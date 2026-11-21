@@ -50,6 +50,7 @@ import { customElement, property, query, state } from 'lit/decorators.js';
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { cachedProjectLabel } from '../../client/project-label.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
 import {
   ARTIFACT_MANAGE_ACCESS_FLAG,
@@ -1364,10 +1365,17 @@ export class ScionPageArtifactDetail extends LitElement {
    * list when the page was opened from it (ptone/scion#6847) or the home
    * project was deleted, the home project otherwise.
    */
-  private get backTarget(): { href: string; label: string } {
-    return this.data?.scopeDeleted || this.origin === 'artifacts'
-      ? { href: '/artifacts', label: 'Artifacts' }
-      : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
+  private get backTarget(): { href: string; label: string; truncate: boolean; tooltip: string } {
+    if (this.data?.scopeDeleted || this.origin === 'artifacts') {
+      return { href: '/artifacts', label: 'Artifacts', truncate: false, tooltip: '' };
+    }
+    const projectName = cachedProjectLabel(this.homeProject);
+    return {
+      href: `/projects/${encodeURIComponent(this.homeProject)}`,
+      label: projectName || 'Project',
+      truncate: !!projectName,
+      tooltip: projectName,
+    };
   }
 
   /** After a delete: say so, and go back to where the artifact was listed (mock S8). */
@@ -2098,7 +2106,13 @@ export class ScionPageArtifactDetail extends LitElement {
     const back = this.backTarget;
     return html`
       <scion-detail-header heading=${a.title}>
-        <scion-back-link slot="back" href=${back.href}>${back.label}</scion-back-link>
+        <scion-back-link
+          slot="back"
+          href=${back.href}
+          ?truncate=${back.truncate}
+          tooltip=${back.tooltip}
+          >${back.label}</scion-back-link
+        >
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
         ${this.currentIsReview
           ? html`<sl-badge variant="warning" pill>

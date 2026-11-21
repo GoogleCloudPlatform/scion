@@ -47,6 +47,7 @@ interface HarnessConfigEntry {
 }
 
 import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
+import { projectDisplayName } from '../../client/project-label.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { isFlatBroker, runtimeTargetLabel } from '../../shared/runtime-target.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
@@ -1028,11 +1029,16 @@ export class ScionPageAgentCreate extends LitElement {
       `;
     }
 
+    const sourceProjectLabel = this.sourceProject
+      ? projectDisplayName(this.sourceProject, this.sourceProject.id)
+      : '';
     const backHref = this.sourceProject ? `/projects/${this.sourceProject.id}` : '/agents';
-    const backLabel = this.sourceProject ? `To ${this.sourceProject.name}` : 'Back to Agents';
+    const backLabel = this.sourceProject
+      ? `To ${sourceProjectLabel || 'Project'}`
+      : 'Back to Agents';
 
     return html`
-      <a href="${backHref}" class="back-link">
+      <a href="${backHref}" class="back-link" title=${sourceProjectLabel || nothing}>
         <sl-icon name="arrow-left"></sl-icon>
         ${backLabel}
       </a>

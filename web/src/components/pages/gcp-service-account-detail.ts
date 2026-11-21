@@ -64,6 +64,7 @@ import { saRef, saStatusUrl, saVerifyUrl } from '../../shared/gcp-service-accoun
 import { deleteGCPServiceAccount } from '../../shared/gcp-service-account-delete.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { cachedProjectLabel } from '../../client/project-label.js';
 import { navigateTo } from '../../client/navigation.js';
 import '../shared/detail-header.js';
 import '../shared/gcp-service-account-status.js';
@@ -281,15 +282,24 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
    * status view says the account is parentless; otherwise to the hub
    * settings tab.
    */
-  private backLink(): { href: string; label: string } {
+  private backLink(): { href: string; label: string; truncate: boolean; tooltip: string } {
     const scope = this.accountStatus?.account.scope;
     if (this.projectId && (scope === undefined || scope === 'project')) {
+      const projectName = cachedProjectLabel(this.projectId);
+      const label = projectName ? `${projectName} Settings` : 'Project Settings';
       return {
         href: `/projects/${encodeURIComponent(this.projectId)}/settings?tab=gcp-sa`,
-        label: 'Project Settings',
+        label,
+        truncate: !!projectName,
+        tooltip: projectName ? label : '',
       };
     }
-    return { href: '/settings?tab=service-accounts', label: 'Hub Resources' };
+    return {
+      href: '/settings?tab=service-accounts',
+      label: 'Hub Resources',
+      truncate: false,
+      tooltip: '',
+    };
   }
 
   private renderStatusSections() {
@@ -316,8 +326,11 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
     }
 
     if (this.error || !this.account) {
+      const back = this.backLink();
       return html`
-        <scion-back-link href=${this.backLink().href}>${this.backLink().label}</scion-back-link>
+        <scion-back-link href=${back.href} ?truncate=${back.truncate} tooltip=${back.tooltip}
+          >${back.label}</scion-back-link
+        >
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error ?? 'Service account not found'}</p>
@@ -333,7 +346,13 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
 
     return html`
       <scion-detail-header heading=${account.email}>
-        <scion-back-link slot="back" href=${back.href}>${back.label}</scion-back-link>
+        <scion-back-link
+          slot="back"
+          href=${back.href}
+          ?truncate=${back.truncate}
+          tooltip=${back.tooltip}
+          >${back.label}</scion-back-link
+        >
         ${account.displayName
           ? html`<div slot="meta" class="display-name">${account.displayName}</div>`
           : nothing}

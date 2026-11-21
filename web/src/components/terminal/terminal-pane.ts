@@ -41,6 +41,7 @@ import {
   type TerminalDisconnectReason,
 } from '../../client/terminal-sessions.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { projectDisplayName } from '../../client/project-label.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
@@ -306,6 +307,15 @@ export class ScionTerminalPane extends LitElement {
 
     .back-link:hover {
       color: var(--scion-primary, #3b82f6);
+    }
+
+    .back-link.project-back-link {
+      display: inline-block;
+      max-width: 24ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      vertical-align: middle;
     }
 
     /* Compact header (ptone/scion#4324): icon-only back links, the size of
@@ -2145,10 +2155,15 @@ export class ScionTerminalPane extends LitElement {
   private renderBackLinks() {
     const projectHref = `/projects/${this.projectId}`;
     const agentHref = `/agents/${this.agentId}`;
+    const projectName = projectDisplayName({
+      name: this.agent?.project,
+      slug: this.agent?.projectSlug,
+    });
+    const compactProjectLabel = projectName ? `Back to ${projectName}` : 'Back to Project';
     if (this.compactHeader) {
       return html`${this.projectId
-          ? html`<sl-tooltip content="Back to Project">
-              <a href=${projectHref} class="back-link compact" aria-label="Back to Project"
+          ? html`<sl-tooltip content=${compactProjectLabel}>
+              <a href=${projectHref} class="back-link compact" aria-label=${compactProjectLabel}
                 ><sl-icon name="folder" aria-hidden="true"></sl-icon
               ></a>
             </sl-tooltip>`
@@ -2159,9 +2174,14 @@ export class ScionTerminalPane extends LitElement {
           >
         </sl-tooltip>`;
     }
-    return html`${this.projectId
-        ? html`<a href=${projectHref} class="back-link">&larr; Back to Project</a>`
-        : nothing} <a href=${agentHref} class="back-link"> &larr; Back to Agent </a>`;
+    const projectLink = this.projectId
+      ? projectName
+        ? html`<sl-tooltip content=${projectName}>
+            <a href=${projectHref} class="back-link project-back-link">&larr; ${projectName}</a>
+          </sl-tooltip>`
+        : html`<a href=${projectHref} class="back-link">&larr; Back to Project</a>`
+      : nothing;
+    return html`${projectLink} <a href=${agentHref} class="back-link"> &larr; Back to Agent </a>`;
   }
 
   /** The agent name in the header, with its length for the .agent-name minimum width. */

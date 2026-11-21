@@ -199,18 +199,85 @@ describe('agent detail layout', () => {
   // The back link is the shared scion-back-link in the header's back slot
   // (ptone/scion#4177); its target and label follow the agent's project.
   it.each([
-    ['without a project', null, '/agents', 'Back to Agents'],
-    ['with a project', { id: 'p-1', name: 'Payments' }, '/projects/p-1', 'To Payments'],
-  ])('hands the back link to the back slot (%s)', (_label, project, href, text) => {
-    const el = document.createElement('scion-page-agent-detail');
-    Object.assign(el, { agentId: 'a-1', agent: makeAgent({}), project });
-    const host = document.createElement('div');
-    render((el as unknown as { renderHeader: () => TemplateResult }).renderHeader(), host);
-    const back = host.querySelectorAll('scion-detail-header > [slot="back"]');
-    expect(Array.from(back).map((n) => n.tagName.toLowerCase())).toEqual(['scion-back-link']);
-    expect(back[0].getAttribute('href')).toBe(href);
-    expect(back[0].textContent?.trim()).toBe(text);
-  });
+    ['without a project', null, {}, '/agents', 'Back to Agents', false, ''],
+    [
+      'with a project',
+      { id: 'p-1', name: 'Payments' },
+      {},
+      '/projects/p-1',
+      'To Payments',
+      true,
+      'Payments',
+    ],
+    [
+      'with project slug fallback when name is blank',
+      { id: 'p-1', name: '  ', slug: 'payments-api' },
+      {},
+      '/projects/p-1',
+      'To payments-api',
+      true,
+      'payments-api',
+    ],
+    [
+      'with project missing both name and slug',
+      { id: 'p-1', name: '', slug: '' },
+      {},
+      '/projects/p-1',
+      'To Project',
+      true,
+      '',
+    ],
+    [
+      'with agent project fallback when project fetch failed',
+      null,
+      { projectId: 'p-1', project: 'Checkout' },
+      '/projects/p-1',
+      'To Checkout',
+      true,
+      'Checkout',
+    ],
+    [
+      'with agent projectSlug fallback when agent.project is absent',
+      null,
+      { projectId: 'p-1', projectSlug: 'checkout-svc' },
+      '/projects/p-1',
+      'To checkout-svc',
+      true,
+      'checkout-svc',
+    ],
+    [
+      'URL-encodes project.id with special characters',
+      { id: 'org/p 1', name: 'Payments' },
+      {},
+      '/projects/org%2Fp%201',
+      'To Payments',
+      true,
+      'Payments',
+    ],
+    [
+      'URL-encodes agent.projectId with special characters',
+      null,
+      { projectId: 'org/p 2', project: 'Checkout' },
+      '/projects/org%2Fp%202',
+      'To Checkout',
+      true,
+      'Checkout',
+    ],
+  ])(
+    'hands the back link to the back slot (%s)',
+    (_label, project, agentOverrides, href, text, truncate, tooltip) => {
+      const el = document.createElement('scion-page-agent-detail');
+      Object.assign(el, { agentId: 'a-1', agent: makeAgent(agentOverrides), project });
+      const host = document.createElement('div');
+      render((el as unknown as { renderHeader: () => TemplateResult }).renderHeader(), host);
+      const back = host.querySelectorAll('scion-detail-header > [slot="back"]');
+      expect(Array.from(back).map((n) => n.tagName.toLowerCase())).toEqual(['scion-back-link']);
+      expect(back[0].getAttribute('href')).toBe(href);
+      expect(back[0].textContent?.trim()).toBe(text);
+      expect(back[0].hasAttribute('truncate')).toBe(truncate);
+      expect(back[0].getAttribute('tooltip') ?? '').toBe(tooltip);
+    }
+  );
 
   it('renders the shared back link on its own in the error state', () => {
     const el = document.createElement('scion-page-agent-detail');

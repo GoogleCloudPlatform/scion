@@ -402,23 +402,23 @@ describe('artifact page', () => {
 
   it("links back to the artifact's own project, not the one in the URL", async () => {
     // The back link is the shared scion-back-link in the header's back slot.
-    const backHref = (page: Element): string | null => {
+    const backHref = (page: Element, expectedLabel: string): string | null => {
       const link = page.shadowRoot!.querySelector(
         'scion-detail-header > scion-back-link[slot="back"]'
       );
-      expect(link?.textContent?.trim()).toBe('Project');
+      expect(link?.textContent?.trim()).toBe(expectedLabel);
       return link!.getAttribute('href');
     };
     mockFetch(artifact('design.md', 'text/markdown'));
     const el = await mount(true); // URL project is p-1; scopeRef is p-1 too
-    expect(backHref(el)).toBe('/projects/p-1');
+    expect(backHref(el, 'p-1')).toBe('/projects/p-1');
     document.body.innerHTML = '';
 
     const meta = artifact('design.md', 'text/markdown');
     meta.artifact.scopeRef = 'home-project';
     mockFetch(meta);
     const el2 = await mount(true);
-    expect(backHref(el2)).toBe('/projects/home-project');
+    expect(backHref(el2, 'home-project')).toBe('/projects/home-project');
   });
 
   it('links back to the artifacts list when the home project was deleted (ptone/scion#4588)', async () => {
@@ -2345,7 +2345,7 @@ describe('artifact page: refresh, origin and version labels', () => {
     const back = el.shadowRoot!.querySelector(
       'scion-detail-header > scion-back-link[slot="back"]'
     )!;
-    expect(text(back)).toBe('Project');
+    expect(text(back)).toBe('p-1');
     expect(back.getAttribute('href')).toBe('/projects/p-1');
     const nav = onNav();
     try {
