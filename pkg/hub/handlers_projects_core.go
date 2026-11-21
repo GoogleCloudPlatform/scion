@@ -330,6 +330,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, msg, cloneURLLabelErrorDetails())
 		return
 	}
+	normalizeADOCloneURLLabel(req.Labels)
 	sanitizeSourceURLLabel(req.Labels)
 
 	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
@@ -1452,7 +1453,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		// No clone ran (a hub-native workspace): a storage failure, not a git one.
 		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
 	}
-	return sharedWorkspaceCloneError(err)
+	return sharedWorkspaceCloneError(err, cloneCfg.URL)
 }
 
 // provisionHubNativeWorkspace provisions the empty workspace of a hub-native
@@ -1581,8 +1582,9 @@ func (s *Server) deleteSharedProjectRoot(project *store.Project) error {
 // sharedWorkspaceCloneError maps a provisioning failure to a *util.GitError
 // with the classified kind and fixed text (no host path, no git output), so
 // the create handler keeps its status mapping and guidance.
-func sharedWorkspaceCloneError(err error) error {
-	kind := util.ClassifyGitError(err.Error()).Kind
+func sharedWorkspaceCloneError(err error, cloneURL string) error {
+	classified := util.ClassifyGitErrorForURL(err.Error(), cloneURL)
+	kind := classified.Kind
 	msg := "the repository could not be cloned into the shared workspace"
 	switch kind {
 	case util.GitErrAuth:
@@ -1592,7 +1594,7 @@ func sharedWorkspaceCloneError(err error) error {
 	case util.GitErrNetwork:
 		msg = "the repository could not be reached"
 	}
-	return &util.GitError{Kind: kind, Message: msg}
+	return &util.GitError{Kind: kind, Message: msg, RemoteHost: classified.RemoteHost}
 }
 
 // updateSharedProjectSlugFile rewrites <ProjectRoot>/.scion/project-slug
@@ -1919,6 +1921,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, msg, cloneURLLabelErrorDetails())
 		return
 	}
+	normalizeADOCloneURLLabel(req.Labels)
 	sanitizeSourceURLLabel(req.Labels)
 
 	normalizedRemote, msg := normalizeRequestGitRemote(req.GitRemote)
@@ -3807,6 +3810,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 				return
 			}
 		}
+		normalizeADOCloneURLLabel(updates.Labels)
 		sanitizeSourceURLLabel(updates.Labels)
 		// PATCH replaces the labels map wholesale; keep the server-owned
 		// workspace-mode label and refuse attempts to change it (design

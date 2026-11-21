@@ -1389,18 +1389,36 @@ func sanitizeSourceURLLabel(labels map[string]string) {
 	}
 }
 
+// normalizeADOCloneURLLabel strips an erroneous trailing ".git" from an Azure
+// DevOps clone-url label so the Hub stores canonical ADO URLs on create,
+// register, clone, and PATCH. Non-ADO labels are left unchanged.
+func normalizeADOCloneURLLabel(labels map[string]string) {
+	v, ok := labels[store.LabelCloneURL]
+	if !ok || v == "" {
+		return
+	}
+	if normalized := util.StripADOCloneURLGitSuffix(v); normalized != v {
+		labels[store.LabelCloneURL] = normalized
+	}
+}
+
 // sanitizeCopiedCloneURLLabel makes a clone-url label copied from another
 // project (which may predate write-time validation) acceptable to
 // validateCloneURLLabelValue: a value that fails validation is replaced by its
 // sanitized form, or removed when that is still not a plain repository URL.
+// Azure DevOps labels also have any trailing ".git" stripped.
 // labels is modified in place.
 func sanitizeCopiedCloneURLLabel(labels map[string]string) {
 	v, ok := labels[store.LabelCloneURL]
-	if !ok || util.ValidateCloneURLLabel(v) == nil {
+	if !ok {
+		return
+	}
+	if util.ValidateCloneURLLabel(v) == nil {
+		normalizeADOCloneURLLabel(labels)
 		return
 	}
 	if clean := util.SanitizeGitSourceURL(v); clean != "" && util.ValidateCloneURLLabel(clean) == nil {
-		labels[store.LabelCloneURL] = clean
+		labels[store.LabelCloneURL] = util.StripADOCloneURLGitSuffix(clean)
 	} else {
 		delete(labels, store.LabelCloneURL)
 	}

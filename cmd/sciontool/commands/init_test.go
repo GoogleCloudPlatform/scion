@@ -709,6 +709,41 @@ func TestFormatCloneError(t *testing.T) {
 			t.Errorf("expected stderr in error, got: %v", err)
 		}
 	})
+
+	t.Run("ADO TF401019 not misclassified as auth or GitHub", func(t *testing.T) {
+		stderr := "remote: TF401019: The Git repository with name or identifier repo.git does not exist or you do not have permissions for the operation you are attempting.\nfatal: repository 'https://dev.azure.com/org/proj/_git/repo.git/' not found"
+		if isAuthError(stderr) {
+			t.Fatalf("isAuthError(%q) = true, want false (TF401019 must not match 401)", stderr)
+		}
+		for _, tok := range []string{"", "ado-pat-token"} {
+			err := formatCloneErrorForURL(stderr, "https://dev.azure.com/org/proj/_git/repo", tok)
+			if strings.Contains(err.Error(), "GITHUB_TOKEN") || strings.Contains(err.Error(), "GitHub") {
+				t.Errorf("token=%q: ADO not-found error must not mention GitHub/GITHUB_TOKEN, got: %v", tok, err)
+			}
+			if !strings.Contains(err.Error(), "dev.azure.com") {
+				t.Errorf("token=%q: ADO error should name dev.azure.com, got: %v", tok, err)
+			}
+		}
+	})
+
+	t.Run("ADO auth error names dev.azure.com without GitHub hint", func(t *testing.T) {
+		stderr := "fatal: Authentication failed for 'https://dev.azure.com/org/proj/_git/repo/'"
+		err := formatCloneErrorForURL(stderr, "https://dev.azure.com/org/proj/_git/repo", "ado-pat-token")
+		if strings.Contains(err.Error(), "GITHUB_TOKEN") || strings.Contains(err.Error(), "GitHub") {
+			t.Errorf("ADO auth error must not mention GitHub/GITHUB_TOKEN, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "dev.azure.com") {
+			t.Errorf("ADO auth error should name dev.azure.com, got: %v", err)
+		}
+
+		noTokErr := formatCloneErrorForURL("fatal: could not read Username for 'https://dev.azure.com'", "https://dev.azure.com/org/proj/_git/repo", "")
+		if strings.Contains(noTokErr.Error(), "GITHUB_TOKEN") || strings.Contains(noTokErr.Error(), "GitHub") {
+			t.Errorf("ADO no-token error must not mention GitHub/GITHUB_TOKEN, got: %v", noTokErr)
+		}
+		if !strings.Contains(noTokErr.Error(), "dev.azure.com") {
+			t.Errorf("ADO no-token error should name dev.azure.com, got: %v", noTokErr)
+		}
+	})
 }
 
 func TestIsClaude(t *testing.T) {

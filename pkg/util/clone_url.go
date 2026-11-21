@@ -31,8 +31,10 @@ import (
 // be sanitized unambiguously normalizes to "" (ResolveCloneURL then falls
 // back to the git remote). After that:
 //   - URLs with an explicit scheme (http(s)://, ssh://, git://, file://, ...)
-//     are kept as they are;
-//   - scp-style "git@host:org/repo" is kept as it is (ssh transport);
+//     are kept as they are, except Azure DevOps URLs have any erroneous
+//     trailing ".git" stripped;
+//   - scp-style "git@host:org/repo" is kept as it is (ssh transport), with
+//     trailing ".git" stripped for Azure DevOps hosts;
 //   - scp-style remotes with another login ("deploy@host:org/repo") become
 //     the HTTPS clone URL of host/org/repo;
 //   - other remotes (e.g. "github.com/org/repo") are converted to an HTTPS
@@ -50,11 +52,17 @@ func NormalizeCloneURL(cloneURL string) string {
 	if cloneURL == "" {
 		return ""
 	}
-	if _, _, ok := splitScheme(cloneURL); ok {
+	if scheme, rest, ok := splitScheme(cloneURL); ok {
+		if (scheme == "https" || scheme == "http" || isSSHScheme(scheme)) && isAzureDevOpsURL(rest) {
+			return cloneURL[:len(cloneURL)-len(rest)] + stripADOGitSuffix(rest)
+		}
 		return cloneURL
 	}
-	if login, _, _, ok := splitSCP(cloneURL); ok {
+	if login, host, path, ok := splitSCP(cloneURL); ok {
 		if login == "git" {
+			if isAzureDevOpsURL(host + "/" + path) {
+				return login + "@" + host + ":" + stripADOGitSuffix(path)
+			}
 			return cloneURL
 		}
 		return HTTPSCloneURL(cloneURL)

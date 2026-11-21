@@ -66,6 +66,17 @@ func TestNormalizeCloneURL(t *testing.T) {
 		{"embedded newline dropped", "https://host/r\nhttps://u:PW@h/x", ""},
 		{"scheme-like suffix userinfo stripped", "user:PW@host/org/repo://", "https://host/org/repo:.git"},
 		{"single-slash scheme dropped", "https:/user:PW@host/r", ""},
+		// Azure DevOps URLs must not retain a trailing .git suffix.
+		{"ado https .git stripped", "https://dev.azure.com/org/proj/_git/repo.git", "https://dev.azure.com/org/proj/_git/repo"},
+		{"ado https uppercase .GIT stripped", "https://dev.azure.com/org/proj/_git/repo.GIT", "https://dev.azure.com/org/proj/_git/repo"},
+		{"ado https .git with trailing slash stripped", "https://dev.azure.com/org/proj/_git/repo.git/", "https://dev.azure.com/org/proj/_git/repo"},
+		{"ado https without .git unchanged", "https://dev.azure.com/org/proj/_git/repo", "https://dev.azure.com/org/proj/_git/repo"},
+		{"ado https with org userinfo and .git stripped", "https://org@dev.azure.com/org/proj/_git/repo.git", "https://dev.azure.com/org/proj/_git/repo"},
+		{"ado visualstudio.com .git stripped", "https://myorg.visualstudio.com/proj/_git/repo.git", "https://myorg.visualstudio.com/proj/_git/repo"},
+		{"ado on-prem http /_git/ .git stripped", "http://tfs.corp.local/DefaultCollection/proj/_git/repo.git", "http://tfs.corp.local/DefaultCollection/proj/_git/repo"},
+		{"ado schemeless .git stripped", "dev.azure.com/org/proj/_git/repo.git", "https://dev.azure.com/org/proj/_git/repo"},
+		{"ado ssh scheme .git stripped", "ssh://git@ssh.dev.azure.com/v3/org/proj/repo.git", "ssh://git@ssh.dev.azure.com/v3/org/proj/repo"},
+		{"ado scp .git stripped", "git@ssh.dev.azure.com:v3/org/proj/repo.git", "git@ssh.dev.azure.com:v3/org/proj/repo"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

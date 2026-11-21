@@ -209,6 +209,19 @@ func TestCloneError_WithToken(t *testing.T) {
 
 	notFound := cloneError("https://github.com/org/gone.git", "remote: Repository not found.\n", nil, true, "")
 	assert.Contains(t, notFound.Error(), "has no access to it")
+
+	adoNotFound := cloneError("https://dev.azure.com/org/proj/_git/repo",
+		"remote: TF401019: The Git repository with name or identifier repo.git does not exist or you do not have permissions for the operation you are attempting.\nfatal: repository 'https://dev.azure.com/org/proj/_git/repo.git/' not found\n",
+		nil, true, "")
+	assert.Contains(t, adoNotFound.Error(), "not found on dev.azure.com")
+	assert.NotContains(t, adoNotFound.Error(), "GITHUB_TOKEN")
+	assert.NotContains(t, adoNotFound.Error(), "did not accept")
+
+	adoAuth := cloneError("https://dev.azure.com/org/proj/_git/repo",
+		"fatal: Authentication failed for 'https://dev.azure.com/org/proj/_git/repo/'\n",
+		nil, true, "")
+	assert.Contains(t, adoAuth.Error(), "on dev.azure.com did not accept the project's git credential")
+	assert.NotContains(t, adoAuth.Error(), "GITHUB_TOKEN")
 }
 
 // runGitClone passes the clone's token to cloneError, so a token that git
