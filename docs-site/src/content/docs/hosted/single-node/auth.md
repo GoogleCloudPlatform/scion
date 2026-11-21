@@ -225,7 +225,12 @@ If your identity provider returns an `invalid redirect_uri` error during login, 
 Google, GitHub and external OIDC sign-in accept only an email address that the provider marks as verified. The Hub never falls back to an unverified address.
 
 - **Google and OIDC**: the provider's verified-email claim must be true.
+- **OIDC providers whose userinfo omits `email_verified`** (Microsoft Entra ID never sends it from userinfo, and its userinfo cannot be customised): the Hub checks the ID token from the same sign-in instead. It verifies the token's signature against the provider's `jwks_uri`, its issuer (the discovered issuer, which must equal `issuer_url`), its audience (your `client_id`), its expiry and its subject (the same `sub` as userinfo). The address is accepted only if the ID token carries the **same** email with `email_verified: true` or Microsoft's `xms_edov: true` ("the email domain owner has been verified"). A userinfo `email_verified: false` is always refused, whatever the ID token says.
 - **GitHub**: the Hub always reads the account's full email list (the `user:email` scope) rather than trusting the public profile email. It uses the profile email if the list marks it verified, otherwise the primary verified email, otherwise any verified email.
+
+:::tip[Microsoft Entra ID]
+Register the Hub as a **Web** app (a confidential client with a client secret) with the redirect URI `<hub-base-url>/auth/callback/oidc`. Use the tenant-specific issuer `https://login.microsoftonline.com/<tenant-id>/v2.0`, not `common`, `organizations` or `consumers`. Under **Token configuration**, add the **ID** token optional claims `email` and `xms_edov`. The `email` claim comes from the user's `mail` attribute, so a user without one cannot sign in. Because `mail` is set by the tenant's administrators, they are trusted for every address in the tenant's verified domains: an address the Hub already knows from Google or GitHub sign-in maps to the same Hub user. Test a B2B guest account before inviting guests, and keep `server.auth.authorized_domains` set to your own domains.
+:::
 
 :::caution[Breaking change]
 Users whose only email address is unverified at their provider can no longer sign in. They must verify an address with the provider (for GitHub, under **Settings > Emails**) and sign in again.

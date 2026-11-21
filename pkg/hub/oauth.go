@@ -159,6 +159,12 @@ type OAuthService struct {
 	oidcLoginConfig *config.OIDCLoginConfig // nil when OIDC login is disabled
 	httpClient      *http.Client
 	oidcCache       *oidcDiscoveryCache // lazy-initialized when oidcLoginConfig != nil
+
+	// oidcIDTokenKeys verifies OIDC ID tokens; built on first use for the
+	// discovered jwks_uri (see oidcIDTokenKeySource).
+	oidcIDTokenKeysMu  sync.Mutex
+	oidcIDTokenKeys    jwtKeySource
+	oidcIDTokenKeysURL string
 }
 
 // NewOAuthService creates a new OAuth service.
@@ -388,6 +394,9 @@ type tokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 	RefreshToken string `json:"refresh_token"`
 	Scope        string `json:"scope"`
+	// IDToken is the OIDC ID token, present when the "openid" scope was
+	// requested. Only OIDC login reads it (oidcIDTokenVouchesForEmail).
+	IDToken string `json:"id_token"`
 }
 
 // exchangeCodeForToken exchanges an authorization code for an access token (Google).
@@ -1003,10 +1012,12 @@ func (s *OAuthService) OIDCDisplayName() string {
 }
 
 // oidcUserInfoResponse represents the standard OIDC userinfo response.
+// EmailVerified is nil only when the provider omits the claim (Microsoft
+// Entra ID never sends it from userinfo); see getOIDCUserInfoChecked.
 type oidcUserInfoResponse struct {
 	Sub               string `json:"sub"`
 	Email             string `json:"email"`
-	EmailVerified     bool   `json:"email_verified"`
+	EmailVerified     *bool  `json:"email_verified"`
 	Name              string `json:"name"`
 	PreferredUsername string `json:"preferred_username"`
 	Picture           string `json:"picture"`
@@ -1065,11 +1076,29 @@ func (s *OAuthService) exchangeOIDCCode(ctx context.Context, code, callbackURL s
 		return nil, fmt.Errorf("OIDC token exchange failed: %w", err)
 	}
 
-	return s.getOIDCUserInfo(ctx, tokenResp.AccessToken, doc.UserinfoEndpoint)
+	vouch := func(sub, email string) (string, error) {
+		return s.oidcIDTokenVouchesForEmail(tokenResp.IDToken, doc, sub, email)
+	}
+	return s.getOIDCUserInfoChecked(ctx, tokenResp.AccessToken, doc.UserinfoEndpoint, vouch)
 }
 
 // getOIDCUserInfo fetches user information from the OIDC userinfo endpoint.
+// It has no ID token to consult, so a userinfo response without
+// email_verified is refused.
 func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinfoURL string) (*OAuthUserInfo, error) {
+	return s.getOIDCUserInfoChecked(ctx, accessToken, userinfoURL, nil)
+}
+
+// oidcEmailVoucher reports which ID token claim marks email as verified for
+// the user sub ("" with a reason when none does).
+type oidcEmailVoucher func(sub, email string) (claim string, err error)
+
+// getOIDCUserInfoChecked fetches user information from the OIDC userinfo
+// endpoint. The userinfo email_verified claim decides, as it always has,
+// whenever the provider sends it. Only when the provider omits it, and
+// vouch is not nil, may the ID token from the same exchange vouch for the
+// address.
+func (s *OAuthService) getOIDCUserInfoChecked(ctx context.Context, accessToken, userinfoURL string, vouch oidcEmailVoucher) (*OAuthUserInfo, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", userinfoURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create userinfo request: %w", err)
@@ -1088,10 +1117,26 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 		return nil, fmt.Errorf("OIDC userinfo endpoint returned %d: %s", resp.StatusCode, upstreamText(string(body)))
 	}
 
-	var userInfo oidcUserInfoResponse
 	// Limit userinfo response to 1 MB to prevent OOM from oversized payloads.
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&userInfo); err != nil {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read OIDC userinfo response: %w", err)
+	}
+	var userInfo oidcUserInfoResponse
+	if err := json.Unmarshal(body, &userInfo); err != nil {
 		return nil, fmt.Errorf("failed to decode OIDC userinfo response: %w", err)
+	}
+	// An explicit "email_verified": null decodes to nil like an absent
+	// claim; treat it as false, as before, so only a response that omits
+	// the claim can be vouched for by the ID token.
+	if userInfo.EmailVerified == nil {
+		var keys map[string]json.RawMessage
+		if json.Unmarshal(body, &keys) == nil {
+			if _, present := keys["email_verified"]; present {
+				f := false
+				userInfo.EmailVerified = &f
+			}
+		}
 	}
 
 	// The "sub" claim is the primary user identifier in OIDC; it must be
@@ -1101,13 +1146,27 @@ func (s *OAuthService) getOIDCUserInfo(ctx context.Context, accessToken, userinf
 		return nil, fmt.Errorf("OIDC provider did not return a 'sub' claim; the identity provider must include a subject identifier")
 	}
 
-	email, err := requireVerifiedEmail(hubclient.OAuthProviderOIDC, userInfo.Email, userInfo.EmailVerified)
+	verified := userInfo.EmailVerified != nil && *userInfo.EmailVerified
+	var vouchErr error
+	if userInfo.EmailVerified == nil && vouch != nil && strings.TrimSpace(userInfo.Email) != "" {
+		var claim string
+		claim, vouchErr = vouch(userInfo.Sub, userInfo.Email)
+		if vouchErr == nil {
+			verified = true
+			slog.Info("OIDC sign-in: email verified by the ID token", "claim", claim)
+		}
+	}
+
+	email, err := requireVerifiedEmail(hubclient.OAuthProviderOIDC, userInfo.Email, verified)
 	if err != nil {
 		if strings.TrimSpace(userInfo.Email) == "" {
 			// The shared message only names what's missing; OIDC configuration
 			// is the one case here where an operator can readily fix the
 			// upstream cause, so keep pointing at it.
 			return nil, fmt.Errorf("%w; ensure the 'email' scope is requested and the user has an email address configured in the identity provider", err)
+		}
+		if vouchErr != nil {
+			return nil, fmt.Errorf("%w; the userinfo response has no email_verified claim and the ID token did not vouch for the address: %v", err, vouchErr)
 		}
 		return nil, err
 	}
