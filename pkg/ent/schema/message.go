@@ -71,9 +71,12 @@ func (Message) Fields() []ent.Field {
 		// conduit (see the store.MessageDispatch* constants).
 		// After Phase 4 (no-queuing delivery), every writer sets the state
 		// explicitly. Only ExecuteAgentDM writes "pending", for the length of its
-		// dispatch; a row stays pending only after a deadline-ambiguous dispatch,
-		// by design (AC-4 of #1689), and brokerMessageSweepHandler reports and
-		// expires it. The schema default applies only to a writer that leaves
+		// dispatch (or background auto-wake), then marks it dispatched or failed —
+		// including when a dispatch deadline expires with an unknown outcome
+		// (ptone/scion#5111). A row stays pending past the threshold only while
+		// queued behind a slow auto-wake or after a fault (AC-3 MarkMessageDispatched
+		// failure or an interrupted dispatch), and brokerMessageSweepHandler reports
+		// and expires it. The schema default applies only to a writer that leaves
 		// the state empty, which the store logs (ptone/scion#4827).
 		field.String("dispatch_state").
 			Default("pending"),

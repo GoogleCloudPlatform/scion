@@ -195,6 +195,22 @@ func (s *Server) markFailed(ctx context.Context, msgID string, reason string) er
 	return markMessageFailed(ctx, s.store, msgID, reason)
 }
 
+// failUndelivered atomically transitions an undelivered message row to
+// dispatch_state="failed" on fresh bounded finalization contexts and reports
+// whether this call made the transition. Rows already marked "delivered" or
+// "failed" are left untouched and return (false, nil), so callers that emit
+// async sender notices only notify when they own the transition.
+func (s *Server) failUndelivered(ctx context.Context, msgID string, reason string) (bool, error) {
+	sanitized := sanitizeFailureReason(reason)
+	var won bool
+	err := retryFinalization(ctx, func(finCtx context.Context) error {
+		var failErr error
+		won, failErr = s.store.FailUndeliveredMessage(finCtx, msgID, sanitized)
+		return failErr
+	})
+	return won, err
+}
+
 // messageFailureMarker is the slice of the store needed to record a dispatch
 // failure. Narrow so MessageBrokerProxy (which has no *Server) can share
 // markMessageFailed.

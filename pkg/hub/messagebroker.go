@@ -1517,12 +1517,13 @@ func newDeliveryNotice(recipient, recipientID, text, status, category string) *m
 	return notice
 }
 
-// publishDeliveryUnconfirmed tells an agent sender that a message row to
-// agentSlug expired in dispatch_state="pending" without dispatch confirmation
-// (ptone/scion#7405): because existing row data cannot distinguish a never-sent
-// pending row from an AC-3 (broker accepted, MarkMessageDispatched failed) or
-// AC-4 (deadline-ambiguous) row, delivery may have occurred and the sender
-// should check before resending rather than blindly duplicating the message.
+// publishDeliveryUnconfirmed tells an agent sender that delivery to agentSlug
+// could not be confirmed — either because a pending row expired past
+// stuckMessageExpireTTL (ptone/scion#7405, e.g. AC-3 or an interrupted
+// dispatch) or because a background auto-wake dispatch timed out or was
+// cancelled with an unknown outcome. Because delivery may have occurred, the
+// sender should check before resending rather than blindly duplicating the
+// message.
 func (p *MessageBrokerProxy) publishDeliveryUnconfirmed(ctx context.Context, agentSlug string, msg *messages.StructuredMessage) {
 	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
 		return

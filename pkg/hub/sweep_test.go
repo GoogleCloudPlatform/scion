@@ -383,17 +383,26 @@ func (w *backdatePendingCreateStore) MarkMessageDispatched(ctx context.Context, 
 	return w.Store.MarkMessageDispatched(ctx, id)
 }
 
-// TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice
-// reproduces review R1 end-to-end: both AC-3 (broker accepted, all
-// MarkMessageDispatched retries failed) and AC-4 (dispatch deadline exceeded
-// mid-flight) leave the persisted row pending; when the 10m sweep expires
-// them, the sender receives DELIVERY_UNCONFIRMED ("check before resending")
-// rather than DELIVERY_FAILED, and the target agent never receives a duplicate.
-func TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice(t *testing.T) {
+// TestBrokerMessageSweepHandler_AC3SweepNoticeAndAC4ImmediateFinalization
+// verifies the post-#5058 (ptone/scion#5111) and #5104 (ptone/scion#7405)
+// interaction for both ambiguous outcomes:
+//   - AC-3 (broker accepted, all MarkMessageDispatched retries failed): the row
+//     stays pending until the 10m sweep expires it, which sends one
+//     DELIVERY_UNCONFIRMED notice ("check before resending", never
+//     DELIVERY_FAILED) and never redelivers to the target.
+//   - AC-4 (dispatch deadline exceeded mid-flight): ExecuteAgentDM returns
+//     AgentDMAmbiguous synchronously (HTTP 202 "ambiguous") and immediately
+//     finalizes the row as failed with dispatchOutcomeUnknownReason instead of
+//     leaving it pending for the 10m sweep, so a subsequent sweep is a no-op
+//     (no duplicate target dispatch, no late sweep notice, reason preserved).
+func TestBrokerMessageSweepHandler_AC3SweepNoticeAndAC4ImmediateFinalization(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		setupCase func(dispatcher *recordingDispatcher, fs *backdatePendingCreateStore)
-		wantCalls int
+		name              string
+		setupCase         func(dispatcher *recordingDispatcher, fs *backdatePendingCreateStore)
+		wantCalls         int
+		wantPreSweepState string
+		wantFinalReason   string
+		wantSenderNotices int
 	}{
 		{
 			name: "AC-3_broker_accepted_mark_dispatched_failed",
@@ -401,7 +410,10 @@ func TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice(t *
 				fs.backdate.Store(true)
 				fs.failMark.Store(true)
 			},
-			wantCalls: 1,
+			wantCalls:         1,
+			wantPreSweepState: store.MessageDispatchPending,
+			wantFinalReason:   store.MessageExpiredStuckPendingReason,
+			wantSenderNotices: 1,
 		},
 		{
 			name: "AC-4_dispatch_deadline_ambiguous",
@@ -409,7 +421,10 @@ func TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice(t *
 				fs.backdate.Store(true)
 				dispatcher.returnErr = context.DeadlineExceeded
 			},
-			wantCalls: 1,
+			wantCalls:         1,
+			wantPreSweepState: store.MessageDispatchFailed,
+			wantFinalReason:   dispatchOutcomeUnknownReason,
+			wantSenderNotices: 0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -462,11 +477,22 @@ func TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice(t *
 			require.Nil(t, dmErr)
 			require.NotNil(t, res)
 			require.Equal(t, AgentDMAmbiguous, res.Outcome)
+			require.NotEmpty(t, res.MessageID)
+
+			preSweepMsg, err := s.GetMessage(ctx, res.MessageID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPreSweepState, preSweepMsg.DispatchState, "unexpected dispatch_state before sweep")
 
 			faultStore.backdate.Store(false)
 			faultStore.failMark.Store(false)
 			dispatcher.returnErr = nil
 			srv.brokerMessageSweepHandler()(ctx)
+
+			postSweepMsg, err := s.GetMessage(ctx, res.MessageID)
+			require.NoError(t, err)
+			assert.Equal(t, store.MessageDispatchFailed, postSweepMsg.DispatchState)
+			require.NotNil(t, postSweepMsg.DispatchFailureReason)
+			assert.Equal(t, tc.wantFinalReason, *postSweepMsg.DispatchFailureReason)
 
 			var targetCalls, senderNotices int
 			for _, c := range dispatcher.getCalls() {
@@ -482,7 +508,7 @@ func TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice(t *
 				}
 			}
 			assert.Equal(t, tc.wantCalls, targetCalls, "sweep must never redeliver to target")
-			assert.Equal(t, 1, senderNotices, "sender must receive one DELIVERY_UNCONFIRMED notice")
+			assert.Equal(t, tc.wantSenderNotices, senderNotices, "unexpected DELIVERY_UNCONFIRMED sender notice count")
 		})
 	}
 }
