@@ -1034,14 +1034,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			mergedLabels[k] = val
 		}
 	}
-	triggerID := req.Authority.DefinitionID
-	triggerName := ""
-	if ev.Trigger != nil {
-		if ev.Trigger.ID != "" {
-			triggerID = ev.Trigger.ID
-		}
-		triggerName = ev.Trigger.Name
-	}
 	mergedLabels[triggerLabelKeyTrigger] = triggerID
 	mergedLabels[triggerLabelKeyTriggerEvent] = ev.ID
 	mergedLabels[triggerLabelKeyTriggerSource] = ev.SourceKind
@@ -1058,6 +1050,9 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		EventID:       ev.ID,
 	}
 	effectiveGitHubToken := da.payload.GithubToken
+	if effectiveGitHubToken == "" && ev.SourceKind == store.TriggerSourceKindGitHub {
+		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
+	}
 	parentUsesInst, err := a.srv.parentAgentUsesInstallationGitHubToken(ctx, da.auth)
 	if err != nil {
 		return hubfire.FireOutcome{}, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, da.auth.PrincipalID, err)
@@ -1067,7 +1062,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	}
 	if effectiveGitHubToken == DispatchAgentGitHubTokenInstallation &&
 		!a.srv.hasGitHubMintProjectForHeadless(ctx, da.project, da.auth, mergedLabels) {
-		fc.Notes = append(fc.Notes, "GitHub access: unavailable for this run (no GitHub App installation configured for this project).")
+		fc.Notes = append(fc.Notes, "GitHub access is not available for this run.")
 	}
 	frameOpt := triggertemplate.WithFrame(fc)
 
@@ -1171,7 +1166,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			Task:           renderedTask,
 			Branch:         renderedBranch,
 			Labels:         maps.Clone(mergedLabels),
-			GitHubToken:    da.payload.GithubToken,
+			GitHubToken:    effectiveGitHubToken,
 			EventEnv:       eventEnv,
 			EventFile:      eventFileBytes,
 			Detached:       true,

@@ -17,8 +17,11 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -53,10 +56,36 @@ import (
 //     keys before backend read and again by item.Meta.Target after lookup
 //     (ReasonGitHubTokenInstallationOnly, not_found-indistinguishable across
 //     project and user scopes).
-//   - Pull (secret list endpoints):
+//   - Pull (runtime secret list: GET /api/v1/agents/{id}/secrets):
 //     Server.agentListSecrets (handlers_env_secrets.go) and
 //     Server.agentListUserSecrets (material_list_user.go) -> omit blocked keys
 //     by Name or Target.
+//   - Pull (env var by key: GET /api/v1/env/{key}?scope=...,
+//     GET /api/v1/projects/{id}/env/{key},
+//     GET /api/v1/runtime-brokers/{id}/env/{key}):
+//     Server.serveEnvVarByKey (handlers_env_secrets.go) -> checks
+//     callerAgentUsesInstallationGitHubToken (fail-closed 503 on store error),
+//     returns 404 before lookup for blocked key names and before returning an
+//     aliased environment-secret fallback whose Target is blocked.
+//   - Pull (env var lists: GET /api/v1/env?scope=...,
+//     GET /api/v1/projects/{id}/env, GET /api/v1/runtime-brokers/{id}/env):
+//     Server.listEnvVars, Server.handleProjectEnvVars, Server.handleBrokerEnvVars
+//     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
+//     (fail-closed 503), omit blocked env keys and blocked merged environment
+//     secrets (by Name or Target).
+//   - Pull (secret metadata by key: GET /api/v1/secrets/{key}?scope=...,
+//     GET /api/v1/projects/{id}/secrets/{key},
+//     GET /api/v1/runtime-brokers/{id}/secrets/{key}):
+//     Server.getSecret and Server.handleScopedSecretByKey
+//     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
+//     (fail-closed 503), return 404 for blocked key names (before lookup) or
+//     blocked Meta.Target (after lookup).
+//   - Pull (secret metadata lists: GET /api/v1/secrets?scope=...,
+//     GET /api/v1/projects/{id}/secrets,
+//     GET /api/v1/runtime-brokers/{id}/secrets):
+//     Server.listSecrets, Server.handleProjectSecrets, Server.handleBrokerSecrets
+//     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
+//     (fail-closed 503), omit blocked secrets by Name or Target.
 //   - Descendants (interactive agent-created create):
 //     Server.createAgentInProject (handlers_agents_core.go) ->
 //     agentHasInstallationGitHubTokenPreference (tri-state; fails closed with
@@ -67,6 +96,9 @@ import (
 //     parentAgentUsesInstallationGitHubToken (tri-state; fails closed with
 //     errAgentCreatorUnreadable on store lookup error, forces "installation"
 //     otherwise).
+//   - Reincarnation:
+//     Server.reincarnateConfig (reincarnate_config.go) -> sticky: preserves
+//     "installation" if either AppliedConfig or CreateInputs carries it.
 
 // isGitHubTokenEnvKey reports whether key is a GitHub token environment
 // variable that git's credential helper, gh CLI, or sciontool gh-wrapper
@@ -137,6 +169,59 @@ func (s *Server) parentAgentUsesInstallationGitHubToken(ctx context.Context, aut
 		return usesInstallationGitHubToken(auth.agent), nil
 	}
 	return s.agentHasInstallationGitHubTokenPreference(ctx, auth.PrincipalID)
+}
+
+// callerAgentUsesInstallationGitHubToken reports whether the HTTP request
+// caller is an agent carrying GitHubTokenPreference == "installation".
+// Non-agent callers return (false, true). If the caller is an agent and the
+// store lookup fails, this fails closed by writing HTTP 503 ErrCodeUnavailable
+// and returning (false, false) so the handler aborts immediately.
+func (s *Server) callerAgentUsesInstallationGitHubToken(w http.ResponseWriter, ctx context.Context) (installationOnly bool, ok bool) {
+	agentIdent := GetAgentIdentityFromContext(ctx)
+	if agentIdent == nil {
+		return false, true
+	}
+	usesInst, err := s.agentHasInstallationGitHubTokenPreference(ctx, agentIdent.ID())
+	if err != nil {
+		slog.Warn("Refusing material read: failed to verify calling agent GitHub token preference",
+			"agent_id", agentIdent.ID(), "error", err)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"Could not verify agent GitHub token preference; retry", nil)
+		return false, false
+	}
+	return usesInst, true
+}
+
+// withoutInstallationBlockedEnvVars omits env vars whose key is blocked for
+// installation-only agents.
+func withoutInstallationBlockedEnvVars(envVars []store.EnvVar) []store.EnvVar {
+	if len(envVars) == 0 {
+		return envVars
+	}
+	out := make([]store.EnvVar, 0, len(envVars))
+	for _, ev := range envVars {
+		if isBlockedInstallationGitHubEnvKey(ev.Key) {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// withoutInstallationBlockedSecrets omits secret metadata whose Name or Target
+// is blocked for installation-only agents.
+func withoutInstallationBlockedSecrets(metas []secret.SecretMeta) []secret.SecretMeta {
+	if len(metas) == 0 {
+		return metas
+	}
+	out := make([]secret.SecretMeta, 0, len(metas))
+	for _, m := range metas {
+		if isBlockedInstallationGitHubEnvKey(m.Name) || isBlockedInstallationGitHubEnvKey(m.Target) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // hasGitHubMintProjectForHeadless reports whether the hub dispatcher can

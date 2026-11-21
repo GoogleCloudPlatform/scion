@@ -420,6 +420,11 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 		scopeID = resolved
 	}
 
+	installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+	if !ok {
+		return
+	}
+
 	filter := store.EnvVarFilter{
 		Scope:   scope,
 		ScopeID: scopeID,
@@ -435,12 +440,15 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 	if includeSecretMeta {
 		var ok bool
 		envVars, ok = s.applyEnvironmentSecretsToEnvVarList(w, ctx, envVars, filter,
-			"failed to list environment secrets for env var merge")
+			"failed to list environment secrets for env var merge", installationOnly)
 		if !ok {
 			return
 		}
 	} else {
 		envVars = withoutSecretEnvVars(envVars)
+	}
+	if installationOnly {
+		envVars = withoutInstallationBlockedEnvVars(envVars)
 	}
 
 	// Mask sensitive values
@@ -500,16 +508,28 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 }
 
 func (s *Server) serveEnvVarByKey(w http.ResponseWriter, ctx context.Context, key, scope, scopeID string) {
+	installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+	if !ok {
+		return
+	}
+	if installationOnly && isBlockedInstallationGitHubEnvKey(key) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
+
 	hideProjectSecretMeta := agentLacksProjectSecretReadScope(ctx, scope)
 
 	envVar, err := s.store.GetEnvVar(ctx, key, scope, scopeID)
 	if err != nil {
 		if !hideProjectSecretMeta && errors.Is(err, store.ErrNotFound) && s.secretBackend != nil && !isSystemOneReservedSecretKey(key) {
 			// Fallback: check if this key exists as an environment secret.
-			// Defence in depth: agentHiddenHubSecret is checked regardless of
-			// which route reached this helper.
+			// Defence in depth: agentHiddenHubSecret and installation-only
+			// blocked targets are checked regardless of which route reached
+			// this helper.
 			meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-			if metaErr == nil && meta.SecretType == store.SecretTypeEnvironment && !agentHiddenHubSecret(ctx, scope, *meta) {
+			if metaErr == nil && meta.SecretType == store.SecretTypeEnvironment &&
+				!agentHiddenHubSecret(ctx, scope, *meta) &&
+				(!installationOnly || !isBlockedInstallationGitHubEnvKey(meta.Target)) {
 				ev := secretMetaToEnvVar(*meta)
 				writeJSON(w, http.StatusOK, &ev)
 				return
@@ -830,7 +850,7 @@ func secretMetaToEnvVar(m secret.SecretMeta) store.EnvVar {
 	}
 }
 
-func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.EnvVar, filter store.EnvVarFilter, warning string) []store.EnvVar {
+func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.EnvVar, filter store.EnvVarFilter, warning string, installationOnly bool) []store.EnvVar {
 	if s.secretBackend == nil {
 		return envVars
 	}
@@ -845,7 +865,11 @@ func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.En
 		s.envSecretLog.Warn(warning, "error", err)
 		return envVars
 	}
-	return mergeEnvironmentSecretMetadata(envVars, withoutSystemOneReservedSecrets(withoutAgentHiddenHubSecrets(ctx, filter.Scope, metas)))
+	metas = withoutSystemOneReservedSecrets(withoutAgentHiddenHubSecrets(ctx, filter.Scope, metas))
+	if installationOnly {
+		metas = withoutInstallationBlockedSecrets(metas)
+	}
+	return mergeEnvironmentSecretMetadata(envVars, metas)
 }
 
 // rejectSystemOneReservedSecretWrite rejects writes to the reserved
@@ -959,9 +983,9 @@ func withoutAgentHiddenHubSecrets(ctx context.Context, scope string, metas []sec
 // secret-flagged and secret-shadowed rows when an agent caller lacks
 // ScopeProjectSecretRead (ptone/scion#8211). Returns false after writing an
 // error response if shadow-check lookup fails closed.
-func (s *Server) applyEnvironmentSecretsToEnvVarList(w http.ResponseWriter, ctx context.Context, envVars []store.EnvVar, filter store.EnvVarFilter, warning string) ([]store.EnvVar, bool) {
+func (s *Server) applyEnvironmentSecretsToEnvVarList(w http.ResponseWriter, ctx context.Context, envVars []store.EnvVar, filter store.EnvVarFilter, warning string, installationOnly bool) ([]store.EnvVar, bool) {
 	if !agentLacksProjectSecretReadScope(ctx, filter.Scope) {
-		return s.mergeEnvironmentSecrets(ctx, envVars, filter, warning), true
+		return s.mergeEnvironmentSecrets(ctx, envVars, filter, warning, installationOnly), true
 	}
 
 	envVars = withoutSecretEnvVars(envVars)
@@ -1073,6 +1097,10 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	if !checkAgentProjectSecretReadScope(w, r, scope) {
 		return
 	}
+	installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+	if !ok {
+		return
+	}
 
 	metas, err := s.secretBackend.List(ctx, secret.Filter{
 		Scope:   scope,
@@ -1085,6 +1113,9 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metas = withoutInternalSecrets(withoutSystemOneReservedSecrets(withoutAgentHiddenHubSecrets(ctx, scope, metas)))
+	if installationOnly {
+		metas = withoutInstallationBlockedSecrets(metas)
+	}
 	// Convert to store.Secret for response compatibility
 	secrets := make([]store.Secret, len(metas))
 	for i, m := range metas {
@@ -1140,13 +1171,17 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if !checkAgentProjectSecretReadScope(w, r, scope) {
 		return
 	}
-	if isSystemOneReservedSecretKey(key) {
+	installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+	if !ok {
+		return
+	}
+	if isSystemOneReservedSecretKey(key) || (installationOnly && isBlockedInstallationGitHubEnvKey(key)) {
 		writeErrorFromErr(w, store.ErrNotFound, "")
 		return
 	}
 
 	meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-	if err == nil && (meta.SecretType == store.SecretTypeInternal || agentHiddenHubSecret(ctx, scope, *meta)) {
+	if err == nil && (meta.SecretType == store.SecretTypeInternal || agentHiddenHubSecret(ctx, scope, *meta) || (installationOnly && isBlockedInstallationGitHubEnvKey(meta.Target))) {
 		// The same response as a key that does not exist.
 		err = store.ErrNotFound
 	}
@@ -2381,6 +2416,10 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 
 	switch r.Method {
 	case http.MethodGet:
+		installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+		if !ok {
+			return
+		}
 		filter := store.EnvVarFilter{
 			Scope:   store.ScopeProject,
 			ScopeID: projectID,
@@ -2390,11 +2429,13 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		var ok bool
 		envVars, ok = s.applyEnvironmentSecretsToEnvVarList(w, ctx, envVars, filter,
-			"failed to list environment secrets for project env var merge")
+			"failed to list environment secrets for project env var merge", installationOnly)
 		if !ok {
 			return
+		}
+		if installationOnly {
+			envVars = withoutInstallationBlockedEnvVars(envVars)
 		}
 		// Mask sensitive values
 		for i := range envVars {
@@ -2658,6 +2699,10 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 
 	switch r.Method {
 	case http.MethodGet:
+		installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+		if !ok {
+			return
+		}
 		metas, err := s.secretBackend.List(ctx, secret.Filter{
 			Scope:   store.ScopeProject,
 			ScopeID: projectID,
@@ -2667,6 +2712,9 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 			return
 		}
 		metas = withoutInternalSecrets(withoutSystemOneReservedSecrets(metas))
+		if installationOnly {
+			metas = withoutInstallationBlockedSecrets(metas)
+		}
 		secrets := make([]store.Secret, len(metas))
 		for i, m := range metas {
 			secrets[i] = metaToStoreSecret(m)
@@ -2688,12 +2736,16 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 
 	switch r.Method {
 	case http.MethodGet:
-		if isSystemOneReservedSecretKey(key) {
+		installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+		if !ok {
+			return
+		}
+		if isSystemOneReservedSecretKey(key) || (installationOnly && isBlockedInstallationGitHubEnvKey(key)) {
 			writeErrorFromErr(w, store.ErrNotFound, "")
 			return
 		}
 		meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-		if err == nil && meta.SecretType == store.SecretTypeInternal {
+		if err == nil && (meta.SecretType == store.SecretTypeInternal || (installationOnly && isBlockedInstallationGitHubEnvKey(meta.Target))) {
 			err = store.ErrNotFound
 		}
 		if err != nil {
@@ -3423,6 +3475,10 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 
 	switch r.Method {
 	case http.MethodGet:
+		installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+		if !ok {
+			return
+		}
 		filter := store.EnvVarFilter{
 			Scope:   store.ScopeRuntimeBroker,
 			ScopeID: brokerID,
@@ -3433,7 +3489,10 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 			return
 		}
 		envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
-			"failed to list environment secrets for broker env var merge")
+			"failed to list environment secrets for broker env var merge", installationOnly)
+		if installationOnly {
+			envVars = withoutInstallationBlockedEnvVars(envVars)
+		}
 		for i := range envVars {
 			if envVars[i].Sensitive {
 				envVars[i].Value = "********"
@@ -3487,6 +3546,10 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 
 	switch r.Method {
 	case http.MethodGet:
+		installationOnly, ok := s.callerAgentUsesInstallationGitHubToken(w, ctx)
+		if !ok {
+			return
+		}
 		metas, err := s.secretBackend.List(ctx, secret.Filter{
 			Scope:   store.ScopeRuntimeBroker,
 			ScopeID: brokerID,
@@ -3496,6 +3559,9 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 			return
 		}
 		metas = withoutInternalSecrets(withoutSystemOneReservedSecrets(metas))
+		if installationOnly {
+			metas = withoutInstallationBlockedSecrets(metas)
+		}
 		secrets := make([]store.Secret, len(metas))
 		for i, m := range metas {
 			secrets[i] = metaToStoreSecret(m)

@@ -152,6 +152,16 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		}
 	}
 
+	// Sticky fail-closed: keep "installation" if either AppliedConfig or
+	// CreateInputs carries it so reincarnation can never downgrade an
+	// installation-only agent back to user_preferred.
+	githubTokenPref := createInputs.GitHubTokenPreference
+	if old.GitHubTokenPreference == DispatchAgentGitHubTokenInstallation ||
+		createInputs.GitHubTokenPreference == DispatchAgentGitHubTokenInstallation {
+		githubTokenPref = DispatchAgentGitHubTokenInstallation
+		createInputs.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+	}
+
 	fresh := &store.AgentAppliedConfig{
 		// Kept verbatim: identity-adjacent fields the pipeline never touches,
 		// and (for Phase 1, which accepts no --harness/--reset-overrides/etc.
@@ -167,7 +177,7 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		CreatorName:            old.CreatorName,
 		AgentRole:              old.AgentRole,
 		AgentRoleGrandfathered: old.AgentRoleGrandfathered,
-		GitHubTokenPreference:  createInputs.GitHubTokenPreference,
+		GitHubTokenPreference:  githubTokenPref,
 		GitClone:               old.GitClone,
 		Workspace:              old.Workspace,
 		WorkspaceStoragePath:   old.WorkspaceStoragePath,
