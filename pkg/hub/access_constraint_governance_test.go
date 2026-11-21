@@ -448,11 +448,11 @@ func (s *governanceErrorStore) UpdateAccessConstraint(ctx context.Context, c *st
 	return s.Store.UpdateAccessConstraint(ctx, c, expectedRevision)
 }
 
-func (s *governanceErrorStore) DeleteAccessConstraint(ctx context.Context, id string) error {
+func (s *governanceErrorStore) DeleteAccessConstraint(ctx context.Context, id string, expectedRevision int64) (*store.AccessConstraint, error) {
 	if s.deleteConstraintErr != nil {
-		return s.deleteConstraintErr
+		return nil, s.deleteConstraintErr
 	}
-	return s.Store.DeleteAccessConstraint(ctx, id)
+	return s.Store.DeleteAccessConstraint(ctx, id, expectedRevision)
 }
 
 func TestGovernance_StoreFailure_RollsBack(t *testing.T) {
