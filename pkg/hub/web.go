@@ -412,7 +412,13 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 
     <!-- Fonts -->
+{{- if .HasCustomFontSans}}
+{{- if .BrandFontSansURL}}
+    <link id="scion-brand-font-sans" href="{{.BrandFontSansURL}}" rel="stylesheet">
+{{- end}}
+{{- else}}
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+{{- end}}
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 
     <!-- Shoelace components, theme CSS and icons are bundled with the client
@@ -682,6 +688,10 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
 		bodyColor = dark.Text
 	}
 	codeRadius, hintRadius := brandPageNoAssetsRadii(b)
+	fontStack := "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+	if b.FontSans != "" && b.FontSans != config.BrandFontSansDefault && b.FontSansStack != "" {
+		fontStack = b.FontSansStack
+	}
 	var badgeHTML string
 	if isCustomBrandIdentity(b) {
 		badgeHTML = fmt.Sprintf("\n        <span class=\"badge\">%s</span>", html.EscapeString(brandBadgeText(b)))
@@ -695,7 +705,7 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: %s;
             background: %s; color: %s;
             display: flex; align-items: center; justify-content: center;
             min-height: 100vh; padding: 2rem;
@@ -741,6 +751,7 @@ func renderNoAssetsPage(b *config.ResolvedBranding) string {
 </body>
 </html>`,
 		html.EscapeString(b.Name),
+		fontStack,
 		dark.Bg, bodyColor,
 		dark.Text,
 		dark.TextMuted,
@@ -763,6 +774,8 @@ type spaShellData struct {
 	FaviconType        string
 	AppleTouchIconHref string
 	ThemeColor         string
+	HasCustomFontSans  bool
+	BrandFontSansURL   string
 	// BrandingCSS holds validated custom palette and style CSS rules injected into
 	// <style id="scion-branding-tokens"> in <head> for zero-FOUC first paint.
 	BrandingCSS template.CSS
@@ -2243,6 +2256,8 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			FaviconType:        branding.FaviconMediaType,
 			AppleTouchIconHref: appleTouchHref,
 			ThemeColor:         themeColor,
+			HasCustomFontSans:  branding.FontSans != "" && branding.FontSans != config.BrandFontSansDefault,
+			BrandFontSansURL:   branding.FontSansStylesheetURL,
 			BrandingCSS:        brandingCSS,
 			ModulePreloads:     ws.shellModulePreloads,
 			ScriptNonce:        nonce,

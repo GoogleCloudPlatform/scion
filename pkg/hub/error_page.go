@@ -86,6 +86,14 @@ func brandPageNoAssetsRadii(b *config.ResolvedBranding) (codeRadius, hintRadius 
 	}
 }
 
+func brandPageFontSansStack(b *config.ResolvedBranding) string {
+	b = brandOrDefault(b)
+	if b.FontSans != "" && b.FontSans != config.BrandFontSansDefault && b.FontSansStack != "" {
+		return b.FontSansStack
+	}
+	return "'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif"
+}
+
 func brandPageColorsCSS(b *config.ResolvedBranding) string {
 	b = brandOrDefault(b)
 	light := b.Light
@@ -139,7 +147,7 @@ func renderErrorPageWithBranding(b *config.ResolvedBranding, pageTitle, icon, ic
 
         html, body {
             height: 100%%;
-            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+            font-family: %s;
             background: var(--bg);
             color: var(--text);
             -webkit-font-smoothing: antialiased;
@@ -213,6 +221,7 @@ func renderErrorPageWithBranding(b *config.ResolvedBranding, pageTitle, icon, ic
 </html>`,
 		html.EscapeString(pageTitle),
 		brandPageColorsCSS(b),
+		brandPageFontSansStack(b),
 		brandLogoHTML(b),
 		html.EscapeString(iconLabel),
 		icon, // icon is a raw HTML entity, not user input

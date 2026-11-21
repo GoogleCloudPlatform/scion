@@ -407,6 +407,7 @@ func fetchHubCallbackBranding(ctx context.Context, hubURL string) *auth.Callback
 		Name:        b.Name,
 		Attribution: b.Attribution,
 		Corners:     b.Corners,
+		FontSans:    b.FontSans,
 		LogoLight:   resolveCallbackLogoURL(base, b.LogoLight),
 		LogoDark:    resolveCallbackLogoURL(base, b.LogoDark),
 	}
