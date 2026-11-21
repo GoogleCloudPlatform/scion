@@ -854,12 +854,13 @@ const ROUTES: RouteConfig[] = [
 ];
 
 /**
- * Routes that render without the app shell (full-page layout)
+ * Routes that render without the app shell (full-page layout), mapped to
+ * their document title segment.
  */
-const STANDALONE_ROUTES = new Set([
-  'scion-login-page',
-  'scion-page-invite',
-  'scion-page-onboarding',
+const STANDALONE_ROUTE_TITLES = new Map<string, string>([
+  ['scion-login-page', 'Login'],
+  ['scion-page-invite', 'Invite'],
+  ['scion-page-onboarding', 'Setup'],
 ]);
 
 /**
@@ -1167,7 +1168,7 @@ function resolveRoute(path: string): RouteConfig {
 type ShellType = 'standalone' | 'profile' | 'chat' | 'app';
 
 function getShellType(tag: string): ShellType {
-  if (STANDALONE_ROUTES.has(tag)) return 'standalone';
+  if (STANDALONE_ROUTE_TITLES.has(tag)) return 'standalone';
   if (PROFILE_ROUTES.has(tag)) return 'profile';
   if (CHAT_ROUTES.has(tag)) return 'chat';
   return 'app';
@@ -1468,13 +1469,7 @@ async function renderRoute(path: string): Promise<void> {
     activeShell = null;
     const page = document.createElement(tag);
     appContainer.appendChild(page);
-    setDocumentTitle(
-      tag === 'scion-login-page'
-        ? 'Login'
-        : tag === 'scion-page-invite'
-          ? 'Invite'
-          : 'Page Not Found'
-    );
+    setDocumentTitle(STANDALONE_ROUTE_TITLES.get(tag) ?? 'Page Not Found');
   } else if (activeShell) {
     // Reuse existing shell — just update properties and swap page content
     const shell = activeShell.element as HTMLElement & {

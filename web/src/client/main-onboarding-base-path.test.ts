@@ -28,6 +28,18 @@ vi.mock('../components/pages/onboarding.js', () => {
   }
   return {};
 });
+vi.mock('../components/pages/login.js', () => {
+  if (!customElements.get('scion-login-page')) {
+    customElements.define('scion-login-page', class extends HTMLElement {});
+  }
+  return {};
+});
+vi.mock('../components/pages/invite.js', () => {
+  if (!customElements.get('scion-page-invite')) {
+    customElements.define('scion-page-invite', class extends HTMLElement {});
+  }
+  return {};
+});
 
 describe('main.ts onboarding redirect', () => {
   afterAll(() => {
@@ -35,9 +47,9 @@ describe('main.ts onboarding redirect', () => {
     vi.unstubAllGlobals();
   });
 
-  it('keeps the base path when redirecting to onboarding', async () => {
+  it('keeps the base path and sets the Setup document title when redirecting to onboarding', async () => {
     vi.stubEnv('BASE_URL', '/scion/');
-    await bootMainAt('/scion/', (p) =>
+    const { navigateTo } = await bootMainAt('/scion/', (p) =>
       p === '/api/v1/system/status' ? Promise.resolve(json({ complete: false })) : undefined
     );
 
@@ -46,8 +58,30 @@ describe('main.ts onboarding redirect', () => {
       BOOT_WAIT
     );
     expect(window.location.pathname).toBe('/scion/onboarding');
+    expect(document.title).toBe('Setup — Scion');
     expect(JSON.parse(sessionStorage.getItem('onboardingStatus') ?? '{}')).toEqual({
       complete: false,
     });
+
+    navigateTo('/login');
+    await vi.waitFor(
+      () => expect(document.querySelector('scion-login-page')).not.toBeNull(),
+      BOOT_WAIT
+    );
+    expect(document.title).toBe('Login — Scion');
+
+    navigateTo('/invite');
+    await vi.waitFor(
+      () => expect(document.querySelector('scion-page-invite')).not.toBeNull(),
+      BOOT_WAIT
+    );
+    expect(document.title).toBe('Invite — Scion');
+
+    navigateTo('/onboarding');
+    await vi.waitFor(
+      () => expect(document.querySelector('scion-page-onboarding')).not.toBeNull(),
+      BOOT_WAIT
+    );
+    expect(document.title).toBe('Setup — Scion');
   }, 15_000);
 });

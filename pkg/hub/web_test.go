@@ -2703,6 +2703,23 @@ func TestLoginPageRendersLoginComponent(t *testing.T) {
 	assert.NotContains(t, html, "<scion-app>")
 }
 
+func TestOnboardingPageRendersOnboardingComponent(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+
+	req := httptest.NewRequest("GET", "/onboarding", nil)
+	rec := httptest.NewRecorder()
+	devSignedIn(t, ws).ServeHTTP(rec, req)
+
+	resp := rec.Result()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	html := string(body)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, html, "<scion-page-onboarding></scion-page-onboarding>")
+	assert.NotContains(t, html, "<scion-app>")
+}
+
 func TestNonLoginPageRendersAppComponent(t *testing.T) {
 	ws := newDevAuthWebServer(t)
 
