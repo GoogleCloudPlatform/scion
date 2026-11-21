@@ -899,9 +899,9 @@ var portProxyPolicyHeaders = [...]string{"Content-Security-Policy", "Permissions
 // headers of a proxied app response after stripFromProxyResponse, for both
 // port proxy transports: the page view rules (portViewModifyResponse) when
 // policy.portView, then the sandbox policy with its Permissions-Policy and
-// Referrer-Policy, and nosniff. The last two are set unconditionally and last:
-// nothing sets them on a proxied answer after this, so the app cannot replace
-// them.
+// Referrer-Policy, and nosniff. The sandbox headers and nosniff are set
+// unconditionally and last: nothing sets them on a proxied answer after this,
+// so the app cannot replace them.
 func applyPortProxyResponsePolicy(h http.Header, policy portProxyPolicy) {
 	if policy.portView {
 		portViewModifyResponse(h)
