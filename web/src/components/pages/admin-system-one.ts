@@ -37,6 +37,7 @@ import {
 } from '../../utils/feature-flags.js';
 import { formatInstantWithZone } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { srOnlyStyles } from '../shared/styles.js';
 import './not-found.js';
 
 const ADAPTERS_PATH = '/api/v1/admin/system-one/adapters';
@@ -187,7 +188,7 @@ interface ProjectOption {
 
 /** Format Go time.Duration (nanoseconds) into a human-readable latency string. */
 export function formatElapsedNs(ns?: number): string {
-  if (ns === undefined || ns === null || !Number.isFinite(ns) || ns < 0) {
+  if (ns === undefined || ns === null || !Number.isFinite(ns) || ns <= 0) {
     return 'Unavailable';
   }
   const ms = ns / 1_000_000;
@@ -279,6 +280,7 @@ export class ScionPageAdminSystemOne extends LitElement {
 
   @state() private adapters: SystemOneAdapterCapability[] = [];
   @state() private instances: SystemOneInstance[] = [];
+  @state() private hasMoreInstances = false;
 
   // Inspect dialog state
   @state() private inspectDialogOpen = false;
@@ -314,6 +316,8 @@ export class ScionPageAdminSystemOne extends LitElement {
   @state() private testRunning = false;
   @state() private testError: string | null = null;
   @state() private testResult: ProbeSystemOneResponse | null = null;
+  private testRequestSeq = 0;
+  private testAbortController: AbortController | null = null;
 
   // Delete dialog state
   @state() private deleteDialogOpen = false;
@@ -331,290 +335,293 @@ export class ScionPageAdminSystemOne extends LitElement {
     }
   };
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    srOnlyStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-      flex-wrap: wrap;
-    }
+      .header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+        flex-wrap: wrap;
+      }
 
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.25rem 0;
-    }
+      .header h1 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.25rem 0;
+      }
 
-    .header-subtitle {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      margin: 0;
-      max-width: 48rem;
-      line-height: 1.5;
-    }
+      .header-subtitle {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        margin: 0;
+        max-width: 48rem;
+        line-height: 1.5;
+      }
 
-    .header-actions {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-    }
+      .header-actions {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
 
-    .table-container {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      overflow-x: auto;
-    }
+      .table-container {
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        overflow-x: auto;
+      }
 
-    table {
-      width: 100%;
-      table-layout: fixed;
-      border-collapse: collapse;
-    }
+      table {
+        width: 100%;
+        table-layout: fixed;
+        border-collapse: collapse;
+      }
 
-    th {
-      text-align: left;
-      padding: 0.625rem 0.5rem;
-      font-size: 0.7rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: var(--scion-text-muted, #64748b);
-      background: var(--scion-bg-subtle, #f1f5f9);
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      white-space: normal;
-      line-height: 1.3;
-    }
+      th {
+        text-align: left;
+        padding: 0.625rem 0.5rem;
+        font-size: 0.7rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--scion-text-muted, #64748b);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        white-space: normal;
+        line-height: 1.3;
+      }
 
-    td {
-      padding: 0.625rem 0.5rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      color: var(--scion-text, #1e293b);
-      font-size: 0.8125rem;
-      vertical-align: top;
-      overflow-wrap: break-word;
-    }
+      td {
+        padding: 0.625rem 0.5rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+        color: var(--scion-text, #1e293b);
+        font-size: 0.8125rem;
+        vertical-align: top;
+        overflow-wrap: break-word;
+      }
 
-    tr:last-child td {
-      border-bottom: none;
-    }
+      tr:last-child td {
+        border-bottom: none;
+      }
 
-    tr:hover td {
-      background: var(--scion-bg-subtle, #f8fafc);
-    }
+      tr:hover td {
+        background: var(--scion-bg-subtle, #f8fafc);
+      }
 
-    .instance-name-btn {
-      background: none;
-      border: none;
-      padding: 0;
-      font: inherit;
-      font-weight: 600;
-      color: var(--scion-primary, #3b82f6);
-      cursor: pointer;
-      text-align: left;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 100%;
-    }
+      .instance-name-btn {
+        background: none;
+        border: none;
+        padding: 0;
+        font: inherit;
+        font-weight: 600;
+        color: var(--scion-primary, #3b82f6);
+        cursor: pointer;
+        text-align: left;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 100%;
+      }
 
-    .instance-name-btn:hover {
-      text-decoration: underline;
-    }
+      .instance-name-btn:hover {
+        text-decoration: underline;
+      }
 
-    .mono {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.75rem;
-    }
+      .mono {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.75rem;
+      }
 
-    .endpoint-cell sl-tooltip {
-      display: block;
-      max-width: 100%;
-    }
+      .endpoint-cell sl-tooltip {
+        display: block;
+        max-width: 100%;
+      }
 
-    .endpoint-text {
-      display: block;
-      width: 100%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
+      .endpoint-text {
+        display: block;
+        width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
-    .actions-cell {
-      white-space: nowrap;
-    }
+      .actions-cell {
+        white-space: nowrap;
+      }
 
-    .muted {
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.75rem;
-    }
+      .muted {
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.75rem;
+      }
 
-    .cell-stack {
-      display: flex;
-      flex-direction: column;
-      gap: 0.2rem;
-      min-width: 0;
-    }
+      .cell-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+        min-width: 0;
+      }
 
-    .row-actions {
-      display: flex;
-      gap: 0.25rem;
-      flex-wrap: nowrap;
-      align-items: center;
-    }
+      .row-actions {
+        display: flex;
+        gap: 0.25rem;
+        flex-wrap: nowrap;
+        align-items: center;
+      }
 
-    .row-actions sl-button::part(base) {
-      padding: 0;
-      font-size: 0.75rem;
-    }
+      .row-actions sl-button::part(base) {
+        padding: 0;
+        font-size: 0.75rem;
+      }
 
-    .row-actions sl-button::part(label) {
-      padding: 0 0.45rem;
-    }
+      .row-actions sl-button::part(label) {
+        padding: 0 0.45rem;
+      }
 
-    .loading-state,
-    .empty-state,
-    .error-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 3rem 1.5rem;
-      text-align: center;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      color: var(--scion-text-muted, #64748b);
-    }
+      .loading-state,
+      .empty-state,
+      .error-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 3rem 1.5rem;
+        text-align: center;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        color: var(--scion-text-muted, #64748b);
+      }
 
-    .empty-state sl-icon,
-    .error-state sl-icon {
-      font-size: 2.5rem;
-      margin-bottom: 0.75rem;
-      opacity: 0.6;
-    }
+      .empty-state sl-icon,
+      .error-state sl-icon {
+        font-size: 2.5rem;
+        margin-bottom: 0.75rem;
+        opacity: 0.6;
+      }
 
-    .empty-state h2,
-    .error-state h2 {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.5rem 0;
-    }
+      .empty-state h2,
+      .error-state h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.5rem 0;
+      }
 
-    .empty-state p,
-    .error-state p {
-      margin: 0 0 1.25rem 0;
-      max-width: 34rem;
-      line-height: 1.5;
-    }
+      .empty-state p,
+      .error-state p {
+        margin: 0 0 1.25rem 0;
+        max-width: 34rem;
+        line-height: 1.5;
+      }
 
-    .form-fields {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-    }
+      .form-fields {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
 
-    .field-note {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      line-height: 1.45;
-      margin: 0.25rem 0 0 0;
-    }
+      .field-note {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        line-height: 1.45;
+        margin: 0.25rem 0 0 0;
+      }
 
-    .notice-box {
-      padding: 0.75rem 1rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      background: var(--scion-bg-subtle, #f8fafc);
-      font-size: 0.8125rem;
-      color: var(--scion-text, #1e293b);
-      line-height: 1.5;
-    }
+      .notice-box {
+        padding: 0.75rem 1rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-bg-subtle, #f8fafc);
+        font-size: 0.8125rem;
+        color: var(--scion-text, #1e293b);
+        line-height: 1.5;
+      }
 
-    .notice-box.warning {
-      border-color: var(--sl-color-warning-300, #fcd34d);
-      background: var(--sl-color-warning-50, #fffbeb);
-    }
+      .notice-box.warning {
+        border-color: var(--sl-color-warning-300, #fcd34d);
+        background: var(--sl-color-warning-50, #fffbeb);
+      }
 
-    .notice-box.danger {
-      border-color: var(--sl-color-danger-300, #fca5a5);
-      background: var(--sl-color-danger-50, #fef2f2);
-      color: var(--sl-color-danger-800, #991b1b);
-    }
+      .notice-box.danger {
+        border-color: var(--sl-color-danger-300, #fca5a5);
+        background: var(--sl-color-danger-50, #fef2f2);
+        color: var(--sl-color-danger-800, #991b1b);
+      }
 
-    .detail-grid {
-      display: grid;
-      grid-template-columns: 11rem 1fr;
-      gap: 0.625rem 1rem;
-      font-size: 0.875rem;
-    }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: 11rem 1fr;
+        gap: 0.625rem 1rem;
+        font-size: 0.875rem;
+      }
 
-    .detail-label {
-      color: var(--scion-text-muted, #64748b);
-      font-weight: 500;
-    }
+      .detail-label {
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 500;
+      }
 
-    .detail-value {
-      color: var(--scion-text, #1e293b);
-      word-break: break-word;
-    }
+      .detail-value {
+        color: var(--scion-text, #1e293b);
+        word-break: break-word;
+      }
 
-    .scope-list {
-      margin: 0;
-      padding-left: 1.125rem;
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.8125rem;
-    }
+      .scope-list {
+        margin: 0;
+        padding-left: 1.125rem;
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.8125rem;
+      }
 
-    .probe-result {
-      margin-top: 1rem;
-      padding: 1rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      background: var(--scion-bg-subtle, #f8fafc);
-    }
+      .probe-result {
+        margin-top: 1rem;
+        padding: 1rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-bg-subtle, #f8fafc);
+      }
 
-    .probe-result-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.5rem;
-      margin-bottom: 0.75rem;
-    }
+      .probe-result-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
 
-    .probe-result-header h3 {
-      margin: 0;
-      font-size: 0.9375rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
+      .probe-result-header h3 {
+        margin: 0;
+        font-size: 0.9375rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
 
-    .badge-row {
-      display: flex;
-      gap: 0.375rem;
-      flex-wrap: wrap;
-      align-items: center;
-    }
+      .badge-row {
+        display: flex;
+        gap: 0.375rem;
+        flex-wrap: wrap;
+        align-items: center;
+      }
 
-    .dialog-footer {
-      display: flex;
-      justify-content: flex-end;
-      gap: 0.5rem;
-    }
+      .dialog-footer {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.5rem;
+      }
 
-    sl-dialog::part(panel) {
-      max-width: 42rem;
-      width: 100%;
-    }
-  `;
+      sl-dialog::part(panel) {
+        max-width: 42rem;
+        width: 100%;
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -627,6 +634,9 @@ export class ScionPageAdminSystemOne extends LitElement {
 
   override disconnectedCallback(): void {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
+    this.testAbortController?.abort();
+    this.testAbortController = null;
+    this.testRequestSeq++;
     super.disconnectedCallback();
   }
 
@@ -647,18 +657,19 @@ export class ScionPageAdminSystemOne extends LitElement {
     this.error = null;
     this.hubUnavailable = false;
     this.forbidden = false;
+    this.hasMoreInstances = false;
 
     try {
-      const [adaptersRes, instancesRes] = await Promise.all([
+      const [adaptersRes, firstInstancesRes] = await Promise.all([
         apiFetch(ADAPTERS_PATH),
         apiFetch(INSTANCES_PATH),
       ]);
 
-      if (adaptersRes.status === 404 || instancesRes.status === 404) {
+      if (adaptersRes.status === 404 || firstInstancesRes.status === 404) {
         this.hubUnavailable = true;
         return;
       }
-      if (adaptersRes.status === 403 || instancesRes.status === 403) {
+      if (adaptersRes.status === 403 || firstInstancesRes.status === 403) {
         this.forbidden = true;
         return;
       }
@@ -667,11 +678,11 @@ export class ScionPageAdminSystemOne extends LitElement {
           await extractApiError(adaptersRes, `Failed to load adapters (HTTP ${adaptersRes.status})`)
         );
       }
-      if (!instancesRes.ok) {
+      if (!firstInstancesRes.ok) {
         throw new Error(
           await extractApiError(
-            instancesRes,
-            `Failed to load instances (HTTP ${instancesRes.status})`
+            firstInstancesRes,
+            `Failed to load instances (HTTP ${firstInstancesRes.status})`
           )
         );
       }
@@ -679,10 +690,41 @@ export class ScionPageAdminSystemOne extends LitElement {
       const adaptersBody = (await adaptersRes.json()) as {
         adapters?: SystemOneAdapterCapability[];
       };
-      const instancesBody = (await instancesRes.json()) as { instances?: SystemOneInstance[] };
+      const firstBody = (await firstInstancesRes.json()) as {
+        instances?: SystemOneInstance[];
+        nextCursor?: string;
+      };
+
+      const collected: SystemOneInstance[] = [...(firstBody.instances ?? [])];
+      let cursor = firstBody.nextCursor ?? '';
+      const seenCursors = new Set<string>();
+      const maxPages = 20;
+      let pages = 1;
+
+      while (cursor && !seenCursors.has(cursor) && pages < maxPages) {
+        seenCursors.add(cursor);
+        const pageRes = await apiFetch(
+          `${INSTANCES_PATH}?cursor=${encodeURIComponent(cursor)}&limit=200`
+        );
+        if (!pageRes.ok) {
+          throw new Error(
+            await extractApiError(pageRes, `Failed to load instances (HTTP ${pageRes.status})`)
+          );
+        }
+        const pageBody = (await pageRes.json()) as {
+          instances?: SystemOneInstance[];
+          nextCursor?: string;
+        };
+        if (pageBody.instances) {
+          collected.push(...pageBody.instances);
+        }
+        cursor = pageBody.nextCursor ?? '';
+        pages++;
+      }
 
       this.adapters = adaptersBody.adapters ?? [];
-      this.instances = instancesBody.instances ?? [];
+      this.instances = collected;
+      this.hasMoreInstances = Boolean(cursor);
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load System One providers';
     } finally {
@@ -886,6 +928,9 @@ export class ScionPageAdminSystemOne extends LitElement {
   }
 
   private openTest(inst: SystemOneInstance): void {
+    this.testAbortController?.abort();
+    this.testAbortController = null;
+    this.testRequestSeq++;
     this.testInstance = inst;
     this.testSpecText = DEFAULT_PROBE_SPEC;
     this.testProbeText = DEFAULT_PROBE_TEXT;
@@ -903,8 +948,12 @@ export class ScionPageAdminSystemOne extends LitElement {
   }
 
   private closeTest(): void {
+    this.testAbortController?.abort();
+    this.testAbortController = null;
+    this.testRequestSeq++;
     this.testDialogOpen = false;
     this.testInstance = null;
+    this.testRunning = false;
     this.testResult = null;
     this.testError = null;
   }
@@ -954,24 +1003,57 @@ export class ScionPageAdminSystemOne extends LitElement {
       payload.project = this.testProjectId;
     }
 
+    this.testAbortController?.abort();
+    const controller = new AbortController();
+    this.testAbortController = controller;
+    const seq = ++this.testRequestSeq;
+    const targetName = inst.name;
+
     this.testRunning = true;
     this.testError = null;
     this.testResult = null;
 
     try {
-      const res = await apiFetch(`${INSTANCES_PATH}/${encodeURIComponent(inst.name)}/probe`, {
+      const res = await apiFetch(`${INSTANCES_PATH}/${encodeURIComponent(targetName)}/probe`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
+      if (
+        seq !== this.testRequestSeq ||
+        !this.testDialogOpen ||
+        this.testInstance?.name !== targetName
+      ) {
+        return;
+      }
       if (!res.ok) {
         throw new Error(await extractApiError(res, `Test request failed (HTTP ${res.status})`));
       }
-      this.testResult = (await res.json()) as ProbeSystemOneResponse;
+      const body = (await res.json()) as ProbeSystemOneResponse;
+      if (
+        seq !== this.testRequestSeq ||
+        !this.testDialogOpen ||
+        this.testInstance?.name !== targetName
+      ) {
+        return;
+      }
+      this.testResult = body;
     } catch (err) {
+      if (
+        seq !== this.testRequestSeq ||
+        !this.testDialogOpen ||
+        this.testInstance?.name !== targetName ||
+        (err instanceof DOMException && err.name === 'AbortError')
+      ) {
+        return;
+      }
       this.testError = err instanceof Error ? err.message : 'Test request failed';
     } finally {
-      this.testRunning = false;
+      if (seq === this.testRequestSeq) {
+        this.testRunning = false;
+        this.testAbortController = null;
+      }
     }
   }
 
@@ -1118,8 +1200,19 @@ export class ScionPageAdminSystemOne extends LitElement {
     const byId = this.adaptersById;
 
     return html`
+      ${this.hasMoreInstances
+        ? html`
+            <div class="notice-box" role="status" style="margin-bottom: 0.75rem;">
+              Showing the first ${this.instances.length} provider instances; additional instances
+              exist on the Hub.
+            </div>
+          `
+        : nothing}
       <div class="table-container">
-        <table>
+        <table aria-label="System One provider instances">
+          <caption class="sr-only">
+            System One provider instances
+          </caption>
           <colgroup>
             <col style="width: 13%;" />
             <col style="width: 12%;" />
@@ -1150,6 +1243,7 @@ export class ScionPageAdminSystemOne extends LitElement {
                       <button
                         type="button"
                         class="instance-name-btn"
+                        title=${inst.name}
                         @click=${() => void this.openInspect(inst)}
                       >
                         ${inst.name}
@@ -1172,7 +1266,9 @@ export class ScionPageAdminSystemOne extends LitElement {
                   </td>
                   <td class="endpoint-cell">
                     <sl-tooltip content=${inst.endpoint} hoist>
-                      <span class="mono endpoint-text">${inst.endpoint}</span>
+                      <span class="mono endpoint-text" title=${inst.endpoint}>
+                        ${inst.endpoint}
+                      </span>
                     </sl-tooltip>
                   </td>
                   <td>
@@ -1198,10 +1294,10 @@ export class ScionPageAdminSystemOne extends LitElement {
                         variant="default"
                         @click=${() => void this.openInspect(inst)}
                       >
-                        Inspect
+                        Inspect<span class="sr-only"> ${inst.name}</span>
                       </sl-button>
                       <sl-button size="small" variant="default" @click=${() => this.openTest(inst)}>
-                        Test
+                        Test<span class="sr-only"> ${inst.name}</span>
                       </sl-button>
                       <sl-button
                         size="small"
@@ -1209,7 +1305,7 @@ export class ScionPageAdminSystemOne extends LitElement {
                         outline
                         @click=${() => this.openDelete(inst)}
                       >
-                        Delete
+                        Delete<span class="sr-only"> ${inst.name}</span>
                       </sl-button>
                     </div>
                   </td>
@@ -1230,7 +1326,9 @@ export class ScionPageAdminSystemOne extends LitElement {
       <sl-dialog
         label=${inst ? `Inspect Provider Instance: ${inst.name}` : 'Inspect Provider Instance'}
         ?open=${this.inspectDialogOpen}
-        @sl-after-hide=${() => this.closeInspect()}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.closeInspect();
+        }}
       >
         ${this.inspectLoading
           ? html`
@@ -1372,7 +1470,9 @@ export class ScionPageAdminSystemOne extends LitElement {
       <sl-dialog
         label="Add System One Provider Instance"
         ?open=${this.createDialogOpen}
-        @sl-after-hide=${() => this.closeCreate()}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.closeCreate();
+        }}
       >
         <form
           id="create-system-one-form"
@@ -1595,7 +1695,7 @@ export class ScionPageAdminSystemOne extends LitElement {
           required
           rows="2"
           placeholder="https://www.googleapis.com/auth/..."
-          help-text="One or more https://www.googleapis.com/auth/ scopes (no default). Note: the exact required scope for Gemini Decisions is currently unverified (U-G9)."
+          help-text="One or more https://www.googleapis.com/auth/ scopes (no default). The scope required by Gemini Decisions isn't yet confirmed; cloud-platform alone was observed to be insufficient."
           .value=${this.createScopesText}
           @sl-input=${(e: Event) => {
             this.createScopesText = (e.target as HTMLTextAreaElement).value;
@@ -1627,7 +1727,9 @@ export class ScionPageAdminSystemOne extends LitElement {
       <sl-dialog
         label=${inst ? `Test Provider Instance: ${inst.name}` : 'Test Provider Instance'}
         ?open=${this.testDialogOpen}
-        @sl-after-hide=${() => this.closeTest()}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.closeTest();
+        }}
       >
         ${inst
           ? html`
@@ -1828,7 +1930,9 @@ export class ScionPageAdminSystemOne extends LitElement {
       <sl-dialog
         label="Delete Provider Instance"
         ?open=${this.deleteDialogOpen}
-        @sl-after-hide=${() => this.closeDelete()}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.closeDelete();
+        }}
       >
         ${this.deleteError
           ? html`<div class="notice-box danger" role="alert" style="margin-bottom:0.75rem;">
