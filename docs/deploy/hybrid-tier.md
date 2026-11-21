@@ -101,6 +101,19 @@ Configure a project-level mode (`assign` with a dedicated service account) for
 projects that need GCP access. The hub-level `passthrough` default applies to
 hubs deployed without the hybrid tier.
 
+On Kubernetes, every agent pod is created with
+`automountServiceAccountToken: false` in all GCP identity modes, so no
+Kubernetes API token is mounted in the pod. Workload Identity continues to work
+through the GKE metadata server without a mounted Kubernetes API token. In
+`block` mode, configure a dedicated per-deployment zero-privilege block KSA via
+`kubernetes_block_service_account` (otherwise pods run as the namespace's
+`default` KSA) and ensure that KSA has no Workload Identity annotation or IAM
+bindings. For projects using `assign` mode, bind a dedicated KSA to each
+assigned Google service account via Workload Identity
+(`iam.gke.io/gcp-service-account` and `roles/iam.workloadIdentityUser`). See
+[GCP Identity Modes on Kubernetes](../../docs-site/src/content/docs/hosted/ha/kubernetes.md#gcp-identity-modes-on-kubernetes)
+and [Agent pod identity](../../docs-site/src/content/docs/hosted/ha/kubernetes.md#agent-pod-identity).
+
 The hub's own shared-dir file browser (project pages in the web UI) uses this
 same setting and the same confined resolver, so `scratchpad` listings work
 whether the project is browsed via a co-located Docker broker or lives only on
@@ -719,11 +732,6 @@ running this tier:
   serialized, and any key the settings struct doesn't know about is dropped).
   If you hand-maintain comments or extra keys in your global settings file,
   expect them to disappear the next time a project is registered.
-- **`ptone/scion#1801`** — GKE agent pods run as the namespace's **default**
-  Kubernetes service account, with its token automounted, because the k8s
-  runtime doesn't set `automountServiceAccountToken: false` or require a
-  dedicated service account. Exposure depends entirely on what RBAC exists in
-  your agent namespace; review it for this tier's cluster specifically.
 - **Chat attachments on the NFS tier.** When the Hub has object storage,
   attachments are stored as artifacts and delivered into the recipient's
   inbox (`~/.scion/inbox/<message-id>/`), and that inbox path is the one the
@@ -757,5 +765,5 @@ non-production environment first.
 - `ptone/scion#1802` — shared-dir cleanup on project deletion (the NFS side
   is handled starting Phase 2; the local backend and workspace directory
   cleanup remain tracked on that issue).
-- `ptone/scion#1799`, `ptone/scion#1800`, `ptone/scion#1801` — known limits,
+- `ptone/scion#1799`, `ptone/scion#1800` — known limits,
   above.

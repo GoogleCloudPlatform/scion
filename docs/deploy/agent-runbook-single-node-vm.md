@@ -615,8 +615,8 @@ VM tag.
 **Known limits.** See `docs/deploy/hybrid-tier.md`'s own Known limits
 section for `ptone/scion#1799` (image pinning: use `--image <digest>` at
 agent start, not a profile's `harness_overrides`, since a template's own
-image default wins over it for both Docker and GKE agents),
-`ptone/scion#1800`, and `ptone/scion#1801`. For hardening an NFS tree that
+image default wins over it for both Docker and GKE agents) and
+`ptone/scion#1800`. For hardening an NFS tree that
 was exported before a dedicated squash identity was in place, see that
 same page's manual fix-up recipe under "E2 hardening: dedicated squash
 identity + default ACL".
