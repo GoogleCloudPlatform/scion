@@ -56,13 +56,16 @@ type TrustedIssuerConfig struct {
 
 	// AllowedEmails restricts accepted tokens to specific email claims.
 	// Supports leading-wildcard suffix matching (e.g. "*@example.com").
-	// If empty, all emails accepted.
+	// If empty, all emails accepted. On the Google issuer this also narrows
+	// service-account ID tokens on the external-bearer path: when set, an SA
+	// must match it as well as AllowedGCPProjects.
 	AllowedEmails []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
 
 	// AllowedGCPProjects admits SERVICE-ACCOUNT principals (Google issuer
 	// only) whose GCP project ID — parsed from the SA email — is listed
-	// (exact, case-insensitive). Empty means no service accounts are
-	// admitted. This is deliberately a distinct field from AllowedProjects:
+	// (exact, case-insensitive), narrowed further by AllowedEmails when
+	// that is set. Empty means no service accounts are admitted. This is
+	// deliberately a distinct field from AllowedProjects:
 	// that field already means the Scion project ID matched against a
 	// federated hub agent token's project_id claim (issuer_type: hub,
 	// pkg/hub/federation_auth.go), and reusing it here would give one config
