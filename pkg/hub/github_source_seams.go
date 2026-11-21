@@ -289,6 +289,16 @@ func (s *Server) GitHubSourceReadiness() source.Readiness {
 	}
 }
 
+// Compile-time assertion that serverTriggerCore satisfies source.Enricher
+// (Stage 3 §5.5, app-shaped-source-seams.md §2).
+var _ source.Enricher = serverTriggerCore{}
+
+// GitHubSourceEnricher returns GitHub's source.Enricher delegating directly to
+// serverTriggerCore's G2 PR-comment enricher.
+func (s *Server) GitHubSourceEnricher() source.Enricher {
+	return serverTriggerCore{srv: s}
+}
+
 // GitHubSourcePresets returns GitHub's source.Presets catalog.
 func (s *Server) GitHubSourcePresets() source.Presets {
 	return &triggithub.PresetCatalog{}

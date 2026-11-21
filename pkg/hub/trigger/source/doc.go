@@ -15,9 +15,10 @@
 // Package source defines the provider-free interfaces and record types for
 // app-shaped external trigger sources (such as GitHub Apps, Jira, or GitLab).
 //
-// It intentionally imports only the Go standard library and never imports any
-// provider package (such as pkg/hub/trigger/github or pkg/hub/githubapp) or
-// pkg/hub. An import-boundary guard test enforces this invariant.
+// It intentionally imports only the Go standard library and the provider-free
+// pkg/hub/hubfire types package, and never imports any provider package (such
+// as pkg/hub/trigger/github or pkg/hub/githubapp) or pkg/hub. An
+// import-boundary guard test enforces this invariant.
 //
 // See Triggers Stage 3 design §16 item 17 and app-shaped-source-seams.md §1–§2.
 package source

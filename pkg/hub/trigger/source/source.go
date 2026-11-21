@@ -18,6 +18,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 )
 
 // SecretSource resolves a hub-held webhook signing secret for a provider.
@@ -162,9 +164,17 @@ type Normalizer interface {
 	Normalize(ctx context.Context, d Delivery, payload any, t Target) (Event, error)
 }
 
-// TODO(ptone/scion#8088, GoogleCloudPlatform/scion#5190): declare
-// `type Enricher = SourceEnricher` once G2 enrichment merges SourceEnricher
-// onto main (see app-shaped-source-seams.md §2).
+// Enricher is the drainer-side source enrichment hook consulted once per event
+// before rule evaluation (Stage 3 §5.5, app-shaped-source-seams.md §2).
+// pkg/hub/trigger.SourceEnricher aliases this interface.
+type Enricher interface {
+	// NeedsEnrichment reports whether ev lacks facts the source can fetch.
+	NeedsEnrichment(ev *hubfire.FireEvent) bool
+	// Enrich fetches and returns the attribute/list updates; the dispatcher
+	// persists them on the event row before evaluating any rule, so rules,
+	// history, the envelope, and the agent file all see the same facts.
+	Enrich(ctx context.Context, ev *hubfire.FireEvent) (attrs map[string]string, lists map[string][]string, err error)
+}
 
 // ActorIdentity identifies whether a provider actor is the hub's own app,
 // powering the own-actor loop guard.

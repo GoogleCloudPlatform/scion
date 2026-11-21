@@ -27,6 +27,7 @@ import (
 const (
 	scionModulePath      = "github.com/GoogleCloudPlatform/scion"
 	hubPkgPath           = scionModulePath + "/pkg/hub"
+	hubfirePkgPath       = hubPkgPath + "/hubfire"
 	sourcePkgPath        = hubPkgPath + "/trigger/source"
 	triggerGitHubPkgPath = hubPkgPath + "/trigger/github"
 	githubAppPkgPath     = hubPkgPath + "/githubapp"
@@ -35,7 +36,8 @@ const (
 // TestImportBoundaryGuard enforces app-shaped-source-seams.md §1 (Stage 3
 // design §16 item 17): pkg/hub/trigger/source must remain provider-free and
 // must never import pkg/hub/trigger/github, pkg/hub/githubapp, or pkg/hub
-// directly or transitively (it stays a pure stdlib leaf).
+// directly or transitively (only stdlib and the provider-free pkg/hub/hubfire
+// types package are permitted).
 func TestImportBoundaryGuard(t *testing.T) {
 	root := findModuleRoot(t)
 	pkgDir := filepath.Join(root, "pkg", "hub", "trigger", "source")
@@ -66,8 +68,11 @@ func TestImportBoundaryGuard(t *testing.T) {
 			if isForbiddenSourceImport(imp) {
 				t.Errorf("%s directly imports forbidden package %q", name, imp)
 			}
+			if imp == hubfirePkgPath {
+				continue
+			}
 			if strings.HasPrefix(imp, scionModulePath+"/") || strings.Contains(imp, ".") {
-				t.Errorf("%s imports non-stdlib package %q (pkg/hub/trigger/source must stay a pure stdlib leaf)", name, imp)
+				t.Errorf("%s imports disallowed non-stdlib package %q (only stdlib and %q are permitted)", name, imp, hubfirePkgPath)
 			}
 		}
 	}
