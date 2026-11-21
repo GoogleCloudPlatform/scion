@@ -35,7 +35,9 @@ Conversation subcommands accept three reference formats:
 
 - **`conv:<uuid>`**: Direct conversation ID (from `scion conversation list` or an
   inbound message envelope's `conversation.id`). This is the most common form
-  and always resolves unambiguously for any conversation you can access.
+  and always resolves unambiguously for any conversation you can access. Posting
+  to another pair's direct conversation fails as if the ID did not exist; see
+  `scion-messaging`.
 - **`@<agent-name>`**: The direct-message conversation with an agent.
 - **`#<thread-name>`**: A named thread conversation.
 
