@@ -16,6 +16,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // ErrHarnessConfigPolicy marks a launch refused by the harness-config policy
@@ -551,36 +554,102 @@ func stagedSecretsDir(agentHome string) string {
 	return filepath.Join(agentHome, filepath.FromSlash(stagedSecretsRel))
 }
 
-// ensureSecretsRecord creates an empty secrets record (mode 0700) in agentDir
-// when none exists, leaving an existing record as it is. An empty record
-// restores nothing; it is distinct from an absent record.
+const (
+	secretsRecordOldDirName = config.HarnessSecretsRecordDirName + ".old"
+	secretsRecordTmpPrefix  = config.HarnessSecretsRecordDirName + ".tmp-"
+)
+
+// ensureSecretsRecord creates an empty private secrets record (0700 on Unix,
+// owner-only DACL on Windows) in agentDir when none exists, after recovering
+// any harness-secrets.old left by an interrupted swap. An empty record restores
+// nothing and is distinct from an absent record. An existing record directory,
+// including its permissions, is left unchanged (privatefs.Tree.MkdirAll does
+// not re-chmod existing directories; every recordSecrets replacement installs a
+// fresh private directory via rename).
 func ensureSecretsRecord(agentDir string) error {
-	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
-	if err := os.MkdirAll(record, 0o700); err != nil {
+	if err := recoverSecretsRecordOld(agentDir); err != nil {
 		return err
 	}
-	return os.Chmod(record, 0o700)
+	tree, err := privatefs.OpenTree(agentDir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tree.Close() }()
+	return tree.MkdirAll(config.HarnessSecretsRecordDirName, privatefs.Private)
 }
 
-// restoreSecretsRecord restores exactly the secret files in the control
-// plane's record (agentDir/harness-secrets) into the agent home's cleared
-// staged secrets directory (0700, files 0600), and returns their names for
-// ContainerScriptHarness.SetRecordedSecrets. Only regular files are restored.
+// recoverSecretsRecordOld renames harness-secrets.old back to harness-secrets
+// when an atomic swap was interrupted between its two renames.
+func recoverSecretsRecordOld(agentDir string) error {
+	if _, err := os.Lstat(filepath.Join(agentDir, config.HarnessSecretsRecordDirName)); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Lstat(filepath.Join(agentDir, secretsRecordOldDirName)); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	tree, err := privatefs.OpenTree(agentDir, privatefs.TreeOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tree.Close() }()
+	return tree.Rename(secretsRecordOldDirName, config.HarnessSecretsRecordDirName)
+}
+
+// cleanupSecretsRecordTmp removes leftover harness-secrets.tmp-* directories in
+// agentDir from an earlier crashed recordSecrets call. Callers must ensure no
+// concurrent recordSecrets write for the same agent can be in flight.
+func cleanupSecretsRecordTmp(agentDir string) error {
+	fi, err := os.Lstat(agentDir)
+	if os.IsNotExist(err) || (err == nil && !fi.IsDir()) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	matches, err := filepath.Glob(filepath.Join(agentDir, secretsRecordTmpPrefix+"*"))
+	if err != nil {
+		return err
+	}
+	for _, m := range matches {
+		if err := os.RemoveAll(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var restoreSecretsAllowTestHook func(name string) bool
+
+// restoreSecretsRecord restores recorded regular secret files from
+// agentDir/harness-secrets into the agent home's cleared staged secrets
+// directory (0700, files 0600), and returns their names for
+// ContainerScriptHarness.SetRecordedSecrets. Any harness-secrets.old left by an
+// interrupted recordSecrets swap is recovered first.
 //
-// Recorded secrets are restored only for the harness-config revision that
-// staged them: nothing is restored unless the record's identity matches
-// current, the identity of the harness-config this launch resolved. A record
-// without an identity, an unreadable identity, or an unknown current identity
-// restores nothing.
+// Exact identity matches restore every recorded regular file; same-lineage
+// revision changes (matching name, source, and hub record ID) with a non-nil
+// allow predicate restore only accepted names without writing filtered files to
+// the home; any other mismatch, missing or unreadable identity, or unknown
+// current identity restores nothing.
 //
 // With no record (an agent provisioned before harness secrets were recorded),
 // nothing is restored, a warning names the agent, and an empty record is
 // created so the warning is not repeated.
 //
-// The writes into the home are confined to it (pkg/agenthome), through one
-// handle opened on the home: a link at a secret file is replaced, never
-// written through, and a linked directory component is refused.
-func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessConfigIdentity) ([]string, error) {
+// Writes into the home are confined via pkg/agenthome through one handle opened
+// on the home: a link at a secret file is replaced, never written through, and
+// a linked directory component is refused.
+func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessConfigIdentity, allow func(name string) bool) ([]string, error) {
+	if err := recoverSecretsRecordOld(agentDir); err != nil {
+		return nil, err
+	}
+	if restoreSecretsAllowTestHook != nil {
+		allow = restoreSecretsAllowTestHook
+	}
 	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
 	entries, err := os.ReadDir(record)
 	if os.IsNotExist(err) {
@@ -591,7 +660,9 @@ func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessC
 		return nil, err
 	}
 	recorded := readSecretsIdentity(record)
-	if !recorded.matches(current) {
+	exactMatch := recorded.matches(current)
+	crossRevision := !exactMatch && recorded.sameLineage(current) && allow != nil
+	if !exactMatch && !crossRevision {
 		if recorded != nil {
 			slog.Info("recorded secrets are restored only for the harness-config revision that staged them; none restored", "agent_id", agentID)
 		}
@@ -603,9 +674,13 @@ func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessC
 			_ = home.Close()
 		}
 	}()
-	var names []string
+	var names, dropped []string
 	for _, e := range entries {
 		if !e.Type().IsRegular() || e.Name() == secretsIdentityFile {
+			continue
+		}
+		if crossRevision && !allow(e.Name()) {
+			dropped = append(dropped, e.Name())
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(record, e.Name()))
@@ -625,50 +700,166 @@ func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessC
 		}
 		names = append(names, e.Name())
 	}
+	if crossRevision {
+		slog.Info("restoring recorded secrets across a harness-config revision change",
+			"agent_id", agentID, "from_revision", recorded.Revision, "to_revision", current.Revision,
+			"restored", names, "dropped", dropped)
+	}
 	return names, nil
 }
 
-// recordSecrets replaces the control plane's secrets record with the staged
-// secret files ApplyAuthSettings referenced (names), copied by content from
-// the agent home's staged secrets directory (regular files only), together
-// with current, the identity of the harness-config that staged them (0600).
-// The record is written even when names is empty; with no current identity
-// no identity is written, so the record restores nothing.
-func recordSecrets(agentDir, agentHome string, names []string, current *harnessConfigIdentity) error {
+type recordUpdate struct {
+	Names          []string
+	Current        *harnessConfigIdentity
+	FreshSatisfied bool
+	Allow          func(name string) bool
+}
+
+var recordSecretsBetweenRenamesHook func() error
+
+// recordSecrets updates agentDir/harness-secrets from the regular secret files
+// referenced in u.Names (copied by content from the agent home's staged secrets
+// directory) together with u.Current (written last as .identity.json). It
+// returns replaced=true when a new record was installed, or replaced=false with
+// a nil error when an existing same-lineage record was preserved because
+// !u.FreshSatisfied and replacing would drop a recorded key still valid for the
+// target revision.
+//
+// At entry, any harness-secrets.old left by an interrupted swap is recovered
+// and any leftover harness-secrets.tmp-* directories from a prior crash are
+// removed. Replacements write a private harness-secrets.tmp-<hex> directory,
+// rename an existing harness-secrets aside to harness-secrets.old, rename the
+// populated temp directory into place, and remove .old; on a crash at any
+// point, recovery sees either the old or the new complete record.
+func recordSecrets(agentDir, agentHome, agentID string, u recordUpdate) (bool, error) {
+	if err := recoverSecretsRecordOld(agentDir); err != nil {
+		return false, err
+	}
+	if err := cleanupSecretsRecordTmp(agentDir); err != nil {
+		return false, err
+	}
 	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
-	if err := os.RemoveAll(record); err != nil {
-		return err
+	oldEntries, err := os.ReadDir(record)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
 	}
-	if err := ensureSecretsRecord(agentDir); err != nil {
-		return err
+	recordExists := err == nil
+	var oldID *harnessConfigIdentity
+	var oldNames []string
+	if recordExists {
+		oldID = readSecretsIdentity(record)
+		for _, e := range oldEntries {
+			if e.Type().IsRegular() && e.Name() != secretsIdentityFile {
+				oldNames = append(oldNames, e.Name())
+			}
+		}
 	}
+
+	type stagedSecret struct {
+		name string
+		data []byte
+	}
+	newSet := make(map[string]struct{}, len(u.Names))
+	var staged []stagedSecret
 	src := stagedSecretsDir(agentHome)
-	for _, name := range names {
+	for _, name := range u.Names {
 		if name == secretsIdentityFile {
 			continue
 		}
-		info, err := os.Lstat(filepath.Join(src, name))
+		if _, seen := newSet[name]; seen {
+			continue
+		}
+		p := filepath.Join(src, name)
+		info, err := os.Lstat(p)
 		if err != nil || info.Mode()&os.ModeType != 0 {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(src, name))
+		data, err := os.ReadFile(p)
 		if err != nil {
-			return err
+			return false, err
 		}
-		if err := os.WriteFile(filepath.Join(record, name), data, 0o600); err != nil {
-			return err
+		newSet[name] = struct{}{}
+		staged = append(staged, stagedSecret{name: name, data: data})
+	}
+
+	replace := oldID == nil || (u.Current != nil && !oldID.sameLineage(u.Current)) || u.FreshSatisfied
+	if !replace {
+		var lost []string
+		for _, n := range oldNames {
+			if _, ok := newSet[n]; ok {
+				continue
+			}
+			if u.Current == nil || oldID.matches(u.Current) || u.Allow == nil || u.Allow(n) {
+				lost = append(lost, n)
+			}
+		}
+		if len(lost) > 0 {
+			slog.Warn("kept the existing harness secrets record: this start staged fewer credentials than recorded for the same harness-config",
+				"agent_id", agentID,
+				"missing", lost,
+			)
+			return false, nil
 		}
 	}
-	if current != nil {
-		data, err := json.Marshal(current)
-		if err != nil {
-			return err
+
+	tree, err := privatefs.OpenTree(agentDir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tree.Close() }()
+
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return false, err
+	}
+	tmpRel := secretsRecordTmpPrefix + hex.EncodeToString(rnd[:])
+	tmpMoved := false
+	defer func() {
+		if !tmpMoved {
+			_ = os.RemoveAll(filepath.Join(agentDir, tmpRel))
 		}
-		if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), data, 0o600); err != nil {
-			return err
+	}()
+	if err := tree.MkdirAll(tmpRel, privatefs.Private); err != nil {
+		return false, err
+	}
+	for _, s := range staged {
+		if err := tree.WriteFile(path.Join(tmpRel, s.name), s.data, privatefs.Private); err != nil {
+			return false, err
 		}
 	}
-	return nil
+	if u.Current != nil {
+		idData, err := json.Marshal(u.Current)
+		if err != nil {
+			return false, err
+		}
+		if err := tree.WriteFile(path.Join(tmpRel, secretsIdentityFile), idData, privatefs.Private); err != nil {
+			return false, err
+		}
+	}
+
+	oldPath := filepath.Join(agentDir, secretsRecordOldDirName)
+	if err := os.RemoveAll(oldPath); err != nil {
+		return false, err
+	}
+	if recordExists {
+		if err := tree.Rename(config.HarnessSecretsRecordDirName, secretsRecordOldDirName); err != nil {
+			return false, err
+		}
+	}
+	if recordSecretsBetweenRenamesHook != nil {
+		if err := recordSecretsBetweenRenamesHook(); err != nil {
+			return false, err
+		}
+	}
+	if err := tree.Rename(tmpRel, config.HarnessSecretsRecordDirName); err != nil {
+		if recordExists {
+			_ = tree.Rename(secretsRecordOldDirName, config.HarnessSecretsRecordDirName)
+		}
+		return false, err
+	}
+	tmpMoved = true
+	_ = os.RemoveAll(oldPath)
+	return true, nil
 }
 
 // secretsIdentityFile is the file in the secrets record holding the identity
@@ -726,15 +917,21 @@ func (a *harnessConfigIdentity) matches(b *harnessConfigIdentity) bool {
 	return a != nil && b != nil && a.Name != "" && a.Revision != "" && *a == *b
 }
 
+func (a *harnessConfigIdentity) sameLineage(b *harnessConfigIdentity) bool {
+	return a != nil && b != nil &&
+		a.Name != "" && a.Revision != "" && b.Revision != "" &&
+		a.Name == b.Name && a.Source == b.Source && a.HubRecordID == b.HubRecordID
+}
+
 // readSecretsIdentity reads the identity recorded with the secrets record, or
-// nil when absent or unreadable.
+// nil when absent, unreadable, or incomplete.
 func readSecretsIdentity(record string) *harnessConfigIdentity {
 	data, err := os.ReadFile(filepath.Join(record, secretsIdentityFile))
 	if err != nil {
 		return nil
 	}
 	var id harnessConfigIdentity
-	if err := json.Unmarshal(data, &id); err != nil {
+	if err := json.Unmarshal(data, &id); err != nil || id.Name == "" || id.Revision == "" {
 		return nil
 	}
 	return &id

@@ -25,6 +25,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1619,9 +1621,10 @@ func TestHarnessConfigPolicy_StartRestoresSecretsRecord(t *testing.T) {
 }
 
 // restoreSecretsRecord restores only regular files, into a 0700 directory
-// with 0600 files, and returns their names, and only when the recorded
-// harness-config identity matches the current one; any ambiguity restores
-// nothing.
+// with 0600 files, and returns their names. Exact identity matches restore all
+// regular files; same-lineage revision changes restore only names accepted by
+// allow (never writing filtered files to the home); allow == nil on a revision
+// change or any lineage mismatch restores nothing.
 func TestRestoreSecretsRecord(t *testing.T) {
 	agentDir := t.TempDir()
 	home := filepath.Join(t.TempDir(), "home")
@@ -1629,7 +1632,10 @@ func TestRestoreSecretsRecord(t *testing.T) {
 	if err := os.MkdirAll(record, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(record, "TOKEN_A"), []byte("a"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(record, "TOKEN_A"), []byte("secret-val-a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(record, "TOKEN_B"), []byte("secret-val-b"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(record, "TOKEN_A"), filepath.Join(record, "LINKED")); err != nil {
@@ -1643,17 +1649,23 @@ func TestRestoreSecretsRecord(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), idData, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	allowAll := func(string) bool { return true }
 
-	// Ambiguity or mismatch restores nothing.
-	for name, current := range map[string]*harnessConfigIdentity{
-		"unknown current identity": nil,
-		"different name":           {Name: "other", Source: "broker-local", Revision: "sha256:abc"},
-		"different revision":       {Name: "hc", Source: "broker-local", Revision: "sha256:def"},
-		"different hub record":     {Name: "hc", Source: "broker-local", HubRecordID: "rec-2", Revision: "sha256:abc"},
+	// Ambiguity, lineage mismatch, or cross-revision with nil allow restores nothing.
+	for _, tc := range []struct {
+		name    string
+		current *harnessConfigIdentity
+		allow   func(string) bool
+	}{
+		{"unknown current identity", nil, allowAll},
+		{"different name", &harnessConfigIdentity{Name: "other", Source: "broker-local", Revision: "sha256:abc"}, allowAll},
+		{"different source", &harnessConfigIdentity{Name: "hc", Source: "template-bundled", Revision: "sha256:abc"}, allowAll},
+		{"different hub record", &harnessConfigIdentity{Name: "hc", Source: "broker-local", HubRecordID: "rec-2", Revision: "sha256:abc"}, allowAll},
+		{"same lineage with nil allow", &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:def"}, nil},
 	} {
-		got, err := restoreSecretsRecord(agentDir, home, "agent-x", current)
+		got, err := restoreSecretsRecord(agentDir, home, "agent-x", tc.current, tc.allow)
 		if err != nil || len(got) != 0 {
-			t.Errorf("%s: expected nothing restored, got %v (err=%v)", name, got, err)
+			t.Errorf("%s: expected nothing restored, got %v (err=%v)", tc.name, got, err)
 		}
 	}
 	for name, content := range map[string]string{"missing identity": "", "unparseable identity": "{not json"} {
@@ -1662,7 +1674,7 @@ func TestRestoreSecretsRecord(t *testing.T) {
 		} else if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		got, err := restoreSecretsRecord(agentDir, home, "agent-x", id)
+		got, err := restoreSecretsRecord(agentDir, home, "agent-x", id, allowAll)
 		if err != nil || len(got) != 0 {
 			t.Errorf("%s: expected nothing restored, got %v (err=%v)", name, got, err)
 		}
@@ -1674,12 +1686,34 @@ func TestRestoreSecretsRecord(t *testing.T) {
 		t.Fatalf("nothing should have been restored yet (stat err=%v)", err)
 	}
 
-	names, err := restoreSecretsRecord(agentDir, home, "agent-x", id)
+	// Same lineage with revision change and allow predicate: restores only allowed
+	// names, never writes filtered files to home, and logs names only (no values).
+	logBuf := capturePolicyLogs(t)
+	crossHome := filepath.Join(t.TempDir(), "cross-home")
+	revB := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:def"}
+	crossNames, err := restoreSecretsRecord(agentDir, crossHome, "agent-x", revB, func(n string) bool { return n == "TOKEN_A" })
+	if err != nil || !reflect.DeepEqual(crossNames, []string{"TOKEN_A"}) {
+		t.Fatalf("cross-revision restore = (%v, %v), want ([TOKEN_A], nil)", crossNames, err)
+	}
+	if _, err := os.Stat(filepath.Join(crossHome, ".scion", "harness", "secrets", "TOKEN_B")); !os.IsNotExist(err) {
+		t.Errorf("filtered-out TOKEN_B must never be written to home (stat err=%v)", err)
+	}
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, "restoring recorded secrets across a harness-config revision change") ||
+		!strings.Contains(logOut, "TOKEN_A") || !strings.Contains(logOut, "TOKEN_B") {
+		t.Errorf("expected cross-revision restore log with restored and dropped names, got: %s", logOut)
+	}
+	if strings.Contains(logOut, "secret-val-a") || strings.Contains(logOut, "secret-val-b") {
+		t.Errorf("secret values leaked into log: %s", logOut)
+	}
+
+	// Exact match restores all regular files even with allow == nil.
+	names, err := restoreSecretsRecord(agentDir, home, "agent-x", id, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(names, ",") != "TOKEN_A" {
-		t.Errorf("restored names = %v, want [TOKEN_A]", names)
+	if strings.Join(names, ",") != "TOKEN_A,TOKEN_B" {
+		t.Errorf("restored names = %v, want [TOKEN_A TOKEN_B]", names)
 	}
 	dir := filepath.Join(home, ".scion", "harness", "secrets")
 	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
@@ -1805,15 +1839,49 @@ func TestHarnessConfigPolicy_SecretsRestoredOnlyForStagingConfig(t *testing.T) {
 		}
 	})
 
-	t.Run("content change of the resolved dir restores nothing", func(t *testing.T) {
+	t.Run("content change of the same config restores its declared secrets", func(t *testing.T) {
 		e := newPolicyTestEnv(t)
 		e.projectHC(t, "hc-a", policyTestScriptedADC)
 		mgr := policyTestManager(nil)
 		adcStart(t, mgr, e, "rev", "hc-a", newADCFile(t), nil)
 		e.projectHC(t, "hc-a", policyTestScriptedADC+"# revised\n")
 		adcStart(t, mgr, e, "rev", "hc-a", "", nil)
-		if staged, ref := restoredADC(t, e, "rev"); staged || ref {
-			t.Errorf("a revised harness-config restored the earlier revision's secret (staged=%v referenced=%v)", staged, ref)
+		if staged, ref := restoredADC(t, e, "rev"); !staged || !ref {
+			t.Errorf("a revised harness-config did not restore its declared secret (staged=%v referenced=%v)", staged, ref)
+		}
+	})
+
+	t.Run("content change drops secrets the new revision no longer declares", func(t *testing.T) {
+		e, mgr := newPolicyTestEnv(t), policyTestManager(nil)
+		revB := policyTestScripted + "auth:\n  default_type: api-key\n  types:\n    api-key:\n      required_env:\n        - any_of: [\"KEEP_TOKEN\"]\n"
+		revA := revB + "        - any_of: [\"FOO_TOKEN\"]\n"
+		e.projectHC(t, "hc-drop", revA)
+		if _, err := mgr.Start(context.Background(), api.StartOptions{
+			Name: "drop", ProjectPath: e.scion, HarnessConfig: "hc-drop", HarnessAuth: "api-key",
+			Env: map[string]string{"KEEP_TOKEN": "keep-secret-val", "FOO_TOKEN": "foo-secret-val"},
+		}); err != nil {
+			t.Fatalf("Start revA: %v", err)
+		}
+		e.projectHC(t, "hc-drop", revB)
+		if _, err := mgr.Start(context.Background(), api.StartOptions{
+			Name: "drop", ProjectPath: e.scion, HarnessConfig: "hc-drop", HarnessAuth: "api-key",
+		}); err != nil {
+			t.Fatalf("Start revB: %v", err)
+		}
+
+		home := config.GetAgentHomePath(e.scion, "drop")
+		record := filepath.Join(config.ResolveAgentDir(e.scion, "drop"), config.HarnessSecretsRecordDirName)
+		for _, dir := range []string{filepath.Join(home, ".scion", "harness", "secrets"), record} {
+			if _, err := os.Stat(filepath.Join(dir, "FOO_TOKEN")); !os.IsNotExist(err) {
+				t.Errorf("removed key FOO_TOKEN present in %s (stat err=%v)", dir, err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "KEEP_TOKEN")); err != nil {
+				t.Errorf("declared key KEEP_TOKEN missing from %s: %v", dir, err)
+			}
+		}
+		cands, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "auth-candidates.json"))
+		if err != nil || strings.Contains(string(cands), "FOO_TOKEN") || !strings.Contains(string(cands), "KEEP_TOKEN") {
+			t.Errorf("unexpected auth-candidates.json (err=%v): %s", err, cands)
 		}
 	})
 
@@ -2449,4 +2517,367 @@ func TestHarnessConfigPolicy_AllowedStagesCaptureAuthAsBefore(t *testing.T) {
 			t.Errorf("expected container to run once, got %d", runs)
 		}
 	})
+}
+
+func snapshotDirBytes(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	snap := make(map[string][]byte, len(entries))
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			t.Fatalf("ReadFile(%s): %v", e.Name(), err)
+		}
+		snap[e.Name()] = data
+	}
+	return snap
+}
+
+func capturePolicyLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func writeSecretMap(t *testing.T, dir string, files map[string]string) []string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for k, v := range files {
+		if err := os.WriteFile(filepath.Join(dir, k), []byte(v), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestRecordSecretsGuard(t *testing.T) {
+	oldSame := &harnessConfigIdentity{Name: "claude", Source: "hub-hydrated", HubRecordID: "rec-1", Revision: "sha256:rev1"}
+	curSameRev := &harnessConfigIdentity{Name: "claude", Source: "hub-hydrated", HubRecordID: "rec-1", Revision: "sha256:rev1"}
+	curNewRev := &harnessConfigIdentity{Name: "claude", Source: "hub-hydrated", HubRecordID: "rec-1", Revision: "sha256:rev2"}
+	curOther := &harnessConfigIdentity{Name: "gemini", Source: "hub-hydrated", HubRecordID: "rec-2", Revision: "sha256:rev2"}
+	allowKeepOnly := func(n string) bool { return n == "KEEP_KEY" }
+	allowAll := func(string) bool { return true }
+	allowNone := func(string) bool { return false }
+
+	for _, tc := range []struct {
+		name           string
+		oldID          *harnessConfigIdentity
+		oldFiles       map[string]string
+		cur            *harnessConfigIdentity
+		newFiles       map[string]string
+		freshSatisfied bool
+		allow          func(string) bool
+		wantReplaced   bool
+		wantMissing    []string
+	}{
+		{"oldID nil replaces", nil, map[string]string{"KEEP_KEY": "old-secret"}, curSameRev, nil, false, allowAll, true, nil},
+		{"other lineage replaces despite lost keys", oldSame, map[string]string{"KEEP_KEY": "old-secret"}, curOther, nil, false, allowAll, true, nil},
+		{"same lineage freshSatisfied replaces (credential rotation)", oldSame, map[string]string{"KEEP_KEY": "old-secret"}, curSameRev, map[string]string{"NEW_KEY": "new-secret"}, true, allowAll, true, nil},
+		{"same lineage no lost keys replaces", oldSame, map[string]string{"KEEP_KEY": "old-secret"}, curNewRev, map[string]string{"KEEP_KEY": "old-secret", "EXTRA": "v"}, false, allowAll, true, nil},
+		{"same revision lost key keeps old record", oldSame, map[string]string{"KEEP_KEY": "old-secret", "LOST_KEY": "top-secret-val"}, curSameRev, map[string]string{"KEEP_KEY": "old-secret"}, false, allowKeepOnly, false, []string{"LOST_KEY"}},
+		{"cross-revision declared key lost keeps old record", oldSame, map[string]string{"KEEP_KEY": "old-secret", "DECLARED_KEY": "top-secret-val"}, curNewRev, map[string]string{"KEEP_KEY": "old-secret"}, false, allowAll, false, []string{"DECLARED_KEY"}},
+		{"cross-revision undeclared key dropped still replaces", oldSame, map[string]string{"KEEP_KEY": "old-secret", "REMOVED_KEY": "old-removed"}, curNewRev, map[string]string{"KEEP_KEY": "old-secret"}, false, allowKeepOnly, true, nil},
+		{"cross-revision freshSatisfied replaces", oldSame, map[string]string{"KEEP_KEY": "old-secret"}, curNewRev, map[string]string{"NEW_KEY": "new-secret"}, true, allowAll, true, nil},
+		{"cur nil with lost key keeps old record", oldSame, map[string]string{"KEEP_KEY": "old-secret"}, nil, nil, false, allowNone, false, []string{"KEEP_KEY"}},
+		{"cur nil with no lost keys replaces", oldSame, map[string]string{"KEEP_KEY": "old-secret"}, nil, map[string]string{"KEEP_KEY": "old-secret"}, false, allowAll, true, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agentDir, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+			record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+			writeSecretMap(t, record, tc.oldFiles)
+			if tc.oldID != nil {
+				idBytes, _ := json.Marshal(tc.oldID)
+				if err := os.WriteFile(filepath.Join(record, secretsIdentityFile), idBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			beforeSnap := snapshotDirBytes(t, record)
+			newNames := writeSecretMap(t, stagedSecretsDir(home), tc.newFiles)
+			logBuf := capturePolicyLogs(t)
+
+			replaced, err := recordSecrets(agentDir, home, "agent-guard", recordUpdate{
+				Names: newNames, Current: tc.cur, FreshSatisfied: tc.freshSatisfied, Allow: tc.allow,
+			})
+			if err != nil || replaced != tc.wantReplaced {
+				t.Fatalf("recordSecrets = (%v, %v), want (%v, nil)", replaced, err, tc.wantReplaced)
+			}
+			if !tc.wantReplaced {
+				if afterSnap := snapshotDirBytes(t, record); !reflect.DeepEqual(afterSnap, beforeSnap) {
+					t.Errorf("old record modified when !replaced:\ngot:  %q\nwant: %q", afterSnap, beforeSnap)
+				}
+				logOut := logBuf.String()
+				for _, m := range tc.wantMissing {
+					if !strings.Contains(logOut, m) {
+						t.Errorf("warning log missing key name %q: %s", m, logOut)
+					}
+				}
+				if strings.Contains(logOut, "top-secret-val") || strings.Contains(logOut, "old-secret") {
+					t.Errorf("secret value leaked in warning log: %s", logOut)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordSecretsAtomic(t *testing.T) {
+	agentDir, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+	stagedDir := stagedSecretsDir(home)
+	writeSecretMap(t, stagedDir, map[string]string{"TOKEN_OLD": "val-old", "TOKEN_NEW": "val-new"})
+	id1 := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:r1"}
+	id2 := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:r2"}
+	if replaced, err := recordSecrets(agentDir, home, "agent-atomic", recordUpdate{
+		Names: []string{"TOKEN_OLD"}, Current: id1, FreshSatisfied: true,
+	}); err != nil || !replaced {
+		t.Fatalf("initial recordSecrets: replaced=%v err=%v", replaced, err)
+	}
+
+	boom := errors.New("simulated failure between renames")
+	recordSecretsBetweenRenamesHook = func() error { return boom }
+	t.Cleanup(func() { recordSecretsBetweenRenamesHook = nil })
+	if _, err := recordSecrets(agentDir, home, "agent-atomic", recordUpdate{
+		Names: []string{"TOKEN_NEW"}, Current: id2, FreshSatisfied: true,
+	}); !errors.Is(err, boom) {
+		t.Fatalf("recordSecrets with hook err = %v, want %v", err, boom)
+	}
+	recordSecretsBetweenRenamesHook = nil
+
+	recordPath := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+	oldPath := filepath.Join(agentDir, secretsRecordOldDirName)
+	if _, err := os.Lstat(recordPath); !os.IsNotExist(err) {
+		t.Fatalf("expected harness-secrets absent mid-rename, got err=%v", err)
+	}
+	if _, err := os.Lstat(oldPath); err != nil {
+		t.Fatalf("expected harness-secrets.old present mid-rename: %v", err)
+	}
+	strayTmp := filepath.Join(agentDir, secretsRecordTmpPrefix+"deadbeef")
+	writeSecretMap(t, strayTmp, map[string]string{"TOKEN_STRAY": "val-stray"})
+
+	restored, err := restoreSecretsRecord(agentDir, filepath.Join(t.TempDir(), "restore-home"), "agent-atomic", id1, nil)
+	if err != nil || !reflect.DeepEqual(restored, []string{"TOKEN_OLD"}) {
+		t.Fatalf("restoreSecretsRecord after interrupted swap = (%v, %v), want ([TOKEN_OLD], nil)", restored, err)
+	}
+	if _, err := os.Lstat(oldPath); !os.IsNotExist(err) {
+		t.Errorf("expected .old renamed back, stat err=%v", err)
+	}
+
+	if replaced, err := recordSecrets(agentDir, home, "agent-atomic", recordUpdate{
+		Names: []string{"TOKEN_NEW"}, Current: id2, FreshSatisfied: true,
+	}); err != nil || !replaced {
+		t.Fatalf("second recordSecrets: replaced=%v err=%v", replaced, err)
+	}
+	if fi, err := os.Stat(recordPath); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("record dir mode = %v (err=%v), want 0700", fi, err)
+	}
+	if fi, err := os.Stat(filepath.Join(recordPath, "TOKEN_NEW")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("recorded file mode = %v (err=%v), want 0600", fi, err)
+	}
+	if entries, err := os.ReadDir(agentDir); err != nil || len(entries) != 1 || entries[0].Name() != config.HarnessSecretsRecordDirName {
+		t.Errorf("unexpected agentDir entries (err=%v): %v", err, entries)
+	}
+}
+
+func TestEnsureSecretsRecord_RecoversInterruptedSwap(t *testing.T) {
+	agentDir, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+	id := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:r1"}
+	writeSecretMap(t, stagedSecretsDir(home), map[string]string{"GOOGLE_CLOUD_PROJECT": "p"})
+	if _, err := recordSecrets(agentDir, home, "a", recordUpdate{
+		Names: []string{"GOOGLE_CLOUD_PROJECT"}, Current: id, FreshSatisfied: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a broker crash between Rename(harness-secrets -> .old) and Rename(tmp -> harness-secrets),
+	// followed by ProvisionAgent's ensureSecretsRecord before the next Start.
+	if err := os.Rename(filepath.Join(agentDir, config.HarnessSecretsRecordDirName), filepath.Join(agentDir, secretsRecordOldDirName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSecretsRecord(agentDir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := restoreSecretsRecord(agentDir, filepath.Join(t.TempDir(), "h2"), "a", id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"GOOGLE_CLOUD_PROJECT"}) {
+		t.Fatalf("restored = %v, want [GOOGLE_CLOUD_PROJECT] (.old was orphaned)", got)
+	}
+}
+
+func TestRecordSecrets_CleansLeftoverTmpDirs(t *testing.T) {
+	agentDir, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+	id := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:r1"}
+	writeSecretMap(t, stagedSecretsDir(home), map[string]string{"TOKEN_KEEP": "val"})
+	if _, err := recordSecrets(agentDir, home, "a", recordUpdate{
+		Names: []string{"TOKEN_KEEP"}, Current: id, FreshSatisfied: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leftover .tmp-* dirs from a crashed write are swept even when the guard preserves the record.
+	for _, sfx := range []string{"crash1", "crash2"} {
+		writeSecretMap(t, filepath.Join(agentDir, secretsRecordTmpPrefix+sfx), map[string]string{"LEAK": "v"})
+	}
+	emptyHome := filepath.Join(t.TempDir(), "empty-home")
+	if replaced, err := recordSecrets(agentDir, emptyHome, "a", recordUpdate{Current: id}); err != nil || replaced {
+		t.Fatalf("guarded recordSecrets = (%v, %v), want (false, nil)", replaced, err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(agentDir, secretsRecordTmpPrefix+"*")); err != nil || len(matches) != 0 {
+		t.Fatalf("leftover tmp dirs after guarded recordSecrets = %v (err=%v), want none", matches, err)
+	}
+
+	// Also swept on a replacing write without interfering with the new tmp dir.
+	writeSecretMap(t, filepath.Join(agentDir, secretsRecordTmpPrefix+"crash3"), map[string]string{"LEAK": "v"})
+	if replaced, err := recordSecrets(agentDir, home, "a", recordUpdate{
+		Names: []string{"TOKEN_KEEP"}, Current: id, FreshSatisfied: true,
+	}); err != nil || !replaced {
+		t.Fatalf("replacing recordSecrets = (%v, %v), want (true, nil)", replaced, err)
+	}
+	if entries, err := os.ReadDir(agentDir); err != nil || len(entries) != 1 || entries[0].Name() != config.HarnessSecretsRecordDirName {
+		t.Fatalf("unexpected agentDir entries after replace (err=%v): %v", err, entries)
+	}
+}
+
+const policyTestClaudeVertex = "harness: claude\nimage: scion-claude:test\nuser: scion\nprovisioner:\n" +
+	"  type: container-script\n  interface_version: 1\n  command: [\"python3\", \"/home/scion/.scion/harness/provision.py\"]\n" +
+	"auth:\n  default_type: api-key\n  types:\n    api-key:\n      required_env:\n        - any_of: [\"ANTHROPIC_API_KEY\"]\n" +
+	"    vertex-ai:\n      required_env:\n        - any_of: [\"GOOGLE_CLOUD_PROJECT\"]\n" +
+	"        - any_of: [\"GOOGLE_CLOUD_REGION\", \"CLOUD_ML_REGION\", \"GOOGLE_CLOUD_LOCATION\"]\n" +
+	"      required_files:\n        - name: gcloud-adc\n          type: file\n          field: GoogleAppCredentials\n" +
+	"          alternative_env_keys: [\"GOOGLE_APPLICATION_CREDENTIALS\"]\n          skipped_when_gcp_service_account_assigned: true\n          required: true\n"
+
+var wantClaudeVertex7Files = []string{
+	"ANTHROPIC_VERTEX_PROJECT_ID", "CLAUDE_CODE_USE_VERTEX", "CLOUD_ML_REGION",
+	"GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "SCION_HARNESS_SELECTED_AUTH",
+}
+
+func recordSecretNames(t *testing.T, record string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(record)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", record, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if e.Type().IsRegular() && e.Name() != secretsIdentityFile {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+func startClaudeVertex(t *testing.T, mgr Manager, scionDir, name, hydrated, authType string, env map[string]string) {
+	t.Helper()
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: name, ProjectPath: scionDir, BrokerMode: true,
+		HarnessConfig: "claude", HarnessConfigPath: hydrated, HarnessConfigID: "hc-uuid-1",
+		HarnessAuth: authType, Env: env,
+	}); err != nil {
+		t.Fatalf("Start(%s): %v", name, err)
+	}
+}
+
+func TestStart_AsNeededSurvivesHarnessConfigRevisionChange(t *testing.T) {
+	e, hydrated, mgr := newPolicyTestEnv(t), filepath.Join(t.TempDir(), "hydrated", "claude"), policyTestManager(nil)
+	writePolicyHC(t, hydrated, policyTestClaudeVertex)
+
+	startClaudeVertex(t, mgr, e.scion, "claude-vtx", hydrated, "vertex-ai", map[string]string{
+		"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5", "GOOGLE_CLOUD_PROJECT": "secret-gcp-proj-42",
+	})
+	record := filepath.Join(config.ResolveAgentDir(e.scion, "claude-vtx"), config.HarnessSecretsRecordDirName)
+	id1 := readSecretsIdentity(record)
+	if id1 == nil || !reflect.DeepEqual(recordSecretNames(t, record), wantClaudeVertex7Files) {
+		t.Fatalf("initial record = (%+v, %v), want 7 files", id1, recordSecretNames(t, record))
+	}
+
+	writePolicyHC(t, hydrated, policyTestClaudeVertex+"# synced edit\n")
+	logBuf := capturePolicyLogs(t)
+	startClaudeVertex(t, mgr, e.scion, "claude-vtx", hydrated, "", map[string]string{
+		"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5",
+	})
+
+	home := config.GetAgentHomePath(e.scion, "claude-vtx")
+	candsData, err := os.ReadFile(filepath.Join(home, ".scion", "harness", "inputs", "auth-candidates.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cands struct {
+		EnvSecretFiles map[string]string `json:"env_secret_files"`
+	}
+	if err := json.Unmarshal(candsData, &cands); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"GOOGLE_CLOUD_PROJECT", "ANTHROPIC_VERTEX_PROJECT_ID"} {
+		if cands.EnvSecretFiles[k] != "$HOME/.scion/harness/secrets/"+k {
+			t.Errorf("auth-candidates.json missing %s: %v", k, cands.EnvSecretFiles)
+		}
+	}
+	if id2 := readSecretsIdentity(record); id2 == nil || id2.Revision == id1.Revision {
+		t.Fatalf("expected updated revision in record identity, got %+v (was %+v)", id2, id1)
+	}
+	if got := recordSecretNames(t, record); !reflect.DeepEqual(got, wantClaudeVertex7Files) {
+		t.Errorf("record files after revision bump = %v, want %v", got, wantClaudeVertex7Files)
+	}
+	if strings.Contains(logBuf.String(), "secret-gcp-proj-42") {
+		t.Errorf("secret project value leaked in log: %s", logBuf.String())
+	}
+}
+
+func TestStart_RevisionChangeWithStrictRestoreKeepsRecord(t *testing.T) {
+	e, hydrated, mgr := newPolicyTestEnv(t), filepath.Join(t.TempDir(), "hydrated", "claude"), policyTestManager(nil)
+	writePolicyHC(t, hydrated, policyTestClaudeVertex)
+
+	startClaudeVertex(t, mgr, e.scion, "claude-guard", hydrated, "vertex-ai", map[string]string{
+		"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5", "GOOGLE_CLOUD_PROJECT": "secret-gcp-proj-42",
+	})
+	record := filepath.Join(config.ResolveAgentDir(e.scion, "claude-guard"), config.HarnessSecretsRecordDirName)
+	beforeSnap := snapshotDirBytes(t, record)
+
+	writePolicyHC(t, hydrated, policyTestClaudeVertex+"# synced edit\n")
+	restoreSecretsAllowTestHook = func(string) bool { return false }
+	t.Cleanup(func() { restoreSecretsAllowTestHook = nil })
+	logBuf := capturePolicyLogs(t)
+
+	startClaudeVertex(t, mgr, e.scion, "claude-guard", hydrated, "", map[string]string{
+		"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5",
+	})
+	if afterSnap := snapshotDirBytes(t, record); !reflect.DeepEqual(afterSnap, beforeSnap) {
+		t.Errorf("guard failed to preserve 7-file old-revision record byte-for-byte: got %v", recordSecretNames(t, record))
+	}
+	logOut := logBuf.String()
+	if !strings.Contains(logOut, "ANTHROPIC_VERTEX_PROJECT_ID") || !strings.Contains(logOut, "GOOGLE_CLOUD_PROJECT") {
+		t.Errorf("expected warning naming missing project keys, got: %s", logOut)
+	}
+	if strings.Contains(logOut, "secret-gcp-proj-42") {
+		t.Errorf("secret project value leaked in warning log: %s", logOut)
+	}
+}
+
+func TestStart_OverwrittenRecordHealsWithGatheredEnv(t *testing.T) {
+	e, hydrated, mgr := newPolicyTestEnv(t), filepath.Join(t.TempDir(), "hydrated", "claude"), policyTestManager(nil)
+	writePolicyHC(t, hydrated, policyTestClaudeVertex)
+
+	startClaudeVertex(t, mgr, e.scion, "claude-heal", hydrated, "vertex-ai", map[string]string{
+		"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5",
+	})
+	record := filepath.Join(config.ResolveAgentDir(e.scion, "claude-heal"), config.HarnessSecretsRecordDirName)
+	if got := len(recordSecretNames(t, record)); got != 5 {
+		t.Fatalf("fixture: expected 5-file partial record, got %d (%v)", got, recordSecretNames(t, record))
+	}
+
+	startClaudeVertex(t, mgr, e.scion, "claude-heal", hydrated, "", map[string]string{
+		"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5", "GOOGLE_CLOUD_PROJECT": "healed-proj",
+	})
+	if got := recordSecretNames(t, record); !reflect.DeepEqual(got, wantClaudeVertex7Files) {
+		t.Errorf("healed record files = %v, want %v", got, wantClaudeVertex7Files)
+	}
 }

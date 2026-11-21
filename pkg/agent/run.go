@@ -1229,7 +1229,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			var restored []string
 			err := writeAgentHome(ctx, func() error {
 				var restoreErr error
-				restored, restoreErr = restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity)
+				restored, restoreErr = restoreSecretsRecord(agentDir, agentHome, agentID, hcIdentity, cs.RestorableSecretName)
 				return restoreErr
 			})
 			if err != nil {
@@ -1395,7 +1395,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			// Record the staged secret files auth-candidates.json references,
 			// so later starts restore exactly these.
 			if cs, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
-				if err := recordSecrets(agentDir, agentHome, cs.StagedSecretNames(), hcIdentity); err != nil {
+				if _, err := recordSecrets(agentDir, agentHome, agentID, recordUpdate{
+					Names:          cs.StagedSecretNames(),
+					Current:        hcIdentity,
+					FreshSatisfied: cs.FreshResolutionSatisfiedAuth(),
+					Allow:          cs.RestorableSecretName,
+				}); err != nil {
 					return nil, fmt.Errorf("record harness secrets: %w", err)
 				}
 				// On the broker, fail the start here, before any container
@@ -4507,27 +4512,7 @@ func configAuthEnvKeySet(authMeta *config.HarnessAuthMetadata) map[string]struct
 // It is deliberately wider than configAuthEnvKeySet, which drives Start's
 // auth-env filtering and must not change with it.
 func templateFallbackSuppressedKeys(authMeta *config.HarnessAuthMetadata) map[string]struct{} {
-	if authMeta == nil {
-		return nil
-	}
-	keys := make(map[string]struct{})
-	for k := range configAuthEnvKeySet(authMeta) {
-		keys[k] = struct{}{}
-	}
-	for _, authType := range authMeta.Types {
-		for _, req := range authType.RequiredFiles {
-			for _, k := range req.AlternativeEnvKeys {
-				keys[k] = struct{}{}
-			}
-		}
-	}
-	for k := range authMeta.Autodetect.Env {
-		keys[k] = struct{}{}
-	}
-	if len(keys) == 0 {
-		return nil
-	}
-	return keys
+	return harness.DeclaredAuthEnvKeys(authMeta)
 }
 
 func authFileKind(name, target string) string {

@@ -389,7 +389,7 @@ func TestRestoreSecretsRecord_LinkLeafReplaced(t *testing.T) {
 	c := newConfinedHome(t)
 	id := writeSecretsRecord(t, c.agentDir, "TOKEN_A")
 	c.link(t, filepath.Join(c.outside, "TOKEN_A"), stagedSecretsRel+"/TOKEN_A")
-	names, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id)
+	names, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id, nil)
 	if err != nil || strings.Join(names, ",") != "TOKEN_A" {
 		t.Fatalf("restore = %v, %v", names, err)
 	}
@@ -407,7 +407,7 @@ func TestRestoreSecretsRecord_RefusesLinkedComponent(t *testing.T) {
 			c := newConfinedHome(t)
 			id := writeSecretsRecord(t, c.agentDir, "TOKEN_A")
 			c.link(t, c.outside, rel)
-			if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id); !errors.Is(err, agenthome.ErrLinkComponent) {
+			if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id, nil); !errors.Is(err, agenthome.ErrLinkComponent) {
 				t.Fatalf("err = %v, want a linked directory component refused", err)
 			}
 			c.checkOutside(t)
@@ -418,11 +418,11 @@ func TestRestoreSecretsRecord_RefusesLinkedComponent(t *testing.T) {
 func TestRestoreSecretsRecord_LinkReplantedBetweenStartsIsRefused(t *testing.T) {
 	c := newConfinedHome(t)
 	id := writeSecretsRecord(t, c.agentDir, "TOKEN_A", "TOKEN_B")
-	if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id); err != nil {
+	if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id, nil); err != nil {
 		t.Fatal(err)
 	}
 	c.link(t, c.outside, stagedSecretsRel)
-	if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id); !errors.Is(err, agenthome.ErrLinkComponent) {
+	if _, err := restoreSecretsRecord(c.agentDir, c.home, "agent-x", id, nil); !errors.Is(err, agenthome.ErrLinkComponent) {
 		t.Fatalf("err = %v, want the re-planted link refused", err)
 	}
 	c.checkOutside(t)

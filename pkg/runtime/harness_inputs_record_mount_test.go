@@ -55,6 +55,8 @@ func TestHarnessInputsRecordOutsideScionMounts(t *testing.T) {
 var controlPlaneRecordNames = []string{
 	config.HarnessInputsRecordDirName,
 	config.HarnessSecretsRecordDirName,
+	config.HarnessSecretsRecordDirName + ".old",
+	config.HarnessSecretsRecordDirName + ".tmp-0123456789abcdef",
 	config.ImageProvenanceFileName,
 	config.RerenderRecordFileName,
 }
