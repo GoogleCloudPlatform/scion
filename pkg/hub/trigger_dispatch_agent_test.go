@@ -1492,14 +1492,20 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recPatch.Code, recPatch.Body.String())
 	assert.Contains(t, recPatch.Body.String(), "dispatch_agent_github_unsupported")
 
-	// 3. webhook + dispatch_agent remains accepted (201).
-	grantProjectRole(t, f.sched.store, adminUser.ID, f.sched.proj.ID, store.ProjectRoleAdmin)
-	ep := f.createEndpoint(t, adminCtx, "wh-still-ok")
+	// 3. webhook + dispatch_agent remains accepted (201), and PATCHing it into
+	// github source or subject.mode=skip is refused (security Info I4).
+	recEP := f.doJSON(t, adminCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints", ghProj.ID),
+		CreateWebhookEndpointRequest{Name: "wh-still-ok"})
+	require.Equal(t, http.StatusCreated, recEP.Code, recEP.Body.String())
+	var ghProjEP WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(recEP.Body.Bytes(), &ghProjEP))
+
 	recWH := f.doJSON(t, adminCtx, http.MethodPost,
-		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		fmt.Sprintf("/api/v1/projects/%s/triggers", ghProj.ID),
 		CreateTriggerRequest{
 			Name:   "wh-dispatch-ok",
-			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ghProjEP.ID},
 			Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
 			Action: TriggerActionSpec{
 				Type: store.TriggerActionDispatchAgent,
@@ -1507,6 +1513,27 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 			},
 		})
 	require.Equal(t, http.StatusCreated, recWH.Code, recWH.Body.String())
+	var whTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recWH.Body.Bytes(), &whTrig))
+
+	// PATCH webhook dispatch_agent trigger's source to github -> 400 dispatch_agent_github_unsupported.
+	recPatchSrc := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
+		map[string]any{
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			"match":  map[string]any{"types": []string{"github.issue_comment.created"}},
+		})
+	require.Equal(t, http.StatusBadRequest, recPatchSrc.Code, recPatchSrc.Body.String())
+	assert.Contains(t, recPatchSrc.Body.String(), "dispatch_agent_github_unsupported")
+
+	// PATCH webhook dispatch_agent trigger's subject.mode to skip -> 400 dispatch_agent_skip_unsupported.
+	recPatchSkip := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
+		map[string]any{
+			"subject": map[string]any{"mode": store.TriggerSubjectModeSkip},
+		})
+	require.Equal(t, http.StatusBadRequest, recPatchSkip.Code, recPatchSkip.Body.String())
+	assert.Contains(t, recPatchSkip.Body.String(), "dispatch_agent_skip_unsupported")
 }
 
 func TestScheduleDispatchAgent_IgnoresStrayAgentRoleAndCleanCollisionError(t *testing.T) {
