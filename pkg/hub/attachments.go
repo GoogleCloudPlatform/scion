@@ -272,8 +272,7 @@ func SanitizeFilename(name string) (string, error) {
 	// Re-check the blocklist on the final stored name and the reduced delivery
 	// name so truncation cannot expose a refused extension.
 	for _, candidate := range []string{name, reduceAttachmentName(name)} {
-		switch ext := attachmentExt(candidate); {
-		case DangerousExtensions[ext], refusedMarkupExtensions[ext]:
+		if ext, refused := refusedAttachmentExt(candidate); refused {
 			return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 		}
 	}
