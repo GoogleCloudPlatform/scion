@@ -77,6 +77,11 @@ type Nudger interface {
 	Nudge(ctx context.Context, kind string, dedupKeys []string) (int, error)
 }
 
+// QueueMetrics observes producer-side queue operations.
+type QueueMetrics interface {
+	Enqueued(kind string)
+}
+
 // QueueOption configures a StoreQueue.
 type QueueOption func(*StoreQueue)
 
@@ -90,6 +95,13 @@ func WithQueueClock(now func() time.Time) QueueOption {
 	}
 }
 
+// WithQueueMetrics attaches a producer-side metrics observer to StoreQueue.
+func WithQueueMetrics(m QueueMetrics) QueueOption {
+	return func(q *StoreQueue) {
+		q.metrics = m
+	}
+}
+
 // drainerRegistrar is implemented by Queue implementations (such as StoreQueue)
 // that can notify local drainers when Wake(kind) is called.
 type drainerRegistrar interface {
@@ -99,8 +111,9 @@ type drainerRegistrar interface {
 // StoreQueue implements Queue over a store.DurableQueueStore and fans out
 // Wake(kind) notifications to locally registered drainers of that kind.
 type StoreQueue struct {
-	store store.DurableQueueStore
-	now   func() time.Time
+	store   store.DurableQueueStore
+	now     func() time.Time
+	metrics QueueMetrics
 
 	mu     sync.RWMutex
 	nextID uint64
@@ -147,7 +160,7 @@ func (q *StoreQueue) Enqueue(ctx context.Context, tx store.Tx, item Item) (int64
 	if item.NotBefore.IsZero() {
 		notBefore = createdAt
 	}
-	return q.store.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+	seq, err := q.store.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
 		Kind:          item.Kind,
 		DedupKey:      dedupKey,
 		ProjectID:     item.ProjectID,
@@ -156,6 +169,10 @@ func (q *StoreQueue) Enqueue(ctx context.Context, tx store.Tx, item Item) (int64
 		CreatedAt:     createdAt,
 		NextAttemptAt: notBefore,
 	})
+	if err == nil && q.metrics != nil {
+		q.metrics.Enqueued(item.Kind)
+	}
+	return seq, err
 }
 
 // Wake nudges every local drainer registered for kind without blocking.

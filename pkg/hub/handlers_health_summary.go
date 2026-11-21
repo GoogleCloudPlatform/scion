@@ -83,6 +83,11 @@ type HealthSummaryResponse struct {
 	// health_summary_schedules.go.
 	Schedules *HealthSummarySchedules `json:"schedules"`
 
+	// Triggers lists failing and hub-paused triggers the caller may read
+	// when hub.triggers is enabled; omitted when the experiment is off. See
+	// health_summary_triggers.go.
+	Triggers *HealthSummaryTriggers `json:"triggers,omitempty"`
+
 	// Links holds operator-configured links for the Health page. It is
 	// omitted when no link is configured. The route requires
 	// hub.health.read, so only those callers receive it.
@@ -426,6 +431,7 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 		ServiceAccountCheck: healthSummarySACheck(hubInstances),
 		HubInstances:        hubInstances,
 		Schedules:           s.healthSummaryScheduleSection(r),
+		Triggers:            s.healthSummaryTriggerSection(r),
 		Links:               s.healthSummaryLinks(),
 	}
 	// The policy sees the full integration list, so the status does not

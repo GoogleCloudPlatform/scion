@@ -49,7 +49,8 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 		Audit: trigger.NewSlogAuditSink(trigger.SlogAuditConfig{
 			Logger: logging.Subsystem("hub.audit"),
 		}),
-		Logger: logging.Subsystem("hub.triggers"),
+		Metrics: serverTriggerMetrics{srv: srv},
+		Logger:  logging.Subsystem("hub.triggers"),
 	})
 }
 

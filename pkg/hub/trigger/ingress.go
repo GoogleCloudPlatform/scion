@@ -146,6 +146,29 @@ type IngressAcceptedResponse struct {
 	Status  string `json:"status"`
 }
 
+// Closed-set ingress metric result labels (§6.5). Every ingress outcome maps
+// onto one of these constants so metric label cardinality stays bounded.
+const (
+	IngressResultAccepted                  = "accepted"
+	IngressResultDuplicate                 = "duplicate"
+	IngressResultRejectedSignature         = "rejected_signature"
+	IngressResultRejectedRateLimit         = "rejected_rate_limit"
+	IngressResultRejectedSize              = "rejected_size"
+	IngressResultRejectedUnknownEndpoint   = "rejected_unknown_endpoint"
+	IngressResultRejectedSecretUnavailable = "rejected_secret_unavailable"
+	IngressResultRejectedMediaType         = "rejected_media_type"
+	IngressResultRejectedBadJSON           = "rejected_bad_json"
+	IngressResultRejectedBadHeader         = "rejected_bad_header"
+	IngressResultRejectedQueueFull         = "rejected_queue_full"
+	IngressResultFailedStore               = "failed_store"
+)
+
+// IngressMetrics observes trigger ingress outcomes by bounded source_kind and
+// result labels.
+type IngressMetrics interface {
+	RecordIngressEvent(sourceKind, result string)
+}
+
 // IngressCounts snapshots running request outcome counters for tests and metrics.
 type IngressCounts struct {
 	Accepted          int64
@@ -185,6 +208,7 @@ type IngressConfig struct {
 	Cache      *EndpointCache
 	Counters   *CounterAccumulator
 	Audit      AuditSink
+	Metrics    IngressMetrics
 	Logger     *slog.Logger
 	Now        func() time.Time
 	NewEventID func() string
@@ -203,6 +227,7 @@ type Ingress struct {
 	cache      *EndpointCache
 	counters   *CounterAccumulator
 	audit      AuditSink
+	metrics    IngressMetrics
 	logger     *slog.Logger
 	now        func() time.Time
 	newEventID func() string
@@ -267,9 +292,16 @@ func NewIngress(cfg IngressConfig) *Ingress {
 		cache:      cache,
 		counters:   counters,
 		audit:      audit,
+		metrics:    cfg.Metrics,
 		logger:     logger,
 		now:        nowFn,
 		newEventID: newEventID,
+	}
+}
+
+func (h *Ingress) recordMetric(result string) {
+	if h != nil && h.metrics != nil {
+		h.metrics.RecordIngressEvent(store.TriggerSourceKindWebhook, result)
 	}
 }
 
@@ -362,6 +394,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	endpointID, ok := extractHookEndpointID(r)
 	if !ok {
 		h.rejectedNotFound.Add(1)
+		h.recordMetric(IngressResultRejectedUnknownEndpoint)
 		apierr.WriteError(w, http.StatusNotFound, apierr.ErrCodeNotFound, "not found", nil)
 		return
 	}
@@ -370,6 +403,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	clientIP := h.clientIP(r)
 	if !h.limiter.AllowClientIP(clientIP) {
 		h.rejectedRateLimit.Add(1)
+		h.recordMetric(IngressResultRejectedRateLimit)
 		writeRateLimited(w, "1", "rate limit exceeded")
 		return
 	}
@@ -381,6 +415,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ep, err := h.cache.LookupEndpoint(ctx, h.store, endpointID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		h.failedStore.Add(1)
+		h.recordMetric(IngressResultFailedStore)
 		h.logger.Error("Webhook endpoint lookup failed", "endpoint_id", endpointID, "error", err)
 		apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "internal server error", nil)
 		return
@@ -389,10 +424,12 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Unknown or disabled endpoint ID charges ONLY the hub-wide rejection bucket.
 		if !h.limiter.AllowRejection() {
 			h.rejectedRateLimit.Add(1)
+			h.recordMetric(IngressResultRejectedRateLimit)
 			writeRateLimited(w, "1", "rate limit exceeded")
 			return
 		}
 		h.rejectedNotFound.Add(1)
+		h.recordMetric(IngressResultRejectedUnknownEndpoint)
 		// Identical body for unknown and disabled endpoints (no enumeration oracle).
 		apierr.WriteError(w, http.StatusNotFound, apierr.ErrCodeNotFound, "not found", nil)
 		return
@@ -400,6 +437,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Known active endpoint charges ONLY its per-endpoint bucket (10/s burst 60).
 	if !h.limiter.AllowEndpoint(ep.ID) {
 		h.rejectedRateLimit.Add(1)
+		h.recordMetric(IngressResultRejectedRateLimit)
 		writeRateLimited(w, "1", "rate limit exceeded")
 		return
 	}
@@ -411,11 +449,13 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			h.rejectedTooLarge.Add(1)
+			h.recordMetric(IngressResultRejectedSize)
 			h.counters.RecordRejected(ep.ID)
 			apierr.WriteError(w, http.StatusRequestEntityTooLarge, apierr.ErrCodeInvalidRequest, "payload too large", nil)
 			return
 		}
 		h.rejectedBadJSON.Add(1)
+		h.recordMetric(IngressResultRejectedBadJSON)
 		h.counters.RecordRejected(ep.ID)
 		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, "failed to read request body", nil)
 		return
@@ -424,12 +464,14 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 5: Content-Type is application/json (parameters ignored); body parses as JSON.
 	if !hasJSONContentType(r.Header) {
 		h.rejectedMediaType.Add(1)
+		h.recordMetric(IngressResultRejectedMediaType)
 		h.counters.RecordRejected(ep.ID)
 		apierr.WriteError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json", nil)
 		return
 	}
 	if len(body) == 0 || !utf8.Valid(body) || bytes.ContainsRune(body, '\x00') || !json.Valid(body) {
 		h.rejectedBadJSON.Add(1)
+		h.recordMetric(IngressResultRejectedBadJSON)
 		h.counters.RecordRejected(ep.ID)
 		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, "body must be JSON", nil)
 		return
@@ -441,6 +483,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// caller always receives 401 (§8.1 step 7).
 	if ep.SignatureMode != store.WebhookSignatureModeScionV1 {
 		h.failedSecret.Add(1)
+		h.recordMetric(IngressResultRejectedSecretUnavailable)
 		h.logger.Error("Unsupported webhook endpoint signature mode",
 			"endpoint_id", ep.ID,
 			"project_id", ep.ProjectID,
@@ -452,6 +495,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	secret, err := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion)
 	if err != nil {
 		h.failedSecret.Add(1)
+		h.recordMetric(IngressResultRejectedSecretUnavailable)
 		h.logger.Error("Failed to load or unseal webhook endpoint secret",
 			"endpoint_id", ep.ID,
 			"project_id", ep.ProjectID,
@@ -468,6 +512,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	subjectHdr := r.Header.Get(HeaderSubject)
 	if len(sigVals) != 1 || !VerifyScionV1Signature(secret, now, sigVals[0], delivery, eventHdr, subjectHdr, body) {
 		h.rejectedBadSig.Add(1)
+		h.recordMetric(IngressResultRejectedSignature)
 		h.counters.RecordRejected(ep.ID)
 		h.audit.RecordSignatureFailure(ctx, SignatureFailureAuditRecord{
 			ProjectID:  ep.ProjectID,
@@ -481,6 +526,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 7: routing header bounds and charset checks (400 only after HMAC verified).
 	if hdrErr := validateSignedRoutingHeaders(r.Header, delivery, eventHdr, subjectHdr); hdrErr != nil {
 		h.rejectedBadHeader.Add(1)
+		h.recordMetric(IngressResultRejectedBadHeader)
 		h.counters.RecordRejected(ep.ID)
 		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, hdrErr.Error(), nil)
 		return
@@ -491,11 +537,13 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// checked once authoritatively inside WithTx under LockTriggerQuota below.
 	if !h.limiter.AllowProjectVerified(ep.ProjectID) {
 		h.rejectedRateLimit.Add(1)
+		h.recordMetric(IngressResultRejectedRateLimit)
 		writeRateLimited(w, "1", "rate limit exceeded")
 		return
 	}
 	if !h.limiter.AllowHubVerified() {
 		h.rejectedRateLimit.Add(1)
+		h.recordMetric(IngressResultRejectedRateLimit)
 		writeRateLimited(w, "1", "rate limit exceeded")
 		return
 	}
@@ -505,6 +553,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, body, now, h.newEventID)
 	if !attrOK {
 		h.rejectedBadHeader.Add(1)
+		h.recordMetric(IngressResultRejectedBadHeader)
 		h.counters.RecordRejected(ep.ID)
 		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, "event attributes exceed maximum size", nil)
 		return
@@ -546,6 +595,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if txErr != nil {
 		if errors.Is(txErr, errQueueFull) {
 			h.rejectedQueueFull.Add(1)
+			h.recordMetric(IngressResultRejectedQueueFull)
 			writeRateLimited(w, "30", "queue full")
 			return
 		}
@@ -562,6 +612,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				existing, gErr := h.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
 				if gErr != nil || existing == nil {
 					h.failedStore.Add(1)
+					h.recordMetric(IngressResultFailedStore)
 					h.logger.Error("Failed to resolve webhook trigger event after unique conflict",
 						"endpoint_id", ep.ID,
 						"project_id", ep.ProjectID,
@@ -574,6 +625,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				dupEventID = existing.ID
 			}
 			h.duplicate.Add(1)
+			h.recordMetric(IngressResultDuplicate)
 			h.audit.RecordReceipt(ctx, ReceiptAuditRecord{
 				ProjectID:    ep.ProjectID,
 				EndpointID:   ep.ID,
@@ -591,6 +643,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.failedStore.Add(1)
+		h.recordMetric(IngressResultFailedStore)
 		h.logger.Error("Failed to persist webhook trigger event",
 			"endpoint_id", ep.ID,
 			"project_id", ep.ProjectID,
@@ -603,6 +656,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Step 10: wake local drainer(s), update in-memory counters, emit receipt audit, answer 202.
 	h.queue.Wake(EventQueueKind)
 	h.accepted.Add(1)
+	h.recordMetric(IngressResultAccepted)
 	h.counters.RecordAccepted(ep.ID, now)
 	h.audit.RecordReceipt(ctx, ReceiptAuditRecord{
 		ProjectID:    ep.ProjectID,

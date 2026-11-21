@@ -3253,6 +3253,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetOwnerMaterialChainMetrics(ownerChainRec)
 	}
 
+	if triggerRec, err := hub.NewOTelTriggerMetrics(mp, hubSrv.TriggerSnapshotMetrics()); err != nil {
+		log.Printf("WARNING: hub trigger metrics disabled: %v", err)
+	} else {
+		hubSrv.SetTriggerMetrics(triggerRec)
+	}
+
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
 	// The same instruments carry writer=cloud (P2): the Cloud Logging
