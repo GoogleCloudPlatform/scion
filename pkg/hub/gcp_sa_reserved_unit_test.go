@@ -41,6 +41,32 @@ func (g *stubHubEmailGenerator) ServiceAccountEmail() string {
 	return g.email
 }
 
+func TestIsValidGCPServiceAccountEmail(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"standard gcp sa", "worker@my-proj.iam.gserviceaccount.com", true},
+		{"short email", "agent@example.com", true},
+		{"numeric unique id", "123456789012345678901", false},
+		{"empty", "", false},
+		{"no at sign", "worker-my-proj", false},
+		{"multiple at signs", "a@b@c.com", false},
+		{"missing local part", "@my-proj.iam.gserviceaccount.com", false},
+		{"missing domain", "worker@", false},
+		{"contains slash", "projects/-/serviceAccounts/worker@proj.iam.gserviceaccount.com", false},
+		{"contains space", "worker @my-proj.iam.gserviceaccount.com", false},
+		{"contains newline", "worker@my-proj.iam.gserviceaccount.com\n", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isValidGCPServiceAccountEmail(tc.in))
+		})
+	}
+}
+
 func TestGCPServiceAccountEmailsEqual(t *testing.T) {
 	tests := []struct {
 		name string

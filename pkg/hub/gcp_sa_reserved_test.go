@@ -136,6 +136,157 @@ func TestGCPServiceAccount_RefuseHubOwnIdentityOnRegistration(t *testing.T) {
 	assert.Zero(t, gen.verifyCalls.Load())
 }
 
+func TestGCPServiceAccount_RejectsNonEmailRegistration(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetGCPTokenGenerator(&reservedTestTokenGenerator{email: "hub-runner@hub-proj.iam.gserviceaccount.com"})
+	projectID := createTestProjectForSA(t, srv, s)
+
+	invalidValues := []struct {
+		name  string
+		value string
+	}{
+		{"numeric_id", "109876543210987654321"},
+		{"resource_path", "projects/-/serviceAccounts/hub-runner@hub-proj.iam.gserviceaccount.com"},
+		{"multiple_at", "a@b@c.com"},
+		{"missing_domain", "worker@"},
+		{"internal_space", "worker @hub-proj.iam.gserviceaccount.com"},
+	}
+
+	routes := []struct {
+		name string
+		path string
+	}{
+		{"project_nested", fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts", projectID)},
+		{"project_flat", fmt.Sprintf("/api/v1/gcp-service-accounts?scope=project&scopeId=%s", projectID)},
+		{"hub_scope", "/api/v1/gcp-service-accounts?scope=hub"},
+	}
+
+	for _, rt := range routes {
+		for _, iv := range invalidValues {
+			t.Run(rt.name+"/"+iv.name, func(t *testing.T) {
+				rec := doRequest(t, srv, http.MethodPost, rt.path, map[string]string{
+					"email":     iv.value,
+					"projectId": "hub-proj",
+				})
+				require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+				var errResp ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+				assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+			})
+		}
+	}
+
+	rows, err := s.ListGCPServiceAccounts(context.Background(), store.GCPServiceAccountFilter{})
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+}
+
+func TestCloneProjectGCPServiceAccounts_SkipsReservedAndRemapsDefaults(t *testing.T) {
+	const hubEmail = "hub-runner@hub-proj.iam.gserviceaccount.com"
+
+	srv, s := testServer(t)
+	srv.SetGCPTokenGenerator(&reservedTestTokenGenerator{email: hubEmail})
+	ctx := context.Background()
+
+	srcID := tid("proj-clone-src")
+	cloneID := tid("proj-clone-dst")
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: srcID, Name: "clone-src", Slug: "clone-src", Created: time.Now(), Updated: time.Now(),
+	}))
+
+	// Seed three SAs where the reserved row is NEWEST so ListGCPServiceAccounts
+	// (ordered by Created DESC) returns it at index 0, shifting all subsequent
+	// indices relative to clonedIDs.
+	baseTime := time.Now().Add(-10 * time.Minute)
+	saC := &store.GCPServiceAccount{
+		ID: tid("sa-clone-c"), Scope: store.ScopeProject, ScopeID: srcID,
+		Email: "ccc@hub-proj.iam.gserviceaccount.com", ProjectID: "hub-proj",
+		Verified: true, VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy: "dev-user", CreatedAt: baseTime,
+	}
+	saB := &store.GCPServiceAccount{
+		ID: tid("sa-clone-b"), Scope: store.ScopeProject, ScopeID: srcID,
+		Email: "bbb@hub-proj.iam.gserviceaccount.com", ProjectID: "hub-proj",
+		Verified: true, VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy: "dev-user", CreatedAt: baseTime.Add(time.Minute),
+	}
+	saReserved := &store.GCPServiceAccount{
+		ID: tid("sa-clone-reserved"), Scope: store.ScopeProject, ScopeID: srcID,
+		Email: hubEmail, ProjectID: "hub-proj",
+		Verified: false, VerificationStatus: store.GCPVerificationFailed,
+		CreatedBy: "dev-user", CreatedAt: baseTime.Add(2 * time.Minute),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, saC))
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, saB))
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, saReserved))
+
+	cloneAnnotations := map[string]string{
+		projectSettingDefaultGCPIdentitySAID: saC.ID,
+	}
+	setBrokerDefaultSAIDsAnnotation(cloneAnnotations, map[string]string{
+		"br-1": saC.ID,
+		"br-2": saReserved.ID,
+	})
+	setProfileDefaultSAIDsAnnotation(cloneAnnotations, map[string]string{
+		"prof-1": saB.ID,
+		"prof-2": saReserved.ID,
+	})
+	cloneProj := &store.Project{
+		ID: cloneID, Name: "clone-dst", Slug: "clone-dst",
+		Annotations: cloneAnnotations,
+		Created:     time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, cloneProj))
+
+	var rollback []func()
+	require.NoError(t, srv.cloneProjectGCPServiceAccounts(ctx, srcID, cloneProj, "dev-user", &rollback))
+
+	// Only the two non-reserved accounts should be cloned.
+	clonedSAs, err := s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: cloneID,
+	})
+	require.NoError(t, err)
+	require.Len(t, clonedSAs, 2)
+	idToEmail := make(map[string]string, len(clonedSAs))
+	for _, sa := range clonedSAs {
+		idToEmail[sa.ID] = sa.Email
+	}
+
+	// Reload clone project and verify all three default surfaces.
+	reloaded, err := s.GetProject(ctx, cloneID)
+	require.NoError(t, err)
+
+	// Project default pointed at saC (index 2 in source list); must remap to cloned saC.
+	assert.Equal(t, saC.Email, idToEmail[reloaded.Annotations[projectSettingDefaultGCPIdentitySAID]])
+
+	// Broker default br-1 -> saC must remap to cloned saC; br-2 -> reserved must be dropped.
+	gotBrokers := brokerDefaultSAIDsFromAnnotations(reloaded.Annotations)
+	assert.Equal(t, saC.Email, idToEmail[gotBrokers["br-1"]])
+	_, hasBr2 := gotBrokers["br-2"]
+	assert.False(t, hasBr2, "broker default pointing at skipped reserved SA should be dropped")
+
+	// Profile default prof-1 -> saB must remap to cloned saB; prof-2 -> reserved must be dropped.
+	gotProfiles := profileDefaultSAIDsFromAnnotations(reloaded.Annotations)
+	assert.Equal(t, saB.Email, idToEmail[gotProfiles["prof-1"]])
+	_, hasProf2 := gotProfiles["prof-2"]
+	assert.False(t, hasProf2, "profile default pointing at skipped reserved SA should be dropped")
+
+	// Also verify that a project default pointing directly at the skipped reserved SA is cleared.
+	cloneID2 := tid("proj-clone-dst2")
+	cloneProj2 := &store.Project{
+		ID: cloneID2, Name: "clone-dst2", Slug: "clone-dst2",
+		Annotations: map[string]string{projectSettingDefaultGCPIdentitySAID: saReserved.ID},
+		Created:     time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, cloneProj2))
+	var rollback2 []func()
+	require.NoError(t, srv.cloneProjectGCPServiceAccounts(ctx, srcID, cloneProj2, "dev-user", &rollback2))
+	reloaded2, err := s.GetProject(ctx, cloneID2)
+	require.NoError(t, err)
+	assert.Empty(t, reloaded2.Annotations[projectSettingDefaultGCPIdentitySAID])
+}
+
 func TestGCPServiceAccount_UnknownHubIdentityAllowsRegistration(t *testing.T) {
 	// Documented behaviour when Hub identity is unknown (not running on GCP):
 	// both nil token generator and a generator with an empty ServiceAccountEmail

@@ -388,8 +388,14 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	req.Email = strings.TrimSpace(req.Email)
 	if req.Email == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "missing required field(s): email", nil)
+		return
+	}
+	if !isValidGCPServiceAccountEmail(req.Email) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"invalid service account email: must be an email address", nil)
 		return
 	}
 

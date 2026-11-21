@@ -28,6 +28,20 @@ import (
 // scan, and surfaced on status reads.
 const gcpSAHubIdentityFlagError = "reserved: matches the Hub's own GCP service account identity and cannot be used by agents"
 
+// isValidGCPServiceAccountEmail reports whether s has the shape of a GCP
+// service account email address: no whitespace, no slashes, and exactly one
+// "@" separating a non-empty local part and domain.
+func isValidGCPServiceAccountEmail(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\r\n/") {
+		return false
+	}
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at == len(s)-1 {
+		return false
+	}
+	return strings.IndexByte(s[at+1:], '@') < 0
+}
+
 // gcpServiceAccountEmailsEqual reports whether two GCP service account emails
 // refer to the same identity (case-insensitive, surrounding whitespace trimmed).
 // Returns false when either email is empty after trimming.
