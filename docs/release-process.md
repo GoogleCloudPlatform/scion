@@ -493,12 +493,14 @@ an edited branch cannot read the secret:
 - **Environment secret only:** jobs in an environment also see repository secrets, so a
   `HOMEBREW_SCION_TOKEN` repository secret would bypass the branch and tag rules. Never add it at
   repository level.
-- **Callers pass secrets:** a reusable workflow sees an environment secret only when its caller
-  passes secrets, at every level of nesting. `build-preview-weekly.yml` calls `build-release.yml`
-  and `build-release.yml` calls `publish-homebrew.yml`, both with `secrets: inherit`. A new caller
-  on the preview path needs it too; without it the secret is empty and the jobs skip with the
-  "not set" notice. A manual run of `publish-homebrew.yml` from `main` is not nested, so it always sees the
-  secret.
+- **Callers pass the secret:** a reusable workflow sees an environment secret only when its caller
+  passes that secret, at every level of nesting. `build-preview-weekly.yml` calls
+  `build-release.yml` and `build-release.yml` calls `publish-homebrew.yml`, both passing
+  `HOMEBREW_SCION_TOKEN` by name (declared under `on.workflow_call.secrets`; the environment's
+  value takes precedence). A new caller on the preview path needs it too; without it the secret is
+  empty and the jobs skip with the "not set" notice. Pass it by name rather than with
+  `secrets: inherit`, which the GitHub Actions scan flags. A manual run of `publish-homebrew.yml`
+  from `main` is not nested, so it always sees the secret.
 - **Required reviewers (optional):** GitHub applies them to every run that uses the environment,
   not only to manual dispatches, so each of the three jobs then waits for approval, including on
   the scheduled weekly run.

@@ -27,6 +27,10 @@ on:
         description: 'Git ref (tag) to build'
         required: true
         type: string
+    secrets:
+      HOMEBREW_SCION_TOKEN:
+        description: 'Homebrew tap and ghcr token; the called jobs read it from the homebrew environment, which takes precedence over the passed value'
+        required: false
 
 # Fork guard: forks (e.g. ptone/scion) mirror upstream tags, so without this every
 # upstream tag push would also run this pipeline on the fork, publishing a fork
@@ -565,10 +569,13 @@ jobs:
   # Preview releases only: build the homebrew-scion images and update the
   # tap formula. The called jobs read HOMEBREW_SCION_TOKEN from the
   # "homebrew" environment, but a reusable workflow sees an environment
-  # secret only when its caller passes secrets, so this call inherits them,
-  # and so does every caller of this workflow on the preview path
-  # (build-preview-weekly.yml). Without it the secret resolves to an empty
-  # string and the jobs skip with a notice, as if it were not set.
+  # secret only when its caller passes that secret, at every level of
+  # nesting. So this call passes it by name (the environment's value takes
+  # precedence over the passed one), and so does every caller of this
+  # workflow on the preview path (build-preview-weekly.yml). Without it the
+  # secret resolves to an empty string and the jobs skip with a notice, as if
+  # it were not set. Passing it by name, not with `secrets: inherit`, keeps
+  # every other secret out of the called workflow.
   publish-homebrew:
     name: Publish to Homebrew
     needs: release
@@ -576,6 +583,7 @@ jobs:
     permissions:
       contents: read     # The called jobs only check out code
     uses: ./.github/workflows/publish-homebrew.yml
-    secrets: inherit   # HOMEBREW_SCION_TOKEN (homebrew environment); see above
+    secrets:
+      HOMEBREW_SCION_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}  # see above
     with:
       tag: ${{ needs.release.outputs.tag }}

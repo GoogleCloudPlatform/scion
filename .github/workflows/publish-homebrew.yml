@@ -43,6 +43,10 @@ on:
         description: 'Commit the formula to homebrew-scion/homebrew-scion'
         type: boolean
         default: true
+    secrets:
+      HOMEBREW_SCION_TOKEN:
+        description: 'Homebrew tap and ghcr token; the called jobs read it from the homebrew environment, which takes precedence over the passed value'
+        required: false
   workflow_dispatch:
     inputs:
       tag:
