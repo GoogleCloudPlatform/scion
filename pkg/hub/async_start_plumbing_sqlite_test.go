@@ -264,8 +264,13 @@ func TestAsyncStartMemory_CreateEndpointBranches(t *testing.T) {
 
 	susp := seedResumeMemory(t, f.s, f.addAgent("mem-susp", "suspended", ""), "suspended")
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: susp.Slug, ProjectID: f.projectID})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeAgentExistsResumable)
+	assert.Empty(t, d.starts(), "a suspended memory is refused without Resume (ptone/scion#8584)")
+
+	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{Name: susp.Slug, ProjectID: f.projectID, Resume: true})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.Equal(t, []bool{true}, d.starts(), "a suspended memory resumes its session even on a plain start")
+	require.Equal(t, []bool{true}, d.starts(), "a suspended memory resumes its session with Resume=true")
 	got := getAgent(t, f.s, susp.ID)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
 	assert.Empty(t, got.LaunchResumePhase, "the running write ends the memory")

@@ -203,7 +203,7 @@ func TestStartAgentViaHub_AgentLogLevelWarnsForExistingAgent(t *testing.T) {
 
 	var err error
 	_, stderr := captureStdIO(t, func() {
-		err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", true, nil)
 	})
 	require.NoError(t, err)
 	require.True(t, strings.Contains(stderr, "not applied to an existing agent"), "stderr: %s", stderr)

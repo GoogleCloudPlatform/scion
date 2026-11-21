@@ -83,10 +83,10 @@ func TestScheduledMessage_WithoutWake_PhaseErrors(t *testing.T) {
 			},
 		},
 		{
-			name:  "halted suggests scion start",
+			name:  "halted suggests scion resume",
 			phase: state.PhaseHalted,
 			wantParts: func(slug string) []string {
-				return []string{fmt.Sprintf("agent %q is halted", slug), "scion start"}
+				return []string{fmt.Sprintf("agent %q is halted", slug), "scion resume"}
 			},
 		},
 		{

@@ -19,7 +19,7 @@ different intent:
 | | `scion stop` | `scion suspend` |
 | :--- | :--- | :--- |
 | **Phase after** | `stopped` | `suspended` |
-| **Next `start`** | Fresh harness session | **Continues** the previous conversation |
+| **Next `resume`** | Fresh harness session | **Continues** the previous conversation |
 | **Use when** | The task is done, or you want a clean slate | You'll come back and want the agent to pick up where it left off |
 | **Harness requirement** | None | Harness must support session resume |
 
@@ -78,18 +78,21 @@ appended to the resumed session as a new prompt, if the harness supports it.
 | :--- | :--- |
 | `-a, --attach` | Attach to the agent's session immediately after resuming. |
 
-### `start` and `resume` are intent-aware
+### `start` vs. `resume`
 
-You do not have to remember which command to use — Scion looks at the agent's
-saved phase and does the right thing:
+`scion start` and `scion resume` have distinct responsibilities:
 
-- **`scion start` on a *suspended* agent** performs an **implicit resume**: the
-  harness session is continued, exactly as if you had run `scion resume`.
-- **`scion resume` on a *stopped* agent** starts a **fresh** session — there is
-  no prior conversation to continue, so it falls back to a clean start.
-
-In other words, the *agent's phase* decides whether the session is continued or
-started fresh; the command name is just a hint.
+- **`scion start` (and `scion create`)** creates and starts a new agent (or
+  starts an unstarted `created` / `provisioning` agent). If an agent with that
+  name already exists in a resumable phase — `suspended`, `stopped`, or `halted`
+  (including an `error` agent remembering one of those phases, or a running
+  agent with an active idle-suspend claim) — the Hub refuses the request with
+  `409 agent_exists_resumable` rather than silently reusing the existing agent.
+- **`scion resume`** explicitly brings an existing agent back in place:
+  - On a **`suspended`** agent, it continues the previous harness conversation.
+  - On a **`stopped`** or **`halted`** agent, it restarts the agent in place
+    with a **fresh** harness session (keeping its identity; the workspace is
+    kept unless it lived on the agent's pod storage).
 
 ### Harness support
 
@@ -99,7 +102,7 @@ Session resume is a per-harness capability:
 | :--- | :--- |
 | Claude Code | ✅ Yes (`--continue`) |
 | Gemini CLI | ✅ Yes (`--resume`) |
-| Generic | ❌ No — use `stop`/`start` |
+| Generic | ❌ No — use `stop`/`resume` |
 
 ## Crash Recovery: the `error` phase
 

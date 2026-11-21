@@ -139,7 +139,7 @@ func TestDispatchHalted_MessageAndDedupAcrossScopes(t *testing.T) {
 	notifs, err := e.store.GetNotifications(ctx, store.SubscriberTypeUser, "u1", false)
 	require.NoError(t, err)
 	require.Len(t, notifs, 1, "one notification per subscriber across scopes")
-	assert.Equal(t, "watched-agent was halted by the platform (preempted). Workspace may be re-cloned. Resume: scion start watched-agent.", notifs[0].Message)
+	assert.Equal(t, "watched-agent was halted by the platform (preempted). Workspace may be re-cloned. Resume: scion resume watched-agent.", notifs[0].Message)
 }
 
 func TestDispatchHalted_AgentSubscriber(t *testing.T) {
@@ -342,7 +342,7 @@ func TestHaltedNotificationMessage_ReasonLabels(t *testing.T) {
 		a := &store.Agent{Slug: "a", Runtime: "docker", ExitReason: reason,
 			Message: "free text that must not appear"}
 		msg := haltedNotificationMessage(a)
-		assert.Equal(t, "a was halted by the platform ("+label+"). Workspace kept. Resume: scion start a.", msg, "reason %q", reason)
+		assert.Equal(t, "a was halted by the platform ("+label+"). Workspace kept. Resume: scion resume a.", msg, "reason %q", reason)
 		assert.NotContains(t, msg, "free text")
 	}
 }
@@ -353,7 +353,7 @@ func TestHaltedWorkspaceWording(t *testing.T) {
 	assert.Equal(t, "Workspace may be re-cloned", haltedWorkspaceWording(&store.Agent{Runtime: "kubernetes"}))
 	assert.Equal(t, "Workspace may be re-cloned", haltedWorkspaceWording(&store.Agent{}))
 	assert.Equal(t, "Workspace kept", haltedWorkspaceWording(&store.Agent{Runtime: "docker"}))
-	assert.Equal(t, "a was halted by the platform (unknown). Workspace kept. Resume: scion start a.",
+	assert.Equal(t, "a was halted by the platform (unknown). Workspace kept. Resume: scion resume a.",
 		haltedNotificationMessage(&store.Agent{Slug: "a", Runtime: "docker"}))
 }
 

@@ -64,7 +64,7 @@ func TestFlatCreateOnExisting_RefusalSettlesMessage(t *testing.T) {
 		phase  state.Phase
 		resume bool
 	}{
-		{"suspended resume", state.PhaseSuspended, false},
+		{"suspended resume", state.PhaseSuspended, true},
 		{"stopped resume in place", state.PhaseStopped, true},
 		{"created start", state.PhaseCreated, false},
 	}

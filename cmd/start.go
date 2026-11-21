@@ -28,7 +28,13 @@ The agent will be created from a template and run in a detached container.
 
 The agent-name is required as the first argument. All subsequent arguments
 form the task prompt. The task is optional — if none is given, the agent
-starts interactively or uses its template's built-in prompt.`,
+starts interactively or uses its template's built-in prompt.
+
+If an agent with that name already exists in a suspended, stopped, or halted
+phase, start refuses to reuse it (409 agent_exists_resumable); run
+'scion resume <agent-name>' instead, delete it, or use another name.
+Agents in the created or provisioning phase (such as after 'scion create')
+or with a launch already in flight continue to be started or followed.`,
 	Args:              cobra.MinimumNArgs(1),
 	ValidArgsFunction: getAgentNames,
 	RunE: func(cmd *cobra.Command, args []string) error {

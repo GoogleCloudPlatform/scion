@@ -165,7 +165,7 @@ func TestClassifyExistingAgent_ResumeMemory(t *testing.T) {
 		req  CreateAgentRequest
 		want existingAgentBranch
 	}{
-		{"suspended memory, plain start", memoryRow("suspended"), plain, existingBranchStart},
+		{"suspended memory, plain start", memoryRow("suspended"), plain, existingBranchNone},
 		{"suspended memory, resume", memoryRow("suspended"), resume, existingBranchStart},
 		{"created memory, plain start", memoryRow("created"), plain, existingBranchStart},
 		{"provisioning memory, plain start", memoryRow("provisioning"), plain, existingBranchStart},
@@ -178,7 +178,8 @@ func TestClassifyExistingAgent_ResumeMemory(t *testing.T) {
 		{"plain error row, force resume", memoryRow(""), CreateAgentRequest{Resume: true, ForceResume: true}, existingBranchStart},
 		// Memory is ignored while a launch is active.
 		{"active launch keeps the stored phase", &store.Agent{Phase: string(state.PhaseError), LaunchResumePhase: "suspended", LaunchState: store.LaunchStateActive}, plain, existingBranchNone},
-		{"suspended row", &store.Agent{Phase: string(state.PhaseSuspended)}, plain, existingBranchStart},
+		{"suspended row, plain start", &store.Agent{Phase: string(state.PhaseSuspended)}, plain, existingBranchNone},
+		{"suspended row, resume", &store.Agent{Phase: string(state.PhaseSuspended)}, resume, existingBranchStart},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

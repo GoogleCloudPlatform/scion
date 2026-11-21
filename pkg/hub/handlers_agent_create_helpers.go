@@ -1258,13 +1258,15 @@ const (
 // read-only. Both read the agent's effective resting phase
 // (store.EffectiveRestingPhase, ptone/scion#4669), never its stored phase:
 // an error row that remembers the phase a failed asynchronous start began
-// from takes the branch that phase would take. The CLI's mirror of this
-// tree (cmd/common.go) must follow the same rule.
+// from takes the branch that phase would take.
 func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgentBranch {
 	rest := store.EffectiveRestingPhase(a)
 	switch {
-	case !req.ProvisionOnly && rest == string(state.PhaseSuspended):
-		return existingBranchStart
+	case !req.ProvisionOnly && (rest == string(state.PhaseSuspended) || a.IdleSuspendClaimActive):
+		if req.Resume {
+			return existingBranchStart
+		}
+		return existingBranchNone
 	case !req.ProvisionOnly && (rest == string(state.PhaseRunning) || rest == string(state.PhaseStopped) || rest == string(state.PhaseError) || rest == string(state.PhaseHalted)):
 		if inPlace, _ := resumeInPlaceDecision(rest, req.Resume, req.ForceResume); inPlace {
 			return existingBranchStart
@@ -1276,6 +1278,37 @@ func classifyExistingAgent(a *store.Agent, req CreateAgentRequest) existingAgent
 		return existingBranchStart
 	}
 	return existingBranchNone
+}
+
+// isResumableExistingAgent reports whether an existing agent is in a resting
+// phase that can be resumed or restarted in place only with an explicit Resume
+// request (suspended, stopped, halted, or an active idle-suspend claim).
+func isResumableExistingAgent(a *store.Agent, rest string) bool {
+	return rest == string(state.PhaseSuspended) ||
+		rest == string(state.PhaseStopped) ||
+		rest == string(state.PhaseHalted) ||
+		a.IdleSuspendClaimActive
+}
+
+// writeAgentExistsResumable writes a 409 agent_exists_resumable response naming
+// the agent's phase and hinting scion resume, delete, or using another name.
+func writeAgentExistsResumable(w http.ResponseWriter, slug, storedPhase, rest string, idleSuspendClaimActive bool) {
+	phaseDesc := rest
+	details := map[string]interface{}{
+		"agent": slug,
+		"phase": storedPhase,
+	}
+	switch {
+	case idleSuspendClaimActive && rest != string(state.PhaseSuspended):
+		phaseDesc = fmt.Sprintf("%s (suspending)", storedPhase)
+		details["restingPhase"] = string(state.PhaseSuspended)
+	case rest != storedPhase && storedPhase != "":
+		phaseDesc = fmt.Sprintf("%s, resumes as %s", storedPhase, rest)
+		details["resumePhase"] = rest
+	}
+	msg := fmt.Sprintf("agent %q already exists (phase: %s); run 'scion resume %s' to resume it, delete it, or use another name",
+		slug, phaseDesc, slug)
+	writeError(w, http.StatusConflict, ErrCodeAgentExistsResumable, msg, details)
 }
 
 // existingAgentFlatChecks applies the flat Runtime Broker checks for the
@@ -1364,15 +1397,19 @@ func (s *Server) existingAgentFlatChecks(ctx context.Context, w http.ResponseWri
 //     returned as it is (200, request not applied) → existingAgentStarted;
 //     any other start-gate refusal is written → existingAgentErrored.
 //
-// Branches (all but env-gather are skipped for req.ProvisionOnly):
-//  1. Suspended: restart in place, preserving harness state. Re-reserves
-//     quota, records run intent, dispatches start with the harness resume
-//     flag set, marks the agent running → existingAgentStarted.
-//  2. Running/stopped/error: resumeInPlaceDecision decides. A stopped agent
-//     with req.Resume restarts in place with a fresh harness session; an
-//     errored agent with req.Resume and req.ForceResume is force-resumed
-//     (crash recovery), continuing the interrupted session. Either path
-//     re-reserves quota and dispatches start → existingAgentStarted.
+// Branches (all but branch 0 and env-gather are skipped for req.ProvisionOnly):
+//  0. Resumable without req.Resume (suspended, stopped, halted, or an active
+//     idle-suspend claim): refuse immediately with 409 agent_exists_resumable
+//     naming the phase and hinting `scion resume <name>`, delete, or another
+//     name → existingAgentErrored (no dispatch, no idle-suspend wait).
+//  1. Suspended (with req.Resume): restart in place, preserving harness state.
+//     Re-reserves quota, records run intent, dispatches start with the harness
+//     resume flag set, marks the agent running → existingAgentStarted.
+//  2. Running/stopped/error/halted: resumeInPlaceDecision decides. A stopped or
+//     halted agent with req.Resume restarts in place with a fresh harness
+//     session; an errored agent with req.Resume and req.ForceResume is
+//     force-resumed (crash recovery), continuing the interrupted session.
+//     Either path re-reserves quota and dispatches start → existingAgentStarted.
 //     Anything else, including every running agent, is a duplicate →
 //     existingAgentConflict. Existing agents are never deleted here.
 //  3. Env-gather re-provisioning (provisioning + req.GatherEnv): record run
@@ -1477,7 +1514,7 @@ func (s *Server) handleExistingAgent(
 	// which the whole-row post-start writes would persist. storedPhase is
 	// the stored phase, for the post-start "did the broker set a phase"
 	// checks.
-	if !req.ProvisionOnly && existingAgent.IdleSuspendClaimActive {
+	if !req.ProvisionOnly && req.Resume && existingAgent.IdleSuspendClaimActive {
 		s.waitForIdleSuspendBeforeUserStart(ctx, existingAgent)
 	}
 	rest := store.EffectiveRestingPhase(existingAgent)
@@ -1496,9 +1533,17 @@ func (s *Server) handleExistingAgent(
 		cleanupMode = "strict"
 	}
 
+	// Resumable resting phases (suspended, stopped, halted, or an active
+	// idle-suspend claim) are never reused implicitly: require req.Resume and
+	// refuse with 409 agent_exists_resumable plus a hint.
+	if !req.Resume && isResumableExistingAgent(existingAgent, rest) {
+		writeAgentExistsResumable(w, existingAgent.Slug, storedPhase, rest, existingAgent.IdleSuspendClaimActive)
+		return existingAgentErrored
+	}
+
 	// Branch 1: Suspended agents (or agents mid-idle-suspend claim that have not yet settled)
-	// are restarted in-place (not deleted), preserving harness state.
-	if !req.ProvisionOnly && (rest == string(state.PhaseSuspended) || existingAgent.IdleSuspendClaimActive) {
+	// with Resume=true are restarted in-place (not deleted), preserving harness state.
+	if !req.ProvisionOnly && req.Resume && (rest == string(state.PhaseSuspended) || existingAgent.IdleSuspendClaimActive) {
 		if existingAgent.RuntimeBrokerID == "" && runtimeBrokerID != "" {
 			existingAgent.RuntimeBrokerID = runtimeBrokerID
 		}

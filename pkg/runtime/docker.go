@@ -368,7 +368,7 @@ func (r *DockerRuntime) Attach(ctx context.Context, id string) error {
 
 	// Check if running
 	if agent.Phase != string(state.PhaseRunning) {
-		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion start %s' to resume it", id, agent.ContainerStatus, id)
+		return fmt.Errorf("agent '%s' is not running (status: %s), use 'scion resume %s' to resume it", id, agent.ContainerStatus, id)
 	}
 
 	// Ensure tmux uses the latest client's terminal size so the session

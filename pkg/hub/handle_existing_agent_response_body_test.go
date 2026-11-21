@@ -44,6 +44,7 @@ func TestHandleExistingAgentResponseBody_EnvHiding(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 			"name":      agent.Slug,
 			"projectId": f.project.ID,
+			"resume":    true,
 		})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -75,6 +76,7 @@ func TestHandleExistingAgentResponseBody_EnvHiding(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, projectAdmin, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 			"name":      agent.Slug,
 			"projectId": f.project.ID,
+			"resume":    true,
 		})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -109,6 +111,7 @@ func TestHandleExistingAgent_ClearsStaleExitReason(t *testing.T) {
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 			"name":      agent.Slug,
 			"projectId": f.project.ID,
+			"resume":    true,
 		})
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 

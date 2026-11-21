@@ -39,7 +39,7 @@ The best and most current reference for the CLI commands is available from `scio
 
 6. **Preserve branches**: Use `--preserve-branch` to keep the branch after deletion for later review. The flag does not push — confirm the branch is on the remote first.
 
-7. **Agent state**: Do not attempt to resume an agent unless you were the one who stopped it. An 'idle' agent may still be working.
+7. **Agent state**: Do not attempt to resume an agent unless you were the one who stopped it. An 'idle' agent may still be working. `scion start <name>` never implicitly resumes a `suspended`, `stopped`, or `halted` agent — it fails with `409 agent_exists_resumable` and hints to use `scion resume <name>`, delete the agent, or pick another name. Use `scion resume <name>` explicitly when you intend to continue a suspended session or restart a stopped/halted agent in place.
 
 ## Creating Agents
 
