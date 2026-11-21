@@ -89,6 +89,7 @@ function visibleItems(items: NavItem[]): NavItem[] {
 const ADMIN_SCOPEABLE_ITEMS: NavItem[] = [
   { path: '/settings', label: 'Hub Resources', icon: 'gear' },
   { path: '/admin/server-config', label: 'Server Config', icon: 'sliders' },
+  { path: '/admin/branding', label: 'Branding', icon: 'palette' },
   { path: '/admin/federation', label: 'Federation', icon: 'globe' },
   { path: '/admin/integrations', label: 'Integrations', icon: 'plug' },
   { path: '/admin/scheduler', label: 'Scheduler', icon: 'clock' },
