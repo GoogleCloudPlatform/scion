@@ -65,4 +65,9 @@ if ! go build -buildvcs=false -o "$tmpbin" ./hack/checkrawsqlpredicates 2>&1; th
   exit 3
 fi
 
-exec "$tmpbin" "$@"
+# Not exec: the EXIT trap must still remove the temporary binary.
+set +e
+"$tmpbin" "$@"
+rc=$?
+set -e
+exit "$rc"
