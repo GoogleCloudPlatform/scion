@@ -2084,20 +2084,62 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     }
   });
 
-  it('resubscribes to current-agent updates when the same header instance reconnects after mount (O1)', async () => {
+  it('keeps aria-expanded scoped per tier so opening medium does not mark wide expanded', async () => {
+    const el = await mountHeader({ currentPath: '/projects/p1' });
+    const medTrigger = (): HTMLButtonElement | null =>
+      el.shadowRoot?.querySelector<HTMLButtonElement>(
+        '.compact-mode-segments .terminals-menu-trigger'
+      ) ?? null;
+
+    medTrigger()!.click();
+    await Promise.resolve();
+    await el.updateComplete;
+    await Promise.resolve();
+
+    const medDd = el.shadowRoot?.querySelector('.compact-mode-segments .terminals-dropdown');
+    const wideDd = el.shadowRoot?.querySelector('.wide-center .terminals-dropdown');
+    medDd?.dispatchEvent(new CustomEvent('sl-show'));
+    await el.updateComplete;
+
+    expect(medTrigger()?.getAttribute('aria-expanded')).toBe('true');
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('false');
+
+    wideDd?.dispatchEvent(new CustomEvent('sl-show'));
+    await el.updateComplete;
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('true');
+    expect(medTrigger()?.getAttribute('aria-expanded')).toBe('false');
+
+    wideDd?.dispatchEvent(new CustomEvent('sl-hide'));
+    await el.updateComplete;
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('unsubscribes on disconnect and resubscribes once when the same header instance reconnects after mount (O1)', async () => {
     setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'initial-name' });
     const el = await mountHeader({ currentPath: `/agents/${AGENT_CUR}` });
     await openWideMenu(el);
     expect(menuRows(el)[0].name).toBe('initial-name');
 
-    // Disconnect and reconnect the exact same header instance.
-    el.remove();
-    document.body.appendChild(el);
-    await el.updateComplete;
+    // Disconnect: current-agent events while detached must not trigger updates.
+    const updateSpy = vi.spyOn(el, 'requestUpdate');
+    try {
+      el.remove();
+      updateSpy.mockClear();
+      setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'while-disconnected' });
+      expect(updateSpy).not.toHaveBeenCalled();
 
-    // A CURRENT_AGENT_CHANGED_EVENT after reconnect must still re-render the menu.
-    setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'renamed-after-reconnect' });
-    await el.updateComplete;
-    expect(menuRows(el)[0].name).toBe('renamed-after-reconnect');
+      // Reconnect the exact same header instance.
+      document.body.appendChild(el);
+      await el.updateComplete;
+      updateSpy.mockClear();
+
+      // A CURRENT_AGENT_CHANGED_EVENT after reconnect must trigger exactly one update (no double subscribe).
+      setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'renamed-after-reconnect' });
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      await el.updateComplete;
+      expect(menuRows(el)[0].name).toBe('renamed-after-reconnect');
+    } finally {
+      updateSpy.mockRestore();
+    }
   });
 });

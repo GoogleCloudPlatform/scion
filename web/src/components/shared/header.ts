@@ -191,7 +191,7 @@ export class ScionHeader extends LitElement {
   private narrowTerminalsMounted = false;
 
   @state()
-  private terminalsMenuOpen = false;
+  private terminalsMenuOpenScope: string | null = null;
 
   @state()
   private terminalsMenuMod: HeaderTerminalsMenuMod | null = cachedTerminalsMenuMod;
@@ -1195,10 +1195,11 @@ export class ScionHeader extends LitElement {
       return mod.renderMountedTerminalsDropdown({
         ...this.terminalsMenuCtx(),
         isTerminal,
-        open: this.terminalsMenuOpen,
+        open: this.terminalsMenuOpenScope === scope,
         root: this.shadowRoot,
         setOpen: (open: boolean): void => {
-          this.terminalsMenuOpen = open;
+          if (open) this.terminalsMenuOpenScope = scope;
+          else if (this.terminalsMenuOpenScope === scope) this.terminalsMenuOpenScope = null;
         },
       });
     }
@@ -1247,7 +1248,7 @@ export class ScionHeader extends LitElement {
     const mod = await this.ensureTerminalsMenuMod();
     if (!mod) return;
     this.terminalsMenuMounted = true;
-    this.terminalsMenuOpen = true;
+    this.terminalsMenuOpenScope = scope;
     await this.updateComplete;
     mod.syncTerminalsTriggerAria(this.shadowRoot);
     mod.openMountedTerminalsDropdown(this.shadowRoot, scope, focusTarget);
