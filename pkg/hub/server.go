@@ -3320,7 +3320,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
 	srv.conversationFeed = eventfeed.NewFeed(s, &feedWaker{events: srv.getEventPublisher})
-	if setter, ok := s.(interface{ SetMessagePublisher(entadapter.MessagePublisher) }); ok {
+	if setter, ok := s.(interface {
+		SetMessagePublisher(entadapter.MessagePublisher)
+	}); ok {
 		setter.SetMessagePublisher(&feedNotifier{events: srv.getEventPublisher})
 	}
 
