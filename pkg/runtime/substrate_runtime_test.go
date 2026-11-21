@@ -725,6 +725,119 @@ func TestSubstrateRun_EmptyProjectIDRejected(t *testing.T) {
 	}
 }
 
+// TestSubstrateRun_BuildBootstrapFilesFailsBeforeCreateActor proves
+// buildBootstrapFiles runs pre-flight before template lookup/creation or
+// CreateActor (substrate-runtime.md §4, §5.4): deterministic local file or
+// size-cap configuration errors fail fast without building a golden template
+// or spinning up and tearing down an actor, while still redacting secret
+// values from the returned error.
+func TestSubstrateRun_BuildBootstrapFilesFailsBeforeCreateActor(t *testing.T) {
+	const envSentinel = "FAKE-KEY-SENTINEL-preflight-env-not-a-real-credential"
+	const secretSentinel = "FAKE-KEY-SENTINEL-preflight-secret-not-a-real-credential"
+
+	cases := []struct {
+		name    string
+		cfg     func(t *testing.T, cfg RunConfig) RunConfig
+		wantErr string
+	}{
+		{
+			name: "unreadable auth file",
+			cfg: func(t *testing.T, cfg RunConfig) RunConfig {
+				// Embed envSentinel in the missing path to prove r.redact
+				// scrubs pre-CreateActor buildBootstrapFiles errors too.
+				missing := filepath.Join(t.TempDir(), envSentinel, "does-not-exist")
+				cfg.ResolvedAuth = &api.ResolvedAuth{
+					Files: []api.FileMapping{
+						{SourcePath: missing, ContainerPath: "~/.creds/token"},
+					},
+				}
+				return cfg
+			},
+			wantErr: "read auth file",
+		},
+		{
+			name: "missing HomeDir",
+			cfg: func(t *testing.T, cfg RunConfig) RunConfig {
+				cfg.HomeDir = filepath.Join(t.TempDir(), "missing-home")
+				return cfg
+			},
+			wantErr: "home dir",
+		},
+		{
+			name: "HomeDir is not a directory",
+			cfg: func(t *testing.T, cfg RunConfig) RunConfig {
+				notADir := filepath.Join(t.TempDir(), "regular-file")
+				if err := os.WriteFile(notADir, []byte(secretSentinel), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg.HomeDir = notADir
+				return cfg
+			},
+			wantErr: "is not a directory",
+		},
+		{
+			name: "combined bootstrap files exceed size cap",
+			cfg: func(t *testing.T, cfg RunConfig) RunConfig {
+				home := t.TempDir()
+				if err := os.WriteFile(filepath.Join(home, "home-chunk"), make([]byte, maxBootstrapFilesTotalBytes/2), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				authSrc := filepath.Join(t.TempDir(), "auth-chunk")
+				if err := os.WriteFile(authSrc, make([]byte, maxBootstrapFilesTotalBytes/2+2), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cfg.HomeDir = home
+				cfg.ResolvedAuth = &api.ResolvedAuth{
+					Files: []api.FileMapping{
+						{SourcePath: authSrc, ContainerPath: "~/.creds/auth-chunk"},
+					},
+				}
+				return cfg
+			},
+			wantErr: "exceeds cap",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &callRecorder{}
+			rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+			defer closeServer()
+
+			runCfg := testSubstrateRunConfig()
+			runCfg.Env = append(runCfg.Env, "PREFLIGHT_ENV_KEY="+envSentinel)
+			runCfg.ResolvedSecrets = []api.ResolvedSecret{
+				{Name: "PREFLIGHT_SECRET_KEY", Type: "file", Target: "~/.creds/secret", Value: secretSentinel},
+			}
+			runCfg = tc.cfg(t, runCfg)
+
+			_, err := rt.Run(context.Background(), runCfg)
+			if err == nil {
+				t.Fatal("Run() expected an error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), envSentinel) {
+				t.Errorf("CREDENTIAL LEAK: error = %v, want it to NOT contain %q", err, envSentinel)
+			}
+			if strings.Contains(err.Error(), secretSentinel) {
+				t.Errorf("CREDENTIAL LEAK: error = %v, want it to NOT contain %q", err, secretSentinel)
+			}
+
+			calls := rec.list()
+			if containsCall(calls, "CreateActor") {
+				t.Errorf("Run() called CreateActor before failing buildBootstrapFiles; calls = %v", calls)
+			}
+			for _, c := range calls {
+				if c != "CreateAtespace" {
+					t.Errorf("Run() made unexpected post-preflight call %q before failing buildBootstrapFiles; calls = %v", c, calls)
+				}
+			}
+		})
+	}
+}
+
 // -----------------------------------------------------------------------
 // Run: cleanup on failure at each step after CreateActor
 // -----------------------------------------------------------------------
@@ -788,18 +901,8 @@ func TestSubstrateRun_CleanupOnFailure(t *testing.T) {
 			},
 			wantErr: "did not reach healthz state",
 		},
-		{
-			name: "buildBootstrapFiles read error",
-			cfg: func(cfg RunConfig) RunConfig {
-				cfg.ResolvedAuth = &api.ResolvedAuth{
-					Files: []api.FileMapping{
-						{SourcePath: "/nonexistent/does-not-exist", ContainerPath: "~/.creds/token"},
-					},
-				}
-				return cfg
-			},
-			wantErr: "read auth file",
-		},
+		// buildBootstrapFiles runs pre-flight before CreateActor and is
+		// covered by TestSubstrateRun_BuildBootstrapFilesFailsBeforeCreateActor.
 		{
 			// This is also the broker-side proof that the privilege drop
 			// failing closed actually fails the agent: substrate-serve's

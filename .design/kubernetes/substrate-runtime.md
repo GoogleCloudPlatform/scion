@@ -210,7 +210,10 @@ same image/resources/sandbox share one template.
    (sanitised to a valid Kubernetes short name) and `actor = cfg.Name`
    (already DNS-safe). `CreateAtespace` if missing, treating `AlreadyExists`
    as success.
-2. Verify `cfg.Image` is digest-pinned (§3); fail closed otherwise.
+2. Verify `cfg.Image` is digest-pinned (§3) and assemble the bootstrap `files`
+   payload (`buildBootstrapFiles`: composed home + `ResolvedAuth.Files` +
+   file-type secrets, §5.4) pre-flight; fail closed before building a template
+   or creating an actor.
 3. Ensure the content-addressed ActorTemplate exists and its golden snapshot
    is ready (§3).
 4. `CreateActor(atespace/name, template)`. An existing actor with the same
@@ -219,10 +222,10 @@ same image/resources/sandbox share one template.
 6. `ResumeActor`, then poll `GetActor` until `RUNNING` (bounded).
 7. Poll `GET /scion/v1/healthz` via the router until `awaiting-bootstrap`
    (bounded backoff).
-8. `POST /scion/v1/bootstrap`: env — see §5.3; files = the composed home +
-   `ResolvedAuth.Files` + file-type secrets (§5.4); `start_cmd` built by the
-   same shared helper the docker/k8s runtimes use. Generate a random 32-byte
-   hex `control_token` and keep it in memory, keyed by `<atespace>/<actor>`.
+8. `POST /scion/v1/bootstrap`: env — see §5.3; `files` assembled pre-flight in
+   step 2 (§5.4); `start_cmd` built by the same shared helper the docker/k8s
+   runtimes use. Generate a random 32-byte hex `control_token` and keep it in
+   memory, keyed by `<atespace>/<actor>`.
 9. Return `<atespace>/<actor>` as the runtime ID (the same string
    `splitSubstrateID` parses back into atespace/actor for every later call).
 
@@ -1093,10 +1096,6 @@ every runtime — not a substrate-specific mechanism:
 - **The every-prefix symlink guard (§5.5) is not a general TOCTOU
   guarantee** — it depends on `substrate-serve` being the sole writer during
   bootstrap.
-- Build-bootstrap-files-before-create is not implemented: `buildBootstrapFiles`
-  runs after the actor is already `RUNNING` (§4 step 8), so a deterministic
-  configuration error (e.g. a missing `HomeDir`, §5.4) costs a full actor
-  spin-up and teardown rather than failing before `CreateActor`.
 - No exemption exists for a bootstrap target that must traverse a system
   symlink (§5.5); the documented workaround is the resolved path form.
 
@@ -1143,8 +1142,6 @@ every runtime — not a substrate-specific mechanism:
   reachability).
 - Re-read the dialer's trust material per handshake instead of pinning it
   for the broker process's lifetime (§2).
-- Build bootstrap files before `CreateActor`, so a deterministic
-  configuration error doesn't cost a full actor spin-up (§10).
 - A concrete exemption mechanism for a bootstrap target that must traverse
   a system symlink, if a real case ever needs one (§5.5) — none is known
   today, and an ownership heuristic can't reliably separate a benign
