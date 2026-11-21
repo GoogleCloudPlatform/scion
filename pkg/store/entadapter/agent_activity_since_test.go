@@ -78,7 +78,7 @@ func TestAgentStore_IdleNotStalledOrOffline(t *testing.T) {
 	blockedStall := create("blocked-stall", "blocked", now.Add(-time.Hour), now)
 	workingStall := create("working-stall", "working", now.Add(-time.Hour), now)
 
-	stalled, err := s.MarkStalledAgents(ctx, now.Add(-15*time.Minute), now.Add(-2*time.Minute))
+	stalled, err := s.MarkStalledAgents(ctx, store.StallCutoffs{Activity: now.Add(-15 * time.Minute), Thinking: now.Add(-15 * time.Minute)}, now.Add(-2*time.Minute))
 	require.NoError(t, err)
 	require.Len(t, stalled, 1)
 	assert.Equal(t, workingStall.ID, stalled[0].ID)
@@ -153,7 +153,7 @@ func TestAgentStore_ActivitySince_StallAndOffline(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, a))
 
 	beforeStall := time.Now()
-	stalled, err := s.MarkStalledAgents(ctx, now.Add(-15*time.Minute), now.Add(-2*time.Minute))
+	stalled, err := s.MarkStalledAgents(ctx, store.StallCutoffs{Activity: now.Add(-15 * time.Minute), Thinking: now.Add(-15 * time.Minute)}, now.Add(-2*time.Minute))
 	require.NoError(t, err)
 	require.Len(t, stalled, 1)
 	requireStampedAfter(t, stalled[0].ActivitySince, beforeStall, "stall mark (returned row)")

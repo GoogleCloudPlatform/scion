@@ -859,9 +859,10 @@ func TestIdleSuspend_OwnershipMatrix_SystemStopsAndSweeps(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrClaimPredicate)
 
 	// Row 14: MarkStaleAgentsOffline and MarkStalledAgents preserve active idle claim.
-	_, err = s.MarkStaleAgentsOffline(ctx, time.Now().Add(time.Hour))
+	future := time.Now().Add(time.Hour)
+	_, err = s.MarkStaleAgentsOffline(ctx, future)
 	require.NoError(t, err)
-	_, err = s.MarkStalledAgents(ctx, time.Now().Add(time.Hour), time.Time{})
+	_, err = s.MarkStalledAgents(ctx, store.StallCutoffs{Activity: future, Thinking: future}, time.Time{})
 	require.NoError(t, err)
 
 	// Row 15: stalled autoSuspendAgent (even with a stale pre-claim snapshot where

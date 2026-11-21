@@ -393,11 +393,15 @@ stalled agents** in **Admin > Server Config**).
 An agent is marked `stalled` by the platform when it is `running`, its heartbeat
 arrived within the last 2 minutes (the process is alive), but no activity events
 have arrived within the stall threshold (`server.hub.stalled_threshold`, default
-**5 minutes**; a value under 2 minutes falls back to the default). The Hub
-checks every 5 minutes. With auto-suspend on, the Hub suspends an agent in the
-same check that marks it stalled, unless the agent's harness does not support
-session resume. Agents already `stalled` when you turn auto-suspend on are not
-suspended unless they become active and stall again.
+**5 minutes**; a value under 2 minutes falls back to the default). While an
+agent is in `thinking` (waiting on a model response), the Hub applies a longer
+**20-minute** cutoff (or `stalled_threshold`, whichever is larger) so slow model
+calls are not marked `stalled` prematurely. The Hub checks every 5 minutes. With
+auto-suspend on, the Hub suspends an agent in the same check that marks it
+stalled (including agents that stall past the 20-minute `thinking` cap), unless
+the agent's harness does not support session resume. Agents already `stalled`
+when you turn auto-suspend on are not suspended unless they become active and
+stall again.
 
 A long build, a test run or a background job emits no activity events, so the
 Hub also looks for **live work**. On each 30-second heartbeat, `sciontool init`
