@@ -126,10 +126,12 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if parentName == "project" {
 		return false
 	}
-	// 'templates update --scope global' and 'templates delete --scope global'
-	// act on global templates and read no project, so they run outside a
-	// project (ptone/scion#1713, ptone/scion#8318).
-	if isGlobalTemplatesUpdate(cmd) || isGlobalTemplatesDelete(cmd) {
+	// 'templates update', 'templates delete', 'templates sync' and 'templates
+	// push' (and their singular 'template' aliases) with --scope global or
+	// --scope user act on global or user templates and read no project, so
+	// they run outside a project (ptone/scion#1713, ptone/scion#8318,
+	// ptone/scion#8643).
+	if isProjectlessScopedTemplatesCommand(cmd) {
 		return false
 	}
 	// 'decisions list --all-projects' queries GET /api/v1/users/me/decisions
@@ -196,28 +198,25 @@ func isNotificationsSubscriptionsCommand(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Name() == "subscriptions" && cmd.Parent() != nil && cmd.Parent().Name() == "notifications" && isTopLevel(cmd.Parent())
 }
 
-// isGlobalTemplatesUpdate reports whether cmd is 'templates update' with
-// --scope global.
-func isGlobalTemplatesUpdate(cmd *cobra.Command) bool {
-	if cmd.Name() != "update" || cmd.Parent() == nil || cmd.Parent().Name() != "templates" || !isTopLevel(cmd.Parent()) {
-		return false
-	}
-	scope, _ := cmd.Flags().GetString("scope")
-	return scope == "global"
-}
-
-// isGlobalTemplatesDelete reports whether cmd is 'templates delete' (or the
-// singular 'template delete' alias) with --scope global.
-func isGlobalTemplatesDelete(cmd *cobra.Command) bool {
-	if cmd.Name() != "delete" || cmd.Parent() == nil || !isTopLevel(cmd.Parent()) {
+// isProjectlessScopedTemplatesCommand reports whether cmd is a scoped
+// 'templates' (or singular 'template') subcommand ('update', 'delete', 'sync',
+// or 'push') targeting 'global' or 'user' scope, neither of which reads a
+// project.
+func isProjectlessScopedTemplatesCommand(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Parent() == nil || !isTopLevel(cmd.Parent()) {
 		return false
 	}
 	parent := cmd.Parent().Name()
 	if parent != "templates" && parent != "template" {
 		return false
 	}
+	switch cmd.Name() {
+	case "update", "delete", "sync", "push":
+	default:
+		return false
+	}
 	scope, _ := cmd.Flags().GetString("scope")
-	return scope == "global"
+	return scope == "global" || scope == "user"
 }
 
 // isTopLevel reports whether c is a direct child of the root command.
