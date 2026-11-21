@@ -146,7 +146,10 @@ export const ACTIVITY_TOOLTIPS: Partial<Record<AgentActivity, string>> = {
  * One-line explanation for an agent activity state, or `undefined` when no
  * explanation is defined for that state. Matched case-insensitively.
  */
-export function activityTooltip(status: string): string | undefined {
+export function activityTooltip(status?: string | null): string | undefined {
+  if (!status) {
+    return undefined;
+  }
   const key = status.toLowerCase();
   if (key in ACTIVITY_TOOLTIPS) {
     return ACTIVITY_TOOLTIPS[key as AgentActivity];
@@ -163,9 +166,12 @@ export function activityTooltip(status: string): string | undefined {
  * rather than `message`, so `taskSummary` takes precedence over `message`.
  */
 export function agentReportedStatusHint(
-  agent: Pick<Agent, 'detail' | 'message' | 'taskSummary'>,
-  status: string
+  agent: Pick<Agent, 'detail' | 'message' | 'taskSummary'> | undefined | null,
+  status?: string | null
 ): string | undefined {
+  if (!agent || !status) {
+    return undefined;
+  }
   const key = status.toLowerCase();
   let raw: string | undefined;
   if (key === 'completed') {

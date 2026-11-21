@@ -420,4 +420,14 @@ describe('status badge tooltips and agent-reported status (ptone/scion#8723)', (
       agentStatusTooltip({ name: 'a', phase: 'running', activity: 'blocked', message: '   ' })
     ).toBe(ACTIVITY_TOOLTIPS.blocked);
   });
+
+  it('handles undefined and null inputs in activityTooltip and agentReportedStatusHint', () => {
+    expect(activityTooltip(undefined)).toBeUndefined();
+    expect(activityTooltip(null)).toBeUndefined();
+    expect(activityTooltip('')).toBeUndefined();
+    expect(agentReportedStatusHint(undefined, 'blocked')).toBeUndefined();
+    expect(agentReportedStatusHint(null, 'blocked')).toBeUndefined();
+    expect(agentReportedStatusHint({ message: 'waiting' }, undefined)).toBeUndefined();
+    expect(agentReportedStatusHint({ message: 'waiting' }, null)).toBeUndefined();
+  });
 });

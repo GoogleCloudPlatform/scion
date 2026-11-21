@@ -100,4 +100,28 @@ describe('scion-status-badge', () => {
     expect(body?.querySelector('img, b')).toBeNull();
     expect((window as unknown as { __xss?: number }).__xss).toBeUndefined();
   });
+
+  it('handles tooltip attribute removal and null/undefined tooltip values without throwing', async () => {
+    const el = await mount({ status: 'idle' });
+    el.setAttribute('tooltip', 'Done with any known work.');
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('sl-tooltip')).not.toBeNull();
+
+    // Removing the attribute sets the Lit String property to null (e.g. via ifDefined(undefined)).
+    el.removeAttribute('tooltip');
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('sl-tooltip')).toBeNull();
+    const badge = el.shadowRoot?.querySelector('.badge');
+    expect(badge?.hasAttribute('tabindex')).toBe(false);
+    expect(badge?.hasAttribute('aria-label')).toBe(false);
+
+    // Explicitly assigning undefined or null also renders cleanly without a tooltip.
+    el.tooltip = undefined as unknown as string;
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('sl-tooltip')).toBeNull();
+
+    el.tooltip = null as unknown as string;
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('sl-tooltip')).toBeNull();
+  });
 });

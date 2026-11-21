@@ -300,7 +300,7 @@ export class ScionStatusBadge extends LitElement {
     const config = resolveStatusConfig(this.status);
     const displayLabel = this.label || config.label || this.status.replace(/_/g, ' ');
     const shouldPulse = this.showPulse && config.pulse;
-    const hasTooltip = this.tooltip.length > 0;
+    const hasTooltip = !!this.tooltip;
 
     const badge = html`
       <span
