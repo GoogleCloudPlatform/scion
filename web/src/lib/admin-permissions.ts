@@ -97,6 +97,7 @@ const SETTINGS_PERMISSIONS: string[] = [
 export const NAV_PERMISSION_MAP: Record<string, string[]> = {
   '/settings': SETTINGS_PERMISSIONS,
   '/admin/server-config': ['hub.config.read'],
+  '/admin/branding': ['hub.config.read'],
   '/admin/federation': ['hub.config.read'],
   '/admin/integrations': ['hub.integrations.read'],
   '/admin/scheduler': ['hub.scheduler.read'],
@@ -123,6 +124,7 @@ export const NAV_PERMISSION_MAP: Record<string, string[]> = {
 export const ROUTE_PERMISSION_MAP: Record<string, string[]> = {
   'scion-page-settings': SETTINGS_PERMISSIONS,
   'scion-page-admin-server-config': ['hub.config.read'],
+  'scion-page-admin-branding': ['hub.config.read'],
   'scion-page-admin-federation': ['hub.config.read'],
   'scion-page-admin-integrations': ['hub.integrations.read'],
   'scion-page-admin-scheduler': ['hub.scheduler.read'],
