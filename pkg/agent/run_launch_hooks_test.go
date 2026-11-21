@@ -17,6 +17,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -133,4 +135,108 @@ func TestStart_CheckpointsBeforeDeletingAnExistingAgent(t *testing.T) {
 			assert.Equal(t, tc.wantDeletes, deletes, "events: %v", events)
 		})
 	}
+}
+
+// TestStart_DockerImagePullReportsStepAndTypedLaunchFailure covers
+// ptone/scion#4986: an async Start on the Docker runtime whose image must be
+// pulled reports api.LaunchStepImagePull ("pulling the image") and classifies
+// pull failures (missing tag / unreachable image vs malformed reference) as
+// typed *runtime.LaunchFailure errors in step image_pull.
+func TestStart_DockerImagePullReportsStepAndTypedLaunchFailure(t *testing.T) {
+	cases := []struct {
+		name       string
+		image      string
+		pullStderr string
+		wantCode   string
+	}{
+		{
+			name:       "missing tag",
+			image:      "example.com/scion/agent:missing-tag",
+			pullStderr: "Error response from daemon: manifest for example.com/scion/agent:missing-tag not found: manifest unknown: manifest unknown",
+			wantCode:   api.LaunchCodeImagePullFailed,
+		},
+		{
+			name:       "malformed image reference",
+			image:      "INVALID::IMAGE",
+			pullStderr: "invalid reference format",
+			wantCode:   api.LaunchCodeInvalidImage,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSharedDirStorageRunFixture(t)
+			f.writeGlobalSettings(t, "")
+
+			mockDocker := filepath.Join(t.TempDir(), "mock-docker")
+			script := "#!/bin/sh\n" +
+				"case \"$1\" in\n" +
+				"  ps) exit 0 ;;\n" +
+				"  image)\n" +
+				"    echo 'Error: No such image: '\"$3\" >&2\n" +
+				"    exit 1 ;;\n" +
+				"  pull)\n" +
+				"    echo \"" + tc.pullStderr + "\" >&2\n" +
+				"    exit 1 ;;\n" +
+				"  *) exit 1 ;;\n" +
+				"esac\n"
+			require.NoError(t, os.WriteFile(mockDocker, []byte(script), 0o755))
+
+			var progress []string
+			rt := &runtime.DockerRuntime{Command: mockDocker}
+			_, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+				Name:        "test-agent",
+				ProjectPath: f.projectScionDir,
+				NoAuth:      true,
+				Image:       tc.image,
+				Progress: func(step, message string) {
+					progress = append(progress, step+": "+message)
+				},
+			})
+			require.Error(t, err)
+
+			var lf *runtime.LaunchFailure
+			require.ErrorAs(t, err, &lf, "expected *runtime.LaunchFailure, got %v", err)
+			assert.Equal(t, tc.wantCode, lf.Code)
+			assert.Equal(t, api.LaunchStepImagePull, lf.Step)
+			assert.Empty(t, lf.Reason)
+			assert.Equal(t, []string{api.LaunchStepImagePull + ": pulling the image"}, progress)
+		})
+	}
+
+	t.Run("cached local image skips image_pull step", func(t *testing.T) {
+		f := newSharedDirStorageRunFixture(t)
+		f.writeGlobalSettings(t, "")
+
+		mockDocker := filepath.Join(t.TempDir(), "mock-docker")
+		script := "#!/bin/sh\n" +
+			"case \"$1\" in\n" +
+			"  ps) exit 0 ;;\n" +
+			"  image) exit 0 ;;\n" +
+			"  pull) echo 'unexpected pull' >&2; exit 1 ;;\n" +
+			"  *) exit 0 ;;\n" +
+			"esac\n"
+		require.NoError(t, os.WriteFile(mockDocker, []byte(script), 0o755))
+
+		errAtLaunching := errors.New("reached launching checkpoint")
+		var progress []string
+		var checkpoints []string
+		rt := &runtime.DockerRuntime{Command: mockDocker}
+		_, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+			Name:        "test-agent",
+			ProjectPath: f.projectScionDir,
+			NoAuth:      true,
+			Image:       "example.com/scion/agent:v1",
+			Checkpoint: func(ctx context.Context, step string) error {
+				checkpoints = append(checkpoints, step)
+				return errAtLaunching
+			},
+			Progress: func(step, message string) {
+				progress = append(progress, step+": "+message)
+			},
+		})
+		require.ErrorIs(t, err, errAtLaunching)
+		assert.Equal(t, []string{runtime.CheckpointStepLaunching}, checkpoints)
+		assert.Empty(t, progress)
+	})
 }

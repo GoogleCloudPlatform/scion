@@ -116,7 +116,12 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
 			return "", ctx.Err()
 		}
-		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
+		runErr := fmt.Errorf("container run failed: %w (output: %s)", err, out)
+		if code := classifyDockerRunImageError(out, err); code != "" {
+			hooks.progress(api.LaunchStepImagePull)
+			return "", newLaunchFailure(code, api.LaunchStepImagePull, "", runErr)
+		}
+		return "", runErr
 	}
 
 	// Run returns the whole trimmed output, as before; only the launch
@@ -427,14 +432,90 @@ func (r *DockerRuntime) RemoveImage(ctx context.Context, image string) error {
 }
 
 func (r *DockerRuntime) PullImage(ctx context.Context, image string) error {
+	reportLaunchProgress(ctx, api.LaunchStepImagePull)
 	out, err := runSimpleCommand(ctx, r.Command, "pull", image)
 	if err != nil {
+		var pullErr error
 		if trimmed := strings.TrimSpace(out); trimmed != "" {
-			return fmt.Errorf("pull %q: %w\n%s", image, err, trimmed)
+			pullErr = fmt.Errorf("pull %q: %w\n%s", image, err, trimmed)
+		} else {
+			pullErr = fmt.Errorf("pull %q: %w", image, err)
 		}
-		return fmt.Errorf("pull %q: %w", image, err)
+		if ctx.Err() == nil {
+			if code := classifyDockerPullError(image, out, err); code != "" {
+				return newLaunchFailure(code, api.LaunchStepImagePull, "", pullErr)
+			}
+		}
+		return pullErr
 	}
 	return nil
+}
+
+// isDockerDaemonConnectError reports whether Docker CLI output indicates a
+// failure to reach or authenticate to the Docker daemon socket/API itself,
+// rather than an image or registry error returned by a reachable daemon.
+func isDockerDaemonConnectError(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "cannot connect to the docker daemon") ||
+		strings.Contains(lower, "is the docker daemon running") ||
+		strings.Contains(lower, "permission denied while trying to connect to the docker") ||
+		strings.Contains(lower, "error during connect:")
+}
+
+// isInvalidImageReference reports whether image is empty or contains
+// whitespace, which can never be a valid container image reference.
+func isInvalidImageReference(image string) bool {
+	return strings.TrimSpace(image) == "" || strings.ContainsAny(image, " \t\r\n")
+}
+
+// isInvalidImageOutput reports whether Docker CLI/daemon output indicates a
+// malformed image reference.
+func isInvalidImageOutput(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "invalid reference format") ||
+		strings.Contains(lower, "repository name must be lowercase") ||
+		strings.Contains(lower, "invalid tag format") ||
+		strings.Contains(lower, "invalid digest format") ||
+		strings.Contains(lower, "repository name must have at least one component") ||
+		strings.Contains(lower, "repository name must not be more than") ||
+		strings.Contains(lower, "repository name must be canonical") ||
+		strings.Contains(lower, "not a valid repository/tag") ||
+		strings.Contains(lower, "unable to parse reference") ||
+		strings.Contains(lower, "failed to parse image reference")
+}
+
+// isDockerRunImagePullOutput reports whether `docker run` output indicates
+// that an implicit image pull failed (as opposed to a mount, flag, or
+// container start error).
+func isDockerRunImagePullOutput(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "unable to find image ") ||
+		strings.Contains(lower, "manifest unknown") ||
+		strings.Contains(lower, "pull access denied") ||
+		strings.Contains(lower, "no matching manifest for ")
+}
+
+func classifyDockerPullError(image, out string, err error) string {
+	if err == nil || !isExitError(err) || isDockerDaemonConnectError(out) {
+		return ""
+	}
+	if isInvalidImageReference(image) || isInvalidImageOutput(out) {
+		return api.LaunchCodeInvalidImage
+	}
+	return api.LaunchCodeImagePullFailed
+}
+
+func classifyDockerRunImageError(out string, err error) string {
+	if err == nil || !isExitError(err) || isDockerDaemonConnectError(out) {
+		return ""
+	}
+	if isInvalidImageOutput(out) {
+		return api.LaunchCodeInvalidImage
+	}
+	if isDockerRunImagePullOutput(out) {
+		return api.LaunchCodeImagePullFailed
+	}
+	return ""
 }
 
 func (r *DockerRuntime) Sync(ctx context.Context, id string, direction SyncDirection) error {

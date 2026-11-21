@@ -45,8 +45,8 @@ const (
 	// covers both the image pull and the volume mounts (pod status cannot
 	// tell them apart).
 	LaunchStepContainerCreate = "container_create"
-	// LaunchStepImagePull is reserved for a reader of Kubernetes Events that
-	// can see an image pull in progress. No runtime reports it yet.
+	// LaunchStepImagePull: pulling the agent image before starting the
+	// container (e.g. on the Docker runtime).
 	LaunchStepImagePull = "image_pull"
 	// LaunchStepContainerStart: the main container is running and the
 	// runtime is waiting for it to accept commands.
@@ -103,10 +103,10 @@ const (
 	LaunchCodeHostedConfigRefused = "hosted_config_refused"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
-	// (Kubernetes ImagePullBackOff or ErrImagePull).
+	// (Kubernetes ImagePullBackOff or ErrImagePull, or a failed Docker pull).
 	LaunchCodeImagePullFailed = "image_pull_failed"
 	// LaunchCodeInvalidImage: the image reference is not valid
-	// (Kubernetes InvalidImageName).
+	// (Kubernetes InvalidImageName, or a malformed Docker image reference).
 	LaunchCodeInvalidImage = "invalid_image"
 	// LaunchCodeContainerConfig: the runtime refused the agent container's
 	// configuration, e.g. a missing secret or volume (Kubernetes
