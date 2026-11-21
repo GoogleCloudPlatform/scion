@@ -266,7 +266,9 @@ you're about to run needs:
   `--enable-web` is set, the Hub API is served on `--web-port`, not `--port`.
   `--enable-test-login` lets the browser script sign in as the seeded
   member/owner without a password; never pass it when pointing at anything
-  other than a disposable local hub.
+  other than a disposable local hub. A hosted hub refuses it unless it is
+  declared a test hub, so also set `SCION_SERVER_HUB_CLASS=test` in the
+  launch environment.
 
 Notes on flags, learned the hard way while building this:
 
@@ -444,6 +446,7 @@ Requires the hub from the previous step restarted with web + test-login
 ```sh
 env -i HOME=/tmp/scion-bench/home PATH="$PATH" SCION_CLI_MODE=human \
   GCE_METADATA_HOST=127.0.0.1:1 GCE_METADATA_IP=127.0.0.1:1 \
+  SCION_SERVER_HUB_CLASS=test \
   /tmp/scion-bin server start \
   --hosted --enable-hub --enable-web --enable-test-login \
   --db /tmp/scion-bench/hub25.db --session-secret bench-secret-1 \

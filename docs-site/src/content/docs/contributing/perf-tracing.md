@@ -182,13 +182,13 @@ jq -c --arg id "$id" 'select(.msg == "perf_trace" and .request_id == $id)' /tmp/
 
 ### 6. Run the browser benchmark
 
-The browser benchmark is `web/e2e-perf/large-project-bench.mjs`. It needs the built web assets (`cd web && npm install && npx playwright install chromium && npm run build`) and a Hub restarted with the web server and test login turned on. With `--enable-web`, the Hub API is served on `--web-port`:
+The browser benchmark is `web/e2e-perf/large-project-bench.mjs`. It needs the built web assets (`cd web && npm install && npx playwright install chromium && npm run build`) and a Hub restarted with the web server and test login turned on. A hosted Hub refuses `--enable-test-login` unless `server.hub.class` is `test`, so the launch sets `SCION_SERVER_HUB_CLASS=test`. With `--enable-web`, the Hub API is served on `--web-port`:
 
 ```sh
 cd /tmp/scion-bench
 env -i HOME=/tmp/scion-bench/home PATH="$PATH" SCION_CLI_MODE=human \
   GCE_METADATA_HOST=127.0.0.1:1 GCE_METADATA_IP=127.0.0.1:1 \
-  SCION_SERVER_HUB_PERFTRACE=true \
+  SCION_SERVER_HUB_PERFTRACE=true SCION_SERVER_HUB_CLASS=test \
   /tmp/scion-bin server start \
   --hosted --enable-hub --enable-web --enable-test-login \
   --db /tmp/scion-bench/hub25.db --session-secret bench-secret-1 \
