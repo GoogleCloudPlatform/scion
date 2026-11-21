@@ -868,7 +868,7 @@ func TestCloudRunRuntime_IDRoundTrip(t *testing.T) {
 }
 
 // The Cloud Run instance must mount the NFS share the broker provisions on
-// (workspace_storage.nfs.shares[0]). See ptone/scion#2979.
+// (project_storage.nfs.shares[0]). See ptone/scion#2979.
 func TestResolveCloudRunNFSTarget(t *testing.T) {
 	tests := []struct {
 		name                      string
@@ -885,14 +885,14 @@ func TestResolveCloudRunNFSTarget(t *testing.T) {
 			wantServer: "10.0.0.2", wantExport: "/scion"},
 		{name: "mismatched server is refused", runtimeServer: "10.0.0.3", runtimeExp: "/scion",
 			shareServer: "10.0.0.2", shareExp: "/scion",
-			wantErr: []string{"cloudrun.nfs_server", `"10.0.0.3"`, "server.workspace_storage.nfs.shares[0].server", `"10.0.0.2"`}},
+			wantErr: []string{"cloudrun.nfs_server", `"10.0.0.3"`, "server.project_storage.nfs.shares[0].server", `"10.0.0.2"`}},
 		{name: "mismatched export is refused", runtimeServer: "10.0.0.2", runtimeExp: "/other",
 			shareServer: "10.0.0.2", shareExp: "/scion",
-			wantErr: []string{"cloudrun.nfs_export", `"/other"`, "server.workspace_storage.nfs.shares[0].export", `"/scion"`}},
+			wantErr: []string{"cloudrun.nfs_export", `"/other"`, "server.project_storage.nfs.shares[0].export", `"/scion"`}},
 		{name: "no server anywhere is refused",
-			wantErr: []string{"nfs_server must be non-empty"}},
+			wantErr: []string{"nfs_server must be non-empty", "cloudrun.nfs_server", "server.project_storage.nfs.shares[0].server"}},
 		{name: "no export anywhere is refused", runtimeServer: "10.0.0.2", shareServer: "10.0.0.2",
-			wantErr: []string{"nfs_export must be non-empty", "cloudrun.nfs_export", "server.workspace_storage.nfs.shares[0].export"}},
+			wantErr: []string{"nfs_export must be non-empty", "cloudrun.nfs_export", "server.project_storage.nfs.shares[0].export"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -905,6 +905,9 @@ func TestResolveCloudRunNFSTarget(t *testing.T) {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error %q does not contain %q", err, want)
 					}
+				}
+				if strings.Contains(err.Error(), "workspace_storage") {
+					t.Errorf("error %q still mentions deprecated workspace_storage key", err)
 				}
 				return
 			}
