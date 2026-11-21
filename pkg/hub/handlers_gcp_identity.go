@@ -21,14 +21,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"google.golang.org/api/googleapi"
 )
@@ -1479,14 +1483,22 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent authentication required", nil)
 		return
 	}
+	logging.SetRequestAgentID(r.Context(), agent.Subject)
 
 	// Rate limit check
-	if s.gcpTokenRateLimiter != nil && !s.gcpTokenRateLimiter.Allow(agent.Subject) {
-		if s.gcpTokenMetrics != nil {
-			s.gcpTokenMetrics.RecordRateLimitRejection()
+	if s.gcpTokenRateLimiter != nil {
+		if allowed, retryAfter := s.gcpTokenRateLimiter.AllowWithRetryAfter(agent.Subject); !allowed {
+			if s.gcpTokenMetrics != nil {
+				s.gcpTokenMetrics.RecordRateLimitRejection()
+			}
+			retryAfterSecs := max(1, int(math.Ceil(retryAfter.Seconds())))
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecs))
+			slog.WarnContext(r.Context(), "GCP access token request rate limited",
+				"agent_id", agent.Subject,
+				"retry_after_seconds", retryAfterSecs)
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "rate limit exceeded for GCP token requests", nil)
+			return
 		}
-		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "rate limit exceeded for GCP token requests", nil)
-		return
 	}
 
 	// Look up agent's GCP identity assignment
@@ -1588,14 +1600,24 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent authentication required", nil)
 		return
 	}
+	logging.SetRequestAgentID(r.Context(), agent.Subject)
 
 	// Rate limit check
-	if s.gcpTokenRateLimiter != nil && !s.gcpTokenRateLimiter.Allow(agent.Subject) {
-		if s.gcpTokenMetrics != nil {
-			s.gcpTokenMetrics.RecordRateLimitRejection()
+	if s.gcpTokenRateLimiter != nil {
+		if allowed, retryAfter := s.gcpTokenRateLimiter.AllowWithRetryAfter(agent.Subject); !allowed {
+			if s.gcpTokenMetrics != nil {
+				s.gcpTokenMetrics.RecordRateLimitRejection()
+			}
+			retryAfterSecs := max(1, int(math.Ceil(retryAfter.Seconds())))
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecs))
+			audience := extractRateLimitedAudience(r)
+			slog.WarnContext(r.Context(), "GCP identity token request rate limited",
+				"agent_id", agent.Subject,
+				"audience", audience,
+				"retry_after_seconds", retryAfterSecs)
+			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "rate limit exceeded for GCP token requests", nil)
+			return
 		}
-		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "rate limit exceeded for GCP token requests", nil)
-		return
 	}
 
 	agentRecord, err := s.store.GetAgent(r.Context(), agent.Subject)
@@ -1685,6 +1707,35 @@ type gcpTokenRequest struct {
 
 type gcpIdentityTokenRequest struct {
 	Audience string `json:"audience"`
+}
+
+const (
+	// maxRateLimitedBodyRead bounds how much of a rate-limited request body we
+	// inspect for attribution logging so rejected callers cannot force unbounded
+	// reads or JSON decoding.
+	maxRateLimitedBodyRead = 4096
+	maxLoggedAudienceLen   = 512
+)
+
+// extractRateLimitedAudience performs a strictly bounded best-effort read of
+// the audience field from a rate-limited /gcp-identity-token request body so
+// the 429 warning log can attribute the target audience.
+func extractRateLimitedAudience(r *http.Request) string {
+	if r == nil || r.Body == nil {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(r.Body, maxRateLimitedBodyRead))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	var req gcpIdentityTokenRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return ""
+	}
+	if len(req.Audience) > maxLoggedAudienceLen {
+		return req.Audience[:maxLoggedAudienceLen]
+	}
+	return req.Audience
 }
 
 // mintCreateErrorMessage renders the error body for a failed
