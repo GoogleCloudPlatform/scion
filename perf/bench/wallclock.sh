@@ -142,7 +142,7 @@ mkdir -p "$WORKDIR/home"
 (
   cd "$WORKDIR"
   exec env -i HOME="$WORKDIR/home" PATH="$PATH" SCION_CLI_MODE=human \
-    GCE_METADATA_HOST=127.0.0.1:1 GCE_METADATA_IP=127.0.0.1:1 \
+    GCE_METADATA_HOST=127.0.0.1:1 GCE_METADATA_IP=127.0.0.1:1 SCION_SERVER_HUB_CLASS=test \
     "$BIN/scion" server start --hosted --enable-hub --enable-web --enable-test-login \
     --db "$DB" --session-secret "$SECRET" \
     --port $((PORT + 1)) --web-port "$PORT" --host 127.0.0.1 \

@@ -100,6 +100,43 @@ func TestLoadAndReconcileConfig_RefusesDebugEndpointsInHostedMode(t *testing.T) 
 	}
 }
 
+// --enable-test-login is refused in hosted mode unless server.hub.class is
+// "test", and accepted in workstation mode.
+func TestLoadAndReconcileConfig_RefusesTestLoginInHostedMode(t *testing.T) {
+	const refusal = "--enable-test-login is not allowed in hosted mode"
+	for _, tc := range []struct {
+		name, settings, envClass string
+		wantRefuse               bool
+	}{
+		{name: "hosted", settings: "server:\n  mode: hosted\n", wantRefuse: true},
+		{name: "hosted test hub", settings: "server:\n  mode: hosted\n  hub:\n    class: test\n"},
+		{name: "hosted test hub via env", settings: "server:\n  mode: hosted\n", envClass: "test"},
+		{name: "workstation", settings: "server:\n  mode: workstation\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			savedTestLogin := enableTestLogin
+			t.Cleanup(func() {
+				resetServerFlags()
+				enableTestLogin = savedTestLogin
+			})
+			resetServerFlags()
+			enableTestLogin = true
+			t.Setenv("SCION_SERVER_MODE", "")
+			t.Setenv("SCION_SERVER_HUB_CLASS", tc.envClass)
+			writeServerSettings(t, "schema_version: \"1\"\n"+tc.settings)
+
+			_, err := loadAndReconcileConfig(serverStartCmd)
+			if tc.wantRefuse {
+				if err == nil || !strings.Contains(err.Error(), refusal) {
+					t.Fatalf("%s: loadAndReconcileConfig err = %v, want refusal containing %q", tc.name, err, refusal)
+				}
+			} else if err != nil {
+				t.Fatalf("%s: loadAndReconcileConfig unexpected err = %v", tc.name, err)
+			}
+		})
+	}
+}
+
 // The daemon parent applies the same check before starting the child, so
 // the reason is reported directly.
 func TestResolveDaemonServerMode_DebugEndpoints(t *testing.T) {
@@ -155,6 +192,29 @@ func TestValidateDebugEndpoints(t *testing.T) {
 		err := validateDebugEndpoints(tc.hosted, tc.enabled)
 		if (err != nil) != tc.wantErr {
 			t.Errorf("validateDebugEndpoints(hosted=%v, enabled=%v) err = %v, wantErr %v", tc.hosted, tc.enabled, err, tc.wantErr)
+		}
+	}
+}
+
+// --enable-test-login bypasses authentication: hosted mode refuses it unless
+// the hub is declared a test hub (server.hub.class: test).
+func TestValidateTestLogin(t *testing.T) {
+	for _, tc := range []struct {
+		hosted, enabled bool
+		class           string
+		wantErr         bool
+	}{
+		{hosted: false, enabled: false},
+		{hosted: false, enabled: true},
+		{hosted: true, enabled: false},
+		{hosted: true, enabled: true, wantErr: true},
+		{hosted: true, enabled: true, class: "prod", wantErr: true},
+		{hosted: true, enabled: true, class: "Test", wantErr: true},
+		{hosted: true, enabled: true, class: config.HubClassTest},
+	} {
+		err := validateTestLogin(tc.hosted, tc.enabled, tc.class)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("validateTestLogin(hosted=%v, enabled=%v, class=%q) err = %v, wantErr %v", tc.hosted, tc.enabled, tc.class, err, tc.wantErr)
 		}
 	}
 }
