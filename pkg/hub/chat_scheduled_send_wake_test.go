@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,14 +84,46 @@ func attachScheduledWakeBroker(t *testing.T, f *scheduledSendFixture, phase stri
 	}
 }
 
-func (wf *scheduledWakeFixture) markReadySoon(agentID string) {
+// markReadyOnStart waits until the start path has written PhaseStarting
+// (beginStartDispatch, before the broker dispatch), then reports the agent
+// running/idle as a resumed container's first status would. This avoids
+// racing wakeAgentForDM under -race slowdown.
+func (wf *scheduledWakeFixture) markReadyOnStart(t *testing.T, agentID string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(1)
+	t.Cleanup(func() { cancel(); wg.Wait() })
 	go func() {
-		time.Sleep(150 * time.Millisecond)
-		_ = wf.store.UpdateAgentStatus(context.Background(), agentID, store.AgentStatusUpdate{
-			Phase:    string(state.PhaseRunning),
-			Activity: "idle",
-		})
+		defer wg.Done()
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			a, err := wf.store.GetAgent(ctx, agentID)
+			if err == nil && a.Phase == string(state.PhaseStarting) {
+				_ = wf.store.UpdateAgentStatus(ctx, agentID, store.AgentStatusUpdate{
+					Phase:    string(state.PhaseRunning),
+					Activity: "idle",
+				})
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
 	}()
+}
+
+// sweepTimeAtOrAfter returns a timestamp at or after target so a subsequent
+// sweepScheduledMessages call always sees a row due at target without sleeping.
+func sweepTimeAtOrAfter(target time.Time) time.Time {
+	now := time.Now().UTC()
+	if now.Before(target) {
+		return target.Add(time.Second)
+	}
+	return now
 }
 
 func (wf *scheduledWakeFixture) scheduleWakeIn(t *testing.T, user *store.User, key, content string, wake bool) scheduledMessageResponse {
@@ -176,7 +209,7 @@ func TestScheduledSendWake_SuspendedPrimary_WakesAndDelivers(t *testing.T) {
 	logs := captureSlogDefault(t)
 
 	sm := wf.scheduleWakeIn(t, wf.bob, wf.topicID, "good morning agent", true)
-	wf.markReadySoon(wf.agent.ID)
+	wf.markReadyOnStart(t, wf.agent.ID)
 
 	assert.Equal(t, 1, wf.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
 
@@ -234,7 +267,7 @@ func TestScheduledSendWake_SecondaryMentionNeverWoken(t *testing.T) {
 	require.NoError(t, wf.store.CreateAgent(ctx, secondary))
 
 	sm := wf.scheduleWakeIn(t, wf.bob, wf.topicID, "hello and cc @secondary-agent", true)
-	wf.markReadySoon(wf.agent.ID)
+	wf.markReadyOnStart(t, wf.agent.ID)
 
 	assert.Equal(t, 1, wf.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
 	assert.Equal(t, ScheduledMessageSent, wf.row(t, wf.bob, sm.ID).Status)
@@ -332,9 +365,8 @@ func TestScheduledSendWake_DispatchErrorAndTimeout_FailedThenSendNow(t *testing.
 		assert.Equal(t, ScheduledMessagePending, sendNowResp.Status)
 		assert.True(t, sendNowResp.Wake)
 
-		time.Sleep(time.Until(sendNowResp.FireAt))
-		wf.markReadySoon(wf.agent.ID)
-		assert.Equal(t, 1, wf.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
+		wf.markReadyOnStart(t, wf.agent.ID)
+		assert.Equal(t, 1, wf.srv.sweepScheduledMessages(ctx, sweepTimeAtOrAfter(sendNowResp.FireAt)))
 		assert.Equal(t, ScheduledMessageSent, wf.row(t, wf.bob, sm.ID).Status)
 		require.Len(t, wf.topicMessages(t), 1)
 	})
@@ -380,8 +412,7 @@ func TestScheduledSendWake_DispatchErrorAndTimeout_FailedThenSendNow(t *testing.
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		var sendNowResp scheduledMessageResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sendNowResp))
-		time.Sleep(time.Until(sendNowResp.FireAt))
-		assert.Equal(t, 1, wf.srv.sweepScheduledMessages(ctx, time.Now().UTC()))
+		assert.Equal(t, 1, wf.srv.sweepScheduledMessages(ctx, sweepTimeAtOrAfter(sendNowResp.FireAt)))
 		assert.Equal(t, ScheduledMessageSent, wf.row(t, wf.bob, sm.ID).Status)
 		require.Len(t, wf.topicMessages(t), 1)
 	})
@@ -544,7 +575,7 @@ func TestScheduledSendWake_ShutdownDuringResume_ReleasedToPending(t *testing.T) 
 		wakeTrackingDispatcher: wf.disp,
 		srv:                    wf.srv,
 		store:                  wrapped,
-		markReady:              wf.markReadySoon,
+		markReady:              func(id string) { wf.markReadyOnStart(t, id) },
 	})
 
 	sm := wf.scheduleWakeIn(t, wf.bob, wf.topicID, "wake succeeds after sweeper abort", true)

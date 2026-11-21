@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
@@ -1004,11 +1005,12 @@ func TestAgentDelegatedAttach_ConduitPathRefusedBeforeUpgrade(t *testing.T) {
 
 // adtConduitDelegatedToken has the conduit fixture's owner issue a project
 // grant for agent:attach to its agent f.agent, and returns the delegated
-// credential f.agent exchanges for it.
+// credential f.agent exchanges for it. The caller must enable
+// hub.agent_delegation on f.srv before starting the conduit relay.
 func adtConduitDelegatedToken(t *testing.T, f *ptyConduitFixture) string {
 	t.Helper()
 	ctx := context.Background()
-	adtSetExperiment(t, f.srv, true)
+	require.True(t, f.srv.experimentEnabled(experiments.AgentDelegation), "caller must enable hub.agent_delegation before starting the relay")
 	if f.agent.RunID == "" {
 		_, err := f.store.SetAgentRunID(ctx, f.agent.ID, uuid.NewString(), nil)
 		require.NoError(t, err)
@@ -1052,7 +1054,9 @@ func adtConduitDelegatedToken(t *testing.T, f *ptyConduitFixture) string {
 // the same 503, and no terminal is spawned on the agent. The fixture owner
 // itself still attaches over that path.
 func TestAgentDelegatedAttach_ConduitPathRefusedThroughTheHandler(t *testing.T) {
-	f := newPTYConduitFixture(t)
+	f := newPTYConduitFixtureServer(t, func(srv *Server) {
+		adtSetExperiment(t, srv, true)
+	})
 	f.setBrokerRow(t, attachCaps(false), "")
 	f.startPTYAgent(t, f.public.URL)
 	status, path, _ := f.preflight(t)
