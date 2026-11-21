@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,8 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/knadh/koanf/providers/confmap"
+	"github.com/knadh/koanf/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -585,4 +588,226 @@ func TestCustomDefaultUserRole_ReservedRoleNames(t *testing.T) {
 	require.Len(t, viewerBindings, 1)
 	assert.Equal(t, hubViewerRD.ID, viewerBindings[0].RoleDefinitionID)
 	assert.NotEqual(t, customViewer.ID, viewerBindings[0].RoleDefinitionID)
+}
+
+func TestCustomDefaultUserRole_StartupConfigPrecedenceMatchesSnapshot(t *testing.T) {
+	_, st := testServer(t)
+	ctx := context.Background()
+
+	// Enable experiment in DB so both startup and runtime see custom default roles enabled.
+	_, err := st.UpsertHubSetting(ctx, "experiments",
+		json.RawMessage(`{"overrides":{"`+experiments.CustomDefaultUserRole+`":true}}`), "test", -1, "managed")
+	require.NoError(t, err)
+
+	srvNoOps := &Server{}
+
+	// Case 1: DB "access" row absent -> falls back to cfgDefaultRole.
+	gotRole, gotEnabled := startupDefaultUserRoleConfig(ctx, st, srvNoOps, store.UserRoleViewer)
+	assert.Equal(t, store.UserRoleViewer, gotRole)
+	assert.True(t, gotEnabled)
+
+	// Case 2: DB "access" row present with custom role AND env var set to "member" ->
+	// DB row wins, matching OperationalSettings.Snapshot() (Decision 7).
+	t.Setenv("SCION_SERVER_AUTH_DEFAULTUSERROLE", store.UserRoleMember)
+	_, err = st.UpsertHubSetting(ctx, "access",
+		json.RawMessage(`{"default_user_role":"restricted"}`), "test", -1, "managed")
+	require.NoError(t, err)
+
+	bootstrapK := koanf.New(".")
+	require.NoError(t, bootstrapK.Load(confmap.Provider(map[string]any{
+		"server.auth.default_user_role": store.UserRoleMember,
+	}, "."), nil))
+	envK := koanf.New(".")
+	require.NoError(t, envK.Load(confmap.Provider(map[string]any{
+		"server.auth.default_user_role": store.UserRoleMember,
+	}, "."), nil))
+	ops := NewOperationalSettings(st, bootstrapK, envK)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	snap := ops.Snapshot()
+
+	gotRole, gotEnabled = startupDefaultUserRoleConfig(ctx, st, srvNoOps, store.UserRoleMember)
+	assert.Equal(t, "restricted", snap.DefaultUserRole)
+	assert.Equal(t, snap.DefaultUserRole, gotRole, "startup default_user_role must match runtime snapshot when DB row and env var are both set")
+	assert.True(t, gotEnabled)
+
+	// Case 3: DB "access" row present with empty default_user_role AND cfgDefaultRole="viewer" ->
+	// DB row is authoritative ("" -> effective "member"), matching OperationalSettings.Snapshot().
+	_, err = st.UpsertHubSetting(ctx, "access", json.RawMessage(`{}`), "test", -1, "managed")
+	require.NoError(t, err)
+	bootstrapViewerK := koanf.New(".")
+	require.NoError(t, bootstrapViewerK.Load(confmap.Provider(map[string]any{
+		"server.auth.default_user_role": store.UserRoleViewer,
+	}, "."), nil))
+	opsEmpty := NewOperationalSettings(st, bootstrapViewerK, emptyKoanf())
+	_, err = opsEmpty.Refresh(ctx)
+	require.NoError(t, err)
+	snapEmpty := opsEmpty.Snapshot()
+
+	gotRole, _ = startupDefaultUserRoleConfig(ctx, st, srvNoOps, store.UserRoleViewer)
+	assert.Equal(t, "", snapEmpty.DefaultUserRole)
+	assert.Equal(t, snapEmpty.DefaultUserRole, gotRole, "startup default_user_role must match runtime snapshot when DB access row has empty default_user_role")
+}
+
+func TestCustomDefaultUserRole_ExistingHolderGuardAfterRenameOrDefaultChange(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	grantTestEnableExperiment(t, srv, st, true)
+
+	roleA := grantTestSeedRole(t, st, "holder-role-a", store.RoleScopeSystem, []string{"user.read"})
+	roleB := grantTestSeedRole(t, st, "holder-role-b", store.RoleScopeSystem, []string{"user.read"})
+	srv.config.DefaultUserRole = roleA.Name
+	srv.config.UserAccessMode = "open"
+
+	// Provision a user under roleA so they hold a SystemDefaultRoleCreatedBy binding.
+	u, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: "holder-guard@example.com", DisplayName: "Holder"})
+	require.NoError(t, err)
+	grantTestAssertCustomDefaultOnly(t, st, u.ID, roleA.ID)
+
+	// 1. Rename roleA -> roleA-renamed (allowed while permissions remain clean).
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/admin/roles/"+roleA.ID, updateRoleDefinitionRequest{
+		Name:        "holder-role-a-renamed",
+		Description: "renamed away from configured default",
+		Permissions: []string{"user.read"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Adding an unsupported #7779 permission to the renamed role must still be rejected.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/roles/"+roleA.ID, updateRoleDefinitionRequest{
+		Name:        "holder-role-a-renamed",
+		Description: "attempt to add skill.read after rename",
+		Permissions: []string{"user.read", "skill.read"},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// 2. Move default_user_role to roleB: roleA still has a sentinel-binding holder,
+	// so adding template.list must still be rejected.
+	srv.config.DefaultUserRole = roleB.Name
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/roles/"+roleA.ID, updateRoleDefinitionRequest{
+		Name:        "holder-role-a-renamed",
+		Description: "attempt to add template.list after default changed",
+		Permissions: []string{"user.read", "template.list"},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// 3. Even with the experiment turned off, the existing holder guard still applies.
+	grantTestEnableExperiment(t, srv, st, false)
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/roles/"+roleA.ID, updateRoleDefinitionRequest{
+		Name:        "holder-role-a-renamed",
+		Description: "attempt while experiment off",
+		Permissions: []string{"user.read", "harness_config.read"},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// 4. Once the user is explicitly moved to standard member (removing the sentinel binding),
+	// updating the unreferenced role succeeds.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+u.ID, map[string]string{"role": store.UserRoleMember})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/admin/roles/"+roleA.ID, updateRoleDefinitionRequest{
+		Name:        "holder-role-a-renamed",
+		Description: "no sentinel holders left",
+		Permissions: []string{"user.read", "skill.read"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+type defaultRoleFaultStore struct {
+	store.Store
+	lookupRoleName string
+	lookupErr      error
+	failCreateRB   error
+}
+
+func (f *defaultRoleFaultStore) GetRoleDefinitionByName(ctx context.Context, name, scopeType string) (*store.RoleDefinition, error) {
+	if f.lookupErr != nil && name == f.lookupRoleName {
+		return nil, f.lookupErr
+	}
+	return f.Store.GetRoleDefinitionByName(ctx, name, scopeType)
+}
+
+func (f *defaultRoleFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&defaultRoleFaultStore{
+			Store:          tx,
+			lookupRoleName: f.lookupRoleName,
+			lookupErr:      f.lookupErr,
+			failCreateRB:   f.failCreateRB,
+		})
+	})
+}
+
+func (f *defaultRoleFaultStore) CreateRoleBinding(ctx context.Context, rb *store.RoleBinding) (*store.RoleBinding, error) {
+	if f.failCreateRB != nil && rb.CreatedBy == store.SystemDefaultRoleCreatedBy {
+		return nil, f.failCreateRB
+	}
+	return f.Store.CreateRoleBinding(ctx, rb)
+}
+
+func TestCustomDefaultUserRole_LookupErrorFailsClosedAndTxRollsBack(t *testing.T) {
+	_, st := testServer(t)
+	ctx := context.Background()
+
+	customRole := grantTestSeedRole(t, st, "custom-tx-test", store.RoleScopeSystem, []string{"user.read"})
+
+	// O2(a): transient store lookup error fails closed (returns error, does NOT grant hub-members).
+	uLookup := &store.User{
+		ID: generateID(), Email: "lookup-err@example.com", DisplayName: "Lookup Err",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, uLookup))
+	lookupFault := &defaultRoleFaultStore{
+		Store:          st,
+		lookupRoleName: customRole.Name,
+		lookupErr:      errors.New("simulated transient db error"),
+	}
+	err := applyDefaultUserRoleGrants(ctx, lookupFault, uLookup.ID, store.UserRoleMember, customRole.Name, true)
+	require.Error(t, err)
+	assert.False(t, grantTestIsHubMember(t, st, uLookup.ID), "transient lookup error must not grant hub-members")
+	assert.Empty(t, grantTestSystemBindings(t, st, uLookup.ID), "transient lookup error must not create bindings")
+
+	// O2(b): failure during CreateRoleBinding rolls back removeHubMembershipTx atomically.
+	uTx := &store.User{
+		ID: generateID(), Email: "tx-rollback@example.com", DisplayName: "Tx Rollback",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, uTx))
+	require.NoError(t, ensureHubMembershipTx(ctx, st, uTx.ID))
+	createFault := &defaultRoleFaultStore{
+		Store:        st,
+		failCreateRB: errors.New("simulated binding write error"),
+	}
+	err = applyDefaultUserRoleGrants(ctx, createFault, uTx.ID, store.UserRoleMember, customRole.Name, true)
+	require.Error(t, err)
+	assert.True(t, grantTestIsHubMember(t, st, uTx.ID), "rollback must restore hub-members membership on CreateRoleBinding failure")
+	assert.Empty(t, grantTestSystemBindings(t, st, uTx.ID))
+}
+
+func TestCustomDefaultUserRole_FallbackSyncsPersistedUserRole(t *testing.T) {
+	_, st := testServer(t)
+	ctx := context.Background()
+
+	// O4: if live default_user_role changes from viewer -> member between persisting
+	// User.Role="viewer" and applying grants, built-in fallback must sync persisted
+	// userRole ("viewer") rather than granting hub-members.
+	uViewer := &store.User{
+		ID: generateID(), Email: "race-viewer@example.com", DisplayName: "Race Viewer",
+		Role: store.UserRoleViewer, Status: store.UserStatusActive, Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, uViewer))
+	require.NoError(t, applyDefaultUserRoleGrants(ctx, st, uViewer.ID, store.UserRoleViewer, store.UserRoleMember, true))
+	assert.False(t, grantTestIsHubMember(t, st, uViewer.ID), "persisted viewer must not be added to hub-members")
+	hubViewerRD, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings := grantTestSystemBindings(t, st, uViewer.ID)
+	require.Len(t, bindings, 1)
+	assert.Equal(t, hubViewerRD.ID, bindings[0].RoleDefinitionID)
+
+	// Vice versa: persisted User.Role="member" with defaultRole="viewer" syncs hub-members.
+	uMember := &store.User{
+		ID: generateID(), Email: "race-member@example.com", DisplayName: "Race Member",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}
+	require.NoError(t, st.CreateUser(ctx, uMember))
+	require.NoError(t, applyDefaultUserRoleGrants(ctx, st, uMember.ID, store.UserRoleMember, store.UserRoleViewer, true))
+	grantTestAssertBuiltinHubMember(t, st, uMember.ID)
 }

@@ -2528,33 +2528,48 @@ func applyDefaultUserRoleGrants(ctx context.Context, st store.Store, userID, use
 		return syncHubRoleGrants(ctx, st, userID, store.UserRoleAdmin, store.SystemReconcileCreatedBy)
 	}
 	res := resolveDefaultUserRole(ctx, st, defaultRole, customEnabled, true)
+	// Fail closed on transient store lookup errors rather than falling back to
+	// built-in hub-members (which would grant hub-member privileges permanently
+	// without a sentinel binding).
+	if res.Warning != nil && res.Warning.Code == DefaultUserRoleWarningLookupError {
+		return fmt.Errorf("resolve custom default user role %q: %s", defaultRole, res.Warning.Message)
+	}
 	if res.CustomRole != nil {
-		if err := removeHubMembershipTx(ctx, st, userID); err != nil {
-			return err
-		}
-		if err := deleteHubViewerBindingsTx(ctx, st, userID); err != nil {
-			return err
-		}
-		if err := deleteSystemDefaultRoleBindingsTx(ctx, st, userID); err != nil {
-			return err
-		}
-		_, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
-			RoleDefinitionID: res.CustomRole.ID,
-			PrincipalType:    store.RoleBindingPrincipalUser,
-			PrincipalID:      userID,
-			ScopeType:        store.RoleScopeSystem,
-			ScopeID:          "",
-			CreatedBy:        store.SystemDefaultRoleCreatedBy,
+		return st.WithTx(ctx, func(tx store.Store) error {
+			if err := removeHubMembershipTx(ctx, tx, userID); err != nil {
+				return err
+			}
+			if err := deleteHubViewerBindingsTx(ctx, tx, userID); err != nil {
+				return err
+			}
+			if err := deleteSystemDefaultRoleBindingsTx(ctx, tx, userID); err != nil {
+				return err
+			}
+			_, err := tx.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: res.CustomRole.ID,
+				PrincipalType:    store.RoleBindingPrincipalUser,
+				PrincipalID:      userID,
+				ScopeType:        store.RoleScopeSystem,
+				ScopeID:          "",
+				CreatedBy:        store.SystemDefaultRoleCreatedBy,
+			})
+			if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+				return fmt.Errorf("create custom default role binding: %w", err)
+			}
+			return nil
 		})
-		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-			return fmt.Errorf("create custom default role binding: %w", err)
-		}
-		return nil
 	}
 	if err := deleteSystemDefaultRoleBindingsTx(ctx, st, userID); err != nil {
 		return err
 	}
-	return syncHubRoleGrants(ctx, st, userID, res.BuiltinRole, store.SystemReconcileCreatedBy)
+	// Keep built-in fallback grants tied to the persisted userRole so a live
+	// settings change between role determination and grant application cannot
+	// diverge grants from User.Role.
+	targetRole := res.BuiltinRole
+	if userRole == store.UserRoleMember || userRole == store.UserRoleViewer {
+		targetRole = userRole
+	}
+	return syncHubRoleGrants(ctx, st, userID, targetRole, store.SystemReconcileCreatedBy)
 }
 
 // hubViewerBindingsForUser returns the user's system-scoped hub-viewer role

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 
@@ -381,27 +380,49 @@ func (s *Server) configuredCustomDefaultUserRole() string {
 	return configured
 }
 
+// roleHasSystemDefaultRoleBindings reports whether any system-scope
+// RoleBinding referencing roleDefID carries the SystemDefaultRoleCreatedBy
+// provenance sentinel. Used by updateRoleDefinition to keep the #7779
+// unsupported-permission guard active even after a role is renamed away or
+// server.auth.default_user_role is changed to another role.
+func roleHasSystemDefaultRoleBindings(ctx context.Context, st store.Store, roleDefID string) (bool, error) {
+	if st == nil {
+		return false, nil
+	}
+	bindings, err := st.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	if err != nil {
+		return false, fmt.Errorf("list system role bindings: %w", err)
+	}
+	for _, b := range bindings {
+		if b.RoleDefinitionID == roleDefID && b.CreatedBy == store.SystemDefaultRoleCreatedBy {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // startupDefaultUserRoleConfig determines the effective default_user_role and
 // whether hub.custom_default_user_role is enabled during New(), before
 // OperationalSettings is attached by cmd/server_foreground.go.
 //
-// Precedence mirrors OperationalSettings:
-//   - SCION_SERVER_AUTH_DEFAULTUSERROLE env var (already reflected in
-//     cfgDefaultRole when set) wins over the DB "access" row;
-//   - otherwise the DB "access" row's default_user_role wins over
-//     cfgDefaultRole when present and non-empty;
-//   - for the experiment flag, if OperationalSettings is already attached,
+// Precedence matches OperationalSettings.Snapshot():
+//   - When the DB "access" section row exists, it is authoritative (even when
+//     default_user_role is empty, which resolves to "member"), and wins over
+//     bootstrap/env config.
+//   - Only when the DB "access" row is absent does startup fall back to
+//     cfgDefaultRole.
+//   - For the experiment flag, if OperationalSettings is already attached,
 //     srv.experimentEnabled is used; otherwise the DB "experiments" row is
 //     parsed via opsettings.ParseExperimentsDoc and resolved through
 //     srv.experimentEnabledIn.
 func startupDefaultUserRoleConfig(ctx context.Context, st store.Store, srv *Server, cfgDefaultRole string) (string, bool) {
 	defaultRole := cfgDefaultRole
-	if st != nil && os.Getenv("SCION_SERVER_AUTH_DEFAULTUSERROLE") == "" {
-		if row, err := st.GetHubSetting(ctx, "access"); err == nil && row != nil && len(bytes.TrimSpace(row.Value)) > 0 {
-			var access struct {
-				DefaultUserRole string `json:"default_user_role"`
-			}
-			if jsonErr := json.Unmarshal(row.Value, &access); jsonErr == nil && access.DefaultUserRole != "" {
+	if st != nil {
+		if row, err := st.GetHubSetting(ctx, "access"); err == nil && row != nil {
+			var access opsettings.AccessSettings
+			if len(bytes.TrimSpace(row.Value)) == 0 {
+				defaultRole = ""
+			} else if jsonErr := json.Unmarshal(row.Value, &access); jsonErr == nil {
 				defaultRole = access.DefaultUserRole
 			}
 		}

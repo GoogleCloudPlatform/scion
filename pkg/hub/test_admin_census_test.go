@@ -287,6 +287,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_membership_service.go:MigrateMultiRoleBindings:ListRoleBindingsForScope": "startup: binding migration",
 	"seed.go:CleanupRedundantHubMemberBindings:GetGroupMembers":                       "startup: redundant hub-member binding cleanup",
 	"seed.go:CleanupRedundantHubMemberBindings:ListRoleBindingsForPrincipal":          "startup: redundant hub-member binding cleanup",
+	"default_user_role.go:roleHasSystemDefaultRoleBindings:ListRoleBindingsForScope":  "guard: refuse-only check preventing #7779 catalog permissions on custom roles held via SystemDefaultRoleCreatedBy bindings; never grants authority",
 	"seed.go:deleteSystemDefaultRoleBindingsTx:ListRoleBindingsForPrincipal":          "mutation: hub grant sync",
 	"seed.go:hasActiveSystemDefaultRoleBinding:ListRoleBindingsForPrincipal":          "mutation: hub grant sync",
 	"seed.go:hubViewerBindingsForUser:ListRoleBindingsForPrincipal":                   "mutation: hub grant sync",
