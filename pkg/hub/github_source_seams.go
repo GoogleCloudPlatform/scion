@@ -257,7 +257,7 @@ func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 				Attempts: req.Attempts,
 			}
 
-			out := s.fireAction(ctx, fireReq)
+			out := serverTriggerCore{srv: s}.Fire(ctx, fireReq)
 			return source.ActionFireResult{
 				Status:    out.Status.String(),
 				ResultRef: out.ResultRef,
