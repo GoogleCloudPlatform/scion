@@ -1015,10 +1015,7 @@ func serverStatusBaseURLs(globalDir string, daemonRunning bool) (webBase, hubBas
 	if err != nil {
 		cfg = nil
 	}
-	// The registry check only decides whether the broker runs, not where it
-	// listens; status probes every component.
-	noRegistryCheck := func() error { return nil }
-	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
+	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode())
 	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
 	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
 }
@@ -1164,13 +1161,12 @@ func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg str
 // and, under the browser rule (browserAutoOpenAllowed), opens it. If the hub
 // cannot be asked, it falls back to settingsMissingBeforeStart: whether the
 // global settings file was absent before the daemon started (see
-// quickstartWebPath). When the co-located broker was skipped for lack of an
-// image registry, it prints the fix next to the URL.
+// quickstartWebPath).
 //
 // serverCfg is the server configuration the daemon child loads; its dev
 // token settings decide which token file the quickstart shows. A nil
 // serverCfg means the default settings.
-func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, serverCfg *config.GlobalConfig, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
+func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, serverCfg *config.GlobalConfig, host string, wPort int, webEnabled, devAuth, hubEnabled, _ bool) {
 	if serverCfg == nil {
 		serverCfg = &config.GlobalConfig{}
 	}
@@ -1245,13 +1241,6 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 				fmt.Println("To sign in to the web UI, run: scion server open")
 			}
 		}
-		// The server runs in the global directory, so check the registry
-		// there: a registry set only in the current project does not keep
-		// its broker on.
-		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, daemonRegistryCheck(globalDir)) {
-			fmt.Println(brokerSkippedNotice)
-		}
-
 		// Auto-open the browser in interactive terminals once the server is ready.
 		if serverUp && quickstartBrowserAllowed() {
 			_ = quickstartOpenBrowser(openURL)
