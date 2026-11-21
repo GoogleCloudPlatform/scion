@@ -910,7 +910,7 @@ func (c *Client) ListSecretsWithScope(ctx context.Context, scope string) (*ListS
 
 	respBody, _ := io.ReadAll(resp.Body)
 
-	if resp.StatusCode == http.StatusBadRequest && (scope == "agent" || scope == "all") {
+	if resp.StatusCode == http.StatusBadRequest && (scope == "agent" || scope == "all") && isAgentScopeUnavailableResponse(respBody) {
 		return nil, fmt.Errorf("%w: %s", ErrAgentScopeUnavailable, string(respBody))
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -922,6 +922,22 @@ func (c *Client) ListSecretsWithScope(ctx context.Context, scope string) (*ListS
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	return &result, nil
+}
+
+// isAgentScopeUnavailableResponse reports whether a 400 response body from
+// /api/v1/agents/{id}/secrets is specifically the Hub's invalid-scope error
+// returned when hub.agent_secrets is disabled.
+func isAgentScopeUnavailableResponse(body []byte) bool {
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	return env.Error.Code == "validation_error" && env.Error.Message == `scope must be "project" or "user"`
 }
 
 // RefreshTokenEntry represents a single token in the generalized refresh response.

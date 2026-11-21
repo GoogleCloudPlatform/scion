@@ -823,3 +823,74 @@ func TestAgentSecrets_HardDeleteRouteAndPurgeExpiredAgentsCallExternalCleanup(t 
 	assert.Contains(t, deletedAfterPurge, store.ScopeAgent+"/"+agentY.ID+"/PURGE_EXP_KEY",
 		"purgeExpiredAgents must invoke post-commit backend.Delete")
 }
+
+// TestAgentSecrets_EnvGatherRecreateCarriesOverAndCleansUpOldID proves that
+// Branch 3 (env-gather recreate of a provisioning agent) carries agent-scope
+// secrets over to the replacement agent's new ID with identical metadata and
+// values, leaves nothing under the old ID, and invokes post-commit external
+// backend.Delete for the old ID.
+func TestAgentSecrets_EnvGatherRecreateCarriesOverAndCleansUpOldID(t *testing.T) {
+	ctx := context.Background()
+	disp := &createAgentDispatcher{
+		envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"CARRY_KEY"}},
+	}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	spy := &spyDeleteSecretBackend{SecretBackend: secret.NewLocalBackend(s, "test-hub")}
+	srv.SetSecretBackend(spy)
+
+	// First create with GatherEnv=true leaves the agent in PhaseProvisioning
+	// (202 Accepted) waiting for CARRY_KEY.
+	body := CreateAgentRequest{Name: "eg-carry-agent", ProjectID: project.ID, Task: "t", GatherEnv: true}
+	rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
+	require.NotNil(t, disp.capturedAgent)
+	oldID := disp.capturedAgent.ID
+
+	// User sets an agent-scoped secret on the provisioning agent before retrying.
+	_, _, err := spy.Set(ctx, &secret.SetSecretInput{
+		Name:          "CARRY_KEY",
+		Value:         "super-secret-carry-val",
+		SecretType:    secret.TypeFile,
+		Target:        "/tmp/carry.pem",
+		Scope:         secret.ScopeAgent,
+		ScopeID:       oldID,
+		ProjectID:     project.ID,
+		Description:   "carry over across env-gather recreate",
+		InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+
+	// Second create with GatherEnv=true triggers Branch 3 (env-gather recreate):
+	// snapshots CARRY_KEY, deletes oldID (DB rows + external backend.Delete),
+	// creates a new agent under a new ID, and restores CARRY_KEY onto the new ID.
+	disp.envReqs = nil
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
+	require.True(t, rec2.Code == http.StatusCreated || rec2.Code == http.StatusAccepted || rec2.Code == http.StatusOK,
+		"expected 2xx on env-gather recreate, got %d: %s", rec2.Code, rec2.Body.String())
+	require.NotNil(t, disp.capturedAgent)
+	newID := disp.capturedAgent.ID
+	require.NotEqual(t, oldID, newID, "recreate must assign a new agent ID")
+
+	// New agent holds the carried-over secret with identical metadata and value.
+	carried, err := spy.Get(ctx, "CARRY_KEY", secret.ScopeAgent, newID)
+	require.NoError(t, err, "new agent must have the carried-over agent-scope secret")
+	assert.Equal(t, "super-secret-carry-val", carried.Value)
+	assert.Equal(t, secret.TypeFile, carried.SecretType)
+	assert.Equal(t, "/tmp/carry.pem", carried.Target)
+	assert.Equal(t, store.InjectionModeAsNeeded, carried.InjectionMode)
+	assert.Equal(t, "carry over across env-gather recreate", carried.Description)
+
+	// Nothing remains under the old agent ID in store or backend.
+	_, err = s.GetSecret(ctx, "CARRY_KEY", store.ScopeAgent, oldID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "old agent ID must have no remaining secret rows")
+	oldList, err := spy.List(ctx, secret.Filter{Scope: secret.ScopeAgent, ScopeID: oldID})
+	require.NoError(t, err)
+	assert.Empty(t, oldList)
+
+	// Spy backend observed the post-commit external delete for the old agent ID.
+	spy.mu.Lock()
+	deleted := append([]string(nil), spy.deleted...)
+	spy.mu.Unlock()
+	assert.Contains(t, deleted, store.ScopeAgent+"/"+oldID+"/CARRY_KEY",
+		"env-gather recreate must invoke post-commit backend.Delete for old agent ID")
+}

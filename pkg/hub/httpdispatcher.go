@@ -3560,7 +3560,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 			}
 		} else {
 			// Iterate in reverse: resolved is ordered lowest-precedence first
-			// (runtime_broker < hub < project < user), so walking backwards
+			// (runtime_broker < hub < project < user < agent), so walking backwards
 			// lets higher-precedence secrets win.
 			for i := len(resolved) - 1; i >= 0; i-- {
 				sv := resolved[i]
@@ -4034,6 +4034,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	applyAgentExperiments(resolvedEnv, &envClassifications, experiments)
 	d.applyConduitPolicy(resolvedEnv, &envClassifications)
 
+	var skippedAudienceCanEditAgent bool
+	for _, item := range skippedSecrets {
+		if item.Scope == store.ScopeAgent {
+			skippedAudienceCanEditAgent = d.skippedSecretAudienceCanEditAgent(ctx, agent)
+			break
+		}
+	}
 	return startEnvResult{
 		env:             resolvedEnv,
 		classifications: envClassifications,
@@ -4051,7 +4058,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			skippedSecrets,
 			startedVerb,
 			skippedSecretAudienceIsOwner(ctx, agent),
-			d.skippedSecretAudienceCanEditAgent(ctx, agent),
+			skippedAudienceCanEditAgent,
 		),
 		purpose: purpose,
 	}, nil
@@ -5684,10 +5691,11 @@ func (d *HTTPAgentDispatcher) skippedSecretAudienceCanEditAgent(ctx context.Cont
 // resolveSecrets queries secrets from all applicable scopes and merges them
 // into a flat list. Higher scopes override lower:
 //
-//	runtime_broker  <  hub  <  project  <  user
+//	runtime_broker  <  hub  <  project  <  user  <  agent
 //
-// This matches envScopePrecedence (see above). The divergence previously
-// tracked in issue #624 was corrected in PR #1227.
+// Plain env vars use envScopePrecedence (runtime_broker < hub < project < user);
+// secrets add agent scope at the highest precedence (ptone/scion#8743). The
+// earlier divergence tracked in issue #624 was corrected in PR #1227.
 func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.Agent) ([]ResolvedSecret, []string, error) {
 	if d.secretBackend == nil {
 		if d.debug {

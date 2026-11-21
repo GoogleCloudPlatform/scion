@@ -371,8 +371,11 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 	// check rolls it all back. A delete claim that lands after the read
 	// bumps state_version, so the row delete misses and the attempt is
 	// retried from a fresh read, which then refuses.
-	n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, c.Stage), agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
-		createRowHeldCheck(edgesAndAudit))
+	rbCtx := lifecycleCreateRollback(ctx, c.Stage)
+	n, err := s.withAgentSecretCleanup(rbCtx, agentID, func() (int, error) {
+		return s.store.FinalizeAgentDeletion(rbCtx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+			createRowHeldCheck(edgesAndAudit))
+	})
 	if errors.Is(err, errCreateRowDeleteHeld) {
 		return errCreateRowDeleteHeld
 	}

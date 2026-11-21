@@ -1418,6 +1418,7 @@ func (s *Server) handleExistingAgent(
 	runtimeBrokerID string,
 	req CreateAgentRequest,
 	notifySubscriberType, notifySubscriberID, createdBy string,
+	carriedSecrets *[]*secret.SecretWithValue,
 ) existingAgentResult {
 	if existingAgent == nil {
 		return existingAgentNone
@@ -1811,6 +1812,14 @@ func (s *Server) handleExistingAgent(
 
 	// Branch 3: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && rest == string(state.PhaseProvisioning) {
+		// Snapshot any agent-scoped secrets before tearing down the existing
+		// provisioning agent so they survive recreate under the replacement
+		// agent's new ID. Fail closed on read error before deleting anything.
+		snap, err := s.snapshotAgentSecrets(ctx, existingAgent.ID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		// Flat placement pre-check on the agent being replaced, before its
 		// stop intent: the recreate deletes it on its Runtime Broker.
 		if _, err := s.pinnedPlacementBroker(ctx, existingAgent); err != nil {
@@ -1883,10 +1892,13 @@ func (s *Server) handleExistingAgent(
 		// answers. A failed delete, or a deleting row whose lease lapsed, does
 		// not hold the row, so it is removed as before.
 		actor := auditActorFromContext(ctx)
-		n, err := s.store.FinalizeAgentDeletion(lifecycleCreateRollback(ctx, "env_gather_recreate"), existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
-			createRowHeldCheck(func(tx store.Store) error {
-				return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
-			}))
+		rbCtx := lifecycleCreateRollback(ctx, "env_gather_recreate")
+		n, err := s.withAgentSecretCleanup(rbCtx, existingAgent.ID, func() (int, error) {
+			return s.store.FinalizeAgentDeletion(rbCtx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+				createRowHeldCheck(func(tx store.Store) error {
+					return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
+				}))
+		})
 		if errors.Is(err, errCreateRowDeleteHeld) || (err == nil && n == 0) {
 			deleteInProgressRefusal(existingAgent.ID).write(w)
 			return existingAgentErrored
@@ -1894,6 +1906,9 @@ func (s *Server) handleExistingAgent(
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
+		}
+		if carriedSecrets != nil && len(snap) > 0 {
+			*carriedSecrets = snap
 		}
 		// Reached only when this path removed the row; a row a delete holds
 		// keeps its quotas for that delete.

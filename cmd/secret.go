@@ -249,7 +249,28 @@ var fetchProjectSecretMeta = func(cmd *cobra.Command, key string) (*hubclient.Se
 }
 
 func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
-	secret, err := fetchProjectSecretMeta(cmd, key)
+	var sec *hubclient.Secret
+	var err error
+
+	// Inside an agent container (or when --scope agent is explicitly passed),
+	// resolve metadata through the agent secrets route so --scope is honored
+	// and default lookups check agent scope before project scope (matching
+	// --value). Outside an agent container (no SCION_AGENT_ID and no --scope
+	// agent), use the project-scoped route directly without constructing an
+	// agent value client.
+	if os.Getenv("SCION_AGENT_ID") != "" || agentSecretGetScope == "agent" {
+		agentClient := newSecretValueHubClient()
+		if agentClient == nil || !agentClient.IsConfigured() {
+			if agentSecretGetScope == "agent" {
+				return errSecretValueNeedsAgent
+			}
+			sec, err = fetchProjectSecretMeta(cmd, key)
+		} else {
+			sec, err = fetchAgentSecretMeta(cmd, agentClient, key, agentSecretGetScope)
+		}
+	} else {
+		sec, err = fetchProjectSecretMeta(cmd, key)
+	}
 	if err != nil {
 		return err
 	}
@@ -257,11 +278,73 @@ func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
 	if isJSONOutput() {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		return enc.Encode(secret)
+		return enc.Encode(sec)
 	}
 
-	printSecretMetadata(cmd.OutOrStdout(), secret)
+	printSecretMetadata(cmd.OutOrStdout(), sec)
 	return nil
+}
+
+// fetchAgentSecretMeta resolves secret metadata through the agent-scoped list
+// route (/api/v1/agents/{id}/secrets). When scope is empty, it checks agent
+// scope first and falls back to project scope so metadata lookups match --value.
+func fetchAgentSecretMeta(cmd *cobra.Command, agentClient *sciontoolhub.Client, key, scope string) (*hubclient.Secret, error) {
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	findInScope := func(s string) (*hubclient.Secret, bool, error) {
+		resp, err := agentClient.ListSecretsWithScope(ctx, s)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, item := range resp.Secrets {
+			if item.Key == key {
+				sc := item.Scope
+				if sc == "" {
+					sc = s
+				}
+				return &hubclient.Secret{
+					Key:        item.Key,
+					Scope:      sc,
+					SecretType: item.Type,
+					Target:     item.Target,
+				}, true, nil
+			}
+		}
+		return nil, false, nil
+	}
+
+	if scope != "" {
+		sec, found, err := findInScope(scope)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get secret: %w", err)
+		}
+		if !found {
+			return nil, fmt.Errorf("secret %q not found in scope %s", key, scope)
+		}
+		return sec, nil
+	}
+
+	// Default (--scope unset): check agent scope first, then project scope.
+	sec, found, err := findInScope("agent")
+	if err != nil {
+		if !errors.Is(err, sciontoolhub.ErrAgentScopeUnavailable) {
+			return nil, fmt.Errorf("failed to get secret: %w", err)
+		}
+		// Experiment off: preserve pre-existing project-scoped metadata view.
+		return fetchProjectSecretMeta(cmd, key)
+	}
+	if found {
+		return sec, nil
+	}
+	sec, found, err = findInScope("project")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get secret: %w", err)
+	}
+	if !found {
+		return nil, fmt.Errorf("secret %q not found", key)
+	}
+	return sec, nil
 }
 
 // printSecretMetadata writes the text metadata view of a secret, the
@@ -280,9 +363,15 @@ func printSecretMetadata(w io.Writer, secret *hubclient.Secret) {
 	if secret.SecretRef != "" {
 		_, _ = fmt.Fprintf(w, "  Ref:     %s\n", secret.SecretRef)
 	}
-	_, _ = fmt.Fprintf(w, "  Version: %d\n", secret.Version)
-	_, _ = fmt.Fprintf(w, "  Created: %s\n", clitime.Format(secret.Created, clitime.Full))
-	_, _ = fmt.Fprintf(w, "  Updated: %s\n", clitime.Format(secret.Updated, clitime.Full))
+	if secret.Version > 0 {
+		_, _ = fmt.Fprintf(w, "  Version: %d\n", secret.Version)
+	}
+	if !secret.Created.IsZero() {
+		_, _ = fmt.Fprintf(w, "  Created: %s\n", clitime.Format(secret.Created, clitime.Full))
+	}
+	if !secret.Updated.IsZero() {
+		_, _ = fmt.Fprintf(w, "  Updated: %s\n", clitime.Format(secret.Updated, clitime.Full))
+	}
 	if secret.Description != "" {
 		_, _ = fmt.Fprintf(w, "  Description: %s\n", secret.Description)
 	}

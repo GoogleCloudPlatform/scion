@@ -227,4 +227,65 @@ func TestAgentSecretList_InvalidScopeFlag(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid --scope")
 }
 
+func TestAgentSecretGetMetadata_InsideAgentScopes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/agents/"+secretGetTestAgentID+"/secrets", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("scope") {
+		case "agent":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"secrets": []map[string]string{
+					{"key": "AGENT_ONLY", "type": "environment", "target": "AGENT_ONLY", "scope": "agent"},
+					{"key": "BOTH_KEY", "type": "file", "target": "/agent/path", "scope": "agent"},
+				},
+			})
+		case "project":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"secrets": []map[string]string{
+					{"key": "BOTH_KEY", "type": "file", "target": "/project/path", "scope": "project"},
+					{"key": "PROJ_ONLY", "type": "environment", "target": "PROJ_ONLY", "scope": "project"},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	useSecretGetHub(t, srv)
+	t.Setenv("SCION_AGENT_ID", secretGetTestAgentID)
+	origScope := agentSecretGetScope
+	t.Cleanup(func() { agentSecretGetScope = origScope })
+
+	// 1. --scope agent resolves agent-only key.
+	agentSecretGetScope = "agent"
+	out, err := runSecretGetTest(t, "AGENT_ONLY")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Secret: AGENT_ONLY")
+	assert.Contains(t, out, "Scope:   agent")
+
+	// 2. Unset --scope resolves agent-only key via agent scope.
+	agentSecretGetScope = ""
+	out, err = runSecretGetTest(t, "AGENT_ONLY")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Secret: AGENT_ONLY")
+	assert.Contains(t, out, "Scope:   agent")
+
+	// 3. Unset --scope for a key present at both scopes prefers agent (matching --value).
+	agentSecretGetScope = ""
+	out, err = runSecretGetTest(t, "BOTH_KEY")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Secret: BOTH_KEY")
+	assert.Contains(t, out, "Scope:   agent")
+	assert.Contains(t, out, "Target:  /agent/path")
+
+	// 4. --scope project pins to project scope even when key exists at agent scope.
+	agentSecretGetScope = "project"
+	out, err = runSecretGetTest(t, "BOTH_KEY")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Secret: BOTH_KEY")
+	assert.Contains(t, out, "Scope:   project")
+	assert.Contains(t, out, "Target:  /project/path")
+}
+
 var _ = sciontoolhub.NewClient // keep import explicit

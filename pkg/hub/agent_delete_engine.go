@@ -1591,16 +1591,9 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		return deletionOutcome{}, true
 	}
 
-	// Hard delete: capture agent-scope secret names before the transaction
-	// deletes the DB rows so post-commit cleanup can remove any external
-	// (GCP Secret Manager) values. Publish deleted BEFORE removing the
-	// record (the documented order), then delete, retried once.
-	var agentSecretKeys []string
-	if s.GetSecretBackend() != nil {
-		kctx, kcancel := e.step(deleteShortStep)
-		agentSecretKeys = s.listAgentSecretNames(kctx, agent.ID)
-		kcancel()
-	}
+	// Hard delete: publish deleted BEFORE removing the record (the documented
+	// order), then delete, retried once. Post-commit external (GCP) cleanup of
+	// agent-scope secrets runs structurally inside finalizeAgentDeletion.
 	e.stopRenewal()
 	s.events.PublishAgentDeleted(e.base, agent.ID, agent.ProjectID)
 	var err error
@@ -1612,9 +1605,6 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		if err == nil {
 			if n == 1 || e.rowGone() {
 				e.finished = true
-				if len(agentSecretKeys) > 0 {
-					e.tailStep("remove agent secrets", func() { s.removeAgentScopedSecrets(e.base, agent.ID, agentSecretKeys) })
-				}
 				return deletionOutcome{}, true
 			}
 			return e.lost(), false
@@ -1651,7 +1641,13 @@ var agentDeletionFinalizeSeam store.DeletionFinalizeHook = func(context.Context,
 // agentDeletionFinalizeSeam var first, then the Server's lifecycle finalize,
 // agent_lifecycle_tx.go).
 func (s *Server) finalizeAgentDeletion(ctx context.Context, agentID string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields) (int, error) {
-	return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, s.agentFinalizeHook)
+	run := func() (int, error) {
+		return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, s.agentFinalizeHook)
+	}
+	if mode == store.DeletionFinalizeHard {
+		return s.withAgentSecretCleanup(ctx, agentID, run)
+	}
+	return run()
 }
 
 // --- Request side (design §2.4) ---
