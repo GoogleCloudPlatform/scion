@@ -205,7 +205,7 @@ func (s *MessageStore) minConversationSeqInRange(ctx context.Context, cid uuid.U
 	if err := drv.Query(ctx, query, []any{cid, afterSeq, headSeq}, &rows); err != nil {
 		return 0, false, mapError(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return 0, false, mapError(err)

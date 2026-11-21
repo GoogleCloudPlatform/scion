@@ -78,7 +78,7 @@ func listConversationsNeedingSeqBackfill(ctx context.Context, db *sql.DB, limit 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var ids []uuid.UUID
 	for rows.Next() {

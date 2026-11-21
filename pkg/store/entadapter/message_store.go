@@ -354,7 +354,7 @@ func bumpConversationSeq(ctx context.Context, drv dialect.Driver, cid uuid.UUID)
 	if err := drv.Query(ctx, query, []any{cid}, &rows); err != nil {
 		return 0, false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return 0, false, err

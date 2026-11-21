@@ -143,7 +143,7 @@ func (s *fakeStore) ListConversationFeed(_ context.Context, q store.Conversation
 			if isSelf {
 				continue
 			}
-			if !(m.RecipientID == q.PrincipalID && strings.HasPrefix(m.Recipient, q.PrincipalKind+":")) {
+			if m.RecipientID != q.PrincipalID || !strings.HasPrefix(m.Recipient, q.PrincipalKind+":") {
 				continue
 			}
 		case store.ConversationFeedFilterAll:
