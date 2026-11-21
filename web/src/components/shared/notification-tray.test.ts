@@ -523,6 +523,13 @@ describe('notification tray: SSE reconnect, unhealthy polling, and visibility/fo
     window.dispatchEvent(new Event('focus'));
     await vi.advanceTimersByTimeAsync(0);
     expect(listFetches()).toBe(2);
+
+    // A rapid visibility toggle within the cooldown (or visibilitychange after focus) does not double-fetch.
+    setHidden(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    setHidden(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listFetches()).toBe(2);
   });
 
   it('stops reacting to SSE reconnect and focus events after disconnect', async () => {

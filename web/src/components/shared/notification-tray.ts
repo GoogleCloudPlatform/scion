@@ -508,6 +508,7 @@ export class ScionNotificationTray extends LitElement {
 
   private onVisibilityChange(): void {
     if (document.hidden || !this.activeUserId) return;
+    if (Date.now() - this.lastFetchAt < FOCUS_REFETCH_COOLDOWN_MS) return;
     void this.fetchNotifications();
   }
 
