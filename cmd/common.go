@@ -415,6 +415,28 @@ func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
 	return config.LoadSettings(resolvedPath)
 }
 
+// targetProjectIDFromSettings returns the effective Hub project ID from
+// settings loaded for the current CLI target (see loadSettingsForTarget).
+// When no explicit --project / --global flag was given and the CLI runs in
+// agent/container mode, SCION_HUB_PROJECT_ID / SCION_PROJECT_ID takes
+// precedence over any workspace .scion/project-id or hub.project_id file
+// (ptone/scion#8302). Otherwise hub.project_id (explicit Hub link) wins over
+// ProjectID.
+func targetProjectIDFromSettings(settings *config.Settings) string {
+	if !explicitProjectTarget() {
+		if envID := config.ContainerProjectIDFromEnv(); envID != "" {
+			return envID
+		}
+	}
+	if settings == nil {
+		return ""
+	}
+	if hgid := settings.GetHubProjectID(); hgid != "" {
+		return hgid
+	}
+	return settings.ProjectID
+}
+
 // requireHub returns a ready-to-use Hub context for projectPath. Every
 // agent operation goes through a hub, so it never returns a nil HubContext
 // without an error:
@@ -772,11 +794,8 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 
 	// Check if there's a hub project ID or local project_id in settings
 	if hubCtx.Settings != nil {
-		if hgid := hubCtx.Settings.GetHubProjectID(); hgid != "" {
-			return hgid, nil
-		}
-		if hubCtx.Settings.ProjectID != "" {
-			return hubCtx.Settings.ProjectID, nil
+		if id := targetProjectIDFromSettings(hubCtx.Settings); id != "" {
+			return id, nil
 		}
 	}
 

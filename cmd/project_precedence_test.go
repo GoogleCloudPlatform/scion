@@ -446,3 +446,129 @@ func TestLoadHubClient_ProjectFlagPrecedence(t *testing.T) {
 		})
 	}
 }
+
+// TestContainerProjectIDPrecedence_WorkspaceFiles covers ptone/scion#8302 across
+// cmd callers (requireHubClient + resolveProjectID for notifications/conversations,
+// and requireHub + GetProjectID for message/start/schedule): when a checked-out
+// workspace contains a stale .scion/project-id or .scion/settings.yaml
+// hub.project_id, implicit Hub CLI commands inside an agent container resolve
+// SCION_PROJECT_ID instead of the workspace file, while explicit --project and
+// --global flags still override SCION_PROJECT_ID.
+func TestContainerProjectIDPrecedence_WorkspaceFiles(t *testing.T) {
+	const (
+		envProjectID   = "container-project-id"
+		staleFileID    = "stale-workspace-project-id"
+		staleHubFileID = "stale-workspace-hub-project-id"
+		globalLocalID  = "global-local-project-id"
+		explicitSlugID = "explicit-hub-project-id"
+	)
+
+	fixtures := []struct {
+		name            string
+		projectYAML     string
+		fileID          string
+		wantDirExplicit string
+	}{
+		{
+			name:            "workspace .scion/project-id only",
+			fileID:          staleFileID,
+			wantDirExplicit: staleFileID,
+		},
+		{
+			name:            "workspace v1 hub.project_id",
+			projectYAML:     "schema_version: \"1\"\nhub:\n  project_id: " + staleHubFileID + "\n",
+			wantDirExplicit: staleHubFileID,
+		},
+		{
+			name:            "workspace .scion/project-id and v1 hub.project_id",
+			projectYAML:     "schema_version: \"1\"\nhub:\n  project_id: " + staleHubFileID + "\n",
+			fileID:          staleFileID,
+			wantDirExplicit: staleHubFileID,
+		},
+	}
+
+	for _, fx := range fixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/healthz":
+					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+				case "/api/v1/projects":
+					var projects []hubclient.Project
+					if r.URL.Query().Get("slug") == "other-project" {
+						projects = append(projects, hubclient.Project{ID: explicitSlugID, Name: "Other", Slug: "other-project"})
+					}
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"projects": projects, "totalCount": len(projects)})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			setupFlagPrecedenceHome(t, server.URL, globalLocalID, envProjectID)
+			setOrUnsetTestEnv(t, "SCION_AGENT_ID", "agent-uuid-1")
+			setOrUnsetTestEnv(t, "SCION_HOST_UID", "1000")
+			setOrUnsetTestEnv(t, "SCION_CLI_MODE", "agent")
+
+			workspaceDir := filepath.Join(t.TempDir(), "checked-out-repo")
+			dotScion := filepath.Join(workspaceDir, ".scion")
+			require.NoError(t, os.MkdirAll(dotScion, 0o755))
+			if fx.projectYAML != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte(fx.projectYAML), 0o644))
+			}
+			if fx.fileID != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(dotScion, "project-id"), []byte(fx.fileID+"\n"), 0o644))
+			}
+			t.Chdir(workspaceDir)
+
+			// 1. Implicit project (no --project / --global): SCION_PROJECT_ID wins on both CLI paths.
+			setProjectFlagForTest(t, "")
+			settings, _, err := requireHubClient()
+			require.NoError(t, err)
+			gotClientID, err := resolveProjectID(settings, "")
+			require.NoError(t, err)
+			assert.Equal(t, envProjectID, gotClientID, "requireHubClient/resolveProjectID must resolve SCION_PROJECT_ID")
+
+			hubCtx, err := requireHub("")
+			require.NoError(t, err)
+			gotHubID, err := GetProjectID(hubCtx)
+			require.NoError(t, err)
+			assert.Equal(t, envProjectID, gotHubID, "requireHub/GetProjectID must resolve SCION_PROJECT_ID")
+
+			_, gotSAID, err := resolveLinkedProjectForSA()
+			require.NoError(t, err)
+			assert.Equal(t, envProjectID, gotSAID, "resolveLinkedProjectForSA must resolve SCION_PROJECT_ID")
+
+			// 2. Explicit --project <workspaceDir>: workspace files win over SCION_PROJECT_ID.
+			setProjectFlagForTest(t, workspaceDir)
+			dirSettings, _, err := requireHubClient()
+			require.NoError(t, err)
+			gotDirClientID, err := resolveProjectID(dirSettings, "")
+			require.NoError(t, err)
+			assert.Equal(t, fx.wantDirExplicit, gotDirClientID)
+
+			dirHubCtx, err := requireHub(workspaceDir)
+			require.NoError(t, err)
+			gotDirHubID, err := GetProjectID(dirHubCtx)
+			require.NoError(t, err)
+			assert.Equal(t, fx.wantDirExplicit, gotDirHubID)
+
+			// 3. Explicit --global: global project wins over SCION_PROJECT_ID.
+			setProjectFlagForTest(t, "global")
+			globalSettings, _, err := requireHubClient()
+			require.NoError(t, err)
+			gotGlobalClientID, err := resolveProjectID(globalSettings, "")
+			require.NoError(t, err)
+			assert.Equal(t, globalLocalID, gotGlobalClientID)
+
+			// 4. Explicit --project <hub-slug>: hub reference wins over SCION_PROJECT_ID.
+			setProjectFlagForTest(t, "other-project")
+			slugHubCtx, err := requireHub("other-project")
+			require.NoError(t, err)
+			gotSlugID, err := GetProjectID(slugHubCtx)
+			require.NoError(t, err)
+			assert.Equal(t, explicitSlugID, gotSlugID)
+		})
+	}
+}

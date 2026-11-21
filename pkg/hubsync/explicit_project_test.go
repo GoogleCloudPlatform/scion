@@ -289,3 +289,98 @@ func TestEnsureHubReady_ProjectPrecedence(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureHubReady_ContainerProjectIDBeatsWorkspaceHubProjectID covers
+// ptone/scion#8302 when a checked-out workspace contains .scion/settings.yaml
+// with hub.project_id (or legacy hub.projectId) in addition to .scion/project-id:
+// implicit Hub commands inside an agent container must resolve SCION_PROJECT_ID
+// (or SCION_HUB_PROJECT_ID), whereas an explicit --project <dir> resolves that
+// directory's hub.project_id.
+func TestEnsureHubReady_ContainerProjectIDBeatsWorkspaceHubProjectID(t *testing.T) {
+	const (
+		envProjectID    = "container-env-project-id"
+		envHubProjectID = "container-env-hub-project-id"
+		fileProjectID   = "stale-workspace-file-id"
+		settingsHubID   = "stale-workspace-hub-id"
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/healthz" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	for _, settingsBody := range []struct {
+		name string
+		yaml string
+	}{
+		{name: "v1 hub.project_id", yaml: "schema_version: \"1\"\nhub:\n  project_id: " + settingsHubID + "\n"},
+		{name: "legacy hub.projectId", yaml: "hub:\n  enabled: true\n  projectId: " + settingsHubID + "\n"},
+	} {
+		t.Run(settingsBody.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			globalDir := filepath.Join(tmpHome, ".scion")
+			if err := os.MkdirAll(globalDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			projectRoot := filepath.Join(t.TempDir(), "checked-out-repo")
+			projectDotScion := filepath.Join(projectRoot, ".scion")
+			if err := os.MkdirAll(projectDotScion, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(projectDotScion, "project-id"), []byte(fileProjectID+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(projectDotScion, "settings.yaml"), []byte(settingsBody.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			t.Setenv("HOME", tmpHome)
+			setOrUnsetEnv(t, "SCION_HUB_ENDPOINT", server.URL)
+			setOrUnsetEnv(t, "SCION_HUB_URL", "")
+			setOrUnsetEnv(t, "SCION_HUB_PROJECT_ID", "")
+			setOrUnsetEnv(t, "SCION_PROJECT_ID", envProjectID)
+			setOrUnsetEnv(t, "SCION_AGENT_ID", "agent-1")
+			setOrUnsetEnv(t, "SCION_DEV_TOKEN", "test-dev-token")
+			setOrUnsetEnv(t, "SCION_AUTH_TOKEN", "")
+			t.Chdir(projectRoot)
+
+			// Implicit project: SCION_PROJECT_ID wins over both .scion/project-id and hub.project_id.
+			hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, ExplicitProject: false})
+			if err != nil {
+				t.Fatalf("EnsureHubReady implicit: %v", err)
+			}
+			if hubCtx.ProjectID != envProjectID {
+				t.Errorf("implicit ProjectID = %q, want %q", hubCtx.ProjectID, envProjectID)
+			}
+
+			// Implicit project with SCION_HUB_PROJECT_ID also set: SCION_HUB_PROJECT_ID wins.
+			setOrUnsetEnv(t, "SCION_HUB_PROJECT_ID", envHubProjectID)
+			hubCtxBoth, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, ExplicitProject: false})
+			if err != nil {
+				t.Fatalf("EnsureHubReady implicit with hub env: %v", err)
+			}
+			if hubCtxBoth.ProjectID != envHubProjectID {
+				t.Errorf("implicit ProjectID with SCION_HUB_PROJECT_ID = %q, want %q", hubCtxBoth.ProjectID, envHubProjectID)
+			}
+			setOrUnsetEnv(t, "SCION_HUB_PROJECT_ID", "")
+
+			// Explicit --project <dir>: the target directory's hub.project_id wins.
+			hubCtxExplicit, err := EnsureHubReady(projectRoot, EnsureHubReadyOptions{AutoConfirm: true, ExplicitProject: true})
+			if err != nil {
+				t.Fatalf("EnsureHubReady explicit: %v", err)
+			}
+			if hubCtxExplicit.ProjectID != settingsHubID {
+				t.Errorf("explicit ProjectID = %q, want %q", hubCtxExplicit.ProjectID, settingsHubID)
+			}
+		})
+	}
+}
