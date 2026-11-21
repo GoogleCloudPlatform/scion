@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -460,6 +461,7 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 	}
 	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonUser))
 	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
+	s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
 	s.events.PublishAgentStatus(ctx, agent)
 	respAgent := *agent
 	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(

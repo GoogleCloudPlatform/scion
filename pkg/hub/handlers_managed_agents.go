@@ -544,6 +544,9 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	if !heldMessageTargetPhaseEligible(agent.Phase) {
 		s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
 	}
+	if action == api.AgentActionStop && agent.DeletedAt.IsZero() {
+		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, lifecycleStopReasonFromContext(ctx))
+	}
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent

@@ -2240,24 +2240,25 @@ type Server struct {
 	conduitAuthzUnbind func()
 	// conduitGrantKeysBindMu guards conduitGrantKeysUnbind, which releases
 	// the grant key change subscription (conduit_grant_notify.go).
-	conduitGrantKeysBindMu sync.Mutex
-	conduitGrantKeysUnbind func()
-	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
-	uatService             *UserAccessTokenService // User access token service
-	inviteService          *InviteService          // Invite code service
-	oauthService           *OAuthService           // OAuth service for CLI authentication
-	authConfig             AuthConfig              // Unified auth configuration
-	brokerAuthService      *BrokerAuthService      // Broker HMAC authentication service
-	auditLogger            AuditLogger             // Audit logger for security events
-	metrics                MetricsRecorder         // Metrics recorder for broker auth
-	controlChannel         *ControlChannelManager  // WebSocket control channel for runtime brokers
-	portTunnels            *PortTunnelManager      // Agent-held port-forward tunnels
-	authzService           *AuthzService           // Authorization service for policy evaluation
-	events                 EventPublisher          // Event publisher for real-time SSE updates
-	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
-	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
-	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
-	haltedDispatches       sync.WaitGroup          // Test handle: in-flight onAgentHalted dispatches; not drained on shutdown
+	conduitGrantKeysBindMu   sync.Mutex
+	conduitGrantKeysUnbind   func()
+	listCursorSealer         *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
+	uatService               *UserAccessTokenService // User access token service
+	inviteService            *InviteService          // Invite code service
+	oauthService             *OAuthService           // OAuth service for CLI authentication
+	authConfig               AuthConfig              // Unified auth configuration
+	brokerAuthService        *BrokerAuthService      // Broker HMAC authentication service
+	auditLogger              AuditLogger             // Audit logger for security events
+	metrics                  MetricsRecorder         // Metrics recorder for broker auth
+	controlChannel           *ControlChannelManager  // WebSocket control channel for runtime brokers
+	portTunnels              *PortTunnelManager      // Agent-held port-forward tunnels
+	authzService             *AuthzService           // Authorization service for policy evaluation
+	events                   EventPublisher          // Event publisher for real-time SSE updates
+	commandBus               CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
+	notificationDispatcher   *NotificationDispatcher // Notification dispatcher for agent status events
+	lifecycleHookEvaluator   *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
+	haltedDispatches         sync.WaitGroup          // Test handle: in-flight onAgentHalted dispatches; not drained on shutdown
+	thirdPartyStopDispatches sync.WaitGroup          // Test handle: in-flight notifyThirdPartyLifecycleAction dispatches; not drained on shutdown
 
 	// delegationAdoptionCommitHook, when set, runs after authorization and
 	// before the delegation-adoption commit transaction. Tests use it to
