@@ -237,6 +237,9 @@ SETTINGS_EOF
     # the other config files and lands in /tmp on the instance.
     cp "${SCRIPT_DIR}/merge-settings.py" "$UPLOAD_DIR/scion-merge-settings.py"
 
+    # Root-owned helper that validates and installs /home/scion/scion/scion.rebuild.
+    cp "${SCRIPT_DIR}/scion-install-rebuild.sh" "$UPLOAD_DIR/scion-install-rebuild.sh"
+
     # systemd service file, rendered from scion-hub.service.tmpl. Rebuild
     # from git compares the installed unit against that template, so the
     # unit text lives only there. Lines starting with ## are template notes.
@@ -434,15 +437,29 @@ if $FULL_DEPLOY; then
         echo "  -> Systemd unit file unchanged"
     fi
 
-    # Install sudoers rules for the "Rebuild Server from Git" maintenance task.
+    # Install the root-owned rebuild helper and sudoers rules for the
+    # "Rebuild Server from Git" and binary update maintenance tasks.
+    # Invariant: scion-hub.service runs as User=scion and must never run as root.
     # The scion service user needs elevated privileges for two operations:
-    #   1. Installing the rebuilt binary into /usr/local/bin/
+    #   1. Installing the rebuilt binary into /usr/local/bin/scion via a
+    #      root-owned helper that validates the source is a regular, non-symlink
+    #      file owned by scion before copying it
     #   2. Restarting the scion-hub systemd service
     # Each rule is scoped to the exact command used by the executor.
+    REBUILD_HELPER="/usr/local/libexec/scion/scion-install-rebuild.sh"
+    sudo install -d -m 0755 -o root -g root /usr/local/libexec/scion
+    if ! diff -q /tmp/scion-install-rebuild.sh "$REBUILD_HELPER" >/dev/null 2>&1; then
+        sudo install -m 0755 -o root -g root /tmp/scion-install-rebuild.sh "$REBUILD_HELPER"
+        echo "  -> Rebuild install helper installed at ${REBUILD_HELPER}"
+    else
+        echo "  -> Rebuild install helper unchanged"
+    fi
+    sudo rm -f /tmp/scion-install-rebuild.sh
+
     SUDOERS_RULE="/etc/sudoers.d/scion-rebuild-server"
     cat > /tmp/scion-rebuild-server <<SUDOERS_EOF
 # Scion rebuild-server maintenance task privileges.
-scion ALL=(root) NOPASSWD: /usr/bin/install -m 755 /home/scion/scion/scion.rebuild /usr/local/bin/scion
+scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh ""
 scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart scion-hub
 scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart --no-block scion-hub
 SUDOERS_EOF
