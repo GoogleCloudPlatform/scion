@@ -85,6 +85,8 @@ run_script() {
         -u CERT_EMAIL -u SKIP_TLS -u HEALTH_CHECK_INSECURE -u HUB_BASE_URL \
         -u DNS_ZONE_DESCRIPTION -u PROJECT_ID -u HUB_NAME -u BASE_DOMAIN \
         -u HUB_DOMAIN -u CERT_DOMAIN -u ENABLE_GKE -u IMAGE_REGISTRY \
+        -u SSH_USER \
+        USER=testop \
         PATH="${TESTS_DIR}/lib:${PATH}" \
         HUB_ENV_FILE="${STATE_DIR}/no-such-hub.env" \
         "${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}" \
@@ -1474,6 +1476,115 @@ EOF
     assert_eq "0600" "$(settings_mode "${backups[0]}")" "--reset-db backup is 0600"
     assert_contains "$(cat "${backups[0]}")" "keep_in_backup: true" "--reset-db backup holds prior content"
     assert_eq "0" "$(settings_tmp_count)" "temp files removed after --reset-db"
+}
+
+# --- Starter VM google-sudoers hardening (#7179) ---
+
+test_provision_sets_block_project_ssh_keys() {
+    fresh_state
+    EXTRA_ENV=(STUB_INSTANCE_MISSING=1 MACHINE_TYPE=e2-standard-4)
+    run_script gce-demo-provision.sh
+    EXTRA_ENV=()
+    assert_eq 0 "$RC" "gce-demo-provision.sh succeeds (${OUT})"
+    assert_contains "$CALLS" "compute instances create scion-demo" "creates the VM"
+    assert_contains "$CALLS" "--metadata=block-project-ssh-keys=TRUE" "sets block-project-ssh-keys=TRUE on VM create"
+}
+
+test_cloud_init_uses_posix_redirections() {
+    local ci="${STARTER_DIR}/gce-demo-cloud-init.yaml"
+    local content
+    content="$(cat "${ci}")"
+    assert_not_contains "$content" "&>/dev/null" "cloud-init runcmd must not use bash-only &>/dev/null redirection"
+    assert_contains "$content" "id scion >/dev/null 2>&1 || useradd -m -s /bin/bash scion" "cloud-init uses POSIX redirection for id scion"
+    assert_contains "$content" "getent group docker >/dev/null 2>&1 && usermod -aG docker scion" "cloud-init uses POSIX redirection for docker group"
+}
+
+test_setup_repo_refuses_ssh_user_scion() {
+    fresh_state
+    EXTRA_ENV=(USER=scion)
+    run_script gce-demo-setup-repo.sh
+    EXTRA_ENV=()
+    assert_ne 0 "$RC" "refuses when local USER is scion and SSH_USER is unset"
+    assert_contains "$OUT" "collides with the hub service user" "explains SSH user collision"
+    assert_not_contains "$CALLS" "compute ssh" "does not invoke gcloud compute ssh when USER=scion"
+
+    fresh_state
+    EXTRA_ENV=(USER=testop SSH_USER=scion)
+    run_script gce-demo-setup-repo.sh
+    EXTRA_ENV=()
+    assert_ne 0 "$RC" "refuses when SSH_USER=scion"
+    assert_not_contains "$CALLS" "compute ssh" "does not invoke gcloud compute ssh when SSH_USER=scion"
+
+    fresh_state
+    EXTRA_ENV=(USER=scion SSH_USER=operator)
+    run_script gce-demo-setup-repo.sh
+    EXTRA_ENV=()
+    assert_eq 0 "$RC" "succeeds when SSH_USER overrides local USER=scion (${OUT})"
+    assert_contains "$CALLS" "compute ssh operator@scion-demo" "targets explicit SSH_USER@INSTANCE_NAME"
+}
+
+test_setup_repo_refuses_scion_in_google_sudoers() {
+    fresh_state
+    run_script gce-demo-setup-repo.sh
+    assert_eq 0 "$RC" "gce-demo-setup-repo.sh succeeds against stub gcloud (${OUT})"
+
+    # Extract the user-setup remote command (the block from "if ! id scion" through the docker check).
+    local remote_cmd
+    remote_cmd="$(sed -n '/if ! id scion/,/skipping/p' "${STUB_SSH_LOG}")"
+    # Close the trailing "fi" after the skipping line.
+    remote_cmd="${remote_cmd}
+        fi"
+    assert_contains "$remote_cmd" "google-sudoers" "setup-repo remote script checks google-sudoers"
+    assert_not_contains "$remote_cmd" "&>/dev/null" "setup-repo remote script uses POSIX redirections"
+
+    local fake_bin="${STATE_DIR}/fake-bin"
+    mkdir -p "${fake_bin}"
+    cat > "${fake_bin}/sudo" <<'EOF'
+#!/bin/sh
+echo "sudo $*" >> "${FAKE_SUDO_LOG}"
+exit 0
+EOF
+    cat > "${fake_bin}/getent" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    cat > "${fake_bin}/id" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "-nG" ]; then
+    printf '%s\n' "${FAKE_ID_GROUPS:-}"
+    exit 0
+fi
+[ "${FAKE_ID_EXISTS:-1}" = "1" ]
+EOF
+    chmod +x "${fake_bin}/sudo" "${fake_bin}/getent" "${fake_bin}/id"
+
+    local out rc
+    # Case 1: scion exists and is in google-sudoers -> refuses (exit 1).
+    : > "${STATE_DIR}/sudo.log"
+    out="$(PATH="${fake_bin}:${PATH}" FAKE_SUDO_LOG="${STATE_DIR}/sudo.log" \
+        FAKE_ID_EXISTS=1 FAKE_ID_GROUPS="scion docker google-sudoers" \
+        /bin/sh -c "${remote_cmd}" 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "refuses when scion is in google-sudoers"
+    assert_contains "$out" "google-sudoers" "error mentions google-sudoers"
+    assert_contains "$out" "gpasswd -d scion google-sudoers" "error gives remediation command"
+
+    # Case 2: scion exists and is NOT in google-sudoers -> succeeds (exit 0).
+    : > "${STATE_DIR}/sudo.log"
+    out="$(PATH="${fake_bin}:${PATH}" FAKE_SUDO_LOG="${STATE_DIR}/sudo.log" \
+        FAKE_ID_EXISTS=1 FAKE_ID_GROUPS="scion docker" \
+        /bin/sh -c "${remote_cmd}" 2>&1)"
+    rc=$?
+    assert_eq 0 "$rc" "passes when scion is not in google-sudoers (${out})"
+
+    # Case 3: scion does not exist yet -> creates scion user and succeeds.
+    : > "${STATE_DIR}/sudo.log"
+    out="$(PATH="${fake_bin}:${PATH}" FAKE_SUDO_LOG="${STATE_DIR}/sudo.log" \
+        FAKE_ID_EXISTS=0 FAKE_ID_GROUPS="scion" \
+        /bin/sh -c "${remote_cmd}" 2>&1)"
+    rc=$?
+    assert_eq 0 "$rc" "creates scion user when missing (${out})"
+    assert_contains "$(cat "${STATE_DIR}/sudo.log")" "sudo useradd -m -s /bin/bash scion" "runs useradd when scion is missing"
 }
 
 mapfile -t TESTS < <(declare -F | awk '{print $3}' | grep '^test_' | sort)

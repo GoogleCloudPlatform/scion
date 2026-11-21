@@ -13,6 +13,14 @@ The quickest path to a deployed Scion Hub that builds from source is a single Go
 - The **gcloud CLI** installed and configured (`gcloud auth login`, project set).
 - A **domain name** whose DNS is delegated to Cloud DNS. The default path obtains a wildcard certificate for it through a DNS-01 challenge. Without a public domain, follow [Internal Deployments (BYO TLS)](#internal-deployments-byo-tls) instead.
 
+:::caution[Never use `scion` as an SSH or OS Login username]
+The Hub runs as the `scion` Unix service user. On GCE, connecting via SSH or OS Login as `scion` (or having a `scion` key in project or instance SSH metadata) causes the Compute Engine guest agent to add `scion` to `google-sudoers`, granting passwordless root.
+
+- `gce-demo-provision.sh` sets `block-project-ssh-keys=TRUE` on newly created VMs.
+- If your local username is `scion` (for example inside a container), set `export SSH_USER=<other-user>` before running the starter scripts; the scripts refuse to connect as `scion`.
+- `gce-demo-setup-repo.sh` checks `scion`'s group memberships on the VM and refuses to continue if `scion` is in `google-sudoers`.
+:::
+
 ## Configuration
 
 Every script sources `scripts/starter-hub/hub-config.sh`. That file generates nothing. It is a shared set of shell variables that sets resource names, domains, and file paths from `HUB_NAME` (default `demo`) and `BASE_DOMAIN` (default `scion-ai.dev`). Set those, and any other variable listed in `hub-config.sh`, such as `REGION` or `ZONE`, in your environment before you run a script. Set `CERT_EMAIL` in your environment to your own address; Let's Encrypt uses it for certificate notices. It has no default, and `gce-certs.sh` and `gce-demo-deploy.sh` stop with an error before changing anything if it is not set:

@@ -49,6 +49,9 @@ case "$1 ${2:-}" in
     done
     for a in "$@"; do
       case "$a" in
+        *"cloud-init status"*)
+          echo "status: done"
+          ;;
         *"mktemp -d /tmp/"*.XXXXXX*)
           t="${a#*mktemp -d }"
           t="${t%% *}"
@@ -57,7 +60,12 @@ case "$1 ${2:-}" in
       esac
     done
     ;;
-  "compute instances") echo "203.0.113.10" ;;
+  "compute instances")
+    case "${3:-}" in
+      describe) [ -z "${STUB_INSTANCE_MISSING:-}" ] || exit 1 ;;
+    esac
+    echo "203.0.113.10"
+    ;;
   "dns managed-zones")
     zone_marker="$(dirname "${STUB_LOG}")/zone-created"
     case "${3:-}" in

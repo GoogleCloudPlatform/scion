@@ -34,6 +34,8 @@ if [[ -z "$PROJECT_ID" ]]; then
     exit 1
 fi
 
+require_non_service_ssh_user
+
 echo "=== DNS and Certificate Setup for ${DOMAIN} ==="
 
 # 1. Create Managed DNS Zone if it doesn't exist
@@ -83,11 +85,11 @@ fi
 # 4. Obtain Wildcard Certificate via SSH on the instance
 # This assumes the instance has the roles/dns.admin and python3-certbot-dns-google installed via provision/cloud-init
 echo "Checking certificate status on ${INSTANCE_NAME}..."
-if gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo test -f /etc/letsencrypt/live/${DOMAIN}/fullchain.pem" &>/dev/null; then
+if gcloud compute ssh "${SSH_TARGET}" --zone="${GCE_ZONE}" --command="sudo test -f /etc/letsencrypt/live/${DOMAIN}/fullchain.pem" &>/dev/null; then
     echo "Certificate for ${DOMAIN} already exists. Skipping acquisition."
 else
     echo "Requesting wildcard certificate for ${DOMAIN}..."
-    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo certbot certonly \
+    gcloud compute ssh "${SSH_TARGET}" --zone="${GCE_ZONE}" --command="sudo certbot certonly \
         --dns-google \
         --dns-google-propagation-seconds 60 \
         -d '${DOMAIN}' \
@@ -106,19 +108,19 @@ fi
 # hook from the certonly call (ptone/scion#4207).
 echo "Installing certificate rotation (certbot deploy hook, renewal timer) on ${INSTANCE_NAME}..."
 # A private directory (mktemp -d, mode 0700) rather than a fixed /tmp path.
-REMOTE_DIR="$(gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" \
+REMOTE_DIR="$(gcloud compute ssh "${SSH_TARGET}" --zone="${GCE_ZONE}" \
     --command="mktemp -d /tmp/fix-tls-rotation.XXXXXX" | tr -d '\r' | tail -n 1)"
 if [[ ! "${REMOTE_DIR}" =~ ^/tmp/fix-tls-rotation\.[A-Za-z0-9]+$ ]]; then
     echo "Error: could not create a temporary directory on ${INSTANCE_NAME} (got '${REMOTE_DIR}')."
     exit 1
 fi
-if ! gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${INSTANCE_NAME}:${REMOTE_DIR}/fix-tls-rotation.sh" --zone="${GCE_ZONE}"; then
+if ! gcloud compute scp "${SCRIPT_DIR}/fix-tls-rotation.sh" "${SSH_TARGET}:${REMOTE_DIR}/fix-tls-rotation.sh" --zone="${GCE_ZONE}"; then
     echo "Error: could not copy fix-tls-rotation.sh to ${INSTANCE_NAME}; removing ${REMOTE_DIR}."
-    gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="rm -rf ${REMOTE_DIR}" || true
+    gcloud compute ssh "${SSH_TARGET}" --zone="${GCE_ZONE}" --command="rm -rf ${REMOTE_DIR}" || true
     exit 1
 fi
 # A non-zero exit (a PROBLEM in its final check) stops this script here.
-gcloud compute ssh "${INSTANCE_NAME}" --zone="${GCE_ZONE}" --command="sudo bash ${REMOTE_DIR}/fix-tls-rotation.sh --domain '${DOMAIN}' --host '${HUB_SUBDOMAIN}'; rc=\$?; rm -rf ${REMOTE_DIR}; exit \$rc"
+gcloud compute ssh "${SSH_TARGET}" --zone="${GCE_ZONE}" --command="sudo bash ${REMOTE_DIR}/fix-tls-rotation.sh --domain '${DOMAIN}' --host '${HUB_SUBDOMAIN}'; rc=\$?; rm -rf ${REMOTE_DIR}; exit \$rc"
 
 echo ""
 echo "=== Success ==="

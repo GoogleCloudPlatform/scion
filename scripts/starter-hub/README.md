@@ -12,6 +12,7 @@ secrets. For a simpler binary-based deployment, see the
 
 - Google Cloud SDK (`gcloud`) authenticated with a project
 - A registered domain with DNS delegated to Cloud DNS (see `gce-certs.sh`)
+- **Do not use `scion` as an SSH or OS Login username** on the Hub VM. On GCE, an SSH or OS Login user named `scion` collides with the `scion` hub service account and causes the Compute Engine guest agent to add `scion` to `google-sudoers` (passwordless root). `gce-demo-provision.sh` sets `block-project-ssh-keys=TRUE` on the VM, the SSH scripts refuse when the effective SSH user is `scion` (set `SSH_USER` to another username if your local user is `scion`), and `gce-demo-setup-repo.sh` refuses to proceed if `scion` is already in `google-sudoers`.
 
 ## Configuration
 
@@ -25,6 +26,7 @@ file paths from two primary variables:
 | `ENABLE_GKE` | `false` | Set to `true` to provision a GKE cluster, grant `container.admin`, configure credentials, and use Kubernetes as the default runtime. |
 | `REGION` | `us-central1` | GCP region for GKE and resource locations |
 | `ZONE` | `us-central1-a` | GCP zone for the GCE VM instance |
+| `SSH_USER` | *(local user)* | Optional SSH username for `gcloud compute ssh`/`scp`. Must not be `scion` (set this when running from a workstation or container whose local user is `scion`). |
 | `MACHINE_TYPE` | *(derived)* | Compute machine type to use (overrides `SIZE_CHOICE`) |
 | `CERT_EMAIL` | *(none, required)* | Contact address Let's Encrypt uses for certificate notices, for example `admin@example.com`. `gce-certs.sh` and `gce-demo-deploy.sh` stop with an error if it is empty (unless `SKIP_TLS=true`). |
 | `DNS_ZONE_DESCRIPTION` | `Scion Hub zone for <CERT_DOMAIN>` | Description `gce-certs.sh` sets on a new Cloud DNS zone |

@@ -37,6 +37,10 @@ ENABLE_GKE="${ENABLE_GKE:-false}"
 
 # --- Derived: GCP Resources ---
 INSTANCE_NAME="${INSTANCE_NAME:-scion-${HUB_NAME}}"
+# Optional SSH username for gcloud compute ssh/scp. Must not be "scion" (the
+# hub service user): on GCE, SSHing as "scion" adds it to google-sudoers.
+SSH_USER="${SSH_USER:-}"
+SSH_TARGET="${SSH_USER:+${SSH_USER}@}${INSTANCE_NAME}"
 SERVICE_ACCOUNT_NAME="${SERVICE_ACCOUNT_NAME:-scion-${HUB_NAME}-sa}"
 FIREWALL_RULE="${FIREWALL_RULE:-scion-${HUB_NAME}-allow-http-https}"
 CLUSTER_NAME="${CLUSTER_NAME:-scion-${HUB_NAME}-cluster}"
@@ -224,6 +228,20 @@ require_no_tls_https_base_url() {
     HUB_BASE_URL="$url"
 }
 
+# require_non_service_ssh_user refuses to connect over SSH as the hub service
+# user ("scion"). On GCE, SSHing as "scion" causes the guest agent to add the
+# "scion" Unix account to google-sudoers (passwordless root).
+require_non_service_ssh_user() {
+    local effective_user="${SSH_USER:-${USER:-$(id -un 2>/dev/null || true)}}"
+    if [[ "${effective_user}" == "scion" ]]; then
+        echo "Error: SSH user resolves to 'scion', which collides with the hub service user." >&2
+        echo "  On GCE, connecting via SSH as 'scion' adds the hub service user to google-sudoers." >&2
+        echo "  Set SSH_USER to a different username and rerun, for example:" >&2
+        echo "    export SSH_USER=admin" >&2
+        exit 1
+    fi
+}
+
 # Wait for the instance to be reachable via SSH and for cloud-init to finish.
 # Call this before the first SSH-dependent step after provisioning.
 wait_for_cloud_init() {
@@ -234,7 +252,7 @@ wait_for_cloud_init() {
 
     while (( elapsed < max_wait )); do
         local result
-        result=$(gcloud compute ssh "${INSTANCE_NAME}" \
+        result=$(gcloud compute ssh "${SSH_TARGET}" \
             --project="${PROJECT_ID}" \
             --zone="${ZONE}" \
             --ssh-flag="-o ConnectTimeout=10" \

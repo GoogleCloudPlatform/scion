@@ -2791,6 +2791,22 @@ if [[ "$CLOUD_INIT_OK" != "true" ]]; then
 fi
 echo "  Cloud-init completed."
 
+# --- Check that scion service user is not in google-sudoers ---
+# On GCE, connecting via SSH or OS Login as a user named "scion" causes the
+# guest agent to add the "scion" Unix account to google-sudoers (passwordless
+# root), bypassing narrow sudoers rules. Warn loudly if detected.
+SCION_SUDOERS_CHECK="$(gcloud compute ssh "${INSTANCE_NAME}" \
+  --zone="${ZONE}" --project="${PROJECT_ID}" \
+  --command="id -nG scion 2>/dev/null | tr ' ' '\n' | grep -qx 'google-sudoers' && echo in-google-sudoers || true" \
+  2>/dev/null || true)"
+if [[ "$SCION_SUDOERS_CHECK" == *"in-google-sudoers"* ]]; then
+  warn "Hub service user 'scion' is in the 'google-sudoers' group on ${INSTANCE_NAME} (grants passwordless root)."
+  warn "  This happens when an SSH or OS Login user named 'scion' connects to the VM, or when project/instance SSH metadata includes a key for 'scion'."
+  warn "  Never use 'scion' as an SSH or OS Login username. To remediate on the VM, run:"
+  warn "    sudo gpasswd -d scion google-sudoers"
+  warn "  and remove any 'scion' SSH key from project or instance metadata."
+fi
+
 # --- Get VM internal IP ---
 info "Getting VM internal IP..."
 if [[ "$HYBRID_ENABLED" == "true" ]]; then
