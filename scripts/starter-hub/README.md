@@ -122,6 +122,27 @@ To wipe the hub database on restart:
 ./scripts/starter-hub/gce-start-hub.sh --reset-db
 ```
 
+## Installed File Ownership and Permissions
+
+`gce-start-hub.sh` installs system files with `install -o root -g root -m` so
+none of them are writable by the `scion` service user or the operator's login
+user:
+
+- `/usr/local/bin/scion`: `root:root`, mode `0755`
+- `/etc/systemd/system/scion-hub.service`: `root:root`, mode `0644`
+- `/etc/sudoers.d/scion-rebuild-server`: `root:root`, mode `0440`
+
+Before starting `scion-hub`, `gce-start-hub.sh` runs `check-install-perms.sh`
+on the VM and refuses to continue if any of those files, any path allowed by
+the sudoers rules (`/usr/bin/install`, `/usr/bin/systemctl`,
+`/usr/local/bin/scion`), or any of their parent directories up to `/` is not
+root-owned or is group- or world-writable. You can also run the check manually
+on the VM:
+
+```bash
+sudo bash scripts/starter-hub/check-install-perms.sh --require-sudoers
+```
+
 ## Certificate renewal
 
 certbot renews the certificate through `certbot.timer`. Caddy reads the
@@ -167,6 +188,7 @@ the telemetry service account.
 | `gce-demo-setup-repo.sh` | Clone the repo on the VM |
 | `gce-demo-telemetry-sa.sh` | Telemetry service account and key management |
 | `gce-start-hub.sh` | Build, deploy, and restart the hub service |
+| `check-install-perms.sh` | Verify ownership and permissions of installed binary, systemd unit, sudoers drop-in, sudoers-allowed paths, and parent directories |
 | `gce-certs.sh` | Cloud DNS setup and Let's Encrypt wildcard certificates |
 | `gce-demo-cloud-init.yaml` | Cloud-init config installed on the VM at provision time |
 | `gce-setup-nats.sh` | *(Archived)* Standalone NATS server setup — superseded by in-process events |
