@@ -54,16 +54,17 @@ func (c *client) FetchAttachmentDelivery(ctx context.Context, path string) (io.R
 	return body, nil
 }
 
-// deliveryError returns err without any URL: a refusal, an API error from
-// the hub (built from the response, never the request) and a status from
-// the object store pass as they are; a transport error (*url.Error, which
-// formats with the full URL) keeps only its operation and cause; anything
+// deliveryError returns err without any URL: a refusal, an unexpected status,
+// an API error from the hub (built from the response, never the request) and
+// a status from the object store pass as they are; a transport error (*url.Error,
+// which formats with the full URL) keeps only its operation and cause; anything
 // else becomes a fixed message.
 func deliveryError(err error) error {
 	var ue *url.Error
 	var apiErr *apiclient.APIError
 	switch {
-	case errors.Is(err, errDeliveryRefused), errors.Is(err, errDeliveryObjectStore), errors.Is(err, errDeliveryPath),
+	case errors.Is(err, errDeliveryRefused), errors.Is(err, errDeliveryUnexpectedStatus),
+		errors.Is(err, errDeliveryObjectStore), errors.Is(err, errDeliveryPath),
 		errors.Is(err, errDeliveryRedirect), errors.As(err, &apiErr):
 		return err
 	case errors.As(err, &ue):
@@ -75,9 +76,10 @@ func deliveryError(err error) error {
 
 // Fixed errors of a delivery fetch; none carries a URL.
 var (
-	errDeliveryObjectStore = errors.New("attachment delivery: object store refused the download")
-	errDeliveryPath        = errors.New("attachment delivery: unexpected capability path")
-	errDeliveryRedirect    = errors.New("attachment delivery: invalid redirect")
+	errDeliveryObjectStore      = errors.New("attachment delivery: object store refused the download")
+	errDeliveryPath             = errors.New("attachment delivery: unexpected capability path")
+	errDeliveryRedirect         = errors.New("attachment delivery: invalid redirect")
+	errDeliveryUnexpectedStatus = errors.New("attachment delivery: unexpected response status")
 )
 
 func (c *client) fetchAttachmentDelivery(ctx context.Context, path string) (io.ReadCloser, error) {
@@ -108,7 +110,7 @@ func (c *client) fetchAttachmentDelivery(ctx context.Context, path string) (io.R
 		if err := apiclient.CheckResponse(resp); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w (status %d)", errDeliveryRefused, resp.StatusCode)
+		return nil, fmt.Errorf("%w (status %d)", errDeliveryUnexpectedStatus, resp.StatusCode)
 	}
 }
 
