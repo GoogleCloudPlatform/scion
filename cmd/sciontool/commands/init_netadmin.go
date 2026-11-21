@@ -70,7 +70,21 @@ var (
 	// the metadata interception is required but cannot be set up. The
 	// text is fixed and pinned by a golden test.
 	//nolint:staticcheck // ST1005: fixed user-facing refusal text, pinned verbatim by the golden test.
-	errMetadataProtectionUnavailable = errors.New("agent start refused: the configured metadata protection could not be set up in this container. Provide the required host capabilities, or set the metadata mode to passthrough explicitly to opt out.")
+	errMetadataProtectionUnavailable = errors.New("agent start refused: the configured metadata protection could not be set up in this container (metadata_protection_unavailable). Verify the broker and agent image versions match (use a broker build that supports runtime-managed interception) and host capabilities are available, or set the metadata mode to passthrough explicitly to opt out.")
+
+	// errMetadataInterceptionMarkerMissing is the Hub-visible refusal when
+	// interception is required, the runtime-managed source marker is missing
+	// or unrecognized, and the legacy in-container fallback cannot run. The
+	// text is fixed and pinned by a golden test.
+	//nolint:staticcheck // ST1005: fixed user-facing refusal text, pinned verbatim by the golden test.
+	errMetadataInterceptionMarkerMissing = errors.New("agent start refused: metadata interception version skew (metadata_interception_marker_missing): the broker and agent image disagree on who installs metadata interception. Upgrade the broker to a build that supports runtime-managed interception or use a matching agent image, or set the metadata mode to passthrough explicitly to opt out.")
+)
+
+// Seams for metadataProtectionPreflight and legacy in-container rule install.
+var (
+	preflightEUID               = os.Geteuid
+	preflightNetAdminUsable     = netcap.Usable
+	runInstallInterceptionRules = metadata.InstallInterceptionRules
 )
 
 // initFirewallRequested reports whether SCION_INIT_FIREWALL asks for the
@@ -162,9 +176,16 @@ func dropNetAdmin(required bool) error {
 
 // metadataProtectionPreflight refuses the start, before any credential is
 // written or staged, when cfg requires metadata interception
-// (SCION_METADATA_INTERCEPTION=required) but the runtime did not set the
-// runtime-managed source marker (SCION_METADATA_INTERCEPTION_SOURCE=runtime)
-// or the container shares the host network namespace.
+// (SCION_METADATA_INTERCEPTION=required) but:
+//   - the container shares the host network namespace;
+//   - SCION_METADATA_INTERCEPTION_SOURCE is absent (legacy pre-#5246 broker)
+//     and init does not have root + usable CAP_NET_ADMIN for the in-container
+//     fallback; or
+//   - SCION_METADATA_INTERCEPTION_SOURCE holds an unrecognized value.
+//
+// When SCION_METADATA_INTERCEPTION_SOURCE=runtime, the broker installs rules
+// from a short-lived setup container and init verifies them via probe, so no
+// in-container CAP_NET_ADMIN is required.
 //
 // A nil cfg (passthrough, or no metadata mode) and a cfg without the
 // required marker (Kubernetes, rootless Podman, the Apple runtime, host
@@ -173,20 +194,40 @@ func metadataProtectionPreflight(cfg *metadata.Config) error {
 	if cfg == nil || !cfg.InterceptionRequired {
 		return nil
 	}
-	reason := ""
-	switch {
-	case cfg.InterceptionSource != metadata.InterceptionSourceRuntime:
-		reason = fmt.Sprintf("runtime-managed interception marker (%s=%s) is not set",
-			metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime)
-	case cfg.NetworkMode == "host":
-		reason = "the container shares the host network namespace"
+	if cfg.NetworkMode == "host" {
+		log.Error("Metadata protection (mode=%s) cannot be set up: the container shares the host network namespace", cfg.Mode)
+		return errMetadataProtectionUnavailable
 	}
-	if reason == "" {
+	switch cfg.InterceptionSource {
+	case metadata.InterceptionSourceRuntime:
 		return nil
+	case "":
+		// Compatibility fallback for older (pre-#5246) brokers that grant
+		// CAP_NET_ADMIN to the agent container instead of running a
+		// netns-setup sidecar. Require root and usable CAP_NET_ADMIN before
+		// staging any credentials; fail closed otherwise.
+		if preflightEUID() != 0 {
+			log.Error("Metadata protection (mode=%s) cannot be set up: runtime-managed interception marker (%s=%s) is not set and init is not root (euid=%d)",
+				cfg.Mode, metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime, preflightEUID())
+			return errMetadataInterceptionMarkerMissing
+		}
+		usable, err := preflightNetAdminUsable()
+		if err != nil {
+			log.Error("Metadata protection (mode=%s) cannot be set up: runtime-managed interception marker (%s=%s) is not set and %s check failed: %v",
+				cfg.Mode, metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime, netcap.CapabilityName, err)
+			return errMetadataInterceptionMarkerMissing
+		}
+		if !usable {
+			log.Error("Metadata protection (mode=%s) cannot be set up: runtime-managed interception marker (%s=%s) is not set and %s is not usable",
+				cfg.Mode, metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime, netcap.CapabilityName)
+			return errMetadataInterceptionMarkerMissing
+		}
+		return nil
+	default:
+		log.Error("Metadata protection (mode=%s) cannot be set up: unrecognized interception source %q (expected %s=%s)",
+			cfg.Mode, cfg.InterceptionSource, metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime)
+		return errMetadataInterceptionMarkerMissing
 	}
-	// The reason goes to the local log only; the Hub sees the fixed text.
-	log.Error("Metadata protection (mode=%s) cannot be set up: %s", cfg.Mode, reason)
-	return errMetadataProtectionUnavailable
 }
 
 // Seams and parameters for waitForRedirect.

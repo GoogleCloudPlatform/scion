@@ -632,13 +632,19 @@ func TestRunInit_MetadataStop_ImmediateChildExitStopsViaDefer(t *testing.T) {
 	}
 }
 
-// The refusal text the Hub shows when the required metadata protection
-// cannot be set up. Pinned verbatim: changing it is a reviewed decision.
-const goldenMetadataProtectionRefusal = "agent start refused: the configured metadata protection could not be set up in this container. Provide the required host capabilities, or set the metadata mode to passthrough explicitly to opt out."
+// The refusal texts the Hub shows when the required metadata protection
+// cannot be set up. Pinned verbatim: changing them is a reviewed decision.
+const (
+	goldenMetadataProtectionRefusal         = "agent start refused: the configured metadata protection could not be set up in this container (metadata_protection_unavailable). Verify the broker and agent image versions match (use a broker build that supports runtime-managed interception) and host capabilities are available, or set the metadata mode to passthrough explicitly to opt out."
+	goldenMetadataInterceptionMarkerMissing = "agent start refused: metadata interception version skew (metadata_interception_marker_missing): the broker and agent image disagree on who installs metadata interception. Upgrade the broker to a build that supports runtime-managed interception or use a matching agent image, or set the metadata mode to passthrough explicitly to opt out."
+)
 
 func TestMetadataProtectionRefusalText_Golden(t *testing.T) {
 	if got := errMetadataProtectionUnavailable.Error(); got != goldenMetadataProtectionRefusal {
 		t.Fatalf("refusal text = %q, want exactly %q", got, goldenMetadataProtectionRefusal)
+	}
+	if got := errMetadataInterceptionMarkerMissing.Error(); got != goldenMetadataInterceptionMarkerMissing {
+		t.Fatalf("skew refusal text = %q, want exactly %q", got, goldenMetadataInterceptionMarkerMissing)
 	}
 }
 
@@ -649,15 +655,43 @@ func withRunWaitForRedirect(t *testing.T, f func(context.Context, string) error)
 	t.Cleanup(func() { runWaitForRedirect = orig })
 }
 
+func withPreflightEUID(t *testing.T, euid int) {
+	t.Helper()
+	orig := preflightEUID
+	preflightEUID = func() int { return euid }
+	t.Cleanup(func() { preflightEUID = orig })
+}
+
+func withPreflightNetAdminUsable(t *testing.T, usable bool, err error) {
+	t.Helper()
+	orig := preflightNetAdminUsable
+	preflightNetAdminUsable = func() (bool, error) { return usable, err }
+	t.Cleanup(func() { preflightNetAdminUsable = orig })
+}
+
+func withRunInstallInterceptionRules(t *testing.T, f func(string, int) error) {
+	t.Helper()
+	orig := runInstallInterceptionRules
+	runInstallInterceptionRules = f
+	t.Cleanup(func() { runInstallInterceptionRules = orig })
+}
+
 // preflightFailures is one row per condition the preflight refuses.
 var preflightFailures = []struct {
 	name        string
 	source      string
 	networkMode string
+	euid        int
+	usable      bool
+	usableErr   error
+	wantErr     error
 }{
-	{name: "missing runtime source marker", source: ""},
-	{name: "unknown source marker", source: "legacy"},
-	{name: "host network", source: metadata.InterceptionSourceRuntime, networkMode: "host"},
+	{name: "missing marker non-root", source: "", euid: 1000, usable: true, wantErr: errMetadataInterceptionMarkerMissing},
+	{name: "missing marker without CAP_NET_ADMIN", source: "", euid: 0, usable: false, wantErr: errMetadataInterceptionMarkerMissing},
+	{name: "missing marker capability check error", source: "", euid: 0, usableErr: errors.New("proc unreadable"), wantErr: errMetadataInterceptionMarkerMissing},
+	{name: "unknown source marker", source: "legacy", euid: 0, usable: true, wantErr: errMetadataInterceptionMarkerMissing},
+	{name: "host network", source: metadata.InterceptionSourceRuntime, networkMode: "host", euid: 0, usable: true, wantErr: errMetadataProtectionUnavailable},
+	{name: "host network legacy", source: "", networkMode: "host", euid: 0, usable: true, wantErr: errMetadataProtectionUnavailable},
 }
 
 func TestMetadataProtectionPreflight(t *testing.T) {
@@ -672,13 +706,24 @@ func TestMetadataProtectionPreflight(t *testing.T) {
 	for _, mode := range []string{"block", "assign"} {
 		for _, tt := range preflightFailures {
 			t.Run(mode+"/"+tt.name, func(t *testing.T) {
-				if err := metadataProtectionPreflight(required(mode, tt.source, tt.networkMode)); !errors.Is(err, errMetadataProtectionUnavailable) {
-					t.Fatalf("metadataProtectionPreflight() = %v, want errMetadataProtectionUnavailable", err)
+				withPreflightEUID(t, tt.euid)
+				withPreflightNetAdminUsable(t, tt.usable, tt.usableErr)
+				if err := metadataProtectionPreflight(required(mode, tt.source, tt.networkMode)); !errors.Is(err, tt.wantErr) {
+					t.Fatalf("metadataProtectionPreflight() = %v, want %v", err, tt.wantErr)
 				}
 			})
 		}
 		t.Run(mode+"/runtime source non-host passes", func(t *testing.T) {
+			withPreflightEUID(t, 1000)
+			withPreflightNetAdminUsable(t, false, nil)
 			if err := metadataProtectionPreflight(required(mode, metadata.InterceptionSourceRuntime, "")); err != nil {
+				t.Fatalf("metadataProtectionPreflight() = %v, want nil", err)
+			}
+		})
+		t.Run(mode+"/legacy fallback passes when root with usable NET_ADMIN", func(t *testing.T) {
+			withPreflightEUID(t, 0)
+			withPreflightNetAdminUsable(t, true, nil)
+			if err := metadataProtectionPreflight(required(mode, "", "")); err != nil {
 				t.Fatalf("metadataProtectionPreflight() = %v, want nil", err)
 			}
 		})
@@ -780,6 +825,8 @@ func TestRunInit_MetadataProtectionPreflight_RefusesBeforeCredentials(t *testing
 			t.Run(mode+"/"+tt.name, func(t *testing.T) {
 				f := newNetAdminFixture(t, mode, true, nil)
 				reExecs := observeReExec(t)
+				withPreflightEUID(t, tt.euid)
+				withPreflightNetAdminUsable(t, tt.usable, tt.usableErr)
 				t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
 				t.Setenv(metadata.InterceptionSourceEnvVar, tt.source)
 				t.Setenv(initFirewallEnv, "1")
@@ -813,8 +860,8 @@ func TestRunInit_MetadataProtectionPreflight_RefusesBeforeCredentials(t *testing
 				if phase != string(state.PhaseError) {
 					t.Errorf("phase = %q, want %q", phase, state.PhaseError)
 				}
-				if msg != goldenMetadataProtectionRefusal {
-					t.Errorf("reported message = %q, want exactly %q", msg, goldenMetadataProtectionRefusal)
+				if msg != tt.wantErr.Error() {
+					t.Errorf("reported message = %q, want exactly %q", msg, tt.wantErr.Error())
 				}
 			})
 		}
@@ -1003,4 +1050,114 @@ func TestWaitForRedirect(t *testing.T) {
 			t.Fatalf("waitForRedirect() = %v, want errMetadataProtectionUnavailable", err)
 		}
 	})
+}
+
+// TestRunInit_MetadataProtectionLegacyFallback verifies the old-broker +
+// new-image compatibility path: when SCION_METADATA_INTERCEPTION=required and
+// SCION_METADATA_INTERCEPTION_SOURCE is absent, init runs the optional
+// firewall, starts the metadata server, installs iptables rules in-container,
+// and fatally drops CAP_NET_ADMIN before clone, hooks, sidecars, or harness.
+func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
+	for _, mode := range []string{"block", "assign"} {
+		t.Run(mode+"/succeeds and drops NET_ADMIN before untrusted code", func(t *testing.T) {
+			f := newNetAdminFixture(t, mode, false, nil)
+			withPreflightEUID(t, 0)
+			withPreflightNetAdminUsable(t, true, nil)
+			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
+			t.Setenv(metadata.InterceptionSourceEnvVar, "")
+			t.Setenv(initFirewallEnv, "1")
+			var gotMode string
+			var gotPort int
+			withRunInstallInterceptionRules(t, func(m string, p int) error {
+				gotMode, gotPort = m, p
+				f.order = append(f.order, "install-rules")
+				return nil
+			})
+			withRunWaitForRedirect(t, func(context.Context, string) error {
+				t.Error("waitForRedirect must not run on the legacy fallback path")
+				return nil
+			})
+			if got := f.run(); got != 0 {
+				t.Fatalf("RunInit() = %d, want 0", got)
+			}
+			if want := []string{"firewall", "metadata", "install-rules", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
+				t.Fatalf("order = %v, want %v", f.order, want)
+			}
+			if gotMode != mode || gotPort != 18380 {
+				t.Errorf("installRules(%q, %d), want (%q, 18380)", gotMode, gotPort, mode)
+			}
+			if !netAdminPathExists(f.hookObservedFile) {
+				t.Error("pre-start hook ran before CAP_NET_ADMIN was dropped")
+			}
+			if !netAdminPathExists(f.harnessFile) {
+				t.Fatal("harness did not run")
+			}
+		})
+
+		t.Run(mode+"/rule install failure fails closed and cleans up tokens", func(t *testing.T) {
+			f := newNetAdminFixture(t, mode, false, nil)
+			observeReExec(t)
+			withPreflightEUID(t, 0)
+			withPreflightNetAdminUsable(t, true, nil)
+			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
+			t.Setenv(metadata.InterceptionSourceEnvVar, "")
+			creds := newCredentialFixture(t, f.agentHome)
+			withRunInstallInterceptionRules(t, func(string, int) error {
+				f.order = append(f.order, "install-rules")
+				return metadata.ErrInterceptionUnavailable
+			})
+			if got := f.run(); got != 1 {
+				t.Fatalf("RunInit() = %d, want 1", got)
+			}
+			if want := []string{"metadata", "install-rules"}; !reflect.DeepEqual(f.order, want) {
+				t.Fatalf("order = %v, want %v", f.order, want)
+			}
+			if netAdminPathExists(creds.transportPath) {
+				t.Error("transport token file still present after legacy install refusal")
+			}
+			if netAdminPathExists(creds.hubTokenPath) {
+				t.Error("staged hub credential still present after legacy install refusal")
+			}
+			if netAdminPathExists(f.harnessFile) {
+				t.Error("harness ran after legacy install failure")
+			}
+			phase, msg := readAgentInfoMessage(t, f.agentHome)
+			if phase != string(state.PhaseError) || msg != goldenMetadataProtectionRefusal {
+				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, goldenMetadataProtectionRefusal)
+			}
+		})
+
+		t.Run(mode+"/CAP_NET_ADMIN drop failure is fatal even without firewall", func(t *testing.T) {
+			f := newNetAdminFixture(t, mode, false, errDropDetail)
+			observeReExec(t)
+			withPreflightEUID(t, 0)
+			withPreflightNetAdminUsable(t, true, nil)
+			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
+			t.Setenv(metadata.InterceptionSourceEnvVar, "")
+			creds := newCredentialFixture(t, f.agentHome)
+			withRunInstallInterceptionRules(t, func(string, int) error {
+				f.order = append(f.order, "install-rules")
+				return nil
+			})
+			if got := f.run(); got != 1 {
+				t.Fatalf("RunInit() = %d, want 1", got)
+			}
+			if want := []string{"metadata", "install-rules", "drop"}; !reflect.DeepEqual(f.order, want) {
+				t.Fatalf("order = %v, want %v", f.order, want)
+			}
+			if netAdminPathExists(creds.transportPath) {
+				t.Error("transport token file still present after fatal drop failure")
+			}
+			if netAdminPathExists(creds.hubTokenPath) {
+				t.Error("staged hub credential still present after fatal drop failure")
+			}
+			if netAdminPathExists(f.harnessFile) {
+				t.Error("harness ran after fatal drop failure")
+			}
+			phase, msg := readAgentInfoMessage(t, f.agentHome)
+			if phase != string(state.PhaseError) || msg != errNetAdminDropFailed.Error() {
+				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, errNetAdminDropFailed.Error())
+			}
+		})
+	}
 }
