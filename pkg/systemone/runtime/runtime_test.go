@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
@@ -1794,42 +1795,44 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				var observedRemaining time.Duration
-				adapter := newFakeAdapter(func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-					dl, ok := attemptCtx.Deadline()
+				synctest.Test(t, func(t *testing.T) {
+					var observedRemaining time.Duration
+					adapter := newFakeAdapter(func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+						dl, ok := attemptCtx.Deadline()
+						require.True(t, ok)
+						observedRemaining = time.Until(dl)
+						<-attemptCtx.Done()
+						return provider.ModelResult{}, attemptCtx.Err()
+					})
+
+					reg := provider.NewRegistry()
+					reg.MustRegister(adapter)
+					rt := runtime.New(runtime.Config{
+						Registry:    reg,
+						Instances:   runtime.StaticInstances(defaultTestInstance()),
+						Credentials: runtime.StaticCredential("sk-test"),
+					})
+
+					before := time.Now()
+					engineCtx, cancel := context.WithTimeoutCause(context.Background(), tc.engineBudget, fmt.Errorf("engine timeout"))
+					defer cancel()
+
+					_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("margin"), runtime.EvalOptions{
+						EngineMaxEvalTime: tc.engineBudget,
+					})
+					elapsed := time.Since(before)
+
+					require.Error(t, err)
+					assert.LessOrEqual(t, observedRemaining, tc.wantMaxDur,
+						"attemptCtx deadline must incorporate the min(10ms, 5%%) margin")
+					assert.NoError(t, engineCtx.Err(),
+						"runtime timeout (elapsed=%v) must fire before engine context deadline (%v)", elapsed, tc.engineBudget)
+
+					eval, ok := runtime.EvaluationFrom(err)
 					require.True(t, ok)
-					observedRemaining = time.Until(dl)
-					<-attemptCtx.Done()
-					return provider.ModelResult{}, attemptCtx.Err()
+					assert.Equal(t, runtime.ClassFailed, eval.Class)
+					assert.Equal(t, string(provider.FailTimeout), eval.Reason)
 				})
-
-				reg := provider.NewRegistry()
-				reg.MustRegister(adapter)
-				rt := runtime.New(runtime.Config{
-					Registry:    reg,
-					Instances:   runtime.StaticInstances(defaultTestInstance()),
-					Credentials: runtime.StaticCredential("sk-test"),
-				})
-
-				before := time.Now()
-				engineCtx, cancel := context.WithTimeoutCause(context.Background(), tc.engineBudget, fmt.Errorf("engine timeout"))
-				defer cancel()
-
-				_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("margin"), runtime.EvalOptions{
-					EngineMaxEvalTime: tc.engineBudget,
-				})
-				elapsed := time.Since(before)
-
-				require.Error(t, err)
-				assert.LessOrEqual(t, observedRemaining, tc.wantMaxDur,
-					"attemptCtx deadline must incorporate the min(10ms, 5%%) margin")
-				assert.NoError(t, engineCtx.Err(),
-					"runtime timeout (elapsed=%v) must fire before engine context deadline (%v)", elapsed, tc.engineBudget)
-
-				eval, ok := runtime.EvaluationFrom(err)
-				require.True(t, ok)
-				assert.Equal(t, runtime.ClassFailed, eval.Class)
-				assert.Equal(t, string(provider.FailTimeout), eval.Reason)
 			})
 		}
 	})
@@ -1841,87 +1844,91 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 				name = "adapter_returns_nil_result"
 			}
 			t.Run(name, func(t *testing.T) {
-				engineCtx, cancel := context.WithTimeoutCause(context.Background(), 60*time.Millisecond, fmt.Errorf("engine timeout"))
-				defer cancel()
+				synctest.Test(t, func(t *testing.T) {
+					engineCtx, cancel := context.WithTimeoutCause(context.Background(), 60*time.Millisecond, fmt.Errorf("engine timeout"))
+					defer cancel()
 
-				adapter := newFakeAdapter(func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
-					<-attemptCtx.Done()
-					// Wait until the outer engine context also expires before returning.
-					<-engineCtx.Done()
-					if returnNilErr {
-						dist, val, _, _ := provider.BinaryDistribution(0.9)
-						return provider.ModelResult{
-							ResolvedModel: "jev-1.14.0",
-							HTTPStatus:    200,
-							Answers: map[string]provider.Answer{
-								"q1": {
-									QuestionID:   "q1",
-									Primitive:    spec.PrimitiveBinary,
-									Status:       provider.AnswerStatusAnswered,
-									Bool:         val,
-									Distribution: dist,
+					adapter := newFakeAdapter(func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+						<-attemptCtx.Done()
+						// Wait until the outer engine context also expires before returning.
+						<-engineCtx.Done()
+						if returnNilErr {
+							dist, val, _, _ := provider.BinaryDistribution(0.9)
+							return provider.ModelResult{
+								ResolvedModel: "jev-1.14.0",
+								HTTPStatus:    200,
+								Answers: map[string]provider.Answer{
+									"q1": {
+										QuestionID:   "q1",
+										Primitive:    spec.PrimitiveBinary,
+										Status:       provider.AnswerStatusAnswered,
+										Bool:         val,
+										Distribution: dist,
+									},
 								},
-							},
-						}, nil
-					}
-					return provider.ModelResult{}, attemptCtx.Err()
-				})
+							}, nil
+						}
+						return provider.ModelResult{}, attemptCtx.Err()
+					})
 
-				reg := provider.NewRegistry()
-				reg.MustRegister(adapter)
-				rt := runtime.New(runtime.Config{
-					Registry:    reg,
-					Instances:   runtime.StaticInstances(defaultTestInstance()),
-					Credentials: runtime.StaticCredential("sk-test"),
-				})
+					reg := provider.NewRegistry()
+					reg.MustRegister(adapter)
+					rt := runtime.New(runtime.Config{
+						Registry:    reg,
+						Instances:   runtime.StaticInstances(defaultTestInstance()),
+						Credentials: runtime.StaticCredential("sk-test"),
+					})
 
-				_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("latch"), runtime.EvalOptions{
-					EngineMaxEvalTime: 60 * time.Millisecond,
+					_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("latch"), runtime.EvalOptions{
+						EngineMaxEvalTime: 60 * time.Millisecond,
+					})
+					require.Error(t, err)
+					eval, ok := runtime.EvaluationFrom(err)
+					require.True(t, ok)
+					assert.Equal(t, runtime.ClassFailed, eval.Class)
+					assert.Equal(t, string(provider.FailTimeout), eval.Reason,
+						"once runtime deadline sentinel fires, result must stay timeout even after parent context expires")
+					require.Len(t, eval.Attempts, 1)
+					assert.Equal(t, string(provider.FailTimeout), eval.Attempts[0].Reason)
 				})
-				require.Error(t, err)
-				eval, ok := runtime.EvaluationFrom(err)
-				require.True(t, ok)
-				assert.Equal(t, runtime.ClassFailed, eval.Class)
-				assert.Equal(t, string(provider.FailTimeout), eval.Reason,
-					"once runtime deadline sentinel fires, result must stay timeout even after parent context expires")
-				require.Len(t, eval.Attempts, 1)
-				assert.Equal(t, string(provider.FailTimeout), eval.Attempts[0].Reason)
 			})
 		}
 	})
 
 	t.Run("latch_preserves_timeout_across_stages_after_resolve_when_parent_context_expires", func(t *testing.T) {
-		engineCtx, cancel := context.WithTimeoutCause(context.Background(), 60*time.Millisecond, fmt.Errorf("engine timeout"))
-		defer cancel()
+		synctest.Test(t, func(t *testing.T) {
+			engineCtx, cancel := context.WithTimeoutCause(context.Background(), 60*time.Millisecond, fmt.Errorf("engine timeout"))
+			defer cancel()
 
-		instSrc := slowSuccessInstanceSource{
-			inst: defaultTestInstance(),
-			hook: func(resolveCtx context.Context) {
-				// Runtime deadline fires first on resolveCtx; then parent engineCtx
-				// also expires before GetInstance returns an instance to Step 3-5.
-				<-resolveCtx.Done()
-				<-engineCtx.Done()
-			},
-		}
+			instSrc := slowSuccessInstanceSource{
+				inst: defaultTestInstance(),
+				hook: func(resolveCtx context.Context) {
+					// Runtime deadline fires first on resolveCtx; then parent engineCtx
+					// also expires before GetInstance returns an instance to Step 3-5.
+					<-resolveCtx.Done()
+					<-engineCtx.Done()
+				},
+			}
 
-		adapter := newFakeAdapter(nil)
-		reg := provider.NewRegistry()
-		reg.MustRegister(adapter)
-		rt := runtime.New(runtime.Config{
-			Registry:    reg,
-			Instances:   instSrc,
-			Credentials: runtime.StaticCredential("sk-test"),
+			adapter := newFakeAdapter(nil)
+			reg := provider.NewRegistry()
+			reg.MustRegister(adapter)
+			rt := runtime.New(runtime.Config{
+				Registry:    reg,
+				Instances:   instSrc,
+				Credentials: runtime.StaticCredential("sk-test"),
+			})
+
+			_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("stage-latch"), runtime.EvalOptions{
+				EngineMaxEvalTime: 60 * time.Millisecond,
+			})
+			require.Error(t, err)
+			eval, ok := runtime.EvaluationFrom(err)
+			require.True(t, ok)
+			assert.Equal(t, runtime.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailTimeout), eval.Reason,
+				"latched runtime deadline from Step 2 must not be overwritten by expired parent context in Step 5")
+			assert.Empty(t, eval.Attempts, "provider must not be invoked after deadline expired during resolve")
 		})
-
-		_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("stage-latch"), runtime.EvalOptions{
-			EngineMaxEvalTime: 60 * time.Millisecond,
-		})
-		require.Error(t, err)
-		eval, ok := runtime.EvaluationFrom(err)
-		require.True(t, ok)
-		assert.Equal(t, runtime.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailTimeout), eval.Reason,
-			"latched runtime deadline from Step 2 must not be overwritten by expired parent context in Step 5")
-		assert.Empty(t, eval.Attempts, "provider must not be invoked after deadline expired during resolve")
 	})
 }
