@@ -36,8 +36,8 @@ All branding keys belong to the Layer-1 **`branding`** section under `server.hub
 
 | Key | Type | Default | Limits & Behavior |
 | :--- | :--- | :--- | :--- |
-| `name` | string | `"Scion"` | 1–64 non-whitespace Unicode characters; no control or bidirectional control characters. Trimmed on save. |
-| `short_name` | string | `name` (truncated to 24 chars) | 1–24 non-whitespace Unicode characters; no control or bidirectional control characters. Used in `manifest.webmanifest`. |
+| `name` | string | `"Scion"` | 1–64 Unicode characters (counted on the raw value), not blank; no control or bidirectional control characters. Leading and trailing whitespace is ignored when displayed. |
+| `short_name` | string | `name` (truncated to 24 chars) | 1–24 Unicode characters (counted on the raw value), not blank; no control or bidirectional control characters. Leading and trailing whitespace is ignored when displayed. Used in `manifest.webmanifest`. |
 | `subtitle` | string | `""` | 0–80 characters; no control or bidirectional control characters. Shown on `/login` and as the manifest `description`. When `name` is customized and `subtitle` is omitted, stock Scion's tagline is hidden. |
 | `attribution` | enum | `"shown"` | `"shown"` or `"hidden"` (string enum, not a boolean). When `"shown"` and custom identity (`name != "Scion"` or a custom logo) is active, renders `"Powered by Scion"` on `/login`, `/invite`, expanded sidebar footers, Hub-rendered status pages, and the CLI callback. Omitted in full-viewport Chat/Terminal views and on unbranded `"Scion"` Hubs. |
 
@@ -46,7 +46,7 @@ All branding keys belong to the Layer-1 **`branding`** section under `server.hub
 | Key | Type | Default | Accepted Values |
 | :--- | :--- | :--- | :--- |
 | `corners` | enum | `"default"` | `"default"` (`0.25rem`–`1rem`), `"square"` (`0`), or `"rounded"` (`0.375rem`–`1.25rem`). Applies across the SPA, Shoelace components, Go status pages, and CLI callback. Pill and circular elements (toggle switches, radio buttons, avatars, status dots, pill badges) always keep their rounded shape. |
-| `font_sans` | string | `"default"` | Controls `--scion-font-sans` across the UI. Accepted values: `"default"` (Inter via Google Fonts), `"system"` (native OS sans-serif stack; omits the Google Fonts Inter stylesheet link, ideal for air-gapped or offline Hubs), a curated preset slug (`"ibm-plex-sans"`, `"plus-jakarta-sans"`, `"dm-sans"`, `"source-sans-3"`), or any Google Fonts family name matching `^[A-Za-z0-9]([A-Za-z0-9 -]{0,62}[A-Za-z0-9-])?$` (1–64 ASCII characters, no leading/trailing whitespace). |
+| `font_sans` | string | `"default"` | Controls `--scion-font-sans` across the UI. Accepted values: `"default"` (Inter via Google Fonts), `"system"` (native OS sans-serif stack; drops the Google Fonts Inter stylesheet, while the JetBrains Mono stylesheet and preconnect hints remain and fall back to local monospace fonts when unreachable), a curated preset slug (`"ibm-plex-sans"`, `"plus-jakarta-sans"`, `"dm-sans"`, `"source-sans-3"`), or any Google Fonts family name matching `^[A-Za-z0-9]([A-Za-z0-9 -]{0,62}[A-Za-z0-9-])?$` (1–64 ASCII characters, no leading/trailing whitespace). |
 
 Monospace typography (`--scion-font-mono`, JetBrains Mono) is intentionally unaffected so code editors and `xterm.js` terminals preserve column alignment.
 
@@ -56,11 +56,13 @@ Monospace typography (`--scion-font-mono`, JetBrains Mono) is intentionally unaf
 | :--- | :--- | :--- | :--- |
 | `logo.light` | `logo-light` | `logo.dark` (if set) | Logo displayed in light mode. |
 | `logo.dark` | `logo-dark` | `logo.light` (if set) | Logo displayed in dark mode. |
-| `icons.favicon` | `favicon` | Stock `/favicon.ico` + `/favicon.svg` | When set, replaces both stock favicon `<link>` tags. |
-| `icons.apple_touch_icon` | `apple-touch-icon` | `icons.icon_192`, then stock `/apple-touch-icon.png` | Recommended 180×180 PNG. `data:` URIs must be `image/png`. |
-| `icons.icon_192` | `icon-192` | Stock `/icon-192.png` | 192×192 PNG for PWA manifest and desktop notifications. `data:` URIs must be `image/png`. |
-| `icons.icon_512` | `icon-512` | Stock `/icon-512.png` | 512×512 PNG for PWA manifest. `data:` URIs must be `image/png`. |
-| `icons.icon_maskable_512` | `icon-maskable-512` | Stock `/icon-maskable-512.png` (only when all icons are stock) | 512×512 maskable PNG for Android adaptive icons. `data:` URIs must be `image/png`. |
+| `icons.favicon` | `favicon` | Stock `/favicon.ico` + `/favicon.svg` in `<head>` | When set, replaces both stock favicon `<link>` tags in `<head>`. Also affects `/manifest.webmanifest` (see below). |
+| `icons.apple_touch_icon` | `apple-touch-icon` | `icons.icon_192`, then stock `/apple-touch-icon.png` in `<head>` | Recommended 180×180 PNG. `data:` URIs must be `image/png`. |
+| `icons.icon_192` | `icon-192` | Stock `/icon-192.png` only when all manifest icons are unset | 192×192 PNG for PWA manifest and desktop notifications. `data:` URIs must be `image/png`. |
+| `icons.icon_512` | `icon-512` | Stock `/icon-512.png` only when all manifest icons are unset | 512×512 PNG for PWA manifest. `data:` URIs must be `image/png`. |
+| `icons.icon_maskable_512` | `icon-maskable-512` | Stock `/icon-maskable-512.png` only when all manifest icons are unset | 512×512 maskable PNG for Android adaptive icons. `data:` URIs must be `image/png`. |
+
+If any of `icons.favicon`, `icons.icon_192`, `icons.icon_512`, or `icons.icon_maskable_512` is set, `/manifest.webmanifest` lists **only** the configured icons and drops all stock manifest icons (for example, setting only `icons.favicon` emits a manifest containing only that favicon). Configure `icons.icon_192` and `icons.icon_512` together to keep the Hub installable as a PWA.
 
 OS desktop notifications resolve their icon in order: `icons.icon_192` → `icons.apple_touch_icon` → `icons.favicon` → stock `/scion-notification-icon.png`.
 
@@ -74,14 +76,14 @@ Every logo and icon field accepts one of three URI forms:
    - Plain `http://` URLs are rejected (`422`) because the Hub's `Content-Security-Policy` restricts `img-src` to `'self' data: blob: https:`.
 2. **Same-origin path (`/...`)**:
    - Maximum length: **512 characters**.
-   - Must start with a single `/` (protocol-relative `//` is rejected), contain no `%`, `?`, `#`, `\`, `.` or `..` segments, and use only ASCII `[A-Za-z0-9._-@]` per path segment.
+   - Must start with a single `/` (protocol-relative `//` is rejected), contain no `%`, `?`, `#`, `\`, `.` or `..` segments, and use only ASCII `[A-Za-z0-9._@-]` per path segment.
    - Must end with `.svg`, `.png`, `.webp`, or `.ico`.
    - Must not target reserved Hub route prefixes (`/auth`, `/api`, `/brand`, `/events`, `/.well-known`, `/health`, `/healthz`, `/readyz`).
 3. **Base64 `data:` URI (`data:image/<subtype>;base64,<payload>`)**:
    - Allowed media types: `image/svg+xml`, `image/png`, `image/webp`, and `image/x-icon` (`image/vnd.microsoft.icon` is normalized to `image/x-icon`).
    - **`apple_touch_icon`, `icon_192`, `icon_512`, and `icon_maskable_512` require `image/png`** when supplied as `data:` URIs.
    - **Size limits**: **128 KiB** decoded per asset and **512 KiB** decoded total across all `data:` assets in `server.hub.branding`.
-   - **Content verification**: Binary images are validated against PNG, RIFF/WEBP, or ICO magic bytes. SVGs must be valid UTF-8 XML using only static vector elements (no `DOCTYPE`/`ENTITY`, no `<script>` or active/animation elements, no `on*` event attributes, no external `href` or `url()` references, and no `@import`, `javascript:`, or `data:` in styles).
+   - **Content verification**: Binary images are validated against PNG, RIFF/WEBP, or ICO magic bytes. SVGs must be valid UTF-8 XML restricted to the SVG namespace using only **allowlisted static SVG elements** (rejecting `DOCTYPE`/`ENTITY`, processing instructions, `on*` event attributes, CSS backslash escapes, external `href` or `url()` references, and `@import`, `expression()`, `image-set()`, `javascript:`, `vbscript:`, or `data:` in styles).
 
 #### How `/brand/{slot}` and `/manifest.webmanifest` Are Served
 
@@ -140,10 +142,10 @@ scion hub settings get server.hub.branding.name
 scion hub settings schema branding
 ```
 
-Set one or more keys (changes are deep-merged key-by-key into the stored section, with compare-and-set revision checks):
+Set one or more keys (changes are deep-merged key-by-key into the stored section, with compare-and-set revision checks). Because `scion hub settings set` parses argument values as YAML—where an unquoted `#` begins a comment—pass `#RRGGBB` hex colors with YAML quoting (such as `'"#0d9488"'`) or with `--string`:
 
 ```bash
-scion hub settings set \
+scion hub settings set --string \
   server.hub.branding.name "Acme Cloud" \
   server.hub.branding.short_name "Acme" \
   server.hub.branding.subtitle "Engineering Platform" \
@@ -191,7 +193,7 @@ Branding uses the standard Hub operational settings endpoints (see [Admin Settin
 }
 ```
 
-Nested objects (`logo`, `icons`, `palette.light`, `palette.dark`) are deep-merged key-by-key onto the stored section; sending `null` for a key clears it.
+Nested objects (`logo`, `icons`, `palette.light`, `palette.dark`) are deep-merged key-by-key onto the stored section; sending `null` for a key clears it. The five shade-scale maps (`palette.primary`, `palette.neutral`, `palette.success`, `palette.warning`, `palette.danger`) are replaced whole when sent, so include every step you want to keep in a given scale.
 
 - **Reset section**: `DELETE /api/v1/admin/server-config/sections/branding` deletes the saved database row so the Hub falls back to bootstrap configuration (`settings.yaml` / `SCION_SEED_*`) or stock defaults.
 - **Schema**: `GET /api/v1/admin/server-config/schema` returns the derived JSON Schema and `koanf_paths` for `branding`.
@@ -239,7 +241,7 @@ server:
 
 ### Air-Gapped / Offline Hub
 
-Use `font_sans: "system"` to drop the external Google Fonts stylesheet and embed logos as base64 `data:` URIs (served same-origin from `/brand/{slot}`):
+Use `font_sans: "system"` to drop the Google Fonts Inter stylesheet and embed logos as base64 `data:` URIs (served same-origin from `/brand/{slot}`). Note that the HTML shell still requests the JetBrains Mono stylesheet from Google Fonts (and includes preconnect hints); when unreachable, it falls back gracefully to local monospace fonts:
 
 ```yaml
 server:
