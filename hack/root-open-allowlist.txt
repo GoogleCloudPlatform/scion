@@ -1,0 +1,58 @@
+# Allowlist for hack/check-root-open.sh
+# Format: <file> | <function> | <count> | <reason>
+#
+# Direct (*os.Root).Open, OpenFile, and Create calls are permitted only for
+# the shared open helpers themselves, self-directory (".") opens on verified
+# roots, non-unix platform fallbacks, trusted/private directories, or sites
+# pending migration in parallel follow-up branches.
+
+# Shared open helpers (open "." on the root fd itself)
+pkg/hub/project_workspace_open_unix.go | openAtInRoot | 1 | shared hub open helper opens root fd "."
+pkg/util/rootopen/rootopen_unix.go | OpenAt | 1 | shared rootopen helper opens root fd "."
+pkg/util/rootopen/rootopen_unix.go | OpenDir | 1 | shared rootopen helper opens root fd "."
+
+# Verified root self-directory reads (root.Open("."))
+pkg/hub/welcome_stage.go | welcomeStagedTemplates | 1 | opens "." on verified private staging root
+pkg/projectfs/attachments_remove.go | ListAttachmentEntries | 1 | opens "." on verified channel dir root
+pkg/provision/agent_dir.go | purgePrefixedEntries | 1 | opens "." on Lstat-verified agent dir root
+pkg/transfer/root_walk.go | walkRoot | 1 | opens "." on walk root itself
+
+# Non-unix platform fallbacks (//go:build !unix; required for Windows CLI)
+cmd/artifact_outdir_other.go | WriteFile | 1 | non-unix fallback for Windows CLI artifact output
+pkg/agenthome/home_other.go | ReadFile | 1 | non-unix fallback for Windows builds
+pkg/agenthome/home_other.go | WriteFile | 1 | non-unix fallback for Windows builds
+pkg/agenthome/home_other.go | copyFile | 2 | non-unix fallback for Windows builds
+pkg/agenthome/tree_other.go | ReadDir | 1 | non-unix fallback for Windows builds
+pkg/agenthome/tree_other.go | entries | 1 | non-unix fallback for Windows builds
+pkg/agenthome/tree_other.go | open | 1 | non-unix fallback for Windows builds
+pkg/agenthome/tree_other.go | writeEntry | 1 | non-unix fallback for Windows builds
+
+# Trusted, private, or single-component verified roots
+pkg/agent/skills_dir_switch.go | readRootDir | 1 | directory listing after realDirs check during harness switch
+pkg/agent/task_file.go | writeTaskFile | 1 | single-component random O_EXCL temp file in verified .scion root
+pkg/agenthome/home.go | readDirSorted | 1 | reads trusted template/seed source root
+pkg/agenthome/home_unix.go | copyFileInto | 1 | reads trusted template/seed source root (dst uses dirfd.CreateExclAt)
+pkg/agenthome/home_unix.go | seedFile | 1 | reads trusted template/seed source root
+pkg/agentplugin/copy.go | copyFile | 2 | broker-managed plugin bundle copy with Lstat/SameFile verification
+pkg/agentplugin/copy.go | readRootDir | 1 | broker-managed plugin bundle directory listing
+pkg/agentplugin/digest.go | fileSHA256 | 1 | broker-managed plugin bundle digest calculation
+pkg/agentplugin/fsutil.go | readRegularFile | 1 | broker-managed plugin metadata read with realDirs/Lstat/SameFile
+pkg/config/remote_templates.go | copyRegularFileNoFollow | 1 | reads private fetched template temp dir with Lstat/SameFile
+pkg/config/remote_templates.go | writeFileInRoot | 1 | writes private fetched template cache dir (not agent-mounted)
+pkg/hub/welcome_stage.go | welcomeWriteFile | 1 | writes fresh hub-private 0700 temp staging dir with O_EXCL
+pkg/runtimebroker/delete_ownership.go | findForeignOwnerInRoot | 1 | read-only directory listing for delete ownership diagnostics
+pkg/runtimebroker/delete_ownership.go | firstEntryInRootDir | 1 | read-only single-entry listing for delete ownership diagnostics
+pkg/runtimebroker/project_relink.go | removeStaleRelinkTemps | 1 | directory listing during workspace relink cleanup
+pkg/runtimebroker/project_relink.go | writeWorkspaceIdentityNoFollow | 2 | random O_EXCL temp file and dir fsync during workspace relink
+pkg/runtimebroker/workspace_signed_download.go | writeFile | 1 | random O_EXCL temp file in workspace download target
+pkg/transfer/normalize.go | normalizeRootFile | 1 | cross-platform random O_EXCL temp file (compiled on Windows CLI)
+pkg/transfer/open_regular.go | OpenRegularFile | 1 | cross-platform Lstat/readOnlyFlags/SameFile open (compiled on Windows CLI)
+pkg/transfer/root_walk.go | walkRootDir | 1 | cross-platform trailing-slash dir open with SameFile (compiled on Windows CLI)
+pkg/webassets/disk.go | Open | 1 | serves read-only operator-owned static web assets
+pkg/webassets/disk.go | Serve | 1 | serves read-only operator-owned static web assets
+pkg/webassets/disk.go | sniff | 1 | sniffs content-type on read-only operator-owned static web assets
+
+# Pending migration in parallel follow-up branch (remove once it lands)
+pkg/hub/attachments_agent.go | storeAgentAttachment | 1 | pending migration in parallel hub attachments follow-up branch
+pkg/hub/attachments_staging.go | verifyStagedCopy | 1 | pending migration in parallel hub attachments follow-up branch
+pkg/hub/attachments_staging.go | writeStagingTemp | 1 | pending migration in parallel hub attachments follow-up branch

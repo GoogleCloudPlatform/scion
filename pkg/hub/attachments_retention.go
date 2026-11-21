@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // Attachment retention (ptone/scion#5832), in the artifact maintenance
@@ -323,9 +324,9 @@ func openRealSubdir(parent *os.Root, name string) (*os.Root, error) {
 	return sub, nil
 }
 
-// readRootDir lists directory name inside root.
+// readRootDir lists directory name inside root without following symlinks.
 func readRootDir(root *os.Root, name string) ([]os.DirEntry, error) {
-	d, err := root.Open(name)
+	d, err := rootopen.OpenDir(root, name)
 	if err != nil {
 		return nil, err
 	}
