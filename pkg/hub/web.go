@@ -173,8 +173,12 @@ type AccessSettingsProvider interface {
 	// ("open", "domain_restricted", "invite_only").
 	UserAccessMode() string
 	// DefaultUserRole returns the configured default role for new users
-	// ("member" or "viewer"). Returns "member" when unconfigured.
+	// ("member", "viewer", or a custom system-scope role name when enabled).
+	// Returns "member" when unconfigured.
 	DefaultUserRole() string
+	// CustomDefaultRoleEnabled reports whether the hub.custom_default_user_role
+	// experiment is enabled.
+	CustomDefaultRoleEnabled() bool
 }
 
 // WebServerConfig holds configuration for the web frontend server.
@@ -1149,6 +1153,15 @@ func (ws *WebServer) defaultUserRole() string {
 		return "member"
 	}
 	return ws.accessSettings.DefaultUserRole()
+}
+
+// customDefaultRoleEnabled reports whether the hub.custom_default_user_role
+// experiment is enabled via the access settings provider.
+func (ws *WebServer) customDefaultRoleEnabled() bool {
+	if ws.accessSettings == nil {
+		return false
+	}
+	return ws.accessSettings.CustomDefaultRoleEnabled()
 }
 
 // auditLoggerSource is implemented by an access settings provider that also
@@ -3751,6 +3764,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// Find or create user (same pattern as handleOAuthCallback)
 		user, err := ws.store.GetUserByEmail(ctx, proxyUser.Email)
 		syncGrants := true
+		applyDefaultGrants := false
 		roleChanged := false
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			// Genuine DB error — don't treat as "create new user"
@@ -3759,6 +3773,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if err != nil {
+			applyDefaultGrants = true
 			// User not found — create new user
 			role := determineUserRole(proxyUser.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
 			user = &store.User{
@@ -3799,6 +3814,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			activating := user.Status == store.UserStatusInvited
 
 			if activating {
+				applyDefaultGrants = true
 				// Transition invited → active on first login
 				// (mirrors handleOAuthCallback's invited→active block)
 				ws.logger().Info("user activated from invited state via proxy auth", "email", proxyUser.Email, "user_id", user.ID)
@@ -3838,6 +3854,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					roleChanged = true
 					if oldRole == "admin" {
 						bindingSuperAdmin = "delete"
+						applyDefaultGrants = true
 					} else if newRole == "admin" {
 						bindingSuperAdmin = "ensure"
 					}
@@ -3864,13 +3881,20 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Make the hub-members group and hub-viewer binding match the stored
-		// role (mirrors provisionUser). Skipped when UpdateUser failed, so the
-		// grants keep following the persisted role. Best-effort: a failure is
-		// logged and the login continues; the startup backfill repairs it.
+		// Make the hub-members group, hub-viewer binding, or custom default role
+		// binding match the stored role (mirrors provisionUser). Skipped when
+		// UpdateUser failed, so the grants keep following the persisted role.
+		// Best-effort: a failure is logged and the login continues; the startup
+		// backfill repairs built-in grants.
 		if syncGrants {
-			if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
-				ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", err)
+			var grantErr error
+			if applyDefaultGrants {
+				grantErr = applyDefaultUserRoleGrants(ctx, ws.store, user.ID, user.Role, ws.defaultUserRole(), ws.customDefaultRoleEnabled())
+			} else {
+				grantErr = syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy)
+			}
+			if grantErr != nil {
+				ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", grantErr)
 			}
 		}
 		if syncGrants && roleChanged {
@@ -4248,8 +4272,10 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Find or create user
 	user, err := ws.store.GetUserByEmail(ctx, userInfo.Email)
 	syncGrants := true
+	applyDefaultGrants := false
 	roleChanged := false
 	if err != nil {
+		applyDefaultGrants = true
 		// Create new user (only reachable in open/domain_restricted modes;
 		// in invite_only mode, checkUserAuthorized already confirmed a User record exists)
 		role := determineUserRole(userInfo.Email, ws.adminEmails(), "", ws.isDemotionSafe(), false, ws.defaultUserRole())
@@ -4290,6 +4316,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		activating := user.Status == store.UserStatusInvited
 
 		if activating {
+			applyDefaultGrants = true
 			// Transition invited → active on first login
 			// TODO(NG4): This duplicates the invited→active logic in provisionUser.
 			// Consolidate into a shared function in a future refactor.
@@ -4339,6 +4366,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 				roleChanged = true
 				if oldRole == "admin" {
 					bindingSuperAdmin = "delete"
+					applyDefaultGrants = true
 				} else if newRole == "admin" {
 					bindingSuperAdmin = "ensure"
 				}
@@ -4365,13 +4393,20 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// Make the hub-members group and hub-viewer binding match the stored
-	// role (mirrors provisionUser). Skipped when UpdateUser failed, so the
-	// grants keep following the persisted role. Best-effort: a failure is
-	// logged and the login continues; the startup backfill repairs it.
+	// Make the hub-members group, hub-viewer binding, or custom default role
+	// binding match the stored role (mirrors provisionUser). Skipped when
+	// UpdateUser failed, so the grants keep following the persisted role.
+	// Best-effort: a failure is logged and the login continues; the startup
+	// backfill repairs built-in grants.
 	if syncGrants {
-		if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
-			ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", err)
+		var grantErr error
+		if applyDefaultGrants {
+			grantErr = applyDefaultUserRoleGrants(ctx, ws.store, user.ID, user.Role, ws.defaultUserRole(), ws.customDefaultRoleEnabled())
+		} else {
+			grantErr = syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy)
+		}
+		if grantErr != nil {
+			ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", grantErr)
 		}
 	}
 	if syncGrants && roleChanged {

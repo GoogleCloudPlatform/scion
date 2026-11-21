@@ -603,12 +603,18 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 			} else {
 				if oldRole == store.UserRoleAdmin {
 					s.deleteSuperAdminBinding(r.Context(), user.ID)
-				} else if role == store.UserRoleAdmin {
-					s.ensureSuperAdminBinding(r.Context(), user.ID)
-				}
-				if err := syncHubRoleGrants(r.Context(), s.store, user.ID, role, store.SystemReconcileCreatedBy); err != nil {
-					slog.Warn("failed to sync hub role grants on token refresh",
-						"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
+					if err := applyDefaultUserRoleGrants(r.Context(), s.store, user.ID, role, s.DefaultUserRole(), s.CustomDefaultRoleEnabled()); err != nil {
+						slog.Warn("failed to apply default user role grants on token refresh",
+							"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
+					}
+				} else {
+					if role == store.UserRoleAdmin {
+						s.ensureSuperAdminBinding(r.Context(), user.ID)
+					}
+					if err := syncHubRoleGrants(r.Context(), s.store, user.ID, role, store.SystemReconcileCreatedBy); err != nil {
+						slog.Warn("failed to sync hub role grants on token refresh",
+							"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
+					}
 				}
 				s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 			}
@@ -1712,13 +1718,12 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 		if user.Role == "admin" {
 			s.ensureSuperAdminBinding(ctx, user.ID)
 		}
-		// Make the hub-members group and hub-viewer binding match the role
-		// now, so the user's first request already has the right hub
-		// permissions. Best-effort: a grant write failure degrades the
-		// session but must not fail the login; the startup backfill repairs
-		// it.
-		if err := syncHubRoleGrants(ctx, s.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
-			slog.Warn("failed to sync hub role grants on login", "email", info.Email, "user_id", user.ID, "role", user.Role, "error", err)
+		// Apply initial default role grants (built-in or custom) now, so the
+		// user's first request already has the right hub permissions.
+		// Best-effort: a grant write failure degrades the session but must not
+		// fail the login; the startup backfill repairs built-in grants.
+		if err := applyDefaultUserRoleGrants(ctx, s.store, user.ID, user.Role, s.DefaultUserRole(), s.CustomDefaultRoleEnabled()); err != nil {
+			slog.Warn("failed to apply default user role grants on login", "email", info.Email, "user_id", user.ID, "role", user.Role, "error", err)
 		}
 		return user, nil
 	}
@@ -1770,6 +1775,9 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		deleteSuperAdminBinding: s.deleteSuperAdminBinding,
 		syncGrants: func(ctx context.Context, userID, role string) error {
 			return syncHubRoleGrants(ctx, s.store, userID, role, store.SystemReconcileCreatedBy)
+		},
+		applyDefaultGrants: func(ctx context.Context, userID, role string) error {
+			return applyDefaultUserRoleGrants(ctx, s.store, userID, role, s.DefaultUserRole(), s.CustomDefaultRoleEnabled())
 		},
 		auditActivated: func(ctx context.Context, email, userID string) {
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, email, "", userID, email, nil)

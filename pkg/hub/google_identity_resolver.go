@@ -637,6 +637,21 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 		return nil, false, fmt.Errorf("create user: %w", createErr)
 	}
 
+	if newUser.Role == store.UserRoleAdmin && r.policyDeps.ensureSuperAdminBinding != nil {
+		r.policyDeps.ensureSuperAdminBinding(ctx, newUser.ID)
+	}
+	if r.policyDeps.applyDefaultGrants != nil {
+		if err := r.policyDeps.applyDefaultGrants(ctx, newUser.ID, newUser.Role); err != nil {
+			r.log.Warn("google identity resolver: failed to apply default user role grants",
+				"email", normalizedEmail, "user_id", newUser.ID, "role", newUser.Role, "error", err)
+		}
+	} else if r.policyDeps.syncGrants != nil {
+		if err := r.policyDeps.syncGrants(ctx, newUser.ID, newUser.Role); err != nil {
+			r.log.Warn("google identity resolver: failed to sync hub role grants",
+				"email", normalizedEmail, "user_id", newUser.ID, "role", newUser.Role, "error", err)
+		}
+	}
+
 	r.log.Info("google identity resolver: provisioned new user",
 		"email", normalizedEmail,
 		"user_id", newUser.ID,

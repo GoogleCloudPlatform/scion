@@ -1279,6 +1279,10 @@ func (s *transientErrorStore) AddGroupMember(_ context.Context, _ *store.GroupMe
 	return nil
 }
 
+func (s *transientErrorStore) ListRoleBindingsForPrincipal(_ context.Context, _ string, _ string) ([]*store.RoleBinding, error) {
+	return nil, nil
+}
+
 // ---------------------------------------------------------------------------
 // Helper: loginSession creates a session cookie for a test user.
 // ---------------------------------------------------------------------------

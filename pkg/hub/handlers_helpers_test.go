@@ -178,6 +178,10 @@ func (s *testLoginStore) GetRoleDefinitionByName(_ context.Context, _ string, _ 
 	return nil, store.ErrNotFound
 }
 
+func (s *testLoginStore) ListRoleBindingsForPrincipal(_ context.Context, _ string, _ string) ([]*store.RoleBinding, error) {
+	return nil, nil
+}
+
 func newTestLoginStore() *testLoginStore {
 	return &testLoginStore{users: make(map[string]*store.User)}
 }

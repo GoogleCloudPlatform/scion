@@ -3819,7 +3819,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Must run after BackfillRoleBindings.
 	// D11: pass AdminEmails to enable bidirectional convergence (demotion).
 	// Revocation latency: takes effect on this restart; documented in commit.
-	if demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, cfg.AdminEmails, cfg.DefaultUserRole); err != nil {
+	// Read effective default_user_role and custom-default-role experiment from
+	// DB operational settings when present (falling back to cfg), so startup
+	// admin demotion matches login-time demotion.
+	startupDefaultRole, startupCustomDefaultEnabled := startupDefaultUserRoleConfig(ctx, s, srv, cfg.DefaultUserRole)
+	if demotionSafe, err := reconcileSuperAdminBindings(ctx, s, cfg.AdminEmails, startupDefaultRole, startupCustomDefaultEnabled); err != nil {
 		slog.Error("failed to reconcile super-admin bindings — revocation may be incomplete", "error", err)
 	} else {
 		srv.demotionSafe.Store(demotionSafe)
@@ -5286,6 +5290,12 @@ func (s *Server) DefaultUserRole() string {
 		return "member"
 	}
 	return s.config.DefaultUserRole
+}
+
+// CustomDefaultRoleEnabled reports whether the hub.custom_default_user_role
+// experiment is currently enabled. Implements AccessSettingsProvider.
+func (s *Server) CustomDefaultRoleEnabled() bool {
+	return s.experimentEnabled(experiments.CustomDefaultUserRole)
 }
 
 // SetSecretBackend sets the secret backend for pluggable secret storage.

@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +25,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -105,10 +108,14 @@ func unsupportedPermissionsForDefaultUserRole(perms []string) []string {
 }
 
 // checkCustomDefaultUserRoleEligible verifies that rd is a custom system-scope
-// role definition containing no unsupported catalog permissions.
+// role definition containing no unsupported catalog permissions and not
+// colliding with reserved built-in default_user_role names.
 func checkCustomDefaultUserRoleEligible(rd *store.RoleDefinition) error {
 	if rd == nil {
 		return errors.New("role definition is nil")
+	}
+	if isBuiltinDefaultUserRole(rd.Name) || rd.Name == store.UserRoleAdmin {
+		return fmt.Errorf("role name %q is reserved and cannot be selected as a custom default user role", rd.Name)
 	}
 	if rd.ScopeType != store.RoleScopeSystem {
 		return fmt.Errorf("role %q has scope %q; must be %q", rd.Name, rd.ScopeType, store.RoleScopeSystem)
@@ -360,4 +367,84 @@ func (s *Server) populateDefaultUserRoleView(ctx context.Context, resp *ServerCo
 	if customEnabled && s.store != nil {
 		resp.EligibleDefaultRoles = listEligibleDefaultRoles(ctx, s.store)
 	}
+}
+
+// configuredCustomDefaultUserRole returns the configured custom default user
+// role name, or "" when server.auth.default_user_role is unset or names a
+// built-in/reserved role ("member", "viewer", "admin").
+func (s *Server) configuredCustomDefaultUserRole() string {
+	configured := s.DefaultUserRole()
+	if isBuiltinDefaultUserRole(configured) || configured == store.UserRoleAdmin {
+		return ""
+	}
+	return configured
+}
+
+// roleHasSystemDefaultRoleBindings reports whether any system-scope
+// RoleBinding referencing roleDefID carries the SystemDefaultRoleCreatedBy
+// provenance sentinel. Used by updateRoleDefinition to keep the #7779
+// unsupported-permission guard active even after a role is renamed away or
+// server.auth.default_user_role is changed to another role.
+func roleHasSystemDefaultRoleBindings(ctx context.Context, st store.Store, roleDefID string) (bool, error) {
+	if st == nil {
+		return false, nil
+	}
+	bindings, err := st.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	if err != nil {
+		return false, fmt.Errorf("list system role bindings: %w", err)
+	}
+	for _, b := range bindings {
+		if b.RoleDefinitionID == roleDefID && b.CreatedBy == store.SystemDefaultRoleCreatedBy {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// startupDefaultUserRoleConfig determines the effective default_user_role and
+// whether hub.custom_default_user_role is enabled during New(), before
+// OperationalSettings is attached by cmd/server_foreground.go.
+//
+// Precedence matches OperationalSettings.Snapshot():
+//   - When the DB "access" section row exists, it is authoritative (even when
+//     default_user_role is empty, which resolves to "member"), and wins over
+//     bootstrap/env config.
+//   - Only when the DB "access" row is absent does startup fall back to
+//     cfgDefaultRole.
+//   - For the experiment flag, if OperationalSettings is already attached,
+//     srv.experimentEnabled is used; otherwise the DB "experiments" row is
+//     parsed via opsettings.ParseExperimentsDoc and resolved through
+//     srv.experimentEnabledIn.
+func startupDefaultUserRoleConfig(ctx context.Context, st store.Store, srv *Server, cfgDefaultRole string) (string, bool) {
+	defaultRole := cfgDefaultRole
+	if st != nil {
+		if row, err := st.GetHubSetting(ctx, "access"); err == nil && row != nil {
+			var access opsettings.AccessSettings
+			if len(bytes.TrimSpace(row.Value)) == 0 {
+				defaultRole = ""
+			} else if jsonErr := json.Unmarshal(row.Value, &access); jsonErr == nil {
+				defaultRole = access.DefaultUserRole
+			}
+		}
+	}
+
+	customEnabled := false
+	if srv != nil {
+		if srv.GetOperationalSettings() != nil {
+			customEnabled = srv.experimentEnabled(experiments.CustomDefaultUserRole)
+		} else if st != nil {
+			if row, err := st.GetHubSetting(ctx, "experiments"); err == nil && row != nil {
+				doc, malformed := opsettings.ParseExperimentsDoc(row.Value)
+				customEnabled = srv.experimentEnabledIn(ExperimentsSnapshot{
+					Overrides: doc.Overrides,
+					Malformed: malformed,
+				}, experiments.CustomDefaultUserRole)
+			} else {
+				customEnabled = srv.experimentEnabled(experiments.CustomDefaultUserRole)
+			}
+		} else {
+			customEnabled = srv.experimentEnabled(experiments.CustomDefaultUserRole)
+		}
+	}
+	return defaultRole, customEnabled
 }
