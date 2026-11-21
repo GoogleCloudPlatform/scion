@@ -380,6 +380,7 @@ func scopeRequestedGitHubTokenPermissions(
 	requested githubapp.TokenPermissions,
 	stored *store.GitHubTokenPermissions,
 	grant githubAssociationGrant,
+	appPermissions map[string]string,
 ) (githubapp.TokenPermissions, error) {
 	requiresWrite := false
 	level := func(field, raw string) (string, error) {
@@ -424,7 +425,10 @@ func scopeRequestedGitHubTokenPermissions(
 		return githubapp.TokenPermissions{}, ErrGitHubWriteNotPermitted
 	}
 
-	limit := githubTokenPermissionsForGrant(stored, grant)
+	limit, _, ok := githubTokenPermissionsForGrant(stored, grant, appPermissions)
+	if !ok {
+		return githubapp.TokenPermissions{}, fmt.Errorf("%w: no usable permissions", ErrGitHubPermissionNotPermitted)
+	}
 	// GitHub always grants metadata:read implicitly on installation tokens, so
 	// a project limit such as {issues: write} (with metadata omitted) still
 	// permits metadata:read while still refusing metadata:write unless granted.

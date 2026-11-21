@@ -1047,8 +1047,24 @@ func (s *Server) mintGitHubAppTokenInternal(
 	var usedDefaults bool
 	var appPermissions map[string]string
 	if requested != nil {
+		var reqAppPerms map[string]string
+		if !hasUsableStoredGitHubPermissions(project.GitHubPermissions) {
+			id, hasID := s.GitHubAppIdentity(ctx)
+			if !hasID || id == nil {
+				const msg = "Unable to verify GitHub App permissions. See the hub log for details."
+				slog.WarnContext(ctx, "GitHub App token refused: app permissions unavailable",
+					"project_id", project.ID, "installation_id", *project.GitHubInstallationID)
+				s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
+					githubapp.ErrCodeTokenMintFailed, msg)
+				return "", "", &githubapp.TokenMintError{
+					ErrorCode: githubapp.ErrCodeTokenMintFailed,
+					Message:   msg,
+				}
+			}
+			reqAppPerms = id.Permissions
+		}
 		var permErr error
-		perms, permErr = scopeRequestedGitHubTokenPermissions(*requested, project.GitHubPermissions, grant)
+		perms, permErr = scopeRequestedGitHubTokenPermissions(*requested, project.GitHubPermissions, grant, reqAppPerms)
 		if permErr != nil {
 			return "", "", permErr
 		}

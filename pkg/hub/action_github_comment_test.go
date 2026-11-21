@@ -80,9 +80,10 @@ func newFakeGitHubCommentAPI(t *testing.T) *fakeGitHubCommentAPI {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":   778899,
-			"slug": "scion-bot",
-			"name": "Scion Bot",
+			"id":          778899,
+			"slug":        "scion-bot",
+			"name":        "Scion Bot",
+			"permissions": map[string]string{"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read"},
 		})
 	})
 	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
