@@ -19,8 +19,10 @@ test_deploy_warns_when_scion_in_google_sudoers() {
   export GCLOUD_STUB_SSH_SUCCEEDS=true
   export GCLOUD_STUB_SSH_SCION_GOOGLE_SUDOERS=true
   local out_warn
-  out_warn="$((
+  out_warn="$( (
+    # shellcheck disable=SC2034 # read by the eval'd deploy.sh check
     INSTANCE_NAME="scion-hub-test" ZONE="us-central1-a" PROJECT_ID="demo-project"
+    # shellcheck disable=SC2329 # invoked indirectly via eval "$block"
     warn() { echo "WARNING: $*" >&2; }
     eval "$block"
   ) 2>&1)"
@@ -29,8 +31,10 @@ test_deploy_warns_when_scion_in_google_sudoers() {
 
   export GCLOUD_STUB_SSH_SCION_GOOGLE_SUDOERS=false
   local out_clean
-  out_clean="$((
+  out_clean="$( (
+    # shellcheck disable=SC2034 # read by the eval'd deploy.sh check
     INSTANCE_NAME="scion-hub-test" ZONE="us-central1-a" PROJECT_ID="demo-project"
+    # shellcheck disable=SC2329 # invoked indirectly via eval "$block"
     warn() { echo "WARNING: $*" >&2; }
     eval "$block"
   ) 2>&1)"
