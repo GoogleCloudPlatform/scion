@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 )
@@ -309,5 +311,100 @@ func TestStart_StopBeforeServe_Backstop(t *testing.T) {
 	}
 	if !portFree(t, port) {
 		t.Fatalf("port %d still bound after the backstop refused", port)
+	}
+}
+
+func TestConfigFromEnv_InterceptionSource(t *testing.T) {
+	t.Setenv("SCION_METADATA_MODE", "block")
+	t.Setenv(InterceptionEnvVar, InterceptionRequired)
+	t.Setenv(InterceptionSourceEnvVar, InterceptionSourceRuntime)
+	cfg := ConfigFromEnv()
+	if cfg == nil {
+		t.Fatal("ConfigFromEnv() = nil")
+	}
+	if !cfg.InterceptionRequired {
+		t.Error("InterceptionRequired = false, want true")
+	}
+	if cfg.InterceptionSource != InterceptionSourceRuntime {
+		t.Errorf("InterceptionSource = %q, want %q", cfg.InterceptionSource, InterceptionSourceRuntime)
+	}
+}
+
+func TestProbeHandler_ExactPathEveryMode(t *testing.T) {
+	for _, mode := range []string{modeAssign, modeBlock, "unknown-coerced"} {
+		t.Run(mode, func(t *testing.T) {
+			s := New(Config{Mode: mode, Port: 18380})
+			path := s.ProbePath()
+			if len(path) != 65 || path[0] != '/' {
+				t.Fatalf("ProbePath() = %q, want leading '/' + 64 hex chars", path)
+			}
+			h := s.buildMux()
+
+			// Exact probe path answers 204 without Metadata-Flavor.
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("GET %s status = %d, want 204", path, rec.Code)
+			}
+
+			// Other paths do not answer 204.
+			for _, other := range []string{path + "/extra", "/not-the-probe", "/computeMetadata/v1/"} {
+				rec2 := httptest.NewRecorder()
+				h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, other, nil))
+				if rec2.Code == http.StatusNoContent {
+					t.Errorf("GET %s unexpectedly returned 204", other)
+				}
+			}
+		})
+	}
+}
+
+func TestStart_RuntimeSourceSkipsInContainerInterception(t *testing.T) {
+	redirectCalled, blockCalled := stubInterception(t, errors.New("should not run"), errors.New("should not run"))
+	port := freePort(t)
+	s := New(Config{
+		Mode:                 modeBlock,
+		Port:                 port,
+		InterceptionRequired: true,
+		InterceptionSource:   InterceptionSourceRuntime,
+	})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	t.Cleanup(s.Stop)
+	if *redirectCalled || *blockCalled {
+		t.Errorf("in-container interception ran under runtime source (redirect=%v, block=%v)", *redirectCalled, *blockCalled)
+	}
+}
+
+func TestInstallInterceptionRules(t *testing.T) {
+	failure := errors.New("exit status 4")
+	tests := []struct {
+		name        string
+		mode        string
+		redirectErr error
+		blockErr    error
+		wantErr     bool
+		wantBlock   bool
+	}{
+		{name: "block succeeds", mode: modeBlock, wantBlock: true},
+		{name: "assign succeeds", mode: modeAssign, wantBlock: false},
+		{name: "redirect fails", mode: modeBlock, redirectErr: failure, wantErr: true, wantBlock: false},
+		{name: "filter fails", mode: modeBlock, blockErr: failure, wantErr: true, wantBlock: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			redirectCalled, blockCalled := stubInterception(t, tt.redirectErr, tt.blockErr)
+			err := InstallInterceptionRules(tt.mode, 18380)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("InstallInterceptionRules() = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !*redirectCalled {
+				t.Error("redirect was not called")
+			}
+			if *blockCalled != tt.wantBlock {
+				t.Errorf("block called = %v, want %v", *blockCalled, tt.wantBlock)
+			}
+		})
 	}
 }

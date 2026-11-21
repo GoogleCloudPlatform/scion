@@ -122,6 +122,14 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	// Run returns the whole trimmed output, as before; only the launch
 	// handle is restricted to a well-formed container ID line.
 	id := strings.TrimSpace(out)
+	if config.MetadataInterception {
+		if err := runNetnsSetup(ctx, r.Command, id, config); err != nil {
+			if rmErr := removeCreatedContainer(r.Command, id); rmErr != nil {
+				return "", fmt.Errorf("metadata network setup failed: %w (container cleanup also failed: %v)", err, rmErr)
+			}
+			return "", fmt.Errorf("metadata network setup failed: %w", err)
+		}
+	}
 	reportContainerCreated(hooks, config.Name, out)
 	return id, nil
 }

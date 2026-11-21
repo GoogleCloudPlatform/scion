@@ -9,11 +9,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -647,71 +649,54 @@ func TestMetadataProtectionRefusalText_Golden(t *testing.T) {
 	}
 }
 
-// preflightChecks are the stubbed results of metadataProtectionPreflight's
-// three checks; okPreflight passes all of them.
-type preflightChecks struct {
-	euid      int
-	iptables  error
-	usable    bool
-	usableErr error
-}
-
-var okPreflight = preflightChecks{euid: 0, usable: true}
-
-func withPreflightChecks(t *testing.T, c preflightChecks) {
+func withRunWaitForRedirect(t *testing.T, f func(context.Context, string) error) {
 	t.Helper()
-	origEUID, origIPT, origUsable := preflightEUID, preflightResolveIPTables, preflightNetAdminUsable
-	preflightEUID = func() int { return c.euid }
-	preflightResolveIPTables = func() error { return c.iptables }
-	preflightNetAdminUsable = func() (bool, error) { return c.usable, c.usableErr }
-	t.Cleanup(func() {
-		preflightEUID, preflightResolveIPTables, preflightNetAdminUsable = origEUID, origIPT, origUsable
-	})
+	orig := runWaitForRedirect
+	runWaitForRedirect = f
+	t.Cleanup(func() { runWaitForRedirect = orig })
 }
 
 // preflightFailures is one row per condition the preflight refuses.
 var preflightFailures = []struct {
 	name        string
-	checks      preflightChecks
+	source      string
 	networkMode string
 }{
-	{name: "not root", checks: preflightChecks{euid: 1000, usable: true}},
-	{name: "host network", checks: okPreflight, networkMode: "host"},
-	{name: "iptables not resolvable", checks: preflightChecks{euid: 0, iptables: errors.New("not found in a root-owned directory"), usable: true}},
-	{name: "capability missing", checks: preflightChecks{euid: 0, usable: false}},
-	{name: "capability check failed", checks: preflightChecks{euid: 0, usableErr: errors.New("read thread status")}},
+	{name: "missing runtime source marker", source: ""},
+	{name: "unknown source marker", source: "legacy"},
+	{name: "host network", source: metadata.InterceptionSourceRuntime, networkMode: "host"},
 }
 
 func TestMetadataProtectionPreflight(t *testing.T) {
-	required := func(mode, networkMode string) *metadata.Config {
-		return &metadata.Config{Mode: mode, NetworkMode: networkMode, InterceptionRequired: true}
+	required := func(mode, source, networkMode string) *metadata.Config {
+		return &metadata.Config{
+			Mode:                 mode,
+			NetworkMode:          networkMode,
+			InterceptionRequired: true,
+			InterceptionSource:   source,
+		}
 	}
 	for _, mode := range []string{"block", "assign"} {
 		for _, tt := range preflightFailures {
 			t.Run(mode+"/"+tt.name, func(t *testing.T) {
-				withPreflightChecks(t, tt.checks)
-				if err := metadataProtectionPreflight(required(mode, tt.networkMode)); !errors.Is(err, errMetadataProtectionUnavailable) {
+				if err := metadataProtectionPreflight(required(mode, tt.source, tt.networkMode)); !errors.Is(err, errMetadataProtectionUnavailable) {
 					t.Fatalf("metadataProtectionPreflight() = %v, want errMetadataProtectionUnavailable", err)
 				}
 			})
 		}
-		t.Run(mode+"/all checks pass", func(t *testing.T) {
-			withPreflightChecks(t, okPreflight)
-			if err := metadataProtectionPreflight(required(mode, "")); err != nil {
+		t.Run(mode+"/runtime source non-host passes", func(t *testing.T) {
+			if err := metadataProtectionPreflight(required(mode, metadata.InterceptionSourceRuntime, "")); err != nil {
 				t.Fatalf("metadataProtectionPreflight() = %v, want nil", err)
 			}
 		})
-		// Without the runtime's required marker the preflight changes
-		// nothing, however the checks would come out.
+		// Without the runtime's required marker the preflight changes nothing.
 		t.Run(mode+"/marker off", func(t *testing.T) {
-			withPreflightChecks(t, preflightChecks{euid: 1000, iptables: errors.New("missing")})
-			if err := metadataProtectionPreflight(&metadata.Config{Mode: mode}); err != nil {
+			if err := metadataProtectionPreflight(&metadata.Config{Mode: mode, NetworkMode: "host"}); err != nil {
 				t.Fatalf("metadataProtectionPreflight() = %v, want nil", err)
 			}
 		})
 	}
 	t.Run("no metadata config (passthrough)", func(t *testing.T) {
-		withPreflightChecks(t, preflightChecks{euid: 1000})
 		if err := metadataProtectionPreflight(nil); err != nil {
 			t.Fatalf("metadataProtectionPreflight(nil) = %v, want nil", err)
 		}
@@ -803,11 +788,11 @@ func TestRunInit_MetadataProtectionPreflight_RefusesBeforeCredentials(t *testing
 				f := newNetAdminFixture(t, mode, true, nil)
 				reExecs := observeReExec(t)
 				t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
+				t.Setenv(metadata.InterceptionSourceEnvVar, tt.source)
 				t.Setenv(initFirewallEnv, "1")
 				if tt.networkMode != "" {
 					t.Setenv("SCION_NETWORK_MODE", tt.networkMode)
 				}
-				withPreflightChecks(t, tt.checks)
 				creds := newCredentialFixture(t, f.agentHome)
 
 				if got := f.run(); got != 1 {
@@ -844,17 +829,27 @@ func TestRunInit_MetadataProtectionPreflight_RefusesBeforeCredentials(t *testing
 }
 
 // TestRunInit_MetadataProtectionPreflight_PassesWhenUsable: with the
-// marker set and every check passing, the start goes on as before.
+// required and runtime-source markers set, init skips the in-container
+// firewall, awaits the redirect probe after starting the metadata server,
+// and only then runs clone/hooks/sidecars/harness.
 func TestRunInit_MetadataProtectionPreflight_PassesWhenUsable(t *testing.T) {
 	for _, mode := range []string{"block", "assign"} {
 		t.Run(mode, func(t *testing.T) {
-			f := newNetAdminFixture(t, mode, true, nil)
+			f := newNetAdminFixture(t, mode, false, nil)
 			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
-			withPreflightChecks(t, okPreflight)
+			t.Setenv(metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime)
+			t.Setenv(initFirewallEnv, "1") // handled by sidecar, must not run in init
+			withRunWaitForRedirect(t, func(_ context.Context, probePath string) error {
+				if probePath == "" {
+					t.Error("waitForRedirect called with empty probePath")
+				}
+				f.order = append(f.order, "probe")
+				return nil
+			})
 			if got := f.run(); got != 0 {
 				t.Fatalf("RunInit() = %d, want 0", got)
 			}
-			if want := []string{"metadata", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
+			if want := []string{"metadata", "probe", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
 				t.Fatalf("order = %v, want %v", f.order, want)
 			}
 			if !netAdminPathExists(f.harnessFile) {
@@ -866,13 +861,11 @@ func TestRunInit_MetadataProtectionPreflight_PassesWhenUsable(t *testing.T) {
 
 // TestRunInit_MetadataProtectionPreflight_MarkerOffUnchanged: without the
 // marker (Kubernetes, rootless Podman, the Apple runtime, host networking)
-// the start is unchanged even though every check would fail. A mutant
-// that ignores the marker fails here.
+// the start is unchanged.
 func TestRunInit_MetadataProtectionPreflight_MarkerOffUnchanged(t *testing.T) {
 	for _, mode := range []string{"block", "assign"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newNetAdminFixture(t, mode, false, nil)
-			withPreflightChecks(t, preflightChecks{euid: 1000, iptables: errors.New("missing")})
 			if got := f.run(); got != 0 {
 				t.Fatalf("RunInit() = %d, want 0", got)
 			}
@@ -887,12 +880,10 @@ func TestRunInit_MetadataProtectionPreflight_MarkerOffUnchanged(t *testing.T) {
 }
 
 // TestRunInit_MetadataProtectionPreflight_PassthroughUnchanged:
-// passthrough runs no metadata server, so neither the marker nor failing
-// checks change anything.
+// passthrough runs no metadata server, so the marker changes nothing.
 func TestRunInit_MetadataProtectionPreflight_PassthroughUnchanged(t *testing.T) {
 	f := newNetAdminFixture(t, "passthrough", false, nil)
 	t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
-	withPreflightChecks(t, preflightChecks{euid: 1000, iptables: errors.New("missing")})
 	if got := f.run(); got != 0 {
 		t.Fatalf("RunInit() = %d, want 0", got)
 	}
@@ -902,22 +893,17 @@ func TestRunInit_MetadataProtectionPreflight_PassthroughUnchanged(t *testing.T) 
 }
 
 // TestRunInit_MetadataStartRefusal_AfterStaging_CleansUp: the preflight
-// passes but the real install fails (here, a stubbed start returning the
-// interception error). That late refusal comes after staging, so it
-// removes the transport token file and its pointer and, through the
-// deferred finishStagedHubToken, the hub credential this init staged.
-// File secrets written to their payload targets and the harness secrets
-// in the in-memory dir stay, as on every other init failure after staging:
-// init no longer has their names after the re-exec, and on Kubernetes the
-// runtime fills that dir itself. A mutant that drops the cleanup fails
-// here.
+// passes but the redirect probe times out/fails. That late refusal comes
+// after staging, so it removes the transport token file and its pointer
+// and, through the deferred finishStagedHubToken, the hub credential this
+// init staged, stops the metadata server, and never starts the harness.
 func TestRunInit_MetadataStartRefusal_AfterStaging_CleansUp(t *testing.T) {
 	for _, mode := range []string{"block", "assign"} {
 		t.Run(mode, func(t *testing.T) {
-			f := newNetAdminFixture(t, mode, true, nil)
+			f := newNetAdminFixture(t, mode, false, nil)
 			observeReExec(t)
 			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
-			withPreflightChecks(t, okPreflight)
+			t.Setenv(metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime)
 			creds := newCredentialFixture(t, f.agentHome)
 			var transportAtStart, hubTokenAtStart, harnessSecretAtStart bool
 			withRunMetadataServerStart(t, func(context.Context, *metadata.Server) error {
@@ -925,13 +911,17 @@ func TestRunInit_MetadataStartRefusal_AfterStaging_CleansUp(t *testing.T) {
 				transportAtStart = netAdminPathExists(creds.transportPath)
 				hubTokenAtStart = netAdminPathExists(creds.hubTokenPath)
 				harnessSecretAtStart = netAdminPathExists(creds.harnessSecretPath)
-				return fmt.Errorf("%w: redirect: exit status 4", metadata.ErrInterceptionUnavailable)
+				return nil
+			})
+			withRunWaitForRedirect(t, func(context.Context, string) error {
+				f.order = append(f.order, "probe")
+				return errMetadataProtectionUnavailable
 			})
 
 			if got := f.run(); got != 1 {
 				t.Fatalf("RunInit() = %d, want 1", got)
 			}
-			if want := []string{"metadata"}; !reflect.DeepEqual(f.order, want) {
+			if want := []string{"metadata", "probe"}; !reflect.DeepEqual(f.order, want) {
 				t.Fatalf("order = %v, want %v (no drop, clone or sidecars)", f.order, want)
 			}
 			// Controls: staging did run before the start.
@@ -959,9 +949,65 @@ func TestRunInit_MetadataStartRefusal_AfterStaging_CleansUp(t *testing.T) {
 			if netAdminPathExists(f.harnessFile) {
 				t.Error("harness ran after the refusal")
 			}
-			if phase, _ := readAgentInfoMessage(t, f.agentHome); phase != string(state.PhaseError) {
+			if f.stops != 1 {
+				t.Errorf("metadata server stops = %d, want 1", f.stops)
+			}
+			phase, msg := readAgentInfoMessage(t, f.agentHome)
+			if phase != string(state.PhaseError) {
 				t.Errorf("phase = %q, want %q", phase, state.PhaseError)
+			}
+			if msg != goldenMetadataProtectionRefusal {
+				t.Errorf("reported message = %q, want %q", msg, goldenMetadataProtectionRefusal)
 			}
 		})
 	}
+}
+
+func TestWaitForRedirect(t *testing.T) {
+	origBase, origAttempt, origDeadline, origInterval := redirectProbeBaseURL, redirectProbeAttemptTimeout, redirectProbeDeadline, redirectProbeInterval
+	t.Cleanup(func() {
+		redirectProbeBaseURL, redirectProbeAttemptTimeout, redirectProbeDeadline, redirectProbeInterval = origBase, origAttempt, origDeadline, origInterval
+	})
+	redirectProbeAttemptTimeout = 200 * time.Millisecond
+	redirectProbeInterval = 10 * time.Millisecond
+
+	t.Run("retries until 204", func(t *testing.T) {
+		var attempts atomic.Int32
+		const wantPath = "/probe-token-path"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != wantPath {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if attempts.Add(1) < 3 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		t.Cleanup(srv.Close)
+		redirectProbeBaseURL = srv.URL
+		redirectProbeDeadline = 2 * time.Second
+
+		if err := waitForRedirect(context.Background(), wantPath); err != nil {
+			t.Fatalf("waitForRedirect() = %v, want nil", err)
+		}
+		if got := attempts.Load(); got != 3 {
+			t.Errorf("attempts = %d, want 3", got)
+		}
+	})
+
+	t.Run("times out when server never returns 204", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(srv.Close)
+		redirectProbeBaseURL = srv.URL
+		redirectProbeDeadline = 60 * time.Millisecond
+
+		err := waitForRedirect(context.Background(), "/probe-token-path")
+		if !errors.Is(err, errMetadataProtectionUnavailable) {
+			t.Fatalf("waitForRedirect() = %v, want errMetadataProtectionUnavailable", err)
+		}
+	})
 }

@@ -22,31 +22,40 @@ import (
 )
 
 // TestBuildCommonRunArgs_MetadataInterceptionMarkerIsRuntimeOwned checks
-// that the interception marker the container sees follows
-// RunConfig.MetadataInterception (the field that grants NET_ADMIN) and that
-// no other env source can set or clear it: not config.Env (user, template
-// config and harness-config env reach the runtime there), not an
-// environment-type secret, and not the template env fallback.
+// that the interception markers the container sees follow
+// RunConfig.MetadataInterception, that NET_ADMIN is never granted to the
+// agent container itself, and that no other env source can set or clear
+// either marker: not config.Env (user, template config and harness-config
+// env reach the runtime there), not an environment-type secret, and not
+// the template env fallback.
 func TestBuildCommonRunArgs_MetadataInterceptionMarkerIsRuntimeOwned(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		interception bool
 		injected     string
 		want         string
-		wantNetAdmin bool
+		wantSource   string
 	}{
-		{name: "granted, others try to clear", interception: true, injected: MetadataInterceptionOff, want: MetadataInterceptionRequired, wantNetAdmin: true},
-		{name: "granted, others try an empty value", interception: true, injected: "", want: MetadataInterceptionRequired, wantNetAdmin: true},
-		{name: "not granted, others try to set", interception: false, injected: MetadataInterceptionRequired, want: MetadataInterceptionOff},
+		{name: "granted, others try to clear", interception: true, injected: MetadataInterceptionOff, want: MetadataInterceptionRequired, wantSource: MetadataInterceptionSourceRuntime},
+		{name: "granted, others try an empty value", interception: true, injected: "", want: MetadataInterceptionRequired, wantSource: MetadataInterceptionSourceRuntime},
+		{name: "not granted, others try to set", interception: false, injected: MetadataInterceptionRequired, want: MetadataInterceptionOff, wantSource: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := minimalRunConfig()
 			cfg.MetadataInterception = tc.interception
-			cfg.Env = []string{"SCION_METADATA_MODE=block", MetadataInterceptionEnvVar + "=" + tc.injected}
+			cfg.Env = []string{
+				"SCION_METADATA_MODE=block",
+				MetadataInterceptionEnvVar + "=" + tc.injected,
+				MetadataInterceptionSourceEnvVar + "=" + MetadataInterceptionSourceRuntime,
+			}
 			cfg.ResolvedSecrets = []api.ResolvedSecret{
 				{Name: "MARKER", Type: "environment", Target: MetadataInterceptionEnvVar, Value: tc.injected, Source: "user"},
+				{Name: "SOURCE", Type: "environment", Target: MetadataInterceptionSourceEnvVar, Value: MetadataInterceptionSourceRuntime, Source: "user"},
 			}
-			cfg.FallbackEnv = map[string]string{MetadataInterceptionEnvVar: tc.injected}
+			cfg.FallbackEnv = map[string]string{
+				MetadataInterceptionEnvVar:       tc.injected,
+				MetadataInterceptionSourceEnvVar: MetadataInterceptionSourceRuntime,
+			}
 
 			args, err := buildCommonRunArgs(cfg)
 			if err != nil {
@@ -55,6 +64,9 @@ func TestBuildCommonRunArgs_MetadataInterceptionMarkerIsRuntimeOwned(t *testing.
 			env := effectiveArgsEnv(args, cfg.Image)
 			if got := env[MetadataInterceptionEnvVar]; got != tc.want {
 				t.Errorf("%s = %q, want %q (args %v)", MetadataInterceptionEnvVar, got, tc.want, args)
+			}
+			if got := env[MetadataInterceptionSourceEnvVar]; got != tc.wantSource {
+				t.Errorf("%s = %q, want %q (args %v)", MetadataInterceptionSourceEnvVar, got, tc.wantSource, args)
 			}
 			n := 0
 			for i := 0; i+1 < len(args); i++ {
@@ -65,8 +77,8 @@ func TestBuildCommonRunArgs_MetadataInterceptionMarkerIsRuntimeOwned(t *testing.
 			if n != 1 {
 				t.Errorf("%s emitted %d times, want exactly once (args %v)", MetadataInterceptionEnvVar, n, args)
 			}
-			if got := containsArg(args, "--cap-add", "NET_ADMIN"); got != tc.wantNetAdmin {
-				t.Errorf("NET_ADMIN granted = %v, want %v", got, tc.wantNetAdmin)
+			if containsArg(args, "--cap-add", "NET_ADMIN") {
+				t.Errorf("agent container must not receive --cap-add NET_ADMIN (args %v)", args)
 			}
 		})
 	}

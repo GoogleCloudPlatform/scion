@@ -874,13 +874,23 @@ func RunInit(args []string, opts InitRunOptions) int {
 	_, projectHookStatErr := os.Stat(projectHookPath)
 	projectHookStaged := projectHookStatErr == nil
 
-	// Opt-in egress firewall. It runs before the metadata server start
-	// because the script resets the nat and filter tables, which would
-	// remove the interception rules installed below.
-	firewallInstalled, err := setupInitFirewall()
-	if err != nil {
-		reportInitFailure(agentHome, err)
-		return 1
+	// Opt-in egress firewall. When the runtime owns network-namespace setup
+	// (SCION_METADATA_INTERCEPTION_SOURCE=runtime), the short-lived
+	// netns-setup container runs init-firewall.sh before installing the
+	// metadata redirect rules, so init skips it here. Otherwise it runs
+	// before the metadata server start because the script resets the nat
+	// and filter tables.
+	runtimeManagedInterception := metaCfg != nil &&
+		metaCfg.InterceptionRequired &&
+		metaCfg.InterceptionSource == metadata.InterceptionSourceRuntime
+	var firewallInstalled bool
+	if !runtimeManagedInterception {
+		var fwErr error
+		firewallInstalled, fwErr = setupInitFirewall()
+		if fwErr != nil {
+			reportInitFailure(agentHome, fwErr)
+			return 1
+		}
 	}
 
 	// Initialize hubClient early so the metadata server's fetch callbacks
@@ -951,6 +961,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Warn("Metadata server not started (mode=%s, host networking); continuing: %v", metaCfg.Mode, err)
 		} else {
 			log.Info("GCP metadata server started (mode=%s, port=%d)", metaCfg.Mode, metaCfg.Port)
+			if runtimeManagedInterception {
+				if err := runWaitForRedirect(metaCtx, metadataServer.ProbePath()); err != nil {
+					log.Error("Metadata redirect verification failed (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
+					reportInitFailure(agentHome, err)
+					removeTransportTokenOnRefusal()
+					stagedTokenCleanExit = true
+					return 1
+				}
+			}
 		}
 	}
 

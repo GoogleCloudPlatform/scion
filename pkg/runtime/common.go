@@ -868,7 +868,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// (ptone/scion#3155), never template or user env.
 			continue
 		}
-		if parts[0] == MetadataInterceptionEnvVar {
+		if parts[0] == MetadataInterceptionEnvVar || parts[0] == MetadataInterceptionSourceEnvVar {
 			// Runtime-owned: set below from config.MetadataInterception.
 			continue
 		}
@@ -895,7 +895,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || reservedAgentEnvName(s.Target) {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar || s.Target == MetadataInterceptionSourceEnvVar || reservedAgentEnvName(s.Target) {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -997,18 +997,16 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Add NET_ADMIN capability for iptables-based metadata server interception,
-	// and tell sciontool whether that interception is required. The marker
-	// always comes from config.MetadataInterception, never from config.Env, a
-	// secret or the template fallback (all of which skip this key), so it
-	// cannot disagree with the capability. The Apple runtime drops --cap-add
-	// (stripUnsupportedAppleFlags), so it never reports the interception as
-	// required.
-	if config.MetadataInterception {
-		addArg("--cap-add", "NET_ADMIN")
-	}
+	// Tell sciontool whether runtime-managed metadata interception is required.
+	// The agent container itself receives no NET_ADMIN capability; the runtime
+	// installs the iptables rules from a short-lived setup container sharing
+	// the agent's network namespace. Both markers always come from
+	// config.MetadataInterception, never from config.Env, a secret or the
+	// template fallback. The Apple runtime does not run the setup container,
+	// so it never reports interception as required.
 	if config.MetadataInterception && config.RuntimeName != appleContainerRuntimeName {
 		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionRequired)
+		addArg("-e", MetadataInterceptionSourceEnvVar+"="+MetadataInterceptionSourceRuntime)
 	} else {
 		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionOff)
 	}
@@ -3042,18 +3040,89 @@ func nfsOwnerIDs(uid, gid int) (int, int) {
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
 
 // MetadataInterceptionEnvVar tells sciontool inside a Docker/Podman agent
-// whether the in-container GCP metadata interception is required
-// (MetadataInterceptionRequired) or not (MetadataInterceptionOff). It is set
-// only by buildCommonRunArgs, from RunConfig.MetadataInterception, the same
-// field that grants NET_ADMIN; template, user and secret values are dropped.
-// Mirrored in pkg/sciontool/metadata (InterceptionEnvVar).
-const MetadataInterceptionEnvVar = "SCION_METADATA_INTERCEPTION"
-
-// Values of MetadataInterceptionEnvVar.
+// whether GCP metadata interception is required (MetadataInterceptionRequired)
+// or not (MetadataInterceptionOff). MetadataInterceptionSourceEnvVar records
+// that the runtime installs the rules from a short-lived setup container
+// (MetadataInterceptionSourceRuntime). Both are set only by buildCommonRunArgs
+// from RunConfig.MetadataInterception; template, user and secret values are
+// dropped. Mirrored in pkg/sciontool/metadata.
 const (
-	MetadataInterceptionRequired = "required"
-	MetadataInterceptionOff      = "off"
+	MetadataInterceptionEnvVar        = "SCION_METADATA_INTERCEPTION"
+	MetadataInterceptionRequired      = "required"
+	MetadataInterceptionOff           = "off"
+	MetadataInterceptionSourceEnvVar  = "SCION_METADATA_INTERCEPTION_SOURCE"
+	MetadataInterceptionSourceRuntime = "runtime"
 )
+
+const (
+	netnsSetupLabelKey = "scion.netns-setup"
+	netnsSetupTimeout  = 3 * time.Minute
+)
+
+// buildNetnsSetupArgs builds the container CLI argv for the short-lived
+// netns-setup container that joins the agent container's network namespace
+// with NET_ADMIN, runs init-firewall.sh if requested, installs the metadata
+// iptables rules, and exits. It carries only the minimal metadata/firewall
+// environment subset and a non-agent label so List ignores it.
+func buildNetnsSetupArgs(containerID string, cfg RunConfig) []string {
+	args := []string{
+		"run", "--rm",
+		"--network", "container:" + containerID,
+		"--cap-add", "NET_ADMIN",
+		"--user", "0",
+		"--entrypoint", "/usr/local/bin/sciontool",
+	}
+	envVals := make(map[string]string, 3)
+	for _, e := range cfg.Env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "SCION_METADATA_MODE", "SCION_METADATA_PORT", "SCION_INIT_FIREWALL":
+			envVals[k] = v
+		}
+	}
+	for _, k := range []string{"SCION_METADATA_MODE", "SCION_METADATA_PORT", "SCION_INIT_FIREWALL"} {
+		if v := envVals[k]; v != "" {
+			args = append(args, "-e", k+"="+v)
+		}
+	}
+	args = append(args,
+		"--label", netnsSetupLabelKey+"="+containerID,
+		cfg.Image,
+		"netns-setup",
+	)
+	return args
+}
+
+// runNetnsSetup runs the short-lived netns-setup container against
+// containerID with a 3-minute timeout.
+func runNetnsSetup(ctx context.Context, command, containerID string, cfg RunConfig) error {
+	setupCtx, cancel := context.WithTimeout(ctx, netnsSetupTimeout)
+	defer cancel()
+	args := buildNetnsSetupArgs(containerID, cfg)
+	out, err := runSimpleCommand(setupCtx, command, args...)
+	if err != nil {
+		if setupCtx.Err() != nil {
+			return fmt.Errorf("netns-setup timed out or cancelled: %w", setupCtx.Err())
+		}
+		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			return fmt.Errorf("netns-setup failed: %w (output: %s)", err, truncateForError(trimmed))
+		}
+		return fmt.Errorf("netns-setup failed: %w", err)
+	}
+	return nil
+}
+
+// removeCreatedContainer best-effort force-removes a container by ID using a
+// fresh context so cleanup still runs when the caller context was cancelled.
+func removeCreatedContainer(command, containerID string) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", containerID)
+	return err
+}
 
 // sharedDirGroups returns the guarded shared-dir leaf groups for config,
 // or nil when the agent mounts no shared dir from a shared backend.

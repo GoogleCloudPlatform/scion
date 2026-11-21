@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -164,53 +165,26 @@ func dropNetAdmin(required bool) error {
 	return nil
 }
 
-// Seams for metadataProtectionPreflight. Tests replace them; the defaults
-// check the real process.
-var (
-	preflightEUID = os.Geteuid
-	// preflightResolveIPTables resolves iptables the same way the install
-	// does (metadata's iptablesCmd: rootexec.Resolve, root-owned system
-	// directories only).
-	preflightResolveIPTables = func() error {
-		_, err := rootexec.Resolve("iptables")
-		return err
-	}
-	preflightNetAdminUsable = netcap.Usable
-)
-
 // metadataProtectionPreflight refuses the start, before any credential is
-// written or staged, when cfg requires the metadata interception (the
-// runtime granted the capability for it and set the required marker, in
-// block or assign mode) but this container cannot install it: init is not
-// root, the container shares the host network namespace, iptables does not
-// resolve, or CAP_NET_ADMIN is not in the effective and bounding sets.
+// written or staged, when cfg requires metadata interception
+// (SCION_METADATA_INTERCEPTION=required) but the runtime did not set the
+// runtime-managed source marker (SCION_METADATA_INTERCEPTION_SOURCE=runtime)
+// or the container shares the host network namespace.
 //
 // A nil cfg (passthrough, or no metadata mode) and a cfg without the
-// marker (Kubernetes, rootless Podman, the Apple runtime, host networking:
-// runtimes that never install the interception) pass unchanged.
-//
-// These are the failures init can see in advance. Anything only the real
-// install shows (a kernel without the nat table, say) is still caught by
-// the fatal metadata start in RunInit, after staging; see
-// removeTransportTokenOnRefusal for what that later exit cleans up.
+// required marker (Kubernetes, rootless Podman, the Apple runtime, host
+// networking) pass unchanged.
 func metadataProtectionPreflight(cfg *metadata.Config) error {
 	if cfg == nil || !cfg.InterceptionRequired {
 		return nil
 	}
 	reason := ""
 	switch {
-	case preflightEUID() != 0:
-		reason = "init is not running as root"
+	case cfg.InterceptionSource != metadata.InterceptionSourceRuntime:
+		reason = fmt.Sprintf("runtime-managed interception marker (%s=%s) is not set",
+			metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime)
 	case cfg.NetworkMode == "host":
 		reason = "the container shares the host network namespace"
-	default:
-		if err := preflightResolveIPTables(); err != nil {
-			reason = fmt.Sprintf("iptables is not available: %v", err)
-		} else if usable, err := preflightNetAdminUsable(); err != nil {
-			reason = fmt.Sprintf("cannot check %s: %v", netcap.CapabilityName, err)
-		} else if !usable {
-			reason = netcap.CapabilityName + " is not in the effective and bounding sets"
-		}
 	}
 	if reason == "" {
 		return nil
@@ -218,6 +192,69 @@ func metadataProtectionPreflight(cfg *metadata.Config) error {
 	// The reason goes to the local log only; the Hub sees the fixed text.
 	log.Error("Metadata protection (mode=%s) cannot be set up: %s", cfg.Mode, reason)
 	return errMetadataProtectionUnavailable
+}
+
+// Seams and parameters for waitForRedirect.
+var (
+	redirectProbeBaseURL        = "http://169.254.169.254"
+	redirectProbeAttemptTimeout = time.Second
+	redirectProbeDeadline       = 180 * time.Second
+	redirectProbeInterval       = 100 * time.Millisecond
+	runWaitForRedirect          = waitForRedirect
+)
+
+// waitForRedirect polls the metadata IP on the emulator's per-boot random
+// probe path until the emulator answers HTTP 204 No Content, proving that the
+// runtime's setup container has installed the nat OUTPUT REDIRECT rule.
+// Returns errMetadataProtectionUnavailable if the deadline expires or ctx is
+// cancelled.
+func waitForRedirect(ctx context.Context, probePath string) error {
+	if probePath == "" {
+		log.Error("Metadata redirect probe path is empty")
+		return errMetadataProtectionUnavailable
+	}
+	client := &http.Client{
+		Timeout: redirectProbeAttemptTimeout,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	url := redirectProbeBaseURL + probePath
+	deadline := time.Now().Add(redirectProbeDeadline)
+	var lastErr error
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			log.Error("Metadata redirect probe request build failed: %v", err)
+			return errMetadataProtectionUnavailable
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusNoContent {
+				log.Info("Metadata redirect verified via probe")
+				return nil
+			}
+			lastErr = fmt.Errorf("unexpected status %d", resp.StatusCode)
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			log.Error("Metadata redirect verification timed out after %s: %v", redirectProbeDeadline, lastErr)
+			return errMetadataProtectionUnavailable
+		}
+		timer := time.NewTimer(redirectProbeInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			log.Error("Metadata redirect verification cancelled: %v", ctx.Err())
+			return errMetadataProtectionUnavailable
+		case <-timer.C:
+		}
+	}
 }
 
 // removeTransportTokenOnRefusal removes the transport token file and its

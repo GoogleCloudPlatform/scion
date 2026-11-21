@@ -140,17 +140,18 @@ func TestPodmanRuntime_ExecUserMethod(t *testing.T) {
 
 // TestPodmanRuntime_Run_MetadataInterception checks that rootless Podman,
 // whose init drops to the keep-id user before the metadata server starts,
-// never gets NET_ADMIN or a required interception marker, while rootful
-// Podman keeps both.
+// never gets a required interception marker, while rootful Podman gets the
+// required and runtime-source markers without granting NET_ADMIN to the
+// agent container.
 func TestPodmanRuntime_Run_MetadataInterception(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		rootless     bool
-		wantMarker   string
-		wantNetAdmin bool
+		name       string
+		rootless   bool
+		wantMarker string
+		wantSource bool
 	}{
-		{name: "rootless", rootless: true, wantMarker: "SCION_METADATA_INTERCEPTION=off", wantNetAdmin: false},
-		{name: "rootful", rootless: false, wantMarker: "SCION_METADATA_INTERCEPTION=required", wantNetAdmin: true},
+		{name: "rootless", rootless: true, wantMarker: "SCION_METADATA_INTERCEPTION=off", wantSource: false},
+		{name: "rootful", rootless: false, wantMarker: "SCION_METADATA_INTERCEPTION=required", wantSource: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := runPodmanRecorded(t, tc.rootless, RunConfig{
@@ -165,8 +166,11 @@ func TestPodmanRuntime_Run_MetadataInterception(t *testing.T) {
 			if !strings.Contains(out, tc.wantMarker) {
 				t.Errorf("expected %q in args, got %q", tc.wantMarker, out)
 			}
-			if got := strings.Contains(out, "--cap-add NET_ADMIN"); got != tc.wantNetAdmin {
-				t.Errorf("NET_ADMIN granted = %v, want %v (args %q)", got, tc.wantNetAdmin, out)
+			if got := strings.Contains(out, "SCION_METADATA_INTERCEPTION_SOURCE=runtime"); got != tc.wantSource {
+				t.Errorf("SCION_METADATA_INTERCEPTION_SOURCE=runtime present = %v, want %v (args %q)", got, tc.wantSource, out)
+			}
+			if strings.Contains(out, "--cap-add NET_ADMIN") {
+				t.Errorf("agent container must not receive --cap-add NET_ADMIN (args %q)", out)
 			}
 		})
 	}

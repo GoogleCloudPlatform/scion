@@ -71,12 +71,14 @@ type Config struct {
 	// When "host", iptables interception is skipped to avoid leaking
 	// redirect rules into the host's network namespace.
 	NetworkMode string
-	// InterceptionRequired is set when the runtime granted the container the
-	// capability for the metadata interception (InterceptionEnvVar is
-	// InterceptionRequired). Start then fails when the interception, or in
-	// block mode the filter rule, cannot be installed, instead of continuing
-	// with only the GCE_METADATA_HOST variables.
+	// InterceptionRequired is set when the runtime requires metadata
+	// interception (InterceptionEnvVar is InterceptionRequired).
 	InterceptionRequired bool
+	// InterceptionSource records how metadata interception is installed
+	// (InterceptionSourceEnvVar). When InterceptionSourceRuntime, the
+	// runtime installs the rules in the container's network namespace
+	// via a setup container and sciontool verifies them by probe.
+	InterceptionSource string
 
 	// FetchGCPToken, if set, is called to obtain a GCP access token from the
 	// Hub instead of making a direct HTTP call. This allows the metadata
@@ -89,13 +91,14 @@ type Config struct {
 	FetchGCPIdentityToken func(ctx context.Context, audience string) (string, error)
 }
 
-// InterceptionEnvVar and its required value mirror
-// runtime.MetadataInterceptionEnvVar and runtime.MetadataInterceptionRequired
-// (pkg/runtime/common.go), which the Docker/Podman runtime sets from the same
-// decision that grants NET_ADMIN.
+// InterceptionEnvVar, InterceptionSourceEnvVar and their values mirror
+// pkg/runtime/common.go, which the Docker/Podman runtime sets when metadata
+// interception is enabled.
 const (
-	InterceptionEnvVar   = "SCION_METADATA_INTERCEPTION"
-	InterceptionRequired = "required"
+	InterceptionEnvVar        = "SCION_METADATA_INTERCEPTION"
+	InterceptionRequired      = "required"
+	InterceptionSourceEnvVar  = "SCION_METADATA_INTERCEPTION_SOURCE"
+	InterceptionSourceRuntime = "runtime"
 )
 
 // ErrInterceptionUnavailable is returned by Start when InterceptionRequired is
@@ -186,6 +189,7 @@ func ConfigFromEnv() *Config {
 		NetworkMode: os.Getenv("SCION_NETWORK_MODE"),
 
 		InterceptionRequired: os.Getenv(InterceptionEnvVar) == InterceptionRequired,
+		InterceptionSource:   os.Getenv(InterceptionSourceEnvVar),
 	}
 }
 
@@ -257,6 +261,7 @@ type Server struct {
 
 	shutdownToken     string
 	shutdownTokenPath string
+	probePath         string
 
 	// Hub refusals of the access token and of identity tokens (refusal.go).
 	accessRefusal *refusalState
@@ -409,6 +414,10 @@ func selectLinkLocalAddress(found []string) (string, error) {
 
 // New creates a new metadata server.
 func New(cfg Config) *Server {
+	var probeBuf [32]byte
+	if _, err := rand.Read(probeBuf[:]); err != nil {
+		panic(fmt.Sprintf("metadata: generate probe path: %v", err))
+	}
 	return &Server{
 		config:         cfg,
 		client:         &http.Client{Timeout: 10 * time.Second},
@@ -416,7 +425,16 @@ func New(cfg Config) *Server {
 		idFetches:      make(map[string]chan struct{}),
 		accessRefusal:  newRefusalState(),
 		idRefusal:      newRefusalState(),
+		probePath:      "/" + hex.EncodeToString(probeBuf[:]),
 	}
+}
+
+// ProbePath returns the per-boot random path that the server answers with
+// HTTP 204 No Content in every mode without requiring Metadata-Flavor.
+// Used by sciontool init to verify that the runtime's metadata redirect
+// reaches this emulator before starting any workload.
+func (s *Server) ProbePath() string {
+	return s.probePath
 }
 
 func (s *Server) buildMux() http.Handler {
@@ -424,7 +442,18 @@ func (s *Server) buildMux() http.Handler {
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/computeMetadata/v1/", s.handleMetadata)
 	mux.HandleFunc("/_scion/shutdown", s.handleShutdown)
+	if s.probePath != "" {
+		mux.HandleFunc(s.probePath, s.handleProbe)
+	}
 	return s.requireMetadataFlavor(mux)
+}
+
+func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if s.probePath == "" || r.URL.Path != s.probePath {
+		http.NotFound(w, r)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // Start starts the metadata server in the background. Returns immediately.
@@ -510,14 +539,16 @@ func (s *Server) Start(ctx context.Context) error {
 	// This runs before the server starts serving, so a required interception
 	// that fails closes the listener here, synchronously, and Start leaves
 	// nothing bound behind it.
-	if err := s.configureMetadataInterception(os.Getuid()); err != nil {
-		s.cleanupInterception()
-		cancel()
-		_ = ln.Close()
-		if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-			log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
+	if s.config.InterceptionSource != InterceptionSourceRuntime {
+		if err := s.configureMetadataInterception(os.Getuid()); err != nil {
+			s.cleanupInterception()
+			cancel()
+			_ = ln.Close()
+			if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
+			}
+			return err
 		}
-		return err
 	}
 
 	srv := &http.Server{
@@ -969,8 +1000,9 @@ func (s *Server) restartHTTP(ctx context.Context) error {
 
 func (s *Server) requireMetadataFlavor(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Health check at root doesn't require the header
-		if r.URL.Path == "/" {
+		// Health check at root and the per-boot redirect probe do not require
+		// the Metadata-Flavor header.
+		if r.URL.Path == "/" || (s.probePath != "" && r.URL.Path == s.probePath) {
 			next.ServeHTTP(w, r)
 			return
 		}
