@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -313,5 +314,69 @@ func TestReincarnateHandoffTemplate_WorksAnywhere(t *testing.T) {
 			require.Error(t, err, "the requires-project gate must still reject an ordinary reincarnate call")
 			assert.Contains(t, err.Error(), "not in a scion project")
 		})
+	})
+}
+
+func TestFprintReincarnationPlan_ReasonsAndHarnessName(t *testing.T) {
+	t.Run("reasons and harness name next to hash", func(t *testing.T) {
+		var out, errBuf bytes.Buffer
+		fprintReincarnationPlan(&out, &errBuf, hubclient.ReincarnationPlan{
+			Template: hubclient.FieldChange{Old: "t1", New: "t1"},
+			Image: hubclient.FieldChange{
+				Old:    "us-docker.pkg.dev/p/r/scion-claude:latest",
+				New:    "us-docker.pkg.dev/p/r/scion-claude:latest",
+				Reason: "registry resolved by broker",
+			},
+			HarnessName: "antigravity",
+			HarnessCfg: hubclient.FieldChange{
+				Old:    "3f2a",
+				New:    "9c1d",
+				Reason: `harness config "antigravity" content updated`,
+			},
+			Model: hubclient.FieldChange{
+				Old:    "Gemini 3.8 Flash (Medium)",
+				New:    "gemini-4-hydrogen-medium",
+				Reason: `alias "medium" re-resolved by harness config "antigravity"`,
+			},
+			Branch: "scion/dev",
+		})
+		want := strings.Join([]string{
+			"Reincarnation plan:",
+			"  Template:      t1 (unchanged)",
+			"  Image:         us-docker.pkg.dev/p/r/scion-claude:latest (unchanged; registry resolved by broker)",
+			`  Harness cfg:   antigravity 3f2a -> antigravity 9c1d (harness config "antigravity" content updated)`,
+			`  Model:         Gemini 3.8 Flash (Medium) -> gemini-4-hydrogen-medium (alias "medium" re-resolved by harness config "antigravity")`,
+			"  Branch:        scion/dev",
+			"",
+		}, "\n")
+		assert.Equal(t, want, out.String())
+		assert.Empty(t, errBuf.String())
+	})
+
+	t.Run("unchanged harness cfg shows name and move image shows broker reason", func(t *testing.T) {
+		var out, errBuf bytes.Buffer
+		fprintReincarnationPlan(&out, &errBuf, hubclient.ReincarnationPlan{
+			Template: hubclient.FieldChange{Old: "t1", New: "t1"},
+			Image: hubclient.FieldChange{
+				Old:    "src.example/scion-claude:latest",
+				New:    "scion-claude:latest",
+				Reason: "same image; registry resolved by target broker",
+			},
+			HarnessName: "claude",
+			HarnessCfg:  hubclient.FieldChange{Old: "h1", New: "h1"},
+			Model:       hubclient.FieldChange{Old: "sonnet", New: "sonnet"},
+			Branch:      "main",
+		})
+		want := strings.Join([]string{
+			"Reincarnation plan:",
+			"  Template:      t1 (unchanged)",
+			"  Image:         src.example/scion-claude:latest -> scion-claude:latest (same image; registry resolved by target broker)",
+			"  Harness cfg:   claude h1 (unchanged)",
+			"  Model:         sonnet (unchanged)",
+			"  Branch:        main",
+			"",
+		}, "\n")
+		assert.Equal(t, want, out.String())
+		assert.Empty(t, errBuf.String())
 	})
 }

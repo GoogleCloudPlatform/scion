@@ -734,21 +734,57 @@ func printMoveConsequences(w io.Writer, cs []hubclient.MoveConsequence) {
 // values, per design §3.2), the resolved branch, and any warnings from a
 // legacy-agent CreateInputs reconstruction.
 func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
-	printChange := func(label string, c hubclient.FieldChange) {
-		if c.Old == c.New {
-			fmt.Printf("  %-14s %s (unchanged)\n", label+":", valueOrNone(c.New))
+	fprintReincarnationPlan(os.Stdout, os.Stderr, plan)
+}
+
+func fprintReincarnationPlan(w, errW io.Writer, plan hubclient.ReincarnationPlan) {
+	printFormatted := func(label, oldVal, newVal, reason string, unchanged bool) {
+		if unchanged {
+			if reason != "" {
+				_, _ = fmt.Fprintf(w, "  %-14s %s (unchanged; %s)\n", label+":", newVal, reason)
+				return
+			}
+			_, _ = fmt.Fprintf(w, "  %-14s %s (unchanged)\n", label+":", newVal)
 			return
 		}
-		fmt.Printf("  %-14s %s -> %s\n", label+":", valueOrNone(c.Old), valueOrNone(c.New))
+		if reason != "" {
+			_, _ = fmt.Fprintf(w, "  %-14s %s -> %s (%s)\n", label+":", oldVal, newVal, reason)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "  %-14s %s -> %s\n", label+":", oldVal, newVal)
+	}
+	printChange := func(label string, c hubclient.FieldChange) {
+		printFormatted(label, valueOrNone(c.Old), valueOrNone(c.New), c.Reason, c.Old == c.New)
 	}
 
-	fmt.Println("Reincarnation plan:")
+	_, _ = fmt.Fprintln(w, "Reincarnation plan:")
 	printChange("Template", plan.Template)
 	printChange("Image", plan.Image)
 	if plan.Harness != nil {
 		printChange("Harness", *plan.Harness)
 	}
-	printChange("Harness cfg", plan.HarnessCfg)
+	oldHCName, newHCName := plan.HarnessName, plan.HarnessName
+	if plan.Harness != nil {
+		oldHCName = plan.Harness.Old
+		if plan.Harness.New != "" {
+			newHCName = plan.Harness.New
+		}
+	}
+	formatHarnessCfg := func(name, hash string) string {
+		if name != "" && hash != "" {
+			return name + " " + hash
+		}
+		if name != "" {
+			return name
+		}
+		return valueOrNone(hash)
+	}
+	printFormatted("Harness cfg",
+		formatHarnessCfg(oldHCName, plan.HarnessCfg.Old),
+		formatHarnessCfg(newHCName, plan.HarnessCfg.New),
+		plan.HarnessCfg.Reason,
+		oldHCName == newHCName && plan.HarnessCfg.Old == plan.HarnessCfg.New,
+	)
 	printChange("Model", plan.Model)
 	printPatch := func(label string, c *hubclient.FieldChange) {
 		if c != nil {
@@ -759,27 +795,27 @@ func printReincarnationPlan(plan hubclient.ReincarnationPlan) {
 	printPatch("Service acct", plan.ServiceAccount)
 	printPatch("Thinking", plan.ThinkingLevel)
 	printPatch("Harness auth", plan.HarnessAuth)
-	fmt.Printf("  %-14s %s\n", "Branch:", valueOrNone(plan.Branch))
+	_, _ = fmt.Fprintf(w, "  %-14s %s\n", "Branch:", valueOrNone(plan.Branch))
 
 	if len(plan.EnvKeys.Added) > 0 {
-		fmt.Printf("  Env added:     %s\n", strings.Join(plan.EnvKeys.Added, ", "))
+		_, _ = fmt.Fprintf(w, "  Env added:     %s\n", strings.Join(plan.EnvKeys.Added, ", "))
 	}
 	if len(plan.EnvKeys.Removed) > 0 {
-		fmt.Printf("  Env removed:   %s\n", strings.Join(plan.EnvKeys.Removed, ", "))
+		_, _ = fmt.Fprintf(w, "  Env removed:   %s\n", strings.Join(plan.EnvKeys.Removed, ", "))
 	}
 	if len(plan.EnvKeys.Changed) > 0 {
-		fmt.Printf("  Env changed:   %s\n", strings.Join(plan.EnvKeys.Changed, ", "))
+		_, _ = fmt.Fprintf(w, "  Env changed:   %s\n", strings.Join(plan.EnvKeys.Changed, ", "))
 	}
 
 	warnings := plan.Warnings
 	if plan.HomeReset && len(warnings) > 0 {
 		// The hub puts the home-reset warning first; the CLI only adds
 		// emphasis, so every client shows the same wording.
-		printHomeResetWarning(os.Stderr, warnings[0])
+		printHomeResetWarning(errW, warnings[0])
 		warnings = warnings[1:]
 	}
-	for _, w := range warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	for _, warn := range warnings {
+		_, _ = fmt.Fprintf(errW, "Warning: %s\n", warn)
 	}
 }
 

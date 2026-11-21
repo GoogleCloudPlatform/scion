@@ -193,15 +193,15 @@ func TestReincarnatePatch_DryRunShowsOldAndNewPerFlag(t *testing.T) {
 
 	assert.Equal(t, []string{"serviceAccount", "role", "image", "model", "thinkingLevel", "harnessAuth"}, p.Patched)
 	require.NotNil(t, p.ServiceAccount)
-	assert.Equal(t, FieldChange{Old: oldSA.Email, New: newSA.Email}, *p.ServiceAccount)
+	assert.Equal(t, FieldChange{Old: oldSA.Email, New: newSA.Email, Reason: "requested"}, *p.ServiceAccount)
 	require.NotNil(t, p.Role)
-	assert.Equal(t, FieldChange{Old: "baseline", New: "readonly"}, *p.Role)
-	assert.Equal(t, FieldChange{Old: "old-image:v1", New: "new-image:v2"}, p.Image)
-	assert.Equal(t, FieldChange{Old: "old-model", New: "new-model"}, p.Model)
+	assert.Equal(t, FieldChange{Old: "baseline", New: "readonly", Reason: "requested"}, *p.Role)
+	assert.Equal(t, FieldChange{Old: "old-image:v1", New: "new-image:v2", Reason: "requested"}, p.Image)
+	assert.Equal(t, FieldChange{Old: "old-model", New: "new-model", Reason: "requested"}, p.Model)
 	require.NotNil(t, p.ThinkingLevel)
-	assert.Equal(t, FieldChange{Old: "10", New: "80"}, *p.ThinkingLevel)
+	assert.Equal(t, FieldChange{Old: "10", New: "80", Reason: "requested"}, *p.ThinkingLevel)
 	require.NotNil(t, p.HarnessAuth)
-	assert.Equal(t, FieldChange{Old: "api-key", New: "vertex-ai"}, *p.HarnessAuth)
+	assert.Equal(t, FieldChange{Old: "api-key", New: "vertex-ai", Reason: "requested"}, *p.HarnessAuth)
 
 	assertAgentUntouched(t, s, disp, agent.ID, before)
 }

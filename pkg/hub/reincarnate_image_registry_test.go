@@ -84,7 +84,9 @@ func TestReincarnateMove_DryRun_TargetWithoutHubRewriteKeepsBareImage(t *testing
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, "src.example/user-image:v1", resp.Plan.Image.Old)
 	assert.Equal(t, "user-image:v1", resp.Plan.Image.New)
+	assert.Equal(t, "same image; registry resolved by target broker", resp.Plan.Image.Reason)
 }
 
 // In place, the registry is resolved on the agent's own broker for the new
@@ -169,6 +171,7 @@ func TestReincarnateInPlace_DryRun_BrokerOwnedRegistryShowsUnchanged(t *testing.
 			plan := decodeReincarnateResponse(t, rec).Plan
 			assert.Equal(t, qualified, plan.Image.Old)
 			assert.Equal(t, qualified, plan.Image.New)
+			assert.Equal(t, "registry resolved by broker", plan.Image.Reason)
 		})
 	}
 }
@@ -228,4 +231,5 @@ func TestReincarnateInPlace_DryRun_BrokerOwnedRegistryGenuineImageChange(t *test
 	plan := decodeReincarnateResponse(t, rec).Plan
 	assert.Equal(t, qualified, plan.Image.Old)
 	assert.Equal(t, "scion-codex:latest", plan.Image.New)
+	assert.Equal(t, "registry resolved by broker", plan.Image.Reason)
 }

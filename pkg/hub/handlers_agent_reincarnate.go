@@ -120,10 +120,12 @@ type ReincarnateAgentResponse struct {
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
-// reincarnation plan.
+// reincarnation plan, with an optional hub-written reason explaining why the
+// field changed (or noting broker-side resolution).
 type FieldChange struct {
-	Old string `json:"old,omitempty"`
-	New string `json:"new,omitempty"`
+	Old    string `json:"old,omitempty"`
+	New    string `json:"new,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // KeyDiff describes an old→new change to a set of map keys (e.g. env var
@@ -159,9 +161,12 @@ type ReincarnationPlan struct {
 	// agent's home (a harness switch, ptone/scion#7757); Warnings[0] is
 	// then the home-reset warning. Harness is the harness-config name
 	// old→new, set when the request names a harness config (HarnessCfg is
-	// the content hash change).
-	HomeReset bool         `json:"homeReset,omitempty"`
-	Harness   *FieldChange `json:"harness,omitempty"`
+	// the content hash change). HarnessName is the resolved harness-config
+	// name for the new generation, always populated when known so clients
+	// can display it alongside HarnessCfg's hash.
+	HomeReset   bool         `json:"homeReset,omitempty"`
+	Harness     *FieldChange `json:"harness,omitempty"`
+	HarnessName string       `json:"harnessName,omitempty"`
 }
 
 // removedSharedDirBackendOptionError is the 400 message for a reincarnate
@@ -550,6 +555,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imgCtx)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	addHarnessSwitchToPlan(&plan, agent.AppliedConfig, fresh, patch)
+	s.addPlanReasons(ctx, &plan, agent.AppliedConfig, fresh, req, &runAs)
 	addAuthorityToPlan(&plan, auth)
 	targetGeneration := agent.Generation + 1
 
@@ -856,6 +862,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	}
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imgCtx)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	s.addPlanReasons(ctx, &plan, agent.AppliedConfig, fresh, req, &runAs)
 	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
 	// The access probes judge the config the next generation runs with: a

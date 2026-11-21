@@ -193,7 +193,7 @@ func TestReincarnateHarness_DryRunPlan(t *testing.T) {
 	plan := decodeReincarnateResponse(t, rec).Plan
 
 	require.NotNil(t, plan.Harness)
-	assert.Equal(t, FieldChange{Old: "claude-hc", New: "codex-hc"}, *plan.Harness)
+	assert.Equal(t, FieldChange{Old: "claude-hc", New: "codex-hc", Reason: "requested"}, *plan.Harness)
 	assert.True(t, plan.HomeReset)
 	assert.Equal(t, "codex-hash", plan.HarnessCfg.New)
 	require.NotEmpty(t, plan.Warnings)

@@ -653,28 +653,105 @@ func sameImageModuloBrokerRewrite(oldImg, freshImg string) bool {
 //     registry.
 func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []string, img planImageContext) ReincarnationPlan {
 	plan := ReincarnationPlan{
-		Template:   FieldChange{Old: old.TemplateHash, New: fresh.TemplateHash},
-		Image:      FieldChange{Old: old.Image, New: fresh.Image},
-		HarnessCfg: FieldChange{Old: old.HarnessConfigHash, New: fresh.HarnessConfigHash},
-		Model:      FieldChange{Old: old.Model, New: fresh.Model},
-		EnvKeys:    diffEnvKeys(old.Env, fresh.Env),
-		Branch:     fresh.Branch,
-		Warnings:   warnings,
-	}
-	if old.Image == "" {
-		return plan
+		Template:    FieldChange{Old: old.TemplateHash, New: fresh.TemplateHash},
+		Image:       FieldChange{Old: old.Image, New: fresh.Image},
+		HarnessCfg:  FieldChange{Old: old.HarnessConfigHash, New: fresh.HarnessConfigHash},
+		HarnessName: fresh.HarnessConfig,
+		Model:       FieldChange{Old: old.Model, New: fresh.Model},
+		EnvKeys:     diffEnvKeys(old.Env, fresh.Env),
+		Branch:      fresh.Branch,
+		Warnings:    warnings,
 	}
 	if !config.IsShortFormImage(fresh.Image) || img.Registry != "" {
-		if config.RewriteImageRef(old.Image, img.Registry, img.Tag) == fresh.Image {
+		if old.Image != "" && config.RewriteImageRef(old.Image, img.Registry, img.Tag) == fresh.Image {
 			plan.Image.Old = fresh.Image
 		}
 		return plan
 	}
-	if img.SameBroker && sameImageModuloBrokerRewrite(old.Image, fresh.Image) {
-		plan.Image.Old = old.Image
-		plan.Image.New = old.Image
+	if old.Image != "" && sameImageModuloBrokerRewrite(old.Image, fresh.Image) {
+		if img.SameBroker {
+			plan.Image.Old = old.Image
+			plan.Image.New = old.Image
+			plan.Image.Reason = "registry resolved by broker"
+		} else {
+			plan.Image.Reason = "same image; registry resolved by target broker"
+		}
+		return plan
 	}
+	plan.Image.Reason = "registry resolved by broker"
 	return plan
+}
+
+// addPlanReasons populates FieldChange.Reason on plan entries so clients can
+// explain why each changed field differs (ptone/scion#7918). Unchanged fields
+// leave Reason empty, except for broker-resolved image notes already set by
+// computeReincarnationPlan.
+func (s *Server) addPlanReasons(ctx context.Context, plan *ReincarnationPlan, old, fresh *store.AgentAppliedConfig, req ReincarnateAgentRequest, runAs *store.Agent) {
+	if plan == nil || old == nil || fresh == nil {
+		return
+	}
+	setRequested := func(c *FieldChange) {
+		if c != nil && c.Old != c.New {
+			c.Reason = "requested"
+		}
+	}
+	if req.Role != "" {
+		setRequested(plan.Role)
+	}
+	if req.ServiceAccount != "" {
+		setRequested(plan.ServiceAccount)
+	}
+	if req.ThinkingLevel != nil {
+		setRequested(plan.ThinkingLevel)
+	}
+	if req.HarnessAuth != "" {
+		setRequested(plan.HarnessAuth)
+	}
+	if req.HarnessConfig != "" {
+		setRequested(plan.Harness)
+	}
+
+	if plan.Template.Old != plan.Template.New {
+		plan.Template.Reason = "template content updated"
+	}
+
+	if plan.HarnessCfg.Old != plan.HarnessCfg.New {
+		if req.HarnessConfig != "" && old.HarnessConfig != fresh.HarnessConfig {
+			plan.HarnessCfg.Reason = "requested"
+		} else if fresh.HarnessConfig != "" {
+			plan.HarnessCfg.Reason = fmt.Sprintf("harness config %q content updated", fresh.HarnessConfig)
+		} else {
+			plan.HarnessCfg.Reason = "harness config content updated"
+		}
+	}
+
+	if plan.Model.Old != plan.Model.New {
+		if req.Model != "" {
+			plan.Model.Reason = "requested"
+		} else {
+			explicitModel := ""
+			if fresh.CreateInputs != nil && fresh.CreateInputs.InlineConfig != nil {
+				explicitModel = fresh.CreateInputs.InlineConfig.Model
+			}
+			if explicitModel == "" {
+				plan.Model.Reason = "not set at create; re-resolved from current project/template/hub default"
+			} else if s.resolveModelAliasForAgent(ctx, runAs, explicitModel) != explicitModel {
+				if fresh.HarnessConfig != "" {
+					plan.Model.Reason = fmt.Sprintf("alias %q re-resolved by harness config %q", explicitModel, fresh.HarnessConfig)
+				} else {
+					plan.Model.Reason = fmt.Sprintf("alias %q re-resolved", explicitModel)
+				}
+			}
+		}
+	}
+
+	if plan.Image.Old != plan.Image.New {
+		if req.Image != "" {
+			plan.Image.Reason = "requested"
+		} else if plan.Image.Reason == "" && explicitDispatchImage(fresh) == "" {
+			plan.Image.Reason = "harness config default image changed"
+		}
+	}
 }
 
 // diffEnvKeys compares two env maps by key name only (never values, per
