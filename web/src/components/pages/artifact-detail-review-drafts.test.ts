@@ -101,6 +101,7 @@ interface DraftServerState {
   currentSeq: number;
   requests: Array<{ method: string; url: string; body?: string }>;
   nextPutResponse?: () => Response;
+  holdPut?: (res: Response) => Promise<Response>;
   nextDeleteResponse?: () => Response;
   finalizeResponse?: () => Response;
 }
@@ -164,12 +165,11 @@ function mockHub(state: DraftServerState): void {
           savedAt,
           createdAt: state.draft?.createdAt ?? savedAt,
         };
-        return reply(
-          new Response(
-            JSON.stringify({ rev: state.draft.rev, savedAt, currentSeq: state.currentSeq }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } }
-          )
+        const res = new Response(
+          JSON.stringify({ rev: state.draft.rev, savedAt, currentSeq: state.currentSeq }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
         );
+        return state.holdPut ? state.holdPut(res) : reply(res);
       }
       if (method === 'DELETE') {
         if (state.nextDeleteResponse) return reply(state.nextDeleteResponse());
@@ -570,10 +570,71 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
 
   it('drops the buffer and cancels draft activity on sign-out (ACCOUNT_TEARDOWN_EVENT) and writes nothing to browser storage (C8)', async () => {
     const lsSpy = vi.spyOn(Storage.prototype, 'setItem');
-    const state: DraftServerState = { draft: null, currentSeq: 1, requests: [] };
-    mockHub(state);
-    const el = await mountPage();
+    const idbOpen = vi.fn();
+    const cachesOpen = vi.fn();
+    const origIdb = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+    const origCaches = Object.getOwnPropertyDescriptor(globalThis, 'caches');
+    Object.defineProperty(globalThis, 'indexedDB', {
+      configurable: true,
+      value: { open: idbOpen },
+    });
+    Object.defineProperty(globalThis, 'caches', {
+      configurable: true,
+      value: { open: cachesOpen },
+    });
 
+    try {
+      const state: DraftServerState = { draft: null, currentSeq: 1, requests: [] };
+      mockHub(state);
+      const el = await mountPage();
+
+      findButton(el, '.header-actions sl-button', 'Review')!.click();
+      await settle(el);
+
+      el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+        new CustomEvent('content-changed', { detail: { content: MARKED_TEXT } })
+      );
+      await el.updateComplete;
+      findButton(el, '.edit-footer sl-button', 'Save Draft')!.click();
+      await settle(el);
+
+      // Sign-out clears Review mode and disarms beforeunload.
+      window.dispatchEvent(new CustomEvent(ACCOUNT_TEARDOWN_EVENT));
+      await el.updateComplete;
+
+      expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+      const unload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+      window.dispatchEvent(unload);
+      expect(unload.defaultPrevented).toBe(false);
+
+      // C8: zero writes to localStorage, sessionStorage, IndexedDB, or Cache API.
+      expect(lsSpy).not.toHaveBeenCalled();
+      expect(idbOpen).not.toHaveBeenCalled();
+      expect(cachesOpen).not.toHaveBeenCalled();
+      expect(window.localStorage.length).toBe(0);
+      expect(window.sessionStorage.length).toBe(0);
+    } finally {
+      if (origIdb) Object.defineProperty(globalThis, 'indexedDB', origIdb);
+      else delete (globalThis as Record<string, unknown>).indexedDB;
+      if (origCaches) Object.defineProperty(globalThis, 'caches', origCaches);
+      else delete (globalThis as Record<string, unknown>).caches;
+    }
+  });
+
+  it('settles an in-flight rev-0 draft PUT before Submit Review so DELETE ?rev=1 removes the draft (R1)', async () => {
+    let releasePut!: () => void;
+    const state: DraftServerState = {
+      draft: null,
+      currentSeq: 1,
+      requests: [],
+      holdPut: (res): Promise<Response> =>
+        new Promise<Response>((resolve) => {
+          releasePut = (): void => resolve(res);
+        }),
+    };
+    mockHub(state);
+
+    const el = await mountPage();
     findButton(el, '.header-actions sl-button', 'Review')!.click();
     await settle(el);
 
@@ -582,19 +643,63 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     );
     await el.updateComplete;
 
-    // Sign-out clears Review mode and disarms beforeunload.
-    window.dispatchEvent(new CustomEvent(ACCOUNT_TEARDOWN_EVENT));
+    // Start rev-0 Save Draft PUT (committed on hub, HTTP response held in flight).
+    findButton(el, '.edit-footer sl-button', 'Save Draft')!.click();
     await el.updateComplete;
 
-    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
-    const unload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
-    window.dispatchEvent(unload);
-    expect(unload.defaultPrevented).toBe(false);
+    // Belt-and-braces: Submit Review is disabled while PUT is in flight.
+    const submitBtn = findButton(el, '.edit-footer sl-button', 'Submit Review')!;
+    expect(submitBtn.hasAttribute('disabled')).toBe(true);
 
-    // C8: zero browser storage writes.
-    expect(lsSpy).not.toHaveBeenCalled();
-    expect(window.localStorage.length).toBe(0);
-    expect(window.sessionStorage.length).toBe(0);
+    // Trigger saveReview() while the rev-0 PUT is in flight; quiesce() awaits it.
+    const submitPromise = (el as unknown as { saveReview(): Promise<void> }).saveReview();
+    releasePut();
+    await submitPromise;
+    await settle(el);
+
+    const delReq = state.requests.find(
+      (r) => r.method === 'DELETE' && r.url.includes('/review-draft')
+    );
+    expect(delReq?.url).toContain('?rev=1');
+    expect(state.draft).toBeNull();
+    expect(state.currentSeq).toBe(2);
+  });
+
+  it('Save draft and close awaits an in-flight PUT and closes Review mode cleanly (S2)', async () => {
+    let releasePut!: () => void;
+    const state: DraftServerState = {
+      draft: null,
+      currentSeq: 1,
+      requests: [],
+      holdPut: (res): Promise<Response> =>
+        new Promise<Response>((resolve) => {
+          releasePut = (): void => resolve(res);
+        }),
+    };
+    mockHub(state);
+
+    const el = await mountPage();
+    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    await settle(el);
+
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED_TEXT } })
+    );
+    await el.updateComplete;
+
+    findButton(el, '.edit-footer sl-button', 'Save Draft')!.click();
+    await el.updateComplete;
+
+    // Click Cancel while PUT is in flight -> opens Cancel dialog.
+    findButton(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await el.updateComplete;
+    const saveCloseBtn = el.shadowRoot!.querySelector<HTMLElement>('sl-button.draft-cancel-save')!;
+    saveCloseBtn.click();
+    releasePut();
+    await settle(el);
+
+    expect(state.draft?.rev).toBe(1);
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
   });
 
   it('renders the polite draft status line in the graphical .g-toolbar layout too', async () => {

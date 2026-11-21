@@ -1871,7 +1871,12 @@ export class ScionPageArtifactDetail extends LitElement {
       return;
     this.reviewBusy = true;
     this.reviewError = null;
+    const draftCtrl = this.reviewDraftsEnabled ? this.draftController : null;
     try {
+      if (draftCtrl) {
+        await draftCtrl.quiesce();
+        if (!this.reviewing || this.draftController !== draftCtrl) return;
+      }
       const files: PublishFile[] = v.files
         .filter((x) => !isRemoteFile(x))
         .map((x) =>
@@ -1888,8 +1893,8 @@ export class ScionPageArtifactDetail extends LitElement {
         files,
         resume: this.reviewPending,
       });
-      if (this.reviewDraftsEnabled && this.draftController) {
-        const delResult = await this.draftController.deleteAfterSubmit();
+      if (draftCtrl && this.draftController === draftCtrl) {
+        const delResult = await draftCtrl.deleteAfterSubmit();
         this.disposeDraftController();
         if (delResult === 'conflict') {
           this.reviewNotice =
@@ -1900,6 +1905,9 @@ export class ScionPageArtifactDetail extends LitElement {
       this.reviewing = false;
       this.showCurrentVersion();
     } catch (err) {
+      if (draftCtrl && this.draftController === draftCtrl) {
+        draftCtrl.resumeFromQuiesce();
+      }
       if (this.reviewDraftsEnabled && err instanceof PublishError && err.code === 'stale_review') {
         // Keep the buffer, draft rev, and beforeunload guard intact without
         // sending DELETE (design-delta §2.1 & §6 A3).
@@ -3489,7 +3497,11 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private renderReviewFooter(marks: number, marksOnly: boolean): TemplateResult {
-    const submitDisabled = marks === 0 || !marksOnly || this.reviewText === lfText(this.text);
+    const submitDisabled =
+      marks === 0 ||
+      !marksOnly ||
+      this.reviewText === lfText(this.text) ||
+      (this.reviewDraftsEnabled && (this.draftSnapshot?.inFlight ?? false));
     const saveDraftDisabled = this.reviewBusy || !(this.draftController?.canSaveNow ?? false);
     return html`
       <div class="edit-footer">

@@ -433,19 +433,98 @@ describe('ReviewDraftController', () => {
     h.controller.dispose();
   });
 
-  it('never writes draft data to localStorage, sessionStorage, IndexedDB, or Cache API (C8)', async () => {
-    const lsSpy = vi.spyOn(Storage.prototype, 'setItem');
-    const h = makeHarness();
+  it('quiesce awaits an in-flight PUT without aborting it and blocks new saves until resumed (R1/S2)', async () => {
+    let resolveFirst!: (res: PutReviewDraftResponse) => void;
+    const puts: PutReviewDraftRequest[] = [];
+    const h = makeHarness({
+      put: (_id, req) => {
+        puts.push(req);
+        if (puts.length === 1) {
+          return new Promise<PutReviewDraftResponse>((r) => {
+            resolveFirst = r;
+          });
+        }
+        return Promise.resolve({
+          rev: req.rev + 1,
+          savedAt: new Date(Date.now()).toISOString(),
+          currentSeq: 1,
+        });
+      },
+    });
 
-    h.setBody('Secret unpublished review comment.{>>private<<}\n');
-    h.setNote('Private note');
-    await h.controller.saveNow();
-    await h.controller.deleteAfterSubmit();
+    h.setBody('first edit');
+    const save1 = h.controller.saveNow();
+    expect(puts).toHaveLength(1);
 
-    expect(lsSpy).not.toHaveBeenCalled();
-    expect(window.localStorage.length).toBe(0);
-    expect(window.sessionStorage.length).toBe(0);
+    // Calling saveNow() while PUT #1 is in flight awaits PUT #1 and returns true (S2).
+    const save2 = h.controller.saveNow();
+    resolveFirst({ rev: 1, savedAt: new Date(Date.now()).toISOString(), currentSeq: 1 });
+    expect(await save1).toBe(true);
+    expect(await save2).toBe(true);
+    expect(h.controller.currentRev).toBe(1);
+
+    // Start PUT #2 (held), then quiesce(): quiesce settles PUT #2 and blocks new timers.
+    let resolveSecond!: (res: PutReviewDraftResponse) => void;
+    const h2 = makeHarness({
+      put: (_id, req) =>
+        new Promise<PutReviewDraftResponse>((r) => {
+          resolveSecond = r;
+          void req;
+        }),
+    });
+    h2.setBody('pending rev-0 edit');
+    const p2 = h2.controller.saveNow();
+    const quiescePromise = h2.controller.quiesce();
+    resolveSecond({ rev: 1, savedAt: new Date(Date.now()).toISOString(), currentSeq: 1 });
+    await quiescePromise;
+    await p2;
+    expect(h2.controller.currentRev).toBe(1);
+
+    // While quiesced, edits do not schedule autosave; resumeFromQuiesce re-arms autosave.
+    h2.setBody('edit after refused submit');
+    await vi.advanceTimersByTimeAsync(REVIEW_DRAFT_AUTOSAVE_MS * 2);
+    expect(h2.controller.getSnapshot().status).toBe('saved');
+
+    h2.controller.resumeFromQuiesce();
+    expect(h2.controller.getSnapshot().status).toBe('unsaved');
 
     h.controller.dispose();
+    h2.controller.dispose();
+  });
+
+  it('never writes draft data to localStorage, sessionStorage, IndexedDB, or Cache API (C8)', async () => {
+    const lsSpy = vi.spyOn(Storage.prototype, 'setItem');
+    const idbOpen = vi.fn();
+    const cachesOpen = vi.fn();
+    const origIdb = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+    const origCaches = Object.getOwnPropertyDescriptor(globalThis, 'caches');
+    Object.defineProperty(globalThis, 'indexedDB', {
+      configurable: true,
+      value: { open: idbOpen },
+    });
+    Object.defineProperty(globalThis, 'caches', {
+      configurable: true,
+      value: { open: cachesOpen },
+    });
+
+    const h = makeHarness();
+    try {
+      h.setBody('Secret unpublished review comment.{>>private<<}\n');
+      h.setNote('Private note');
+      await h.controller.saveNow();
+      await h.controller.deleteAfterSubmit();
+
+      expect(lsSpy).not.toHaveBeenCalled();
+      expect(idbOpen).not.toHaveBeenCalled();
+      expect(cachesOpen).not.toHaveBeenCalled();
+      expect(window.localStorage.length).toBe(0);
+      expect(window.sessionStorage.length).toBe(0);
+    } finally {
+      h.controller.dispose();
+      if (origIdb) Object.defineProperty(globalThis, 'indexedDB', origIdb);
+      else delete (globalThis as Record<string, unknown>).indexedDB;
+      if (origCaches) Object.defineProperty(globalThis, 'caches', origCaches);
+      else delete (globalThis as Record<string, unknown>).caches;
+    }
   });
 });

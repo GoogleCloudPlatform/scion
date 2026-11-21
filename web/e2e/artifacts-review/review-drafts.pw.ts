@@ -178,8 +178,8 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
     expect(savedDraftBody).toContain('Carefully.');
     expect(savedDraftBody).not.toBe(DOC);
 
-    // C8: no draft text in localStorage or sessionStorage.
-    const leaked = await pageA.evaluate((needle) => {
+    // C8: no draft text in localStorage, sessionStorage, IndexedDB, or Cache API.
+    const leaked = await pageA.evaluate(async (needle) => {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i)!;
         if ((localStorage.getItem(k) ?? '').includes(needle)) return `localStorage:${k}`;
@@ -187,6 +187,14 @@ test('save draft in context A, close, resume byte-exact and submit in context B'
       for (let i = 0; i < sessionStorage.length; i++) {
         const k = sessionStorage.key(i)!;
         if ((sessionStorage.getItem(k) ?? '').includes(needle)) return `sessionStorage:${k}`;
+      }
+      if (typeof indexedDB !== 'undefined' && typeof indexedDB.databases === 'function') {
+        const dbs = await indexedDB.databases();
+        if (dbs.length > 0) return `indexedDB:${dbs.map((d) => d.name ?? '').join(',')}`;
+      }
+      if (typeof caches !== 'undefined' && typeof caches.keys === 'function') {
+        const keys = await caches.keys();
+        if (keys.length > 0) return `caches:${keys.join(',')}`;
       }
       return null;
     }, 'Carefully.');
