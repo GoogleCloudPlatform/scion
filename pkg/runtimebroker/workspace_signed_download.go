@@ -433,6 +433,13 @@ func (d *signedDownloader) round(ctx context.Context, page int, resp *api.Worksp
 	roundCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	pending := make([]int, 0, len(resp.Files))
+	for i, f := range resp.Files {
+		if !done[f.Path] {
+			pending = append(pending, i)
+		}
+	}
+
 	type result struct {
 		path  string
 		state signedFileState
@@ -454,10 +461,7 @@ func (d *signedDownloader) round(ctx context.Context, page int, resp *api.Worksp
 	}
 	go func() {
 		defer close(work)
-		for i, f := range resp.Files {
-			if done[f.Path] {
-				continue
-			}
+		for _, i := range pending {
 			select {
 			case work <- i:
 			case <-roundCtx.Done():
