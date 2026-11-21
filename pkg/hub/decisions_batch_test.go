@@ -1087,3 +1087,77 @@ func TestDecisionSetAnswer_AllowOther_EndToEnd(t *testing.T) {
 	assert.Equal(t, store.AnswerSetReasonDismissed, dsmReasons[dsmRes.Decisions[0].RowID])
 	assert.Equal(t, store.AnswerSetReasonDismissed, dsmReasons[dsmRes.Decisions[1].RowID])
 }
+
+func TestDecisionSetAnswer_InterpretedOther_ConfirmOverrideAndAgentLine(t *testing.T) {
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
+
+	// 1. Two-question set with allow_other on both: confirm one (same text), override the other (new text).
+	promptMsg, promptRes := f.topicPrompt(t, `[
+		{"id":"reg-set","question":"Which region?","choices":["us-central1"],"allow_other":{"label":"Another region"}},
+		{"id":"win-set","question":"When?","choices":["now"],"allow_other":true}
+	]`, false)
+	require.Len(t, promptRes.Decisions, 2)
+	r0, r1 := promptRes.Decisions[0].RowID, promptRes.Decisions[1].RowID
+
+	reply := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "europe-west4, after 6 PM")
+	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: reply.ID,
+		Answers: []InterpretedAnswerInput{
+			{Key: "reg-set", ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4"},
+			{Key: "win-set", ChoiceID: messages.ChoiceIDOther, OtherText: "after 6 PM"},
+		},
+	})
+	require.Equal(t, http.StatusOK, recRR.Code, recRR.Body.String())
+
+	beforeDeliveries := len(f.dispatcher.getMessages())
+	setRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", map[string]interface{}{
+		"answers": []map[string]interface{}{
+			{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "europe-west4"},
+			{"decision_row_id": r1, "choice_id": messages.ChoiceIDOther, "other_text": "after 8 PM"},
+		},
+	})
+	require.Equal(t, http.StatusOK, setRR.Code, setRR.Body.String())
+
+	var setOut DecisionSetAnswerResponse
+	require.NoError(t, json.Unmarshal(setRR.Body.Bytes(), &setOut))
+	require.Len(t, setOut.Decisions, 2)
+	assert.Equal(t, store.DecisionOutcomeConfirm, setOut.Decisions[0].Decision.Outcome)
+	assert.Equal(t, "europe-west4", setOut.Decisions[0].Decision.OtherText)
+	assert.Equal(t, store.DecisionOutcomeOverride, setOut.Decisions[1].Decision.Outcome)
+	assert.Equal(t, "after 8 PM", setOut.Decisions[1].Decision.OtherText)
+	assert.Equal(t, "after 6 PM", setOut.Decisions[1].Decision.PreviousOtherText)
+
+	// Verify exact golden set-path agent delivery line with override note including previous Other text.
+	delivered := f.dispatcher.getMessages()[beforeDeliveries:]
+	require.Len(t, delivered, 1)
+	wantLine0 := `reg-set v1 ("Which region?") answer=Another region (choice $other, confirmed) text="europe-west4"`
+	wantLine1 := `win-set v1 ("When?") answer=Other (choice $other, overriding interpreted answer Other text="after 6 PM") text="after 8 PM"`
+	assert.Contains(t, delivered[0].structured.Msg, wantLine0)
+	assert.Contains(t, delivered[0].structured.Msg, wantLine1)
+
+	// 2. All-confirm set (both unchanged Other text): 200 OK, zero agent delivery.
+	promptMsg2, promptRes2 := f.topicPrompt(t, `[
+		{"id":"reg-conf2","question":"Region?","choices":["us-central1"],"allow_other":{"label":"Another region"}},
+		{"id":"win-conf2","question":"Window?","choices":["now"],"allow_other":true}
+	]`, false)
+	reply2 := f.storeUserReply(t, f.bob, f.topicID, "", "slack", "same answers")
+	recRR2 := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: reply2.ID,
+		Answers: []InterpretedAnswerInput{
+			{Key: "reg-conf2", ChoiceID: messages.ChoiceIDOther, OtherText: "asia-east1"},
+			{Key: "win-conf2", ChoiceID: messages.ChoiceIDOther, OtherText: "tonight"},
+		},
+	})
+	require.Equal(t, http.StatusOK, recRR2.Code, recRR2.Body.String())
+
+	beforeConfirmOnly := len(f.dispatcher.getMessages())
+	confRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg2.ID+"/answers", map[string]interface{}{
+		"answers": []map[string]interface{}{
+			{"decision_row_id": promptRes2.Decisions[0].RowID, "choice_id": messages.ChoiceIDOther, "other_text": "asia-east1"},
+			{"decision_row_id": promptRes2.Decisions[1].RowID, "choice_id": messages.ChoiceIDOther, "other_text": "tonight"},
+		},
+	})
+	require.Equal(t, http.StatusOK, confRR.Code, confRR.Body.String())
+	assert.Len(t, f.dispatcher.getMessages()[beforeConfirmOnly:], 0, "all-confirm Other set must not deliver to agent")
+}

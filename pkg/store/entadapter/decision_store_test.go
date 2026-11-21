@@ -3507,3 +3507,119 @@ func TestRecordInterpretedAnswers_AllowOther_ReplayConfirmOverrideAndSearch(t *t
 	require.NoError(t, err)
 	assert.Empty(t, notFoundOld, "superseded interpreted other_text must not match effective-answer search")
 }
+
+func TestRecordAnswerSet_InterpretedOther_ConfirmAndOverride(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	pIn := f.prompt("Two Other decisions", false,
+		messages.Decision{
+			Key:      "reg-set",
+			Question: "Which region?",
+			Choices:  []messages.Choice{{ID: "1", Label: "us-central1"}},
+			Other:    &messages.OtherOption{Label: "Another region"},
+		},
+		messages.Decision{
+			Key:      "win-set",
+			Question: "When?",
+			Choices:  []messages.Choice{{ID: "1", Label: "Now"}},
+			Other:    &messages.OtherOption{Label: "Other"},
+		},
+	)
+	created, err := f.cs.CreateDecisionPrompt(ctx, pIn)
+	require.NoError(t, err)
+	require.Len(t, created.Decisions, 2)
+	r0, r1 := created.Decisions[0].RowID, created.Decisions[1].RowID
+
+	src := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     f.projectID,
+		Sender:        "user:user-1",
+		SenderID:      "user-1",
+		Recipient:     "group:topic",
+		RecipientID:   "topic:general",
+		Msg:           "europe-west4, after 6 PM",
+		ThreadID:      "topic:general",
+		CreatedAt:     time.Now().UTC().Add(time.Second),
+		DispatchState: store.MessageDispatchDispatched,
+	}
+	require.NoError(t, f.cs.CreateMessage(ctx, src))
+
+	_, err = f.cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agentID,
+		SourceMessageID:      src.ID,
+		AnsweredByUserID:     "user-1",
+		AnsweredByName:       "Alice",
+		AnsweredByEmail:      "alice@test.com",
+		Surface:              store.DecisionSurfaceNative,
+		Answers: []store.InterpretedAnswerPair{
+			{DecisionRowID: r0, Key: "reg-set", ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4"},
+			{DecisionRowID: r1, Key: "win-set", ChoiceID: messages.ChoiceIDOther, OtherText: "after 6 PM"},
+		},
+		ResponseMessage: &store.Message{
+			ID: uuid.NewString(), ProjectID: f.projectID, Sender: "agent:dev", SenderID: f.agentID,
+			Recipient: "group:topic", RecipientID: "topic:general", Msg: "interpreted", Type: messages.TypeDecisionResponse,
+			AgentID: f.agentID, Channel: "web", ThreadID: "topic:general", DispatchState: store.MessageDispatchDispatched,
+		},
+		FormatMessage: func(items []store.InterpretedFormattedItem) string { return "interpreted" },
+	})
+	require.NoError(t, err)
+
+	// Mismatched Outcome vs Other text (Confirm with changed text, Override with same text) is rejected.
+	_, err = f.cs.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
+		MessageID:        pIn.Message.ID,
+		AnsweredByUserID: "user-1",
+		AnsweredByName:   "Alice",
+		AnsweredByEmail:  "alice@test.com",
+		Surface:          store.DecisionSurfaceNative,
+		Answers: []store.AnswerSetItem{
+			{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4", Outcome: store.DecisionOutcomeOverride},
+			{DecisionRowID: r1, ChoiceID: messages.ChoiceIDOther, OtherText: "after 8 PM", Outcome: store.DecisionOutcomeConfirm},
+		},
+		ResponseMessage: &store.Message{
+			ID: uuid.NewString(), ProjectID: f.projectID, Sender: "user:alice@test.com", SenderID: "user-1",
+			Recipient: "agent:dev", RecipientID: f.agentID, Msg: "answered", Type: messages.TypeDecisionResponse,
+			AgentID: f.agentID, Channel: "web", ThreadID: "topic:general",
+		},
+	})
+	var changedErr *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &changedErr)
+	assert.Equal(t, store.AnswerSetReasonDecided, changedErr.Reasons[r0])
+	assert.Equal(t, store.AnswerSetReasonDecided, changedErr.Reasons[r1])
+
+	// Confirm r0 with identical Other text and override r1 with different Other text.
+	setRes, err := f.cs.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
+		MessageID:        pIn.Message.ID,
+		AnsweredByUserID: "user-1",
+		AnsweredByName:   "Alice",
+		AnsweredByEmail:  "alice@test.com",
+		Surface:          store.DecisionSurfaceNative,
+		Answers: []store.AnswerSetItem{
+			{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4", Outcome: store.DecisionOutcomeConfirm},
+			{DecisionRowID: r1, ChoiceID: messages.ChoiceIDOther, OtherText: "after 8 PM", Outcome: store.DecisionOutcomeOverride},
+		},
+		ResponseMessage: &store.Message{
+			ID: uuid.NewString(), ProjectID: f.projectID, Sender: "user:alice@test.com", SenderID: "user-1",
+			Recipient: "agent:dev", RecipientID: f.agentID, Msg: "answered", Type: messages.TypeDecisionResponse,
+			AgentID: f.agentID, Channel: "web", ThreadID: "topic:general",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, setRes.Answers, 2)
+	assert.Equal(t, store.DecisionOutcomeConfirm, setRes.Answers[0].Outcome)
+	assert.Equal(t, "europe-west4", setRes.Answers[0].OtherText)
+	assert.Equal(t, store.DecisionOutcomeOverride, setRes.Answers[1].Outcome)
+	assert.Equal(t, "after 8 PM", setRes.Answers[1].OtherText)
+
+	d0, err := f.cs.GetDecision(ctx, r0)
+	require.NoError(t, err)
+	require.Len(t, d0.Answers, 2)
+	assert.Equal(t, store.DecisionOutcomeConfirm, d0.EffectiveAnswer().Outcome)
+
+	d1, err := f.cs.GetDecision(ctx, r1)
+	require.NoError(t, err)
+	require.Len(t, d1.Answers, 2)
+	assert.Equal(t, store.DecisionOutcomeOverride, d1.EffectiveAnswer().Outcome)
+	assert.Equal(t, "after 6 PM", d1.Answers[0].OtherText)
+	assert.Equal(t, "after 8 PM", d1.Answers[1].OtherText)
+}

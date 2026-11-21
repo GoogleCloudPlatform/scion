@@ -1796,4 +1796,92 @@ describe('set card Other free-form answers (ptone/scion#8153, O5–O7)', () => {
     expect(rowEl(el, 'r1').querySelector('.opt.sel .editor.inset sl-input')).not.toBeNull();
     expect(rowEl(el, 'r1').querySelector('[data-action="send-other"]')).toBeNull();
   });
+
+  it('prefills interpreted Other row selection and draft on a set card and submits confirm/override', async () => {
+    const base = setWithOther();
+    const ds: DecisionView[] = [
+      {
+        ...base[0]!,
+        status: 'decided',
+        decision: {
+          choiceId: '$other',
+          label: 'Another region',
+          otherText: 'europe-west4',
+          answeredByUserId: 'u-me',
+          answeredByName: 'Alice',
+          provenance: 'agent_interpreted',
+          outcome: 'answer',
+          sourceMessageId: 'src-set-1',
+          surface: 'slack',
+          responseMessageId: 'resp-set-interp-1',
+          at: '2026-11-20T03:00:00Z',
+        },
+      },
+      {
+        ...base[2]!,
+        rowId: 'r2',
+        key: 'window',
+        status: 'decided',
+        decision: {
+          choiceId: '$other',
+          label: 'Other',
+          otherText: 'after 6 PM',
+          answeredByUserId: 'u-me',
+          answeredByName: 'Alice',
+          provenance: 'agent_interpreted',
+          outcome: 'answer',
+          sourceMessageId: 'src-set-1',
+          surface: 'slack',
+          responseMessageId: 'resp-set-interp-1',
+          at: '2026-11-20T03:00:00Z',
+        },
+      },
+    ];
+
+    const el = await mount(ds);
+    await settle(el);
+
+    // Both rows pre-select $other (selectionOf) and pre-fill their inline editors (setRowOtherDraft).
+    expect(rowChoice(el, 'r1', '$other').getAttribute('aria-pressed')).toBe('true');
+    expect(rowChoice(el, 'r2', '$other').getAttribute('aria-pressed')).toBe('true');
+    expect(
+      rowEl(el, 'r1').querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value
+    ).toBe('europe-west4');
+    expect(
+      rowEl(el, 'r2').querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value
+    ).toBe('after 6 PM');
+    expect(submitBtn(el).hasAttribute('disabled')).toBe(false);
+
+    // Edit r2 while keeping r1 unchanged, then submit the set.
+    typeIntoSetOther(el, 'r2', 'after 8 PM');
+    await settle(el);
+
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decisions: ds.map((d) => ({
+          ...d,
+          decision: {
+            ...d.decision!,
+            otherText: d.rowId === 'r2' ? 'after 8 PM' : 'europe-west4',
+            provenance: 'direct',
+            outcome: d.rowId === 'r2' ? 'override' : 'confirm',
+          },
+        })),
+        responseMessageId: 'resp-set-sub-1',
+      })
+    );
+
+    submitBtn(el).click();
+    await settle(el);
+
+    const posted = JSON.parse(apiFetch.mock.calls[0]![1]?.body as string) as {
+      answers: Array<{ decision_row_id: string; choice_id: string; other_text?: string }>;
+      idempotency_key: string;
+    };
+    expect(posted.answers).toEqual([
+      { decision_row_id: 'r1', choice_id: '$other', other_text: 'europe-west4' },
+      { decision_row_id: 'r2', choice_id: '$other', other_text: 'after 8 PM' },
+    ]);
+    expect(posted.idempotency_key).toEqual(expect.any(String));
+  });
 });
