@@ -735,29 +735,58 @@ func TestValidateTemplateAgentConfig_ValidAndEdgeCases(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, findings)
 	})
+}
 
-	t.Run("embedded default template passes", func(t *testing.T) {
-		data, err := EmbedsFS.ReadFile("embeds/templates/default/scion-agent.yaml")
+// TestBundledDefaultTemplates_PassAgentConfigSchema pins every bundled and
+// embedded template agent config (scion-agent.{yaml,yml,json}) in both
+// pkg/config/embeds/templates/ and resources/templates/ against
+// ValidateTemplateAgentConfig so schema drift fails CI. Both FSes are tested
+// here because pkg/config imports resources (importing pkg/config from
+// resources/catalog_test.go would create an import cycle).
+func TestBundledDefaultTemplates_PassAgentConfigSchema(t *testing.T) {
+	isAgentConfig := func(base string) bool {
+		return base == "scion-agent.yaml" || base == "scion-agent.yml" || base == "scion-agent.json"
+	}
+
+	walkAndValidate := func(t *testing.T, fsys fs.FS, root string) int {
+		t.Helper()
+		checked := 0
+		err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !isAgentConfig(d.Name()) {
+				return nil
+			}
+			data, readErr := fs.ReadFile(fsys, p)
+			require.NoError(t, readErr, "read %s", p)
+			findings, valErr := ValidateTemplateAgentConfig(d.Name(), data)
+			require.NoError(t, valErr, "parse %s", p)
+			assert.Empty(t, findings, "%s must pass ValidateTemplateAgentConfig", p)
+			checked++
+			return nil
+		})
 		require.NoError(t, err)
-		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", data)
-		require.NoError(t, err)
-		assert.Empty(t, findings, "embedded default template must pass ValidateTemplateAgentConfig")
+		return checked
+	}
+
+	t.Run("pkg/config/embeds/templates", func(t *testing.T) {
+		checked := walkAndValidate(t, EmbedsFS, "embeds/templates")
+		assert.GreaterOrEqual(t, checked, 1, "expected at least embeds/templates/default/scion-agent.yaml")
 	})
 
-	t.Run("bundled catalog templates pass", func(t *testing.T) {
+	t.Run("resources/templates", func(t *testing.T) {
 		templates := resources.BuiltinTemplates()
 		require.NotEmpty(t, templates)
+		checked := 0
 		for _, tmpl := range templates {
-			p := "scion-agent.yaml"
-			if tmpl.Root != "" {
-				p = tmpl.Root + "/" + p
+			root := tmpl.Root
+			if root == "" {
+				root = "."
 			}
-			data, err := fs.ReadFile(tmpl.FS, p)
-			require.NoError(t, err, "read bundled %s scion-agent.yaml", tmpl.Name)
-			findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", data)
-			require.NoError(t, err, "parse bundled %s scion-agent.yaml", tmpl.Name)
-			assert.Empty(t, findings, "bundled %s template must pass ValidateTemplateAgentConfig", tmpl.Name)
+			checked += walkAndValidate(t, tmpl.FS, root)
 		}
+		assert.GreaterOrEqual(t, checked, 1, "expected at least resources/templates/default/scion-agent.yaml")
 	})
 }
 
