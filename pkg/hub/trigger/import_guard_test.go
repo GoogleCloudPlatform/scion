@@ -27,14 +27,18 @@ import (
 )
 
 const (
-	scionModulePath = "github.com/GoogleCloudPlatform/scion"
-	hubPkgPath      = scionModulePath + "/pkg/hub"
-	triggerPkgPath  = scionModulePath + "/pkg/hub/trigger"
+	scionModulePath      = "github.com/GoogleCloudPlatform/scion"
+	hubPkgPath           = scionModulePath + "/pkg/hub"
+	triggerPkgPath       = scionModulePath + "/pkg/hub/trigger"
+	triggerGitHubPkgPath = triggerPkgPath + "/github"
+	githubAppPkgPath     = hubPkgPath + "/githubapp"
 )
 
-// TestNoHubImportGuard enforces stage1-design §11 D-S1-1(c): pkg/hub/trigger
-// must never import pkg/hub directly or transitively (sharing types only via
-// leaf packages such as pkg/hub/hubfire and pkg/hub/internal/principal).
+// TestNoHubImportGuard enforces stage1-design §11 D-S1-1(c) and
+// app-shaped-source-seams.md §1: pkg/hub/trigger must never import pkg/hub,
+// pkg/hub/trigger/github, or pkg/hub/githubapp directly or transitively
+// (sharing types only via provider-free leaf packages such as
+// pkg/hub/trigger/source, pkg/hub/hubfire, and pkg/hub/internal/principal).
 func TestNoHubImportGuard(t *testing.T) {
 	root := findModuleRoot(t)
 	pkgDir := filepath.Join(root, "pkg", "hub", "trigger")
@@ -59,18 +63,22 @@ func TestNoHubImportGuard(t *testing.T) {
 		for _, impSpec := range file.Imports {
 			imp, uerr := strconv.Unquote(impSpec.Path.Value)
 			require.NoError(t, uerr)
-			if imp == hubPkgPath {
-				t.Errorf("%s directly imports forbidden parent package %q", name, imp)
+			if imp == hubPkgPath ||
+				imp == triggerGitHubPkgPath || strings.HasPrefix(imp, triggerGitHubPkgPath+"/") ||
+				imp == githubAppPkgPath || strings.HasPrefix(imp, githubAppPkgPath+"/") {
+				t.Errorf("%s directly imports forbidden package %q", name, imp)
 			}
 		}
 	}
 	require.Positive(t, prodFiles, "expected production .go files in pkg/hub/trigger")
 
-	chain, err := findTransitiveImport(root, triggerPkgPath, hubPkgPath)
-	require.NoError(t, err)
-	if chain != nil {
-		t.Errorf("%s must not transitively import %s, found chain: %s",
-			triggerPkgPath, hubPkgPath, strings.Join(chain, " -> "))
+	for _, f := range []string{hubPkgPath, triggerGitHubPkgPath, githubAppPkgPath} {
+		chain, err := findTransitiveImport(root, triggerPkgPath, f)
+		require.NoError(t, err)
+		if chain != nil {
+			t.Errorf("%s must not transitively import %s, found chain: %s",
+				triggerPkgPath, f, strings.Join(chain, " -> "))
+		}
 	}
 }
 

@@ -25,14 +25,16 @@ import (
 )
 
 const (
-	modulePath = "github.com/GoogleCloudPlatform/scion"
-	hubPath    = modulePath + "/pkg/hub"
-	selfPath   = hubPath + "/trigger/github"
+	modulePath    = "github.com/GoogleCloudPlatform/scion"
+	hubPath       = modulePath + "/pkg/hub"
+	sourcePkgPath = hubPath + "/trigger/source"
+	selfPath      = hubPath + "/trigger/github"
 )
 
-// TestNoHubImport verifies that pkg/hub/trigger/github remains a strict stdlib
-// leaf package and never imports pkg/hub or non-stdlib dependencies in its
-// production files.
+// TestNoHubImport verifies that pkg/hub/trigger/github remains a strict leaf
+// package: it may import only the Go standard library and the provider-free
+// pkg/hub/trigger/source seam package, and never imports pkg/hub,
+// pkg/hub/githubapp, or external dependencies in its production files.
 func TestNoHubImport(t *testing.T) {
 	root := moduleRoot(t)
 	dir := filepath.Join(root, "pkg", "hub", "trigger", "github")
@@ -54,11 +56,14 @@ func TestNoHubImport(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if imp == sourcePkgPath {
+				continue
+			}
 			if strings.HasPrefix(imp, modulePath+"/") {
-				t.Fatalf("%s/%s imports disallowed in-module package %q (must stay a pure stdlib leaf)", selfPath, ent.Name(), imp)
+				t.Fatalf("%s/%s imports disallowed in-module package %q (only %q is permitted)", selfPath, ent.Name(), imp, sourcePkgPath)
 			}
 			if strings.Contains(imp, ".") {
-				t.Fatalf("%s/%s imports disallowed external package %q (must stay a pure stdlib leaf)", selfPath, ent.Name(), imp)
+				t.Fatalf("%s/%s imports disallowed external package %q (must stay a pure stdlib + source seam leaf)", selfPath, ent.Name(), imp)
 			}
 		}
 	}

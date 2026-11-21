@@ -135,13 +135,19 @@ type webhookInstallationEvent struct {
 }
 
 func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
-	var event webhookInstallationEvent
-	if err := json.Unmarshal(body, &event); err != nil {
+	if err := s.processInstallationWebhook(r.Context(), body); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
 
-	ctx := r.Context()
+func (s *Server) processInstallationWebhook(ctx context.Context, body []byte) error {
+	var event webhookInstallationEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		return err
+	}
+
 	installationID := event.Installation.ID
 
 	switch event.Action {
@@ -174,8 +180,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 		existing, err := s.store.GetGitHubInstallation(ctx, installationID)
 		if err != nil {
 			slog.Warn("Installation not found for deletion webhook", "installation_id", installationID)
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-			return
+			return nil
 		}
 
 		existing.Status = store.GitHubInstallationStatusDeleted
@@ -191,8 +196,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 		existing, err := s.store.GetGitHubInstallation(ctx, installationID)
 		if err != nil {
 			slog.Warn("Installation not found for suspend webhook", "installation_id", installationID)
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-			return
+			return nil
 		}
 
 		existing.Status = store.GitHubInstallationStatusSuspended
@@ -207,8 +211,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 		existing, err := s.store.GetGitHubInstallation(ctx, installationID)
 		if err != nil {
 			slog.Warn("Installation not found for unsuspend webhook", "installation_id", installationID)
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-			return
+			return nil
 		}
 
 		existing.Status = store.GitHubInstallationStatusActive
@@ -233,7 +236,7 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	return nil
 }
 
 // webhookInstallationRepositoriesEvent represents the payload for installation_repositories events.
@@ -256,20 +259,25 @@ type webhookInstallationRepositoriesEvent struct {
 }
 
 func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r *http.Request, body []byte) {
-	var event webhookInstallationRepositoriesEvent
-	if err := json.Unmarshal(body, &event); err != nil {
+	if err := s.processInstallationRepositoriesWebhook(r.Context(), body); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid webhook payload", nil)
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
 
-	ctx := r.Context()
+func (s *Server) processInstallationRepositoriesWebhook(ctx context.Context, body []byte) error {
+	var event webhookInstallationRepositoriesEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		return err
+	}
+
 	installationID := event.Installation.ID
 
 	existing, err := s.store.GetGitHubInstallation(ctx, installationID)
 	if err != nil {
 		slog.Warn("Installation not found for repos webhook", "installation_id", installationID)
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-		return
+		return nil
 	}
 
 	switch event.Action {
@@ -318,7 +326,7 @@ func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r 
 		s.checkProjectsForRemovedRepos(ctx, installationID, removedSet)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	return nil
 }
 
 // handleGitHubAppSetup handles GET /github-app/setup.
