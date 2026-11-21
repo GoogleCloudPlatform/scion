@@ -47,7 +47,7 @@ import { dispatchMembershipChanged } from '../../utils/membership-events.js';
 import { navigateTo } from '../../client/navigation.js';
 
 type WorkspaceType = 'git' | 'shared' | 'empty-per-agent' | 'linked';
-type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
+type GitWorkspaceMode = 'per-agent' | 'shared' | 'worktree-per-agent';
 
 /** "Start from" value meaning no template. Template options use the project ID. */
 const START_BLANK = 'blank';
@@ -115,8 +115,8 @@ const WORKSPACE_TYPES: readonly WorkspaceTypeOption[] = [
 
 const GIT_WORKSPACE_MODE_LABELS: Record<GitWorkspaceMode, string> = {
   'per-agent': 'Clone per agent',
-  'worktree-per-agent': 'Worktree per agent',
   shared: 'Shared workspace',
+  'worktree-per-agent': 'Worktree per agent',
 };
 
 const LABEL_WORKSPACE_MODE = 'scion.dev/workspace-mode';
@@ -1696,25 +1696,26 @@ export class ScionPageProjectCreate extends LitElement {
                 }}
               >
                 <sl-radio-button value="per-agent">Clone per agent</sl-radio-button>
-                <sl-radio-button value="worktree-per-agent">Worktree per agent</sl-radio-button>
                 <sl-radio-button value="shared">Shared workspace</sl-radio-button>
+                <sl-radio-button value="worktree-per-agent">Worktree per agent</sl-radio-button>
               </sl-radio-group>
               <div class="hint">
                 ${this.gitWorkspaceMode === 'per-agent'
                   ? 'Each agent gets its own full clone. Most isolated.'
-                  : this.gitWorkspaceMode === 'worktree-per-agent'
-                    ? 'Agents share one base clone via git worktrees — fast startup, low disk.'
-                    : 'A single git clone is shared by all agents in this project.'}
+                  : this.gitWorkspaceMode === 'shared'
+                    ? 'A single git clone is shared by all agents in this project.'
+                    : 'Agents share one base clone via git worktrees — fast startup, low disk.'}
               </div>
-              ${this.gitWorkspaceMode === 'worktree-per-agent'
+              ${this.gitWorkspaceMode === 'shared'
                 ? html`<div class="workspace-mode-note">
-                    A single base clone is created, and each agent gets a lightweight git worktree.
-                    Requires git ≥ 2.48 on the node. On Kubernetes, requires the NFS backend.
+                    A single git clone will be created on the hub and shared by all agents. Agents
+                    can commit, push, and pull but must coordinate branch changes.
                   </div>`
-                : this.gitWorkspaceMode === 'shared'
+                : this.gitWorkspaceMode === 'worktree-per-agent'
                   ? html`<div class="workspace-mode-note">
-                      A single git clone will be created on the hub and shared by all agents. Agents
-                      can commit, push, and pull but must coordinate branch changes.
+                      A single base clone is created, and each agent gets a lightweight git
+                      worktree. Requires git ≥ 2.48 on the node. On Kubernetes, requires the NFS
+                      backend.
                     </div>`
                   : nothing}
             </div>
