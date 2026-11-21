@@ -72,6 +72,8 @@ const RECORDED_ENV = [
   'SCION_SERVER_HUB_HUBID',
   'SCION_SERVER_HUB_CLASS',
   'SCION_SERVER_RUNTIMEBROKER_HOST',
+  'SCION_SERVER_BASE_URL',
+  'SCION_SERVER_HUB_ENDPOINT',
   'SCION_SERVER_HUB_LAUNCHTIMEOUT',
   'SCION_IMAGE_REGISTRY',
 ];
@@ -261,12 +263,37 @@ test('a default hub is a member-level test hub, marked before it starts, on the 
 });
 
 test('without runtimeBroker the server runs no broker', async () => {
-  await startHub({ testLogin: false, testIdentities: true, build: false, binary, stateFile });
+  const state = await startHub({
+    testLogin: false,
+    testIdentities: true,
+    build: false,
+    binary,
+    stateFile,
+  });
   const start = invocations()[1];
   expect(start.argv).toContain('--enable-runtime-broker=false');
   expect(start.argv).not.toContain('--auto-provide');
   expect(start.env.SCION_SERVER_RUNTIMEBROKER_HOST).toBeUndefined();
+  expect(flagValue(start.argv, '--base-url')).toBe(state.baseURL);
+  expect(state.startFlags).toContain('--base-url');
 });
+
+for (const envKey of ['SCION_SERVER_BASE_URL', 'SCION_SERVER_HUB_ENDPOINT'] as const) {
+  test(`explicit ${envKey} omits the default --base-url flag`, async () => {
+    const state = await startHub({
+      testLogin: false,
+      testIdentities: true,
+      build: false,
+      binary,
+      stateFile,
+      env: { [envKey]: 'http://localhost:8080' },
+    });
+    const start = invocations()[1];
+    expect(start.argv).not.toContain('--base-url');
+    expect(state.startFlags).not.toContain('--base-url');
+    expect(start.env[envKey]).toBe('http://localhost:8080');
+  });
+}
 
 for (const key of [
   'HOME',
