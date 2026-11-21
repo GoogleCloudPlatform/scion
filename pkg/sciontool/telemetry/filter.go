@@ -199,11 +199,21 @@ func (r *Redactor) ShouldRedact(key string) bool {
 }
 
 // ShouldHash returns true if the field should be hashed.
+// Fields covered by ShouldRedact (including mandatory floor fields and their
+// native aliases) are never hashed.
 func (r *Redactor) ShouldHash(key string) bool {
 	if r == nil {
 		return false
 	}
-	return r.hashFields[key] || r.hashFields[nativeFieldAliases[key]]
+	if r.ShouldRedact(key) {
+		return false
+	}
+	if alias, ok := nativeFieldAliases[key]; ok {
+		if r.hashFields[alias] {
+			return true
+		}
+	}
+	return r.hashFields[key]
 }
 
 // HashValue returns the SHA256 hash of a value as a hex string.

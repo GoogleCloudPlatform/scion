@@ -281,6 +281,7 @@ func TestRedactor_MandatoryFloorCoversNativeAliases(t *testing.T) {
 	r := NewRedactor(RedactionConfig{
 		Redact: []string{"user.email"},
 		Hash: []string{
+			"user.email",
 			"prompt",
 			"gen_ai.prompt",
 			"gen_ai.system_instructions",
@@ -301,13 +302,24 @@ func TestRedactor_MandatoryFloorCoversNativeAliases(t *testing.T) {
 		if !r.ShouldRedact(key) {
 			t.Errorf("ShouldRedact(%q) = false, want true under mandatory floor", key)
 		}
+		if r.ShouldHash(key) {
+			t.Errorf("ShouldHash(%q) = true, want false when covered by mandatory floor", key)
+		}
 	}
 
-	// Every alias targeting a mandatory floor field must also be redacted.
+	// Explicitly redacted fields must also not report ShouldHash == true.
+	if r.ShouldHash("user.email") {
+		t.Error("ShouldHash(\"user.email\") = true, want false when also in Redact")
+	}
+
+	// Every alias targeting a mandatory floor field must also be redacted and never hashed.
 	for alias, target := range nativeFieldAliases {
 		if _, mandatory := mandatoryRedactFields[target]; mandatory {
 			if !r.ShouldRedact(alias) {
 				t.Errorf("ShouldRedact(%q) (alias of mandatory %q) = false, want true", alias, target)
+			}
+			if r.ShouldHash(alias) {
+				t.Errorf("ShouldHash(%q) (alias of mandatory %q) = true, want false", alias, target)
 			}
 		}
 	}
@@ -318,6 +330,9 @@ func TestRedactor_MandatoryFloorCoversNativeAliases(t *testing.T) {
 	}
 	if r.ShouldRedact("session.id") {
 		t.Error("ShouldRedact(\"session.id\") = true, want false when session_id is only hashed")
+	}
+	if !r.ShouldHash("session.id") {
+		t.Error("ShouldHash(\"session.id\") = false, want true when session_id is hashed")
 	}
 
 	attrs := []*commonpb.KeyValue{
