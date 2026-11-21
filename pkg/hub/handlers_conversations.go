@@ -390,6 +390,8 @@ func (s *Server) handleConversationRoutes(w http.ResponseWriter, r *http.Request
 		s.handleGetConversation(w, r, id)
 	case "messages":
 		s.handleConvListMessages(w, r, id)
+	case "watch":
+		s.handleConvWatch(w, r, id)
 	case "default-agent":
 		s.handleSetDefaultAgent(w, r, id)
 	case "participants":
@@ -483,41 +485,12 @@ func (s *Server) handleConvListMessages(w http.ResponseWriter, r *http.Request, 
 	}
 
 	ctx := r.Context()
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Forbidden(w)
-		return
-	}
-	cls, token, ok := requireInboxCredential(w, r)
-	if !ok {
-		return
-	}
-
-	// Authorization: for direct conversations, use canonical DM key (kind+ID).
-	// For group conversations, project membership is the gate (design doc
-	// §3.2, Q2 = b) — participant rows are a listing index only.
-	conv, err := s.store.GetConversation(ctx, id)
+	// Authorization: shared with handleConvWatch via authorizeConversationReadByID
+	// (DM canonical key + cross-project read gate, group project membership,
+	// and UAT token scope rules).
+	conv, err := s.authorizeConversationReadByID(ctx, r, id)
 	if err != nil {
-		writeErrorFromErr(w, err, "Conversation")
-		return
-	}
-
-	if conv.Kind == "direct" {
-		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
-			Forbidden(w)
-			return
-		}
-		// Hub-off guard: deny agent callers from reading cross-project DMs
-		// when the feature is disabled (design §7).
-		if !s.enforceCrossProjectReadGate(w, r, conv, nil) {
-			return
-		}
-	} else {
-		if !s.authorizeGroupConversationAccess(w, r, conv, ActionRead) {
-			return
-		}
-	}
-	if cls == inboxCredentialToken && !s.authorizeTokenConversationRead(w, r, token, conv) {
+		s.writeConvReadError(w, r, err)
 		return
 	}
 
