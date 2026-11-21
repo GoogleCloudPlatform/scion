@@ -18,6 +18,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 func TestUserTokenService_GenerateAndValidate(t *testing.T) {
@@ -248,5 +250,46 @@ func TestWebServer_RefreshHubTokens_RejectsAccessToken(t *testing.T) {
 	_, _, _, err = ws.refreshHubTokens(context.Background(), accessToken)
 	if err == nil {
 		t.Error("expected error when using access token as refresh token, got nil")
+	}
+}
+
+func TestUserTokenService_MissingExpRejected(t *testing.T) {
+	svc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	now := time.Now()
+	for _, tokenType := range []UserTokenType{TokenTypeAccess, TokenTypeCLI, TokenTypeRefresh} {
+		t.Run(string(tokenType), func(t *testing.T) {
+			claims := UserTokenClaims{
+				Claims: jwt.Claims{
+					Issuer:    UserTokenIssuer,
+					Subject:   "user-123",
+					Audience:  jwt.Audience{UserTokenAudience},
+					IssuedAt:  jwt.NewNumericDate(now),
+					NotBefore: jwt.NewNumericDate(now),
+					ID:        generateUserTokenID(),
+				},
+				UserID:     "user-123",
+				Email:      "test@example.com",
+				Role:       "member",
+				TokenType:  tokenType,
+				ClientType: ClientTypeWeb,
+			}
+			tok, err := svc.signClaims(claims, now)
+			if err != nil {
+				t.Fatalf("failed to sign token: %v", err)
+			}
+
+			if _, err := svc.ValidateUserToken(tok); err == nil {
+				t.Errorf("expected ValidateUserToken to reject %q token without exp", tokenType)
+			}
+			if tokenType == TokenTypeRefresh {
+				if _, err := svc.ValidateRefreshToken(tok); err == nil {
+					t.Errorf("expected ValidateRefreshToken to reject refresh token without exp")
+				}
+			}
+		})
 	}
 }

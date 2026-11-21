@@ -19,8 +19,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // TestIsReservedPlatformIdentity covers the shared predicate that
@@ -177,6 +179,154 @@ func TestUnifiedAuthMiddleware_UserToken(t *testing.T) {
 
 	if userIdentity.Email() != "test@example.com" {
 		t.Errorf("expected email 'test@example.com', got %q", userIdentity.Email())
+	}
+}
+
+func TestUnifiedAuthMiddleware_UserToken_TypeAndExpEnforcement(t *testing.T) {
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("failed to create user token service: %v", err)
+	}
+
+	accessToken, refreshToken, _, err := userTokenSvc.GenerateTokenPair(
+		"user-123", "test@example.com", "Test User", "member", ClientTypeWeb,
+	)
+	if err != nil {
+		t.Fatalf("failed to generate web token pair: %v", err)
+	}
+
+	cliToken, _, _, err := userTokenSvc.GenerateTokenPair(
+		"user-123", "test@example.com", "Test User", "member", ClientTypeCLI,
+	)
+	if err != nil {
+		t.Fatalf("failed to generate CLI token pair: %v", err)
+	}
+
+	now := time.Now()
+	// Mint an access token without an exp claim.
+	noExpClaims := UserTokenClaims{
+		Claims: jwt.Claims{
+			Issuer:    UserTokenIssuer,
+			Subject:   "user-123",
+			Audience:  jwt.Audience{UserTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			ID:        generateUserTokenID(),
+		},
+		UserID:     "user-123",
+		Email:      "test@example.com",
+		Role:       "member",
+		TokenType:  TokenTypeAccess,
+		ClientType: ClientTypeWeb,
+	}
+	noExpToken, err := userTokenSvc.signClaims(noExpClaims, now)
+	if err != nil {
+		t.Fatalf("failed to sign no-exp token: %v", err)
+	}
+
+	// Mint a token with an unrecognized token type.
+	unknownTypeClaims := UserTokenClaims{
+		Claims: jwt.Claims{
+			Issuer:    UserTokenIssuer,
+			Subject:   "user-123",
+			Audience:  jwt.Audience{UserTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
+			NotBefore: jwt.NewNumericDate(now),
+			ID:        generateUserTokenID(),
+		},
+		UserID:     "user-123",
+		Email:      "test@example.com",
+		Role:       "member",
+		TokenType:  UserTokenType("other"),
+		ClientType: ClientTypeWeb,
+	}
+	unknownTypeToken, err := userTokenSvc.signClaims(unknownTypeClaims, now)
+	if err != nil {
+		t.Fatalf("failed to sign unknown-type token: %v", err)
+	}
+
+	// Mint a token with an empty token type.
+	emptyTypeClaims := unknownTypeClaims
+	emptyTypeClaims.TokenType = ""
+	emptyTypeToken, err := userTokenSvc.signClaims(emptyTypeClaims, now)
+	if err != nil {
+		t.Fatalf("failed to sign empty-type token: %v", err)
+	}
+
+	middleware := UnifiedAuthMiddleware(AuthConfig{
+		Mode:         "production",
+		UserTokenSvc: userTokenSvc,
+	})
+
+	cases := []struct {
+		name           string
+		token          string
+		expectedStatus int
+		expectIdentity bool
+	}{
+		{
+			name:           "valid access token accepted",
+			token:          accessToken,
+			expectedStatus: http.StatusOK,
+			expectIdentity: true,
+		},
+		{
+			name:           "valid CLI token accepted",
+			token:          cliToken,
+			expectedStatus: http.StatusOK,
+			expectIdentity: true,
+		},
+		{
+			name:           "refresh token rejected",
+			token:          refreshToken,
+			expectedStatus: http.StatusUnauthorized,
+			expectIdentity: false,
+		},
+		{
+			name:           "access token without exp rejected",
+			token:          noExpToken,
+			expectedStatus: http.StatusUnauthorized,
+			expectIdentity: false,
+		},
+		{
+			name:           "unknown token type rejected",
+			token:          unknownTypeToken,
+			expectedStatus: http.StatusUnauthorized,
+			expectIdentity: false,
+		},
+		{
+			name:           "empty token type rejected",
+			token:          emptyTypeToken,
+			expectedStatus: http.StatusUnauthorized,
+			expectIdentity: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotIdentity Identity
+			handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotIdentity = GetIdentityFromContext(r.Context())
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.expectedStatus {
+				t.Errorf("expected status %d, got %d: %s", tc.expectedStatus, rec.Code, rec.Body.String())
+			}
+			if tc.expectIdentity && gotIdentity == nil {
+				t.Error("expected identity in context, got nil")
+			}
+			if !tc.expectIdentity && gotIdentity != nil {
+				t.Errorf("expected no identity in context, got %v", gotIdentity)
+			}
+		})
 	}
 }
 

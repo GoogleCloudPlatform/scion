@@ -175,16 +175,18 @@ func TestSessionGen_BearerArm_WebAccessToken_DeniedAfterRevoke(t *testing.T) {
 	f.assertDeniedAfterRevoke(t, access)
 }
 
-// Fails if the session generation check is removed from the JWT bearer arm:
-// a refresh token presented as a bearer credential, minted before the
-// revoke, would still be accepted.
+// Refresh tokens are never accepted on the JWT bearer arm (before or after
+// revoke); session-generation enforcement for refresh tokens is covered by
+// TestSessionGen_AuthRefresh_*.
 func TestSessionGen_BearerArm_RefreshTokenAsBearer_DeniedAfterRevoke(t *testing.T) {
 	f := newSessionGenFixture(t)
 	_, refresh := f.mintPair(t, 0, ClientTypeCLI)
 	claims, err := f.srv.userTokenService.ValidateUserToken(refresh)
 	require.NoError(t, err)
 	require.Equal(t, TokenTypeRefresh, claims.TokenType)
-	f.assertDeniedAfterRevoke(t, refresh)
+	require.Equal(t, http.StatusUnauthorized, f.me(t, refresh).Code)
+	f.revoke(t)
+	require.Equal(t, http.StatusUnauthorized, f.me(t, refresh).Code)
 }
 
 // Fails if the session generation check is removed from the JWT bearer arm:
@@ -249,37 +251,45 @@ func TestSessionGen_BearerArm_TokenIssuedAfterRevoke_Accepted(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.wantType, claims.TokenType)
 			assert.Equal(t, gen, claims.SessionGeneration, "issued with the users row's generation")
-			rec := f.me(t, tok)
-			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			if tc.wantType == TokenTypeRefresh {
+				rec := f.postRefresh(t, tok)
+				assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Equal(t, http.StatusUnauthorized, f.me(t, tok).Code, "refresh token refused as bearer")
+			} else {
+				rec := f.me(t, tok)
+				assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			}
 		})
 	}
 }
 
-// Fails if the bearer arm refuses a never-revoked user's tokens (generation
-// 0 on both sides), for each token type.
+// Fails if the bearer arm refuses a never-revoked user's bearer tokens
+// (generation 0 on both sides), for each bearer token type.
 func TestSessionGen_BearerArm_NeverRevoked_Accepted(t *testing.T) {
 	f := newSessionGenFixture(t)
 	require.Zero(t, f.generation(t))
 	cliAccess, cliRefresh := f.mintPair(t, 0, ClientTypeCLI)
 	webAccess, _ := f.mintPair(t, 0, ClientTypeWeb)
-	for name, tok := range map[string]string{"cli_access": cliAccess, "web_access": webAccess, "refresh": cliRefresh} {
+	for name, tok := range map[string]string{"cli_access": cliAccess, "web_access": webAccess} {
 		t.Run(name, func(t *testing.T) {
 			rec := f.me(t, tok)
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		})
 	}
+	t.Run("refresh_refused_as_bearer", func(t *testing.T) {
+		assert.Equal(t, http.StatusUnauthorized, f.me(t, cliRefresh).Code)
+	})
 }
 
 // Fails if the session generation check is removed from the JWT bearer arm,
-// or if a missing sg claim stops reading as 0: a token without the claim
-// must be refused for a user whose sessions were ever revoked.
+// or if a missing sg claim stops reading as 0: a bearer token without the
+// claim must be refused for a user whose sessions were ever revoked.
 func TestSessionGen_BearerArm_ClaimlessToken_EverRevokedUser_Denied(t *testing.T) {
 	f := newSessionGenFixture(t)
 	f.revoke(t)
 	for name, tok := range map[string]string{
 		"cli_access": f.mintClaimless(t, TokenTypeCLI, ClientTypeCLI),
 		"web_access": f.mintClaimless(t, TokenTypeAccess, ClientTypeWeb),
-		"refresh":    f.mintClaimless(t, TokenTypeRefresh, ClientTypeCLI),
 	} {
 		t.Run(name, func(t *testing.T) {
 			requireRefusedAsRevoked(t, f.me(t, tok))
@@ -287,15 +297,15 @@ func TestSessionGen_BearerArm_ClaimlessToken_EverRevokedUser_Denied(t *testing.T
 	}
 }
 
-// Fails if a token without the sg claim is refused for a user whose sessions
-// were never revoked (a missing claim must read as 0, equal to the row).
+// Fails if a bearer token without the sg claim is refused for a user whose
+// sessions were never revoked (a missing claim must read as 0, equal to the
+// row).
 func TestSessionGen_BearerArm_ClaimlessToken_NeverRevokedUser_Accepted(t *testing.T) {
 	f := newSessionGenFixture(t)
 	require.Zero(t, f.generation(t))
 	for name, tok := range map[string]string{
 		"cli_access": f.mintClaimless(t, TokenTypeCLI, ClientTypeCLI),
 		"web_access": f.mintClaimless(t, TokenTypeAccess, ClientTypeWeb),
-		"refresh":    f.mintClaimless(t, TokenTypeRefresh, ClientTypeCLI),
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := f.me(t, tok)

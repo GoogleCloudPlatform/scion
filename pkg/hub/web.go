@@ -1426,7 +1426,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// force the user to re-authenticate.
 		tokenValid := false
 		if ws.userTokenSvc != nil {
-			if _, err := ws.userTokenSvc.ValidateUserToken(accessToken); err == nil {
+			if claims, err := ws.userTokenSvc.ValidateUserToken(accessToken); err == nil && isBearerTokenType(claims.TokenType) {
 				tokenValid = true
 			}
 		} else {
