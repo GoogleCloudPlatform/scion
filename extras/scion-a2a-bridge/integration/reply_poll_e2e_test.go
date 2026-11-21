@@ -75,8 +75,13 @@ const (
 	// rplWait bounds every wait on a delivery or an A2A answer. It is sized
 	// for the A2A integration job's -race and -count=3 runs.
 	rplWait = 60 * time.Second
-	// rplBridgeSendTimeout is the bridge's own wait for an agent reply.
-	rplBridgeSendTimeout = 5 * time.Second
+	// rplBridgeSendTimeout is the bridge's own wait for an agent reply,
+	// sized above waitForTaskEvent's 2s SQLite backoff after a slow-CI
+	// outbound-message stall.
+	rplBridgeSendTimeout = 12 * time.Second
+	// rplShortSendTimeout bounds fast-refusal checks so a regression that
+	// waits for the send deadline fails promptly.
+	rplShortSendTimeout = 3 * time.Second
 	// rplLongSendTimeout is the bridge's wait in tests that take several
 	// hub round trips before the agent replies.
 	rplLongSendTimeout = 15 * time.Second
@@ -1242,7 +1247,10 @@ func TestLegacyCallReturnsReplyFromAdminConversation(t *testing.T) {
 // the send, and the call ends at once with no conversation read after the
 // send (no poll is started) and nothing delivered to the agent.
 func TestCallerWithoutMessagePermissionIsRefusedWithoutPolling(t *testing.T) {
-	e := rplNewEnv(t, rplOptions{users: []rplUserSpec{{email: "carol@example.com", noMessage: true}}})
+	e := rplNewEnv(t, rplOptions{
+		users:       []rplUserSpec{{email: "carol@example.com", noMessage: true}},
+		sendTimeout: rplShortSendTimeout,
+	})
 	carol := e.users["carol@example.com"]
 	const label = "no message permission"
 	ctx, cancel := context.WithTimeout(context.Background(), rplWait)
@@ -1252,7 +1260,7 @@ func TestCallerWithoutMessagePermissionIsRefusedWithoutPolling(t *testing.T) {
 	if out.State != a2a.TaskStateFailed || out.Text != rplMsgRouteFail {
 		t.Fatalf("%s: task ended %v with %q, want failed with %q", label, out.State, out.Text, rplMsgRouteFail)
 	}
-	if elapsed := time.Since(start); elapsed >= rplBridgeSendTimeout {
+	if elapsed := time.Since(start); elapsed >= rplShortSendTimeout {
 		t.Fatalf("%s: the call took %v, want it to end at once, not at the deadline", label, elapsed)
 	}
 	select {
