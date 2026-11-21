@@ -131,6 +131,7 @@ type convReadDenial struct {
 	storeErr    error
 	authzDenied bool
 	resource    Resource
+	action      Action
 	decision    Decision
 }
 
@@ -157,10 +158,11 @@ func (d *convReadDenial) Unwrap() error {
 // handleConvListMessages and handleConvWatch for exact authz parity
 // (ptone/scion#8136 §3.5).
 func (s *Server) authorizeConversationReadByID(ctx context.Context, r *http.Request, id string) (*store.Conversation, error) {
-	if GetIdentityFromContext(ctx) == nil {
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
 		return nil, &convReadDenial{status: http.StatusForbidden}
 	}
-	cls, _ := inboxCredentialOf(ctx)
+	cls, token := inboxCredentialOf(ctx)
 	if cls == inboxCredentialRefused {
 		return nil, &convReadDenial{status: http.StatusForbidden}
 	}
@@ -168,7 +170,7 @@ func (s *Server) authorizeConversationReadByID(ctx context.Context, r *http.Requ
 	if err != nil {
 		return nil, err
 	}
-	if err := s.authorizeConversationRead(ctx, r, conv); err != nil {
+	if err := s.authorizeConversationReadChecked(ctx, identity, cls, token, conv); err != nil {
 		return nil, err
 	}
 	return conv, nil
@@ -177,7 +179,7 @@ func (s *Server) authorizeConversationReadByID(ctx context.Context, r *http.Requ
 // authorizeConversationRead performs the non-HTTP-writing read authorization
 // check for an already-loaded conversation (DM key, cross-project read gate,
 // group project read, and UAT token scope check).
-func (s *Server) authorizeConversationRead(ctx context.Context, r *http.Request, conv *store.Conversation) error {
+func (s *Server) authorizeConversationRead(ctx context.Context, _ *http.Request, conv *store.Conversation) error {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		return &convReadDenial{status: http.StatusForbidden}
@@ -186,7 +188,10 @@ func (s *Server) authorizeConversationRead(ctx context.Context, r *http.Request,
 	if cls == inboxCredentialRefused {
 		return &convReadDenial{status: http.StatusForbidden}
 	}
+	return s.authorizeConversationReadChecked(ctx, identity, cls, token, conv)
+}
 
+func (s *Server) authorizeConversationReadChecked(ctx context.Context, identity Identity, cls inboxCredential, token *ScopedUserIdentity, conv *store.Conversation) error {
 	if conv.Kind == "direct" {
 		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
 			return &convReadDenial{status: http.StatusForbidden}
@@ -195,7 +200,7 @@ func (s *Server) authorizeConversationRead(ctx context.Context, r *http.Request,
 			return err
 		}
 	} else {
-		if err := s.checkGroupConversationRead(ctx, identity, conv); err != nil {
+		if err := s.checkGroupConversationAccess(ctx, identity, conv, ActionRead); err != nil {
 			return err
 		}
 	}
@@ -254,10 +259,14 @@ func (s *Server) checkCrossProjectReadGate(ctx context.Context, conv *store.Conv
 	}
 }
 
-// checkGroupConversationRead is the non-HTTP-writing counterpart of
-// authorizeGroupConversationAccess(..., ActionRead).
-func (s *Server) checkGroupConversationRead(ctx context.Context, identity Identity, conv *store.Conversation) error {
+// checkGroupConversationAccess is the single non-HTTP-writing implementation of
+// group conversation access control, wrapped by authorizeGroupConversationAccess
+// and called by authorizeConversationReadChecked (ptone/scion#8136).
+func (s *Server) checkGroupConversationAccess(ctx context.Context, identity Identity, conv *store.Conversation, action Action) error {
 	if conv.ProjectID == nil || *conv.ProjectID == "" {
+		if identity == nil {
+			return &convReadDenial{status: http.StatusForbidden}
+		}
 		allowed, err := s.canReadGroupConversation(ctx, identity, conv)
 		if err != nil {
 			return &convReadDenial{storeErr: err}
@@ -282,22 +291,27 @@ func (s *Server) checkGroupConversationRead(ctx context.Context, identity Identi
 		return &convReadDenial{storeErr: err}
 	}
 
+	if identity == nil {
+		return &convReadDenial{status: http.StatusUnauthorized}
+	}
+
 	res := projectResource(project)
-	decision := s.authzService.CheckAccess(ctx, identity, res, ActionRead)
+	decision := s.authzService.CheckAccess(ctx, identity, res, action)
 	if !decision.Allowed {
 		return &convReadDenial{
 			status:      http.StatusForbidden,
 			authzDenied: true,
 			resource:    res,
+			action:      action,
 			decision:    decision,
 		}
 	}
 	return nil
 }
 
-// writeConvReadError maps an error returned by authorizeConversationReadByID
-// or authorizeConversationRead to the exact HTTP response used by
-// handleConvListMessages.
+// writeConvReadError maps an error returned by authorizeConversationReadByID,
+// checkCrossProjectReadGate, or checkGroupConversationAccess to the exact HTTP
+// response used across the conversation handlers.
 func (s *Server) writeConvReadError(w http.ResponseWriter, r *http.Request, err error) {
 	var denial *convReadDenial
 	if errors.As(err, &denial) {
@@ -310,8 +324,16 @@ func (s *Server) writeConvReadError(w http.ResponseWriter, r *http.Request, err 
 			return
 		}
 		if denial.authzDenied {
-			logAuthzDenial(r, GetIdentityFromContext(r.Context()), denial.resource, ActionRead, denial.decision.Reason)
-			writeForbiddenStructuredDenialCause(w, "", denial.resource.Type, ActionRead, denial.decision.DeniedBy, denial.decision.adoptionDetailsCause())
+			action := denial.action
+			if action == "" {
+				action = ActionRead
+			}
+			logAuthzDenial(r, GetIdentityFromContext(r.Context()), denial.resource, action, denial.decision.Reason)
+			writeForbiddenStructuredDenialCause(w, "", denial.resource.Type, action, denial.decision.DeniedBy, denial.decision.adoptionDetailsCause())
+			return
+		}
+		if denial.status == http.StatusUnauthorized {
+			Unauthorized(w)
 			return
 		}
 		if denial.message != "" {
@@ -322,6 +344,19 @@ func (s *Server) writeConvReadError(w http.ResponseWriter, r *http.Request, err 
 		return
 	}
 	writeErrorFromErr(w, err, "Conversation")
+}
+
+// normalizeFeedPrincipalKind maps Hub identity types to the canonical message
+// principal kind ("user" or "agent"), matching messageability.go:getSenderMode.
+// Dev-token ("dev") and federated user ("federated_user") callers stamp rows as
+// "user:..." and addressees as principal_kind="user".
+func normalizeFeedPrincipalKind(identityType string) string {
+	switch identityType {
+	case "user", "dev", "federated_user":
+		return "user"
+	default:
+		return identityType
+	}
 }
 
 // conversationWatchResponse is the HTTP JSON wire shape for
@@ -394,7 +429,7 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 
 	var principal eventfeed.Principal
 	if identity := GetIdentityFromContext(ctx); identity != nil {
-		principal = eventfeed.Principal{Kind: identity.Type(), ID: identity.ID()}
+		principal = eventfeed.Principal{Kind: normalizeFeedPrincipalKind(identity.Type()), ID: identity.ID()}
 	}
 
 	var authorizedConv *store.Conversation

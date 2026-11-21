@@ -376,3 +376,188 @@ func TestConversationWatch_CreateMessageWakesPoll(t *testing.T) {
 		"/api/v1/conversations/"+dm.ID+"/watch?cursor="+string(futureCursor)+"&wait=0", nil)
 	assert.Equal(t, http.StatusGone, recExp.Code)
 }
+
+// Regression test: PromoteDM moving messages from a DM conversation into a new
+// topic conversation must re-sequence conversation_seq and update the target
+// conversation's last_message_seq so subsequent CreateMessage calls never
+// collide on the (conversation_id, conversation_seq) unique index.
+func TestPromoteDM_ReallocatesConversationSeqWithoutCollision(t *testing.T) {
+	srv, s := testServer(t)
+	require.NotNil(t, srv.webChatStore, "testServer must configure webChatStore")
+
+	ctx := context.Background()
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	user := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	agent := &store.Agent{ID: uuid.NewString(), Slug: "a1", Name: "Agent 1", ProjectID: projID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	dm := watchTestDirectConv(t, s, "user", user.ID, "agent", agent.ID)
+
+	m1 := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: dm.ID,
+		ThreadID:       dm.ExternalRef,
+		Channel:        "web",
+		Sender:         "user:" + user.Email,
+		SenderID:       user.ID,
+		Recipient:      "agent:" + agent.Slug,
+		RecipientID:    agent.ID,
+		Msg:            "first DM msg",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, m1))
+	m2 := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: dm.ID,
+		ThreadID:       dm.ExternalRef,
+		Channel:        "web",
+		Sender:         "agent:" + agent.Slug,
+		SenderID:       agent.ID,
+		Recipient:      "user:" + user.Email,
+		RecipientID:    user.ID,
+		Msg:            "second DM msg",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, m2))
+
+	now := time.Now().UTC()
+	topic, err := srv.webChatStore.PromoteDM(ctx, WebChatTopic{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		Name:           "promoted-topic",
+		CreatedBy:      user.ID,
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}, PromoteKeys{
+		DMKey:                dm.ExternalRef,
+		DirectConversationID: dm.ID,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, topic.ConversationID)
+
+	head, err := s.ConversationHeadSeq(ctx, topic.ConversationID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), head)
+
+	// Next CreateMessage in the promoted topic must succeed with seq 3 (no unique collision).
+	m3 := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: topic.ConversationID,
+		ThreadID:       topic.ID,
+		Channel:        "web",
+		Sender:         "user:" + user.Email,
+		SenderID:       user.ID,
+		Recipient:      "agent:" + agent.Slug,
+		RecipientID:    agent.ID,
+		Msg:            "after promote",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, m3))
+	assert.Equal(t, int64(3), m3.ConversationSeq)
+
+	page, err := s.ListConversationFeed(ctx, store.ConversationFeedQuery{
+		ConversationID: topic.ConversationID,
+		AfterSeq:       0,
+		Filter:         store.ConversationFeedFilterAll,
+	})
+	require.NoError(t, err)
+	require.Len(t, page.Messages, 3)
+	assert.Equal(t, []string{m1.ID, m2.ID, m3.ID}, []string{
+		page.Messages[0].ID, page.Messages[1].ID, page.Messages[2].ID,
+	})
+}
+
+// Regression test (O1): CreateMessage inside store.WithTx wakes a waiting poll
+// after Commit, and does NOT wake if the transaction rolls back.
+func TestConversationWatch_WithTxCreateMessageWakesPoll(t *testing.T) {
+	srv, s := testServer(t)
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	srv.SetEventPublisher(ep)
+
+	ctx := context.Background()
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	user := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	conv := watchTestGroupConv(t, s, projID)
+
+	// Subscribe directly to verify rollback does NOT publish.
+	wakeCh, unsub := ep.Subscribe("conversation." + conv.ID + ".message")
+	defer unsub()
+
+	rollbackErr := assert.AnError
+	err := s.WithTx(ctx, func(tx store.Store) error {
+		if cErr := tx.CreateMessage(ctx, &store.Message{
+			ID:             uuid.NewString(),
+			ProjectID:      projID,
+			ConversationID: conv.ID,
+			Sender:         "agent:a",
+			SenderID:       "a1",
+			Recipient:      "user:" + user.Email,
+			RecipientID:    user.ID,
+			Msg:            "rolled back",
+			Type:           "chat",
+			DispatchState:  store.MessageDispatchDispatched,
+		}); cErr != nil {
+			return cErr
+		}
+		return rollbackErr
+	})
+	require.ErrorIs(t, err, rollbackErr)
+	select {
+	case evt := <-wakeCh:
+		t.Fatalf("rolled-back tx must not publish wakeup, got %s", evt.Subject)
+	default:
+	}
+
+	// Start a waiting watch poll, then commit a message inside WithTx.
+	resCh := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		resCh <- doRequestAsUser(t, srv, user, http.MethodGet,
+			"/api/v1/conversations/"+conv.ID+"/watch?start=head&wait=5s", nil)
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	txMsg := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: conv.ID,
+		Sender:         "agent:a",
+		SenderID:       "a1",
+		Recipient:      "user:" + user.Email,
+		RecipientID:    user.ID,
+		Msg:            "committed in tx",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	start := time.Now()
+	require.NoError(t, s.WithTx(ctx, func(tx store.Store) error {
+		return tx.CreateMessage(ctx, txMsg)
+	}))
+
+	select {
+	case rec := <-resCh:
+		assert.Less(t, time.Since(start), time.Second, "WithTx commit must wake poll promptly")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body conversationWatchResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		require.Len(t, body.Events, 1)
+		assert.Equal(t, "msg:"+txMsg.ID, body.Events[0].EventID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("watch poll did not wake after WithTx CreateMessage commit")
+	}
+}
+
+// Regression test (O2): dev and federated_user identities normalize to "user".
+func TestNormalizeFeedPrincipalKind(t *testing.T) {
+	assert.Equal(t, "user", normalizeFeedPrincipalKind("user"))
+	assert.Equal(t, "user", normalizeFeedPrincipalKind("dev"))
+	assert.Equal(t, "user", normalizeFeedPrincipalKind("federated_user"))
+	assert.Equal(t, "agent", normalizeFeedPrincipalKind("agent"))
+}

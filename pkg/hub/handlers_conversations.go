@@ -1586,55 +1586,11 @@ func (s *Server) canUserReadMessage(ctx context.Context, user Identity, msg *sto
 // authorizeDMRead + enforceCrossProjectReadGate and is untouched.
 func (s *Server) authorizeGroupConversationAccess(w http.ResponseWriter, r *http.Request, conv *store.Conversation, action Action) bool {
 	ctx := r.Context()
-
-	// Legacy projectless groups (pre-#1846, chat-thread-bridge design) have
-	// no project to gate on. Fall back to the participant check — today's
-	// behavior, preserved rather than widened.
-	if conv.ProjectID == nil || *conv.ProjectID == "" {
-		identity := GetIdentityFromContext(ctx)
-		if identity == nil {
-			Forbidden(w)
-			return false
-		}
-		allowed, err := s.canReadGroupConversation(ctx, identity, conv)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return false
-		}
-		if !allowed {
-			Forbidden(w)
-			return false
-		}
-		return true
-	}
-
-	// Strict cross-project rule (ptone decision, design §3.2): an agent from
-	// project B can never read a group in project A, whatever cross-project
-	// messaging settings say. This explicit equality check makes the rule
-	// independent of how authorize/CheckAccess treats agent tokens — it
-	// mirrors the DEF-138/DEF-49 checks already on the send paths.
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if agentIdent.ProjectID() != *conv.ProjectID {
-			Forbidden(w)
-			return false
-		}
-	}
-
-	project, err := s.store.GetProject(ctx, *conv.ProjectID)
-	if err != nil {
-		// Review round 1 finding #6: a missing project fails closed (403),
-		// but any other error (transient DB failure, timeout, ...) is not
-		// an authorization decision — surfacing it as 403 would be
-		// misleading to debug. Distinguish the two.
-		if errors.Is(err, store.ErrNotFound) {
-			Forbidden(w)
-			return false
-		}
-		writeErrorFromErr(w, err, "")
+	if err := s.checkGroupConversationAccess(ctx, GetIdentityFromContext(ctx), conv, action); err != nil {
+		s.writeConvReadError(w, r, err)
 		return false
 	}
-
-	return s.authorize(w, r, projectResource(project), action)
+	return true
 }
 
 // canReadProject reports whether identity may read the given project,
@@ -1799,46 +1755,11 @@ func (s *Server) isCrossProjectReadAllowed(ctx context.Context, conv *store.Conv
 // allowed. The peer is derived from the canonical DM key (ExternalRef), not
 // from mutable participant rows.
 func (s *Server) enforceCrossProjectReadGate(w http.ResponseWriter, r *http.Request, conv *store.Conversation, msg *store.Message) bool {
-	agentIdent := GetAgentIdentityFromContext(r.Context())
-	if agentIdent == nil {
-		// Human callers always pass — authorized audit survives Hub disable.
-		return true
-	}
-
-	if conv.Kind != "direct" {
-		return true
-	}
-
-	peerKind, peerID, inKey, err := dmKeyPeer(conv, agentIdent.ID())
-	if err != nil {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"cross-project read denied: unparseable conversation key", nil)
+	if err := s.checkCrossProjectReadGate(r.Context(), conv, msg); err != nil {
+		s.writeConvReadError(w, r, err)
 		return false
 	}
-	if !inKey {
-		// Caller is not named in the key — authorizeDMRead should have
-		// caught this already. Allow through; the prior check is
-		// authoritative.
-		return true
-	}
-
-	var stampedPeerProject *string
-	if msg != nil {
-		stampedPeerProject = peerProjectFromRow(msg, peerKind, peerID)
-	}
-
-	decision, reason := s.crossProjectPeerAllowed(r.Context(), agentIdent.ProjectID(), peerKind, peerID, stampedPeerProject)
-	switch decision {
-	case peerAllowed:
-		return true
-	case peerDenied403:
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, reason, nil)
-		return false
-	default:
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"Internal server error verifying peer agent", nil)
-		return false
-	}
+	return true
 }
 
 // peerDecision is the outcome of crossProjectPeerAllowed.
