@@ -284,7 +284,7 @@ func (s *Server) conduitBrokerAdmissionSecret(w http.ResponseWriter, r *http.Req
 	secret, err := s.store.GetBrokerSecret(r.Context(), brokerID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
+			writeError(w, http.StatusUnauthorized, ErrCodeBrokerDeregistered, "unknown broker: "+brokerID, nil)
 			return conduitBrokerSecretFingerprint{}, false
 		}
 		writeErrorFromErr(w, err, "")

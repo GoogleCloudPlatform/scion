@@ -760,6 +760,20 @@ func (m *ControlChannelManager) ListConnectedBrokers() []string {
 	return brokers
 }
 
+// Disconnect closes and removes any active control-channel connection for
+// brokerID (for example when the broker is deregistered).
+func (m *ControlChannelManager) Disconnect(brokerID string) {
+	m.mu.Lock()
+	conn, ok := m.connections[brokerID]
+	if ok {
+		delete(m.connections, brokerID)
+	}
+	m.mu.Unlock()
+	if ok {
+		conn.Close()
+	}
+}
+
 // Shutdown closes all connections and stops the manager.
 func (m *ControlChannelManager) Shutdown() {
 	m.mu.Lock()

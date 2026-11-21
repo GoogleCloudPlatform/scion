@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -324,8 +325,20 @@ func (s *HeartbeatService) Stop() {
 // IsRunning returns true if the heartbeat service is currently running.
 func (s *HeartbeatService) IsRunning() bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.stopCh != nil
+	stopCh := s.stopCh
+	doneCh := s.doneCh
+	s.mu.Unlock()
+	if stopCh == nil {
+		return false
+	}
+	if doneCh != nil {
+		select {
+		case <-doneCh:
+			return false
+		default:
+		}
+	}
+	return true
 }
 
 // run is the main heartbeat loop.
@@ -349,6 +362,11 @@ func (s *HeartbeatService) run(ctx context.Context) {
 
 	// Send initial heartbeat immediately
 	if err := s.sendHeartbeat(ctx); err != nil {
+		if apiclient.IsBrokerDeregisteredError(err) {
+			s.log.Error("Broker is deregistered on the Hub; stopping heartbeats. Re-register the broker to reconnect.",
+				"broker_id", s.brokerID, "error", err)
+			return
+		}
 		s.log.Error("Initial heartbeat failed", "error", err)
 	} else {
 		s.log.Info("Initial heartbeat sent to Hub")
@@ -361,6 +379,11 @@ func (s *HeartbeatService) run(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			if err := s.sendHeartbeat(ctx); err != nil {
+				if apiclient.IsBrokerDeregisteredError(err) {
+					s.log.Error("Broker is deregistered on the Hub; stopping heartbeats. Re-register the broker to reconnect.",
+						"broker_id", s.brokerID, "error", err)
+					return
+				}
 				s.log.Error("Failed to send heartbeat", "error", err)
 			}
 		case <-stopCh:

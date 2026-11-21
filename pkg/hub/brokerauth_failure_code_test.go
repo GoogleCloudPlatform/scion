@@ -112,6 +112,7 @@ func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T)
 		svc         *BrokerAuthService
 		before      func(t *testing.T)
 		req         *http.Request
+		wantErrCode string // defaults to ErrCodeBrokerAuthFailed
 		wantMessage string // exact, unless wantPrefix is set
 		wantPrefix  string
 		wantCode    auditevent.BrokerFailureCode
@@ -144,6 +145,7 @@ func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T)
 		}, req: replayed,
 			wantMessage: "nonce already used (possible replay attack)", wantCode: auditevent.BrokerFailureReplay},
 		{name: "unknown broker", req: unsignedBrokerRequest(unknownID, now, "n5"),
+			wantErrCode: ErrCodeBrokerDeregistered,
 			wantMessage: "unknown broker: " + unknownID, wantCode: auditevent.BrokerFailureUnknownBroker},
 		{name: "non-UUID claimed broker", req: unsignedBrokerRequest("probe-1", now, "n10"),
 			wantMessage: `failed to get broker secret: invalid input: invalid UUID "probe-1"`, wantCode: auditevent.BrokerFailureUnknownBroker},
@@ -178,7 +180,11 @@ func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T)
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
 			require.Len(t, body, 1)
 			require.Len(t, body["error"], 2, "only code and message: %s", rec.Body.String())
-			assert.Equal(t, ErrCodeBrokerAuthFailed, body["error"]["code"])
+			wantErrCode := c.wantErrCode
+			if wantErrCode == "" {
+				wantErrCode = ErrCodeBrokerAuthFailed
+			}
+			assert.Equal(t, wantErrCode, body["error"]["code"])
 			message, _ := body["error"]["message"].(string)
 			if c.wantPrefix != "" {
 				assert.True(t, strings.HasPrefix(message, c.wantPrefix) && strings.HasSuffix(message, ")"), "message %q", message)

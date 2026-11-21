@@ -132,12 +132,13 @@ const (
 	ErrCodeSendInProgress = "send_in_progress"
 
 	// Broker authentication error codes
-	ErrCodeInvalidJoinToken = "invalid_join_token"
-	ErrCodeExpiredJoinToken = "expired_join_token"
-	ErrCodeBrokerAuthFailed = "broker_auth_failed"
-	ErrCodeInvalidSignature = "invalid_signature"
-	ErrCodeClockSkew        = "clock_skew"
-	ErrCodeReplayDetected   = "replay_detected"
+	ErrCodeInvalidJoinToken   = "invalid_join_token"
+	ErrCodeExpiredJoinToken   = "expired_join_token"
+	ErrCodeBrokerAuthFailed   = "broker_auth_failed"
+	ErrCodeBrokerDeregistered = "broker_deregistered"
+	ErrCodeInvalidSignature   = "invalid_signature"
+	ErrCodeClockSkew          = "clock_skew"
+	ErrCodeReplayDetected     = "replay_detected"
 
 	// ErrCodeUserNotFound is returned (401) when a hub-issued user token
 	// names a subject that has no user record, for example after the

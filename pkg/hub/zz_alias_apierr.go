@@ -39,6 +39,7 @@ const (
 	ErrCodeAgentSessionUnavailable          = apierr.ErrCodeAgentSessionUnavailable
 	ErrCodeAgentUpgradeRequired             = apierr.ErrCodeAgentUpgradeRequired
 	ErrCodeBrokerAuthFailed                 = apierr.ErrCodeBrokerAuthFailed
+	ErrCodeBrokerDeregistered               = apierr.ErrCodeBrokerDeregistered
 	ErrCodeBrokerTimeout                    = apierr.ErrCodeBrokerTimeout
 	ErrCodeChatPostDenied                   = apierr.ErrCodeChatPostDenied
 	ErrCodeClockSkew                        = apierr.ErrCodeClockSkew

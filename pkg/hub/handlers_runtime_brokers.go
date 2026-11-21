@@ -740,8 +740,13 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 
 	// DeleteRuntimeBroker removed the broker's HMAC secret and any
 	// unconsumed join token in the same transaction as the row; announce
-	// the credential change now that it is committed.
+	// the credential change now that it is committed and disconnect any
+	// active control-channel session so the broker receives a terminal
+	// broker_deregistered refusal and stops retrying.
 	s.conduitBrokerCredentialChanged(id)
+	if s.controlChannel != nil {
+		s.controlChannel.Disconnect(id)
+	}
 
 	// Log the deregistration event
 	LogDeregisterEvent(ctx, s.auditLogger, id, brokerName, actorID, clientIP)

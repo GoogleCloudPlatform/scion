@@ -16,11 +16,18 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
+
+// errBrokerDeregistered is returned when the Hub answers a broker request with
+// ErrCodeBrokerDeregistered, indicating the broker is no longer registered and
+// must stop retrying until re-registered.
+var errBrokerDeregistered = errors.New("broker deregistered on hub")
 
 // hubTransportRefusalCode is the error code of a hub (or conduit relay)
 // that refused a broker request because it did not arrive over TLS, from
@@ -55,6 +62,12 @@ func (e *hubRefusalError) Error() string {
 // transportPolicy reports whether e is the hub's transport refusal.
 func (e *hubRefusalError) transportPolicy() bool {
 	return e != nil && e.Code == hubTransportRefusalCode
+}
+
+// brokerDeregistered reports whether e is the hub's terminal refusal telling
+// the broker that its registration no longer exists and it must stop retrying.
+func (e *hubRefusalError) brokerDeregistered() bool {
+	return e != nil && e.Code == apiclient.ErrCodeBrokerDeregistered
 }
 
 // logMessage is the broker's line for a transport refusal of channel

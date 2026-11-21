@@ -369,6 +369,11 @@ func (c *ControlChannelClient) connectWithBackoff() error {
 				return c.ctx.Err()
 			}
 			var refusal *hubRefusalError
+			if errors.As(err, &refusal) && refusal.brokerDeregistered() {
+				c.log.Error("Broker is deregistered on the Hub; stopping control channel reconnects. Re-register the broker to reconnect.",
+					"broker_id", c.config.BrokerID, "status", refusal.Status, "error", err)
+				return fmt.Errorf("%w: %w", errBrokerDeregistered, err)
+			}
 			if errors.As(err, &refusal) && refusal.transportPolicy() {
 				c.log.Error(refusal.logMessage("control channel"),
 					"reason", refusal.Reason, "setting", refusal.Setting, "status", refusal.Status, "retry_in", backoff)
