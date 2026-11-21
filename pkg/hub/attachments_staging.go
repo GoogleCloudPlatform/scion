@@ -183,7 +183,7 @@ func writeStagingTemp(root *os.Root, dir, name string, open func() (io.ReadClose
 		return "", fmt.Errorf("staging temp name: %w", err)
 	}
 	tmpPath := path.Join(dir, "."+name+".tmp-"+hex.EncodeToString(rnd[:]))
-	dst, err := root.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	dst, err := openWorkspaceFileForWrite(root, tmpPath, false)
 	if err != nil {
 		return "", fmt.Errorf("create staged file: %w", err)
 	}
@@ -224,14 +224,14 @@ func verifyStagedCopy(root *os.Root, destPath string, info fs.FileInfo, open fun
 	if !info.Mode().IsRegular() {
 		return errStagedCopyMismatch
 	}
-	staged, err := root.Open(destPath)
+	staged, _, err := openWorkspaceRegularForRead(root, destPath, info)
 	if err != nil {
+		if errors.Is(err, errWorkspaceWriteRefused) {
+			return errStagedCopyMismatch
+		}
 		return fmt.Errorf("open staged file: %w", err)
 	}
 	defer func() { _ = staged.Close() }()
-	if fi, err := staged.Stat(); err != nil || !os.SameFile(fi, info) {
-		return errStagedCopyMismatch
-	}
 	src, err := open()
 	if err != nil {
 		return fmt.Errorf("open attachment: %w", err)

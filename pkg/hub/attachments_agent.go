@@ -271,16 +271,14 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 		return AttachmentRef{}, errAttachmentOutsideSharedDir
 	}
 
-	// Lstat, not Stat: an agent writes into the same shared dir, so a symlink
-	// at the final component would otherwise hand it any file the hub can read.
-	// The root covers the components above it, which Lstat does follow.
-	info, err := root.Lstat(rel)
+	f, info, err := openWorkspaceRegularForRead(root, rel, nil)
 	if err != nil {
+		if errors.Is(err, errWorkspaceWriteRefused) {
+			return AttachmentRef{}, errAttachmentNotRegular
+		}
 		return AttachmentRef{}, err
 	}
-	if !info.Mode().IsRegular() {
-		return AttachmentRef{}, errAttachmentNotRegular
-	}
+	defer func() { _ = f.Close() }()
 	if info.Size() > MaxAttachmentSize {
 		return AttachmentRef{}, errAttachmentTooLarge
 	}
@@ -288,16 +286,6 @@ func (s *Server) storeAgentAttachment(ctx context.Context, wcs WebChatStore, as 
 	name, err := SanitizeFilename(path.Base(rel))
 	if err != nil {
 		return AttachmentRef{}, fmt.Errorf("%w: %w", errAttachmentFilename, err)
-	}
-
-	f, err := root.Open(rel)
-	if err != nil {
-		return AttachmentRef{}, err
-	}
-	defer func() { _ = f.Close() }()
-	// Re-check through the open handle: Lstat and Open are separate syscalls.
-	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
-		return AttachmentRef{}, errAttachmentNotRegular
 	}
 
 	mimeType := attachmentMimeForName(name)
