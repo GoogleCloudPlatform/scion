@@ -5699,9 +5699,12 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			// does not appear anywhere else in this test, so a passing
 			// assertion below can only mean the value was re-derived, not
 			// coincidentally inherited. CreateInputs is left untouched —
-			// it's the real one create persisted. ---
+			// it's the real one create persisted.
+			// HarnessConfig is NOT staled: plain reincarnate pins the live
+			// HarnessConfig when CreateInputs.HarnessConfig is empty so a
+			// changed default cannot implicitly switch an agent's harness
+			// (ptone/scion#7918). ---
 			staleThinking := 99
-			created.AppliedConfig.HarnessConfig = "stale-hc-from-old-generation"
 			created.AppliedConfig.HarnessAuth = "stale-auth"
 			created.AppliedConfig.NoAuth = false
 			created.AppliedConfig.Model = "stale-model"

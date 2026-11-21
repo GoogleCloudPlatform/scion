@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -47,12 +48,11 @@ import (
 //     that changed one of these fields' (or an Env key's) live value — see
 //     recordExplicitEdits — so "explicit inputs" here means the create
 //     request plus any explicit edit made since, not just what create itself
-//     saw. HarnessConfig and HarnessAuth are dual-purpose exactly like Model,
-//     NOT kept fields — left empty here (rather than copied from the live
-//     config) is what lets deriveAgentConfig's project/template/hub
-//     resolution below fill them fresh from the CURRENT catalog when the
-//     requester never set them, instead of freezing in whatever generation N
-//     happened to resolve;
+//     saw. HarnessConfig is pinned from the live AppliedConfig when
+//     CreateInputs.HarnessConfig is empty (ptone/scion#7918) so a changed
+//     default never implicitly switches an agent's harness; HarnessAuth is
+//     dual-purpose like Model and left empty when unset so deriveAgentConfig
+//     fills it fresh from the current catalog;
 //   - then deriveAgentConfig run on THAT fresh config: harness-config
 //     resolution, applyProjectDefaults, applyHubAgentDefaults, then
 //     populateAgentConfig/resolveDerivedConfig — so every derived slot is
@@ -124,6 +124,13 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	if createInputs == nil {
 		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old)
 	}
+	// Pin the agent's live harness config when the request did not ask for a
+	// switch and CreateInputs did not record one (ptone/scion#7918). Never
+	// mutate old.CreateInputs (aliased into PreviousAppliedConfig).
+	if createInputs.HarnessConfig == "" && (patch == nil || patch.HarnessConfig == nil) && old.HarnessConfig != "" {
+		createInputs = cloneCreateInputs(createInputs)
+		createInputs.HarnessConfig = old.HarnessConfig
+	}
 	if patch != nil {
 		// A copy: createInputs may be the outgoing generation's own record
 		// (old.CreateInputs, also saved as PreviousAppliedConfig).
@@ -176,12 +183,11 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		ExplicitTimezoneLegacy:   old.ExplicitTimezoneLegacy,
 		ExplicitTimezoneUnpinned: old.ExplicitTimezoneUnpinned,
 
-		// Explicit-only: empty here (rather than copied from `old`) is what
-		// lets deriveAgentConfig's pipeline fill these fresh from the CURRENT
-		// project/template/hub configuration when the requester never set
-		// them, instead of freezing in whatever generation N resolved.
-		// HarnessConfig and HarnessAuth are NOT kept fields (design §3.3
-		// Amendment A1) — they are explicit-only, exactly like Model.
+		// Explicit-only (except HarnessConfig, which was pinned from old
+		// above when unset so a changed default cannot implicitly switch
+		// harnesses): empty here lets deriveAgentConfig's pipeline fill
+		// HarnessAuth/Profile/ThinkingLevel fresh from the CURRENT
+		// project/template/hub configuration when the requester never set them.
 		HarnessConfig: createInputs.HarnessConfig,
 		HarnessAuth:   createInputs.HarnessAuth,
 		Profile:       createInputs.Profile,
@@ -729,3 +735,39 @@ func addHarnessSwitchToPlan(plan *ReincarnationPlan, old, fresh *store.AgentAppl
 // reincarnateSwitchNoAuthKeptWarning is the plan warning for a harness
 // switch of an agent whose create-time no-credentials request is kept.
 const reincarnateSwitchNoAuthKeptWarning = "the agent keeps running with no injected credentials on the new harness: it was created with --no-auth or role none, and reincarnate keeps that setting"
+
+// implicitHarnessSwitch reports a harness-config change the request did not
+// ask for: no explicit --harness patch was requested, the agent's live
+// harness config is non-empty, and the freshly resolved config would run a
+// different harness config (ptone/scion#7918).
+func implicitHarnessSwitch(old, fresh *store.AgentAppliedConfig, patch *reincarnatePatch) (from, to string, ok bool) {
+	if old == nil || fresh == nil {
+		return "", "", false
+	}
+	if patch != nil && patch.HarnessConfig != nil {
+		return "", "", false
+	}
+	if old.HarnessConfig == "" || fresh.HarnessConfig == old.HarnessConfig {
+		return "", "", false
+	}
+	return old.HarnessConfig, fresh.HarnessConfig, true
+}
+
+// implicitHarnessSwitchMessage builds the 412 error message for an unrequested
+// harness-config change, including any recorded-harness drop warning and the
+// experiment-gated --harness instruction.
+func implicitHarnessSwitchMessage(from, to string, dropWarnings []string) string {
+	detail := ""
+	for _, w := range dropWarnings {
+		if strings.Contains(w, "harness config") {
+			detail = fmt.Sprintf(" (the recorded harness config is no longer usable: %s)", w)
+			break
+		}
+	}
+	target := to
+	if target == "" {
+		target = "<name>"
+	}
+	return fmt.Sprintf("reincarnate would change harness config from %q to %q%s. Pass --harness %s to switch (resets the agent's home; --harness requires the %s experiment), or restore harness config %q.",
+		from, to, detail, target, experiments.ReincarnateHarnessSwitch, from)
+}

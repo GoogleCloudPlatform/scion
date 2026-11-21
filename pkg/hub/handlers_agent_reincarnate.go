@@ -485,12 +485,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
 	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
-	buildCtx := ctx
+	buildCtx, buildDispatchWarnings := withDispatchWarnings(ctx)
 	if patch != nil && patch.HarnessConfig != nil {
 		// A harness switch never falls back to no credentials on its own
 		// (ptone/scion#7757 §3.3.4): `--harness-auth none` asks for that
 		// explicitly.
-		buildCtx = withNoAuthFallbackForbidden(ctx)
+		buildCtx = withNoAuthFallbackForbidden(buildCtx)
 	}
 	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, agent.RuntimeBrokerID), patch)
 	if err != nil {
@@ -503,6 +503,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	if from, to, ok := implicitHarnessSwitch(agent.AppliedConfig, fresh, patch); ok {
+		writeError(w, http.StatusPreconditionFailed, ErrCodeImplicitHarnessSwitch,
+			implicitHarnessSwitchMessage(from, to, buildDispatchWarnings.Warnings()), nil)
 		return
 	}
 	imageRegistry := resolveRegistry(fresh.Profile)
@@ -814,13 +819,19 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	// The new generation runs on dst: resolve its registry there, for the
 	// new profile (ptone/scion#3916).
 	resolveRegistry := reincarnateImageRegistry(dispatcher, dst.ID)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, dst.ID), patch)
+	buildCtx, buildDispatchWarnings := withDispatchWarnings(ctx)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, dst.ID), patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	if from, to, ok := implicitHarnessSwitch(agent.AppliedConfig, fresh, patch); ok {
+		writeError(w, http.StatusPreconditionFailed, ErrCodeImplicitHarnessSwitch,
+			implicitHarnessSwitchMessage(from, to, buildDispatchWarnings.Warnings()), nil)
 		return
 	}
 	// A dry-run move reports the same GCP identity refusal as start and

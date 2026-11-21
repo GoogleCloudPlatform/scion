@@ -214,6 +214,12 @@ const (
 	// attachment transfer). Status 422.
 	ErrCodeUnsupportedCapability = "unsupported_capability"
 
+	// ErrCodeImplicitHarnessSwitch is returned (412) when a plain
+	// reincarnation (without --harness) would change the agent's harness
+	// config, refusing an unrequested switch that would bypass home-reset
+	// and credential safeguards.
+	ErrCodeImplicitHarnessSwitch = "implicit_harness_switch"
+
 	// ErrCodeInvalidDMKey is returned when a DM key does not have exactly 5
 	// colon-separated parts. Distinguishable from ErrCodeConversationNotResolved
 	// because this is a parse failure, not a lookup miss.
