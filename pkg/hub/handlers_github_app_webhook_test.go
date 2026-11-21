@@ -34,6 +34,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 func TestGitHubOwnerRepo(t *testing.T) {
@@ -1558,4 +1559,415 @@ func TestGitHubAppHandlers_PaginateProjects(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestHandleGitHubWebhook_InstallationReposRemoved_PausesGitHubTriggers(t *testing.T) {
+	srv, s := webhookTestServer(t)
+	ctx := context.Background()
+
+	instID := int64(12345)
+	otherInstID := int64(99999)
+
+	if err := s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          42,
+		Repositories:   []string{"Acme/Widgets", "acme/api"},
+		Status:         store.GitHubInstallationStatusActive,
+	}); err != nil {
+		t.Fatalf("failed to create installation: %v", err)
+	}
+	if err := s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: otherInstID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          42,
+		Repositories:   []string{"acme/widgets"},
+		Status:         store.GitHubInstallationStatusActive,
+	}); err != nil {
+		t.Fatalf("failed to create other installation: %v", err)
+	}
+
+	projAffectedA := tid("repo-rem-aff-a")
+	projAffectedB := tid("repo-rem-aff-b")
+	projOtherRepo := tid("repo-rem-other-repo")
+	projOtherInst := tid("repo-rem-other-inst")
+
+	now := time.Now().UTC()
+	for _, p := range []*store.Project{
+		{
+			ID:                   projAffectedA,
+			Name:                 "Affected A",
+			Slug:                 "affected-a",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &instID,
+			GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: now},
+			Created:              now,
+			Updated:              now,
+		},
+		{
+			ID:                   projAffectedB,
+			Name:                 "Affected B",
+			Slug:                 "affected-b",
+			GitRemote:            "git@github.com:ACME/WIDGETS.git", // case-insensitive match
+			GitHubInstallationID: &instID,
+			GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: now},
+			Created:              now,
+			Updated:              now,
+		},
+		{
+			ID:                   projOtherRepo,
+			Name:                 "Other Repo",
+			Slug:                 "other-repo",
+			GitRemote:            "https://github.com/acme/api.git",
+			GitHubInstallationID: &instID,
+			GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: now},
+			Created:              now,
+			Updated:              now,
+		},
+		{
+			ID:                   projOtherInst,
+			Name:                 "Other Installation",
+			Slug:                 "other-inst",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &otherInstID,
+			GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: now},
+			Created:              now,
+			Updated:              now,
+		},
+	} {
+		if err := s.CreateProject(ctx, p); err != nil {
+			t.Fatalf("CreateProject(%s): %v", p.ID, err)
+		}
+	}
+
+	// Set a primary routing entry on instID for acme/widgets; §8.4 requires
+	// installation_repositories.removed NOT to edit trigger_routing.
+	if err := s.SetGitHubInstallationTriggerRoute(ctx, instID, "acme/widgets", store.GitHubTriggerRoute{
+		PrimaryProjectID: projAffectedA,
+		SetBy:            "admin-1",
+		SetAt:            now,
+	}); err != nil {
+		t.Fatalf("SetGitHubInstallationTriggerRoute: %v", err)
+	}
+
+	mkTrigger := func(id, projectID, name, sourceKind, sourceID, status, statusReason string) *store.Trigger {
+		tr := &store.Trigger{
+			ID:            tid(id),
+			ProjectID:     projectID,
+			Name:          name,
+			SourceKind:    sourceKind,
+			SourceID:      sourceID,
+			MatchTypes:    []string{"github.issue_comment.created"},
+			ActionType:    store.TriggerActionMessage,
+			ActionPayload: `{"agentId":"agent-1","message":"hi"}`,
+			Status:        status,
+			StatusReason:  statusReason,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}
+		if err := s.CreateTrigger(ctx, tr); err != nil {
+			t.Fatalf("CreateTrigger(%s): %v", id, err)
+		}
+		return tr
+	}
+
+	trAffActiveA := mkTrigger("tr-aff-a-active", projAffectedA, "gh-active-a", store.TriggerSourceKindGitHub, "", store.TriggerStatusActive, store.TriggerStatusReasonNone)
+	trAffUserPausedA := mkTrigger("tr-aff-a-user-paused", projAffectedA, "gh-user-paused-a", store.TriggerSourceKindGitHub, "", store.TriggerStatusPaused, store.TriggerStatusReasonNone)
+	trAffCreatorDelA := mkTrigger("tr-aff-a-creator-del", projAffectedA, "gh-creator-del-a", store.TriggerSourceKindGitHub, "", store.TriggerStatusPaused, store.TriggerStatusReasonCreatorDeleted)
+	trAffWebhookA := mkTrigger("tr-aff-a-webhook", projAffectedA, "wh-active-a", store.TriggerSourceKindWebhook, tid("ep-1"), store.TriggerStatusActive, store.TriggerStatusReasonNone)
+	trAffActiveB := mkTrigger("tr-aff-b-active", projAffectedB, "gh-active-b", store.TriggerSourceKindGitHub, "", store.TriggerStatusActive, store.TriggerStatusReasonNone)
+	trOtherRepo := mkTrigger("tr-other-repo", projOtherRepo, "gh-other-repo", store.TriggerSourceKindGitHub, "", store.TriggerStatusActive, store.TriggerStatusReasonNone)
+	trOtherInst := mkTrigger("tr-other-inst", projOtherInst, "gh-other-inst", store.TriggerSourceKindGitHub, "", store.TriggerStatusActive, store.TriggerStatusReasonNone)
+
+	sendRemovedWebhook := func() {
+		t.Helper()
+		payload := mustJSON(t, map[string]interface{}{
+			"action":       "removed",
+			"installation": map[string]interface{}{"id": instID},
+			"repositories_removed": []map[string]interface{}{
+				{"id": 1, "full_name": "aCmE/wIdGeTs", "name": "widgets"},
+			},
+			"repositories_added": []map[string]interface{}{},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+		req.Header.Set("X-GitHub-Event", "installation_repositories")
+		req.Header.Set("X-Hub-Signature-256", signWebhookPayload(payload, "test-webhook-secret"))
+		rec := httptest.NewRecorder()
+		srv.handleGitHubWebhook(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	sendRemovedWebhook()
+
+	assertTriggerState := func(id, wantStatus, wantReason string) {
+		t.Helper()
+		got, err := s.GetTrigger(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTrigger(%s): %v", id, err)
+		}
+		if got.Status != wantStatus || got.StatusReason != wantReason {
+			t.Errorf("trigger %s: got (%q, %q), want (%q, %q)", id, got.Status, got.StatusReason, wantStatus, wantReason)
+		}
+	}
+
+	// Affected projects' github triggers paused with source_deleted.
+	assertTriggerState(trAffActiveA.ID, store.TriggerStatusPaused, store.TriggerStatusReasonSourceDeleted)
+	assertTriggerState(trAffUserPausedA.ID, store.TriggerStatusPaused, store.TriggerStatusReasonSourceDeleted)
+	assertTriggerState(trAffActiveB.ID, store.TriggerStatusPaused, store.TriggerStatusReasonSourceDeleted)
+
+	// Already system-paused trigger preserves its existing system reason.
+	assertTriggerState(trAffCreatorDelA.ID, store.TriggerStatusPaused, store.TriggerStatusReasonCreatorDeleted)
+
+	// Webhook trigger on affected project and github triggers on unaffected projects stay active.
+	assertTriggerState(trAffWebhookA.ID, store.TriggerStatusActive, store.TriggerStatusReasonNone)
+	assertTriggerState(trOtherRepo.ID, store.TriggerStatusActive, store.TriggerStatusReasonNone)
+	assertTriggerState(trOtherInst.ID, store.TriggerStatusActive, store.TriggerStatusReasonNone)
+
+	// Primary routing entry on the installation is NOT edited (§8.4).
+	updatedInst, err := s.GetGitHubInstallation(ctx, instID)
+	if err != nil {
+		t.Fatalf("GetGitHubInstallation: %v", err)
+	}
+	route, ok := updatedInst.TriggerRouting["acme/widgets"]
+	if !ok || route.PrimaryProjectID != projAffectedA {
+		t.Errorf("expected trigger_routing[acme/widgets] to stay %q, got %+v", projAffectedA, updatedInst.TriggerRouting)
+	}
+
+	// Exactly 3 mutation audit records written (one per newly paused trigger).
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: mutationTypeTriggerPause,
+		Limit:        100,
+	})
+	if err != nil {
+		t.Fatalf("ListMutationAudits: %v", err)
+	}
+	if len(audits) != 3 {
+		t.Fatalf("expected 3 trigger_pause audit records, got %d", len(audits))
+	}
+	auditedTargets := make(map[string]*store.MutationAuditRecord, len(audits))
+	for _, rec := range audits {
+		auditedTargets[rec.TargetID] = rec
+	}
+	for _, wantID := range []string{trAffActiveA.ID, trAffUserPausedA.ID, trAffActiveB.ID} {
+		rec, exists := auditedTargets[wantID]
+		if !exists {
+			t.Errorf("missing trigger_pause audit for trigger %s", wantID)
+			continue
+		}
+		if !strings.Contains(rec.AfterSummary, store.TriggerStatusReasonSourceDeleted) ||
+			!strings.Contains(rec.AfterSummary, "installation_repositories.removed") {
+			t.Errorf("audit for %s has unexpected AfterSummary: %s", wantID, rec.AfterSummary)
+		}
+	}
+
+	// Redelivery must be idempotent: triggers stay paused, no duplicate audit records.
+	sendRemovedWebhook()
+
+	assertTriggerState(trAffActiveA.ID, store.TriggerStatusPaused, store.TriggerStatusReasonSourceDeleted)
+	assertTriggerState(trAffUserPausedA.ID, store.TriggerStatusPaused, store.TriggerStatusReasonSourceDeleted)
+	assertTriggerState(trAffActiveB.ID, store.TriggerStatusPaused, store.TriggerStatusReasonSourceDeleted)
+
+	auditsAfterRedelivery, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: mutationTypeTriggerPause,
+		Limit:        100,
+	})
+	if err != nil {
+		t.Fatalf("ListMutationAudits after redelivery: %v", err)
+	}
+	if len(auditsAfterRedelivery) != 3 {
+		t.Errorf("expected 3 trigger_pause audit records after idempotent redelivery, got %d", len(auditsAfterRedelivery))
+	}
+}
+
+func TestResumeGitHubTrigger_RefusedUntilRepoReassociated(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	gh := newFakeGitHubForAssoc(t)
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.srv.config.GitHubAppConfig.AppID = 778899
+	f.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	f.srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	sysAdmin := createAssocAdmin(t, f.store, "resume-sys-admin")
+	const instID int64 = 6202
+	createAssocInstallation(t, f.store, instID, "acme", "acme/widgets")
+
+	// Associate the fixture project with instID + Acme/Widgets via admin binding.
+	remote := gh.remote("Acme", "Widgets")
+	proj, err := f.store.GetProject(ctx, f.projectID)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	proj.GitRemote = remote
+	idCopy := instID
+	proj.GitHubInstallationID = &idCopy
+	proj.GitHubAppStatus = &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now().UTC()}
+	if err := f.store.UpdateProject(ctx, proj); err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+	setAdminBinding(t, f.store, proj, instID, util.NormalizeGitRemote(remote), sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(proj.ID)
+
+	// Create an active github trigger.
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-resume-check",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.agentA.ID, Message: "ping"},
+	})
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create trigger: expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created TriggerResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created trigger: %v", err)
+	}
+
+	// Remove acme/widgets via installation_repositories.removed -> pauses trigger with source_deleted.
+	removePayload := mustJSON(t, map[string]any{
+		"action":       "removed",
+		"installation": map[string]any{"id": instID},
+		"repositories_removed": []map[string]any{
+			{"id": 1, "full_name": "acme/widgets", "name": "widgets"},
+		},
+		"repositories_added": []map[string]any{},
+	})
+	removeReq := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(removePayload))
+	removeReq.Header.Set("X-GitHub-Event", "installation_repositories")
+	removeReq.Header.Set("X-Hub-Signature-256", signWebhookPayload(removePayload, "test-webhook-secret"))
+	removeRec := httptest.NewRecorder()
+	f.srv.handleGitHubWebhook(removeRec, removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("removed webhook: expected 200, got %d: %s", removeRec.Code, removeRec.Body.String())
+	}
+
+	// Attempting to resume while repo is absent from installation.Repositories must return 409 repo_not_accessible.
+	refusedRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	if refusedRec.Code != http.StatusConflict {
+		t.Fatalf("resume before re-association: expected 409, got %d: %s", refusedRec.Code, refusedRec.Body.String())
+	}
+	if code := decodeAPIErrorCode(t, refusedRec); code != githubapp.ErrCodeRepoNotAccessible {
+		t.Errorf("expected error code %q, got %q (body: %s)", githubapp.ErrCodeRepoNotAccessible, code, refusedRec.Body.String())
+	}
+	if !strings.Contains(refusedRec.Body.String(), "repository list") {
+		t.Errorf("expected clear reason in 409 body, got: %s", refusedRec.Body.String())
+	}
+
+	// Trigger must still be paused with source_deleted.
+	stillPaused, err := f.store.GetTrigger(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTrigger: %v", err)
+	}
+	if stillPaused.Status != store.TriggerStatusPaused || stillPaused.StatusReason != store.TriggerStatusReasonSourceDeleted {
+		t.Fatalf("expected trigger still paused (source_deleted), got (%q, %q)", stillPaused.Status, stillPaused.StatusReason)
+	}
+
+	// Re-add the repository via installation_repositories.added (mixed case) -> resume now succeeds.
+	addPayload := mustJSON(t, map[string]any{
+		"action":       "added",
+		"installation": map[string]any{"id": instID},
+		"repositories_added": []map[string]any{
+			{"id": 1, "full_name": "Acme/Widgets", "name": "widgets"},
+		},
+		"repositories_removed": []map[string]any{},
+	})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(addPayload))
+	addReq.Header.Set("X-GitHub-Event", "installation_repositories")
+	addReq.Header.Set("X-Hub-Signature-256", signWebhookPayload(addPayload, "test-webhook-secret"))
+	addRec := httptest.NewRecorder()
+	f.srv.handleGitHubWebhook(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("added webhook: expected 200, got %d: %s", addRec.Code, addRec.Body.String())
+	}
+
+	resumedRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	if resumedRec.Code != http.StatusOK {
+		t.Fatalf("resume after re-association: expected 200, got %d: %s", resumedRec.Code, resumedRec.Body.String())
+	}
+	resumed, err := f.store.GetTrigger(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTrigger after resume: %v", err)
+	}
+	if resumed.Status != store.TriggerStatusActive || resumed.StatusReason != store.TriggerStatusReasonNone {
+		t.Fatalf("expected trigger active with empty reason, got (%q, %q)", resumed.Status, resumed.StatusReason)
+	}
+}
+
+func TestResumeGitHubTrigger_UserPausedResumesWithEmptyRepoCache(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	gh := newFakeGitHubForAssoc(t)
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.srv.config.GitHubAppConfig.AppID = 778899
+	f.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	f.srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	sysAdmin := createAssocAdmin(t, f.store, "resume-empty-cache-admin")
+	const instID int64 = 6203
+	// Create installation with an empty cached Repositories list (non-authoritative cache).
+	createAssocInstallation(t, f.store, instID, "acme")
+
+	remote := gh.remote("acme", "widgets")
+	proj, err := f.store.GetProject(ctx, f.projectID)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	proj.GitRemote = remote
+	idCopy := instID
+	proj.GitHubInstallationID = &idCopy
+	proj.GitHubAppStatus = &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now().UTC()}
+	if err := f.store.UpdateProject(ctx, proj); err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+	setAdminBinding(t, f.store, proj, instID, util.NormalizeGitRemote(remote), sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(proj.ID)
+
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "gh-user-paused-empty-cache",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+		Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+		Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: f.agentA.ID, Message: "ping"},
+	})
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create trigger: expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created TriggerResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created trigger: %v", err)
+	}
+
+	// User-pause the trigger (StatusReason == "").
+	pauseRec := f.doTrigger(t, f.ownerAuth, created.ID+"/pause", http.MethodPost, nil)
+	if pauseRec.Code != http.StatusOK {
+		t.Fatalf("pause trigger: expected 200, got %d: %s", pauseRec.Code, pauseRec.Body.String())
+	}
+
+	// User-paused trigger must resume even while installation.Repositories is empty.
+	resumeRec := f.doTrigger(t, f.ownerAuth, created.ID+"/resume", http.MethodPost, nil)
+	if resumeRec.Code != http.StatusOK {
+		t.Fatalf("resume user-paused trigger with empty repo cache: expected 200, got %d: %s", resumeRec.Code, resumeRec.Body.String())
+	}
+	resumed, err := f.store.GetTrigger(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetTrigger: %v", err)
+	}
+	if resumed.Status != store.TriggerStatusActive || resumed.StatusReason != store.TriggerStatusReasonNone {
+		t.Fatalf("expected trigger active with empty reason, got (%q, %q)", resumed.Status, resumed.StatusReason)
+	}
 }

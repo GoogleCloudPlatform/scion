@@ -669,6 +669,7 @@ type ProjectGitHubTriggerRoutingView struct {
 	PrimaryProject *ProjectGitHubTriggerPrimaryRef `json:"primary_project"`
 	IsPrimary      bool                            `json:"is_primary"`
 	OtherProjects  []string                        `json:"other_projects"`
+	Status         string                          `json:"status,omitempty"`
 }
 
 // ProjectGitHubTriggerSettings is the response payload of

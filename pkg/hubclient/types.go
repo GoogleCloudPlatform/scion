@@ -159,23 +159,36 @@ type KubernetesInfo struct {
 	SyncedAt  string `json:"syncedAt,omitempty"`
 }
 
+// GitHubAppProjectStatus reflects the health of a project's GitHub App
+// installation association.
+type GitHubAppProjectStatus struct {
+	State         string     `json:"state"`
+	ErrorCode     string     `json:"error_code,omitempty"`
+	ErrorMessage  string     `json:"error_message,omitempty"`
+	LastTokenMint *time.Time `json:"last_token_mint,omitempty"`
+	LastError     *time.Time `json:"last_error,omitempty"`
+	LastChecked   time.Time  `json:"last_checked"`
+}
+
 // Project represents a project from the Hub API.
 type Project struct {
-	ID                     string            `json:"id"`
-	Name                   string            `json:"name"`
-	Slug                   string            `json:"slug"`
-	GitRemote              string            `json:"gitRemote,omitempty"`
-	DefaultRuntimeBrokerID string            `json:"defaultRuntimeBrokerId,omitempty"`
-	Created                time.Time         `json:"created"`
-	Updated                time.Time         `json:"updated"`
-	CreatedBy              string            `json:"createdBy,omitempty"`
-	OwnerID                string            `json:"ownerId,omitempty"`
-	Labels                 map[string]string `json:"labels,omitempty"`
-	Annotations            map[string]string `json:"annotations,omitempty"`
-	Providers              []ProjectProvider `json:"providers,omitempty"`
-	AgentCount             int               `json:"agentCount,omitempty"`
-	ActiveBrokerCount      int               `json:"activeBrokerCount,omitempty"`
-	ProjectType            string            `json:"projectType,omitempty"`
+	ID                     string                  `json:"id"`
+	Name                   string                  `json:"name"`
+	Slug                   string                  `json:"slug"`
+	GitRemote              string                  `json:"gitRemote,omitempty"`
+	DefaultRuntimeBrokerID string                  `json:"defaultRuntimeBrokerId,omitempty"`
+	Created                time.Time               `json:"created"`
+	Updated                time.Time               `json:"updated"`
+	CreatedBy              string                  `json:"createdBy,omitempty"`
+	OwnerID                string                  `json:"ownerId,omitempty"`
+	Labels                 map[string]string       `json:"labels,omitempty"`
+	Annotations            map[string]string       `json:"annotations,omitempty"`
+	GitHubInstallationID   *int64                  `json:"githubInstallationId,omitempty"`
+	GitHubAppStatus        *GitHubAppProjectStatus `json:"githubAppStatus,omitempty"`
+	Providers              []ProjectProvider       `json:"providers,omitempty"`
+	AgentCount             int                     `json:"agentCount,omitempty"`
+	ActiveBrokerCount      int                     `json:"activeBrokerCount,omitempty"`
+	ProjectType            string                  `json:"projectType,omitempty"`
 }
 
 // MarshalJSON implements custom marshaling to also emit the canonical

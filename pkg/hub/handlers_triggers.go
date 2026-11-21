@@ -1092,6 +1092,9 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if !s.authorizeGitHubTriggerSource(w, r, project, tr.SourceID) {
 			return
 		}
+		if tr.StatusReason == store.TriggerStatusReasonSourceDeleted && !s.requireGitHubInstallationHasRepo(w, r, project) {
+			return
+		}
 	default:
 		ValidationError(w, fmt.Sprintf("unsupported source kind %q (supported: %s, %s)",
 			tr.SourceKind, store.TriggerSourceKindWebhook, store.TriggerSourceKindGitHub), nil)

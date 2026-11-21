@@ -104,6 +104,15 @@ var windowsAllowed = map[string]bool{
 	"trigger.preset.list":    true,
 	"trigger.preset.show":    true,
 	"trigger.preset.apply":   true,
+	// GitHub trigger source status, settings, and primary routing
+	// (ptone/scion#8092): pure Hub API calls, no local writes.
+	"trigger.github":               true,
+	"trigger.github.status":        true,
+	"trigger.github.settings":      true,
+	"trigger.github.primary":       true,
+	"trigger.github.primary.list":  true,
+	"trigger.github.primary.set":   true,
+	"trigger.github.primary.unset": true,
 
 	// Project message policies (ptone/scion#8047): pure Hub API calls and
 	// read-only user input files (--file, --rule-file, --body-file); no local

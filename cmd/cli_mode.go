@@ -235,6 +235,9 @@ var agentAllowed = map[string]bool{
 	"trigger.preset.list":    true,
 	"trigger.preset.show":    true,
 	"trigger.preset.apply":   true,
+	// trigger.github (status, settings, primary.*) are deliberately absent
+	// (ptone/scion#8092, Stage 3 rev 1.11 §9.5): human-mode only, as the
+	// project GitHub trigger settings route denies agent identities.
 
 	// Project message policy read-only inspection (ptone/scion#8047,
 	// maintainer decision m1-agent-cli v1): agents may inspect active project

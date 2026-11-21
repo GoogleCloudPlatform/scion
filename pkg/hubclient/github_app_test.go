@@ -117,3 +117,47 @@ func TestGitHubAppService_RepoRouting(t *testing.T) {
 	assert.Equal(t, "/api/v1/github-app/repo-routing/Acme/Widgets", gotPath)
 	assert.Equal(t, "installation=42", gotQuery)
 }
+
+func TestGitHubAppService_GetConfig(t *testing.T) {
+	ctx := context.Background()
+
+	var gotMethod, gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(GitHubAppConfig{
+			AppID:            98765,
+			WebhooksEnabled:  true,
+			Configured:       true,
+			HasPrivateKey:    true,
+			HasWebhookSecret: true,
+			Triggers: &GitHubTriggersReadiness{
+				Ready:              false,
+				WebhooksEnabled:    true,
+				HasWebhookSecret:   true,
+				MissingEvents:      []string{"issue_comment"},
+				MissingPermissions: []string{"issues:write"},
+				AppSlug:            "scion-bot",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	cfg, err := c.GitHubApp().GetConfig(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodGet, gotMethod)
+	assert.Equal(t, "/api/v1/github-app", gotPath)
+	assert.Equal(t, int64(98765), cfg.AppID)
+	assert.True(t, cfg.Configured)
+	assert.True(t, cfg.WebhooksEnabled)
+	assert.True(t, cfg.HasWebhookSecret)
+	require.NotNil(t, cfg.Triggers)
+	assert.False(t, cfg.Triggers.Ready)
+	assert.Equal(t, []string{"issue_comment"}, cfg.Triggers.MissingEvents)
+	assert.Equal(t, []string{"issues:write"}, cfg.Triggers.MissingPermissions)
+	assert.Equal(t, "scion-bot", cfg.Triggers.AppSlug)
+}

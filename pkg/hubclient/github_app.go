@@ -19,15 +19,23 @@ import (
 	"errors"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
-const githubAppRepoRoutingBasePath = "/api/v1/github-app/repo-routing"
+const (
+	githubAppConfigPath          = "/api/v1/github-app"
+	githubAppRepoRoutingBasePath = "/api/v1/github-app/repo-routing"
+)
 
 // GitHubAppService provides administrative operations on the Hub's GitHub App
 // integration.
 type GitHubAppService interface {
+	// GetConfig retrieves the Hub's administrative GitHub App configuration and
+	// trigger readiness summary (GET /api/v1/github-app).
+	GetConfig(ctx context.Context) (*GitHubAppConfig, error)
+
 	// ListRepoRouting lists primary-project trigger routing entries across
 	// repositories with candidate projects (optional installation filter).
 	ListRepoRouting(ctx context.Context, installationID *int64) ([]GitHubRepoRoutingEntry, error)
@@ -43,6 +51,33 @@ type GitHubAppService interface {
 
 type githubAppService struct {
 	c *client
+}
+
+// GitHubTriggersReadiness reports the admin-level GitHub App readiness for
+// triggers returned under GET /api/v1/github-app.
+type GitHubTriggersReadiness struct {
+	Ready              bool       `json:"ready"`
+	WebhooksEnabled    bool       `json:"webhooks_enabled"`
+	HasWebhookSecret   bool       `json:"has_webhook_secret"`
+	MissingEvents      []string   `json:"missing_events"`
+	MissingPermissions []string   `json:"missing_permissions"`
+	AppSlug            string     `json:"app_slug"`
+	CheckedAt          *time.Time `json:"checked_at,omitempty"`
+	Error              string     `json:"error,omitempty"`
+}
+
+// GitHubAppConfig is the administrative response payload for GET /api/v1/github-app.
+type GitHubAppConfig struct {
+	AppID                     int64                    `json:"app_id"`
+	APIBaseURL                string                   `json:"api_base_url,omitempty"`
+	WebhooksEnabled           bool                     `json:"webhooks_enabled"`
+	Configured                bool                     `json:"configured"`
+	HasPrivateKey             bool                     `json:"has_private_key"`
+	PrivateKeySource          string                   `json:"private_key_source,omitempty"`
+	PrivateKeyOverridesSecret bool                     `json:"private_key_overrides_secret,omitempty"`
+	HasWebhookSecret          bool                     `json:"has_webhook_secret"`
+	InstallationURL           string                   `json:"installation_url,omitempty"`
+	Triggers                  *GitHubTriggersReadiness `json:"triggers,omitempty"`
 }
 
 // GitHubRepoRoutingProject summarizes one candidate project on a repository
@@ -71,6 +106,14 @@ type SetGitHubRepoPrimaryRequest struct {
 
 func githubAppRepoRoutingItemPath(owner, repo string) string {
 	return githubAppRepoRoutingBasePath + "/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+}
+
+func (s *githubAppService) GetConfig(ctx context.Context) (*GitHubAppConfig, error) {
+	resp, err := s.c.get(ctx, githubAppConfigPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[GitHubAppConfig](resp)
 }
 
 func (s *githubAppService) ListRepoRouting(ctx context.Context, installationID *int64) ([]GitHubRepoRoutingEntry, error) {
