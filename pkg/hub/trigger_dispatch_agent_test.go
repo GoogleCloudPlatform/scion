@@ -1495,8 +1495,10 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recPatch.Code, recPatch.Body.String())
 	assert.Contains(t, recPatch.Body.String(), "dispatch_agent_github_unsupported")
 
-	// 3. webhook + dispatch_agent remains accepted (201), and PATCHing it into
-	// github source or subject.mode=skip is refused (security Info I4).
+	// 3. webhook + dispatch_agent remains accepted (201); PATCHing it into
+	// github source is refused (security Info I4), while PATCHing
+	// subject.mode=skip is accepted now that dispatch_agent subject claims
+	// are implemented.
 	recEP := f.doJSON(t, adminCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints", ghProj.ID),
 		CreateWebhookEndpointRequest{Name: "wh-still-ok"})
@@ -1529,14 +1531,17 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recPatchSrc.Code, recPatchSrc.Body.String())
 	assert.Contains(t, recPatchSrc.Body.String(), "dispatch_agent_github_unsupported")
 
-	// PATCH webhook dispatch_agent trigger's subject.mode to skip -> 400 dispatch_agent_skip_unsupported.
+	// PATCH webhook dispatch_agent trigger's subject.mode to skip -> 200 OK.
 	recPatchSkip := f.doJSON(t, adminCtx, http.MethodPatch,
 		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
 		map[string]any{
 			"subject": map[string]any{"mode": store.TriggerSubjectModeSkip},
 		})
-	require.Equal(t, http.StatusBadRequest, recPatchSkip.Code, recPatchSkip.Body.String())
-	assert.Contains(t, recPatchSkip.Body.String(), "dispatch_agent_skip_unsupported")
+	require.Equal(t, http.StatusOK, recPatchSkip.Code, recPatchSkip.Body.String())
+	var patchedTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recPatchSkip.Body.Bytes(), &patchedTrig))
+	require.NotNil(t, patchedTrig.Subject)
+	assert.Equal(t, store.TriggerSubjectModeSkip, patchedTrig.Subject.Mode)
 }
 
 func TestScheduleDispatchAgent_IgnoresStrayAgentRoleAndCleanCollisionError(t *testing.T) {
