@@ -456,6 +456,22 @@ func TestCanDelegate_ProjectScopeRuleEveryGrantType(t *testing.T) {
 				}
 			}
 
+			// Non-group grant types with empty ScopeType, ScopeID, and ProjectID
+			// are refused for UATs even when the grant carries no permissions.
+			if gt != GrantTypeGroupMembership {
+				emptyScope := GrantDescriptor{Type: gt}
+				if gt == GrantTypeAgentDelegation {
+					emptyScope.AgentRole = string(AgentRoleNone)
+				}
+				for name, actor := range map[string]*ScopedUserIdentity{
+					"project boundary": projectToken,
+					"hub boundary":     hubToken,
+				} {
+					d := f.authz.CanDelegate(ctx, actor, emptyScope)
+					assert.False(t, d.Allowed, "%s: empty scope on non-group %s must be refused", name, gt)
+				}
+			}
+
 			// Grant types whose handlers inspect ProjectID must also refuse an
 			// empty ProjectID when ScopeType is project.
 			if gt == GrantTypeAgentDelegation || gt == GrantTypeProjectMembership {
@@ -467,6 +483,22 @@ func TestCanDelegate_ProjectScopeRuleEveryGrantType(t *testing.T) {
 				} {
 					d := f.authz.CanDelegate(ctx, actor, emptyProjectID)
 					assert.False(t, d.Allowed, "%s: empty ProjectID on %s must be refused", name, gt)
+				}
+			}
+
+			// AgentRoleNone delegates no permissions downstream, so an empty
+			// ProjectID with ScopeType project must still be refused by the
+			// UAT project-scope check itself.
+			if gt == GrantTypeAgentDelegation {
+				emptyProjectIDNone := base
+				emptyProjectIDNone.AgentRole = string(AgentRoleNone)
+				emptyProjectIDNone.ProjectID = ""
+				for name, actor := range map[string]*ScopedUserIdentity{
+					"project boundary": projectToken,
+					"hub boundary":     hubToken,
+				} {
+					d := f.authz.CanDelegate(ctx, actor, emptyProjectIDNone)
+					assert.False(t, d.Allowed, "%s: empty ProjectID on %s with AgentRoleNone must be refused", name, gt)
 				}
 			}
 		})
