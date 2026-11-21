@@ -519,7 +519,6 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		Payload:    rawPayload,
 	}
 	budget := ruleengine.NewBudgetTracker(d.ruleBudget)
-	budget.Charge(max(d.now().Sub(parseStart), time.Duration(0)))
 	// SEC-3b2-01: separate per-event compile budget charged only on cache misses
 	// (never charged to eval budget, preserving F2).
 	compileBudget := ruleengine.NewBudgetTracker(d.compileBudget)
