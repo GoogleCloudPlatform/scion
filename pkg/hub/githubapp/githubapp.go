@@ -75,6 +75,46 @@ func DefaultTokenPermissions() TokenPermissions {
 	}
 }
 
+// IntersectTokenPermissions caps each non-empty field of requested to the level
+// granted in appPermissions ("read" or "write"). It never adds fields that are
+// empty in requested, never widens a level above requested or above "write"
+// (an App grant of "admin" satisfies "write" or "read" without widening), and
+// drops fields absent from or with unrecognized levels in appPermissions.
+// If appPermissions is nil or empty, it returns the zero TokenPermissions.
+func IntersectTokenPermissions(requested TokenPermissions, appPermissions map[string]string) TokenPermissions {
+	if len(appPermissions) == 0 {
+		return TokenPermissions{}
+	}
+	capLevel := func(req, app string) string {
+		switch req {
+		case "read":
+			if app == "read" || app == "write" || app == "admin" {
+				return "read"
+			}
+			return ""
+		case "write":
+			switch app {
+			case "write", "admin":
+				return "write"
+			case "read":
+				return "read"
+			default:
+				return ""
+			}
+		default:
+			return ""
+		}
+	}
+	return TokenPermissions{
+		Contents:     capLevel(requested.Contents, appPermissions["contents"]),
+		PullRequests: capLevel(requested.PullRequests, appPermissions["pull_requests"]),
+		Issues:       capLevel(requested.Issues, appPermissions["issues"]),
+		Metadata:     capLevel(requested.Metadata, appPermissions["metadata"]),
+		Checks:       capLevel(requested.Checks, appPermissions["checks"]),
+		Actions:      capLevel(requested.Actions, appPermissions["actions"]),
+	}
+}
+
 // InstallationToken represents a minted GitHub App installation access token.
 type InstallationToken struct {
 	Token       string            `json:"token"`
