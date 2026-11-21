@@ -38,7 +38,7 @@ import {
   suspendReasonHint,
   suspendedStatusLabel,
 } from '../../../shared/agent-state-display.js';
-import { isTerminalActivity } from '../../../shared/types.js';
+import { isTerminalActivity, type DeletionInfo } from '../../../shared/types.js';
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
@@ -57,6 +57,8 @@ import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
 import './chat-avatar.js';
 import '../status-badge.js';
+import { DeletionLeaseController } from '../deletion-badge.js';
+import '../deletion-badge.js';
 import { formatInstantWithZone, formatRelative } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 
@@ -154,6 +156,8 @@ export interface ChatAgentMember {
   detailMessage?: string;
   /** When the agent last changed state (not the heartbeat in `lastSeen`). */
   lastActivityEvent?: string;
+  /** Backend-driven async/failed delete view when active or within display TTL. */
+  deletion?: DeletionInfo | null | undefined;
   /**
    * Whether the viewer may open a terminal on this agent, as decided by the
    * Hub. The sidebar lists every agent in the space's project, but attaching
@@ -187,6 +191,9 @@ export interface MemberClickDetail {
 export class ScionChatMembers extends LitElement {
   /** Re-renders absolute activity dates when the display zone changes. */
   readonly _zone = new DisplayZoneController(this);
+  private readonly deletionLease = new DeletionLeaseController(this, () =>
+    (this.agents || []).map((a) => ({ deletion: a.deletion ?? null }))
+  );
 
   /** Human members of the space. */
   @property({ type: Array })
@@ -436,6 +443,13 @@ export class ScionChatMembers extends LitElement {
     scion-status-badge {
       transform: scale(0.85);
       transform-origin: left center;
+    }
+
+    .member-badges {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
     }
 
     /*
@@ -1188,13 +1202,20 @@ export class ScionChatMembers extends LitElement {
         </div>
         <div class="member-info">
           <div class="member-name">${a.displayName}</div>
-          <scion-status-badge
-            status=${badgeStatus}
-            label=${suspendedLabel ?? ''}
-            size="small"
-          ></scion-status-badge>
+          <div class="member-badges">
+            <scion-status-badge
+              status=${badgeStatus}
+              label=${suspendedLabel ?? ''}
+              size="small"
+            ></scion-status-badge>
+            <scion-deletion-badge
+              .deletion=${this.deletionLease.view({ deletion: a.deletion ?? null })}
+              size="small"
+              compact
+            ></scion-deletion-badge>
+          </div>
         </div>
-        ${a.canAttach !== true
+        ${a.canAttach !== true || this.deletionLease.isDeleting({ deletion: a.deletion ?? null })
           ? nothing
           : html`<a
               href=${terminalHref(a.id)}

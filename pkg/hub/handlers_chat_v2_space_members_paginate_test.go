@@ -101,7 +101,7 @@ func TestSpaceMembers_CanAttachEvaluatedBeyondFirstPage(t *testing.T) {
 	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/chat/spaces/"+projectID+"/members", nil)
 	resp := decodeSpaceMembers(t, rec.Code, rec.Body.Bytes())
 
-	byID := make(map[string]chatMemberEntry, len(resp.Agents))
+	byID := make(map[string]chatAgentMemberEntry, len(resp.Agents))
 	for _, a := range resp.Agents {
 		byID[a.ID] = a
 	}

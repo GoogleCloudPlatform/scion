@@ -46,6 +46,7 @@ const TEN_MINUTES = 10 * 60_000;
 const POLL_LOADERS = [
   'loadUnreadDMPeers',
   'loadV2Members',
+  'refreshSpaceHumans',
   'loadHubMembers',
   'refreshHubMemberPresence',
 ] as const;

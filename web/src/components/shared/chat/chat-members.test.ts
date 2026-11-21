@@ -552,3 +552,62 @@ describe('scion-chat-members people search', () => {
     expect(names(el)).toEqual(['Ann', 'Bob']);
   });
 });
+
+describe('scion-chat-members async/failed deletion badge', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('hides deletion badge for normal agents and renders compact badge for deleting / failed', async () => {
+    const normal = await mount([agent({ canAttach: true })]);
+    const hiddenBadge = normal.shadowRoot?.querySelector('scion-deletion-badge');
+    expect(hiddenBadge?.hasAttribute('hidden')).toBe(true);
+    expect(normal.shadowRoot?.querySelector('a.agent-terminal')).not.toBeNull();
+    document.body.innerHTML = '';
+
+    const leaseFuture = new Date(Date.now() + 60_000).toISOString();
+    const deletingEl = await mount([
+      agent({
+        canAttach: true,
+        phase: 'stopping',
+        deletion: {
+          state: 'deleting',
+          soft: true,
+          startedAt: new Date().toISOString(),
+          leaseExpiresAt: leaseFuture,
+        },
+      } as Partial<ChatAgentMember>),
+    ]);
+    const delBadge = deletingEl.shadowRoot?.querySelector('scion-deletion-badge') as
+      | (HTMLElement & { updateComplete: Promise<unknown> })
+      | null;
+    await delBadge?.updateComplete;
+    expect(delBadge?.hasAttribute('hidden')).toBe(false);
+    expect(delBadge?.shadowRoot?.textContent).toContain('Deleting…');
+    // Terminal button is suppressed while teardown is actively running.
+    expect(deletingEl.shadowRoot?.querySelector('a.agent-terminal')).toBeNull();
+    document.body.innerHTML = '';
+
+    const expFuture = new Date(Date.now() + 600_000).toISOString();
+    const failedEl = await mount([
+      agent({
+        canAttach: true,
+        phase: 'stopped',
+        deletion: {
+          state: 'failed',
+          soft: true,
+          startedAt: new Date().toISOString(),
+          expiresAt: expFuture,
+        },
+      } as Partial<ChatAgentMember>),
+    ]);
+    const failBadge = failedEl.shadowRoot?.querySelector('scion-deletion-badge') as
+      | (HTMLElement & { updateComplete: Promise<unknown> })
+      | null;
+    await failBadge?.updateComplete;
+    expect(failBadge?.hasAttribute('hidden')).toBe(false);
+    expect(failBadge?.shadowRoot?.textContent).toContain('Delete failed');
+    // Once failed (no active delete), terminal gating reverts to canAttach.
+    expect(failedEl.shadowRoot?.querySelector('a.agent-terminal')).not.toBeNull();
+  });
+});

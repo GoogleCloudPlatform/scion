@@ -42,7 +42,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 
-import type { PageData, Agent, Project } from '../../shared/types.js';
+import type { PageData, Agent, Project, DeletionInfo } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { browserPath, stripBasePath } from '../../client/navigation.js';
@@ -233,6 +233,8 @@ function recentFileToPreviewTarget(file: RecentFile): PreviewTarget {
  * (unread DM state, human space membership) and re-syncs after a missed event.
  */
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
+/** Full `/members` (humans + agents) runs every 5th space fallback tick (~5 min). */
+const SPACE_FULL_POLL_EVERY_TICKS = 5;
 
 /**
  * Max age passed to `chatDMsLoad` on a 60 s fallback poll tick: skips the
@@ -321,6 +323,7 @@ function agentMemberToAgent(m: import('../shared/chat/chat-members.js').ChatAgen
     lastSeen: m.lastSeen || '',
     ...(m.detailMessage ? { detail: { message: m.detailMessage } } : {}),
     lastActivityEvent: m.lastActivityEvent || '',
+    deletion: m.deletion ?? null,
   };
 }
 
@@ -343,6 +346,7 @@ function withLiveAgentStatus(
     // row without a message means the message was cleared.
     detailMessage: agentDetailMessage(agent),
     lastActivityEvent: realTimestamp(agent.lastActivityEvent) || member.lastActivityEvent || '',
+    deletion: agent.deletion ?? null,
   };
 }
 
@@ -388,6 +392,7 @@ function hubAgentMember(a: Agent): import('../shared/chat/chat-members.js').Chat
     projectId: a.projectId || '',
     detailMessage: agentDetailMessage(a),
     lastActivityEvent: realTimestamp(a.lastActivityEvent) || realTimestamp(a.updated),
+    deletion: a.deletion ?? null,
     canAttach: undefined,
   };
 }
@@ -724,6 +729,8 @@ export class ScionPageChat extends LitElement {
   private _sidebarOwner: 'none' | 'hub' | 'space' = 'none';
   /** The project whose members `loadV2Members` last loaded into the sidebar. */
   private _sidebarSpaceId = '';
+  /** Fallback poll ticks elapsed since the last full `loadV2Members` call. */
+  private _spacePollTicks = 0;
   /**
    * The {@link _hubMembersGeneration} whose users load last published, or
    * null. A "join" call (no `refresh`) for that same generation has nothing
@@ -2289,17 +2296,18 @@ export class ScionPageChat extends LitElement {
     // It pauses while the tab is hidden and catches up once on return.
     this._stopFallbackPoll = visibleInterval(() => {
       void this.loadUnreadDMPeers({ maxAgeMs: FALLBACK_POLL_MAX_AGE_MS });
-      // A DM has no membership of its own, so re-syncing here would silently
-      // swap the member list the user was just looking at. Leave the sidebar on
-      // whatever the previous view loaded.
-      if (this.v2Conversation?.isDM) return;
-      if (this.v2Conversation?.projectId) {
-        void this.loadV2Members(this.v2Conversation.projectId);
-      } else if (this._sidebarOwner === 'space') {
-        // A space expanded with no conversation open (mobile) keeps its own
-        // members: reload them rather than claiming the sidebar for the hub.
-        void this.loadV2Members(this._sidebarSpaceId);
-      } else {
+      const spaceProjectId = this.activeSpaceSidebarProjectId();
+      if (spaceProjectId) {
+        // 4 of 5 ticks refresh humans + presence only; every 5th tick (~5 min)
+        // runs a full reload to reconcile missed agent events and canAttach.
+        // Also runs while viewing a DM whose sidebar still shows a space, so
+        // missed SSE deletes do not freeze that space's sidebar indefinitely.
+        if (++this._spacePollTicks >= SPACE_FULL_POLL_EVERY_TICKS) {
+          void this.loadV2Members(spaceProjectId);
+        } else {
+          void this.refreshSpaceHumans(spaceProjectId);
+        }
+      } else if (!this.v2Conversation?.isDM) {
         // Human membership has no SSE event, so the users list is loaded
         // again — but only the bounded recent-users page, and only once it
         // is older than RECENT_USERS_TTL_MS: until then this re-publishes the
@@ -2317,6 +2325,18 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * Project ID whose space members currently own the sidebar, if any:
+   * an open non-DM thread's project, or `_sidebarSpaceId` when the sidebar is
+   * space-owned (mobile expanded space, or a DM opened after viewing a space).
+   */
+  private activeSpaceSidebarProjectId(): string {
+    if (!this.v2Conversation?.isDM && this.v2Conversation?.projectId) {
+      return this.v2Conversation.projectId;
+    }
+    return this._sidebarOwner === 'space' ? this._sidebarSpaceId : '';
+  }
+
+  /**
    * Quietly refresh the rail and what loads with it (see the rail's
    * `refresh`): a catch-up, so no pull indicator. A refresh already running
    * is joined.
@@ -2325,12 +2345,18 @@ export class ScionPageChat extends LitElement {
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
-    if (!rail) return;
-    this._inCatchUpRailRefresh = true;
-    try {
-      void rail.refresh({ quiet: true });
-    } finally {
-      this._inCatchUpRailRefresh = false;
+    if (rail) {
+      this._inCatchUpRailRefresh = true;
+      try {
+        void rail.refresh({ quiet: true });
+      } finally {
+        this._inCatchUpRailRefresh = false;
+      }
+      return;
+    }
+    const spaceProjectId = this.activeSpaceSidebarProjectId();
+    if (spaceProjectId) {
+      void this.loadV2Members(spaceProjectId);
     }
   }
 
@@ -2342,8 +2368,9 @@ export class ScionPageChat extends LitElement {
   /**
    * The rail started a full refresh. Reload the DM state the members
    * sidebar shows (a user pull-to-refresh always fetches fresh; an automated
-   * catch-up joins a poll catch-up that started moments earlier), and the
-   * nav badge's count, which has the same staleness.
+   * catch-up joins a poll catch-up that started moments earlier), any active
+   * space's member list (`parseV2Route` short-circuits when a conversation is
+   * already open), and the nav badge's count, which has the same staleness.
    */
   private _handleRailRefresh(e: Event): void {
     const detail = (e as CustomEvent<RailRefreshDetail>).detail;
@@ -2358,6 +2385,10 @@ export class ScionPageChat extends LitElement {
     } else {
       this._noteDMListChange();
       detail?.waitUntil(this.loadUnreadDMPeers());
+    }
+    const spaceProjectId = this.activeSpaceSidebarProjectId();
+    if (spaceProjectId) {
+      void this.loadV2Members(spaceProjectId);
     }
     chatUnread.scheduleRefresh();
   }
@@ -2905,13 +2936,12 @@ export class ScionPageChat extends LitElement {
     // Only adopt agents belonging to the current view: the open conversation's
     // project, the space holding the sidebar (on mobile, expanded with no
     // conversation), or every space the user can see in the base view.
-    const scopeProjectId =
-      this.v2Conversation?.projectId ||
-      (this._sidebarOwner === 'space' ? this._sidebarSpaceId : '');
+    const scopeProjectId = this.activeSpaceSidebarProjectId();
     const inScope = (projectId: string): boolean =>
       scopeProjectId ? projectId === scopeProjectId : true;
 
     const byId = new Map(this.v2AgentMembers.map((a) => [a.id, a]));
+    const addedMembers: ChatAgentMember[] = [];
     let hasNewAgent = false;
 
     for (const agent of stateManager.getAgents()) {
@@ -2923,8 +2953,7 @@ export class ScionPageChat extends LitElement {
       // otherwise every SSE tick re-adds it and re-triggers the refetch that
       // removes it again (the flicker loop).
       if (!existing && this._serverOmittedAgentIds.has(agent.id)) continue;
-      if (!existing) hasNewAgent = true;
-      byId.set(agent.id, {
+      const mapped: ChatAgentMember = {
         id: agent.id,
         kind: 'agent' as const,
         displayName: agent.name || agent.slug || agent.id,
@@ -2942,16 +2971,23 @@ export class ScionPageChat extends LitElement {
           realTimestamp(agent.updated) ||
           existing?.lastActivityEvent ||
           '',
+        deletion: agent.deletion ?? null,
         // SSE deltas carry status, not authorization. Preserve what the
         // members endpoint decided; rebuilding without it restores the
         // terminal control on every status tick.
         canAttach: existing?.canAttach,
-      });
+      };
+      if (!existing) {
+        hasNewAgent = true;
+        addedMembers.push(mapped);
+      }
+      byId.set(agent.id, mapped);
     }
 
     // Drop agents removed via SSE `deleted` events.
+    const deletedIds = new Set(stateManager.getDeletedAgentIds());
     const deletedRefs = new Set<string>();
-    for (const id of stateManager.getDeletedAgentIds()) {
+    for (const id of deletedIds) {
       const removed = byId.get(id);
       if (removed?.slug) deletedRefs.add(removed.slug);
       deletedRefs.add(id);
@@ -2959,6 +2995,30 @@ export class ScionPageChat extends LitElement {
     }
 
     this.v2AgentMembers = Array.from(byId.values());
+
+    // Keep v2Members (@mention composer roster) in sync on SSE membership
+    // changes without replacing the array reference on status-only ticks.
+    const hasDeletedInRoster =
+      deletedIds.size > 0 && this.v2Members.some((m) => m.kind === 'agent' && deletedIds.has(m.id));
+    const existingRosterIds =
+      addedMembers.length > 0 ? new Set(this.v2Members.map((m) => m.id)) : null;
+    const newRosterEntries = existingRosterIds
+      ? addedMembers
+          .filter((a) => !deletedIds.has(a.id) && !existingRosterIds.has(a.id))
+          .map((a) => ({
+            id: a.id,
+            name: a.displayName,
+            email: '',
+            slug: a.slug || '',
+            kind: 'agent' as const,
+          }))
+      : [];
+    if (hasDeletedInRoster || newRosterEntries.length > 0) {
+      const pruned = hasDeletedInRoster
+        ? this.v2Members.filter((m) => m.kind !== 'agent' || !deletedIds.has(m.id))
+        : this.v2Members;
+      this.v2Members = newRosterEntries.length > 0 ? [...pruned, ...newRosterEntries] : pruned;
+    }
 
     // When a brand-new agent appears via SSE, its `canAttach` is unknown
     // (SSE events carry status, not per-viewer authorization). Schedule a
@@ -4075,7 +4135,9 @@ export class ScionPageChat extends LitElement {
     // merging hub presence onto another view's members.
     const seq = this._membersViewSeq;
     try {
-      const res = await apiFetch(`/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members`);
+      const res = await apiFetch(
+        `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members?include=humans`
+      );
       if (!res.ok) return;
       const data = (await res.json()) as {
         humans?: Array<{ id: string; presenceState?: 'active' | 'idle' | '' }>;
@@ -4210,8 +4272,59 @@ export class ScionPageChat extends LitElement {
     }
   }
 
+  /**
+   * Lightweight 60 s space fallback poll: fetches `?include=humans` and merges
+   * only human membership + presence, preserving `v2AgentMembers` (kept live
+   * via SSE and reconciled in full every 5th tick / on reconnect).
+   */
+  private async refreshSpaceHumans(projectId: string): Promise<void> {
+    if (!projectId) return;
+    const seq = this._membersViewSeq;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/members?include=humans`
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        humans?: Array<{
+          id: string;
+          displayName: string;
+          email?: string;
+          avatarUrl?: string;
+          role?: string;
+          presenceState?: 'active' | 'idle' | '';
+        }>;
+      };
+      if (seq !== this._membersViewSeq) return;
+      if (this._sidebarOwner !== 'space' || this._sidebarSpaceId !== projectId) return;
+      const humans = data.humans || [];
+      this.v2HumanMembers = humans.map((h) => ({
+        id: h.id,
+        kind: 'user' as const,
+        displayName: h.displayName,
+        email: h.email || '',
+        avatarUrl: h.avatarUrl || '',
+        role: h.role || '',
+        presenceState: h.presenceState || '',
+      }));
+      this.v2Members = [
+        ...humans.map((h) => ({
+          id: h.id,
+          name: h.displayName,
+          email: h.email || '',
+          avatarUrl: h.avatarUrl || '',
+          kind: 'user' as const,
+        })),
+        ...this.v2Members.filter((m) => m.kind === 'agent'),
+      ];
+    } catch {
+      // Non-critical — next tick or reconnect will catch up
+    }
+  }
+
   private async loadV2Members(projectId: string): Promise<void> {
     if (!projectId) return;
+    this._spacePollTicks = 0;
     const seq = ++this._membersViewSeq;
     // The sidebar is this project's now: the hub list stops updating it.
     this._sidebarOwner = 'space';
@@ -4246,7 +4359,6 @@ export class ScionPageChat extends LitElement {
         const data = (await res.json()) as {
           humans?: Array<{
             id: string;
-            kind: 'user';
             displayName: string;
             email?: string;
             avatarUrl?: string;
@@ -4255,16 +4367,14 @@ export class ScionPageChat extends LitElement {
           }>;
           agents?: Array<{
             id: string;
-            kind: 'agent';
             displayName: string;
             slug?: string;
             phase?: string;
             activity?: string;
             suspendReason?: string;
             message?: string;
-            lastSeen?: string;
             lastActivityEvent?: string;
-            projectId?: string;
+            deletion?: DeletionInfo | null;
             canAttach?: boolean;
           }>;
           members?: SpaceMember[];
@@ -4275,6 +4385,19 @@ export class ScionPageChat extends LitElement {
         // immediately before the first write, so applying this response
         // can't overwrite that current view with stale data.
         if (seq !== this._membersViewSeq) return;
+
+        // Filter out agents tombstoned via SSE `deleted` while this request
+        // was in flight (`stateManager.seedAgents` skips tombstones, so
+        // `withLiveAgentStatus(m, undefined)` would otherwise resurrect them).
+        const deletedIds = new Set(stateManager.getDeletedAgentIds());
+        const droppedRefs = new Set<string>();
+        const liveAgents = (data.agents || []).filter((a) => {
+          if (!deletedIds.has(a.id)) return true;
+          droppedRefs.add(a.id);
+          if (a.slug) droppedRefs.add(a.slug);
+          return false;
+        });
+
         // Populate the sidebar member arrays
         this._agentMembersSource = 'space';
         this.v2HumanMembers = (data.humans || []).map((h) => ({
@@ -4286,7 +4409,7 @@ export class ScionPageChat extends LitElement {
           role: h.role || '',
           presenceState: h.presenceState || '',
         }));
-        this.v2AgentMembers = (data.agents || []).map((a) => ({
+        this.v2AgentMembers = liveAgents.map((a) => ({
           id: a.id,
           kind: 'agent' as const,
           displayName: a.displayName,
@@ -4294,10 +4417,11 @@ export class ScionPageChat extends LitElement {
           phase: a.phase || '',
           activity: a.activity || '',
           suspendReason: a.suspendReason,
-          lastSeen: a.lastSeen || '',
-          projectId: a.projectId || projectId,
+          lastSeen: '',
+          projectId,
           detailMessage: agentDetailMessage(a),
           lastActivityEvent: realTimestamp(a.lastActivityEvent),
+          deletion: a.deletion ?? null,
           // Carry the Hub attach decision through. These mappers rebuild the
           // member objects field by field, so anything not named here is
           // dropped before the sidebar sees it.
@@ -4309,7 +4433,7 @@ export class ScionPageChat extends LitElement {
         // event) — stateManager.seedAgents is add-only, so a stale entry
         // would otherwise linger and get re-added by every SSE tick,
         // triggering this same refetch in a loop (see _handleAgentsUpdated).
-        const serverAgentIds = new Set((data.agents || []).map((a) => a.id));
+        const serverAgentIds = new Set(liveAgents.map((a) => a.id));
         // If an agent the server now returns was previously marked as omitted,
         // lift the suppression — it is active and should not be blocked.
         for (const id of serverAgentIds) {
@@ -4342,15 +4466,19 @@ export class ScionPageChat extends LitElement {
             avatarUrl: h.avatarUrl || '',
             kind: 'user' as const,
           })),
-          ...(data.agents || []).map((a) => ({
+          ...liveAgents.map((a) => ({
             id: a.id,
             name: a.displayName,
             email: '',
             slug: a.slug || '',
             kind: 'agent' as const,
           })),
-          ...(data.members || []),
+          ...(data.members || []).filter((m) => m.kind !== 'agent' || !deletedIds.has(m.id)),
         ];
+        const conv = this.v2Conversation;
+        if (conv?.defaultAgent && droppedRefs.has(conv.defaultAgent)) {
+          this.v2Conversation = { ...conv, defaultAgent: '' };
+        }
       }
     } catch {
       // Non-critical (an abort lands here too: a newer view took over)

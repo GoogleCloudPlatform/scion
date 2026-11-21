@@ -381,7 +381,8 @@ describe('hub members: hub presence fetch', () => {
   function membersRequests(): number {
     return vi
       .mocked(apiFetch)
-      .mock.calls.filter((c) => /\/chat\/spaces\/[^/]+\/members$/.test(c[0])).length;
+      .mock.calls.filter((c) => /\/chat\/spaces\/[^/]+\/members\?include=humans$/.test(c[0]))
+      .length;
   }
 
   function railLoaded(page: ChatPage): void {
@@ -403,8 +404,9 @@ describe('hub members: hub presence fetch', () => {
   }
 
   function presenceReads(): number {
-    return vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === '/api/v1/chat/spaces/p1/members')
-      .length;
+    return vi
+      .mocked(apiFetch)
+      .mock.calls.filter((c) => c[0] === '/api/v1/chat/spaces/p1/members?include=humans').length;
   }
 
   it('returning to the hub view from a space fetches presence again', async () => {
@@ -430,7 +432,7 @@ describe('hub members: hub presence fetch', () => {
     const held: Array<Deferred<Response>> = [];
     vi.mocked(apiFetch).mockImplementation((url) => {
       if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
-      if (url === '/api/v1/chat/spaces/p1/members') {
+      if (url === '/api/v1/chat/spaces/p1/members?include=humans') {
         const d = deferred<Response>();
         held.push(d);
         return d.promise;
@@ -483,7 +485,7 @@ describe('hub members: hub presence fetch', () => {
     const held: Array<Deferred<Response>> = [];
     vi.mocked(apiFetch).mockImplementation((url) => {
       if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
-      if (url === '/api/v1/chat/spaces/p1/members') {
+      if (url === '/api/v1/chat/spaces/p1/members?include=humans') {
         const d = deferred<Response>();
         held.push(d);
         return d.promise;
@@ -526,7 +528,7 @@ describe('hub members: hub presence fetch', () => {
     let held = true;
     vi.mocked(apiFetch).mockImplementation((url) => {
       if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
-      if (url === '/api/v1/chat/spaces/p1/members' && held) {
+      if (url === '/api/v1/chat/spaces/p1/members?include=humans' && held) {
         held = false;
         return presence.promise;
       }
@@ -559,7 +561,7 @@ describe('hub members: hub presence fetch', () => {
     const presence = deferred<Response>();
     vi.mocked(apiFetch).mockImplementation((url) => {
       if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
-      if (url === '/api/v1/chat/spaces/p1/members') return presence.promise;
+      if (url === '/api/v1/chat/spaces/p1/members?include=humans') return presence.promise;
       return Promise.resolve(new Response('{}', { status: 200 }));
     });
     const page = await mountPage();
@@ -623,7 +625,7 @@ describe('hub members: hub presence fetch', () => {
     const presence = deferred<Response>();
     vi.mocked(apiFetch).mockImplementation((url) => {
       if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
-      if (url === '/api/v1/chat/spaces/p1/members') return presence.promise;
+      if (url === '/api/v1/chat/spaces/p1/members?include=humans') return presence.promise;
       return Promise.resolve(new Response('{}', { status: 200 }));
     });
     const page = await mountPage();
@@ -717,7 +719,7 @@ describe('hub members: hub presence fetch', () => {
     let members = 0;
     vi.mocked(apiFetch).mockImplementation((url) => {
       if (url.startsWith('/api/v1/users')) return Promise.resolve(usersPage(['u1']));
-      if (/\/members$/.test(url)) {
+      if (/\/members\?include=humans$/.test(url)) {
         return Promise.resolve(
           ++members === 1 ? new Response('', { status: 500 }) : new Response('{}', { status: 200 })
         );
@@ -1135,19 +1137,28 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
     const page = await mountPage();
     try {
       const spaceReads = (): number =>
-        vi.mocked(apiFetch).mock.calls.filter((c) => c[0] === '/api/v1/chat/spaces/p1/members')
+        vi
+          .mocked(apiFetch)
+          .mock.calls.filter((c) => String(c[0]).startsWith('/api/v1/chat/spaces/p1/members'))
           .length;
       vi.mocked(apiFetch).mockImplementation((url) =>
         Promise.resolve(
-          url === '/api/v1/chat/spaces/p1/members'
+          url === '/api/v1/chat/spaces/p1/members?include=humans'
             ? new Response(
                 JSON.stringify({
-                  humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
-                  agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+                  humans: [{ id: 'h1', displayName: 'h1' }],
                 }),
                 { status: 200 }
               )
-            : new Response('{}', { status: 200 })
+            : url === '/api/v1/chat/spaces/p1/members'
+              ? new Response(
+                  JSON.stringify({
+                    humans: [{ id: 'h1', kind: 'user', displayName: 'h1' }],
+                    agents: [{ id: 'sp1', kind: 'agent', displayName: 'sp1', projectId: 'p1' }],
+                  }),
+                  { status: 200 }
+                )
+              : new Response('{}', { status: 200 })
         )
       );
       await page.loadV2Members('p1');
@@ -1173,7 +1184,9 @@ describe('hub members: a space claiming the sidebar with no conversation', () =>
       const reads = (projectId: string): number =>
         vi
           .mocked(apiFetch)
-          .mock.calls.filter((c) => c[0] === `/api/v1/chat/spaces/${projectId}/members`).length;
+          .mock.calls.filter((c) =>
+            String(c[0]).startsWith(`/api/v1/chat/spaces/${projectId}/members`)
+          ).length;
       vi.mocked(apiFetch).mockImplementation(() =>
         Promise.resolve(new Response(JSON.stringify({ humans: [], agents: [] }), { status: 200 }))
       );
