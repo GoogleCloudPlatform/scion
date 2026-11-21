@@ -93,10 +93,13 @@ const contentSniffLen = 512
 //
 // head may be shorter than contentSniffLen; an empty file classifies as text.
 func ClassifyAttachment(filename string, head []byte) (string, error) {
-	ext := attachmentExt(filename)
-	if DangerousExtensions[ext] || refusedMarkupExtensions[ext] {
+	if ext, refused := refusedAttachmentExt(filename); refused {
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
+	// Use the full-name extension (without stripping ":" stream suffixes) for
+	// text-like MIME classification so POSIX filenames with a colon in the stem
+	// (such as "notes:v2.md") keep their expected type.
+	ext := normalizeAttachmentExt(filename)
 
 	if len(head) > contentSniffLen {
 		head = head[:contentSniffLen]
