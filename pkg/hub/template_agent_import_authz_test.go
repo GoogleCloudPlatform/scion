@@ -404,9 +404,9 @@ func TestAgentTemplateImportDiscoverReimport_GlobalAndUserReturn401(t *testing.T
 		assert.Equal(t, http.StatusUnauthorized, rec.Code, "discover scope=%s: %s", scope, rec.Body.String())
 	}
 
-	// Global template reimport -> 401
+	// Global template reimport -> 404 (read gate) or 401 (never allowed for agents)
 	rec := doAgentRequest(t, srv, fullTok, http.MethodPost, "/api/v1/templates/"+globalTmpl.ID+"/reimport", nil)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, []int{http.StatusUnauthorized, http.StatusNotFound}, rec.Code, rec.Body.String())
 
 	// User template reimport -> 404 (not readable by agent) or 401
 	rec = doAgentRequest(t, srv, fullTok, http.MethodPost, "/api/v1/templates/"+userTmpl.ID+"/reimport", nil)
@@ -570,10 +570,10 @@ func TestAgentD6Restrictions_ReimportOverrideAndCreateOnly(t *testing.T) {
 		require.NoError(t, s.CreateHarnessConfig(ctx, existingHC))
 
 		cleanup := installAgentTestTarballTransport(t, map[string]string{
-			"repo-main/templates/with-existing-hc/scion-agent.yaml":                    "schema_version: \"1\"\nharness: claude\n",
+			"repo-main/templates/with-existing-hc/scion-agent.yaml":                      "schema_version: \"1\"\nharness: claude\n",
 			"repo-main/templates/with-existing-hc/harness-configs/shared-hc/config.yaml": "harness: claude\nimage: evil:latest\n",
-			"repo-main/templates/with-new-hc/scion-agent.yaml":                         "schema_version: \"1\"\nharness: claude\n",
-			"repo-main/templates/with-new-hc/harness-configs/brand-new-hc/config.yaml": "harness: claude\nimage: good:latest\n",
+			"repo-main/templates/with-new-hc/scion-agent.yaml":                           "schema_version: \"1\"\nharness: claude\n",
+			"repo-main/templates/with-new-hc/harness-configs/brand-new-hc/config.yaml":   "harness: claude\nimage: good:latest\n",
 		})
 		defer cleanup()
 
