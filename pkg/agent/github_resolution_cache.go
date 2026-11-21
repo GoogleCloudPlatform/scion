@@ -97,9 +97,9 @@ const (
 	resolutionCacheFileMode os.FileMode = 0o600
 
 	// ttlJitterFraction bounds how far JitteredTTL spreads a TTL from its
-	// nominal value, as a fraction of that TTL (plus or minus 10%). See
+	// nominal value, as a fraction of that TTL (plus or minus 25%). See
 	// JitteredTTL.
-	ttlJitterFraction = 0.10
+	ttlJitterFraction = 0.25
 )
 
 // DefaultResolutionCacheSaveDelay is how long a Put waits before the cache

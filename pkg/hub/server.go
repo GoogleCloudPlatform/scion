@@ -2897,11 +2897,22 @@ type Server struct {
 	// value is ready to use.
 	ghResolveFlight singleflight.Group
 
-	// ghRefreshFailMu guards ghLastRefreshFailure, which records the last
-	// time a background stale-refresh failed for a given cache key (see
-	// refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
+	// ghRefreshFailMu guards ghLastRefreshFailure, which records the jittered
+	// earliest retry time after a background stale-refresh failed for a given
+	// cache key (see refreshGitHubSkillInBackground and ghRefreshFailureBackoff).
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
+
+	// ghRefreshSemOnce lazily initializes ghRefreshSem to bound concurrent
+	// background GitHub skill refreshes (see hubGHRefreshConcurrency).
+	ghRefreshSemOnce sync.Once
+	ghRefreshSem     chan struct{}
+
+	// ghNow and ghRandFloat64 override time.Now and rand.Float64 for
+	// GitHub skill cache TTL and backoff jitter in tests; nil uses the
+	// standard library defaults.
+	ghNow         func() time.Time
+	ghRandFloat64 func() float64
 
 	// ghFailures remembers, per cache key, that GitHub recently reported a
 	// gh:// ref as not found (see rememberGHNotFound and resolveGitHubSkill).

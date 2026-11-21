@@ -1120,7 +1120,7 @@ func TestJitteredTTL_Extremes(t *testing.T) {
 	}{
 		{"minimum", 0, ttl - spread},
 		{"midpoint", 0.5, ttl},
-		{"just under maximum", 1 - 1e-9, ttl + spread}, // rand.Float64 never returns exactly 1
+		{"just under maximum", 1 - 1e-12, ttl + spread}, // rand.Float64 never returns exactly 1
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1133,6 +1133,23 @@ func TestJitteredTTL_Extremes(t *testing.T) {
 				t.Errorf("JitteredTTL(%v, r=%v) = %v, want %v", ttl, tc.r, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestJitteredTTL_SpreadMatchesTargetBand pins the actual jitter fraction
+// (+/-25%, within the +/-20-30% band for ptone/scion#8459) rather than
+// expressing expectations in terms of ttlJitterFraction itself, so a
+// regression back to +/-10% fails explicitly.
+func TestJitteredTTL_SpreadMatchesTargetBand(t *testing.T) {
+	const ttl = DefaultResolutionCacheTTL // 30m
+	wantLo := 22*time.Minute + 30*time.Second
+	wantHi := 37*time.Minute + 30*time.Second
+
+	if got := JitteredTTL(ttl, func() float64 { return 0 }); got != wantLo {
+		t.Fatalf("JitteredTTL(%v, 0) = %v, want %v (-25%%)", ttl, got, wantLo)
+	}
+	if got := MaxJitteredTTL(ttl); got != wantHi {
+		t.Fatalf("MaxJitteredTTL(%v) = %v, want %v (+25%%)", ttl, got, wantHi)
 	}
 }
 

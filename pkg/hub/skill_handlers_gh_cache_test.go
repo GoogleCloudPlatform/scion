@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1344,7 +1345,7 @@ func TestSkillsResolve_GHCacheEntryExpiryIsJittered(t *testing.T) {
 
 	// The refs name a branch, so entries use the branch TTL.
 	ttl := agent.DefaultResolutionCacheTTL
-	band := time.Duration(float64(ttl) * 0.10)
+	band := agent.MaxJitteredTTL(ttl) - ttl
 	// The store may round times; allow a little slack on the band edges.
 	const slack = time.Second
 
@@ -1587,4 +1588,221 @@ func TestSkillsResolve_GHTreeErrorCode(t *testing.T) {
 	require.Empty(t, resp.Resolved)
 	require.Len(t, resp.Errors, 1)
 	assert.Equal(t, agent.SkillErrCodeUnsupportedContent, resp.Errors[0].Code)
+}
+
+// TestResolveGitHubSkill_BackgroundRefreshJittersExpiryDeterministically
+// verifies that background refreshes apply +/-25% TTL jitter across refreshed
+// entries using injected clock and RNG hooks (no wall-clock sleeps).
+func TestResolveGitHubSkill_BackgroundRefreshJittersExpiryDeterministically(t *testing.T) {
+	const (
+		owner    = "acme"
+		repo     = "jitter-refresh-repo"
+		staleSHA = "1111111111111111111111111111111111111111"
+		freshSHA = "2222222222222222222222222222222222222222"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	fixedNow := time.Now().UTC().Truncate(time.Second)
+	srv.ghNow = func() time.Time { return fixedNow }
+
+	// Deterministic RNG outputs for three refreshes: min (-25%), mid (0%), max (+25%).
+	cases := []struct {
+		name    string
+		r       float64
+		wantTTL time.Duration
+	}{
+		{name: "min", r: 0, wantTTL: 22*time.Minute + 30*time.Second},
+		{name: "mid", r: 0.5, wantTTL: 30 * time.Minute},
+		{name: "max", r: 1 - 1e-9, wantTTL: 37*time.Minute + 30*time.Second},
+	}
+
+	var mu sync.Mutex
+	currentR := 0.0
+	srv.ghRandFloat64 = func() float64 {
+		mu.Lock()
+		defer mu.Unlock()
+		return currentR
+	}
+
+	refreshed := make(chan string, len(cases))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(freshSHA))
+	})
+	for _, tc := range cases {
+		skillName := tc.name
+		mux.HandleFunc(ghTreeTestPath(owner, repo, freshSHA, "skills/"+skillName), func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(ghTreeTestSingleFile))
+			refreshed <- skillName
+		})
+	}
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ctx := context.Background()
+	for _, tc := range cases {
+		uri := "gh://" + owner + "/" + repo + "/" + tc.name + "@main"
+		ghRef, err := agent.ParseGitHubSkillURI(uri)
+		require.NoError(t, err)
+		cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+		require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
+			CommitSHA:   staleSHA,
+			FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
+			BundleHash:  "sha256:stale",
+			TokenScope:  "public",
+			ExpiresAt:   fixedNow.Add(-time.Minute),
+			OriginalURI: uri,
+		}))
+
+		mu.Lock()
+		currentR = tc.r
+		mu.Unlock()
+
+		resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion)
+
+		gotName := <-refreshed
+		require.Equal(t, tc.name, gotName)
+		_, _, _ = srv.ghResolveFlight.Do(cacheKey, func() (interface{}, error) { return nil, nil })
+
+		entry, hit, err := srv.ghResolutionStore.Get(ctx, cacheKey)
+		require.NoError(t, err)
+		require.True(t, hit)
+		wantExpires := fixedNow.Add(tc.wantTTL)
+		assert.WithinDuration(t, wantExpires, entry.ExpiresAt, time.Millisecond,
+			"case %s: expected ExpiresAt %v, got %v", tc.name, wantExpires, entry.ExpiresAt)
+	}
+}
+
+// TestResolveGitHubSkill_RefreshFailureBackoffIsJittered verifies that failed
+// background refreshes back off for a jittered window (+/-25% around
+// ghRefreshFailureBackoff) rather than all becoming eligible to retry at the
+// same instant.
+func TestResolveGitHubSkill_RefreshFailureBackoffIsJittered(t *testing.T) {
+	srv := &Server{}
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	srv.ghNow = func() time.Time { return now }
+
+	rVal := 0.0
+	srv.ghRandFloat64 = func() float64 { return rVal }
+
+	// Key A gets minimum backoff (-25% = 45s); key B gets maximum (+25% = 75s).
+	rVal = 0.0
+	srv.recordGHRefreshFailure("key-a")
+	rVal = 1 - 1e-9
+	srv.recordGHRefreshFailure("key-b")
+
+	// At +44s: both are still backed off.
+	now = now.Add(44 * time.Second)
+	assert.True(t, srv.recentGHRefreshFailure("key-a"))
+	assert.True(t, srv.recentGHRefreshFailure("key-b"))
+
+	// At +46s: key-a's shorter backoff has expired while key-b is still backed off.
+	now = now.Add(2 * time.Second)
+	assert.False(t, srv.recentGHRefreshFailure("key-a"))
+	assert.True(t, srv.recentGHRefreshFailure("key-b"))
+
+	// At +76s: key-b's longer backoff has now expired too.
+	now = now.Add(30 * time.Second)
+	assert.False(t, srv.recentGHRefreshFailure("key-b"))
+}
+
+// TestResolveGitHubSkill_BackgroundRefreshBoundsConcurrency verifies that a
+// burst of stale cache hits across distinct skills does not stampede GitHub
+// with unbounded concurrent refreshes; at most hubGHRefreshConcurrency
+// background refreshes execute concurrently.
+func TestResolveGitHubSkill_BackgroundRefreshBoundsConcurrency(t *testing.T) {
+	const (
+		owner    = "acme"
+		repo     = "burst-repo"
+		staleSHA = "1111111111111111111111111111111111111111"
+		freshSHA = "2222222222222222222222222222222222222222"
+		total    = 6
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	var inFlight, maxInFlight atomic.Int64
+	entered := make(chan struct{}, total)
+	release := make(chan struct{})
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/"+owner+"/"+repo+"/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		cur := inFlight.Add(1)
+		for {
+			prev := maxInFlight.Load()
+			if cur <= prev || maxInFlight.CompareAndSwap(prev, cur) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		inFlight.Add(-1)
+		_, _ = w.Write([]byte(freshSHA))
+	})
+	for i := 0; i < total; i++ {
+		skillPath := fmt.Sprintf("skills/s%d", i)
+		mux.HandleFunc(ghTreeTestPath(owner, repo, freshSHA, skillPath), func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(ghTreeTestSingleFile))
+		})
+	}
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ctx := context.Background()
+	cacheKeys := make([]string, total)
+	for i := 0; i < total; i++ {
+		uri := fmt.Sprintf("gh://%s/%s/s%d@main", owner, repo, i)
+		ghRef, err := agent.ParseGitHubSkillURI(uri)
+		require.NoError(t, err)
+		cacheKeys[i] = computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+		require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKeys[i], GitHubCacheEntry{
+			CommitSHA:   staleSHA,
+			FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
+			BundleHash:  "sha256:stale",
+			TokenScope:  "public",
+			ExpiresAt:   time.Now().Add(-time.Minute),
+			OriginalURI: uri,
+		}))
+	}
+
+	// Trigger all stale hits at once.
+	for i := 0; i < total; i++ {
+		uri := fmt.Sprintf("gh://%s/%s/s%d@main", owner, repo, i)
+		resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion)
+	}
+
+	// Exactly hubGHRefreshConcurrency refreshes should reach GitHub while blocked.
+	for i := 0; i < hubGHRefreshConcurrency; i++ {
+		<-entered
+	}
+	select {
+	case <-entered:
+		t.Fatalf("more than hubGHRefreshConcurrency (%d) background refreshes hit GitHub concurrently", hubGHRefreshConcurrency)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	for i := hubGHRefreshConcurrency; i < total; i++ {
+		<-entered
+	}
+	for _, key := range cacheKeys {
+		_, _, _ = srv.ghResolveFlight.Do(key, func() (interface{}, error) { return nil, nil })
+	}
+
+	assert.Equal(t, int64(hubGHRefreshConcurrency), maxInFlight.Load(),
+		"concurrent background refreshes must be bounded by hubGHRefreshConcurrency")
 }
