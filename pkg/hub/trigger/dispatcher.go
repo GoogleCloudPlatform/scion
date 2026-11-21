@@ -86,6 +86,22 @@ const (
 	FireSkipReasonOther                      = "other"
 )
 
+// FireSkipReasons returns the closed set of skipped-fire metric reason labels
+// in canonical order. Metrics recorders use this as the single source of truth
+// so newly added FireSkipReason* constants are never silently bucketed as "other".
+func FireSkipReasons() []string {
+	return []string{
+		FireSkipReasonRuleBudgetExhausted,
+		FireSkipReasonRuleCompileBudgetExhausted,
+		FireSkipReasonRuleEvaluationFailed,
+		FireSkipReasonRuleUncertain,
+		FireSkipReasonRuleNoLongerCompiles,
+		FireSkipReasonSubjectBusy,
+		FireSkipReasonAgentNameInUse,
+		FireSkipReasonOther,
+	}
+}
+
 // NormalizeFireSkipReason maps a skipped trigger fire's persisted error text
 // onto a closed-set metric label value so label cardinality stays bounded.
 func NormalizeFireSkipReason(errMsg string) string {

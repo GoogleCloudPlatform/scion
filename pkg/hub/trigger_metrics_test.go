@@ -230,3 +230,46 @@ func TestServerTriggerMetrics_BareServerNilSafe(t *testing.T) {
 		m.RecordReaperRun(1, time.Now(), nil)
 	})
 }
+
+func TestOTelTriggerMetrics_SkippedFireReasonsCompileBudgetAndAgentNameInUse(t *testing.T) {
+	rec, snap, reader := newTestOTelTriggerMetrics(t)
+
+	rec.RecordTriggerFire(
+		store.TriggerActionMessage,
+		store.TriggerFireStatusSkipped,
+		trigger.NormalizeFireSkipReason(trigger.ErrFireRuleCompileBudgetExhausted),
+	)
+	rec.RecordTriggerFire(
+		store.TriggerActionDispatchAgent,
+		store.TriggerFireStatusSkipped,
+		trigger.NormalizeFireSkipReason("agent name in use"),
+	)
+	rec.RecordTriggerFire(
+		store.TriggerActionMessage,
+		store.TriggerFireStatusSkipped,
+		"unrecognized free-text skip reason",
+	)
+
+	// Verify snapshot counts preserve both new reasons and bucket unknown text as "other".
+	s := snap.GetSnapshot()
+	assert.Equal(t, int64(1), s.Fires.SkippedByReason[trigger.FireSkipReasonRuleCompileBudgetExhausted])
+	assert.Equal(t, int64(1), s.Fires.SkippedByReason[trigger.FireSkipReasonAgentNameInUse])
+	assert.Equal(t, int64(1), s.Fires.SkippedByReason[trigger.FireSkipReasonOther])
+
+	// Verify OTel counter exports the exact same reason labels.
+	collected := collectTriggerMetrics(t, reader)
+	firesMetric, ok := collected[MetricTriggerFires]
+	require.True(t, ok, "expected %s OTel metric", MetricTriggerFires)
+	sum, ok := firesMetric.Data.(metricdata.Sum[int64])
+	require.True(t, ok)
+
+	gotByReason := make(map[string]int64)
+	for _, dp := range sum.DataPoints {
+		if val, exists := dp.Attributes.Value("reason"); exists {
+			gotByReason[val.AsString()] += dp.Value
+		}
+	}
+	assert.Equal(t, int64(1), gotByReason[trigger.FireSkipReasonRuleCompileBudgetExhausted])
+	assert.Equal(t, int64(1), gotByReason[trigger.FireSkipReasonAgentNameInUse])
+	assert.Equal(t, int64(1), gotByReason[trigger.FireSkipReasonOther])
+}
