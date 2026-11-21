@@ -1849,6 +1849,167 @@ describe('scion-chat-thread dispatch state from send response', () => {
     const state = bubble?.shadowRoot?.querySelector('.delivery-state.failed');
     expect(state?.textContent).toContain('Not delivered — @gone-worker was deleted');
   });
+
+  it('shows a warning toast on send when the reply target agent was deleted, without duplicating on replay', async () => {
+    showToastMock.mockReset();
+    const el = await mount();
+    el.defaultAgent = 'live-default';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      composerReplyTo: {
+        messageId: string;
+        senderName: string;
+        content: string;
+        sender?: string;
+        senderId?: string;
+      } | null;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+    internals.composerReplyTo = {
+      messageId: 'orig-agent-msg',
+      senderName: 'gone-worker',
+      content: 'please approve',
+      sender: 'agent:gone-worker',
+      senderId: 'gone-worker-id',
+    };
+
+    const failResponse = {
+      ok: true,
+      status: 201,
+      json: () =>
+        Promise.resolve({
+          id: 'failed-deleted-1',
+          dispatchState: 'failed',
+          dispatchFailureReason: 'Agent unreachable (deleted)',
+          dispatchFailureCode: 'agent_unreachable',
+        }),
+    } as unknown as Response;
+
+    apiFetch.mockResolvedValueOnce(failResponse);
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'approved',
+          plain: false,
+          interrupt: false,
+          replyToId: 'orig-agent-msg',
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'Not delivered — @gone-worker was deleted',
+      'warning'
+    );
+
+    // Replaying the same message ID must not emit a duplicate toast.
+    apiFetch.mockResolvedValueOnce(failResponse);
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'approved',
+          plain: false,
+          interrupt: false,
+          replyToId: 'orig-agent-msg',
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a warning toast with the reason text for non-deleted agent_unreachable failures', async () => {
+    showToastMock.mockReset();
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: () =>
+        Promise.resolve({
+          id: 'failed-stopped-1',
+          dispatchState: 'failed',
+          dispatchFailureReason: 'Agent unreachable (stopped)',
+          dispatchFailureCode: 'agent_unreachable',
+        }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+
+    expect(showToastMock).toHaveBeenCalledWith('Agent unreachable (stopped)', 'warning');
+  });
+
+  it('sets optimistic bubble recipient to the replied-to agent rather than the topic default', async () => {
+    const el = await mount();
+    el.defaultAgent = 'topic-default';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      composerReplyTo: {
+        messageId: string;
+        senderName: string;
+        content: string;
+        sender?: string;
+        senderId?: string;
+      } | null;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+    internals.composerReplyTo = {
+      messageId: 'reply-target-msg',
+      senderName: 'specialist',
+      content: 'question',
+      sender: 'agent:specialist',
+      senderId: 'specialist-id',
+    };
+
+    let resolvePost!: (v: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvePost = resolve;
+        })
+    );
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'answer',
+          plain: false,
+          interrupt: false,
+          replyToId: 'reply-target-msg',
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+
+    const optimistic = [...internals.messageMap.values()].find((m) => m.msg === 'answer');
+    expect(optimistic?.recipient).toBe('agent:specialist');
+    expect(optimistic?.recipientId).toBe('specialist-id');
+
+    resolvePost({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'srv-reply-1', dispatchState: 'dispatched' }),
+    } as unknown as Response);
+    await sendPromise;
+  });
 });
 
 describe('scion-chat-thread stale send and the sending state', () => {
