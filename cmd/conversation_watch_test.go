@@ -237,3 +237,96 @@ func TestConversationWatchOnce_ExpiredBudgetDoesNotPollWithZeroWait(t *testing.T
 	assert.Equal(t, 124, exitCodeFor(err))
 	assert.Equal(t, 1, calls)
 }
+
+// Regression test (Optional 2): truncated=true from an earlier empty poll is
+// preserved across subsequent polls in --once mode (both on event delivery and
+// on timeout).
+func TestConversationWatchOnce_AccumulatesTruncatedAcrossPolls(t *testing.T) {
+	t.Run("preserved on subsequent event delivery", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		call := 0
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				call++
+				if call == 1 {
+					return &hubclient.WatchResult{
+						Events:     []hubclient.WatchEvent{},
+						NextCursor: "cur-1",
+						Truncated:  true,
+						TimedOut:   true,
+					}, nil
+				}
+				return &hubclient.WatchResult{
+					Events: []hubclient.WatchEvent{
+						{
+							EventID: "msg:m2",
+							Type:    "conversation.message.created",
+							Cursor:  "cur-2",
+							Data:    &store.Message{ID: "m2", Sender: "agent:a", Msg: "hi"},
+						},
+					},
+					NextCursor: "cur-2",
+					Truncated:  false,
+				}, nil
+			},
+		}
+
+		err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+			ConversationID: "conv-1",
+			Cursor:         "cur-0",
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        5 * time.Second,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+		})
+		require.NoError(t, err)
+		var got hubclient.WatchResult
+		require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+		assert.True(t, got.Truncated)
+		require.Len(t, got.Events, 1)
+	})
+
+	t.Run("preserved on subsequent timeout", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		call := 0
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				call++
+				if call == 1 {
+					return &hubclient.WatchResult{
+						Events:     []hubclient.WatchEvent{},
+						NextCursor: "cur-1",
+						Truncated:  true,
+						TimedOut:   true,
+					}, nil
+				}
+				time.Sleep(25 * time.Millisecond)
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-1",
+					Truncated:  false,
+					TimedOut:   true,
+				}, nil
+			},
+		}
+
+		err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+			ConversationID: "conv-1",
+			Cursor:         "cur-0",
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        20 * time.Millisecond,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+		})
+		require.Error(t, err)
+		assert.Equal(t, 124, exitCodeFor(err))
+		var got hubclient.WatchResult
+		require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+		assert.True(t, got.TimedOut)
+		assert.True(t, got.Truncated)
+	})
+}

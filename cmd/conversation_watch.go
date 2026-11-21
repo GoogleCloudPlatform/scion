@@ -194,6 +194,8 @@ func executeConversationWatchOnce(ctx context.Context, svc hubclient.Conversatio
 		opts.Start = "beginning"
 	}
 
+	var truncated bool
+
 	for {
 		if ctx.Err() != nil {
 			return &watchExitError{code: watchExitInterrupted, err: errors.New("interrupted")}
@@ -203,7 +205,7 @@ func executeConversationWatchOnce(ctx context.Context, svc hubclient.Conversatio
 		if hasDeadline {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return writeWatchOnceTimeout(params, opts.Cursor, false)
+				return writeWatchOnceTimeout(params, opts.Cursor, truncated)
 			}
 			if remaining < wait {
 				wait = remaining
@@ -227,6 +229,8 @@ func executeConversationWatchOnce(ctx context.Context, svc hubclient.Conversatio
 			return err
 		}
 
+		truncated = truncated || res.Truncated
+
 		// Advance cursor for any follow-up poll inside the same --once budget.
 		if res.NextCursor != "" {
 			opts.Cursor = res.NextCursor
@@ -235,6 +239,7 @@ func executeConversationWatchOnce(ctx context.Context, svc hubclient.Conversatio
 		}
 
 		if len(res.Events) > 0 {
+			res.Truncated = truncated
 			if params.JSON {
 				return writeCompactJSON(params.Stdout, res)
 			}
@@ -243,7 +248,7 @@ func executeConversationWatchOnce(ctx context.Context, svc hubclient.Conversatio
 
 		// Empty result: check whether the total --timeout budget has expired.
 		if hasDeadline && time.Until(deadline) <= 0 {
-			return writeWatchOnceTimeout(params, res.NextCursor, res.Truncated)
+			return writeWatchOnceTimeout(params, res.NextCursor, truncated)
 		}
 	}
 }
