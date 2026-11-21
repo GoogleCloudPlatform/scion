@@ -407,9 +407,8 @@ type deleteResponse struct {
 	// event only: it is not retrievable through any API and is not backed by
 	// history (the constraint's history is deleted with it). A non-empty value
 	// does not guarantee the event was written: a dispatch failure is logged
-	// with this event_id, and the event is silently dropped when the process
-	// log level is above info. Empty if the event could not be built or no
-	// sink is configured.
+	// with this event_id. Empty if the event could not be built or no sink is
+	// configured.
 	AuditID string `json:"auditId"`
 }
 
@@ -2095,10 +2094,10 @@ func parseIntOr(s string, defaultVal int) int {
 // shared asynchronous audit writer (s.auditWriter, built by
 // initDecisionAuditLog). Records through it are async and best-effort, not
 // persisted records: queue-full, oversize and closed-writer rejections are
-// counted, but a record is silently not emitted (and not counted) when the
-// process log level is above info. It is not gated by the decision-audit
-// experiment, which applies only to decision records. Nil when the writer
-// was not initialized.
+// counted, and the writer bypasses the process-wide level filter so raising
+// SCION_LOG_LEVEL above info does not drop audit events. It is not gated by
+// the decision-audit experiment, which applies only to decision records. Nil
+// when the writer was not initialized.
 func (s *Server) sharedAuditLogSink() auditevent.Sink {
 	if s.auditWriter == nil || s.decisionAuditLogger == nil || s.decisionAuditLogger.sink == nil {
 		return nil

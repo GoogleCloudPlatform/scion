@@ -410,14 +410,16 @@ const auditWriterName = "audit"
 const auditLogWriterHealthKey = "audit_log_writer"
 
 // initDecisionAuditLog builds the audit writer and the decision logger.
-// The inner handler is the process default handler captured now, as the
-// boundary services do (slog.SetDefault has already run in production).
+// The inner handler is the process default handler captured now (slog.SetDefault
+// has already run in production), unwrapped from the process-wide levelFilter so
+// raising SCION_LOG_LEVEL or server.log_level above info does not drop
+// structured audit events (boundary deletes, broker events, or decisions).
 func (s *Server) initDecisionAuditLog() error {
 	w, err := logging.NewAsyncWriter(asyncwrite.Config{Name: auditWriterName})
 	if err != nil {
 		return err
 	}
-	h := logging.NewAsyncHandler(slog.Default().Handler(), w)
+	h := logging.NewAsyncHandler(logging.UnwrapLevelFilter(slog.Default().Handler()), w)
 	sink, err := auditevent.NewSlogSink(slog.New(h))
 	if err != nil {
 		_ = w.Close(context.Background())
