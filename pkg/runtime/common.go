@@ -3057,7 +3057,81 @@ const (
 const (
 	netnsSetupLabelKey = "scion.netns-setup"
 	netnsSetupTimeout  = 3 * time.Minute
+
+	// ImageSciontoolCapabilitiesLabel is the image label written by
+	// image-build/scion-base/Dockerfile listing comma-separated capabilities
+	// supported by the image's sciontool binary.
+	ImageSciontoolCapabilitiesLabel = "scion.sciontool.capabilities"
+	// SciontoolCapNetnsSetup advertises that the image's sciontool supports
+	// the `sciontool netns-setup` sidecar subcommand.
+	SciontoolCapNetnsSetup = "netns-setup"
 )
+
+// ErrImageLacksNetnsSetup is returned when Docker or rootful Podman requires
+// runtime-managed metadata interception (netns-setup sidecar) but the agent
+// image does not support `sciontool netns-setup`.
+//
+//nolint:staticcheck // ST1005: fixed user-facing refusal text.
+var ErrImageLacksNetnsSetup = errors.New("agent start refused: metadata interception version skew (image_lacks_netns_setup): the agent image does not advertise sciontool netns-setup support required by this broker. Rebuild or update the agent image to a build matching this broker, or set the metadata mode to passthrough explicitly to opt out.")
+
+func imageHasCapability(labels map[string]string, capability string) bool {
+	if len(labels) == 0 || capability == "" {
+		return false
+	}
+	raw := labels[ImageSciontoolCapabilitiesLabel]
+	for _, part := range strings.Split(raw, ",") {
+		if strings.TrimSpace(part) == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnknownNetnsSetupOutput reports whether a failed netns-setup sidecar
+// invocation failed because the image's sciontool lacks the netns-setup
+// subcommand (a pre-#5246 image).
+func isUnknownNetnsSetupOutput(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, `unknown command "netns-setup"`) ||
+		strings.Contains(lower, `unknown command 'netns-setup'`)
+}
+
+// checkImageNetnsSetupSupport inspects the local image's labels before
+// launching a container that requires runtime-managed metadata interception.
+// When the image is locally present and does not advertise the netns-setup
+// capability in ImageSciontoolCapabilitiesLabel, it returns
+// ErrImageLacksNetnsSetup so broker/image version skew fails cleanly before
+// container start. When the image is not yet cached locally (the container
+// engine will pull it during run), it returns nil and runNetnsSetup classifies
+// any missing-subcommand failure afterwards.
+func checkImageNetnsSetupSupport(ctx context.Context, command, image string) error {
+	if strings.TrimSpace(image) == "" {
+		return nil
+	}
+	out, err := runSimpleCommand(ctx, command, "image", "inspect", "--format", "{{json .Config.Labels}}", image)
+	if err != nil {
+		if isImageNotFoundOutput(out) || isImageNotFoundOutput(err.Error()) {
+			return nil
+		}
+		// Let the subsequent container run surface the underlying daemon error
+		// rather than masking it as version skew.
+		runtimeLog().Debug("image capability inspect skipped due to inspect error", "image", image, "error", err)
+		return nil
+	}
+	trimmed := strings.TrimSpace(out)
+	if trimmed == "" {
+		return nil
+	}
+	var labels map[string]string
+	if err := json.Unmarshal([]byte(trimmed), &labels); err != nil {
+		runtimeLog().Debug("image capability inspect output was not JSON labels", "image", image, "error", err)
+		return nil
+	}
+	if !imageHasCapability(labels, SciontoolCapNetnsSetup) {
+		return ErrImageLacksNetnsSetup
+	}
+	return nil
+}
 
 // buildNetnsSetupArgs builds the container CLI argv for the short-lived
 // netns-setup container that joins the agent container's network namespace
@@ -3108,6 +3182,9 @@ func runNetnsSetup(ctx context.Context, command, containerID string, cfg RunConf
 			return fmt.Errorf("netns-setup timed out or cancelled: %w", setupCtx.Err())
 		}
 		if trimmed := strings.TrimSpace(out); trimmed != "" {
+			if isUnknownNetnsSetupOutput(trimmed) {
+				return fmt.Errorf("%w: %s", ErrImageLacksNetnsSetup, truncateForError(trimmed))
+			}
 			return fmt.Errorf("netns-setup failed: %w (output: %s)", err, truncateForError(trimmed))
 		}
 		return fmt.Errorf("netns-setup failed: %w", err)

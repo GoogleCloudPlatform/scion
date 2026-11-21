@@ -107,6 +107,11 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
 		return "", err
 	}
+	if config.MetadataInterception {
+		if err := checkImageNetnsSetupSupport(ctx, r.Command, config.Image); err != nil {
+			return "", err
+		}
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
