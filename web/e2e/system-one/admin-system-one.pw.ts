@@ -23,7 +23,7 @@
  * required project) -> delete.
  */
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { installEventSourceStub } from '../event-source-stub.js';
 
 interface MockInstance {
@@ -134,13 +134,17 @@ async function installMockHub(page: Page) {
     })
   );
 
-  await page.route('**/api/**', async (route) => {
+  await page.route('**/api/**', (route) => {
     const req = route.request();
     const url = new URL(req.url());
     const p = url.pathname;
 
     if (p === '/api/v1/system/status') {
-      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"complete":true}' });
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: '{"complete":true}',
+      });
     }
     if (p === '/api/v1/settings/public') {
       return route.fulfill({
@@ -196,18 +200,23 @@ async function installMockHub(page: Page) {
       });
     }
     if (p === '/api/v1/admin/system-one/instances' && req.method() === 'POST') {
-      const body = JSON.parse(req.postData() || '{}') as Record<string, unknown>;
-      const auth = (body.auth || {}) as Record<string, unknown>;
+      const body = JSON.parse(req.postData() || '{}') as {
+        name?: string;
+        adapter?: string;
+        model?: string;
+        endpoint?: string;
+        auth?: { secretRef?: { name: string; scope: string } };
+      };
       const created: MockInstance = {
         id: `inst-${instances.length + 1}`,
-        name: String(body.name || ''),
-        adapter: String(body.adapter || ''),
-        model: String(body.model || ''),
-        endpoint: String(body.endpoint || ''),
-        auth: auth.secretRef
+        name: body.name ?? '',
+        adapter: body.adapter ?? '',
+        model: body.model ?? '',
+        endpoint: body.endpoint ?? '',
+        auth: body.auth?.secretRef
           ? {
               kind: 'api_key',
-              secretRef: auth.secretRef as { name: string; scope: string },
+              secretRef: body.auth.secretRef,
             }
           : {
               kind: 'api_key',
@@ -271,6 +280,34 @@ async function installMockHub(page: Page) {
   return { probePayloads, deletedNames };
 }
 
+/**
+ * Opens a Shoelace `<sl-select>`, picks an `<sl-option>`, and waits for the
+ * select's own `sl-after-hide` event to finish bubbling before returning.
+ * If the enclosing `<sl-dialog>` lacks an `e.target === e.currentTarget` guard,
+ * the dialog will already be closed by the time this helper resolves (C1).
+ */
+async function selectOptionAndWaitAfterHide(
+  page: Page,
+  select: Locator,
+  optionValue: string
+): Promise<void> {
+  const afterHidePromise = select.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        el.addEventListener(
+          'sl-after-hide',
+          () => {
+            requestAnimationFrame(() => resolve());
+          },
+          { once: true }
+        );
+      })
+  );
+  await select.click();
+  await page.locator(`sl-option[value="${optionValue}"]`).click();
+  await afterHidePromise;
+}
+
 test('list -> create (real sl-select) -> Test (required project via real sl-select) -> delete', async ({
   page,
 }) => {
@@ -280,15 +317,37 @@ test('list -> create (real sl-select) -> Test (required project via real sl-sele
   await expect(page.locator('tr[data-instance-name="gemini-named"]')).toBeVisible();
   expect(probePayloads).toHaveLength(0);
 
-  // Create dialog: use real clicks on sl-select (adapter & secret name) to catch C1
+  // Create dialog: exercise real sl-select dropdowns (adapter, secretName, secretScope)
+  // waiting for each select's sl-after-hide to catch C1 immediately.
   await page.locator('sl-button:has-text("Add Provider Instance")').first().click();
   const createDialog = page.locator('sl-dialog[label="Add System One Provider Instance"]');
   await expect(createDialog).toHaveAttribute('open', '');
 
+  // 1) Adapter select while an API key is typed: dialog must stay open and key must remain intact.
+  const apiKeyInput = createDialog.locator('sl-input[name="apiKey"] input');
+  await apiKeyInput.fill('synthetic-c1-key');
+  await selectOptionAndWaitAfterHide(
+    page,
+    createDialog.locator('sl-select[name="adapter"]'),
+    'gemini_decisions'
+  );
+  await expect(createDialog).toHaveAttribute('open', '');
+  await expect(apiKeyInput).toHaveValue('synthetic-c1-key');
+
+  // 2) Named secret ref: secretName and secretScope selects must not close the dialog.
   await createDialog.locator('sl-radio[value="secret_ref"]').click();
-  await createDialog.locator('sl-select[name="secretName"]').click();
-  await page.locator('sl-option[value="GEMINI_TEAM_KEY"]').click();
-  // C1 assertion: Create dialog must still be open after sl-select closes
+  await selectOptionAndWaitAfterHide(
+    page,
+    createDialog.locator('sl-select[name="secretName"]'),
+    'GEMINI_TEAM_KEY'
+  );
+  await expect(createDialog).toHaveAttribute('open', '');
+
+  await selectOptionAndWaitAfterHide(
+    page,
+    createDialog.locator('sl-select[name="secretScope"]'),
+    'project_or_hub'
+  );
   await expect(createDialog).toHaveAttribute('open', '');
 
   await createDialog.locator('sl-input[name="name"] input').fill('gemini-e2e');
@@ -297,7 +356,8 @@ test('list -> create (real sl-select) -> Test (required project via real sl-sele
 
   await expect(page.locator('tr[data-instance-name="gemini-e2e"]')).toBeVisible();
 
-  // Test dialog: Run Test disabled until project selected via real sl-select click (catches C1)
+  // Test dialog: Run Test disabled until project selected via real sl-select click;
+  // wait for sl-after-hide and assert dialog stays open (C1).
   await page.locator('tr[data-instance-name="gemini-named"] sl-button:has-text("Test")').click();
   const testDialog = page.locator('sl-dialog[label="Test Provider Instance: gemini-named"]');
   await expect(testDialog).toHaveAttribute('open', '');
@@ -305,9 +365,11 @@ test('list -> create (real sl-select) -> Test (required project via real sl-sele
   const runBtn = testDialog.locator('sl-button:has-text("Run Test")');
   await expect(runBtn).toHaveAttribute('disabled', '');
 
-  await testDialog.locator('sl-select[name="testProject"]').click();
-  await page.locator('sl-option[value="proj-alpha"]').click();
-  // C1 assertion: Test dialog must remain open after sl-select closes
+  await selectOptionAndWaitAfterHide(
+    page,
+    testDialog.locator('sl-select[name="testProject"]'),
+    'proj-alpha'
+  );
   await expect(testDialog).toHaveAttribute('open', '');
   await expect(runBtn).not.toHaveAttribute('disabled', '');
 
