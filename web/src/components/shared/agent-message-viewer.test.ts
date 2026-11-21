@@ -187,3 +187,206 @@ describe('scion-agent-message-viewer authorized-by line', () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('scion-agent-message-viewer SSE reconnect and visibility backfill', () => {
+  class FakeEventSource {
+    static readonly CONNECTING = 0;
+    static readonly OPEN = 1;
+    static readonly CLOSED = 2;
+    static instances: FakeEventSource[] = [];
+
+    readonly url: string;
+    readyState = FakeEventSource.CONNECTING;
+    onopen: ((ev: Event) => void) | null = null;
+    onerror: ((ev: Event) => void) | null = null;
+    closed = false;
+    private listeners = new Map<string, Array<(ev: Event) => void>>();
+
+    constructor(url: string) {
+      this.url = url;
+      FakeEventSource.instances.push(this);
+    }
+
+    addEventListener(type: string, cb: (ev: Event) => void): void {
+      const list = this.listeners.get(type) ?? [];
+      list.push(cb);
+      this.listeners.set(type, list);
+    }
+
+    emitOpen(): void {
+      this.readyState = FakeEventSource.OPEN;
+      this.onopen?.(new Event('open'));
+    }
+
+    emitError(): void {
+      this.onerror?.(new Event('error'));
+    }
+
+    emitMessage(payload: unknown): void {
+      const ev = new MessageEvent('message', { data: JSON.stringify(payload) });
+      for (const cb of this.listeners.get('message') ?? []) cb(ev);
+    }
+
+    close(): void {
+      this.closed = true;
+      this.readyState = FakeEventSource.CLOSED;
+    }
+  }
+
+  function hubMessage(id: string, createdAt: string) {
+    return {
+      id,
+      projectId: 'p1',
+      sender: 'user:alice',
+      senderId: 'user-alice',
+      recipient: 'agent:bob',
+      recipientId: 'agent-bob',
+      msg: `message ${id}`,
+      type: 'instruction',
+      agentId: 'agent-bob',
+      createdAt,
+    };
+  }
+
+  function mockMessagesResponse(items: unknown[]) {
+    return {
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ items }),
+    };
+  }
+
+  let hidden = false;
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    apiFetchMock.mockReset();
+    hidden = false;
+    vi.stubGlobal('EventSource', FakeEventSource);
+    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() =>
+      hidden ? 'hidden' : 'visible'
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function setHidden(value: boolean): void {
+    hidden = value;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  it('backfills missed messages after EventSource error and reconnect without duplicating entries', async () => {
+    const m1 = hubMessage('m1', '2026-09-23T15:00:00.000Z');
+    const m2 = hubMessage('m2', '2026-09-23T15:01:00.000Z');
+    const m3 = hubMessage('m3', '2026-09-23T15:02:00.000Z');
+
+    apiFetchMock.mockResolvedValueOnce(mockMessagesResponse([m1]));
+
+    const el: AnyEl = document.createElement('scion-agent-message-viewer');
+    el.projectId = 'p1';
+    el.agentId = 'agent-bob';
+    document.body.appendChild(el);
+
+    el.loadMessages();
+    await vi.waitFor(() => expect(el.buffer.items).toHaveLength(1));
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+    // Initial stream open should not trigger a redundant fetch.
+    el.startStream();
+    const es = FakeEventSource.instances[0];
+    expect(es).toBeDefined();
+    es.emitOpen();
+    await el.updateComplete;
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+    // Live message arrives over SSE.
+    es.emitMessage(m2);
+    await el.updateComplete;
+    expect((el.buffer.items as { insertId: string }[]).map((r) => r.insertId)).toEqual([
+      'hub:m1',
+      'hub:m2',
+    ]);
+
+    // Stream errors and later reconnects; m3 was published during the drop.
+    apiFetchMock.mockResolvedValueOnce(mockMessagesResponse([m1, m2, m3]));
+    es.emitError();
+    es.emitOpen();
+
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(el.buffer.items).toHaveLength(3));
+    expect((el.buffer.items as { insertId: string }[]).map((r) => r.insertId)).toEqual([
+      'hub:m1',
+      'hub:m2',
+      'hub:m3',
+    ]);
+    await el.updateComplete;
+    expect(el.shadowRoot.querySelectorAll('.message-row').length).toBe(3);
+  });
+
+  it('backfills when the tab becomes visible again without duplicating existing messages', async () => {
+    const m1 = hubMessage('m1', '2026-09-23T15:00:00.000Z');
+    const m2 = hubMessage('m2', '2026-09-23T15:01:00.000Z');
+
+    apiFetchMock.mockResolvedValueOnce(mockMessagesResponse([m1]));
+
+    const el: AnyEl = document.createElement('scion-agent-message-viewer');
+    el.projectId = 'p1';
+    el.agentId = 'agent-bob';
+    document.body.appendChild(el);
+
+    // Before loadMessages(), visibility changes must not eagerly fetch.
+    setHidden(true);
+    setHidden(false);
+    expect(apiFetchMock).not.toHaveBeenCalled();
+
+    el.loadMessages();
+    await vi.waitFor(() => expect(el.buffer.items).toHaveLength(1));
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+    // Tab hides and returns with m2 published in the interim.
+    apiFetchMock.mockResolvedValueOnce(mockMessagesResponse([m1, m2]));
+    setHidden(true);
+    setHidden(false);
+
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(el.buffer.items).toHaveLength(2));
+    expect((el.buffer.items as { insertId: string }[]).map((r) => r.insertId)).toEqual([
+      'hub:m1',
+      'hub:m2',
+    ]);
+
+    // After disconnect, visibility changes must no longer fetch.
+    el.remove();
+    setHidden(true);
+    setHidden(false);
+    expect(apiFetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('restarts a closed EventSource when the tab becomes visible', async () => {
+    const m1 = hubMessage('m1', '2026-09-23T15:00:00.000Z');
+    apiFetchMock.mockResolvedValue(mockMessagesResponse([m1]));
+
+    const el: AnyEl = document.createElement('scion-agent-message-viewer');
+    el.projectId = 'p1';
+    el.agentId = 'agent-bob';
+    document.body.appendChild(el);
+
+    el.loadMessages();
+    await vi.waitFor(() => expect(el.buffer.items).toHaveLength(1));
+
+    el.startStream();
+    const firstEs = FakeEventSource.instances[0];
+    firstEs.emitOpen();
+    // Simulate the browser closing the stream while backgrounded.
+    firstEs.readyState = FakeEventSource.CLOSED;
+
+    setHidden(true);
+    setHidden(false);
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(firstEs.closed).toBe(true);
+  });
+});

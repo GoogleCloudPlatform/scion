@@ -421,3 +421,129 @@ describe('notification tray: message is text', () => {
     expect((window as unknown as { __ranHandler?: number }).__ranHandler).toBeUndefined();
   });
 });
+
+describe('notification tray: SSE reconnect, unhealthy polling, and visibility/focus backfill', () => {
+  let hidden = false;
+
+  function setHidden(value: boolean): void {
+    hidden = value;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  beforeAll(async () => {
+    await import('./notification-tray.js');
+  });
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    popups = [];
+    hidden = false;
+    FakeNotification.permission = 'granted';
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem(PUSH_STORAGE_KEYS.agent, 'true');
+    vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    localStorage.clear();
+  });
+
+  it('backfills missed notifications on SSE reconnect without duplicating entries or re-popping seen ones', async () => {
+    const tray = await mountTray([notif('n1')]);
+
+    // An initial connected event without a prior disconnect does not refetch.
+    stateManager.dispatchEvent(new CustomEvent('connected'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listFetches()).toBe(0);
+
+    // SSE drops; n2 is created while disconnected.
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([notif('n2'), notif('n1')]), { status: 200 }))
+    );
+    stateManager.dispatchEvent(new CustomEvent('disconnected'));
+    stateManager.dispatchEvent(new CustomEvent('connected'));
+    await vi.waitFor(() => expect(listFetches()).toBe(1));
+    await vi.waitFor(() => expect(ids(tray)).toEqual(['n2', 'n1']));
+
+    // Only the genuinely new notification pops; n1 is not duplicated or re-popped.
+    expect(popups).toEqual(['n2']);
+  });
+
+  it('polls more frequently while SSE is disconnected and restores 5-minute polling on reconnect', async () => {
+    await mountTray([]);
+
+    stateManager.dispatchEvent(new CustomEvent('disconnected'));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(listFetches()).toBe(1);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(listFetches()).toBe(2);
+
+    // Reconnect triggers immediate backfill (3) and restores 5-minute cadence.
+    stateManager.dispatchEvent(new CustomEvent('connected'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listFetches()).toBe(3);
+
+    // 60 seconds later, no fast poll fires.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(listFetches()).toBe(3);
+
+    // At 5 minutes total, the normal fallback poll fires once.
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    expect(listFetches()).toBe(4);
+  });
+
+  it('backfills on visibility return after a short absence and deduplicates existing rows', async () => {
+    const tray = await mountTray([notif('n1')]);
+
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(new Response(JSON.stringify([notif('n2'), notif('n1')]), { status: 200 }))
+    );
+
+    setHidden(true);
+    await vi.advanceTimersByTimeAsync(10_000);
+    setHidden(false);
+
+    await vi.waitFor(() => expect(listFetches()).toBe(1));
+    await vi.waitFor(() => expect(ids(tray)).toEqual(['n2', 'n1']));
+    expect(popups).toEqual(['n2']);
+
+    // A focus event in the same tick as visibilitychange does not double-fetch.
+    window.dispatchEvent(new Event('focus'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listFetches()).toBe(1);
+
+    // A focus event after the cooldown refetches.
+    await vi.advanceTimersByTimeAsync(10_000);
+    window.dispatchEvent(new Event('focus'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listFetches()).toBe(2);
+
+    // A rapid visibility toggle within the cooldown (or visibilitychange after focus) does not double-fetch.
+    setHidden(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    setHidden(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(listFetches()).toBe(2);
+  });
+
+  it('stops reacting to SSE reconnect and focus events after disconnect', async () => {
+    const tray = await mountTray([]);
+    tray.remove();
+
+    stateManager.dispatchEvent(new CustomEvent('disconnected'));
+    stateManager.dispatchEvent(new CustomEvent('connected'));
+    setHidden(true);
+    setHidden(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    window.dispatchEvent(new Event('focus'));
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(listFetches()).toBe(0);
+  });
+});

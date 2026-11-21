@@ -208,6 +208,11 @@ export class ScionAgentMessageViewer extends LitElement {
   @state() private sendError: string | null = null;
 
   private eventSource: EventSource | null = null;
+  private streamOpenedOnce = false;
+  private streamHadError = false;
+  private fetchInFlight = false;
+  private pendingRefetch = false;
+  private boundOnVisibilityChange = (): void => this.onVisibilityChange();
 
   static override styles = css`
     :host {
@@ -477,6 +482,7 @@ export class ScionAgentMessageViewer extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    document.addEventListener('visibilitychange', this.boundOnVisibilityChange);
     // Lit does not re-render on reconnect; show lines whose frame was
     // cancelled by disconnectedCallback.
     if (this.buffer.size > 0) this.requestUpdate();
@@ -484,11 +490,22 @@ export class ScionAgentMessageViewer extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    document.removeEventListener('visibilitychange', this.boundOnVisibilityChange);
     this.stopStream();
     // A frame left pending would keep this detached element (and its buffer)
     // alive until a hidden tab becomes visible; connectedCallback renders
     // anything it skipped.
     this.renderBatch.cancel();
+  }
+
+  private onVisibilityChange(): void {
+    if (document.hidden || document.visibilityState === 'hidden') return;
+    if (!this.loaded) return;
+    if (this.streaming && this.eventSource && this.eventSource.readyState === EventSource.CLOSED) {
+      this.stopStream();
+      this.startStream();
+    }
+    void this.fetchMessages();
   }
 
   /** Called by the parent when the messages tab is first shown. */
@@ -519,6 +536,11 @@ export class ScionAgentMessageViewer extends LitElement {
   }
 
   private async fetchMessages(): Promise<void> {
+    if (this.fetchInFlight) {
+      this.pendingRefetch = true;
+      return;
+    }
+    this.fetchInFlight = true;
     this.loading = true;
     this.error = null;
 
@@ -581,7 +603,14 @@ export class ScionAgentMessageViewer extends LitElement {
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to fetch messages';
     } finally {
+      this.fetchInFlight = false;
       this.loading = false;
+      if (this.pendingRefetch && this.isConnected) {
+        this.pendingRefetch = false;
+        void this.fetchMessages();
+      } else {
+        this.pendingRefetch = false;
+      }
     }
   }
 
@@ -718,12 +747,16 @@ export class ScionAgentMessageViewer extends LitElement {
     const url = this.resolvedStreamUrl;
     if (!url) return;
     this.streaming = true;
+    this.streamOpenedOnce = false;
+    this.streamHadError = false;
 
-    this.eventSource = new EventSource(url);
+    const es = new EventSource(url);
+    this.eventSource = es;
 
     // Hub-store-backed stream: emits "message" events with a full
     // UserMessageEvent payload (hub store record) per message.
-    this.eventSource.addEventListener('message', (event: Event) => {
+    es.addEventListener('message', (event: Event) => {
+      if (es !== this.eventSource) return;
       try {
         const msg = JSON.parse((event as MessageEvent<string>).data) as Message;
         this.mergeHubMessages([msg]);
@@ -734,7 +767,8 @@ export class ScionAgentMessageViewer extends LitElement {
 
     // Cloud-Logging-backed stream (fallback path via /message-logs/stream
     // when explicitly opted in): emits "log" events with raw log entries.
-    this.eventSource.addEventListener('log', (event: Event) => {
+    es.addEventListener('log', (event: Event) => {
+      if (es !== this.eventSource) return;
       try {
         const entry = JSON.parse((event as MessageEvent<string>).data) as MessageLogEntry;
         this.mergeEntries([entry]);
@@ -743,13 +777,26 @@ export class ScionAgentMessageViewer extends LitElement {
       }
     });
 
-    this.eventSource.addEventListener('timeout', () => {
+    es.addEventListener('timeout', () => {
+      if (es !== this.eventSource) return;
       this.stopStream();
       void this.fetchMessages(); // backfill anything dropped during the prior window
       this.startStream();
     });
 
-    this.eventSource.onerror = () => {
+    es.onopen = () => {
+      if (es !== this.eventSource) return;
+      const isReconnect = this.streamOpenedOnce || this.streamHadError;
+      this.streamOpenedOnce = true;
+      this.streamHadError = false;
+      if (isReconnect) {
+        void this.fetchMessages(); // backfill anything published while the stream was down
+      }
+    };
+
+    es.onerror = () => {
+      if (es !== this.eventSource) return;
+      this.streamHadError = true;
       // EventSource will auto-reconnect for transient errors
     };
   }
@@ -760,6 +807,8 @@ export class ScionAgentMessageViewer extends LitElement {
       this.eventSource.close();
       this.eventSource = null;
     }
+    this.streamOpenedOnce = false;
+    this.streamHadError = false;
     this.streaming = false;
   }
 
