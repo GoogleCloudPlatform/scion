@@ -383,7 +383,7 @@ func (w *backdatePendingCreateStore) MarkMessageDispatched(ctx context.Context, 
 	return w.Store.MarkMessageDispatched(ctx, id)
 }
 
-// TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice
+// TestBrokerMessageSweepHandler_AC3SweepNoticeAndAC4ImmediateFinalization
 // verifies the post-#5058 (ptone/scion#5111) and #5104 (ptone/scion#7405)
 // interaction for both ambiguous outcomes:
 //   - AC-3 (broker accepted, all MarkMessageDispatched retries failed): the row
@@ -395,7 +395,7 @@ func (w *backdatePendingCreateStore) MarkMessageDispatched(ctx context.Context, 
 //     finalizes the row as failed with dispatchOutcomeUnknownReason instead of
 //     leaving it pending for the 10m sweep, so a subsequent sweep is a no-op
 //     (no duplicate target dispatch, no late sweep notice, reason preserved).
-func TestBrokerMessageSweepHandler_ExpiredAC3AndAC4RowsSendUnconfirmedNotice(t *testing.T) {
+func TestBrokerMessageSweepHandler_AC3SweepNoticeAndAC4ImmediateFinalization(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
 		setupCase         func(dispatcher *recordingDispatcher, fs *backdatePendingCreateStore)

@@ -37,12 +37,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -568,6 +570,251 @@ func TestDelivery_AutoWakeMentionDispatchTimeout_FinalizedFailed(t *testing.T) {
 	stuckCount, err := s.CountStuckPendingMessages(ctx, time.Now().UTC().Add(time.Hour))
 	require.NoError(t, err)
 	assert.Equal(t, 0, stuckCount)
+}
+
+func TestDelivery_AutoWakeMentionAmbiguousDispatch_NotifiesSenderOnce(t *testing.T) {
+	type recordedCall struct {
+		agentID string
+		msg     string
+		sm      *messages.StructuredMessage
+	}
+
+	newHarness := func(t *testing.T, targetFn func(ctx context.Context, s store.Store, target *store.Agent) error) (
+		*Server, store.Store, *store.Project, *store.Agent, *store.Agent, func() []recordedCall,
+	) {
+		t.Helper()
+		srv, s, project, sender, target, _, _ := deliverySetup(t)
+		var (
+			mu    sync.Mutex
+			calls []recordedCall
+		)
+		disp := &spyStateDispatcher{
+			store: s,
+			dispatchFn: func(dctx context.Context, agent *store.Agent, msgText string, sm *messages.StructuredMessage) error {
+				mu.Lock()
+				calls = append(calls, recordedCall{agentID: agent.ID, msg: msgText, sm: sm})
+				mu.Unlock()
+				if agent.ID == target.ID && targetFn != nil {
+					return targetFn(dctx, s, target)
+				}
+				return nil
+			},
+		}
+		srv.SetDispatcher(disp)
+		events := NewChannelEventPublisher()
+		t.Cleanup(events.Close)
+		srv.SetEventPublisher(events)
+		bus := eventbus.NewInProcessEventBus(slog.Default())
+		t.Cleanup(func() { _ = bus.Close() })
+		srv.SetMessageBrokerProxy(NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return disp }, slog.Default()))
+
+		getCalls := func() []recordedCall {
+			mu.Lock()
+			defer mu.Unlock()
+			cp := make([]recordedCall, len(calls))
+			copy(cp, calls)
+			return cp
+		}
+		return srv, s, project, sender, target, getCalls
+	}
+
+	for _, tc := range []struct {
+		name      string
+		targetErr error
+	}{
+		{name: "deadline_exceeded", targetErr: context.DeadlineExceeded},
+		{name: "canceled", targetErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, project, sender, target, getCalls := newHarness(t, func(_ context.Context, _ store.Store, _ *store.Agent) error {
+				return tc.targetErr
+			})
+			ctx := context.Background()
+
+			storeMsg := &store.Message{
+				ID:            tid("autowake-ambig-" + tc.name),
+				ProjectID:     project.ID,
+				Sender:        "agent:" + sender.Slug,
+				SenderID:      sender.ID,
+				Recipient:     "agent:" + target.Slug,
+				RecipientID:   target.ID,
+				Msg:           "@delivery-target ping",
+				Type:          messages.TypeMention,
+				AgentID:       sender.ID,
+				CreatedAt:     time.Now().Add(-11 * time.Minute),
+				DispatchState: store.MessageDispatchPending,
+			}
+			require.NoError(t, s.CreateMessage(ctx, storeMsg))
+
+			in := deliveryDMInput(sender, target, storeMsg.Msg)
+			in.Type = messages.TypeMention
+			in.SkipPhaseGate = true
+			sm := &messages.StructuredMessage{
+				Version:     messages.Version,
+				Sender:      storeMsg.Sender,
+				SenderID:    storeMsg.SenderID,
+				Recipient:   storeMsg.Recipient,
+				RecipientID: storeMsg.RecipientID,
+				Msg:         storeMsg.Msg,
+				Type:        storeMsg.Type,
+			}
+
+			item := srv.agentDMAutoWakeItem(in, storeMsg, sm, sm)
+			item.deliver(ctx, target)
+
+			got, err := s.GetMessage(ctx, storeMsg.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.MessageDispatchFailed, got.DispatchState,
+				"auto-wake ambiguous dispatch must finalize row immediately as failed")
+			require.NotNil(t, got.DispatchFailureReason)
+			assert.Equal(t, dispatchOutcomeUnknownReason, *got.DispatchFailureReason)
+
+			stuckCount, err := s.CountStuckPendingMessages(ctx, time.Now().UTC().Add(time.Hour))
+			require.NoError(t, err)
+			assert.Equal(t, 0, stuckCount)
+
+			countCalls := func() (targetCalls, senderNotices int) {
+				for _, c := range getCalls() {
+					switch c.agentID {
+					case target.ID:
+						targetCalls++
+					case sender.ID:
+						senderNotices++
+						require.NotNil(t, c.sm)
+						assert.Equal(t, "DELIVERY_UNCONFIRMED", c.sm.Status)
+						assert.Contains(t, c.msg, "may have been delivered; check before resending")
+						assert.NotContains(t, c.msg, "Message delivery failed")
+					}
+				}
+				return targetCalls, senderNotices
+			}
+
+			targetCalls, senderNotices := countCalls()
+			assert.Equal(t, 1, targetCalls)
+			assert.Equal(t, 1, senderNotices, "sender must receive exactly one DELIVERY_UNCONFIRMED notice")
+
+			// A subsequent sweep must not add another notice or redeliver to target.
+			srv.brokerMessageSweepHandler()(ctx)
+			afterTargetCalls, afterSenderNotices := countCalls()
+			assert.Equal(t, 1, afterTargetCalls, "sweep must not redeliver to target")
+			assert.Equal(t, 1, afterSenderNotices, "sweep must not send a duplicate DELIVERY_UNCONFIRMED notice")
+
+			postSweep, err := s.GetMessage(ctx, storeMsg.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.MessageDispatchFailed, postSweep.DispatchState)
+			require.NotNil(t, postSweep.DispatchFailureReason)
+			assert.Equal(t, dispatchOutcomeUnknownReason, *postSweep.DispatchFailureReason)
+		})
+	}
+
+	t.Run("already_delivered_leaves_delivered_and_sends_no_notice", func(t *testing.T) {
+		ctx := context.Background()
+		msgID := tid("autowake-ambig-delivered")
+		srv, s, project, sender, target, getCalls := newHarness(t, func(_ context.Context, st store.Store, tgt *store.Agent) error {
+			// Simulate conduit /deliver completing before the dispatch timeout returns.
+			_, err := st.BindMessageDelivery(ctx, tgt.ID, "d-autowake-delivered", []string{msgID}, time.Now())
+			require.NoError(t, err)
+			n, err := st.FinishMessageDelivery(ctx, "d-autowake-delivered", []string{msgID}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+			return context.DeadlineExceeded
+		})
+
+		storeMsg := &store.Message{
+			ID:            msgID,
+			ProjectID:     project.ID,
+			Sender:        "agent:" + sender.Slug,
+			SenderID:      sender.ID,
+			Recipient:     "agent:" + target.Slug,
+			RecipientID:   target.ID,
+			Msg:           "@delivery-target ping",
+			Type:          messages.TypeMention,
+			AgentID:       sender.ID,
+			CreatedAt:     time.Now().Add(-11 * time.Minute),
+			DispatchState: store.MessageDispatchPending,
+		}
+		require.NoError(t, s.CreateMessage(ctx, storeMsg))
+
+		in := deliveryDMInput(sender, target, storeMsg.Msg)
+		in.Type = messages.TypeMention
+		in.SkipPhaseGate = true
+		sm := &messages.StructuredMessage{
+			Version:     messages.Version,
+			Sender:      storeMsg.Sender,
+			SenderID:    storeMsg.SenderID,
+			Recipient:   storeMsg.Recipient,
+			RecipientID: storeMsg.RecipientID,
+			Msg:         storeMsg.Msg,
+			Type:        storeMsg.Type,
+		}
+
+		item := srv.agentDMAutoWakeItem(in, storeMsg, sm, sm)
+		item.deliver(ctx, target)
+
+		got, err := s.GetMessage(ctx, storeMsg.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDelivered, got.DispatchState,
+			"a row already marked delivered must not be overwritten by timeout finalization")
+		assert.Nil(t, got.DispatchFailureReason)
+
+		srv.brokerMessageSweepHandler()(ctx)
+		for _, c := range getCalls() {
+			assert.NotEqual(t, sender.ID, c.agentID,
+				"sender must not receive DELIVERY_UNCONFIRMED when the message was already delivered")
+		}
+	})
+
+	t.Run("already_failed_no_double_finalize_no_duplicate_notice", func(t *testing.T) {
+		ctx := context.Background()
+		msgID := tid("autowake-ambig-already-failed")
+		srv, s, project, sender, target, getCalls := newHarness(t, func(_ context.Context, st store.Store, _ *store.Agent) error {
+			require.NoError(t, st.MarkMessageFailed(ctx, msgID, "prior broker failure"))
+			return context.DeadlineExceeded
+		})
+
+		storeMsg := &store.Message{
+			ID:            msgID,
+			ProjectID:     project.ID,
+			Sender:        "agent:" + sender.Slug,
+			SenderID:      sender.ID,
+			Recipient:     "agent:" + target.Slug,
+			RecipientID:   target.ID,
+			Msg:           "@delivery-target ping",
+			Type:          messages.TypeMention,
+			AgentID:       sender.ID,
+			CreatedAt:     time.Now().Add(-11 * time.Minute),
+			DispatchState: store.MessageDispatchPending,
+		}
+		require.NoError(t, s.CreateMessage(ctx, storeMsg))
+
+		in := deliveryDMInput(sender, target, storeMsg.Msg)
+		in.Type = messages.TypeMention
+		in.SkipPhaseGate = true
+		sm := &messages.StructuredMessage{
+			Version:     messages.Version,
+			Sender:      storeMsg.Sender,
+			SenderID:    storeMsg.SenderID,
+			Recipient:   storeMsg.Recipient,
+			RecipientID: storeMsg.RecipientID,
+			Msg:         storeMsg.Msg,
+			Type:        storeMsg.Type,
+		}
+
+		item := srv.agentDMAutoWakeItem(in, storeMsg, sm, sm)
+		item.deliver(ctx, target)
+
+		got, err := s.GetMessage(ctx, storeMsg.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchFailed, got.DispatchState)
+		require.NotNil(t, got.DispatchFailureReason)
+		assert.Equal(t, "prior broker failure", *got.DispatchFailureReason,
+			"already-failed row must not be overwritten")
+
+		for _, c := range getCalls() {
+			assert.NotEqual(t, sender.ID, c.agentID,
+				"deliver must not send a notice when another caller already finalized the row")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

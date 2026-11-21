@@ -1539,8 +1539,9 @@ const (
 	dispatchFailureCodeDispatchError = "dispatch_error"
 	// dispatchFailureCodeDeliveryUnconfirmed is derived when a pending message
 	// row expired past stuckMessageExpireTTL (store.MessageExpiredStuckPendingReason,
-	// ptone/scion#7405): delivery may already have occurred (AC-3/AC-4), so UI
-	// surfaces must show "Delivery unconfirmed" rather than "Failed".
+	// ptone/scion#7405): delivery may already have occurred (AC-3 or an
+	// interrupted dispatch), so UI surfaces must show "Delivery unconfirmed"
+	// rather than "Failed".
 	dispatchFailureCodeDeliveryUnconfirmed = "delivery_unconfirmed"
 )
 

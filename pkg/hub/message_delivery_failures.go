@@ -411,11 +411,12 @@ func (s *Server) notifyStoredMessageSenderFailed(ctx context.Context, agent *sto
 // notifyStoredMessageSenderUnconfirmed notifies an agent sender (via
 // DELIVERY_UNCONFIRMED notice) or connected human browser clients (via
 // PublishUserMessage with dispatchFailureCode=delivery_unconfirmed) after
-// ExpireAndListStuckPendingMessages has committed dispatch_state=failed with
-// store.MessageExpiredStuckPendingReason (ptone/scion#7405). Because a stored
-// pending row carries no pre- vs post-dispatch marker to separate never-sent
-// rows from AC-3/AC-4 rows that were or may have been delivered, every
-// pending-TTL expiry uses unconfirmed wording telling the sender to check
+// dispatch_state=failed has been committed for an ambiguous delivery outcome —
+// either when ExpireAndListStuckPendingMessages expires a stuck pending row
+// with store.MessageExpiredStuckPendingReason (ptone/scion#7405) or when a
+// background auto-wake dispatch finalizes an ambiguous timeout/cancellation
+// via FailUndeliveredMessage with dispatchOutcomeUnknownReason. In both cases
+// delivery may have occurred, so unconfirmed wording tells the sender to check
 // before resending.
 func (s *Server) notifyStoredMessageSenderUnconfirmed(ctx context.Context, agent *store.Agent, msg *store.Message) {
 	if msg == nil {

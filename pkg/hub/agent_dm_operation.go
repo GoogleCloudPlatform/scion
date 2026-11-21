@@ -1042,11 +1042,24 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 			}
 			if err != nil {
 				LogDMDispatchOutcome(input.SenderAgent, woken, msgID, DispatchFailed, err)
-				reason := err.Error()
 				if isAmbiguousDispatchError(err) {
-					reason = dispatchOutcomeUnknownReason
+					// The synchronous caller already received AgentDMWakeQueued
+					// ("delivered"), so no HTTP response can inform it of the
+					// ambiguous dispatch. Finalize immediately as failed
+					// (ptone/scion#5111) via atomic CAS and send the sender one
+					// DELIVERY_UNCONFIRMED notice only when this call owns the
+					// transition (leaving already-delivered or already-failed
+					// rows untouched and preventing duplicate sweep notices).
+					won, markErr := s.failUndelivered(fctx, msgID, dispatchOutcomeUnknownReason)
+					if markErr != nil {
+						s.messageLog.Error("agent DM: failed to mark message failed",
+							"message_id", msgID, "error", markErr)
+					} else if won {
+						s.notifyStoredMessageSenderUnconfirmed(fctx, woken, curMsg)
+					}
+					return
 				}
-				if markErr := s.markFailed(fctx, msgID, reason); markErr != nil {
+				if markErr := s.markFailed(fctx, msgID, err.Error()); markErr != nil {
 					s.messageLog.Error("agent DM: failed to mark message failed",
 						"message_id", msgID, "error", markErr)
 				}
