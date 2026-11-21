@@ -108,13 +108,14 @@ func TestWebChatStore_Postgres_MessagesInOtherSchema(t *testing.T) {
 
 	const messagesDDL = `CREATE TABLE %s.messages (
     id uuid PRIMARY KEY, created timestamptz NOT NULL, channel text, thread_id text,
+    conversation_id uuid, conversation_seq bigint,
     project_id text, msg text, sender text, sender_id text, recipient text, recipient_id text)`
 	// The columns the store's conversation statements use (the real table
 	// is created by the Ent migration).
 	const conversationsDDL = `CREATE TABLE %s.conversations (
     id uuid PRIMARY KEY, project_id uuid, kind text, surface text, external_ref text,
     parent_ref text, display_name text, default_agent_id uuid, drift_state text,
-    last_activity_at timestamptz, created_at timestamptz, deleted_at timestamptz)`
+    last_activity_at timestamptz, last_message_seq bigint NOT NULL DEFAULT 0, created_at timestamptz, deleted_at timestamptz)`
 	const foreignID = "00000000-0000-4000-8000-000000000001"
 	const ownID = "00000000-0000-4000-8000-000000000002"
 
