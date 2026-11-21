@@ -440,12 +440,18 @@ func (c *Client) postComment(ctx context.Context, installationToken, endpoint, b
 		return nil, classifyCommentError(resp, errBody)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, commentResponseBodyLimit))
+	respBody, err := readBoundedBody(resp.Body, commentResponseBodyLimit)
 	if err != nil {
+		msg := "failed to read comment response"
+		if errors.Is(err, errResponseBodyTooLarge) {
+			msg = "GitHub comment response body exceeded size limit"
+		}
 		return nil, &CommentAPIError{
-			ErrorCode: ErrCodeCommentRequestFailed,
-			Message:   "failed to read comment response",
-			Err:       err,
+			ErrorCode:  ErrCodeCommentRequestFailed,
+			StatusCode: resp.StatusCode,
+			Message:    msg,
+			Err:        err,
+			upstream:   err.Error(),
 		}
 	}
 
@@ -494,12 +500,18 @@ func (c *Client) listComments(ctx context.Context, installationToken, endpoint s
 		return nil, classifyCommentError(resp, errBody)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, commentListResponseBodyLimit))
+	respBody, err := readBoundedBody(resp.Body, commentListResponseBodyLimit)
 	if err != nil {
+		msg := "failed to read comment list response"
+		if errors.Is(err, errResponseBodyTooLarge) {
+			msg = "GitHub comment list response body exceeded size limit"
+		}
 		return nil, &CommentAPIError{
-			ErrorCode: ErrCodeCommentRequestFailed,
-			Message:   "failed to read comment list response",
-			Err:       err,
+			ErrorCode:  ErrCodeCommentRequestFailed,
+			StatusCode: resp.StatusCode,
+			Message:    msg,
+			Err:        err,
+			upstream:   err.Error(),
 		}
 	}
 

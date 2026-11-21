@@ -471,10 +471,11 @@ func (c *Client) MintInstallationToken(ctx context.Context, installationID int64
 		errBody, err := io.ReadAll(io.LimitReader(resp.Body, upstreamBodyReadLimit))
 		if err != nil {
 			return nil, &TokenMintError{
-				ErrorCode: ErrCodeTokenMintFailed,
-				Message:   "failed to read response body",
-				Err:       err,
-				upstream:  err.Error(),
+				ErrorCode:  ErrCodeTokenMintFailed,
+				StatusCode: resp.StatusCode,
+				Message:    "failed to read response body",
+				Err:        err,
+				upstream:   err.Error(),
 			}
 		}
 		return nil, classifyGitHubError(resp.StatusCode, errBody)

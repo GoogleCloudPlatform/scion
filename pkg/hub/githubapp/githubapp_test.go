@@ -1326,3 +1326,46 @@ func TestIntersectTokenPermissions(t *testing.T) {
 		})
 	}
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type failingReadCloser struct {
+	err error
+}
+
+func (f failingReadCloser) Read([]byte) (int, error) { return 0, f.err }
+func (f failingReadCloser) Close() error             { return nil }
+
+func TestMintInstallationToken_Non201ReadErrorSetsStatusCode(t *testing.T) {
+	pemData, _ := generateTestKey(t)
+	client, err := NewClient(Config{AppID: 42, APIBaseURL: "https://api.github.test"}, pemData)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.httpClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Header:     make(http.Header),
+			Body:       failingReadCloser{err: errors.New("connection reset by peer")},
+		}, nil
+	})
+
+	_, err = client.MintInstallationToken(context.Background(), 12345, []string{"repo"}, DefaultTokenPermissions())
+	var mintErr *TokenMintError
+	if !errors.As(err, &mintErr) {
+		t.Fatalf("expected TokenMintError, got %T: %v", err, err)
+	}
+	if mintErr.ErrorCode != ErrCodeTokenMintFailed {
+		t.Errorf("ErrorCode = %q, want %q", mintErr.ErrorCode, ErrCodeTokenMintFailed)
+	}
+	if mintErr.StatusCode != http.StatusBadGateway {
+		t.Errorf("StatusCode = %d, want %d", mintErr.StatusCode, http.StatusBadGateway)
+	}
+	if mintErr.UpstreamDetail() == "" {
+		t.Error("expected UpstreamDetail for non-201 read error")
+	}
+}
