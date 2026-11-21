@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,11 +29,25 @@ import (
 // page requests. Any other path, including one that only decodes to that
 // prefix, is checked.
 func (s *Server) proxyModeWriteGuard(next http.Handler) http.Handler {
-	if s.authConfig.AuthMode != proxyAuthMode {
+	return proxyModeWriteGuardMiddleware(s.authConfig.AuthMode, func(r *http.Request) bool {
+		return isStateChangingAPIRequest(r) && !isPortViewRequest(r)
+	}, next)
+}
+
+// proxyModeWriteGuard applies the same proxy-mode request checks to
+// state-changing sign-in and sign-out endpoints served directly by WebServer
+// (/auth/* and /api/v1/auth/test-login). It runs before authentication and is a
+// no-op outside proxy auth mode.
+func (ws *WebServer) proxyModeWriteGuard(next http.Handler) http.Handler {
+	return proxyModeWriteGuardMiddleware(ws.config.AuthMode, isStateChangingWebAuthRequest, next)
+}
+
+func proxyModeWriteGuardMiddleware(authMode string, match func(*http.Request) bool, next http.Handler) http.Handler {
+	if authMode != proxyAuthMode {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isStateChangingAPIRequest(r) || isPortViewRequest(r) {
+		if !match(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -111,18 +126,31 @@ func segmentsMatch(pattern, segs []string) bool {
 	return true
 }
 
-// isStateChangingAPIRequest reports whether r targets an /api/v1 route with a
-// state-changing method.
-func isStateChangingAPIRequest(r *http.Request) bool {
-	if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
-		return false
-	}
-	switch r.Method {
+// isStateChangingMethod reports whether method is one of the state-changing
+// HTTP methods checked by proxyModeWriteGuard.
+func isStateChangingMethod(method string) bool {
+	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 		return true
 	default:
 		return false
 	}
+}
+
+// isStateChangingAPIRequest reports whether r targets an /api/v1 route with a
+// state-changing method.
+func isStateChangingAPIRequest(r *http.Request) bool {
+	return strings.HasPrefix(r.URL.Path, "/api/v1/") && isStateChangingMethod(r.Method)
+}
+
+// isStateChangingWebAuthRequest reports whether r targets a WebServer sign-in
+// or sign-out endpoint (/auth/* or /api/v1/auth/test-login) with a
+// state-changing method.
+func isStateChangingWebAuthRequest(r *http.Request) bool {
+	if !isStateChangingMethod(r.Method) {
+		return false
+	}
+	return strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/api/v1/auth/test-login"
 }
 
 // requestHasOriginSignal reports whether r carries the Sec-Fetch-Site or Origin
@@ -220,8 +248,11 @@ func requestIsCrossSite(r *http.Request) bool {
 // originMatchesHost reports whether the Origin header value names the same host
 // as the request's Host header. "null", an empty value and a malformed Origin
 // do not match. Only the host is compared, not the scheme, because a
-// TLS-terminating proxy changes the request scheme. X-Forwarded-Host is not
-// read, so the front proxy must pass the public Host header through.
+// TLS-terminating proxy changes the request scheme. An explicit default port
+// for the Origin's scheme (443 for https, 80 for http) is treated the same as
+// no port, including on bracketed IPv6 hosts; non-default ports must match.
+// X-Forwarded-Host is not read, so the front proxy must pass the public Host
+// header through.
 func originMatchesHost(origin, host string) bool {
 	if origin == "" || host == "" || strings.EqualFold(origin, "null") {
 		return false
@@ -230,5 +261,63 @@ func originMatchesHost(origin, host string) bool {
 	if err != nil || u.Host == "" {
 		return false
 	}
-	return strings.EqualFold(u.Host, host)
+	originHost, originPort, ok := splitHostAndPort(u.Host)
+	if !ok {
+		return false
+	}
+	reqHost, reqPort, ok := splitHostAndPort(host)
+	if !ok {
+		return false
+	}
+	if defaultPort := defaultPortForScheme(u.Scheme); defaultPort != "" {
+		if originPort == defaultPort {
+			originPort = ""
+		}
+		if reqPort == defaultPort {
+			reqPort = ""
+		}
+	}
+	return strings.EqualFold(originHost, reqHost) && originPort == reqPort
+}
+
+func defaultPortForScheme(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+// splitHostAndPort splits a Host header or URL authority (host or host:port,
+// including bracketed IPv6 literals such as "[::1]" or "[::1]:443") into its
+// unbracketed host and optional port.
+func splitHostAndPort(hostport string) (host, port string, ok bool) {
+	if hostport == "" {
+		return "", "", false
+	}
+	if strings.HasPrefix(hostport, "[") {
+		if strings.HasSuffix(hostport, "]") {
+			h := hostport[1 : len(hostport)-1]
+			if h == "" || strings.ContainsAny(h, "[]") {
+				return "", "", false
+			}
+			return h, "", true
+		}
+		h, p, err := net.SplitHostPort(hostport)
+		if err != nil || h == "" || p == "" {
+			return "", "", false
+		}
+		return h, p, true
+	}
+	if strings.Contains(hostport, ":") {
+		h, p, err := net.SplitHostPort(hostport)
+		if err != nil || h == "" || p == "" {
+			return "", "", false
+		}
+		return h, p, true
+	}
+	return hostport, "", true
 }

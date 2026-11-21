@@ -1108,6 +1108,12 @@ type JWTAuthConfig struct {
 	// Default: "X-Auth-Proxy-JWT"
 	Header string `json:"header,omitempty" yaml:"header,omitempty" koanf:"header"`
 
+	// IdentityHeaders lists additional HTTP headers the front proxy sets with
+	// user identity information (for example email or ID headers). They are
+	// stripped alongside the assertion header when proxying requests to an
+	// agent's exposed port.
+	IdentityHeaders []string `json:"identityHeaders,omitempty" yaml:"identityHeaders,omitempty" koanf:"identityHeaders"`
+
 	// Algorithm is the expected JWT signing algorithm (MANDATORY).
 	// Must be an asymmetric algorithm: RS256, RS384, RS512, ES256, ES384, ES512,
 	// PS256, PS384, PS512.

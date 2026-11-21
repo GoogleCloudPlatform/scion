@@ -168,7 +168,7 @@ Keep page view (`hub.port_view`) off in such a deployment until it has been veri
 
 Apps served through an agent's port never receive the Hub's own credential headers, the Hub federation token (`X-Scion-Federation-Token`), or the forwarded-user identity headers (`X-Forwarded-User-Id`, `-Email`, `-Name`, `-Role`), on either transport.
 
-With the IAP provider, apps served through an agent's port do not receive the IAP assertion or the IAP user email and ID headers. With the JWT provider, they do not receive the configured assertion header. The Hub reads only that header, so configure the front proxy not to add other user identity headers, such as email or ID headers.
+With the IAP provider, apps served through an agent's port do not receive the IAP assertion or the IAP user email and ID headers. With the JWT provider, they do not receive the configured assertion header or any headers listed in `server.auth.proxy.jwt.identity_headers`.
 
 ---
 

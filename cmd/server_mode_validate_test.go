@@ -100,17 +100,22 @@ func TestLoadAndReconcileConfig_RefusesDebugEndpointsInHostedMode(t *testing.T) 
 	}
 }
 
-// --enable-test-login is refused in hosted mode unless server.hub.class is
-// "test", and accepted in workstation mode.
+// --enable-test-login is refused in proxy auth mode (even on a test hub) and
+// in hosted mode unless server.hub.class is "test", and accepted in
+// workstation mode outside proxy auth.
 func TestLoadAndReconcileConfig_RefusesTestLoginInHostedMode(t *testing.T) {
-	const refusal = "--enable-test-login is not allowed in hosted mode"
+	const hostedRefusal = "--enable-test-login is not allowed in hosted mode"
+	const proxyRefusal = "--enable-test-login is not allowed in proxy auth mode"
 	for _, tc := range []struct {
 		name, settings, envClass string
-		wantRefuse               bool
+		wantRefusal              string
 	}{
-		{name: "hosted", settings: "server:\n  mode: hosted\n", wantRefuse: true},
+		{name: "hosted", settings: "server:\n  mode: hosted\n", wantRefusal: hostedRefusal},
 		{name: "hosted test hub", settings: "server:\n  mode: hosted\n  hub:\n    class: test\n"},
 		{name: "hosted test hub via env", settings: "server:\n  mode: hosted\n", envClass: "test"},
+		{name: "hosted proxy mode", settings: "server:\n  mode: hosted\n  auth:\n    mode: proxy\n", wantRefusal: proxyRefusal},
+		{name: "hosted proxy mode test hub", settings: "server:\n  mode: hosted\n  hub:\n    class: test\n  auth:\n    mode: proxy\n", wantRefusal: proxyRefusal},
+		{name: "workstation proxy mode", settings: "server:\n  mode: workstation\n  auth:\n    mode: proxy\n", wantRefusal: proxyRefusal},
 		{name: "workstation", settings: "server:\n  mode: workstation\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,9 +131,9 @@ func TestLoadAndReconcileConfig_RefusesTestLoginInHostedMode(t *testing.T) {
 			writeServerSettings(t, "schema_version: \"1\"\n"+tc.settings)
 
 			_, err := loadAndReconcileConfig(serverStartCmd)
-			if tc.wantRefuse {
-				if err == nil || !strings.Contains(err.Error(), refusal) {
-					t.Fatalf("%s: loadAndReconcileConfig err = %v, want refusal containing %q", tc.name, err, refusal)
+			if tc.wantRefusal != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantRefusal) {
+					t.Fatalf("%s: loadAndReconcileConfig err = %v, want refusal containing %q", tc.name, err, tc.wantRefusal)
 				}
 			} else if err != nil {
 				t.Fatalf("%s: loadAndReconcileConfig unexpected err = %v", tc.name, err)
@@ -196,12 +201,13 @@ func TestValidateDebugEndpoints(t *testing.T) {
 	}
 }
 
-// --enable-test-login bypasses authentication: hosted mode refuses it unless
-// the hub is declared a test hub (server.hub.class: test).
+// --enable-test-login bypasses authentication: proxy auth mode refuses it
+// unconditionally, and hosted mode refuses it unless the hub is declared a
+// test hub (server.hub.class: test).
 func TestValidateTestLogin(t *testing.T) {
 	for _, tc := range []struct {
 		hosted, enabled bool
-		class           string
+		class, authMode string
 		wantErr         bool
 	}{
 		{hosted: false, enabled: false},
@@ -211,10 +217,38 @@ func TestValidateTestLogin(t *testing.T) {
 		{hosted: true, enabled: true, class: "prod", wantErr: true},
 		{hosted: true, enabled: true, class: "Test", wantErr: true},
 		{hosted: true, enabled: true, class: config.HubClassTest},
+		{hosted: false, enabled: false, authMode: "proxy"},
+		{hosted: true, enabled: false, authMode: "proxy"},
+		{hosted: false, enabled: true, authMode: "proxy", wantErr: true},
+		{hosted: true, enabled: true, class: config.HubClassTest, authMode: "proxy", wantErr: true},
+		{hosted: true, enabled: true, class: config.HubClassTest, authMode: "PROXY", wantErr: true},
+		{hosted: true, enabled: true, class: config.HubClassTest, authMode: "oauth"},
 	} {
-		err := validateTestLogin(tc.hosted, tc.enabled, tc.class)
+		err := validateTestLogin(tc.hosted, tc.enabled, tc.class, tc.authMode)
 		if (err != nil) != tc.wantErr {
-			t.Errorf("validateTestLogin(hosted=%v, enabled=%v, class=%q) err = %v, wantErr %v", tc.hosted, tc.enabled, tc.class, err, tc.wantErr)
+			t.Errorf("validateTestLogin(hosted=%v, enabled=%v, class=%q, authMode=%q) err = %v, wantErr %v", tc.hosted, tc.enabled, tc.class, tc.authMode, err, tc.wantErr)
+		}
+	}
+}
+
+func TestNewJWTProxyAuthenticator_IdentityHeaders(t *testing.T) {
+	auth, err := newJWTProxyAuthenticator(&config.JWTAuthConfig{
+		Header:          "X-Custom-JWT",
+		IdentityHeaders: []string{"X-Proxy-Email", "X-Proxy-User-Id"},
+		Algorithm:       "RS256",
+		JWKSURL:         "https://auth.example.com/.well-known/jwks.json",
+	})
+	if err != nil {
+		t.Fatalf("newJWTProxyAuthenticator unexpected err = %v", err)
+	}
+	got := auth.AssertionHeaders()
+	want := []string{"X-Custom-JWT", "X-Proxy-Email", "X-Proxy-User-Id"}
+	if len(got) != len(want) {
+		t.Fatalf("AssertionHeaders() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("AssertionHeaders()[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }

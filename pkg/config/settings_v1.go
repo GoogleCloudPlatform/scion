@@ -2502,14 +2502,15 @@ type V1IAPConfig struct {
 // V1JWTAuthConfig holds settings for the generic JWT proxy auth provider
 // (V1/snake_case settings.yaml equivalent of JWTAuthConfig).
 type V1JWTAuthConfig struct {
-	Header        string             `json:"header,omitempty" yaml:"header,omitempty" koanf:"header"`
-	Algorithm     string             `json:"algorithm,omitempty" yaml:"algorithm,omitempty" koanf:"algorithm"`
-	Issuer        string             `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
-	Audience      string             `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
-	JWKSURL       string             `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
-	JWKSFile      string             `json:"jwks_file,omitempty" yaml:"jwks_file,omitempty" koanf:"jwks_file"`
-	PublicKeyFile string             `json:"public_key_file,omitempty" yaml:"public_key_file,omitempty" koanf:"public_key_file"`
-	Claims        *V1JWTClaimsConfig `json:"claims,omitempty" yaml:"claims,omitempty" koanf:"claims"`
+	Header          string             `json:"header,omitempty" yaml:"header,omitempty" koanf:"header"`
+	IdentityHeaders []string           `json:"identity_headers,omitempty" yaml:"identity_headers,omitempty" koanf:"identity_headers"`
+	Algorithm       string             `json:"algorithm,omitempty" yaml:"algorithm,omitempty" koanf:"algorithm"`
+	Issuer          string             `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	Audience        string             `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+	JWKSURL         string             `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
+	JWKSFile        string             `json:"jwks_file,omitempty" yaml:"jwks_file,omitempty" koanf:"jwks_file"`
+	PublicKeyFile   string             `json:"public_key_file,omitempty" yaml:"public_key_file,omitempty" koanf:"public_key_file"`
+	Claims          *V1JWTClaimsConfig `json:"claims,omitempty" yaml:"claims,omitempty" koanf:"claims"`
 }
 
 // V1JWTClaimsConfig maps JWT claim names to identity fields (V1/snake_case
@@ -5008,13 +5009,14 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 			if v1.Auth.Proxy.JWT != nil {
 				gc.Auth.Proxy.JWT = &JWTAuthConfig{
-					Header:        v1.Auth.Proxy.JWT.Header,
-					Algorithm:     v1.Auth.Proxy.JWT.Algorithm,
-					Issuer:        v1.Auth.Proxy.JWT.Issuer,
-					Audience:      v1.Auth.Proxy.JWT.Audience,
-					JWKSURL:       v1.Auth.Proxy.JWT.JWKSURL,
-					JWKSFile:      v1.Auth.Proxy.JWT.JWKSFile,
-					PublicKeyFile: v1.Auth.Proxy.JWT.PublicKeyFile,
+					Header:          v1.Auth.Proxy.JWT.Header,
+					IdentityHeaders: append([]string(nil), v1.Auth.Proxy.JWT.IdentityHeaders...),
+					Algorithm:       v1.Auth.Proxy.JWT.Algorithm,
+					Issuer:          v1.Auth.Proxy.JWT.Issuer,
+					Audience:        v1.Auth.Proxy.JWT.Audience,
+					JWKSURL:         v1.Auth.Proxy.JWT.JWKSURL,
+					JWKSFile:        v1.Auth.Proxy.JWT.JWKSFile,
+					PublicKeyFile:   v1.Auth.Proxy.JWT.PublicKeyFile,
 				}
 				if v1.Auth.Proxy.JWT.Claims != nil {
 					gc.Auth.Proxy.JWT.Claims = &JWTClaimsConfig{
@@ -5451,13 +5453,14 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		}
 		if gc.Auth.Proxy.JWT != nil {
 			v1.Auth.Proxy.JWT = &V1JWTAuthConfig{
-				Header:        gc.Auth.Proxy.JWT.Header,
-				Algorithm:     gc.Auth.Proxy.JWT.Algorithm,
-				Issuer:        gc.Auth.Proxy.JWT.Issuer,
-				Audience:      gc.Auth.Proxy.JWT.Audience,
-				JWKSURL:       gc.Auth.Proxy.JWT.JWKSURL,
-				JWKSFile:      gc.Auth.Proxy.JWT.JWKSFile,
-				PublicKeyFile: gc.Auth.Proxy.JWT.PublicKeyFile,
+				Header:          gc.Auth.Proxy.JWT.Header,
+				IdentityHeaders: append([]string(nil), gc.Auth.Proxy.JWT.IdentityHeaders...),
+				Algorithm:       gc.Auth.Proxy.JWT.Algorithm,
+				Issuer:          gc.Auth.Proxy.JWT.Issuer,
+				Audience:        gc.Auth.Proxy.JWT.Audience,
+				JWKSURL:         gc.Auth.Proxy.JWT.JWKSURL,
+				JWKSFile:        gc.Auth.Proxy.JWT.JWKSFile,
+				PublicKeyFile:   gc.Auth.Proxy.JWT.PublicKeyFile,
 			}
 			if gc.Auth.Proxy.JWT.Claims != nil {
 				v1.Auth.Proxy.JWT.Claims = &V1JWTClaimsConfig{

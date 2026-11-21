@@ -1566,7 +1566,7 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
 		return nil, err
 	}
-	if err := validateTestLogin(hostedMode, enableTestLogin, cfg.Hub.HubClass); err != nil {
+	if err := validateTestLogin(hostedMode, enableTestLogin, cfg.Hub.HubClass, cfg.Auth.Mode); err != nil {
 		return nil, err
 	}
 	// Test mode: the flag-only checks (removed flags, G3, G5) run before
@@ -1680,13 +1680,20 @@ func validateDebugEndpoints(hosted, enabled bool) error {
 	return nil
 }
 
-// validateTestLogin refuses --enable-test-login in hosted mode unless the
-// hub is declared a test hub (server.hub.class: test). The test-login
-// endpoint signs anyone in without authentication, so on a production hub it
-// is an authentication bypass. Hosted-mode test hubs (the web e2e harness,
-// the perf benchmarks) set the class to keep using it.
-func validateTestLogin(hosted, enabled bool, hubClass string) error {
-	if hosted && enabled && !config.IsTestHubClass(hubClass) {
+// validateTestLogin refuses --enable-test-login in proxy auth mode (even on a
+// test hub) and in hosted mode unless the hub is declared a test hub
+// (server.hub.class: test). The test-login endpoint signs anyone in without
+// authentication, so on a production hub or behind an authenticating front
+// proxy it is not allowed. Hosted-mode non-proxy test hubs (the web e2e
+// harness, the perf benchmarks) set the class to keep using it.
+func validateTestLogin(hosted, enabled bool, hubClass, authMode string) error {
+	if !enabled {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(authMode), "proxy") {
+		return fmt.Errorf("--enable-test-login is not allowed in proxy auth mode (server.auth.mode=proxy); the test-login endpoint bypasses proxy authentication")
+	}
+	if hosted && !config.IsTestHubClass(hubClass) {
 		return fmt.Errorf("--enable-test-login is not allowed in hosted mode unless %s is %q; the test-login endpoint bypasses authentication", config.HubClassKey, config.HubClassTest)
 	}
 	return nil
@@ -2935,6 +2942,15 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 		}
 	}
 
+	auth := &hub.JWTProxyAuthenticator{
+		Header:          jwtCfg.Header,
+		IdentityHeaders: append([]string(nil), jwtCfg.IdentityHeaders...),
+		Algorithm:       jwtCfg.Algorithm,
+		Issuer:          jwtCfg.Issuer,
+		Audience:        jwtCfg.Audience,
+		Claims:          claims,
+	}
+
 	// Exactly one key source must be configured.
 	switch {
 	case jwtCfg.PublicKeyFile != "" && jwtCfg.JWKSURL == "" && jwtCfg.JWKSFile == "":
@@ -2942,36 +2958,18 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 		if err != nil {
 			return nil, fmt.Errorf("auth.proxy.jwt.publicKeyFile: %w", err)
 		}
-		return &hub.JWTProxyAuthenticator{
-			Header:    jwtCfg.Header,
-			Algorithm: jwtCfg.Algorithm,
-			Issuer:    jwtCfg.Issuer,
-			Audience:  jwtCfg.Audience,
-			Claims:    claims,
-			KeySource: keySource,
-		}, nil
+		auth.KeySource = keySource
+		return auth, nil
 	case jwtCfg.JWKSURL != "" && jwtCfg.PublicKeyFile == "" && jwtCfg.JWKSFile == "":
-		return &hub.JWTProxyAuthenticator{
-			Header:    jwtCfg.Header,
-			Algorithm: jwtCfg.Algorithm,
-			Issuer:    jwtCfg.Issuer,
-			Audience:  jwtCfg.Audience,
-			Claims:    claims,
-			KeySource: hub.NewJWKSURLKeySource(jwtCfg.JWKSURL),
-		}, nil
+		auth.KeySource = hub.NewJWKSURLKeySource(jwtCfg.JWKSURL)
+		return auth, nil
 	case jwtCfg.JWKSFile != "" && jwtCfg.PublicKeyFile == "" && jwtCfg.JWKSURL == "":
 		keySource, err := hub.NewJWKSFileKeySource(jwtCfg.JWKSFile)
 		if err != nil {
 			return nil, fmt.Errorf("auth.proxy.jwt.jwksFile: %w", err)
 		}
-		return &hub.JWTProxyAuthenticator{
-			Header:    jwtCfg.Header,
-			Algorithm: jwtCfg.Algorithm,
-			Issuer:    jwtCfg.Issuer,
-			Audience:  jwtCfg.Audience,
-			Claims:    claims,
-			KeySource: keySource,
-		}, nil
+		auth.KeySource = keySource
+		return auth, nil
 	default:
 		return nil, fmt.Errorf("auth.proxy.jwt: exactly one key source must be configured (publicKeyFile, jwksURL, or jwksFile)")
 	}

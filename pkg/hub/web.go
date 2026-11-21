@@ -4805,6 +4805,12 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// only from a sign-in link, see handleDevSignIn)
 	handler = ws.devAuthMiddleware(handler)
 
+	// Behind an authenticating front proxy (AuthMode == "proxy"), apply the
+	// same state-changing request checks to web sign-in/sign-out endpoints
+	// (/auth/* and /api/v1/auth/test-login) before authentication. No-op in
+	// other auth modes.
+	handler = ws.proxyModeWriteGuard(handler)
+
 	// Refuse new requests once shutdown has begun (ptone/scion#5054); the
 	// health endpoints stay reachable, and requests for the mounted hub API
 	// are left to the hub handler's own refusal.

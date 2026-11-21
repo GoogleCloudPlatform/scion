@@ -2454,6 +2454,11 @@
               "description": "Settings for the generic JWT proxy auth provider.",
               "properties": {
                 "header": { "type": "string", "description": "Request header that carries the JWT." },
+                "identity_headers": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Additional user identity headers set by the front proxy (for example email or ID headers) to strip before forwarding requests to an agent's exposed port."
+                },
                 "algorithm": { "type": "string", "description": "Expected JWT signing algorithm." },
                 "issuer": { "type": "string", "description": "Expected JWT issuer." },
                 "audience": { "type": "string", "description": "If set, validated against the JWT 'aud' claim." },

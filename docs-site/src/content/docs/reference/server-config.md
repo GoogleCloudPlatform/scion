@@ -718,6 +718,7 @@ Used when `provider` is `"jwt"`. Exactly one key source — `public_key_file`, `
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `header` | string | `"X-Auth-Proxy-JWT"` | HTTP header carrying the signed JWT assertion. |
+| `identity_headers` | string[] | | Additional user identity headers set by the front proxy (for example email or user ID headers) to strip before forwarding requests to an agent's exposed port. |
 | `algorithm` | string | | **Required.** The single accepted signing algorithm. Must be asymmetric: `RS256`, `RS384`, `RS512`, `ES256`, `ES384`, `ES512`, `PS256`, `PS384`, or `PS512`. |
 | `issuer` | string | | If set, must match the JWT `iss` claim. Empty skips issuer validation. |
 | `audience` | string | | If set, must be contained in the JWT `aud` claim. Empty skips audience validation. |

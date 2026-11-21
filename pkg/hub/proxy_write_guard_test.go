@@ -520,3 +520,166 @@ func TestIsPolicyReportRoute_Units(t *testing.T) {
 		}
 	}
 }
+
+func TestOriginMatchesHost_DefaultPortsAndIPv6(t *testing.T) {
+	cases := []struct {
+		name   string
+		origin string
+		host   string
+		want   bool
+	}{
+		// Default ports
+		{name: "https default port on host", origin: "https://hub.example", host: "hub.example:443", want: true},
+		{name: "https default port on origin", origin: "https://hub.example:443", host: "hub.example", want: true},
+		{name: "https default port on both", origin: "https://hub.example:443", host: "hub.example:443", want: true},
+		{name: "http default port on host", origin: "http://hub.example", host: "hub.example:80", want: true},
+		{name: "http default port on origin", origin: "http://hub.example:80", host: "hub.example", want: true},
+		{name: "case-insensitive host with default port", origin: "https://hub.example", host: "HUB.EXAMPLE:443", want: true},
+		// Wrong-scheme ports are not default
+		{name: "https origin with port 80 host", origin: "https://hub.example", host: "hub.example:80", want: false},
+		{name: "http origin with port 443 host", origin: "http://hub.example", host: "hub.example:443", want: false},
+		// Non-default ports keep exact-port matching
+		{name: "non-default port matches", origin: "https://hub.example:8443", host: "hub.example:8443", want: true},
+		{name: "non-default port on host only", origin: "https://hub.example", host: "hub.example:8443", want: false},
+		{name: "non-default port on origin only", origin: "https://hub.example:8443", host: "hub.example", want: false},
+		{name: "different non-default ports", origin: "https://hub.example:8443", host: "hub.example:9443", want: false},
+		// Bracketed IPv6 hosts
+		{name: "ipv6 https bare match", origin: "https://[::1]", host: "[::1]", want: true},
+		{name: "ipv6 https default port on host", origin: "https://[::1]", host: "[::1]:443", want: true},
+		{name: "ipv6 https default port on origin", origin: "https://[::1]:443", host: "[::1]", want: true},
+		{name: "ipv6 http default port on host", origin: "http://[::1]", host: "[::1]:80", want: true},
+		{name: "ipv6 case-insensitive hex with default port", origin: "https://[2001:db8::1]", host: "[2001:DB8::1]:443", want: true},
+		{name: "ipv6 non-default port matches", origin: "https://[::1]:8443", host: "[::1]:8443", want: true},
+		{name: "ipv6 non-default port mismatch", origin: "https://[::1]", host: "[::1]:8443", want: false},
+		{name: "ipv6 wrong scheme port", origin: "https://[::1]", host: "[::1]:80", want: false},
+		{name: "ipv6 different address", origin: "https://[::1]", host: "[::2]:443", want: false},
+		// Malformed inputs
+		{name: "empty port after colon", origin: "https://hub.example", host: "hub.example:", want: false},
+		{name: "unbracketed ipv6 host", origin: "https://[::1]", host: "::1", want: false},
+		{name: "empty brackets", origin: "https://[::1]", host: "[]", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := originMatchesHost(tc.origin, tc.host)
+			if got != tc.want {
+				t.Fatalf("originMatchesHost(%q, %q) = %v, want %v", tc.origin, tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProxyWriteGuard_HostWithDefaultPortAndIPv6(t *testing.T) {
+	run := func(host, origin string) (int, bool) {
+		var reached bool
+		h := guardFor(proxyAuthMode, &reached)
+		r := httptest.NewRequest(http.MethodPost, "https://"+host+"/api/v1/projects", strings.NewReader(jsonBody))
+		r.Host = host
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, reached
+	}
+
+	if code, reached := run("hub.example:443", "https://hub.example"); !reached || code != http.StatusOK {
+		t.Fatalf("default https port: got code=%d reached=%v, want 200 reached", code, reached)
+	}
+	if code, reached := run("[::1]:443", "https://[::1]"); !reached || code != http.StatusOK {
+		t.Fatalf("ipv6 default https port: got code=%d reached=%v, want 200 reached", code, reached)
+	}
+	if code, reached := run("hub.example:8443", "https://hub.example"); reached || code != http.StatusForbidden {
+		t.Fatalf("non-default port mismatch: got code=%d reached=%v, want 403 not reached", code, reached)
+	}
+}
+
+func TestWebProxyWriteGuard_AuthEndpoints(t *testing.T) {
+	doWebGuard := func(mode, method, path, body string, headers map[string]string) (int, bool) {
+		var reached bool
+		ws := &WebServer{config: WebServerConfig{AuthMode: mode}}
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		})
+		h := ws.proxyModeWriteGuard(next)
+		var r *http.Request
+		if body == "" {
+			r = httptest.NewRequest(method, "https://hub.example"+path, nil)
+		} else {
+			r = httptest.NewRequest(method, "https://hub.example"+path, strings.NewReader(body))
+		}
+		r.Host = "hub.example"
+		for k, v := range headers {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, reached
+	}
+
+	authPaths := []string{
+		"/auth/logout",
+		"/auth/test-identity/redeem",
+		"/auth/login/google",
+		"/api/v1/auth/test-login",
+	}
+
+	// Cross-site state-changing requests are refused with 403 in proxy mode.
+	for _, p := range authPaths {
+		code, reached := doWebGuard(proxyAuthMode, http.MethodPost, p, jsonBody, map[string]string{
+			"Sec-Fetch-Site": "cross-site",
+			"Content-Type":   "application/json",
+		})
+		if reached || code != http.StatusForbidden {
+			t.Fatalf("%s cross-site POST: got code=%d reached=%v, want 403 not reached", p, code, reached)
+		}
+		// Browser POST with non-JSON body is refused with 415.
+		code, reached = doWebGuard(proxyAuthMode, http.MethodPost, p, "a=b", map[string]string{
+			"Sec-Fetch-Site": "same-origin",
+			"Content-Type":   "application/x-www-form-urlencoded",
+		})
+		if reached || code != http.StatusUnsupportedMediaType {
+			t.Fatalf("%s form POST: got code=%d reached=%v, want 415 not reached", p, code, reached)
+		}
+		// Same-origin JSON POST is allowed.
+		code, reached = doWebGuard(proxyAuthMode, http.MethodPost, p, jsonBody, map[string]string{
+			"Sec-Fetch-Site": "same-origin",
+			"Content-Type":   "application/json",
+		})
+		if !reached || code != http.StatusOK {
+			t.Fatalf("%s same-origin JSON POST: got code=%d reached=%v, want 200 reached", p, code, reached)
+		}
+		// Same-origin bodyless POST (e.g. fetch('/auth/logout', { method: 'POST' })) is allowed.
+		code, reached = doWebGuard(proxyAuthMode, http.MethodPost, p, "", map[string]string{
+			"Sec-Fetch-Site": "same-origin",
+		})
+		if !reached || code != http.StatusOK {
+			t.Fatalf("%s same-origin empty POST: got code=%d reached=%v, want 200 reached", p, code, reached)
+		}
+		// GET navigation is not blocked by the write guard.
+		code, reached = doWebGuard(proxyAuthMode, http.MethodGet, p, "", map[string]string{
+			"Sec-Fetch-Site": "cross-site",
+		})
+		if !reached || code != http.StatusOK {
+			t.Fatalf("%s GET: got code=%d reached=%v, want 200 reached", p, code, reached)
+		}
+		// Non-proxy mode is a no-op.
+		code, reached = doWebGuard("oauth", http.MethodPost, p, "a=b", map[string]string{
+			"Sec-Fetch-Site": "cross-site",
+			"Content-Type":   "application/x-www-form-urlencoded",
+		})
+		if !reached || code != http.StatusOK {
+			t.Fatalf("%s oauth mode: got code=%d reached=%v, want 200 reached", p, code, reached)
+		}
+	}
+
+	// Verify buildHandler wires proxyModeWriteGuard on WebServer.
+	ws := NewWebServer(WebServerConfig{AuthMode: proxyAuthMode})
+	req := httptest.NewRequest(http.MethodPost, "https://hub.example/auth/logout", nil)
+	req.Host = "hub.example"
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("WebServer.Handler() cross-site POST /auth/logout: got %d, want 403", rec.Code)
+	}
+}

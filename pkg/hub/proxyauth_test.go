@@ -1073,6 +1073,33 @@ func TestJWTProxyAuthenticator_Name(t *testing.T) {
 	}
 }
 
+func TestJWTProxyAuthenticator_AssertionHeaders(t *testing.T) {
+	t.Run("default header only", func(t *testing.T) {
+		auth := &JWTProxyAuthenticator{}
+		got := auth.AssertionHeaders()
+		if len(got) != 1 || got[0] != DefaultJWTHeader {
+			t.Fatalf("AssertionHeaders() = %v, want [%s]", got, DefaultJWTHeader)
+		}
+	})
+
+	t.Run("custom header and identity headers", func(t *testing.T) {
+		auth := &JWTProxyAuthenticator{
+			Header:          "X-Custom-JWT",
+			IdentityHeaders: []string{"X-Proxy-Email", "  X-Proxy-User-Id  ", "", "   "},
+		}
+		got := auth.AssertionHeaders()
+		want := []string{"X-Custom-JWT", "X-Proxy-Email", "X-Proxy-User-Id"}
+		if len(got) != len(want) {
+			t.Fatalf("AssertionHeaders() = %v, want %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("AssertionHeaders()[%d] = %q, want %q (full: %v)", i, got[i], want[i], got)
+			}
+		}
+	})
+}
+
 func TestJWTStaticKeySource_LoadsPEMKey(t *testing.T) {
 	kp := newTestRSAKeyPair(t)
 	path := kp.writePublicKeyPEM(t)

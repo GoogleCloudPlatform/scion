@@ -623,6 +623,13 @@ type JWTProxyAuthenticator struct {
 	// DefaultJWTHeader ("X-Auth-Proxy-JWT") when empty.
 	Header string
 
+	// IdentityHeaders lists additional HTTP headers the front proxy adds with
+	// user identity information (for example email or ID headers). They are
+	// returned by AssertionHeaders alongside the JWT assertion header so
+	// Server.stripFrontProxyIdentityHeaders strips them on both port-proxy
+	// transports.
+	IdentityHeaders []string
+
 	// Algorithm is the required JWT signing algorithm — MANDATORY, and must
 	// be one of the asymmetric algorithms accepted by IsAsymmetricJWTAlgorithm.
 	// This is the single algorithm passed to jwt.ParseSigned; a JWT signed
@@ -651,12 +658,21 @@ type JWTProxyAuthenticator struct {
 // Name returns "jwt" for logging/metrics.
 func (a *JWTProxyAuthenticator) Name() string { return "jwt" }
 
-// AssertionHeaders names the configured JWT assertion header (or the default).
+// AssertionHeaders names the configured JWT assertion header (or the default)
+// plus any additional configured front-proxy identity headers.
 func (a *JWTProxyAuthenticator) AssertionHeaders() []string {
-	if a.Header != "" {
-		return []string{a.Header}
+	header := a.Header
+	if header == "" {
+		header = DefaultJWTHeader
 	}
-	return []string{DefaultJWTHeader}
+	headers := make([]string, 0, 1+len(a.IdentityHeaders))
+	headers = append(headers, header)
+	for _, h := range a.IdentityHeaders {
+		if trimmed := strings.TrimSpace(h); trimmed != "" {
+			headers = append(headers, trimmed)
+		}
+	}
+	return headers
 }
 
 // Authenticate reads the configured JWT assertion header, verifies the JWT,

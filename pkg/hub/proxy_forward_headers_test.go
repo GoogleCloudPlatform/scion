@@ -350,3 +350,36 @@ func TestPortProxyRequestHeaderParity(t *testing.T) {
 		})
 	}
 }
+
+// TestJWTIdentityHeadersStrippedOnBothTransports proves that configured
+// JWTProxyAuthenticator.IdentityHeaders (alongside its assertion header) are
+// removed on both the conduit and the legacy tunnel port-proxy paths, while
+// ordinary headers are still forwarded.
+func TestJWTIdentityHeadersStrippedOnBothTransports(t *testing.T) {
+	jwtAuth := &JWTProxyAuthenticator{
+		Header:          "X-Custom-JWT",
+		IdentityHeaders: []string{"X-Proxy-User-Email", "X-Proxy-User-Id"},
+	}
+	conduit := newConduitProxyFixtureServer(t, nil, func(s *Server) {
+		s.authConfig.ProxyAuthenticator = jwtAuth
+	})
+	conduit.startAgent(t)
+	legacy := startLegacyPortApp(t)
+	legacy.srv.authConfig.ProxyAuthenticator = jwtAuth
+
+	sent := http.Header{
+		"X-Custom-Jwt":       {"jwt-assertion"},
+		"X-Proxy-User-Email": {"alice@example.com"},
+		"X-Proxy-User-Id":    {"user-123"},
+		"X-Keep":             {"kept"},
+	}
+
+	gotConduit := conduitAppHeaders(t, conduit, sent)
+	gotLegacy := legacy.appHeaders(t, sent)
+	for _, name := range []string{"X-Custom-Jwt", "X-Proxy-User-Email", "X-Proxy-User-Id"} {
+		assert.Empty(t, gotConduit.Values(name), "conduit: %s reached the agent app", name)
+		assert.Empty(t, gotLegacy.Values(name), "legacy tunnel: %s reached the agent app", name)
+	}
+	assert.Equal(t, "kept", gotConduit.Get("X-Keep"))
+	assert.Equal(t, "kept", gotLegacy.Get("X-Keep"))
+}
