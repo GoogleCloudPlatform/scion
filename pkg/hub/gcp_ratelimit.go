@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 )
@@ -48,6 +49,14 @@ func (rl *GCPTokenRateLimiter) StartCleanup(ctx context.Context) {
 
 // Allow returns true if the request is allowed for the given agent ID.
 func (rl *GCPTokenRateLimiter) Allow(agentID string) bool {
+	allowed, _ := rl.AllowWithRetryAfter(agentID)
+	return allowed
+}
+
+// AllowWithRetryAfter reports whether the request is allowed for the given
+// agent ID. When denied, it returns a retryAfter duration (at least 1s)
+// indicating how long until a token will be available.
+func (rl *GCPTokenRateLimiter) AllowWithRetryAfter(agentID string) (bool, time.Duration) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -59,7 +68,7 @@ func (rl *GCPTokenRateLimiter) Allow(agentID string) bool {
 			lastCheck: now,
 		}
 		rl.limiters[agentID] = b
-		return true
+		return true, 0
 	}
 
 	// Refill tokens based on elapsed time
@@ -72,9 +81,17 @@ func (rl *GCPTokenRateLimiter) Allow(agentID string) bool {
 
 	if b.tokens >= 1 {
 		b.tokens--
-		return true
+		return true, 0
 	}
-	return false
+	if rl.rate <= 0 {
+		return false, time.Second
+	}
+	needed := 1.0 - b.tokens
+	secs := int(math.Ceil(needed / rl.rate))
+	if secs < 1 {
+		secs = 1
+	}
+	return false, time.Duration(secs) * time.Second
 }
 
 func (rl *GCPTokenRateLimiter) cleanupLoop(ctx context.Context) {
