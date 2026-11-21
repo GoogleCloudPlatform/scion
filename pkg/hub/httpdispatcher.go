@@ -1387,72 +1387,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	sealCreateRequest(ctx, req)
 	d.warnGCPTelemetryBlockedWithoutCredentials(ctx, agent, tel, req.ResolvedEnv, req.ResolvedSecrets)
 
-	// GitHub App token minting: if the project has a GitHub App installation,
-	// always mint an installation token. GitHub App tokens take priority over
-	// GITHUB_TOKEN from secrets/env because they provide managed, scoped access
-	// with automatic refresh. If minting fails, fall back to any existing
-	// GITHUB_TOKEN from secrets/env.
-	if d.githubAppMinter != nil && agent.ProjectID != "" {
-		project, projectErr := d.store.GetProject(ctx, agent.ProjectID)
-		if projectErr == nil {
-			// Determine which project to use for GitHub App token minting:
-			// the agent's own project, or a token-source project named by
-			// label only when resolveGitHubMintProject authorizes it.
-			mintProject := d.githubMintProject(ctx, agent, project)
-			if mintProject != nil {
-				if req.ResolvedEnv != nil && req.ResolvedEnv["GITHUB_TOKEN"] != "" {
-					// User already has a GITHUB_TOKEN from secrets/env.
-					// Respect it: skip overwriting with the GitHub App token.
-					d.log.Warn("buildCreateRequest: user has GITHUB_TOKEN from secrets; skipping GitHub App token injection — user token takes precedence for gh CLI, GitHub App will still be used for git credential helper",
-						"project_id", agent.ProjectID)
-					req.ResolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
-					classifyEnv(&req.EnvClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
-					// Still enable the GitHub App machinery so the credential
-					// helper can mint tokens for git push/pull operations.
-					req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-					classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-				} else {
-					token, expiry, mintErr := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
-					if mintErr != nil {
-						if d.debug {
-							d.log.Warn("buildCreateRequest: GitHub App token minting failed, falling back to PAT",
-								"error", mintErr, "project_id", agent.ProjectID)
-						}
-						// Fall through — PAT from secrets/env may still be available
-					} else if token != "" {
-						if req.ResolvedEnv == nil {
-							req.ResolvedEnv = make(map[string]string)
-						}
-						// GitHub App minted token — ephemeral, not in secret store.
-						// This MUST run AFTER the secret-store GITHUB_TOKEN injection
-						// (H6/H7/H8 above) so the classification overwrites
-						// secret-fetchable → secret-injected when the App token wins.
-						// A test pins this ordering dependency.
-						req.ResolvedEnv["GITHUB_TOKEN"] = token
-						classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
-						// Only a token minted for the agent's own project counts
-						// as project-bound (gitTokenProjectBound); a token-source
-						// project's token is bound to that other project.
-						if mintProject.ID == project.ID {
-							req.githubAppToken = token
-						}
-						req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-						req.ResolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
-						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
-						req.ResolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
-						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
-						if d.debug {
-							d.log.Debug("buildCreateRequest: injected GitHub App token",
-								"project_id", agent.ProjectID,
-								"installationID", *mintProject.GitHubInstallationID,
-								"expiry", expiry)
-						}
-					}
-				}
-			}
-		}
+	// GitHub token delivery (Stage 2 §5.1a): single auditable policy deciding
+	// whether user PATs / GH_* aliases are dropped in favor of the GitHub App
+	// installation token (GitHubTokenPreference == "installation") or keep the
+	// default user-preferred precedence.
+	if usesInstallationGitHubToken(agent) {
+		req.noAuthProjectToken = ""
 	}
+	req.ResolvedSecrets, req.AvailableAsNeededKeys, req.githubAppToken = d.deliverGitHubToken(
+		ctx, agent, req.ResolvedEnv, &req.EnvClassifications, req.ResolvedSecrets, req.AvailableAsNeededKeys, "buildCreateRequest",
+	)
 
 	// A personal git token goes only to a recorded remote on the GitHub
 	// host (personal_git_token.go). This runs after secret resolution and
@@ -2931,11 +2875,14 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	if req.ResolvedEnv == nil {
 		req.ResolvedEnv = map[string]string{}
 	}
+	installationOnly := usesInstallationGitHubToken(agent)
 	for k, v := range env {
+		if installationOnly && isBlockedInstallationGitHubEnvKey(k) {
+			continue
+		}
 		req.ResolvedEnv[k] = v
+		classifyEnv(&req.EnvClassifications, k, api.EnvKindPlain)
 	}
-	// Classify the caller-provided env as plain config vars.
-	classifyEnvKeys(&req.EnvClassifications, env, api.EnvKindPlain)
 	// The caller's env may carry a GITHUB_TOKEN: decide the token remote
 	// again on the merged env.
 	d.restrictCreateRequestTokenRemote(req)
@@ -3482,6 +3429,15 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 
 	// TZ is never an as_needed key: only the agent TZ resolver supplies it.
 	delete(keySet, agentTZEnvKey)
+	// When the agent requires installation-only GitHub tokens, never satisfy
+	// as_needed requests for GITHUB_TOKEN or GH_* aliases from stored PATs.
+	if usesInstallationGitHubToken(agent) {
+		for k := range keySet {
+			if isBlockedInstallationGitHubEnvKey(k) {
+				delete(keySet, k)
+			}
+		}
+	}
 
 	// The start-time user-scope checks: both passes below apply them to the
 	// owner's rows (startSecretResolveOpts).
@@ -3622,6 +3578,13 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	}
 
 	delete(result, agentTZEnvKey)
+	if usesInstallationGitHubToken(agent) {
+		for k := range result {
+			if isBlockedInstallationGitHubEnvKey(k) {
+				delete(result, k)
+			}
+		}
+	}
 	return result, nil
 }
 
@@ -3632,55 +3595,8 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	envClassifications *map[string]api.EnvKind,
 	operation string,
 ) (ownAppToken string) {
-	if d.githubAppMinter == nil || agent.ProjectID == "" {
-		return ""
-	}
-
-	project, err := d.store.GetProject(ctx, agent.ProjectID)
-	if err != nil {
-		return ""
-	}
-	mintProject := d.githubMintProject(ctx, agent, project)
-	if mintProject == nil {
-		return ""
-	}
-
-	if resolvedEnv["GITHUB_TOKEN"] != "" {
-		d.log.Warn(operation+": user GITHUB_TOKEN takes precedence over GitHub App token — user token will be used for gh CLI, GitHub App for git credential helper",
-			"project_id", agent.ProjectID)
-		resolvedEnv["SCION_USER_GITHUB_TOKEN"] = "true"
-		classifyEnv(envClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
-		resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-		classifyEnv(envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-		return ""
-	}
-
-	token, expiry, err := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
-	if err != nil {
-		if d.debug {
-			d.log.Warn(operation+": GitHub App token minting failed", "error", err, "project_id", agent.ProjectID)
-		}
-		return ""
-	}
-	if token == "" {
-		return ""
-	}
-
-	resolvedEnv["GITHUB_TOKEN"] = token
-	classifyEnv(envClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
-	resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
-	classifyEnv(envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-	resolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
-	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
-	resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
-	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
-	// ownAppToken is only a token minted for the agent's own project; a
-	// token-source project's token is not project-bound for this agent
-	// (gitTokenProjectBound).
-	if mintProject.ID != project.ID {
-		return ""
-	}
-	return token
+	_, _, ownAppToken = d.deliverGitHubToken(ctx, agent, resolvedEnv, envClassifications, nil, nil, operation)
+	return ownAppToken
 }
 
 // setStartEnvToken adds the Hub auth token beginRun issued to a start's
@@ -4026,7 +3942,12 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		}
 	}
 
-	appToken := d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
+	var appToken string
+	resolvedSecrets, _, appToken = d.deliverGitHubToken(ctx, agent, resolvedEnv, &envClassifications, resolvedSecrets, nil, caller)
+	projectToken := gitToken.projectBound()
+	if usesInstallationGitHubToken(agent) {
+		projectToken = ""
+	}
 	// A personal git token goes only to a recorded remote on the GitHub
 	// host (personal_git_token.go).
 	d.restrictPersonalTokenRemote(gitTokenDispatch{
@@ -4037,7 +3958,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		appToken:  appToken,
 		// The project's own token, for an agent without credentials (as
 		// create passes it): it is not in secrets.
-		projectToken: gitToken.projectBound(),
+		projectToken: projectToken,
 	}, &wsSpec.GitClone, &wsSpec.SharedWorkspaceClone)
 	// Read once: DispatchAgentStart/Restart send the same set to the broker.
 	experiments := d.dispatchExperiments()

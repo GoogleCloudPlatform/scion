@@ -99,16 +99,17 @@ type dispatchAgentAction struct {
 }
 
 type dispatchAgentAuthorized struct {
-	payload        DispatchAgentEventPayload
-	auth           FireAuthority
-	identity       Identity
-	creatorName    string
-	edgeCeiling    store.EffectCeiling
-	edgeProvenance store.AuthorityProvenance
-	resolvedRole   headlessResolvedRole
-	projectName    string
-	sourceName     string
-	signatureMode  string
+	payload                      DispatchAgentEventPayload
+	auth                         FireAuthority
+	identity                     Identity
+	creatorName                  string
+	edgeCeiling                  store.EffectCeiling
+	edgeProvenance               store.AuthorityProvenance
+	resolvedRole                 headlessResolvedRole
+	projectName                  string
+	projectHasGitHubInstallation bool
+	sourceName                   string
+	signatureMode                string
 }
 
 func (a *dispatchAgentAction) Type() string {
@@ -130,11 +131,11 @@ func (a *dispatchAgentAction) Detaches(_ hubfire.FireRequest) bool {
 // delegation-ceiling checks. Schedule authoring handlers continue authorizing
 // through authorizeScheduledDispatchAgentAuthoring.
 func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, error) {
-	normalized, _, _, err := a.validateWithRole(ctx, caller, projectID, rawPayload)
+	normalized, _, _, err := a.validateWithRole(ctx, caller, projectID, "", rawPayload)
 	return normalized, err
 }
 
-func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, AgentRole, bool, error) {
+func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Identity, projectID string, sourceKind string, rawPayload string) (string, AgentRole, bool, error) {
 	if a == nil || a.srv == nil {
 		return "", "", false, errors.New("dispatch_agent action: server not configured")
 	}
@@ -206,21 +207,23 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 		}
 	}
 
-	// GitHubToken enum and Stage 2 P1c-1 resolution (§5.1a).
+	// GitHubToken enum and authoring-time default resolution (Stage 2 §5.1a).
+	// Resolved value is stored so a later default change cannot re-point an
+	// existing rule: "" -> "installation" for github sources, "user_preferred"
+	// otherwise.
 	switch payload.GithubToken {
-	case "", DispatchAgentGitHubTokenUserPreferred:
-		payload.GithubToken = DispatchAgentGitHubTokenUserPreferred
-	case DispatchAgentGitHubTokenInstallation:
-		return "", "", false, &dispatchAgentValidationError{
-			status:  http.StatusBadRequest,
-			code:    "github_token_unsupported",
-			message: "githubToken \"installation\" is not yet supported",
+	case "":
+		if sourceKind == store.TriggerSourceKindGitHub {
+			payload.GithubToken = DispatchAgentGitHubTokenInstallation
+		} else {
+			payload.GithubToken = DispatchAgentGitHubTokenUserPreferred
 		}
+	case DispatchAgentGitHubTokenUserPreferred, DispatchAgentGitHubTokenInstallation:
 	default:
 		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
-			message: fmt.Sprintf("unsupported githubToken %q (supported: user_preferred)", payload.GithubToken),
+			message: fmt.Sprintf("unsupported githubToken %q (supported: %s, %s)", payload.GithubToken, DispatchAgentGitHubTokenInstallation, DispatchAgentGitHubTokenUserPreferred),
 			details: map[string]any{"field": "githubToken"},
 		}
 	}
@@ -571,27 +574,27 @@ func (s *Server) authorizeDispatchAgentFire(
 	identity Identity,
 	requestedRole AgentRole,
 	noAuth bool,
-) (headlessResolvedRole, string, error) {
+) (headlessResolvedRole, string, bool, error) {
 	if auth.PrincipalKind == store.DelegationPrincipalAgent {
 		agentIdent, ok := identity.(AgentIdentity)
 		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
-			return headlessResolvedRole{}, "", fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
+			return headlessResolvedRole{}, "", false, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
 	}
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return headlessResolvedRole{}, "", &dispatchAgentProjectNotFoundError{projectID: projectID}
+			return headlessResolvedRole{}, "", false, &dispatchAgentProjectNotFoundError{projectID: projectID}
 		}
-		return headlessResolvedRole{}, "", fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
+		return headlessResolvedRole{}, "", false, fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
 	}
 	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(ctx, project, auth, requestedRole, noAuth)
 	if err != nil {
-		return headlessResolvedRole{}, "", err
+		return headlessResolvedRole{}, "", false, err
 	}
 
 	if decision := s.agentCreateDecision(ctx, identity, projectID); !decision.Allowed {
-		return headlessResolvedRole{}, "", fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
+		return headlessResolvedRole{}, "", false, fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
 			auth.PrincipalKind, auth.PrincipalID, projectID, decision.Reason)
 	}
 
@@ -616,14 +619,14 @@ func (s *Server) authorizeDispatchAgentFire(
 			CanDelegateResult:  "deny",
 			CanDelegateReason:  delegateDecision.Reason,
 		})
-		return headlessResolvedRole{}, "", fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
+		return headlessResolvedRole{}, "", false, fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
 			auth.PrincipalKind, auth.PrincipalID, delegateDecision.Reason)
 	}
 	return headlessResolvedRole{
 		preCapRole:        preCapRole,
 		roleExplicit:      roleExplicit,
 		parentMessageMode: parentMessageMode,
-	}, project.Name, nil
+	}, project.Name, project.GitHubInstallationID != nil, nil
 }
 
 func (a *dispatchAgentAction) Authorize(
@@ -649,8 +652,10 @@ func (a *dispatchAgentAction) Authorize(
 		if payload.Ephemeral {
 			return nil, &FireRefusal{Reason: "ephemeral agents are not yet supported"}, nil
 		}
-		if payload.GithubToken != "" && payload.GithubToken != DispatchAgentGitHubTokenUserPreferred {
-			return nil, &FireRefusal{Reason: "githubToken mode is not yet supported"}, nil
+		switch payload.GithubToken {
+		case "", DispatchAgentGitHubTokenUserPreferred, DispatchAgentGitHubTokenInstallation:
+		default:
+			return nil, &FireRefusal{Reason: "unsupported githubToken mode"}, nil
 		}
 		if req.Event != nil {
 			var ep *store.WebhookEndpoint
@@ -677,7 +682,7 @@ func (a *dispatchAgentAction) Authorize(
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
 		requestedRole = AgentRole(payload.AgentRole)
 	}
-	resolvedRole, projectName, err := s.authorizeDispatchAgentFire(
+	resolvedRole, projectName, projectHasGitHubInstallation, err := s.authorizeDispatchAgentFire(
 		ctx,
 		req.ProjectID,
 		fireID,
@@ -722,16 +727,17 @@ func (a *dispatchAgentAction) Authorize(
 	}
 
 	return &dispatchAgentAuthorized{
-		payload:        payload,
-		auth:           auth,
-		identity:       identity,
-		creatorName:    fireCreatorName(auth),
-		edgeCeiling:    edgeCeiling,
-		edgeProvenance: edgeProvenance,
-		resolvedRole:   resolvedRole,
-		projectName:    projectName,
-		sourceName:     sourceName,
-		signatureMode:  signatureMode,
+		payload:                      payload,
+		auth:                         auth,
+		identity:                     identity,
+		creatorName:                  fireCreatorName(auth),
+		edgeCeiling:                  edgeCeiling,
+		edgeProvenance:               edgeProvenance,
+		resolvedRole:                 resolvedRole,
+		projectName:                  projectName,
+		projectHasGitHubInstallation: projectHasGitHubInstallation,
+		sourceName:                   sourceName,
+		signatureMode:                signatureMode,
 	}, nil, nil
 }
 
@@ -1005,11 +1011,21 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	}
 
 	vars := buildDispatchTemplateVars(req, da)
-	frameOpt := triggertemplate.WithFrame(triggertemplate.FrameContext{
+	fc := triggertemplate.FrameContext{
 		EndpointName:  da.sourceName,
 		SignatureMode: da.signatureMode,
 		EventID:       ev.ID,
-	})
+	}
+	if ev.SourceKind == store.TriggerSourceKindGitHub {
+		fc.Source = "github"
+		if fc.SignatureMode == "" {
+			fc.SignatureMode = "github_app"
+		}
+	}
+	if da.payload.GithubToken == DispatchAgentGitHubTokenInstallation && !da.projectHasGitHubInstallation {
+		fc.Notes = append(fc.Notes, "GitHub access: unavailable for this run (no GitHub App installation configured for this project).")
+	}
+	frameOpt := triggertemplate.WithFrame(fc)
 
 	renderedTask, err := renderTemplateSlot(da.payload.Task, triggertemplate.SlotTask, vars, da.payload.UntrustedVars, frameOpt)
 	if err != nil {
@@ -1119,13 +1135,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		nameConflict = DispatchAgentNameConflictSuffix
 	}
 
-	// Pass "" to HeadlessCreate.GitHubToken for user_preferred (= today's
-	// precedence; createAgentHeadless refuses non-empty values until P1c-3).
-	headlessGitHubToken := ""
-	if da.payload.GithubToken != "" && da.payload.GithubToken != DispatchAgentGitHubTokenUserPreferred {
-		headlessGitHubToken = da.payload.GithubToken
-	}
-
 	resolvedRole := da.resolvedRole
 	candidate := baseSlug
 	for attempt := 0; ; attempt++ {
@@ -1144,7 +1153,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			Task:           renderedTask,
 			Branch:         renderedBranch,
 			Labels:         maps.Clone(mergedLabels),
-			GitHubToken:    headlessGitHubToken,
+			GitHubToken:    da.payload.GithubToken,
 			EventEnv:       eventEnv,
 			EventFile:      eventFileBytes,
 			Detached:       true,

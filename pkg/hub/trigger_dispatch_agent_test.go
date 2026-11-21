@@ -473,8 +473,12 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 
 	t.Run("github_token_validation", func(t *testing.T) {
 		req := baseReq("gh-inst")
-		req.Action.GithubToken = "installation"
-		assertErrCode(t, postTrigger(userCtx, req), http.StatusBadRequest, "github_token_unsupported")
+		req.Action.GithubToken = DispatchAgentGitHubTokenInstallation
+		rec := postTrigger(userCtx, req)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var created TriggerResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		assert.Equal(t, DispatchAgentGitHubTokenInstallation, created.Action.GithubToken)
 
 		reqBad := baseReq("gh-bad")
 		reqBad.Action.GithubToken = "magic"
@@ -1388,7 +1392,7 @@ func TestTriggerDispatchAgent_UpdateResumeAndRoleCaps(t *testing.T) {
 	})
 }
 
-func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
+func TestTriggerDispatchAgent_GitHubSourceAuthoring(t *testing.T) {
 	f := newTriggerDispatchAgentFixture(t, "gh-unsupported")
 	ctx := context.Background()
 
@@ -1451,11 +1455,12 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 	}
 	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAg))
 
-	// 1. Create github + dispatch_agent -> 400 dispatch_agent_github_unsupported.
+	// 1. Create github + dispatch_agent with omitted githubToken -> 201 and
+	// resolves/stores githubToken="installation" (visible in GET, §5.1a).
 	rec := f.doJSON(t, adminCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/triggers", ghProj.ID),
 		CreateTriggerRequest{
-			Name:   "gh-dispatch-refused",
+			Name:   "gh-dispatch-ok",
 			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
 			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
 			Action: TriggerActionSpec{
@@ -1463,11 +1468,20 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 				Task: "triage",
 			},
 		})
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "dispatch_agent_github_unsupported")
-	assert.Contains(t, rec.Body.String(), "P1c-3")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var ghTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ghTrig))
+	assert.Equal(t, DispatchAgentGitHubTokenInstallation, ghTrig.Action.GithubToken)
 
-	// 2. Create github + message -> 201, then PATCH action to dispatch_agent -> 400.
+	recGet := f.doJSON(t, adminCtx, http.MethodGet,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, ghTrig.ID), nil)
+	require.Equal(t, http.StatusOK, recGet.Code, recGet.Body.String())
+	var gotGHTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recGet.Body.Bytes(), &gotGHTrig))
+	assert.Equal(t, DispatchAgentGitHubTokenInstallation, gotGHTrig.Action.GithubToken)
+
+	// 2. Create github + message -> 201, then PATCH action to dispatch_agent -> 200
+	// with omitted githubToken resolved to "installation".
 	recMsg := f.doJSON(t, adminCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/triggers", ghProj.ID),
 		CreateTriggerRequest{
@@ -1492,13 +1506,15 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 				Task: "escalate",
 			},
 		})
-	require.Equal(t, http.StatusBadRequest, recPatch.Code, recPatch.Body.String())
-	assert.Contains(t, recPatch.Body.String(), "dispatch_agent_github_unsupported")
+	require.Equal(t, http.StatusOK, recPatch.Code, recPatch.Body.String())
+	var patchedMsgTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recPatch.Body.Bytes(), &patchedMsgTrig))
+	assert.Equal(t, DispatchAgentGitHubTokenInstallation, patchedMsgTrig.Action.GithubToken)
 
-	// 3. webhook + dispatch_agent remains accepted (201); PATCHing it into
-	// github source is refused (security Info I4), while PATCHing
-	// subject.mode=skip is accepted now that dispatch_agent subject claims
-	// are implemented.
+	// 3. webhook + dispatch_agent remains accepted (201, resolves to user_preferred),
+	// PATCHing its source to github succeeds while preserving stored user_preferred,
+	// and PATCHing subject.mode=skip is accepted now that dispatch_agent subject
+	// claims are implemented.
 	recEP := f.doJSON(t, adminCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints", ghProj.ID),
 		CreateWebhookEndpointRequest{Name: "wh-still-ok"})
@@ -1520,16 +1536,19 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 	require.Equal(t, http.StatusCreated, recWH.Code, recWH.Body.String())
 	var whTrig TriggerResponse
 	require.NoError(t, json.Unmarshal(recWH.Body.Bytes(), &whTrig))
+	assert.Equal(t, DispatchAgentGitHubTokenUserPreferred, whTrig.Action.GithubToken)
 
-	// PATCH webhook dispatch_agent trigger's source to github -> 400 dispatch_agent_github_unsupported.
+	// PATCH webhook dispatch_agent trigger's source to github -> 200 (stored user_preferred preserved).
 	recPatchSrc := f.doJSON(t, adminCtx, http.MethodPatch,
 		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
 		map[string]any{
 			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
 			"match":  map[string]any{"types": []string{"github.issue_comment.created"}},
 		})
-	require.Equal(t, http.StatusBadRequest, recPatchSrc.Code, recPatchSrc.Body.String())
-	assert.Contains(t, recPatchSrc.Body.String(), "dispatch_agent_github_unsupported")
+	require.Equal(t, http.StatusOK, recPatchSrc.Code, recPatchSrc.Body.String())
+	var patchedWHTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recPatchSrc.Body.Bytes(), &patchedWHTrig))
+	assert.Equal(t, DispatchAgentGitHubTokenUserPreferred, patchedWHTrig.Action.GithubToken)
 
 	// PATCH webhook dispatch_agent trigger's subject.mode to skip -> 200 OK.
 	recPatchSkip := f.doJSON(t, adminCtx, http.MethodPatch,

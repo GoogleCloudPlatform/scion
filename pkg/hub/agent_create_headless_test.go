@@ -804,12 +804,24 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 		f.assertNoChild(t, hcMissingEnv.Name)
 	})
 
-	t.Run("non_empty_github_token_and_mismatched_edge_provenance_rejected", func(t *testing.T) {
-		hcToken := baseHC("gh-token-unsupported")
-		hcToken.GitHubToken = "installation"
-		_, err := f.srv.createAgentHeadless(ctx, hcToken)
-		require.ErrorIs(t, err, errHeadlessGitHubTokenUnsupported)
-		f.assertNoChild(t, hcToken.Name)
+	t.Run("github_token_preference_and_mismatched_edge_provenance", func(t *testing.T) {
+		hcBadToken := baseHC("gh-token-invalid")
+		hcBadToken.GitHubToken = "magic"
+		_, err := f.srv.createAgentHeadless(ctx, hcBadToken)
+		require.ErrorIs(t, err, errHeadlessInvalidGitHubToken)
+		f.assertNoChild(t, hcBadToken.Name)
+
+		hcInst := baseHC("gh-token-installation")
+		hcInst.GitHubToken = DispatchAgentGitHubTokenInstallation
+		agInst, err := f.srv.createAgentHeadless(ctx, hcInst)
+		require.NoError(t, err)
+		require.NotNil(t, agInst.AppliedConfig)
+		assert.Equal(t, DispatchAgentGitHubTokenInstallation, agInst.AppliedConfig.GitHubTokenPreference)
+		require.NotNil(t, agInst.AppliedConfig.CreateInputs)
+		assert.Equal(t, DispatchAgentGitHubTokenInstallation, agInst.AppliedConfig.CreateInputs.GitHubTokenPreference)
+		audits := agentAudits(t, f.store, mutationTypeAgentDelegation, agInst.ID)
+		require.Len(t, audits, 1)
+		assert.Contains(t, audits[0].AfterSummary, `"github_token_preference":"installation"`)
 
 		hcBadID := baseHC("prov-bad-id")
 		hcBadID.EdgeProvenance.SourcePrincipalID = api.NewUUID()
