@@ -2400,9 +2400,9 @@ var errWorktreePerAgentCloudRun = errors.New(`cloudrun: "Worktree per agent" (wo
 // by CloudRunRuntime.Run for a workspace backend other than "nfs"
 // (ptone/scion#5264).
 var errCloudRunNeedsNFSWorkspace = errors.New("cloudrun: the Cloud Run runtime needs an NFS (Filestore) workspace share: " +
-	"it mounts the agent's workspace and home only from that share. Set server.workspace_storage.backend to \"nfs\" " +
-	"with the Filestore share in server.workspace_storage.nfs.shares[0] (server and export), mounted on the broker " +
-	"under server.workspace_storage.nfs.mount_root, or use a Docker, Podman, Apple or Kubernetes broker for this project")
+	"it mounts the agent's workspace and home only from that share. Set server.project_storage.backend to \"nfs\" " +
+	"with the Filestore share in server.project_storage.nfs.shares[0] (server and export), mounted on the broker " +
+	"under server.project_storage.nfs.mount_root, or use a Docker, Podman, Apple or Kubernetes broker for this project")
 
 // rejectNonNFSOnCloudRun fails when cfg's workspace backend is not "nfs".
 func rejectNonNFSOnCloudRun(cfg RunConfig) error {
