@@ -1916,6 +1916,7 @@ export interface DecisionResponseSetAnswer {
   question: string;
   choiceId: string;
   label: string;
+  otherText?: string;
   provenance: string;
   outcome: string;
   dismissReason?: string;

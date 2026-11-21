@@ -3111,3 +3111,191 @@ func TestRecordAnswer_AllowOther_RoundTripIdempotencyTerminalAndUserDeletion(t *
 		})
 	}
 }
+
+func TestRecordAnswerSet_AllowOther_AtomicIdempotencyAndDismiss(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// 3-question set: row 0 has object Other, row 1 has no Other, row 2 has string Other with 1 fixed choice.
+	pIn := f.prompt("Three decisions", false,
+		messages.Decision{
+			Key:             "region",
+			Question:        "Which region for the canary?",
+			DefaultChoiceID: "1",
+			Choices:         []messages.Choice{{ID: "1", Label: "us-central1"}, {ID: "2", Label: "europe-west1"}},
+			Other:           &messages.OtherOption{Label: "Another region", Placeholder: "e.g. europe-west4"},
+		},
+		yesNo("notify", "Notify the release channel?"),
+		messages.Decision{
+			Key:      "proceed",
+			Question: "Tag v0.9 now?",
+			Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+			Other:    &messages.OtherOption{Label: "Something else"},
+		},
+	)
+	res, err := f.cs.CreateDecisionPrompt(ctx, pIn)
+	require.NoError(t, err)
+	require.Len(t, res.Decisions, 3)
+	msgID := pIn.Message.ID
+	r0, r1, r2 := res.Decisions[0].RowID, res.Decisions[1].RowID, res.Decisions[2].RowID
+
+	makeSetInput := func(idem string, items []store.AnswerSetItem) *store.RecordAnswerSetInput {
+		return &store.RecordAnswerSetInput{
+			MessageID:        msgID,
+			AnsweredByUserID: "user-1",
+			AnsweredByName:   "Alice",
+			AnsweredByEmail:  "alice@example.com",
+			Surface:          store.DecisionSurfaceNative,
+			Answers:          items,
+			ResponseMessage: &store.Message{
+				ID:        uuid.NewString(),
+				ProjectID: f.projectID,
+				Sender:    "user:alice@example.com",
+				SenderID:  "user-1",
+				Recipient: "agent:dev",
+				Msg:       "set response",
+				Type:      messages.TypeDecisionResponse,
+				AgentID:   f.agentID,
+				Channel:   "web",
+				ThreadID:  "topic:general",
+			},
+			IdempotencyKey: idem,
+		}
+	}
+
+	// 1. Atomic validation rejections: nothing stored when any row fails.
+	badCases := map[string][]store.AnswerSetItem{
+		"$other on non-Other row": {
+			{DecisionRowID: r0, ChoiceID: "1"},
+			{DecisionRowID: r1, ChoiceID: messages.ChoiceIDOther, OtherText: "maybe"},
+			{DecisionRowID: r2, ChoiceID: "1"},
+		},
+		"empty other_text on $other row": {
+			{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: "   "},
+			{DecisionRowID: r1, ChoiceID: "1"},
+			{DecisionRowID: r2, ChoiceID: "1"},
+		},
+		"newline in other_text": {
+			{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: "a\nb"},
+			{DecisionRowID: r1, ChoiceID: "1"},
+			{DecisionRowID: r2, ChoiceID: "1"},
+		},
+		"201 runes in other_text": {
+			{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: strings.Repeat("é", 201)},
+			{DecisionRowID: r1, ChoiceID: "1"},
+			{DecisionRowID: r2, ChoiceID: "1"},
+		},
+		"other_text on fixed choice row": {
+			{DecisionRowID: r0, ChoiceID: "1", OtherText: "not allowed"},
+			{DecisionRowID: r1, ChoiceID: "1"},
+			{DecisionRowID: r2, ChoiceID: "1"},
+		},
+		"reserved $dismissed choice": {
+			{DecisionRowID: r0, ChoiceID: messages.ChoiceIDDismissed},
+			{DecisionRowID: r1, ChoiceID: "1"},
+			{DecisionRowID: r2, ChoiceID: "1"},
+		},
+	}
+	for name, items := range badCases {
+		t.Run(name, func(t *testing.T) {
+			_, err := f.cs.RecordAnswerSet(ctx, makeSetInput("", items))
+			require.ErrorIs(t, err, store.ErrInvalidInput)
+			for _, id := range []string{r0, r1, r2} {
+				d, gerr := f.cs.GetDecision(ctx, id)
+				require.NoError(t, gerr)
+				assert.Equal(t, store.DecisionStatusPending, d.Status)
+				assert.Empty(t, d.Answers)
+			}
+		})
+	}
+
+	// 2. Valid set submit with Other on rows 0 and 2, fixed choice on row 1.
+	validItems := []store.AnswerSetItem{
+		{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: "  europe-west4 canary  "},
+		{DecisionRowID: r1, ChoiceID: "1"},
+		{DecisionRowID: r2, ChoiceID: messages.ChoiceIDOther, OtherText: "Wait until Monday"},
+	}
+	setRes, err := f.cs.RecordAnswerSet(ctx, makeSetInput("set-other-idem-1", validItems))
+	require.NoError(t, err)
+	assert.False(t, setRes.Replayed)
+	require.NotEmpty(t, setRes.BatchID)
+	require.Len(t, setRes.Answers, 3)
+
+	assert.Equal(t, messages.ChoiceIDOther, setRes.Answers[0].ChoiceID)
+	assert.Equal(t, "Another region", setRes.Answers[0].ChoiceLabel)
+	assert.Equal(t, "europe-west4 canary", setRes.Answers[0].OtherText)
+	assert.False(t, setRes.Answers[0].MatchedDefault)
+
+	assert.Equal(t, "1", setRes.Answers[1].ChoiceID)
+	assert.Empty(t, setRes.Answers[1].OtherText)
+
+	assert.Equal(t, messages.ChoiceIDOther, setRes.Answers[2].ChoiceID)
+	assert.Equal(t, "Something else", setRes.Answers[2].ChoiceLabel)
+	assert.Equal(t, "Wait until Monday", setRes.Answers[2].OtherText)
+	assert.False(t, setRes.Answers[2].MatchedDefault)
+
+	// 3. Idempotency: same key + same (trimmed) text replays; different text -> ErrIdempotencyMismatch.
+	replayItems := []store.AnswerSetItem{
+		{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: "europe-west4 canary"},
+		{DecisionRowID: r1, ChoiceID: "1"},
+		{DecisionRowID: r2, ChoiceID: messages.ChoiceIDOther, OtherText: "  Wait until Monday "},
+	}
+	replayed, err := f.cs.RecordAnswerSet(ctx, makeSetInput("set-other-idem-1", replayItems))
+	require.NoError(t, err)
+	assert.True(t, replayed.Replayed)
+	assert.Equal(t, setRes.BatchID, replayed.BatchID)
+	require.Len(t, replayed.Answers, 3)
+	assert.Equal(t, "europe-west4 canary", replayed.Answers[0].OtherText)
+	assert.Equal(t, "Wait until Monday", replayed.Answers[2].OtherText)
+
+	diffTextItems := []store.AnswerSetItem{
+		{DecisionRowID: r0, ChoiceID: messages.ChoiceIDOther, OtherText: "asia-east1"},
+		{DecisionRowID: r1, ChoiceID: "1"},
+		{DecisionRowID: r2, ChoiceID: messages.ChoiceIDOther, OtherText: "Wait until Monday"},
+	}
+	_, err = f.cs.RecordAnswerSet(ctx, makeSetInput("set-other-idem-1", diffTextItems))
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// 4. Dismissed set rows do not match replayableAnswerSet even if idempotency_key is reused.
+	pDsm := f.prompt("Dismiss set", false,
+		messages.Decision{
+			Key:      "dsm-s1",
+			Question: "First?",
+			Choices:  []messages.Choice{{ID: "1", Label: "Yes"}},
+			Other:    &messages.OtherOption{Label: "Other"},
+		},
+		yesNo("dsm-s2", "Second?"),
+	)
+	dsmRes, err := f.cs.CreateDecisionPrompt(ctx, pDsm)
+	require.NoError(t, err)
+	dsmDec0, err := f.cs.GetDecision(ctx, dsmRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	dsmIn := f.dismissInput(pDsm.Message.ID, "user-1", "No longer needed", func() time.Time {
+		return dsmDec0.CreatedAt.Add(store.DecisionDismissMinAge)
+	})
+	dsmIn.IdempotencyKey = "shared-set-dsm-key"
+	_, err = f.cs.DismissDecisions(ctx, dsmIn)
+	require.NoError(t, err)
+
+	_, err = f.cs.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
+		MessageID:        pDsm.Message.ID,
+		AnsweredByUserID: "user-1",
+		AnsweredByName:   "Alice",
+		AnsweredByEmail:  "alice@example.com",
+		Surface:          store.DecisionSurfaceNative,
+		Answers: []store.AnswerSetItem{
+			{DecisionRowID: dsmRes.Decisions[0].RowID, ChoiceID: messages.ChoiceIDOther, OtherText: "too late"},
+			{DecisionRowID: dsmRes.Decisions[1].RowID, ChoiceID: "1"},
+		},
+		ResponseMessage: &store.Message{
+			ID: uuid.NewString(), ProjectID: f.projectID, Sender: "user:alice@example.com",
+			SenderID: "user-1", Recipient: "agent:dev", Msg: "late", Type: messages.TypeDecisionResponse,
+			AgentID: f.agentID, Channel: "web", ThreadID: "topic:general",
+		},
+		IdempotencyKey: "shared-set-dsm-key",
+	})
+	var changedErr *store.AnswerSetChangedError
+	require.ErrorAs(t, err, &changedErr)
+	assert.Equal(t, store.AnswerSetReasonDismissed, changedErr.Reasons[dsmRes.Decisions[0].RowID])
+	assert.Equal(t, store.AnswerSetReasonDismissed, changedErr.Reasons[dsmRes.Decisions[1].RowID])
+}

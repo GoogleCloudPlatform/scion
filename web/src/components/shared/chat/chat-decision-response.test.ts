@@ -707,3 +707,44 @@ describe('single Other free-form response line (ptone/scion#8152)', () => {
     expect(got).toEqual(['prompt-9']);
   });
 });
+
+describe('set Other free-form response lines (ptone/scion#8153)', () => {
+  it('renders Other label and quoted plain text per row without parsing HTML or Markdown', async () => {
+    const literal = '**bold** <img src=x onerror="window.__pwnedSet=1"> @release-bot';
+    const el = await mount({
+      answererName: 'Alice',
+      responseSet: set({
+        answers: [
+          setAnswer({
+            rowId: 'r1',
+            key: 'region',
+            choiceId: '$other',
+            label: 'Another region',
+            otherText: literal,
+          }),
+          setAnswer({
+            rowId: 'r2',
+            key: 'notify',
+            choiceId: '1',
+            label: 'Yes',
+            matchedDefault: true,
+          }),
+        ],
+      }),
+    });
+    const details = root(el).querySelector('details')!;
+    details.open = true;
+    await el.updateComplete;
+
+    const rows = root(el).querySelectorAll<HTMLLIElement>('.answers li[data-row]');
+    expect(rows).toHaveLength(2);
+    expect(text(rows[0])).toBe(`region Another region — “${literal}”`);
+    const otherSpan = rows[0]!.querySelector('.other-text');
+    expect(otherSpan?.textContent).toBe(`“${literal}”`);
+    expect(otherSpan?.children.length).toBe(0);
+    expect((window as unknown as { __pwnedSet?: number }).__pwnedSet).toBeUndefined();
+
+    expect(text(rows[1])).toBe('notify Yes (recommended)');
+    expect(rows[1]!.querySelector('.other-text')).toBeNull();
+  });
+});

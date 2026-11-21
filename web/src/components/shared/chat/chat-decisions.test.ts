@@ -1242,3 +1242,320 @@ describe('single Other free-form option (ptone/scion#8152)', () => {
     expect(foot(el)).toMatch(/^Answered by Bob · /);
   });
 });
+
+describe('set card Other free-form answers (ptone/scion#8153, O5–O7)', () => {
+  function setWithOther(): DecisionView[] {
+    return [
+      view({
+        rowId: 'r1',
+        key: 'region',
+        ref: 'region',
+        question: 'Which region for the canary?',
+        defaultChoiceId: 'us-central1',
+        choices: [
+          { id: 'us-central1', label: 'us-central1' },
+          { id: 'europe-west1', label: 'europe-west1' },
+        ],
+        other: { label: 'Another region', placeholder: 'e.g. europe-west4' },
+      }),
+      view({
+        rowId: 'r2',
+        key: 'notify',
+        ref: 'notify',
+        question: 'Notify the release channel?',
+        choices: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+      }),
+      view({
+        rowId: 'r3',
+        key: 'proceed',
+        ref: 'proceed',
+        question: 'Tag `v0.9` now?',
+        choices: [{ id: 'yes', label: 'Yes' }],
+        other: { label: 'Something else' },
+      }),
+    ];
+  }
+
+  function rowEl(el: ScionChatDecisions, rowId: string): HTMLElement {
+    const row = root(el).querySelector<HTMLElement>(`.row[data-row="${rowId}"]`);
+    if (!row) throw new Error(`no row ${rowId}`);
+    return row;
+  }
+
+  function rowChoice(el: ScionChatDecisions, rowId: string, choiceId: string): HTMLElement {
+    const btn = rowEl(el, rowId).querySelector<HTMLElement>(`[data-choice="${choiceId}"]`);
+    if (!btn) throw new Error(`no choice ${choiceId} in row ${rowId}`);
+    return btn;
+  }
+
+  function typeIntoSetOther(el: ScionChatDecisions, rowId: string, value: string): HTMLElement {
+    const input = rowEl(el, rowId).querySelector<HTMLElement & { value: string }>(
+      '.editor sl-input'
+    );
+    if (!input) throw new Error(`no set other sl-input in row ${rowId}`);
+    input.value = value;
+    input.dispatchEvent(new CustomEvent('sl-input', { bubbles: true, composed: true }));
+    return input;
+  }
+
+  function submitBtn(el: ScionChatDecisions): HTMLElement {
+    const btn = root(el).querySelector<HTMLElement>('.card-foot sl-button.submit');
+    if (!btn) throw new Error('no submit button');
+    return btn;
+  }
+
+  function submitHint(el: ScionChatDecisions): string {
+    return root(el).querySelector('.card-foot sl-tooltip')?.getAttribute('content') ?? '';
+  }
+
+  it('O5–O7: per-row Other editor without Send/Cancel, remaining gating, draft preservation across choice switch, submit and literal display', async () => {
+    const el = await mount(setWithOther());
+
+    // Row r2 has no Other button; r1 and r3 do.
+    expect(rowEl(el, 'r1').querySelector('[data-choice="$other"]')).not.toBeNull();
+    expect(rowEl(el, 'r2').querySelector('[data-choice="$other"]')).toBeNull();
+    expect(rowEl(el, 'r3').querySelector('[data-choice="$other"]')).not.toBeNull();
+
+    // Pick fixed answers on r2 and r3, and Other on r1.
+    rowChoice(el, 'r2', 'yes').click();
+    rowChoice(el, 'r3', 'yes').click();
+    rowChoice(el, 'r1', '$other').click();
+    await settle(el);
+
+    // Editor opens on r1 with no per-row Send/Cancel buttons.
+    const r1Editor = rowEl(el, 'r1').querySelector('.editor');
+    expect(r1Editor).not.toBeNull();
+    expect(r1Editor?.querySelector('[data-action="send-other"]')).toBeNull();
+    expect(r1Editor?.querySelector('[data-action="cancel-other"]')).toBeNull();
+    expect(r1Editor?.querySelector('.set-other-help')?.textContent?.trim()).toBe(
+      'Type your answer to include it in the submit.'
+    );
+    expect(rowChoice(el, 'r1', '$other').getAttribute('aria-pressed')).toBe('true');
+
+    // Empty Other counts as 1 remaining, Submit disabled, hint names region.
+    expect(root(el).querySelector('.counter')?.textContent?.trim()).toBe('1 remaining');
+    expect(submitBtn(el).hasAttribute('disabled')).toBe(true);
+    expect(submitHint(el)).toBe('Choose or type an answer for region first');
+    const srHintId = submitBtn(el).getAttribute('aria-describedby');
+    expect(srHintId).toBeTruthy();
+    expect(root(el).querySelector(`#${srHintId}`)?.textContent?.trim()).toBe(
+      'Choose or type an answer for region first'
+    );
+
+    // Whitespace-only still counts as remaining.
+    typeIntoSetOther(el, 'r1', '   ');
+    await el.updateComplete;
+    expect(submitBtn(el).hasAttribute('disabled')).toBe(true);
+    expect(root(el).querySelector('.counter')?.textContent?.trim()).toBe('1 remaining');
+
+    // Typing text makes 0 remaining and enables Submit.
+    const literal = 'eu-"west4" *bold* <b>hi</b> @release-bot';
+    typeIntoSetOther(el, 'r1', `  ${literal}  `);
+    await el.updateComplete;
+    expect(root(el).querySelector('.counter')?.textContent?.trim()).toBe('0 remaining');
+    expect(submitBtn(el).hasAttribute('disabled')).toBe(false);
+    expect(rowEl(el, 'r1').querySelector('.set-other-help')).toBeNull();
+
+    // Switching r1 to a fixed choice hides the editor but keeps the draft in memory.
+    rowChoice(el, 'r1', 'europe-west1').click();
+    await settle(el);
+    expect(rowEl(el, 'r1').querySelector('.editor')).toBeNull();
+    expect(rowChoice(el, 'r1', '$other').getAttribute('aria-pressed')).toBe('false');
+
+    // Switching back to Other restores the draft.
+    rowChoice(el, 'r1', '$other').click();
+    await settle(el);
+    expect(
+      rowEl(el, 'r1').querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value
+    ).toBe(`  ${literal}  `);
+
+    // Also test counter at 160, 180, and >200 runes (astral emoji = 1 rune) on r3.
+    rowChoice(el, 'r3', '$other').click();
+    await settle(el);
+    typeIntoSetOther(el, 'r3', '🚀'.repeat(160));
+    await el.updateComplete;
+    expect(rowEl(el, 'r3').querySelector('.cnt')?.textContent?.trim()).toBe('160 / 200');
+    expect(submitBtn(el).hasAttribute('disabled')).toBe(false);
+
+    typeIntoSetOther(el, 'r3', '🚀'.repeat(201));
+    await el.updateComplete;
+    expect(rowEl(el, 'r3').querySelector('.cnt.over')?.textContent?.trim()).toBe('201 / 200');
+    expect(submitBtn(el).hasAttribute('disabled')).toBe(true);
+    expect(submitHint(el)).toBe('Shorten the answer for proceed');
+    const overHintId = submitBtn(el).getAttribute('aria-describedby');
+    expect(overHintId).toBeTruthy();
+    expect(root(el).querySelector(`#${overHintId}`)?.textContent?.trim()).toBe(
+      'Shorten the answer for proceed'
+    );
+
+    typeIntoSetOther(el, 'r3', 'Wait until Monday');
+    await el.updateComplete;
+    expect(submitBtn(el).hasAttribute('disabled')).toBe(false);
+
+    // Submit posts trimmed other_text only on $other rows.
+    const decided = setWithOther().map((d, idx) => ({
+      ...d,
+      status: 'decided',
+      decision:
+        idx === 0
+          ? {
+              choiceId: '$other',
+              label: 'Another region',
+              otherText: literal,
+              answeredByUserId: 'u-alice',
+              answeredByName: 'Alice',
+              provenance: 'direct',
+              surface: 'native',
+              responseMessageId: 'resp-set-1',
+              batchId: 'batch-1',
+              at: '2026-11-20T01:00:00Z',
+            }
+          : idx === 1
+            ? {
+                choiceId: 'yes',
+                label: 'Yes',
+                answeredByUserId: 'u-alice',
+                answeredByName: 'Alice',
+                provenance: 'direct',
+                surface: 'native',
+                responseMessageId: 'resp-set-1',
+                batchId: 'batch-1',
+                at: '2026-11-20T01:00:00Z',
+              }
+            : {
+                choiceId: '$other',
+                label: 'Something else',
+                otherText: 'Wait until Monday',
+                answeredByUserId: 'u-alice',
+                answeredByName: 'Alice',
+                provenance: 'direct',
+                surface: 'native',
+                responseMessageId: 'resp-set-1',
+                batchId: 'batch-1',
+                at: '2026-11-20T01:00:00Z',
+              },
+    }));
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decisions: decided, responseMessageId: 'resp-set-1', batchId: 'batch-1' })
+    );
+    submitBtn(el).click();
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    const [url, init] = apiFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/v1/decision-prompts/m1/answers');
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      answers: [
+        { decision_row_id: 'r1', choice_id: '$other', other_text: literal },
+        { decision_row_id: 'r2', choice_id: 'yes' },
+        { decision_row_id: 'r3', choice_id: '$other', other_text: 'Wait until Monday' },
+      ],
+    });
+
+    // O7: chosen Other button has no ellipsis, .otext renders literal text without HTML parsing, drafts cleared.
+    expect(rowChoice(el, 'r1', '$other').textContent?.trim()).toBe('Another region');
+    const otext = rowEl(el, 'r1').querySelector('.otext');
+    expect(otext?.textContent).toBe(`“${literal}”`);
+    expect(otext?.children.length).toBe(0);
+    expect((el as unknown as { setOtherDrafts: Map<string, string> }).setOtherDrafts.size).toBe(0);
+  });
+
+  it('preselectRecommendedChoices never selects Other', async () => {
+    const { setPreselectRecommendedChoices } =
+      await import('../../../client/decision-preferences.js');
+    setPreselectRecommendedChoices(true);
+    try {
+      const ds = setWithOther();
+      // Even if a malformed payload carried defaultChoiceId: '$other', never pick Other.
+      ds[2] = { ...ds[2]!, defaultChoiceId: '$other' };
+      const el = await mount(ds);
+
+      expect(rowChoice(el, 'r1', 'us-central1').getAttribute('aria-pressed')).toBe('true');
+      expect(rowChoice(el, 'r1', '$other').getAttribute('aria-pressed')).toBe('false');
+      expect(rowChoice(el, 'r3', '$other').getAttribute('aria-pressed')).toBe('false');
+      expect(rowEl(el, 'r3').querySelector('.editor')).toBeNull();
+    } finally {
+      setPreselectRecommendedChoices(false);
+    }
+  });
+
+  it('409 answer_set_changed keeps drafts of still-open rows and clears drafts of closed rows (not just hides)', async () => {
+    const el = await mount(setWithOther());
+
+    // Type drafts on both r1 and r3, and pick fixed choice on r2.
+    rowChoice(el, 'r1', '$other').click();
+    rowChoice(el, 'r2', 'yes').click();
+    rowChoice(el, 'r3', '$other').click();
+    await settle(el);
+    typeIntoSetOther(el, 'r1', 'draft-for-r1');
+    typeIntoSetOther(el, 'r3', 'draft-for-r3');
+    await el.updateComplete;
+
+    // 409 answer_set_changed: r3 was replaced (no longer open), r1 and r2 are still open.
+    const fresh = setWithOther();
+    fresh[2] = {
+      ...fresh[2]!,
+      status: 'replaced',
+      replacedBy: { rowId: 'r3-v2', messageId: 'm2', version: 2, at: '2026-11-20T01:05:00Z' },
+    };
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'answer_set_changed',
+          message: 'the decisions to answer changed',
+          details: { decisions: fresh, reasons: { r3: 'replaced' } },
+        },
+      })
+    );
+
+    submitBtn(el).click();
+    await settle(el);
+
+    // Real assertion on internal draft map: r1 kept, r3 deleted (cleared, not just hidden).
+    const drafts = (el as unknown as { setOtherDrafts: Map<string, string> }).setOtherDrafts;
+    expect(drafts.get('r1')).toBe('draft-for-r1');
+    expect(drafts.has('r3')).toBe(false);
+    expect(
+      rowEl(el, 'r1').querySelector<HTMLElement & { value: string }>('.editor sl-input')?.value
+    ).toBe('draft-for-r1');
+    expect(rowEl(el, 'r3').querySelector('.editor')).toBeNull();
+
+    // Also verify SSE/prop update withdrawing r1 clears r1's draft too.
+    el.decisions = fresh.map((d) =>
+      d.rowId === 'r1'
+        ? { ...d, status: 'withdrawn', withdrawn: { at: '2026-11-20T01:06:00Z', byName: 'bot' } }
+        : d
+    );
+    await settle(el);
+    expect(
+      (el as unknown as { setOtherDrafts: Map<string, string> }).setOtherDrafts.has('r1')
+    ).toBe(false);
+  });
+
+  it('renders stacked layout with Other description and inset editor on a set row', async () => {
+    const ds = setWithOther();
+    ds[0] = {
+      ...ds[0]!,
+      other: {
+        label: 'Another region',
+        description: 'Any `GCP` region code',
+        placeholder: 'e.g. europe-west4',
+      },
+    };
+    const el = await mount(ds);
+    await settle(el);
+
+    expect(rowEl(el, 'r1').querySelector('.choices')?.classList.contains('stack')).toBe(true);
+    const otherOpt = rowChoice(el, 'r1', '$other');
+    expect(otherOpt.classList.contains('other-opt')).toBe(true);
+    expect(otherOpt.querySelector('.desc code')?.textContent).toBe('GCP');
+
+    otherOpt.click();
+    await settle(el);
+    expect(rowEl(el, 'r1').querySelector('.opt.sel .editor.inset sl-input')).not.toBeNull();
+    expect(rowEl(el, 'r1').querySelector('[data-action="send-other"]')).toBeNull();
+  });
+});

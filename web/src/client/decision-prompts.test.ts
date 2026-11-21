@@ -819,3 +819,51 @@ describe('dismissRemainingMinutes and dismissDecisionPrompt', () => {
     expect(out).toMatchObject({ ok: false, status: 0 });
   });
 });
+
+describe('answerDecisionSet other_text (ptone/scion#8153)', () => {
+  it('sends other_text only on items where it is provided', async () => {
+    apiFetch.mockClear();
+    apiFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          decisions: [
+            view({
+              rowId: 'r1',
+              status: 'decided',
+              decision: {
+                choiceId: '$other',
+                label: 'Another region',
+                otherText: 'europe-west4',
+                provenance: 'direct',
+                surface: 'native',
+                responseMessageId: 'rm1',
+                at: '2026-11-20T00:00:00Z',
+              },
+            }),
+            view({ rowId: 'r2', status: 'decided' }),
+          ],
+          responseMessageId: 'rm1',
+          batchId: 'b1',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    const out = await answerDecisionSet(
+      'm1',
+      [
+        { rowId: 'r1', choiceId: '$other', otherText: 'europe-west4' },
+        { rowId: 'r2', choiceId: '1' },
+      ],
+      'idem-set-other'
+    );
+    expect(out.ok).toBe(true);
+    const [, init] = apiFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      idempotency_key: 'idem-set-other',
+      answers: [
+        { decision_row_id: 'r1', choice_id: '$other', other_text: 'europe-west4' },
+        { decision_row_id: 'r2', choice_id: '1' },
+      ],
+    });
+  });
+});

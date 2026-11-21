@@ -704,12 +704,14 @@ type RecordAnswerInput struct {
 	IdempotencyKey string
 }
 
-// AnswerSetItem is one answer of a set submit: the row, the chosen id and
-// the outcome the caller expects from the state it read (answer, or
+// AnswerSetItem is one answer of a set submit: the row, the chosen id,
+// optional free-form other text (required iff ChoiceID == messages.ChoiceIDOther),
+// and the outcome the caller expects from the state it read (answer, or
 // confirm or override over the user's own agent_interpreted answer).
 type AnswerSetItem struct {
 	DecisionRowID string
 	ChoiceID      string
+	OtherText     string // required iff ChoiceID == messages.ChoiceIDOther; trimmed by store
 	Outcome       string // DecisionOutcome*; empty means answer
 }
 

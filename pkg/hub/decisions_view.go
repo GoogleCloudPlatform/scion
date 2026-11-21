@@ -142,6 +142,7 @@ type DecisionResponseSetAnswer struct {
 	Question             string `json:"question"`
 	ChoiceID             string `json:"choiceId"`
 	Label                string `json:"label"`
+	OtherText            string `json:"otherText,omitempty"`
 	Provenance           string `json:"provenance"`
 	Outcome              string `json:"outcome"`
 	DismissReason        string `json:"dismissReason,omitempty"`
@@ -504,6 +505,7 @@ func decisionResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) Dec
 		Question:             a.QuestionText,
 		ChoiceID:             a.ChoiceID,
 		Label:                a.ChoiceLabel,
+		OtherText:            a.OtherText,
 		Provenance:           a.Provenance,
 		Outcome:              a.Outcome,
 		DismissReason:        a.DismissReason,

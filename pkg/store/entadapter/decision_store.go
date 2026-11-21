@@ -927,8 +927,11 @@ func validateRecordAnswerSetInput(in *store.RecordAnswerSetInput) error {
 		if a.DecisionRowID == "" || a.ChoiceID == "" {
 			return fmt.Errorf("%w: every answer needs a decision row id and a choice id", store.ErrInvalidInput)
 		}
-		if messages.IsReservedChoiceID(a.ChoiceID) {
+		if messages.IsReservedChoiceID(a.ChoiceID) && a.ChoiceID != messages.ChoiceIDOther {
 			return fmt.Errorf("%w: choice %q is reserved", store.ErrInvalidInput, a.ChoiceID)
+		}
+		if _, verr := messages.NormalizeOtherText(a.ChoiceID, a.OtherText); verr != nil {
+			return fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
 		}
 		if seen[a.DecisionRowID] {
 			return fmt.Errorf("%w: decision row %s is answered twice", store.ErrInvalidInput, a.DecisionRowID)
@@ -989,21 +992,38 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 	// Shape: every requested row is in the prompt and names one of its
 	// choices.
 	labels := make(map[string]string, len(in.Answers))
+	otherTexts := make(map[string]string, len(in.Answers))
 	for _, a := range in.Answers {
 		r, ok := byID[a.DecisionRowID]
 		if !ok {
 			return nil, fmt.Errorf("%w: decision row %s is not in message %s", store.ErrInvalidInput, a.DecisionRowID, in.MessageID)
 		}
-		label := ""
-		for _, ch := range r.Choices {
-			if ch.ID == a.ChoiceID {
-				label = ch.Label
+		var label string
+		if a.ChoiceID == messages.ChoiceIDOther {
+			if !r.AllowOther {
+				return nil, fmt.Errorf("%w: %s has no choice %q", store.ErrInvalidInput, r.Key, a.ChoiceID)
+			}
+			if r.OtherLabel != nil && *r.OtherLabel != "" {
+				label = *r.OtherLabel
+			} else {
+				label = messages.DefaultOtherLabel
+			}
+		} else {
+			for _, ch := range r.Choices {
+				if ch.ID == a.ChoiceID {
+					label = ch.Label
+				}
 			}
 		}
 		if label == "" {
 			return nil, fmt.Errorf("%w: %s has no choice %q", store.ErrInvalidInput, r.Key, a.ChoiceID)
 		}
+		otherText, verr := messages.NormalizeOtherText(a.ChoiceID, a.OtherText)
+		if verr != nil {
+			return nil, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+		}
 		labels[a.DecisionRowID] = label
+		otherTexts[a.DecisionRowID] = otherText
 	}
 
 	// The actionable set (design choices v5, 4.1) must equal the request.
@@ -1045,7 +1065,11 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			if e.Provenance == decisionanswer.ProvenanceAgentInterpreted {
 				interpreted = true
 				want = store.DecisionOutcomeConfirm
-				if e.ChoiceID != a.ChoiceID {
+				eOther := ""
+				if e.OtherText != nil {
+					eOther = *e.OtherText
+				}
+				if e.ChoiceID != a.ChoiceID || eOther != otherTexts[a.DecisionRowID] {
 					want = store.DecisionOutcomeOverride
 				}
 			}
@@ -1097,6 +1121,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			SetQuestionText(r.Question).
 			SetChoiceID(a.ChoiceID).
 			SetChoiceLabel(labels[a.DecisionRowID]).
+			SetNillableOtherText(nullableString(otherTexts[a.DecisionRowID])).
 			SetAnsweredByUserID(in.AnsweredByUserID).
 			SetAnsweredByName(in.AnsweredByName).
 			SetAnsweredByEmail(in.AnsweredByEmail).
@@ -1106,7 +1131,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			SetResponseMessageID(responseID).
 			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 			SetBatchID(batchID).
-			SetMatchedDefault(r.DefaultChoiceID != nil && *r.DefaultChoiceID == a.ChoiceID).
+			SetMatchedDefault(a.ChoiceID != messages.ChoiceIDOther && r.DefaultChoiceID != nil && *r.DefaultChoiceID == a.ChoiceID).
 			SetCreatedAt(now).
 			Save(ctx)
 		if err != nil {
@@ -1146,8 +1171,13 @@ func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.De
 		pos[r.ID] = i
 	}
 	found, err := client.DecisionAnswer.Query().
-		Where(decisionanswer.DecisionRowIDIn(rowIDs...), decisionanswer.IdempotencyKey(in.IdempotencyKey),
-			decisionanswer.BatchIDNotNil(), decisionanswer.AnsweredByUserID(in.AnsweredByUserID)).
+		Where(
+			decisionanswer.DecisionRowIDIn(rowIDs...),
+			decisionanswer.IdempotencyKey(in.IdempotencyKey),
+			decisionanswer.BatchIDNotNil(),
+			decisionanswer.AnsweredByUserID(in.AnsweredByUserID),
+			decisionanswer.OutcomeNEQ(decisionanswer.OutcomeDismiss),
+		).
 		All(ctx)
 	if err != nil {
 		return nil, false, mapError(err)
@@ -1159,16 +1189,28 @@ func replayableAnswerSet(ctx context.Context, client *ent.Client, rows []*ent.De
 	if len(found) != len(in.Answers) {
 		return nil, false, mismatch
 	}
-	want := make(map[string]string, len(in.Answers))
+	type setAnswerWant struct {
+		choiceID  string
+		otherText string
+	}
+	want := make(map[string]setAnswerWant, len(in.Answers))
 	for _, a := range in.Answers {
-		want[a.DecisionRowID] = a.ChoiceID
+		otherText, verr := messages.NormalizeOtherText(a.ChoiceID, a.OtherText)
+		if verr != nil {
+			return nil, false, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+		}
+		want[a.DecisionRowID] = setAnswerWant{choiceID: a.ChoiceID, otherText: otherText}
 	}
 	batch := *found[0].BatchID
 	for _, f := range found {
 		if f.AnsweredByUserID == nil || *f.AnsweredByUserID != in.AnsweredByUserID || f.BatchID == nil || *f.BatchID != batch {
 			return nil, false, mismatch
 		}
-		if choice, ok := want[f.DecisionRowID.String()]; !ok || choice != f.ChoiceID {
+		fOther := ""
+		if f.OtherText != nil {
+			fOther = *f.OtherText
+		}
+		if w, ok := want[f.DecisionRowID.String()]; !ok || w.choiceID != f.ChoiceID || w.otherText != fOther {
 			return nil, false, mismatch
 		}
 	}

@@ -364,13 +364,29 @@ func TestNormalizeDecisions_AllowOther_AcceptedForms(t *testing.T) {
 		})
 	}
 
-	// False on a multi-decision prompt is treated as absent (not refused as not_supported).
+	// Multi-decision prompts may enable allow_other per decision (P2, design-8146 §4.1).
 	in := parseDecisions(t, `[
-	  {"id":"d1","question":"Q1?","choices":["a","b"],"allow_other":false},
-	  {"id":"d2","question":"Q2?","choices":["x","y"]}
+	  {"id":"region","question":"Which region?","choices":["us-central1"],"default":"us-central1","allow_other":{"label":"Another region","placeholder":"e.g. europe-west4"}},
+	  {"id":"notify","question":"Notify channel?","choices":["Yes","No"],"allow_other":false},
+	  {"id":"proceed","question":"Tag now?","choices":["Yes"],"allow_other":"Something else"}
 	]`)
-	if _, err := NormalizeDecisions("decisions", in); err != nil {
-		t.Fatalf("multi-decision with allow_other:false rejected: %v", err)
+	gotSet, err := NormalizeDecisions("decisions", in)
+	if err != nil {
+		t.Fatalf("multi-decision with per-row allow_other rejected: %v", err)
+	}
+	if len(gotSet) != 3 {
+		t.Fatalf("got %d decisions, want 3", len(gotSet))
+	}
+	wantRegion := &OtherOption{Label: "Another region", Placeholder: "e.g. europe-west4"}
+	if !reflect.DeepEqual(gotSet[0].Other, wantRegion) {
+		t.Fatalf("gotSet[0].Other = %+v, want %+v", gotSet[0].Other, wantRegion)
+	}
+	if gotSet[1].Other != nil {
+		t.Fatalf("gotSet[1].Other = %+v, want nil", gotSet[1].Other)
+	}
+	wantProceed := &OtherOption{Label: "Something else"}
+	if !reflect.DeepEqual(gotSet[2].Other, wantProceed) {
+		t.Fatalf("gotSet[2].Other = %+v, want %+v", gotSet[2].Other, wantProceed)
 	}
 }
 
@@ -411,7 +427,7 @@ func TestNormalizeDecisions_AllowOther_ValidationRules(t *testing.T) {
 		{"default names $other", `[{"question":"q","choices":["Yes"],"allow_other":true,"default":"$other"}]`, "decisions[0].default", DecisionErrNoMatch},
 		{"default names Other label", `[{"question":"q","choices":["Yes"],"allow_other":"Another region","default":"Another region"}]`, "decisions[0].default", DecisionErrNoMatch},
 		{"fixed choice id $other", `[{"question":"q","choices":[{"id":"$other","label":"Yes"},{"id":"no","label":"No"}]}]`, "decisions[0].choices[0].id", DecisionErrInvalid},
-		{"multi-decision prompt with allow_other refused in P1", `[{"id":"d1","question":"Q1?","choices":["a","b"]},{"id":"d2","question":"Q2?","choices":["x"],"allow_other":true}]`, "decisions[1].allow_other", DecisionErrNotSupported},
+		{"multi-decision prompt invalid allow_other field path", `[{"id":"d1","question":"Q1?","choices":["a","b"]},{"id":"d2","question":"Q2?","choices":["x"],"allow_other":{"label":" "}}]`, "decisions[1].allow_other.label", DecisionErrInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

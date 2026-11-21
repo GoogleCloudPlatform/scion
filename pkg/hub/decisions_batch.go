@@ -55,6 +55,7 @@ type DecisionSetAnswerRequest struct {
 type DecisionSetAnswerItem struct {
 	DecisionRowID string `json:"decision_row_id"`
 	ChoiceID      string `json:"choice_id"`
+	OtherText     string `json:"other_text,omitempty"`
 }
 
 // DecisionSetAnswerResponse is the 200 body of a set submit: the one
@@ -250,6 +251,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 	}
 	requested := make(map[string]bool, len(req.Answers))
 	choices := make(map[string]messages.Choice, len(req.Answers))
+	otherTexts := make(map[string]string, len(req.Answers))
 	for i, a := range req.Answers {
 		field := fmt.Sprintf("answers[%d]", i)
 		rowID := strings.TrimSpace(a.DecisionRowID)
@@ -265,19 +267,43 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		choiceID := strings.TrimSpace(a.ChoiceID)
-		if messages.IsReservedChoiceID(choiceID) {
+		if messages.IsReservedChoiceID(choiceID) && choiceID != messages.ChoiceIDOther {
 			ValidationError(w, fmt.Sprintf("choice %q is reserved", choiceID),
 				map[string]interface{}{"field": field + ".choice_id"})
 			return
 		}
-		choice, ok := d.Choice(choiceID)
-		if !ok {
-			ValidationError(w, fmt.Sprintf("choice %q is not a choice of decision %s", a.ChoiceID, d.Key),
-				map[string]interface{}{"field": field + ".choice_id"})
+		var choice messages.Choice
+		if choiceID == messages.ChoiceIDOther {
+			if d.Other == nil {
+				ValidationError(w, fmt.Sprintf("choice %q is not a choice of decision %s", choiceID, d.Key),
+					map[string]interface{}{"field": field + ".choice_id", "code": ErrCodeInvalidChoice})
+				return
+			}
+			choice = messages.Choice{
+				ID:          messages.ChoiceIDOther,
+				Label:       d.Other.Label,
+				Description: d.Other.Description,
+			}
+		} else {
+			var ok bool
+			choice, ok = d.Choice(choiceID)
+			if !ok {
+				ValidationError(w, fmt.Sprintf("choice %q is not a choice of decision %s", a.ChoiceID, d.Key),
+					map[string]interface{}{"field": field + ".choice_id", "code": ErrCodeInvalidChoice})
+				return
+			}
+		}
+		otherText, verr := messages.NormalizeOtherText(choice.ID, a.OtherText)
+		if verr != nil {
+			ValidationError(w, verr.Message, map[string]interface{}{
+				"field": field + "." + verr.Field,
+				"code":  verr.Code,
+			})
 			return
 		}
 		requested[rowID] = true
 		choices[rowID] = choice
+		otherTexts[rowID] = otherText
 	}
 
 	// Step 3: a replay of the key is answered before any state check; the
@@ -285,7 +311,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 	// 422. Another user's answers under the same key are not this user's.
 	if req.IdempotencyKey != "" {
 		if prior := setAnswersWithIdempotencyKey(ds, req.IdempotencyKey, user.ID()); len(prior) > 0 {
-			if !sameSetAnswers(prior, user.ID(), choices) {
+			if !sameSetAnswers(prior, user.ID(), choices, otherTexts) {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeIdempotencyMismatch,
 					"the idempotency key was used for other answers", nil)
 				return
@@ -305,7 +331,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	// Outcomes: a row with the user's own interpreted answer is a confirm
-	// (same choice) or an override (another choice).
+	// (same choice and other_text) or an override (different choice or text).
 	items := make([]store.AnswerSetItem, 0, len(ds))
 	overridden := map[string]*store.DecisionAnswer{}
 	allConfirm := true
@@ -314,10 +340,11 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 			continue
 		}
 		choice := choices[d.ID]
+		otherText := otherTexts[d.ID]
 		outcome := store.DecisionOutcomeAnswer
 		if eff := d.EffectiveAnswer(); eff != nil && eff.Provenance == store.DecisionProvenanceAgentInterpreted {
 			outcome = store.DecisionOutcomeConfirm
-			if eff.ChoiceID != choice.ID {
+			if eff.ChoiceID != choice.ID || eff.OtherText != otherText {
 				outcome = store.DecisionOutcomeOverride
 				overridden[d.ID] = eff
 			}
@@ -325,7 +352,12 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 		if outcome != store.DecisionOutcomeConfirm {
 			allConfirm = false
 		}
-		items = append(items, store.AnswerSetItem{DecisionRowID: d.ID, ChoiceID: choice.ID, Outcome: outcome})
+		items = append(items, store.AnswerSetItem{
+			DecisionRowID: d.ID,
+			ChoiceID:      choice.ID,
+			OtherText:     otherText,
+			Outcome:       outcome,
+		})
 	}
 
 	asker, askerGone, ok := s.decisionAsker(w, ctx, ds[0].AskerAgentID)
@@ -346,7 +378,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	responseMsg := s.decisionSetResponseStoreMessage(ctx, user, ds, chatKey, requested, choices, asker, askerGone, willDeliver)
+	responseMsg := s.decisionSetResponseStoreMessage(ctx, user, ds, chatKey, requested, choices, otherTexts, asker, askerGone, willDeliver)
 
 	// Steps 5 to 7 in one transaction.
 	res, err := s.store.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
@@ -415,13 +447,16 @@ func firstResponseID(res *store.AnswerSetResult) string {
 	return res.Answers[0].ResponseMessageID
 }
 
-// setAnswersWithIdempotencyKey returns the set answers userID recorded on ds
-// under key, in position order (the key is scoped to the user and the
-// prompt).
+// setAnswersWithIdempotencyKey returns the non-dismiss set answers userID
+// recorded on ds under key, in position order (the key is scoped to the user
+// and the prompt).
 func setAnswersWithIdempotencyKey(ds []*store.Decision, key, userID string) []*store.DecisionAnswer {
 	var out []*store.DecisionAnswer
 	for _, d := range ds {
 		for _, a := range d.Answers {
+			if a.Outcome == store.DecisionOutcomeDismiss {
+				continue
+			}
 			if a.IdempotencyKey == key && a.BatchID != "" && a.AnsweredByUserID == userID {
 				out = append(out, a)
 			}
@@ -431,15 +466,15 @@ func setAnswersWithIdempotencyKey(ds []*store.Decision, key, userID string) []*s
 }
 
 // sameSetAnswers reports whether the recorded set is userID's answers with
-// exactly the requested choices.
-func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[string]messages.Choice) bool {
+// exactly the requested (choice_id, other_text) pairs.
+func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[string]messages.Choice, otherTexts map[string]string) bool {
 	if len(prior) != len(choices) {
 		return false
 	}
 	batch := prior[0].BatchID
 	for _, a := range prior {
 		c, ok := choices[a.DecisionRowID]
-		if !ok || c.ID != a.ChoiceID || a.AnsweredByUserID != userID || a.BatchID != batch {
+		if !ok || c.ID != a.ChoiceID || otherTexts[a.DecisionRowID] != a.OtherText || a.AnsweredByUserID != userID || a.BatchID != batch {
 			return false
 		}
 	}
@@ -452,11 +487,19 @@ func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[st
 // position order. A gone asker (askerGone; asker is then unused) or one
 // that cannot take a message gets the row born failed, as for a one-click
 // answer.
-func (s *Server) decisionSetResponseStoreMessage(ctx context.Context, user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
+func (s *Server) decisionSetResponseStoreMessage(ctx context.Context, user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, otherTexts map[string]string, asker *store.Agent, askerGone, willDeliver bool) *store.Message {
 	var parts []string
 	for _, d := range ds {
 		if requested[d.ID] {
-			parts = append(parts, d.Key+" "+plainLine(choices[d.ID].Label))
+			c := choices[d.ID]
+			if c.ID == messages.ChoiceIDOther {
+				parts = append(parts, fmt.Sprintf("%s \"%s\" (%s)",
+					d.Key,
+					messages.EscapeMarkdownPlain(otherTexts[d.ID]),
+					messages.EscapeMarkdownPlain(c.Label)))
+			} else {
+				parts = append(parts, d.Key+" "+plainLine(c.Label))
+			}
 		}
 	}
 	noun := "decisions"
@@ -550,13 +593,21 @@ func decisionSetAgentLines(promptID string, answers []*store.DecisionAnswer, ove
 			notes = append(notes, "confirmed")
 		case store.DecisionOutcomeOverride:
 			if o := overridden[a.DecisionRowID]; o != nil {
-				notes = append(notes, "overriding interpreted answer "+o.ChoiceLabel)
+				prev := "overriding interpreted answer " + o.ChoiceLabel
+				if o.ChoiceID == messages.ChoiceIDOther && o.OtherText != "" {
+					prev += " text=" + strconv.Quote(o.OtherText)
+				}
+				notes = append(notes, prev)
 			} else {
 				notes = append(notes, "overriding interpreted answer")
 			}
 		}
-		lines = append(lines, fmt.Sprintf("%s v%d (%q) answer=%s (%s)",
-			a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, strings.Join(notes, ", ")))
+		otherPart := ""
+		if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
+			otherPart = " text=" + strconv.Quote(a.OtherText)
+		}
+		lines = append(lines, fmt.Sprintf("%s v%d (%q) answer=%s (%s)%s",
+			a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), decisionResponseQuestionMax), a.ChoiceLabel, strings.Join(notes, ", "), otherPart))
 	}
 	return strings.Join(lines, "\n")
 }

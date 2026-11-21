@@ -26,10 +26,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -788,4 +790,300 @@ func TestDecisionResponseSetView_AttributionAndOutcomes(t *testing.T) {
 	assert.Equal(t, "prompt-2", multi.Answers[1].PromptMessageID)
 	assert.Equal(t, f.agent.ID, multi.Answers[0].InterpretedByAgentID)
 	assert.Equal(t, "src-1", multi.Answers[0].SourceMessageID)
+}
+
+// P2 (ptone/scion#8153, design-8146 §4.3, §4.5, §7, acceptance 5, 6, 9, 10):
+// Multi-decision prompt with allow_other on a subset of rows, per-row validation
+// and atomicity, idempotency replay 200 vs 422 mismatch on different other_text,
+// exact agent-delivered set lines + decision_answers metadata (no free text),
+// stored fallback neutralization/escaping, live SSE + history otherText, and no
+// mention fan-out.
+func TestDecisionSetAnswer_AllowOther_EndToEnd(t *testing.T) {
+	f := newDecisionsFixture(t)
+	ctx := context.Background()
+
+	// Add a bystander agent to prove @bystander-bot inside other_text triggers zero fan-out.
+	bystander := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "bystander-bot",
+		Name:            "bystander-bot",
+		ProjectID:       f.project.ID,
+		RuntimeBrokerID: f.agent.RuntimeBrokerID,
+		OwnerID:         f.agent.OwnerID,
+		Phase:           "running",
+		Activity:        "idle",
+		MessageMode:     f.agent.MessageMode,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, bystander))
+
+	chat, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.message")
+	defer unsub()
+
+	promptMsg, promptRes := f.topicPrompt(t, `[
+		{
+			"id": "region",
+			"question": "Which region for the canary?",
+			"choices": ["us-central1", "europe-west1"],
+			"default": "us-central1",
+			"allow_other": {"label": "Another region", "placeholder": "e.g. europe-west4"}
+		},
+		{
+			"id": "notify",
+			"question": "Notify the release channel?",
+			"choices": ["Yes", "No"]
+		},
+		{
+			"id": "proceed",
+			"question": "Tag v0.9 now?",
+			"choices": ["Yes"],
+			"allow_other": "Something else"
+		}
+	]`, false)
+	require.Len(t, promptRes.Decisions, 3)
+	r0, r1, r2 := promptRes.Decisions[0].RowID, promptRes.Decisions[1].RowID, promptRes.Decisions[2].RowID
+
+	assert.Contains(t, promptMsg.Msg, "  - Another region — *your own answer, in words*\n")
+	assert.Contains(t, promptMsg.Msg, "  - Something else — *your own answer, in words*\n")
+
+	postSet := func(idem string, items []map[string]interface{}) *httptest.ResponseRecorder {
+		body := map[string]interface{}{"answers": items}
+		if idem != "" {
+			body["idempotency_key"] = idem
+		}
+		return doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+promptMsg.ID+"/answers", body)
+	}
+
+	// 1. Per-row validation failures refuse the entire set atomically.
+	validationCases := []struct {
+		name      string
+		items     []map[string]interface{}
+		wantField string
+		wantCode  string
+	}{
+		{
+			name: "$other on row without allow_other",
+			items: []map[string]interface{}{
+				{"decision_row_id": r0, "choice_id": "1"},
+				{"decision_row_id": r1, "choice_id": messages.ChoiceIDOther, "other_text": "custom"},
+				{"decision_row_id": r2, "choice_id": "1"},
+			},
+			wantField: "answers[1].choice_id",
+			wantCode:  ErrCodeInvalidChoice,
+		},
+		{
+			name: "missing other_text on $other row",
+			items: []map[string]interface{}{
+				{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "   "},
+				{"decision_row_id": r1, "choice_id": "1"},
+				{"decision_row_id": r2, "choice_id": "1"},
+			},
+			wantField: "answers[0].other_text",
+			wantCode:  messages.DecisionErrRequired,
+		},
+		{
+			name: "other_text with fixed choice",
+			items: []map[string]interface{}{
+				{"decision_row_id": r0, "choice_id": "1", "other_text": "unexpected"},
+				{"decision_row_id": r1, "choice_id": "1"},
+				{"decision_row_id": r2, "choice_id": "1"},
+			},
+			wantField: "answers[0].other_text",
+			wantCode:  messages.DecisionErrNotAllowed,
+		},
+		{
+			name: "newline in other_text",
+			items: []map[string]interface{}{
+				{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "line1\nline2"},
+				{"decision_row_id": r1, "choice_id": "1"},
+				{"decision_row_id": r2, "choice_id": "1"},
+			},
+			wantField: "answers[0].other_text",
+			wantCode:  messages.DecisionErrInvalid,
+		},
+		{
+			name: "too long other_text (201 runes)",
+			items: []map[string]interface{}{
+				{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": strings.Repeat("é", 201)},
+				{"decision_row_id": r1, "choice_id": "1"},
+				{"decision_row_id": r2, "choice_id": "1"},
+			},
+			wantField: "answers[0].other_text",
+			wantCode:  messages.DecisionErrTooLong,
+		},
+		{
+			name: "generic $ sentinel still refused",
+			items: []map[string]interface{}{
+				{"decision_row_id": r0, "choice_id": messages.ChoiceIDDismissed},
+				{"decision_row_id": r1, "choice_id": "1"},
+				{"decision_row_id": r2, "choice_id": "1"},
+			},
+			wantField: "answers[0].choice_id",
+		},
+	}
+	for _, tc := range validationCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := postSet("", tc.items)
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			code, details := errorCodeAndDetails(t, rr)
+			assert.Equal(t, ErrCodeValidationError, code)
+			assert.Equal(t, tc.wantField, details["field"])
+			if tc.wantCode != "" {
+				assert.Equal(t, tc.wantCode, details["code"])
+			}
+			for _, id := range []string{r0, r1, r2} {
+				d, err := f.store.GetDecision(ctx, id)
+				require.NoError(t, err)
+				assert.Equal(t, store.DecisionStatusPending, d.Status)
+				assert.Empty(t, d.Answers)
+			}
+		})
+	}
+
+	// 2. Valid set submit with quotes, backslashes, non-ASCII, Markdown, HTML, @everyone, and @bystander-bot.
+	before := len(f.dispatcher.getMessages())
+	trickyText := `eu-"west4"\café *bold* <b>hi</b> @everyone @bystander-bot`
+	validItems := []map[string]interface{}{
+		{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "  " + trickyText + "  "},
+		{"decision_row_id": r1, "choice_id": "1"},
+		{"decision_row_id": r2, "choice_id": messages.ChoiceIDOther, "other_text": "Wait until Monday"},
+	}
+	rr := postSet("set-other-hub-idem-1", validItems)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	out := decodeSetResponse(t, rr)
+	require.False(t, out.Replayed)
+	require.Len(t, out.Decisions, 3)
+
+	assert.Equal(t, messages.ChoiceIDOther, out.Decisions[0].Decision.ChoiceID)
+	assert.Equal(t, "Another region", out.Decisions[0].Decision.Label)
+	assert.Equal(t, trickyText, out.Decisions[0].Decision.OtherText)
+	assert.False(t, out.Decisions[0].Decision.MatchedDefault)
+
+	assert.Equal(t, "1", out.Decisions[1].Decision.ChoiceID)
+	assert.Empty(t, out.Decisions[1].Decision.OtherText)
+
+	assert.Equal(t, messages.ChoiceIDOther, out.Decisions[2].Decision.ChoiceID)
+	assert.Equal(t, "Something else", out.Decisions[2].Decision.Label)
+	assert.Equal(t, "Wait until Monday", out.Decisions[2].Decision.OtherText)
+
+	// 3. Stored response fallback neutralizes broadcast mentions and escapes Markdown/HTML.
+	storedResp, err := f.store.GetMessage(ctx, out.ResponseMessageID)
+	require.NoError(t, err)
+	assert.NotContains(t, storedResp.Msg, "@everyone")
+	assert.Contains(t, storedResp.Msg, "@\u200beveryone")
+	assert.Contains(t, storedResp.Msg, `\*bold\*`)
+	assert.Contains(t, storedResp.Msg, `\<b\>hi\</b\>`)
+
+	// 4. Agent delivery: single message to asking agent only, exact golden lines and metadata.
+	sent := f.dispatcher.getMessages()[before:]
+	require.Len(t, sent, 1, "only asking agent receives set response; no @bystander-bot fan-out")
+	sm := sent[0].structured
+	require.NotNil(t, sm)
+	assert.Equal(t, f.agent.ID, sm.RecipientID)
+	lines := strings.Split(sm.Msg, "\n")
+	require.Len(t, lines, 4, sm.Msg)
+	assert.Equal(t, "[decision-response] 3 decisions answered by "+f.bob.Email+" (prompt "+promptMsg.ID+")", lines[0])
+	assert.Equal(t, `region v1 ("Which region for the canary?") answer=Another region (choice $other) text="eu-\"west4\"\\café *bold* <b>hi</b> @everyone @bystander-bot"`, lines[1])
+	assert.Equal(t, `notify v1 ("Notify the release channel?") answer=Yes (choice 1)`, lines[2])
+	assert.Equal(t, `proceed v1 ("Tag v0.9 now?") answer=Something else (choice $other) text="Wait until Monday"`, lines[3])
+
+	assert.Equal(t, out.BatchID, sm.Metadata[messages.MetadataDecisionBatch])
+	assert.Equal(t, "region@1=$other,notify@1=1,proceed@1=$other", sm.Metadata[messages.MetadataDecisionAnswers])
+	assert.Empty(t, sm.Metadata[messages.MetadataDecisionOtherText], "set delivery metadata must not carry decision_other_text")
+
+	// 5. Live SSE and history DecisionResponseSetView both carry otherText.
+	var liveSet *DecisionResponseSetView
+	for _, e := range collectEvents(chat) {
+		var evt UserMessageEvent
+		require.NoError(t, json.Unmarshal(e.Data, &evt))
+		if evt.ID == out.ResponseMessageID {
+			liveSet = evt.DecisionResponseSet
+		}
+	}
+	require.NotNil(t, liveSet)
+
+	histRec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, histRec.Code)
+	var hist chatHistoryResponse
+	require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &hist))
+	histSet, ok := hist.MessageDecisionResponseSets[out.ResponseMessageID]
+	require.True(t, ok)
+
+	for src, sv := range map[string]DecisionResponseSetView{"live": *liveSet, "history": histSet} {
+		require.Len(t, sv.Answers, 3, src)
+		assert.Equal(t, messages.ChoiceIDOther, sv.Answers[0].ChoiceID, src)
+		assert.Equal(t, trickyText, sv.Answers[0].OtherText, src)
+		assert.Empty(t, sv.Answers[1].OtherText, src)
+		assert.Equal(t, messages.ChoiceIDOther, sv.Answers[2].ChoiceID, src)
+		assert.Equal(t, "Wait until Monday", sv.Answers[2].OtherText, src)
+	}
+
+	// 6. Idempotency: same key + same (trimmed) text replays 200; same key + different text -> 422 idempotency_mismatch.
+	replayRR := postSet("set-other-hub-idem-1", []map[string]interface{}{
+		{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": trickyText},
+		{"decision_row_id": r1, "choice_id": "1"},
+		{"decision_row_id": r2, "choice_id": messages.ChoiceIDOther, "other_text": "  Wait until Monday "},
+	})
+	require.Equal(t, http.StatusOK, replayRR.Code, replayRR.Body.String())
+	replayOut := decodeSetResponse(t, replayRR)
+	assert.True(t, replayOut.Replayed)
+	assert.Equal(t, out.BatchID, replayOut.BatchID)
+	assert.Equal(t, out.ResponseMessageID, replayOut.ResponseMessageID)
+	assert.Len(t, f.dispatcher.getMessages()[before:], 1, "replay must not re-deliver")
+
+	mismatchRR := postSet("set-other-hub-idem-1", []map[string]interface{}{
+		{"decision_row_id": r0, "choice_id": messages.ChoiceIDOther, "other_text": "asia-east1"},
+		{"decision_row_id": r1, "choice_id": "1"},
+		{"decision_row_id": r2, "choice_id": messages.ChoiceIDOther, "other_text": "Wait until Monday"},
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, mismatchRR.Code, mismatchRR.Body.String())
+	mmCode, _ := errorCodeAndDetails(t, mismatchRR)
+	assert.Equal(t, ErrCodeIdempotencyMismatch, mmCode)
+
+	// 7. Reusing a dismissal's idempotency key on the set route must fall through
+	// to 409 answer_set_changed (dismissed), never 422 idempotency_mismatch.
+	dsmMsg, dsmRes := f.topicPrompt(t, `[
+		{"id":"dsm-set-1","question":"First?","choices":["Yes"],"allow_other":true},
+		{"id":"dsm-set-2","question":"Second?","choices":["Yes","No"]}
+	]`, false)
+	require.Len(t, dsmRes.Decisions, 2)
+	dsmRow0, err := f.store.GetDecision(ctx, dsmRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	_, err = f.store.DismissDecisions(ctx, &store.DismissDecisionsInput{
+		MessageID:      dsmMsg.ID,
+		User:           store.DecisionAnswerer{UserID: f.bob.ID, Name: f.bob.DisplayName, Email: f.bob.Email},
+		Reason:         "No longer needed",
+		Surface:        store.DecisionSurfaceNative,
+		IdempotencyKey: "shared-dsm-set-idem-key",
+		ResponseMessage: &store.Message{
+			ID:             api.NewUUID(),
+			ProjectID:      f.project.ID,
+			Sender:         "user:" + f.bob.Email,
+			SenderID:       f.bob.ID,
+			Recipient:      "agent:" + f.agent.Slug,
+			RecipientID:    f.agent.ID,
+			Msg:            "dismissed",
+			Type:           messages.TypeDecisionResponse,
+			AgentID:        f.agent.ID,
+			Channel:        "web",
+			ThreadID:       f.topicID,
+			ConversationID: dsmRow0.ConversationID,
+		},
+		Now: func() time.Time { return dsmRow0.CreatedAt.Add(store.DecisionDismissMinAge) },
+	})
+	require.NoError(t, err)
+
+	dsmAnswerRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+dsmMsg.ID+"/answers", map[string]interface{}{
+		"idempotency_key": "shared-dsm-set-idem-key",
+		"answers": []map[string]interface{}{
+			{"decision_row_id": dsmRes.Decisions[0].RowID, "choice_id": messages.ChoiceIDOther, "other_text": "too late"},
+			{"decision_row_id": dsmRes.Decisions[1].RowID, "choice_id": "1"},
+		},
+	})
+	require.Equal(t, http.StatusConflict, dsmAnswerRR.Code, dsmAnswerRR.Body.String())
+	dsmCode, dsmDetails := errorCodeAndDetails(t, dsmAnswerRR)
+	assert.Equal(t, ErrCodeAnswerSetChanged, dsmCode)
+	dsmReasons, ok := dsmDetails["reasons"].(map[string]interface{})
+	require.True(t, ok, "details: %v", dsmDetails)
+	assert.Equal(t, store.AnswerSetReasonDismissed, dsmReasons[dsmRes.Decisions[0].RowID])
+	assert.Equal(t, store.AnswerSetReasonDismissed, dsmReasons[dsmRes.Decisions[1].RowID])
 }
