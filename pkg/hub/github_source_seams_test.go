@@ -132,7 +132,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	}))
 
 	// 1. Readiness
-	rep, err := srv.githubSourceReadiness().Check(ctx)
+	rep, err := srv.GitHubSourceReadiness().Check(ctx)
 	require.NoError(t, err)
 	assert.True(t, rep.Ready)
 	assert.Equal(t, "seam-app", rep.AppSlug)
@@ -140,7 +140,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	assert.Empty(t, rep.MissingPermissions)
 
 	// 2. ActorIdentity
-	actor := srv.githubSourceActorIdentity()
+	actor := srv.GitHubSourceActorIdentity()
 	assert.True(t, actor.IsSelf(ctx, source.Principal{Type: "Bot", Login: "seam-app[bot]"}))
 	assert.True(t, actor.IsSelf(ctx, source.Principal{Type: "User", Login: "alice", PerformedViaAppID: "4242"}))
 	assert.False(t, actor.IsSelf(ctx, source.Principal{Type: "User", Login: "alice"}))
@@ -185,7 +185,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	req.Header.Set("X-GitHub-Hook-Installation-Target-Type", "integration")
 	req.Header.Set("X-GitHub-Hook-Installation-Target-ID", "4242")
 
-	verifier := srv.githubSourceWireVerifier()
+	verifier := srv.GitHubSourceWireVerifier()
 	delivery, err := verifier.Verify(req, body, source.SecretFunc(func(context.Context) (string, error) {
 		return "seam-secret", nil
 	}))
@@ -194,7 +194,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	assert.NotEmpty(t, verifier.DedupKey(delivery, body))
 
 	// 4. InstallationResolver (lookup + candidate/primary routing + lifecycle)
-	resolver := srv.githubSourceInstallationResolver()
+	resolver := srv.GitHubSourceInstallationResolver()
 	inst, err := resolver.Installation(ctx, delivery, body)
 	require.NoError(t, err)
 	assert.Equal(t, "8101", inst.ID)
@@ -226,7 +226,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	assert.True(t, handled)
 
 	// 5. Normalizer
-	ev, err := srv.githubSourceNormalizer().Normalize(ctx, delivery, body, targets[0])
+	ev, err := srv.GitHubSourceNormalizer().Normalize(ctx, delivery, body, targets[0])
 	require.NoError(t, err)
 	assert.True(t, ev.Handled)
 	assert.Equal(t, "github.issue_comment.created", ev.Type)
@@ -234,7 +234,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	assert.Equal(t, "11111111-2222-3333-4444-555555555555/"+projA.ID, ev.DedupKey)
 
 	// 6. IdentityMinter
-	minter := srv.githubSourceIdentityMinter()
+	minter := srv.GitHubSourceIdentityMinter()
 	cred, err := minter.Mint(ctx, targets[0], source.CredentialScope{
 		Permissions: map[string]string{"issues": "write", "metadata": "read"},
 	})
@@ -242,7 +242,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	assert.Equal(t, "ghs_seam_minted_token", cred.Token)
 
 	// 7. ProviderAction (github.comment)
-	action := srv.githubSourceCommentAction()
+	action := srv.GitHubSourceCommentAction()
 	assert.Equal(t, store.TriggerActionGitHubComment, action.Kind())
 	normPayload, err := action.Validate(ctx, source.ActionValidateRequest{
 		ProjectID: projA.ID,
@@ -266,7 +266,7 @@ func TestServerGitHubSourceSeams(t *testing.T) {
 	assert.Equal(t, int64(1), commentPosted.Load())
 
 	// 8. Presets
-	presets := srv.githubSourcePresets()
+	presets := srv.GitHubSourcePresets()
 	list := presets.List()
 	require.NotEmpty(t, list)
 	match, suggested, err := presets.Compile(list[0], map[string]any{"command": "review"})

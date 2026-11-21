@@ -29,19 +29,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// githubSourceWireVerifier returns GitHub's source.WireVerifier backed by the
+// GitHubSourceWireVerifier returns GitHub's source.WireVerifier backed by the
 // Server's configured AppID and clock.
-func (s *Server) githubSourceWireVerifier() source.WireVerifier {
+func (s *Server) GitHubSourceWireVerifier() source.WireVerifier {
 	return &triggithub.WireVerifier{
 		ExpectedAppID: s.githubAppConfiguredID(),
 		Now:           s.githubWebhookIngress.now,
 	}
 }
 
-// githubSourceInstallationResolver returns GitHub's source.InstallationResolver
+// GitHubSourceInstallationResolver returns GitHub's source.InstallationResolver
 // backed by Server's installation store lookup, candidate/primary routing, and
 // installation/installation_repositories lifecycle handlers.
-func (s *Server) githubSourceInstallationResolver() source.InstallationResolver {
+func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver {
 	return &triggithub.InstallationResolver{
 		LookupInstallation: func(ctx context.Context, installationID int64) (source.Installation, error) {
 			if s.store == nil {
@@ -112,9 +112,9 @@ func (s *Server) githubSourceInstallationResolver() source.InstallationResolver 
 	}
 }
 
-// githubSourceNormalizer returns GitHub's source.Normalizer wired to Server's
+// GitHubSourceNormalizer returns GitHub's source.Normalizer wired to Server's
 // App mention identity cache.
-func (s *Server) githubSourceNormalizer() source.Normalizer {
+func (s *Server) GitHubSourceNormalizer() source.Normalizer {
 	return &triggithub.EventNormalizer{
 		OptionsFn: func(ctx context.Context, d source.Delivery) triggithub.Options {
 			slug, aliases, _ := s.GitHubAppMentionIdentities(ctx)
@@ -127,9 +127,9 @@ func (s *Server) githubSourceNormalizer() source.Normalizer {
 	}
 }
 
-// githubSourceActorIdentity returns GitHub's source.ActorIdentity backed by
+// GitHubSourceActorIdentity returns GitHub's source.ActorIdentity backed by
 // Server's App bot login and configured AppID.
-func (s *Server) githubSourceActorIdentity() source.ActorIdentity {
+func (s *Server) GitHubSourceActorIdentity() source.ActorIdentity {
 	return &triggithub.AppActorIdentity{
 		Resolve: func(ctx context.Context) (string, int64) {
 			return s.GitHubAppBotLogin(ctx), s.githubAppConfiguredID()
@@ -137,10 +137,10 @@ func (s *Server) githubSourceActorIdentity() source.ActorIdentity {
 	}
 }
 
-// githubSourceIdentityMinter returns GitHub's source.IdentityMinter backed by
+// GitHubSourceIdentityMinter returns GitHub's source.IdentityMinter backed by
 // Server.MintGitHubAppTokenWithPermissions (with association authorization,
 // project permission limits, and in-memory token caching).
-func (s *Server) githubSourceIdentityMinter() source.IdentityMinter {
+func (s *Server) GitHubSourceIdentityMinter() source.IdentityMinter {
 	return &triggithub.TokenMinter{
 		MintFunc: func(ctx context.Context, t source.Target, scope source.CredentialScope) (source.Credential, error) {
 			if s.store == nil {
@@ -172,13 +172,13 @@ func (s *Server) githubSourceIdentityMinter() source.IdentityMinter {
 	}
 }
 
-// githubSourceCommentAction returns GitHub's source.ProviderAction for
+// GitHubSourceCommentAction returns GitHub's source.ProviderAction for
 // github.comment backed by githubCommentAction's validation, per-project rate
 // bucket (AllowGitHubComment), IdentityMinter credential minting, and
 // idempotent comment posting (PostGitHubCommentIdempotent).
-func (s *Server) githubSourceCommentAction() source.ProviderAction {
+func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 	commentAction := &githubCommentAction{srv: s}
-	minter := s.githubSourceIdentityMinter()
+	minter := s.GitHubSourceIdentityMinter()
 	return &triggithub.CommentAction{
 		DefaultMinter: minter,
 		ValidateFunc: func(ctx context.Context, req source.ActionValidateRequest) (string, error) {
@@ -248,9 +248,9 @@ func (s *Server) githubSourceCommentAction() source.ProviderAction {
 	}
 }
 
-// githubSourceReadiness returns GitHub's source.Readiness backed by Server's
+// GitHubSourceReadiness returns GitHub's source.Readiness backed by Server's
 // App identity cache and webhook configuration.
-func (s *Server) githubSourceReadiness() source.Readiness {
+func (s *Server) GitHubSourceReadiness() source.Readiness {
 	return &triggithub.ReadinessChecker{
 		Snapshot: func(ctx context.Context) (triggithub.ReadinessSnapshot, error) {
 			cfg, _, hasWebhookSecret := s.githubAppCredentialPresence(ctx)
@@ -276,7 +276,7 @@ func (s *Server) githubSourceReadiness() source.Readiness {
 	}
 }
 
-// githubSourcePresets returns GitHub's source.Presets catalog.
-func (s *Server) githubSourcePresets() source.Presets {
+// GitHubSourcePresets returns GitHub's source.Presets catalog.
+func (s *Server) GitHubSourcePresets() source.Presets {
 	return &triggithub.PresetCatalog{}
 }
