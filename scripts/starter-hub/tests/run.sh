@@ -1781,6 +1781,273 @@ EOF
     assert_eq "old-binary" "$(cat "${dest}")" "overridden destination remains untouched under sudo/root"
 }
 
+# --- check-install-perms.sh and gce-start-hub.sh install permissions (ptone/scion#7184) ---
+
+# perms_fake_root -- creates a clean fake root where every installed file,
+# sudoers-allowed path, and parent directory has valid permissions and is
+# owned by the current test user (passed as --expected-uid / --expected-gid).
+perms_fake_root() {
+    fresh_state
+    PERMS_ROOT="${STATE_DIR}/root"
+    PERMS_UID="$(id -u)"
+    PERMS_GID="$(id -g)"
+    mkdir -p "${PERMS_ROOT}/usr/local/bin" \
+        "${PERMS_ROOT}/usr/bin" \
+        "${PERMS_ROOT}/etc/systemd/system" \
+        "${PERMS_ROOT}/etc/sudoers.d"
+    chmod 0755 "${PERMS_ROOT}" \
+        "${PERMS_ROOT}/usr" \
+        "${PERMS_ROOT}/usr/local" \
+        "${PERMS_ROOT}/usr/local/bin" \
+        "${PERMS_ROOT}/usr/bin" \
+        "${PERMS_ROOT}/etc" \
+        "${PERMS_ROOT}/etc/systemd" \
+        "${PERMS_ROOT}/etc/systemd/system"
+    chmod 0750 "${PERMS_ROOT}/etc/sudoers.d"
+
+    printf '#!/bin/sh\n' > "${PERMS_ROOT}/usr/local/bin/scion"
+    chmod 0755 "${PERMS_ROOT}/usr/local/bin/scion"
+
+    printf '#!/bin/sh\n' > "${PERMS_ROOT}/usr/bin/install"
+    chmod 0755 "${PERMS_ROOT}/usr/bin/install"
+
+    printf '#!/bin/sh\n' > "${PERMS_ROOT}/usr/bin/systemctl"
+    chmod 0755 "${PERMS_ROOT}/usr/bin/systemctl"
+
+    printf '[Unit]\nDescription=Scion Hub\n' > "${PERMS_ROOT}/etc/systemd/system/scion-hub.service"
+    chmod 0644 "${PERMS_ROOT}/etc/systemd/system/scion-hub.service"
+
+    cat > "${PERMS_ROOT}/etc/sudoers.d/scion-rebuild-server" <<'EOF'
+# Scion rebuild-server maintenance task privileges.
+scion ALL=(root) NOPASSWD: /usr/bin/install -m 755 /home/scion/scion/scion.rebuild /usr/local/bin/scion
+scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart scion-hub
+scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart --no-block scion-hub
+EOF
+    chmod 0440 "${PERMS_ROOT}/etc/sudoers.d/scion-rebuild-server"
+}
+
+run_perms_check() {
+    OUT="$(bash "${STARTER_DIR}/check-install-perms.sh" \
+        --root "${PERMS_ROOT}" \
+        --expected-uid "${PERMS_UID}" \
+        --expected-gid "${PERMS_GID}" \
+        "$@" 2>&1)"
+    RC=$?
+}
+
+test_install_perms_clean_root_passes() {
+    perms_fake_root
+    run_perms_check --require-sudoers
+    assert_eq 0 "$RC" "clean fake root passes (${OUT})"
+    assert_contains "$OUT" "Install ownership and permissions verified" "prints verification message"
+}
+
+test_install_perms_rejects_wrong_owner_and_group() {
+    perms_fake_root
+    # Use a different expected UID to simulate files/dirs not owned by root.
+    local wrong_uid=$((PERMS_UID + 1))
+    OUT="$(bash "${STARTER_DIR}/check-install-perms.sh" \
+        --root "${PERMS_ROOT}" \
+        --expected-uid "${wrong_uid}" \
+        --expected-gid "${PERMS_GID}" \
+        --require-sudoers 2>&1)"
+    RC=$?
+    assert_eq 1 "$RC" "non-root owner fails"
+    assert_contains "$OUT" "/usr/local/bin/scion: owner uid is ${PERMS_UID}, expected ${wrong_uid}" "reports binary owner mismatch"
+    assert_contains "$OUT" "/etc/systemd/system/scion-hub.service: owner uid is ${PERMS_UID}, expected ${wrong_uid}" "reports unit owner mismatch"
+    assert_contains "$OUT" "/etc/sudoers.d/scion-rebuild-server: owner uid is ${PERMS_UID}, expected ${wrong_uid}" "reports sudoers owner mismatch"
+    assert_contains "$OUT" "/usr/local/bin: directory owner uid is ${PERMS_UID}, expected ${wrong_uid}" "reports parent dir owner mismatch"
+
+    # Wrong group on installed files.
+    local wrong_gid=$((PERMS_GID + 1))
+    OUT="$(bash "${STARTER_DIR}/check-install-perms.sh" \
+        --root "${PERMS_ROOT}" \
+        --expected-uid "${PERMS_UID}" \
+        --expected-gid "${wrong_gid}" \
+        --require-sudoers 2>&1)"
+    RC=$?
+    assert_eq 1 "$RC" "non-root group on installed files fails"
+    assert_contains "$OUT" "/usr/local/bin/scion: group gid is ${PERMS_GID}, expected ${wrong_gid}" "reports binary group mismatch"
+    assert_contains "$OUT" "/etc/systemd/system/scion-hub.service: group gid is ${PERMS_GID}, expected ${wrong_gid}" "reports unit group mismatch"
+    assert_contains "$OUT" "/etc/sudoers.d/scion-rebuild-server: group gid is ${PERMS_GID}, expected ${wrong_gid}" "reports sudoers group mismatch"
+}
+
+test_install_perms_rejects_writable_files_and_wrong_modes() {
+    # Binary group-writable (0775)
+    perms_fake_root
+    chmod 0775 "${PERMS_ROOT}/usr/local/bin/scion"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "group-writable scion binary fails"
+    assert_contains "$OUT" "/usr/local/bin/scion: mode is 0775, expected 0755" "reports group-writable binary"
+
+    # Binary world-writable (0757)
+    perms_fake_root
+    chmod 0757 "${PERMS_ROOT}/usr/local/bin/scion"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "world-writable scion binary fails"
+    assert_contains "$OUT" "/usr/local/bin/scion: mode is 0757, expected 0755" "reports world-writable binary"
+
+    # Systemd unit wrong mode (0664)
+    perms_fake_root
+    chmod 0664 "${PERMS_ROOT}/etc/systemd/system/scion-hub.service"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "group-writable systemd unit fails"
+    assert_contains "$OUT" "/etc/systemd/system/scion-hub.service: mode is 0664, expected 0644" "reports unit mode"
+
+    # Sudoers drop-in wrong mode (0644)
+    perms_fake_root
+    chmod 0644 "${PERMS_ROOT}/etc/sudoers.d/scion-rebuild-server"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "mode 0644 sudoers drop-in fails"
+    assert_contains "$OUT" "/etc/sudoers.d/scion-rebuild-server: mode is 0644, expected 0440" "reports sudoers mode"
+
+    # Sudoers-allowed command binary group-writable (/usr/bin/install)
+    perms_fake_root
+    chmod 0775 "${PERMS_ROOT}/usr/bin/install"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "group-writable /usr/bin/install fails"
+    assert_contains "$OUT" "/usr/bin/install: mode is 0775 (must not be group- or world-writable)" "reports writable install binary"
+
+    # Sudoers-allowed command binary world-writable (/usr/bin/systemctl)
+    perms_fake_root
+    chmod 0757 "${PERMS_ROOT}/usr/bin/systemctl"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "world-writable /usr/bin/systemctl fails"
+    assert_contains "$OUT" "/usr/bin/systemctl: mode is 0757 (must not be group- or world-writable)" "reports writable systemctl binary"
+}
+
+test_install_perms_rejects_writable_parent_dirs() {
+    local dir
+    for dir in /usr/local/bin /usr/local /usr /usr/bin /etc/systemd/system /etc/systemd /etc/sudoers.d /etc; do
+        perms_fake_root
+        chmod 0775 "${PERMS_ROOT}${dir}"
+        run_perms_check --require-sudoers
+        assert_eq 1 "$RC" "group-writable ${dir} fails"
+        assert_contains "$OUT" "${dir}: directory is group- or world-writable (mode 0775)" "reports group-writable ${dir}"
+    done
+
+    perms_fake_root
+    chmod 0757 "${PERMS_ROOT}/usr/local"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "world-writable /usr/local fails"
+    assert_contains "$OUT" "/usr/local: directory is group- or world-writable (mode 0757)" "reports world-writable /usr/local"
+}
+
+test_install_perms_symlinks_and_dropins() {
+    # Installed binary must be a regular file, not a symlink.
+    perms_fake_root
+    rm -f "${PERMS_ROOT}/usr/local/bin/scion"
+    ln -s /usr/bin/install "${PERMS_ROOT}/usr/local/bin/scion"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "symlinked /usr/local/bin/scion fails"
+    assert_contains "$OUT" "/usr/local/bin/scion: must be a regular file, not a symlink" "reports symlinked binary"
+
+    # Systemd unit must be a regular file, not a symlink.
+    perms_fake_root
+    rm -f "${PERMS_ROOT}/etc/systemd/system/scion-hub.service"
+    ln -s /etc/sudoers.d/scion-rebuild-server "${PERMS_ROOT}/etc/systemd/system/scion-hub.service"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "symlinked scion-hub.service fails"
+    assert_contains "$OUT" "/etc/systemd/system/scion-hub.service: must be a regular file, not a symlink" "reports symlinked unit"
+
+    # Sudoers command symlink pointing to safe target inside root passes.
+    perms_fake_root
+    mkdir -p "${PERMS_ROOT}/bin"
+    chmod 0755 "${PERMS_ROOT}/bin"
+    mv "${PERMS_ROOT}/usr/bin/systemctl" "${PERMS_ROOT}/bin/systemctl"
+    ln -s ../../bin/systemctl "${PERMS_ROOT}/usr/bin/systemctl"
+    run_perms_check --require-sudoers
+    assert_eq 0 "$RC" "safe symlinked /usr/bin/systemctl passes (${OUT})"
+
+    # Sudoers command symlink pointing to a writable directory fails.
+    chmod 0775 "${PERMS_ROOT}/bin"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "symlinked /usr/bin/systemctl into writable /bin fails"
+    assert_contains "$OUT" "/bin: directory is group- or world-writable" "reports writable symlink target dir"
+
+    # Systemd unit drop-in directory with a bad mode fails.
+    perms_fake_root
+    mkdir -p "${PERMS_ROOT}/etc/systemd/system/scion-hub.service.d"
+    chmod 0755 "${PERMS_ROOT}/etc/systemd/system/scion-hub.service.d"
+    printf '[Service]\n' > "${PERMS_ROOT}/etc/systemd/system/scion-hub.service.d/override.conf"
+    chmod 0664 "${PERMS_ROOT}/etc/systemd/system/scion-hub.service.d/override.conf"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "group-writable systemd drop-in fails"
+    assert_contains "$OUT" "/etc/systemd/system/scion-hub.service.d/override.conf: mode is 0664, expected 0644" "reports bad drop-in mode"
+}
+
+test_install_perms_require_sudoers_and_extra_rules() {
+    # Missing sudoers fails with --require-sudoers, passes without it.
+    perms_fake_root
+    rm -f "${PERMS_ROOT}/etc/sudoers.d/scion-rebuild-server"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "missing sudoers fails with --require-sudoers"
+    assert_contains "$OUT" "/etc/sudoers.d/scion-rebuild-server: does not exist" "reports missing sudoers"
+
+    run_perms_check
+    assert_eq 0 "$RC" "missing sudoers is allowed without --require-sudoers (${OUT})"
+
+    # Extra command path in sudoers drop-in is parsed and checked.
+    perms_fake_root
+    mkdir -p "${PERMS_ROOT}/opt/custom"
+    chmod 0775 "${PERMS_ROOT}/opt/custom"
+    printf '#!/bin/sh\n' > "${PERMS_ROOT}/opt/custom/helper"
+    chmod 0755 "${PERMS_ROOT}/opt/custom/helper"
+    chmod 0644 "${PERMS_ROOT}/etc/sudoers.d/scion-rebuild-server"
+    printf 'scion ALL=(root) NOPASSWD: /opt/custom/helper\n' >> "${PERMS_ROOT}/etc/sudoers.d/scion-rebuild-server"
+    chmod 0440 "${PERMS_ROOT}/etc/sudoers.d/scion-rebuild-server"
+    run_perms_check --require-sudoers
+    assert_eq 1 "$RC" "extra sudoers command in writable parent dir fails"
+    assert_contains "$OUT" "/opt/custom: directory is group- or world-writable" "reports writable parent of extra sudoers path"
+}
+
+test_install_perms_help_hides_test_flags() {
+    OUT="$(bash "${STARTER_DIR}/check-install-perms.sh" --help 2>&1)"
+    RC=$?
+    assert_eq 0 "$RC" "--help exits 0"
+    assert_contains "$OUT" "--require-sudoers" "help documents --require-sudoers"
+    assert_not_contains "$OUT" "--root" "help hides --root"
+    assert_not_contains "$OUT" "--expected-uid" "help hides --expected-uid"
+}
+
+test_start_hub_uses_install_and_verifies_perms() {
+    local ssh
+    # Full deploy
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "gce-start-hub.sh --full succeeds"
+    if bash -n "${STUB_SSH_LOG}"; then pass; else fail "full remote SSH script is valid bash syntax"; fi
+    ssh="$(cat "${STUB_SSH_LOG}")"
+    assert_contains "$ssh" "sudo install -o root -g root -m 0755 /home/scion/scion/scion /usr/local/bin/scion" "binary installed root:root 0755"
+    assert_not_contains "$ssh" "sudo mv /home/scion/scion/scion /usr/local/bin/scion" "binary not installed with mv"
+    assert_contains "$ssh" "sudo install -o root -g root -m 0644 /tmp/scion-hub.service /etc/systemd/system/scion-hub.service" "systemd unit installed root:root 0644"
+    assert_not_contains "$ssh" "sudo mv /tmp/scion-hub.service /etc/systemd/system/scion-hub.service" "systemd unit not installed with mv"
+    assert_contains "$ssh" "sudo install -o root -g root -m 0440 /tmp/scion-rebuild-server \"\$SUDOERS_RULE\"" "sudoers installed root:root 0440"
+    assert_contains "$ssh" "Verifying installed binary, unit, and sudoers permissions..." "runs permission check"
+    assert_contains "$ssh" "CHECK_PERMS_ARGS+=(--require-sudoers)" "full mode requires sudoers"
+
+    # Verify the permission check runs before systemctl enable/start.
+    local check_line start_line
+    check_line="$(grep -n "Verifying installed binary, unit, and sudoers permissions..." "${STUB_SSH_LOG}" | head -n 1 | cut -d: -f1)"
+    start_line="$(grep -n "sudo systemctl enable scion-hub" "${STUB_SSH_LOG}" | head -n 1 | cut -d: -f1)"
+    if [[ -n "$check_line" && -n "$start_line" && "$check_line" -lt "$start_line" ]]; then
+        pass
+    else
+        fail "permission check (line ${check_line}) must run before systemctl enable (line ${start_line})"
+    fi
+
+    # Fast deploy also installs binary with install -o root -g root -m 0755 and runs the check.
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh
+    assert_eq 0 "$RC" "gce-start-hub.sh fast deploy succeeds"
+    if bash -n "${STUB_SSH_LOG}"; then pass; else fail "fast remote SSH script is valid bash syntax"; fi
+    ssh="$(cat "${STUB_SSH_LOG}")"
+    assert_contains "$ssh" "sudo install -o root -g root -m 0755 /home/scion/scion/scion /usr/local/bin/scion" "fast deploy installs binary root:root 0755"
+    assert_contains "$ssh" "Verifying installed binary, unit, and sudoers permissions..." "fast deploy runs permission check"
+}
+
 mapfile -t TESTS < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
 for t in "${TESTS[@]}"; do
     CURRENT="$t"

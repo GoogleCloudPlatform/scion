@@ -428,14 +428,20 @@ FULL_POST_INSTALL_COMMANDS=""
 if $FULL_DEPLOY; then
     # shellcheck disable=SC2016 # remote script: $vars must expand on the remote host, not locally
     FULL_POST_INSTALL_COMMANDS='
-    # Update systemd unit file if changed
+    # Update systemd unit file if changed (or if ownership/mode drifted from root:root 0644)
     echo ""
     echo "==> Installing infrastructure config..."
     if ! diff -q /tmp/scion-hub.service /etc/systemd/system/scion-hub.service >/dev/null 2>&1; then
-        sudo mv /tmp/scion-hub.service /etc/systemd/system/scion-hub.service
+        sudo install -o root -g root -m 0644 /tmp/scion-hub.service /etc/systemd/system/scion-hub.service
+        rm -f /tmp/scion-hub.service
         echo "  -> Systemd unit file updated, reloading daemon..."
         sudo systemctl daemon-reload
+    elif [ "$(sudo stat -c "%u:%g:%a" /etc/systemd/system/scion-hub.service 2>/dev/null || true)" != "0:0:644" ]; then
+        sudo install -o root -g root -m 0644 /tmp/scion-hub.service /etc/systemd/system/scion-hub.service
+        rm -f /tmp/scion-hub.service
+        echo "  -> Systemd unit file ownership/permissions repaired (root:root 0644)"
     else
+        rm -f /tmp/scion-hub.service
         echo "  -> Systemd unit file unchanged"
     fi
 
@@ -465,10 +471,14 @@ scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh ""
 scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart scion-hub
 scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart --no-block scion-hub
 SUDOERS_EOF
-    if ! diff -q /tmp/scion-rebuild-server "$SUDOERS_RULE" >/dev/null 2>&1; then
-        sudo install -m 440 -o root -g root /tmp/scion-rebuild-server "$SUDOERS_RULE"
+    if ! sudo diff -q /tmp/scion-rebuild-server "$SUDOERS_RULE" >/dev/null 2>&1; then
+        sudo install -o root -g root -m 0440 /tmp/scion-rebuild-server "$SUDOERS_RULE"
         rm -f /tmp/scion-rebuild-server
         echo "  -> Sudoers rules installed (scion user can install binary and restart service)"
+    elif [ "$(sudo stat -c "%u:%g:%a" "$SUDOERS_RULE" 2>/dev/null || true)" != "0:0:440" ]; then
+        sudo install -o root -g root -m 0440 /tmp/scion-rebuild-server "$SUDOERS_RULE"
+        rm -f /tmp/scion-rebuild-server
+        echo "  -> Sudoers rules ownership/permissions repaired (root:root 0440)"
     else
         rm -f /tmp/scion-rebuild-server
         echo "  -> Sudoers rules unchanged"
@@ -518,6 +528,8 @@ SUDOERS_EOF
 fi
 
 step "Remote: pull, build, restart..."
+
+CHECK_PERMS_SCRIPT="$(cat "${SCRIPT_DIR}/check-install-perms.sh")"
 
 # shellcheck disable=SC2016 # remote script: $vars must expand on the remote host, not locally
 gcloud compute ssh "${SSH_TARGET}" --zone="${ZONE}" --command '
@@ -583,12 +595,25 @@ gcloud compute ssh "${SSH_TARGET}" --zone="${ZONE}" --command '
         echo "  -> Database deleted"
     fi
 
-    # Install binary
+    # Install binary as root:root 0755 (not writable by the scion service user)
     echo "  -> Installing binary..."
-    sudo mv /home/scion/scion/scion /usr/local/bin/scion
-    sudo chmod +x /usr/local/bin/scion
+    sudo install -o root -g root -m 0755 /home/scion/scion/scion /usr/local/bin/scion
+    sudo rm -f /home/scion/scion/scion
 
     '"${FULL_POST_INSTALL_COMMANDS}"'
+
+    # Verify installed binary, systemd unit, sudoers drop-in, and every path
+    # allowed by the sudoers rules (plus all parent directories) before
+    # starting the service. Refuses to continue on any failure.
+    echo ""
+    echo "==> Verifying installed binary, unit, and sudoers permissions..."
+    CHECK_PERMS_ARGS=()
+    if [ "$FULL_DEPLOY" = "true" ]; then
+        CHECK_PERMS_ARGS+=(--require-sudoers)
+    fi
+    sudo bash -s -- ${CHECK_PERMS_ARGS[@]+"${CHECK_PERMS_ARGS[@]}"} <<'\''SCION_CHECK_INSTALL_PERMS_EOF'\''
+'"${CHECK_PERMS_SCRIPT}"'
+SCION_CHECK_INSTALL_PERMS_EOF
 
     # Start service
     echo ""
