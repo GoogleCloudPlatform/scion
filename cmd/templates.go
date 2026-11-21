@@ -1976,4 +1976,22 @@ func init() {
 	importAlias.Flags().Bool("dry-run", false, "Preview import without writing files")
 	importAlias.Flags().Bool("all", false, "Import all discovered agents")
 	templateCmd.AddCommand(importAlias)
+
+	updateAlias := &cobra.Command{
+		Use:   "update [name]",
+		Short: "Refresh a Hub template from its source URL",
+		Args:  cobra.MaximumNArgs(1),
+		RunE:  runTemplatesUpdate,
+	}
+	registerTemplatesUpdateFlags(updateAlias)
+	templateCmd.AddCommand(updateAlias)
+
+	importURLAlias := &cobra.Command{
+		Use:   "import-url <github-url>",
+		Short: "Import templates from a GitHub URL through the Hub",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runTemplatesImportURL,
+	}
+	registerTemplatesImportURLFlags(importURLAlias)
+	templateCmd.AddCommand(importURLAlias)
 }
