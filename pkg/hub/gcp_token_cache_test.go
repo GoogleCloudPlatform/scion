@@ -361,6 +361,21 @@ func TestCachedGCPTokenGenerator_IDTokenConcurrentSingleflightAndLeaderCancel(t 
 	}
 }
 
+func TestCachedGCPTokenGenerator_IDTokenNilGuard(t *testing.T) {
+	inner := &countingTokenGenerator{
+		email: "hub@project.iam.gserviceaccount.com",
+		idTokenFn: func(_ context.Context, _, _ string) (*GCPIDToken, error) {
+			return nil, nil
+		},
+	}
+	cached := NewCachedGCPTokenGenerator(inner)
+
+	tok, err := cached.GenerateIDToken(context.Background(), "sa@p.iam.gserviceaccount.com", "https://aud")
+	if err == nil {
+		t.Fatalf("expected error for nil token, got tok=%v", tok)
+	}
+}
+
 func TestCachedGCPTokenGenerator_Passthrough(t *testing.T) {
 	inner := &countingTokenGenerator{email: "hub@project.iam.gserviceaccount.com"}
 	cached := NewCachedGCPTokenGenerator(inner)
