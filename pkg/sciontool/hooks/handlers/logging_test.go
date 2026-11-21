@@ -80,7 +80,25 @@ func TestLoggingHandler_Handle(t *testing.T) {
 		{
 			name:        "ToolEnd",
 			event:       &hooks.Event{Name: hooks.EventToolEnd, Data: hooks.EventData{ToolName: "Read"}},
-			wantContain: "Tool Read completed",
+			wantContain: "[thinking] Tool Read completed",
+		},
+		{
+			name: "ToolEndSubagent",
+			event: &hooks.Event{
+				Name:    hooks.EventToolEnd,
+				Dialect: "claude",
+				Data: hooks.EventData{
+					ToolName:  "Read",
+					SessionID: "parent-1",
+					Raw:       map[string]interface{}{"agent_id": "child-1"},
+				},
+			},
+			wantContain: "[working] Tool Read completed",
+		},
+		{
+			name:        "AgentEnd",
+			event:       &hooks.Event{Name: hooks.EventAgentEnd},
+			wantContain: "[working] Agent turn completed",
 		},
 		{
 			name:        "PromptSubmit",

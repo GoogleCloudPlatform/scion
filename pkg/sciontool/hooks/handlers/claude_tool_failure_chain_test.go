@@ -143,10 +143,10 @@ func TestClaudeToolFailureHandlerChain_WaitClearing(t *testing.T) {
 		require.Equal(t, "waiting_for_input", info["activity"])
 		require.Equal(t, activitySourceNotification, info[activitySourceKey])
 
-		assert.Equal(t, []string{"working"}, c.send(t, chainPostToolUseFailure),
+		assert.Equal(t, []string{"thinking"}, c.send(t, chainPostToolUseFailure),
 			"hub must leave waiting_for_input after the failed tool call")
 		info = readAgentInfoMap(t, c.status.StatusPath)
-		assert.Equal(t, "working", info["activity"], "failed tool call must leave a notification-set waiting_for_input")
+		assert.Equal(t, "thinking", info["activity"], "failed tool call must leave a notification-set waiting_for_input")
 		assert.NotContains(t, info, activitySourceKey, "marker must be dropped with the activity it described")
 	})
 

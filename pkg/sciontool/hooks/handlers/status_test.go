@@ -111,8 +111,20 @@ func TestStatusHandler_Handle(t *testing.T) {
 			wantActivity: "executing",
 		},
 		{
-			name:         "ToolEnd sets working",
+			name:         "ToolEnd sets thinking",
 			event:        &hooks.Event{Name: hooks.EventToolEnd},
+			wantActivity: "thinking",
+		},
+		{
+			name: "ToolEnd from sub-agent sets working",
+			event: &hooks.Event{
+				Name:    hooks.EventToolEnd,
+				Dialect: "claude",
+				Data: hooks.EventData{
+					SessionID: "parent-1",
+					Raw:       map[string]interface{}{"agent_id": "child-1"},
+				},
+			},
 			wantActivity: "working",
 		},
 		{
@@ -157,12 +169,12 @@ func TestStatusHandler_ToolStartSetsToolName(t *testing.T) {
 	assert.Equal(t, "executing", info.Activity)
 	assert.Equal(t, "Bash", info.ToolName)
 
-	// Tool-end should clear toolName
+	// Tool-end should clear toolName and transition to thinking
 	err = h.Handle(&hooks.Event{Name: hooks.EventToolEnd})
 	require.NoError(t, err)
 
 	info = readAgentInfo(t, statusPath)
-	assert.Equal(t, "working", info.Activity)
+	assert.Equal(t, "thinking", info.Activity)
 	assert.Equal(t, "", info.ToolName)
 }
 
@@ -961,7 +973,7 @@ func TestStatusHandler_ReadinessEventsReplaceInitializing(t *testing.T) {
 		hooks.EventModelStart:       "thinking",
 		hooks.EventModelEnd:         "working",
 		hooks.EventToolStart:        "executing",
-		hooks.EventToolEnd:          "working",
+		hooks.EventToolEnd:          "thinking",
 		hooks.EventAgentEnd:         "working",
 		hooks.EventNotification:     "waiting_for_input",
 		hooks.EventResponseComplete: "completed",

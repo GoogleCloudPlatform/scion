@@ -1120,7 +1120,13 @@ func eventToPhaseActivity(event *hooks.Event) *eventResult {
 	case hooks.EventToolStart:
 		return &eventResult{activity: state.ActivityExecuting}
 
-	case hooks.EventToolEnd, hooks.EventAgentEnd:
+	case hooks.EventToolEnd:
+		if isSubagentEvent(event) {
+			return &eventResult{activity: state.ActivityWorking}
+		}
+		return &eventResult{activity: state.ActivityThinking}
+
+	case hooks.EventAgentEnd:
 		return &eventResult{activity: state.ActivityWorking}
 
 	case hooks.EventResponseComplete:

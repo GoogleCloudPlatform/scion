@@ -285,9 +285,9 @@ func TestParentWaitOwners_RestoredNotificationClearsAsBefore(t *testing.T) {
 	parentHeldStep(t, sh, hh, sent, bgSubagentStop(t, parentHeldSubA))
 
 	got, info := parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "PostToolUse", "Bash"))
-	assert.Equal(t, "working", info["activity"])
+	assert.Equal(t, "thinking", info["activity"])
 	assert.NotContains(t, info, activitySourceKey)
-	assert.Equal(t, []string{parentHeldWorking}, got)
+	assert.Equal(t, []string{parentHeldThinking}, got)
 }
 
 // Edge 3: the parent's Stop with background_tasks present and empty releases

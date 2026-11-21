@@ -105,16 +105,16 @@ func handleToolEndBounded(t *testing.T, handler *HubHandler, release func()) {
 	}
 }
 
-// assertSingleWorking asserts the handler sent exactly one status update,
-// "working": the result for a missing agent-info.json on tool-end.
-func assertSingleWorking(t *testing.T, rec *statusRecorder) {
+// assertSingleThinking asserts the handler sent exactly one status update,
+// "thinking": the result for a missing agent-info.json on tool-end.
+func assertSingleThinking(t *testing.T, rec *statusRecorder) {
 	t.Helper()
 	statuses, other := rec.snapshot()
 	if other != 0 {
 		t.Errorf("unexpected non-status hub requests: %d", other)
 	}
-	if len(statuses) != 1 || statuses[0] != "working" {
-		t.Fatalf("status updates sent to hub = %q, want exactly [\"working\"] (same as a missing agent-info.json)", statuses)
+	if len(statuses) != 1 || statuses[0] != "thinking" {
+		t.Fatalf("status updates sent to hub = %q, want exactly [\"thinking\"] (same as a missing agent-info.json)", statuses)
 	}
 }
 
@@ -125,7 +125,7 @@ func TestHubHandler_LocalActivityFIFOLeafTreatedAsMissing(t *testing.T) {
 	t.Run("missing", func(t *testing.T) {
 		handler, rec, _ := newLeafTestHandler(t)
 		handleToolEndBounded(t, handler, nil)
-		assertSingleWorking(t, rec)
+		assertSingleThinking(t, rec)
 	})
 
 	t.Run("fifo", func(t *testing.T) {
@@ -151,13 +151,13 @@ func TestHubHandler_LocalActivityFIFOLeafTreatedAsMissing(t *testing.T) {
 			_ = syscall.Close(fd)
 		}
 		handleToolEndBounded(t, handler, release)
-		assertSingleWorking(t, rec)
+		assertSingleThinking(t, rec)
 	})
 }
 
 // An agent-info.json with a second hardlink is refused even though it holds
 // a sticky activity: the handler behaves as for a missing file and sends
-// "working". The single-link control proves the same content is sticky
+// "thinking". The single-link control proves the same content is sticky
 // when read.
 func TestHubHandler_LocalActivityHardlinkedLeafRefused(t *testing.T) {
 	sticky := []byte(`{"activity":"` + stickyActivity + `"}`)
@@ -190,6 +190,6 @@ func TestHubHandler_LocalActivityHardlinkedLeafRefused(t *testing.T) {
 		}
 
 		handleToolEndBounded(t, handler, nil)
-		assertSingleWorking(t, rec)
+		assertSingleThinking(t, rec)
 	})
 }

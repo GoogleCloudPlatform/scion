@@ -353,8 +353,8 @@ func TestParentHeld_SubagentEndReleasesOnlyItsOwn(t *testing.T) {
 	assert.Equal(t, []string{parentHeldWorking}, got)
 
 	got, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "PostToolUse", "Agent"))
-	assert.Equal(t, "working", info["activity"])
-	assert.Equal(t, []string{parentHeldWorking}, got)
+	assert.Equal(t, "thinking", info["activity"])
+	assert.Equal(t, []string{parentHeldThinking}, got)
 }
 
 // With nothing held, SubagentStop writes nothing and sends nothing.
@@ -540,7 +540,7 @@ func TestParentHeld_CapturedClaudeSubagentReplay(t *testing.T) {
 			{"executing", parentHeldExecuting}, // sub-agent Bash tool-start
 			{"working", parentHeldWorking},     // sub-agent Bash tool-end
 			{"working", ""},                    // SubagentStop: no change
-			{"working", parentHeldWorking},     // parent Agent tool-end
+			{"thinking", parentHeldThinking},   // parent Agent tool-end
 			{"working", parentHeldWorking},     // parent Stop
 		}
 		for i, e := range turn {
