@@ -62,11 +62,25 @@ func openatNoIntr(dirfd int, name string, flags int, mode uint32) (int, error) {
 	}
 }
 
-// OpenAt opens the slash-separated relative path name under dir using
-// kernel-enforced openat flags. Intermediate directory components are walked
-// with O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC and the leaf is opened with
-// flags|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC.
-func OpenAt(dir *os.Root, name string, flags int, perm uint32) (*os.File, error) {
+func mkdiratNoIntr(dirfd int, name string, mode uint32) error {
+	for {
+		err := unix.Mkdirat(dirfd, name, mode)
+		if err != unix.EINTR {
+			return err
+		}
+	}
+}
+
+func unlinkatNoIntr(dirfd int, name string, flags int) error {
+	for {
+		err := unix.Unlinkat(dirfd, name, flags)
+		if err != unix.EINTR {
+			return err
+		}
+	}
+}
+
+func validateRelPath(name string) ([]string, error) {
 	if name == "" || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.ContainsRune(name, 0) {
 		return nil, fmt.Errorf("%w: invalid path", ErrRefused)
 	}
@@ -76,22 +90,46 @@ func OpenAt(dir *os.Root, name string, flags int, perm uint32) (*os.File, error)
 			return nil, fmt.Errorf("%w: invalid path", ErrRefused)
 		}
 	}
+	return parts, nil
+}
 
+func validateSingleComponent(name string) error {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\x00") {
+		return fmt.Errorf("%w: invalid path", ErrRefused)
+	}
+	return nil
+}
+
+func withRootFD(dir *os.Root, fn func(rootFD int)) error {
 	rootDir, err := dir.Open(".")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = rootDir.Close() }()
 
 	rawConn, err := rootDir.SyscallConn()
+	if err != nil {
+		return err
+	}
+	return rawConn.Control(func(rootFD uintptr) {
+		fn(int(rootFD))
+	})
+}
+
+// OpenAt opens the slash-separated relative path name under dir using
+// kernel-enforced openat flags. Intermediate directory components are walked
+// with O_DIRECTORY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC and the leaf is opened with
+// flags|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC.
+func OpenAt(dir *os.Root, name string, flags int, perm uint32) (*os.File, error) {
+	parts, err := validateRelPath(name)
 	if err != nil {
 		return nil, err
 	}
 
 	leafFD := -1
 	var openErr error
-	ctrlErr := rawConn.Control(func(rootFD uintptr) {
-		curFD := int(rootFD)
+	ctrlErr := withRootFD(dir, func(rootFD int) {
+		curFD := rootFD
 		ownedFD := -1
 		defer func() {
 			if ownedFD >= 0 {
@@ -162,8 +200,9 @@ func OpenRegularForRead(dir *os.Root, name string, expected fs.FileInfo) (*os.Fi
 }
 
 // OpenFileForWrite opens name under dir for writing without truncating, without
-// blocking on special files, and without following any symlink component. When
-// exists is false, O_CREAT|O_EXCL ensures an existing entry is refused.
+// blocking on special files, and without following any symlink component, then
+// verifies that the opened descriptor refers to a regular file. When exists is
+// false, O_CREAT|O_EXCL ensures an existing entry is refused.
 func OpenFileForWrite(dir *os.Root, name string, perm uint32, exists bool) (*os.File, error) {
 	if hook := beforeOpenHook.Load(); hook != nil {
 		(*hook)(name)
@@ -180,6 +219,15 @@ func OpenFileForWrite(dir *os.Root, name string, perm uint32, exists bool) (*os.
 		default:
 			return nil, err
 		}
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: target is not a regular file", ErrRefused)
 	}
 	return f, nil
 }
@@ -203,4 +251,149 @@ func OpenDir(dir *os.Root, name string) (*os.File, error) {
 		}
 	}
 	return f, nil
+}
+
+// MkdirAll creates each missing directory component of the slash-separated
+// relative path name under dir without following any symlink component, and
+// returns an open descriptor pinned to the leaf directory.
+func MkdirAll(dir *os.Root, name string, perm uint32) (*os.File, error) {
+	parts, err := validateRelPath(name)
+	if err != nil {
+		return nil, err
+	}
+	if hook := beforeOpenHook.Load(); hook != nil {
+		(*hook)(name)
+	}
+
+	leafFD := -1
+	var openErr error
+	openOp := "openat"
+	ctrlErr := withRootFD(dir, func(rootFD int) {
+		curFD := rootFD
+		ownedFD := -1
+		defer func() {
+			if ownedFD >= 0 {
+				_ = unix.Close(ownedFD)
+			}
+		}()
+
+		const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+		for _, comp := range parts {
+			nextFD, err := openatNoIntr(curFD, comp, dirFlags, 0)
+			if err == unix.ENOENT {
+				if merr := mkdiratNoIntr(curFD, comp, perm); merr != nil && merr != unix.EEXIST {
+					openOp = "mkdirat"
+					openErr = merr
+					return
+				}
+				nextFD, err = openatNoIntr(curFD, comp, dirFlags, 0)
+			}
+			if err != nil {
+				openOp = "openat"
+				openErr = err
+				return
+			}
+			if ownedFD >= 0 {
+				_ = unix.Close(ownedFD)
+			}
+			curFD = nextFD
+			ownedFD = nextFD
+		}
+		leafFD = ownedFD
+		ownedFD = -1
+	})
+	if ctrlErr != nil {
+		if leafFD >= 0 {
+			_ = unix.Close(leafFD)
+		}
+		return nil, ctrlErr
+	}
+	if openErr != nil {
+		switch {
+		case errors.Is(openErr, unix.ELOOP), errors.Is(openErr, unix.ENOTDIR), errors.Is(openErr, unix.ENXIO), errors.Is(openErr, unix.EOPNOTSUPP):
+			return nil, fmt.Errorf("%w: target is not a directory", ErrRefused)
+		default:
+			return nil, &fs.PathError{Op: openOp, Path: name, Err: openErr}
+		}
+	}
+	return os.NewFile(uintptr(leafFD), name), nil
+}
+
+// OpenFileForWriteInDir opens a single path component name directly under an
+// already-pinned directory file descriptor dir for writing without truncating,
+// without blocking on special files, and without following symlinks, then
+// verifies that the opened descriptor refers to a regular file.
+func OpenFileForWriteInDir(dir *os.File, name string, perm uint32, exists bool) (*os.File, error) {
+	if err := validateSingleComponent(name); err != nil {
+		return nil, err
+	}
+	if hook := beforeOpenHook.Load(); hook != nil {
+		(*hook)(name)
+	}
+	rawConn, err := dir.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	flags := unix.O_WRONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
+	if !exists {
+		flags |= unix.O_CREAT | unix.O_EXCL
+	}
+
+	leafFD := -1
+	var openErr error
+	ctrlErr := rawConn.Control(func(dirFD uintptr) {
+		fd, err := openatNoIntr(int(dirFD), name, flags, perm)
+		if err != nil {
+			openErr = err
+			return
+		}
+		leafFD = fd
+	})
+	if ctrlErr != nil {
+		if leafFD >= 0 {
+			_ = unix.Close(leafFD)
+		}
+		return nil, ctrlErr
+	}
+	if openErr != nil {
+		switch {
+		case errors.Is(openErr, unix.ENXIO), errors.Is(openErr, unix.ELOOP), errors.Is(openErr, unix.EOPNOTSUPP), errors.Is(openErr, unix.ENOTDIR), errors.Is(openErr, unix.EISDIR):
+			return nil, fmt.Errorf("%w: target is not a regular file", ErrRefused)
+		default:
+			return nil, &fs.PathError{Op: "openat", Path: name, Err: openErr}
+		}
+	}
+	f := os.NewFile(uintptr(leafFD), name)
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: target is not a regular file", ErrRefused)
+	}
+	return f, nil
+}
+
+// UnlinkInDir unlinks a single path component name directly under an
+// already-pinned directory file descriptor dir via unlinkat(2).
+func UnlinkInDir(dir *os.File, name string) error {
+	if err := validateSingleComponent(name); err != nil {
+		return err
+	}
+	rawConn, err := dir.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var unlinkErr error
+	if ctrlErr := rawConn.Control(func(dirFD uintptr) {
+		unlinkErr = unlinkatNoIntr(int(dirFD), name, 0)
+	}); ctrlErr != nil {
+		return ctrlErr
+	}
+	if unlinkErr != nil {
+		return &fs.PathError{Op: "unlinkat", Path: name, Err: unlinkErr}
+	}
+	return nil
 }

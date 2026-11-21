@@ -50,3 +50,18 @@ func OpenFileForWrite(dir *os.Root, name string, perm uint32, exists bool) (*os.
 func OpenDir(dir *os.Root, name string) (*os.File, error) {
 	return nil, fmt.Errorf("rootopen: open dir %s: %w on this platform", name, errors.ErrUnsupported)
 }
+
+// MkdirAll fails closed on platforms without openat(2) support.
+func MkdirAll(dir *os.Root, name string, perm uint32) (*os.File, error) {
+	return nil, fmt.Errorf("rootopen: mkdir %s: %w on this platform", name, errors.ErrUnsupported)
+}
+
+// OpenFileForWriteInDir fails closed on platforms without openat(2) support.
+func OpenFileForWriteInDir(dir *os.File, name string, perm uint32, exists bool) (*os.File, error) {
+	return nil, fmt.Errorf("rootopen: open %s for write: %w on this platform", name, errors.ErrUnsupported)
+}
+
+// UnlinkInDir fails closed on platforms without unlinkat(2) support.
+func UnlinkInDir(dir *os.File, name string) error {
+	return fmt.Errorf("rootopen: unlink %s: %w on this platform", name, errors.ErrUnsupported)
+}
