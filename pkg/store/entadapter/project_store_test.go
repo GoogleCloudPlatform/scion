@@ -265,6 +265,66 @@ func TestProjectOwnerID_UpdateProjectNilReturnsInvalidInput(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
+// TestProject_UpdateProjectGitHubAppStatus pins G3 S7 / G1 S1 / G1 S4:
+// UpdateProjectGitHubAppStatus writes only github_app_status and leaves every
+// other field untouched so a concurrent admin unbind or remote change is never
+// reverted by a status writer holding a stale project snapshot.
+func TestProject_UpdateProjectGitHubAppStatus(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	instID := int64(4242)
+	p := &store.Project{
+		ID:                   uuid.NewString(),
+		Name:                 "Status Narrow Update",
+		Slug:                 "status-narrow-update",
+		GitRemote:            "https://github.com/acme/widgets",
+		GitHubInstallationID: &instID,
+		Annotations:          map[string]string{"k": "v1"},
+	}
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	// Simulate a concurrent admin unbind and remote update after another caller
+	// already took a snapshot of p.
+	concurrent, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	concurrent.GitHubInstallationID = nil
+	concurrent.GitRemote = "https://github.com/acme/renamed"
+	concurrent.Annotations = map[string]string{"k": "v2"}
+	require.NoError(t, ps.UpdateProject(ctx, concurrent))
+
+	// Now write only GitHubAppStatus using the narrow store method.
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	status := &store.GitHubAppProjectStatus{
+		State:        store.GitHubAppStateError,
+		ErrorCode:    "association_unauthorized",
+		ErrorMessage: "fixed content-free message",
+		LastChecked:  now,
+		LastError:    &now,
+	}
+	require.NoError(t, ps.UpdateProjectGitHubAppStatus(ctx, p.ID, status))
+
+	got, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.GitHubAppStatus)
+	assert.Equal(t, store.GitHubAppStateError, got.GitHubAppStatus.State)
+	assert.Equal(t, "association_unauthorized", got.GitHubAppStatus.ErrorCode)
+	assert.Equal(t, "fixed content-free message", got.GitHubAppStatus.ErrorMessage)
+	assert.Nil(t, got.GitHubInstallationID, "narrow status write must not revert concurrent admin unbind")
+	assert.Equal(t, "https://github.com/acme/renamed", got.GitRemote, "narrow status write must not revert concurrent remote update")
+	assert.Equal(t, map[string]string{"k": "v2"}, got.Annotations, "narrow status write must not revert concurrent annotations")
+
+	// Passing nil clears github_app_status without touching other columns.
+	require.NoError(t, ps.UpdateProjectGitHubAppStatus(ctx, p.ID, nil))
+	got, err = ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.GitHubAppStatus)
+	assert.Equal(t, "https://github.com/acme/renamed", got.GitRemote)
+
+	// Missing project returns store.ErrNotFound.
+	assert.ErrorIs(t, ps.UpdateProjectGitHubAppStatus(ctx, uuid.NewString(), status), store.ErrNotFound)
+}
+
 func TestProject_SharedDirsRoundTrip(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()

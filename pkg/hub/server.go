@@ -2826,6 +2826,9 @@ type Server struct {
 	// githubCommentLimiter bounds outbound GitHub App comments per project
 	// at 1/s, burst 5 (github_trigger_client_support.go).
 	githubCommentLimiter githubCommentRateLimiter
+	// unmatchedCommandLimiter bounds unmatched-command guidance replies to
+	// 1/min per (project, subject) (action_github_comment.go).
+	unmatchedCommandLimiter unmatchedCommandRateLimiter
 
 	// Shared HTTP client for federation proxy calls (no redirect following).
 	federationClient *http.Client

@@ -112,7 +112,6 @@ var pendingNonRouteRows = map[string]string{
 	"secret.deliver":          "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"env_var.deliver":         "decision rules exist; no production path requests it yet (ptone/scion#4171)",
 	"skill_injection.deliver": "decision rules exist; no production path requests it yet (ptone/scion#4171)",
-	"github_trigger.comment":  "held by built-in project roles; enforced by github.comment trigger action once Stage 1 trigger registry lands (ptone/scion#8090)",
 }
 
 // parseNonTestGoFiles parses the non-test Go files in dir.
@@ -182,6 +181,10 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 	"gcp_service_account.use": {
 		{"handlers_gcp_identity_mint_authority.go", "Server.authorizeAgentGCPMint"},
 		{"authz_resource_parent_ceiling.go", "AuthzService.decideStoredAgentServiceAccountUse"},
+	},
+	"github_trigger.comment": {
+		{"trigger_authz.go", "Server.authorizeTriggerGitHubCommentAuthoring"},
+		{"action_github_comment.go", "Server.authorizeGitHubCommentFire"},
 	},
 }
 

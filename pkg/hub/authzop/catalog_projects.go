@@ -1191,7 +1191,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.create",
 		Domain:      "trigger",
-		Description: "Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id=\"\") require hub.github_triggers and an authorized GitHub App association on the project; both pass the action's target checks",
+		Description: "Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id=\"\") require hub.github_triggers and an authorized GitHub App association on the project; a github.comment action requires github_trigger.comment (users only in Stage 3; agents cannot author github.comment triggers because github_trigger.comment has no agent scope); all actions pass their target checks",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers", Method: "POST"},
 		},
@@ -1209,12 +1209,12 @@ var projectOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 		DelegationDescription: "Authoring a trigger records the author's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) on the trigger row. " +
-			"A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling and creates agents bounded by the recorded principal's current authority and frozen ceiling",
+			"A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling and creates agents bounded by the recorded principal's current authority and frozen ceiling; a github.comment action requires github_trigger.comment (users only in Stage 3; agents are refused because github_trigger.comment has no agent scope)",
 	},
 	{
 		ID:          "trigger.update",
 		Domain:      "trigger",
-		Description: "Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target and record the caller's attribution and frozen ceiling",
+		Description: "Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target (a github.comment action requires github_trigger.comment, users only in Stage 3) and record the caller's attribution and frozen ceiling",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers/{id}", Method: "PATCH"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers/{id}/resume", Method: "POST"},
@@ -1233,7 +1233,7 @@ var projectOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 		DelegationDescription: "A resume, and an update that changes the source, match rules, action, subject rules or status, records the caller's initiator attribution and frozen effect ceiling " +
-			"(triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling",
+			"(triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling; a github.comment action requires github_trigger.comment (users only in Stage 3; agents have no github_trigger.comment scope)",
 	},
 	{
 		ID:          "trigger.pause",
@@ -1292,10 +1292,11 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.fire",
 		Domain:      "trigger",
-		Description: "Fire a matched event trigger's message or dispatch_agent action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal",
+		Description: "Fire a matched event trigger's message, dispatch_agent, or github.comment action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:message"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:dispatch_agent"},
+			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:github.comment"},
 		},
 		Principals:       []PrincipalKind{PrincipalSystem},
 		Credentials:      []CredentialKind{CredentialSystemInternal},

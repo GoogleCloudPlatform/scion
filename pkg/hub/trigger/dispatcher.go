@@ -139,6 +139,21 @@ type SourceAuthorizer interface {
 	AuthorizeEventSource(ctx context.Context, ev *store.TriggerEvent) (authorized bool, err error)
 }
 
+// EventEvaluationOutcome summarizes the candidate-loop outcome for an event
+// before it is marked processed.
+type EventEvaluationOutcome struct {
+	MatchCount      int
+	FireCount       int
+	AnyFireRecorded bool
+}
+
+// PostEvaluationHook is an optional interface Core implementations may satisfy
+// to observe an event once after all candidate rules have been evaluated (and
+// before the event is marked processed).
+type PostEvaluationHook interface {
+	OnEventEvaluated(ctx context.Context, ev *store.TriggerEvent, outcome EventEvaluationOutcome, attempts int)
+}
+
 // DispatcherConfig configures a trigger event Dispatcher.
 type DispatcherConfig struct {
 	Core           Core
@@ -434,6 +449,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	var (
 		matchCount        int
 		fireCount         int
+		hadAnyFire        bool
 		sourceAuthChecked bool
 		sourceAuthorized  bool
 	)
@@ -484,6 +500,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 			if !sourceAuthorized {
 				matchCount++
+				hadAnyFire = true
 				if rErr := d.recordDirectFire(
 					ctx, tr, ev, deriveFireSubject(ev.Subject),
 					store.TriggerFireStatusRefused, ErrFireGitHubAssociationUnauthorized,
@@ -509,6 +526,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				BudgetRemainingMs: &remMs,
 			})
 			d.recordRuleEval(ctx, "unknown", triggerrule.MatchClassFailed, 0)
+			hadAnyFire = true
 			if rErr := d.recordDirectFire(
 				ctx, tr, ev, deriveFireSubject(ev.Subject),
 				store.TriggerFireStatusSkipped, ErrFireRuleEvaluationFailed,
@@ -537,6 +555,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 
 		if len(matchRules) == 0 {
 			if budget.Exhausted() {
+				hadAnyFire = true
 				if rErr := d.recordDirectFire(
 					ctx, tr, ev, deriveFireSubject(ev.Subject),
 					store.TriggerFireStatusSkipped, ErrFireRuleBudgetExhausted,
@@ -560,6 +579,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					BudgetRemainingMs: &remMs,
 				})
 				d.recordRuleEval(ctx, firstDialect, triggerrule.MatchClassFailed, 0)
+				hadAnyFire = true
 				if rErr := d.recordDirectFire(
 					ctx, tr, ev, deriveFireSubject(ev.Subject),
 					store.TriggerFireStatusSkipped, ErrFireRuleEvaluationFailed,
@@ -604,6 +624,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 						"category", ce.Category,
 					)
 				}
+				hadAnyFire = true
 				if rErr := d.recordDirectFire(
 					ctx, tr, ev, deriveFireSubject(ev.Subject),
 					store.TriggerFireStatusSkipped, skipReason,
@@ -619,6 +640,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		}
 
 		matchCount++
+		hadAnyFire = true
 
 		// Derived subject_rule output applies to trigger_fires.subject and coalescing
 		// only; FireEvent.Subject for the agent envelope keeps the hub-shaped source
@@ -758,8 +780,9 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				Kind: ExecutorKindTriggerDrainer,
 				ID:   ExecutorIDPrefixTriggerEvent + ev.ID,
 			},
-			FireAt:  ev.ReceivedAt,
-			Tracked: tracker,
+			FireAt:   ev.ReceivedAt,
+			Attempts: item.Attempts,
+			Tracked:  tracker,
 		}
 
 		fireCtx, cancelFire := context.WithTimeout(ctx, d.perFireTimeout)
@@ -813,6 +836,13 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 
 	if ctx.Err() != nil {
 		return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
+	}
+	if hook, ok := d.core.(PostEvaluationHook); ok {
+		hook.OnEventEvaluated(ctx, ev, EventEvaluationOutcome{
+			MatchCount:      matchCount,
+			FireCount:       fireCount,
+			AnyFireRecorded: hadAnyFire,
+		}, item.Attempts)
 	}
 	if err := d.store.MarkTriggerEventProcessed(ctx, ev.ID, d.now().UTC(), matchCount, fireCount); err != nil &&
 		!errors.Is(err, store.ErrNotFound) {

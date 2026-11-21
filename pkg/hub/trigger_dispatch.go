@@ -90,9 +90,10 @@ type serverTriggerCore struct {
 }
 
 var (
-	_ trigger.Core             = serverTriggerCore{}
-	_ trigger.FireAdmitter     = serverTriggerCore{}
-	_ trigger.SourceAuthorizer = serverTriggerCore{}
+	_ trigger.Core               = serverTriggerCore{}
+	_ trigger.FireAdmitter       = serverTriggerCore{}
+	_ trigger.SourceAuthorizer   = serverTriggerCore{}
+	_ trigger.PostEvaluationHook = serverTriggerCore{}
 )
 
 func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
@@ -101,6 +102,18 @@ func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hu
 
 func (c serverTriggerCore) Experiment(name string) bool {
 	return c.srv.experimentEnabled(name)
+}
+
+func (c serverTriggerCore) OnEventEvaluated(ctx context.Context, ev *store.TriggerEvent, outcome trigger.EventEvaluationOutcome, attempts int) {
+	if c.srv == nil || ev == nil {
+		return
+	}
+	if outcome.AnyFireRecorded || outcome.MatchCount != 0 || outcome.FireCount != 0 {
+		return
+	}
+	if ev.SourceKind == store.TriggerSourceKindGitHub {
+		c.srv.handleUnmatchedGitHubCommand(ctx, ev, attempts)
+	}
 }
 
 // AuthorizeEventSource implements trigger.SourceAuthorizer for Stage 3 §4.2
@@ -143,7 +156,7 @@ func (c serverTriggerCore) AuthorizeEventSource(ctx context.Context, ev *store.T
 		}
 		errCode := githubAssociationErrorCode(authzErr)
 		c.srv.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
-			errCode, authzErr.Error())
+			errCode, githubAppStatusMessage(errCode))
 		if errors.Is(authzErr, errGitHubAssociationCheckFailed) {
 			slog.WarnContext(ctx, "GitHub trigger fire deferred: installation association check inconclusive; will retry",
 				"project_id", project.ID, "installation_id", instID, "event_id", ev.ID, "error", authzErr)
@@ -281,8 +294,8 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 }
 
 // triggerDrainer constructs the trigger.event durablequeue.Drainer wired to
-// Server's fire core (catalog entry points triggerDrainer:message and
-// triggerDrainer:dispatch_agent for trigger.fire).
+// Server's fire core (catalog entry points triggerDrainer:message,
+// triggerDrainer:dispatch_agent, and triggerDrainer:github.comment for trigger.fire).
 func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durablequeue.StoreQueue) (*durablequeue.Drainer, error) {
 	core := serverTriggerCore{srv: s}
 	logger := logging.Subsystem("hub.trigger-drainer")

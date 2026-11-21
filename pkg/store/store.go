@@ -1828,6 +1828,15 @@ type ProjectStore interface {
 	// Returns ErrNotFound if the project doesn't exist.
 	SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error
 
+	// UpdateProjectGitHubAppStatus updates only the project's GitHubAppStatus
+	// column, leaving every other field (such as GitHubInstallationID,
+	// GitRemote, GitHubPermissions, Annotations, and OwnerID) untouched so
+	// concurrent admin unbinds or configuration changes cannot be reverted by
+	// a status writer holding a stale project snapshot. Passing status == nil
+	// clears the column.
+	// Returns ErrNotFound if the project doesn't exist.
+	UpdateProjectGitHubAppStatus(ctx context.Context, projectID string, status *GitHubAppProjectStatus) error
+
 	// DeleteProject removes a project by ID.
 	// It does not deactivate the delegation edges or service-account
 	// assignments of the project's agents, which have no foreign key to the

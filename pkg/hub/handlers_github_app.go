@@ -875,6 +875,7 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
+		s.githubTokenCache.invalidateProject(project.ID)
 
 		writeJSON(w, http.StatusOK, perms)
 
@@ -884,6 +885,7 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to update project", nil)
 			return
 		}
+		s.githubTokenCache.invalidateProject(project.ID)
 
 		w.WriteHeader(http.StatusNoContent)
 
@@ -1024,8 +1026,8 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 			LastError:    &now,
 		}
 
-		if err := s.store.UpdateProject(ctx, project); err != nil {
-			slog.Error("Failed to update project after permission sync",
+		if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
+			slog.ErrorContext(ctx, "Failed to update project after permission sync",
 				"project_id", project.ID, "error", err)
 			return
 		}

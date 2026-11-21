@@ -48,6 +48,7 @@ const (
 	TriggerActionMessage       = "message"
 	TriggerActionDispatchAgent = "dispatch_agent"
 	TriggerActionExec          = "exec"
+	TriggerActionGitHubComment = "github.comment"
 
 	TriggerSubjectModeNew  = "new"
 	TriggerSubjectModeSkip = "skip"

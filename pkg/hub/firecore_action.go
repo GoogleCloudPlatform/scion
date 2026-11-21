@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 
@@ -65,6 +66,14 @@ type FireAction interface {
 // resolution.
 type FirePayloadValidator interface {
 	ValidatePayload(req hubfire.FireRequest) error
+}
+
+// FireErrorSanitizer is an optional capability implemented by FireActions that
+// supply their own allowlisted generic failure reasons and fallback text for
+// trigger_fires.error sanitization so provider-specific strings stay out of the
+// generic fire core.
+type FireErrorSanitizer interface {
+	SanitizedReasons() (known []string, fallback string)
 }
 
 // FirePreauthorizer is an optional capability implemented by FireActions that
@@ -188,7 +197,7 @@ func (s *Server) fireAction(ctx context.Context, req hubfire.FireRequest) hubfir
 	}
 	out := s.fireActionWith(ctx, req, action)
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger && out.Status == hubfire.FireStatusFailed && out.Error != "" {
-		out.Error = sanitizeTriggerFireError(req, out.Status, out.Error)
+		out.Error = sanitizeTriggerFireError(ctx, action, req, out.Status, out.Error)
 	}
 	return out
 }
@@ -199,9 +208,32 @@ func (s *Server) fireAction(ctx context.Context, req hubfire.FireRequest) hubfir
 // never leak through trigger history (1b-3 review N4). Refusals and skips
 // already carry generic reasons by contract; schedule fires are never passed
 // here and retain their existing scheduled_events.error text unchanged.
-func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus, raw string) string {
+func sanitizeTriggerFireError(ctx context.Context, action FireAction, req hubfire.FireRequest, status hubfire.FireStatus, raw string) string {
 	if raw == "" {
 		return ""
+	}
+	if sanitizer, ok := action.(FireErrorSanitizer); ok {
+		known, fallback := sanitizer.SanitizedReasons()
+		if raw == req.ActionType+" refused" ||
+			raw == errScheduledAuthorityUnrecorded.Error() ||
+			raw == "hub shutting down" ||
+			raw == "fire failed" ||
+			slices.Contains(known, raw) {
+			return raw
+		}
+		mapped := fallback
+		if mapped == "" {
+			mapped = "fire failed"
+		}
+		slog.WarnContext(ctx, "trigger fire error mapped to generic text",
+			"actionType", req.ActionType,
+			"status", status,
+			"fireID", req.Authority.FireID,
+			"triggerID", req.Authority.DefinitionID,
+			"projectID", req.ProjectID,
+			"mapped", mapped,
+			"raw_error", raw)
+		return mapped
 	}
 	switch req.ActionType {
 	case "message", "dispatch_agent", scheduledEventTypeExec:
@@ -273,7 +305,7 @@ func sanitizeTriggerFireError(req hubfire.FireRequest, status hubfire.FireStatus
 		}
 	}
 
-	slog.Warn("trigger fire error mapped to generic text",
+	slog.WarnContext(ctx, "trigger fire error mapped to generic text",
 		"actionType", req.ActionType,
 		"status", status,
 		"fireID", req.Authority.FireID,

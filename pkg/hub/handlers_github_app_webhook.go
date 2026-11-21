@@ -619,10 +619,10 @@ func (s *Server) updateProjectsForInstallation(ctx context.Context, installation
 			project.GitHubAppStatus.LastError = &now
 		}
 
-		if err := s.store.UpdateProject(ctx, project); err != nil {
-			slog.Error("Failed to update project GitHub App status",
+		if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
+			slog.ErrorContext(ctx, "Failed to update project GitHub App status",
 				"project_id", project.ID, "error", err)
-		} else {
+		} else if s.events != nil {
 			s.events.PublishProjectUpdated(ctx, project)
 		}
 	}); err != nil {
@@ -678,13 +678,15 @@ func (s *Server) resetPermissionDeniedProjectsForInstallation(ctx context.Contex
 				LastTokenMint: lastTokenMint,
 			}
 
-			if err := s.store.UpdateProject(ctx, project); err != nil {
-				slog.Error("Failed to reset project GitHub App status after new_permissions_accepted",
+			if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
+				slog.ErrorContext(ctx, "Failed to reset project GitHub App status after new_permissions_accepted",
 					"project_id", project.ID, "error", err)
 				continue
 			}
 			s.invalidateGitHubAssociation(project.ID)
-			s.events.PublishProjectUpdated(ctx, project)
+			if s.events != nil {
+				s.events.PublishProjectUpdated(ctx, project)
+			}
 		}
 
 		if page.NextCursor == "" {
@@ -728,12 +730,14 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			LastError:    &now,
 		}
 
-		if err := s.store.UpdateProject(ctx, project); err != nil {
-			slog.Error("Failed to update project after repo removal",
+		if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
+			slog.ErrorContext(ctx, "Failed to update project after repo removal",
 				"project_id", project.ID, "error", err)
 		} else {
 			s.invalidateGitHubAssociation(project.ID)
-			s.events.PublishProjectUpdated(ctx, project)
+			if s.events != nil {
+				s.events.PublishProjectUpdated(ctx, project)
+			}
 		}
 
 		s.pauseGitHubTriggersForRemovedRepo(ctx, project, installationID, ownerRepo)
@@ -954,10 +958,11 @@ func (s *Server) mintGitHubAppTokenInternal(
 	// project status.
 	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, project, *project.GitHubInstallationID)
 	if authzErr != nil {
-		slog.Warn("GitHub App token refused: installation association not authorized",
+		slog.WarnContext(ctx, "GitHub App token refused: installation association not authorized",
 			"project_id", project.ID, "installation_id", *project.GitHubInstallationID, "error", authzErr)
+		errCode := githubAssociationErrorCode(authzErr)
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
-			githubAssociationErrorCode(authzErr), authzErr.Error())
+			errCode, githubAppStatusMessage(errCode))
 		return "", "", authzErr
 	}
 
@@ -966,7 +971,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 	var appPermissions map[string]string
 	if requested != nil {
 		var permErr error
-		perms, permErr = scopeRequestedGitHubTokenPermissions(*requested, grant)
+		perms, permErr = scopeRequestedGitHubTokenPermissions(*requested, project.GitHubPermissions, grant)
 		if permErr != nil {
 			return "", "", permErr
 		}
@@ -1111,16 +1116,17 @@ func (s *Server) mintGitHubAppTokenInternal(
 			LastChecked:   now,
 		}
 	}
-	if err := s.store.UpdateProject(ctx, project); err != nil {
-		slog.Warn("Failed to update project status after successful token mint", "error", err)
-	} else {
+	if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
+		slog.WarnContext(ctx, "Failed to update project status after successful token mint", "error", err)
+	} else if s.events != nil {
 		s.events.PublishProjectUpdated(ctx, project)
 	}
 
 	return token.Token, token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"), nil
 }
 
-// updateProjectGitHubAppStatus is a helper to update a project's GitHub App status.
+// updateProjectGitHubAppStatus is a helper to update a project's GitHub App status
+// via a narrow status-only store write so concurrent project updates are never reverted.
 func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, project *store.Project, state, errorCode, errorMessage string) {
 	now := timeNow()
 	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
@@ -1130,9 +1136,9 @@ func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, project *stor
 		LastChecked:  now,
 		LastError:    &now,
 	}
-	if err := s.store.UpdateProject(ctx, project); err != nil {
-		slog.Warn("Failed to update project GitHub App status", "project_id", project.ID, "error", err)
-	} else {
+	if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
+		slog.WarnContext(ctx, "Failed to update project GitHub App status", "project_id", project.ID, "error", err)
+	} else if s.events != nil {
 		s.events.PublishProjectUpdated(ctx, project)
 	}
 }
@@ -1147,6 +1153,12 @@ func githubAppStatusMessage(errorCode string) string {
 		return "The GitHub App private key is missing or invalid. Re-upload it in Admin > Server Config."
 	case githubapp.ErrCodeAppNotFound:
 		return "GitHub App not found — verify the App ID in Admin > Server Config > GitHub App."
+	case githubAppErrAssociationUnauthorized:
+		return "The project's GitHub App installation association is not authorized. Re-bind or re-verify the installation."
+	case githubAppErrAssociationCheckFailed:
+		return "Could not verify the project's GitHub App installation association. See the hub log for details."
+	case githubapp.ErrCodePermissionDenied:
+		return "The GitHub App does not have the required permissions for this repository. Update the App's permissions on GitHub."
 	default:
 		return "The GitHub App could not provide a token. See the hub log for details."
 	}
