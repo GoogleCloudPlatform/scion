@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,20 @@ type testServerProcess struct {
 	cancel context.CancelFunc
 }
 
+// buildA2ATestServer compiles ./internal/bridge/testdata/a2a-testserver/ into
+// a per-test temporary directory and returns the binary path.
+func buildA2ATestServer(t *testing.T) string {
+	t.Helper()
+	binaryPath := filepath.Join(t.TempDir(), "a2a-testserver")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binaryPath,
+		"./internal/bridge/testdata/a2a-testserver/")
+	build.Dir = findModuleRoot(t)
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build a2a-testserver: %v\n%s", err, out)
+	}
+	return binaryPath
+}
+
 // startTestServer builds and starts a test server subprocess on a random port.
 // Returns the process info and a cleanup function. An optional callerID may be
 // provided; if non-empty, it is passed as -caller-id to inject authenticated
@@ -57,15 +72,7 @@ type testServerProcess struct {
 func startTestServer(t *testing.T, dbURL, project, agent string, callerID ...string) *testServerProcess {
 	t.Helper()
 
-	// Build the test server binary.
-	binaryPath := t.TempDir() + "/a2a-testserver"
-	build := exec.Command("go", "build", "-buildvcs=false", "-o", binaryPath,
-		"./internal/bridge/testdata/a2a-testserver/")
-	build.Dir = findModuleRoot(t)
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		t.Fatalf("build test server: %v", err)
-	}
+	binaryPath := buildA2ATestServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	args := []string{
@@ -238,6 +245,13 @@ func findModuleRoot(t *testing.T) string {
 }
 
 // ---------- Two-process SDK HTTP-level tests ----------
+
+// TestA2ATestServerCompiles verifies that the testdata/a2a-testserver binary
+// compiles even when TEST_DATABASE_URL is unset (Go ignores testdata/ under
+// ./..., and the cross-process tests below skip without PostgreSQL).
+func TestA2ATestServerCompiles(t *testing.T) {
+	_ = buildA2ATestServer(t)
+}
 
 // TestPostgresTaskStoreCrossProcessCreateGetListCancel tests the full A2A
 // JSON-RPC lifecycle across two separate OS processes sharing one Postgres
@@ -2693,15 +2707,7 @@ func TestBarrierStoreWrapperChain(t *testing.T) {
 func startProductionServer(t *testing.T, dbURL, project, agent, callerID string) *testServerProcess {
 	t.Helper()
 
-	// Build the test server binary.
-	binaryPath := t.TempDir() + "/a2a-testserver"
-	build := exec.Command("go", "build", "-buildvcs=false", "-o", binaryPath,
-		"./internal/bridge/testdata/a2a-testserver/")
-	build.Dir = findModuleRoot(t)
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		t.Fatalf("build test server: %v", err)
-	}
+	binaryPath := buildA2ATestServer(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	args := []string{

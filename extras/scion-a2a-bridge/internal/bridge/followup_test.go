@@ -19,16 +19,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -55,11 +58,15 @@ func boolPtr(b bool) *bool { return &b }
 
 // mockAgentService implements hubclient.AgentService for testing.
 type mockAgentService struct {
+	hubclient.AgentService // embed so new AgentService methods do not break tests
+
 	sendFn   func(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error)
 	listFn   func(ctx context.Context, opts *hubclient.ListAgentsOptions) (*hubclient.ListAgentsResponse, error)
 	createFn func(ctx context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error)
 	getFn    func(ctx context.Context, agentID string) (*hubclient.Agent, error)
 }
+
+var _ hubclient.AgentService = (*mockAgentService)(nil)
 
 func (m *mockAgentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 	if m.sendFn != nil {
@@ -88,143 +95,29 @@ func (m *mockAgentService) Get(ctx context.Context, agentID string) (*hubclient.
 	}
 	return nil, fmt.Errorf("not implemented")
 }
+
 func (m *mockAgentService) Create(ctx context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
 	if m.createFn != nil {
 		return m.createFn(ctx, req)
 	}
 	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Update(ctx context.Context, agentID string, req *hubclient.UpdateAgentRequest) (*hubclient.Agent, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) ResetAuth(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Delete(ctx context.Context, agentID string, opts *hubclient.DeleteAgentOptions) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Start(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Stop(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Suspend(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Restart(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) StopAll(ctx context.Context) (*hubclient.StopAllResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) SendMessage(ctx context.Context, agentID string, message string, interrupt bool) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) (*hubclient.BroadcastResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) SubmitEnv(ctx context.Context, agentID string, req *hubclient.SubmitEnvRequest) (*hubclient.CreateAgentResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Restore(ctx context.Context, agentID string) (*hubclient.Agent, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Exec(ctx context.Context, agentID string, command []string, timeout int) (*hubclient.ExecResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) GetLogs(ctx context.Context, agentID string, opts *hubclient.GetLogsOptions) (string, error) {
-	return "", fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) (*hubclient.OutboundMessageResult, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) GetCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions) (*hubclient.CloudLogsResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) StreamCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions, handler func(hubclient.CloudLogEntry)) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) SetMessageMode(ctx context.Context, agentID string, req *hubclient.SetMessageModeRequest, opts *hubclient.SetMessageModeOptions) (*hubclient.SetMessageModeResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) Reincarnate(ctx context.Context, agentID string, req *hubclient.ReincarnateAgentRequest) (*hubclient.ReincarnateAgentResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockAgentService) SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error) {
-	return nil, fmt.Errorf("not implemented")
-}
 
 // mockHubClient implements hubclient.Client for testing, delegating to a mockAgentService.
 type mockHubClient struct {
+	hubclient.Client // embed so new Client methods do not break tests
+
 	agents *mockAgentService
 }
 
-func (m *mockHubClient) Agents() hubclient.AgentService                               { return m.agents }
-func (m *mockHubClient) ProjectAgents(string) hubclient.AgentService                  { return m.agents }
-func (m *mockHubClient) Projects() hubclient.ProjectService                           { return nil }
-func (m *mockHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService               { return nil }
-func (m *mockHubClient) Templates() hubclient.TemplateService                         { return nil }
-func (m *mockHubClient) HarnessConfigs() hubclient.HarnessConfigService               { return nil }
-func (m *mockHubClient) Workspace() hubclient.WorkspaceService                        { return nil }
-func (m *mockHubClient) Users() hubclient.UserService                                 { return nil }
-func (m *mockHubClient) Env() hubclient.EnvService                                    { return nil }
-func (m *mockHubClient) Secrets() hubclient.SecretService                             { return nil }
-func (m *mockHubClient) Auth() hubclient.AuthService                                  { return nil }
-func (m *mockHubClient) Notifications() hubclient.NotificationService                 { return nil }
-func (m *mockHubClient) Tokens() hubclient.TokenService                               { return nil }
-func (m *mockHubClient) Subscriptions() hubclient.SubscriptionService                 { return nil }
-func (m *mockHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService { return nil }
-func (m *mockHubClient) ScheduledEvents(string) hubclient.ScheduledEventService       { return nil }
-func (m *mockHubClient) Schedules(string) hubclient.ScheduleService                   { return nil }
-func (m *mockHubClient) WebhookEndpoints(string) hubclient.WebhookEndpointService     { return nil }
-func (m *mockHubClient) Triggers(string) hubclient.TriggerService                     { return nil }
-func (m *mockHubClient) TriggerEvents(string) hubclient.TriggerEventService           { return nil }
-func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService       { return nil }
-func (m *mockHubClient) Messages() hubclient.MessageService                           { return nil }
-func (m *mockHubClient) Conversations() hubclient.ConversationService                 { return nil }
-func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                   { return nil }
-func (m *mockHubClient) AllowList() hubclient.AllowListService                        { return nil }
-func (m *mockHubClient) Invites() hubclient.InviteService                             { return nil }
-func (m *mockHubClient) Messaging() hubclient.MessagingService                        { return nil }
-func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService                { return nil }
-func (m *mockHubClient) Skills() hubclient.SkillService                               { return nil }
-func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService              { return nil }
-func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
-	return nil
-}
-func (m *mockHubClient) UserInjectedSkills() hubclient.InjectedSkillsService { return nil }
-func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
-	return nil
-}
-func (m *mockHubClient) ProjectVisitors(projectID string) hubclient.ProjectVisitorService {
-	return nil
-}
-func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
-func (m *mockHubClient) Artifacts() hubclient.ArtifactService               { return nil }
-func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
-func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
-	return nil
-}
-func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService       { return nil }
-func (m *mockHubClient) Decisions() hubclient.DecisionService                     { return nil }
-func (m *mockHubClient) ProjectDecisions(string) hubclient.ProjectDecisionService { return nil }
-func (m *mockHubClient) ProjectMessagePolicies(string) hubclient.MessagePolicyService {
-	return nil
-}
-func (m *mockHubClient) MyDecisions() hubclient.MyDecisionService       { return nil }
-func (m *mockHubClient) SystemOne() hubclient.SystemOneService          { return nil }
-func (m *mockHubClient) GitHubApp() hubclient.GitHubAppService          { return nil }
-func (m *mockHubClient) TriggerPresets() hubclient.TriggerPresetService { return nil }
-func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
-	return &hubclient.HealthResponse{}, nil
-}
-func (m *mockHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummary, error) {
-	return nil, nil
-}
-func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
-	return nil, nil
-}
+var _ hubclient.Client = (*mockHubClient)(nil)
+
+func (m *mockHubClient) Agents() hubclient.AgentService              { return m.agents }
+func (m *mockHubClient) ProjectAgents(string) hubclient.AgentService { return m.agents }
+
+// Conversations returns nil rather than panicking on the nil embedded Client
+// when ScionExecutor.Execute checks writeClient.Conversations() != nil.
+func (m *mockHubClient) Conversations() hubclient.ConversationService { return nil }
 
 // --- Test helpers ---
 
@@ -915,6 +808,101 @@ func TestSendFollowUp_ConcurrentFollowUps_SameTask(t *testing.T) {
 	b.tasksMu.RUnlock()
 	if dupes > 1 {
 		t.Errorf("agentTasks has %d entries for task-1, want at most 1", dupes)
+	}
+}
+
+func TestMockHubClient_EmbedsHubClientInterfaces(t *testing.T) {
+	hasEmbeddedType := func(st reflect.Type, want reflect.Type) bool {
+		for i := 0; i < st.NumField(); i++ {
+			f := st.Field(i)
+			if f.Anonymous && f.Type == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !hasEmbeddedType(reflect.TypeFor[mockHubClient](), reflect.TypeFor[hubclient.Client]()) {
+		t.Errorf("mockHubClient must embed hubclient.Client")
+	}
+	if !hasEmbeddedType(reflect.TypeFor[mockAgentService](), reflect.TypeFor[hubclient.AgentService]()) {
+		t.Errorf("mockAgentService must embed hubclient.AgentService")
+	}
+
+	// ScionExecutor.Execute checks writeClient.Conversations() != nil when
+	// reply polling is enabled; ensure a zero-embedded mockHubClient returns
+	// nil instead of panicking on the nil embedded hubclient.Client.
+	hub := &mockHubClient{agents: &mockAgentService{}}
+	if got := hub.Conversations(); got != nil {
+		t.Errorf("mockHubClient.Conversations() = %v, want nil", got)
+	}
+
+	// Also verify testdata/a2a-testserver/main.go's mockProdHubClient and
+	// mockProdAgentService embed hubclient.Client and hubclient.AgentService
+	// and keep the nil-safe Conversations() override.
+	testServerPath := filepath.Join("testdata", "a2a-testserver", "main.go")
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, testServerPath, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", testServerPath, err)
+	}
+
+	embeds := map[string]map[string]bool{}
+	hasConversationsMethod := false
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			if d.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range d.Specs {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				st, ok := ts.Type.(*ast.StructType)
+				if !ok || st.Fields == nil {
+					continue
+				}
+				embeds[ts.Name.Name] = map[string]bool{}
+				for _, field := range st.Fields.List {
+					if len(field.Names) != 0 {
+						continue
+					}
+					sel, ok := field.Type.(*ast.SelectorExpr)
+					if !ok {
+						continue
+					}
+					pkgIdent, ok := sel.X.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					embeds[ts.Name.Name][pkgIdent.Name+"."+sel.Sel.Name] = true
+				}
+			}
+		case *ast.FuncDecl:
+			if d.Recv == nil || len(d.Recv.List) == 0 || d.Name.Name != "Conversations" {
+				continue
+			}
+			star, ok := d.Recv.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			ident, ok := star.X.(*ast.Ident)
+			if ok && ident.Name == "mockProdHubClient" {
+				hasConversationsMethod = true
+			}
+		}
+	}
+
+	if !embeds["mockProdHubClient"]["hubclient.Client"] {
+		t.Errorf("mockProdHubClient in %s must embed hubclient.Client", testServerPath)
+	}
+	if !embeds["mockProdAgentService"]["hubclient.AgentService"] {
+		t.Errorf("mockProdAgentService in %s must embed hubclient.AgentService", testServerPath)
+	}
+	if !hasConversationsMethod {
+		t.Errorf("mockProdHubClient in %s must override Conversations() to avoid nil-interface panic in ScionExecutor", testServerPath)
 	}
 }
 

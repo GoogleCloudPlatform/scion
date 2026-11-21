@@ -53,7 +53,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/bridge"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-a2a-bridge/internal/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -152,10 +151,14 @@ func (h *mockProductionHub) recordSend(agentID string, msg *messages.StructuredM
 
 // mockProdAgentService implements hubclient.AgentService for production testing.
 type mockProdAgentService struct {
+	hubclient.AgentService // embed so new AgentService methods do not break builds
+
 	hub         *mockProductionHub
 	projectSlug string
 	agentSlug   string
 }
+
+var _ hubclient.AgentService = (*mockProdAgentService)(nil)
 
 func (m *mockProdAgentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {
 	m.hub.recordSend(agentID, msg)
@@ -186,146 +189,27 @@ func (m *mockProdAgentService) List(ctx context.Context, opts *hubclient.ListAge
 	}, nil
 }
 
-// Stub implementations for the remaining AgentService methods.
+// Get returns a non-nil error rather than panicking on the nil embedded
+// AgentService when Bridge.ensureRunningBeforeFollowUp reads the agent.
 func (m *mockProdAgentService) Get(ctx context.Context, agentID string) (*hubclient.Agent, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Create(ctx context.Context, req *hubclient.CreateAgentRequest) (*hubclient.CreateAgentResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Update(ctx context.Context, agentID string, req *hubclient.UpdateAgentRequest) (*hubclient.Agent, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) ResetAuth(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Delete(ctx context.Context, agentID string, opts *hubclient.DeleteAgentOptions) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Start(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Stop(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Suspend(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Restart(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) StopAll(ctx context.Context) (*hubclient.StopAllResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) SendMessage(ctx context.Context, agentID string, message string, interrupt bool) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) BroadcastMessage(ctx context.Context, msg *messages.StructuredMessage, interrupt bool) (*hubclient.BroadcastResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) SubmitEnv(ctx context.Context, agentID string, req *hubclient.SubmitEnvRequest) (*hubclient.CreateAgentResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Restore(ctx context.Context, agentID string) (*hubclient.Agent, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Exec(ctx context.Context, agentID string, command []string, timeout int) (*hubclient.ExecResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) GetLogs(ctx context.Context, agentID string, opts *hubclient.GetLogsOptions) (string, error) {
-	return "", fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) SendOutboundMessage(ctx context.Context, agentID string, msg *hubclient.OutboundMessageRequest) (*hubclient.OutboundMessageResult, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) GetCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions) (*hubclient.CloudLogsResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) StreamCloudLogs(ctx context.Context, agentID string, opts *hubclient.GetCloudLogsOptions, handler func(hubclient.CloudLogEntry)) error {
-	return fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) SetMessageMode(ctx context.Context, agentID string, req *hubclient.SetMessageModeRequest, opts *hubclient.SetMessageModeOptions) (*hubclient.SetMessageModeResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) Reincarnate(ctx context.Context, agentID string, req *hubclient.ReincarnateAgentRequest) (*hubclient.ReincarnateAgentResponse, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-func (m *mockProdAgentService) SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
 // mockProdHubClient implements hubclient.Client.
 type mockProdHubClient struct {
+	hubclient.Client // embed so new Client methods do not break builds
+
 	agents *mockProdAgentService
 }
 
-func (m *mockProdHubClient) Agents() hubclient.AgentService                 { return m.agents }
-func (m *mockProdHubClient) ProjectAgents(string) hubclient.AgentService    { return m.agents }
-func (m *mockProdHubClient) Projects() hubclient.ProjectService             { return nil }
-func (m *mockProdHubClient) RuntimeBrokers() hubclient.RuntimeBrokerService { return nil }
-func (m *mockProdHubClient) Templates() hubclient.TemplateService           { return nil }
-func (m *mockProdHubClient) HarnessConfigs() hubclient.HarnessConfigService { return nil }
-func (m *mockProdHubClient) Workspace() hubclient.WorkspaceService          { return nil }
-func (m *mockProdHubClient) Users() hubclient.UserService                   { return nil }
-func (m *mockProdHubClient) Env() hubclient.EnvService                      { return nil }
-func (m *mockProdHubClient) Secrets() hubclient.SecretService               { return nil }
-func (m *mockProdHubClient) Auth() hubclient.AuthService                    { return nil }
-func (m *mockProdHubClient) Notifications() hubclient.NotificationService   { return nil }
-func (m *mockProdHubClient) Tokens() hubclient.TokenService                 { return nil }
-func (m *mockProdHubClient) Subscriptions() hubclient.SubscriptionService   { return nil }
-func (m *mockProdHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService {
-	return nil
-}
-func (m *mockProdHubClient) ScheduledEvents(string) hubclient.ScheduledEventService   { return nil }
-func (m *mockProdHubClient) Schedules(string) hubclient.ScheduleService               { return nil }
-func (m *mockProdHubClient) WebhookEndpoints(string) hubclient.WebhookEndpointService { return nil }
-func (m *mockProdHubClient) Triggers(string) hubclient.TriggerService                 { return nil }
-func (m *mockProdHubClient) TriggerEvents(string) hubclient.TriggerEventService       { return nil }
-func (m *mockProdHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService   { return nil }
-func (m *mockProdHubClient) Messages() hubclient.MessageService                       { return nil }
-func (m *mockProdHubClient) Conversations() hubclient.ConversationService             { return nil }
-func (m *mockProdHubClient) ThreadGroups() hubclient.ThreadGroupService               { return nil }
-func (m *mockProdHubClient) AllowList() hubclient.AllowListService                    { return nil }
-func (m *mockProdHubClient) Invites() hubclient.InviteService                         { return nil }
-func (m *mockProdHubClient) Skills() hubclient.SkillService                           { return nil }
-func (m *mockProdHubClient) SkillRegistries() hubclient.SkillRegistryService          { return nil }
-func (m *mockProdHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
-	return nil
-}
-func (m *mockProdHubClient) UserInjectedSkills() hubclient.InjectedSkillsService { return nil }
-func (m *mockProdHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
-	return nil
-}
-func (m *mockProdHubClient) ProjectVisitors(projectID string) hubclient.ProjectVisitorService {
-	return nil
-}
-func (m *mockProdHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }
-func (m *mockProdHubClient) Artifacts() hubclient.ArtifactService               { return nil }
-func (m *mockProdHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
-func (m *mockProdHubClient) Messaging() hubclient.MessagingService              { return nil }
-func (m *mockProdHubClient) AdminSettings() hubclient.AdminSettingsService      { return nil }
-func (m *mockProdHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
-	return nil
-}
-func (m *mockProdHubClient) AgentDelegations() hubclient.AgentDelegationService       { return nil }
-func (m *mockProdHubClient) Decisions() hubclient.DecisionService                     { return nil }
-func (m *mockProdHubClient) ProjectDecisions(string) hubclient.ProjectDecisionService { return nil }
-func (m *mockProdHubClient) ProjectMessagePolicies(string) hubclient.MessagePolicyService {
-	return nil
-}
-func (m *mockProdHubClient) MyDecisions() hubclient.MyDecisionService       { return nil }
-func (m *mockProdHubClient) SystemOne() hubclient.SystemOneService          { return nil }
-func (m *mockProdHubClient) GitHubApp() hubclient.GitHubAppService          { return nil }
-func (m *mockProdHubClient) TriggerPresets() hubclient.TriggerPresetService { return nil }
-func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
-	return &hubclient.HealthResponse{}, nil
-}
-func (m *mockProdHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummary, error) {
-	return nil, nil
-}
-func (m *mockProdHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
-	return nil, nil
-}
+var _ hubclient.Client = (*mockProdHubClient)(nil)
+
+func (m *mockProdHubClient) Agents() hubclient.AgentService              { return m.agents }
+func (m *mockProdHubClient) ProjectAgents(string) hubclient.AgentService { return m.agents }
+
+// Conversations returns nil rather than panicking on the nil embedded Client
+// when ScionExecutor.Execute checks writeClient.Conversations() != nil.
+func (m *mockProdHubClient) Conversations() hubclient.ConversationService { return nil }
 
 func main() {
 	flag.Parse()
