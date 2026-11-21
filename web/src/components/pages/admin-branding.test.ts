@@ -435,5 +435,70 @@ describe('scion-page-admin-branding', () => {
     expect(query(element, '[data-field="name"]')).toBeNull();
     expect(element.shadowRoot?.textContent).toContain('Env Locked Name');
     expect(element.shadowRoot?.textContent).toContain('Set via environment variable');
+
+    // Edit an unlocked field and save: env-locked 'name' must be omitted from PUT
+    const subtitleInput = query<HTMLInputElement>(element, '[data-field="subtitle"]')!;
+    subtitleInput.value = 'Updated Subtitle';
+    subtitleInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    await element.updateComplete;
+
+    query<HTMLElement>(element, '[data-save-btn]')!.click();
+    await new Promise((r) => setTimeout(r, 50));
+    await element.updateComplete;
+
+    expect(handler.puts).toHaveLength(1);
+    expect(handler.puts[0]).toEqual({
+      server: { hub: { branding: { subtitle: 'Updated Subtitle' } } },
+      expected_revisions: { branding: 2 },
+    });
+  });
+
+  it('renders reset failure error inside the confirmation dialog', async () => {
+    const handler = createHandler({
+      del: { status: 403, body: { error: { message: 'forbidden' } } },
+    });
+    element = await mountPage(handler);
+
+    query<HTMLElement>(element, '[data-reset-all-btn]')!.click();
+    await element.updateComplete;
+    query<HTMLElement>(element, '[data-confirm-reset-btn]')!.click();
+    await new Promise((r) => setTimeout(r, 50));
+    await element.updateComplete;
+
+    expect(query(element, '[data-reset-dialog]')?.hasAttribute('open')).toBe(true);
+    expect(query(element, '[data-reset-error]')?.textContent).toContain('forbidden');
+  });
+
+  it('blocks saving an empty Custom Google Font and sets referrerpolicy on preview images', async () => {
+    const handler = createHandler({
+      config: {
+        settings_tier: 'db',
+        server: {
+          hub: {
+            branding: {
+              font_sans: 'dm-sans',
+              logo: { light: 'https://cdn.example.com/logo.svg' },
+            },
+          },
+        },
+        section_metadata: { branding: { source: 'db', origin: 'managed', revision: 1 } },
+      },
+    });
+    element = await mountPage(handler);
+
+    // Preview img has referrerpolicy="no-referrer"
+    const img = query<HTMLImageElement>(element, '.logo-swatch img');
+    expect(img?.getAttribute('referrerpolicy')).toBe('no-referrer');
+
+    // Switching to Custom Google Font with empty value shows client error and disables Save
+    const fontSelect = query<HTMLSelectElement>(element, '[data-field="font_sans_select"]')!;
+    fontSelect.value = '__custom__';
+    fontSelect.dispatchEvent(new CustomEvent('sl-change', { bubbles: true }));
+    await element.updateComplete;
+
+    expect(query(element, '[data-client-error="font_sans"]')?.textContent).toContain(
+      'Google Fonts'
+    );
+    expect(query(element, '[data-save-btn]')?.hasAttribute('disabled')).toBe(true);
   });
 });

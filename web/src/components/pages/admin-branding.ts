@@ -83,6 +83,7 @@ import {
   hasAnyConfiguredBranding,
   isBrandingDirty,
   isCuratedOrBuiltinFont,
+  normalizeAssetDataUrl,
   parseDataUriInfo,
   setSlotValue,
   totalDataUriBytes,
@@ -158,6 +159,7 @@ export class ScionPageAdminBranding extends LitElement {
   @state() private sectionMetadata: SectionMetadataInfo | null = null;
 
   @state() private resetDialogOpen = false;
+  @state() private resetError: string | null = null;
   @state() private slotUploadErrors: Record<string, string> = {};
 
   private brandingRevision: number | null = null;
@@ -337,8 +339,8 @@ export class ScionPageAdminBranding extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    /* Hide Shoelace radio-group internal label when we render our own label row with reset action */
-    .sr-radio-group::part(form-control-label) {
+    /* Hide Shoelace control internal label when we render our own label row with reset action */
+    .sr-control-label::part(form-control-label) {
       position: absolute;
       width: 1px;
       height: 1px;
@@ -348,6 +350,30 @@ export class ScionPageAdminBranding extends LitElement {
       clip: rect(0, 0, 0, 0);
       white-space: nowrap;
       border: 0;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .dimension-hint {
+      display: inline-block;
+      margin-left: 0.375rem;
+      padding: 0.0625rem 0.5rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--scion-text-muted, #64748b);
+      background: var(--scion-surface, #ffffff);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 9999px;
     }
 
     .corner-option {
@@ -759,8 +785,12 @@ export class ScionPageAdminBranding extends LitElement {
 
   private clientFieldErrors(): Record<string, string> {
     const errs: Record<string, string> = {};
-    const fontErr = validateFontSansInput(this.draft.font_sans);
-    if (fontErr && !this.envLocked('font_sans')) errs.font_sans = fontErr;
+    if (this.customFontMode && this.draft.font_sans.trim() === '' && !this.envLocked('font_sans')) {
+      errs.font_sans = 'Enter a Google Fonts family name or select a preset.';
+    } else {
+      const fontErr = validateFontSansInput(this.draft.font_sans);
+      if (fontErr && !this.envLocked('font_sans')) errs.font_sans = fontErr;
+    }
 
     const accentErr = validateAccentColorInput(this.draft.accent_color);
     if (accentErr && !this.envLocked('accent_color')) errs.accent_color = accentErr;
@@ -864,6 +894,7 @@ export class ScionPageAdminBranding extends LitElement {
     if (!this.canEdit || this.resetting) return;
     this.resetting = true;
     this.error = null;
+    this.resetError = null;
     this.saveError = null;
     this.successMessage = null;
 
@@ -886,17 +917,18 @@ export class ScionPageAdminBranding extends LitElement {
       }
 
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to reset branding settings');
+        this.resetError = await extractApiError(res, 'Failed to reset branding settings');
         return;
       }
 
       this.resetDialogOpen = false;
+      this.resetError = null;
       invalidatePublicSettings();
       await getPublicSettings();
       await this.loadData(false);
       this.showSuccess('Branding reset to defaults');
     } catch {
-      this.error = 'Failed to connect to server';
+      this.resetError = 'Failed to connect to server';
     } finally {
       this.resetting = false;
     }
@@ -956,7 +988,8 @@ export class ScionPageAdminBranding extends LitElement {
     }
 
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      const rawDataUrl = await readFileAsDataUrl(file);
+      const dataUrl = normalizeAssetDataUrl(rawDataUrl, file.name, slot);
       this.updateSlot(slot, dataUrl);
     } catch {
       this.slotUploadErrors = {
@@ -964,6 +997,13 @@ export class ScionPageAdminBranding extends LitElement {
         [slot.key]: 'Failed to read selected file.',
       };
     }
+  }
+
+  private async handleSwitchToUrl(slot: AssetSlotDef): Promise<void> {
+    this.updateSlot(slot, '');
+    await this.updateComplete;
+    const input = this.shadowRoot?.querySelector<HTMLElement>(`sl-input[data-field="${slot.key}"]`);
+    input?.focus();
   }
 
   // --- Render Helpers ---
@@ -1009,27 +1049,36 @@ export class ScionPageAdminBranding extends LitElement {
     const serverErrs = this.fieldErrors(slot.key);
     const disabled = !this.canEdit || this.saving || locked;
 
+    const previewSrc = value && !urlErr ? value : '';
     const preview =
       slot.group === 'logo'
         ? html`
-            <div class="logo-swatch" aria-label="${slot.label} light and dark preview">
+            <div class="logo-swatch">
               <div class="logo-swatch-half sl-theme-light">
-                ${value
-                  ? html`<img src=${value} alt="${slot.label} on light" />`
-                  : html`<sl-icon name="image"></sl-icon>`}
+                ${previewSrc
+                  ? html`<img
+                      src=${previewSrc}
+                      alt="${slot.label} on light"
+                      referrerpolicy="no-referrer"
+                    />`
+                  : html`<sl-icon name="image" aria-hidden="true"></sl-icon>`}
               </div>
               <div class="logo-swatch-half sl-theme-dark">
-                ${value
-                  ? html`<img src=${value} alt="${slot.label} on dark" />`
-                  : html`<sl-icon name="image"></sl-icon>`}
+                ${previewSrc
+                  ? html`<img
+                      src=${previewSrc}
+                      alt="${slot.label} on dark"
+                      referrerpolicy="no-referrer"
+                    />`
+                  : html`<sl-icon name="image" aria-hidden="true"></sl-icon>`}
               </div>
             </div>
           `
         : html`
-            <div class="icon-swatch" aria-label="${slot.label} preview">
-              ${value
-                ? html`<img src=${value} alt="${slot.label}" />`
-                : html`<sl-icon name="image"></sl-icon>`}
+            <div class="icon-swatch">
+              ${previewSrc
+                ? html`<img src=${previewSrc} alt="${slot.label}" referrerpolicy="no-referrer" />`
+                : html`<sl-icon name="image" aria-hidden="true"></sl-icon>`}
             </div>
           `;
 
@@ -1057,16 +1106,16 @@ export class ScionPageAdminBranding extends LitElement {
                   @click=${() => this.triggerFilePicker(slot.key)}
                 >
                   <sl-icon slot="prefix" name="upload"></sl-icon>
-                  Replace file
+                  Replace <span class="sr-only">${slot.label} </span>file
                 </sl-button>
                 <sl-button
                   size="small"
                   variant="default"
                   ?disabled=${disabled}
-                  @click=${() => this.updateSlot(slot, '')}
+                  @click=${() => void this.handleSwitchToUrl(slot)}
                 >
                   <sl-icon slot="prefix" name="link"></sl-icon>
-                  Switch to URL
+                  Switch <span class="sr-only">${slot.label} </span>to URL
                 </sl-button>
                 <sl-button
                   size="small"
@@ -1074,7 +1123,7 @@ export class ScionPageAdminBranding extends LitElement {
                   ?disabled=${disabled}
                   @click=${() => this.updateSlot(slot, '')}
                 >
-                  Clear
+                  Clear<span class="sr-only"> ${slot.label}</span>
                 </sl-button>
               </span>
             </div>
@@ -1082,6 +1131,8 @@ export class ScionPageAdminBranding extends LitElement {
         : html`
             <div class="asset-input-row">
               <sl-input
+                class="sr-control-label"
+                label=${slot.label}
                 data-field=${slot.key}
                 .value=${value}
                 placeholder="https://cdn.example.com/... or /path/to/asset"
@@ -1097,7 +1148,7 @@ export class ScionPageAdminBranding extends LitElement {
                 @click=${() => this.triggerFilePicker(slot.key)}
               >
                 <sl-icon slot="prefix" name="upload"></sl-icon>
-                Upload
+                Upload<span class="sr-only"> ${slot.label}</span>
               </sl-button>
             </div>
           `}
@@ -1111,7 +1162,7 @@ export class ScionPageAdminBranding extends LitElement {
             <span class="field-label-text">
               ${slot.label}
               ${slot.dimensionHint
-                ? html`<sl-badge variant="neutral" pill>${slot.dimensionHint}</sl-badge>`
+                ? html`<span class="dimension-hint">${slot.dimensionHint}</span>`
                 : nothing}
             </span>
             ${this.renderPerKeyReset(slot.label, value !== '' && !locked, () =>
@@ -1178,6 +1229,7 @@ export class ScionPageAdminBranding extends LitElement {
           data-reset-all-btn
           ?disabled=${!this.canResetAll()}
           @click=${() => {
+            this.resetError = null;
             this.resetDialogOpen = true;
           }}
         >
@@ -1245,7 +1297,7 @@ export class ScionPageAdminBranding extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <div class="field-label-row">
-              <label for="brand-name">Product Name</label>
+              <span class="field-label-text">Product Name</span>
               ${this.renderPerKeyReset(
                 'Product Name',
                 this.draft.name !== '' && !this.envLocked('name'),
@@ -1257,7 +1309,8 @@ export class ScionPageAdminBranding extends LitElement {
               this.draft.name,
               html`
                 <sl-input
-                  id="brand-name"
+                  class="sr-control-label"
+                  label="Product Name"
                   data-field="name"
                   .value=${this.draft.name}
                   placeholder="Scion"
@@ -1276,7 +1329,7 @@ export class ScionPageAdminBranding extends LitElement {
 
           <div class="form-field">
             <div class="field-label-row">
-              <label for="brand-short-name">Short Name</label>
+              <span class="field-label-text">Short Name</span>
               ${this.renderPerKeyReset(
                 'Short Name',
                 this.draft.short_name !== '' && !this.envLocked('short_name'),
@@ -1288,7 +1341,8 @@ export class ScionPageAdminBranding extends LitElement {
               this.draft.short_name,
               html`
                 <sl-input
-                  id="brand-short-name"
+                  class="sr-control-label"
+                  label="Short Name"
                   data-field="short_name"
                   .value=${this.draft.short_name}
                   placeholder=${this.draft.name || 'Scion'}
@@ -1307,7 +1361,7 @@ export class ScionPageAdminBranding extends LitElement {
 
           <div class="form-field full-width">
             <div class="field-label-row">
-              <label for="brand-subtitle">Subtitle</label>
+              <span class="field-label-text">Subtitle</span>
               ${this.renderPerKeyReset(
                 'Subtitle',
                 this.draft.subtitle !== '' && !this.envLocked('subtitle'),
@@ -1319,7 +1373,8 @@ export class ScionPageAdminBranding extends LitElement {
               this.draft.subtitle,
               html`
                 <sl-input
-                  id="brand-subtitle"
+                  class="sr-control-label"
+                  label="Subtitle"
                   data-field="subtitle"
                   .value=${this.draft.subtitle}
                   placeholder="Optional tagline"
@@ -1351,7 +1406,7 @@ export class ScionPageAdminBranding extends LitElement {
               this.draft.attribution,
               html`
                 <sl-radio-group
-                  class="sr-radio-group"
+                  class="sr-control-label"
                   label="Scion Attribution"
                   data-field="attribution"
                   .value=${this.draft.attribution}
@@ -1400,7 +1455,7 @@ export class ScionPageAdminBranding extends LitElement {
               this.draft.corners,
               html`
                 <sl-radio-group
-                  class="sr-radio-group"
+                  class="sr-control-label"
                   label="Corner Style"
                   data-field="corners"
                   .value=${this.draft.corners}
@@ -1434,7 +1489,7 @@ export class ScionPageAdminBranding extends LitElement {
 
           <div class="form-field">
             <div class="field-label-row">
-              <label for="brand-font-sans">Sans-Serif Font</label>
+              <span class="field-label-text">Sans-Serif Font</span>
               ${this.renderPerKeyReset(
                 'Sans-Serif Font',
                 this.draft.font_sans !== 'default' &&
@@ -1451,7 +1506,8 @@ export class ScionPageAdminBranding extends LitElement {
               this.draft.font_sans,
               html`
                 <sl-select
-                  id="brand-font-sans"
+                  class="sr-control-label"
+                  label="Sans-Serif Font"
                   data-field="font_sans_select"
                   .value=${fontSelectValue}
                   hoist
@@ -1467,7 +1523,8 @@ export class ScionPageAdminBranding extends LitElement {
                 ${this.customFontMode
                   ? html`
                       <sl-input
-                        class="custom-font-input"
+                        class="sr-control-label custom-font-input"
+                        label="Custom Google Font family"
                         data-field="font_sans_custom"
                         .value=${this.draft.font_sans}
                         placeholder="e.g. Lato, Open Sans, Work Sans"
@@ -1538,7 +1595,7 @@ export class ScionPageAdminBranding extends LitElement {
 
         <div class="form-field">
           <div class="field-label-row">
-            <label for="brand-accent-color">Accent Color</label>
+            <span class="field-label-text">Accent Color</span>
             ${this.renderPerKeyReset(
               'Accent Color',
               this.draft.accent_color !== '' && !this.envLocked('accent_color'),
@@ -1560,7 +1617,8 @@ export class ScionPageAdminBranding extends LitElement {
                     this.updateField('accent_color', (e.target as HTMLInputElement).value)}
                 />
                 <sl-input
-                  id="brand-accent-color"
+                  class="sr-control-label"
+                  label="Accent Color"
                   data-field="accent_color"
                   .value=${this.draft.accent_color}
                   placeholder=${DEFAULT_ACCENT_PICKER_COLOR}
@@ -1635,8 +1693,13 @@ export class ScionPageAdminBranding extends LitElement {
         label="Reset All Branding"
         data-reset-dialog
         ?open=${this.resetDialogOpen}
-        @sl-request-close=${() => {
-          if (!this.resetting) this.resetDialogOpen = false;
+        @sl-request-close=${(e: Event) => {
+          if (this.resetting) {
+            e.preventDefault();
+            return;
+          }
+          this.resetDialogOpen = false;
+          this.resetError = null;
         }}
       >
         <p>
@@ -1644,12 +1707,18 @@ export class ScionPageAdminBranding extends LitElement {
             ? 'This clears all editable branding settings in settings.yaml and restores stock Scion defaults immediately.'
             : 'This removes managed branding overrides from the database and reverts to deployment/bootstrap defaults immediately.'}
         </p>
+        ${this.resetError
+          ? html`<div class="status-message error" role="alert" data-reset-error>
+              ${this.resetError}
+            </div>`
+          : nothing}
         <div class="dialog-footer" slot="footer">
           <sl-button
             variant="default"
             ?disabled=${this.resetting}
             @click=${() => {
               this.resetDialogOpen = false;
+              this.resetError = null;
             }}
           >
             Cancel

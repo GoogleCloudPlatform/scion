@@ -27,6 +27,7 @@ import {
   hasAdvancedPaletteOverrides,
   isBrandingDirty,
   isCuratedOrBuiltinFont,
+  normalizeAssetDataUrl,
   parseDataUriInfo,
   totalDataUriBytes,
   validateAccentColorInput,
@@ -183,6 +184,17 @@ describe('admin-branding-state', () => {
       const diff = buildBrandingDiff(draft, base, locked);
       expect(diff).toEqual({ subtitle: 'Updated' });
     });
+
+    it('trims accent_color before diffing and sending', () => {
+      const base = brandingFromConfig({});
+      const draft: BrandingFormState = {
+        ...base,
+        accent_color: '  #0d9488  ',
+        logo: { ...base.logo },
+        icons: { ...base.icons },
+      };
+      expect(buildBrandingDiff(draft, base, new Set())).toEqual({ accent_color: '#0d9488' });
+    });
   });
 
   describe('buildFileModeResetPayload', () => {
@@ -236,14 +248,33 @@ describe('admin-branding-state', () => {
       expect(formatKiB(1536)).toBe('1.5 KiB');
     });
 
-    it('enforces PNG-only on PWA/Apple icon slots', () => {
+    it('enforces PNG-only and rejects mismatched MIME types on all slots', () => {
       const appleSlot = ASSET_SLOTS.find((s) => s.key === 'icons.apple_touch_icon')!;
       expect(
         validateAssetFile({ name: 'icon.svg', type: 'image/svg+xml', size: 1024 }, appleSlot, 0)
       ).toMatch(/PNG/i);
       expect(
+        validateAssetFile({ name: 'x.png', type: 'image/jpeg', size: 1024 }, appleSlot, 0)
+      ).toMatch(/PNG/i);
+      expect(
         validateAssetFile({ name: 'icon.png', type: 'image/png', size: 1024 }, appleSlot, 0)
       ).toBeNull();
+
+      const logoSlot = ASSET_SLOTS.find((s) => s.key === 'logo.light')!;
+      expect(
+        validateAssetFile({ name: 'foo.svg', type: 'text/html', size: 500 }, logoSlot, 0)
+      ).toMatch(/Unsupported file type/i);
+      expect(validateAssetFile({ name: 'foo.svg', type: '', size: 500 }, logoSlot, 0)).toBeNull();
+    });
+
+    it('rewrites generic octet-stream data: URI header from allowed extension', () => {
+      const logoSlot = ASSET_SLOTS.find((s) => s.key === 'logo.light')!;
+      const rewritten = normalizeAssetDataUrl(
+        'data:application/octet-stream;base64,AAAA',
+        'brand.svg',
+        logoSlot
+      );
+      expect(rewritten).toBe('data:image/svg+xml;base64,AAAA');
     });
 
     it('rejects files over 128 KiB per asset and over 512 KiB total budget', () => {
