@@ -677,6 +677,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// max_agents_per_project one (ptone/scion#6033).
 	s.releaseBrokerQuota(ctx, agent)
 	s.releaseProjectQuota(ctx, agent)
+	// Defensive guard: handleAgentLifecycle currently admits only running
+	// agents or an idle-suspend claim, so this is always true in production,
+	// but keeps the dedup invariant local.
 	if isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionSuspend) {
 		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
 	}

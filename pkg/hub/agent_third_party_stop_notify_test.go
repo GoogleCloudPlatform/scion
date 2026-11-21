@@ -739,6 +739,54 @@ func TestThirdPartyLifecycleNotify_NoRepeatWhenAlreadyInTargetState(t *testing.T
 			assert.NotEqual(t, agent.ID, n.AgentID, "re-suspending an already user-suspended agent must not notify")
 		}
 	})
+
+	t.Run("re-stopping an already stopped managed agent does not send another notice", func(t *testing.T) {
+		useManagedBackend(t, &recordingManagedBackend{})
+
+		agent := &store.Agent{
+			ID:        tid("tp-noop-managed-restop"),
+			Name:      "managed-restop",
+			Slug:      "managed-restop",
+			ProjectID: project.ID,
+			Runtime:   ManagedRuntimePrefix + "test",
+			Phase:     string(state.PhaseRunning),
+			Template:  "claude",
+			CreatedBy: creatorID,
+			OwnerID:   creatorID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		// First stop: running -> stopped (real transition -> 1 notice).
+		body1, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "first managed stop"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(body1))
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec := httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		// Second stop: stopped -> stopped (already in target state -> 0 new notices).
+		body2, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "second managed stop"})
+		req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(body2))
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec = httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		var agentNotifs []store.Notification
+		for _, n := range notifs {
+			if n.AgentID == agent.ID {
+				agentNotifs = append(agentNotifs, n)
+			}
+		}
+		require.Len(t, agentNotifs, 1, "re-stopping an already-stopped managed agent must not send a second notice")
+		assert.Contains(t, agentNotifs[0].Message, ": first managed stop")
+	})
 }
 
 func TestThirdPartyLifecycleNotify_TerminalActivityNoStaleRefire(t *testing.T) {

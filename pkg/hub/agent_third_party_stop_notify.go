@@ -138,6 +138,8 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 		status = "SUSPENDED"
 	}
 
+	now := time.Now().UTC()
+
 	// Only attach the third-party notification to an existing creator
 	// subscription when the subsequent PublishAgentStatus event will compute
 	// the same notification status. When a stopped agent retains a terminal
@@ -147,12 +149,7 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 	// handleEvent to re-fire a stale terminal notice. Using the creator-fallback
 	// subscription delivers the third-party notice while leaving the real
 	// subscription's deduplication history intact (ptone/scion#8695).
-	postWriteStatus := notificationEventStatus(AgentStatusEvent{
-		AgentID:   agent.ID,
-		ProjectID: agent.ProjectID,
-		Phase:     agent.Phase,
-		Activity:  agent.Activity,
-	})
+	postWriteStatus := notificationEventStatus(agentStatusEvent(agent, now))
 	matchExistingSub := strings.EqualFold(postWriteStatus, status)
 
 	sub := nd.resolveThirdPartyCreatorSubscription(ctx, agent, status, matchExistingSub)
@@ -161,7 +158,6 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 	}
 
 	actorLabel := s.thirdPartyActorLabel(ctx, identity)
-	now := time.Now().UTC()
 	message := thirdPartyLifecycleMessage(agent.Slug, action, actorLabel, now, reason)
 	evt := AgentStatusEvent{
 		AgentID:   agent.ID,
