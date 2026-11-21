@@ -5320,7 +5320,7 @@ type QuotaStore interface {
 	//  5. No row and !CreateIfAbsent: TransferAbsent.
 	//  6. Cap > 0: counts active rows with the predicate Reserve uses
 	//     (CountActiveReservations: subject = scope = (broker, ToBrokerID));
-	//     count >= Cap returns ErrQuotaExceeded.
+	//     count >= Cap returns ErrQuotaExceeded with TargetCount set to count.
 	//  7. Releases the held row, if any (released_at = now WHERE id AND
 	//     released_at IS NULL); affected rows != 1 rolls back with
 	//     ErrTransferRaced. Never falls through to the insert.
@@ -5429,6 +5429,9 @@ type BrokerReservationTransferResult struct {
 	// ReservationID is the active row on ToBrokerID afterwards (empty when
 	// no row is on it).
 	ReservationID string
+	// TargetCount is the active broker-scoped reservation count observed on
+	// ToBrokerID when Cap > 0 refuses the transfer with ErrQuotaExceeded.
+	TargetCount int64
 }
 
 // =============================================================================

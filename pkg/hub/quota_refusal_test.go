@@ -37,7 +37,7 @@ func TestQuotaRefusal_MaxAgentsPerBroker(t *testing.T) {
 			Max:       4,
 		})
 		assert.Equal(t,
-			"quota exceeded: max_agents_per_broker (broker broker-123: 4 of 4 running agents); stop, suspend, or delete a running agent on this broker to free a slot",
+			"quota exceeded: max_agents_per_broker (broker broker-123: 4 of 4 active agents (starting, running, stopping, or stop-queued)); stop, suspend, or delete an active agent on this broker to free a slot",
 			msg)
 		assert.Equal(t, map[string]interface{}{
 			"runtimeBrokerId": "broker-123",
@@ -54,11 +54,23 @@ func TestQuotaRefusal_MaxAgentsPerBroker(t *testing.T) {
 			Max:       2,
 		})
 		assert.Equal(t,
-			"quota exceeded: max_agents_per_broker (2 of 2 running agents); stop, suspend, or delete a running agent on this broker to free a slot",
+			"quota exceeded: max_agents_per_broker (2 of 2 active agents (starting, running, stopping, or stop-queued)); stop, suspend, or delete an active agent on this broker to free a slot",
 			msg)
 		assert.Equal(t, map[string]interface{}{
 			"count": int64(2),
 			"limit": int64(2),
+		}, details)
+	})
+
+	t.Run("unpopulated count and max omits 0 of 0", func(t *testing.T) {
+		msg, details := quotaRefusal(store.LimitMaxAgentsPerBroker, &QuotaExceededError{
+			Limit:     store.LimitMaxAgentsPerBroker,
+			ScopeType: store.QuotaScopeBroker,
+			ScopeID:   "broker-123",
+		})
+		assert.Equal(t, "quota exceeded: max_agents_per_broker", msg)
+		assert.Equal(t, map[string]interface{}{
+			"runtimeBrokerId": "broker-123",
 		}, details)
 	})
 
@@ -83,8 +95,8 @@ func TestQuotaRefusal_MaxAgentsPerBroker(t *testing.T) {
 		require.NotNil(t, apiErr)
 		assert.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode)
 		assert.Equal(t, ErrCodeQuotaExceeded, apiErr.Code)
-		assert.Contains(t, apiErr.Error(), "broker broker-xyz: 3 of 3 running agents")
-		assert.Contains(t, apiErr.Error(), "stop, suspend, or delete a running agent on this broker to free a slot")
+		assert.Contains(t, apiErr.Error(), "broker broker-xyz: 3 of 3 active agents (starting, running, stopping, or stop-queued)")
+		assert.Contains(t, apiErr.Error(), "stop, suspend, or delete an active agent on this broker to free a slot")
 	})
 }
 
@@ -110,4 +122,9 @@ func TestBrokerQuotaCountedPhase_ExcludesStoppedAndSuspended(t *testing.T) {
 	for _, p := range counted {
 		assert.True(t, isBrokerQuotaCountedPhase(string(p)), fmt.Sprintf("phase %q must count toward max_agents_per_broker", p))
 	}
+
+	assert.True(t, store.AgentHoldsBrokerCapacity(&store.Agent{
+		Phase:           string(state.PhaseStopped),
+		ContainerStatus: store.ContainerStatusStopQueued,
+	}), "stop_queued agent must still hold broker capacity")
 }

@@ -432,8 +432,9 @@ func TransferBrokerReservationConformance(t *testing.T, factory Factory) {
 			for _, limit := range []int64{1, 2} {
 				r := f.req(f.to)
 				r.Cap = limit
-				_, err := s.TransferBrokerReservation(ctx, r)
+				res, err := s.TransferBrokerReservation(ctx, r)
 				assert.ErrorIs(t, err, store.ErrQuotaExceeded, "cap %d", limit)
+				assert.Equal(t, int64(2), res.TargetCount, "cap %d reports observed target count", limit)
 				f.requireUnchanged(t, ctx)
 				assert.Equal(t, int64(2), f.count(t, ctx, f.to))
 			}
@@ -452,8 +453,9 @@ func TransferBrokerReservationConformance(t *testing.T, factory Factory) {
 			require.NoError(t, err)
 			r := f.req(f.from)
 			r.CreateIfAbsent, r.Cap = true, 1
-			_, err = s.TransferBrokerReservation(ctx, r)
+			res, err := s.TransferBrokerReservation(ctx, r)
 			assert.ErrorIs(t, err, store.ErrQuotaExceeded)
+			assert.Equal(t, int64(1), res.TargetCount)
 			f.requireUnchanged(t, ctx)
 		})
 

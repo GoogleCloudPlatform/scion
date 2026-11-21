@@ -818,7 +818,7 @@ func (q *QuotaStore) TransferBrokerReservation(ctx context.Context, req store.Br
 			return none, mapError(err)
 		}
 		if int64(count) >= req.Cap {
-			return none, store.ErrQuotaExceeded
+			return store.BrokerReservationTransferResult{TargetCount: int64(count)}, store.ErrQuotaExceeded
 		}
 	}
 
