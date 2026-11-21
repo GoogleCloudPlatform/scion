@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -339,4 +340,142 @@ func TestSuspendScreen_ManualSuspendAndRBACAndLook(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, managed))
 	rec = doRequestAsUser(t, srv, owner, http.MethodGet, "/api/v1/agents/"+managed.ID+"/screen", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestSuspendScreen_AutoSuspendPaths(t *testing.T) {
+	ctx := context.Background()
+
+	seedRunningAgent := func(t *testing.T, s store.Store, broker *store.RuntimeBroker, project *store.Project, name, activity string, actSince time.Time) *store.Agent {
+		t.Helper()
+		a := newWorkspaceAgent(t, s, broker, project, name, "docker", "", state.PhaseRunning)
+		_, err := s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+		require.NoError(t, err)
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err = db.ExecContext(ctx,
+			"UPDATE agents SET run_id = ?, activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			"run-"+name, activity, actSince.UTC(), time.Now().UTC(), a.ID,
+		)
+		require.NoError(t, err)
+		loaded, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		return loaded
+	}
+
+	enableIdle := func(t *testing.T, srv *Server) {
+		t.Helper()
+		setExperimentOverrides(t, srv, map[string]bool{
+			experiments.SuspendScreen: true,
+			experiments.IdleSuspend:   true,
+		})
+		srv.mu.Lock()
+		srv.config.AutoSuspendIdle = true
+		srv.config.IdleSuspendAfter = MinIdleSuspendAfter
+		srv.mu.Unlock()
+	}
+
+	idleSince := time.Now().Add(-2 * DefaultIdleSuspendAfter)
+
+	t.Run("stalled auto-suspend captures and persists screen", func(t *testing.T) {
+		disp := &suspendScreenDispatcher{tmuxOutput: "stalled output\n"}
+		srv, s := testServer(t)
+		srv.SetDispatcher(disp)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "as-stalled")
+		a := seedRunningAgent(t, s, broker, project, "stalled-1", string(state.ActivityStalled), time.Now().Add(-10*time.Minute))
+
+		ok := srv.autoSuspendAgent(ctx, disp, a, state.SuspendReasonStalled)
+		require.True(t, ok)
+
+		got, err := s.GetAgentSuspendScreen(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "stalled output\n", got.Content)
+	})
+
+	t.Run("idle auto-suspend captures and persists screen and conversion preserves it", func(t *testing.T) {
+		disp := &suspendScreenDispatcher{tmuxOutput: "idle output\n"}
+		srv, s := testServer(t)
+		srv.SetDispatcher(disp)
+		enableIdle(t, srv)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "as-idle")
+		a := seedRunningAgent(t, s, broker, project, "idle-1", string(state.ActivityIdle), idleSince)
+
+		ok := srv.autoSuspendAgent(ctx, disp, a, state.SuspendReasonIdle)
+		require.True(t, ok)
+
+		got, err := s.GetAgentSuspendScreen(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "idle output\n", got.Content)
+
+		// Hub->user conversion ("Keep suspended") preserves the existing row
+		// without issuing another capture.
+		callsBefore := disp.tmuxCalls
+		disp.setTmux("should-not-replace\n", 0, nil)
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, callsBefore, disp.tmuxCalls)
+
+		still, err := s.GetAgentSuspendScreen(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "idle output\n", still.Content)
+	})
+
+	t.Run("idle auto-suspend refused stop leaves existing row untouched", func(t *testing.T) {
+		disp := &suspendScreenDispatcher{
+			tmuxOutput: "new capture\n",
+			stopErr:    &brokerStatusError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"bad_request"}}`},
+		}
+		srv, s := testServer(t)
+		srv.SetDispatcher(disp)
+		enableIdle(t, srv)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "as-refused")
+		a := seedRunningAgent(t, s, broker, project, "refused-1", string(state.ActivityIdle), idleSince)
+
+		// Seed an older screen row.
+		require.NoError(t, s.PutAgentSuspendScreen(ctx, &store.AgentSuspendScreen{
+			AgentID:    a.ID,
+			Content:    "prior screen\n",
+			CapturedAt: time.Now().UTC().Add(-time.Hour),
+		}))
+
+		ok := srv.autoSuspendAgent(ctx, disp, a, state.SuspendReasonIdle)
+		require.False(t, ok)
+		assert.Equal(t, 1, disp.tmuxCalls, "probe ran before refused stop")
+
+		got, err := s.GetAgentSuspendScreen(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "prior screen\n", got.Content)
+	})
+
+	t.Run("idle auto-suspend unknown outcome persists captured screen now", func(t *testing.T) {
+		disp := &suspendScreenDispatcher{
+			tmuxOutput: "unknown-outcome capture\n",
+			stopErr:    errors.New("broker connection reset"),
+		}
+		srv, s := testServer(t)
+		srv.SetDispatcher(disp)
+		enableIdle(t, srv)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "as-unknown")
+		a := seedRunningAgent(t, s, broker, project, "unknown-1", string(state.ActivityIdle), idleSince)
+
+		ok := srv.autoSuspendAgent(ctx, disp, a, state.SuspendReasonIdle)
+		require.False(t, ok)
+
+		got, err := s.GetAgentSuspendScreen(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "unknown-outcome capture\n", got.Content)
+	})
+
+	t.Run("membership-loss hold suspend does not capture screen", func(t *testing.T) {
+		disp := &suspendScreenDispatcher{tmuxOutput: "held secret output\n"}
+		srv, s := testServer(t)
+		srv.SetDispatcher(disp)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "as-held")
+		a := seedRunningAgent(t, s, broker, project, "held-1", string(state.ActivityIdle), time.Now().Add(-time.Minute))
+
+		err := srv.stopHeldAgent(ctx, a.ID, 1)
+		require.NoError(t, err)
+		assert.Zero(t, disp.tmuxCalls)
+
+		_, err = s.GetAgentSuspendScreen(ctx, a.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
 }
