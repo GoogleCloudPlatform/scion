@@ -66,57 +66,67 @@ func newRawKeepaliveWSPair(t *testing.T) (client, server *websocket.Conn, cleanu
 // extends the read deadline enough that a read on the keepalive side never
 // times out, well past what a single, un-extended deadline would allow.
 func TestStartKeepalive_PongsExtendTheReadDeadline(t *testing.T) {
-	client, server, cleanup := newRawKeepaliveWSPair(t)
-	defer cleanup()
+	synctest.Test(t, func(t *testing.T) {
+		client, server, cleanup := newPipeKeepaliveWSPair(t)
+		defer cleanup()
 
-	// The client only needs to keep pumping reads for gorilla's default ping
-	// handler to fire (which answers with a pong automatically); it never
-	// sends anything itself.
-	clientDone := make(chan struct{})
-	go func() {
-		defer close(clientDone)
-		for {
-			if _, _, err := client.ReadMessage(); err != nil {
-				return
+		// The client only needs to keep pumping reads for gorilla's default ping
+		// handler to fire (which answers with a pong automatically); it never
+		// sends anything itself.
+		clientDone := make(chan struct{})
+		go func() {
+			defer close(clientDone)
+			for {
+				if _, _, err := client.ReadMessage(); err != nil {
+					return
+				}
 			}
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() {
+			cancel()
+			cleanup()
+			<-clientDone
+			synctest.Wait()
+		}()
+		var mu sync.Mutex
+		cfg := ConnectionConfig{PingInterval: 20 * time.Millisecond, PongWait: 80 * time.Millisecond, WriteWait: 200 * time.Millisecond}
+		require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
+
+		// Read on the server side for well over 3x PongWait. If pongs were not
+		// extending the deadline, this would time out at ~1x PongWait.
+		readErrCh := make(chan error, 1)
+		go func() {
+			_, _, err := server.ReadMessage()
+			readErrCh <- err
+		}()
+
+		select {
+		case err := <-readErrCh:
+			t.Fatalf("read ended too early (deadline was not extended): %v", err)
+		case <-time.After(300 * time.Millisecond):
+			// Still alive well past a single PongWait: the pongs are extending
+			// the deadline as intended.
 		}
-	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var mu sync.Mutex
-	cfg := ConnectionConfig{PingInterval: 20 * time.Millisecond, PongWait: 80 * time.Millisecond, WriteWait: 200 * time.Millisecond}
-	require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
+		// Stop the client from reading (and therefore from ever pong-ing again),
+		// and confirm the server's read now does eventually fail once the last
+		// extended deadline lapses.
+		cancel()
+		_ = client.Close()
+		<-clientDone
 
-	// Read on the server side for well over 3x PongWait. If pongs were not
-	// extending the deadline, this would time out at ~1x PongWait.
-	readErrCh := make(chan error, 1)
-	go func() {
-		_, _, err := server.ReadMessage()
-		readErrCh <- err
-	}()
+		select {
+		case err := <-readErrCh:
+			require.Error(t, err)
+		case <-time.After(2 * time.Second):
+			t.Fatal("server read did not fail after the peer stopped answering")
+		}
 
-	select {
-	case err := <-readErrCh:
-		t.Fatalf("read ended too early (deadline was not extended): %v", err)
-	case <-time.After(300 * time.Millisecond):
-		// Still alive well past a single PongWait: the pongs are extending
-		// the deadline as intended.
-	}
-
-	// Stop the client from reading (and therefore from ever pong-ing again),
-	// and confirm the server's read now does eventually fail once the last
-	// extended deadline lapses.
-	cancel()
-	_ = client.Close()
-	<-clientDone
-
-	select {
-	case err := <-readErrCh:
-		require.Error(t, err)
-	case <-time.After(2 * time.Second):
-		t.Fatal("server read did not fail after the peer stopped answering")
-	}
+		cleanup()
+		synctest.Wait()
+	})
 }
 
 // TestStartKeepalive_NoPongsExpireTheReadDeadline is the negative control for
@@ -126,23 +136,28 @@ func TestStartKeepalive_PongsExtendTheReadDeadline(t *testing.T) {
 // PongWait, ruling out a false pass where the deadline was never really
 // armed in the first place.
 func TestStartKeepalive_NoPongsExpireTheReadDeadline(t *testing.T) {
-	_, server, cleanup := newRawKeepaliveWSPair(t)
-	defer cleanup()
-	// The client deliberately never reads, so it never answers a ping with a
-	// pong.
+	synctest.Test(t, func(t *testing.T) {
+		_, server, cleanup := newPipeKeepaliveWSPair(t)
+		// The client deliberately never reads, so it never answers a ping with a
+		// pong.
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var mu sync.Mutex
-	cfg := ConnectionConfig{PingInterval: 20 * time.Millisecond, PongWait: 100 * time.Millisecond, WriteWait: 200 * time.Millisecond}
-	require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() {
+			cancel()
+			cleanup()
+			synctest.Wait()
+		}()
+		var mu sync.Mutex
+		cfg := ConnectionConfig{PingInterval: 20 * time.Millisecond, PongWait: 100 * time.Millisecond, WriteWait: 200 * time.Millisecond}
+		require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
 
-	start := time.Now()
-	_, _, err := server.ReadMessage()
-	elapsed := time.Since(start)
+		start := time.Now()
+		_, _, err := server.ReadMessage()
+		elapsed := time.Since(start)
 
-	require.Error(t, err)
-	require.Less(t, elapsed, 500*time.Millisecond, "deadline should expire at about PongWait, not hang")
+		require.Error(t, err)
+		require.Equal(t, cfg.PongWait, elapsed, "deadline should expire at PongWait, not hang")
+	})
 }
 
 // TestStartKeepalive_ZeroConfigFallsBackToDefaults proves that a zero-valued
@@ -188,43 +203,52 @@ func TestStartKeepalive_ZeroConfigFallsBackToDefaults(t *testing.T) {
 // already-armed PongWait elapses on its own, not because pongs kept
 // extending it.
 func TestStartKeepalive_ZeroWriteWaitStillPings(t *testing.T) {
-	client, server, cleanup := newRawKeepaliveWSPair(t)
-	defer cleanup()
+	synctest.Test(t, func(t *testing.T) {
+		client, server, cleanup := newPipeKeepaliveWSPair(t)
+		defer cleanup()
 
-	clientDone := make(chan struct{})
-	go func() {
-		defer close(clientDone)
-		for {
-			if _, _, err := client.ReadMessage(); err != nil {
-				return
+		clientDone := make(chan struct{})
+		go func() {
+			defer close(clientDone)
+			for {
+				if _, _, err := client.ReadMessage(); err != nil {
+					return
+				}
 			}
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer func() {
+			cancel()
+			cleanup()
+			<-clientDone
+			synctest.Wait()
+		}()
+		var mu sync.Mutex
+		// WriteWait deliberately left at zero.
+		cfg := ConnectionConfig{PingInterval: 20 * time.Millisecond, PongWait: 100 * time.Millisecond}
+		require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
+
+		readErrCh := make(chan error, 1)
+		go func() {
+			_, _, err := server.ReadMessage()
+			readErrCh <- err
+		}()
+
+		select {
+		case err := <-readErrCh:
+			t.Fatalf("read ended too early; the WriteWait fallback did not take effect: %v", err)
+		case <-time.After(300 * time.Millisecond):
+			// Still alive well past a single PongWait: pings kept being sent
+			// (each with a working write deadline) and answered.
 		}
-	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var mu sync.Mutex
-	// WriteWait deliberately left at zero.
-	cfg := ConnectionConfig{PingInterval: 20 * time.Millisecond, PongWait: 100 * time.Millisecond}
-	require.NoError(t, StartKeepalive(ctx, server, &mu, cfg))
-
-	readErrCh := make(chan error, 1)
-	go func() {
-		_, _, err := server.ReadMessage()
-		readErrCh <- err
-	}()
-
-	select {
-	case err := <-readErrCh:
-		t.Fatalf("read ended too early; the WriteWait fallback did not take effect: %v", err)
-	case <-time.After(300 * time.Millisecond):
-		// Still alive well past a single PongWait: pings kept being sent
-		// (each with a working write deadline) and answered.
-	}
-
-	cancel()
-	_ = client.Close()
-	<-clientDone
+		cancel()
+		cleanup()
+		<-clientDone
+		require.Error(t, <-readErrCh)
+		synctest.Wait()
+	})
 }
 
 // pipeHijackResponseWriter is a minimal http.ResponseWriter + http.Hijacker
