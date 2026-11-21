@@ -461,7 +461,7 @@ if $FULL_DEPLOY; then
     SUDOERS_RULE="/etc/sudoers.d/scion-rebuild-server"
     cat > /tmp/scion-rebuild-server <<SUDOERS_EOF
 # Scion rebuild-server maintenance task privileges.
-scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh
+scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh ""
 scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart scion-hub
 scion ALL=(root) NOPASSWD: /usr/bin/systemctl restart --no-block scion-hub
 SUDOERS_EOF

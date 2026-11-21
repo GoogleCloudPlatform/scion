@@ -32,16 +32,20 @@
 
 set -euo pipefail
 
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 if [[ $# -ne 0 ]]; then
     echo "scion-install-rebuild: unexpected arguments" >&2
     exit 2
 fi
 
+cd /
+
 DEFAULT_SRC="/home/scion/scion/scion.rebuild"
 DEFAULT_DEST="/usr/local/bin/scion"
 DEFAULT_OWNER="scion"
 
-if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+if [[ "$(/usr/bin/id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
     SRC="${DEFAULT_SRC}"
     DEST="${DEFAULT_DEST}"
     EXPECTED_OWNER="${DEFAULT_OWNER}"
@@ -51,7 +55,7 @@ else
     EXPECTED_OWNER="${SCION_REBUILD_OWNER:-${DEFAULT_OWNER}}"
 fi
 
-python3 - "${SRC}" "${DEST}" "${EXPECTED_OWNER}" <<'PY'
+/usr/bin/python3 -I - "${SRC}" "${DEST}" "${EXPECTED_OWNER}" <<'PY'
 import errno
 import os
 import pwd
