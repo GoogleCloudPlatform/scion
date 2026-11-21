@@ -54,25 +54,33 @@ import (
 // minted, as pkg/agent.Start does.
 type holdingBrokerClient struct {
 	RuntimeBrokerClient
-	held     chan DeleteAgentOptions
-	release  chan struct{}
-	mgr      *runLabelManager
-	project  string
-	scionDir string
-	starts   int
+	held      chan DeleteAgentOptions
+	release   chan struct{}
+	mgr       *runLabelManager
+	agentUUID string
+	project   string
+	scionDir  string
+	starts    int
 }
 
 func (c *holdingBrokerClient) StartAgent(_ context.Context, _, _, agentID, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	c.starts++
+	labels := map[string]string{"agent_id": c.agentUUID, "scion.project_id": c.project}
 	entries, _ := c.mgr.snapshot()
 	for _, e := range entries {
 		if e.Name == agentID {
-			return &RemoteAgentResponse{Agent: &RemoteAgentInfo{Slug: agentID, ContainerID: e.ContainerID, Phase: "running", RunID: e.RunID}}, nil
+			return &RemoteAgentResponse{Agent: &RemoteAgentInfo{
+				ID: c.agentUUID, Slug: agentID, ProjectID: c.project, Labels: labels,
+				ContainerID: e.ContainerID, Phase: "running", RunID: e.RunID,
+			}}, nil
 		}
 	}
 	cid := "cid-new"
 	c.mgr.run(agentID, cid, c.project, c.scionDir, extras.RunID)
-	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{Slug: agentID, ContainerID: cid, Phase: "running", RunID: extras.RunID}, Created: true}, nil
+	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{
+		ID: c.agentUUID, Slug: agentID, ProjectID: c.project, Labels: labels,
+		ContainerID: cid, Phase: "running", RunID: extras.RunID,
+	}, Created: true}, nil
 }
 
 func (c *holdingBrokerClient) DeleteAgent(ctx context.Context, brokerID, endpoint, agentID, projectID string, opts DeleteAgentOptions) error {
@@ -143,8 +151,13 @@ func newFenceE2E(t *testing.T) *fenceE2E {
 		ID: tid("agent-fence-e2e"), Name: name, Slug: name, ProjectID: projectID, RuntimeBrokerID: brokerID,
 		Phase: string(state.PhaseRunning), AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
 	}
+	client.agentUUID = a.ID
 	require.NoError(t, s.CreateAgent(ctx, a))
-	_, err := s.SetAgentRunID(ctx, a.ID, "run-a", nil)
+	_, credA, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID: a.ID, ProjectID: a.ProjectID, Scopes: ScopesForRole(AgentRoleFull),
+	}, "run-a")
+	require.NoError(t, err)
+	_, err = s.SetAgentRunID(ctx, a.ID, "run-a", credA)
 	require.NoError(t, err)
 	mgr.run(name, "cid-a", projectID, scionDir, "run-a")
 

@@ -94,6 +94,13 @@ func newSettle3bFixture(t *testing.T, name string, observed bool) *settle3bFixtu
 		_, err := s.SetAgentRunID(ctx, agent.ID, r, nil)
 		require.NoError(t, err)
 	}
+	// Record a minted credential for s3bRunB (the kept entry's run the broker
+	// reports) so settleLaunchedRun's adoption identity check passes.
+	_, credB, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: ScopesForRole(AgentRoleFull),
+	}, s3bRunB)
+	require.NoError(t, err)
+	require.NoError(t, s.CreateAgentCredential(ctx, credB))
 	launchID, err := s.BeginLaunchWithOptions(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute, store.BeginLaunchOptions{RunID: s3bRunM})
 	require.NoError(t, err)
 	require.Equal(t, s3bRunM, mustGetAgent(t, s, agent.ID).LaunchRunID, "slice 3 binds the dispatched run")

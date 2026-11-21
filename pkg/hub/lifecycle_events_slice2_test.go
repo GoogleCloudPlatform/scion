@@ -71,9 +71,12 @@ type lcBrokerClient struct {
 	// runID, when set, is the run the answer names instead (a broker that
 	// kept another running entry; the Hub adopts it by compare-and-swap).
 	runID string
+	// srv, when set alongside runID, mints a credential for (req.ID, runID)
+	// before returning so adoptBrokerRunID's credential check passes.
+	srv *Server
 }
 
-func (c *lcBrokerClient) shape(resp *RemoteAgentResponse, req *RemoteCreateAgentRequest) {
+func (c *lcBrokerClient) shape(ctx context.Context, resp *RemoteAgentResponse, req *RemoteCreateAgentRequest) {
 	if resp == nil || resp.Agent == nil || req == nil {
 		return
 	}
@@ -85,18 +88,27 @@ func (c *lcBrokerClient) shape(resp *RemoteAgentResponse, req *RemoteCreateAgent
 	}
 	if c.runID != "" {
 		resp.Agent.RunID = c.runID
+		resp.Agent.ProjectID = req.ProjectID
+		resp.Agent.Labels = map[string]string{"agent_id": req.ID, "scion.project_id": req.ProjectID}
+		if c.srv != nil && c.srv.agentTokenService != nil && c.srv.store != nil {
+			if _, cred, err := c.srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+				AgentID: req.ID, ProjectID: req.ProjectID, Scopes: ScopesForRole(AgentRoleFull),
+			}, c.runID); err == nil {
+				_ = c.srv.store.CreateAgentCredential(ctx, cred)
+			}
+		}
 	}
 }
 
 func (c *lcBrokerClient) CreateAgent(ctx context.Context, brokerID, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	resp, err := c.mockRuntimeBrokerClient.CreateAgent(ctx, brokerID, endpoint, req)
-	c.shape(resp, req)
+	c.shape(ctx, resp, req)
 	return resp, err
 }
 
 func (c *lcBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, endpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 	resp, envs, err := c.mockRuntimeBrokerClient.CreateAgentWithGather(ctx, brokerID, endpoint, req)
-	c.shape(resp, req)
+	c.shape(ctx, resp, req)
 	return resp, envs, err
 }
 
@@ -106,7 +118,7 @@ func (c *lcBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, en
 func lcDispatchServer(t *testing.T, phase string, echoRun bool) (*Server, lifecycleEventStore, string, *telemetryemit.MemorySink, *lcBrokerClient) {
 	t.Helper()
 	srv, s, project, mock := setupThinkingLevelDispatch(t)
-	client := &lcBrokerClient{mockRuntimeBrokerClient: mock, phase: phase, echoRun: echoRun}
+	client := &lcBrokerClient{mockRuntimeBrokerClient: mock, phase: phase, echoRun: echoRun, srv: srv}
 	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
 	ls, ok := s.(lifecycleEventStore)
 	require.True(t, ok)

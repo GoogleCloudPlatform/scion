@@ -238,7 +238,9 @@ func TestLifecycleEvents_3bAlreadyRunningStartSettlesWithoutEcho(t *testing.T) {
 func reportAlreadyRunning(t *testing.T, f *echoReportFixture, run string) string {
 	t.Helper()
 	info := &RemoteAgentInfo{
-		ID: f.agent.Slug, Slug: f.agent.Slug, RunID: run, Phase: string(state.PhaseRunning),
+		ID: f.agent.ID, Slug: f.agent.Slug, ProjectID: f.agent.ProjectID,
+		Labels: map[string]string{"agent_id": f.agent.ID, "scion.project_id": f.agent.ProjectID},
+		RunID:  run, Phase: string(state.PhaseRunning),
 		Template: "default", Image: "example/agent:1", Runtime: "docker", Profile: "default",
 		HarnessConfig: "claude-default", HarnessConfigSource: "broker-resolved", HarnessConfigRevision: "rev-kept",
 	}

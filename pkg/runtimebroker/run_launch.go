@@ -506,6 +506,8 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			Runtime:         sr.info.Runtime,
 			RuntimeState:    sr.info.RuntimeState,
 			Profile:         sr.info.Profile,
+			ProjectID:       sr.info.ProjectID,
+			Labels:          sr.info.Labels,
 			Phase:           sr.info.Phase,
 			Activity:        sr.info.Activity,
 			ContainerStatus: sr.info.ContainerStatus,

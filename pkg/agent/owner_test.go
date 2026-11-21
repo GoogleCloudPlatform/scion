@@ -189,9 +189,9 @@ func TestOwner_DeliverWithoutProjectNeverPicksAmongSeveral(t *testing.T) {
 }
 
 // TestOwner_StartVerifiesOnlyItsOwnProjectsAgent: after the runtime creates
-// the container, an owned manager's verification never matches another
-// project's stopped agent of the same name (which would delete the new
-// container and fail the start); a legacy manager's name match is unchanged.
+// the container, post-Run verification never matches another project's stopped
+// agent of the same name (which would delete the new container and fail the
+// start), whether the manager is owned or not (ptone/scion#8240).
 func TestOwner_StartVerifiesOnlyItsOwnProjectsAgent(t *testing.T) {
 	mockRuntimeForTest(t)
 	tmpDir := t.TempDir()
@@ -223,12 +223,8 @@ func TestOwner_StartVerifiesOnlyItsOwnProjectsAgent(t *testing.T) {
 			}
 			_, err := m.Start(context.Background(), api.StartOptions{Name: "worker", ProjectPath: root, HarnessConfig: "claude", NoAuth: true,
 				Env: map[string]string{"SCION_PROJECT_ID": "proj-1", "SCION_AGENT_ID": "agent-1"}})
-			if owned {
-				require.NoError(t, err)
-				assert.NotContains(t, deleted, "new-id", "the new container is kept")
-			} else {
-				require.Error(t, err, "legacy behaviour: the name match reports an immediate exit")
-			}
+			require.NoError(t, err)
+			assert.NotContains(t, deleted, "new-id", "the new container is kept")
 		})
 	}
 }

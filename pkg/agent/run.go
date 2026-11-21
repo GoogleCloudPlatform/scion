@@ -3056,10 +3056,20 @@ authDone:
 		}
 	}
 
-	// Fetch fresh info and verify the container is actually running
-	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
+	// Fetch fresh info and verify the container is actually running.
+	// Scope the query to this project when projectID is known (so runtimes
+	// such as Substrate do not trip their cross-project ambiguity guard when
+	// two projects run the same agent name).
+	postRunFilter := map[string]string{"scion.name": slug}
+	if projectID != "" {
+		postRunFilter["scion.project_id"] = projectID
+	}
+	allAgents, err := m.listRuntime(ctx, postRunFilter)
 	if err == nil {
-		for _, a := range allAgents {
+		matchID := scopeProjectID(projectID, projectDir)
+		var found *api.AgentInfo
+		for i := range allAgents {
+			a := allAgents[i]
 			// An entry of another run is never this start's container, so
 			// it is neither reported, failed nor deleted here
 			// (ptone/scion#7289): a runtime with a deterministic instance
@@ -3068,53 +3078,59 @@ authDone:
 			if !postRunEntryOfRun(a, runID) {
 				continue
 			}
-			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
-			// An owned (flat instance) manager matches by name only within
-			// the agent's project, never another project's same-named agent.
-			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, scopeProjectID(projectID, projectDir)) {
-				matched = false
+			// Keep the exact ContainerID == id match first, because Docker's
+			// Run returns a long ID while its listing returns a short one.
+			if a.ContainerID == id {
+				found = &allAgents[i]
+				break
 			}
-			if matched {
-				// Check if the container has already exited
-				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted) {
-					// Try to get logs for diagnosis
-					logs, _ := m.Runtime.GetLogs(ctx, id)
-					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
-					// Record the failed start as the Run error path does, so
-					// list shows error rather than the pre-run phase. The
-					// container is gone, so the host write keeps the
-					// ptone/scion#4766 invariant (no host write while the
-					// container may read the file).
-					if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
-						slog.Warn("Start: failed to record the failed start in the host state file",
-							"agent", opts.Name, "run_id", runID, "error", recErr)
-					}
-					if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, string(state.PhaseError), m.Runtime.Name(), profileName); updateErr != nil {
-						util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
-					}
-					return nil, fmt.Errorf("container started but exited immediately (status: %s). Container logs:\n%s", a.ContainerStatus, logs)
-				}
-				a.Detached = detached
-				a.Warnings = warnings
-				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
-				a.RelayedWarnings = relayedWarnings
-				a.StartNotice = startNotice
-				a.Phase = successPhase
-				a.HarnessConfig = harnessConfigName
-				a.HarnessConfigRevision = harnessConfigRevision
-				a.HarnessConfigSource = harnessConfigSource
-				// The effective configuration the hub records (WP1 slice 3).
-				a.Harness = launchedHarness
-				a.Model = effectiveModel
-				a.ConfigResolved = true
-				if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
-					a.TemplateHash = th
-				}
-				a.HarnessAuth = opts.HarnessAuth
-				a.Profile = profileName
-				a.WorkspacePlacement = workspacePlacement
-				return &a, nil
+			// Name fallback is always project-scoped (ptone/scion#8240):
+			// never match another project's same-named agent.
+			if found == nil && strings.EqualFold(a.Name, opts.Name) && matchAgentProject(a, projectName, matchID) {
+				found = &allAgents[i]
 			}
+		}
+		if found != nil {
+			a := *found
+			// Check if the container has already exited
+			if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) || a.Phase == string(state.PhaseHalted) {
+				// Try to get logs for diagnosis
+				logs, _ := m.Runtime.GetLogs(ctx, id)
+				_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
+				// Record the failed start as the Run error path does, so
+				// list shows error rather than the pre-run phase. The
+				// container is gone, so the host write keeps the
+				// ptone/scion#4766 invariant (no host write while the
+				// container may read the file).
+				if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+					slog.Warn("Start: failed to record the failed start in the host state file",
+						"agent", opts.Name, "run_id", runID, "error", recErr)
+				}
+				if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, string(state.PhaseError), m.Runtime.Name(), profileName); updateErr != nil {
+					util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+				}
+				return nil, fmt.Errorf("container started but exited immediately (status: %s). Container logs:\n%s", a.ContainerStatus, logs)
+			}
+			a.Detached = detached
+			a.Warnings = warnings
+			a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
+			a.RelayedWarnings = relayedWarnings
+			a.StartNotice = startNotice
+			a.Phase = successPhase
+			a.HarnessConfig = harnessConfigName
+			a.HarnessConfigRevision = harnessConfigRevision
+			a.HarnessConfigSource = harnessConfigSource
+			// The effective configuration the hub records (WP1 slice 3).
+			a.Harness = launchedHarness
+			a.Model = effectiveModel
+			a.ConfigResolved = true
+			if th := startedTemplateHash(provenance, finalScionCfg); th != "" {
+				a.TemplateHash = th
+			}
+			a.HarnessAuth = opts.HarnessAuth
+			a.Profile = profileName
+			a.WorkspacePlacement = workspacePlacement
+			return &a, nil
 		}
 	}
 

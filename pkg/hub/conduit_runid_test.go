@@ -21,10 +21,12 @@ import (
 	"log/slog"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,7 +148,21 @@ func TestConduitAdmission_ReusedContainerAdoptedRunID(t *testing.T) {
 	require.Error(t, err, "in-flux window: the row holds the minted id")
 	assert.True(t, relay.IsSupersededIncarnation(err), "%v", err)
 
-	d.adoptBrokerRunID(ctx, &agent, minted, &RemoteAgentResponse{Agent: &RemoteAgentInfo{RunID: containerRun}})
+	require.NoError(t, f.store.CreateAgentCredential(ctx, &store.AgentCredential{
+		ID:           tid("cred-reused-" + containerRun),
+		AgentID:      agent.ID,
+		ProjectID:    agent.ProjectID,
+		RunID:        containerRun,
+		TokenJTIHash: "jti-hash-" + tid("cred-reused-"+containerRun),
+		IssuedAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}))
+	d.adoptBrokerRunID(ctx, &agent, minted, &RemoteAgentResponse{Agent: &RemoteAgentInfo{
+		ID:        agent.ID,
+		ProjectID: agent.ProjectID,
+		Labels:    map[string]string{"agent_id": agent.ID, "scion.project_id": agent.ProjectID},
+		RunID:     containerRun,
+	}})
 	got, err := f.store.GetAgent(ctx, f.launched.ID)
 	require.NoError(t, err)
 	require.Equal(t, containerRun, got.RunID, "the broker's run id is adopted")

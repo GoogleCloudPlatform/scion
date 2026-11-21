@@ -132,12 +132,22 @@ func TestRunID_ProvisionDoesNotMint(t *testing.T) {
 func TestRunID_StartOnAlreadyRunningAdoptsExistingLabel(t *testing.T) {
 	ctx := context.Background()
 	f := newRunIDFixture(t, "runid-adopt")
-	if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "live-run", nil); err != nil {
+	if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "live-run", &store.AgentCredential{
+		ID:           tid("cred-start-live-run"),
+		AgentID:      f.agent.ID,
+		ProjectID:    f.agent.ProjectID,
+		RunID:        "live-run",
+		TokenJTIHash: "jti-hash-" + tid("cred-start-live-run"),
+		IssuedAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	f.agent.RunID = "live-run"
 	f.client.startReturnResp = &RemoteAgentResponse{Agent: &RemoteAgentInfo{
-		ID: f.agent.Slug, Name: f.agent.Slug, Phase: "running", RunID: "live-run",
+		ID: f.agent.ID, Slug: f.agent.Slug, Name: f.agent.Slug, ProjectID: f.agent.ProjectID,
+		Labels: map[string]string{"agent_id": f.agent.ID, "scion.project_id": f.agent.ProjectID},
+		Phase:  "running", RunID: "live-run",
 	}}
 
 	if err := f.dispatcher.DispatchAgentStart(ctx, f.agent, "", false); err != nil {
@@ -382,11 +392,21 @@ func TestRunID_RevertDoesNotOverwriteNewerRun(t *testing.T) {
 func TestRunID_RestartAdoptsBrokerRunID(t *testing.T) {
 	ctx := context.Background()
 	f := newRunIDFixture(t, "runid-restart-adopt")
-	if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "live-run", nil); err != nil {
+	if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "live-run", &store.AgentCredential{
+		ID:           tid("cred-restart-live-run"),
+		AgentID:      f.agent.ID,
+		ProjectID:    f.agent.ProjectID,
+		RunID:        "live-run",
+		TokenJTIHash: "jti-hash-" + tid("cred-restart-live-run"),
+		IssuedAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	f.client.restartReturnResp = &RemoteAgentResponse{Agent: &RemoteAgentInfo{
-		ID: f.agent.Slug, Name: f.agent.Slug, Phase: "running", RunID: "live-run",
+		ID: f.agent.ID, Slug: f.agent.Slug, Name: f.agent.Slug, ProjectID: f.agent.ProjectID,
+		Labels: map[string]string{"agent_id": f.agent.ID, "scion.project_id": f.agent.ProjectID},
+		Phase:  "running", RunID: "live-run",
 	}}
 	if err := f.dispatcher.DispatchAgentRestart(ctx, f.agent); err != nil {
 		t.Fatalf("DispatchAgentRestart: %v", err)
@@ -620,13 +640,28 @@ type reportingCreateClient struct {
 
 func (c *reportingCreateClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
 	c.lastCreateReq = req
-	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Phase: "running", RunID: c.runID}, Created: true}, nil
+	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{
+		ID: req.ID, Slug: req.Slug, ProjectID: req.ProjectID,
+		Labels: map[string]string{"agent_id": req.ID, "scion.project_id": req.ProjectID},
+		Phase:  "running", RunID: c.runID,
+	}, Created: true}, nil
 }
 
 // Create adopts the run ID the broker reports for the entry, as start does.
 func TestRunID_CreateAdoptsBrokerRunID(t *testing.T) {
 	ctx := context.Background()
 	f := newRunIDFixture(t, "runid-create-adopt")
+	if err := f.store.CreateAgentCredential(ctx, &store.AgentCredential{
+		ID:           tid("cred-create-broker-run"),
+		AgentID:      f.agent.ID,
+		ProjectID:    f.agent.ProjectID,
+		RunID:        "broker-run",
+		TokenJTIHash: "jti-hash-" + tid("cred-create-broker-run"),
+		IssuedAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	client := &reportingCreateClient{mockRuntimeBrokerClient: f.client, runID: "broker-run"}
 	d := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
 	if _, err := d.DispatchAgentCreate(ctx, f.agent); err != nil {

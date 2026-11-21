@@ -521,6 +521,11 @@ func newEchoReportFixture(t *testing.T, name string) *echoReportFixture {
 	require.NoError(t, raw.CreateAgent(ctx, agent))
 	_, err := raw.SetAgentRunID(ctx, agent.ID, "run-m", nil)
 	require.NoError(t, err)
+	_, credB, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: ScopesForRole(AgentRoleFull),
+	}, "run-b")
+	require.NoError(t, err)
+	require.NoError(t, raw.CreateAgentCredential(ctx, credB))
 	launchID, err := raw.BeginLaunchWithOptions(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute, store.BeginLaunchOptions{RunID: "run-m"})
 	require.NoError(t, err)
 	require.Equal(t, "run-m", mustGetAgent(t, raw, agent.ID).LaunchRunID, "the launch binds its minted run")
@@ -537,7 +542,11 @@ func newEchoReportFixture(t *testing.T, name string) *echoReportFixture {
 // noEcho) and returns its 200 result.
 func (f *echoReportFixture) report(t *testing.T, run string, noEcho bool) string {
 	t.Helper()
-	info := &RemoteAgentInfo{ID: f.agent.Slug, Slug: f.agent.Slug, RunID: run, Phase: string(state.PhaseRunning)}
+	info := &RemoteAgentInfo{
+		ID: f.agent.ID, Slug: f.agent.Slug, ProjectID: f.agent.ProjectID,
+		Labels: map[string]string{"agent_id": f.agent.ID, "scion.project_id": f.agent.ProjectID},
+		RunID:  run, Phase: string(state.PhaseRunning),
+	}
 	if !noEcho {
 		info.TemplateHash, info.Harness, info.Model, info.BrokerBuild = "sha256:echo", "claude", "model-echo-1", "v9.9.9"
 		info.HarnessConfigRevision = "rev-echo"
