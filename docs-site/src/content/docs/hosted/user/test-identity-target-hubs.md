@@ -179,9 +179,9 @@ and `--uat-sa`.
 
 Select the profile for a command with `--hub-profile t1`, or for a whole session with
 `SCION_HUB_PROFILE=t1`. Name the run with `--run <label>` or `SCION_HUB_RUN`. `--as` and
-`--run` are flags of the `hub` and `artifact` commands and of the agent commands that run with a
-profile (`create`, `start`, `list`, `stop`, `delete`, `look`, `logs`), and apply only with a
-profile.
+`--run` are flags of the `hub`, `artifact`, and `project service-accounts` commands and of the
+agent commands that run with a profile (`create`, `start`, `list`, `stop`, `delete`, `look`,
+`logs`), and apply only with a profile.
 
 :::caution
 A profile must name another hub. The CLI refuses a profile whose endpoint names the agent's own
@@ -246,6 +246,8 @@ Only these commands run with a profile:
 - `hub projects`: list, `info`, `create` and `delete`, with the project named explicitly
 - `artifact publish`, `get`, `versions` and `delete`; `publish` needs `--project <name or id>`
   on the target
+- `project service-accounts` (`add`, `list`, `show`, `remove`, `verify` and `mint`), with
+  `--project <name or id>` on the target
 - the agent commands `create`, `start`, `list`, `stop`, `delete`, `look` and `logs`, with
   `--project <name or id>` on the target (see [Agents on the target](#6-agents-on-the-target))
 
@@ -362,6 +364,7 @@ Inside an agent (`SCION_CLI_MODE=agent`), these commands are available:
 - `hub profile`
 - `hub test-identity` `issue`, `issue-admin`, `token`, `list`, `delete`, `teardown` and `web-code`
 - `artifact publish`, `get` and `versions` (agent commands with or without a profile)
+- `project service-accounts show` (agent command with or without a profile)
 - `create`, `start`, `list`, `stop`, `delete`, `look` and `logs` (agent commands with or without
   a profile)
 

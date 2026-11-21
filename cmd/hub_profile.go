@@ -106,6 +106,18 @@ var hubProfileAllowed = map[string]bool{
 	"delete": true,
 	"look":   true,
 	"logs":   true,
+
+	// Project service accounts (ptone/scion#8301): act on a project on the
+	// target hub named with --project, through the profile client only
+	// (hub_project_resolver.go).
+	"project":                         true,
+	"project.service-accounts":        true,
+	"project.service-accounts.add":    true,
+	"project.service-accounts.list":   true,
+	"project.service-accounts.show":   true,
+	"project.service-accounts.remove": true,
+	"project.service-accounts.verify": true,
+	"project.service-accounts.mint":   true,
 }
 
 // hubProfileNoSession are the allowed commands that manage profiles
@@ -193,7 +205,7 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 		return err
 	}
 	if !hubProfileAllowed[path] {
-		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate, hub projects, artifact publish/get/versions/delete, and create, start, list, stop, delete, look and logs with --project); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
+		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate, hub projects, artifact publish/get/versions/delete, project service-accounts, and create, start, list, stop, delete, look and logs with --project); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
 	}
 	if hubEndpoint != "" {
 		return errors.New("--hub cannot be used with a hub profile: the profile names the hub")
@@ -210,14 +222,17 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 }
 
 // profileFlagIsOurs reports whether name on cmd is the profile flag of the
-// hub or artifact tree or of an agent command that runs with a profile
-// (not a same-named local flag) and was given.
+// hub, artifact, or project service-accounts tree or of an agent command that
+// runs with a profile (not a same-named local flag) and was given.
 func profileFlagIsOurs(cmd *cobra.Command, name string) bool {
 	f := cmd.Flags().Lookup(name)
 	if f == nil || !f.Changed {
 		return false
 	}
-	return f == hubCmd.PersistentFlags().Lookup(name) || f == artifactCmd.PersistentFlags().Lookup(name) || hubProfileAgentFlags[f]
+	return f == hubCmd.PersistentFlags().Lookup(name) ||
+		f == artifactCmd.PersistentFlags().Lookup(name) ||
+		f == projectServiceAccountsCmd.PersistentFlags().Lookup(name) ||
+		hubProfileAgentFlags[f]
 }
 
 // checkProfileNotOwnHub loads a profile and refuses it when its endpoint is
@@ -383,9 +398,10 @@ var (
 func init() {
 	rootCmd.PersistentFlags().StringVar(&hubProfileFlag, "hub-profile", "", "Target-hub profile to use (overrides SCION_HUB_PROFILE); see 'scion hub profile'")
 	// --as and --run apply only with a hub profile, and only to the command
-	// trees a profile can use (hub and artifact here; the agent commands in
-	// hub_profile_agents.go), so they do not appear on unrelated commands.
-	for _, c := range []*cobra.Command{hubCmd, artifactCmd} {
+	// trees a profile can use (hub, artifact, and project service-accounts here;
+	// the agent commands in hub_profile_agents.go), so they do not appear on
+	// unrelated commands.
+	for _, c := range []*cobra.Command{hubCmd, artifactCmd, projectServiceAccountsCmd} {
 		c.PersistentFlags().StringVar(&hubProfileAs, "as", "", "Only with a hub profile: act as this cached test identity of the run")
 		c.PersistentFlags().StringVar(&hubProfileRun, "run", "", "Only with a hub profile: the run label of cached test identities (overrides SCION_HUB_RUN)")
 	}

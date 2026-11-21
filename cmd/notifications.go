@@ -16,22 +16,16 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -529,7 +523,7 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	client, uat, err := loadSubscriptionsHubClient()
+	client, uat, err := loadHubClientForProjectResolution()
 	if err != nil {
 		return err
 	}
@@ -540,12 +534,15 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 	opts := &hubclient.ListSubscriptionsOptions{}
 	var filterDisplay, unlinkedNote string
 	if !subscriptionsAll {
-		var projectID string
-		projectID, filterDisplay, unlinkedNote, err = resolveSubscriptionsProjectFilter(ctx, client, uat)
+		res, err := resolveHubProject(ctx, client, uat, false)
 		if err != nil {
 			return err
 		}
-		opts.ProjectID = projectID
+		opts.ProjectID = res.ID
+		filterDisplay = res.Display
+		if res.UnlinkedDir != "" {
+			unlinkedNote = fmt.Sprintf("Note: directory project %s is not linked to a hub; listing subscriptions across all projects.", res.UnlinkedDir)
+		}
 	}
 
 	subs, err := client.Subscriptions().List(ctx, opts)
@@ -573,148 +570,6 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 
 	writeSubscriptionsTable(out, subs)
 	return nil
-}
-
-// loadSubscriptionsHubClient loads the Hub client for 'notifications subscriptions'
-// without treating a Hub project reference or 'scion use' UUID in projectPath
-// as a local directory path.
-func loadSubscriptionsHubClient() (hubclient.Client, bool, error) {
-	if hubProfileSelected() {
-		return getHubClientUAT(nil)
-	}
-
-	settingsTarget := ""
-	if projectPath != "" && projectSource != targetSourceContext && !hubsync.IsHubProjectRef(projectPath) {
-		settingsTarget = projectPath
-	}
-
-	resolvedPath, _, err := config.ResolveProjectPath(settingsTarget)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	var settings *config.Settings
-	if settingsTarget != "" {
-		settings, err = loadSettingsForTarget(resolvedPath)
-	} else {
-		settings, err = config.LoadSettings(resolvedPath)
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	if !hubConfigured() {
-		return nil, false, errHubNotConfigured
-	}
-
-	return getHubClientUAT(settings)
-}
-
-// resolveSubscriptionsProjectFilter resolves the Hub project ID to filter by
-// (or "" to list across all projects), a display label for empty-state output,
-// and an optional stderr note when a walked directory project is not linked to
-// a Hub.
-func resolveSubscriptionsProjectFilter(ctx context.Context, client hubclient.Client, uat bool) (projectID, display, unlinkedNote string, err error) {
-	if hubProfileSelected() {
-		if projectPath != "" && projectSource != targetSourceContext && !globalMode {
-			id, disp, err := resolveSubscriptionsHubProject(ctx, client, projectPath, uat)
-			return id, disp, "", err
-		}
-		return "", "", "", nil
-	}
-
-	// 1. --global (without a separate --project) or --project global/home.
-	if (globalMode && (projectPath == "" || projectPath == "global")) || (!globalMode && (projectPath == "global" || projectPath == "home")) {
-		if globalDir, gerr := config.GetGlobalDir(); gerr == nil {
-			if id := linkedHubProjectID(globalDir); id != "" {
-				return id, formatSubscriptionsProjectDisplay("global", id), "", nil
-			}
-		}
-		return "", "", "", nil
-	}
-
-	// 2. Explicit --project / -g flag.
-	if projectPath != "" && projectSource != targetSourceContext {
-		if !hubsync.IsHubProjectRef(projectPath) {
-			dir, _, rerr := config.ResolveProjectPath(projectPath)
-			if rerr != nil {
-				return "", "", "", fmt.Errorf("failed to resolve project path: %w", rerr)
-			}
-			id := linkedHubProjectID(dir)
-			if id == "" {
-				return "", "", "", unlinkedScopeProjectError(config.GetProjectName(dir))
-			}
-			return id, formatSubscriptionsProjectDisplay(config.GetProjectName(dir), id), "", nil
-		}
-		id, disp, rerr := resolveSubscriptionsHubProject(ctx, client, projectPath, uat)
-		return id, disp, "", rerr
-	}
-
-	// 3. Hub/agent container environment (SCION_HUB_PROJECT_ID / SCION_PROJECT_ID)
-	// wins over a cloned checkout's .scion/project-id, matching hubsync.EnsureHubReady.
-	if config.IsHubContext() {
-		if id := projectkeys.ProjectIDFromEnv(os.Getenv); id != "" {
-			return id, formatSubscriptionsProjectDisplay(os.Getenv("SCION_PROJECT"), id), "", nil
-		}
-	}
-
-	// 4. Walked directory project (.scion): use its linked Hub project ID only.
-	// Never send an unlinked local .scion/project-id to the Hub.
-	if dir, ok := walkedProject(); ok {
-		name := config.GetProjectName(dir)
-		if id := linkedHubProjectID(dir); id != "" {
-			return id, formatSubscriptionsProjectDisplay(name, id), "", nil
-		}
-		note := fmt.Sprintf("Note: directory project %s is not linked to a hub; listing subscriptions across all projects.", name)
-		return "", "", note, nil
-	}
-
-	// 5. 'scion use' context project (outside any filesystem project).
-	if projectSource == targetSourceContext && projectPath != "" {
-		return projectPath, formatSubscriptionsProjectDisplay(contextProjectSlug, projectPath), "", nil
-	}
-
-	// 6. Fallback: ~/.scion global settings if explicitly linked to a Hub project.
-	if globalDir, gerr := config.GetGlobalDir(); gerr == nil {
-		if id := linkedHubProjectID(globalDir); id != "" {
-			return id, formatSubscriptionsProjectDisplay("global", id), "", nil
-		}
-	}
-
-	return "", "", "", nil
-}
-
-func resolveSubscriptionsHubProject(ctx context.Context, client hubclient.Client, ref string, uat bool) (projectID, display string, err error) {
-	var project *hubclient.Project
-	if util.IsGitURL(ref) {
-		project, err = hubsync.ResolveProjectOnHub(ctx, client, ref)
-		if err != nil {
-			var notFound *hubsync.ProjectNotFoundError
-			if errors.As(err, &notFound) && uat {
-				return "", "", hubsync.ScopedTokenProjectLookupEmptyError(ref)
-			}
-			return "", "", err
-		}
-	} else {
-		project, err = resolveProjectByNameOrID(ctx, client, ref, uat)
-		if err != nil {
-			if _, uerr := uuid.Parse(ref); uerr == nil && apiclient.IsForbiddenError(err) {
-				return ref, ref, nil
-			}
-			return "", "", err
-		}
-	}
-	return project.ID, formatSubscriptionsProjectDisplay(projectLabel(project), project.ID), nil
-}
-
-func formatSubscriptionsProjectDisplay(label, id string) string {
-	if label == "" || label == id {
-		return id
-	}
-	if strings.Contains(label, id) {
-		return label
-	}
-	return fmt.Sprintf("%s (%s)", label, id)
 }
 
 func writeSubscriptionsTable(w io.Writer, subs []hubclient.Subscription) {

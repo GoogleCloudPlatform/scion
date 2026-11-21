@@ -161,7 +161,8 @@ generation. You can later grant IAM permissions on your own GCP projects.
 Examples:
   scion project service-accounts mint
   scion project service-accounts mint --account-id my-pipeline
-  scion project service-accounts mint --account-id my-pipeline --name "My Pipeline SA"`,
+  scion project service-accounts mint --account-id my-pipeline --name "My Pipeline SA"
+  scion project service-accounts mint --json`,
 	Args: cobra.NoArgs,
 	RunE: runSAMint,
 }
@@ -187,6 +188,7 @@ func init() {
 
 	saMintCmd.Flags().StringVar(&saMintID, "account-id", "", "Custom account ID (will be prefixed with scion-)")
 	saMintCmd.Flags().StringVar(&saDisplayName, "name", "", "Display name for the service account")
+	saMintCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 
 	saListCmd.Flags().BoolVar(&saOutputJSON, "json", false, "Output in JSON format")
 	addSAAssignStatusFlags(saListCmd)
@@ -200,22 +202,9 @@ func init() {
 var resolveProjectForSA = resolveLinkedProjectForSA
 
 // resolveLinkedProjectForSA resolves the project ID and creates a hub client
-// for SA operations.
+// for project-scoped operations via the shared Hub project resolver.
 func resolveLinkedProjectForSA() (hubclient.Client, string, error) {
-	settings, client, err := loadHubClient()
-	if err != nil {
-		return nil, "", err
-	}
-
-	projectID := ""
-	if settings.Hub != nil && settings.Hub.ProjectID != "" {
-		projectID = settings.Hub.ProjectID
-	}
-	if projectID == "" {
-		return nil, "", fmt.Errorf("project not linked to Hub. Use 'scion hub link' first")
-	}
-
-	return client, projectID, nil
+	return requireHubProjectClient()
 }
 
 func runSAAdd(cmd *cobra.Command, args []string) error {
@@ -288,7 +277,7 @@ func runSAList(cmd *cobra.Command, args []string) error {
 	}
 	printSAWarnings(warnings)
 
-	if saOutputJSON {
+	if saOutputJSON || isJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(sas)
@@ -603,7 +592,7 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 	}
 	printSAWarnings(sa.Warnings)
 
-	if isJSONOutput() {
+	if saOutputJSON || isJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(sa)
