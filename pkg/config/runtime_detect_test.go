@@ -15,6 +15,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -371,6 +372,46 @@ func TestCheckRuntimeDaemon(t *testing.T) {
 	t.Run("unknown runtime returns error", func(t *testing.T) {
 		if err := CheckRuntimeDaemon(t.Context(), "unknown-rt"); err == nil {
 			t.Fatal("expected error for unknown runtime")
+		}
+	})
+
+	t.Run("cancelled context aborts probe", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		called := false
+		restore := OverrideRuntimeDetection(
+			func(file string) (string, error) { return "/usr/bin/" + file, nil },
+			func(binary string, args []string) error {
+				called = true
+				return nil
+			},
+		)
+		t.Cleanup(restore)
+
+		err := CheckRuntimeDaemon(ctx, "docker")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+		if called {
+			t.Error("expected cancelled context not to invoke probe")
+		}
+	})
+
+	t.Run("context cancellation during probe is propagated", func(t *testing.T) {
+		orig := runCheckCtxFunc
+		t.Cleanup(func() { runCheckCtxFunc = orig })
+
+		ctx, cancel := context.WithCancel(t.Context())
+		runCheckCtxFunc = func(probeCtx context.Context, binary string, args []string) error {
+			cancel()
+			<-probeCtx.Done()
+			return probeCtx.Err()
+		}
+
+		err := CheckRuntimeDaemon(ctx, "docker")
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
 		}
 	})
 }
