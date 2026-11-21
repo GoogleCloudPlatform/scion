@@ -84,7 +84,11 @@ export const DELETED_AGENT_TOOLTIP = 'Mention a live agent with @ to resend.';
  * Whether a failed message's reason/code indicates an unreachable deleted agent.
  * Matches both explicit `agent_unreachable` codes and history rows without a code.
  */
-export function isDeletedUnreachableReason(reason: string, code?: string): boolean {
+export function isDeletedUnreachableReason(
+  reason: string | null | undefined,
+  code?: string
+): boolean {
+  if (!reason) return false;
   const isUnreachable =
     code === 'agent_unreachable' || (!code && reason.startsWith('Agent unreachable'));
   return isUnreachable && reason.endsWith('(deleted)');
@@ -3133,7 +3137,7 @@ export class ScionChatMessage extends LitElement {
     // conversation, not only the sender (where `fromAgent` means "not my
     // message" in v2). Agent-sent messages never render delivery states.
     if (this.dispatchState === 'failed') {
-      if (this.senderIsAgent || this.sender.startsWith('agent:')) return nothing;
+      if (this.senderIsAgent || this.sender?.startsWith('agent:')) return nothing;
     } else if (this.fromAgent) {
       return nothing;
     }

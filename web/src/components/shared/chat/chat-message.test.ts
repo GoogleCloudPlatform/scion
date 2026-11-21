@@ -1235,6 +1235,19 @@ describe('scion-chat-message delivery state', () => {
     expect(deliveryState(el)).toBeNull();
   });
 
+  it('handles nullish sender and dispatchFailureReason safely on failed messages', async () => {
+    const el = await mountOutbound({
+      fromAgent: true,
+      senderIsAgent: false,
+      sender: undefined as unknown as string,
+      dispatchState: 'failed',
+      dispatchFailureReason: undefined as unknown as string,
+      dispatchFailureCode: 'agent_unreachable',
+    });
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Agent unreachable');
+  });
+
   it('keeps the generic "Failed" label for a non-unreachable dispatch error', async () => {
     const el = await mountOutbound({
       dispatchState: 'failed',
