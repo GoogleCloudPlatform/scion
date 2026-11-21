@@ -1,6 +1,11 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import {
+  CUSTOM_DEFAULT_USER_ROLE_FLAG,
+  resetServerFlagStateForTests,
+  setFeatureFlag,
+} from '../../utils/feature-flags.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 import {
@@ -2601,6 +2606,165 @@ describe('scion-page-admin-server-config', () => {
       expect(shadowText(element)).not.toContain(
         'Role assigned to new users who are not in the admin emails list.'
       );
+    });
+  });
+
+  // ── Custom Default User Role (hub.custom_default_user_role) ──
+
+  describe('Custom Default User Role', () => {
+    afterEach(() => {
+      delete window.__SCION_FEATURES__;
+      resetServerFlagStateForTests();
+    });
+
+    function defaultRoleOptions(el: HTMLElement): Element[] {
+      const select = query(el, 'sl-select.default-user-role-select');
+      return select ? Array.from(select.querySelectorAll('sl-option')) : [];
+    }
+
+    it('shows only Member and Viewer when experiment is off even if eligible roles are present', async () => {
+      setFeatureFlag(CUSTOM_DEFAULT_USER_ROLE_FLAG, false);
+      const config = makeBaseConfig({
+        eligible_default_roles: [
+          { id: 'r-1', name: 'contractor', description: 'Limited system access' },
+        ],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const values = defaultRoleOptions(element).map((o) => o.getAttribute('value'));
+      expect(values).toEqual(['member', 'viewer']);
+      expect(query(element, '.default-user-role-help')?.textContent).not.toContain(
+        'Custom system roles:'
+      );
+      expect(query(element, 'sl-alert.default-user-role-warning')).toBeNull();
+    });
+
+    it('populates eligible custom roles and updates help text when experiment is on', async () => {
+      setFeatureFlag(CUSTOM_DEFAULT_USER_ROLE_FLAG, true);
+      const config = makeBaseConfig({
+        settings_tier: 'db',
+        eligible_default_roles: [
+          { id: 'r-1', name: 'contractor', description: 'Limited system access' },
+          { id: 'r-2', name: 'auditor' },
+        ],
+      });
+      let capturedPayload: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            capturedPayload = body;
+            return { status: 200, body: { reload: { applied: ['access'] } } };
+          },
+        })
+      );
+
+      const options = defaultRoleOptions(element);
+      expect(options.map((o) => o.getAttribute('value'))).toEqual([
+        'member',
+        'viewer',
+        'contractor',
+        'auditor',
+      ]);
+      expect(options[2].textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        'contractor — Limited system access'
+      );
+      expect(options[3].textContent?.replace(/\s+/g, ' ').trim()).toBe('auditor');
+
+      const help = query(element, '.default-user-role-help')?.textContent ?? '';
+      expect(help).toContain('Custom system roles:');
+      expect(help).toContain('replaces the');
+      expect(help).toContain('hub-member');
+
+      // Selecting a custom role sends it in the PUT payload without read-only view fields.
+      const select = query(element, 'sl-select.default-user-role-select') as HTMLElement & {
+        value: string;
+      };
+      select.value = 'contractor';
+      select.dispatchEvent(new Event('sl-change'));
+      await (element as any).updateComplete;
+
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(capturedPayload).not.toBeNull();
+      const server = capturedPayload!.server as Record<string, unknown> | undefined;
+      const auth = server?.auth as Record<string, unknown> | undefined;
+      expect(auth?.default_user_role).toBe('contractor');
+      expect(capturedPayload!.eligible_default_roles).toBeUndefined();
+      expect(capturedPayload!.default_user_role_warning).toBeUndefined();
+    });
+
+    it('renders warning alert and disabled unavailable option when configured role is missing', async () => {
+      setFeatureFlag(CUSTOM_DEFAULT_USER_ROLE_FLAG, true);
+      const base = makeBaseConfig();
+      const config = {
+        ...base,
+        server: {
+          ...base.server,
+          auth: {
+            ...base.server.auth,
+            default_user_role: 'deleted-role',
+          },
+        },
+        eligible_default_roles: [{ id: 'r-1', name: 'contractor' }],
+        default_user_role_warning: {
+          code: 'role_not_found',
+          configured_role: 'deleted-role',
+          effective_role: 'member',
+          message:
+            'Configured default_user_role "deleted-role" was not found as a system-scope role; falling back to "member".',
+        },
+      };
+      element = await createComponent(createFetchHandler(config));
+
+      const alert = query(element, 'sl-alert.default-user-role-warning');
+      expect(alert).not.toBeNull();
+      expect(alert!.getAttribute('variant')).toBe('warning');
+      expect(alert!.textContent).toContain('Fallback active:');
+      expect(alert!.textContent).toContain('deleted-role');
+
+      const options = defaultRoleOptions(element);
+      const unavailable = options.find((o) => o.getAttribute('value') === 'deleted-role');
+      expect(unavailable).toBeDefined();
+      expect(unavailable!.hasAttribute('disabled')).toBe(true);
+      expect(unavailable!.textContent?.trim()).toContain('deleted-role (unavailable)');
+    });
+
+    it('renders fallback warning even when experiment is off if a custom role is stored', async () => {
+      setFeatureFlag(CUSTOM_DEFAULT_USER_ROLE_FLAG, false);
+      const base = makeBaseConfig();
+      const config = {
+        ...base,
+        server: {
+          ...base.server,
+          auth: {
+            ...base.server.auth,
+            default_user_role: 'contractor',
+          },
+        },
+        default_user_role_warning: {
+          code: 'experiment_disabled',
+          configured_role: 'contractor',
+          effective_role: 'member',
+          message:
+            'Configured default_user_role "contractor" requires experiment hub.custom_default_user_role; falling back to "member".',
+        },
+      };
+      element = await createComponent(createFetchHandler(config));
+
+      const alert = query(element, 'sl-alert.default-user-role-warning');
+      expect(alert).not.toBeNull();
+      expect(alert!.textContent).toContain('hub.custom_default_user_role');
+
+      const options = defaultRoleOptions(element);
+      expect(options.map((o) => o.getAttribute('value'))).toEqual([
+        'member',
+        'viewer',
+        'contractor',
+      ]);
+      expect(options[2].hasAttribute('disabled')).toBe(true);
     });
   });
 
