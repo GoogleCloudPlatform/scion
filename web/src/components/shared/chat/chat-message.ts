@@ -97,6 +97,124 @@ export interface ChatMessageMember {
   kind?: string;
 }
 
+/** Detail emitted when a highlighted `@mention` requests its context menu. */
+export interface MentionContextMenuDetail {
+  slug: string;
+  mentionEl: HTMLElement;
+  clientX: number;
+  clientY: number;
+  fromKeyboard: boolean;
+  originalEvent?: MouseEvent | undefined;
+}
+
+/** Detail emitted on `pointerdown` over a highlighted `@mention` (for touch long-press). */
+export interface MentionPointerDownDetail {
+  slug: string;
+  mentionEl: HTMLElement;
+  originalEvent: PointerEvent;
+}
+
+/** How long a press-time selection snapshot stays valid for the ensuing `contextmenu`. */
+const CONTEXT_PRESS_WINDOW_MS = 1000;
+
+type ComposedSelection = Selection & {
+  getComposedRanges?: (options: { shadowRoots: ShadowRoot[] }) => StaticRange[];
+};
+
+function hasRangeSelection(sel: Selection | null | undefined): sel is Selection {
+  return !!sel && sel.type === 'Range';
+}
+
+function ancestorShadowRoots(node: Node): ShadowRoot[] {
+  const roots: ShadowRoot[] = [];
+  let cur: Node | null = node;
+  while (cur) {
+    const root = cur.getRootNode();
+    if (root instanceof ShadowRoot) {
+      roots.push(root);
+      cur = root.host;
+    } else {
+      break;
+    }
+  }
+  return roots;
+}
+
+function staticRangeCoversNode(sr: StaticRange, target: Node): boolean {
+  if (sr.collapsed) return false;
+  const startRoot = sr.startContainer.getRootNode();
+  const endRoot = sr.endContainer.getRootNode();
+  let node: Node | null = target;
+  while (node) {
+    const root = node.getRootNode();
+    if (startRoot === root || endRoot === root) {
+      const range = document.createRange();
+      if (startRoot === root) {
+        range.setStart(sr.startContainer, sr.startOffset);
+      } else {
+        range.setStart(root, 0);
+      }
+      if (endRoot === root) {
+        range.setEnd(sr.endContainer, sr.endOffset);
+      } else {
+        range.setEnd(root, root.childNodes.length);
+      }
+      return !range.collapsed && range.intersectsNode(node);
+    }
+    if (root instanceof ShadowRoot) {
+      node = root.host;
+    } else {
+      return false;
+    }
+  }
+  return false;
+}
+
+function selectionRangesCoverNode(sel: Selection | null | undefined, target: Node): boolean {
+  if (!hasRangeSelection(sel)) return false;
+  const targetRoot = target.getRootNode();
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const range = sel.getRangeAt(i);
+    if (range.collapsed) continue;
+    if (range.startContainer.getRootNode() === targetRoot && range.intersectsNode(target)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether an active non-empty text selection covers or intersects `target`.
+ * Uses `Selection.getComposedRanges` across `target`'s enclosing shadow roots
+ * when available, falling back to `ShadowRoot.getSelection` and
+ * `window.getSelection`.
+ */
+export function selectionCoversNode(target?: EventTarget | null): boolean {
+  if (!(target instanceof Node) || typeof window === 'undefined') return false;
+  const sel: ComposedSelection | null =
+    typeof window.getSelection === 'function' ? window.getSelection() : null;
+  if (sel && typeof sel.getComposedRanges === 'function') {
+    // A collapsed Caret inside an unrelated shadow tree (for example after
+    // clicking in a sibling header component) is re-targeted by
+    // getComposedRanges to a non-collapsed StaticRange wrapping the shadow
+    // host. Only a non-collapsed Range selection can cover `target`.
+    if (!hasRangeSelection(sel)) return false;
+    const roots = ancestorShadowRoots(target);
+    return sel
+      .getComposedRanges({ shadowRoots: roots })
+      .some((sr) => staticRangeCoversNode(sr, target));
+  }
+  const root: ShadowRoot & { getSelection?: () => Selection | null } =
+    target.getRootNode() as ShadowRoot;
+  if (
+    typeof root.getSelection === 'function' &&
+    selectionRangesCoverNode(root.getSelection(), target)
+  ) {
+    return true;
+  }
+  return selectionRangesCoverNode(sel, target);
+}
+
 /**
  * A reply preview: the message a reply quotes. `unavailable` is set when
  * that message no longer exists (for example removed by the hub's chat
@@ -860,6 +978,12 @@ function linkifyRenderedFragment(
     (el) => isCode(el) || artifactLinks.has(el) || isMailtoLink(el),
     (text) => styleMentionsInText(text, opts.knownUsersByEmail)
   );
+  for (const el of root.querySelectorAll('.mention[data-mention]')) {
+    if (!el.closest('a, button')) {
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('role', 'button');
+    }
+  }
   linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
     styleEntityLinksInText(text, opts.gcs)
   );
@@ -1507,6 +1631,15 @@ export class ScionChatMessage extends LitElement {
     .md-content .mention.clickable:hover {
       background: color-mix(in srgb, var(--scion-primary, #3b82f6) 18%, transparent);
       text-decoration: underline;
+    }
+
+    .md-content .mention.clickable:focus {
+      outline: none;
+    }
+
+    .md-content .mention.clickable:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 1px;
     }
 
     /* A wide table scrolls sideways inside its own box rather than
@@ -2335,8 +2468,23 @@ export class ScionChatMessage extends LitElement {
     }
   `;
 
+  /** Selection coverage captured at context-menu press start (`pointerdown`). */
+  private _contextPress: { target: Node; covered: boolean; at: number } | null = null;
+
+  private readonly boundRecordContextPress: EventListener = (e: Event): void => {
+    this.recordContextPress(e);
+  };
+
+  private readonly boundHostContextPress: EventListener = (e: Event): void => {
+    if (e.composedPath()[0] === this) {
+      this.recordContextPress(e);
+    }
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
+    this.renderRoot.addEventListener('pointerdown', this.boundRecordContextPress, true);
+    this.addEventListener('pointerdown', this.boundHostContextPress, true);
     this.renderedCardMode = this.showsDecisionCard;
     this.renderedKnownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     void this.renderContent();
@@ -2344,9 +2492,78 @@ export class ScionChatMessage extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.renderRoot.removeEventListener('pointerdown', this.boundRecordContextPress, true);
+    this.removeEventListener('pointerdown', this.boundHostContextPress, true);
+    this._contextPress = null;
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
+  }
+
+  private recordContextPress(e: Event): void {
+    // Only record presses that can initiate a context menu: secondary button,
+    // macOS Ctrl+click, or touch long-press. Plain primary-button presses
+    // start drag-selections and clear any earlier press snapshot without
+    // masking the selection the drag creates.
+    const pe = e as Partial<PointerEvent>;
+    if (pe.button !== 2 && pe.pointerType !== 'touch' && !(pe.button === 0 && pe.ctrlKey)) {
+      this._contextPress = null;
+      return;
+    }
+    const origin = e.composedPath()[0];
+    if (!(origin instanceof Node)) return;
+    const mentionEl =
+      (origin instanceof Element ? origin : origin.parentElement)?.closest<HTMLElement>(
+        '.mention[data-mention]'
+      ) ?? null;
+    const pressTarget = mentionEl ?? origin;
+    this._contextPress = {
+      target: pressTarget,
+      covered: selectionCoversNode(pressTarget),
+      at: Date.now(),
+    };
+  }
+
+  private matchingContextPress(
+    target: Node
+  ): { target: Node; covered: boolean; at: number } | null {
+    const press = this._contextPress;
+    if (
+      press &&
+      Date.now() - press.at <= CONTEXT_PRESS_WINDOW_MS &&
+      (press.target === target || target.contains(press.target))
+    ) {
+      return press;
+    }
+    return null;
+  }
+
+  /**
+   * Whether `target` was covered by an active text selection when the
+   * context-menu press started (ignoring any word selection the browser
+   * creates between `pointerdown` and `contextmenu`, as on macOS and
+   * Android). Falls back to live `selectionCoversNode(target)` when no
+   * matching press was recorded (e.g. synthetic `contextmenu` events).
+   */
+  hasSelectionForContextMenu(target?: EventTarget | null): boolean {
+    if (!(target instanceof Node)) return false;
+    const press = this.matchingContextPress(target);
+    return press ? press.covered : selectionCoversNode(target);
+  }
+
+  /**
+   * Clear a selection that the browser created on `target` between
+   * `pointerdown` and `contextmenu` (e.g. macOS right-click word selection
+   * or touch long-press selection) once a custom menu opens. Pre-existing
+   * selections (`press.covered === true`) and selections outside `target`
+   * are preserved.
+   */
+  clearContextPressSelection(target?: EventTarget | null): void {
+    if (!(target instanceof Node) || typeof window === 'undefined') return;
+    const press = this.matchingContextPress(target);
+    if (press && !press.covered && selectionCoversNode(target)) {
+      window.getSelection()?.removeAllRanges();
+    }
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
@@ -2753,8 +2970,98 @@ export class ScionChatMessage extends LitElement {
     content.className = 'md-content';
     content.addEventListener('click', (e) => this.handleContentClick(e));
     content.addEventListener('auxclick', (e) => this.handleContentAuxClick(e));
+    content.addEventListener('pointerdown', (e) => this.handleContentPointerDown(e));
+    content.addEventListener('contextmenu', (e) => this.handleContentContextMenu(e));
+    content.addEventListener('keydown', (e) => this.handleContentKeydown(e));
     content.append(fragment);
     return content;
+  }
+
+  private handleContentPointerDown(e: PointerEvent): void {
+    const target = (e.target as HTMLElement | null)?.closest<HTMLElement>('.mention[data-mention]');
+    if (!target) return;
+    const slug = target.getAttribute('data-mention');
+    if (!slug) return;
+    if (this.hasSelectionForContextMenu(target)) return;
+    this.dispatchEvent(
+      new CustomEvent<MentionPointerDownDetail>('mention-pointerdown', {
+        bubbles: true,
+        composed: true,
+        detail: { slug, mentionEl: target, originalEvent: e },
+      })
+    );
+  }
+
+  private handleContentContextMenu(e: MouseEvent): void {
+    const target = (e.target as HTMLElement | null)?.closest<HTMLElement>('.mention[data-mention]');
+    if (!target) return;
+    const slug = target.getAttribute('data-mention');
+    if (!slug) return;
+
+    const fromKeyboard =
+      (e.clientX === 0 && e.clientY === 0) ||
+      (typeof PointerEvent !== 'undefined' && e instanceof PointerEvent && e.pointerType === '');
+    if (!fromKeyboard && this.hasSelectionForContextMenu(target)) return;
+
+    const ev = new CustomEvent<MentionContextMenuDetail>('mention-contextmenu', {
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+      detail: {
+        slug,
+        mentionEl: target,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        fromKeyboard,
+        originalEvent: e,
+      },
+    });
+    if (!this.dispatchEvent(ev)) {
+      this.clearContextPressSelection(target);
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }
+
+  private handleContentKeydown(e: KeyboardEvent): void {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const target = (e.target as HTMLElement | null)?.closest<HTMLElement>('.mention[data-mention]');
+    if (!target) return;
+    const slug = target.getAttribute('data-mention');
+    if (!slug) return;
+
+    if ((e.key === 'Enter' || e.key === ' ') && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dispatchEvent(
+        new CustomEvent('mention-click', {
+          bubbles: true,
+          composed: true,
+          detail: { slug },
+        })
+      );
+      return;
+    }
+
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      const r = target.getBoundingClientRect();
+      const ev = new CustomEvent<MentionContextMenuDetail>('mention-contextmenu', {
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+        detail: {
+          slug,
+          mentionEl: target,
+          clientX: r.left,
+          clientY: r.bottom,
+          fromKeyboard: true,
+        },
+      });
+      if (!this.dispatchEvent(ev)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }
   }
 
   /**

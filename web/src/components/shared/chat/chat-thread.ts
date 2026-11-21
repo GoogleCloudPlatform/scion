@@ -125,11 +125,15 @@ import './chat-message.js';
 import {
   buildKnownUsersByEmail,
   knownUsersByEmailKey,
+  selectionCoversNode,
+  type MentionContextMenuDetail,
+  type MentionPointerDownDetail,
   type ReplyPreviewInfo,
 } from './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
-import { resolveReplyAllTargets, type Participant } from './prose-mentions.js';
+import { LongPressController } from './long-press.js';
+import { resolveReplyAllTargets, toMentionSlug, type Participant } from './prose-mentions.js';
 import './chat-interagent-marker.js';
 import {
   formatChatDate,
@@ -573,6 +577,15 @@ interface MemberIndex {
   byEmail: Map<string, number>;
 }
 
+/** Resolved agent targeted by message or `@mention` agent menu actions. */
+interface AgentMenuTarget {
+  id: string;
+  slug: string;
+  displayName: string;
+  projectId: string;
+  canAttach: boolean;
+}
+
 /**
  * Reactive properties that only drive controls around the transcript (the
  * context menu, the file preview, the composer's reply and edit bars), never
@@ -582,6 +595,8 @@ interface MemberIndex {
  */
 const ROW_INDEPENDENT_UI_KEYS: ReadonlySet<PropertyKey> = new Set([
   'contextMenuMessage',
+  'contextMenuAgent',
+  'contextMenuLinkHref',
   'contextMenuPosition',
   'contextMenuAsSheet',
   'filePreview',
@@ -1006,6 +1021,15 @@ export class ScionChatThread extends LitElement {
 
   /** The message targeted by the right-click context menu. */
   @state() private contextMenuMessage: Message | null = null;
+
+  /** The mentioned agent targeted by a right-click / long-press / keyboard menu. */
+  @state() private contextMenuAgent: {
+    target: AgentMenuTarget;
+    messageId: string;
+  } | null = null;
+
+  /** Touch long-press tracker for highlighted `@agent` mentions. */
+  private readonly _mentionLongPress = new LongPressController(this);
 
   /** Position of the right-click context menu. */
   @state() private contextMenuPosition: { x: number; y: number } = { x: 0, y: 0 };
@@ -1938,7 +1962,7 @@ export class ScionChatThread extends LitElement {
       const list = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
       if (list) list.scrollTop = list.scrollHeight;
     }
-    if (this.contextMenuMessage && !this.contextMenuAsSheet) {
+    if ((this.contextMenuMessage || this.contextMenuAgent) && !this.contextMenuAsSheet) {
       const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
       placeMenuInViewport(menu, this.contextMenuPosition);
       this._menuFocus.afterRender(menu);
@@ -2007,6 +2031,7 @@ export class ScionChatThread extends LitElement {
 
   /** Tear down v2 state so a fresh load can happen. */
   private resetV2State(): void {
+    this.closeContextMenu();
     // Cancel any pending jump-to-message scrollend re-check — it belongs to
     // the thread we're leaving, and a late correction must not fire against
     // the new one.
@@ -2158,6 +2183,7 @@ export class ScionChatThread extends LitElement {
       this._readDebounceTimer = null;
     }
     // Clean up context menu keyboard listener
+    this.contextMenuAgent = null;
     document.removeEventListener('keydown', this.handleContextMenuKeydown);
   }
 
@@ -4519,7 +4545,7 @@ export class ScionChatThread extends LitElement {
     // stranded, and any other scroll moves it with its message
     // (followMenuAnchor). The mobile sheet is not anchored to the message,
     // so it stays open (a new message arriving scrolls the list underneath).
-    if (this.contextMenuMessage && !this.contextMenuAsSheet) {
+    if ((this.contextMenuMessage || this.contextMenuAgent) && !this.contextMenuAsSheet) {
       this.followMenuAnchor(el);
     }
 
@@ -5444,12 +5470,90 @@ export class ScionChatThread extends LitElement {
     return this.defaultAgentMember()?.slug || this.defaultAgent;
   }
 
-  /** Whether `msg` was sent by the thread's default agent. */
-  private isDefaultAgentSender(msg: Message): boolean {
+  /** Whether `target` names the thread's default agent. */
+  private isDefaultAgentTarget(target: { id: string; slug: string }): boolean {
     if (!this.defaultAgent) return false;
     const member = this.defaultAgentMember();
-    if (member && msg.senderId === member.id) return true;
-    return msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgentSlug();
+    if (member && target.id && target.id === member.id) return true;
+    return Boolean(target.slug && target.slug === this.defaultAgentSlug());
+  }
+
+  /** Build the shared agent menu target from an agent-authored message. */
+  private agentMenuTargetFromMessage(msg: Message): AgentMenuTarget | null {
+    if (!this.isSenderAgent(msg)) return null;
+    const member = msg.senderId ? this.agentMembers.find((m) => m.id === msg.senderId) : undefined;
+    const senderSlug = msg.sender.startsWith('agent:') ? msg.sender.slice(6) : '';
+    const slug = senderSlug || (member?.slug || '').trim();
+    return {
+      id: msg.senderId || '',
+      slug,
+      displayName: this.getSenderDisplayName(msg) || msg.sender,
+      projectId: this.resolveAgentActionProjectId(msg),
+      canAttach: Boolean(msg.senderId && member?.canAttach === true),
+    };
+  }
+
+  /** Resolve a highlighted `@mention` slug to a known agent target, or null. */
+  private agentMenuTargetFromMention(rawSlug: string): AgentMenuTarget | null {
+    const trimmed = rawSlug.trim();
+    if (!trimmed) return null;
+    const lower = trimmed.toLowerCase();
+    const wanted = toMentionSlug(trimmed);
+    if (!wanted) return null;
+
+    const matchesSlug = (candidate: string | undefined): boolean => {
+      if (!candidate) return false;
+      const c = candidate.trim();
+      return c !== '' && (c.toLowerCase() === lower || toMentionSlug(c) === wanted);
+    };
+
+    const agentMember = this.agentMembers.find(
+      (a) => matchesSlug(a.slug) || matchesSlug(a.displayName)
+    );
+    if (agentMember) {
+      const slug = (agentMember.slug || toMentionSlug(agentMember.displayName)).trim();
+      const id = agentMember.id.trim();
+      const projectId = agentMember.projectId || (!this.isDM ? this.projectId : '');
+      return {
+        id,
+        slug,
+        displayName: agentMember.displayName || slug || id,
+        projectId,
+        canAttach: Boolean(id && agentMember.canAttach === true),
+      };
+    }
+
+    const rosterAgent = this.members.find(
+      (m) => m.kind === 'agent' && (matchesSlug(m.slug) || matchesSlug(m.name))
+    );
+    if (rosterAgent) {
+      const slug = (rosterAgent.slug || toMentionSlug(rosterAgent.name)).trim();
+      const id = rosterAgent.id.trim();
+      const projectId = !this.isDM ? this.projectId : '';
+      return {
+        id,
+        slug,
+        displayName: rosterAgent.name || slug || id,
+        projectId,
+        canAttach: false,
+      };
+    }
+
+    const composerAgent = this.agents.find((a) => matchesSlug(a.slug) || matchesSlug(a.name));
+    if (composerAgent) {
+      const slug = (composerAgent.slug || toMentionSlug(composerAgent.name)).trim();
+      const id = composerAgent.id.trim();
+      const projectId = composerAgent.projectId || (!this.isDM ? this.projectId : '');
+      return {
+        id,
+        slug,
+        displayName: composerAgent.name || slug || id,
+        projectId,
+        canAttach: false,
+      };
+    }
+
+    return null;
   }
 
   /** The actions of a message's menu, shared by the popup and the sheet. */
@@ -5499,15 +5603,8 @@ export class ScionChatThread extends LitElement {
     }
     // An unsent local row has no server ID yet, so it cannot be starred.
     if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
-    if (this.isSenderAgent(msg) && !this.isDM && !this.isDefaultAgentSender(msg)) {
-      actions.push({
-        id: 'set-default-agent',
-        label: 'Make this agent thread default',
-        icon: 'robot',
-        run: () => void this.handleContextMenuSetDefault(),
-      });
-    }
-    if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
+    const agentTarget = this.agentMenuTargetFromMessage(msg);
+    if (agentTarget) actions.push(...this.agentMenuActionsForTarget(agentTarget, true));
     return actions;
   }
 
@@ -5928,7 +6025,8 @@ export class ScionChatThread extends LitElement {
       actions.push(this.copyLinkAddressAction(this.contextMenuLinkHref));
     }
     if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
-    if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
+    const agentTarget = this.agentMenuTargetFromMessage(msg);
+    if (agentTarget) actions.push(...this.agentMenuActionsForTarget(agentTarget, false));
     return actions;
   }
 
@@ -5948,11 +6046,40 @@ export class ScionChatThread extends LitElement {
     }, 50);
   }
 
-  /** Render the context menu when a message is right-clicked or tapped. */
+  /** The currently open message or `@agent` mention menu, or null when closed. */
+  private activeContextMenu(): {
+    label: string;
+    heading: string;
+    actions: MenuAction[];
+  } | null {
+    if (this.contextMenuAgent) {
+      const { target } = this.contextMenuAgent;
+      const actions = this.agentMenuActionsForTarget(target);
+      if (actions.length === 0) return null;
+      const who = target.displayName || (target.slug ? `@${target.slug}` : '');
+      return {
+        label: who ? `Agent actions, ${who}` : 'Agent actions',
+        heading: who,
+        actions,
+      };
+    }
+    if (this.contextMenuMessage) {
+      const msg = this.contextMenuMessage;
+      const sender = this.getSenderDisplayName(msg) || msg.sender;
+      return {
+        label: sender ? `Message actions, ${sender}` : 'Message actions',
+        heading: sender,
+        actions: this.messageMenuActions(msg),
+      };
+    }
+    return null;
+  }
+
+  /** Render the context menu when a message or `@agent` mention is right-clicked or tapped. */
   private renderContextMenu() {
-    if (!this.contextMenuMessage || this.contextMenuAsSheet) return nothing;
-    const msg = this.contextMenuMessage;
-    const sender = this.getSenderDisplayName(msg) || msg.sender;
+    if (this.contextMenuAsSheet) return nothing;
+    const menu = this.activeContextMenu();
+    if (!menu) return nothing;
     return html`
       <div
         class="context-menu-overlay"
@@ -5961,25 +6088,26 @@ export class ScionChatThread extends LitElement {
           this._menuFocus.closed();
         }}
       ></div>
-      ${renderMenu(this.messageMenuActions(msg), {
-        label: sender ? `Message actions, ${sender}` : 'Message actions',
+      ${renderMenu(menu.actions, {
+        label: menu.label,
         focus: this._menuFocus,
         close: () => this.closeContextMenu(),
       })}
     `;
   }
 
-  /** The mobile presentation of the message menu. */
+  /** The mobile presentation of the message or `@agent` mention menu. */
   private renderContextMenuSheet() {
-    const msg = this.contextMenuAsSheet ? this.contextMenuMessage : null;
+    const menu = this.contextMenuAsSheet ? this.activeContextMenu() : null;
     return html`
       <scion-action-sheet
-        .items=${msg ? this.messageMenuActions(msg) : []}
-        heading=${msg ? this.getSenderDisplayName(msg) || msg.sender : ''}
-        .open=${msg !== null}
+        .items=${menu?.actions ?? []}
+        heading=${menu?.heading ?? ''}
+        .open=${menu !== null}
         @action-sheet-select=${(e: CustomEvent<ActionSheetSelectDetail>): void => {
-          if (this.contextMenuMessage) {
-            runMenuAction(this.messageMenuActions(this.contextMenuMessage), e.detail.id);
+          const current = this.activeContextMenu();
+          if (current) {
+            runMenuAction(current.actions, e.detail.id);
           }
         }}
         @action-sheet-close=${(): void => this.closeContextMenu()}
@@ -5988,46 +6116,37 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
-   * "Open terminal" / "Open in graph" menu actions for the message's
-   * author agent — the same icons, labels and actions as the toolbar's
-   * `renderAgentToolbarButtons` (pages/chat.ts) and the members sidebar's
-   * `renderAgent` (chat-members.ts), scoped to the author of this message
-   * rather than the thread's default agent or DM peer.
-   *
-   * Terminal is gated on the author being a current roster member with
-   * `canAttach === true`, fail-closed exactly like the sidebar: absent,
-   * false, or the agent missing from `agentMembers` altogether (e.g. it left
-   * the space or was deleted — chat.ts drops deleted agents from that list)
-   * all hide the item rather than offering a control the server would
-   * refuse.
-   *
-   * Graph does not require a roster entry: it's gated only on a resolvable
-   * project id, which `senderProjectId` (#1706, cross-project messaging)
-   * supplies even for a departed author — the graph page can still show that
-   * project and the agent's history. An empty `senderId` hides both
-   * regardless (see `resolveAgentActionProjectId`): `isSenderAgent` can
-   * classify a message as agent-authored by `type` alone, with no id to act
-   * on.
+   * Shared agent menu actions ("Make this agent thread default", "Open terminal",
+   * "Open in graph") used both for messages authored by an agent and for
+   * highlighted `@agent` mentions inside another message (ptone/scion#8419).
    */
-  private agentMenuActions(msg: Message): MenuAction[] {
-    if (!msg.senderId) return [];
-    const member = this.agentMembers.find((m) => m.id === msg.senderId);
-    const projectId = this.resolveAgentActionProjectId(msg);
+  private agentMenuActionsForTarget(
+    target: AgentMenuTarget,
+    includeSetDefault = !this.filtered
+  ): MenuAction[] {
     const actions: MenuAction[] = [];
-    if (member?.canAttach === true) {
+    if (includeSetDefault && !this.isDM && target.slug && !this.isDefaultAgentTarget(target)) {
+      actions.push({
+        id: 'set-default-agent',
+        label: 'Make this agent thread default',
+        icon: 'robot',
+        run: () => void this.handleSetDefaultAgent(target.slug),
+      });
+    }
+    if (target.id && target.canAttach) {
       actions.push({
         id: 'open-terminal',
         label: 'Open terminal',
         icon: 'terminal',
-        run: () => this.handleContextMenuOpenTerminal(),
+        run: () => this.handleOpenAgentTerminal(target.id),
       });
     }
-    if (projectId) {
+    if (target.id && target.projectId) {
       actions.push({
         id: 'open-graph',
         label: 'Open in graph',
         icon: 'diagram-3',
-        run: () => this.handleContextMenuOpenGraph(),
+        run: () => this.handleOpenAgentGraph(target.id, target.projectId),
       });
     }
     return actions;
@@ -6094,7 +6213,6 @@ export class ScionChatThread extends LitElement {
 
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
-    e.preventDefault();
     // A context menu the keyboard raised (the ContextMenu key on a focused
     // message) may carry no pointer position: anchor it to the message.
     const noPosition = e.clientX === 0 && e.clientY === 0;
@@ -6107,6 +6225,16 @@ export class ScionChatThread extends LitElement {
         typeof PointerEvent !== 'undefined' &&
         e instanceof PointerEvent &&
         e.pointerType === '');
+    if (e.type === 'contextmenu' && !fromKeyboard) {
+      const target = e.composedPath()[0];
+      const msgEl = this.messageElement(msg.id);
+      if (msgEl ? msgEl.hasSelectionForContextMenu(target) : selectionCoversNode(target)) {
+        this._mentionLongPress.cancel();
+        return;
+      }
+      msgEl?.clearContextPressSelection(target);
+    }
+    e.preventDefault();
     let at = { x: e.clientX, y: e.clientY };
     if (noPosition) {
       const el = this.shadowRoot?.getElementById(`msg-${msg.id}`);
@@ -6122,6 +6250,61 @@ export class ScionChatThread extends LitElement {
     this.openMessageMenu(msg, at, own ?? (fromKeyboard ? null : pressed));
   }
 
+  /** Track a touch long-press on a highlighted `@agent` mention. */
+  private handleMentionPointerDown(ev: CustomEvent<MentionPointerDownDetail>, msg: Message): void {
+    const { slug, mentionEl, originalEvent } = ev.detail;
+    const target = this.agentMenuTargetFromMention(slug);
+    if (!target || this.agentMenuActionsForTarget(target).length === 0) {
+      this._mentionLongPress.cancel();
+      return;
+    }
+    this._mentionLongPress.pointerDown(originalEvent, (at) => {
+      const fresh = this.agentMenuTargetFromMention(slug);
+      if (!fresh || this.agentMenuActionsForTarget(fresh).length === 0) return;
+      this.messageElement(msg.id)?.clearContextPressSelection(mentionEl);
+      this.openAgentMentionMenu(msg, mentionEl, fresh, at);
+    });
+  }
+
+  /** Handle right-click / touch `contextmenu` / keyboard menu open on a `@mention`. */
+  private handleMentionContextMenu(ev: CustomEvent<MentionContextMenuDetail>, msg: Message): void {
+    const { slug, mentionEl, clientX, clientY, fromKeyboard, originalEvent } = ev.detail;
+    if (originalEvent && this._mentionLongPress.contextMenu(originalEvent)) {
+      ev.preventDefault();
+      return;
+    }
+    const target = this.agentMenuTargetFromMention(slug);
+    const actions = target ? this.agentMenuActionsForTarget(target) : [];
+    if (!target || actions.length === 0) return;
+    ev.preventDefault();
+    let at = { x: clientX, y: clientY };
+    if (fromKeyboard && clientX === 0 && clientY === 0) {
+      const r = mentionEl.getBoundingClientRect();
+      at = { x: r.left, y: r.bottom };
+    }
+    this.openAgentMentionMenu(msg, mentionEl, target, at);
+  }
+
+  /** Open the agent menu for a highlighted `@agent` mention at `at`. */
+  private openAgentMentionMenu(
+    msg: Message,
+    mentionEl: HTMLElement,
+    target: AgentMenuTarget,
+    at: { x: number; y: number }
+  ): void {
+    this.contextMenuMessage = null;
+    this.contextMenuLinkHref = null;
+    this.contextMenuAgent = { target, messageId: msg.id };
+    this.contextMenuPosition = at;
+    this.contextMenuAsSheet = shouldUseMenuSheet();
+    document.addEventListener('keydown', this.handleContextMenuKeydown);
+    if (this.starsActive) this.syncActionsTabStop();
+    if (!this.contextMenuAsSheet) {
+      this._menuFocus.opened(mentionEl);
+    }
+    this.trackMenuAnchor(msg.id);
+  }
+
   /**
    * Open the message menu at `at`. The message becomes the list's tab stop
    * (pointer or keyboard alike), and its More actions button is where
@@ -6132,6 +6315,7 @@ export class ScionChatThread extends LitElement {
     at: { x: number; y: number },
     linkHref: string | null = null
   ): void {
+    this.contextMenuAgent = null;
     // Star states whose request failed are retried when a menu opens.
     if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
@@ -6423,10 +6607,12 @@ export class ScionChatThread extends LitElement {
 
   /** Close the context menu. */
   private closeContextMenu(): void {
+    this.contextMenuAgent = null;
     this.contextMenuMessage = null;
     this.contextMenuLinkHref = null;
     document.removeEventListener('keydown', this.handleContextMenuKeydown);
     this.untrackMenuAnchor();
+    if (this.starsActive) this.syncActionsTabStop();
   }
 
   /** Context menu: Reply to the right-clicked message. */
@@ -6536,17 +6722,10 @@ export class ScionChatThread extends LitElement {
     void copyWithToast(url);
   }
 
-  /** Context menu: Set the sender agent as the thread default. */
-  private async handleContextMenuSetDefault(): Promise<void> {
-    const msg = this.contextMenuMessage;
+  /** Context menu: Set `agentSlug` as the thread default. */
+  private async handleSetDefaultAgent(agentSlug: string): Promise<void> {
     this.closeContextMenu();
-    if (!msg || !this.conversationKey || this.isDM) return;
-
-    // Extract agent slug from sender (strip "agent:" prefix).
-    // Guard: only proceed if the sender uses the "agent:" format.
-    if (!msg.sender.startsWith('agent:')) return;
-    const agentSlug = msg.sender.slice(6);
-    if (!agentSlug) return;
+    if (!agentSlug || !this.conversationKey || this.isDM) return;
 
     try {
       const body: Record<string, unknown> = {
@@ -6574,22 +6753,18 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** Context menu: Open a terminal for the message's author agent. */
-  private handleContextMenuOpenTerminal(): void {
-    const msg = this.contextMenuMessage;
+  /** Context menu: Open a terminal for `agentId`. */
+  private handleOpenAgentTerminal(agentId: string): void {
     this.closeContextMenu();
-    if (!msg) return;
-    openTerminal(msg.senderId);
+    if (!agentId) return;
+    openTerminal(agentId);
   }
 
-  /** Context menu: Open the message's author agent in the dependency graph. */
-  private handleContextMenuOpenGraph(): void {
-    const msg = this.contextMenuMessage;
+  /** Context menu: Open `agentId` in `projectId`'s dependency graph. */
+  private handleOpenAgentGraph(agentId: string, projectId: string): void {
     this.closeContextMenu();
-    if (!msg) return;
-    const projectId = this.resolveAgentActionProjectId(msg);
-    if (!projectId) return;
-    navigateTo(agentGraphHref(projectId, msg.senderId));
+    if (!agentId || !projectId) return;
+    navigateTo(agentGraphHref(projectId, agentId));
   }
 
   // ---------------------------------------------------------------------------
@@ -7760,6 +7935,10 @@ export class ScionChatThread extends LitElement {
         tpl: html`
           <scion-chat-message
             @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+            @mention-pointerdown=${(e: CustomEvent<MentionPointerDownDetail>): void =>
+              this.handleMentionPointerDown(e, msg)}
+            @mention-contextmenu=${(e: CustomEvent<MentionContextMenuDetail>): void =>
+              this.handleMentionContextMenu(e, msg)}
             @pointerdown=${(e: PointerEvent) => this.handleMessagePress(e, msg)}
             @pointerup=${(e: PointerEvent) => this.handleMessagePress(e, msg)}
             @pointercancel=${(e: PointerEvent) => this.handleMessagePress(e, msg)}
