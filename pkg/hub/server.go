@@ -784,6 +784,31 @@ func (s *Server) idleSuspendSettings() (bool, time.Duration) {
 	return enabled, after
 }
 
+// stalledThreshold returns the current StalledThreshold duration under s.mu.RLock().
+func (s *Server) stalledThreshold() time.Duration {
+	s.mu.RLock()
+	d := s.config.StalledThreshold
+	s.mu.RUnlock()
+	if d <= 0 {
+		return DefaultServerConfig().StalledThreshold
+	}
+	return d
+}
+
+// autoSuspendThreshold returns the configured threshold duration for an
+// automatic suspension reason (idle or stalled), or 0 for other reasons.
+func (s *Server) autoSuspendThreshold(reason state.SuspendReason) time.Duration {
+	switch reason {
+	case state.SuspendReasonIdle:
+		_, after := s.idleSuspendSettings()
+		return after
+	case state.SuspendReasonStalled:
+		return s.stalledThreshold()
+	default:
+		return 0
+	}
+}
+
 // idleSuspendDeliveryGateActive reports whether the lifecycle.idle_suspend
 // experiment is enabled. Whenever the experiment is on, message delivery stamps
 // last_delivery_at via MarkAgentDelivery even while server.hub.auto_suspend_idle
@@ -5627,6 +5652,7 @@ func (s *Server) StartNotificationDispatcher() {
 	nd.channelRegistryFn = s.currentChannelRegistry
 	nd.autoWakeFn = s.autoWakeNotificationSubscriber
 	nd.idleSuspendGateFn = s.idleSuspendDeliveryGateActive
+	nd.autoSuspendThresholdFn = s.autoSuspendThreshold
 	nd.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
