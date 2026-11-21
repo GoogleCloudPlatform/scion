@@ -25,6 +25,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// classifyPathProjectPageSize is the ListProjects page size used by
+// ClassifyPath when checking whether a directory is already linked to a
+// project. The store caps a single ListProjects page at 1000 rows, so
+// ClassifyPath follows NextCursor until exhausted or a match is found.
+const classifyPathProjectPageSize = 500
+
 // pathEqual compares two cleaned absolute paths for equality,
 // case-insensitive on platforms with case-insensitive filesystems (macOS, Windows).
 func pathEqual(a, b string) bool {
@@ -107,9 +113,22 @@ func ClassifyPath(ctx context.Context, s store.Store, path, managedRoot string) 
 	}
 
 	if s != nil && pc.IsDir {
-		// Cap at 10000 projects; installations with more will not detect duplicates beyond this limit.
-		result, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-		if err == nil && result != nil {
+		cursor := ""
+		for {
+			if err := ctx.Err(); err != nil {
+				return pc, err
+			}
+			result, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+				Limit:          classifyPathProjectPageSize,
+				Cursor:         cursor,
+				SkipTotalCount: true,
+			})
+			if err != nil {
+				return pc, err
+			}
+			if result == nil {
+				break
+			}
 			for _, proj := range result.Items {
 				providers, err := s.GetProjectProviders(ctx, proj.ID)
 				if err != nil {
@@ -132,6 +151,10 @@ func ClassifyPath(ctx context.Context, s store.Store, path, managedRoot string) 
 					break
 				}
 			}
+			if pc.AlreadyLinked || result.NextCursor == "" || result.NextCursor == cursor || len(result.Items) == 0 {
+				break
+			}
+			cursor = result.NextCursor
 		}
 	}
 
