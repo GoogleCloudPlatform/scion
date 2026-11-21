@@ -505,13 +505,13 @@ func yamlFieldName(f reflect.StructField) string {
 var errServerSectionUnreadable = errors.New("server: request value is not a readable JSON object")
 
 // validateMergedServerSections re-runs the server checks whose result
-// depends on more than one field, on the merged settings: a request that
-// sends only part of a storage block (project_storage or one it replaces) is combined with
-// the stored fields by the deep merge, so the request alone does not show
-// the result that will be written. Only sections the request sent are
-// checked, so a save is not blocked by an unrelated stored value.
-// rawServer must be the request's server object: when it is nil or not a
-// JSON object, the sent sections cannot be determined and an error is
+// depends on the merged section rather than the request alone: storage
+// blocks (project_storage or one it replaces) and startup-checked server
+// blocks (startupCheckedFileBlocks, shared with the workstation path:
+// server.hub.conduit, server.hub.port_proxy, and so on). Only sections the
+// request sent are checked, so a save is not blocked by an unrelated stored
+// value. rawServer must be the request's server object: when it is nil or
+// not a JSON object, the sent sections cannot be determined and an error is
 // returned.
 func validateMergedServerSections(raw map[string]interface{}, rawServer json.RawMessage) error {
 	sent, ok := sentStructFields(reflect.TypeOf(config.V1ServerConfig{}), rawServer)
@@ -529,17 +529,25 @@ func validateMergedServerSections(raw map[string]interface{}, rawServer json.Raw
 			sentStorage = true
 		}
 	}
-	if !sentStorage {
+	sentStartup := startupFileBlockSentKeys(rawServer)
+	if !sentStorage && len(sentStartup) == 0 {
 		return nil
 	}
 	merged, err := serverConfigFromRaw(raw)
 	if err != nil || merged == nil {
 		return err
 	}
-	// The merged storage blocks must resolve to one server.project_storage
-	// (exactly one block, or deprecated blocks that synthesize it).
-	if _, _, err := config.ResolveProjectStorage(merged); err != nil {
-		return err
+	if sentStorage {
+		// The merged storage blocks must resolve to one server.project_storage
+		// (exactly one block, or deprecated blocks that synthesize it).
+		if _, _, err := config.ResolveProjectStorage(merged); err != nil {
+			return err
+		}
+	}
+	if len(sentStartup) > 0 {
+		if err := checkStartupFileBlocks(merged, sentStartup); err != nil {
+			return err
+		}
 	}
 	return nil
 }
