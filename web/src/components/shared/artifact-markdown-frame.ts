@@ -133,6 +133,8 @@ export class ScionArtifactMarkdownFrame extends LitElement {
       reviewNoteBlockBg: v('--sl-color-violet-50'),
       reviewNoteLine: v('--scion-review-note-line'),
       fontMono: v('--scion-font-mono'),
+      radiusSm: v('--scion-radius-sm'),
+      radius: v('--scion-radius'),
     };
   }
 

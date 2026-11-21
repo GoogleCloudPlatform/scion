@@ -1332,13 +1332,13 @@ export class ScionChatMessage extends LitElement {
       color: var(--sl-color-success-700, #15803d);
       background: var(--sl-color-success-50, #f0fdf4);
       padding: 0 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       white-space: nowrap;
     }
 
     .bubble-content {
       padding: 0.5rem 0.75rem;
-      border-radius: 0.75rem;
+      border-radius: var(--scion-radius-lg);
       line-height: 1.5;
       font-size: var(--chat-fs-lg);
       word-break: break-word;
@@ -1347,13 +1347,13 @@ export class ScionChatMessage extends LitElement {
     .from-agent .bubble-content {
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text, #1e293b);
-      border-top-left-radius: 0.25rem;
+      border-top-left-radius: var(--scion-radius-sm);
     }
 
     .from-user .bubble-content {
       background: var(--scion-primary-tint, #eff6ff);
       color: var(--scion-text, #1e293b);
-      border-top-right-radius: 0.25rem;
+      border-top-right-radius: var(--scion-radius-sm);
     }
 
     .from-user .bubble-header {
@@ -1418,7 +1418,7 @@ export class ScionChatMessage extends LitElement {
       font-size: 0.8125em;
       background: var(--scion-bg-subtle, #f1f5f9);
       padding: 0.1em 0.3em;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       border: 1px solid var(--scion-border, #e2e8f0);
     }
 
@@ -1426,7 +1426,7 @@ export class ScionChatMessage extends LitElement {
       position: relative;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       padding: 0.75rem;
       overflow-x: auto;
       margin: 0.5em 0;
@@ -1446,7 +1446,7 @@ export class ScionChatMessage extends LitElement {
       max-height: 400px;
       overflow: auto;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
     }
 
     .copy-btn {
@@ -1458,7 +1458,7 @@ export class ScionChatMessage extends LitElement {
       font-family: inherit;
       line-height: var(--chat-lh-tight);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -1496,7 +1496,7 @@ export class ScionChatMessage extends LitElement {
       background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
       color: var(--scion-primary, #60a5fa);
       padding: 0 4px;
-      border-radius: 3px;
+      border-radius: calc(var(--scion-radius-sm) * 0.75);
       font-weight: 500;
     }
 
@@ -1564,7 +1564,7 @@ export class ScionChatMessage extends LitElement {
     .badge {
       display: inline-block;
       padding: 0 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: var(--chat-fs-xs);
       font-weight: 600;
       text-transform: uppercase;
@@ -1602,7 +1602,7 @@ export class ScionChatMessage extends LitElement {
       padding: 0.125rem 0.5rem;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       cursor: default;
@@ -1635,7 +1635,7 @@ export class ScionChatMessage extends LitElement {
       display: flex;
       gap: 0.125rem;
       padding: 0.0625rem;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       background: rgba(15, 23, 42, 0.65);
       opacity: 0;
       transition: opacity 0.15s ease;
@@ -1673,7 +1673,7 @@ export class ScionChatMessage extends LitElement {
       border: none;
       background: none;
       cursor: pointer;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
     }
 
     .image-expand:focus-visible {
@@ -1690,7 +1690,7 @@ export class ScionChatMessage extends LitElement {
       max-width: 100%;
       height: auto;
       box-sizing: border-box;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       border: 1px solid var(--scion-border, #e2e8f0);
       cursor: pointer;
       object-fit: contain;
@@ -1718,7 +1718,7 @@ export class ScionChatMessage extends LitElement {
       padding: 0.25rem 0.625rem;
       background: var(--scion-surface, #fff);
       border: 1px solid var(--scion-border, #cbd5e1);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       font: inherit;
       font-size: var(--chat-fs-sm);
       color: var(--scion-text, #0f172a);
@@ -1761,7 +1761,7 @@ export class ScionChatMessage extends LitElement {
       padding: 0.375rem 0.625rem;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       font-size: var(--chat-fs-base);
       color: var(--scion-text, #1e293b);
       cursor: pointer;
@@ -1795,7 +1795,7 @@ export class ScionChatMessage extends LitElement {
     .attachment-preview {
       margin-top: 0.375rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       overflow: hidden;
       background: var(--scion-surface, #ffffff);
     }
@@ -1926,7 +1926,7 @@ export class ScionChatMessage extends LitElement {
 
     .trace-block details {
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       background: var(--scion-bg-subtle, #f8fafc);
       max-width: min(80%, 700px);
     }
@@ -2020,7 +2020,7 @@ export class ScionChatMessage extends LitElement {
       margin-bottom: 0.25rem;
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
       background: var(--scion-bg, #f8fafc);
-      border-radius: 0 0.25rem 0.25rem 0;
+      border-radius: 0 var(--scion-radius-sm) var(--scion-radius-sm) 0;
       cursor: pointer;
       font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
@@ -2087,7 +2087,7 @@ export class ScionChatMessage extends LitElement {
       height: 1.5rem;
       padding: 0;
       border: none;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       background: none;
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
@@ -2202,7 +2202,7 @@ export class ScionChatMessage extends LitElement {
       line-height: 1.5;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       padding: 0.75rem;
       overflow-x: auto;
       margin: 0.5em 0;
@@ -2257,7 +2257,7 @@ export class ScionChatMessage extends LitElement {
       padding: 0.25rem 0.75rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-top: none;
-      border-radius: 0 0 0.375rem 0.375rem;
+      border-radius: 0 0 calc(var(--scion-radius) * 0.75) calc(var(--scion-radius) * 0.75);
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--sl-color-primary-600, #2563eb);
       font-size: var(--chat-fs-base);
@@ -2277,7 +2277,7 @@ export class ScionChatMessage extends LitElement {
       line-height: 1.5;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       padding: 0.75rem;
       overflow-x: auto;
       margin: 0.5em 0;

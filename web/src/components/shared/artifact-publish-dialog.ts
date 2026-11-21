@@ -159,7 +159,7 @@ export class ScionArtifactPublishDialog extends LitElement {
       font-size: 0.8125rem;
       background: var(--scion-bg-subtle, #f8fafc);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       padding: 0.4rem 0.6rem;
       margin-bottom: 0.75rem;
     }

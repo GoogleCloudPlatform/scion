@@ -143,7 +143,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       .verify-failed-content code {
         background: var(--sl-color-neutral-100, #f1f5f9);
         padding: 0.125rem 0.375rem;
-        border-radius: 0.25rem;
+        border-radius: var(--scion-radius-sm);
         font-size: 0.875em;
         word-break: break-all;
       }
@@ -183,7 +183,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       .mint-result-content .gcloud-command {
         background: var(--sl-color-neutral-100, #f1f5f9);
         padding: 0.75rem 1rem;
-        border-radius: 0.375rem;
+        border-radius: calc(var(--scion-radius) * 0.75);
         font-family: monospace;
         font-size: 0.8125rem;
         line-height: 1.6;
@@ -206,7 +206,7 @@ export class ScionGCPServiceAccountList extends LitElement {
       .mint-result-content code {
         background: var(--sl-color-neutral-100, #f1f5f9);
         padding: 0.125rem 0.375rem;
-        border-radius: 0.25rem;
+        border-radius: var(--scion-radius-sm);
         font-size: 0.875em;
         word-break: break-all;
       }

@@ -209,7 +209,7 @@ export class ScionChatStarredList extends LitElement {
       padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
         env(safe-area-inset-left, 0px);
       border: none;
-      border-radius: 0.875rem 0.875rem 0 0;
+      border-radius: calc(var(--scion-radius-xl) * 0.875) calc(var(--scion-radius-xl) * 0.875) 0 0;
       background: var(--scion-surface, #ffffff);
       color: var(--scion-text, #1e293b);
       box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.18);
@@ -283,7 +283,7 @@ export class ScionChatStarredList extends LitElement {
       height: 44px;
       border: none;
       background: none;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       color: var(--scion-text-muted, #64748b);
       font-size: 1.125rem;
       cursor: pointer;
@@ -319,7 +319,7 @@ export class ScionChatStarredList extends LitElement {
       min-height: 44px;
       box-sizing: border-box;
       padding: 0.375rem 0.5rem;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       color: inherit;
       text-decoration: none;
     }

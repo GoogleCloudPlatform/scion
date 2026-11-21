@@ -438,7 +438,7 @@ export class ScionChatComposer extends LitElement {
 
     sl-textarea::part(base) {
       font-size: var(--chat-fs-lg);
-      border-radius: 0.75rem;
+      border-radius: var(--scion-radius-lg);
       background: var(--scion-surface-raised, #ffffff);
       border-color: var(--scion-border, #e2e8f0);
     }
@@ -608,7 +608,7 @@ export class ScionChatComposer extends LitElement {
       margin-bottom: 0.25rem;
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
       min-width: 180px;
       padding: 0.25rem 0;
@@ -702,7 +702,7 @@ export class ScionChatComposer extends LitElement {
       font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: 0.5rem 0.5rem 0 0;
+      border-radius: var(--scion-radius) var(--scion-radius) 0 0;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-bottom: none;
       /* Keep the tab over the composer's content, which moves in by the
@@ -785,7 +785,7 @@ export class ScionChatComposer extends LitElement {
       padding: 0.125rem 0.25rem 0.125rem 0.5rem;
       border: 1px solid var(--sl-color-primary-200, #bfdbfe);
       background: var(--sl-color-primary-50, #eff6ff);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       font-size: var(--chat-fs-sm);
       max-width: 100%;
     }
@@ -824,7 +824,7 @@ export class ScionChatComposer extends LitElement {
       padding: 0.25rem 0.5rem;
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       font-size: var(--chat-fs-sm);
       color: var(--scion-text, #1e293b);
       max-width: 200px;
@@ -834,7 +834,7 @@ export class ScionChatComposer extends LitElement {
       width: 24px;
       height: 24px;
       object-fit: cover;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
     }
 
     .pending-file .file-name {
@@ -906,7 +906,7 @@ export class ScionChatComposer extends LitElement {
       padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
       background: var(--scion-bg, #f8fafc);
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
-      border-radius: 0 0.25rem 0.25rem 0;
+      border-radius: 0 var(--scion-radius-sm) var(--scion-radius-sm) 0;
       font-size: var(--chat-fs-base);
       color: var(--scion-text-secondary, #475569);
     }
@@ -959,7 +959,7 @@ export class ScionChatComposer extends LitElement {
       padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
       background: var(--scion-warning-50, #fffbeb);
       border-left: 3px solid var(--scion-warning-400, #fbbf24);
-      border-radius: 0 0.25rem 0.25rem 0;
+      border-radius: 0 var(--scion-radius-sm) var(--scion-radius-sm) 0;
       font-size: var(--chat-fs-base);
       color: var(--scion-neutral-600, #475569);
     }
@@ -989,7 +989,7 @@ export class ScionChatComposer extends LitElement {
       justify-content: center;
       background: color-mix(in srgb, var(--scion-primary, #3b82f6) 8%, transparent);
       border: 2px dashed var(--scion-primary, #3b82f6);
-      border-radius: 0.75rem;
+      border-radius: var(--scion-radius-lg);
       pointer-events: none;
     }
 

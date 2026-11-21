@@ -103,7 +103,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
     .group-icon {
       width: 2.5rem;
       height: 2.5rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       display: flex;
       align-items: center;
       justify-content: center;

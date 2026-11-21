@@ -279,6 +279,18 @@ describe('previewDocument', () => {
       '.image-placeholder.failed{border-color:rgba(248, 113, 113, 0.4);color:#fca5a5;background:rgba(239, 68, 68, 0.15)}'
     );
   });
+  it('forwards radius tokens and rejects unsafe radius values', () => {
+    const square = previewDocument('<pre><code>x</code></pre>', { radiusSm: '0', radius: '0' });
+    expect(square).toContain('border-radius:0;border:1px solid');
+    expect(square).toContain('pre{background:#f8fafc;border:1px solid #e2e8f0;border-radius:0;');
+    const injected = previewDocument('<pre><code>x</code></pre>', {
+      radiusSm: '0;}</style><script>',
+      radius: '12px',
+    });
+    expect(injected).not.toContain('<script>');
+    expect(injected).toContain('border-radius:0.25rem;border:1px solid');
+    expect(injected).toContain('border-radius:12px;padding:1rem');
+  });
 });
 
 /**

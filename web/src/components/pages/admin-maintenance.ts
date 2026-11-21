@@ -760,7 +760,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       width: 36px;
       height: 20px;
       background: var(--scion-border, #e2e8f0);
-      border-radius: 10px;
+      border-radius: var(--scion-radius-full);
       cursor: pointer;
       transition: background 0.2s ease;
       border: none;
@@ -997,7 +997,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       margin-top: 0.5rem;
       margin-bottom: 0.5rem;
       padding: 0.625rem 0.75rem;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       border: 1px solid var(--sl-color-primary-200, #bfdbfe);
       background: var(--sl-color-primary-50, #eff6ff);
       font-size: 0.8125rem;

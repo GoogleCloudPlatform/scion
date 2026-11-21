@@ -381,7 +381,7 @@ export class ScionQuickPalette extends LitElement {
         display: inline-block;
         padding: 0 0.25rem;
         border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 0.125rem;
+        border-radius: calc(var(--scion-radius-sm) * 0.5);
         font-family: inherit;
         font-size: var(--palette-fs-xs);
         background: var(--scion-bg-subtle, #f1f5f9);

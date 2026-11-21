@@ -857,7 +857,7 @@ export class ScionNotificationTray extends LitElement {
       width: 2.25rem;
       height: 2.25rem;
       border: none;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -883,7 +883,7 @@ export class ScionNotificationTray extends LitElement {
       min-width: 16px;
       height: 16px;
       padding: 0 4px;
-      border-radius: 8px;
+      border-radius: var(--scion-radius-full);
       background: var(--sl-color-danger-600, #dc2626);
       color: var(--sl-color-neutral-0, #fff);
       font-size: 0.625rem;
@@ -920,7 +920,7 @@ export class ScionNotificationTray extends LitElement {
       flex-direction: column;
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.75rem;
+      border-radius: var(--scion-radius-lg);
       box-shadow:
         0 10px 15px -3px rgba(0, 0, 0, 0.1),
         0 4px 6px -4px rgba(0, 0, 0, 0.1);
@@ -951,7 +951,7 @@ export class ScionNotificationTray extends LitElement {
       font-weight: 500;
       cursor: pointer;
       padding: 0.25rem 0.5rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       transition: background 0.15s ease;
     }
 
@@ -1074,7 +1074,7 @@ export class ScionNotificationTray extends LitElement {
       font-size: 0.6875rem;
       font-weight: 700;
       line-height: 1.25rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -1158,7 +1158,7 @@ export class ScionNotificationTray extends LitElement {
       font-weight: 500;
       cursor: pointer;
       padding: 0.25rem 0.5rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       transition: background 0.15s ease;
     }
 
@@ -1183,7 +1183,7 @@ export class ScionNotificationTray extends LitElement {
       font-weight: 500;
       cursor: pointer;
       padding: 0.25rem 0.5rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       text-decoration: none;
       transition: background 0.15s ease;
     }
@@ -1222,7 +1222,7 @@ export class ScionNotificationTray extends LitElement {
         right: 0;
         width: 100%;
         max-height: 70vh;
-        border-radius: 0.75rem 0.75rem 0 0;
+        border-radius: var(--scion-radius-lg) var(--scion-radius-lg) 0 0;
       }
     }
   `;

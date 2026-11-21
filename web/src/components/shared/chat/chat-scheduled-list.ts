@@ -111,7 +111,7 @@ export class ScionChatScheduledList extends LitElement {
       opacity: 0.6;
       background: var(--scion-primary-tint, #eff6ff);
       border: 1px dashed var(--scion-border, #cbd5e1);
-      border-radius: 0.75rem 0.75rem 0 0;
+      border-radius: var(--scion-radius-lg) var(--scion-radius-lg) 0 0;
       padding: 0.5rem 0.75rem;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
@@ -125,7 +125,7 @@ export class ScionChatScheduledList extends LitElement {
       padding: 0.25rem 0.75rem;
       border: 1px solid var(--scion-border, #e2e8f0);
       border-top: none;
-      border-radius: 0 0 0.75rem 0.75rem;
+      border-radius: 0 0 var(--scion-radius-lg) var(--scion-radius-lg);
       font-size: var(--chat-fs-sm, 0.75rem);
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-surface, #ffffff);

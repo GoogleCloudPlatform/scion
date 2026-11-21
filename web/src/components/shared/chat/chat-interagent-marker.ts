@@ -149,7 +149,7 @@ export class ScionChatInteragentMarker extends LitElement {
         padding: 0.5rem 1rem;
         background: color-mix(in srgb, var(--scion-neutral-400, #94a3b8) 5%, transparent);
         border: 2px solid var(--scion-border, rgba(148, 163, 184, 0.2));
-        border-radius: 0.5rem;
+        border-radius: var(--scion-radius);
         cursor: pointer;
         user-select: none;
       }
@@ -232,7 +232,7 @@ export class ScionChatInteragentMarker extends LitElement {
         color: var(--sl-color-success-700, #15803d);
         background: var(--sl-color-success-50, #f0fdf4);
         padding: 0 0.25rem;
-        border-radius: 0.1875rem;
+        border-radius: calc(var(--scion-radius-sm) * 0.75);
         flex-shrink: 0;
         white-space: nowrap;
       }
@@ -282,7 +282,7 @@ export class ScionChatInteragentMarker extends LitElement {
       .ia-full-preview .ia-full-body pre {
         background: var(--scion-bg-subtle, #f1f5f9);
         border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 0.375rem;
+        border-radius: calc(var(--scion-radius) * 0.75);
         padding: 0.75rem;
         overflow-x: auto;
         margin: 0.5em 0;

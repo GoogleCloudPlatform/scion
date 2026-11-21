@@ -239,7 +239,7 @@ export class ScionArtifactShareDialog extends LitElement {
       border-collapse: collapse;
       font-size: 0.8125rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
     }
     th {
       text-align: left;
@@ -298,7 +298,7 @@ export class ScionArtifactShareDialog extends LitElement {
       list-style: none;
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       box-shadow: var(--sl-shadow-medium);
       max-height: 14rem;
       overflow-y: auto;
@@ -357,7 +357,7 @@ export class ScionArtifactShareDialog extends LitElement {
       font-size: 0.8125rem;
       background: var(--scion-bg-subtle, #f8fafc);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
     }
     .expires {
       margin: 0 0 0.25rem;

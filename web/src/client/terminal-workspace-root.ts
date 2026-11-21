@@ -2355,7 +2355,7 @@ export class TerminalWorkspaceRoot {
         gap: 0.5rem;
         padding: 0 0.625rem;
         border: 0;
-        border-radius: 6px;
+        border-radius: calc(var(--scion-radius) * 0.75);
         background: transparent;
         color: var(--scion-text, #1e293b);
         font: inherit;
@@ -2407,7 +2407,7 @@ export class TerminalWorkspaceRoot {
         grid-template-columns: auto minmax(0, 1fr) auto;
         align-items: center;
         gap: 0.25rem;
-        border-radius: 6px;
+        border-radius: calc(var(--scion-radius) * 0.75);
       }
       .terminal-rail-item[data-dragging='true'] {
         opacity: 0.5;
@@ -2443,7 +2443,7 @@ export class TerminalWorkspaceRoot {
       .terminal-rail-select:focus-visible {
         outline: none;
         background: var(--scion-bg-subtle, #f1f5f9);
-        border-radius: 6px;
+        border-radius: calc(var(--scion-radius) * 0.75);
       }
       .terminal-connection-dot {
         width: 0.625rem;
@@ -2502,7 +2502,7 @@ export class TerminalWorkspaceRoot {
         border: 0;
         background: transparent;
         color: var(--scion-text-muted, #64748b);
-        border-radius: 4px;
+        border-radius: var(--scion-radius-sm);
         cursor: pointer;
       }
       .terminal-icon-action:hover,
@@ -2540,7 +2540,7 @@ export class TerminalWorkspaceRoot {
         font-size: 0.75rem;
         padding: 0.25rem 0.5rem;
         border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 4px;
+        border-radius: var(--scion-radius-sm);
         background: transparent;
         color: var(--scion-text-muted, #64748b);
         cursor: pointer;
@@ -2563,7 +2563,7 @@ export class TerminalWorkspaceRoot {
         padding: 0.25rem 0.5rem;
         margin-left: auto;
         border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 4px;
+        border-radius: var(--scion-radius-sm);
         background: transparent;
         color: var(--scion-text-muted, #64748b);
         cursor: pointer;
@@ -2594,7 +2594,7 @@ export class TerminalWorkspaceRoot {
         min-height: 0;
         min-width: 0;
         border: 1px solid #333;
-        border-radius: 4px;
+        border-radius: var(--scion-radius-sm);
       }
       /* Focus outline only in multi-pane layouts — in single-pane mode focus
          is implicit and the outline is visual noise (#1716). */
@@ -2610,7 +2610,7 @@ export class TerminalWorkspaceRoot {
         align-items: center;
         justify-content: center;
         border: 2px dashed var(--scion-border, #e2e8f0);
-        border-radius: 8px;
+        border-radius: var(--scion-radius);
         margin: 4px;
         color: var(--scion-text-muted, #64748b);
         font-size: 0.875rem;
@@ -2649,7 +2649,7 @@ export class TerminalWorkspaceRoot {
         min-width: 12rem;
         background: var(--scion-surface, #fff);
         border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 6px;
+        border-radius: calc(var(--scion-radius) * 0.75);
         box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         padding: 0.25rem;
       }
@@ -2663,7 +2663,7 @@ export class TerminalWorkspaceRoot {
         color: var(--scion-text, #1e293b);
         font-size: 0.8125rem;
         cursor: pointer;
-        border-radius: 4px;
+        border-radius: var(--scion-radius-sm);
       }
       .terminal-place-menu-item:hover,
       .terminal-place-menu-item:focus-visible {
@@ -2697,7 +2697,7 @@ export class TerminalWorkspaceRoot {
         max-width: 18rem;
         padding: 0.6rem 0.75rem;
         border: 1px solid var(--scion-border, #cbd5e1);
-        border-radius: 0.375rem;
+        border-radius: calc(var(--scion-radius) * 0.75);
         background: var(--scion-surface, #ffffff);
         color: var(--scion-text, #0f172a);
         font-size: 0.875rem;
@@ -2712,7 +2712,7 @@ export class TerminalWorkspaceRoot {
         z-index: 2;
         padding: 0.4rem 0.9rem;
         border: 1px solid var(--scion-border, #cbd5e1);
-        border-radius: 0.375rem;
+        border-radius: calc(var(--scion-radius) * 0.75);
         background: var(--scion-surface, #ffffff);
         color: var(--scion-text, #0f172a);
         font: inherit;

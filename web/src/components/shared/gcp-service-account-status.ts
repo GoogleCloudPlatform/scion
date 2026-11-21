@@ -231,7 +231,7 @@ export class ScionGCPServiceAccountStatus extends LitElement {
     code {
       background: var(--sl-color-neutral-100, #f1f5f9);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.8125rem;
       word-break: break-all;
     }

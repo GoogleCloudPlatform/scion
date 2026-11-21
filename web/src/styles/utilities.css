@@ -180,7 +180,7 @@
 
 .scion-scrollbar::-webkit-scrollbar-thumb {
   background: var(--scion-neutral-300);
-  border-radius: 3px;
+  border-radius: calc(var(--scion-radius-sm) * 0.75);
 }
 
 .scion-scrollbar::-webkit-scrollbar-thumb:hover {

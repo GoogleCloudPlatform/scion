@@ -335,7 +335,7 @@ export const decisionsPageSharedStyles: CSSResult = css`
     background: var(--scion-badge-neutral-bg, #f1f5f9);
     color: var(--scion-badge-neutral-text, #334155);
     padding: 0.2rem 0.4rem;
-    border-radius: 0.25rem;
+    border-radius: var(--scion-radius-sm);
     white-space: nowrap;
   }
 

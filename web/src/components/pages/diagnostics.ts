@@ -193,7 +193,7 @@ export class ScionPageDiagnostics extends LitElement {
     .degradation-panel code {
       background: var(--scion-bg-subtle, #f1f5f9);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.8125rem;
       font-family: var(--scion-font-mono, monospace);
     }

@@ -403,7 +403,7 @@ export class ScionAgentMessageViewer extends LitElement {
     .msg-badge {
       display: inline-block;
       padding: 0.0625rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.625rem;
       font-weight: 600;
       text-transform: uppercase;

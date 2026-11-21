@@ -26,9 +26,13 @@ function body(doc: string): string {
 async function frameDoc(
   content: string,
   critic: string,
-  props: Partial<ScionArtifactMarkdownFrame> = {}
+  props: Partial<ScionArtifactMarkdownFrame> = {},
+  cssVars: Record<string, string> = {}
 ): Promise<string> {
   const el = document.createElement('scion-artifact-markdown-frame') as ScionArtifactMarkdownFrame;
+  for (const [k, v] of Object.entries(cssVars)) {
+    el.style.setProperty(k, v);
+  }
   el.content = content;
   el.artifactId = 'a';
   el.seq = 1;
@@ -124,5 +128,27 @@ describe('artifact markdown frame: CriticMarkup', () => {
     const off = body(await frameDoc('a', 'off', { sideNote: 'x', marginNotes: true }));
     expect(off).not.toContain('critic-side');
     expect(off).not.toContain('notes-margin');
+  });
+
+  it('forwards --scion-radius-sm and --scion-radius tokens into the preview iframe document', async () => {
+    const squareDoc = await frameDoc(
+      '`inline`\n\n```\nblock\n```',
+      'marks',
+      {},
+      { '--scion-radius-sm': '0', '--scion-radius': '0' }
+    );
+    expect(squareDoc).toContain('border-radius:0;border:1px solid');
+    expect(squareDoc).toContain('border-radius:0;padding:1rem');
+    expect(squareDoc).not.toContain('border-radius:0.25rem');
+    expect(squareDoc).not.toContain('border-radius:0.5rem');
+
+    const roundedDoc = await frameDoc(
+      '`inline`\n\n```\nblock\n```',
+      'marks',
+      {},
+      { '--scion-radius-sm': '0.375rem', '--scion-radius': '0.75rem' }
+    );
+    expect(roundedDoc).toContain('border-radius:0.375rem;border:1px solid');
+    expect(roundedDoc).toContain('border-radius:0.75rem;padding:1rem');
   });
 });

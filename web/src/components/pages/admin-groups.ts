@@ -238,7 +238,7 @@ export class ScionPageAdminGroups extends LitElement {
     .group-icon {
       width: 2rem;
       height: 2rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -282,7 +282,7 @@ export class ScionPageAdminGroups extends LitElement {
     .group-name-link:focus-visible {
       outline: 2px solid var(--sl-color-primary-600, #2563eb);
       outline-offset: 2px;
-      border-radius: 2px;
+      border-radius: calc(var(--scion-radius-sm) * 0.5);
     }
 
     .group-slug {

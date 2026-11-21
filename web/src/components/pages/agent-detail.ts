@@ -670,12 +670,12 @@ export class ScionPageAgentDetail extends LitElement {
       width: 100%;
       height: 6px;
       background: var(--scion-bg-subtle, #f1f5f9);
-      border-radius: 3px;
+      border-radius: var(--scion-radius-full);
       overflow: hidden;
     }
     .progress-bar-fill {
       height: 100%;
-      border-radius: 3px;
+      border-radius: var(--scion-radius-full);
       transition: width 0.3s ease;
     }
     .progress-bar-fill.normal {
@@ -753,7 +753,7 @@ export class ScionPageAgentDetail extends LitElement {
       font-size: 0.6875rem;
       font-weight: 700;
       line-height: 1.25rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -1792,7 +1792,7 @@ export class ScionPageAgentDetail extends LitElement {
         ? html`
             <div
               class="alert alert-warning"
-              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-warning-100); border: 1px solid var(--sl-color-warning-300);"
+              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: var(--scion-radius-sm); background: var(--sl-color-warning-100); border: 1px solid var(--sl-color-warning-300);"
             >
               <sl-icon name="exclamation-triangle" style="margin-right: 0.5em;"></sl-icon>
               ${getDenialMessage(agent._messageability.reason, agent.name)}
@@ -1803,7 +1803,7 @@ export class ScionPageAgentDetail extends LitElement {
         ? html`
             <div
               class="alert alert-danger"
-              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: 4px; background: var(--sl-color-danger-100); border: 1px solid var(--sl-color-danger-300);"
+              style="margin-bottom: 0.5em; padding: 0.75em; border-radius: var(--scion-radius-sm); background: var(--sl-color-danger-100); border: 1px solid var(--sl-color-danger-300);"
             >
               <sl-icon name="shield-lock" style="margin-right: 0.5em;"></sl-icon>
               This agent is sealed (mode: none). Only super-admins can message it.
