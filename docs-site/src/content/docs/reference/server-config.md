@@ -90,6 +90,7 @@ Controls the central Hub API server.
 | `platform_request_timeout` | duration | | Request timeout of the platform in front of the Hub, for example the Cloud Run service timeout. No default. When set, the events stream maximum age and the conduit `lifetime_cap` are lowered to 0.8 of it (see [Platform request timeout](#platform-request-timeout)). Between `"150s"` and `"24h"`. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PLATFORMREQUESTTIMEOUT`. |
 | `chat` | object | | Web chat limits (see [Chat search](#chat-search-serverhubchatsearch)). |
 | `schedules` | object | | Limits on recurring schedules (see [Recurring schedules](#recurring-schedules-serverhubschedules)). |
+| `default_message_mode` | string | `"project"` | [Message mode](/scion/reference/messaging-authorization/) of a new agent when neither the create request, its template nor its parent agent sets one: `none`, `lineage`, `branch` or `project`. `hub` is refused: hub mode is granted per agent. Existing agents keep their mode. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_DEFAULTMESSAGEMODE`. |
 
 #### Recurring schedules (`server.hub.schedules`)
 
