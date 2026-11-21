@@ -502,7 +502,10 @@ func (s *Server) canCreateSkillInScope(ctx context.Context, scope, scopeID strin
 	case store.SkillScopeProject:
 		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			own := agentIdent.ProjectID()
-			return own != "" && agentIdent.HasScope(ScopeAgentCreate) && (scopeID == "" || scopeID == own)
+			if own == "" || (scopeID != "" && scopeID != own) {
+				return false
+			}
+			return s.authzService.CheckAccess(ctx, agentIdent, skillScopeResource(store.SkillScopeProject, own), ActionCreate).Allowed
 		}
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
@@ -657,6 +660,10 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 	case store.SkillScopeGlobal:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
+			if GetIdentityFromContext(ctx) != nil {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
@@ -676,29 +683,24 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 				"scopeId is required for project-scoped skills", nil)
 			return
 		}
-		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-			if !agentIdent.HasScope(ScopeAgentCreate) {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope", nil)
-				return
-			}
-			if req.ScopeID != agentIdent.ProjectID() {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agents can only manage resources within their own project", nil)
-				return
-			}
-		} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-			decision := s.authzService.CheckAccess(ctx, userIdent,
-				skillScopeResource(store.SkillScopeProject, req.ScopeID), ActionCreate)
-			if !decision.Allowed {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in this project", nil)
-				return
-			}
-		} else {
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+			return
+		}
+		decision := s.authzService.CheckAccess(ctx, identity,
+			skillScopeResource(store.SkillScopeProject, req.ScopeID), ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in this project", nil)
 			return
 		}
 	case store.SkillScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
+			if GetIdentityFromContext(ctx) != nil {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in user scope", nil)
+				return
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized", "User authentication required for user-scoped skills", nil)
 			return
 		}

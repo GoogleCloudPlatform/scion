@@ -120,12 +120,13 @@ func TestCeilingOptionalScopesDoNotDecideDelegation(t *testing.T) {
 }
 
 // TestCeilingOptionalRoleScopesAreExactlyTheArtifactScopes keeps the set of
-// role scopes that do not decide role fit or delegation to exactly the two
-// artifact scopes; any addition needs its own review.
+// role scopes that do not decide role fit or delegation pinned; any addition
+// needs its own review.
 func TestCeilingOptionalRoleScopesAreExactlyTheArtifactScopes(t *testing.T) {
 	assert.Equal(t, map[AgentTokenScope]bool{
 		ScopeProjectArtifactRead:  true,
 		ScopeProjectArtifactWrite: true,
+		ScopeProjectSkillWrite:    true,
 	}, ceilingOptionalRoleScopes)
 }
 

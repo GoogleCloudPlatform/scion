@@ -1850,7 +1850,7 @@ func decodeReissueSummary(t *testing.T, rec *store.MutationAuditRecord) reissueA
 }
 
 func artifactScopeStrings() []string {
-	return []string{string(ScopeProjectArtifactRead), string(ScopeProjectArtifactWrite)}
+	return []string{string(ScopeProjectArtifactRead), string(ScopeProjectArtifactWrite), string(ScopeProjectSkillWrite)}
 }
 
 func reissueSorted(in []string) []string {

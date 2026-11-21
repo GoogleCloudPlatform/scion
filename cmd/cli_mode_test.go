@@ -549,17 +549,18 @@ func resolveCommandPath(root *cobra.Command, path string) *cobra.Command {
 	return current
 }
 
-// ptone/scion#1968: agents may browse the hub skill bank read-only. The
-// allowlisted skill paths must resolve to real commands, and every mutating
-// skill verb must stay out of agent mode.
+// ptone/scion#1968, ptone/scion#8734: agents may browse the hub skill bank
+// and publish project-scoped skills. The allowlisted skill paths must resolve
+// to real commands, and every other mutating skill verb must stay out of agent
+// mode.
 func TestAgentAllowedSkillBrowse(t *testing.T) {
-	for _, path := range []string{"skills", "skills.list", "skills.show", "skill", "skill.list"} {
+	for _, path := range []string{"skills", "skills.list", "skills.show", "skills.publish", "skill", "skill.list"} {
 		assert.True(t, agentAllowed[path], "agentAllowed should contain %s", path)
 		assert.NotNil(t, resolveCommandPath(rootCmd, path),
 			"agentAllowed key %q must resolve to a real command", path)
 	}
 	for _, path := range []string{
-		"skills.create", "skills.publish", "skills.delete", "skills.deprecate",
+		"skills.create", "skills.delete", "skills.deprecate",
 		"skills.registries", "skills.registries.add", "skills.registries.update",
 		"skills.registries.remove", "skills.registries.pin",
 	} {
@@ -587,9 +588,10 @@ func cloneCommandShape(cmd *cobra.Command) *cobra.Command {
 	return c
 }
 
-// ptone/scion#1968: runs agent-mode filtering over a copy of the real skills
-// and skill subtrees and checks that exactly the read-only browse verbs
-// survive, so a mistyped allowlist key or a new mutating verb fails here.
+// ptone/scion#1968, ptone/scion#8734: runs agent-mode filtering over a copy of
+// the real skills and skill subtrees and checks that exactly the allowed browse
+// and publish verbs survive, so a mistyped allowlist key or a new mutating verb
+// fails here.
 func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := &cobra.Command{Use: "scion"}
@@ -599,15 +601,15 @@ func TestApplyModeRestrictions_AgentRealSkillTree(t *testing.T) {
 		root.AddCommand(cloneCommandShape(real))
 	}
 	before := collectCommandNames(root)
-	for _, mutating := range []string{"skills.create", "skills.publish", "skills.delete", "skills.deprecate"} {
+	for _, mutating := range []string{"skills.create", "skills.delete", "skills.deprecate"} {
 		require.Contains(t, before, mutating, "real tree should contain %s before filtering", mutating)
 	}
 
 	applyModeRestrictions(root, resolveMode())
 
-	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.show"},
+	assert.Equal(t, []string{"skill", "skill.list", "skills", "skills.list", "skills.publish", "skills.show"},
 		collectCommandNames(root),
-		"agent mode must keep exactly the read-only skill browse verbs")
+		"agent mode must keep exactly the allowed skill browse and publish verbs")
 }
 
 // TestHubTokenScopesCommand_ModeRestricted pins the mode-availability

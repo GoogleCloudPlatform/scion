@@ -388,6 +388,7 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
 	ScopeProjectArtifactRead:  true,
 	ScopeProjectArtifactWrite: true,
+	ScopeProjectSkillWrite:    true,
 }
 
 // roleFitsCeiling reports whether every scope of role, other than the
