@@ -141,15 +141,16 @@ user:
 - `/etc/systemd/system/scion-hub.service`: `root:root`, mode `0644`
 - `/etc/sudoers.d/scion-rebuild-server`: `root:root`, mode `0440`
 
-Before starting `scion-hub`, `gce-start-hub.sh` runs `check-install-perms.sh`
-on the VM and refuses to continue if any of those files, any path allowed by
-the sudoers rules (`/usr/bin/install`, `/usr/bin/systemctl`,
-`/usr/local/bin/scion`), or any of their parent directories up to `/` is not
-root-owned or is group- or world-writable. You can also run the check manually
-on the VM:
+Before starting `scion-hub`, `gce-start-hub.sh` repairs any drifted ownership
+or mode on `/etc/systemd/system/scion-hub.service` in place, then runs
+`check-install-perms.sh` on the VM and refuses to continue if any of those
+files, any command or destination path in the sudoers rules
+(`/usr/bin/install`, `/usr/bin/systemctl`, `/usr/local/bin/scion`), or any of
+their parent directories up to `/` is not root-owned or is group- or
+world-writable. You can also run the check manually on the VM:
 
 ```bash
-sudo bash scripts/starter-hub/check-install-perms.sh --require-sudoers
+sudo bash /home/scion/scion/scripts/starter-hub/check-install-perms.sh --require-sudoers
 ```
 
 ## Certificate renewal
@@ -198,7 +199,7 @@ the telemetry service account.
 | `gce-demo-telemetry-sa.sh` | Telemetry service account and key management |
 | `gce-start-hub.sh` | Build, deploy, and restart the hub service |
 | `scion-install-rebuild.sh` | Root-owned helper installed at `/usr/local/libexec/scion/scion-install-rebuild.sh` that validates `/home/scion/scion/scion.rebuild` is a regular, non-symlink file owned by `scion` before installing it to `/usr/local/bin/scion` |
-| `check-install-perms.sh` | Verify ownership and permissions of installed binary, systemd unit, sudoers drop-in, sudoers-allowed paths, and parent directories |
+| `check-install-perms.sh` | Verify ownership and permissions of installed binary, systemd unit, sudoers drop-in, sudoers command and destination paths, and parent directories |
 | `gce-certs.sh` | Cloud DNS setup and Let's Encrypt wildcard certificates |
 | `gce-demo-cloud-init.yaml` | Cloud-init config installed on the VM at provision time |
 | `gce-setup-nats.sh` | *(Archived)* Standalone NATS server setup — superseded by in-process events |

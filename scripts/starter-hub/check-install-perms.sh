@@ -27,7 +27,7 @@
 #   - /etc/sudoers.d/scion-rebuild-server (required with --require-sudoers,
 #     checked if present otherwise) is a regular file owned by root:root with
 #     mode 0440.
-#   - Every path allowed by the sudoers rules (/usr/bin/install,
+#   - Every command and destination path in the sudoers rules (/usr/bin/install,
 #     /usr/bin/systemctl, /usr/local/bin/scion, and any command paths listed in
 #     /etc/sudoers.d/scion-rebuild-server) is root-owned and neither group- nor
 #     world-writable.
@@ -51,8 +51,8 @@ usage() {
 Usage: check-install-perms.sh [--require-sudoers] [--scion-bin <path>]
 
 Verifies that the installed scion binary, systemd unit file, sudoers drop-in,
-every path allowed by the sudoers rules, and all of their parent directories
-are root-owned and neither group- nor world-writable.
+every command and destination path in the sudoers rules, and all of their
+parent directories are root-owned and neither group- nor world-writable.
 
 Options:
   --require-sudoers    Fail if /etc/sudoers.d/scion-rebuild-server is missing.
@@ -361,33 +361,67 @@ if [[ "${REQUIRE_SUDOERS}" == "true" || -e "${SUDOERS_HOST}" || -L "${SUDOERS_HO
     check_installed_file "${SUDOERS_PATH}" "0440"
 fi
 
-# 4. Every path allowed by the sudoers rules and its parent directories.
+# 4. Every command and destination path in the sudoers rules and its parent directories.
 check_sudoers_path "/usr/bin/install"
 check_sudoers_path "/usr/bin/systemctl"
 check_sudoers_path "${SCION_BIN}"
 
 # Also inspect any NOPASSWD rules present in the sudoers drop-in so any
-# additional command paths are verified automatically.
+# additional command paths are verified automatically. Supports single commands
+# and comma-separated command lists on NOPASSWD lines; fails closed on
+# unsupported sudoers constructs (Cmnd_Alias, line continuations, #include /
+# @include directives, or non-absolute commands) that could hide unverified paths.
 if [[ -f "${SUDOERS_HOST}" && -r "${SUDOERS_HOST}" ]]; then
-    while IFS= read -r line; do
-        # Strip leading whitespace and skip comments/empty lines.
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        # Strip leading whitespace.
         line="${line#"${line%%[![:space:]]*}"}"
-        [[ -z "${line}" || "${line}" == \#* ]] && continue
+        [[ -z "${line}" ]] && continue
+
+        # Fail closed on include directives before skipping regular comments.
+        if [[ "${line}" =~ ^[#@](include|includedir)[[:space:]] ]]; then
+            record_error "${SUDOERS_PATH}: unsupported sudoers include directive cannot be verified: ${line}"
+            continue
+        fi
+        [[ "${line}" == \#* ]] && continue
+
+        # Fail closed on line continuations and command aliases.
+        if [[ "${line}" == *\\ ]]; then
+            record_error "${SUDOERS_PATH}: unsupported sudoers line continuation cannot be verified"
+            continue
+        fi
+        if [[ "${line}" =~ ^Cmnd_Alias[[:space:]] ]]; then
+            record_error "${SUDOERS_PATH}: unsupported Cmnd_Alias directive cannot be verified"
+            continue
+        fi
+
         if [[ "${line}" == *NOPASSWD:* ]]; then
-            cmd_spec="${line#*NOPASSWD:}"
-            cmd_spec="${cmd_spec#"${cmd_spec%%[![:space:]]*}"}"
-            # First whitespace-delimited token is the command binary.
-            cmd_bin="${cmd_spec%%[[:space:]]*}"
-            if [[ "${cmd_bin}" == /* ]]; then
-                check_sudoers_path "${cmd_bin}"
-            fi
-            # For install rules, also check the destination path (last token).
-            if [[ "${cmd_bin}" == */install ]]; then
-                dest_path="${cmd_spec##*[[:space:]]}"
-                if [[ "${dest_path}" == /* ]]; then
-                    check_sudoers_path "${dest_path}"
+            cmd_list="${line#*NOPASSWD:}"
+            IFS=',' read -r -a cmd_entries <<< "${cmd_list}"
+            for cmd_spec in "${cmd_entries[@]}"; do
+                # Trim leading/trailing whitespace.
+                cmd_spec="${cmd_spec#"${cmd_spec%%[![:space:]]*}"}"
+                cmd_spec="${cmd_spec%"${cmd_spec##*[![:space:]]}"}"
+                [[ -z "${cmd_spec}" ]] && continue
+                # Strip optional repeated tag prefixes (e.g. NOPASSWD: / PASSWD:) on subsequent items.
+                while [[ "${cmd_spec}" =~ ^(NO)?(PASSWD|EXEC|SETENV):[[:space:]]*(.*)$ ]]; do
+                    cmd_spec="${BASH_REMATCH[3]}"
+                done
+                # First whitespace-delimited token is the command binary.
+                cmd_bin="${cmd_spec%%[[:space:]]*}"
+                if [[ "${cmd_bin}" == /* ]]; then
+                    check_sudoers_path "${cmd_bin}"
+                else
+                    record_error "${SUDOERS_PATH}: cannot verify non-absolute sudoers command '${cmd_bin}'"
+                    continue
                 fi
-            fi
+                # For install rules, also check the destination path (last token).
+                if [[ "${cmd_bin}" == */install ]]; then
+                    dest_path="${cmd_spec##*[[:space:]]}"
+                    if [[ "${dest_path}" == /* ]]; then
+                        check_sudoers_path "${dest_path}"
+                    fi
+                fi
+            done
         fi
     done < "${SUDOERS_HOST}"
 fi

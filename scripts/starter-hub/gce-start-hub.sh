@@ -602,9 +602,20 @@ gcloud compute ssh "${SSH_TARGET}" --zone="${ZONE}" --command '
 
     '"${FULL_POST_INSTALL_COMMANDS}"'
 
-    # Verify installed binary, systemd unit, sudoers drop-in, and every path
-    # allowed by the sudoers rules (plus all parent directories) before
-    # starting the service. Refuses to continue on any failure.
+    # Repair drifted ownership/mode on the systemd unit file on every run
+    # (existing VMs provisioned before install -o root -g root may still have
+    # an operator-owned scion-hub.service left by the old sudo mv). Do not
+    # follow symlinks here; let check-install-perms.sh reject a symlinked unit.
+    if [ -f /etc/systemd/system/scion-hub.service ] && [ ! -L /etc/systemd/system/scion-hub.service ] && \
+       [ "$(sudo stat -c "%u:%g:%a" /etc/systemd/system/scion-hub.service 2>/dev/null || true)" != "0:0:644" ]; then
+        sudo chown root:root /etc/systemd/system/scion-hub.service
+        sudo chmod 0644 /etc/systemd/system/scion-hub.service
+        echo "  -> Systemd unit file ownership/permissions repaired (root:root 0644)"
+    fi
+
+    # Verify installed binary, systemd unit, sudoers drop-in, and every command
+    # and destination path in the sudoers rules (plus all parent directories)
+    # before starting the service. Refuses to continue on any failure.
     echo ""
     echo "==> Verifying installed binary, unit, and sudoers permissions..."
     CHECK_PERMS_ARGS=()
