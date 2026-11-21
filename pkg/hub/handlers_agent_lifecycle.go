@@ -616,10 +616,11 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		state.Activity(agent.Activity),
 		state.Activity(agent.StalledFromActivity),
 	))
+	var captured *capturedScreen
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
-		// As for stop: warn about, and record, work in an ephemeral
-		// workspace that the suspend discards (ptone/scion#3819).
-		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
+		// Run the ephemeral workspace check (ptone/scion#3819) and pre-suspend
+		// terminal screen capture (ptone/scion#8530) concurrently before stop.
+		captured = s.preSuspendProbes(ctx, dispatcher, agent, true)
 		// As for stop, the dispatch is bounded by syncDispatch.
 		if err := syncDispatch(ctx, func(dctx context.Context) error {
 			return dispatcher.DispatchAgentStop(dctx, agent)
@@ -668,6 +669,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	s.syncAgentAfterStopRecord(ctx, agent, newPhase, string(state.SuspendReasonUser))
+	s.persistSuspendScreen(ctx, agent.ID, captured)
 	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
 		agent.Activity = fresh.Activity
 	}

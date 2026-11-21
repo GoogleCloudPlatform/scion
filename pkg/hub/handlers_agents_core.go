@@ -4259,6 +4259,8 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case AgentRouteLogs:
 		// Agent logs relay (GET, proxied to broker).
 		s.handleAgentLogs(w, r, id)
+	case AgentRouteScreen:
+		s.handleAgentScreen(w, r, id)
 	case AgentRouteCloudLogs:
 		s.handleAgentCloudLogs(w, r, id)
 	case AgentRouteCloudLogsStream:

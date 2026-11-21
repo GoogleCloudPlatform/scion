@@ -11,6 +11,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsuspendscreen"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -241,9 +242,11 @@ type AgentEdges struct {
 	Holds []*AgentHold `json:"holds,omitempty"`
 	// ReportedRuns holds the value of the reported_runs edge.
 	ReportedRuns []*BrokerReportedRun `json:"reported_runs,omitempty"`
+	// SuspendScreen holds the value of the suspend_screen edge.
+	SuspendScreen *AgentSuspendScreen `json:"suspend_screen,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [5]bool
+	loadedTypes [6]bool
 }
 
 // ProjectOrErr returns the Project value or an error if the edge
@@ -291,6 +294,17 @@ func (e AgentEdges) ReportedRunsOrErr() ([]*BrokerReportedRun, error) {
 		return e.ReportedRuns, nil
 	}
 	return nil, &NotLoadedError{edge: "reported_runs"}
+}
+
+// SuspendScreenOrErr returns the SuspendScreen value or an error if the edge
+// was not loaded in eager-loading, or loaded but was not found.
+func (e AgentEdges) SuspendScreenOrErr() (*AgentSuspendScreen, error) {
+	if e.SuspendScreen != nil {
+		return e.SuspendScreen, nil
+	} else if e.loadedTypes[5] {
+		return nil, &NotFoundError{label: agentsuspendscreen.Label}
+	}
+	return nil, &NotLoadedError{edge: "suspend_screen"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -1020,6 +1034,11 @@ func (_m *Agent) QueryHolds() *AgentHoldQuery {
 // QueryReportedRuns queries the "reported_runs" edge of the Agent entity.
 func (_m *Agent) QueryReportedRuns() *BrokerReportedRunQuery {
 	return NewAgentClient(_m.config).QueryReportedRuns(_m)
+}
+
+// QuerySuspendScreen queries the "suspend_screen" edge of the Agent entity.
+func (_m *Agent) QuerySuspendScreen() *AgentSuspendScreenQuery {
+	return NewAgentClient(_m.config).QuerySuspendScreen(_m)
 }
 
 // Update returns a builder for updating this Agent.

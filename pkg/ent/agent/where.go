@@ -6426,6 +6426,29 @@ func HasReportedRunsWith(preds ...predicate.BrokerReportedRun) predicate.Agent {
 	})
 }
 
+// HasSuspendScreen applies the HasEdge predicate on the "suspend_screen" edge.
+func HasSuspendScreen() predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, SuspendScreenTable, SuspendScreenColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasSuspendScreenWith applies the HasEdge predicate on the "suspend_screen" edge with a given conditions (other predicates).
+func HasSuspendScreenWith(preds ...predicate.AgentSuspendScreen) predicate.Agent {
+	return predicate.Agent(func(s *sql.Selector) {
+		step := newSuspendScreenStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // And groups predicates with the AND operator between them.
 func And(predicates ...predicate.Agent) predicate.Agent {
 	return predicate.Agent(sql.AndPredicates(predicates...))

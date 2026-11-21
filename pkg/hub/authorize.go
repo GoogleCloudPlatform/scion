@@ -636,6 +636,8 @@ func agentActionPermission(action string) Action {
 		// one), so an authorized call still 404s via each switch's own
 		// default branch, not because it was denied.
 		return ActionAttach
+	case api.AgentActionScreen:
+		return ActionAttach
 	default:
 		return ActionAttach
 	}

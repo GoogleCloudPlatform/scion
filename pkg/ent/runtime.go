@@ -22,6 +22,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsuspendscreen"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
@@ -906,6 +907,16 @@ func init() {
 	agentsessionmetricsDescID := agentsessionmetricsFields[0].Descriptor()
 	// agentsessionmetrics.DefaultID holds the default value on creation for the id field.
 	agentsessionmetrics.DefaultID = agentsessionmetricsDescID.Default.(func() uuid.UUID)
+	agentsuspendscreenFields := schema.AgentSuspendScreen{}.Fields()
+	_ = agentsuspendscreenFields
+	// agentsuspendscreenDescTruncated is the schema descriptor for truncated field.
+	agentsuspendscreenDescTruncated := agentsuspendscreenFields[3].Descriptor()
+	// agentsuspendscreen.DefaultTruncated holds the default value on creation for the truncated field.
+	agentsuspendscreen.DefaultTruncated = agentsuspendscreenDescTruncated.Default.(bool)
+	// agentsuspendscreenDescID is the schema descriptor for id field.
+	agentsuspendscreenDescID := agentsuspendscreenFields[0].Descriptor()
+	// agentsuspendscreen.DefaultID holds the default value on creation for the id field.
+	agentsuspendscreen.DefaultID = agentsuspendscreenDescID.Default.(func() uuid.UUID)
 	allowlistentryFields := schema.AllowListEntry{}.Fields()
 	_ = allowlistentryFields
 	// allowlistentryDescEmail is the schema descriptor for email field.

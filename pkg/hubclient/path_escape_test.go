@@ -139,6 +139,7 @@ func TestPathEscape_Agents(t *testing.T) {
 		}},
 		{"SendKeys", "/keys", func(ctx context.Context, s AgentService, id string) { _, _ = s.SendKeys(ctx, id, "ls") }},
 		{"Exec", "/exec", func(ctx context.Context, s AgentService, id string) { _, _ = s.Exec(ctx, id, []string{"true"}, 0) }},
+		{"GetScreen", "/screen", func(ctx context.Context, s AgentService, id string) { _, _ = s.GetScreen(ctx, id) }},
 		{"GetLogs", "/logs", func(ctx context.Context, s AgentService, id string) { _, _ = s.GetLogs(ctx, id, nil) }},
 		{"GetCloudLogs", "/cloud-logs", func(ctx context.Context, s AgentService, id string) { _, _ = s.GetCloudLogs(ctx, id, nil) }},
 		{"StreamCloudLogs", "/cloud-logs/stream", func(ctx context.Context, s AgentService, id string) {

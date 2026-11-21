@@ -101,6 +101,9 @@ type AgentService interface {
 	// Exec executes a command in an agent container.
 	Exec(ctx context.Context, agentID string, command []string, timeout int) (*ExecResponse, error)
 
+	// GetScreen retrieves the terminal screen saved before an agent's most recent suspend.
+	GetScreen(ctx context.Context, agentID string) (*AgentScreen, error)
+
 	// GetLogs retrieves agent logs.
 	GetLogs(ctx context.Context, agentID string, opts *GetLogsOptions) (string, error)
 
@@ -1209,6 +1212,24 @@ func (s *agentService) Exec(ctx context.Context, agentID string, command []strin
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ExecResponse](resp)
+}
+
+// AgentScreen is the saved terminal screen returned by GET .../agents/{id}/screen.
+type AgentScreen struct {
+	AgentID    string    `json:"agentId"`
+	Content    string    `json:"content"`
+	CapturedAt time.Time `json:"capturedAt"`
+	Truncated  bool      `json:"truncated"`
+	Phase      string    `json:"phase"`
+}
+
+// GetScreen retrieves the terminal screen saved before an agent's most recent suspend.
+func (s *agentService) GetScreen(ctx context.Context, agentID string) (*AgentScreen, error) {
+	resp, err := s.c.get(ctx, s.agentPath(agentID)+"/screen", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[AgentScreen](resp)
 }
 
 // GetLogs retrieves agent logs.

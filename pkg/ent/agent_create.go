@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsuspendscreen"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
@@ -1459,6 +1460,25 @@ func (_c *AgentCreate) AddReportedRuns(v ...*BrokerReportedRun) *AgentCreate {
 	return _c.AddReportedRunIDs(ids...)
 }
 
+// SetSuspendScreenID sets the "suspend_screen" edge to the AgentSuspendScreen entity by ID.
+func (_c *AgentCreate) SetSuspendScreenID(id uuid.UUID) *AgentCreate {
+	_c.mutation.SetSuspendScreenID(id)
+	return _c
+}
+
+// SetNillableSuspendScreenID sets the "suspend_screen" edge to the AgentSuspendScreen entity by ID if the given value is not nil.
+func (_c *AgentCreate) SetNillableSuspendScreenID(id *uuid.UUID) *AgentCreate {
+	if id != nil {
+		_c = _c.SetSuspendScreenID(*id)
+	}
+	return _c
+}
+
+// SetSuspendScreen sets the "suspend_screen" edge to the AgentSuspendScreen entity.
+func (_c *AgentCreate) SetSuspendScreen(v *AgentSuspendScreen) *AgentCreate {
+	return _c.SetSuspendScreenID(v.ID)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_c *AgentCreate) Mutation() *AgentMutation {
 	return _c.mutation
@@ -2249,6 +2269,22 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.SuspendScreenIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   agent.SuspendScreenTable,
+			Columns: []string{agent.SuspendScreenColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agentsuspendscreen.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

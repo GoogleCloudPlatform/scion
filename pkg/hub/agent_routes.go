@@ -40,6 +40,7 @@ const (
 	AgentRoutePortItem           AgentSubRouteID = "agents.ports.item"
 	AgentRoutePortProxy          AgentSubRouteID = "agents.ports.proxy"
 	AgentRouteLogs               AgentSubRouteID = "agents.logs"
+	AgentRouteScreen             AgentSubRouteID = "agents.screen"
 	AgentRouteCloudLogs          AgentSubRouteID = "agents.cloudLogs"
 	AgentRouteCloudLogsStream    AgentSubRouteID = "agents.cloudLogs.stream"
 	AgentRouteMessageLogs        AgentSubRouteID = "agents.messageLogs"
@@ -81,6 +82,7 @@ const (
 	ProjectAgentRouteStopAll           AgentSubRouteID = "projects.agents.stopAll"
 	ProjectAgentRouteRoot              AgentSubRouteID = "projects.agents.byId"
 	ProjectAgentRouteLogs              AgentSubRouteID = "projects.agents.logs"
+	ProjectAgentRouteScreen            AgentSubRouteID = "projects.agents.screen"
 	ProjectAgentRouteCloudLogs         AgentSubRouteID = "projects.agents.cloudLogs"
 	ProjectAgentRouteCloudLogsStream   AgentSubRouteID = "projects.agents.cloudLogs.stream"
 	ProjectAgentRouteMessageLogs       AgentSubRouteID = "projects.agents.messageLogs"
@@ -199,6 +201,7 @@ const (
 	opAgentMetricsReport    authzop.OperationID = "agent.metrics.report"
 	opAgentStatusUpdate     authzop.OperationID = "agent.status.update"
 	opAgentLogsRead         authzop.OperationID = "agent.logs.read"
+	opAgentScreenRead       authzop.OperationID = "agent.screen.read"
 	opAgentMessagesRead     authzop.OperationID = "agent.messages.read"
 	opAgentMetricsRead      authzop.OperationID = "agent.metrics.read"
 	opAgentKeys             authzop.OperationID = "agent.lifecycle.keys"
@@ -251,6 +254,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 	{id: AgentRoutePortProxy, form: agentFormByID, segs: []string{"ports", agentRouteParam, "proxy"}, opaque: true, allMethodsOp: opAgentPortAccess},
 	{id: AgentRoutePortItem, form: agentFormByID, segs: []string{"ports", agentRouteParam}, ops: map[string]authzop.OperationID{http.MethodDelete: opAgentPortRegister}},
 	{id: AgentRouteLogs, form: agentFormByID, segs: []string{"logs"}, ops: getOp(opAgentLogsRead)},
+	{id: AgentRouteScreen, form: agentFormByID, segs: []string{"screen"}, ops: getOp(opAgentScreenRead)},
 	{id: AgentRouteCloudLogs, form: agentFormByID, segs: []string{"cloud-logs"}, ops: getOp(opAgentLogsRead)},
 	{id: AgentRouteCloudLogsStream, form: agentFormByID, segs: []string{"cloud-logs", "stream"}, ops: getOp(opAgentLogsRead), kind: authzop.EntryPointSSE},
 	{id: AgentRouteMessageLogs, form: agentFormByID, segs: []string{"message-logs"}, ops: getOp(opAgentMessagesRead)},
@@ -316,6 +320,7 @@ var agentSubRouteTable = []agentSubRouteRow{
 		http.MethodPatch:  opAgentUpdate,
 	}},
 	{id: ProjectAgentRouteLogs, form: agentFormProject, segs: []string{"logs"}, ops: getOp(opAgentLogsRead)},
+	{id: ProjectAgentRouteScreen, form: agentFormProject, segs: []string{"screen"}, ops: getOp(opAgentScreenRead)},
 	{id: ProjectAgentRouteCloudLogs, form: agentFormProject, segs: []string{"cloud-logs"}, ops: getOp(opAgentLogsRead)},
 	{id: ProjectAgentRouteCloudLogsStream, form: agentFormProject, segs: []string{"cloud-logs", "stream"}, ops: getOp(opAgentLogsRead), kind: authzop.EntryPointSSE},
 	{id: ProjectAgentRouteMessageLogs, form: agentFormProject, segs: []string{"message-logs"}, ops: getOp(opAgentMessagesRead)},

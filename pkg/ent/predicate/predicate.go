@@ -54,6 +54,9 @@ type AgentServiceAccountAssignment func(*sql.Selector)
 // AgentSessionMetrics is the predicate function for agentsessionmetrics builders.
 type AgentSessionMetrics func(*sql.Selector)
 
+// AgentSuspendScreen is the predicate function for agentsuspendscreen builders.
+type AgentSuspendScreen func(*sql.Selector)
+
 // AllowListEntry is the predicate function for allowlistentry builders.
 type AllowListEntry func(*sql.Selector)
 

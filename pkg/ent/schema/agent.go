@@ -628,6 +628,9 @@ func (Agent) Edges() []ent.Edge {
 			Annotations(entsql.OnDelete(entsql.Cascade)),
 		edge.To("reported_runs", BrokerReportedRun.Type).
 			Annotations(entsql.OnDelete(entsql.Cascade)),
+		edge.To("suspend_screen", AgentSuspendScreen.Type).
+			Unique().
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }
 

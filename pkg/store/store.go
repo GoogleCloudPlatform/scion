@@ -609,6 +609,9 @@ type Store interface {
 
 	// Project-scoped message admission policies and decisions (ptone/scion#8047)
 	MessagePolicyStore
+
+	// Pre-suspend terminal screen snapshots (ptone/scion#8530)
+	AgentSuspendScreenStore
 }
 
 // StallCutoffs holds the activity-age cutoffs used by MarkStalledAgents.

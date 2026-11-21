@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsuspendscreen"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
@@ -165,6 +166,8 @@ type Client struct {
 	AgentServiceAccountAssignment *AgentServiceAccountAssignmentClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
+	// AgentSuspendScreen is the client for interacting with the AgentSuspendScreen builders.
+	AgentSuspendScreen *AgentSuspendScreenClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
 	AllowListEntry *AllowListEntryClient
 	// ApiKey is the client for interacting with the ApiKey builders.
@@ -380,6 +383,7 @@ func (c *Client) init() {
 	c.AgentReincarnation = NewAgentReincarnationClient(c.config)
 	c.AgentServiceAccountAssignment = NewAgentServiceAccountAssignmentClient(c.config)
 	c.AgentSessionMetrics = NewAgentSessionMetricsClient(c.config)
+	c.AgentSuspendScreen = NewAgentSuspendScreenClient(c.config)
 	c.AllowListEntry = NewAllowListEntryClient(c.config)
 	c.ApiKey = NewApiKeyClient(c.config)
 	c.BrokerDispatch = NewBrokerDispatchClient(c.config)
@@ -582,6 +586,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		AgentReincarnation:            NewAgentReincarnationClient(cfg),
 		AgentServiceAccountAssignment: NewAgentServiceAccountAssignmentClient(cfg),
 		AgentSessionMetrics:           NewAgentSessionMetricsClient(cfg),
+		AgentSuspendScreen:            NewAgentSuspendScreenClient(cfg),
 		AllowListEntry:                NewAllowListEntryClient(cfg),
 		ApiKey:                        NewApiKeyClient(cfg),
 		BrokerDispatch:                NewBrokerDispatchClient(cfg),
@@ -711,6 +716,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		AgentReincarnation:            NewAgentReincarnationClient(cfg),
 		AgentServiceAccountAssignment: NewAgentServiceAccountAssignmentClient(cfg),
 		AgentSessionMetrics:           NewAgentSessionMetricsClient(cfg),
+		AgentSuspendScreen:            NewAgentSuspendScreenClient(cfg),
 		AllowListEntry:                NewAllowListEntryClient(cfg),
 		ApiKey:                        NewApiKeyClient(cfg),
 		BrokerDispatch:                NewBrokerDispatchClient(cfg),
@@ -838,27 +844,28 @@ func (c *Client) Use(hooks ...Hook) {
 		c.AgentCredential, c.AgentDelegatedCredential, c.AgentDelegationGrant,
 		c.AgentDeliveryHold, c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
 		c.AgentLifecycleOutbox, c.AgentRecovery, c.AgentReincarnation,
-		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AllowListEntry,
-		c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken, c.BrokerReportedRun,
-		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
-		c.ChatRetentionCursor, c.ChatRetentionRun, c.ConduitPrincipalEpoch,
-		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.Decision,
-		c.DecisionAnswer, c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
-		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
-		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
-		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
-		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
-		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
-		c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AgentSuspendScreen,
+		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
+		c.BrokerReportedRun, c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory,
+		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun,
+		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
+		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionKeyCounter,
+		c.DelegationAdoption, c.DelegationEdge, c.DurableQueueItem,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
+		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MessagePolicy,
+		c.MessagePolicyDecision, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
+		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
+		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
+		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
 		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
@@ -877,27 +884,28 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.AgentCredential, c.AgentDelegatedCredential, c.AgentDelegationGrant,
 		c.AgentDeliveryHold, c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
 		c.AgentLifecycleOutbox, c.AgentRecovery, c.AgentReincarnation,
-		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AllowListEntry,
-		c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken, c.BrokerReportedRun,
-		c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory, c.ChatLinkCode,
-		c.ChatRetentionCursor, c.ChatRetentionRun, c.ConduitPrincipalEpoch,
-		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.Decision,
-		c.DecisionAnswer, c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
-		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
-		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
-		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
-		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
-		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
-		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
-		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
-		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
-		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
-		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
-		c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AgentSuspendScreen,
+		c.AllowListEntry, c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken,
+		c.BrokerReportedRun, c.BrokerSecret, c.BrokerSetting, c.BrokerTargetInventory,
+		c.ChatLinkCode, c.ChatRetentionCursor, c.ChatRetentionRun,
+		c.ConduitPrincipalEpoch, c.ConduitSession, c.Conversation,
+		c.ConversationParticipant, c.Decision, c.DecisionAnswer, c.DecisionKeyCounter,
+		c.DelegationAdoption, c.DelegationEdge, c.DurableQueueItem,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
+		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MessagePolicy,
+		c.MessagePolicyDecision, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
+		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
+		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
+		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
 		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
@@ -943,6 +951,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.AgentServiceAccountAssignment.mutate(ctx, m)
 	case *AgentSessionMetricsMutation:
 		return c.AgentSessionMetrics.mutate(ctx, m)
+	case *AgentSuspendScreenMutation:
+		return c.AgentSuspendScreen.mutate(ctx, m)
 	case *AllowListEntryMutation:
 		return c.AllowListEntry.mutate(ctx, m)
 	case *ApiKeyMutation:
@@ -1764,6 +1774,22 @@ func (c *AgentClient) QueryReportedRuns(_m *Agent) *BrokerReportedRunQuery {
 			sqlgraph.From(agent.Table, agent.FieldID, id),
 			sqlgraph.To(brokerreportedrun.Table, brokerreportedrun.FieldID),
 			sqlgraph.Edge(sqlgraph.O2M, false, agent.ReportedRunsTable, agent.ReportedRunsColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QuerySuspendScreen queries the suspend_screen edge of a Agent.
+func (c *AgentClient) QuerySuspendScreen(_m *Agent) *AgentSuspendScreenQuery {
+	query := (&AgentSuspendScreenClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(agent.Table, agent.FieldID, id),
+			sqlgraph.To(agentsuspendscreen.Table, agentsuspendscreen.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, agent.SuspendScreenTable, agent.SuspendScreenColumn),
 		)
 		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
 		return fromV, nil
@@ -3405,6 +3431,155 @@ func (c *AgentSessionMetricsClient) mutate(ctx context.Context, m *AgentSessionM
 		return (&AgentSessionMetricsDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AgentSessionMetrics mutation op: %q", m.Op())
+	}
+}
+
+// AgentSuspendScreenClient is a client for the AgentSuspendScreen schema.
+type AgentSuspendScreenClient struct {
+	config
+}
+
+// NewAgentSuspendScreenClient returns a client for the AgentSuspendScreen from the given config.
+func NewAgentSuspendScreenClient(c config) *AgentSuspendScreenClient {
+	return &AgentSuspendScreenClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentsuspendscreen.Hooks(f(g(h())))`.
+func (c *AgentSuspendScreenClient) Use(hooks ...Hook) {
+	c.hooks.AgentSuspendScreen = append(c.hooks.AgentSuspendScreen, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentsuspendscreen.Intercept(f(g(h())))`.
+func (c *AgentSuspendScreenClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentSuspendScreen = append(c.inters.AgentSuspendScreen, interceptors...)
+}
+
+// Create returns a builder for creating a AgentSuspendScreen entity.
+func (c *AgentSuspendScreenClient) Create() *AgentSuspendScreenCreate {
+	mutation := newAgentSuspendScreenMutation(c.config, OpCreate)
+	return &AgentSuspendScreenCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentSuspendScreen entities.
+func (c *AgentSuspendScreenClient) CreateBulk(builders ...*AgentSuspendScreenCreate) *AgentSuspendScreenCreateBulk {
+	return &AgentSuspendScreenCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentSuspendScreenClient) MapCreateBulk(slice any, setFunc func(*AgentSuspendScreenCreate, int)) *AgentSuspendScreenCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentSuspendScreenCreateBulk{err: fmt.Errorf("calling to AgentSuspendScreenClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentSuspendScreenCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentSuspendScreenCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentSuspendScreen.
+func (c *AgentSuspendScreenClient) Update() *AgentSuspendScreenUpdate {
+	mutation := newAgentSuspendScreenMutation(c.config, OpUpdate)
+	return &AgentSuspendScreenUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentSuspendScreenClient) UpdateOne(_m *AgentSuspendScreen) *AgentSuspendScreenUpdateOne {
+	mutation := newAgentSuspendScreenMutation(c.config, OpUpdateOne, withAgentSuspendScreen(_m))
+	return &AgentSuspendScreenUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentSuspendScreenClient) UpdateOneID(id uuid.UUID) *AgentSuspendScreenUpdateOne {
+	mutation := newAgentSuspendScreenMutation(c.config, OpUpdateOne, withAgentSuspendScreenID(id))
+	return &AgentSuspendScreenUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentSuspendScreen.
+func (c *AgentSuspendScreenClient) Delete() *AgentSuspendScreenDelete {
+	mutation := newAgentSuspendScreenMutation(c.config, OpDelete)
+	return &AgentSuspendScreenDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentSuspendScreenClient) DeleteOne(_m *AgentSuspendScreen) *AgentSuspendScreenDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentSuspendScreenClient) DeleteOneID(id uuid.UUID) *AgentSuspendScreenDeleteOne {
+	builder := c.Delete().Where(agentsuspendscreen.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentSuspendScreenDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentSuspendScreen.
+func (c *AgentSuspendScreenClient) Query() *AgentSuspendScreenQuery {
+	return &AgentSuspendScreenQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentSuspendScreen},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentSuspendScreen entity by its id.
+func (c *AgentSuspendScreenClient) Get(ctx context.Context, id uuid.UUID) (*AgentSuspendScreen, error) {
+	return c.Query().Where(agentsuspendscreen.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentSuspendScreenClient) GetX(ctx context.Context, id uuid.UUID) *AgentSuspendScreen {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryAgent queries the agent edge of a AgentSuspendScreen.
+func (c *AgentSuspendScreenClient) QueryAgent(_m *AgentSuspendScreen) *AgentQuery {
+	query := (&AgentClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(agentsuspendscreen.Table, agentsuspendscreen.FieldID, id),
+			sqlgraph.To(agent.Table, agent.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, agentsuspendscreen.AgentTable, agentsuspendscreen.AgentColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *AgentSuspendScreenClient) Hooks() []Hook {
+	return c.hooks.AgentSuspendScreen
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentSuspendScreenClient) Interceptors() []Interceptor {
+	return c.inters.AgentSuspendScreen
+}
+
+func (c *AgentSuspendScreenClient) mutate(ctx context.Context, m *AgentSuspendScreenMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentSuspendScreenCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentSuspendScreenUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentSuspendScreenUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentSuspendScreenDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentSuspendScreen mutation op: %q", m.Op())
 	}
 }
 
@@ -16509,15 +16684,15 @@ type (
 		AgentDelegatedCredential, AgentDelegationGrant, AgentDeliveryHold, AgentHold,
 		AgentIdentityKey, AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery,
 		AgentReincarnation, AgentServiceAccountAssignment, AgentSessionMetrics,
-		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerReportedRun,
-		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
-		ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession,
-		Conversation, ConversationParticipant, Decision, DecisionAnswer,
-		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
-		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
-		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		AgentSuspendScreen, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
+		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
+		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
+		ConduitSession, Conversation, ConversationParticipant, Decision,
+		DecisionAnswer, DecisionKeyCounter, DelegationAdoption, DelegationEdge,
+		DurableQueueItem, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
+		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
 		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
 		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
 		MessageAddressee, MessagePolicy, MessagePolicyDecision, MutationAudit,
@@ -16538,15 +16713,15 @@ type (
 		AgentDelegatedCredential, AgentDelegationGrant, AgentDeliveryHold, AgentHold,
 		AgentIdentityKey, AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery,
 		AgentReincarnation, AgentServiceAccountAssignment, AgentSessionMetrics,
-		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerReportedRun,
-		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
-		ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession,
-		Conversation, ConversationParticipant, Decision, DecisionAnswer,
-		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
-		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
-		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		AgentSuspendScreen, AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken,
+		BrokerReportedRun, BrokerSecret, BrokerSetting, BrokerTargetInventory,
+		ChatLinkCode, ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch,
+		ConduitSession, Conversation, ConversationParticipant, Decision,
+		DecisionAnswer, DecisionKeyCounter, DelegationAdoption, DelegationEdge,
+		DurableQueueItem, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy,
+		HubInstance, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
 		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
 		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
 		MessageAddressee, MessagePolicy, MessagePolicyDecision, MutationAudit,

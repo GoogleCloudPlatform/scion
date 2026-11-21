@@ -99,7 +99,12 @@ func (d *workspaceCheckDispatcher) DispatchAgentStop(ctx context.Context, agent 
 	return d.quotaLifecycleDispatcher.DispatchAgentStop(ctx, agent)
 }
 
-func (d *workspaceCheckDispatcher) DispatchAgentExec(ctx context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
+func (d *workspaceCheckDispatcher) DispatchAgentExec(ctx context.Context, _ *store.Agent, command []string, _ int) (string, int, error) {
+	if len(command) > 0 && command[0] == "tmux" {
+		// Pre-suspend screen capture runs concurrently with the workspace check;
+		// ignore it here so execCalls counts workspace checks only.
+		return "", 1, nil
+	}
 	d.mu.Lock()
 	d.execCalls++
 	out, err, block := d.execOutput, d.execErr, d.block

@@ -823,6 +823,35 @@ var (
 			},
 		},
 	}
+	// AgentSuspendScreensColumns holds the columns for the "agent_suspend_screens" table.
+	AgentSuspendScreensColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "content", Type: field.TypeString, Size: 2147483647},
+		{Name: "truncated", Type: field.TypeBool, Default: false},
+		{Name: "captured_at", Type: field.TypeTime},
+		{Name: "agent_id", Type: field.TypeUUID, Unique: true},
+	}
+	// AgentSuspendScreensTable holds the schema information for the "agent_suspend_screens" table.
+	AgentSuspendScreensTable = &schema.Table{
+		Name:       "agent_suspend_screens",
+		Columns:    AgentSuspendScreensColumns,
+		PrimaryKey: []*schema.Column{AgentSuspendScreensColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "agent_suspend_screens_agents_suspend_screen",
+				Columns:    []*schema.Column{AgentSuspendScreensColumns[4]},
+				RefColumns: []*schema.Column{AgentsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentsuspendscreen_agent_id",
+				Unique:  true,
+				Columns: []*schema.Column{AgentSuspendScreensColumns[4]},
+			},
+		},
+	}
 	// AllowListColumns holds the columns for the "allow_list" table.
 	AllowListColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -4428,6 +4457,7 @@ var (
 		AgentReincarnationsTable,
 		AgentServiceAccountAssignmentsTable,
 		AgentSessionMetricsTable,
+		AgentSuspendScreensTable,
 		AllowListTable,
 		APIKeysTable,
 		BrokerDispatchTable,
@@ -4561,6 +4591,10 @@ func init() {
 	}
 	AgentSessionMetricsTable.Annotation = &entsql.Annotation{
 		Table: "agent_session_metrics",
+	}
+	AgentSuspendScreensTable.ForeignKeys[0].RefTable = AgentsTable
+	AgentSuspendScreensTable.Annotation = &entsql.Annotation{
+		Table: "agent_suspend_screens",
 	}
 	AllowListTable.Annotation = &entsql.Annotation{
 		Table: "allow_list",
