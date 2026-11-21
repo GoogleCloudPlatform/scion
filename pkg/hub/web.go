@@ -3887,14 +3887,14 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// Best-effort: a failure is logged and the login continues; the startup
 		// backfill repairs built-in grants.
 		if syncGrants {
+			var grantErr error
 			if applyDefaultGrants {
-				if err := applyDefaultUserRoleGrants(ctx, ws.store, user.ID, user.Role, ws.defaultUserRole(), ws.customDefaultRoleEnabled()); err != nil {
-					ws.logger().Warn("Proxy auth: failed to apply default user role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", err)
-				}
+				grantErr = applyDefaultUserRoleGrants(ctx, ws.store, user.ID, user.Role, ws.defaultUserRole(), ws.customDefaultRoleEnabled())
 			} else {
-				if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
-					ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", err)
-				}
+				grantErr = syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy)
+			}
+			if grantErr != nil {
+				ws.logger().Warn("Proxy auth: failed to sync hub role grants", "email", proxyUser.Email, "user_id", user.ID, "role", user.Role, "error", grantErr)
 			}
 		}
 		if syncGrants && roleChanged {
@@ -4399,14 +4399,14 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Best-effort: a failure is logged and the login continues; the startup
 	// backfill repairs built-in grants.
 	if syncGrants {
+		var grantErr error
 		if applyDefaultGrants {
-			if err := applyDefaultUserRoleGrants(ctx, ws.store, user.ID, user.Role, ws.defaultUserRole(), ws.customDefaultRoleEnabled()); err != nil {
-				ws.logger().Warn("OAuth login: failed to apply default user role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", err)
-			}
+			grantErr = applyDefaultUserRoleGrants(ctx, ws.store, user.ID, user.Role, ws.defaultUserRole(), ws.customDefaultRoleEnabled())
 		} else {
-			if err := syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy); err != nil {
-				ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", err)
-			}
+			grantErr = syncHubRoleGrants(ctx, ws.store, user.ID, user.Role, store.SystemReconcileCreatedBy)
+		}
+		if grantErr != nil {
+			ws.logger().Warn("OAuth login: failed to sync hub role grants", "email", userInfo.Email, "user_id", user.ID, "role", user.Role, "error", grantErr)
 		}
 	}
 	if syncGrants && roleChanged {
