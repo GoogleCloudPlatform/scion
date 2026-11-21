@@ -553,7 +553,7 @@ Scion agents frequently need to interact with remote Git repositories to push ch
 
 ### GitHub App Integration (Recommended)
 
-Scion provides deep integration with GitHub Apps to manage Git credentials automatically, eliminating the need to manage static PATs.
+Scion provides deep integration with GitHub Apps to manage Git credentials automatically, eliminating the need to manage static PATs. A Hub admin sets up the App once; see [GitHub App Setup](/scion/hosted/single-node/github-app/).
 
 1. **Automated Token Refresh**: The Scion Hub maintains a background refresh loop that constantly mints valid installation tokens for your GitHub App.
 2. **Credential Helper**: Scion injects `sciontool` as a Git credential helper into the agent container (`git config --global credential.helper`).

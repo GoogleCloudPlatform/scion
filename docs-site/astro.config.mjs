@@ -193,6 +193,7 @@ export default defineConfig({
 							        { label: 'Deploy on a VM (Hardened Org)', slug: 'hosted/single-node/hub-setup-gce-hardened-org' },
 							        { label: 'Deploy on Cloud Run (Sandbox)', slug: 'hosted/single-node/hub-setup-cloudrun' },
 							        { label: 'Auth & Tenancy', slug: 'hosted/single-node/auth' },
+							        { label: 'GitHub App Setup', slug: 'hosted/single-node/github-app' },
 							        { label: 'Managed Agents', slug: 'hosted/single-node/managed-agents' },
 								{ label: 'Skill Registry & Federation', slug: 'hosted/single-node/skill-registry' },
 								{ label: 'Observability', slug: 'hosted/single-node/observability' },
