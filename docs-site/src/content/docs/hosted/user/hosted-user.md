@@ -181,6 +181,42 @@ scion start my-agent --project acme-backend "add user authentication"
 scion list --project acme-backend
 ```
 
+## Start with an Agent Team
+
+A quick way to begin on a hosted Hub (Single-node or HA) is to import the
+[scion-frontiers/agent-team](https://github.com/scion-frontiers/agent-team) template set
+(`coordinator`, `developer`, `architect`, `code-reviewer`, and more) directly from its GitHub URL
+into your project, then start the `coordinator` agent to help build out the project's team, roles,
+and workflow.
+
+### Import the templates
+
+- **Web UI** (direct server-side import into the Hub project — no local checkout required): open
+  your project in the Web Dashboard, go to **Settings → Templates**, select **Import from URL**,
+  paste `https://github.com/scion-frontiers/agent-team/tree/main/templates`, click
+  **Import Templates**, and confirm with **Import Selected**.
+- **CLI** (inside a linked project directory): import from the URL and sync the templates to the
+  Hub so remote Runtime Brokers can use them:
+
+  ```bash
+  scion templates import --all https://github.com/scion-frontiers/agent-team/tree/main/templates
+  scion templates sync --all
+  ```
+
+### Start the coordinator
+
+Start the `coordinator` from the CLI:
+
+```bash
+scion start coordinator --project my-project --type coordinator \
+  "Help me set up this project: review the repository, suggest a team of roles and a workflow, and help me get started."
+```
+
+Or from the Web Dashboard, click **New Agent**, choose the `coordinator` template and a harness,
+enter the same prompt, and click **Start**. Continue the conversation in Web Chat or attach with
+`scion attach coordinator --project my-project`. See [Templates & Roles](/scion/local/templates/)
+for managing and refreshing imported templates.
+
 ## Collaboration
 
 - **Web Dashboard**: Use the Hub's web interface to view running agents, logs, and status.

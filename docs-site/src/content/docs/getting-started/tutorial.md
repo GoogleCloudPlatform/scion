@@ -148,6 +148,37 @@ scion delete my-first-agent
 This stops the agent's container and removes its worktree. It also deletes the branch, including
 commits you have not merged, so merge what you want to keep first, or pass `--preserve-branch`.
 
+## Start with an agent team
+
+Instead of starting from the blank `default` template, you can import the ready-to-use role templates
+(`coordinator`, `developer`, `architect`, `code-reviewer`, and more) from
+[scion-frontiers/agent-team](https://github.com/scion-frontiers/agent-team) directly from their
+GitHub URL and let a `coordinator` agent help build out your project:
+
+```bash
+# Import the agent-team templates into this project (.scion/templates/)
+scion templates import --all https://github.com/scion-frontiers/agent-team/tree/main/templates
+
+# Upload them to the local Hub so they also appear in the Web Dashboard
+scion templates sync --all
+
+# Start the coordinator and ask it to help shape the project
+scion start coordinator --type coordinator \
+  "Help me set up this project: review the repository, suggest a team of roles and a workflow, and help me get started."
+```
+
+You can also import the templates and start the coordinator in the
+[Web Dashboard](/scion/workstation/dashboard/):
+
+1. Open your project, go to **Settings → Templates**, choose **Import from URL**, paste
+   `https://github.com/scion-frontiers/agent-team/tree/main/templates`, click **Import Templates**,
+   and confirm with **Import Selected**.
+2. Click **New Agent**, name it `coordinator`, select the `coordinator` template and a harness,
+   enter the task prompt above, and click **Start**.
+
+Follow up with the coordinator in **Chat** or with `scion attach coordinator`. See
+[Templates & Roles](/scion/local/templates/) for customizing roles and skills.
+
 ## Working from outside the repository
 
 Inside a project directory, commands target that project. To work with the project from anywhere

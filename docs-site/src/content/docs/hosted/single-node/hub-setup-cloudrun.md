@@ -291,6 +291,21 @@ From the Hub web UI, click **New Project**. Provide a name and a git remote URL
 Create an agent via the web UI or the API. The web UI is the simplest path — click
 a project, then **New Agent**, pick a harness (e.g. Claude), and start it.
 
+:::tip[Start quickly with the agent-team templates]
+To begin with a ready-made set of roles (`coordinator`, `developer`, `architect`, `code-reviewer`,
+and more) from [scion-frontiers/agent-team](https://github.com/scion-frontiers/agent-team):
+
+1. In your project, open **Settings → Templates**, choose **Import from URL**, paste
+   `https://github.com/scion-frontiers/agent-team/tree/main/templates`, click **Import Templates**,
+   and confirm with **Import Selected**.
+2. Click **New Agent**, pick the `coordinator` template and a harness, and ask it to help build out
+   the project (for example, *"Help me set up this project: review the repository, suggest a team
+   of roles and a workflow, and help me get started."*).
+
+For the equivalent CLI commands, see
+[Connecting to a Hub — Start with an Agent Team](/scion/hosted/user/hosted-user/#start-with-an-agent-team).
+:::
+
 :::note[IAP authentication for API and scripted access]
 If you access the Hub API programmatically (scripts, CI, or `curl`), authenticate
 through IAP with an access token or an OIDC identity token. For identity tokens,

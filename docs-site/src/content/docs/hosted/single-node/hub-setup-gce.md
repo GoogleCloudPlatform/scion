@@ -161,6 +161,7 @@ Once the Hub is running:
 1. **Access the Web Dashboard** — Navigate to your domain (or the VM's external IP) in a browser.
 2. **Create your first project** — Use the dashboard or `scion project create` from the CLI.
 3. **Register a Runtime Broker** — Connect a machine to execute agents. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for details on registering your local machine or a remote VM.
+4. **Import starter templates and launch a coordinator** — Import the [scion-frontiers/agent-team](https://github.com/scion-frontiers/agent-team) templates (`https://github.com/scion-frontiers/agent-team/tree/main/templates`) in **Project Settings → Templates** (or via the CLI) and start a `coordinator` agent to help build out your project. See [Start with an Agent Team](/scion/hosted/user/hosted-user/#start-with-an-agent-team).
 
 For ongoing Hub administration (auth, permissions, observability), see the other guides in the Hub Administration section.
 

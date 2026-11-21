@@ -110,6 +110,7 @@ The final screen confirms your workstation is configured. Click **Go to Dashboar
 ## After onboarding
 
 - Start your first agent from the CLI: follow the [Tutorial](/scion/getting-started/tutorial/).
+- Want a ready-to-use set of roles right away? Import the [scion-frontiers/agent-team](https://github.com/scion-frontiers/agent-team) templates and start a `coordinator` — see [Start with an agent team](/scion/getting-started/tutorial/#start-with-an-agent-team).
 - Manage the running server with `scion server status`, `scion server restart`, and `scion server stop`. See [Workstation Server Mode](/scion/workstation/workstation-server/) for the combo server, network bridges, and lifecycle details.
 - Learn your way around the [Web Dashboard](/scion/workstation/dashboard/).
 - Understand the pieces you just configured in [Core Concepts](/scion/concepts/).
