@@ -161,6 +161,10 @@ const (
 	// chain has no recorded provenance (it cannot be fully evaluated).
 	// Re-delegating the agent records the chain.
 	ReasonChainUnrecorded = "chain_unrecorded"
+	// ReasonGitHubTokenInstallationOnly: the requesting agent (or an ancestor)
+	// has GitHubTokenPreference == "installation", so user/project GITHUB_TOKEN
+	// and GH_* alias secrets are withheld from runtime reads (Stage 2 §5.1a).
+	ReasonGitHubTokenInstallationOnly = "github_token_installation_only"
 )
 
 // selectRuntimeMaterial composes checks 7-9 for one candidate key in one
@@ -184,6 +188,24 @@ const (
 // check-7 Detail string (Decision.Reason verbatim; "" for user scope, which
 // makes no such decision).
 func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity, facts *TargetFacts, scope, key string, decisionCache *projectDecisionCache) (item ItemResult, value *secret.SecretWithValue, permission, detail string) {
+	installationOnly := facts != nil && usesInstallationGitHubToken(facts.Agent)
+	if installationOnly && isBlockedInstallationGitHubEnvKey(key) {
+		switch scope {
+		case store.ScopeProject:
+			return ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonGitHubTokenInstallationOnly,
+			}, nil, "project.secret_read", ""
+		case store.ScopeUser:
+			return ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny},
+				Reason:    ReasonGitHubTokenInstallationOnly,
+			}, nil, "", ""
+		default:
+			return ItemResult{}, nil, "", ""
+		}
+	}
+
 	switch scope {
 	case store.ScopeAgent:
 		if facts != nil && facts.RootViewerOnly {
@@ -234,6 +256,11 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 
 	if !item.Allowed {
 		return item, nil, permission, detail
+	}
+	if installationOnly && isBlockedInstallationGitHubEnvKey(item.Meta.Target) {
+		item.Allowed = false
+		item.Reason = ReasonGitHubTokenInstallationOnly
+		return item, nil, permission, ""
 	}
 
 	sv, valReason := s.fetchAuthorizedValue(ctx, item)

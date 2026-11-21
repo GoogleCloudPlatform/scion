@@ -1538,17 +1538,81 @@ func TestTriggerDispatchAgent_GitHubSourceAuthoring(t *testing.T) {
 	require.NoError(t, json.Unmarshal(recWH.Body.Bytes(), &whTrig))
 	assert.Equal(t, DispatchAgentGitHubTokenUserPreferred, whTrig.Action.GithubToken)
 
-	// PATCH webhook dispatch_agent trigger's source to github -> 200 (stored user_preferred preserved).
+	// PATCH webhook dispatch_agent trigger's source to github without explicit
+	// action.githubToken -> 400 github_token_required (R2: cannot silently carry
+	// webhook default user_preferred onto a github rule).
 	recPatchSrc := f.doJSON(t, adminCtx, http.MethodPatch,
 		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
 		map[string]any{
 			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
 			"match":  map[string]any{"types": []string{"github.issue_comment.created"}},
 		})
-	require.Equal(t, http.StatusOK, recPatchSrc.Code, recPatchSrc.Body.String())
-	var patchedWHTrig TriggerResponse
-	require.NoError(t, json.Unmarshal(recPatchSrc.Body.Bytes(), &patchedWHTrig))
-	assert.Equal(t, DispatchAgentGitHubTokenUserPreferred, patchedWHTrig.Action.GithubToken)
+	require.Equal(t, http.StatusBadRequest, recPatchSrc.Code, recPatchSrc.Body.String())
+	assert.Contains(t, recPatchSrc.Body.String(), "github_token_required")
+
+	// Same PATCH with action omitted githubToken -> 400 github_token_required.
+	recPatchSrcEmptyTok := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
+		map[string]any{
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			"match":  map[string]any{"types": []string{"github.issue_comment.created"}},
+			"action": TriggerActionSpec{
+				Type: store.TriggerActionDispatchAgent,
+				Task: "run",
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recPatchSrcEmptyTok.Code, recPatchSrcEmptyTok.Body.String())
+	assert.Contains(t, recPatchSrcEmptyTok.Body.String(), "github_token_required")
+
+	// Same PATCH with explicit githubToken="installation" -> 200 and stored.
+	recPatchSrcInst := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
+		map[string]any{
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			"match":  map[string]any{"types": []string{"github.issue_comment.created"}},
+			"action": TriggerActionSpec{
+				Type:        store.TriggerActionDispatchAgent,
+				Task:        "run",
+				GithubToken: DispatchAgentGitHubTokenInstallation,
+			},
+		})
+	require.Equal(t, http.StatusOK, recPatchSrcInst.Code, recPatchSrcInst.Body.String())
+	var patchedWHInst TriggerResponse
+	require.NoError(t, json.Unmarshal(recPatchSrcInst.Body.Bytes(), &patchedWHInst))
+	assert.Equal(t, DispatchAgentGitHubTokenInstallation, patchedWHInst.Action.GithubToken)
+
+	// A second webhook dispatch_agent trigger PATCHed to github with explicit
+	// githubToken="user_preferred" -> 200 and stored.
+	recWH2 := f.doJSON(t, adminCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", ghProj.ID),
+		CreateTriggerRequest{
+			Name:   "wh-dispatch-ok-2",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ghProjEP.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Action: TriggerActionSpec{
+				Type: store.TriggerActionDispatchAgent,
+				Task: "run",
+			},
+		})
+	require.Equal(t, http.StatusCreated, recWH2.Code, recWH2.Body.String())
+	var whTrig2 TriggerResponse
+	require.NoError(t, json.Unmarshal(recWH2.Body.Bytes(), &whTrig2))
+
+	recPatchSrcUserPref := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig2.ID),
+		map[string]any{
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			"match":  map[string]any{"types": []string{"github.issue_comment.created"}},
+			"action": TriggerActionSpec{
+				Type:        store.TriggerActionDispatchAgent,
+				Task:        "run",
+				GithubToken: DispatchAgentGitHubTokenUserPreferred,
+			},
+		})
+	require.Equal(t, http.StatusOK, recPatchSrcUserPref.Code, recPatchSrcUserPref.Body.String())
+	var patchedWHUserPref TriggerResponse
+	require.NoError(t, json.Unmarshal(recPatchSrcUserPref.Body.Bytes(), &patchedWHUserPref))
+	assert.Equal(t, DispatchAgentGitHubTokenUserPreferred, patchedWHUserPref.Action.GithubToken)
 
 	// PATCH webhook dispatch_agent trigger's subject.mode to skip -> 200 OK.
 	recPatchSkip := f.doJSON(t, adminCtx, http.MethodPatch,

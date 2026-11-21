@@ -99,17 +99,17 @@ type dispatchAgentAction struct {
 }
 
 type dispatchAgentAuthorized struct {
-	payload                      DispatchAgentEventPayload
-	auth                         FireAuthority
-	identity                     Identity
-	creatorName                  string
-	edgeCeiling                  store.EffectCeiling
-	edgeProvenance               store.AuthorityProvenance
-	resolvedRole                 headlessResolvedRole
-	projectName                  string
-	projectHasGitHubInstallation bool
-	sourceName                   string
-	signatureMode                string
+	payload        DispatchAgentEventPayload
+	auth           FireAuthority
+	identity       Identity
+	creatorName    string
+	edgeCeiling    store.EffectCeiling
+	edgeProvenance store.AuthorityProvenance
+	resolvedRole   headlessResolvedRole
+	project        *store.Project
+	projectName    string
+	sourceName     string
+	signatureMode  string
 }
 
 func (a *dispatchAgentAction) Type() string {
@@ -574,27 +574,27 @@ func (s *Server) authorizeDispatchAgentFire(
 	identity Identity,
 	requestedRole AgentRole,
 	noAuth bool,
-) (headlessResolvedRole, string, bool, error) {
+) (headlessResolvedRole, *store.Project, error) {
 	if auth.PrincipalKind == store.DelegationPrincipalAgent {
 		agentIdent, ok := identity.(AgentIdentity)
 		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
-			return headlessResolvedRole{}, "", false, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
+			return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
 	}
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return headlessResolvedRole{}, "", false, &dispatchAgentProjectNotFoundError{projectID: projectID}
+			return headlessResolvedRole{}, nil, &dispatchAgentProjectNotFoundError{projectID: projectID}
 		}
-		return headlessResolvedRole{}, "", false, fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
+		return headlessResolvedRole{}, nil, fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
 	}
 	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(ctx, project, auth, requestedRole, noAuth)
 	if err != nil {
-		return headlessResolvedRole{}, "", false, err
+		return headlessResolvedRole{}, nil, err
 	}
 
 	if decision := s.agentCreateDecision(ctx, identity, projectID); !decision.Allowed {
-		return headlessResolvedRole{}, "", false, fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
+		return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
 			auth.PrincipalKind, auth.PrincipalID, projectID, decision.Reason)
 	}
 
@@ -619,14 +619,14 @@ func (s *Server) authorizeDispatchAgentFire(
 			CanDelegateResult:  "deny",
 			CanDelegateReason:  delegateDecision.Reason,
 		})
-		return headlessResolvedRole{}, "", false, fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
+		return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
 			auth.PrincipalKind, auth.PrincipalID, delegateDecision.Reason)
 	}
 	return headlessResolvedRole{
 		preCapRole:        preCapRole,
 		roleExplicit:      roleExplicit,
 		parentMessageMode: parentMessageMode,
-	}, project.Name, project.GitHubInstallationID != nil, nil
+	}, project, nil
 }
 
 func (a *dispatchAgentAction) Authorize(
@@ -682,7 +682,7 @@ func (a *dispatchAgentAction) Authorize(
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
 		requestedRole = AgentRole(payload.AgentRole)
 	}
-	resolvedRole, projectName, projectHasGitHubInstallation, err := s.authorizeDispatchAgentFire(
+	resolvedRole, project, err := s.authorizeDispatchAgentFire(
 		ctx,
 		req.ProjectID,
 		fireID,
@@ -726,18 +726,22 @@ func (a *dispatchAgentAction) Authorize(
 		return nil, dispatchAgentRefusalReason(req, err), nil
 	}
 
+	var projectName string
+	if project != nil {
+		projectName = project.Name
+	}
 	return &dispatchAgentAuthorized{
-		payload:                      payload,
-		auth:                         auth,
-		identity:                     identity,
-		creatorName:                  fireCreatorName(auth),
-		edgeCeiling:                  edgeCeiling,
-		edgeProvenance:               edgeProvenance,
-		resolvedRole:                 resolvedRole,
-		projectName:                  projectName,
-		projectHasGitHubInstallation: projectHasGitHubInstallation,
-		sourceName:                   sourceName,
-		signatureMode:                signatureMode,
+		payload:        payload,
+		auth:           auth,
+		identity:       identity,
+		creatorName:    fireCreatorName(auth),
+		edgeCeiling:    edgeCeiling,
+		edgeProvenance: edgeProvenance,
+		resolvedRole:   resolvedRole,
+		project:        project,
+		projectName:    projectName,
+		sourceName:     sourceName,
+		signatureMode:  signatureMode,
 	}, nil, nil
 }
 
@@ -1011,12 +1015,54 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	}
 
 	vars := buildDispatchTemplateVars(req, da)
+
+	// Render author labels in deterministic key order, then merge hub provenance
+	// labels (hub wins) BEFORE rendering the task slot so the GitHub App mint
+	// project check sees the final labels (e.g. token-source project label).
+	mergedLabels := make(map[string]string, len(da.payload.Labels)+hubAppliedTriggerLabelCount)
+	if len(da.payload.Labels) > 0 {
+		keys := make([]string, 0, len(da.payload.Labels))
+		for k := range da.payload.Labels {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			val, rErr := renderTemplateSlot(da.payload.Labels[k], triggertemplate.SlotLabel, vars, da.payload.UntrustedVars)
+			if rErr != nil {
+				return a.refuseTemplateRender(req, triggertemplate.SlotLabel, rErr), nil
+			}
+			mergedLabels[k] = val
+		}
+	}
+	triggerID := req.Authority.DefinitionID
+	triggerName := ""
+	if ev.Trigger != nil {
+		if ev.Trigger.ID != "" {
+			triggerID = ev.Trigger.ID
+		}
+		triggerName = ev.Trigger.Name
+	}
+	mergedLabels[triggerLabelKeyTrigger] = triggerID
+	mergedLabels[triggerLabelKeyTriggerEvent] = ev.ID
+	mergedLabels[triggerLabelKeyTriggerSource] = ev.SourceKind
+	if err := labels.Validate(mergedLabels); err != nil {
+		return a.refuseTemplateRender(req, triggertemplate.SlotLabel, &triggertemplate.RenderError{
+			Kind: triggertemplate.KindValueRejected,
+			Slot: triggertemplate.SlotLabel,
+		}), nil
+	}
+
 	fc := triggertemplate.FrameContext{
 		EndpointName:  da.sourceName,
 		SignatureMode: da.signatureMode,
 		EventID:       ev.ID,
 	}
-	if da.payload.GithubToken == DispatchAgentGitHubTokenInstallation && !da.projectHasGitHubInstallation {
+	effectiveGitHubToken := da.payload.GithubToken
+	if a.srv.parentAgentUsesInstallationGitHubToken(ctx, da.auth) {
+		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
+	}
+	if effectiveGitHubToken == DispatchAgentGitHubTokenInstallation &&
+		!a.srv.hasGitHubMintProjectForHeadless(ctx, da.project, da.auth, mergedLabels) {
 		fc.Notes = append(fc.Notes, "GitHub access: unavailable for this run (no GitHub App installation configured for this project).")
 	}
 	frameOpt := triggertemplate.WithFrame(fc)
@@ -1051,32 +1097,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			}
 			renderedBranch = trimmed
 		}
-	}
-
-	// Render author labels in deterministic key order, then merge hub provenance labels (hub wins).
-	mergedLabels := make(map[string]string, len(da.payload.Labels)+hubAppliedTriggerLabelCount)
-	if len(da.payload.Labels) > 0 {
-		keys := make([]string, 0, len(da.payload.Labels))
-		for k := range da.payload.Labels {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for _, k := range keys {
-			val, rErr := renderTemplateSlot(da.payload.Labels[k], triggertemplate.SlotLabel, vars, da.payload.UntrustedVars)
-			if rErr != nil {
-				return a.refuseTemplateRender(req, triggertemplate.SlotLabel, rErr), nil
-			}
-			mergedLabels[k] = val
-		}
-	}
-	mergedLabels[triggerLabelKeyTrigger] = triggerID
-	mergedLabels[triggerLabelKeyTriggerEvent] = ev.ID
-	mergedLabels[triggerLabelKeyTriggerSource] = ev.SourceKind
-	if err := labels.Validate(mergedLabels); err != nil {
-		return a.refuseTemplateRender(req, triggertemplate.SlotLabel, &triggertemplate.RenderError{
-			Kind: triggertemplate.KindValueRejected,
-			Slot: triggertemplate.SlotLabel,
-		}), nil
 	}
 
 	// Name resolution and normal create-path name checks (§5.3).

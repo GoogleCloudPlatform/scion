@@ -93,7 +93,7 @@ func TestInjectLifecycleGitHubToken(t *testing.T) {
 	}
 	labelledEnv := make(map[string]string)
 	var labelledClassifications map[string]api.EnvKind
-	own := dispatcher.injectLifecycleGitHubToken(ctx, labelled, labelledEnv, &labelledClassifications, "DispatchAgentStart")
+	_, _, own := dispatcher.deliverGitHubToken(ctx, labelled, labelledEnv, &labelledClassifications, nil, nil, "DispatchAgentStart")
 	assert.False(t, minter.called, "no token may be minted for a project named by a label")
 	assert.Empty(t, own, "no own App token is returned")
 	for _, key := range []string{"GITHUB_TOKEN", "SCION_GITHUB_APP_ENABLED", "SCION_GITHUB_TOKEN_EXPIRY", "SCION_GITHUB_TOKEN_PATH"} {
@@ -106,7 +106,7 @@ func TestInjectLifecycleGitHubToken(t *testing.T) {
 	resolvedEnv := make(map[string]string)
 	var classifications map[string]api.EnvKind
 
-	dispatcher.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &classifications, "DispatchAgentStart")
+	dispatcher.deliverGitHubToken(ctx, agent, resolvedEnv, &classifications, nil, nil, "DispatchAgentStart")
 
 	assert.True(t, minter.called)
 	assert.Equal(t, sourceProject.ID, minter.projectID)
@@ -145,7 +145,7 @@ func TestInjectLifecycleGitHubTokenPreservesUserToken(t *testing.T) {
 	resolvedEnv := map[string]string{"GITHUB_TOKEN": "user-token"}
 	var classifications map[string]api.EnvKind
 
-	dispatcher.injectLifecycleGitHubToken(ctx, &store.Agent{ProjectID: project.ID}, resolvedEnv, &classifications, "DispatchAgentRestart")
+	dispatcher.deliverGitHubToken(ctx, &store.Agent{ProjectID: project.ID}, resolvedEnv, &classifications, nil, nil, "DispatchAgentRestart")
 
 	assert.False(t, minter.called)
 	assert.Equal(t, "user-token", resolvedEnv["GITHUB_TOKEN"])

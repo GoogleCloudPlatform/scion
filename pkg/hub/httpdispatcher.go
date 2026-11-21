@@ -1302,7 +1302,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// it enables repository clone/pull in clone-per-agent workspaces.
 		// Without this, NoAuth blanket-suppresses all secrets including
 		// GITHUB_TOKEN, causing git clone failures (#1165).
-		if agent.ProjectID != "" && d.secretBackend != nil {
+		if !usesInstallationGitHubToken(agent) && agent.ProjectID != "" && d.secretBackend != nil {
 			projectValue := ""
 			if !isShellAgent(agent) {
 				projectValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
@@ -3588,17 +3588,6 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	return result, nil
 }
 
-func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
-	ctx context.Context,
-	agent *store.Agent,
-	resolvedEnv map[string]string,
-	envClassifications *map[string]api.EnvKind,
-	operation string,
-) (ownAppToken string) {
-	_, _, ownAppToken = d.deliverGitHubToken(ctx, agent, resolvedEnv, envClassifications, nil, nil, operation)
-	return ownAppToken
-}
-
 // setStartEnvToken adds the Hub auth token beginRun issued to a start's
 // env. It does nothing for an empty token.
 func setStartEnvToken(env map[string]string, classifications *map[string]api.EnvKind, token string) {
@@ -3780,9 +3769,11 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// (over any existing value), and none is sent as a resolved secret.
 	var gitToken noAuthGitToken
 	if noAuth {
-		gitToken = pickNoAuthGitTokenFrom(resolvedSecrets)
+		if !usesInstallationGitHubToken(agent) {
+			gitToken = pickNoAuthGitTokenFrom(resolvedSecrets)
+			applyNoAuthGitToken(resolvedEnv, &envClassifications, gitToken)
+		}
 		resolvedSecrets = nil
-		applyNoAuthGitToken(resolvedEnv, &envClassifications, gitToken)
 	}
 	resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
 	for _, s := range resolvedSecrets {

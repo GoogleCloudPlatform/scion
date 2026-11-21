@@ -56,6 +56,67 @@ func usesInstallationGitHubToken(agent *store.Agent) bool {
 	return agentGitHubTokenPreference(agent) == DispatchAgentGitHubTokenInstallation
 }
 
+// agentHasInstallationGitHubTokenPreference reports whether the stored agent
+// with ID agentID carries GitHubTokenPreference == "installation". Used by
+// child-create paths so descendants of an installation-preference agent inherit
+// the preference (fail-closed on lookup error is not needed here because
+// standing checks already refuse unreadable callers, and a missing row has no
+// preference).
+func (s *Server) agentHasInstallationGitHubTokenPreference(ctx context.Context, agentID string) bool {
+	if s == nil || s.store == nil || agentID == "" {
+		return false
+	}
+	ag, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		return false
+	}
+	return usesInstallationGitHubToken(ag)
+}
+
+// parentAgentUsesInstallationGitHubToken reports whether a headless create's
+// agent principal carries GitHubTokenPreference == "installation".
+func (s *Server) parentAgentUsesInstallationGitHubToken(ctx context.Context, auth FireAuthority) bool {
+	if auth.PrincipalKind != store.DelegationPrincipalAgent {
+		return false
+	}
+	if auth.agent != nil {
+		return usesInstallationGitHubToken(auth.agent)
+	}
+	return s.agentHasInstallationGitHubTokenPreference(ctx, auth.PrincipalID)
+}
+
+// hasGitHubMintProjectForHeadless reports whether the hub dispatcher can
+// resolve a GitHub App mint project for a prospective headless agent using the
+// exact same resolver as deliverGitHubToken (resolveGitHubMintProject). Returns
+// false when no HTTP dispatcher or GitHub App minter is configured, or when
+// resolveGitHubMintProject returns nil.
+func (s *Server) hasGitHubMintProjectForHeadless(
+	ctx context.Context,
+	project *store.Project,
+	auth FireAuthority,
+	labels map[string]string,
+) bool {
+	if s == nil || s.store == nil || project == nil {
+		return false
+	}
+	disp, ok := s.GetDispatcher().(*HTTPAgentDispatcher)
+	if !ok || disp == nil || disp.githubAppMinter == nil {
+		return false
+	}
+	ownerID, ancestry, err := s.resolveHeadlessOwnerAndAncestry(ctx, HeadlessCreate{Authority: auth})
+	if err != nil {
+		return false
+	}
+	prospective := &store.Agent{
+		ProjectID: project.ID,
+		CreatedBy: auth.PrincipalID,
+		OwnerID:   ownerID,
+		Ancestry:  ancestry,
+		Labels:    labels,
+	}
+	return resolveGitHubMintProject(ctx, s.store, disp.githubAppMinter, disp.log, prospective, project) != nil
+}
+
 // stripNonInstallationGitHubMaterial removes all non-installation GitHub token
 // material (GITHUB_TOKEN, GH_* aliases, SCION_USER_GITHUB_TOKEN) from env,
 // classifications, resolved secrets, and available as-needed keys so that user

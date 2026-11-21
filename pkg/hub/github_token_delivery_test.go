@@ -17,13 +17,18 @@
 package hub
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -473,4 +478,594 @@ func TestTriggerDispatchAgent_GitHubTokenInstallationEndToEnd(t *testing.T) {
 			"payload":   `{"agentName":"a","githubToken":"installation"}`,
 		})
 	assert.Equal(t, http.StatusBadRequest, recSched.Code, recSched.Body.String())
+}
+
+// TestGitHubTokenInstallation_RuntimeSecretPullRefusedAndChildInherits covers
+// R1: runtime secret pull endpoints (GET /agents/{id}/secrets/{key} and
+// POST /agent/secrets) refuse GITHUB_TOKEN and GH_* aliases in both user and
+// project scope when GitHubTokenPreference=="installation" (indistinguishable
+// from not_found, audited with github_token_installation_only), user_preferred
+// agents remain unchanged, and children of an installation agent inherit the
+// preference on both interactive and headless create paths.
+func TestGitHubTokenInstallation_RuntimeSecretPullRefusedAndChildInherits(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("installation_agent_refused_on_both_endpoints_and_both_scopes", func(t *testing.T) {
+		f := newMaterialFixture(t, "inst-runtime-pull")
+		f.recordAgentEdge(t)
+
+		ag, err := f.Store.GetAgent(ctx, f.AgentID)
+		require.NoError(t, err)
+		if ag.AppliedConfig == nil {
+			ag.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		ag.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+		require.NoError(t, f.Store.UpdateAgent(ctx, ag))
+
+		const userPAT = "ghp_runtime_user_pat"
+		const userGH = "ghp_runtime_user_gh"
+		const projPAT = "ghp_runtime_proj_pat"
+		const projGH = "ghp_runtime_proj_gh"
+		const allowedVal = "allowed-secret-value"
+
+		for _, in := range []*secret.SetSecretInput{
+			{Name: "GITHUB_TOKEN", Value: userPAT, SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN", Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID},
+			{Name: "GH_TOKEN", Value: userGH, SecretType: store.SecretTypeEnvironment, Target: "GH_TOKEN", Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID},
+			{Name: "ALLOWED_USER_KEY", Value: allowedVal, SecretType: store.SecretTypeEnvironment, Target: "ALLOWED_USER_KEY", Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID},
+			{Name: "GITHUB_TOKEN", Value: projPAT, SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN", Scope: store.ScopeProject, ScopeID: f.ProjectID, CreatedBy: f.UserID, UpdatedBy: f.UserID},
+			{Name: "GH_TOKEN", Value: projGH, SecretType: store.SecretTypeEnvironment, Target: "GH_TOKEN", Scope: store.ScopeProject, ScopeID: f.ProjectID, CreatedBy: f.UserID, UpdatedBy: f.UserID},
+			{Name: "ALLOWED_PROJ_KEY", Value: allowedVal, SecretType: store.SecretTypeEnvironment, Target: "ALLOWED_PROJ_KEY", Scope: store.ScopeProject, ScopeID: f.ProjectID, CreatedBy: f.UserID, UpdatedBy: f.UserID},
+		} {
+			_, _, err := f.Server.secretBackend.Set(ctx, in)
+			require.NoError(t, err)
+		}
+
+		// GET /api/v1/agents/{id}/secrets/{key} for both scopes: blocked keys return 404 not_found.
+		for _, scope := range []string{store.ScopeUser, store.ScopeProject} {
+			for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+				rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+					fmt.Sprintf("/api/v1/agents/%s/secrets/%s?scope=%s", f.AgentID, key, scope), nil, f.Token)
+				assert.Equal(t, http.StatusNotFound, rec.Code, "scope=%s key=%s body=%s", scope, key, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), userPAT)
+				assert.NotContains(t, rec.Body.String(), base64.StdEncoding.EncodeToString([]byte(userPAT)))
+				assert.NotContains(t, rec.Body.String(), projPAT)
+				assert.NotContains(t, rec.Body.String(), base64.StdEncoding.EncodeToString([]byte(projPAT)))
+			}
+		}
+
+		// Positive controls on GET: unrelated secrets remain readable in both scopes.
+		recUserOK := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			fmt.Sprintf("/api/v1/agents/%s/secrets/ALLOWED_USER_KEY?scope=user", f.AgentID), nil, f.Token)
+		assert.Equal(t, http.StatusOK, recUserOK.Code, recUserOK.Body.String())
+		recProjOK := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			fmt.Sprintf("/api/v1/agents/%s/secrets/ALLOWED_PROJ_KEY?scope=project", f.AgentID), nil, f.Token)
+		assert.Equal(t, http.StatusOK, recProjOK.Code, recProjOK.Body.String())
+
+		// POST /api/v1/agent/secrets: blocked keys return status=not_found; allowed key returns ok.
+		recFetch := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+			secretFetchRequest{Keys: []string{"GITHUB_TOKEN", "GH_TOKEN", "ALLOWED_PROJ_KEY"}}, f.Token)
+		require.Equal(t, http.StatusOK, recFetch.Code, recFetch.Body.String())
+		var fetchResp secretFetchResponse
+		require.NoError(t, json.Unmarshal(recFetch.Body.Bytes(), &fetchResp))
+		require.Len(t, fetchResp.Secrets, 3)
+		assert.Equal(t, "not_found", fetchResp.Secrets[0].Status)
+		assert.Empty(t, fetchResp.Secrets[0].Value)
+		assert.Equal(t, "not_found", fetchResp.Secrets[1].Status)
+		assert.Empty(t, fetchResp.Secrets[1].Value)
+		assert.Equal(t, "ok", fetchResp.Secrets[2].Status)
+		assert.Equal(t, allowedVal, fetchResp.Secrets[2].Value)
+
+		// GET /api/v1/agents/{id}/secrets (list) omits blocked keys in both scopes.
+		recList := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			fmt.Sprintf("/api/v1/agents/%s/secrets", f.AgentID), nil, f.Token)
+		require.Equal(t, http.StatusOK, recList.Code, recList.Body.String())
+		var listResp AgentListSecretsResponse
+		require.NoError(t, json.Unmarshal(recList.Body.Bytes(), &listResp))
+		for _, m := range listResp.Secrets {
+			assert.False(t, isBlockedInstallationGitHubEnvKey(m.Key), "list must not expose blocked key %q", m.Key)
+		}
+
+		// Verify selectRuntimeMaterial returns ReasonGitHubTokenInstallationOnly directly.
+		ident := &agentIdentityWrapper{&AgentTokenClaims{}}
+		facts := &TargetFacts{
+			Agent:     ag,
+			ProjectID: f.ProjectID,
+			Root:      ProvenanceRoot{Kind: "user", ID: f.UserID},
+		}
+		var cache projectDecisionCache
+		itemProj, valProj, _, _ := f.Server.selectRuntimeMaterial(ctx, ident, facts, store.ScopeProject, "GITHUB_TOKEN", &cache)
+		assert.False(t, itemProj.Allowed)
+		assert.Nil(t, valProj)
+		assert.Equal(t, ReasonGitHubTokenInstallationOnly, itemProj.Reason)
+
+		itemUser, valUser, _, _ := f.Server.selectRuntimeMaterial(ctx, ident, facts, store.ScopeUser, "GH_TOKEN", &cache)
+		assert.False(t, itemUser.Allowed)
+		assert.Nil(t, valUser)
+		assert.Equal(t, ReasonGitHubTokenInstallationOnly, itemUser.Reason)
+	})
+
+	t.Run("user_preferred_agent_unchanged", func(t *testing.T) {
+		f := newMaterialFixture(t, "userpref-runtime-pull")
+		f.recordAgentEdge(t)
+
+		ag, err := f.Store.GetAgent(ctx, f.AgentID)
+		require.NoError(t, err)
+		if ag.AppliedConfig == nil {
+			ag.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		ag.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenUserPreferred
+		require.NoError(t, f.Store.UpdateAgent(ctx, ag))
+
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: "GITHUB_TOKEN", Value: "ghp_up_user", SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN",
+			Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: "GITHUB_TOKEN", Value: "ghp_up_proj", SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN",
+			Scope: store.ScopeProject, ScopeID: f.ProjectID, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+
+		recUser := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			fmt.Sprintf("/api/v1/agents/%s/secrets/GITHUB_TOKEN?scope=user", f.AgentID), nil, f.Token)
+		assert.Equal(t, http.StatusOK, recUser.Code, recUser.Body.String())
+
+		recFetch := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+			secretFetchRequest{Keys: []string{"GITHUB_TOKEN"}}, f.Token)
+		require.Equal(t, http.StatusOK, recFetch.Code, recFetch.Body.String())
+		var fetchResp secretFetchResponse
+		require.NoError(t, json.Unmarshal(recFetch.Body.Bytes(), &fetchResp))
+		require.Len(t, fetchResp.Secrets, 1)
+		assert.Equal(t, "ok", fetchResp.Secrets[0].Status)
+		assert.Equal(t, "ghp_up_proj", fetchResp.Secrets[0].Value)
+	})
+
+	t.Run("child_of_installation_agent_inherits_on_interactive_and_headless_create", func(t *testing.T) {
+		f := newMaterialFixture(t, "inst-child-inherit")
+		f.recordAgentEdge(t)
+
+		// Mark parent agent as installation-only with full role.
+		parent, err := f.Store.GetAgent(ctx, f.AgentID)
+		require.NoError(t, err)
+		if parent.AppliedConfig == nil {
+			parent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		parent.AppliedConfig.AgentRole = string(AgentRoleFull)
+		parent.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+		require.NoError(t, f.Store.UpdateAgent(ctx, parent))
+
+		// Store user + project PATs and configure a dispatcher to inspect child dispatch.
+		const projPAT = "ghp_child_proj_pat_blocked"
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: "GITHUB_TOKEN", Value: projPAT, SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN",
+			Scope: store.ScopeProject, ScopeID: f.ProjectID, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: "GITHUB_TOKEN", Value: "ghp_child_user_pat_blocked", SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN",
+			Scope: store.ScopeUser, ScopeID: f.UserID, AllowProgeny: true, CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+
+		// Attach a runtime broker to the project so interactive agent create succeeds.
+		broker := &store.RuntimeBroker{
+			ID:       api.NewUUID(),
+			Name:     "child-inherit-broker",
+			Slug:     "child-inherit-broker",
+			Endpoint: "http://localhost:9800",
+			Status:   store.BrokerStatusOnline,
+		}
+		require.NoError(t, f.Store.CreateRuntimeBroker(ctx, broker))
+		require.NoError(t, f.Store.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID:  f.ProjectID,
+			BrokerID:   broker.ID,
+			BrokerName: broker.Name,
+			LocalPath:  t.TempDir(),
+			Status:     store.BrokerStatusOnline,
+		}))
+
+		// 1. Interactive child create by the installation parent agent.
+		parentToken := mintRecordedMaterialToken(t, f.Server, f.Store, parent.ID, f.ProjectID, ScopesForRole(AgentRoleFull), parent.Ancestry)
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/agents", f.ProjectID),
+			CreateAgentRequest{
+				Name: "child-interactive",
+				Task: "subtask",
+			}, parentToken)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		child, err := f.Store.GetAgentBySlug(ctx, f.ProjectID, "child-interactive")
+		require.NoError(t, err)
+		require.NotNil(t, child.AppliedConfig)
+		assert.Equal(t, DispatchAgentGitHubTokenInstallation, child.AppliedConfig.GitHubTokenPreference)
+		require.NotNil(t, child.AppliedConfig.CreateInputs)
+		assert.Equal(t, DispatchAgentGitHubTokenInstallation, child.AppliedConfig.CreateInputs.GitHubTokenPreference)
+
+		// Dispatch-time stripping on the child drops the project PAT.
+		d := NewHTTPAgentDispatcherWithClient(f.Store, &mockRuntimeBrokerClient{}, false, slog.Default())
+		d.SetSecretBackend(f.Server.secretBackend)
+		childReq, err := d.buildCreateRequest(ctx, child, "TestChildDispatch")
+		require.NoError(t, err)
+		_, hasGH := childReq.ResolvedEnv["GITHUB_TOKEN"]
+		assert.False(t, hasGH, "child dispatch must strip PAT")
+
+		// Runtime pull by the child is also refused on both endpoints.
+		childToken := mintRecordedMaterialToken(t, f.Server, f.Store, child.ID, f.ProjectID, ScopesForRole(AgentRoleFull), child.Ancestry)
+		recChildGet := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			fmt.Sprintf("/api/v1/agents/%s/secrets/GITHUB_TOKEN?scope=user", child.ID), nil, childToken)
+		assert.Equal(t, http.StatusNotFound, recChildGet.Code, recChildGet.Body.String())
+
+		recChildFetch := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+			secretFetchRequest{Keys: []string{"GITHUB_TOKEN"}}, childToken)
+		require.Equal(t, http.StatusOK, recChildFetch.Code, recChildFetch.Body.String())
+		var childFetchResp secretFetchResponse
+		require.NoError(t, json.Unmarshal(recChildFetch.Body.Bytes(), &childFetchResp))
+		require.Len(t, childFetchResp.Secrets, 1)
+		assert.Equal(t, "not_found", childFetchResp.Secrets[0].Status)
+
+		// 2. Headless child create by the installation parent agent (even if hc.GitHubToken is user_preferred).
+		parentClaims := &AgentTokenClaims{
+			ProjectID: f.ProjectID,
+			Scopes:    ScopesForRole(AgentRoleFull),
+			Ancestry:  parent.Ancestry,
+		}
+		parentClaims.Subject = parent.ID
+		parentIdent := &agentIdentityWrapper{parentClaims}
+		resolved := headlessResolvedRole{preCapRole: AgentRoleFull}
+		hcChild, err := f.Server.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID: f.ProjectID,
+			Authority: FireAuthority{
+				PrincipalKind: store.DelegationPrincipalAgent,
+				PrincipalID:   parent.ID,
+				Revision:      1,
+				agent:         parent,
+				Recorded: hubfire.RecordedAuthority{
+					DefinitionKind: hubfire.DefinitionKindTrigger,
+					DefinitionID:   api.NewUUID(),
+					FireID:         api.NewUUID(),
+				},
+			},
+			Identity:    parentIdent,
+			CreatorName: parent.Name,
+			EdgeCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			EdgeProvenance: store.AuthorityProvenance{
+				ProvenanceVersion:           1,
+				SourcePrincipalKind:         store.DelegationPrincipalAgent,
+				SourcePrincipalID:           parent.ID,
+				SourceCredentialKind:        store.SourceCredentialScheduler,
+				SourceEventID:               api.NewUUID(),
+				SourceAuthorizationRevision: 1,
+			},
+			resolvedRole: &resolved,
+			Name:         "child-headless",
+			Task:         "headless-subtask",
+			GitHubToken:  DispatchAgentGitHubTokenUserPreferred,
+			Detached:     true,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, hcChild.AppliedConfig)
+		assert.Equal(t, DispatchAgentGitHubTokenInstallation, hcChild.AppliedConfig.GitHubTokenPreference)
+		require.NotNil(t, hcChild.AppliedConfig.CreateInputs)
+		assert.Equal(t, DispatchAgentGitHubTokenInstallation, hcChild.AppliedConfig.CreateInputs.GitHubTokenPreference)
+	})
+}
+
+// TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver covers O1:
+// the no-installation trailer note uses resolveGitHubMintProject (including
+// token-source-project label authorization and minter presence).
+func TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver(t *testing.T) {
+	ctx := t.Context()
+	f := newTriggerDispatchAgentFixture(t, "o1-note-resolver")
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "o1-hooks")
+
+	installID := int64(77701)
+	require.NoError(t, f.sched.store.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installID,
+		AccountLogin:   "src-org",
+		AccountType:    "Organization",
+		AppID:          11,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	sourceProj := &store.Project{
+		ID:                   api.NewUUID(),
+		Name:                 "o1-token-source",
+		Slug:                 "o1-token-source",
+		GitHubInstallationID: &installID,
+	}
+	require.NoError(t, f.sched.store.CreateProject(ctx, sourceProj))
+
+	disp, ok := f.sched.srv.GetDispatcher().(*HTTPAgentDispatcher)
+	require.True(t, ok)
+
+	fireWithLabel := func(t *testing.T, eventSuffix, agentName string, minter GitHubAppTokenMinter) *store.Agent {
+		t.Helper()
+		disp.SetGitHubAppMinter(minter)
+		rec := f.doJSON(t, userCtx, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+			CreateTriggerRequest{
+				Name:   agentName,
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+				Match:  &TriggerMatchSpec{Types: []string{"webhook." + eventSuffix}},
+				Action: TriggerActionSpec{
+					Type:        store.TriggerActionDispatchAgent,
+					AgentName:   agentName,
+					Task:        "Run ${event.id}",
+					GithubToken: DispatchAgentGitHubTokenInstallation,
+					Labels: map[string]string{
+						githubTokenSourceProjectLabel: sourceProj.ID,
+					},
+				},
+			})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		before := len(f.client.calls)
+		hookRec := f.postSignedWebhook(t, ep, "deliv-"+agentName, eventSuffix, "subj-"+agentName, []byte(`{}`))
+		require.Equal(t, http.StatusAccepted, hookRec.Code, hookRec.Body.String())
+		f.drainOneTriggerEvent(t)
+
+		f.client.mu.Lock()
+		require.Greater(t, len(f.client.calls), before)
+		call := f.client.calls[len(f.client.calls)-1]
+		f.client.mu.Unlock()
+		ag, err := f.sched.store.GetAgent(ctx, call.ID)
+		require.NoError(t, err)
+		return ag
+	}
+
+	// 1. Authorized token-source project -> NO unavailable note.
+	agAuth := fireWithLabel(t, "src_authorized", "src-authorized-ag", &recordingGitHubAppMinter{allowSource: true})
+	assert.NotContains(t, agAuth.AppliedConfig.Task, "GitHub access: unavailable")
+
+	// 2. Unauthorized token-source project -> unavailable note IS added.
+	agUnauth := fireWithLabel(t, "src_unauthorized", "src-unauthorized-ag", &recordingGitHubAppMinter{allowSource: false})
+	assert.Contains(t, agUnauth.AppliedConfig.Task, "GitHub access: unavailable for this run")
+
+	// 3. No minter configured even when the project itself has an installation ID -> unavailable note IS added.
+	f.sched.proj.GitHubInstallationID = &installID
+	require.NoError(t, f.sched.store.UpdateProject(ctx, f.sched.proj))
+	agNoMinter := fireWithLabel(t, "no_minter", "no-minter-ag", nil)
+	assert.Contains(t, agNoMinter.AppliedConfig.Task, "GitHub access: unavailable for this run")
+}
+
+// TestGitHubTokenDelivery_NoAuthAndFinalizeEnv covers O2 (killing mutants
+// m1, m2, m3): installation + noAuth on create and start, and finalizeEnv
+// dropping blocked GitHub token keys.
+func TestGitHubTokenDelivery_NoAuthAndFinalizeEnv(t *testing.T) {
+	ctx := t.Context()
+	st := createTestStore(t)
+	secBackend := secret.NewLocalBackend(st, "test-hub-id", "test-secret")
+	authzSvc := NewAuthzService(st, slog.Default())
+
+	proj := &store.Project{
+		ID:        tid("o2-noauth-proj"),
+		Name:      "o2-noauth",
+		Slug:      "o2-noauth",
+		GitRemote: "https://git.internal.example/org/repo.git",
+	}
+	require.NoError(t, st.CreateProject(ctx, proj))
+	broker := &store.RuntimeBroker{
+		ID:       tid("o2-noauth-broker"),
+		Name:     "o2-noauth-broker",
+		Slug:     "o2-noauth-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	require.NoError(t, st.CreateRuntimeBroker(ctx, broker))
+
+	const projPAT = "ghp_o2_proj_pat_blocked"
+	_, _, err := secBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "GITHUB_TOKEN",
+		Value:         projPAT,
+		SecretType:    store.SecretTypeEnvironment,
+		Target:        "GITHUB_TOKEN",
+		Scope:         store.ScopeProject,
+		ScopeID:       proj.ID,
+		InjectionMode: store.InjectionModeAlways,
+	})
+	require.NoError(t, err)
+
+	agNoAuth := &store.Agent{
+		ID:              api.NewUUID(),
+		Name:            "o2-noauth-agent",
+		Slug:            "o2-noauth-agent",
+		ProjectID:       proj.ID,
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole:             string(AgentRoleNone),
+			NoAuth:                true,
+			GitHubTokenPreference: DispatchAgentGitHubTokenInstallation,
+			GitClone:              &api.GitCloneConfig{URL: proj.GitRemote},
+		},
+	}
+	require.NoError(t, st.CreateAgent(ctx, agNoAuth))
+
+	// Create + noAuth + installation (kills m2): noAuthProjectToken is empty and no PAT delivered.
+	d := NewHTTPAgentDispatcherWithClient(st, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetSecretBackend(secBackend)
+	d.SetAuthzService(authzSvc)
+	req, err := d.buildCreateRequest(ctx, agNoAuth, "TestO2NoAuthCreate")
+	require.NoError(t, err)
+	assert.Empty(t, req.noAuthProjectToken, "installation + noAuth must not set noAuthProjectToken")
+	_, hasGH := req.ResolvedEnv["GITHUB_TOKEN"]
+	assert.False(t, hasGH)
+	_, hasUserFlag := req.ResolvedEnv["SCION_USER_GITHUB_TOKEN"]
+	assert.False(t, hasUserFlag)
+
+	// Start + noAuth + installation (kills m3): no PAT delivered and token remote withheld.
+	startRes, err := d.buildStartEnv(ctx, agNoAuth, "DispatchAgentStart", mintSiteStart)
+	require.NoError(t, err)
+	_, hasGH = startRes.env["GITHUB_TOKEN"]
+	assert.False(t, hasGH)
+	if startRes.workspace.GitClone != nil {
+		assert.Empty(t, startRes.workspace.GitClone.TokenRemote)
+	}
+
+	// DispatchFinalizeEnv + installation (kills m1): caller-submitted GITHUB_TOKEN and GH_TOKEN dropped.
+	var captured *RemoteCreateAgentRequest
+	captureClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, r *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			captured = r
+			return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: r.ID, Slug: r.Slug, Status: "running"}}, nil, nil
+		},
+	}
+	dFin := NewHTTPAgentDispatcherWithClient(st, captureClient, false, slog.Default())
+	dFin.SetSecretBackend(secBackend)
+	agFin := &store.Agent{
+		ID:              api.NewUUID(),
+		Name:            "o2-finalize-agent",
+		Slug:            "o2-finalize-agent",
+		ProjectID:       proj.ID,
+		RuntimeBrokerID: broker.ID,
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole:             string(AgentRoleFull),
+			GitHubTokenPreference: DispatchAgentGitHubTokenInstallation,
+		},
+	}
+	require.NoError(t, st.CreateAgent(ctx, agFin))
+	_, err = dFin.DispatchFinalizeEnv(ctx, agFin, map[string]string{
+		"GITHUB_TOKEN": "ghp_finalize_blocked",
+		"GH_TOKEN":     "ghp_finalize_gh_blocked",
+		"SAFE_ENV":     "kept-value",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, captured)
+	_, hasGH = captured.ResolvedEnv["GITHUB_TOKEN"]
+	assert.False(t, hasGH, "finalizeEnv must drop GITHUB_TOKEN for installation preference")
+	_, hasGHAlias := captured.ResolvedEnv["GH_TOKEN"]
+	assert.False(t, hasGHAlias, "finalizeEnv must drop GH_TOKEN for installation preference")
+	assert.Equal(t, "kept-value", captured.ResolvedEnv["SAFE_ENV"])
+}
+
+// TestTriggerDispatchAgent_GitHubSourceDefaultInstallationEndToEnd covers O2:
+// an end-to-end fire from a github-source dispatch_agent trigger whose omitted
+// githubToken defaulted to "installation".
+func TestTriggerDispatchAgent_GitHubSourceDefaultInstallationEndToEnd(t *testing.T) {
+	ctx := t.Context()
+	f := newTriggerDispatchAgentFixture(t, "gh-src-e2e")
+
+	// Enable both hub.triggers and hub.github_triggers.
+	var active []experiments.Experiment
+	for _, e := range f.sched.srv.experimentRegistry().All() {
+		if e.Name == experiments.Triggers || e.Name == experiments.GitHubTriggers {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.sched.srv.experiments = reg
+
+	// Configure a project with an authorized active GitHub App installation.
+	const instID int64 = 88221
+	require.NoError(t, f.sched.store.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          55,
+		Repositories:   []string{"acme/widgets"},
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	idCopy := instID
+	ghProj := &store.Project{
+		ID:                   api.NewUUID(),
+		Slug:                 "gh-src-e2e-proj",
+		Name:                 "gh-src-e2e-proj",
+		GitRemote:            "https://github.com/acme/widgets.git",
+		GitHubInstallationID: &idCopy,
+		CreatedBy:            f.sched.creator.ID,
+	}
+	require.NoError(t, f.sched.store.CreateProject(ctx, ghProj))
+	grantProjectRole(t, f.sched.store, f.sched.creator.ID, ghProj.ID, store.ProjectRoleAdmin)
+	require.NoError(t, f.sched.store.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  ghProj.ID,
+		BrokerID:   f.sched.broker.ID,
+		BrokerName: f.sched.broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	const authorPAT = "ghp_github_src_author_pat"
+	_, _, err = f.sched.srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:          "GITHUB_TOKEN",
+		Value:         authorPAT,
+		SecretType:    store.SecretTypeEnvironment,
+		Target:        "GITHUB_TOKEN",
+		Scope:         store.ScopeUser,
+		ScopeID:       f.sched.creator.ID,
+		InjectionMode: store.InjectionModeAlways,
+	})
+	require.NoError(t, err)
+
+	minter := &mockGitHubAppMinter{token: "ghs_github_src_app_token", expiry: "2026-11-21T09:00:00Z"}
+	disp, ok := f.sched.srv.GetDispatcher().(*HTTPAgentDispatcher)
+	require.True(t, ok)
+	disp.SetGitHubAppMinter(minter)
+
+	// Author github-source dispatch_agent trigger with omitted githubToken.
+	userCtx := f.userAuth(t, f.sched.creator)
+	rec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", ghProj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-issue-triage",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:          store.TriggerActionDispatchAgent,
+				AgentName:     "gh-triage-worker",
+				Task:          "Triage issue ${event.attributes.number}",
+				UntrustedVars: []string{"event.attributes.number"},
+			},
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	assert.Equal(t, DispatchAgentGitHubTokenInstallation, created.Action.GithubToken)
+
+	// Fire a github event through fireAction.
+	storedTrig, err := f.sched.store.GetTrigger(ctx, created.ID)
+	require.NoError(t, err)
+	evID := api.NewUUID()
+	fireID := api.NewUUID()
+	outcome := f.sched.srv.fireAction(ctx, hubfire.FireRequest{
+		ProjectID:  ghProj.ID,
+		ActionType: store.TriggerActionDispatchAgent,
+		Payload:    storedTrig.ActionPayload,
+		Authority: hubfire.RecordedAuthority{
+			DefinitionKind: hubfire.DefinitionKindTrigger,
+			DefinitionID:   storedTrig.ID,
+			FireID:         fireID,
+			Attribution:    storedTrig.InitiatorAttribution,
+			Ceiling:        storedTrig.AuthorityCeiling,
+		},
+		Event: &hubfire.FireEvent{
+			ID:         evID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "",
+			Type:       "github.issue_comment.created",
+			Subject:    "github:acme/widgets#42",
+			ReceivedAt: time.Now().UTC(),
+			Attributes: map[string]string{"number": "42"},
+			Payload:    []byte(`{"action":"created"}`),
+			Trigger:    &hubfire.FireTriggerRef{ID: storedTrig.ID, Name: storedTrig.Name},
+		},
+	})
+	require.Equal(t, hubfire.FireStatusFired, outcome.Status, "error=%q", outcome.Error)
+	require.NotEmpty(t, outcome.ResultRef)
+
+	f.client.mu.Lock()
+	require.Len(t, f.client.calls, 1)
+	brokerReq := f.client.calls[0]
+	f.client.mu.Unlock()
+
+	assert.Equal(t, "ghs_github_src_app_token", brokerReq.ResolvedEnv["GITHUB_TOKEN"])
+	_, hasUserFlag := brokerReq.ResolvedEnv["SCION_USER_GITHUB_TOKEN"]
+	assert.False(t, hasUserFlag)
+	assert.Equal(t, "true", brokerReq.ResolvedEnv["SCION_GITHUB_APP_ENABLED"])
+
+	ag, err := f.sched.store.GetAgent(ctx, outcome.ResultRef)
+	require.NoError(t, err)
+	require.NotNil(t, ag.AppliedConfig)
+	assert.Equal(t, DispatchAgentGitHubTokenInstallation, ag.AppliedConfig.GitHubTokenPreference)
+	assert.NotContains(t, ag.AppliedConfig.Task, "GitHub access: unavailable")
 }

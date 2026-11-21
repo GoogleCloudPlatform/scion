@@ -687,6 +687,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	oldSourceID := tr.SourceID
 	oldSourceKind := tr.SourceKind
+	oldActionType := tr.ActionType
 	prevRevision := tr.AuthorizationRevision
 	prevRevisionKnown := tr.AuthorizationRevision != 0
 
@@ -953,6 +954,16 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		}
 		ceiling, prov, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 		if !ok {
+			return
+		}
+		if oldSourceKind != store.TriggerSourceKindGitHub &&
+			tr.SourceKind == store.TriggerSourceKindGitHub &&
+			oldActionType == store.TriggerActionDispatchAgent &&
+			tr.ActionType == store.TriggerActionDispatchAgent &&
+			(req.Action == nil || strings.TrimSpace(req.Action.GithubToken) == "") {
+			writeError(w, http.StatusBadRequest, "github_token_required",
+				"set githubToken explicitly to installation or user_preferred when changing a dispatch_agent trigger source to github",
+				map[string]any{"field": "action.githubToken"})
 			return
 		}
 		if req.Action != nil {

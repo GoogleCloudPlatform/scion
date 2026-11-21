@@ -495,10 +495,14 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		NoAuth: effectiveNoAuth,
 	}, creatorName, childRole)
 	pinResolvedCreateProfile(agent, project, scheduledBroker, false)
-	if hc.GitHubToken != "" {
-		agent.AppliedConfig.GitHubTokenPreference = hc.GitHubToken
+	effectiveGitHubToken := hc.GitHubToken
+	if s.parentAgentUsesInstallationGitHubToken(ctx, hc.Authority) {
+		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
+	}
+	if effectiveGitHubToken != "" {
+		agent.AppliedConfig.GitHubTokenPreference = effectiveGitHubToken
 		if agent.AppliedConfig.CreateInputs != nil {
-			agent.AppliedConfig.CreateInputs.GitHubTokenPreference = hc.GitHubToken
+			agent.AppliedConfig.CreateInputs.GitHubTokenPreference = effectiveGitHubToken
 		}
 	}
 
@@ -660,9 +664,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		ActorPrincipalID:   creatorIdentity.ID(),
 		CanDelegateResult:  "allow",
 	}
-	if hc.GitHubToken != "" {
+	if effectiveGitHubToken != "" {
 		if summaryBytes, mErr := json.Marshal(map[string]string{
-			"github_token_preference": hc.GitHubToken,
+			"github_token_preference": effectiveGitHubToken,
 		}); mErr == nil {
 			scheduledDispatchAudit.AfterSummary = string(summaryBytes)
 		}
