@@ -90,6 +90,10 @@ func (s *rootSource) entries() ([]srcEntry, error) {
 				continue
 			}
 			e.kind = kindFile
+		case fi.Mode()&fs.ModeSymlink != 0:
+			e.skip = skipLink
+		default:
+			e.skip = skipSpecial
 		}
 		out = append(out, e)
 	}

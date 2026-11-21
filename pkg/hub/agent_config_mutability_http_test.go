@@ -869,6 +869,9 @@ func TestAgentConfigPatch_NoWarningsForUnchangedValues(t *testing.T) {
 func TestAgentConfigPatch_RemovedEntriesWarnings(t *testing.T) {
 	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	// Host volumes in agent config are refused on a hosted hub
+	// (hostedguard); the warning behaviour is the workstation one.
+	srv.workstation = true
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseStopped)
 		a.AppliedConfig.InlineConfig = &api.ScionConfig{

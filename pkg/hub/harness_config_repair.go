@@ -529,8 +529,9 @@ func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.R
 // is "not found", with no name fallback — the dispatch retry still carries
 // the stale ID and hash, so repairing some other same-named row could not
 // make it succeed and would only touch an unrelated record. The name is
-// used only when no ID was stamped, looked up by slug in the agent's project
-// scope, then global scope. Returns (nil, nil) when nothing matches.
+// used only when no ID was stamped, looked up by slug in the scopes and order
+// dispatch uses (harnessConfigLookupScopes). Returns (nil, nil) when nothing
+// matches.
 //
 // There is deliberately no Status filter (the old name lookup required
 // "active"): resolveDerivedConfig stamps the ID via the same unfiltered
@@ -550,21 +551,15 @@ func (s *Server) resolveHarnessConfigForRepair(ctx context.Context, ref HarnessC
 	if ref.Name == "" {
 		return nil, nil
 	}
-	if ref.ProjectID != "" {
-		hc, err := s.store.GetHarnessConfigBySlug(ctx, ref.Name, store.HarnessConfigScopeProject, ref.ProjectID)
+	// The scopes in dispatch's order (resolveHarnessConfigBySlug).
+	for _, sc := range s.harnessConfigLookupScopes(ref.ProjectID) {
+		hc, err := s.store.GetHarnessConfigBySlug(ctx, ref.Name, sc.scope, sc.scopeID)
 		if err == nil && hc != nil {
 			return hc, nil
 		}
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("lookup project harness-config %q: %w", ref.Name, err)
+			return nil, fmt.Errorf("lookup %s harness-config %q: %w", sc.scope, ref.Name, err)
 		}
-	}
-	hc, err := s.store.GetHarnessConfigBySlug(ctx, ref.Name, store.HarnessConfigScopeGlobal, "")
-	if err == nil && hc != nil {
-		return hc, nil
-	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("lookup global harness-config %q: %w", ref.Name, err)
 	}
 	return nil, nil
 }

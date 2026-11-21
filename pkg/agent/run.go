@@ -553,6 +553,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	var hcModelAliases map[string]string
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
+			// Its volumes are applied below on every start.
+			if opts.HostedMode {
+				if err := CheckHostedHarnessConfig(true, hcDir, m.Runtime.Name()); err != nil {
+					return nil, err
+				}
+			}
 			hcModelAliases = hcDir.Config.ModelAliases
 			if hcDir.Config.Image != "" {
 				fileImage = hcDir.Config.Image

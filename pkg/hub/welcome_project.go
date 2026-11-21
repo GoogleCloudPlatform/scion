@@ -753,15 +753,21 @@ func (s *Server) welcomeCoordinatorHasCredentials(ctx context.Context, project *
 	if hcName == "" {
 		return false, nil
 	}
-	hc, err := s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeProject, project.ID)
-	if errors.Is(err, store.ErrNotFound) {
-		hc, err = s.store.GetHarnessConfigBySlug(ctx, hcName, store.HarnessConfigScopeGlobal, "")
+	// The scopes in dispatch's order (resolveHarnessConfigBySlug).
+	var hc *store.HarnessConfig
+	for _, sc := range s.harnessConfigLookupScopes(project.ID) {
+		found, err := s.store.GetHarnessConfigBySlug(ctx, hcName, sc.scope, sc.scopeID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		hc = found
+		break
 	}
-	if errors.Is(err, store.ErrNotFound) {
+	if hc == nil {
 		return false, nil
-	}
-	if err != nil {
-		return false, err
 	}
 	probe := &store.Agent{ProjectID: project.ID, OwnerID: ownerID, AppliedConfig: &store.AgentAppliedConfig{}}
 	var authMeta *config.HarnessAuthMetadata

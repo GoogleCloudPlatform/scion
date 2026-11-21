@@ -101,6 +101,9 @@ func TestHubAPIStartupPreflight_ThroughConfigLoad(t *testing.T) {
 		settings string
 		flags    map[string]string
 		wantErr  bool
+		// wantLoadRefusal: config load itself refuses (dev auth in hosted
+		// mode), before the listener preflight runs.
+		wantLoadRefusal bool
 	}{
 		{
 			name:     "workstation default dev auth, --host 0.0.0.0, web off",
@@ -119,21 +122,22 @@ func TestHubAPIStartupPreflight_ThroughConfigLoad(t *testing.T) {
 			flags:    map[string]string{"host": "0.0.0.0", "enable-web": "false", "dev-auth": "false"},
 		},
 		{
-			name:     "hosted, --enable-hub --dev-auth, default host",
-			settings: "schema_version: \"1\"\nserver:\n  mode: hosted\n",
-			flags:    map[string]string{"enable-hub": "true", "dev-auth": "true"},
-			wantErr:  true,
+			name:            "hosted, --enable-hub --dev-auth, default host",
+			settings:        "schema_version: \"1\"\nserver:\n  mode: hosted\n",
+			flags:           map[string]string{"enable-hub": "true", "dev-auth": "true"},
+			wantLoadRefusal: true,
 		},
 		{
-			name:     "hosted, --enable-hub, server.auth.dev_mode, default host",
-			settings: "schema_version: \"1\"\nserver:\n  mode: hosted\n  auth:\n    dev_mode: true\n",
-			flags:    map[string]string{"enable-hub": "true"},
-			wantErr:  true,
+			name:            "hosted, --enable-hub, server.auth.dev_mode, default host",
+			settings:        "schema_version: \"1\"\nserver:\n  mode: hosted\n  auth:\n    dev_mode: true\n",
+			flags:           map[string]string{"enable-hub": "true"},
+			wantLoadRefusal: true,
 		},
 		{
-			name:     "hosted, --enable-hub --dev-auth, --host 127.0.0.1",
-			settings: "schema_version: \"1\"\nserver:\n  mode: hosted\n",
-			flags:    map[string]string{"enable-hub": "true", "dev-auth": "true", "host": "127.0.0.1"},
+			name:            "hosted, --enable-hub --dev-auth, --host 127.0.0.1",
+			settings:        "schema_version: \"1\"\nserver:\n  mode: hosted\n",
+			flags:           map[string]string{"enable-hub": "true", "dev-auth": "true", "host": "127.0.0.1"},
+			wantLoadRefusal: true,
 		},
 		{
 			name:     "hosted, --enable-hub, no dev auth, default host",
@@ -162,6 +166,11 @@ func TestHubAPIStartupPreflight_ThroughConfigLoad(t *testing.T) {
 			}
 
 			cfg, err := loadAndReconcileConfig(serverStartCmd)
+			if tc.wantLoadRefusal {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "dev auth is not allowed in hosted mode")
+				return
+			}
 			require.NoError(t, err)
 			err = hubAPIStartupPreflight(cfg, enableHub, enableWeb)
 			if tc.wantErr {

@@ -184,7 +184,13 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
 		return err
 	}
-	return validateTestModeFlagsEarly(cmd)
+	if err := validateTestModeFlagsEarly(cmd); err != nil {
+		return err
+	}
+	// Only the flag is visible here; dev auth enabled in settings is refused
+	// by the foreground child (loadAndReconcileConfig). With --test-mode the
+	// child decides it, once the test mode startup gate can be checked.
+	return validateHostedDevAuth(hostedMode, cmd.Flags().Changed("dev-auth") && enableDevAuth, testModeRequested())
 }
 
 // runServerStartOrDaemon handles the server start command. By default it launches

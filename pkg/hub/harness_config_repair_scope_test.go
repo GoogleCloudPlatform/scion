@@ -134,14 +134,30 @@ func TestHarnessConfigRepair_GlobalStampedIDRepairsGlobal(t *testing.T) {
 	assert.False(t, f.repaired(t, f.inA), "the stamped ID is authoritative over the name fallback")
 }
 
+// On a workstation hub the name resolves project scope first, as dispatch
+// does there.
 func TestHarnessConfigRepair_NameOnlyProjectARepairsProjectA(t *testing.T) {
 	f := newRepairScopeFixture(t)
+	f.srv.workstation = true
 	err := f.srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{
 		Name: "claude", ProjectID: f.projectA.ID,
 	})
 	require.NoError(t, err)
 	assert.True(t, f.repaired(t, f.inA))
 	assert.False(t, f.repaired(t, f.global))
+}
+
+// On a hosted hub the name resolves global scope first, as dispatch does
+// there, so the global record is repaired even for a project-A agent.
+func TestHarnessConfigRepair_NameOnlyProjectAHostedRepairsGlobal(t *testing.T) {
+	f := newRepairScopeFixture(t)
+	f.srv.workstation = false
+	err := f.srv.syncHarnessConfigFromStorage(context.Background(), HarnessConfigRepairRef{
+		Name: "claude", ProjectID: f.projectA.ID,
+	})
+	require.NoError(t, err)
+	assert.True(t, f.repaired(t, f.global))
+	assert.False(t, f.repaired(t, f.inA))
 }
 
 // A stamped ID that no longer exists is "not found": no name fallback, so no

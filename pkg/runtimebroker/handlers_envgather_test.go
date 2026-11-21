@@ -3316,6 +3316,10 @@ profiles:
   default:
     runtime: mock
 `)
+	// Expanding a project-tier harness config's env against the broker
+	// is workstation behavior; a hosted broker refuses such env
+	// (TestCreateAgent_HostedEnvGatherRefusesHarnessConfigEnvBeforeExpanding).
+	srv.config.WorkstationMode = true
 
 	body := `{
 		"name": "test-agent-dirvar-unset",
@@ -3363,6 +3367,10 @@ profiles:
   default:
     runtime: mock
 `)
+	// Expanding a project-tier harness config's env against the broker
+	// is workstation behavior; a hosted broker refuses such env
+	// (TestCreateAgent_HostedEnvGatherRefusesHarnessConfigEnvBeforeExpanding).
+	srv.config.WorkstationMode = true
 
 	body := `{
 		"name": "test-agent-dirvar-set",
@@ -3399,6 +3407,10 @@ profiles:
   default:
     runtime: mock
 `)
+	// Expanding a project-tier harness config's env against the broker
+	// is workstation behavior; a hosted broker refuses such env
+	// (TestCreateAgent_HostedEnvGatherRefusesHarnessConfigEnvBeforeExpanding).
+	srv.config.WorkstationMode = true
 
 	body := `{
 		"name": "test-agent-dirvar-hostpass",
@@ -3824,6 +3836,10 @@ profiles:
   default:
     runtime: mock
 `)
+	// Expanding a project-tier harness config's env against the broker
+	// is workstation behavior; a hosted broker refuses such env
+	// (TestCreateAgent_HostedEnvGatherRefusesHarnessConfigEnvBeforeExpanding).
+	srv.config.WorkstationMode = true
 
 	body := `{
 		"name": "test-agent-dirkey-expand",

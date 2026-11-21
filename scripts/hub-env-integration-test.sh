@@ -258,8 +258,12 @@ start_hub_server() {
 
     mkdir -p "$TEST_DIR"
 
-    local cmd=("$SCION" "server" "start" "--foreground" "--production"
+    # Workstation mode: dev auth is refused in hosted mode. Only the Hub runs,
+    # on its own listener (--port), as before.
+    local cmd=("$SCION" "server" "start" "--foreground"
         "--enable-hub"
+        "--enable-runtime-broker=false"
+        "--enable-web=false"
         "--dev-auth"
         "--port" "$HUB_PORT"
         "--db" "$TEST_DIR/hub-test.db"

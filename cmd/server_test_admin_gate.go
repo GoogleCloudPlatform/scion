@@ -406,12 +406,7 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 		PreconfiguredSigningKey: len(hubCfg.UserTokenConfig.SigningKey) > 0 || len(hubCfg.AgentTokenConfig.SigningKey) > 0,
 		AdminWebSessions:        cfg.Hub.TestIdentityAdminWebSessions(),
 		OfflineAdminDelegations: cfg.Hub.TestIdentityOfflineAdminDelegations(),
-		ReadMarker: func() (*testinfra.Marker, error) {
-			if entClient == nil {
-				return nil, testinfra.ErrMarkerAbsent
-			}
-			return testinfra.Read(ctx, entClient)
-		},
+		ReadMarker:              testInfraMarkerReader(ctx, entClient),
 	}
 	if !keyringSigning {
 		in.SharedSigningSecret = testModeSharedSecretSet(hubCfg)
@@ -442,4 +437,53 @@ func webSessionKeySource(sessionSecret string) string {
 		return "generated"
 	}
 	return "shared_secret"
+}
+
+// validateHostedDevAuthTestHub decides dev auth on a hosted server that
+// requested a --test-mode level (validateHostedDevAuth left it here). Dev
+// auth is allowed only on a designated test hub: the member-level test mode
+// startup gate must pass for this hub (a user store, no explicit
+// --production, the --test-mode hub id binding and a pinned hub id,
+// server.hub.class: test, and the test infrastructure marker for this hub id
+// in the hub database). Otherwise startup is refused. runServerStart calls
+// it once the store is open and before the dev token is created; hub
+// construction checks the full gate of the requested level again
+// (initHubServer). The level comes only from the --test-mode flag, never
+// from settings or the environment.
+func validateHostedDevAuthTestHub(cfg *config.GlobalConfig, hosted, devAuthEnabled, hasStore bool, readMarker func() (*testinfra.Marker, error)) error {
+	if !hosted || !devAuthEnabled {
+		return nil
+	}
+	if !testModeRequested() || cfg == nil {
+		return hostedDevAuthRefusal()
+	}
+	res, err := resolveTestMode(testModeInputs{
+		Level:                  hub.TestModeMember,
+		BindingHubID:           testModeHubID,
+		ProductionFlagExplicit: productionFlagIsExplicit,
+		HubEnabled:             enableHub,
+		HasUserStore:           hasStore,
+		ResolvedHubID:          cfg.Hub.ResolveHubID(),
+		HubIDPinned:            hubIDPinned(cfg),
+		HubClass:               cfg.Hub.HubClass,
+		ReadMarker:             readMarker,
+	})
+	if err != nil {
+		return fmt.Errorf("dev auth in hosted mode is allowed only on a test hub whose --test-mode startup gate passes: %w", err)
+	}
+	if !res.EnableTestIdentities {
+		return hostedDevAuthRefusal()
+	}
+	return nil
+}
+
+// testInfraMarkerReader reads the test infrastructure marker (G6) from the
+// hub database; without one it reports the marker absent.
+func testInfraMarkerReader(ctx context.Context, entClient *ent.Client) func() (*testinfra.Marker, error) {
+	return func() (*testinfra.Marker, error) {
+		if entClient == nil {
+			return nil, testinfra.ErrMarkerAbsent
+		}
+		return testinfra.Read(ctx, entClient)
+	}
 }

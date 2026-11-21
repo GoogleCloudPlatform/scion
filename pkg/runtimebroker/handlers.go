@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -1076,6 +1077,23 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeControlPathRefusal(w, err)
 			return
 		}
+		// On a hosted broker, member-written request config (volumes and
+		// inline config) may not name host resources. An unresolvable
+		// profile fails the create later; the default runtime's name is
+		// used for this check then.
+		runtimeName := func() string {
+			name, _ := s.resolveRuntimeNameForOpts(api.StartOptions{
+				Name:        req.Name,
+				ProjectPath: req.ProjectPath,
+				Profile:     createRequestProfile(req),
+			})
+			return name
+		}
+		if err := s.checkHostedRequestConfig(runtimeName, &api.ScionConfig{Volumes: cfgVols}, req.InlineConfig); err != nil {
+			span.SetStatus(codes.Error, hostedguard.ErrorCode)
+			writeHostedConfigRefusal(w, err)
+			return
+		}
 	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,
@@ -1483,7 +1501,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		required, secretInfo, alternatives, settingsEnv := s.extractRequiredEnvKeys(req, hydratedTemplatePath, hydratedHCPath)
+		required, secretInfo, alternatives, settingsEnv, hostedErr := s.extractRequiredEnvKeysChecked(req, hydratedTemplatePath, hydratedHCPath)
+		// A member-written harness config refused on a hosted broker is
+		// answered before any of its env is evaluated against this host.
+		if re, ok := hostedConfigRefusalFrom(hostedErr); ok {
+			span.SetStatus(codes.Error, hostedguard.ErrorCode)
+			writeHostedConfigRefusalDetails(w, re, nil)
+			return
+		}
 		// Fold in the settings/harness-config-directory env
 		// extractRequiredEnvKeys resolved (its withDir, minus whatever
 		// requestEnv already decided — see settingsEnvSatisfied there), but
@@ -2173,6 +2198,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				s.writeUnusableProvisioner(w, ue, "provision agent", req.ID, nil)
 				return
 			}
+			if re, ok := hostedConfigRefusalFrom(err); ok {
+				markAttemptFailed(http.StatusBadRequest, re.Error())
+				writeHostedConfigRefusalDetails(w, re, nil)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
 			s.writeRuntimeOpError(w, ctx, "provision agent", err, "agent_id", req.ID)
 			return
@@ -2246,6 +2276,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		isSkillErr := errors.As(err, &skillErr)
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
+		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		isEmptyGenericCmd := emptyGenericCommandFrom(err)
@@ -2254,6 +2285,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
 		case isUnusable:
 			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
+		case isHostedRefusal:
+			markAttemptFailed(http.StatusBadRequest, hostedErr.Error())
 		case isStorageRefusal:
 			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case isResourceRefusal:
@@ -2346,6 +2379,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
 		case isUnusable:
 			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
+		case isHostedRefusal:
+			writeHostedConfigRefusalDetails(w, hostedErr, nil)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
 		case isResourceRefusal:
@@ -4290,6 +4325,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeControlPathRefusal(w, err)
 			return
 		}
+		// On a hosted broker, member-written inline config may not name
+		// host resources.
+		if err := s.checkHostedRequestConfig(func() string { return resolvedRuntimeType }, startReq.InlineConfig); err != nil {
+			span.SetStatus(codes.Error, hostedguard.ErrorCode)
+			writeHostedConfigRefusal(w, err)
+			return
+		}
 	}
 
 	// The runtime this start runs in may not be the one the agent's
@@ -4393,12 +4435,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		ue, unusable := unusableProvisionerFrom(err)
+		hostedErr, isHostedRefusal := hostedConfigRefusalFrom(err)
 		gitRefusal, isGitRefusal := util.StartRefusalText(err)
 		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		resourceErr, isResourceRefusal := resourceLimitsErrorFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
+		case isHostedRefusal:
+			writeHostedConfigRefusalDetails(w, hostedErr, details)
 		case isStorageRefusal:
 			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
 		case isResourceRefusal:
@@ -5628,6 +5673,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			s.writeUnusableProvisioner(w, ue, "restart agent", id, details)
 			return
 		}
+		if re, ok := hostedConfigRefusalFrom(err); ok {
+			writeHostedConfigRefusalDetails(w, re, details)
+			return
+		}
 		if se, ok := storageMigrationRequiredFrom(err); ok {
 			s.writeStorageMigrationRequired(w, se, "restart agent", id, details)
 			return
@@ -6647,6 +6696,17 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 // directories of the same name are consulted only when no hydrated copy was
 // supplied.
 func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string) {
+	keys, secretInfo, alternatives, settingsEnv, _ := s.extractRequiredEnvKeysChecked(req, hydratedTemplatePath, hydratedHarnessConfigPath...)
+	return keys, secretInfo, alternatives, settingsEnv
+}
+
+// extractRequiredEnvKeysChecked is extractRequiredEnvKeys, plus the hosted
+// harness-config refusal: on a hosted broker, a project-tier or
+// template-bundled harness config is checked (agent.CheckHostedHarnessConfig)
+// where it is resolved, and when it is refused none of its env is read or
+// expanded against this host, and the refusal is returned.
+func (s *Server) extractRequiredEnvKeysChecked(req CreateAgentRequest, hydratedTemplatePath string, hydratedHarnessConfigPath ...string) ([]string, map[string]api.SecretKeyInfo, map[string][]string, map[string]string, error) {
+	var hostedErr error
 	required := make(map[string]struct{})
 	alternatives := make(map[string][]string)
 	// settingsEnvSatisfied holds the non-empty env values that settings
@@ -6767,10 +6827,16 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 		}
 		if hcProjectDir := harnessConfigProjectTier(req.ProjectPath); hydratedHCPath != "" || hcProjectDir != "" {
 			if hcDir, err := config.ResolveHarnessConfigDir(hydratedHCPath, harnessConfigName, hcProjectDir, harnessConfigTemplatePaths...); err == nil && hcDir != nil {
-				harnessType = hcDir.Config.Harness
-				authType = hcDir.Config.AuthSelectedType
-				authMeta = hcDir.Config.Auth
-				hcDirEnv = hcDir.Config.Env
+				// On a hosted broker a refused member-written harness
+				// config contributes nothing, so its env is never expanded
+				// against this host (the caller answers 400).
+				hostedErr = agent.CheckHostedHarnessConfig(!s.config.WorkstationMode, hcDir, "")
+				if hostedErr == nil {
+					harnessType = hcDir.Config.Harness
+					authType = hcDir.Config.AuthSelectedType
+					authMeta = hcDir.Config.Auth
+					hcDirEnv = hcDir.Config.Env
+				}
 			} else if err != nil && s.config.Debug {
 				s.envSecretLog.Debug("extractRequiredEnvKeys: harness-config dir not resolved",
 					"harnessConfigName", harnessConfigName,
@@ -7060,10 +7126,13 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 			for _, as := range authSecrets {
 				if _, ok := fileSecrets[as.Key]; !ok {
 					// Check if any alternative env keys satisfy this requirement
-					// via resolved env, inline config env, or process env (the
-					// latter covers workstation mode where PR #719 sets
-					// GOOGLE_APPLICATION_CREDENTIALS at startup).
-					if !altEnvKeySatisfied(req.ResolvedEnv, as.AlternativeEnvKeys) {
+					// via resolved env, inline config env, or, on a
+					// workstation broker only, process env (PR #719 sets
+					// GOOGLE_APPLICATION_CREDENTIALS at startup). A hosted
+					// broker's launch never reads its own env for auth
+					// (GatherAuthWithEnv in broker mode), and a member-written
+					// harness config must not make it read env by name.
+					if !altEnvKeySatisfied(req.ResolvedEnv, as.AlternativeEnvKeys, s.config.WorkstationMode) {
 						required[as.Key] = struct{}{}
 						secretInfo[as.Key] = api.SecretKeyInfo{
 							Description: as.Description,
@@ -7179,7 +7248,7 @@ func (s *Server) extractRequiredEnvKeys(req CreateAgentRequest, hydratedTemplate
 	for k := range required {
 		keys = append(keys, k)
 	}
-	return keys, secretInfo, alternatives, settingsEnvSatisfied
+	return keys, secretInfo, alternatives, settingsEnvSatisfied, hostedErr
 }
 
 // buildRequestEnv returns req.ResolvedEnv overridden per-key by req.Config.Env
@@ -7275,14 +7344,15 @@ func expandDirEnv(dirEnv map[string]string) map[string]string {
 }
 
 // altEnvKeySatisfied reports whether any of altKeys has a non-empty value in
-// resolvedEnv or, for names not refused for agents
-// (util.IsAgentRefusedHostEnvName), in this process's env.
-func altEnvKeySatisfied(resolvedEnv map[string]string, altKeys []string) bool {
+// resolvedEnv or, when processEnv is set (a workstation broker) and for names
+// not refused for agents (util.IsAgentRefusedHostEnvName), in this process's
+// env.
+func altEnvKeySatisfied(resolvedEnv map[string]string, altKeys []string, processEnv bool) bool {
 	for _, altKey := range altKeys {
 		if v, ok := resolvedEnv[altKey]; ok && v != "" {
 			return true
 		}
-		if util.IsAgentRefusedHostEnvName(altKey) {
+		if !processEnv || util.IsAgentRefusedHostEnvName(altKey) {
 			continue
 		}
 		if v := os.Getenv(altKey); v != "" {

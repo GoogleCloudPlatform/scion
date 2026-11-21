@@ -1201,6 +1201,21 @@ func IsBrokerModeFromContext(ctx context.Context) bool {
 	return v
 }
 
+type hostedModeContextKey struct{}
+
+// ContextWithHostedMode returns a new context flagged as served by a hosted
+// Runtime Broker (StartOptions.HostedMode).
+func ContextWithHostedMode(ctx context.Context) context.Context {
+	return context.WithValue(ctx, hostedModeContextKey{}, true)
+}
+
+// IsHostedModeFromContext returns true if the context indicates a hosted
+// Runtime Broker.
+func IsHostedModeFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(hostedModeContextKey{}).(bool)
+	return v
+}
+
 type reprovisionContextKey struct{}
 
 // ContextWithReprovision returns a new context flagged as a reincarnation
@@ -1498,6 +1513,11 @@ type StartOptions struct {
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
+	// HostedMode is true when the Runtime Broker serving this start runs
+	// on a hosted server (not workstation mode). Member-written config is
+	// then checked by pkg/hostedguard. Unlike BrokerMode, which is true for
+	// every Hub dispatch, it is false on a workstation.
+	HostedMode bool
 	// RecordedOriginURL is the broker-recorded origin for the project (the hub
 	// project's repository), captured from GitClone before the linked-checkout
 	// route clears GitClone. It is threaded to worktree creation so the git-lfs

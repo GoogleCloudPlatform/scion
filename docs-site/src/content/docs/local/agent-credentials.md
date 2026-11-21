@@ -11,7 +11,7 @@ Scion automatically handles discovering and injecting LLM credentials into agent
 
 Every agent is started by a Runtime Broker on behalf of a Hub. What the agent can pick up from your machine depends on where that broker runs:
 
-- **Workstation** (the broker inside `scion server start`, on your machine, with the Hub on loopback and dev auth): API keys exported in the shell you run `scion` from are sent with the start request. The harness login files in your home directory are given to the agent too; see [Host credential files on a workstation](#host-credential-files-on-a-workstation). Your gcloud ADC file is given to agents only when you opt in with `auto_inject_gcloud_adc: true` (the onboarding wizard offers it). Hub secrets take precedence over all of these.
+- **Workstation** (the broker inside `scion server start`, on your machine, with the Hub on loopback and dev auth): API keys exported in the shell you run `scion` from are sent with the start request. The harness login files in your home directory are given to the agent too; see [Host credential files on a workstation](#host-credential-files-on-a-workstation). Your gcloud ADC file is given to agents only when you opt in with `auto_inject_gcloud_adc: true` (the onboarding wizard offers it). A hosted server never gives agents the host's ADC file, whatever the setting says. Hub secrets take precedence over all of these.
 - **Hosted brokers**: the agent's environment is strictly isolated from the broker's host machine. You must provide credentials explicitly via Hub Secrets or profile settings, which are then securely injected into the agent container at launch.
 
 ## Host credential files on a workstation

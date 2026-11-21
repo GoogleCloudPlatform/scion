@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -153,6 +154,10 @@ func (s *Server) handleProjectImportResources(
 		return
 	}
 
+	if req.WorkspacePath == "" && s.refuseImportSource(w, config.NormalizeTemplateSourceURL(req.SourceURL)) {
+		return
+	}
+
 	run := func(progress importProgressFunc) ([]string, error) {
 		if req.WorkspacePath != "" {
 			return s.importFromWorkspace(ctx, project, req.WorkspacePath, options.scope, options.kind, progress, req.Names)
@@ -172,7 +177,7 @@ func (s *Server) handleProjectImportResources(
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
-		if writeUnusableProvisionerImportError(w, err) {
+		if writeImportContentRefusal(w, err) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
@@ -349,6 +354,10 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.refuseImportSource(w, sourceURL) {
+		return
+	}
+
 	run := func(progress importProgressFunc) ([]string, error) {
 		return s.importFromRemote(ctx, projectID, sourceURL, scope, kind, progress, req.Names)
 	}
@@ -364,7 +373,7 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
-		if writeUnusableProvisionerImportError(w, err) {
+		if writeImportContentRefusal(w, err) {
 			return
 		}
 		writeError(w, http.StatusBadRequest, "import_failed", err.Error(), nil)
@@ -446,12 +455,17 @@ func (s *Server) streamImport(w http.ResponseWriter, run func(progress importPro
 
 // importErrorEvent builds the in-band error event for a failed streaming
 // import. A refused harness-config event also carries the error code of the
-// non-streaming 422 answer (ptone/scion#4214); its Reason is the same public
-// message err.Error() already gave.
+// non-streaming answer (422 harness_config_unusable, ptone/scion#4214, or
+// 400 hosted_config_refused); its Reason is the same public message
+// err.Error() already gave.
 func importErrorEvent(err error) ResourceImportEvent {
 	var ierr *unusableProvisionerImportError
 	if errors.As(err, &ierr) {
 		return ResourceImportEvent{Type: ImportEventError, Code: harnessConfigUnusableErrorCode, Reason: ierr.publicMessage()}
+	}
+	var herr *hostedHarnessConfigImportError
+	if errors.As(err, &herr) {
+		return ResourceImportEvent{Type: ImportEventError, Code: hostedguard.ErrorCode, Reason: herr.Error()}
 	}
 	return ResourceImportEvent{Type: ImportEventError, Reason: err.Error()}
 }
@@ -625,6 +639,9 @@ func (s *Server) handleProjectDiscoverResources(
 		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, kind)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
+		if s.refuseImportSource(w, req.SourceURL) {
+			return
+		}
 		names, skipped, err = s.discoverFromRemote(ctx, store.TemplateScopeProject, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
@@ -753,6 +770,10 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			"scope must be 'global', 'project', or 'user'", nil)
+		return
+	}
+
+	if s.refuseImportSource(w, sourceURL) {
 		return
 	}
 

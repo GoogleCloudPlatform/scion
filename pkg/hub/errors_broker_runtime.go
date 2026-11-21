@@ -303,7 +303,8 @@ func brokerProfileUnresolvedMessage(profile string) string {
 // Hub (.design/flat-runtime-brokers-contract.md sections 7 and 9): a
 // correctness or compatibility refusal, never an authorization result.
 // Handlers write it with its own Status, Code and Details; it is classified
-// as a confirmed not-acted-on start error.
+// as a confirmed not-acted-on start error. It also carries the Hub's other
+// pre-dispatch refusals, such as hosted_config_refused (hostedConfigRefusal).
 type RuntimeTargetRefusal struct {
 	Code    string
 	Status  int

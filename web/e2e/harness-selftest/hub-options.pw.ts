@@ -240,6 +240,26 @@ test('runtimeBroker with testIdentities marks the database before the server sta
   expect(start.env.SCION_CLI_MODE).toBe('human');
 });
 
+test('a default hub is a member-level test hub, marked before it starts, on the caller HOME', async () => {
+  const state = await startHub({ build: false, binary, stateFile });
+  const calls = invocations();
+  expect(calls.map((c) => c.argv.slice(0, 3).join(' '))).toEqual([
+    'server test-infra mark',
+    'server start --foreground',
+  ]);
+  const [mark, start] = calls;
+  expect(state.hubId).toMatch(/^[0-9a-f]{12}$/);
+  expect(flagValue(mark.argv, '--hub-id')).toBe(state.hubId);
+  expect(start.argv).toContain('--hosted');
+  expect(start.argv).toContain('--dev-auth');
+  expect(start.argv).toContain('--enable-test-login');
+  expect(start.argv).toContain(`--test-mode=member:${String(state.hubId)}`);
+  expect(start.env.SCION_SERVER_HUB_HUBID).toBe(state.hubId);
+  expect(start.env.SCION_SERVER_HUB_CLASS).toBe('test');
+  expect(state.homeDir).toBeUndefined();
+  expect(start.env.HOME).toBe(process.env.HOME);
+});
+
 test('without runtimeBroker the server runs no broker', async () => {
   await startHub({ testLogin: false, testIdentities: true, build: false, binary, stateFile });
   const start = invocations()[1];

@@ -53,16 +53,26 @@ func TestResolveHarnessConfigDir_Source(t *testing.T) {
 		templates []string
 		image     string
 		source    HarnessConfigSource
+		// projectTier is FromProjectTier: only the project's own
+		// directory, not the global one, which Source does not tell apart.
+		projectTier bool
+		// projectPath overrides the project directory when set.
+		projectPath string
 	}{
-		{"hydrated wins over every on-disk tier", hydrated, "claude", []string{tpl}, "hydrated", HarnessConfigSourceHubHydrated},
-		{"template-bundled outranks project", "", "claude", []string{tpl}, "template", HarnessConfigSourceTemplateBundled},
-		{"project is broker-local", "", "claude", nil, "project", HarnessConfigSourceBrokerLocal},
-		{"global is broker-local", "", "only-global", nil, "global-only", HarnessConfigSourceBrokerLocal},
-		{"synthetic generic is builtin", "", "generic", nil, "scion-base:latest", HarnessConfigSourceBuiltin},
+		{"hydrated wins over every on-disk tier", hydrated, "claude", []string{tpl}, "hydrated", HarnessConfigSourceHubHydrated, false, ""},
+		{"template-bundled outranks project", "", "claude", []string{tpl}, "template", HarnessConfigSourceTemplateBundled, false, ""},
+		{"project is broker-local", "", "claude", nil, "project", HarnessConfigSourceBrokerLocal, true, ""},
+		{"global is broker-local", "", "only-global", nil, "global-only", HarnessConfigSourceBrokerLocal, false, ""},
+		{"global dir as project path is the global tier", "", "claude", nil, "global", HarnessConfigSourceBrokerLocal, false, filepath.Join(home, ".scion")},
+		{"synthetic generic is builtin", "", "generic", nil, "scion-base:latest", HarnessConfigSourceBuiltin, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hcDir, err := ResolveHarnessConfigDir(tc.hydrated, tc.hcName, project, tc.templates...)
+			projectPath := project
+			if tc.projectPath != "" {
+				projectPath = tc.projectPath
+			}
+			hcDir, err := ResolveHarnessConfigDir(tc.hydrated, tc.hcName, projectPath, tc.templates...)
 			if err != nil {
 				t.Fatalf("resolve: %v", err)
 			}
@@ -71,6 +81,9 @@ func TestResolveHarnessConfigDir_Source(t *testing.T) {
 			}
 			if hcDir.Source != tc.source {
 				t.Errorf("Source = %q, want %q", hcDir.Source, tc.source)
+			}
+			if got := hcDir.FromProjectTier(); got != tc.projectTier {
+				t.Errorf("FromProjectTier = %v, want %v", got, tc.projectTier)
 			}
 		})
 	}

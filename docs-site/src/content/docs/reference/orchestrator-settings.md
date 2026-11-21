@@ -328,6 +328,46 @@ The check runs at each of these points:
 - **Runtime listing.** If the Runtime Broker cannot list a runtime's containers, it cannot tell which agents to check, so it stops none and tries again at the next check.
 - **Hard links.** Directories are not walked. A hard link to a protected file, placed inside an allowed directory by a process on the host, is not detected. An agent cannot create such a link itself.
 
+### Volumes in agent config on a hosted server
+
+On a hosted server (one not running in workstation mode), volumes written by project members are restricted further. This covers:
+
+- the `config` of an agent create request, the agent's stored inline config (sent again with each start), and config changes saved later through an agent update, including held edits;
+- the `config.yaml` of a project-scope harness config stored in the Hub;
+- a harness config bundled in a project-scope template stored in the Hub (`harness-configs/<name>/config.yaml`);
+- on a Runtime Broker, a harness config in the project's own `harness-configs` directory, or one bundled in a template.
+
+A refused volume gets `400` with the code `hosted_config_refused`:
+
+| Volume `type` | On a hosted server |
+| :--- | :--- |
+| `local` or unset (a host file or directory) | Refused |
+| `nfs` | Refused |
+| `cloudrun-volume`, `gke-shared-volume` | Refused |
+| `gcs` (spelled exactly so, in lower case) | Allowed only for agents that run on Kubernetes |
+| Any other type | Refused |
+
+- **Where it is checked.** A hosted Hub checks agent create and update requests, and checks again before it sends each create, provision, start or restart to a Runtime Broker, whatever mode that Runtime Broker runs in. It checks a project-scope harness config whenever its files change (file writes and uploads, finalize, clone into project scope, and import or reimport, which is refused as a whole before anything is stored), and again at dispatch for the harness config the agent uses. A `config.yaml` too large for the Hub to read is refused, because it cannot be checked. Before a dispatch, and when an agent's config is updated, the Hub judges a `gcs` volume by the runtime type the target Runtime Broker reports for the agent's profile: it is refused unless that type is Kubernetes. When the Hub does not know the profile or its type, and when a harness config is stored, it leaves the `gcs` decision in agent config to the Runtime Broker. A hosted Runtime Broker checks the config and inline config of each create and start request before anything is saved. It also checks a project-level or template-bundled harness config when it provisions and when it starts an agent. It does not check a harness config the Hub sends with the dispatch, because the Hub checks it. So at dispatch the Hub refuses a `gcs` volume in a project-scope Hub harness config unless the runtime type is known to be Kubernetes: when the Hub cannot determine the agent's runtime type (the profile is not reported, has no type, or the Runtime Broker reports several profiles and none is named), the dispatch is refused.
+- **Harness configs bundled in Hub templates.** A hosted Hub checks every bundled `harness-configs/<name>/config.yaml` of a project-scope or user-scope template (any member can write templates in their own user scope) whenever the template's files change (file writes and uploads, finalize, clone, and import or reimport, which is refused as a whole before anything is stored), and again before each dispatch of an agent that uses the template. A file path that a Runtime Broker's filesystem could read under another name is refused: the path's top-level name, and under `harness-configs/` the harness config's name and the names in its top directory, must be plain ASCII, must not end with a dot or a space, must not contain `~`, and must spell `harness-configs` and `config.yaml` in lower case. Global templates are not checked by the Hub.
+- **Agents and harness configs created earlier.** An agent whose stored config, or whose project harness config, already holds a refused volume is refused at its next start or restart, with the same error. A running agent keeps its mounts until it stops. Remove the volume from the agent's config or the harness config's `config.yaml`, or create the agent again without it.
+- **Operator-configured volumes.** Volumes configured by the server operator are not affected: profiles, flat Runtime Broker instance `agent_defaults`, `harness_configs` in global settings, global harness-config directories and the Hub's global harness configs. A harness config bundled in a template is checked even when the template is global; move such volumes into one of the operator places above. To give agents a host directory on a hosted server, use a project shared directory, or ask the operator to configure the volume in one of those places.
+- **Workstation mode.** Nothing changes. Volumes in agent config are subject only to the control-path rules above.
+
+The error names the volume by its target and says where it came from (for example `agent config` or `harness config "name"`). It never includes the volume's source, server or bucket.
+
+### Environment and Hub settings in agent config on a hosted server
+
+On a hosted server, the same member-written config is also checked for environment variables and for a `hub` block. It is checked in the same places and at the same times as volumes (see above), with the same `400 hosted_config_refused` error:
+
+- **Host environment references.** An `env` name or value that the Runtime Broker would expand against its own environment (`$NAME`, `${NAME}`) is refused. Use a literal value, or store the value as a secret.
+- **Empty values.** An `env` entry with an empty value is refused, because an empty value takes the variable of the same name from the Runtime Broker's environment. The reserved names listed below that may be set may also be left empty.
+- **Reserved names.** An `env` name starting with `SCION_` or `GCE_METADATA_` is refused: these names are reserved for Scion's own variables. A few names may still be set, each only where it is needed: `SCION_AUTO_EXPOSE_PORTS`, `SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PORTS_LIST` and `SCION_AUTO_EXPOSE_INTERVAL` (port auto-expose) in agent config at create, in agent config updates and in harness configs; `SCION_LOG_LEVEL` and `SCION_TELEMETRY_ENABLED` (set by the CLI's `--agent-log-level`, `--enable-telemetry` and `--disable-telemetry`) in agent config at create only; and `SCION_LIVENESS_HARNESS_ROOT_DEPTH` (set by the bundled Codex harness config) and `SCION_AGENT_NAME` (set in `env_template` by bundled harness configs) in harness configs only. Any other reserved name is refused, including ones added in later releases.
+- **Hub endpoint.** A `hub` block with an endpoint in agent config is refused. The server sets the agent's Hub connection.
+
+Harness configs are checked for `env`, and for reserved names in `env_template` (its values are filled from the agent's own fields, never from the Runtime Broker's environment); they have no `hub` block. On a Runtime Broker, the `env` list in the `config` of a create request is not checked: its values are used as written, never expanded or taken from the Runtime Broker's environment, and the Runtime Broker drops the reserved names it reads from it: the in-container clone URL and depth, the git token remote, `SCION_AUTH_TOKEN` and the Cloud Run native identity marker. A template's `env` is not checked: its values are used literally, without expansion or passthrough, and its `SCION_*` names and `hub` block are already ignored. Env from operator sources (profiles, settings `harness_configs`, global harness-config directories, the Hub's global harness configs and environment variables and secrets the Hub resolves) is not affected. In workstation mode, nothing changes.
+
+The error names the env variable (or `hub "endpoint"`) and where it came from. It never includes the value.
+
 ## Telemetry Configuration (`telemetry`)
 
 Controls agent telemetry collection, forwarding, privacy filtering, and debug output. Telemetry settings can be defined at global or project scope and are merged across the hierarchy (last write wins). A template's `telemetry` block is ignored; the Hub telemetry configuration and project telemetry policy also apply, and an agent's own config can only turn telemetry on or off. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).

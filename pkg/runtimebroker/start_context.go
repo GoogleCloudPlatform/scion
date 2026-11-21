@@ -1058,6 +1058,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Name:               in.Name,
 		Persistence:        in.Persistence,
 		BrokerMode:         true,
+		HostedMode:         !s.config.WorkstationMode,
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
@@ -1519,12 +1520,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
-	// In co-located (workstation) hub mode, auto-inject the host ADC file as a
+	// In co-located workstation hub mode, auto-inject the host ADC file as a
 	// gcloud-adc file secret so agents can authenticate with GCP without requiring
 	// the user to manually upload the credential file.
 	// Only inject if the user has explicitly opted in via settings.
-	// Never for an agent without credentials.
-	if isColocated && !in.NoAuth {
+	// Never in hosted mode (like host credential files, whatever the setting
+	// says), and never for an agent without credentials.
+	if s.config.WorkstationMode && isColocated && !in.NoAuth {
 		if adcGlobalDir, gErr := config.GetGlobalDir(); gErr == nil {
 			if vs, loadErr := config.LoadSingleFileVersioned(adcGlobalDir); loadErr == nil &&
 				vs != nil && vs.AutoInjectGcloudADC {

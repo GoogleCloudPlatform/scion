@@ -377,6 +377,14 @@ func installClaudeViaHub(t *testing.T, srv *Server, s store.Store, sourceURL str
 	return after
 }
 
+// setWorkstationImports puts srv in workstation mode for tests that import from
+// a loopback http:// httptest source, which a hosted hub refuses
+// (checkImportSource). Those tests exercise import content handling, which
+// does not depend on the mode.
+func setWorkstationImports(srv *Server) {
+	srv.workstation = true
+}
+
 // testInstallSourceServer is a dev-auth hub with storage after one hosted
 // bootstrap, with the bundled claude row deleted (the ledger lists it, so
 // startup does not re-create it).

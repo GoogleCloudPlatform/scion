@@ -35,6 +35,13 @@ const (
 	kindFile
 )
 
+// Reasons a tree copy skips a source entry, as reported by CheckTree.
+const (
+	skipLink     = "a symbolic link"
+	skipSpecial  = "not a regular file or directory"
+	skipHardLink = "a file with more than one hard link"
+)
+
 // srcEntry is one entry of a tree copy's source directory, classified
 // without following a link.
 type srcEntry struct {
@@ -42,6 +49,9 @@ type srcEntry struct {
 	kind entryKind
 	mode fs.FileMode
 	size int64
+	// skip says why a kindSkip entry is not copied (skipLink,
+	// skipSpecial or skipHardLink); empty for other kinds.
+	skip string
 	// id identifies the entry seen when listing, so an entry replaced
 	// before it is opened is refused; zero when the source has none.
 	dev, ino uint64
@@ -109,6 +119,10 @@ func (s *fsSource) entries() ([]srcEntry, error) {
 			}
 		default:
 			e.kind = kindSkip
+			e.skip = skipSpecial
+			if t&fs.ModeSymlink != 0 {
+				e.skip = skipLink
+			}
 		}
 		out = append(out, e)
 	}
@@ -137,6 +151,61 @@ func (s *fsSource) open(e srcEntry) (io.ReadCloser, error) {
 }
 
 func (s *fsSource) close() error { return nil }
+
+// RefusedEntryError reports an entry CheckTree refuses: Path is the
+// entry's path relative to the checked directory, in slash form, never a
+// host path; Reason says what it is (a symbolic link, not a regular file
+// or directory, or a file with more than one hard link).
+type RefusedEntryError struct {
+	Path   string
+	Reason string
+}
+
+func (e *RefusedEntryError) Error() string {
+	return e.Path + " is " + e.Reason + "; replace it with a regular file or directory"
+}
+
+// CheckTree walks the directory srcRel in src, as InstallTreeFrom and
+// OverlayTreeFrom would read it (without following a link), and fails
+// with a *RefusedEntryError for the first entry those copies would skip:
+// a symbolic link, a special file, or (on unix) a regular file with more
+// than one hard link. SkipCopyName entries are ignored. A caller that must
+// not drop entries silently checks the source with CheckTree before
+// copying it; an entry replaced between the check and the copy is still
+// never followed by the copy.
+func CheckTree(src *Home, srcRel string) error {
+	s, err := openSource(src, srcRel)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = s.close() }()
+	return checkTree(s, "")
+}
+
+func checkTree(src treeSource, prefix string) error {
+	entries, err := src.entries()
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		rel := path.Join(prefix, e.name)
+		switch e.kind {
+		case kindSkip:
+			return &RefusedEntryError{Path: rel, Reason: e.skip}
+		case kindDir:
+			child, err := src.sub(e)
+			if err != nil {
+				return err
+			}
+			err = checkTree(child, rel)
+			_ = child.close()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
 
 // preWalk charges every entry below src to b without writing anything, so
 // OverlayTreeFrom reports a limit before its first write.

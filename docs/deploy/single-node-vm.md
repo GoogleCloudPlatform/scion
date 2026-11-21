@@ -750,15 +750,10 @@ The Phase 3 file does **not** turn on dev auth. `server.auth.mode: dev` on its o
 does not enable it, so until Phase 5 the Hub answers `/healthz` normally and
 every authenticated API call with `401`. Dev auth is turned on only by the
 `--dev-auth` flag or `server.auth.dev_mode: true` (environment variable
-`SCION_SERVER_AUTH_DEVMODE=true`). The server refuses to start with dev auth
-when the web server binds a non-loopback address. From Phase 5 on, the Hub
-binds `0.0.0.0` so that the IAP proxy can reach it, so do not enable dev auth
-on the VM. If you need authenticated access before Phase 5, configure OAuth
+`SCION_SERVER_AUTH_DEVMODE=true`). The VM runs the server in hosted mode,
+which refuses to start with dev auth enabled, so do not enable it on the VM.
+If you need authenticated access before Phase 5, configure OAuth
 (see [Authentication](../../docs-site/src/content/docs/hosted/single-node/auth.md)).
-For a short-lived test only, you can bind the Hub to loopback
-(`--host 127.0.0.1`) with dev auth and reach it through an SSH tunnel
-(`gcloud compute ssh scion-hub-my-hub -- -L 8080:localhost:8080`). Revert both
-before Phase 5, because the IAP proxy cannot reach a loopback-only Hub.
 
 Final configuration:
 

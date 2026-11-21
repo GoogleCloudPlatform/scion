@@ -1238,6 +1238,9 @@ func TestGCPSARemove_CloudRunAllowListNotABrokerMapping(t *testing.T) {
 func TestValidateAgentConfigPatch_ReservedEnvEdits(t *testing.T) {
 	ctx := context.Background()
 	srv, _ := testServer(t)
+	// The echo rule is the same in both modes; a hosted hub also refuses
+	// reserved env names in agent config outright (hostedguard).
+	srv.workstation = true
 	stored := map[string]string{"A": "1", "SCION_HUB_ENDPOINT": "https://hub", envNativeCloudRun: "1"}
 	agent := &store.Agent{ID: tid("agent-patch-cr"), ProjectID: tid("project-patch-cr"),
 		AppliedConfig: &store.AgentAppliedConfig{Env: stored}}
@@ -1286,6 +1289,7 @@ func TestValidateAgentConfigPatch_ReservedEnvEdits(t *testing.T) {
 func TestValidateAgentConfigPatch_ReservedEnvConcurrentChange(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
+	srv.workstation = true // as in TestValidateAgentConfigPatch_ReservedEnvEdits
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: tid("project-patch-race"), Name: "race", Slug: "race"}))
 	row := &store.Agent{ID: tid("agent-patch-race"), Name: "race", Slug: "race", ProjectID: tid("project-patch-race"),
 		AppliedConfig: &store.AgentAppliedConfig{Env: map[string]string{"SCION_HUB_ENDPOINT": "https://hub"}}}

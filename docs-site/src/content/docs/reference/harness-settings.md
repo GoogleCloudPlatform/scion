@@ -282,11 +282,12 @@ The same applies to the built-in `default` template: you can re-import it as a g
 result is always user-managed and does not receive later bundled updates. Workstation Hubs keep
 it updated.
 
-The Hub must be able to reach GitHub to fetch the URL. An air-gapped Hub needs another source it
-can reach, for example a mirror given as an rclone URI in `sourceUrl` (`:gcs:bucket/path`), or a
-project workspace import (`POST /api/v1/projects/{id}/import-harness-configs` with
-`workspacePath`), which creates a project-scoped config. On a hosted Hub, both give a
-user-managed copy.
+The Hub must be able to reach GitHub to fetch the URL. Rclone URIs in `sourceUrl`
+(`:gcs:bucket/path`) and other non-https sources work on **workstation** Hubs only. A hosted Hub
+accepts only `https://` sources on public addresses, and does not follow redirects for archive
+URLs. On a hosted Hub without access to GitHub, use a project workspace import
+(`POST /api/v1/projects/{id}/import-harness-configs` with `workspacePath`), which creates a
+project-scoped, user-managed config.
 
 ## Configuration (`config.yaml`)
 

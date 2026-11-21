@@ -103,6 +103,11 @@ func (s *Server) beginAsyncLaunch(w http.ResponseWriter, r *http.Request, ctx co
 			s.writeHarnessPolicyRefusal(w, d, "create agent", req.ID, nil)
 			return false
 		}
+		if re, ok := hostedConfigRefusalFrom(err); ok {
+			markAttemptFailed(http.StatusBadRequest, re.Error())
+			writeHostedConfigRefusalDetails(w, re, nil)
+			return false
+		}
 		if emptyGenericCommandFrom(err) {
 			markAttemptFailed(emptyGenericCommandStatus, emptyGenericCommandMessage())
 			s.agentLifecycleLog.Warn("Agent create failed: preflight: empty generic command",

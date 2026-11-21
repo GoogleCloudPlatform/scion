@@ -196,6 +196,7 @@ func TestBuildStartContext_NoAuthSkipsADC(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				cfg := DefaultServerConfig()
 				cfg.StateDir = t.TempDir()
+				cfg.WorkstationMode = true
 				srv := newTestServerForStartContext(t, cfg)
 				srv.hubMu.Lock()
 				srv.hubConnections["hub-1"] = &HubConnection{Name: "hub-1", IsColocated: true, Hydrator: newTestHydrator(t)}
@@ -234,6 +235,59 @@ func TestBuildStartContext_NoAuthSkipsADC(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestBuildStartContext_ADCAutoInjectWorkstationOnly: with the gcloud login
+// file auto-inject turned on, a co-located workstation broker gives the file
+// to an agent with credentials; a hosted broker never does.
+func TestBuildStartContext_ADCAutoInjectWorkstationOnly(t *testing.T) {
+	clearSCIONEnv(t)
+	for _, tc := range []struct {
+		name        string
+		workstation bool
+		want        bool
+	}{
+		{name: "workstation", workstation: true, want: true},
+		{name: "hosted", workstation: false, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			cfg.WorkstationMode = tc.workstation
+			srv := newTestServerForStartContext(t, cfg)
+			srv.hubMu.Lock()
+			srv.hubConnections["hub-1"] = &HubConnection{Name: "hub-1", IsColocated: true, Hydrator: newTestHydrator(t)}
+			srv.hubMu.Unlock()
+
+			// A home of its own, so the auto-inject setting written below
+			// does not stay on for later tests in the package.
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			naEnableADCAutoInject(t, home)
+
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+			r.Header.Set("X-Scion-Hub-Connection", "hub-1")
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-adc-mode",
+				HubEndpoint: "http://localhost:8080",
+				HTTPRequest: r,
+				Operation:   opCreate,
+				Config:      &CreateAgentConfig{},
+			})
+			if err != nil {
+				t.Fatalf("buildStartContext: %v", err)
+			}
+			var got bool
+			for _, s := range sc.Opts.ResolvedSecrets {
+				if s.Name == "gcloud-adc" {
+					got = true
+				}
+			}
+			if got != tc.want {
+				t.Errorf("gcloud-adc injected = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

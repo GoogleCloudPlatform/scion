@@ -99,7 +99,13 @@ func (s *fdSource) entries() ([]srcEntry, error) {
 			}
 			if st.Nlink == 1 {
 				e.kind = kindFile
+			} else {
+				e.skip = skipHardLink
 			}
+		case unix.S_IFLNK:
+			e.skip = skipLink
+		default:
+			e.skip = skipSpecial
 		}
 		out = append(out, e)
 	}

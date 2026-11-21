@@ -5754,6 +5754,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug, logging.Subsystem("hub.dispatcher"))
 	dispatcher.SetStorageLayout(s.projectStorageLayout)
 	dispatcher.SetWorkspaceStorage(s.GetStorage)
+	dispatcher.SetHostedMode(!s.config.Workstation)
+	dispatcher.SetHostedHarnessConfigCheck(s.checkStoredHostedHarnessConfig)
+	dispatcher.SetHostedTemplateCheck(s.checkStoredHostedTemplate)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {

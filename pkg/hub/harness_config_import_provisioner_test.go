@@ -110,6 +110,7 @@ func TestHarnessConfigImport_RejectsUnusableProvisioner(t *testing.T) {
 	for _, tc := range unusableProvisionerCases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testInstallSourceServer(t)
+			setWorkstationImports(srv)
 			stor := srv.GetStorage().(*mockStorage)
 			before := storageSnapshot(stor)
 
@@ -137,6 +138,7 @@ func TestHarnessConfigImport_RejectsUnusableProvisioner(t *testing.T) {
 
 	t.Run("usable provisioner imports", func(t *testing.T) {
 		srv, s := testInstallSourceServer(t)
+		setWorkstationImports(srv)
 		src := tarGzFilesServer(t, map[string]string{
 			"config.yaml": "name: goodcfg\nharness: claude\nprovisioner:\n  type: container-script\n  interface_version: 1\n  command: [python3, provision.py]\n",
 		})
@@ -156,6 +158,7 @@ func TestHarnessConfigReimport_RejectsUnusableProvisioner(t *testing.T) {
 	for _, tc := range unusableProvisionerCases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testInstallSourceServer(t)
+			setWorkstationImports(srv)
 			hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
 			stor := srv.GetStorage().(*mockStorage)
 			before := storageSnapshot(stor)
@@ -285,6 +288,7 @@ func TestHandleProjectImportHarnessConfigs_RejectsUnusableProvisioner(t *testing
 // whole through POST /api/v1/resources/import.
 func TestHarnessConfigImport_RejectsUnusableProvisionerAllOrNothing(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
+	setWorkstationImports(srv)
 	stor := srv.GetStorage().(*mockStorage)
 	before := storageSnapshot(stor)
 
@@ -324,6 +328,7 @@ func reimportSiblingSource(claudeBlock string) map[string]string {
 // (ptone/scion#4213).
 func TestHarnessConfigReimport_IgnoresUnusableSibling(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
+	setWorkstationImports(srv)
 	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
 
 	src := tarGzFilesServer(t, reimportSiblingSource(""))
@@ -347,6 +352,7 @@ func TestHarnessConfigReimport_IgnoresUnusableSibling(t *testing.T) {
 // other configs, and changes nothing.
 func TestHarnessConfigReimport_RejectsUnusableTargetWithSiblings(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
+	setWorkstationImports(srv)
 	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
 	stor := srv.GetStorage().(*mockStorage)
 	before := storageSnapshot(stor)
@@ -381,6 +387,7 @@ func TestHarnessConfigReimport_RenamedTargetIgnoresNameSibling(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testInstallSourceServer(t)
+			setWorkstationImports(srv)
 			ctx := context.Background()
 			hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
 			hc.Name = "renamed-target"
@@ -413,6 +420,7 @@ func TestHarnessConfigReimport_RenamedTargetIgnoresNameSibling(t *testing.T) {
 // a message naming that slug, and changes nothing (ptone/scion#4213).
 func TestHarnessConfigReimport_NoMatchingSlug(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
+	setWorkstationImports(srv)
 	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
 
 	src := tarGzFilesServer(t, map[string]string{
@@ -441,6 +449,7 @@ func TestHarnessConfigReimport_NoMatchingSlug(t *testing.T) {
 // non-streaming 422 answer (ptone/scion#4214).
 func TestHarnessConfigImportStream_RefusalCarriesCode(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
+	setWorkstationImports(srv)
 	src := tarGzFilesServer(t, multiConfigSource)
 	importReq := ImportResourcesRequest{
 		Kind: "harness-config", Scope: "global", SourceURL: src.URL + "/configs/multi.tar.gz",
