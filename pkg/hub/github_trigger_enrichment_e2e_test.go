@@ -67,6 +67,13 @@ func TestGitHubTriggerE2E_PREnrichmentHappyForkFailureUnauthorizedAndNoCandidate
 
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":          appID,
+				"slug":        "octo-app",
+				"permissions": map[string]string{"contents": "write", "pull_requests": "read", "issues": "read", "metadata": "read"},
+			})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
 			mintCallCount.Add(1)
 			var req struct {
