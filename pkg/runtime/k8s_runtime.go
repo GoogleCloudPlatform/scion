@@ -2041,8 +2041,9 @@ func storageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested string) (
 // RWX PVCs. It creates a PVC with a deterministic name if one does not already
 // exist. Used by both shared-dir and (future) workspace claim paths.
 //
-// An existing claim is reused as it is, with no policy needed, unless it is
-// labelled for a different project, which refuses the start. An existing
+// An existing claim (including one created concurrently by another agent start
+// between Get and Create) is reused as it is, with no policy needed, unless it
+// is labelled for a different project, which refuses the start. An existing
 // claim without a project ID label (one made by hand) is reused with a
 // warning. A claim that does not exist is created only when policy allows
 // it (sharedDirClaimPolicy.createSpec); otherwise the start is refused with
@@ -2058,18 +2059,7 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
 	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
-		claimProjectID := projectkeys.ProjectIDFromLabels(existing.Labels)
-		switch {
-		case claimProjectID == "":
-			runtimeLog().Warn("Reusing shared-dir claim without a project ID label; it is used as is",
-				"pvc", pvcName, "namespace", namespace, "dir", dirName, "project_id", projectID)
-		case projectID != "" && claimProjectID != projectID:
-			return sharedDirClaimOtherProjectError(dirName, namespace, pvcName, claimProjectID, projectID)
-		default:
-			runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
-		}
-		warnOnStorageClassMismatch(existing, policy.Class)
-		return nil
+		return reuseProjectRWXClaim(existing, namespace, pvcName, projectID, dirName, policy)
 	}
 	if !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("checking shared-dir claim %s/%s: %w", namespace, pvcName, err)
@@ -2111,9 +2101,35 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 
 	runtimeLog().Info("Creating project RWX PVC", "pvc", pvcName, "dir", dirName, "storage", storageQuantity.String())
 	if _, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			existing, getErr := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+			if getErr != nil {
+				return fmt.Errorf("reading concurrently created shared-dir claim %s/%s: %w", namespace, pvcName, getErr)
+			}
+			return reuseProjectRWXClaim(existing, namespace, pvcName, projectID, dirName, policy)
+		}
 		return fmt.Errorf("failed to create project RWX PVC %q: %w", pvcName, err)
 	}
 
+	return nil
+}
+
+func reuseProjectRWXClaim(
+	existing *corev1.PersistentVolumeClaim,
+	namespace, pvcName, projectID, dirName string,
+	policy sharedDirClaimPolicy,
+) error {
+	claimProjectID := projectkeys.ProjectIDFromLabels(existing.Labels)
+	switch {
+	case claimProjectID == "":
+		runtimeLog().Warn("Reusing shared-dir claim without a project ID label; it is used as is",
+			"pvc", pvcName, "namespace", namespace, "dir", dirName, "project_id", projectID)
+	case projectID != "" && claimProjectID != projectID:
+		return sharedDirClaimOtherProjectError(dirName, namespace, pvcName, claimProjectID, projectID)
+	default:
+		runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
+	}
+	warnOnStorageClassMismatch(existing, policy.Class)
 	return nil
 }
 

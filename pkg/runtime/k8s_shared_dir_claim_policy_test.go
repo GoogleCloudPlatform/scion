@@ -209,3 +209,134 @@ func TestEnsureProjectRWXClaim_GetErrorReturned(t *testing.T) {
 	assert.True(t, k8serrors.IsServiceUnavailable(errors.Unwrap(err)))
 	assert.Empty(t, claimWrites(clientset))
 }
+
+// When two agent starts race to create the same missing shared-dir claim,
+// Create returns AlreadyExists; the losing start re-reads the claim and
+// applies the same reuse rules as for an existing claim.
+func TestEnsureProjectRWXClaim_ConcurrentAlreadyExists(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	pvcName := "scion-shared-myproject-build-cache"
+	pvcGR := corev1.Resource("persistentvolumeclaims")
+
+	t.Run("matching claim reused", func(t *testing.T) {
+		var buf bytes.Buffer
+		setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
+
+		rt, clientset, _ := newTestK8sRuntime()
+		concurrent := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: pvcName, Namespace: "default",
+				Labels: map[string]string{
+					"scion.project":    "myproject",
+					"scion.project_id": "proj-1",
+					"scion.shared-dir": "build-cache",
+				},
+			},
+			Spec:   corev1.PersistentVolumeClaimSpec{StorageClassName: strPtr("standard-rwx")},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}
+		clientset.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			require.NoError(t, clientset.Tracker().Add(concurrent))
+			return true, nil, k8serrors.NewAlreadyExists(pvcGR, pvcName)
+		})
+
+		require.NoError(t, rt.createSharedDirPVCs(context.Background(), "default", sharedDirClaimConfig("standard-rwx")))
+		assert.Equal(t, []string{"create"}, claimWrites(clientset))
+		assert.NotContains(t, buf.String(), "level=WARN")
+	})
+
+	t.Run("other project refused", func(t *testing.T) {
+		rt, clientset, _ := newTestK8sRuntime()
+		concurrent := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: pvcName, Namespace: "default",
+				Labels: map[string]string{
+					"scion.project":    "myproject",
+					"scion.project_id": "proj-other",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{StorageClassName: strPtr("standard-rwx")},
+		}
+		clientset.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			require.NoError(t, clientset.Tracker().Add(concurrent))
+			return true, nil, k8serrors.NewAlreadyExists(pvcGR, pvcName)
+		})
+
+		err := rt.createSharedDirPVCs(context.Background(), "default", sharedDirClaimConfig("standard-rwx"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "is labelled for project proj-other")
+		assert.Contains(t, err.Error(), "not this project proj-1")
+	})
+
+	t.Run("storage class mismatch warns", func(t *testing.T) {
+		var buf bytes.Buffer
+		setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
+
+		rt, clientset, _ := newTestK8sRuntime()
+		concurrent := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: pvcName, Namespace: "default",
+				Labels: map[string]string{
+					"scion.project":    "myproject",
+					"scion.project_id": "proj-1",
+				},
+			},
+			Spec:   corev1.PersistentVolumeClaimSpec{StorageClassName: strPtr("standard")},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending},
+		}
+		clientset.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			require.NoError(t, clientset.Tracker().Add(concurrent))
+			return true, nil, k8serrors.NewAlreadyExists(pvcGR, pvcName)
+		})
+
+		require.NoError(t, rt.createSharedDirPVCs(context.Background(), "default", sharedDirClaimConfig("standard-rwx")))
+		out := buf.String()
+		assert.Contains(t, out, "level=WARN")
+		assert.Contains(t, out, "existing_storage_class=standard")
+		assert.Contains(t, out, "requested_storage_class=standard-rwx")
+	})
+
+	t.Run("unlabelled claim reused with warning", func(t *testing.T) {
+		var buf bytes.Buffer
+		setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
+
+		rt, clientset, _ := newTestK8sRuntime()
+		concurrent := &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: pvcName, Namespace: "default"},
+			Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: strPtr("standard-rwx")},
+		}
+		clientset.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			require.NoError(t, clientset.Tracker().Add(concurrent))
+			return true, nil, k8serrors.NewAlreadyExists(pvcGR, pvcName)
+		})
+
+		require.NoError(t, rt.createSharedDirPVCs(context.Background(), "default", sharedDirClaimConfig("standard-rwx")))
+		out := buf.String()
+		assert.Contains(t, out, "level=WARN")
+		assert.Contains(t, out, "without a project ID label")
+	})
+
+	t.Run("follow-up read error returned", func(t *testing.T) {
+		rt, clientset, _ := newTestK8sRuntime()
+		clientset.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, k8serrors.NewAlreadyExists(pvcGR, pvcName)
+		})
+
+		err := rt.createSharedDirPVCs(context.Background(), "default", sharedDirClaimConfig("standard-rwx"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reading concurrently created shared-dir claim default/"+pvcName)
+		assert.True(t, k8serrors.IsNotFound(errors.Unwrap(err)))
+	})
+
+	t.Run("non-AlreadyExists create error still returned", func(t *testing.T) {
+		rt, clientset, _ := newTestK8sRuntime()
+		clientset.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+			return true, nil, k8serrors.NewForbidden(pvcGR, pvcName, errors.New("quota exceeded"))
+		})
+
+		err := rt.createSharedDirPVCs(context.Background(), "default", sharedDirClaimConfig("standard-rwx"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `failed to create project RWX PVC "`+pvcName+`"`)
+		assert.True(t, k8serrors.IsForbidden(errors.Unwrap(err)))
+	})
+}
