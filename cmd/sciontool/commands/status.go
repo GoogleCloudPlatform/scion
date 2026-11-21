@@ -48,19 +48,16 @@ Examples:
   # Signal limits exceeded
   sciontool status limits_exceeded "max_turns of 50 exceeded"`,
 	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		statusType := args[0]
 		message := strings.Join(args[1:], " ")
 
 		definition, ok := agentstatus.Lookup(statusType)
 		if !ok {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: unknown status type %q\n", statusType)
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Valid types: ask_user, blocked, idle, task_completed, limits_exceeded\n")
-			cmd.Root().SetArgs([]string{"status", "--help"})
-			_ = cmd.Root().Execute()
-			return
+			return fmt.Errorf("unknown status type %q\nValid types: ask_user, blocked, idle, task_completed, limits_exceeded", statusType)
 		}
 		agentstatus.Run(definition, message)
+		return nil
 	},
 }
 
