@@ -76,6 +76,9 @@ func TestHandleGitHubAppDiscover_RepoListingFailurePreservesStoredRepos(t *testi
 
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"discover-app","permissions":{"contents":"write","pull_requests":"write","issues":"write","metadata":"read"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":12345,"app_id":42,"account":{"login":"acme","type":"Organization"}}]`))
@@ -170,6 +173,9 @@ func TestHandleGitHubAppDiscover_PartialMultiPageFailurePreservesStoredRepos(t *
 	var pagesRequested []string
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"discover-app","permissions":{"contents":"write","pull_requests":"write","issues":"write","metadata":"read"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":12345,"app_id":42,"account":{"login":"acme","type":"Organization"}}]`))
@@ -246,6 +252,9 @@ func TestHandleGitHubAppDiscover_PartialMultiInstallationFailure(t *testing.T) {
 
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"discover-app","permissions":{"contents":"write","pull_requests":"write","issues":"write","metadata":"read"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[
@@ -333,6 +342,9 @@ func TestHandleGitHubAppDiscover_PartialMultiInstallationFailure(t *testing.T) {
 func TestHandleGitHubAppDiscover_SuccessReplacesStoredRepos(t *testing.T) {
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"discover-app","permissions":{"contents":"write","pull_requests":"write","issues":"write","metadata":"read"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":12345,"app_id":42,"account":{"login":"acme","type":"Organization"}}]`))
@@ -410,6 +422,9 @@ func TestHandleGitHubAppDiscover_ListInstallationsFailureIsNonLeaky(t *testing.T
 func TestHandleGitHubAppDiscover_AuthorizationUnchanged(t *testing.T) {
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"discover-app","permissions":{"contents":"write","pull_requests":"write","issues":"write","metadata":"read"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[]`))
@@ -482,6 +497,9 @@ func TestHandleGitHubAppDiscover_AuthorizationUnchanged(t *testing.T) {
 func TestHandleGitHubAppDiscover_OtherCallersAfterFailure(t *testing.T) {
 	fakeGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":42,"slug":"discover-app","permissions":{"contents":"write","pull_requests":"write","issues":"write","metadata":"read"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":12345,"app_id":42,"account":{"login":"acme","type":"Organization"}}]`))
