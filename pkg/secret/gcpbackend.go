@@ -133,6 +133,15 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 			if status.Code(err) == codes.NotFound {
 				return nil, store.ErrNotFound
 			}
+			// Under least-privilege prefix-conditioned IAM (legacy grant
+			// removed), every legacy name returns PermissionDenied even when
+			// no secret exists. With no DB record claiming the secret exists,
+			// prefixed NotFound followed by legacy PermissionDenied means not
+			// found.
+			var legacyErr *legacyLookupError
+			if errors.As(err, &legacyErr) && status.Code(err) == codes.PermissionDenied {
+				return nil, store.ErrNotFound
+			}
 		} else {
 			slog.Info("Recovered secret from GCP SM without DB record", "name", name, "scope", scope)
 		}
@@ -866,12 +875,26 @@ func (b *GCPBackend) legacyGCPSecretName(name, scope, scopeID string) string {
 	return sanitizeSecretID(fmt.Sprintf("scion-%s-%s-%s", scope, shortHash, name))
 }
 
+// legacyLookupError wraps an error returned from the legacy (pre-prefix)
+// Secret Manager name fallback in accessSecretByComputedName so callers with
+// no DB record claiming the secret exists can distinguish a legacy-name IAM
+// denial (expected under least-privilege prefix-conditioned IAM) from a
+// prefixed-name failure.
+type legacyLookupError struct {
+	err error
+}
+
+func (e *legacyLookupError) Error() string { return e.err.Error() }
+func (e *legacyLookupError) Unwrap() error { return e.err }
+
 // accessSecretByComputedName tries the current hub-prefixed GCP SM name first
 // and, only if that is not found, falls back to the legacy (pre-prefix) name,
 // logging a WARN on a legacy hit. It is used whenever a secret must be looked
 // up without a stored DB SecretRef to guide the lookup (a DB-less recovery
 // read, or a Resolve() pass over a record that predates SecretRef being
-// persisted). Returns the value and the GCP SM secret ID that resolved it.
+// persisted). Only a NotFound on both names is reported as NotFound; any
+// non-NotFound legacy lookup error is returned wrapped in *legacyLookupError.
+// Returns the value and the GCP SM secret ID that resolved it.
 func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope, scopeID string) (value, smName string, err error) {
 	prefixedName := b.gcpSecretName(name, scope, scopeID)
 	value, err = b.accessLatestVersion(ctx, prefixedName)
@@ -885,8 +908,8 @@ func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	value, legacyErr := b.accessLatestVersion(ctx, legacyName)
 	if legacyErr != nil {
-		if errors.Is(legacyErr, errNilSecretPayload) || status.Code(legacyErr) != codes.NotFound {
-			return "", "", legacyErr
+		if status.Code(legacyErr) != codes.NotFound {
+			return "", "", &legacyLookupError{err: legacyErr}
 		}
 		// Neither name exists; surface the prefixed-name NotFound error since
 		// that is the current/expected name.

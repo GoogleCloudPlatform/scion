@@ -3908,3 +3908,126 @@ func TestGCPBackend_Resolve_AccessErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestGCPBackend_Get_LegacyLookupPermissionDenied(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("no_db_record_legacy_permission_denied_returns_not_found", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		legacyPath := base.smSecretPath(base.legacyGCPSecretName("OPT_PLUGIN_SECRET", ScopeHub, base.hubID))
+		client := &accessErrSMClient{
+			mockSMClient: mock,
+			errs: map[string]error{
+				legacyPath: status.Error(codes.PermissionDenied, "iam permission denied on legacy name"),
+			},
+		}
+		backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+
+		sv, err := backend.Get(ctx, "OPT_PLUGIN_SECRET", ScopeHub, base.hubID)
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("Get() error = %v (%T), want store.ErrNotFound", err, err)
+		}
+		if sv != nil {
+			t.Fatalf("Get() = %+v, want nil", sv)
+		}
+	})
+
+	t.Run("no_db_record_prefixed_permission_denied_returns_permission_error", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		prefixedPath := base.smSecretPath(base.gcpSecretName("OPT_PLUGIN_SECRET", ScopeHub, base.hubID))
+		client := &accessErrSMClient{
+			mockSMClient: mock,
+			errs: map[string]error{
+				prefixedPath: status.Error(codes.PermissionDenied, "iam permission denied on prefixed name"),
+			},
+		}
+		backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+
+		sv, err := backend.Get(ctx, "OPT_PLUGIN_SECRET", ScopeHub, base.hubID)
+		if errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("Get() error = store.ErrNotFound, want *PermissionError")
+		}
+		var permErr *PermissionError
+		if !errors.As(err, &permErr) {
+			t.Fatalf("Get() error = %v (%T), want *PermissionError", err, err)
+		}
+		if sv != nil {
+			t.Fatalf("Get() = %+v, want nil", sv)
+		}
+	})
+
+	t.Run("no_db_record_legacy_unavailable_returns_error", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		legacyPath := base.smSecretPath(base.legacyGCPSecretName("OPT_PLUGIN_SECRET", ScopeHub, base.hubID))
+		client := &accessErrSMClient{
+			mockSMClient: mock,
+			errs: map[string]error{
+				legacyPath: status.Error(codes.Unavailable, "secret manager unavailable"),
+			},
+		}
+		backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+
+		sv, err := backend.Get(ctx, "OPT_PLUGIN_SECRET", ScopeHub, base.hubID)
+		if err == nil || errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("Get() error = %v, want Unavailable error", err)
+		}
+		var permErr *PermissionError
+		if errors.As(err, &permErr) {
+			t.Fatalf("Get() transient error must not match *PermissionError: %v", err)
+		}
+		if st, ok := status.FromError(err); !ok || st.Code() != codes.Unavailable {
+			t.Errorf("status.FromError(err) = (%v, %v), want code %s", st, ok, codes.Unavailable)
+		}
+		if sv != nil {
+			t.Fatalf("Get() = %+v, want nil", sv)
+		}
+	})
+
+	t.Run("db_record_without_ref_legacy_permission_denied_fails_closed", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		if err := base.store.CreateSecret(ctx, &store.Secret{
+			ID:         tid("db-row-no-ref-legacy-denied"),
+			Key:        "LEGACY_SECRET",
+			SecretType: store.SecretTypeEnvironment,
+			Target:     "LEGACY_SECRET",
+			Scope:      ScopeProject,
+			ScopeID:    "project-1",
+		}); err != nil {
+			t.Fatalf("CreateSecret failed: %v", err)
+		}
+
+		legacyPath := base.smSecretPath(base.legacyGCPSecretName("LEGACY_SECRET", ScopeProject, "project-1"))
+		client := &accessErrSMClient{
+			mockSMClient: mock,
+			errs: map[string]error{
+				legacyPath: status.Error(codes.PermissionDenied, "iam permission denied on legacy name"),
+			},
+		}
+		backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+
+		// Get with an existing DB record and no ref must still return *PermissionError.
+		sv, err := backend.Get(ctx, "LEGACY_SECRET", ScopeProject, "project-1")
+		if errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("Get() error = store.ErrNotFound, want *PermissionError")
+		}
+		var permErr *PermissionError
+		if !errors.As(err, &permErr) {
+			t.Fatalf("Get() error = %v (%T), want *PermissionError", err, err)
+		}
+		if sv != nil {
+			t.Fatalf("Get() = %+v, want nil", sv)
+		}
+
+		// Resolve on the same record must also continue to fail closed.
+		resolved, err := backend.Resolve(ctx, "", "project-1", "", nil)
+		if !errors.Is(err, ErrValueAccess) {
+			t.Fatalf("Resolve() error = %v, want ErrValueAccess", err)
+		}
+		if !errors.As(err, &permErr) {
+			t.Fatalf("Resolve() error = %v, want *PermissionError", err)
+		}
+		if resolved != nil {
+			t.Fatalf("Resolve() = %+v, want nil", resolved)
+		}
+	})
+}
