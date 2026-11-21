@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -1911,14 +1912,13 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "user_access_mode")
 	}
 
-	// Default user role. Writes are validated (schema enum in DB mode,
-	// explicit check in the file-mode PUT), but a hand-edited settings.yaml
-	// or DB row can still hold garbage. Normalize anything other than
-	// member/viewer to member so the live config never grants an
-	// unexpected role at user creation (design D6). The rule itself lives in
-	// normalizedDefaultRole; "" stays unset here (clear semantics).
+	// Default user role. When hub.custom_default_user_role is enabled,
+	// preserve custom role names verbatim so runtime resolution can look up
+	// the role definition (and fall back with a warning if missing/ineligible).
+	// When the experiment is off, normalize anything other than member/viewer
+	// to member (design D6). "" stays unset here (clear semantics).
 	defaultRole := snap.DefaultUserRole
-	if defaultRole != "" {
+	if defaultRole != "" && !s.experimentEnabled(experiments.CustomDefaultUserRole) {
 		if n := normalizedDefaultRole(defaultRole); n != defaultRole {
 			slog.Warn("invalid default_user_role, using member",
 				"configured", defaultRole, "allowed", []string{store.UserRoleMember, store.UserRoleViewer})

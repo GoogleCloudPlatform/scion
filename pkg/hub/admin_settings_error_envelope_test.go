@@ -70,9 +70,9 @@ func assertValidation422(t *testing.T, rr *httptest.ResponseRecorder) []settings
 func TestSettingsEnvelope_DBSchemaErrorsAcrossSections(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	rr := putServerConfigDB(t, srv, ops,
-		`{"server":{"auth":{"default_user_role":"superuser"},"hub":{"hub_name":"Bad.Name"}}}`)
+		`{"default_max_turns":-1,"server":{"hub":{"hub_name":"Bad.Name"}}}`)
 	entries := assertValidation422(t, rr)
-	assertFields(t, entries, "server.auth.default_user_role", "server.hub.hub_name")
+	assertFields(t, entries, "default_max_turns", "server.hub.hub_name")
 	for _, e := range entries {
 		if e.Section == "" {
 			t.Errorf("schema entry without a section: %+v", e)

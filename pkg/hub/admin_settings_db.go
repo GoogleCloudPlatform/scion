@@ -293,6 +293,9 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// Mask sensitive fields — same logic as file mode.
 	maskSensitiveFields(&resp.ServerConfigResponse)
 
+	// Attach default_user_role fallback warning and eligible custom roles.
+	s.populateDefaultUserRoleView(ctx, &resp.ServerConfigResponse)
+
 	return &resp, nil
 }
 
@@ -1455,22 +1458,37 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		fp := sectionBodyPresence("access", rawBody)
 		domainsSent := fp.has("authorized_domains") && !echoedRunning[authorizedDomainsKey]
 		adminsSent := fp.has("admin_emails")
+		defaultRoleSent := fp.has("default_user_role")
 		pinned := slices.Contains(ops.EnvOverriddenKeys(), authorizedDomainsKey)
-		if adminsSent || domainsSent {
+		if adminsSent || domainsSent || defaultRoleSent {
 			var merged opsettings.AccessSettings
 			if err := json.Unmarshal(doc, &merged); err != nil {
 				slog.Error("PUT server-config: failed to decode access document", "error", err)
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
 				return
 			}
-			domains, admins := s.accessListsAfterDBSave(merged, false)
-			if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
-				return
+			if defaultRoleSent {
+				storedRole := ops.Snapshot().DefaultUserRole
+				if row, err := ops.store.GetHubSetting(r.Context(), "access"); err == nil && len(bytes.TrimSpace(row.Value)) > 0 {
+					var existing opsettings.AccessSettings
+					if json.Unmarshal(row.Value, &existing) == nil {
+						storedRole = existing.DefaultUserRole
+					}
+				}
+				if !s.validateDefaultUserRoleSave(w, r, merged.DefaultUserRole, storedRole) {
+					return
+				}
 			}
-			if pinned && adminsSent {
-				domains, admins = s.accessListsAfterDBSave(merged, true)
+			if adminsSent || domainsSent {
+				domains, admins := s.accessListsAfterDBSave(merged, false)
 				if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
 					return
+				}
+				if pinned && adminsSent {
+					domains, admins = s.accessListsAfterDBSave(merged, true)
+					if s.rejectAuthorizedDomainsLockout(r.Context(), w, updatedBy, domains, admins) {
+						return
+					}
 				}
 			}
 		}

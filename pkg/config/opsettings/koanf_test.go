@@ -203,4 +203,9 @@ func TestAccessSection_DefaultUserRoleRoundTrip(t *testing.T) {
 	if got := back.String("server.auth.default_user_role"); got != "viewer" {
 		t.Errorf("koanf server.auth.default_user_role = %q after load, want viewer", got)
 	}
+
+	// Schema allows custom role name strings (semantic validation runs in hub).
+	if errs := Validate("access", json.RawMessage(`{"default_user_role":"custom-default"}`)); len(errs) > 0 {
+		t.Errorf("Validate(access) rejected custom default_user_role string: %v", errs)
+	}
 }

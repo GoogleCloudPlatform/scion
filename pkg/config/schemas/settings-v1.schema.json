@@ -2386,8 +2386,7 @@
         },
         "default_user_role": {
           "type": "string",
-          "description": "Role assigned to new users not in admin_emails. Values: 'member' (default), 'viewer'. 'admin' is blocked.",
-          "enum": ["member", "viewer"],
+          "description": "Role assigned to new users not in admin_emails. Values: 'member' (default), 'viewer', or an eligible custom system-scope role name when hub.custom_default_user_role is enabled. 'admin' is blocked.",
           "default": "member",
           "x-env-var": "SCION_SERVER_AUTH_DEFAULTUSERROLE",
           "x-since": "1"

@@ -624,23 +624,24 @@ func serverConfigForMaskTest() config.V1ServerConfig {
 	}
 }
 
-// Design D6: file-mode PUT rejects default_user_role values outside the
-// schema enum with 422 and writes nothing.
+// Design D6 & ptone/scion#8288: when hub.custom_default_user_role is off,
+// file-mode PUT refuses any default_user_role outside member/viewer with
+// 412 experiment_disabled and writes nothing.
 func TestHandlePutServerConfig_DefaultUserRole_InvalidRejected(t *testing.T) {
 	for _, v := range []string{"superuser", "admin", "Viewer"} {
 		t.Run(v, func(t *testing.T) {
 			srv := &Server{}
 			rr, settingsPath := fileModePutServerConfig(t, srv,
 				`{"server":{"auth":{"default_user_role":"`+v+`"}}}`)
-			if rr.Code != http.StatusUnprocessableEntity {
-				t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+			if rr.Code != http.StatusPreconditionFailed {
+				t.Fatalf("expected 412, got %d: %s", rr.Code, rr.Body.String())
 			}
-			if !strings.Contains(rr.Body.String(), "default_user_role") {
-				t.Errorf("422 body should name default_user_role, got: %s", rr.Body.String())
+			if !strings.Contains(rr.Body.String(), ErrCodeExperimentDisabled) {
+				t.Errorf("412 body should carry %s, got: %s", ErrCodeExperimentDisabled, rr.Body.String())
 			}
 			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
 				data, _ := os.ReadFile(settingsPath)
-				t.Errorf("nothing should be persisted for an invalid value, got settings.yaml: %s", data)
+				t.Errorf("nothing should be persisted for a refused value, got settings.yaml: %s", data)
 			}
 		})
 	}

@@ -543,10 +543,30 @@ const MessagePolicies = "hub.message_policies"
 // (while off, the dialog shows only the roles content without tabs).
 const EffectivePermissions = "hub.effective_permissions"
 
+// CustomDefaultUserRole gates setting server.auth.default_user_role to an
+// eligible custom system-scope role definition (ptone/scion#8288). Server
+// layer: while off, saving a non-built-in default_user_role returns 412
+// experiment_disabled (echoes of an already-stored value and resets to
+// member/viewer pass), and runtime resolution falls back to member with a
+// warning. Web layer: shows eligible custom roles and fallback warnings in
+// Admin > Server Config.
+const CustomDefaultUserRole = "hub.custom_default_user_role"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        CustomDefaultUserRole,
+		Title:       "Custom default user role",
+		Description: "Allows setting server.auth.default_user_role to an eligible custom system-scope role definition instead of only the built-in member or viewer roles. Server layer: while off, saving a custom default_user_role returns 412 experiment_disabled and runtime resolution falls back to member with a warning. Web layer: shows eligible custom roles and fallback warnings in Admin > Server Config.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8288",
+		Owner:       "auth",
+		ReviewBy:    "2027-05-21",
+	},
 	{
 		Name:        EffectivePermissions,
 		Title:       "Effective permissions viewer",
