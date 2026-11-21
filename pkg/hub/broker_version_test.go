@@ -568,7 +568,6 @@ func TestHealthSummary_BrokerVersionBoundedOnRead(t *testing.T) {
 // it, and the value is bounded.
 func TestBrokerHeartbeat_Version(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	id := tid("ver-hb")
 	createSummaryBroker(t, s, versionTestBroker("ver-hb", "v1.2.0"))

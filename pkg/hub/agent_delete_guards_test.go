@@ -425,7 +425,6 @@ func TestDeleteGuard_StatusReport(t *testing.T) {
 func TestDeleteGuard_Heartbeat(t *testing.T) {
 	t.Run("deleting", func(t *testing.T) {
 		srv, s := testServer(t)
-		grantDevUserRuntimeBrokerAccess(t, s)
 		broker, project := newQuotaTestBrokerAndProject(t, s, "dg-hb")
 		agent := newQuotaTestAgent(t, s, broker, project, "dg-hb-agent", state.PhaseRunning)
 		reserveBrokerSlot(t, s, broker, agent.ID)

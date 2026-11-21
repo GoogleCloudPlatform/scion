@@ -55,7 +55,6 @@ func newBrokerHealthTestBroker(t *testing.T, s store.Store, name string) *store.
 // and a broker that reported one before keeps it.
 func TestBrokerHeartbeat_HealthAbsentLeavesStoredValue(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	broker := newBrokerHealthTestBroker(t, s, "broker-health-absent")
 	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
@@ -82,7 +81,6 @@ func TestBrokerHeartbeat_HealthAbsentLeavesStoredValue(t *testing.T) {
 // A changed report is persisted and replaces the stored one.
 func TestBrokerHeartbeat_HealthChangePersists(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	broker := newBrokerHealthTestBroker(t, s, "broker-health-change")
 	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
@@ -107,7 +105,6 @@ func TestBrokerHeartbeat_HealthChangePersists(t *testing.T) {
 // A heartbeat repeating the stored report causes no broker write.
 func TestBrokerHeartbeat_HealthUnchangedNoWrite(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	broker := newBrokerHealthTestBroker(t, s, "broker-health-nowrite")
 
 	counting := &countingBrokerLoadStore{Store: s}
@@ -140,7 +137,6 @@ func TestBrokerHeartbeat_HealthUnchangedNoWrite(t *testing.T) {
 // returned by the health summary.
 func TestBrokerHeartbeat_HealthCheckValuesNormalised(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	broker := newBrokerHealthTestBroker(t, s, "broker-health-normalise")
 	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
@@ -179,7 +175,6 @@ func TestBrokerHeartbeat_HealthCheckValuesNormalised(t *testing.T) {
 // causes no write.
 func TestBrokerHeartbeat_HealthChecksCapped(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	broker := newBrokerHealthTestBroker(t, s, "broker-health-cap")
 
@@ -217,7 +212,6 @@ func TestBrokerHeartbeat_HealthChecksCapped(t *testing.T) {
 // broker stays online, and the status the heartbeat states is kept.
 func TestBrokerHeartbeat_HealthLeavesStatusUnchanged(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	broker := newBrokerHealthTestBroker(t, s, "broker-health-status")
 	path := "/api/v1/runtime-brokers/" + broker.ID + "/heartbeat"
@@ -320,7 +314,6 @@ func TestCountBrokerHealthNormalization(t *testing.T) {
 // A report that needed no normalisation is not logged.
 func TestBrokerHeartbeat_HealthNormalisationLogged(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	broker := newBrokerHealthTestBroker(t, s, "broker-health-log")
 	logs := &syncBuffer{}
 	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))

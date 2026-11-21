@@ -1228,7 +1228,6 @@ func TestAdminPatch_RenameCollidingWithFlatRowRejected(t *testing.T) {
 
 func TestHeartbeat_DropsProfilesForFlatRow(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	logs := captureFlatSlog(t)
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/runtime-brokers/"+f.flat.ID+"/heartbeat", map[string]interface{}{
 		"status":         "online",

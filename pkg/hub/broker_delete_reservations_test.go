@@ -32,7 +32,6 @@ import (
 // broker's reservation stays active (ptone/scion#3994).
 func TestDeleteRuntimeBroker_ReleasesItsReservations_Audited(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s) // the DELETE endpoint checks runtime_broker permissions
 	_, deregistered := capacityCounters(t, srv)
 	gone, project := newQuotaTestBrokerAndProject(t, s, "delete-releases-gone")
 	kept, keptProject := newQuotaTestBrokerAndProject(t, s, "delete-releases-kept")

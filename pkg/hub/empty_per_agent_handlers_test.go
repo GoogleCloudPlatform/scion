@@ -196,7 +196,6 @@ func TestSyncsHubProjectWorkspace(t *testing.T) {
 // the broker.
 func TestStartAgent_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	project, broker := newEmptyPerAgentHandlerProject(t, s, "start", false)
 	agent := newQuotaTestAgent(t, s, broker, project, "epah-start", state.PhaseStopped)
 
@@ -218,7 +217,6 @@ func TestStartAgent_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
 // (review #2717 N3).
 func TestRestartAgent_EmptyPerAgent_BrokerWithoutCapability_412(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	project, broker := newEmptyPerAgentHandlerProject(t, s, "restart", false)
 	agent := newQuotaTestAgent(t, s, broker, project, "epah-restart", state.PhaseRunning)
 

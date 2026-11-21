@@ -14,5 +14,4 @@ waitUserScopedDataSweep
 doRequest
 doRequestNoAuth
 doRequestRaw
-grantDevUserRuntimeBrokerAccess
 grantSuperAdminRole

@@ -78,7 +78,6 @@ func TestBrokerHeartbeat_ConcurrentReregistrationSurvives(t *testing.T) {
 	require.NoError(t, err)
 	wrapped := &reregisterAfterBrokerReadStore{Store: base}
 	srv, _ := testServerOnMigratedStore(t, wrapped)
-	grantDevUserRuntimeBrokerAccess(t, base)
 
 	broker := &store.RuntimeBroker{
 		ID:       tid("hb-rereg-broker"),

@@ -35,7 +35,6 @@ import (
 // keeps the stored value, and an explicit empty default profile clears it.
 func TestBrokerHeartbeat_ExportIDAndDefaultProfileRoundTrip(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{

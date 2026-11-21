@@ -61,7 +61,6 @@ func TestBrokerQuota_ReconcileDuringDispatch(t *testing.T) {
 	t.Run("wake", func(t *testing.T) {
 		srv, s := testServer(t)
 		setBrokerAgentCeiling(t, s, 1)
-		grantDevUserRuntimeBrokerAccess(t, s)
 		broker, project := newQuotaTestBrokerAndProject(t, s, "grace-wake")
 		target := newQuotaTestAgent(t, s, broker, project, "grace-wake-target", state.PhaseSuspended)
 		srv.SetDispatcher(&reconcileMidDispatchDispatcher{srv: srv})

@@ -50,7 +50,6 @@ func newHaltFixture(t *testing.T) haltFixture {
 	t.Helper()
 	ctx := context.Background()
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
-	grantDevUserRuntimeBrokerAccess(t, s)
 	a := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Runtime = "kubernetes"
 		a.Activity = "working"

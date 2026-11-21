@@ -171,7 +171,6 @@ func mustHash(t *testing.T, p *api.RuntimeTargetPresentation) string {
 // hash or the fence.
 func TestPresentationHeartbeat_WritesOnHashChangeOnly(t *testing.T) {
 	f := newPresentationFixture(t, true)
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	target := f.flat.RuntimeTarget.ID
 	p1, p2 := dockerPresentation("one"), dockerPresentation("two")
 
@@ -218,7 +217,6 @@ func TestPresentationHeartbeat_WritesOnHashChangeOnly(t *testing.T) {
 // the store).
 func TestPresentationHeartbeat_IgnoredWithoutAWrite(t *testing.T) {
 	f := newPresentationFixture(t, true)
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	target := f.flat.RuntimeTarget.ID
 	stored := dockerPresentation("stored")
 	sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(stored, target, 100, 1, nil))
@@ -467,7 +465,6 @@ func TestPresentationHeartbeat_TwoWritersEndOnNewerProcess(t *testing.T) {
 // misbehaving broker might send them) stores and serves none of them.
 func TestPresentationHeartbeat_NeverKeysNotStored(t *testing.T) {
 	f := newPresentationFixture(t, true)
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	raw := map[string]interface{}{
 		"schemaVersion": 1, "key": "local-docker", "name": "example-docker",
 		"target": map[string]interface{}{"type": "docker", "context": "NEVER-context", "kubeconfig": "/NEVER-kubeconfig",
@@ -541,7 +538,6 @@ server:
 	for name, evict := range map[string]*bool{"unset": nil, "false": &fa, "true": &tr} {
 		t.Run(name, func(t *testing.T) {
 			f := newPresentationFixture(t, true)
-			grantDevUserRuntimeBrokerAccess(t, f.s)
 			inst := instances[0]
 			rt := *inst.RuntimeTarget
 			rt.SafeToEvict = evict
@@ -578,7 +574,6 @@ server:
 // image registry.
 func TestPresentation_ImageRegistryRedactedOnBrokerRead(t *testing.T) {
 	f := newPresentationFixture(t, true)
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	inst := config.V1RuntimeBrokerInstanceConfig{
 		Key: "local-docker", Name: "example-docker",
 		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "docker"},
@@ -606,7 +601,6 @@ func TestPresentation_ImageRegistryRedactedOnBrokerRead(t *testing.T) {
 // plain image registry is stored unchanged.
 func TestPresentationHeartbeat_StoresImageRegistryRedacted(t *testing.T) {
 	f := newPresentationFixture(t, true)
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	target := f.flat.RuntimeTarget.ID
 	reported := dockerPresentation("raw")
 	reported.AgentDefaults.ImageRegistry = "https://user:s3cret@registry.example/team"

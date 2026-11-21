@@ -44,7 +44,6 @@ func TestHeartbeat_ReincarnationStartedAfterRead(t *testing.T) {
 	srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *reincarnateBeforeStatusStore {
 		return &reincarnateBeforeStatusStore{Store: inner, fault: f, t: t}
 	})
-	grantDevUserRuntimeBrokerAccess(t, s)
 	broker, project := newQuotaTestBrokerAndProject(t, s, "hb-reinc-race")
 	agent := newQuotaTestAgent(t, s, broker, project, "hb-reinc-race-agent", state.PhaseRunning)
 	require.NoError(t, s.UpdateAgentStatus(context.Background(), agent.ID, store.AgentStatusUpdate{Activity: string(state.ActivityWorking)}))
@@ -223,7 +222,6 @@ func TestHeartbeat_KeptCreateGetsResolvedConfig(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			srv, s := testServer(t)
-			grantDevUserRuntimeBrokerAccess(t, s)
 			broker, project := newQuotaTestBrokerAndProject(t, s, "kept-cfg")
 			agent := keptCreateHeartbeatAgent(t, s, broker, project, "kept-cfg-agent", c.claimKind, c.claimState, c.agentRuntime)
 
@@ -304,7 +302,6 @@ func TestHeartbeat_KeptCreateRecordsHarnessAuthAndProfile(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			srv, s := testServer(t)
-			grantDevUserRuntimeBrokerAccess(t, s)
 			broker, project := newQuotaTestBrokerAndProject(t, s, "kept-auth")
 			agent := keptCreateHeartbeatAgent(t, s, broker, project, "kept-auth-agent", c.claimKind, c.claimState, "", func(a *store.Agent) {
 				a.AppliedConfig.HarnessAuth = storedAuth
@@ -350,7 +347,6 @@ func TestHeartbeat_KeptCreateRecordsHarnessAuthAndProfile(t *testing.T) {
 // resolvedConfigSnapshot.createInputsProfile so the change triggers UpdateAgent.
 func TestHeartbeat_KeptCreateRecordsCreateInputsProfileWhenAppliedProfileAlreadySet(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	broker, project := newQuotaTestBrokerAndProject(t, s, "kept-ci-prof")
 	agent := keptCreateHeartbeatAgent(t, s, broker, project, "kept-ci-prof-agent", store.StartClaimCreate, store.StartClaimUnconfirmed, "", func(a *store.Agent) {
 		a.AppliedConfig.Profile = "remote"

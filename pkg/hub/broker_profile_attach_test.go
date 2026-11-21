@@ -30,7 +30,6 @@ import (
 // profiles; a heartbeat that omits the field leaves them unchanged.
 func TestBrokerHeartbeat_ProfileAttachRefresh(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -85,7 +84,6 @@ func TestBrokerHeartbeat_ProfileAttachRefresh(t *testing.T) {
 // write: the handler persists the row only when something changed.
 func TestBrokerHeartbeat_ProfileAttachUnchangedNoWrite(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{

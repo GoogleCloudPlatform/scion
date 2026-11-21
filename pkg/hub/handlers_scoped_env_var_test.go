@@ -58,7 +58,6 @@ func TestScopedEnvVarByKeyLifecycle(t *testing.T) {
 			scope: store.ScopeRuntimeBroker,
 			setup: func(t *testing.T, _ *Server, s store.Store) (string, string) {
 				t.Helper()
-				grantDevUserRuntimeBrokerAccess(t, s)
 				broker := &store.RuntimeBroker{
 					ID:      tid("scoped-env-broker"),
 					Name:    "Scoped Env Broker",

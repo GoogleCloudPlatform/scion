@@ -109,7 +109,6 @@ func TestHeartbeatContainerStatus_AgreesWithHeldPhase(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
-			grantDevUserRuntimeBrokerAccess(t, s)
 			ctx := context.Background()
 			suffix := fmt.Sprint(i)
 

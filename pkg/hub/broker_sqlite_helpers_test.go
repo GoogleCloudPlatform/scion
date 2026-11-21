@@ -52,7 +52,6 @@ type reconcileFixture struct {
 func newReconcileFixture(t *testing.T) *reconcileFixture {
 	t.Helper()
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{

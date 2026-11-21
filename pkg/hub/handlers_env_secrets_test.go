@@ -138,7 +138,6 @@ func TestPatchSecret_ProjectScope_AllowProgenyRejected(t *testing.T) {
 // broker-scoped secret returns 200 with updated metadata fields.
 func TestPatchSecret_BrokerScope_ReturnsUpdatedMetadata(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
@@ -197,7 +196,6 @@ func TestPatchSecret_BrokerScope_ReturnsUpdatedMetadata(t *testing.T) {
 // allowProgeny=true at broker scope returns 400.
 func TestPatchSecret_BrokerScope_AllowProgenyRejected(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
@@ -340,7 +338,6 @@ func TestPatchSecret_ProjectScope_PathTraversalOnFileSecret(t *testing.T) {
 // with a path traversal target on an existing file-type broker secret is rejected.
 func TestPatchSecret_BrokerScope_PathTraversalOnFileSecret(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
@@ -582,7 +579,6 @@ func TestPatchSecret_ProjectScope_InvalidInjectionMode(t *testing.T) {
 // invalid injectionMode at broker scope is rejected.
 func TestPatchSecret_BrokerScope_InvalidInjectionMode(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()
