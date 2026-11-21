@@ -81,10 +81,19 @@ func dsnSecrets(dsn string) []string {
 // own: replacing a shorter string would rewrite unrelated text.
 const minSecretLen = 3
 
+// minMultilinePieceLen is the minimum length of a CR/LF-separated piece of a
+// multi-line credential that RedactSecretForms masks on its own. Four is
+// deliberately arbitrary: shorter pieces mask ordinary text (noise), and
+// longer ones let a meaningful fragment of a multi-line password survive a
+// line-splitting log or capture cut.
+const minMultilinePieceLen = 4
+
 // RedactSecretForms replaces secret (a password or a URL user info)
 // everywhere in text: as given, and as strconv.Quote, JSON, url.PathEscape
 // and url.QueryEscape write it, so no rendering of an error that quoted it
-// shows it. A secret shorter than 3 characters is left alone.
+// shows it. If secret contains CR or LF, each line piece of at least
+// minMultilinePieceLen characters is also masked. A secret shorter than 3
+// characters is left alone.
 func RedactSecretForms(text, secret string) string {
 	if len(secret) < minSecretLen {
 		return text
@@ -95,6 +104,13 @@ func RedactSecretForms(text, secret string) string {
 	}
 	for _, f := range forms {
 		text = strings.ReplaceAll(text, f, redactedSecret)
+	}
+	if strings.ContainsAny(secret, "\r\n") {
+		for _, piece := range strings.FieldsFunc(secret, func(r rune) bool { return r == '\r' || r == '\n' }) {
+			if len(piece) >= minMultilinePieceLen {
+				text = RedactSecretForms(text, piece)
+			}
+		}
 	}
 	return text
 }

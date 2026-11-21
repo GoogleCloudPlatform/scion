@@ -124,3 +124,24 @@ func TestRedactSecretForms_ShortSecretLeftAlone(t *testing.T) {
 		t.Errorf("RedactSecretForms with a 3-character secret = %q", got)
 	}
 }
+
+// A multi-line credential masks each CR/LF-separated piece of 4+ chars, while
+// leaving shorter pieces (which would be noise) untouched.
+func TestRedactDSNIn_MultilineCredentialPieces(t *testing.T) {
+	kvDSN := "host=db password='first-line-secret\r\nabc\nsecond-line-secret' dbname=hub"
+	text := "line1: first-line-secret\nshort: abc\nline2: second-line-secret\n"
+	got := RedactDSNIn(text, "postgres", kvDSN)
+	want := "line1: xxxxx\nshort: abc\nline2: xxxxx\n"
+	if got != want {
+		t.Errorf("RedactDSNIn multiline:\n got  %q\n want %q", got, want)
+	}
+
+	// URL-encoded multi-line password in a postgres:// URL.
+	urlDSN := "postgres://hub:partOne%0ApartTwo%0D%0Axyz@db.internal/hub"
+	urlText := "leaked partOne and partTwo and xyz"
+	gotURL := RedactDSNIn(urlText, "postgres", urlDSN)
+	wantURL := "leaked xxxxx and xxxxx and xyz"
+	if gotURL != wantURL {
+		t.Errorf("RedactDSNIn URL multiline:\n got  %q\n want %q", gotURL, wantURL)
+	}
+}
