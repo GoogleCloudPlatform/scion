@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"sync/atomic"
 
 	"golang.org/x/sys/unix"
@@ -124,13 +125,17 @@ func writeRootFile(root *os.Root, name, content string) error {
 // mode 0644), fsyncs and closes it, and returns its name. The file is removed
 // again on a write failure.
 func writeRootTempFile(root *os.Root, name, content string) (string, error) {
+	dir, base := path.Split(name)
+	if base == "" || base == "." || base == ".." {
+		return "", fmt.Errorf("invalid root file path %q", name)
+	}
 	var lastErr error
 	for range 8 {
 		var rnd [8]byte
 		if _, err := rand.Read(rnd[:]); err != nil {
 			return "", err
 		}
-		tmp := "." + name + ".tmp-" + hex.EncodeToString(rnd[:])
+		tmp := dir + "." + base + ".tmp-" + hex.EncodeToString(rnd[:])
 		f, err := openAtInRoot(root, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, 0o644)
 		if errors.Is(err, fs.ErrExist) {
 			lastErr = err

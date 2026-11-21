@@ -20,6 +20,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -940,5 +941,71 @@ func TestWriteRootFile_SwappedSymlinkAndSpecialFile(t *testing.T) {
 		got, err = os.ReadFile(filepath.Join(dir, "item"))
 		require.NoError(t, err)
 		assert.Equal(t, "second\n", string(got))
+	})
+
+	t.Run("multi_component_create_and_replace", func(t *testing.T) {
+		dir := t.TempDir()
+		nestedDir := filepath.Join(dir, "sub", "nested")
+		require.NoError(t, os.MkdirAll(nestedDir, 0o755))
+
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		require.NoError(t, writeRootFile(root, "sub/nested/item", "first\n"))
+		got, err := os.ReadFile(filepath.Join(nestedDir, "item"))
+		require.NoError(t, err)
+		assert.Equal(t, "first\n", string(got))
+
+		require.NoError(t, writeRootFile(root, "sub/nested/item", "second\n"))
+		got, err = os.ReadFile(filepath.Join(nestedDir, "item"))
+		require.NoError(t, err)
+		assert.Equal(t, "second\n", string(got))
+
+		entries, err := os.ReadDir(nestedDir)
+		require.NoError(t, err)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		assert.ElementsMatch(t, []string{"item"}, names, "no temp file left behind in nested directory")
+	})
+
+	t.Run("multi_component_symlink_dir_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		subDir := filepath.Join(dir, "sub")
+		require.NoError(t, os.MkdirAll(subDir, 0o755))
+		require.NoError(t, os.Symlink("sub", filepath.Join(dir, "symdir")))
+
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		err = writeRootFile(root, "symdir/item", "val\n")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR), "expected ELOOP or ENOTDIR, got: %v", err)
+
+		entries, err := os.ReadDir(subDir)
+		require.NoError(t, err)
+		assert.Empty(t, entries, "no temp file created through symlinked directory")
+	})
+
+	t.Run("invalid_leaf_paths_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		subDir := filepath.Join(dir, "sub")
+		require.NoError(t, os.MkdirAll(subDir, 0o755))
+
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		for _, bad := range []string{"", ".", "..", "sub/", "sub/.", "sub/.."} {
+			err := writeRootFile(root, bad, "val\n")
+			assert.Error(t, err, "path %q should be refused", bad)
+		}
+
+		entries, err := os.ReadDir(subDir)
+		require.NoError(t, err)
+		assert.Empty(t, entries, "no temp file left behind in sub")
 	})
 }
