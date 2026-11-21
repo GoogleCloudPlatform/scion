@@ -118,6 +118,19 @@ func TestConversationCreateFlags(t *testing.T) {
 	require.NotNil(t, f, "--json flag should exist")
 }
 
+// TestConversationCreateHelpStatesAllowedCharacters covers ptone/scion#8455:
+// `scion conversation create --help` states the allowed character set and
+// 100-character length limit for group conversation names.
+func TestConversationCreateHelpStatesAllowedCharacters(t *testing.T) {
+	long := conversationCreateCmd.Long
+	assert.Contains(t, long, "100", "help must state the 100-character length limit")
+	assert.Contains(t, long, "letter", "help must state that letters are allowed")
+	assert.Contains(t, long, "digit", "help must state that digits are allowed")
+	assert.Contains(t, long, "space", "help must state that spaces are allowed")
+	assert.Contains(t, long, "underscore", "help must state that underscores are allowed")
+	assert.Contains(t, long, "hyphen", "help must state that hyphens are allowed")
+}
+
 func TestConversationGetFlags(t *testing.T) {
 	flags := conversationGetCmd.Flags()
 

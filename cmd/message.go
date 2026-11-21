@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
@@ -396,6 +397,8 @@ Examples:
 		if err != nil {
 			return err
 		}
+
+		warnInvalidBodyConvRefs(message)
 
 		// Handle scheduled messages
 		if msgIn != "" || msgAt != "" {
@@ -1836,14 +1839,118 @@ func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
 		return
 	}
 	if d := result.DefaultAgentResult; d != nil {
+		reason := defaultAgentNotWokenReason(d)
 		if d.Slug == "" {
-			fmt.Fprintf(os.Stderr, "No agent was woken: the default agent could not be reached (%s).\n", d.Status)
+			fmt.Fprintf(os.Stderr, "No agent was woken: the default agent could not be reached (%s).\n", reason)
 		} else {
-			fmt.Fprintf(os.Stderr, "No agent was woken: default agent @%s was not reached (%s).\n", d.Slug, d.Status)
+			fmt.Fprintf(os.Stderr, "No agent was woken: default agent @%s was not reached (%s).\n", d.Slug, reason)
 		}
 		return
 	}
 	fmt.Fprintln(os.Stderr, "No agent was woken by this post.")
+}
+
+func defaultAgentNotWokenReason(d *messages.MentionResult) string {
+	var stateDesc string
+	if d.AgentPhase != "" {
+		stateDesc = "state: " + suspendedPhaseLabel(d.AgentPhase, d.SuspendReason)
+	}
+
+	switch {
+	case stateDesc != "" && d.Error != "":
+		if d.Status != "" && d.Status != "error" {
+			return fmt.Sprintf("%s; %s: %s", stateDesc, d.Status, d.Error)
+		}
+		return fmt.Sprintf("%s; %s", stateDesc, d.Error)
+	case stateDesc != "":
+		if d.Status != "" && d.Status != "error" {
+			return fmt.Sprintf("%s; %s", d.Status, stateDesc)
+		}
+		return stateDesc
+	case d.Error != "":
+		if d.Status != "" {
+			return fmt.Sprintf("%s: %s", d.Status, d.Error)
+		}
+		return d.Error
+	default:
+		return d.Status
+	}
+}
+
+// warnInvalidBodyConvRefs emits a stderr warning at send time when the message
+// body contains a truncated or malformed conv:<id> reference (for example
+// conv:69e36cbf or conv:69e36cbf... in a brief), so the sender sees the mistake
+// before the recipient fails to resolve it (ptone/scion#8469).
+func warnInvalidBodyConvRefs(text string) {
+	if isJSONOutput() {
+		return
+	}
+	for _, bad := range findInvalidBodyConvRefs(text) {
+		fmt.Fprintf(os.Stderr, "Warning: message body contains truncated or invalid conversation reference %q; use a full 36-character UUID (conv:<uuid>) so recipients can resolve it.\n", bad)
+	}
+}
+
+func findInvalidBodyConvRefs(text string) []string {
+	const prefix = "conv:"
+	var out []string
+	seen := make(map[string]bool)
+	offset := 0
+	for offset < len(text) {
+		rel := strings.Index(text[offset:], prefix)
+		if rel < 0 {
+			break
+		}
+		idx := offset + rel
+		if idx > 0 {
+			prev := text[idx-1]
+			if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') ||
+				(prev >= '0' && prev <= '9') || prev == '/' || prev == ':' ||
+				prev == '_' || prev == '-' || prev == '.' {
+				offset = idx + len(prefix)
+				continue
+			}
+		}
+		after := text[idx+len(prefix):]
+		end := 0
+		hexCount := 0
+		for end < len(after) {
+			c := after[end]
+			if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+				hexCount++
+				end++
+				continue
+			}
+			if c == '-' {
+				end++
+				continue
+			}
+			break
+		}
+		offset = idx + len(prefix) + end
+		if end == 0 || hexCount < 4 {
+			continue
+		}
+		// Ignore hex prefixes of non-hex words such as "conv:default".
+		if end < len(after) {
+			next := after[end]
+			if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') ||
+				(next >= '0' && next <= '9') || next == '_' {
+				continue
+			}
+		}
+		tok := after[:end]
+		if len(tok) == 36 {
+			if _, err := uuid.Parse(tok); err == nil {
+				continue
+			}
+		}
+		candidate := prefix + tok
+		if !seen[candidate] {
+			seen[candidate] = true
+			out = append(out, candidate)
+		}
+	}
+	return out
 }
 
 // printMentionResults prints one line per mention result to stderr,

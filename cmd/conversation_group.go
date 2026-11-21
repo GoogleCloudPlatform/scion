@@ -161,7 +161,8 @@ A thread already in another group of the project moves to this one.
 ` + threadGroupRefHelp + `
 
 Conversation references:
-  conv:<uuid>     Direct conversation ID
+  conv:<uuid>     Direct conversation ID (full 36-character UUID)
+  <uuid>          Bare 36-character conversation ID
   #<thread-name>  Named thread conversation
 
 Examples:
@@ -179,7 +180,8 @@ var conversationGroupRemoveCmd = &cobra.Command{
 ` + threadGroupRefHelp + `
 
 Conversation references:
-  conv:<uuid>     Direct conversation ID
+  conv:<uuid>     Direct conversation ID (full 36-character UUID)
+  <uuid>          Bare 36-character conversation ID
   #<thread-name>  Named thread conversation
 
 Examples:

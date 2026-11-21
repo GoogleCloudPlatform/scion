@@ -133,7 +133,13 @@ func (s *Server) wakeGroupDefaultAgent(ctx context.Context, in groupDefaultWakeI
 		"conversation_id", in.Conv.ConversationID,
 		"parent_message_id", in.ParentMessageID,
 		"status", out.Status)
-	return &messages.MentionResult{Slug: def.Slug, Status: out.Status, Error: out.Error, AgentPhase: out.AgentPhase}
+	return &messages.MentionResult{
+		Slug:          def.Slug,
+		Status:        out.Status,
+		Error:         out.Error,
+		AgentPhase:    out.AgentPhase,
+		SuspendReason: out.SuspendReason,
+	}
 }
 
 // groupDefault is the result of resolveGroupDefaultAgent.
