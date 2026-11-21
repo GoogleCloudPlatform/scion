@@ -7634,14 +7634,13 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 	return s.CloseAuditWriter(ctx)
 }
 
-// CloseAuditWriter stops async mutation-audit admission, joins in-flight
-// emitMutationAudit store writes up to min(ctx deadline, auditWriteTimeout)
-// (cancelling any write still blocked at that bound and waiting up to
-// auditCancelDrainGrace for cancelled goroutines to unwind), and closes the
-// asynchronous decision/broker audit writer: admission stops and queued
-// records are drained, bounded by min(ctx deadline, the writer's 5s drain
-// timeout). Mutation audit emission is best-effort: writes cancelled at the
-// shutdown bound or calls arriving after admission closes are lost (with
+// CloseAuditWriter stops async user last-seen and mutation-audit admission,
+// joins in-flight writes before the store closes (bounded by ctx and each
+// tracker's timeout, cancelling stuck writes and waiting a short unwind grace),
+// and closes the asynchronous decision/broker audit writer: admission stops and
+// queued records are drained, bounded by min(ctx deadline, the writer's 5s
+// drain timeout). Mutation audit emission is best-effort: writes cancelled at
+// the shutdown bound or calls arriving after admission closes are lost (with
 // warning logs) rather than hanging shutdown or racing store close; decision
 // and broker audit records emitted afterwards are counted as closed. It is
 // idempotent and nil-safe. It returns asyncwrite.ErrWorkerStuck when a
@@ -7657,6 +7656,9 @@ func (s *Server) CloseAuditWriter(ctx context.Context) error {
 	}
 	if s.webhookIngress != nil {
 		s.webhookIngress.Close(ctx)
+	}
+	if s.userActivity != nil {
+		s.userActivity.Close(ctx)
 	}
 	if cancelled, remaining := s.mutationAuditWork.stop(ctx, auditWriteTimeout, auditCancelDrainGrace); remaining > 0 {
 		slog.Warn("Mutation audit writes still running after cancellation grace; proceeding with shutdown",
