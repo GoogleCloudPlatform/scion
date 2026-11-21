@@ -108,6 +108,10 @@ import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import {
+  getAgentPageCurrentAgent,
+  setAgentPageCurrentAgent,
+} from '../../client/terminal-workspace-events.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { formatNumber } from '../../utils/format-number.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -889,6 +893,9 @@ export class ScionPageAgentDetail extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    if (this.agentId && getAgentPageCurrentAgent()?.agentId === this.agentId) {
+      setAgentPageCurrentAgent(null);
+    }
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
@@ -920,6 +927,10 @@ export class ScionPageAgentDetail extends LitElement {
     const updatedAgent = stateManager.getAgent(this.agentId);
     if (updatedAgent && this.agent) {
       this.agent = { ...this.agent, ...updatedAgent };
+      setAgentPageCurrentAgent({
+        agentId: this.agentId,
+        name: this.agent.name || this.agentId,
+      });
       return;
     }
     // The agent is missing from stateManager's map. That alone does not
@@ -1247,6 +1258,10 @@ export class ScionPageAgentDetail extends LitElement {
       void this.loadMetricsSummary();
 
       this.seedAgent(this.agent, agentId, epoch, epochGeneration);
+      setAgentPageCurrentAgent({
+        agentId: this.agentId,
+        name: this.agent.name || this.agentId,
+      });
       if (this.project) {
         stateManager.seedProjects([this.project]);
         dispatchPageTitle(this, this.agent.name, this.project.name || this.agent.projectId);

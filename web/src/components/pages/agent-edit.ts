@@ -40,6 +40,10 @@ import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { navigateTo } from '../../client/navigation.js';
 import { lifecycleActionErrorMessage } from '../../client/agent-delete.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import {
+  getAgentPageCurrentAgent,
+  setAgentPageCurrentAgent,
+} from '../../client/terminal-workspace-events.js';
 import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { getPublicSettings } from '../../client/server-feature-flags.js';
 import { agentStatusBadge } from '../../shared/agent-state-display.js';
@@ -288,6 +292,13 @@ export class ScionPageAgentEdit extends LitElement {
     void this.load();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.agentId && getAgentPageCurrentAgent()?.agentId === this.agentId) {
+      setAgentPageCurrentAgent(null);
+    }
+  }
+
   override willUpdate(changed: Map<string, unknown>): void {
     super.willUpdate(changed);
     if (changed.has('targetBroker') || changed.has('agent')) {
@@ -324,6 +335,10 @@ export class ScionPageAgentEdit extends LitElement {
         this.gcp.applyStored(id?.metadataMode, id?.serviceAccountId);
       }
       dispatchPageTitle(this, 'Edit', agent.name || this.agentId);
+      setAgentPageCurrentAgent({
+        agentId: this.agentId,
+        name: agent.name || this.agentId,
+      });
       if (first) {
         void this.loadHubDefaults();
         void this.gcpAccounts.load();
