@@ -615,6 +615,18 @@ func (s *Server) updateRoleDefinition(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Guard against adding unsupported catalog permissions to a custom
+	// system-scope role that is currently configured as server.auth.default_user_role
+	// (ptone/scion#8288, ptone/scion#7779).
+	if existing.ScopeType == store.RoleScopeSystem &&
+		s.experimentEnabled(experiments.CustomDefaultUserRole) &&
+		existing.Name == s.DefaultUserRole() {
+		if bad := unsupportedPermissionsForDefaultUserRole(req.Permissions); len(bad) > 0 {
+			BadRequest(w, fmt.Sprintf("cannot add permissions %s to role %q while it is configured as server.auth.default_user_role", strings.Join(bad, ", "), existing.Name))
+			return
+		}
+	}
+
 	// CanDelegate check: actor must hold all permissions in the updated role.
 	if s.authzService != nil {
 		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{

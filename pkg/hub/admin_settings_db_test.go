@@ -3733,18 +3733,19 @@ func TestPutServerConfigDB_DefaultUserRoleOnly_PersistedAndSnapshot(t *testing.T
 	}
 }
 
-// Invalid values are rejected by the access-section schema in DB mode.
+// Non-built-in values are refused with 412 experiment_disabled in DB mode
+// while hub.custom_default_user_role is off, and nothing is written.
 func TestPutServerConfigDB_DefaultUserRoleInvalid_422NothingWritten(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	fakeStore.seed("access", json.RawMessage(`{"default_user_role":"viewer"}`))
 	_, _ = ops.Refresh(context.Background())
 
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"auth":{"default_user_role":"superuser"}}}`)
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412, got %d: %s", rr.Code, rr.Body.String())
 	}
-	if entries := settingsErrorEntries(t, rr); entries[0].Field != "server.auth.default_user_role" {
-		t.Errorf("field = %q, want server.auth.default_user_role", entries[0].Field)
+	if !strings.Contains(rr.Body.String(), ErrCodeExperimentDisabled) {
+		t.Errorf("412 body should carry %s, got: %s", ErrCodeExperimentDisabled, rr.Body.String())
 	}
 	access, _ := readAccessRow(t, fakeStore)
 	if access.DefaultUserRole != "viewer" {

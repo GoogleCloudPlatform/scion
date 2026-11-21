@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,6 +136,16 @@ type ServerConfigResponse struct {
 	// keys and the migration (ptone/scion#6371). Agents of those profiles
 	// are refused at start. There is no request field for it.
 	StorageOverrideErrors []string `json:"storage_override_errors,omitempty"`
+
+	// DefaultUserRoleWarning is populated, read-only, when
+	// server.auth.default_user_role names a custom role that cannot currently
+	// be applied and is falling back to "member" (ptone/scion#8288).
+	DefaultUserRoleWarning *DefaultUserRoleWarning `json:"default_user_role_warning,omitempty"`
+
+	// EligibleDefaultRoles lists, read-only, custom system-scope role
+	// definitions eligible for server.auth.default_user_role when the
+	// hub.custom_default_user_role experiment is enabled (ptone/scion#8288).
+	EligibleDefaultRoles []EligibleDefaultRole `json:"eligible_default_roles,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -465,6 +476,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		return
 	}
 	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
+	s.populateDefaultUserRoleView(context.Background(), resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -606,7 +618,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
 	// written, unless it echoes the GET view (ptone/scion#3463). A key
 	// inside server.broker.instances was already decoded strictly above.
-	if rejectUnknownFileConfigKeys(w, rawBody, s.config.StartupServerSettings) {
+	if s.rejectUnknownFileConfigKeys(r.Context(), w, rawBody) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {
@@ -640,21 +652,6 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// agent endpoint and the one this save sends (S2).
 	if !validateContentURLRequest(w, &req, s.HubEndpoints().Public, contentURLAllowSameSiteAfter(&req, s.contentURLAllowSameSiteLiveValue()), s.config.AgentEndpoint, requestAgentEndpoint(&req)) {
 		return
-	}
-
-	// server.auth.default_user_role must be one of the schema enum values
-	// (design D6). The DB path validates section docs against the schema;
-	// file mode has no schema pass, so validate this key against the same
-	// access-section schema here rather than writing garbage to settings.yaml.
-	if req.Server != nil && req.Server.Auth != nil && req.Server.Auth.DefaultUserRole != "" {
-		doc, err := json.Marshal(opsettings.AccessSettings{DefaultUserRole: req.Server.Auth.DefaultUserRole})
-		if err == nil {
-			if errs := opsettings.Validate("access", doc); len(errs) > 0 {
-				writeSettingsFieldError(w, "server.auth.default_user_role",
-					fmt.Sprintf("invalid server.auth.default_user_role %q: must be \"member\" or \"viewer\"", req.Server.Auth.DefaultUserRole))
-				return
-			}
-		}
 	}
 
 	// shared_dir_size on runtime and profile entries must be a Kubernetes
@@ -730,6 +727,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	var stored struct {
 		Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
 		Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
+		Server   *struct {
+			Auth *struct {
+				DefaultUserRole string `yaml:"default_user_role"`
+			} `yaml:"auth"`
+		} `yaml:"server"`
 	}
 	// The file as read, before the merge: the content URL audit below
 	// compares its content_url with the merged file's (S1).
@@ -753,6 +755,20 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if req.Profiles != nil && !s.experimentEnabled(experiments.ImageTagSetting) && profileMapsSetImageTag(req.Profiles, stored.Profiles) {
 		writeImageTagExperimentDisabled(w)
 		return
+	}
+
+	// server.auth.default_user_role: built-in values ("", "member", "viewer")
+	// and echoes of an already-stored custom value always pass; setting or
+	// changing to a custom role requires hub.custom_default_user_role,
+	// eligibility validation, and CanDelegate (ptone/scion#8288).
+	if req.Server != nil && req.Server.Auth != nil && req.Server.Auth.DefaultUserRole != "" {
+		storedRole := ""
+		if stored.Server != nil && stored.Server.Auth != nil {
+			storedRole = stored.Server.Auth.DefaultUserRole
+		}
+		if !s.validateDefaultUserRoleSave(w, r, req.Server.Auth.DefaultUserRole, storedRole) {
+			return
+		}
 	}
 
 	// GET masks secrets and clients send the GET body back on save: restore

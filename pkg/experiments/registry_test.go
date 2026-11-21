@@ -894,3 +894,24 @@ func TestEffectivePermissionsExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestCustomDefaultUserRoleExperimentRegistered pins hub.custom_default_user_role
+// (ptone/scion#8288): server+web layers, alpha, default off, owned by auth.
+func TestCustomDefaultUserRoleExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(CustomDefaultUserRole)
+	if !ok {
+		t.Fatalf("%s is not registered", CustomDefaultUserRole)
+	}
+	if CustomDefaultUserRole != "hub.custom_default_user_role" {
+		t.Fatalf("frozen name changed: %q", CustomDefaultUserRole)
+	}
+	if e.Default {
+		t.Fatal("hub.custom_default_user_role must default to off")
+	}
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerServer and LayerWeb, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#8288" || e.Stage != StageAlpha || e.Owner != "auth" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}
