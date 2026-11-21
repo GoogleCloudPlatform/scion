@@ -126,6 +126,14 @@ function isMessageRecord(entry: MessageLogEntry, parsed: ParsedMessage): boolean
   return parsed.sender !== '' || parsed.recipient !== '';
 }
 
+/**
+ * Reports whether a message crossed project boundaries: its sender and
+ * recipient provenance stamps name two different, non-empty projects.
+ */
+function isCrossProjectMessage(senderProjectId?: string, recipientProjectId?: string): boolean {
+  return !!senderProjectId && !!recipientProjectId && senderProjectId !== recipientProjectId;
+}
+
 @customElement('scion-agent-message-viewer')
 export class ScionAgentMessageViewer extends LitElement {
   /** Re-renders timestamps and date dividers when the display zone changes. */
@@ -181,8 +189,8 @@ export class ScionAgentMessageViewer extends LitElement {
   broadcastUrl = '';
 
   /**
-   * Current project ID, used to detect cross-project messages.
-   * When set, messages from/to a different project get a cross-project badge.
+   * Host project ID when mounted in a project or agent view. Cross-project
+   * badges are computed from message provenance rather than this property.
    */
   @property()
   projectId = '';
@@ -621,11 +629,7 @@ export class ScionAgentMessageViewer extends LitElement {
     const direction: 'sent' | 'received' =
       !this.agentId || msg.senderId === this.agentId ? 'sent' : 'received';
 
-    // Cross-project detection: if either project ID differs from the current project
-    const crossProject =
-      !!this.projectId &&
-      ((!!msg.senderProjectId && msg.senderProjectId !== this.projectId) ||
-        (!!msg.recipientProjectId && msg.recipientProjectId !== this.projectId));
+    const crossProject = isCrossProjectMessage(msg.senderProjectId, msg.recipientProjectId);
 
     return {
       sender: msg.sender,
@@ -697,13 +701,25 @@ export class ScionAgentMessageViewer extends LitElement {
     // The actual message body is in payload['message_content'].
     const body = (payload['message_content'] as string) || '';
 
-    // Cross-project provenance from log labels
-    const senderProjectId = labels['sender_project_id'] || undefined;
-    const recipientProjectId = labels['recipient_project_id'] || undefined;
+    // Cross-project provenance from the message record itself (labels or payload)
+    const senderProjectId =
+      labels['sender_project_id'] ||
+      (typeof payload['sender_project_id'] === 'string' ? payload['sender_project_id'] : '') ||
+      undefined;
+    const recipientProjectId =
+      labels['recipient_project_id'] ||
+      (typeof payload['recipient_project_id'] === 'string'
+        ? payload['recipient_project_id']
+        : '') ||
+      undefined;
+    const explicitCrossProject =
+      payload['cross_project'] === true || labels['cross_project'] === 'true'
+        ? true
+        : payload['cross_project'] === false || labels['cross_project'] === 'false'
+          ? false
+          : undefined;
     const crossProject =
-      !!this.projectId &&
-      ((!!senderProjectId && senderProjectId !== this.projectId) ||
-        (!!recipientProjectId && recipientProjectId !== this.projectId));
+      explicitCrossProject ?? isCrossProjectMessage(senderProjectId, recipientProjectId);
 
     return {
       sender,
