@@ -256,14 +256,30 @@ func (e *Engine) CompileWithOptions(expr string, kind Kind, opts ...Option) (Pro
 // Cached returns a compiled Program from the content-addressed LRU cache or
 // compiles and stores it on miss.
 func (e *Engine) Cached(ctx context.Context, scope CacheScope, expr string, kind Kind, opts ...Option) (Program, error) {
+	prog, _, err := e.CachedWithMissGate(ctx, scope, expr, kind, nil, opts...)
+	return prog, err
+}
+
+// CachedWithMissGate returns a compiled Program from the content-addressed LRU
+// cache (hit=true) or, on a cache miss (hit=false), invokes beforeCompile (when
+// non-nil) before compiling and storing the program. If beforeCompile returns a
+// non-nil error, compilation is skipped and that error is returned with hit=false.
+func (e *Engine) CachedWithMissGate(
+	ctx context.Context,
+	scope CacheScope,
+	expr string,
+	kind Kind,
+	beforeCompile func() error,
+	opts ...Option,
+) (Program, bool, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
-			return Program{}, err
+			return Program{}, false, err
 		}
 	}
 	maxBytes := e.effectiveMaxExprBytes(opts...)
 	if len(expr) > maxBytes {
-		return Program{}, &CompileError{
+		return Program{}, false, &CompileError{
 			Line:     1,
 			Column:   1,
 			Message:  fmt.Sprintf("expression length %d exceeds maximum %d bytes", len(expr), maxBytes),
@@ -272,7 +288,7 @@ func (e *Engine) Cached(ctx context.Context, scope CacheScope, expr string, kind
 		}
 	}
 	if !kind.Result.isSupportedResultKind() {
-		return Program{}, &CompileError{
+		return Program{}, false, &CompileError{
 			Line:     1,
 			Column:   1,
 			Message:  fmt.Sprintf("unsupported result type %s for kind %q", kind.Result.String(), kind.Name),
@@ -283,13 +299,18 @@ func (e *Engine) Cached(ctx context.Context, scope CacheScope, expr string, kind
 
 	id := computeCacheIdentity(e.env.Name, e.env.Version, e.fnSetHash, kind, expr, maxBytes)
 	if prog, ok := e.cache.get(id, scope); ok {
-		return prog, nil
+		return prog, true, nil
+	}
+	if beforeCompile != nil {
+		if err := beforeCompile(); err != nil {
+			return Program{}, false, err
+		}
 	}
 	prog, err := e.compileInternal(expr, kind, maxBytes)
 	if err != nil {
-		return Program{}, err
+		return Program{}, false, err
 	}
-	return e.cache.put(id, len(expr), prog, scope), nil
+	return e.cache.put(id, len(expr), prog, scope), false, nil
 }
 
 func (e *Engine) effectiveMaxExprBytes(opts ...Option) int {

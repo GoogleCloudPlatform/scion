@@ -2474,3 +2474,108 @@ func TestStage1CacheConfigBudgetAndPrecompiledRegexHeapBound(t *testing.T) {
 		t.Fatalf("Stage1CacheConfig retained heap delta = %d MiB, want <= %d MiB", retained>>20, maxRetainedBytes>>20)
 	}
 }
+
+func TestCompileBudgetExhaustion_R3CacheHitsStillEvaluateAndR4SkipReason(t *testing.T) {
+	ctx := context.Background()
+	rules, err := triggerrule.NewDefault()
+	if err != nil {
+		t.Fatalf("NewDefault: %v", err)
+	}
+	act, err := triggerrule.NewEventActivation(hubfire.FireEvent{
+		ID:        "ev-compile-budget",
+		ProjectID: "proj-cb",
+		Type:      "webhook.received",
+		Subject:   "webhook:ep-1",
+		Payload:   []byte(`{"env":"prod","service":"api"}`),
+	})
+	if err != nil {
+		t.Fatalf("NewEventActivation: %v", err)
+	}
+
+	warmMatchScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ProjectID: "proj-cb", ID: "tr-warm", Revision: 1}
+	coldMatchScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ProjectID: "proj-cb", ID: "tr-cold", Revision: 1}
+	warmRule := []triggerrule.Rule{{Dialect: ruleengine.DialectCEL, Expr: `event.payload.env == "prod"`}}
+	coldRule := []triggerrule.Rule{{Dialect: ruleengine.DialectCEL, Expr: `event.payload.service == "api"`}}
+	warmSubjRule := triggerrule.Rule{Dialect: ruleengine.DialectCEL, Expr: `"svc:" + event.payload.service`}
+	coldSubjRule := triggerrule.Rule{Dialect: ruleengine.DialectCEL, Expr: `"env:" + event.payload.env`}
+
+	// Pre-warm warmRule and warmSubjRule in cache, recording misses.
+	var misses []string
+	obs := triggerrule.WithCompileMissObserver(func(d string) { misses = append(misses, d) })
+	if res, _, err := rules.MatchAllWithTrace(ctx, warmMatchScope, warmRule, act, obs); err != nil || !res.Matched {
+		t.Fatalf("pre-warm MatchAllWithTrace: res=%+v err=%v", res, err)
+	}
+	if s, err := rules.Subject(ctx, warmMatchScope, warmSubjRule, act, obs); err != nil || s != "svc:api" {
+		t.Fatalf("pre-warm Subject: s=%q err=%v", s, err)
+	}
+	if len(misses) != 2 || misses[0] != "cel" || misses[1] != "cel" {
+		t.Fatalf("expected 2 pre-warm compile misses, got %v", misses)
+	}
+
+	// Exhausted compile tracker + fresh eval tracker.
+	evalBudget := triggerrule.NewEventBudget()
+	compileBudget := ruleengine.NewBudgetTracker(time.Nanosecond)
+	compileBudget.Exhaust()
+
+	misses = nil
+	// Cold match rule must fail closed with ErrCompileBudgetExhausted (R4).
+	res, trace, err := rules.MatchAllWithTrace(
+		ctx, coldMatchScope, coldRule, act,
+		triggerrule.WithBudget(evalBudget),
+		triggerrule.WithCompileBudget(compileBudget),
+		obs,
+	)
+	if !errors.Is(err, triggerrule.ErrCompileBudgetExhausted) {
+		t.Fatalf("cold match err = %v, want ErrCompileBudgetExhausted", err)
+	}
+	if res.Matched || res.Class != triggerrule.MatchClassBudget || res.Reason != triggerrule.MatchReasonCompileBudgetExhausted {
+		t.Fatalf("cold match res = %+v, want Class=budget Reason=compile_budget_exhausted", res)
+	}
+	if len(trace.Elements) != 1 || trace.Elements[0].Reason != triggerrule.MatchReasonCompileBudgetExhausted {
+		t.Fatalf("cold match trace = %+v, want compile_budget_exhausted", trace)
+	}
+	if reason, isSkip := triggerrule.SkipReason(err); !isSkip || reason != triggerrule.SkipReasonCompileBudgetExhausted {
+		t.Fatalf("SkipReason(ErrCompileBudgetExhausted) = (%q, %v), want (%q, true)", reason, isSkip, triggerrule.SkipReasonCompileBudgetExhausted)
+	}
+	if len(misses) != 0 {
+		t.Fatalf("gated miss must not record a compile miss, got %v", misses)
+	}
+	// Eval budget untouched by gated compile miss (F2).
+	if evalBudget.Remaining() != triggerrule.EventRuleBudget {
+		t.Fatalf("evalBudget.Remaining() = %v, want untouched %v", evalBudget.Remaining(), triggerrule.EventRuleBudget)
+	}
+
+	// R3: warm match rule (cache hit) MUST still evaluate and match after compile exhaustion!
+	res, _, err = rules.MatchAllWithTrace(
+		ctx, warmMatchScope, warmRule, act,
+		triggerrule.WithBudget(evalBudget),
+		triggerrule.WithCompileBudget(compileBudget),
+		obs,
+	)
+	if err != nil || !res.Matched {
+		t.Fatalf("R3 warm match hit after exhaustion: res=%+v err=%v", res, err)
+	}
+	if len(misses) != 0 {
+		t.Fatalf("cache hit must not record compile miss, got %v", misses)
+	}
+
+	// R3 for subject_rule: warm subject rule still derives; cold subject rule falls back.
+	gotWarm := rules.DeriveSubject(
+		ctx, warmMatchScope, warmSubjRule, act, "fallback", nil,
+		triggerrule.WithBudget(evalBudget),
+		triggerrule.WithCompileBudget(compileBudget),
+		obs,
+	)
+	if gotWarm != "svc:api" {
+		t.Fatalf("R3 warm subject_rule = %q, want svc:api", gotWarm)
+	}
+	gotCold := rules.DeriveSubject(
+		ctx, coldMatchScope, coldSubjRule, act, "fallback", nil,
+		triggerrule.WithBudget(evalBudget),
+		triggerrule.WithCompileBudget(compileBudget),
+		obs,
+	)
+	if gotCold != "fallback" {
+		t.Fatalf("cold subject_rule after compile exhaustion = %q, want fallback", gotCold)
+	}
+}

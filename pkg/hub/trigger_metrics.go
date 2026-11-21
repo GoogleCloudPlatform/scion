@@ -90,15 +90,17 @@ func triggerFireStatuses() []string {
 	}
 }
 
-func triggerFireSkipReasons() []string {
-	return []string{
-		trigger.FireSkipReasonRuleBudgetExhausted,
-		trigger.FireSkipReasonRuleEvaluationFailed,
-		trigger.FireSkipReasonRuleUncertain,
-		trigger.FireSkipReasonRuleNoLongerCompiles,
-		trigger.FireSkipReasonSubjectBusy,
-		trigger.FireSkipReasonOther,
+var triggerFireSkipReasonSet = func() map[string]struct{} {
+	reasons := trigger.FireSkipReasons()
+	set := make(map[string]struct{}, len(reasons))
+	for _, r := range reasons {
+		set[r] = struct{}{}
 	}
+	return set
+}()
+
+func triggerFireSkipReasons() []string {
+	return trigger.FireSkipReasons()
 }
 
 func triggerReaperOutcomes() []string {
@@ -184,17 +186,10 @@ func normalizeTriggerFireSkipReasonLabel(status, skipReason string) string {
 	if status != store.TriggerFireStatusSkipped {
 		return ""
 	}
-	switch skipReason {
-	case trigger.FireSkipReasonRuleBudgetExhausted,
-		trigger.FireSkipReasonRuleEvaluationFailed,
-		trigger.FireSkipReasonRuleUncertain,
-		trigger.FireSkipReasonRuleNoLongerCompiles,
-		trigger.FireSkipReasonSubjectBusy,
-		trigger.FireSkipReasonOther:
+	if _, ok := triggerFireSkipReasonSet[skipReason]; ok {
 		return skipReason
-	default:
-		return trigger.FireSkipReasonOther
 	}
+	return trigger.FireSkipReasonOther
 }
 
 // TriggerMetricsRecorder records durable queue, trigger ingress, trigger fire,

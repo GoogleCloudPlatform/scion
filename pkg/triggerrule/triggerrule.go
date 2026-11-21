@@ -60,6 +60,7 @@ const (
 	MaxAttributesBytes = 8 * 1024
 	MaxRuleTraceBytes  = 4 * 1024
 	EventRuleBudget    = time.Second
+	EventCompileBudget = time.Second
 
 	Stage1CacheMaxEntries = celengine.DefaultCacheMaxEntries // 1024 global entries (stage1-design rev 8.3)
 	Stage1CacheMaxBytes   = celengine.DefaultCacheMaxBytes   // 1 MiB global program weight (stage1-design rev 8.3)
@@ -83,12 +84,13 @@ const (
 // Closed content-free MatchResult.Reason codes (separate from MatchResult.Class
 // and from the human-facing SkipReason strings stored in trigger_fires.error).
 const (
-	MatchReasonBudgetExhausted    = "budget_exhausted"
-	MatchReasonCorruptRules       = "corrupt_rules"
-	MatchReasonUncertain          = "uncertain"
-	MatchReasonEvalFailed         = "eval_failed"
-	MatchReasonCompileError       = "compile_error"
-	MatchReasonUnsupportedDialect = "unsupported_dialect"
+	MatchReasonBudgetExhausted        = "budget_exhausted"
+	MatchReasonCompileBudgetExhausted = "compile_budget_exhausted"
+	MatchReasonCorruptRules           = "corrupt_rules"
+	MatchReasonUncertain              = "uncertain"
+	MatchReasonEvalFailed             = "eval_failed"
+	MatchReasonCompileError           = "compile_error"
+	MatchReasonUnsupportedDialect     = "unsupported_dialect"
 )
 
 // Dialect-level FailedError / UncertainError reason codes mirrored here so
@@ -127,6 +129,7 @@ var allowedMatchReasons = map[string]bool{
 	ruleengine.ReasonIONotAllowed:          true,
 	ruleengine.ReasonUnknownDialect:        true,
 	MatchReasonBudgetExhausted:             true,
+	MatchReasonCompileBudgetExhausted:      true,
 	MatchReasonCorruptRules:                true,
 	MatchReasonUncertain:                   true,
 	MatchReasonEvalFailed:                  true,
@@ -262,11 +265,16 @@ type MatchResult struct {
 
 // Generic history reasons recorded on skipped trigger fires (§6.3, §7.0a, §7.2).
 const (
-	SkipReasonEvalFailed       = "rule evaluation failed"
-	SkipReasonRuleUncertain    = "rule uncertain"
-	SkipReasonNoLongerCompiles = "rule no longer compiles"
-	SkipReasonBudgetExhausted  = "rule budget exhausted"
+	SkipReasonEvalFailed             = "rule evaluation failed"
+	SkipReasonRuleUncertain          = "rule uncertain"
+	SkipReasonNoLongerCompiles       = "rule no longer compiles"
+	SkipReasonBudgetExhausted        = "rule budget exhausted"
+	SkipReasonCompileBudgetExhausted = "rule compile budget exhausted"
 )
+
+// ErrCompileBudgetExhausted is returned when a cache-miss rule compilation is
+// skipped because the per-event compile budget is already exhausted (SEC-3b2-01).
+var ErrCompileBudgetExhausted = errors.New("triggerrule: rule compile budget exhausted")
 
 // ErrCorruptMatchRules is the sentinel error returned when a stored trigger's
 // match_rules column cannot be parsed as a JSON rule array or violates stored
@@ -580,7 +588,9 @@ func normalizeJSONNumbers(v any) (any, error) {
 type EvalOption func(*evalConfig)
 
 type evalConfig struct {
-	tracker *ruleengine.BudgetTracker
+	tracker        *ruleengine.BudgetTracker
+	compileTracker *ruleengine.BudgetTracker
+	onCompileMiss  func(dialect string)
 }
 
 // WithBudget attaches an aggregate per-event BudgetTracker (see NewEventBudget).
@@ -590,9 +600,62 @@ func WithBudget(tracker *ruleengine.BudgetTracker) EvalOption {
 	}
 }
 
+// WithCompileBudget attaches a separate per-event compile BudgetTracker charged
+// only on cache misses, never on cache hits and never shared with the eval
+// budget (SEC-3b2-01, F2).
+func WithCompileBudget(tracker *ruleengine.BudgetTracker) EvalOption {
+	return func(c *evalConfig) {
+		c.compileTracker = tracker
+	}
+}
+
+// WithCompileMissObserver invokes fn with the sanitized dialect name whenever
+// a cache miss triggers compilation (3b-2 C2).
+func WithCompileMissObserver(fn func(dialect string)) EvalOption {
+	return func(c *evalConfig) {
+		c.onCompileMiss = fn
+	}
+}
+
 // NewEventBudget creates a 1s aggregate per-event rule budget tracker (§6.3, F5).
 func NewEventBudget() *ruleengine.BudgetTracker {
 	return ruleengine.NewBudgetTracker(EventRuleBudget)
+}
+
+// NewEventCompileBudget creates a 1s per-event rule compile budget tracker (SEC-3b2-01).
+func NewEventCompileBudget() *ruleengine.BudgetTracker {
+	return ruleengine.NewBudgetTracker(EventCompileBudget)
+}
+
+func (r *Rules) cachedCompileWithBudget(
+	ctx context.Context,
+	dialect string,
+	scope celengine.CacheScope,
+	expr string,
+	kind ruleengine.Kind,
+	env ruleengine.EnvironmentRef,
+	cfg evalConfig,
+) (ruleengine.Compiled, error) {
+	var beforeCompile func() error
+	if cfg.compileTracker != nil {
+		beforeCompile = func() error {
+			if cfg.compileTracker.Exhausted() {
+				return ErrCompileBudgetExhausted
+			}
+			return nil
+		}
+	}
+	compileStart := time.Now()
+	compiled, hit, err := r.engine.CachedCompileWithGate(ctx, dialect, scope, expr, kind, env, beforeCompile)
+	if !hit && err != ErrCompileBudgetExhausted {
+		if cfg.compileTracker != nil {
+			cfg.compileTracker.Charge(max(time.Since(compileStart), time.Duration(0)))
+		}
+		if cfg.onCompileMiss != nil {
+			cfg.onCompileMiss(SafeDialectName(dialect))
+		}
+	}
+	return compiled, err
 }
 
 func applyEvalOpts(opts []EvalOption) evalConfig {
@@ -637,7 +700,7 @@ func (r *Rules) Match(ctx context.Context, scope celengine.CacheScope, rule Rule
 	}
 	scope = normalizeTriggerScope(scope, act.projectID)
 
-	compiled, err := r.engine.CachedCompile(ctx, dialect, scope, rule.Expr, ruleengine.KindFilter, matchEnvRef())
+	compiled, err := r.cachedCompileWithBudget(ctx, dialect, scope, rule.Expr, ruleengine.KindFilter, matchEnvRef(), cfg)
 	if err != nil {
 		return false, err
 	}
@@ -862,8 +925,10 @@ func (r *Rules) MatchAllWithTrace(
 			return finishEarly(through, dialect, cls, reason, 0, "", err)
 		}
 
-		// O2 / 3a F2: compile time on a cache miss is NOT charged to cfg.tracker.
-		compiled, err := r.engine.CachedCompile(ctx, rawDialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef())
+		// O2 / 3a F2 & SEC-3b2-01: compile time on a cache miss is NOT charged
+		// to cfg.tracker (eval budget); it is bounded by cfg.compileTracker,
+		// while cache hits continue evaluating even after compile exhaustion (R3).
+		compiled, err := r.cachedCompileWithBudget(ctx, rawDialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef(), cfg)
 		if err != nil {
 			cls, reason := classifyMatchError(err)
 			return finishEarly(through, dialect, cls, reason, 0, "", err)
@@ -922,6 +987,9 @@ func classifyMatchErrorTopDown(err error) (class, reason string, matched bool) {
 	if err == ruleengine.ErrBudgetExhausted {
 		return MatchClassBudget, MatchReasonBudgetExhausted, true
 	}
+	if err == ErrCompileBudgetExhausted {
+		return MatchClassBudget, MatchReasonCompileBudgetExhausted, true
+	}
 	if _, isSize := err.(*corruptRuleSizeError); isSize {
 		return MatchClassFailed, celengine.CategorySize, true
 	}
@@ -978,7 +1046,7 @@ func (r *Rules) Subject(ctx context.Context, scope celengine.CacheScope, rule Ru
 	}
 	scope = normalizeTriggerScope(scope, act.projectID)
 
-	compiled, err := r.engine.CachedCompile(ctx, dialect, scope, rule.Expr, ruleengine.KindSubject, subjectEnvRef())
+	compiled, err := r.cachedCompileWithBudget(ctx, dialect, scope, rule.Expr, ruleengine.KindSubject, subjectEnvRef(), cfg)
 	if err != nil {
 		return "", err
 	}
@@ -1095,6 +1163,9 @@ func classifyRuleErrorTopDown(err error) (reason string, isSkip bool, matched bo
 	// still reached in outermost-first order by the Unwrap recursion below.
 	if err == ruleengine.ErrBudgetExhausted {
 		return SkipReasonBudgetExhausted, true, true
+	}
+	if err == ErrCompileBudgetExhausted {
+		return SkipReasonCompileBudgetExhausted, true, true
 	}
 	if err == ErrCorruptMatchRules {
 		return SkipReasonEvalFailed, true, true

@@ -56,6 +56,18 @@ func (s *Server) isScheduleBlockedPlacementRefusal(ctx context.Context, existing
 	return false
 }
 
+// scheduleBlockedAgentError is the typed error returned by scheduleBlockedError
+// when a dispatch_agent fire is blocked by an existing agent row in phase error
+// (ptone/scion#3701). Typing it lets serverTriggerCore.Fire preserve its
+// actionable remedy text without substring matching on arbitrary errors.
+type scheduleBlockedAgentError struct {
+	msg string
+}
+
+func (e *scheduleBlockedAgentError) Error() string {
+	return e.msg
+}
+
 // scheduleBlockedError is a dispatch_agent fire's error when an agent row in
 // phase error already holds the name. Deleting the row is the only remedy
 // unless the row's saved placement is inconsistent (where ordinary and force
@@ -69,14 +81,20 @@ func scheduleBlockedError(existing *store.Agent, placementRefused bool) error {
 	}
 	if placementRefused {
 		if detail != "" {
-			return fmt.Errorf("agent %q already exists in project in phase error%s; ordinary and force delete cannot remove this agent while its saved placement is inconsistent",
-				existing.Slug, detail)
+			return &scheduleBlockedAgentError{
+				msg: fmt.Sprintf("agent %q already exists in project in phase error%s; ordinary and force delete cannot remove this agent while its saved placement is inconsistent",
+					existing.Slug, detail),
+			}
 		}
-		return fmt.Errorf("agent %q already exists in project in phase error; its saved placement is inconsistent, so ordinary and force delete cannot remove it (see %s)",
-			existing.Slug, inconsistentPlacementDocsURL)
+		return &scheduleBlockedAgentError{
+			msg: fmt.Sprintf("agent %q already exists in project in phase error; its saved placement is inconsistent, so ordinary and force delete cannot remove it (see %s)",
+				existing.Slug, inconsistentPlacementDocsURL),
+		}
 	}
-	return fmt.Errorf("agent %q already exists in project in phase error%s; delete the agent to resume this schedule",
-		existing.Slug, detail)
+	return &scheduleBlockedAgentError{
+		msg: fmt.Sprintf("agent %q already exists in project in phase error%s; delete the agent to resume this schedule",
+			existing.Slug, detail),
+	}
 }
 
 // notifyFireBlocked creates a SCHEDULE_BLOCKED notification for the owner of

@@ -15,12 +15,14 @@
 package trigger
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -48,11 +50,12 @@ const (
 	DefaultMaxAge         = 72 * time.Hour
 	DefaultMaxPermanent   = 5
 
-	DefaultPerFireTimeout  = 30 * time.Second
-	DefaultEventRuleBudget = time.Second
-	FireLeaseHorizon       = 10 * time.Minute
-	HistoryRetention       = 7 * 24 * time.Hour
-	MaxFireSubjectBytes    = 256
+	DefaultPerFireTimeout     = 30 * time.Second
+	DefaultEventRuleBudget    = time.Second
+	DefaultEventCompileBudget = triggerrule.EventCompileBudget
+	FireLeaseHorizon          = 10 * time.Minute
+	HistoryRetention          = 7 * 24 * time.Hour
+	MaxFireSubjectBytes       = 256
 
 	DefaultReapBatchLimit      = 500
 	DefaultReconcileBatchLimit = 500
@@ -64,6 +67,7 @@ const (
 	ErrEventDroppedByQueueLimits         = "dropped by queue limits"
 	ErrEventProcessingFailed             = "processing failed"
 	ErrFireRuleBudgetExhausted           = "rule budget exhausted"
+	ErrFireRuleCompileBudgetExhausted    = triggerrule.SkipReasonCompileBudgetExhausted
 	ErrFireRuleEvaluationFailed          = "rule evaluation failed"
 	ErrFireRuleUncertain                 = "rule uncertain"
 	ErrFireRuleNoLongerCompiles          = "rule no longer compiles"
@@ -72,13 +76,33 @@ const (
 
 	// Closed-set skipped-fire metric reasons (§6.5). Free-text errors are
 	// never emitted as metric labels.
-	FireSkipReasonRuleBudgetExhausted  = "rule_budget_exhausted"
-	FireSkipReasonRuleEvaluationFailed = "rule_evaluation_failed"
-	FireSkipReasonRuleUncertain        = "rule_uncertain"
-	FireSkipReasonRuleNoLongerCompiles = "rule_no_longer_compiles"
-	FireSkipReasonSubjectBusy          = "subject_busy"
-	FireSkipReasonOther                = "other"
+	FireSkipReasonRuleBudgetExhausted        = "rule_budget_exhausted"
+	FireSkipReasonRuleCompileBudgetExhausted = "rule_compile_budget_exhausted"
+	FireSkipReasonRuleEvaluationFailed       = "rule_evaluation_failed"
+	FireSkipReasonRuleUncertain              = "rule_uncertain"
+	FireSkipReasonRuleNoLongerCompiles       = "rule_no_longer_compiles"
+	FireSkipReasonSubjectBusy                = "subject_busy"
+	FireSkipReasonAgentNameInUse             = "agent_name_in_use"
+	FireSkipReasonCommentRateLimited         = "comment_rate_limited"
+	FireSkipReasonOther                      = "other"
 )
+
+// FireSkipReasons returns the closed set of skipped-fire metric reason labels
+// in canonical order. Metrics recorders use this as the single source of truth
+// so newly added FireSkipReason* constants are never silently bucketed as "other".
+func FireSkipReasons() []string {
+	return []string{
+		FireSkipReasonRuleBudgetExhausted,
+		FireSkipReasonRuleCompileBudgetExhausted,
+		FireSkipReasonRuleEvaluationFailed,
+		FireSkipReasonRuleUncertain,
+		FireSkipReasonRuleNoLongerCompiles,
+		FireSkipReasonSubjectBusy,
+		FireSkipReasonAgentNameInUse,
+		FireSkipReasonCommentRateLimited,
+		FireSkipReasonOther,
+	}
+}
 
 // NormalizeFireSkipReason maps a skipped trigger fire's persisted error text
 // onto a closed-set metric label value so label cardinality stays bounded.
@@ -86,6 +110,8 @@ func NormalizeFireSkipReason(errMsg string) string {
 	switch strings.TrimSpace(errMsg) {
 	case ErrFireRuleBudgetExhausted:
 		return FireSkipReasonRuleBudgetExhausted
+	case ErrFireRuleCompileBudgetExhausted:
+		return FireSkipReasonRuleCompileBudgetExhausted
 	case ErrFireRuleEvaluationFailed:
 		return FireSkipReasonRuleEvaluationFailed
 	case ErrFireRuleUncertain:
@@ -94,6 +120,10 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonRuleNoLongerCompiles
 	case "subject busy":
 		return FireSkipReasonSubjectBusy
+	case "agent name in use":
+		return FireSkipReasonAgentNameInUse
+	case "comment rate limited":
+		return FireSkipReasonCommentRateLimited
 	default:
 		return FireSkipReasonOther
 	}
@@ -163,6 +193,7 @@ type DispatcherConfig struct {
 	FireAudit      FireAuditSink
 	PerFireTimeout time.Duration
 	RuleBudget     time.Duration
+	CompileBudget  time.Duration
 	Metrics        DispatcherMetrics
 	Logger         *slog.Logger
 	Now            func() time.Time
@@ -203,12 +234,14 @@ type Dispatcher struct {
 	fireAudit      FireAuditSink
 	perFireTimeout time.Duration
 	ruleBudget     time.Duration
+	compileBudget  time.Duration
 	metrics        DispatcherMetrics
 	logger         *slog.Logger
 	now            func() time.Time
 
-	statsMu   sync.Mutex
-	evalStats map[RuleEvalKey]RuleEvalBucket
+	statsMu       sync.Mutex
+	evalStats     map[RuleEvalKey]RuleEvalBucket
+	compileMisses map[string]int64
 }
 
 // NewDispatcher validates cfg and constructs a Dispatcher.
@@ -226,6 +259,10 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 	ruleBudget := cfg.RuleBudget
 	if ruleBudget <= 0 {
 		ruleBudget = DefaultEventRuleBudget
+	}
+	compileBudget := cfg.CompileBudget
+	if compileBudget <= 0 {
+		compileBudget = DefaultEventCompileBudget
 	}
 	logger := cfg.Logger
 	if logger == nil {
@@ -247,10 +284,12 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		fireAudit:      fireAudit,
 		perFireTimeout: perFire,
 		ruleBudget:     ruleBudget,
+		compileBudget:  compileBudget,
 		metrics:        cfg.Metrics,
 		logger:         logger,
 		now:            nowFn,
 		evalStats:      make(map[RuleEvalKey]RuleEvalBucket),
+		compileMisses:  make(map[string]int64),
 	}, nil
 }
 
@@ -297,6 +336,34 @@ func (d *Dispatcher) recordFireMetric(actionType, status, errMsg string) {
 		skipReason = NormalizeFireSkipReason(errMsg)
 	}
 	d.metrics.RecordTriggerFire(actionType, status, skipReason)
+}
+
+// RuleCompileMissStats returns a point-in-time snapshot of per-dialect rule
+// cache compile misses observed by this Dispatcher.
+func (d *Dispatcher) RuleCompileMissStats() map[string]int64 {
+	if d == nil {
+		return nil
+	}
+	d.statsMu.Lock()
+	defer d.statsMu.Unlock()
+	out := make(map[string]int64, len(d.compileMisses))
+	maps.Copy(out, d.compileMisses)
+	return out
+}
+
+func (d *Dispatcher) recordRuleCompileMiss(ctx context.Context, dialect string) {
+	if d == nil {
+		return
+	}
+	dName := normalizeMetricDialect(dialect, d.rules)
+
+	d.statsMu.Lock()
+	d.compileMisses[dName]++
+	d.statsMu.Unlock()
+
+	if cm, ok := d.ruleMetrics.(RuleCompileMissMetrics); ok {
+		cm.ObserveRuleCompileMiss(ctx, dName)
+	}
 }
 
 // NewDrainer constructs the trigger.event durablequeue.Drainer with Stage 1
@@ -445,6 +512,12 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	baseAct, actErr := triggerrule.NewEventActivation(baseEvent)
 	budget := ruleengine.NewBudgetTracker(d.ruleBudget)
 	budget.Charge(max(d.now().Sub(parseStart), time.Duration(0)))
+	// SEC-3b2-01: separate per-event compile budget charged only on cache misses
+	// (never charged to eval budget, preserving F2).
+	compileBudget := ruleengine.NewBudgetTracker(d.compileBudget)
+	onCompileMiss := func(dialect string) {
+		d.recordRuleCompileMiss(ctx, dialect)
+	}
 
 	var (
 		matchCount        int
@@ -591,14 +664,17 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				continue
 			}
 
-			// SEC-3b1rw-01: ALWAYS pass WithBudget(budget) so rule evaluation is
-			// bounded by the shared per-event aggregate tracker.
+			// SEC-3b1rw-01 & SEC-3b2-01: ALWAYS pass WithBudget(budget) and
+			// WithCompileBudget(compileBudget) so evaluation and miss-compiles
+			// are each bounded by their separate per-event trackers.
 			res, trace, evalErr := d.rules.MatchAllWithTrace(
 				ctx,
 				scope,
 				matchRules,
 				trigAct,
 				triggerrule.WithBudget(budget),
+				triggerrule.WithCompileBudget(compileBudget),
+				triggerrule.WithCompileMissObserver(onCompileMiss),
 			)
 			for _, el := range trace.Elements {
 				d.recordRuleEval(ctx, el.Dialect, el.Class, el.Elapsed)
@@ -664,6 +740,8 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					"",
 					d.logger,
 					triggerrule.WithBudget(budget),
+					triggerrule.WithCompileBudget(compileBudget),
+					triggerrule.WithCompileMissObserver(onCompileMiss),
 				)
 				if ctx.Err() != nil {
 					return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
@@ -892,6 +970,15 @@ func (d *Dispatcher) loadActiveTriggers(ctx context.Context, projectID, sourceKi
 		}
 		all = append(all, res.Items...)
 		if res.NextCursor == "" || len(res.Items) == 0 {
+			// SEC-3b2-02: evaluate candidates oldest-first (CreatedAt ASC, ID ASC)
+			// so a newly authored slow trigger cannot exhaust the shared per-event
+			// budget ahead of pre-existing triggers on the same source.
+			slices.SortFunc(all, func(a, b store.Trigger) int {
+				if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
+					return c
+				}
+				return cmp.Compare(a.ID, b.ID)
+			})
 			return all, nil
 		}
 		cursor = res.NextCursor
