@@ -3632,6 +3632,10 @@ type ScheduledEventStore interface {
 type ScheduledExecQuotaSnapshot struct {
 	PendingEvents   []ScheduledEvent
 	ActiveSchedules []Schedule
+	// ActiveSchedulesAllKinds counts the project's active recurring
+	// schedules of every event type (excluding the schedule being updated),
+	// for the hub's per-project recurring schedule cap.
+	ActiveSchedulesAllKinds int
 }
 
 // ScheduledExecRunStore manages the run records of scheduled exec events

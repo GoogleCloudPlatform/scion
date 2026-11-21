@@ -618,20 +618,38 @@ type concurrentReattributeStore struct {
 
 func (c *concurrentReattributeStore) UpdateSchedule(ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
 	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution) error {
-	if !c.fired {
-		c.fired = true
-		competing, err := c.GetSchedule(ctx, sc.ID)
-		if err != nil {
-			return err
-		}
-		attr := competing.InitiatorAttribution
-		attr.AuthorizationRevision++
-		competing.AuthorityCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
-		if err := c.Store.UpdateSchedule(ctx, competing, store.ScheduleFieldMask{}, prevRevision, prevRevisionKnown, &attr); err != nil {
-			return err
-		}
+	if err := c.competeOnce(ctx, sc, prevRevision, prevRevisionKnown); err != nil {
+		return err
 	}
 	return c.Store.UpdateSchedule(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution)
+}
+
+// UpdateScheduleChecked races the same competing write: resume and enable
+// write through it (the per-project active schedule cap).
+func (c *concurrentReattributeStore) UpdateScheduleChecked(ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
+	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,
+	limit int, check func(store.ScheduledExecQuotaSnapshot) error) error {
+	if err := c.competeOnce(ctx, sc, prevRevision, prevRevisionKnown); err != nil {
+		return err
+	}
+	return c.Store.UpdateScheduleChecked(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution, limit, check)
+}
+
+// competeOnce lands one competing re-attribution of sc before the first
+// write.
+func (c *concurrentReattributeStore) competeOnce(ctx context.Context, sc *store.Schedule, prevRevision int, prevRevisionKnown bool) error {
+	if c.fired {
+		return nil
+	}
+	c.fired = true
+	competing, err := c.GetSchedule(ctx, sc.ID)
+	if err != nil {
+		return err
+	}
+	attr := competing.InitiatorAttribution
+	attr.AuthorizationRevision++
+	competing.AuthorityCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
+	return c.Store.UpdateSchedule(ctx, competing, store.ScheduleFieldMask{}, prevRevision, prevRevisionKnown, &attr)
 }
 
 // A resume racing a concurrent re-attribution answers 409 and writes

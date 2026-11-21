@@ -83,6 +83,14 @@ func (s *Server) authorizeScheduledEventAccess(w http.ResponseWriter, r *http.Re
 // call it with the row they loaded, after their project check and before
 // any other work.
 func (s *Server) authorizeScheduledEventRow(w http.ResponseWriter, r *http.Request, projectID string, action Action, row *scheduledEventRow) bool {
+	return s.authorizeScheduledEventRowOr(w, r, projectID, action, row, nil)
+}
+
+// authorizeScheduledEventRowOr is authorizeScheduledEventRow with an
+// exception: when the decision denies the request, fallback (if non-nil) is
+// consulted before the denial is logged and the 403 written, and the
+// request is allowed if it returns true. The decision itself is made once.
+func (s *Server) authorizeScheduledEventRowOr(w http.ResponseWriter, r *http.Request, projectID string, action Action, row *scheduledEventRow, fallback func() bool) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
@@ -96,6 +104,9 @@ func (s *Server) authorizeScheduledEventRow(w http.ResponseWriter, r *http.Reque
 	}
 	d := s.scheduledEventAccessDecision(r.Context(), projectID, action, row)
 	if d.allowed {
+		return true
+	}
+	if fallback != nil && fallback() {
 		return true
 	}
 	logAuthzDenial(r, identity, scheduledEventResource(projectID), action, d.reason)

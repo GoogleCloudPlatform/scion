@@ -87,6 +87,18 @@ Controls the central Hub API server.
 | `sse` | object | | Browser events stream settings (see [Events streams](#events-streams-serverhubsse)). |
 | `platform_request_timeout` | duration | | Request timeout of the platform in front of the Hub, for example the Cloud Run service timeout. No default. When set, the events stream maximum age and the conduit `lifetime_cap` are lowered to 0.8 of it (see [Platform request timeout](#platform-request-timeout)). Between `"150s"` and `"24h"`. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_PLATFORMREQUESTTIMEOUT`. |
 | `chat` | object | | Web chat limits (see [Chat search](#chat-search-serverhubchatsearch)). |
+| `schedules` | object | | Limits on recurring schedules (see [Recurring schedules](#recurring-schedules-serverhubschedules)). |
+
+#### Recurring schedules (`server.hub.schedules`)
+
+Limits on recurring (cron) schedules of every kind (`message`, `dispatch_agent`, `exec`) and every author. They are checked whenever a schedule is armed: on create, on a cron change, and on enable or resume. Schedules that are already active keep running when the limits change; a paused schedule that breaks them must be edited before it can be resumed. Startup-only: restart required to change.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `min_interval` | duration | `"5m"` | Shortest interval a schedule's cron expression may fire at, from its minute and hour fields (for example `0,1 * * * *` fires one minute apart and is refused at `5m`). `"0s"` turns the check off; at most `"24h"`. The default matches the default `launch_timeout`: a `dispatch_agent` schedule starts an agent on every fire, and a wake-message schedule every minute keeps an agent from ever idling. Refused with `400`. Env: `SCION_SERVER_HUB_SCHEDULES_MININTERVAL`. |
+| `max_active_per_project` | int | `50` | Most active recurring schedules one project may hold, of every kind together (exec schedules also keep their own limits). `0` means no cap; at most `10000`. Refused with `429` (`quota_exceeded`). Env: `SCION_SERVER_HUB_SCHEDULES_MAXACTIVEPERPROJECT`. |
+
+The user who created a schedule can pause or delete it even without the `scheduled_event.update` or `scheduled_event.delete` permission (project members hold neither), when signed in interactively and still able to read the project's schedules. Resuming and editing still need `scheduled_event.update`.
 
 #### CORS (`server.hub.cors`)
 

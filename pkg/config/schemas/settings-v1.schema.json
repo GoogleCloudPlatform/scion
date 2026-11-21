@@ -1916,6 +1916,27 @@
           "$ref": "#/$defs/serverHubBranding",
           "description": "Hub-wide UI branding settings (product name, logos, icons, accent color, and WCAG AA validated light/dark color palettes).",
           "x-since": "1"
+        },
+        "schedules": {
+          "type": "object",
+          "description": "Limits on recurring schedules, for every kind and author. Read at startup.",
+          "additionalProperties": false,
+          "properties": {
+            "min_interval": {
+              "type": "string",
+              "description": "Shortest interval a recurring schedule's cron expression may fire at, as a Go duration (default '5m'; '0s' turns the check off; at most '24h'). Checked on create, cron change, enable and resume.",
+              "x-env-var": "SCION_SERVER_HUB_SCHEDULES_MININTERVAL",
+              "x-since": "1"
+            },
+            "max_active_per_project": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000,
+              "description": "Most active recurring schedules one project may hold, of every kind (default 50; 0 = no cap). Checked on create, enable and resume.",
+              "x-env-var": "SCION_SERVER_HUB_SCHEDULES_MAXACTIVEPERPROJECT",
+              "x-since": "1"
+            }
+          }
         }
       }
     },
