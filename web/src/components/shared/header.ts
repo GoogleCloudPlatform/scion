@@ -188,6 +188,9 @@ export class ScionHeader extends LitElement {
   private terminalsMenuMounted = false;
 
   @state()
+  private narrowTerminalsMounted = false;
+
+  @state()
   private terminalsMenuOpen = false;
 
   @state()
@@ -529,6 +532,7 @@ export class ScionHeader extends LitElement {
        the compact sizing to match the other header icon buttons. */
     @media (hover: none) and (pointer: coarse) {
       .palette-button,
+      .mode-trigger,
       .mode-switch button.terminals-menu-trigger {
         min-width: 44px;
         min-height: 44px;
@@ -943,7 +947,7 @@ export class ScionHeader extends LitElement {
       </div>
 
       <!-- Wide center column: segmented mode switch with labels (>1100px) -->
-      <div class="wide-center">${this.renderModeSwitch(true)}</div>
+      <div class="wide-center">${this.renderModeSwitch('.wide-center')}</div>
 
       <div class="header-right">
         ${this.renderPaletteButton()}
@@ -1012,7 +1016,9 @@ export class ScionHeader extends LitElement {
 
         <!-- Compact layout (<=1100px): mode segments/dropdown + user dropdown -->
         <div class="compact-right">
-          <div class="compact-mode-segments">${this.renderModeSwitch(false)}</div>
+          <div class="compact-mode-segments">
+            ${this.renderModeSwitch('.compact-mode-segments')}
+          </div>
           <div class="compact-mode-dropdown">${this.renderModeDropdown()}</div>
           ${this.user
             ? this.renderUserDropdown()
@@ -1097,11 +1103,11 @@ export class ScionHeader extends LitElement {
 
   /**
    * Inline segmented control for switching between Console / Chat /
-   * Terminals modes. Used in the wide center column (with labels and the
-   * Terminals chevron split-button) and in the compact tier (icon-only via
-   * CSS, without the chevron).
+   * Terminals modes. Used in the wide center column (with labels) and in the
+   * compact medium tier (icon-only via CSS), both with the Terminals chevron
+   * split-button.
    */
-  private renderModeSwitch(withTerminalsDropdown = false): TemplateResult {
+  private renderModeSwitch(scope: string): TemplateResult {
     const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
 
     const isChat = this.isChatView();
@@ -1110,23 +1116,6 @@ export class ScionHeader extends LitElement {
     const dashboardHint = this.modeShortcutHint('dashboard');
     const chatHint = this.modeShortcutHint('chat');
     const terminalsHint = this.modeShortcutHint('terminals');
-
-    const terminalsButton = html`
-      <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
-        <button
-          class=${isTerminal ? 'active' : ''}
-          data-mode="terminals"
-          @click=${(): void => {
-            void this.handleModeSwitch('terminals');
-          }}
-          aria-label=${terminalsLabel}
-          aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
-        >
-          <sl-icon name="terminal"></sl-icon>
-          <span class="mode-label">Terminals</span>
-        </button>
-      </sl-tooltip>
-    `;
 
     return html`
       <div class="mode-switch" role="group" aria-label="Switch view">
@@ -1165,27 +1154,48 @@ export class ScionHeader extends LitElement {
               </sl-tooltip>
             `
           : ''}
-        ${withTerminalsDropdown
-          ? html`
-              <div class="terminals-split">
-                ${terminalsButton} ${this.renderTerminalsDropdown(isTerminal)}
-              </div>
-            `
-          : terminalsButton}
+        <div class="terminals-split">
+          <sl-tooltip content=${withHint(terminalsLabel, terminalsHint)}>
+            <button
+              class=${isTerminal ? 'active' : ''}
+              data-mode="terminals"
+              @click=${(): void => {
+                void this.handleModeSwitch('terminals');
+              }}
+              aria-label=${terminalsLabel}
+              aria-keyshortcuts=${terminalsHint?.aria ?? nothing}
+            >
+              <sl-icon name="terminal"></sl-icon>
+              <span class="mode-label">Terminals</span>
+            </button>
+          </sl-tooltip>
+          ${this.renderTerminalsDropdown(isTerminal, scope)}
+        </div>
       </div>
     `;
   }
 
-  private renderTerminalsDropdown(isTerminal: boolean): TemplateResult {
+  private terminalsMenuCtx(): {
+    currentPath: string;
+    userId: string;
+    sessions: readonly TerminalSessionSummary[];
+    focusedAgentId: string | null;
+  } {
+    return {
+      currentPath: this.currentPath,
+      userId: this.user?.id ?? '',
+      sessions: this.terminalSessions,
+      focusedAgentId: this.terminalFocusedAgentId,
+    };
+  }
+
+  private renderTerminalsDropdown(isTerminal: boolean, scope: string): TemplateResult {
     const mod = this.terminalsMenuMounted ? this.terminalsMenuMod : null;
     if (mod) {
       return mod.renderMountedTerminalsDropdown({
+        ...this.terminalsMenuCtx(),
         isTerminal,
         open: this.terminalsMenuOpen,
-        currentPath: this.currentPath,
-        userId: this.user?.id ?? '',
-        sessions: this.terminalSessions,
-        focusedAgentId: this.terminalFocusedAgentId,
         root: this.shadowRoot,
         setOpen: (open: boolean): void => {
           this.terminalsMenuOpen = open;
@@ -1200,7 +1210,7 @@ export class ScionHeader extends LitElement {
       aria-haspopup="menu"
       aria-expanded="false"
       @click=${(): void => {
-        void this.openTerminalsMenu('none');
+        void this.openTerminalsMenu(scope, 'none');
       }}
       @keydown=${(e: KeyboardEvent): void => {
         const k = e.key;
@@ -1212,26 +1222,40 @@ export class ScionHeader extends LitElement {
               : null;
         if (!focus) return;
         e.preventDefault();
-        void this.openTerminalsMenu(focus);
+        void this.openTerminalsMenu(scope, focus);
       }}
     >
       <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
     </button>`;
   }
 
-  private async openTerminalsMenu(focusTarget: 'none' | 'first' | 'last'): Promise<void> {
+  private async ensureTerminalsMenuMod(): Promise<HeaderTerminalsMenuMod | null> {
     const mod = this.terminalsMenuMod ?? (await preloadHeaderTerminalsMenu());
-    if (!this.isConnected) return;
+    if (!this.isConnected) return null;
     this.terminalsMenuMod = mod;
     mod.ensureTerminalsMenuStyles(this.shadowRoot);
     this.unsubscribeTerminalsMenu ??= mod.subscribeCurrentAgentChanges(
       this.handleCurrentAgentChanged
     );
+    return mod;
+  }
+
+  private async openTerminalsMenu(
+    scope: string,
+    focusTarget: 'none' | 'first' | 'last'
+  ): Promise<void> {
+    const mod = await this.ensureTerminalsMenuMod();
+    if (!mod) return;
     this.terminalsMenuMounted = true;
     this.terminalsMenuOpen = true;
     await this.updateComplete;
     mod.syncTerminalsTriggerAria(this.shadowRoot);
-    mod.openMountedTerminalsDropdown(this.shadowRoot, focusTarget);
+    mod.openMountedTerminalsDropdown(this.shadowRoot, scope, focusTarget);
+  }
+
+  private async openNarrowTerminals(): Promise<void> {
+    const mod = await this.ensureTerminalsMenuMod();
+    if (mod) this.narrowTerminalsMounted = true;
   }
 
   // =========================================================================
@@ -1249,7 +1273,11 @@ export class ScionHeader extends LitElement {
     const isTerminal = this.isTerminalView();
 
     return html`
-      <sl-dropdown>
+      <sl-dropdown
+        @sl-show=${(): void => {
+          void this.openNarrowTerminals();
+        }}
+      >
         <button
           slot="trigger"
           class="mode-trigger"
@@ -1297,6 +1325,9 @@ export class ScionHeader extends LitElement {
               : ''}
             ${this.renderMenuShortcutHint('terminals')}
           </sl-menu-item>
+          ${this.narrowTerminalsMounted && this.terminalsMenuMod
+            ? this.terminalsMenuMod.renderNarrowTerminalsSection(this.terminalsMenuCtx())
+            : nothing}
         </sl-menu>
       </sl-dropdown>
     `;
@@ -1344,6 +1375,8 @@ export class ScionHeader extends LitElement {
     const value = e.detail.item.value;
     if (value === 'dashboard' || value === 'chat' || value === 'terminals') {
       void this.handleModeSwitch(value);
+    } else {
+      this.terminalsMenuMod?.selectNarrowTerminalValue(value);
     }
   }
 
@@ -1637,6 +1670,11 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
+    if (this.terminalsMenuMod && (this.terminalsMenuMounted || this.narrowTerminalsMounted)) {
+      this.unsubscribeTerminalsMenu ??= this.terminalsMenuMod.subscribeCurrentAgentChanges(
+        this.handleCurrentAgentChanged
+      );
+    }
     this.graphPaletteAvailable = isGraphPaletteAvailable();
     window.addEventListener(GRAPH_PALETTE_AVAILABILITY_EVENT, this.handleGraphPaletteAvailability);
     this.rememberModePath();

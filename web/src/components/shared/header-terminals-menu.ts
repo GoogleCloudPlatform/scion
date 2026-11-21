@@ -16,8 +16,8 @@
 
 /**
  * Lazy-loaded menu item rendering, route current-agent resolution, and
- * keyboard/selection handlers for the wide-tier Terminals split-button
- * dropdown in `<scion-header>` (ptone/scion#8284).
+ * keyboard/selection handlers for the Terminals dropdown in `<scion-header>`
+ * across wide, medium, and narrow tiers (ptone/scion#8284, ptone/scion#8440).
  *
  * Kept out of `header.ts`'s static import graph so `src/client/main.ts` stays
  * within its initial entry-closure gzip budget.
@@ -57,6 +57,9 @@ const MENU_CSS = `
   .terminals-menu {
     min-width: 14rem;
     max-width: 22rem;
+  }
+  .compact-mode-dropdown sl-menu {
+    max-width: calc(100vw - 1.5rem);
   }
   .terminal-row-dot {
     width: 0.5rem;
@@ -199,8 +202,11 @@ export function buildTerminalDropdownRows(ctx: TerminalsMenuRenderContext): Term
   return rows;
 }
 
+const NARROW_TERMINAL_VALUE_PREFIX = 'terminal:';
+
 export function renderTerminalsMenuItems(
-  ctx: TerminalsMenuRenderContext
+  ctx: TerminalsMenuRenderContext,
+  valuePrefix = ''
 ): TemplateResult | TemplateResult[] {
   const rows = buildTerminalDropdownRows(ctx);
   if (rows.length === 0) {
@@ -210,7 +216,10 @@ export function renderTerminalsMenuItems(
   }
   return rows.map((row) => {
     const status = row.dot ? row.dot.meaning : 'not open';
-    return html`<sl-menu-item value=${row.agentId} aria-label=${`${row.name}, ${status}`}>
+    return html`<sl-menu-item
+      value=${`${valuePrefix}${row.agentId}`}
+      aria-label=${`${row.name}, ${status}`}
+    >
       <span
         slot="prefix"
         class="terminal-row-dot ${row.dot ? '' : 'placeholder'}"
@@ -228,11 +237,23 @@ export function renderTerminalsMenuItems(
   });
 }
 
-function menuItems(root: ShadowRoot | null): HTMLElement[] {
+export function renderNarrowTerminalsSection(ctx: TerminalsMenuRenderContext): TemplateResult {
+  return html`<sl-divider></sl-divider>
+    <sl-menu-label>Open terminals</sl-menu-label>
+    ${renderTerminalsMenuItems(ctx, NARROW_TERMINAL_VALUE_PREFIX)}`;
+}
+
+export function selectNarrowTerminalValue(value: string): boolean {
+  if (!value.startsWith(NARROW_TERMINAL_VALUE_PREFIX)) return false;
+  const id = value.slice(NARROW_TERMINAL_VALUE_PREFIX.length);
+  if (!id) return false;
+  selectTerminalFromDropdown(id);
+  return true;
+}
+
+function menuItems(dd: Element): HTMLElement[] {
   return Array.from(
-    root?.querySelectorAll<HTMLElement>(
-      '.wide-center .terminals-menu sl-menu-item:not([disabled])'
-    ) ?? []
+    dd.querySelectorAll<HTMLElement>('.terminals-menu sl-menu-item:not([disabled])')
   );
 }
 
@@ -254,15 +275,11 @@ type SlDropdownLike = HTMLElement & {
   getMenu?: () => { setCurrentItem?: (item: HTMLElement) => void } | undefined;
 };
 
-function focusMenuItemAfterOpen(
-  dd: SlDropdownLike,
-  root: ShadowRoot | null,
-  which: 'first' | 'last'
-): void {
+function focusMenuItemAfterOpen(dd: SlDropdownLike, which: 'first' | 'last'): void {
   const focus = (): void => {
     requestAnimationFrame(() => {
       if (!dd.open) return;
-      const items = menuItems(root);
+      const items = menuItems(dd);
       const target = which === 'last' ? items[items.length - 1] : items[0];
       if (!target) return;
       dd.getMenu?.()?.setCurrentItem?.(target);
@@ -274,19 +291,21 @@ function focusMenuItemAfterOpen(
 }
 
 /**
- * Opens a newly-mounted `<sl-dropdown class="terminals-dropdown">`. Focuses the
- * mounted trigger button so replacing the pre-mount placeholder does not drop
- * focus to `<body>`, and when opened via keyboard moves roving focus to the
- * first or last enabled item.
+ * Opens a newly-mounted `<sl-dropdown class="terminals-dropdown">` inside
+ * `scope` (`.wide-center` or `.compact-mode-segments`). Focuses the mounted
+ * trigger button so replacing the pre-mount placeholder does not drop focus to
+ * `<body>`, and when opened via keyboard moves roving focus to the first or
+ * last enabled item.
  */
 export function openMountedTerminalsDropdown(
   root: ShadowRoot | null,
+  scope: string,
   focusTarget: 'none' | 'first' | 'last'
 ): void {
-  const dd = root?.querySelector<SlDropdownLike>('.wide-center .terminals-dropdown');
+  const dd = root?.querySelector<SlDropdownLike>(`${scope} .terminals-dropdown`);
   if (!dd) return;
   const focusTrigger = (): void => {
-    root?.querySelector<HTMLElement>('.wide-center .terminals-menu-trigger')?.focus();
+    dd.querySelector<HTMLElement>('.terminals-menu-trigger')?.focus();
   };
   if (typeof dd.show === 'function') {
     const shown = Promise.resolve(dd.show());
@@ -298,13 +317,13 @@ export function openMountedTerminalsDropdown(
       });
     }
     void shown.then(() => {
-      if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, root, focusTarget);
+      if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, focusTarget);
       else if (dd.open) focusTrigger();
     });
   } else {
     focusTrigger();
     dd.open = true;
-    if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, root, focusTarget);
+    if (focusTarget !== 'none') focusMenuItemAfterOpen(dd, focusTarget);
   }
 }
 
@@ -314,11 +333,11 @@ export function openMountedTerminalsDropdown(
  * Focus the first enabled item once the dropdown finishes opening so keyboard
  * users land directly in the menu on `Enter` or `Space` as well.
  */
-export function onTerminalsTriggerKey(e: KeyboardEvent, root: ShadowRoot | null): void {
+export function onTerminalsTriggerKey(e: KeyboardEvent): void {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   const dd = (e.currentTarget as HTMLElement).closest('sl-dropdown') as SlDropdownLike | null;
   if (!dd || dd.open) return;
-  queueMicrotask(() => focusMenuItemAfterOpen(dd, root, 'first'));
+  queueMicrotask(() => focusMenuItemAfterOpen(dd, 'first'));
 }
 
 export interface TerminalsDropdownRenderOptions extends TerminalsMenuRenderContext {
@@ -329,9 +348,9 @@ export interface TerminalsDropdownRenderOptions extends TerminalsMenuRenderConte
 }
 
 export function syncTerminalsTriggerAria(root: ShadowRoot | null): void {
-  root
-    ?.querySelector('.wide-center .terminals-menu-trigger')
-    ?.setAttribute('aria-haspopup', 'menu');
+  for (const el of root?.querySelectorAll('.terminals-menu-trigger') ?? []) {
+    el.setAttribute('aria-haspopup', 'menu');
+  }
 }
 
 export function renderMountedTerminalsDropdown(
@@ -356,7 +375,7 @@ export function renderMountedTerminalsDropdown(
       aria-label="Open terminals menu"
       aria-haspopup="menu"
       aria-expanded=${opts.open ? 'true' : 'false'}
-      @keydown=${(e: KeyboardEvent): void => onTerminalsTriggerKey(e, opts.root)}
+      @keydown=${onTerminalsTriggerKey}
     >
       <sl-icon name="chevron-down" aria-hidden="true"></sl-icon>
     </button>
