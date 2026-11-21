@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 func watchTestUser(t *testing.T, s store.Store, projectID, projectRole string) *store.User {
@@ -382,8 +383,11 @@ func TestConversationWatch_CreateMessageWakesPoll(t *testing.T) {
 // conversation's last_message_seq so subsequent CreateMessage calls never
 // collide on the (conversation_id, conversation_seq) unique index.
 func TestPromoteDM_ReallocatesConversationSeqWithoutCollision(t *testing.T) {
-	srv, s := testServer(t)
-	require.NotNil(t, srv.webChatStore, "testServer must configure webChatStore")
+	_, s := testServer(t)
+	cs, ok := s.(*entadapter.CompositeStore)
+	require.True(t, ok, "testServer store must be *entadapter.CompositeStore")
+	wcs := NewWebChatStore(cs.DB(), "sqlite")
+	require.NoError(t, wcs.Init())
 
 	ctx := context.Background()
 	projID := uuid.NewString()
@@ -425,7 +429,7 @@ func TestPromoteDM_ReallocatesConversationSeqWithoutCollision(t *testing.T) {
 	require.NoError(t, s.CreateMessage(ctx, m2))
 
 	now := time.Now().UTC()
-	topic, err := srv.webChatStore.PromoteDM(ctx, WebChatTopic{
+	topic, err := wcs.PromoteDM(ctx, WebChatTopic{
 		ID:             uuid.NewString(),
 		ProjectID:      projID,
 		Name:           "promoted-topic",
