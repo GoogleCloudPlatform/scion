@@ -4312,7 +4312,7 @@ export class ScionPageChat extends LitElement {
           id: h.id,
           name: h.displayName,
           email: h.email || '',
-          ...(h.avatarUrl ? { avatarUrl: h.avatarUrl } : {}),
+          avatarUrl: h.avatarUrl || '',
           kind: 'user' as const,
         })),
         ...this.v2Members.filter((m) => m.kind === 'agent'),

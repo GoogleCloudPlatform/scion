@@ -5165,7 +5165,8 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	now := time.Now()
 	seesDeletionDetail := callerSeesDeletionDetail(ctx)
 	agents := make([]chatAgentMemberEntry, 0, len(projectAgents))
-	for _, a := range projectAgents {
+	for i := range projectAgents {
+		a := &projectAgents[i]
 		// Each attach check reads the store and may write an audit record,
 		// so stop once the client has gone rather than finishing the list.
 		if ctx.Err() != nil {
@@ -5179,14 +5180,14 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 			Activity:      a.Activity,
 			SuspendReason: a.SuspendReason,
 			Message:       truncatePreview(a.Message, spaceMembersMessageRunes),
-			Deletion:      deletionViewForCaller(&a, now, seesDeletionDetail),
+			Deletion:      deletionViewForCaller(a, now, seesDeletionDetail),
 		}
 		// Whether this viewer may open a terminal on this agent. The PTY
 		// route gates on authorizeAgentLifecycle, which decides
 		// ActionAttach for a user identity, so ask the same question here
 		// rather than offering a control the server will refuse.
 		entry.CanAttach = s.authzService.CheckAccess(
-			attachCtx, user, agentResource(&a), ActionAttach).Allowed
+			attachCtx, user, agentResource(a), ActionAttach).Allowed
 		switch {
 		case !a.LastActivityEvent.IsZero():
 			entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)

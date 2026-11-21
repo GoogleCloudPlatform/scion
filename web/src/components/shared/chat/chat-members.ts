@@ -192,7 +192,7 @@ export class ScionChatMembers extends LitElement {
   /** Re-renders absolute activity dates when the display zone changes. */
   readonly _zone = new DisplayZoneController(this);
   private readonly deletionLease = new DeletionLeaseController(this, () =>
-    this.agents.map((a) => ({ deletion: a.deletion ?? null }))
+    (this.agents || []).map((a) => ({ deletion: a.deletion ?? null }))
   );
 
   /** Human members of the space. */
