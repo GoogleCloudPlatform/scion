@@ -307,6 +307,6 @@ func TestFetchRemoteTemplateWithOptions_GitHubTagAndCommitRefs(t *testing.T) {
 		require.ErrorIs(t, err, ErrRemoteFetchLimit)
 		assert.Contains(t, err.Error(), "more than 10")
 		assert.Contains(t, err.Error(), "whole repository")
-		assert.Contains(t, err.Error(), "release archive")
+		assert.Contains(t, err.Error(), AllowedImportSourcesKey)
 	})
 }
