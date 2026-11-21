@@ -101,6 +101,7 @@ describe('scion-page-skill-create scope default', () => {
   afterEach(() => {
     element?.remove();
     element = null;
+    window.history.replaceState({}, '', '/skills/new');
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -152,5 +153,148 @@ describe('scion-page-skill-create scope default', () => {
     const calls = skillListCalls(fetchMock);
     expect(calls).toHaveLength(2);
     expect(calls.filter((path) => path.includes('scope=global'))).toHaveLength(1);
+  });
+});
+
+describe('scion-page-skill-create project picker (ptone/scion#8735)', () => {
+  let element: PageElement | null = null;
+
+  beforeAll(async () => {
+    await import('./skill-create.js');
+  }, 60_000);
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    window.history.replaceState({}, '', '/skills/new');
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const PROJECTS = [
+    {
+      id: 'proj-owner',
+      name: 'Owned Project',
+      slug: 'owned-project',
+      _capabilities: { actions: ['read', 'update', 'manage', 'delete'] },
+    },
+    {
+      id: 'proj-admin',
+      name: 'Admin Project',
+      slug: 'admin-project',
+      _capabilities: { actions: ['read', 'update', 'manage'] },
+    },
+    {
+      id: 'proj-member',
+      name: 'Member Only Project',
+      slug: 'member-only',
+      _capabilities: { actions: ['read', 'chat_post'] },
+    },
+    {
+      id: 'proj-viewer',
+      name: 'Viewer Project',
+      slug: 'viewer-project',
+      _capabilities: { actions: ['read'] },
+    },
+  ];
+
+  function stubWithProjects(globalAllowed = false): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn((url: string | URL | Request): Promise<Response> => {
+      const path = requestPath(url);
+      if (path.includes('/api/v1/skills')) {
+        return answer(
+          path.includes('scope=global') ? (globalAllowed ? 'create' : 'none') : 'create'
+        );
+      }
+      if (path.includes('/api/v1/projects/')) {
+        const id = path.split('/api/v1/projects/')[1].split('?')[0];
+        const found = PROJECTS.find((p) => p.id === id);
+        return Promise.resolve(found ? jsonResponse(found) : jsonResponse({}, 404));
+      }
+      if (path.includes('/api/v1/projects')) {
+        const u = new URL(path, 'http://localhost');
+        const q = (u.searchParams.get('search') ?? '').toLowerCase();
+        const matched = q
+          ? PROJECTS.filter(
+              (p) => p.name.toLowerCase().includes(q) || p.slug.toLowerCase().includes(q)
+            )
+          : PROJECTS;
+        return Promise.resolve(jsonResponse({ projects: matched }));
+      }
+      return Promise.resolve(jsonResponse({}, 404));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('renders a searchable, permission-filtered project picker instead of a text box for project scope', async () => {
+    stubWithProjects(false);
+    element = await mountPage();
+
+    const scopeSelect = element.shadowRoot?.querySelector('sl-select#scope') as HTMLElement & {
+      value: string;
+    };
+    scopeSelect.value = 'project';
+    scopeSelect.dispatchEvent(new Event('sl-change'));
+    await element.updateComplete;
+
+    expect(element.shadowRoot?.querySelector('sl-input#scopeId')).toBeNull();
+    const picker = element.shadowRoot?.querySelector('scion-project-picker#scopeId') as
+      | (HTMLElement & { updateComplete: Promise<boolean>; value: string })
+      | null;
+    expect(picker).not.toBeNull();
+
+    // Focus the picker input to load projects
+    const pickerInput = picker?.shadowRoot?.querySelector('sl-input');
+    expect(pickerInput).not.toBeNull();
+    pickerInput?.dispatchEvent(new Event('sl-focus'));
+    await new Promise((r) => setTimeout(r, 25));
+    await picker!.updateComplete;
+
+    // Only projects with update/manage permission appear (member & viewer filtered out)
+    const optionNames = Array.from(
+      picker!.shadowRoot?.querySelectorAll('.project-search-option .project-name') ?? []
+    ).map((el) => el.textContent?.trim());
+    expect(optionNames).toEqual(['Owned Project', 'Admin Project']);
+
+    // Selecting a project updates scopeId
+    const secondOption = picker!.shadowRoot?.querySelectorAll('.project-search-option')[1];
+    secondOption?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await element.updateComplete;
+
+    expect((element as unknown as { scopeId: string }).scopeId).toBe('proj-admin');
+  });
+
+  it('preselects the current project when opened with ?projectId= in a project context', async () => {
+    window.history.replaceState({}, '', '/skills/new?projectId=proj-owner');
+    stubWithProjects(false);
+    element = await mountPage();
+
+    // Scope stays 'project' (not overridden to 'user') and scopeId is preselected
+    expect(scopeOf(element)).toBe('project');
+    expect((element as unknown as { scopeId: string }).scopeId).toBe('proj-owner');
+
+    const picker = element.shadowRoot?.querySelector('scion-project-picker#scopeId') as
+      | (HTMLElement & { updateComplete: Promise<boolean> })
+      | null;
+    expect(picker).not.toBeNull();
+    await new Promise((r) => setTimeout(r, 25));
+    await picker!.updateComplete;
+
+    expect((picker as unknown as Record<string, unknown>)['searchQuery']).toBe(
+      'Owned Project (owned-project)'
+    );
+  });
+
+  it('clears preselected project if user lacks publish permission on it', async () => {
+    window.history.replaceState({}, '', '/skills/new?projectId=proj-member');
+    stubWithProjects(false);
+    element = await mountPage();
+
+    await new Promise((r) => setTimeout(r, 25));
+    await element.updateComplete;
+
+    expect(scopeOf(element)).toBe('project');
+    expect((element as unknown as { scopeId: string }).scopeId).toBe('');
   });
 });

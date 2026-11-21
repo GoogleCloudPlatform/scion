@@ -28,10 +28,12 @@ import { can } from '../../shared/types.js';
 import { paginateAll, PaginationError, PaginationStoppedError } from '../../client/paginate-all.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
+import type { ProjectsChangeDetail } from '../shared/project-picker.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import '../shared/project-picker.js';
 import { formatRelative } from '../../utils/time.js';
-import { navigateTo } from '../../client/navigation.js';
+import { navigateTo, replaceSearch } from '../../client/navigation.js';
 
 /** Skills requested per page; the server's maximum list limit. */
 const SKILLS_PAGE_SIZE = 200;
@@ -61,6 +63,7 @@ export class ScionPageSkills extends LitElement {
   @state() private viewMode: ViewMode = 'grid';
   @state() private searchQuery = '';
   @state() private scopeFilter: SkillScope | '' = '';
+  @state() private selectedProjectIds: string[] = [];
   @state() private sortField: SkillSortField = 'updated';
   @state() private sortDir: SortDir = 'desc';
 
@@ -169,6 +172,10 @@ export class ScionPageSkills extends LitElement {
         min-width: 200px;
       }
 
+      .filter-bar .project-filter {
+        min-width: 240px;
+      }
+
       .filter-bar .inline-loading {
         font-size: 1rem;
       }
@@ -232,12 +239,20 @@ export class ScionPageSkills extends LitElement {
       }
     }
 
+    this.readFiltersFromURL();
+
     const ssrData = this.pageData?.data as
       | { skills?: Skill[]; nextCursor?: string; _capabilities?: Capabilities }
       | undefined;
     // The server prefetch is a single page; when it has more, walk every
     // page on the client instead (ptone/scion#1949).
-    if (ssrData?.skills && !ssrData.nextCursor && this.scopeFilter === '' && !this.searchQuery) {
+    if (
+      ssrData?.skills &&
+      !ssrData.nextCursor &&
+      this.scopeFilter === '' &&
+      this.selectedProjectIds.length === 0 &&
+      !this.searchQuery
+    ) {
       this.skills = ssrData.skills;
       this.scopeCapabilities = ssrData._capabilities;
       this.loading = false;
@@ -245,6 +260,59 @@ export class ScionPageSkills extends LitElement {
     } else {
       void this.loadSkills();
     }
+  }
+
+  private readFiltersFromURL(): void {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const scopeParam = params.get('scope');
+    if (scopeParam === 'global' || scopeParam === 'project' || scopeParam === 'user') {
+      this.scopeFilter = scopeParam;
+    }
+
+    const projectsParam = params.get('projects');
+    if (projectsParam) {
+      const parsed = Array.from(
+        new Set(
+          projectsParam
+            .split(',')
+            .map((id) => id.trim())
+            .filter(Boolean)
+        )
+      );
+      if (parsed.length > 0) {
+        this.selectedProjectIds = parsed;
+        if (!this.scopeFilter) {
+          this.scopeFilter = 'project';
+        }
+      }
+    } else {
+      const singleProject = (params.get('projectId') || params.get('project') || '').trim();
+      if (singleProject) {
+        this.selectedProjectIds = [singleProject];
+        if (!this.scopeFilter) {
+          this.scopeFilter = 'project';
+        }
+      }
+    }
+  }
+
+  private syncFiltersToURL(): void {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    if (this.scopeFilter) {
+      params.set('scope', this.scopeFilter);
+    } else {
+      params.delete('scope');
+    }
+    params.delete('projectId');
+    params.delete('project');
+    if (this.scopeFilter === 'project' && this.selectedProjectIds.length > 0) {
+      params.set('projects', this.selectedProjectIds.join(','));
+    } else {
+      params.delete('projects');
+    }
+    replaceSearch(params);
   }
 
   private async loadSkills(): Promise<void> {
@@ -264,6 +332,9 @@ export class ScionPageSkills extends LitElement {
       const params = new URLSearchParams();
       params.set('status', 'active');
       if (this.scopeFilter) params.set('scope', this.scopeFilter);
+      if (this.scopeFilter === 'project' && this.selectedProjectIds.length === 1) {
+        params.set('scopeId', this.selectedProjectIds[0]);
+      }
       if (this.searchQuery) params.set('search', this.searchQuery);
 
       await paginateAll<Skill>({
@@ -346,7 +417,12 @@ export class ScionPageSkills extends LitElement {
   }
 
   private get displaySkills(): Skill[] {
-    const sorted = [...this.skills];
+    let list = this.skills;
+    if (this.scopeFilter === 'project' && this.selectedProjectIds.length > 0) {
+      const selected = new Set(this.selectedProjectIds);
+      list = list.filter((s) => !!s.scopeId && selected.has(s.scopeId));
+    }
+    const sorted = [...list];
     sorted.sort((a, b) => {
       let cmp = 0;
       switch (this.sortField) {
@@ -386,8 +462,25 @@ export class ScionPageSkills extends LitElement {
     }, 300);
   }
 
+  private get createSkillHref(): string {
+    if (this.scopeFilter === 'project' && this.selectedProjectIds.length === 1) {
+      return `/skills/new?projectId=${encodeURIComponent(this.selectedProjectIds[0])}`;
+    }
+    return '/skills/new';
+  }
+
   private onScopeFilterChange(e: Event): void {
     this.scopeFilter = (e.target as HTMLElement & { value: string }).value as SkillScope | '';
+    if (this.scopeFilter !== 'project') {
+      this.selectedProjectIds = [];
+    }
+    this.syncFiltersToURL();
+    void this.loadSkills();
+  }
+
+  private onProjectsFilterChange(e: CustomEvent<ProjectsChangeDetail>): void {
+    this.selectedProjectIds = [...e.detail.projectIds];
+    this.syncFiltersToURL();
     void this.loadSkills();
   }
 
@@ -421,7 +514,7 @@ export class ScionPageSkills extends LitElement {
           ></scion-view-toggle>
           ${can(this.scopeCapabilities, 'create')
             ? html`
-                <a href="/skills/new" style="text-decoration: none;">
+                <a href=${this.createSkillHref} style="text-decoration: none;">
                   <sl-button variant="primary" size="small">
                     <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                     Create Skill
@@ -468,6 +561,21 @@ export class ScionPageSkills extends LitElement {
           <sl-option value="project">Project</sl-option>
           <sl-option value="user">User</sl-option>
         </sl-select>
+        ${this.scopeFilter === 'project'
+          ? html`
+              <scion-project-picker
+                class="project-filter"
+                label=""
+                placeholder="Filter by projects..."
+                size="small"
+                multiple
+                browse-on-focus
+                .values=${this.selectedProjectIds}
+                @projects-change=${(e: CustomEvent<ProjectsChangeDetail>) =>
+                  this.onProjectsFilterChange(e)}
+              ></scion-project-picker>
+            `
+          : nothing}
         ${this.viewMode === 'grid'
           ? html`
               <sl-dropdown>
@@ -551,7 +659,8 @@ export class ScionPageSkills extends LitElement {
   }
 
   private renderSkills() {
-    if (this.skills.length === 0) {
+    const hasProjectFilter = this.scopeFilter === 'project' && this.selectedProjectIds.length > 0;
+    if (this.skills.length === 0 && !hasProjectFilter) {
       return this.renderEmptyState();
     }
 
@@ -582,7 +691,7 @@ export class ScionPageSkills extends LitElement {
         </p>
         ${can(this.scopeCapabilities, 'create')
           ? html`
-              <a href="/skills/new" style="text-decoration: none;">
+              <a href=${this.createSkillHref} style="text-decoration: none;">
                 <sl-button variant="primary">
                   <sl-icon slot="prefix" name="plus-lg"></sl-icon>
                   Create Skill
