@@ -19,7 +19,6 @@ package projectfs
 import (
 	"fmt"
 	"io"
-	"path"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
@@ -27,11 +26,12 @@ import (
 // WriteAttachment writes r as attachment file name of channel and id into
 // the resolved shared dir of Mount m, at
 // <resolved>/.attachments/<channel>/<id>/<name>, and returns the file's
-// container path (AttachmentContainerPath). Every operation goes through
-// resolved.Open(create) and rootopen.OpenFileForWrite (O_CREAT|O_EXCL with
-// kernel-enforced O_NOFOLLOW on every component and O_NONBLOCK on the leaf),
-// so symlink components and existing entries are refused, and a failed copy
-// leaves no file.
+// container path (AttachmentContainerPath). Parent directories are created and
+// pinned via rootopen.MkdirAll (no-follow component walk), and file creation
+// and failure cleanup operate relative to that pinned leaf directory
+// descriptor via rootopen.OpenFileForWriteInDir and rootopen.UnlinkInDir, so
+// symlink components and existing entries are refused and a failed copy leaves
+// no file.
 func WriteAttachment(resolved Resolved, create bool, m Mount, channel, id, name string, r io.Reader) (string, error) {
 	rel, err := AttachmentRelDir(channel, id)
 	if err != nil {
@@ -47,21 +47,23 @@ func WriteAttachment(resolved Resolved, create bool, m Mount, channel, id, name 
 	}
 	defer func() { _ = root.Close() }()
 
-	if err := root.MkdirAll(rel, 0o755); err != nil {
+	leafDir, err := rootopen.MkdirAll(root, rel, 0o755)
+	if err != nil {
 		return "", fmt.Errorf("create attachment dir: %w", err)
 	}
-	dest := path.Join(rel, name)
-	f, err := rootopen.OpenFileForWrite(root, dest, 0o644, false)
+	defer func() { _ = leafDir.Close() }()
+
+	f, err := rootopen.OpenFileForWriteInDir(leafDir, name, 0o644, false)
 	if err != nil {
 		return "", fmt.Errorf("create attachment file: %w", err)
 	}
 	if _, err := io.Copy(f, r); err != nil {
 		_ = f.Close()
-		_ = root.Remove(dest)
+		_ = rootopen.UnlinkInDir(leafDir, name)
 		return "", fmt.Errorf("write attachment file: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		_ = root.Remove(dest)
+		_ = rootopen.UnlinkInDir(leafDir, name)
 		return "", fmt.Errorf("write attachment file: %w", err)
 	}
 	return containerPath, nil

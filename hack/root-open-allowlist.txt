@@ -7,9 +7,8 @@
 # pending migration in parallel follow-up branches.
 
 # Shared open helpers (open "." on the root fd itself)
-pkg/hub/project_workspace_open_unix.go | openAtInRoot | 1 | shared hub open helper opens root fd "."
-pkg/util/rootopen/rootopen_unix.go | OpenAt | 1 | shared rootopen helper opens root fd "."
 pkg/util/rootopen/rootopen_unix.go | OpenDir | 1 | shared rootopen helper opens root fd "."
+pkg/util/rootopen/rootopen_unix.go | withRootFD | 1 | shared rootopen helper opens root fd "."
 
 # Verified root self-directory reads (root.Open("."))
 pkg/hub/welcome_stage.go | welcomeStagedTemplates | 1 | opens "." on verified private staging root
