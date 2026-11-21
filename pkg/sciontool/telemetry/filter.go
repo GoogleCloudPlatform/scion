@@ -187,7 +187,15 @@ func (r *Redactor) ShouldRedact(key string) bool {
 	if _, mandatory := mandatoryRedactFields[key]; mandatory {
 		return true
 	}
-	return r.redactFields[key] || r.redactFields[nativeFieldAliases[key]]
+	if alias, ok := nativeFieldAliases[key]; ok {
+		if _, mandatory := mandatoryRedactFields[alias]; mandatory {
+			return true
+		}
+		if r.redactFields[alias] {
+			return true
+		}
+	}
+	return r.redactFields[key]
 }
 
 // ShouldHash returns true if the field should be hashed.
