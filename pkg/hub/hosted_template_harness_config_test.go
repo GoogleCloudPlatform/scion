@@ -56,8 +56,11 @@ func createHostedTestTemplate(t *testing.T, s store.Store, stor *contentMockStor
 		StoragePath: "templates/" + scope + "/" + hostedTplName, StorageBucket: "test-bucket",
 		Updated: time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC),
 	}
-	if scope == store.TemplateScopeProject {
+	switch scope {
+	case store.TemplateScopeProject:
 		tmpl.ScopeID = tid("project-1")
+	case store.TemplateScopeUser:
+		tmpl.ScopeID = tid("user-tpl-owner")
 	}
 	for p, content := range files {
 		obj := tmpl.StoragePath + "/" + p
@@ -186,6 +189,7 @@ func TestTemplateCommit_HostedProjectChecksEveryBundledConfig(t *testing.T) {
 		refused     bool
 	}{
 		"hosted project template": {store.TemplateScopeProject, false, true},
+		"hosted user template":    {store.TemplateScopeUser, false, true},
 		"hosted global template":  {store.TemplateScopeGlobal, false, false},
 		"workstation hub":         {store.TemplateScopeProject, true, false},
 	} {
@@ -240,6 +244,10 @@ func TestCheckHostedTemplateDirs(t *testing.T) {
 	rec := httptest.NewRecorder()
 	assert.True(t, writeImportContentRefusal(rec, err))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	err = srv.checkHostedTemplateDirs(dirs, store.TemplateScopeUser)
+	require.True(t, errors.As(err, &ie), "user scope refused as an import: %v", err)
+	require.Len(t, ie.errs, 3)
 
 	assert.NoError(t, srv.checkHostedTemplateDirs(dirs, store.TemplateScopeGlobal))
 	srv.workstation = true
@@ -297,6 +305,16 @@ func TestDispatch_HostedTemplateHarnessConfigPrecheck(t *testing.T) {
 			assert.False(t, op.called(m), "no broker call")
 		})
 	}
+	t.Run("user template refuses", func(t *testing.T) {
+		srv, s, stor := testTemplateFileServer(t)
+		tmpl := createHostedTestTemplate(t, s, stor, store.TemplateScopeUser, map[string]string{hostedTplHCPath: hostedHCVolYAML})
+		d, m, a := hostedTemplateDispatcher(t, srv, s, tmpl, true)
+		err := d.DispatchAgentStart(ctx, a, "task", false)
+		var refusal *RuntimeTargetRefusal
+		require.True(t, errors.As(err, &refusal) && refusal.Code == hostedguard.ErrorCode, "refused: %v", err)
+		assert.Contains(t, refusal.Message, `volume "/hc-data"`)
+		assert.False(t, m.startCalled, "no broker call")
+	})
 	t.Run("case variant path refuses", func(t *testing.T) {
 		srv, s, stor := testTemplateFileServer(t)
 		tmpl := createHostedTestTemplate(t, s, stor, store.TemplateScopeProject, map[string]string{"harness-configs/hc/CONFIG.yaml": hostedHCOKYAML})
@@ -333,4 +351,38 @@ func TestCreateAuthenticatedDispatcher_WiresHostedTemplateCheck(t *testing.T) {
 	srv, _, _ := testTemplateFileServer(t)
 	d := srv.CreateAuthenticatedDispatcher()
 	require.NotNil(t, d.hostedTemplateCheck)
+}
+
+// TestUserTemplate_HostedMemberBundledHarnessConfig: any hub member can
+// create a template in their own user scope (/api/v1/users/me/templates)
+// and write its files, so on a hosted hub its bundled harness configs are
+// member content: a bundled harness config naming a host volume is refused
+// before it is written, and a clean one is accepted.
+func TestUserTemplate_HostedMemberBundledHarnessConfig(t *testing.T) {
+	ctx := context.Background()
+	srv, s, stor := testTemplateFileServer(t)
+	require.False(t, srv.workstation)
+	member := &store.User{
+		ID: tid("user-tpl-member"), Email: "tpl-member@example.com", DisplayName: "Member",
+		Role: store.UserRoleMember, Status: store.UserStatusActive,
+	}
+	require.NoError(t, s.CreateUser(ctx, member))
+	ensureHubMembership(ctx, s, member.ID)
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPost, "/api/v1/users/me/templates",
+		CreateTemplateRequest{Name: hostedTplName, Harness: "claude"})
+	require.Equal(t, http.StatusCreated, rec.Code, "a member can create a user-scope template: %s", rec.Body.String())
+	var created CreateTemplateResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.NotNil(t, created.Template)
+	require.Equal(t, store.TemplateScopeUser, created.Template.Scope)
+
+	before := len(stor.content)
+	path := "/api/v1/templates/" + created.Template.ID + "/files/harness-configs/hc-tpl/config.yaml"
+	rec = doRequestAsUser(t, srv, member, http.MethodPut, path, map[string]string{"content": hostedHCVolYAML})
+	assertHostedTemplateRefusal(t, rec, `volume "/hc-data"`, `harness config "hc-tpl"`)
+	assert.Equal(t, before, len(stor.content), "no object written")
+
+	rec = doRequestAsUser(t, srv, member, http.MethodPut, path, map[string]string{"content": hostedHCOKYAML})
+	require.Equal(t, http.StatusOK, rec.Code, "a member writes a clean bundled harness config: %s", rec.Body.String())
 }

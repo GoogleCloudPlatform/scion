@@ -27,8 +27,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// On a hosted hub, a harness config bundled in a project-scope template
-// (harness-configs/<name>/config.yaml) is member content, like a
+// On a hosted hub, a harness config bundled in a project-scope or
+// user-scope template (harness-configs/<name>/config.yaml; any member can
+// write templates in their own user scope) is member content, like a
 // project-scope harness config: it is checked with
 // hostedHarnessConfigYAMLRefusal at every commit of the template's files
 // (commitTemplateFiles: file writes, finalize, import, reimport and clone),
@@ -44,9 +45,9 @@ import (
 const bundledHarnessConfigsDir = "harness-configs"
 
 // checksHostedTemplate reports whether templates of scope have their bundled
-// harness configs checked: project scope, on a hosted hub.
+// harness configs checked: project and user scope, on a hosted hub.
 func (s *Server) checksHostedTemplate(scope string) bool {
-	return !s.workstation && scope == store.TemplateScopeProject
+	return !s.workstation && (scope == store.TemplateScopeProject || scope == store.TemplateScopeUser)
 }
 
 // hostedTemplateError wraps the refusal of a bundled harness config with the
@@ -231,8 +232,8 @@ func (d *HTTPAgentDispatcher) SetHostedTemplateCheck(check func(ctx context.Cont
 
 // checkStoredHostedTemplate checks, at dispatch, the bundled harness configs
 // of the hub template id an agent is dispatched with, for runtimeKind ("" when
-// not known; hostedRuntimeKind). Only a project-scope template on a hosted
-// hub is checked. A record that no longer exists, an object that is gone or
+// not known; hostedRuntimeKind). Only a project-scope or user-scope template
+// on a hosted hub is checked (checksHostedTemplate). A record that no longer exists, an object that is gone or
 // a hub without storage is left to the dispatch; a storage read error fails
 // the dispatch.
 func (s *Server) checkStoredHostedTemplate(ctx context.Context, id, runtimeKind string) error {
