@@ -824,7 +824,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
 			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
 			e.Name == experiments.UserDeleteForceCascade || e.Name == experiments.ArtifactArchive ||
-			e.Name == experiments.ArtifactsOpenReviewCheck ||
+			e.Name == experiments.ArtifactsOpenReviewCheck || e.Name == experiments.ArtifactsReviewDrafts ||
 			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile ||
 			e.Name == experiments.Triggers {
 			e.Default = true
@@ -843,6 +843,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
 	require.True(t, srv.experimentEnabled(experiments.ArtifactArchive))
 	require.True(t, srv.experimentEnabled(experiments.ArtifactsOpenReviewCheck))
+	require.True(t, srv.experimentEnabled(experiments.ArtifactsReviewDrafts))
 	require.True(t, srv.experimentEnabled(experiments.ProjectSelfLeave))
 	require.True(t, srv.experimentEnabled(experiments.RuntimeOrphanReconcile))
 	require.True(t, srv.experimentEnabled(experiments.Triggers))
@@ -1098,6 +1099,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}/versions/{seq}/view":         {"id": f.artifact, "seq": "1"},
 		"/api/v1/artifacts/{id}/versions/{seq}/archive":      {"id": f.artifact, "seq": "1"},
 		"/api/v1/artifacts/{id}/review-sessions/{sid}":       {"id": f.artifact, "sid": "AAAAAAAAAAAAAAAAAAAAAA"},
+		"/api/v1/artifacts/{id}/review-draft":                {"id": f.artifact},
 
 		// --- test identity family ---
 		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},

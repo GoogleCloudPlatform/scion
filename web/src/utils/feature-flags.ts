@@ -236,6 +236,14 @@ export const ARTIFACT_MANAGE_ACCESS_FLAG = 'web.artifact_manage_access';
 export const ARTIFACTS_OPEN_REVIEW_CHECK_FLAG = 'hub.artifacts_open_review_check';
 
 /**
+ * Durable artifact review drafts (ptone/scion#7116, ptone/scion#8470): saves
+ * in-progress reviews as private per-reviewer drafts on the hub and offers to
+ * resume them across browser sessions or devices. Presentation only: the hub
+ * checks the experiment on every review-draft route. Default OFF.
+ */
+export const ARTIFACTS_REVIEW_DRAFTS_FLAG = 'hub.artifacts_review_drafts';
+
+/**
  * Force user delete (ptone/scion#2143): the admin users page offers to
  * force-delete a user who has agents and shows a deletion in
  * progress. Presentation only: the hub checks the experiment on the force

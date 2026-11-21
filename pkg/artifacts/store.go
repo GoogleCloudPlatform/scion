@@ -394,6 +394,33 @@ type Store interface {
 	// cutoff and returns how many it deleted.
 	ReapReviewSessions(ctx context.Context, cutoff time.Time, limit int) (int, error)
 
+	// PutReviewDraft writes d when the stored revision equals expectRev (0
+	// creates a new row with Rev = 1; a positive expectRev updates an
+	// existing row to expectRev + 1), setting UpdatedAt = now, and returns
+	// the stored row. A revision mismatch returns a *DraftConflictError
+	// wrapping ErrDraftConflict with the stored row's revision, save time
+	// and base version (or zero values when expectRev > 0 and no row
+	// exists), never its body or note. An insert when the principal already
+	// holds maxPerPrincipal drafts returns ErrTooManyDrafts and writes
+	// nothing.
+	PutReviewDraft(ctx context.Context, d ReviewDraft, expectRev int, now time.Time, maxPerPrincipal int) (ReviewDraft, error)
+
+	// GetReviewDraft returns the principal's saved draft of the artifact,
+	// or ErrNotFound.
+	GetReviewDraft(ctx context.Context, artifactID, kind, ref string) (ReviewDraft, error)
+
+	// DeleteReviewDraft deletes the principal's saved draft of the artifact
+	// and reports whether a row was deleted. When expectRev is 0, any
+	// revision is deleted; when expectRev is positive, an existing row with
+	// a different revision is left intact and a *DraftConflictError
+	// wrapping ErrDraftConflict is returned. A missing row is not an error
+	// in either case.
+	DeleteReviewDraft(ctx context.Context, artifactID, kind, ref string, expectRev int) (bool, error)
+
+	// ReapReviewDrafts deletes at most limit review drafts last saved
+	// (updated_at) before cutoff and returns how many it deleted.
+	ReapReviewDrafts(ctx context.Context, cutoff time.Time, limit int) (int, error)
+
 	// GetArtifact returns the artifact with id unless it is absent or
 	// soft-deleted, in which case it returns ErrNotFound.
 	GetArtifact(ctx context.Context, id string) (*Artifact, error)

@@ -163,6 +163,26 @@ func TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded(t *testing.T)
 		check("artifact:create", create, r.method, spath, r.body, r.allowed)
 	}
 
+	// Review drafts, with hub.artifacts_review_drafts on: GET, PUT and DELETE
+	// all run readableArtifact (404 without artifact:read or outside project)
+	// and canWriteErr (403 without artifact:create); with artifact:read and
+	// artifact:create they reach the handler (GET -> 200, PUT {} -> 400,
+	// DELETE -> 204).
+	setReviewDraftsForTest(t, srv, true)
+	dpath := base + "/review-draft"
+	for _, r := range []struct {
+		method  string
+		body    []byte
+		allowed int
+	}{
+		{http.MethodGet, nil, http.StatusOK},
+		{http.MethodPut, []byte(`{}`), http.StatusBadRequest},
+		{http.MethodDelete, nil, http.StatusNoContent},
+	} {
+		refused(r.method, dpath, r.body, true)
+		check("artifact:create", create, r.method, dpath, r.body, r.allowed)
+	}
+
 	// The archive route answers 404 to everyone while hub.artifact_archive
 	// is off, the owner's session included.
 	check("archive, experiment off", session, http.MethodGet, base+"/versions/1/archive", nil, http.StatusNotFound)
