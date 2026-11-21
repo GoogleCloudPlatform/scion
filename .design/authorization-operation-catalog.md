@@ -12524,6 +12524,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
+| http_route | GET | `/api/v1/admin/system-one/adapters` |
 | http_route | GET | `/api/v1/admin/system-one/instances` |
 | http_route | GET | `/api/v1/admin/system-one/instances/{name}` |
 

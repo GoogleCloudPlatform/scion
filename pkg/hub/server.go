@@ -8260,6 +8260,7 @@ func (s *Server) registerRoutes() {
 	// System One provider instance administration (hub.system_one; 404 while off).
 	// Checked per request inside the handlers rather than with requireExperiment
 	// at registration so servers built over a synthetic test registry still boot.
+	s.mux.HandleFunc("/api/v1/admin/system-one/adapters", s.guarded("/api/v1/admin/system-one/adapters", s.handleAdminSystemOneAdapters))
 	s.mux.HandleFunc("/api/v1/admin/system-one/instances", s.guarded("/api/v1/admin/system-one/instances", s.handleAdminSystemOneInstances))
 	s.mux.HandleFunc("/api/v1/admin/system-one/instances/", s.guarded("/api/v1/admin/system-one/instances/", s.handleAdminSystemOneInstanceByName))
 	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.guarded("/api/v1/admin/validate-resources", s.handleAdminValidateResources))

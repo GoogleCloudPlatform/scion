@@ -188,6 +188,40 @@ type ListSystemOneInstancesResponse struct {
 	TotalCount int                         `json:"totalCount"`
 }
 
+// SystemOneAdapterAuthModeDTO describes one authentication mode supported by a
+// registered System One adapter. It carries capability metadata only.
+type SystemOneAdapterAuthModeDTO struct {
+	Mode                  string `json:"mode"`
+	AuthKind              string `json:"authKind"`
+	TransportScheme       string `json:"transportScheme,omitempty"`
+	CustomEndpointAllowed bool   `json:"customEndpointAllowed"`
+	ScopesRequired        bool   `json:"scopesRequired,omitempty"`
+}
+
+// SystemOneAdapterCapabilityDTO is the non-secret capability metadata for a
+// registered System One provider adapter returned by
+// GET /api/v1/admin/system-one/adapters.
+type SystemOneAdapterCapabilityDTO struct {
+	ID                   string                        `json:"id"`
+	Version              string                        `json:"version,omitempty"`
+	DisplayName          string                        `json:"displayName,omitempty"`
+	ProviderRetention    string                        `json:"providerRetention,omitempty"`
+	DefaultEndpoint      string                        `json:"defaultEndpoint,omitempty"`
+	ModelRequired        bool                          `json:"modelRequired"`
+	SupportsModelListing bool                          `json:"supportsModelListing"`
+	AuthModes            []SystemOneAdapterAuthModeDTO `json:"authModes"`
+	AllowedSecretNames   []string                      `json:"allowedSecretNames,omitempty"`
+	DefaultSecretName    string                        `json:"defaultSecretName,omitempty"`
+	AllowedSecretScopes  []string                      `json:"allowedSecretScopes,omitempty"`
+	DefaultSecretScope   string                        `json:"defaultSecretScope,omitempty"`
+}
+
+// ListSystemOneAdaptersResponse is the response body for
+// GET /api/v1/admin/system-one/adapters.
+type ListSystemOneAdaptersResponse struct {
+	Adapters []SystemOneAdapterCapabilityDTO `json:"adapters"`
+}
+
 // ProbeSystemOneInput holds the synthetic probe content passed to
 // POST /api/v1/admin/system-one/instances/{name}/probe.
 type ProbeSystemOneInput struct {
@@ -345,6 +379,117 @@ func (s *Server) requireSystemOneInstancePermission(
 		return nil, false
 	}
 	return user, true
+}
+
+// handleAdminSystemOneAdapters serves GET /api/v1/admin/system-one/adapters,
+// returning non-secret capability metadata and effective named-secret allowlists
+// for all registered System One provider adapters. It never performs provider
+// I/O, ADC discovery, or secret reads.
+func (s *Server) handleAdminSystemOneAdapters(w http.ResponseWriter, r *http.Request) {
+	if !s.experimentEnabled(experiments.SystemOne) {
+		NotFound(w, "route")
+		return
+	}
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
+		return
+	}
+
+	reg := s.SystemOneProviderRegistry()
+	names := reg.Names()
+	adapters := make([]SystemOneAdapterCapabilityDTO, 0, len(names))
+	for _, name := range names {
+		adapter, ok := reg.Lookup(name)
+		if !ok {
+			continue
+		}
+		caps, err := adapter.Capabilities(systemoneprovider.InstanceView{})
+		if err != nil {
+			continue
+		}
+		defaultEndpoint := defaultSystemOneAdapterEndpoint(adapter)
+		allowedSecretNames := s.allowedSecretNamesFor(adapter)
+
+		authModes := make([]SystemOneAdapterAuthModeDTO, 0, 3)
+		if scheme, supported := resolveAdapterAuthSchemeForCreate(caps, store.SystemOneAuthKindAPIKey); supported {
+			authModes = append(authModes, SystemOneAdapterAuthModeDTO{
+				Mode:                  "owned_api_key",
+				AuthKind:              store.SystemOneAuthKindAPIKey,
+				TransportScheme:       scheme.String(),
+				CustomEndpointAllowed: true,
+			})
+			if len(allowedSecretNames) > 0 {
+				authModes = append(authModes, SystemOneAdapterAuthModeDTO{
+					Mode:                  "secret_ref",
+					AuthKind:              store.SystemOneAuthKindAPIKey,
+					TransportScheme:       scheme.String(),
+					CustomEndpointAllowed: false,
+				})
+			}
+		}
+		if scheme, supported := resolveAdapterAuthSchemeForCreate(caps, store.SystemOneAuthKindGoogleAccessToken); supported {
+			authModes = append(authModes, SystemOneAdapterAuthModeDTO{
+				Mode:                  store.SystemOneAuthKindGoogleAccessToken,
+				AuthKind:              store.SystemOneAuthKindGoogleAccessToken,
+				TransportScheme:       scheme.String(),
+				CustomEndpointAllowed: false,
+				ScopesRequired:        true,
+			})
+		}
+
+		_, supportsModelListing := adapter.(systemoneprovider.ModelLister)
+		dto := SystemOneAdapterCapabilityDTO{
+			ID:                   adapter.Name(),
+			Version:              adapter.Version(),
+			DisplayName:          systemOneAdapterDisplayName(adapter.Name()),
+			ProviderRetention:    caps.ProviderRetention,
+			DefaultEndpoint:      defaultEndpoint,
+			ModelRequired:        adapterRequiresModel(adapter, defaultEndpoint),
+			SupportsModelListing: supportsModelListing,
+			AuthModes:            authModes,
+		}
+		if len(allowedSecretNames) > 0 {
+			dto.AllowedSecretNames = slices.Clone(allowedSecretNames)
+			dto.AllowedSecretScopes = []string{
+				systemoneprovider.SecretScopeHub,
+				systemoneprovider.SecretScopeProject,
+				systemoneprovider.SecretScopeProjectOrHub,
+			}
+			dto.DefaultSecretScope = systemoneprovider.DefaultSecretRefScope
+			if defRefer, ok := adapter.(systemoneprovider.DefaultSecretRefer); ok {
+				if defName := strings.TrimSpace(defRefer.DefaultSecretRefName()); defName != "" && slices.Contains(allowedSecretNames, defName) {
+					dto.DefaultSecretName = defName
+				}
+			}
+		}
+		adapters = append(adapters, dto)
+	}
+
+	writeJSON(w, http.StatusOK, ListSystemOneAdaptersResponse{
+		Adapters: adapters,
+	})
+}
+
+func systemOneAdapterDisplayName(id string) string {
+	switch id {
+	case "gemini_decisions":
+		return "Gemini Decisions"
+	case "typesafe":
+		return "TypeSafe"
+	default:
+		return id
+	}
+}
+
+func adapterRequiresModel(adapter systemoneprovider.Adapter, defaultEndpoint string) bool {
+	validator, ok := adapter.(systemoneprovider.InstanceValidator)
+	if !ok {
+		return false
+	}
+	if err := validator.ValidateInstance(systemoneprovider.InstanceView{Endpoint: defaultEndpoint}); err == nil {
+		return false
+	}
+	return validator.ValidateInstance(systemoneprovider.InstanceView{Model: "example-model", Endpoint: defaultEndpoint}) == nil
 }
 
 // handleAdminSystemOneInstances serves GET (list) and POST (create) on
