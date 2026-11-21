@@ -399,13 +399,12 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 		writeTemplateCommitError(w, err)
 		return
 	}
-	if s.refuseInvalidTemplateAgentConfig(ctx, w, template, map[string][]byte{filePath: data}) {
-		return
-	}
 
 	// An upload URL (?uploadId=) only stages the file: finalize hashes and
 	// commits the whole upload in one compare-and-swap, so nothing here
-	// touches the row or what readers see (ptone/scion#4221).
+	// touches the row or what readers see (ptone/scion#4221). Agent config
+	// schema validation is deferred to finalize so the complete manifest
+	// determines the effective config file (matching GCS signed URLs and D4d).
 	if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
 		if !validTemplateUploadID(uploadID) {
 			BadRequest(w, "Invalid uploadId")
@@ -419,6 +418,10 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if s.refuseInvalidTemplateAgentConfig(ctx, w, template, map[string][]byte{filePath: data}) {
 		return
 	}
 

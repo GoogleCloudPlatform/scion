@@ -1089,4 +1089,58 @@ func TestTemplateCommit_AgentConfigValidation(t *testing.T) {
 			t.Fatalf("BootstrapSource on unchanged stored invalid template refused: %v", err)
 		}
 	})
+
+	t.Run("staged_raw_upload_defers_agent_config_validation_to_finalize", func(t *testing.T) {
+		srv, _ := newCommitTestServer(t, newCommitTestStorage(t))
+		setTemplateValidationExperiment(t, srv, true)
+
+		// Create a new pending template (no files yet).
+		createBody, _ := json.Marshal(CreateTemplateRequest{Name: "tpl-staged-pair", Scope: store.TemplateScopeGlobal})
+		w := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates", "application/json", createBody)
+		mustStatus(t, w, http.StatusCreated)
+		var created CreateTemplateResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+		const uploadID = "0123456789abcdef"
+
+		// Stage invalid scion-agent.json first (alphabetically before .yaml),
+		// then valid scion-agent.yaml. Neither staged PUT is refused, and
+		// finalize accepts because scion-agent.yaml is the effective config.
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+created.Template.ID+"/files/scion-agent.json?uploadId="+uploadID, "application/octet-stream", []byte(invalidCaseJSON)), http.StatusOK)
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+created.Template.ID+"/files/scion-agent.yaml?uploadId="+uploadID, "application/octet-stream", []byte(commitCfgBoth)), http.StatusOK)
+
+		finBody, _ := json.Marshal(FinalizeRequest{
+			Manifest: &TemplateManifest{
+				Version: "1.0",
+				Harness: "claude",
+				Files: commitManifest(map[string]string{
+					"scion-agent.json": invalidCaseJSON,
+					"scion-agent.yaml": commitCfgBoth,
+				}),
+			},
+			UploadID: uploadID,
+		})
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+created.Template.ID+"/finalize", "application/json", finBody), http.StatusOK)
+
+		// Conversely, staging only an invalid scion-agent.json succeeds on PUT
+		// and is refused at finalize with 422 invalid_agent_config.
+		createBody2, _ := json.Marshal(CreateTemplateRequest{Name: "tpl-staged-only-bad", Scope: store.TemplateScopeGlobal})
+		w2 := doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates", "application/json", createBody2)
+		mustStatus(t, w2, http.StatusCreated)
+		var created2 CreateTemplateResponse
+		if err := json.Unmarshal(w2.Body.Bytes(), &created2); err != nil {
+			t.Fatal(err)
+		}
+		mustStatus(t, doTemplateRequest(t, srv, http.MethodPut, "/api/v1/templates/"+created2.Template.ID+"/files/scion-agent.json?uploadId="+uploadID, "application/octet-stream", []byte(invalidCaseJSON)), http.StatusOK)
+		finBody2, _ := json.Marshal(FinalizeRequest{
+			Manifest: &TemplateManifest{
+				Version: "1.0",
+				Harness: "claude",
+				Files:   commitManifest(map[string]string{"scion-agent.json": invalidCaseJSON}),
+			},
+			UploadID: uploadID,
+		})
+		assert422InvalidConfig(t, doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+created2.Template.ID+"/finalize", "application/json", finBody2), "auth_selectedType")
+	})
 }
