@@ -672,6 +672,9 @@ func (s *Server) decideConduitAgent(w http.ResponseWriter, r *http.Request, iden
 		writeErrorFromErr(w, errors.Unwrap(err), "") // the store error, as read
 		return conduitAdmission{}, false
 	}
+	if s.agentStandingForbidden(r.Context(), w, agent.ID) {
+		return conduitAdmission{}, false
+	}
 	if !isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
 		return conduitAdmission{}, false

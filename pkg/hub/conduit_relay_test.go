@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -100,6 +101,38 @@ func TestConduitEndpoint_AgentSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ps.Sessions, 1)
 	assert.Equal(t, f.launched.ProjectID, ps.Sessions[0].Session.ProjectID, "project comes from the agent row")
+}
+
+// TestConduitEndpoint_AgentDelegationStanding: an agent whose root delegator
+// is suspended (with no hold on the agent) is refused at conduit admission
+// with the generic 403 Forbidden response and opens no session, while a
+// healthy agent is unaffected.
+func TestConduitEndpoint_AgentDelegationStanding(t *testing.T) {
+	f := newRelayFixture(t, nil)
+	ctx := context.Background()
+	tok := f.agentToken(t, f.launched)
+
+	// Healthy agent is admitted.
+	sess, _, err := f.dial(t, tok, f.launched.RunID)
+	require.NoError(t, err)
+	require.NoError(t, sess.Close())
+
+	// Suspend the root delegator without placing a hold on the agent.
+	owner, err := f.store.GetUser(ctx, f.owner.ID())
+	require.NoError(t, err)
+	owner.Status = store.UserStatusSuspended
+	require.NoError(t, f.store.UpdateUser(ctx, owner))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
+	req.Header.Set("X-Scion-Agent-Token", tok)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Insufficient permissions")
+	assert.NotContains(t, rec.Body.String(), standingReasonRootInactive)
+
+	_, _, err = f.dial(t, tok, f.launched.RunID)
+	require.Error(t, err, "suspended delegator must be refused at WebSocket admission")
 }
 
 // TestConduitInternalHandler_PeerIdentity (C7, hub side): the internal

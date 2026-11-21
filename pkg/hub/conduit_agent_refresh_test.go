@@ -204,6 +204,14 @@ func TestConduitAgentRefresh_RefusalsClose4401(t *testing.T) {
 			f.srv.authConfig.HoldStore = fixedHoldStore{AgentHoldStore: f.store, held: true}
 			return f.agentToken(t, f.launched)
 		}},
+		{name: "root user suspended", token: func(t *testing.T, f *relayFixture) string {
+			ctx := context.Background()
+			owner, err := f.store.GetUser(ctx, f.owner.ID())
+			require.NoError(t, err)
+			owner.Status = store.UserStatusSuspended
+			require.NoError(t, f.store.UpdateUser(ctx, owner))
+			return f.agentToken(t, f.launched)
+		}},
 		{name: "stale run, enforced", enforce: true, token: func(t *testing.T, f *relayFixture) string {
 			return signRunToken(t, f.srv, f.store, f.launched, "stale-run", recordRun("stale-run"))
 		}},
@@ -386,6 +394,49 @@ type agentReadFaultStore struct {
 func (s *agentReadFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	if !s.fault.Active() {
 		return s.Store.GetAgent(ctx, id)
+	}
+	return nil, s.err
+}
+
+// TestConduitAgentRefresh_StandingReadFaultKeepsSession: a store fault while
+// evaluating delegation standing during AuthRefresh is unevaluated, not a
+// refusal, so the session stays open.
+func TestConduitAgentRefresh_StandingReadFaultKeepsSession(t *testing.T) {
+	wantErr := errors.New("user read unavailable for testing")
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *userReadFaultStore {
+		return &userReadFaultStore{Store: inner, err: wantErr, fault: fault}
+	})
+	srv, s, user, project := setupCredentialTestServerOn(t, srv, s)
+	agentID := tid("agent-refresh-standing-fault")
+	createCredTestAgent(t, s, agentID, project.ID, user.ID)
+	tok, err := srv.GenerateAgentToken(agentID, project.ID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
+	require.NoError(t, err)
+	fault.Arm()
+
+	_, err = srv.conduitAgentAdmissionCheck(context.Background(), &agentIdentityWrapper{claims})
+	require.ErrorIs(t, err, wantErr)
+	assert.False(t, conduitAgentCheckRefused(err))
+
+	p := relay.Principal{Kind: registry.PrincipalAgent, ID: agentID, ProjectID: project.ID}
+	outcome, _ := srv.conduitAgentRefreshCheck(context.Background(), p, relay.RefreshSession{SessionID: "s1"},
+		&conduitv1.AuthRefresh{Credential: []byte(tok)})
+	assert.Equal(t, conduitRefreshUnevaluated, outcome)
+	assert.NoError(t, srv.conduitAgentRefresh(context.Background(), p, relay.RefreshSession{SessionID: "s1"},
+		&conduitv1.AuthRefresh{Credential: []byte(tok)}), "unevaluated keeps the session")
+}
+
+// userReadFaultStore fails GetUser while its switch is armed.
+type userReadFaultStore struct {
+	store.Store
+	err   error
+	fault *storeFaultSwitch
+}
+
+func (s *userReadFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if !s.fault.Active() {
+		return s.Store.GetUser(ctx, id)
 	}
 	return nil, s.err
 }

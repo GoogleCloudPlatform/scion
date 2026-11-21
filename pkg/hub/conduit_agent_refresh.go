@@ -53,9 +53,9 @@ const conduitRefreshRoute = "/api/v1/conduit"
 //     and token-run checks of every agent request
 //     (verifyAgentTokenCredential);
 //   - it names the session's agent and project;
-//   - it carries agent:port:forward, and the agent row still exists, is
-//     not deleted, and is in the token's project
-//     (conduitAgentAdmissionCheck);
+//   - it carries agent:port:forward, the agent row still exists, is
+//     not deleted, and is in the token's project, and the agent is in
+//     good delegation standing (conduitAgentAdmissionCheck);
 //   - its run matches the session's endpoint incarnation (§3.11), refused
 //     only when run-scope enforcement is on, as at admission.
 //
@@ -142,6 +142,9 @@ func (s *Server) conduitAgentRefreshCheck(ctx context.Context, p relay.Principal
 
 	if _, err := s.conduitAgentAdmissionCheck(ctx, &agentIdentityWrapper{claims}); err != nil {
 		if conduitAgentCheckRefused(err) {
+			if errors.Is(err, errAgentNotInStanding) {
+				return refuse("standing")
+			}
 			return refuse("agent")
 		}
 		return unevaluated(err)
