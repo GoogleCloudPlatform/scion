@@ -1516,9 +1516,25 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 				sel.Where(entsql.Exists(sub))
 			}))
 		}
-		if len(visPreds) == 0 {
-			return &store.ListResult[store.TriggerEvent]{Items: []store.TriggerEvent{}, TotalCount: 0}, nil
-		}
+		// Stage 2 §5.4: an agent dispatched by a trigger fire (result_ref == agent.ID)
+		// may also read/list the event that created it (indexed on result_ref).
+		agentID := filter.VisibleToAgentID
+		visPreds = append(visPreds, predicate.TriggerEvent(func(sel *entsql.Selector) {
+			d := sel.Dialect()
+			tf := entsql.Dialect(d).Table(triggerfire.Table).As("tf_res")
+			conds := []*entsql.Predicate{
+				entsql.ColumnsEQ(tf.C(triggerfire.FieldEventID), sel.C(triggerevent.FieldID)),
+				entsql.EQ(tf.C(triggerfire.FieldResultRef), agentID),
+			}
+			if hasPID {
+				conds = append(conds, entsql.EQ(tf.C(triggerfire.FieldProjectID), pid))
+			}
+			sub := entsql.Dialect(d).
+				Select(tf.C(triggerfire.FieldID)).
+				From(tf).
+				Where(entsql.And(conds...))
+			sel.Where(entsql.Exists(sub))
+		}))
 		query.Where(triggerevent.Or(visPreds...))
 	}
 
@@ -1774,6 +1790,9 @@ func entTriggerFireToStore(e *ent.TriggerFire) *store.TriggerFire {
 		FinishedAt:     e.FinishedAt,
 		CreatedAt:      e.Created,
 	}
+	if e.TargetAgentID != nil {
+		tf.TargetAgentID = e.TargetAgentID.String()
+	}
 	tf.InitiatorAttribution = initiatorAttributionFromColumns(
 		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
 		e.InitiatorCredentialKind, e.InitiatorCredentialID, e.InitiatorCredentialSnapshot,
@@ -1830,7 +1849,7 @@ func parseTriggerFireUUIDs(fire *store.TriggerFire) (uid, pid, tid, eid uuid.UUI
 	return uid, pid, tid, eid, nil
 }
 
-func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fire *store.TriggerFire, defaultNow time.Time) *ent.TriggerFireCreate {
+func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fire *store.TriggerFire, defaultNow time.Time) (*ent.TriggerFireCreate, error) {
 	startedAt := defaultNow
 	if !fire.StartedAt.IsZero() {
 		startedAt = fire.StartedAt.UTC()
@@ -1872,11 +1891,18 @@ func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fi
 	if fire.RuleTrace != "" {
 		create.SetRuleTrace(fire.RuleTrace)
 	}
+	if fire.TargetAgentID != "" {
+		taid, err := parseUUID(fire.TargetAgentID)
+		if err != nil {
+			return nil, err
+		}
+		create.SetTargetAgentID(taid)
+	}
 	if fire.FinishedAt != nil {
 		create.SetFinishedAt(fire.FinishedAt.UTC())
 	}
 	setTriggerFireInitiatorAttribution(create, fire.InitiatorAttribution)
-	return create
+	return create, nil
 }
 
 func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.TriggerFire) (bool, *store.TriggerFire, error) {
@@ -1885,7 +1911,11 @@ func (s *TriggerStore) ClaimTriggerFire(ctx context.Context, fire *store.Trigger
 		return false, nil, err
 	}
 	now := time.Now().UTC()
-	created, err := buildTriggerFireCreate(s.client, uid, pid, tid, eid, fire, now).Save(ctx)
+	create, err := buildTriggerFireCreate(s.client, uid, pid, tid, eid, fire, now)
+	if err != nil {
+		return false, nil, err
+	}
+	created, err := create.Save(ctx)
 	if err != nil {
 		mapped := mapError(err)
 		if errors.Is(mapped, store.ErrAlreadyExists) {
@@ -1961,7 +1991,11 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 			skippedBusy = false
 		}
 
-		created, cErr := buildTriggerFireCreate(client, uid, pid, tid, eid, &row, now).Save(ctx)
+		create, bErr := buildTriggerFireCreate(client, uid, pid, tid, eid, &row, now)
+		if bErr != nil {
+			return bErr
+		}
+		created, cErr := create.Save(ctx)
 		if cErr != nil {
 			return mapError(cErr)
 		}
@@ -1984,7 +2018,7 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 	return claimed, skippedBusy, existingOut, nil
 }
 
-func (s *TriggerStore) FinishTriggerFire(ctx context.Context, id, status, resultRef, errMsg string, finishedAt time.Time) (bool, error) {
+func (s *TriggerStore) FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
@@ -1997,6 +2031,13 @@ func (s *TriggerStore) FinishTriggerFire(ctx context.Context, id, status, result
 		u.SetResultRef(resultRef)
 	} else {
 		u.ClearResultRef()
+	}
+	if targetAgentID != "" {
+		taid, err := parseUUID(targetAgentID)
+		if err != nil {
+			return false, err
+		}
+		u.SetTargetAgentID(taid)
 	}
 	if errMsg != "" {
 		u.SetError(errMsg)
@@ -2147,6 +2188,22 @@ func (s *TriggerStore) AgentHasFiredTriggerForEvent(ctx context.Context, eventID
 				sub := entsql.Dialect(d).Select(tr.C(trigger.FieldID)).From(tr).Where(entsql.And(conds...))
 				sel.Where(entsql.Exists(sub))
 			}),
+		).
+		Exist(ctx)
+}
+
+func (s *TriggerStore) EventHasTriggerFireForResultRef(ctx context.Context, eventID, resultRef string) (bool, error) {
+	eid, err := parseGetID(eventID)
+	if err != nil {
+		return false, err
+	}
+	if resultRef == "" {
+		return false, nil
+	}
+	return s.client.TriggerFire.Query().
+		Where(
+			triggerfire.EventIDEQ(eid),
+			triggerfire.ResultRefEQ(resultRef),
 		).
 		Exist(ctx)
 }

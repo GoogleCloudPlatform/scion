@@ -99,13 +99,24 @@ type TriggerMatchSpec struct {
 
 // TriggerActionSpec holds the action executed when a trigger matches.
 type TriggerActionSpec struct {
-	Type      string `json:"type"`
-	AgentID   string `json:"agentId,omitempty"`
-	AgentName string `json:"agentName,omitempty"`
-	Message   string `json:"message,omitempty"`
-	Interrupt bool   `json:"interrupt,omitempty"`
-	Plain     bool   `json:"plain,omitempty"`
-	Wake      bool   `json:"wake,omitempty"`
+	Type          string            `json:"type"`
+	AgentID       string            `json:"agentId,omitempty"`
+	AgentName     string            `json:"agentName,omitempty"`
+	Message       string            `json:"message,omitempty"`
+	Interrupt     bool              `json:"interrupt,omitempty"`
+	Plain         bool              `json:"plain,omitempty"`
+	Wake          bool              `json:"wake,omitempty"`
+	NameConflict  string            `json:"nameConflict,omitempty"`
+	Template      string            `json:"template,omitempty"`
+	Task          string            `json:"task,omitempty"`
+	Branch        string            `json:"branch,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Ephemeral     bool              `json:"ephemeral,omitempty"`
+	GithubToken   string            `json:"githubToken,omitempty"`
+	AgentRole     string            `json:"agentRole,omitempty"`
+	ReuseMessage  string            `json:"reuseMessage,omitempty"`
+	UntrustedVars []string          `json:"untrustedVars,omitempty"`
+	NoAuth        bool              `json:"noAuth,omitempty"`
 }
 
 // TriggerSubjectSpec configures per-subject handling for a trigger.
@@ -176,6 +187,7 @@ type TriggerFireResponse struct {
 	Subject        string            `json:"subject,omitempty"`
 	Status         string            `json:"status"`
 	ResultRef      string            `json:"resultRef,omitempty"`
+	TargetAgentID  string            `json:"targetAgentId,omitempty"`
 	Error          string            `json:"error,omitempty"`
 	MatchedThrough string            `json:"matchedThrough,omitempty"`
 	DecidedDialect string            `json:"decidedDialect,omitempty"`
@@ -266,7 +278,11 @@ func (s *Server) buildWebhookEndpointResponses(endpoints []store.WebhookEndpoint
 
 func buildTriggerActionSpec(actionType, rawPayload string) TriggerActionSpec {
 	spec := TriggerActionSpec{Type: actionType}
-	if actionType == store.TriggerActionMessage && rawPayload != "" {
+	if rawPayload == "" {
+		return spec
+	}
+	switch actionType {
+	case store.TriggerActionMessage:
 		var p MessageEventPayload
 		if json.Unmarshal([]byte(rawPayload), &p) == nil {
 			spec.AgentID = p.AgentID
@@ -275,6 +291,24 @@ func buildTriggerActionSpec(actionType, rawPayload string) TriggerActionSpec {
 			spec.Interrupt = p.Interrupt
 			spec.Plain = p.Plain
 			spec.Wake = p.Wake
+		}
+	case store.TriggerActionDispatchAgent:
+		var p DispatchAgentEventPayload
+		if json.Unmarshal([]byte(rawPayload), &p) == nil {
+			spec.AgentName = p.AgentName
+			spec.NameConflict = p.NameConflict
+			spec.Template = p.Template
+			spec.Task = p.Task
+			spec.Branch = p.Branch
+			spec.Labels = copyTriggerStringMap(p.Labels)
+			spec.Ephemeral = p.Ephemeral
+			spec.GithubToken = p.GithubToken
+			spec.AgentRole = p.AgentRole
+			spec.ReuseMessage = p.ReuseMessage
+			if len(p.UntrustedVars) > 0 {
+				spec.UntrustedVars = append([]string(nil), p.UntrustedVars...)
+			}
+			spec.NoAuth = p.NoAuth
 		}
 	}
 	return spec
@@ -371,6 +405,7 @@ func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
 		Subject:        tf.Subject,
 		Status:         tf.Status,
 		ResultRef:      tf.ResultRef,
+		TargetAgentID:  tf.TargetAgentID,
 		Error:          tf.Error,
 		MatchedThrough: tf.MatchedThrough,
 		DecidedDialect: decidedDialect,

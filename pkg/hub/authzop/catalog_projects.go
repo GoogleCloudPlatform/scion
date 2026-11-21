@@ -1209,7 +1209,7 @@ var projectOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 		DelegationDescription: "Authoring a trigger records the author's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) on the trigger row. " +
-			"In Stage 1 only the message action is supported, which grants no authority; fire-time delivery remains bounded by the recorded principal's current authority and frozen ceiling",
+			"A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling and creates agents bounded by the recorded principal's current authority and frozen ceiling",
 	},
 	{
 		ID:          "trigger.update",
@@ -1233,7 +1233,7 @@ var projectOperations = []OperationSpec{
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 		DelegationDescription: "A resume, and an update that changes the source, match rules, action, subject rules or status, records the caller's initiator attribution and frozen effect ceiling " +
-			"(triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. In Stage 1 only the message action is supported, which grants no authority",
+			"(triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. A message trigger grants no authority; a dispatch_agent trigger requires agent.create and CanDelegate within the caller's role ceiling",
 	},
 	{
 		ID:          "trigger.pause",
@@ -1292,9 +1292,10 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.fire",
 		Domain:      "trigger",
-		Description: "Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision",
+		Description: "Fire a matched event trigger's message or dispatch_agent action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:message"},
+			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:dispatch_agent"},
 		},
 		Principals:       []PrincipalKind{PrincipalSystem},
 		Credentials:      []CredentialKind{CredentialSystemInternal},
@@ -1306,6 +1307,8 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestTriggerDispatchE2E_RevokedAuthorityRecordsRefusedFire"},
 			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenCeiling"},
+			{Package: "pkg/hub", Function: "TestTriggerDispatchAgent_EndToEndWebhookToAgent"},
+			{Package: "pkg/hub", Function: "TestTriggerDispatchAgent_RenderRefusalAndCollisionMatrix"},
 		},
 		Exemptions: []Exemption{{
 			Kind: ExemptionInternalOnly,

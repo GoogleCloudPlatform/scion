@@ -253,6 +253,7 @@ type TriggerFire struct {
 	Status         string     `json:"status"`
 	Error          string     `json:"error,omitempty"`
 	ResultRef      string     `json:"resultRef,omitempty"`
+	TargetAgentID  string     `json:"targetAgentId,omitempty"`
 	MatchedThrough string     `json:"matchedThrough,omitempty"`
 	DecidedDialect string     `json:"decidedDialect,omitempty"`
 	RuleTrace      string     `json:"ruleTrace,omitempty"`
@@ -322,11 +323,12 @@ type TriggerStore interface {
 	// Trigger fires
 	ClaimTriggerFire(ctx context.Context, fire *TriggerFire) (claimed bool, existing *TriggerFire, err error)
 	ClaimTriggerFireSubjectSkip(ctx context.Context, fire *TriggerFire, skipError string, now time.Time) (claimed bool, skippedBusy bool, existing *TriggerFire, err error)
-	FinishTriggerFire(ctx context.Context, id, status, resultRef, errMsg string, finishedAt time.Time) (bool, error)
+	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
 	HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error)
 	AgentHasFiredTriggerForEvent(ctx context.Context, eventID, agentID string) (bool, error)
+	EventHasTriggerFireForResultRef(ctx context.Context, eventID, resultRef string) (bool, error)
 	ReapExpiredTriggerFires(ctx context.Context, now time.Time, limit int) (int, error)
 	PurgeOldTriggerHistory(ctx context.Context, olderThan time.Time) (eventsDeleted int, firesDeleted int, err error)
 }

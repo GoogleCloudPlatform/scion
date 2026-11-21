@@ -559,8 +559,8 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 			wantMsg: "unsupported subject dialect",
 		},
 		{
-			name:    "non-message action.type refused in Stage 1",
-			mutate:  func(r *CreateTriggerRequest) { r.Action.Type = "dispatch_agent" },
+			name:    "unsupported action.type refused",
+			mutate:  func(r *CreateTriggerRequest) { r.Action.Type = "exec" },
 			wantMsg: "unsupported action type",
 		},
 	}

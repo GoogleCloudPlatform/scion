@@ -236,6 +236,20 @@ func (_c *TriggerFireCreate) SetNillableRuleTrace(v *string) *TriggerFireCreate 
 	return _c
 }
 
+// SetTargetAgentID sets the "target_agent_id" field.
+func (_c *TriggerFireCreate) SetTargetAgentID(v uuid.UUID) *TriggerFireCreate {
+	_c.mutation.SetTargetAgentID(v)
+	return _c
+}
+
+// SetNillableTargetAgentID sets the "target_agent_id" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableTargetAgentID(v *uuid.UUID) *TriggerFireCreate {
+	if v != nil {
+		_c.SetTargetAgentID(*v)
+	}
+	return _c
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_c *TriggerFireCreate) SetExecutorKind(v string) *TriggerFireCreate {
 	_c.mutation.SetExecutorKind(v)
@@ -542,6 +556,10 @@ func (_c *TriggerFireCreate) createSpec() (*TriggerFire, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.RuleTrace(); ok {
 		_spec.SetField(triggerfire.FieldRuleTrace, field.TypeString, value)
 		_node.RuleTrace = value
+	}
+	if value, ok := _c.mutation.TargetAgentID(); ok {
+		_spec.SetField(triggerfire.FieldTargetAgentID, field.TypeUUID, value)
+		_node.TargetAgentID = &value
 	}
 	if value, ok := _c.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)
@@ -856,6 +874,24 @@ func (u *TriggerFireUpsert) UpdateRuleTrace() *TriggerFireUpsert {
 // ClearRuleTrace clears the value of the "rule_trace" field.
 func (u *TriggerFireUpsert) ClearRuleTrace() *TriggerFireUpsert {
 	u.SetNull(triggerfire.FieldRuleTrace)
+	return u
+}
+
+// SetTargetAgentID sets the "target_agent_id" field.
+func (u *TriggerFireUpsert) SetTargetAgentID(v uuid.UUID) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldTargetAgentID, v)
+	return u
+}
+
+// UpdateTargetAgentID sets the "target_agent_id" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateTargetAgentID() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldTargetAgentID)
+	return u
+}
+
+// ClearTargetAgentID clears the value of the "target_agent_id" field.
+func (u *TriggerFireUpsert) ClearTargetAgentID() *TriggerFireUpsert {
+	u.SetNull(triggerfire.FieldTargetAgentID)
 	return u
 }
 
@@ -1259,6 +1295,27 @@ func (u *TriggerFireUpsertOne) UpdateRuleTrace() *TriggerFireUpsertOne {
 func (u *TriggerFireUpsertOne) ClearRuleTrace() *TriggerFireUpsertOne {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.ClearRuleTrace()
+	})
+}
+
+// SetTargetAgentID sets the "target_agent_id" field.
+func (u *TriggerFireUpsertOne) SetTargetAgentID(v uuid.UUID) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetTargetAgentID(v)
+	})
+}
+
+// UpdateTargetAgentID sets the "target_agent_id" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateTargetAgentID() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateTargetAgentID()
+	})
+}
+
+// ClearTargetAgentID clears the value of the "target_agent_id" field.
+func (u *TriggerFireUpsertOne) ClearTargetAgentID() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearTargetAgentID()
 	})
 }
 
@@ -1838,6 +1895,27 @@ func (u *TriggerFireUpsertBulk) UpdateRuleTrace() *TriggerFireUpsertBulk {
 func (u *TriggerFireUpsertBulk) ClearRuleTrace() *TriggerFireUpsertBulk {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.ClearRuleTrace()
+	})
+}
+
+// SetTargetAgentID sets the "target_agent_id" field.
+func (u *TriggerFireUpsertBulk) SetTargetAgentID(v uuid.UUID) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetTargetAgentID(v)
+	})
+}
+
+// UpdateTargetAgentID sets the "target_agent_id" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateTargetAgentID() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateTargetAgentID()
+	})
+}
+
+// ClearTargetAgentID clears the value of the "target_agent_id" field.
+func (u *TriggerFireUpsertBulk) ClearTargetAgentID() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearTargetAgentID()
 	})
 }
 

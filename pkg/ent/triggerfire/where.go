@@ -145,6 +145,11 @@ func RuleTrace(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldRuleTrace, v))
 }
 
+// TargetAgentID applies equality check predicate on the "target_agent_id" field. It's identical to TargetAgentIDEQ.
+func TargetAgentID(v uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldTargetAgentID, v))
+}
+
 // ExecutorKind applies equality check predicate on the "executor_kind" field. It's identical to ExecutorKindEQ.
 func ExecutorKind(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldExecutorKind, v))
@@ -1338,6 +1343,56 @@ func RuleTraceEqualFold(v string) predicate.TriggerFire {
 // RuleTraceContainsFold applies the ContainsFold predicate on the "rule_trace" field.
 func RuleTraceContainsFold(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldContainsFold(FieldRuleTrace, v))
+}
+
+// TargetAgentIDEQ applies the EQ predicate on the "target_agent_id" field.
+func TargetAgentIDEQ(v uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldTargetAgentID, v))
+}
+
+// TargetAgentIDNEQ applies the NEQ predicate on the "target_agent_id" field.
+func TargetAgentIDNEQ(v uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldTargetAgentID, v))
+}
+
+// TargetAgentIDIn applies the In predicate on the "target_agent_id" field.
+func TargetAgentIDIn(vs ...uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldTargetAgentID, vs...))
+}
+
+// TargetAgentIDNotIn applies the NotIn predicate on the "target_agent_id" field.
+func TargetAgentIDNotIn(vs ...uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldTargetAgentID, vs...))
+}
+
+// TargetAgentIDGT applies the GT predicate on the "target_agent_id" field.
+func TargetAgentIDGT(v uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldTargetAgentID, v))
+}
+
+// TargetAgentIDGTE applies the GTE predicate on the "target_agent_id" field.
+func TargetAgentIDGTE(v uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldTargetAgentID, v))
+}
+
+// TargetAgentIDLT applies the LT predicate on the "target_agent_id" field.
+func TargetAgentIDLT(v uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldTargetAgentID, v))
+}
+
+// TargetAgentIDLTE applies the LTE predicate on the "target_agent_id" field.
+func TargetAgentIDLTE(v uuid.UUID) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldTargetAgentID, v))
+}
+
+// TargetAgentIDIsNil applies the IsNil predicate on the "target_agent_id" field.
+func TargetAgentIDIsNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIsNull(FieldTargetAgentID))
+}
+
+// TargetAgentIDNotNil applies the NotNil predicate on the "target_agent_id" field.
+func TargetAgentIDNotNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotNull(FieldTargetAgentID))
 }
 
 // ExecutorKindEQ applies the EQ predicate on the "executor_kind" field.

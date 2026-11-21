@@ -50,6 +50,8 @@ const (
 	FieldDecidedDialect = "decided_dialect"
 	// FieldRuleTrace holds the string denoting the rule_trace field in the database.
 	FieldRuleTrace = "rule_trace"
+	// FieldTargetAgentID holds the string denoting the target_agent_id field in the database.
+	FieldTargetAgentID = "target_agent_id"
 	// FieldExecutorKind holds the string denoting the executor_kind field in the database.
 	FieldExecutorKind = "executor_kind"
 	// FieldExecutorID holds the string denoting the executor_id field in the database.
@@ -87,6 +89,7 @@ var Columns = []string{
 	FieldMatchedThrough,
 	FieldDecidedDialect,
 	FieldRuleTrace,
+	FieldTargetAgentID,
 	FieldExecutorKind,
 	FieldExecutorID,
 	FieldLeaseUntil,
@@ -224,6 +227,11 @@ func ByDecidedDialect(opts ...sql.OrderTermOption) OrderOption {
 // ByRuleTrace orders the results by the rule_trace field.
 func ByRuleTrace(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuleTrace, opts...).ToFunc()
+}
+
+// ByTargetAgentID orders the results by the target_agent_id field.
+func ByTargetAgentID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTargetAgentID, opts...).ToFunc()
 }
 
 // ByExecutorKind orders the results by the executor_kind field.

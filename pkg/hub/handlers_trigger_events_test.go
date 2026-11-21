@@ -199,7 +199,7 @@ func TestTriggerHistoryAndEvents_PaginationFilteringAndSerializers(t *testing.T)
 		claimed, _, err := f.store.ClaimTriggerFire(ctx, fire)
 		require.NoError(t, err)
 		require.True(t, claimed)
-		transitioned, err := f.store.FinishTriggerFire(ctx, fire.ID, targetStatus, fire.ResultRef, targetErr, finishedAt)
+		transitioned, err := f.store.FinishTriggerFire(ctx, fire.ID, targetStatus, fire.ResultRef, fire.TargetAgentID, targetErr, finishedAt)
 		require.NoError(t, err)
 		require.True(t, transitioned)
 	}

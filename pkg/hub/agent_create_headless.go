@@ -32,31 +32,51 @@ import (
 )
 
 // Fixed allow-list of event data environment variables accepted by
-// HeadlessCreate.EventEnv (Stage 1 design §5.7 constraint 3 & 4).
+// HeadlessCreate.EventEnv (Stage 1 design §5.7 constraint 3 & 4; Stage 2 §5.4).
 const (
-	EventEnvKeyTriggerEventID = "SCION_TRIGGER_EVENT_ID"
-	EventEnvKeyTriggerID      = "SCION_TRIGGER_ID"
+	EventEnvKeyTriggerEventID   = "SCION_TRIGGER_EVENT_ID"
+	EventEnvKeyTriggerID        = "SCION_TRIGGER_ID"
+	EventEnvKeyTriggerEventFile = "SCION_TRIGGER_EVENT_FILE"
 
 	// HeadlessEventFilePath is the relative home-directory path where
 	// HeadlessCreate.EventFile is written via WithCreateHomeFiles (Stage 1
-	// design §5.7).
+	// design §5.7, Stage 2 §5.4).
 	HeadlessEventFilePath = ".scion/trigger-event.json"
-	headlessEventFileMode = 0o600
+	// HeadlessEventFileContainerPath is the resolved absolute path inside the
+	// agent container advertised via SCION_TRIGGER_EVENT_FILE (Stage 2 §5.4).
+	HeadlessEventFileContainerPath = "/home/scion/" + HeadlessEventFilePath
+	headlessEventFileMode          = 0o600
 
-	// maxHeadlessEventFileBytes bounds HeadlessCreate.EventFile to the 16 KiB
-	// trigger envelope cap (Stage 1 design §5.7).
-	maxHeadlessEventFileBytes = 16 * 1024
+	// maxHeadlessEventFileBytes bounds HeadlessCreate.EventFile to the 64 KiB
+	// HomeFiles channel cap (Stage 2 §5.4; external_payload inside the file is
+	// separately bounded to 16 KiB by messaging.NewExternalPayload).
+	maxHeadlessEventFileBytes = api.MaxHomeFilesTotalBytes
 )
 
 var (
 	errDisallowedHeadlessEventEnvKey       = errors.New("disallowed headless event env key")
 	errInvalidHeadlessEventEnvValue        = errors.New("headless event env value contains NUL byte")
-	errHeadlessEventFileTooLarge           = errors.New("headless create event file exceeds 16 KiB limit")
+	errHeadlessEventFileTooLarge           = errors.New("headless create event file exceeds limit")
 	errHeadlessGitHubTokenUnsupported      = errors.New("headless create githubToken is not supported before Stage 2 P1c")
 	errHeadlessProvenancePrincipalMismatch = errors.New("headless create: edge provenance principal does not match authority principal")
 	errHeadlessInvalidEdgeProvenance       = errors.New("headless create: invalid scheduler edge provenance")
 	errHeadlessNoUsableRole                = errors.New("no usable role for the recorded authority; set noAuth: true or re-authorize the schedule")
+	errHeadlessMissingResolvedRole         = errors.New("headless create: missing pre-authorized resolved role")
+	errHeadlessNoDispatcherForHomeFiles    = errors.New("no dispatcher available for homeFiles create")
+	errHeadlessAgentExists                 = errors.New("agent already exists in project")
 )
+
+type headlessAgentExistsError struct {
+	slug string
+}
+
+func (e *headlessAgentExistsError) Error() string {
+	return fmt.Sprintf("agent %q already exists in project", e.slug)
+}
+
+func (e *headlessAgentExistsError) Is(target error) bool {
+	return target == errHeadlessAgentExists
+}
 
 // HeadlessMissingEnvError is the content-free error returned when a headless
 // agent create still has unsatisfied required environment variables after
@@ -132,7 +152,7 @@ type headlessResolvedRole struct {
 func validateHeadlessEventEnv(env map[string]string) error {
 	for k, v := range env {
 		switch k {
-		case EventEnvKeyTriggerEventID, EventEnvKeyTriggerID:
+		case EventEnvKeyTriggerEventID, EventEnvKeyTriggerID, EventEnvKeyTriggerEventFile:
 		default:
 			return fmt.Errorf("%w: %q", errDisallowedHeadlessEventEnvKey, k)
 		}
@@ -278,6 +298,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	if hc.Identity == nil {
 		return nil, errors.New("headless create: missing creator identity")
 	}
+	if hc.resolvedRole == nil {
+		return nil, errHeadlessMissingResolvedRole
+	}
 	if hc.Name == "" {
 		return nil, fmt.Errorf("dispatch_agent payload: agentName is required")
 	}
@@ -350,22 +373,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	if err != nil {
 		return nil, err
 	}
-	var (
-		preCapRole        AgentRole
-		roleExplicit      bool
-		parentMessageMode string
-	)
-	if hc.resolvedRole != nil {
-		preCapRole = hc.resolvedRole.preCapRole
-		roleExplicit = hc.resolvedRole.roleExplicit
-		parentMessageMode = hc.resolvedRole.parentMessageMode
-	} else {
-		preCapRole, roleExplicit, parentMessageMode, err = s.resolveHeadlessPreCapRole(
-			ctx, project, hc.Authority, hc.AgentRole, hc.NoAuth)
-		if err != nil {
-			return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
-		}
-	}
+	preCapRole := hc.resolvedRole.preCapRole
+	roleExplicit := hc.resolvedRole.roleExplicit
+	parentMessageMode := hc.resolvedRole.parentMessageMode
 	fireID := hc.Authority.Recorded.FireID
 	childRole, cause, fits := childRoleWithinCeiling(
 		uatHopEffectCeiling(edgeProvenance.SourcePrincipalKind, edgeProvenance.SourcePrincipalID, edgeProvenance, edgeCeiling),
@@ -417,19 +427,21 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		return nil, fmt.Errorf("failed to check existing agent %q in project %q: %w", slug, hc.ProjectID, err)
 	}
 	if err == nil && existingAgent != nil {
-		slog.Warn("Scheduler: agent already exists, skipping dispatch_agent",
-			"eventID", fireID,
-			"agentName", slug,
-			"projectID", hc.ProjectID,
-			"existingPhase", existingAgent.Phase)
-		if existingAgent.Phase == string(state.PhaseError) {
-			placementRefused := s.isScheduleBlockedPlacementRefusal(ctx, existingAgent)
-			if hc.NotifyBlocked != nil {
-				hc.NotifyBlocked(ctx, existingAgent, placementRefused)
+		if hc.Authority.Recorded.DefinitionKind != hubfire.DefinitionKindTrigger {
+			slog.Warn("Scheduler: agent already exists, skipping dispatch_agent",
+				"eventID", fireID,
+				"agentName", slug,
+				"projectID", hc.ProjectID,
+				"existingPhase", existingAgent.Phase)
+			if existingAgent.Phase == string(state.PhaseError) {
+				placementRefused := s.isScheduleBlockedPlacementRefusal(ctx, existingAgent)
+				if hc.NotifyBlocked != nil {
+					hc.NotifyBlocked(ctx, existingAgent, placementRefused)
+				}
+				return nil, scheduleBlockedError(existingAgent, placementRefused)
 			}
-			return nil, scheduleBlockedError(existingAgent, placementRefused)
 		}
-		return nil, fmt.Errorf("agent %q already exists in project", slug)
+		return nil, &headlessAgentExistsError{slug: slug}
 	}
 
 	var clonedLabels map[string]string
@@ -647,6 +659,18 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	dispatchExecutor, _ := ExecutorContextFromContext(ctx)
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
+		if len(hc.EventFile) > 0 {
+			slog.Error("Scheduler: no dispatcher available for homeFiles create; rolling back",
+				"eventID", fireID,
+				"agent_id", agent.ID,
+				"agentName", agent.Name,
+				"executor_kind", dispatchExecutor.Kind,
+				"executor_id", dispatchExecutor.ID)
+			return nil, rollback(createRollback{
+				Stage: createStageDispatch,
+				Cause: errHeadlessNoDispatcherForHomeFiles,
+			})
+		}
 		slog.Warn("Scheduler: no dispatcher available, agent created but not started",
 			"eventID", fireID,
 			"agent_id", agent.ID,

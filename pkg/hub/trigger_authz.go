@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -71,17 +72,17 @@ func newTriggerAudit(ctx context.Context, mutationType, triggerID string) *store
 }
 
 // triggerRevisionAuthorityCeiling resolves the caller's frozen effect ceiling
-// for a trigger authoring write (create, dispatch-affecting PATCH, or resume),
-// mirroring revisionAuthorityCeiling for schedules.
-func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID string, action Action) (store.EffectCeiling, bool) {
+// and provenance for a trigger authoring write (create, dispatch-affecting
+// PATCH, or resume), mirroring revisionAuthorityCeiling for schedules.
+func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.Request, projectID string, action Action) (store.EffectCeiling, store.AuthorityProvenance, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if s.authzService == nil {
 		slog.ErrorContext(ctx, "trigger authoring: no authorization service", "project_id", projectID)
 		InternalError(w)
-		return store.EffectCeiling{}, false
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, false
 	}
-	ceiling, _, err := s.authzService.sourceEffectCeiling(ctx, identity)
+	ceiling, prov, err := s.authzService.sourceEffectCeiling(ctx, identity)
 	if err != nil {
 		cause, structural := ceilingDenyCauseForError(err)
 		if !structural {
@@ -89,7 +90,7 @@ func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.
 				"project_id", projectID, "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Unable to evaluate the credential's delegation ceiling; retry later", nil)
-			return store.EffectCeiling{}, false
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, false
 		}
 		logAuthzDenial(r, identity, triggerResource(projectID), action,
 			"effect ceiling denied: "+string(cause)+": "+err.Error())
@@ -98,9 +99,9 @@ func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.
 			msg = "This credential kind cannot authorize trigger work"
 		}
 		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
-		return store.EffectCeiling{}, false
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, false
 	}
-	return ceiling, true
+	return ceiling, prov, true
 }
 
 func writeWebhookEndpointNotFound(w http.ResponseWriter) {
@@ -413,6 +414,104 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	return normalized, true
 }
 
+// authorizeTriggerDispatchAgentAuthoring validates a Stage 2 dispatch_agent
+// action spec for triggers (§5.1, §5.1a, §5.5, §7.3): enforces replay-protected
+// source, delegates payload/template/label/authority checks to
+// dispatchAgentAction.Validate, and enforces the caller's effect ceiling on
+// an explicit agentRole.
+func (s *Server) authorizeTriggerDispatchAgentAuthoring(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	sourceKind string,
+	ep *store.WebhookEndpoint,
+	subjectMode string,
+	spec *TriggerActionSpec,
+	ceiling store.EffectCeiling,
+	prov store.AuthorityProvenance,
+) (string, bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return "", false
+	}
+
+	// TODO(P1c-2): remove this refusal once P1c-2 implements subject claims
+	// (Stage 2 §5.6: Stage 1's fire-level skip finishes as soon as the agent is
+	// created and would not block a second agent on the same subject).
+	if subjectMode == store.TriggerSubjectModeSkip {
+		writeError(w, http.StatusBadRequest, "dispatch_agent_skip_unsupported",
+			"subject mode skip for dispatch_agent requires subject claims (Stage 2 P1c-2)", nil)
+		return "", false
+	}
+
+	// TODO(P1c-3): remove this refusal once P1c-3 implements githubToken="installation"
+	// (Stage 2 §5.1a requires omitted githubToken on github sources to default to
+	// "installation" so an author's PAT never drives a GitHub-triggered agent).
+	if sourceKind == store.TriggerSourceKindGitHub {
+		writeError(w, http.StatusBadRequest, "dispatch_agent_github_unsupported",
+			"dispatch_agent triggers on github sources need githubToken installation support (Stage 2 P1c-3)", nil)
+		return "", false
+	}
+
+	if !trigger.SourceReplayProtected(sourceKind, ep) {
+		writeError(w, http.StatusBadRequest, "source_not_replay_protected",
+			"dispatch_agent triggers require a replay-protected source", nil)
+		return "", false
+	}
+
+	raw, err := json.Marshal(DispatchAgentEventPayload{
+		AgentName:     spec.AgentName,
+		NameConflict:  spec.NameConflict,
+		Template:      spec.Template,
+		Task:          spec.Task,
+		Branch:        spec.Branch,
+		Labels:        spec.Labels,
+		Ephemeral:     spec.Ephemeral,
+		GithubToken:   spec.GithubToken,
+		AgentRole:     spec.AgentRole,
+		ReuseMessage:  spec.ReuseMessage,
+		UntrustedVars: spec.UntrustedVars,
+		NoAuth:        spec.NoAuth,
+	})
+	if err != nil {
+		InternalError(w)
+		return "", false
+	}
+
+	action := &dispatchAgentAction{srv: s}
+	normalized, preCapRole, roleExplicit, err := action.validateWithRole(ctx, identity, projectID, string(raw))
+	if err != nil {
+		var ve *dispatchAgentValidationError
+		if errors.As(err, &ve) {
+			writeError(w, ve.status, ve.code, ve.message, ve.details)
+			return "", false
+		}
+		slog.ErrorContext(ctx, "trigger dispatch_agent authoring failed", "project_id", projectID, "error", err)
+		InternalError(w)
+		return "", false
+	}
+
+	// Enforce the caller's hop effect ceiling against both explicit and
+	// omitted (default-ladder) agentRole (mirrors interactive create's
+	// applyCreateEffectCeiling; §5.1).
+	if _, cause, fits := childRoleWithinCeiling(
+		uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling),
+		preCapRole,
+		roleExplicit,
+	); !fits {
+		msg := "requested agentRole exceeds caller's delegation ceiling: " + string(cause)
+		if !roleExplicit {
+			msg = "no agent role fits caller's delegation ceiling: " + string(cause)
+		}
+		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
+		return "", false
+	}
+
+	return normalized, true
+}
+
 // triggerEventAccess is the outcome of triggerEventAccessDecision.
 type triggerEventAccess struct {
 	allowed           bool
@@ -472,6 +571,16 @@ func (s *Server) triggerEventAccessDecision(ctx context.Context, projectID strin
 			}
 		}
 		if fired {
+			return triggerEventAccess{allowed: true}
+		}
+		dispatched, err := s.store.EventHasTriggerFireForResultRef(ctx, ev.ID, identity.ID())
+		if err != nil && !errors.Is(err, store.ErrInvalidInput) {
+			return triggerEventAccess{
+				reason:   "trigger fire result_ref visibility lookup failed",
+				storeErr: err,
+			}
+		}
+		if dispatched {
 			return triggerEventAccess{allowed: true}
 		}
 		return triggerEventAccess{
