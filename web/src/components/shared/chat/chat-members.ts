@@ -33,6 +33,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues, TemplateResult } from 'lit';
 import {
   ACTIVITY_DISPLAY,
+  activityTooltip,
   stateLabel,
   suspendReasonHint,
   suspendedStatusLabel,
@@ -1155,13 +1156,17 @@ export class ScionChatMembers extends LitElement {
       suspendedLabel ||
       a.phase ||
       'unknown';
+    const badgeStatus = this.resolveAgentStatus(a);
     const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';
     const updatedText = updated ? `Updated: ${updated}` : '';
-    const tooltipContent = [detailText, suspendReasonHint(suspended), updatedText]
+    const tooltipContent = [
+      detailText,
+      activityTooltip(badgeStatus),
+      suspendReasonHint(suspended),
+      updatedText,
+    ]
       .filter(Boolean)
       .join('\n');
-
-    const badgeStatus = this.resolveAgentStatus(a);
 
     const agentRow = html`
       <div

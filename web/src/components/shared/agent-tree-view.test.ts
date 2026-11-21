@@ -318,7 +318,7 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
 
     const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
     expect(badge?.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
-    expect(badge?.getAttribute('title')).toContain('scion start kid');
+    expect(badge?.getAttribute('tooltip')).toContain('scion start kid');
   });
 
   /** Edges whose title indicates non-messageable ("mismatch") styling. */

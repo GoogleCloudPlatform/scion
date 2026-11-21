@@ -131,6 +131,54 @@ export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
   offline: { emoji: '📡', icon: 'wifi-off', variant: 'neutral', pulse: false },
 };
 
+/**
+ * One-line system explanations for key agent activity states shown in
+ * status badge tooltips (ptone/scion#8723).
+ */
+export const ACTIVITY_TOOLTIPS: Partial<Record<AgentActivity, string>> = {
+  completed: "Finished its most recent task. It isn't done forever and can take new work.",
+  idle: 'Done with any known work. Similar to completed, but not tied to a specific task.',
+  blocked: 'Active and expecting to hear back from another agent, a person, or a system.',
+  stalled: "The system hasn't heard from the agent recently.",
+};
+
+/**
+ * One-line explanation for an agent activity state, or `undefined` when no
+ * explanation is defined for that state. Matched case-insensitively.
+ */
+export function activityTooltip(status: string): string | undefined {
+  const key = status.toLowerCase();
+  if (key in ACTIVITY_TOOLTIPS) {
+    return ACTIVITY_TOOLTIPS[key as AgentActivity];
+  }
+  return undefined;
+}
+
+/**
+ * The agent's own reported status message formatted for a tooltip
+ * (`"Agent says: ..."`), for agent-signaled states (`completed`, `idle`,
+ * `blocked`), or `undefined` when unavailable or not applicable.
+ *
+ * For `completed`, `sciontool status task_completed` writes `taskSummary`
+ * rather than `message`, so `taskSummary` takes precedence over `message`.
+ */
+export function agentReportedStatusHint(
+  agent: Pick<Agent, 'detail' | 'message' | 'taskSummary'>,
+  status: string
+): string | undefined {
+  const key = status.toLowerCase();
+  let raw: string | undefined;
+  if (key === 'completed') {
+    raw = agent.detail?.taskSummary || agent.taskSummary || agent.detail?.message || agent.message;
+  } else if (key === 'idle' || key === 'blocked') {
+    raw = agent.detail?.message || agent.message;
+  } else {
+    return undefined;
+  }
+  const trimmed = raw?.trim();
+  return trimmed ? `Agent says: ${trimmed}` : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Lookup helpers
 // ---------------------------------------------------------------------------
@@ -281,10 +329,45 @@ function joinHints(...hints: (string | undefined)[]): string | undefined {
 }
 
 /**
+ * Build the accessible tooltip text for an agent status badge, combining
+ * any one-line state explanation, the agent's own reported status message
+ * when available, and any diagnostic or suspend-reason hint.
+ */
+export function agentStatusTooltip(
+  agent: Pick<
+    Agent,
+    | 'name'
+    | 'phase'
+    | 'activity'
+    | 'suspendReason'
+    | 'provisionedOnly'
+    | 'detail'
+    | 'message'
+    | 'taskSummary'
+  >,
+  status?: string
+): string | undefined {
+  if (isProvisionedOnly(agent)) {
+    return `Not started yet. Use Start, or run: scion start ${agent.name}`;
+  }
+  const displayStatus = getAgentDisplayStatus(agent as Agent);
+  const effectiveStatus = status ?? displayStatus;
+  const isDisplayStatus = effectiveStatus === displayStatus;
+  return joinHints(
+    activityTooltip(effectiveStatus),
+    agentReportedStatusHint(agent, effectiveStatus),
+    harnessErrorHint(agent, effectiveStatus) ?? stalledHint(agent, effectiveStatus),
+    isDisplayStatus ? suspendReasonHint(agent) : undefined
+  );
+}
+
+/**
  * An agent status badge. Use it for every agent status badge: it shows a
- * provision-only agent as "created (not started)" with a start hint, and a
+ * provision-only agent as "created (not started)" with a start hint, a
  * suspended agent as "suspended · <activity> (<reason>)" (see
- * suspendedStatusLabel) with the reason explained in its tooltip.
+ * suspendedStatusLabel) with the reason explained in its tooltip, and
+ * accessible tooltips for key states (completed, idle, waiting on others,
+ * stalled) including the agent's own reported status where available.
  */
 export function agentStatusBadge(
   agent: Agent,
@@ -292,19 +375,14 @@ export function agentStatusBadge(
 ): TemplateResult {
   const po = isProvisionedOnly(agent);
   const isDisplayStatus = status === getAgentDisplayStatus(agent);
-  const hint = po
-    ? `Not started yet. Use Start, or run: scion start ${agent.name}`
-    : joinHints(
-        harnessErrorHint(agent, status) ?? stalledHint(agent, status),
-        isDisplayStatus ? suspendReasonHint(agent) : undefined
-      );
+  const hint = agentStatusTooltip(agent, status);
   const defaultLabel = isDisplayStatus
     ? (suspendedStatusLabel(agent) ?? stateLabel(status))
     : stateLabel(status);
   return html`<scion-status-badge
     status=${status}
     label=${po ? PROVISIONED_ONLY_LABEL : (label ?? defaultLabel)}
-    title=${ifDefined(hint)}
+    tooltip=${ifDefined(hint)}
     size=${ifDefined(size)}
     data-testid=${ifDefined(testId)}
   ></scion-status-badge>`;

@@ -58,13 +58,13 @@ describe('broker detail agent card status badge', () => {
   it('shows a provision-only agent as created (not started) with a start hint', () => {
     const badge = cardBadge(makeAgent({ phase: 'created', provisionedOnly: true }));
     expect(badge.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
-    expect(badge.getAttribute('title')).toContain('scion start agent-1');
+    expect(badge.getAttribute('tooltip')).toContain('scion start agent-1');
   });
 
   it('shows a plain created agent as created, with no hint', () => {
     const badge = cardBadge(makeAgent({ phase: 'created' }));
     expect(badge.getAttribute('label')).toBe('created');
-    expect(badge.hasAttribute('title')).toBe(false);
+    expect(badge.hasAttribute('tooltip')).toBe(false);
   });
 });
 

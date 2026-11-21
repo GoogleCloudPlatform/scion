@@ -23,6 +23,7 @@
 
 import { LitElement, html, css, nothing, unsafeCSS, type PropertyValues } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { ifDefined } from 'lit/directives/if-defined.js';
 
 import type {
   Agent,
@@ -31,6 +32,7 @@ import type {
   ExposedPort,
   SharedDir,
 } from '../../shared/types.js';
+import { activityTooltip, agentStatusBadge } from '../../shared/agent-state-display.js';
 import {
   TerminalSessionRegistry,
   type TerminalSession,
@@ -2260,10 +2262,16 @@ export class ScionTerminalPane extends LitElement {
               </button>
             `
           : ''}
-        <scion-status-badge
-          status=${this.agentDisplayStatus}
-          size="small"
-        ></scion-status-badge>
+        ${this.agent
+          ? agentStatusBadge(this.agent, {
+              status: this.agentDisplayStatus,
+              size: 'small',
+            })
+          : html`<scion-status-badge
+              status=${this.agentDisplayStatus}
+              tooltip=${ifDefined(activityTooltip(this.agentDisplayStatus))}
+              size="small"
+            ></scion-status-badge>`}
         <div class="status-indicator">
           <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
           ${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}

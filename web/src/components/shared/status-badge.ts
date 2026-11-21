@@ -20,7 +20,7 @@
  * Displays status indicators with appropriate colors and icons
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import { getStateDisplay } from '../../shared/agent-state-display.js';
 import type { StatusVariant } from '../../shared/agent-state-display.js';
@@ -55,6 +55,7 @@ export type StatusType =
   | 'thinking'
   | 'executing'
   | 'waiting_for_input'
+  | 'blocked'
   | 'idle'
   | 'completed'
   | 'limits_exceeded'
@@ -151,9 +152,22 @@ export class ScionStatusBadge extends LitElement {
   @property({ type: Boolean })
   showPulse = true;
 
+  /**
+   * Optional accessible tooltip text. When set, wraps the badge in a hoisted
+   * sl-tooltip and makes the badge keyboard-focusable with an aria-label.
+   */
+  @property({ type: String })
+  tooltip = '';
+
   static override styles = css`
     :host {
       display: inline-flex;
+    }
+
+    sl-tooltip::part(body) {
+      white-space: pre-line;
+      text-align: left;
+      max-width: 280px;
     }
 
     .badge {
@@ -165,6 +179,11 @@ export class ScionStatusBadge extends LitElement {
       font-weight: 500;
       text-transform: capitalize;
       white-space: nowrap;
+    }
+
+    .badge:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 2px;
     }
 
     /* Size variants */
@@ -281,17 +300,27 @@ export class ScionStatusBadge extends LitElement {
     const config = resolveStatusConfig(this.status);
     const displayLabel = this.label || config.label || this.status.replace(/_/g, ' ');
     const shouldPulse = this.showPulse && config.pulse;
+    const hasTooltip = this.tooltip.length > 0;
 
-    return html`
-      <span class="badge ${config.variant} ${this.size} ${shouldPulse ? 'pulse' : ''}">
+    const badge = html`
+      <span
+        class="badge ${config.variant} ${this.size} ${shouldPulse ? 'pulse' : ''}"
+        tabindex=${hasTooltip ? '0' : nothing}
+        aria-label=${hasTooltip ? `${displayLabel}: ${this.tooltip}` : nothing}
+      >
         ${config.emoji
-          ? html`<span class="emoji">${config.emoji}</span>`
+          ? html`<span class="emoji" aria-hidden="true">${config.emoji}</span>`
           : this.showIcon && config.icon
-            ? html`<sl-icon name="${config.icon}"></sl-icon>`
+            ? html`<sl-icon name="${config.icon}" aria-hidden="true"></sl-icon>`
             : ''}
         ${displayLabel}
       </span>
     `;
+
+    if (hasTooltip) {
+      return html`<sl-tooltip .content=${this.tooltip} hoist>${badge}</sl-tooltip>`;
+    }
+    return badge;
   }
 }
 

@@ -619,7 +619,7 @@ describe('project-detail — agent list window', () => {
     const badges = () =>
       Array.from(el.shadowRoot?.querySelectorAll('scion-status-badge') ?? []).map((b) => [
         b.getAttribute('label'),
-        b.getAttribute('title'),
+        b.getAttribute('tooltip'),
       ]);
     const expected = [
       ['created (not started)', 'Not started yet. Use Start, or run: scion start agent-1'],

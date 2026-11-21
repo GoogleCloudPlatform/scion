@@ -2169,23 +2169,22 @@ export class ScionPageAgentDetail extends LitElement {
             <span class="info-label">Activity</span>
             <span class="info-value">
               ${agent.activity
-                ? html`<scion-status-badge
-                      status=${agent.activity}
-                      label=${stateLabel(agent.activity)}
-                      size="small"
-                    ></scion-status-badge
-                    >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
-                    agent.updated ||
-                    agent.updatedAt
-                      ? html`<span
-                          style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
-                          >${this.formatRelativeTime(
-                            (agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)
-                              ? agent.lastActivityEvent
-                              : agent.updated || agent.updatedAt)!
-                          )}</span
-                        >`
-                      : ''}`
+                ? html`${agentStatusBadge(agent, {
+                    status: agent.activity,
+                    label: stateLabel(agent.activity),
+                    size: 'small',
+                  })}${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
+                  agent.updated ||
+                  agent.updatedAt
+                    ? html`<span
+                        style="color: var(--scion-text-muted, #64748b); font-size: 0.85em; margin-left: 0.5em;"
+                        >${this.formatRelativeTime(
+                          (agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)
+                            ? agent.lastActivityEvent
+                            : agent.updated || agent.updatedAt)!
+                        )}</span
+                      >`
+                    : ''}`
                 : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
             </span>
           </div>
