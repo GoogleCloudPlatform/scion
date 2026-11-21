@@ -564,8 +564,11 @@ jobs:
 
   # Preview releases only: build the homebrew-scion images and update the
   # tap formula. The called jobs read HOMEBREW_SCION_TOKEN from the
-  # "homebrew" environment, so no secret is passed here; they skip with a
-  # notice when it is not set.
+  # "homebrew" environment, but a reusable workflow sees an environment
+  # secret only when its caller passes secrets, so this call inherits them,
+  # and so does every caller of this workflow on the preview path
+  # (build-preview-weekly.yml). Without it the secret resolves to an empty
+  # string and the jobs skip with a notice, as if it were not set.
   publish-homebrew:
     name: Publish to Homebrew
     needs: release
@@ -573,5 +576,6 @@ jobs:
     permissions:
       contents: read     # The called jobs only check out code
     uses: ./.github/workflows/publish-homebrew.yml
+    secrets: inherit   # HOMEBREW_SCION_TOKEN (homebrew environment); see above
     with:
       tag: ${{ needs.release.outputs.tag }}
