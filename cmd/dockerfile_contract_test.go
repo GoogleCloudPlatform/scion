@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -346,6 +348,7 @@ type cloudBuildFile struct {
 const (
 	hubGKEImageTag   = "$_REGISTRY/scion-hub-gke:$_SHORT_SHA"
 	hubGKEIgnoreFile = "image-build/gcloudignore-omni"
+	hubGKEHelmDoc    = "docs-site/src/content/docs/hosted/ha/helm.md"
 )
 
 // checkHubGKECloudBuildContract returns violations for the hub-gke Cloud Build
@@ -487,14 +490,37 @@ func TestDockerfileContractHubGKECloudBuild(t *testing.T) {
 	}
 }
 
+// checkHubGKEHelmDocIgnoreFiles checks that the hosted HA Helm doc names at
+// least one --ignore-file= flag and that every --ignore-file= value in the doc
+// matches hubGKEIgnoreFile.
+func checkHubGKEHelmDocIgnoreFiles(doc string) []string {
+	refs := docIgnoreFileRefs(doc)
+	if len(refs) == 0 {
+		return []string{hubGKEHelmDoc + " must pass --ignore-file=" + hubGKEIgnoreFile}
+	}
+	var errs []string
+	for _, ref := range refs {
+		if ref.path == "" || path.Clean(ref.path) != hubGKEIgnoreFile {
+			errs = append(errs, fmt.Sprintf("%s:%d: --ignore-file=%s differs from expected %s", hubGKEHelmDoc, ref.line, ref.path, hubGKEIgnoreFile))
+		}
+	}
+	return errs
+}
+
 // TestDockerfileContractHubGKEIgnoreFile checks the hub-gke ignore file exists
-// and the README points at it. That no ignore file drops embedded files is
-// checked by TestGcloudIgnoreKeepsEmbeddedFiles (gcloudignore_contract_test.go).
+// and that image-build/README.md and the hosted HA Helm doc point at it. That
+// no ignore file drops embedded files is checked by
+// TestGcloudIgnoreKeepsEmbeddedFiles (gcloudignore_contract_test.go), and that
+// every --ignore-file= path anywhere in docs-site/ exists is checked by
+// TestDocsSiteIgnoreFilesExist (gcloudignore_copy_contract_test.go).
 func TestDockerfileContractHubGKEIgnoreFile(t *testing.T) {
 	_ = readRepoFile(t, hubGKEIgnoreFile)
 	readme := readRepoFile(t, "image-build/README.md")
 	if !strings.Contains(readme, "--ignore-file="+hubGKEIgnoreFile) {
 		t.Error("image-build/README.md must pass --ignore-file=" + hubGKEIgnoreFile + " for the hub-gke build")
+	}
+	for _, e := range checkHubGKEHelmDocIgnoreFiles(readRepoFile(t, hubGKEHelmDoc)) {
+		t.Error(e)
 	}
 }
 
@@ -508,7 +534,7 @@ func TestDockerfileContractHubGKEDocs(t *testing.T) {
 		heading string
 	}{
 		{"image-build/README.md", "## GKE Hub Image (`cloudbuild-hub-gke.yaml`)"},
-		{"docs-site/src/content/docs/hosted/ha/helm.md", "## 2. Build the hub image"},
+		{hubGKEHelmDoc, "## 2. Build the hub image"},
 	}
 	for _, tc := range cases {
 		doc := readRepoFile(t, tc.file)
@@ -635,6 +661,19 @@ func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 	}
 	if errs := checkHubGKECloudBuildContract("# never latest\n" + cb); len(errs) != 0 {
 		t.Errorf("latest in a comment: valid file reported violations: %q", errs)
+	}
+
+	helmDoc := readRepoFile(t, hubGKEHelmDoc)
+	if errs := checkHubGKEHelmDocIgnoreFiles(helmDoc); len(errs) != 0 {
+		t.Errorf("valid %s reported violations: %q", hubGKEHelmDoc, errs)
+	}
+	helmMutations := []struct{ name, src, want string }{
+		{"helm doc non-existent ignore file", mustReplace(t, helmDoc, "--ignore-file="+hubGKEIgnoreFile, "--ignore-file=image-build/gcloudignore-hub-gke"), "differs from expected " + hubGKEIgnoreFile},
+		{"helm doc extra drifted ignore file", helmDoc + "\n  --ignore-file=.gcloudignore \\\n", "differs from expected " + hubGKEIgnoreFile},
+		{"helm doc missing ignore file flag", strings.ReplaceAll(helmDoc, "--ignore-file="+hubGKEIgnoreFile, ""), "must pass --ignore-file=" + hubGKEIgnoreFile},
+	}
+	for _, m := range helmMutations {
+		expectViolation(t, m.name, checkHubGKEHelmDocIgnoreFiles(m.src), m.want)
 	}
 }
 
