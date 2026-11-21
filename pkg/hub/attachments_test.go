@@ -137,6 +137,89 @@ func TestSanitizeFilename_TrailingCharactersDoNotDefeatTheBlocklist(t *testing.T
 	}
 }
 
+func TestAttachmentExt_StripsStreamSuffixes(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"a.lnk::$DATA", ".lnk"},
+		{"a.lnk:stream", ".lnk"},
+		{"a.lnk:Zone.Identifier", ".lnk"},
+		{"a.lnk:stream.txt", ".lnk"},
+		{"a.LNK::$DATA", ".lnk"},
+		{"a.lnk. :$DATA", ".lnk"},
+		{"a.lnk..:stream", ".lnk"},
+		{"a.sh\u200b:$DATA", ".sh"},
+		{"a.s\u200bh::$DATA", ".sh"},
+		{"a.exe:stream::$DATA", ".exe"},
+		{"notes.txt:stream", ".txt"},
+		{"notes.txt", ".txt"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, attachmentExt(tt.input), "attachmentExt(%q)", tt.input)
+	}
+}
+
+func TestSanitizeFilename_StreamSuffixesDoNotDefeatTheBlocklist(t *testing.T) {
+	blocked := []struct {
+		input   string
+		wantExt string
+	}{
+		// NTFS alternate data stream spellings across blocked extensions.
+		{"shortcut.lnk::$DATA", ".lnk"},
+		{"shortcut.lnk:stream", ".lnk"},
+		{"shortcut.lnk:Zone.Identifier", ".lnk"},
+		{"shortcut.lnk:benign.txt", ".lnk"},
+		{"SHORTCUT.LNK::$DATA", ".lnk"},
+		{"shortcut.lnk. :$DATA", ".lnk"},
+		{"shortcut.lnk..:stream", ".lnk"},
+		{"payload.exe::$DATA", ".exe"},
+		{"PAYLOAD.EXE:stream", ".exe"},
+		{"payload.exe. :stream.txt", ".exe"},
+		{"run.bat::$DATA", ".bat"},
+		{"run.b\u200bat::$DATA", ".bat"},
+		{"deploy.sh:stream", ".sh"},
+		{"deploy.sh .:$DATA", ".sh"},
+		{"script.ps1::$DATA", ".ps1"},
+		{"app.js:stream.txt", ".js"},
+		{"page.html::$DATA", ".html"},
+		{"diagram.svg:stream", ".svg"},
+		// Colon in the stem before a blocked extension (POSIX filename).
+		{"log:12.sh", ".sh"},
+		{":evil.exe", ".exe"},
+		{"2026-11-21T14:58:10.html", ".html"},
+	}
+	for _, tc := range blocked {
+		wantErr := "files with a " + tc.wantExt + " extension are not accepted"
+
+		_, err := SanitizeFilename(tc.input)
+		require.Error(t, err, "SanitizeFilename(%q) was accepted", tc.input)
+		assert.Equal(t, wantErr, err.Error(), "SanitizeFilename(%q)", tc.input)
+
+		_, err = ClassifyAttachment(tc.input, []byte("plain text content\n"))
+		require.Error(t, err, "ClassifyAttachment(%q) was accepted", tc.input)
+		assert.Equal(t, wantErr, err.Error(), "ClassifyAttachment(%q)", tc.input)
+	}
+
+	// Normal filenames and harmless colon-bearing names remain accepted.
+	allowed := []string{
+		"notes.txt",
+		"archive.tar.gz",
+		"notes.lnk.txt",
+		"2026-11-21T14:58:10.txt",
+		"report:2026.log",
+		"notes.txt:stream",
+	}
+	for _, name := range allowed {
+		got, err := SanitizeFilename(name)
+		require.NoError(t, err, "SanitizeFilename(%q)", name)
+		assert.Equal(t, name, got)
+
+		_, err = ClassifyAttachment(name, []byte("plain text content\n"))
+		require.NoError(t, err, "ClassifyAttachment(%q)", name)
+	}
+}
+
 // The blocklist should have no hole immediately beside an entry it already
 // carries: the same code, the same interpreter, a different suffix.
 func TestSanitizeFilename_RejectsPeersOfBlockedExtensions(t *testing.T) {
