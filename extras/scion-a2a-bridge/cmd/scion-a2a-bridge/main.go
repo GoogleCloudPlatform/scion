@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -934,14 +935,38 @@ func accessSecret(ctx context.Context, resourceName string) (string, error) {
 	}
 	defer client.Close()
 
+	return accessSecretVersion(ctx, resourceName, func(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+		return client.AccessSecretVersion(ctx, req)
+	})
+}
+
+func accessSecretVersion(
+	ctx context.Context,
+	resourceName string,
+	access func(context.Context, *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error),
+) (string, error) {
 	if !strings.Contains(resourceName, "/versions/") {
 		resourceName += "/versions/latest"
 	}
-	resp, err := client.AccessSecretVersion(ctx, &smpb.AccessSecretVersionRequest{
+	resp, err := access(ctx, &smpb.AccessSecretVersionRequest{
 		Name: resourceName,
 	})
 	if err != nil {
 		return "", fmt.Errorf("accessing secret version: %w", err)
 	}
-	return cleanBase64(string(resp.Payload.Data))
+	data, err := secretPayloadData(resp)
+	if err != nil {
+		return "", fmt.Errorf("accessing secret version: %w", err)
+	}
+	return cleanBase64(data)
+}
+
+// secretPayloadData returns the secret value of a successful
+// AccessSecretVersion response. A missing response or payload is an error,
+// never an empty value; a payload with empty data is an empty value.
+func secretPayloadData(resp *smpb.AccessSecretVersionResponse) (string, error) {
+	if resp == nil || resp.Payload == nil {
+		return "", errors.New("secret manager returned no payload")
+	}
+	return string(resp.Payload.Data), nil
 }
