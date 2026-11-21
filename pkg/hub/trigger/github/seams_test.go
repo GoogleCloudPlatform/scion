@@ -310,7 +310,7 @@ func TestAppActorIdentity(t *testing.T) {
 	}
 }
 
-func TestTokenMinterAndCommentAction(t *testing.T) {
+func TestTokenMinter(t *testing.T) {
 	exp := time.Date(2026, 11, 21, 13, 0, 0, 0, time.UTC)
 	minter := &triggithub.TokenMinter{
 		MintFunc: func(_ context.Context, tgt source.Target, scope source.CredentialScope) (source.Credential, error) {
@@ -332,33 +332,10 @@ func TestTokenMinterAndCommentAction(t *testing.T) {
 		t.Fatalf("unexpected credential: %+v", cred)
 	}
 
-	action := &triggithub.CommentAction{
-		ValidateFunc: func(_ context.Context, req source.ActionValidateRequest) (string, error) {
-			return req.Payload, nil
-		},
-		FireFunc: func(_ context.Context, _ source.ActionFireRequest) (source.ActionFireResult, error) {
-			return source.ActionFireResult{Status: "fired", ResultRef: "555"}, nil
-		},
-	}
-
-	if action.Kind() != triggithub.ActionKindGitHubComment {
-		t.Fatalf("Kind = %q, want %q", action.Kind(), triggithub.ActionKindGitHubComment)
-	}
-	if norm, err := action.Validate(context.Background(), source.ActionValidateRequest{ProjectID: "p1", Payload: `{"body":"hi"}`}); err != nil || norm != `{"body":"hi"}` {
-		t.Fatalf("Validate = (%q, %v)", norm, err)
-	}
-	res, err := action.Fire(context.Background(), source.ActionFireRequest{ProjectID: "p1", FireID: "f1"})
-	if err != nil || res.Status != "fired" || res.ResultRef != "555" {
-		t.Fatalf("Fire = (%+v, %v)", res, err)
-	}
-
-	// Nil callbacks return ErrNotConfigured.
-	empty := &triggithub.CommentAction{}
-	if _, err := empty.Validate(context.Background(), source.ActionValidateRequest{}); !errors.Is(err, triggithub.ErrNotConfigured) {
-		t.Errorf("expected ErrNotConfigured on Validate, got %v", err)
-	}
-	if _, err := empty.Fire(context.Background(), source.ActionFireRequest{}); !errors.Is(err, triggithub.ErrNotConfigured) {
-		t.Errorf("expected ErrNotConfigured on Fire, got %v", err)
+	// Nil callback returns ErrNotConfigured.
+	empty := &triggithub.TokenMinter{}
+	if _, err := empty.Mint(context.Background(), source.Target{ProjectID: "p1"}, source.CredentialScope{}); !errors.Is(err, triggithub.ErrNotConfigured) {
+		t.Errorf("expected ErrNotConfigured on Mint, got %v", err)
 	}
 }
 

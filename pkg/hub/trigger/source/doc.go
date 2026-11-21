@@ -20,5 +20,13 @@
 // as pkg/hub/trigger/github or pkg/hub/githubapp) or pkg/hub. An
 // import-boundary guard test enforces this invariant.
 //
+// ProviderAction invariant (app-shaped-source-seams.md §2.1):
+// ProviderAction.Fire is only ever invoked by the trigger dispatcher inside a
+// leased fire row so marker idempotency, attempts, and once-write outcome
+// bookkeeping are owned in one place with no second entry point. GitHub's
+// github.comment remains implemented by the registered FireAction in
+// pkg/hub/action_github_comment.go until G7 re-homes it onto ProviderAction
+// behind the dispatcher's action registry.
+//
 // See Triggers Stage 3 design §16 item 17 and app-shaped-source-seams.md §1–§2.
 package source

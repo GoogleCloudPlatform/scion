@@ -30,15 +30,17 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 )
 
-// Compile-time assertions that GitHub's adapters satisfy every app-shaped
-// source seam interface in pkg/hub/trigger/source (app-shaped-source-seams.md §2).
+// Compile-time assertions that GitHub's adapters satisfy the app-shaped
+// source seam interfaces in pkg/hub/trigger/source (app-shaped-source-seams.md §2).
+// source.ProviderAction is intentionally omitted here per §2.1: GitHub's
+// github.comment remains implemented by the registered FireAction in
+// pkg/hub/action_github_comment.go until G7 re-homes it behind the dispatcher.
 var (
 	_ source.WireVerifier         = (*WireVerifier)(nil)
 	_ source.InstallationResolver = (*InstallationResolver)(nil)
 	_ source.Normalizer           = (*EventNormalizer)(nil)
 	_ source.ActorIdentity        = (*AppActorIdentity)(nil)
 	_ source.IdentityMinter       = (*TokenMinter)(nil)
-	_ source.ProviderAction       = (*CommentAction)(nil)
 	_ source.Readiness            = (*ReadinessChecker)(nil)
 	_ source.Presets              = (*PresetCatalog)(nil)
 )
@@ -431,38 +433,6 @@ func (m *TokenMinter) Mint(ctx context.Context, t source.Target, scope source.Cr
 		return source.Credential{}, ErrNotConfigured
 	}
 	return m.MintFunc(ctx, t, scope)
-}
-
-// CommentAction implements source.ProviderAction for the github.comment action
-// by delegating Validate and Fire to the hub's registered github.comment
-// FireAction (which owns authorization, per-project rate limiting, token
-// minting, idempotent marker posting, outcome classification, and audit).
-type CommentAction struct {
-	// ValidateFunc validates and normalises a github.comment action payload.
-	ValidateFunc func(ctx context.Context, req source.ActionValidateRequest) (string, error)
-	// FireFunc executes the canonical github.comment fire sequence.
-	FireFunc func(ctx context.Context, req source.ActionFireRequest) (source.ActionFireResult, error)
-}
-
-// Kind returns the canonical action kind ("github.comment").
-func (a *CommentAction) Kind() string {
-	return ActionKindGitHubComment
-}
-
-// Validate validates and normalises a github.comment action payload.
-func (a *CommentAction) Validate(ctx context.Context, req source.ActionValidateRequest) (string, error) {
-	if a == nil || a.ValidateFunc == nil {
-		return "", ErrNotConfigured
-	}
-	return a.ValidateFunc(ctx, req)
-}
-
-// Fire delegates to the canonical github.comment fire sequence.
-func (a *CommentAction) Fire(ctx context.Context, req source.ActionFireRequest) (source.ActionFireResult, error) {
-	if a == nil || a.FireFunc == nil {
-		return source.ActionFireResult{}, ErrNotConfigured
-	}
-	return a.FireFunc(ctx, req)
 }
 
 // ReadinessChecker implements source.Readiness by delegating to the hub's

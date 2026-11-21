@@ -236,6 +236,14 @@ type ActionFireResult struct {
 // ProviderAction is the base interface for provider-backed outbound actions
 // (such as github.comment or jira.comment) that enforce idempotency markers,
 // per-project rate buckets, and short-lived credentials via IdentityMinter.
+//
+// Invariant (app-shaped-source-seams.md §2.1): ProviderAction.Fire is only
+// ever invoked by the trigger dispatcher inside a leased fire row so marker
+// idempotency, attempts, and once-write outcome bookkeeping are owned in one
+// place with no second entry point. GitHub's github.comment remains
+// implemented by the registered FireAction in pkg/hub/action_github_comment.go
+// until G7 re-homes it onto this interface when the shared ingress skeleton
+// moves and the dispatcher's action registry is the sole caller.
 type ProviderAction interface {
 	Kind() string
 	Validate(ctx context.Context, req ActionValidateRequest) (string, error)
