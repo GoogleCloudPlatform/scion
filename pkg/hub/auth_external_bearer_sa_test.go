@@ -386,3 +386,226 @@ func TestExternalBearer_PlatformAuthSA_Denied(t *testing.T) {
 		t.Fatalf("expected no user row for the configured service account, lookup returned err=%v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// allowed_emails on the Google issuer also narrows service-account
+// admission: with it set, an SA must be in an allowed_gcp_projects project
+// AND match allowed_emails (exact, case-insensitive, or "*@suffix", as on the
+// federation path). Empty allowed_emails keeps project-only admission.
+// ---------------------------------------------------------------------------
+
+// TestExternalBearer_ServiceAccountIDToken_EmailNotListed_Unauthorized: an
+// SA in an allowed project but not in allowed_emails gets the same 401 as an
+// unlisted project, and no user row or binding is created.
+func TestExternalBearer_ServiceAccountIDToken_EmailNotListed_Unauthorized(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfigWithSAEmails(t, newTestValidator(endpoints), resolver,
+		[]string{"my-a2a-project"}, []string{"canary@my-a2a-project.iam.gserviceaccount.com"})
+
+	claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if result.reached {
+		t.Fatal("handler must not be reached: SA email is not in allowed_emails")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401: body=%s", w.Code, w.Body.String())
+	}
+	wantBody := wantErrorBody(t, ErrCodeUnauthorized, "invalid external bearer token")
+	if !bytes.Equal(w.Body.Bytes(), wantBody) {
+		t.Errorf("body = %s, want %s", w.Body.Bytes(), wantBody)
+	}
+	if len(userStore.users) != 0 {
+		t.Errorf("expected no users created, got %d", len(userStore.users))
+	}
+	if _, err := extStore.GetExternalIdentity(context.Background(), "google", googleCanonicalIssuer, saNumericSub); err == nil {
+		t.Error("expected no external identity binding for an SA outside allowed_emails")
+	}
+}
+
+// TestExternalBearer_ServiceAccountIDToken_EmailListed_Authenticates covers
+// the admitted side: an exact entry (in a different case from the token's
+// email, so the match must be case-insensitive) and a "*@suffix" entry.
+// neverAuthorized proves admission still bypasses the sign-in policy.
+func TestExternalBearer_ServiceAccountIDToken_EmailListed_Authenticates(t *testing.T) {
+	cases := []struct {
+		name          string
+		allowedEmails []string
+	}{
+		{"exact_case_insensitive", []string{"other@my-a2a-project.iam.gserviceaccount.com", "Worker@My-A2A-Project.IAM.gserviceaccount.com"}},
+		{"suffix_wildcard", []string{"*@my-a2a-project.iam.gserviceaccount.com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kp := newGCVTestKeyPair("test-kid-1")
+			endpoints := newSAJWKSEndpoints(kp)
+			defer endpoints.close()
+
+			userStore := newFakeUserStore()
+			extStore := newMemExtIDStore()
+			resolver := NewGoogleIdentityResolver(userStore, extStore, neverAuthorized, nil, slog.Default())
+			cfg := newExternalBearerConfigWithSAEmails(t, newTestValidator(endpoints), resolver,
+				[]string{"my-a2a-project"}, tc.allowedEmails)
+
+			claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
+			token := signIDToken(kp, claims)
+
+			w, result := doExternalBearerRequest(cfg, token)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: body=%s", w.Code, w.Body.String())
+			}
+			if !result.reached || result.identity == nil || result.identity.Email() != "worker@my-a2a-project.iam.gserviceaccount.com" {
+				t.Fatalf("expected the listed SA to be admitted, got reached=%v identity=%+v", result.reached, result.identity)
+			}
+			if len(userStore.users) != 1 {
+				t.Fatalf("expected exactly 1 user provisioned, got %d", len(userStore.users))
+			}
+		})
+	}
+}
+
+// TestExternalBearer_ServiceAccountIDToken_EmailWildcardOtherSuffix_Unauthorized:
+// a "*@suffix" entry for another project's SA domain does not admit this SA,
+// and a listed email never widens allowed_gcp_projects (the email check
+// narrows admission; it is not an alternative to the project check).
+func TestExternalBearer_ServiceAccountIDToken_EmailWildcardOtherSuffix_Unauthorized(t *testing.T) {
+	cases := []struct {
+		name          string
+		allowedGCP    []string
+		allowedEmails []string
+	}{
+		{"wildcard_other_project", []string{"my-a2a-project"}, []string{"*@other-project.iam.gserviceaccount.com"}},
+		{"email_listed_project_not", []string{"some-other-project"}, []string{"worker@my-a2a-project.iam.gserviceaccount.com"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kp := newGCVTestKeyPair("test-kid-1")
+			endpoints := newSAJWKSEndpoints(kp)
+			defer endpoints.close()
+
+			userStore := newFakeUserStore()
+			extStore := newMemExtIDStore()
+			resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+			cfg := newExternalBearerConfigWithSAEmails(t, newTestValidator(endpoints), resolver, tc.allowedGCP, tc.allowedEmails)
+
+			claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
+			token := signIDToken(kp, claims)
+
+			w, result := doExternalBearerRequest(cfg, token)
+			if result.reached || w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d reached=%v, want 401 and not reached: body=%s", w.Code, result.reached, w.Body.String())
+			}
+			if len(userStore.users) != 0 {
+				t.Errorf("expected no users created, got %d", len(userStore.users))
+			}
+		})
+	}
+}
+
+// TestExternalBearer_ServiceAccountIDToken_EmptyAllowedEmails_ProjectOnly
+// pins the unchanged behaviour: with allowed_emails empty, any SA in an
+// allowed project is still admitted.
+func TestExternalBearer_ServiceAccountIDToken_EmptyAllowedEmails_ProjectOnly(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, neverAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfigWithSAEmails(t, newTestValidator(endpoints), resolver,
+		[]string{"my-a2a-project"}, []string{})
+
+	claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if w.Code != http.StatusOK || !result.reached {
+		t.Fatalf("status = %d reached=%v, want 200: body=%s", w.Code, result.reached, w.Body.String())
+	}
+}
+
+// TestExternalBearer_ServiceAccountIDToken_RemovedFromAllowedEmails_CachedTokenRefused:
+// an SA provisioned while listed is refused once it is removed from
+// allowed_emails (a live federation config swap, as an operational-settings
+// reload does), even when its token is served from the production credential
+// cache. The cache holds only the verified identity; the allowed_emails
+// check runs on every request, before Resolve, so the existing user row and
+// binding do not let the SA back in.
+func TestExternalBearer_ServiceAccountIDToken_RemovedFromAllowedEmails_CachedTokenRefused(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	validator := NewCachingGoogleCredentialValidator(newTestValidator(endpoints))
+	cfg := newExternalBearerConfigWithSAEmails(t, validator, resolver,
+		[]string{"my-a2a-project"}, []string{"worker@my-a2a-project.iam.gserviceaccount.com"})
+
+	claims := serviceAccountIDTokenClaims("worker@my-a2a-project.iam.gserviceaccount.com")
+	token := signIDToken(kp, claims)
+
+	w1, first := doExternalBearerRequest(cfg, token)
+	if w1.Code != http.StatusOK || !first.reached {
+		t.Fatalf("first request status = %d reached=%v, want 200: body=%s", w1.Code, first.reached, w1.Body.String())
+	}
+	if len(userStore.users) != 1 {
+		t.Fatalf("expected the listed SA to be provisioned, got %d users", len(userStore.users))
+	}
+
+	probe, ok := validator.(externalBearerCacheProbe)
+	if !ok || !probe.Cached(token, []string{externalBearerTestAudience}) {
+		t.Fatal("expected the SA token to be in the credential cache after the first request")
+	}
+
+	cfg.FederationAuth.Store(newGoogleTrustFederationAuthWithSAEmails(t, externalBearerTestAudience,
+		[]string{"my-a2a-project"}, []string{"canary@my-a2a-project.iam.gserviceaccount.com"}))
+
+	w2, second := doExternalBearerRequest(cfg, token)
+	if second.reached {
+		t.Fatal("handler must not be reached: the SA was removed from allowed_emails")
+	}
+	if w2.Code != http.StatusUnauthorized {
+		t.Fatalf("second request status = %d, want 401: body=%s", w2.Code, w2.Body.String())
+	}
+}
+
+// TestExternalBearer_UserIDToken_NotInAllowedEmails_Authenticates: on the
+// external-bearer path allowed_emails narrows service accounts only. A user
+// principal whose email is not listed is still admitted (here with no
+// allowed_domains and a sign-in policy that allows), so an operator who lists
+// only service accounts there does not lock users out of this path.
+func TestExternalBearer_UserIDToken_NotInAllowedEmails_Authenticates(t *testing.T) {
+	kp := newGCVTestKeyPair("test-kid-1")
+	endpoints := newSAJWKSEndpoints(kp)
+	defer endpoints.close()
+
+	userStore := newFakeUserStore()
+	extStore := newMemExtIDStore()
+	resolver := NewGoogleIdentityResolver(userStore, extStore, alwaysAuthorized, nil, slog.Default())
+	cfg := newExternalBearerConfigWithSAEmails(t, newTestValidator(endpoints), resolver,
+		[]string{"my-a2a-project"}, []string{"worker@my-a2a-project.iam.gserviceaccount.com"})
+
+	claims := validIDTokenClaims()
+	claims["aud"] = externalBearerTestAudience
+	claims["email"] = "user@example.com"
+	claims["hd"] = "example.com" // authoritative domain, so Resolve may provision the user
+	token := signIDToken(kp, claims)
+
+	w, result := doExternalBearerRequest(cfg, token)
+	if w.Code != http.StatusOK || !result.reached {
+		t.Fatalf("status = %d reached=%v, want 200: body=%s", w.Code, result.reached, w.Body.String())
+	}
+	if result.identity == nil || result.identity.Email() != "user@example.com" {
+		t.Fatalf("unexpected identity: %+v", result.identity)
+	}
+}

@@ -35,8 +35,8 @@ import (
 // The Hub accepts a Google-issued end-user or service-account credential
 // directly in Authorization: Bearer, without a credential-exchange round
 // trip: user ID tokens and access tokens, and service-account ID tokens
-// gated by allowed_gcp_projects. A service-account access token is never
-// accepted.
+// gated by allowed_gcp_projects (and allowed_emails, when set). A
+// service-account access token is never accepted.
 //
 // serveExternalBearer runs only after the request has already failed every
 // other authentication path (Hub JWT, PAT, agent, proxy, federation). It is
@@ -67,6 +67,12 @@ var errSAAccessTokenRejected = errors.New("external bearer: service account acce
 // (googleSAProject's second return false) and an unset allowed_gcp_projects
 // (admits no service accounts at all) both take this path.
 var errSAProjectNotAllowed = errors.New("external bearer: service account project not allowed")
+
+// errSAEmailNotAllowed reports that a service-account ID token's verified
+// email is not listed in the Google issuer's allowed_emails (only checked
+// when allowed_emails is non-empty). Maps to the same 401 as
+// errSAProjectNotAllowed.
+var errSAEmailNotAllowed = errors.New("external bearer: service account email not allowed")
 
 // errDomainNotAllowed reports that a user identity's verified email domain
 // is not listed in the Google issuer's allowed_domains. Applies only to a
@@ -384,7 +390,8 @@ type externalBearerCacheProbe interface {
 //
 // A service-account identity is admitted only as an ID token whose GCP
 // project (parsed from its verified email) is listed in the Google issuer's
-// allowed_gcp_projects; an SA access token is rejected on every project. A
+// allowed_gcp_projects and, if the issuer's allowed_emails is non-empty,
+// whose email matches it; an SA access token is rejected on every project. A
 // user identity is unaffected by any of this; instead, if the issuer's
 // allowed_domains is non-empty, the verified email's domain must be listed
 // there — a check that never applies to a service account.
@@ -457,6 +464,12 @@ func authenticateExternalBearer(ctx context.Context, r *http.Request, token stri
 		proj, ok := googleSAProject(id.Email)
 		if !ok || !containsFold(trust.AllowedGCPProjects, proj) {
 			return nil, attempt, errSAProjectNotAllowed
+		}
+		// allowed_emails, when set, narrows SA admission to the listed
+		// accounts (exact, case-insensitive, or "*@suffix", matching the
+		// federation path).
+		if len(trust.AllowedEmails) > 0 && !matchesAllowedEmails(trust.AllowedEmails, id.Email) {
+			return nil, attempt, errSAEmailNotAllowed
 		}
 		// The project allowlist IS the authorization decision for a
 		// first-time provision (ResolvePolicy.PreAuthorized): it never

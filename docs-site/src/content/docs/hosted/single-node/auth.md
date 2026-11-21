@@ -409,7 +409,7 @@ This path activates once a `user`-type trusted issuer for `https://accounts.goog
 | Principal | Google OIDC ID token (JWT) | Google OAuth2 access token (opaque) |
 |---|---|---|
 | **User** | Accepted: `aud` in `expected_audience`, verified email, `allowed_domains` (if set), then the Hub sign-in policy | Accepted: `azp` in `expected_audience`, verified email, `allowed_domains` (if set), then the Hub sign-in policy |
-| **Service account** | Accepted: `aud` in `expected_audience`, verified email, GCP project (parsed from the email) in `allowed_gcp_projects` — unset admits none | **Always rejected** |
+| **Service account** | Accepted: `aud` in `expected_audience`, verified email, GCP project (parsed from the email) in `allowed_gcp_projects` — unset admits none — and, if `allowed_emails` is set, the email matches it | **Always rejected** |
 
 ```yaml
 server:
@@ -435,9 +435,25 @@ server:
         # (parsed from the service account's email) is listed (exact,
         # case-insensitive). Omitting this admits NO service accounts.
         allowed_gcp_projects: ["my-a2a-project"]
+        # Recommended: also require a SERVICE-ACCOUNT principal's email to
+        # match one of these. Without it, every service account in a listed
+        # project is admitted. List exact addresses: a
+        # "*@<project>.iam.gserviceaccount.com" pattern admits the whole
+        # project again. This list is shared with the issuer's other uses
+        # (see below), so keep any user patterns in it.
+        allowed_emails:
+          - "a2a-bridge@my-a2a-project.iam.gserviceaccount.com"
 ```
 
-A verified **user** identity is still resolved through the same sign-in policy as interactive login (`admin_emails`, `authorized_domains`, `user_access_mode`) after the `allowed_domains` check passes — a listed domain narrows *which* users reach that policy, it does not replace it. A verified **service account** identity skips the sign-in policy entirely: membership in `allowed_gcp_projects` **is** the authorization decision for first-time admission. A service account is never subject to `allowed_domains`, and a user is never subject to `allowed_gcp_projects`. Bypassing the sign-in policy does not extend to suspension: a service account that was already provisioned and is later suspended is refused on its next request exactly like a suspended user.
+A verified **user** identity is still resolved through the same sign-in policy as interactive login (`admin_emails`, `authorized_domains`, `user_access_mode`) after the `allowed_domains` check passes — a listed domain narrows *which* users reach that policy, it does not replace it. A verified **service account** identity skips the sign-in policy entirely: membership in `allowed_gcp_projects` (and, when `allowed_emails` is set, a matching email) **is** the authorization decision for first-time admission. Both checks run on every request, so a service account removed from `allowed_emails` is refused on its next request even if it was already provisioned and its token is cached; its Hub user is kept, so suspend or delete it if it should not come back. Bypassing the sign-in policy does not extend to suspension: a service account that was already provisioned and is later suspended is refused on its next request exactly like a suspended user. A service account is never subject to `allowed_domains`, and a user is never subject to `allowed_gcp_projects`. On this path `allowed_emails` applies only to service accounts; users are narrowed by `allowed_domains` and the sign-in policy.
+
+`allowed_emails` matches exactly (case-insensitively), or, for an entry that starts with `*`, as a suffix of the email: `*@example.com` matches any address at `example.com`, and a bare `*` matches every email, which is the same as leaving the list empty.
+
+The issuer has only one `allowed_emails` list. Besides service accounts on this path, it also restricts users from this issuer on the OIDC federation token path, and visitor grants when `allow_visitor_grants` is on. If you rely on those, keep their user patterns (for example `*@example.com`) in the list next to the service-account addresses.
+
+:::caution[Upgrade note]
+Earlier versions ignored `allowed_emails` for service accounts on this path. If your Google issuer sets both `allowed_gcp_projects` and `allowed_emails`, and the list holds only user patterns, every service account is now refused with `401`. The server logs `service account email not allowed`. Add the service-account addresses you want to admit.
+:::
 
 The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`auth.scheme: hubBearer` in `scion-a2a-bridge.yaml`): it admits a caller by presenting the same token to the Hub's `GET /api/v1/auth/me`, then forwards that token verbatim on every downstream call. The Hub re-verifies the token on each request: a suspended user is refused on the next call. A revoked Google credential stops being accepted once the Hub's verification cache entry expires (at most 5 minutes, and never beyond the credential's own expiry).
 
@@ -447,7 +463,7 @@ The A2A bridge forwards Google credentials under the `hubBearer` auth scheme (`a
 |---|---|---|
 | No Google trust configured, or the token isn't a shape this path recognizes | Falls through unchanged to whichever other authentication check applies to that credential | — |
 | Per-client-IP rate limit exceeded (checked only on a credential-cache miss) | 429, with `Retry-After` | `rate_limited` |
-| Verification failed, unverified email, a service account presented as an access token, or its project/domain isn't listed | 401 | `unauthorized` (message `invalid external bearer token`; the specific reason is logged, never returned) |
+| Verification failed, unverified email, a service account presented as an access token, or its project/domain/email isn't listed | 401 | `unauthorized` (message `invalid external bearer token`; the specific reason is logged, never returned) |
 | Google's token-verification endpoints are unreachable or return an undecodable response | 503 | `upstream_unavailable` (message `external identity provider unavailable`; the upstream error is logged once, never returned) |
 | An internal fault while resolving the verified identity to a Hub user (store error) | 503 | `store_error` |
 | The resolved user is suspended | 403 | `user_suspended` |
@@ -463,7 +479,7 @@ Once a Google issuer is trusted, the Hub does not sniff a bearer token's prefix 
 A domain-scoped GCP project ID such as `example.com:proj` produces service-account emails whose domain is `proj.example.com.iam.gserviceaccount.com`, which parses to `proj.example.com`. List that parsed form — `proj.example.com`, not `example.com:proj` — in `allowed_gcp_projects`.
 :::
 
-`allowed_domains` and `allowed_gcp_projects` are matched case-insensitively against the verified email; the configured lists themselves are kept exactly as written (not lower-cased or otherwise rewritten when the config loads).
+`allowed_domains`, `allowed_gcp_projects` and `allowed_emails` are matched case-insensitively against the verified email; the configured lists themselves are kept exactly as written (not lower-cased or otherwise rewritten when the config loads).
 
 ---
 

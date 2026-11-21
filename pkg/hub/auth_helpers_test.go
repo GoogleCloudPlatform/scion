@@ -243,6 +243,25 @@ func newExternalBearerConfigWithSA(t *testing.T, validator GoogleCredentialValid
 	}
 }
 
+// newExternalBearerConfigWithSAEmails is newExternalBearerConfigWithSA with
+// allowed_emails also set on the Google trust entry.
+func newExternalBearerConfigWithSAEmails(t *testing.T, validator GoogleCredentialValidator, resolver *GoogleIdentityResolver, allowedGCPProjects, allowedEmails []string) AuthConfig {
+	t.Helper()
+	userTokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	if err != nil {
+		t.Fatalf("NewUserTokenService: %v", err)
+	}
+	fa := newGoogleTrustFederationAuthWithSAEmails(t, externalBearerTestAudience, allowedGCPProjects, allowedEmails)
+	return AuthConfig{
+		Mode:            "production",
+		UserTokenSvc:    userTokenSvc,
+		FederationAuth:  federationAuthPointer(fa),
+		GoogleValidator: validator,
+		GoogleResolver:  resolver,
+		Logger:          slog.Default(),
+	}
+}
+
 func doExternalBearerRequest(cfg AuthConfig, token string) (*httptest.ResponseRecorder, *probeResult) {
 	result := &probeResult{}
 	middleware := UnifiedAuthMiddleware(cfg)
@@ -310,6 +329,31 @@ func newGoogleTrustFederationAuthWithDomains(t *testing.T, expectedAudience stri
 				IssuerType:         "user",
 				AllowedDomains:     allowedDomains,
 				AllowedGCPProjects: allowedGCPProjects,
+			},
+		},
+	}
+	fa, err := NewFederationAuthenticator(fedCfg, "https://hub.example.com", http.DefaultClient, "hosted", slog.Default())
+	if err != nil {
+		t.Fatalf("NewFederationAuthenticator: %v", err)
+	}
+	return fa
+}
+
+// newGoogleTrustFederationAuthWithSAEmails is newGoogleTrustFederationAuthWithSA
+// with AllowedEmails also set on the Google issuer entry, which narrows
+// service-account admission on the external-bearer path.
+func newGoogleTrustFederationAuthWithSAEmails(t *testing.T, expectedAudience string, allowedGCPProjects, allowedEmails []string) *FederationAuthenticator {
+	t.Helper()
+	fedCfg := config.FederationConfig{
+		Enabled: true,
+		TrustedIssuers: []config.TrustedIssuerConfig{
+			{
+				IssuerURL:          googleIssuerHTTPS,
+				JWKSURL:            "http://unused.invalid/jwks",
+				ExpectedAudience:   expectedAudience,
+				IssuerType:         "user",
+				AllowedGCPProjects: allowedGCPProjects,
+				AllowedEmails:      allowedEmails,
 			},
 		},
 	}

@@ -1332,7 +1332,8 @@ export class ScionPageAdminFederation extends LitElement {
             }}
           ></sl-input>
           <span class="hint"
-            >Comma-separated email patterns. Use * for wildcards (e.g. *@corp.com).</span
+            >Comma-separated email patterns. Use * for wildcards (e.g. *@corp.com). On the Google
+            issuer this also limits which service accounts are accepted.</span
           >
         </div>
       </div>
