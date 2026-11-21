@@ -42,7 +42,7 @@ func (s *p3LoggingServer) WriteLogEntries(ctx context.Context, r *lp.WriteLogEnt
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		return nil, status.Error(codes.PermissionDenied, "synthetic local backend rejection")
+		return nil, status.Error(codes.FailedPrecondition, "synthetic local backend rejection")
 	}
 	return &lp.WriteLogEntriesResponse{}, nil
 }

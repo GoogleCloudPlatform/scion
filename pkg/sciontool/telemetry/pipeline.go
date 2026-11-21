@@ -109,6 +109,8 @@ type Pipeline struct {
 	metricDirtyBytes, metricDirtyRecords, metricDirtyEntries       int
 	metricPendingBytes, metricPendingRecords, metricPendingEntries int
 	metricBatchSequence, metricPendingSequence                     uint64
+
+	authStandDown authStandDown
 }
 
 func (p *Pipeline) now() time.Time {
@@ -302,9 +304,12 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		} else {
 			p.exporter = exporter
 			if exporter.gcpExporter != nil {
-				exporter.gcpExporter.onAsyncLogError = func(error) {
+				exporter.gcpExporter.onAsyncLogError = func(err error) {
 					p.logDiagnostics.sdkErrors.Add(1)
 					p.markDeliveryDegraded()
+					if isPermanentAuthError(err) {
+						p.recordCloudExportOutcome("logs", err, false)
+					}
 				}
 			}
 			p.analytics.start(ctx, exporter.gcpExporter)
@@ -776,6 +781,11 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	// and transport calls may have their own retry policy within the caller's
 	// context; this count is not a network-attempt guarantee.
 	if p.exporter != nil {
+		allow, isProbe := p.allowCloudExport()
+		if !allow {
+			p.spanDiagnostics.dropped.Add(int64(spanCount))
+			return nil
+		}
 		p.spanDiagnostics.queued.Add(int64(spanCount))
 		err := retryExport(ctx, p.retryConfig, "spans", p.spanDiagnostics.countedAttempt(func() error {
 			return p.exporter.ExportProtoSpans(ctx, filtered)
@@ -788,9 +798,12 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 			}
 			p.spanDiagnostics.terminal(spanCount, reason, rejected)
 			p.recordExportError(ctx, "spans", err)
-			log.Error("Failed to export spans to cloud: %v", err)
+			if !p.recordCloudExportOutcome("spans", err, isProbe) {
+				log.Error("Failed to export spans to cloud: %v", err)
+			}
 			return err
 		}
+		p.recordCloudExportOutcome("spans", nil, isProbe)
 		p.spanDiagnostics.success(spanCount)
 		log.Debug("Exported %d spans to cloud", spanCount)
 	} else {
@@ -1044,6 +1057,28 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 		if p.exporter == nil {
 			return
 		}
+		if p.isAuthStandingDown() {
+			p.metricStateMu.Lock()
+			dropped := p.metricPendingRecords + p.metricDirtyRecords
+			if dropped > 0 {
+				p.metricDiagnostics.dropped.Add(int64(dropped))
+			}
+			p.budget.release(p.metricPendingBytes+p.metricDirtyBytes, dropped, p.metricPendingEntries+p.metricDirtyEntries)
+			p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
+			p.metricDirtyBytes, p.metricDirtyRecords, p.metricDirtyEntries = 0, 0, 0
+			p.metricPendingAdmissions, p.metricDirtyAdmissions = nil, nil
+			p.metricPendingAttempts = 0
+			p.metricPending = nil
+			p.metricPendingSequence = 0
+			if p.metricStreams != nil {
+				for _, stream := range p.metricStreams.streams {
+					stream.dirty = false
+				}
+				p.metricStreams.clearPendingMarker()
+			}
+			p.metricStateMu.Unlock()
+			return
+		}
 		if delay := time.Until(nextFlush); delay > 0 {
 			timer := time.NewTimer(delay)
 			select {
@@ -1148,6 +1183,24 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		return false
 	}
 
+	allow, isProbe := p.allowCloudExport()
+	if !allow {
+		p.metricStateMu.Lock()
+		p.metricLastFlush = p.now()
+		p.metricDiagnostics.dropped.Add(int64(p.metricPendingRecords))
+		p.budget.release(p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries)
+		p.metricPendingBytes, p.metricPendingRecords, p.metricPendingEntries = 0, 0, 0
+		p.metricPendingAdmissions = nil
+		p.metricPendingAttempts = 0
+		p.metricPending = nil
+		p.metricPendingSequence = 0
+		if p.metricStreams != nil {
+			p.metricStreams.clearPendingMarker()
+		}
+		p.metricStateMu.Unlock()
+		return false
+	}
+
 	metricCount := 0
 	for _, rm := range batch {
 		for _, sm := range rm.ScopeMetrics {
@@ -1195,7 +1248,9 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		if !metricBatchContains(batch, pipelineMetricScope, "scion.telemetry.export.errors") {
 			p.recordExportError(ctx, "metrics", err)
 		}
-		log.Error("Failed to export %d metric streams to cloud: %v", metricCount, err)
+		if !p.recordCloudExportOutcome("metrics", err, isProbe) {
+			log.Error("Failed to export %d metric streams to cloud: %v", metricCount, err)
+		}
 		if !isRetryable(err) {
 			p.metricStateMu.Lock()
 			reason, rejected := terminalExportReason(err)
@@ -1216,6 +1271,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		}
 		return false
 	}
+	p.recordCloudExportOutcome("metrics", nil, isProbe)
 	p.metricStateMu.Lock()
 	p.metricDiagnostics.success(p.metricPendingRecords)
 	p.metricPending = nil
@@ -1330,6 +1386,11 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	// Pipeline-level retry on top of gRPC/SDK transport retry — see
 	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
+		allow, isProbe := p.allowCloudExport()
+		if !allow {
+			p.logDiagnostics.dropped.Add(int64(logCount))
+			return nil
+		}
 		p.logDiagnostics.queued.Add(int64(logCount))
 		err := retryExport(ctx, p.retryConfig, "logs", p.logDiagnostics.countedAttempt(func() error {
 			return p.exporter.ExportProtoLogs(ctx, processed)
@@ -1339,9 +1400,12 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 			reason, rejected := terminalExportReason(err)
 			p.logDiagnostics.terminal(logCount, reason, rejected)
 			p.recordExportError(ctx, "logs", err)
-			log.Error("Failed to export logs to cloud: %v", err)
+			if !p.recordCloudExportOutcome("logs", err, isProbe) {
+				log.Error("Failed to export logs to cloud: %v", err)
+			}
 			return err
 		}
+		p.recordCloudExportOutcome("logs", nil, isProbe)
 		p.logDiagnostics.success(logCount)
 		log.Debug("Exported %d log records to cloud", logCount)
 	} else {
