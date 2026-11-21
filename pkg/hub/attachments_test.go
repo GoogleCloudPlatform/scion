@@ -102,6 +102,13 @@ func TestSanitizeFilename_LongNamesPreserveExtensionAndCheckFinalName(t *testing
 		assert.True(t, strings.HasSuffix(reduceAttachmentName(safe), ".txt"))
 	})
 
+	t.Run("overlong extension is capped at MaxFilenameLength", func(t *testing.T) {
+		input := "report." + strings.Repeat("b", MaxFilenameLength+50)
+		safe, err := SanitizeFilename(input)
+		require.NoError(t, err)
+		assert.Equal(t, MaxFilenameLength, len(safe))
+	})
+
 	t.Run("truncation or reduction exposing refused extension is rejected", func(t *testing.T) {
 		cases := []struct {
 			name    string
