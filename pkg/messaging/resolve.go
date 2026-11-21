@@ -153,8 +153,23 @@ type ResolutionStore interface {
 }
 
 // ---------------------------------------------------------------------------
-// Resolve function
+// Resolve options and function
 // ---------------------------------------------------------------------------
+
+// resolveConfig holds optional dependencies for Resolve.
+type resolveConfig struct {
+	topicLookup TopicConversationLookup
+}
+
+// ResolveOption configures optional dependencies for Resolve.
+type ResolveOption func(*resolveConfig)
+
+// WithResolveTopicLookup injects a TopicConversationLookup so conv:<id>
+// references also resolve live webchat topic IDs (such as those returned by
+// POST /api/v1/chat/spaces/{project}/threads) to their linked conversation.
+func WithResolveTopicLookup(tl TopicConversationLookup) ResolveOption {
+	return func(c *resolveConfig) { c.topicLookup = tl }
+}
 
 // Resolve resolves a conversation reference string to a conversation ID,
 // creating the conversation if needed (resolve-or-create for @ references).
@@ -166,7 +181,14 @@ type ResolutionStore interface {
 //   - @<agent-slug>: resolved only within rctx.ProjectID.
 //   - @<email>: global DM, no project restriction.
 //   - #<thread-name>: resolved only within rctx.ProjectID's space.
-func Resolve(ctx context.Context, s ResolutionStore, ref string, rctx ResolveContext) (*ResolveResult, error) {
+func Resolve(ctx context.Context, s ResolutionStore, ref string, rctx ResolveContext, opts ...ResolveOption) (*ResolveResult, error) {
+	var cfg resolveConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+
 	parsed, err := ParseReference(ref)
 	if err != nil {
 		return nil, err
@@ -175,7 +197,7 @@ func Resolve(ctx context.Context, s ResolutionStore, ref string, rctx ResolveCon
 	var result *ResolveResult
 	switch parsed.Kind {
 	case RefConversation:
-		result, err = resolveConvByID(ctx, s, parsed.Value, rctx)
+		result, err = resolveConvByID(ctx, s, parsed.Value, rctx, cfg.topicLookup)
 	case RefAgent:
 		result, err = resolveAgentDM(ctx, s, parsed.Value, rctx)
 	case RefEmail:
@@ -269,16 +291,47 @@ func requireParticipant(ctx context.Context, s ResolutionStore, convID, ref stri
 }
 
 // resolveConvByID resolves a conv:<id> reference with project isolation checks.
-func resolveConvByID(ctx context.Context, s ResolutionStore, id string, rctx ResolveContext) (*ResolveResult, error) {
+// When id is not itself a conversation UUID and tl is provided, it falls back
+// to looking up a live webchat topic of rctx.ProjectID with that ID (such as a
+// topic ID returned by POST /api/v1/chat/spaces/{project}/threads).
+func resolveConvByID(ctx context.Context, s ResolutionStore, id string, rctx ResolveContext, tl TopicConversationLookup) (*ResolveResult, error) {
 	conv, err := s.GetConversation(ctx, id)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
+		if !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("fetching conversation %s: %w", id, err)
+		}
+		if tl == nil || rctx.ProjectID == "" {
 			return nil, &ResolutionError{
 				Ref:    "conv:" + id,
 				Reason: "not-found",
 			}
 		}
-		return nil, fmt.Errorf("fetching conversation %s: %w", id, err)
+		topicConvID, topicErr := tl.GetTopicConversationIDInProject(ctx, rctx.ProjectID, id)
+		if topicErr != nil {
+			if errors.Is(topicErr, store.ErrNotFound) {
+				return nil, &ResolutionError{
+					Ref:    "conv:" + id,
+					Reason: "not-found",
+				}
+			}
+			return nil, fmt.Errorf("looking up topic %s: %w", id, topicErr)
+		}
+		if topicConvID == "" {
+			return nil, &ResolutionError{
+				Ref:    "conv:" + id,
+				Reason: "not-found",
+			}
+		}
+		conv, err = s.GetConversation(ctx, topicConvID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, &ResolutionError{
+					Ref:    "conv:" + id,
+					Reason: "not-found",
+				}
+			}
+			return nil, fmt.Errorf("fetching conversation %s for topic %s: %w", topicConvID, id, err)
+		}
 	}
 
 	// Project isolation check (AC-30).

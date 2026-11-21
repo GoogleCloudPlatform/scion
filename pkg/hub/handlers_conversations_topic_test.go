@@ -207,6 +207,136 @@ func TestCreateConversation_GroupMessageReachesThreadHistory(t *testing.T) {
 		"AC-6: a web post to the same thread must persist with the same conversation_id as the CLI-created group")
 }
 
+// TestCreateThread_AgentOutboundConvRefAcceptsTopicID covers ptone/scion#8178:
+// POST /api/v1/chat/spaces/{projectId}/threads returns the webchat topic ID
+// (which differs from the linked conversations.id row CreateTopic mints), and
+// an agent posting via outbound conversation_ref = "conv:<topicId>" must
+// resolve to that topic's linked conversation and deliver to the thread.
+func TestCreateThread_AgentOutboundConvRefAcceptsTopicID(t *testing.T) {
+	srv, s, wcs, _ := setupGroupConvTopicTest(t)
+	ctx := context.Background()
+	project, agent, _ := setupConvTestData(t, s)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+project.ID+"/threads",
+		map[string]string{"name": "qa-topic-conv-id"})
+	require.Equal(t, http.StatusCreated, createRec.Code, "body: %s", createRec.Body.String())
+
+	var createdTopic WebChatTopic
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &createdTopic))
+	require.NotEmpty(t, createdTopic.ID)
+
+	linkedConvID, err := wcs.GetTopicConversationIDInProject(ctx, project.ID, createdTopic.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, linkedConvID)
+	require.NotEqual(t, createdTopic.ID, linkedConvID,
+		"precondition: threads API returns the topic ID, distinct from the linked conversation ID")
+
+	// Agent posts to the newly created topic using conv:<topicId>.
+	sendRR := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "hi via topic conv ref", "conv:"+createdTopic.ID)
+	require.Equal(t, http.StatusOK, sendRR.Code, "body: %s", sendRR.Body.String())
+
+	var sendResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(sendRR.Body.Bytes(), &sendResp))
+	msgID, _ := sendResp["message_id"].(string)
+	require.NotEmpty(t, msgID, "expected message_id in outbound-message response")
+	require.Equal(t, linkedConvID, sendResp["conversation_id"],
+		"outbound response should report the resolved linked conversation ID")
+
+	stored, err := s.GetMessage(ctx, msgID)
+	require.NoError(t, err)
+	require.Equal(t, createdTopic.ID, stored.ThreadID)
+	require.Equal(t, "web", stored.Channel)
+	require.Equal(t, linkedConvID, stored.ConversationID)
+
+	// Verify the message appears in thread history both before and after the read switch.
+	offRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+createdTopic.ID+"/messages", nil)
+	require.Equal(t, http.StatusOK, offRec.Code, "body: %s", offRec.Body.String())
+	var offHist chatHistoryResponse
+	require.NoError(t, json.Unmarshal(offRec.Body.Bytes(), &offHist))
+	require.True(t, chatHistoryContains(offHist.Messages, "hi via topic conv ref"))
+
+	enableReadSwitch(t, srv)
+	onRec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/conversations/"+createdTopic.ID+"/messages", nil)
+	require.Equal(t, http.StatusOK, onRec.Code, "body: %s", onRec.Body.String())
+	var onHist chatHistoryResponse
+	require.NoError(t, json.Unmarshal(onRec.Body.Bytes(), &onHist))
+	require.True(t, chatHistoryContains(onHist.Messages, "hi via topic conv ref"))
+}
+
+// TestCreateThread_AgentOutboundConvRefTopicID_EdgeCases verifies that
+// resolving conv:<topicId> enforces soft-delete, project isolation (with
+// collapsed error parity per DEF-142 AC-3), and 500 propagation on store
+// lookup faults.
+func TestCreateThread_AgentOutboundConvRefTopicID_EdgeCases(t *testing.T) {
+	t.Run("deleted topic rejected", func(t *testing.T) {
+		srv, s, wcs, _ := setupGroupConvTopicTest(t)
+		ctx := context.Background()
+		project, agent, _ := setupConvTestData(t, s)
+		grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+		// Keep a second topic so DeleteTopic's last-thread guard permits deletion.
+		keepRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+project.ID+"/threads",
+			map[string]string{"name": "keep-topic"})
+		require.Equal(t, http.StatusCreated, keepRec.Code)
+
+		delRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+project.ID+"/threads",
+			map[string]string{"name": "deleted-topic"})
+		require.Equal(t, http.StatusCreated, delRec.Code)
+		var delTopic WebChatTopic
+		require.NoError(t, json.Unmarshal(delRec.Body.Bytes(), &delTopic))
+
+		require.NoError(t, wcs.DeleteTopic(ctx, delTopic.ID))
+
+		rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "post to deleted", "conv:"+delTopic.ID)
+		require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+		require.Contains(t, rr.Body.String(), "could not be resolved")
+	})
+
+	t.Run("foreign project topic rejected with collapsed body", func(t *testing.T) {
+		srv, s, _, _ := setupGroupConvTopicTest(t)
+		ctx := context.Background()
+		project, agent, _ := setupConvTestData(t, s)
+		grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+		foreignProj := &store.Project{ID: api.NewUUID(), Name: "foreign-proj", Slug: "foreign-proj"}
+		require.NoError(t, s.CreateProject(ctx, foreignProj))
+
+		foreignRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/spaces/"+foreignProj.ID+"/threads",
+			map[string]string{"name": "foreign-topic"})
+		require.Equal(t, http.StatusCreated, foreignRec.Code)
+		var foreignTopic WebChatTopic
+		require.NoError(t, json.Unmarshal(foreignRec.Body.Bytes(), &foreignTopic))
+
+		nonexistentRR := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "probe missing", "conv:"+api.NewUUID())
+		require.Equal(t, http.StatusBadRequest, nonexistentRR.Code)
+
+		foreignRR := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "probe foreign", "conv:"+foreignTopic.ID)
+		require.Equal(t, http.StatusBadRequest, foreignRR.Code)
+		require.Equal(t, nonexistentRR.Body.String(), foreignRR.Body.String(),
+			"foreign topic lookup must collapse to byte-identical not-found response")
+	})
+
+	t.Run("topic lookup fault returns 500 without leaking error detail", func(t *testing.T) {
+		srv, s, wcs, _ := setupGroupConvTopicTest(t)
+		project, agent, _ := setupConvTestData(t, s)
+		grantAgentProjectAccess(t, s, agent.ID, project.ID)
+		srv.SetWebChatStore(convRefTopicLookupFaultStore{WebChatStore: wcs})
+
+		rr := postConvRefNoRecipient(t, srv, project.ID, agent.ID, "lookup fault", "conv:"+api.NewUUID())
+		require.Equal(t, http.StatusInternalServerError, rr.Code, "body: %s", rr.Body.String())
+		require.NotContains(t, rr.Body.String(), "secret-detail")
+	})
+}
+
+type convRefTopicLookupFaultStore struct {
+	WebChatStore
+}
+
+func (convRefTopicLookupFaultStore) GetTopicConversationIDInProject(context.Context, string, string) (string, error) {
+	return "", errors.New("injected topic lookup failure: secret-detail")
+}
+
 // chatHistoryContains reports whether msgs contains a message with the given text.
 func chatHistoryContains(msgs []store.Message, text string) bool {
 	for _, m := range msgs {
