@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -359,11 +358,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 	appID := s.config.GitHubAppConfig.AppID
 	s.mu.RUnlock()
 
-	targetTypes := r.Header.Values("X-GitHub-Hook-Installation-Target-Type")
-	targetIDs := r.Header.Values("X-GitHub-Hook-Installation-Target-ID")
-	if appID <= 0 ||
-		len(targetTypes) != 1 || targetTypes[0] != "integration" ||
-		len(targetIDs) != 1 || targetIDs[0] != strconv.FormatInt(appID, 10) {
+	if !githubtrigger.WebhookTargetMatches(r.Header, appID) {
 		s.githubWebhookIngress.recordTargetMismatchAudit(ctx, now)
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "wrong target", nil)
 		return
@@ -379,7 +374,7 @@ func (s *Server) handleGitHubContentWebhook(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "event": eventType})
 		return
 	}
-	if len(r.Header.Values("X-GitHub-Delivery")) != 1 || !isValidGitHubDeliveryGUID(deliveryID) {
+	if len(r.Header.Values("X-GitHub-Delivery")) != 1 || !githubtrigger.IsDeliveryGUID(deliveryID) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid delivery id", nil)
 		return
 	}
@@ -798,27 +793,6 @@ func (s *Server) listGitHubInstallationCandidateProjects(ctx context.Context, in
 		}
 		cursor = page.NextCursor
 	}
-}
-
-func isValidGitHubDeliveryGUID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-			if !isHex {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func sanitizeGitHubEventHeaders(in map[string]string) map[string]string {

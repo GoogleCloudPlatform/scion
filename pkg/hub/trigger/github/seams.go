@@ -83,11 +83,55 @@ func VerifyWebhookSignature(payload []byte, signature string, secret string) boo
 	return hmac.Equal([]byte(sigHex), []byte(expectedHex))
 }
 
+// WebhookTargetMatches checks Stage 3 §4.1 step 1: configured appID > 0,
+// exactly one X-GitHub-Hook-Installation-Target-Type header equal to
+// "integration", and exactly one X-GitHub-Hook-Installation-Target-ID header
+// equal to strconv.FormatInt(appID, 10). Shared by production webhook ingress
+// and WireVerifier.
+func WebhookTargetMatches(h http.Header, appID int64) bool {
+	if appID <= 0 || h == nil {
+		return false
+	}
+	targetTypes := h.Values("X-GitHub-Hook-Installation-Target-Type")
+	targetIDs := h.Values("X-GitHub-Hook-Installation-Target-ID")
+	return len(targetTypes) == 1 && targetTypes[0] == "integration" &&
+		len(targetIDs) == 1 && targetIDs[0] == strconv.FormatInt(appID, 10)
+}
+
+// IsDeliveryGUID reports whether s is a 36-byte canonical UUID/GUID string
+// (8-4-4-4-12 hex, case-insensitive) as required by Stage 3 §4.1 step 2.
+// Shared by production webhook ingress and WireVerifier.
+func IsDeliveryGUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+			if !isHex {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // WireVerifier implements source.WireVerifier for GitHub App webhooks.
 type WireVerifier struct {
-	// ExpectedAppID is the hub's configured GitHub App ID. For content events,
-	// ExpectedAppID <= 0 fails closed with ErrWebhookTargetMismatch, matching
-	// production handleGitHubContentWebhook step 1.
+	// ExpectedAppIDFn returns the hub's currently configured GitHub App ID on
+	// each request. When non-nil it takes precedence over ExpectedAppID so a
+	// long-lived WireVerifier observes live AppID updates.
+	ExpectedAppIDFn func() int64
+	// ExpectedAppID is the static GitHub App ID used when ExpectedAppIDFn is
+	// nil. For content events, a resolved AppID <= 0 fails closed with
+	// ErrWebhookTargetMismatch, matching production handleGitHubContentWebhook
+	// step 1.
 	ExpectedAppID int64
 	// Now returns the delivery receipt timestamp (defaults to time.Now).
 	Now func() time.Time
@@ -126,26 +170,28 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 		eventName == EventInstallationRepositories
 
 	if !isNonContent {
-		// Step 1: target-id check fails closed when ExpectedAppID <= 0.
+		// Step 1: target-id check fails closed when resolved AppID <= 0.
 		var expectedAppID int64
 		if v != nil {
-			expectedAppID = v.ExpectedAppID
+			if v.ExpectedAppIDFn != nil {
+				expectedAppID = v.ExpectedAppIDFn()
+			} else {
+				expectedAppID = v.ExpectedAppID
+			}
 		}
-		targetTypes := r.Header.Values("X-GitHub-Hook-Installation-Target-Type")
-		targetIDs := r.Header.Values("X-GitHub-Hook-Installation-Target-ID")
-		if expectedAppID <= 0 ||
-			len(targetTypes) != 1 || targetTypes[0] != "integration" ||
-			len(targetIDs) != 1 || targetIDs[0] != strconv.FormatInt(expectedAppID, 10) {
+		if !WebhookTargetMatches(r.Header, expectedAppID) {
 			return source.Delivery{}, ErrWebhookTargetMismatch
 		}
 
 		// Step 2: single X-GitHub-Event header, and for supported families a
-		// single GUID-shaped X-GitHub-Delivery header.
-		if len(r.Header.Values("X-GitHub-Event")) != 1 || strings.TrimSpace(eventName) == "" {
+		// single GUID-shaped X-GitHub-Delivery header. An empty single
+		// X-GitHub-Event value passes here with IsSupportedEvent("") == false,
+		// matching production's 200 ignored response.
+		if len(r.Header.Values("X-GitHub-Event")) != 1 {
 			return source.Delivery{}, ErrInvalidWebhookHeaders
 		}
 		if IsSupportedEvent(eventName) {
-			if len(r.Header.Values("X-GitHub-Delivery")) != 1 || !isGUIDDeliveryID(deliveryID) {
+			if len(r.Header.Values("X-GitHub-Delivery")) != 1 || !IsDeliveryGUID(deliveryID) {
 				return source.Delivery{}, ErrInvalidDeliveryID
 			}
 			deliveryID = strings.ToLower(deliveryID)
@@ -181,27 +227,6 @@ func (v *WireVerifier) DedupKey(d source.Delivery, body []byte) string {
 		return bodyHash
 	}
 	return id + ":" + bodyHash
-}
-
-func isGUIDDeliveryID(s string) bool {
-	if len(s) != 36 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch i {
-		case 8, 13, 18, 23:
-			if c != '-' {
-				return false
-			}
-		default:
-			isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-			if !isHex {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // InstallationResolver implements source.InstallationResolver for GitHub App

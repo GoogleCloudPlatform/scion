@@ -132,6 +132,51 @@ func TestWireVerifier_VerifyAndDedupKey(t *testing.T) {
 	if _, err := zeroAppVerifier.Verify(req, body, secrets); !errors.Is(err, triggithub.ErrWebhookTargetMismatch) {
 		t.Errorf("expected ErrWebhookTargetMismatch when ExpectedAppID == 0, got %v", err)
 	}
+
+	// ExpectedAppIDFn observes live AppID updates.
+	liveAppID := int64(12345)
+	liveVerifier := &triggithub.WireVerifier{
+		ExpectedAppIDFn: func() int64 { return liveAppID },
+		Now:             func() time.Time { return now },
+	}
+	if _, err := liveVerifier.Verify(req, body, secrets); err != nil {
+		t.Fatalf("expected liveVerifier to accept initial AppID 12345, got %v", err)
+	}
+	liveAppID = 54321
+	if _, err := liveVerifier.Verify(req, body, secrets); !errors.Is(err, triggithub.ErrWebhookTargetMismatch) {
+		t.Errorf("expected ErrWebhookTargetMismatch after live AppID change, got %v", err)
+	}
+
+	// Single empty X-GitHub-Event header matches production step 2 (passes with
+	// empty Event so IsSupportedEvent("") == false -> 200 ignored).
+	emptyEventReq := req.Clone(context.Background())
+	emptyEventReq.Header.Set("X-GitHub-Event", "")
+	emptyEventReq.Header.Del("X-GitHub-Delivery")
+	dEmpty, err := v.Verify(emptyEventReq, body, secrets)
+	if err != nil {
+		t.Fatalf("expected single empty X-GitHub-Event to pass Verify like production, got %v", err)
+	}
+	if dEmpty.Event != "" || triggithub.IsSupportedEvent(dEmpty.Event) {
+		t.Errorf("unexpected empty-event delivery: %+v", dEmpty)
+	}
+
+	// Duplicate X-GitHub-Event header rejected.
+	dupEventReq := req.Clone(context.Background())
+	dupEventReq.Header.Add("X-GitHub-Event", triggithub.EventIssues)
+	if _, err := v.Verify(dupEventReq, body, secrets); !errors.Is(err, triggithub.ErrInvalidWebhookHeaders) {
+		t.Errorf("expected ErrInvalidWebhookHeaders for duplicate X-GitHub-Event, got %v", err)
+	}
+
+	// Exported helpers WebhookTargetMatches and IsDeliveryGUID.
+	if !triggithub.WebhookTargetMatches(req.Header, 12345) {
+		t.Error("expected WebhookTargetMatches to accept matching headers")
+	}
+	if triggithub.WebhookTargetMatches(req.Header, 0) || triggithub.WebhookTargetMatches(nil, 12345) {
+		t.Error("expected WebhookTargetMatches to fail closed on 0 appID or nil headers")
+	}
+	if !triggithub.IsDeliveryGUID("11111111-2222-3333-4444-555555555555") || triggithub.IsDeliveryGUID("not-a-guid") {
+		t.Error("unexpected IsDeliveryGUID result")
+	}
 }
 
 func TestInstallationResolver(t *testing.T) {
