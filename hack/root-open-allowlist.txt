@@ -3,8 +3,7 @@
 #
 # Direct (*os.Root).Open, OpenFile, and Create calls are permitted only for
 # the shared open helpers themselves, self-directory (".") opens on verified
-# roots, non-unix platform fallbacks, trusted/private directories, or sites
-# pending migration in parallel follow-up branches.
+# roots, non-unix platform fallbacks, or trusted/private directories.
 
 # Shared open helpers (open "." on the root fd itself)
 pkg/util/rootopen/rootopen_unix.go | OpenDir | 1 | shared rootopen helper opens root fd "."
@@ -50,8 +49,3 @@ pkg/transfer/root_walk.go | walkRootDir | 1 | cross-platform trailing-slash dir 
 pkg/webassets/disk.go | Open | 1 | serves read-only operator-owned static web assets
 pkg/webassets/disk.go | Serve | 1 | serves read-only operator-owned static web assets
 pkg/webassets/disk.go | sniff | 1 | sniffs content-type on read-only operator-owned static web assets
-
-# Pending migration in parallel follow-up branch (remove once it lands)
-pkg/hub/attachments_agent.go | storeAgentAttachment | 1 | pending migration in parallel hub attachments follow-up branch
-pkg/hub/attachments_staging.go | verifyStagedCopy | 1 | pending migration in parallel hub attachments follow-up branch
-pkg/hub/attachments_staging.go | writeStagingTemp | 1 | pending migration in parallel hub attachments follow-up branch
