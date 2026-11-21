@@ -203,7 +203,7 @@ func isNotificationsSubscriptionsCommand(cmd *cobra.Command) bool {
 // or 'push') targeting 'global' or 'user' scope, neither of which reads a
 // project.
 func isProjectlessScopedTemplatesCommand(cmd *cobra.Command) bool {
-	if cmd.Parent() == nil || !isTopLevel(cmd.Parent()) {
+	if cmd == nil || cmd.Parent() == nil || !isTopLevel(cmd.Parent()) {
 		return false
 	}
 	parent := cmd.Parent().Name()

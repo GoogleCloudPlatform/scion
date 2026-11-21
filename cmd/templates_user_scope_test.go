@@ -311,7 +311,9 @@ func TestTemplatesDelete_ScopeUser(t *testing.T) {
 
 	t.Run("401 on explicit --scope user is surfaced", func(t *testing.T) {
 		hub, srv := newUserScopeHub(t, allTemplates)
+		hub.mu.Lock()
 		hub.userScopeStatus = http.StatusUnauthorized
+		hub.mu.Unlock()
 		tuSetup(t)
 		tuHubSettings(t, srv.URL)
 
@@ -368,7 +370,9 @@ func TestFindTemplateAllLocations_HubUserScope(t *testing.T) {
 		hub, srv := newUserScopeHub(t, []map[string]string{
 			{"id": tuGlobalTemplateID, "name": "base", "slug": "base", "scope": "global", "status": "active"},
 		})
+		hub.mu.Lock()
 		hub.userScopeStatus = http.StatusUnauthorized
+		hub.mu.Unlock()
 		tuSetup(t)
 		client, err := hubclient.New(srv.URL)
 		require.NoError(t, err)
