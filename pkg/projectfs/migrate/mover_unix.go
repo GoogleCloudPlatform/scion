@@ -309,36 +309,39 @@ func Move(spec Spec, opts Options) Result {
 	// empty one, may be the source of a running agent's bind or subPath
 	// mount, or held open by an upload, which a rename onto it would leave
 	// on the replaced, unlinked inode; it is copied into instead.
-	if !spec.NoRename && !spec.CopyOnly && targetKind == kindAbsent && (!dstParentOK || sameDevice(srcFd, dstParent)) {
+	if !spec.NoRename && !spec.CopyOnly && targetKind == kindAbsent && sameDeviceTarget(&srcSt, spec.Target, dstParent, dstParentOK) {
 		if opts.DryRun {
-			res.Outcome = OutcomeWouldRename
-			return res
-		}
-		// Atomic no-replace rename (renameat2 RENAME_NOREPLACE): a target
-		// created concurrently by a broker, an agent start or an upload is
-		// never replaced. Where the filesystem has no atomic no-replace
-		// rename (NFS), the tree is copied instead.
-		renamed := false
-		err := renameDirNoReplace(srcParent, srcName, dstParent, dstName)
-		switch {
-		case err == nil:
-			renamed = true
-		case errors.Is(err, errNoAtomicRename), errors.Is(err, unix.EEXIST), errors.Is(err, unix.ENOTEMPTY),
-			errors.Is(err, unix.EXDEV), errors.Is(err, unix.EBUSY):
-			// copy below
-		default:
-			return fail(fmt.Errorf("rename source into target: %w", err))
-		}
-		if renamed {
-			res.Outcome = OutcomeRenamed
-			n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res, ctx: opts.Context}
-			if spec.TargetIsLeaf {
-				// The renamed directory replaces the leaf the owner would
-				// have created: give it the leaf's own contract.
-				n.leaf(dstParent, dstName)
+			if canAtomicRenameTarget(spec.Target, dstParent, dstParentOK) {
+				res.Outcome = OutcomeWouldRename
+				return res
 			}
-			n.tree(dstParent, dstName)
-			return res
+		} else {
+			// Atomic no-replace rename (renameat2 RENAME_NOREPLACE): a target
+			// created concurrently by a broker, an agent start or an upload is
+			// never replaced. Where the filesystem has no atomic no-replace
+			// rename (NFS), the tree is copied instead.
+			renamed := false
+			err := renameDirNoReplace(srcParent, srcName, dstParent, dstName)
+			switch {
+			case err == nil:
+				renamed = true
+			case errors.Is(err, errNoAtomicRename), errors.Is(err, unix.EEXIST), errors.Is(err, unix.ENOTEMPTY),
+				errors.Is(err, unix.EXDEV), errors.Is(err, unix.EBUSY):
+				// copy below
+			default:
+				return fail(fmt.Errorf("rename source into target: %w", err))
+			}
+			if renamed {
+				res.Outcome = OutcomeRenamed
+				n := normalizer{mode: spec.Normalize, owner: opts.Owner, res: &res, ctx: opts.Context}
+				if spec.TargetIsLeaf {
+					// The renamed directory replaces the leaf the owner would
+					// have created: give it the leaf's own contract.
+					n.leaf(dstParent, dstName)
+				}
+				n.tree(dstParent, dstName)
+				return res
+			}
 		}
 	}
 
@@ -507,7 +510,7 @@ func moveFile(spec Spec, opts Options, res Result, srcParent int, srcName string
 		case spec.CopyOnly:
 			res.Copied++
 			res.Outcome = OutcomeWouldCopy
-		case !dstParentOK || sameDeviceStat(srcSt, dstParent):
+		case sameDeviceTarget(srcSt, spec.Target, dstParent, dstParentOK):
 			res.Outcome = OutcomeWouldRename
 		default:
 			res.Copied++
@@ -1129,20 +1132,61 @@ func readDirNames(dirFd int) ([]string, error) {
 	return names, nil
 }
 
-func sameDevice(aFd, bFd int) bool {
-	var a unix.Stat_t
-	if err := unix.Fstat(aFd, &a); err != nil {
-		return false
-	}
-	return sameDeviceStat(&a, bFd)
-}
+var sameDev = func(a, b uint64) bool { return a == b }
 
 func sameDeviceStat(a *unix.Stat_t, bFd int) bool {
 	var b unix.Stat_t
 	if err := unix.Fstat(bFd, &b); err != nil {
 		return false
 	}
-	return a.Dev == b.Dev
+	return sameDev(uint64(a.Dev), uint64(b.Dev))
+}
+
+// openExistingTargetAncestor opens the deepest existing directory along t's
+// parent chain (starting at t.Base, walking with O_NOFOLLOW) when dstParent
+// itself does not exist yet in a dry run.
+func openExistingTargetAncestor(t Tree) (int, bool) {
+	cur, err := unix.Open(t.Base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, false
+	}
+	parent, _ := filepath.Split(filepath.Clean(t.Rel))
+	for _, comp := range strings.Split(filepath.ToSlash(filepath.Clean(parent)), "/") {
+		if comp == "" || comp == "." {
+			continue
+		}
+		next, err := openDirAt(cur, comp)
+		if err != nil {
+			break
+		}
+		closeFd(cur)
+		cur = next
+	}
+	return cur, true
+}
+
+func sameDeviceTarget(srcSt *unix.Stat_t, target Tree, dstParent int, dstParentOK bool) bool {
+	if dstParentOK {
+		return sameDeviceStat(srcSt, dstParent)
+	}
+	anc, ok := openExistingTargetAncestor(target)
+	if !ok {
+		return false
+	}
+	defer closeFd(anc)
+	return sameDeviceStat(srcSt, anc)
+}
+
+func canAtomicRenameTarget(target Tree, dstParent int, dstParentOK bool) bool {
+	if dstParentOK {
+		return supportsAtomicDirRename(dstParent)
+	}
+	anc, ok := openExistingTargetAncestor(target)
+	if !ok {
+		return false
+	}
+	defer closeFd(anc)
+	return supportsAtomicDirRename(anc)
 }
 
 func closeFd(fd int) {

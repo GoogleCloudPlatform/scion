@@ -1528,3 +1528,87 @@ func TestRun_LocalTreeScionMarkerFile(t *testing.T) {
 		assertAbsent(t, filepath.Join(f.share, "projects", pid1))
 	})
 }
+
+// Symbolic links in shared directories are never copied; both the dry run and
+// the migration report count AND name every skipped symbolic link (including a
+// shared dir holding only symbolic links), and a symlinked shared-dir root
+// refuses that shared-dir move.
+func TestRun_SharedDirsSymlinksListedInDryRunAndReport(t *testing.T) {
+	f := newHubFixture(t)
+	outside := t.TempDir()
+	writeTree(t, outside, map[string]string{"secret.txt": "SECRET"})
+	sdRoot := "project-configs/p1__0f8fad5b/shared-dirs"
+	writeTree(t, f.global, map[string]string{
+		sdRoot + "/scratchpad/notes.txt":   "notes",
+		sdRoot + "/scratchpad/latest.md":   "->notes.txt",
+		sdRoot + "/scratchpad/sub/escape":  "->" + filepath.Join(outside, "secret.txt"),
+		sdRoot + "/links-only/dangling.md": "->missing.txt",
+	})
+	in := f.input(ProjectRef{ID: pid1, Slug: "p1"})
+	in.Workspace = projectfs.Layout{Backend: projectfs.BackendLocal, HostBase: f.global}
+	beforeGlobal := snapshot(t, f.global)
+
+	dry, err := Run(context.Background(), in, opts(true))
+	if err != nil || dry.Failed() {
+		t.Fatalf("dry run: err=%v failed=%t", err, dry.Failed())
+	}
+	var dryLog bytes.Buffer
+	dry.WriteLog(&dryLog)
+	for _, want := range []string{
+		"dry run: nothing is changed",
+		"step 3-shared-dirs would-merge " + filepath.Join(f.global, sdRoot, "links-only") + " -> " + filepath.Join(f.share, "projects", pid1, "shared-dirs/links-only") + " refused=1",
+		"  REFUSED dangling.md (symlink) (not copied)",
+		"step 3-shared-dirs would-merge " + filepath.Join(f.global, sdRoot, "scratchpad") + " -> " + filepath.Join(f.share, "projects", pid1, "shared-dirs/scratchpad") + " copied=1 identical=0 refused=2",
+		"  REFUSED latest.md (symlink) (not copied)",
+		"  REFUSED sub/escape (symlink) (not copied)",
+		"refused=3 failed=0",
+	} {
+		if !strings.Contains(dryLog.String(), want) {
+			t.Fatalf("dry-run log lacks %q:\n%s", want, dryLog.String())
+		}
+	}
+	if got := snapshot(t, f.global); !reflect.DeepEqual(got, beforeGlobal) {
+		t.Fatal("dry run changed global dir")
+	}
+	assertAbsent(t, filepath.Join(f.share, "projects", pid1))
+
+	rep, err := Run(context.Background(), in, opts(false))
+	if err != nil || rep.Failed() {
+		t.Fatalf("run: err=%v failed=%t", err, rep.Failed())
+	}
+	var runLog bytes.Buffer
+	rep.WriteLog(&runLog)
+	for _, want := range []string{
+		"step 3-shared-dirs merged " + filepath.Join(f.global, sdRoot, "links-only") + " -> " + filepath.Join(f.share, "projects", pid1, "shared-dirs/links-only") + " refused=1 source kept as ",
+		"  REFUSED dangling.md (symlink) (not copied)",
+		"step 3-shared-dirs merged " + filepath.Join(f.global, sdRoot, "scratchpad") + " -> " + filepath.Join(f.share, "projects", pid1, "shared-dirs/scratchpad") + " copied=1 identical=0 refused=2 source kept as ",
+		"  REFUSED latest.md (symlink) (not copied)",
+		"  REFUSED sub/escape (symlink) (not copied)",
+		"refused=3 failed=0",
+	} {
+		if !strings.Contains(runLog.String(), want) {
+			t.Fatalf("migration report lacks %q:\n%s", want, runLog.String())
+		}
+	}
+	targetSD := filepath.Join(f.share, "projects", pid1, "shared-dirs")
+	if got := readFile(t, filepath.Join(targetSD, "scratchpad/notes.txt")); got != "notes" {
+		t.Fatalf("notes.txt = %q", got)
+	}
+	assertAbsent(t, filepath.Join(targetSD, "scratchpad/latest.md"))
+	assertAbsent(t, filepath.Join(targetSD, "scratchpad/sub/escape"))
+	assertAbsent(t, filepath.Join(targetSD, "links-only/dangling.md"))
+
+	// A symlink at the shared-dir leaf itself refuses the move in both dry run and run.
+	writeTree(t, f.global, map[string]string{sdRoot + "/linked-leaf": "->" + outside})
+	for _, isDry := range []bool{true, false} {
+		r, err := Run(context.Background(), in, opts(isDry))
+		if err != nil || !r.Failed() {
+			t.Fatalf("dry=%t: want failed for symlinked shared-dir leaf, got err=%v failed=%t", isDry, err, r.Failed())
+		}
+		var b bytes.Buffer
+		r.WriteLog(&b)
+		if !strings.Contains(b.String(), "linked-leaf") || !strings.Contains(b.String(), "source is a symlink; refusing to follow it") {
+			t.Fatalf("dry=%t: log lacks symlinked leaf refusal:\n%s", isDry, b.String())
+		}
+	}
+}

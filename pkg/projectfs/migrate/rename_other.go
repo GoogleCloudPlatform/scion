@@ -24,6 +24,11 @@ func renameNoReplace(oldDir int, oldName string, newDir int, newName string) err
 	return errNoAtomicRename
 }
 
+// supportsAtomicDirRename reports false where renameat2 does not exist.
+func supportsAtomicDirRename(int) bool {
+	return false
+}
+
 // syncFS flushes what it can where syncfs(2) does not exist: the
 // directory itself.
 func syncFS(fd int) error {

@@ -469,6 +469,89 @@ func TestMove_SymlinksInSourceAreRefused(t *testing.T) {
 	}
 }
 
+// Dry run lists every symbolic link that will not be copied: on NoRename
+// targets (shared dirs), on filesystems without atomic no-replace directory
+// rename (NFS), and on cross-device moves whose target parent directory does
+// not exist yet.
+func TestMove_DryRunListsRefusedSymlinks(t *testing.T) {
+	wantRefused := []string{"link.txt (symlink)", "sub/linkdir (symlink)"}
+
+	t.Run("no-rename-shared-dir", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		outside := t.TempDir()
+		writeTree(t, outside, map[string]string{"secret.txt": "SECRET", "secretdir/s.txt": "SECRET"})
+		writeTree(t, src, map[string]string{
+			"cfg/shared-dirs/scratch/ok.txt":      "ok",
+			"cfg/shared-dirs/scratch/link.txt":    "->" + filepath.Join(outside, "secret.txt"),
+			"cfg/shared-dirs/scratch/sub/linkdir": "->" + filepath.Join(outside, "secretdir"),
+		})
+		before := snapshot(t, src)
+		s := Spec{
+			Step:     StepSharedDirs,
+			Source:   Tree{Base: src, Rel: "cfg/shared-dirs/scratch"},
+			Target:   Tree{Base: dst, Rel: "projects/u1/shared-dirs/scratch"},
+			NoRename: true,
+		}
+		res := Move(s, opts(true))
+		if res.Outcome != OutcomeWouldMerge || res.Err != nil || res.Copied != 1 {
+			t.Fatalf("got %s copied=%d err=%v, want would-merge copied=1", res.Outcome, res.Copied, res.Err)
+		}
+		if !reflect.DeepEqual(res.Refused, wantRefused) {
+			t.Fatalf("dry-run refused = %v, want %v", res.Refused, wantRefused)
+		}
+		assertAbsent(t, filepath.Join(dst, "projects"))
+		if got := snapshot(t, src); !reflect.DeepEqual(got, before) {
+			t.Fatalf("dry run changed source: %v", got)
+		}
+	})
+
+	t.Run("nfs-no-atomic-rename-absent-target", func(t *testing.T) {
+		base := t.TempDir()
+		writeTree(t, base, map[string]string{
+			"old/proj/ok.txt":      "ok",
+			"old/proj/link.txt":    "->ok.txt",
+			"old/proj/sub/linkdir": "->..",
+		})
+		forceRename(t, nil, syscall.EINVAL)
+		res := Move(spec(base, "old/proj", "projects/u1/workspace"), opts(true))
+		if res.Outcome != OutcomeWouldMerge || res.Err != nil || res.Copied != 1 {
+			t.Fatalf("got %s copied=%d err=%v, want would-merge copied=1", res.Outcome, res.Copied, res.Err)
+		}
+		if !reflect.DeepEqual(res.Refused, wantRefused) {
+			t.Fatalf("dry-run refused = %v, want %v", res.Refused, wantRefused)
+		}
+		assertAbsent(t, filepath.Join(base, "projects"))
+	})
+
+	t.Run("cross-device-absent-target-parent", func(t *testing.T) {
+		src := t.TempDir()
+		dst := t.TempDir()
+		writeTree(t, src, map[string]string{
+			"old/proj/ok.txt":      "ok",
+			"old/proj/link.txt":    "->ok.txt",
+			"old/proj/sub/linkdir": "->..",
+		})
+		oldSame := sameDev
+		sameDev = func(uint64, uint64) bool { return false }
+		t.Cleanup(func() { sameDev = oldSame })
+
+		s := Spec{
+			Step:   StepLocalProjects,
+			Source: Tree{Base: src, Rel: "old/proj"},
+			Target: Tree{Base: dst, Rel: "projects/u1/workspace"},
+		}
+		res := Move(s, opts(true))
+		if res.Outcome != OutcomeWouldMerge || res.Err != nil || res.Copied != 1 {
+			t.Fatalf("got %s copied=%d err=%v, want would-merge copied=1", res.Outcome, res.Copied, res.Err)
+		}
+		if !reflect.DeepEqual(res.Refused, wantRefused) {
+			t.Fatalf("dry-run refused = %v, want %v", res.Refused, wantRefused)
+		}
+		assertAbsent(t, filepath.Join(dst, "projects"))
+	})
+}
+
 func TestMove_SpecialFilesAreRefused(t *testing.T) {
 	base := t.TempDir()
 	writeTree(t, base, map[string]string{"old/proj/ok.txt": "ok", "projects/u1/workspace/x": "x"})
