@@ -3138,8 +3138,9 @@ export class ScionPageChat extends LitElement {
     const newDefault = (topic?.defaultAgent as string) ?? '';
 
     // If this is the currently-viewed conversation, update defaultAgent directly
-    // and skip the rail reload to avoid the parseV2Route race that overwrites
-    // defaultAgent on subsequent changes, and to prevent sidebar flash.
+    // (and sync the rail's cached thread entry) and skip the rail reload to avoid
+    // the parseV2Route race that overwrites defaultAgent on subsequent changes,
+    // and to prevent sidebar flash.
     if (topicId && this.v2Conversation?.conversationKey === topicId) {
       if (this.v2Conversation.defaultAgent !== newDefault) {
         this.v2Conversation = {
@@ -3147,6 +3148,10 @@ export class ScionPageChat extends LitElement {
           defaultAgent: newDefault,
         };
       }
+      const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+        | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+        | null;
+      rail?.updateThreadDefaultAgent(this.v2Conversation.projectId, topicId, newDefault);
       return;
     }
 
@@ -3430,7 +3435,9 @@ export class ScionPageChat extends LitElement {
    */
   private async fetchThreadDetails(conversationKey: string): Promise<void> {
     try {
-      const res = await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`);
+      const res = await apiFetch(`/api/v1/chat/topics/${encodeURIComponent(conversationKey)}`, {
+        cache: 'no-store',
+      });
       if (!res.ok) return;
       const data = (await res.json()) as { name?: string; defaultAgent?: string };
       const conv = this.v2Conversation;
@@ -3439,7 +3446,7 @@ export class ScionPageChat extends LitElement {
       this.v2Conversation = {
         ...conv,
         threadName: data.name || conv.threadName,
-        defaultAgent: data.defaultAgent || conv.defaultAgent,
+        defaultAgent: data.defaultAgent ?? '',
       };
       if (data.name) {
         dispatchPageTitle(this, `#${data.name}`, 'Chat');
@@ -3449,14 +3456,24 @@ export class ScionPageChat extends LitElement {
     }
   }
 
-  /** Handle default-agent-changed from the thread component. Updates local state in place to avoid re-render. */
+  /** Handle default-agent-changed from the thread component. Updates local state and cached rail entry in place. */
   private handleDefaultAgentChanged(e: CustomEvent): void {
     const detail = e.detail as { defaultAgent: string };
+    const newDefault = detail.defaultAgent || '';
     if (this.v2Conversation) {
       this.v2Conversation = {
         ...this.v2Conversation,
-        defaultAgent: detail.defaultAgent || '',
+        defaultAgent: newDefault,
       };
+      const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+        | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+        | null;
+      rail?.updateThreadDefaultAgent(
+        this.v2Conversation.projectId,
+        this.v2Conversation.conversationKey,
+        newDefault
+      );
+      this._markPaletteGroupsDirty('threads');
     }
   }
 
