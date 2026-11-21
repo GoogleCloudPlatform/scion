@@ -2847,11 +2847,10 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 	var res sql.Result
 	if topic.ConversationID != "" {
 		if hasMsgSeq {
-			// Clear conversation_seq while moving rows so the unique index
-			// (conversation_id, conversation_seq) cannot collide across merged
-			// arms, then immediately re-allocate contiguous seqs in (created, id)
-			// order and update conversations.last_message_seq in the same tx
-			// (ptone/scion#8136).
+			// Clear conversation_seq while moving rows so merged arms never
+			// carry duplicate or stale sequences, then immediately re-allocate
+			// contiguous seqs in (created, id) order and update
+			// conversations.last_message_seq in the same tx (ptone/scion#8136).
 			res, err = tx.ExecContext(ctx,
 				`UPDATE messages SET thread_id = ?, conversation_id = ?, conversation_seq = NULL
 				 WHERE (? <> '' AND conversation_id = ?)

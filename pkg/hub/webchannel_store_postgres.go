@@ -2299,11 +2299,10 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	// avoid blanking conversation_id on moved rows (design §3.1 C2a).
 	var res sql.Result
 	if topic.ConversationID != "" {
-		// Clear conversation_seq while moving rows so the unique index
-		// (conversation_id, conversation_seq) cannot collide across merged
-		// arms, then immediately re-allocate contiguous seqs in (created, id)
-		// order and update conversations.last_message_seq in the same tx
-		// (ptone/scion#8136).
+		// Clear conversation_seq while moving rows so merged arms never
+		// carry duplicate or stale sequences, then immediately re-allocate
+		// contiguous seqs in (created, id) order and update
+		// conversations.last_message_seq in the same tx (ptone/scion#8136).
 		res, err = tx.ExecContext(ctx,
 			`UPDATE `+messagesTable+` SET thread_id = $1, conversation_id = $2, conversation_seq = NULL
 			 WHERE conversation_id = NULLIF($3, '')::uuid

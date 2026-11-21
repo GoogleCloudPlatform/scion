@@ -51,13 +51,20 @@ func (c *CompositeStore) BackfillConversationMessageSeqs(ctx context.Context) er
 			break
 		}
 
+		var batchUpdated int64
 		for _, convID := range convIDs {
 			n, err := backfillOneConversationSeq(ctx, db, isPostgres, convID)
 			if err != nil {
 				return fmt.Errorf("backfill conversation %s seqs: %w", convID, err)
 			}
-			totalUpdated += n
+			batchUpdated += n
 		}
+		if batchUpdated == 0 {
+			slog.WarnContext(ctx, "conversation_seq backfill batch made no progress; stopping to avoid infinite loop",
+				"conversation_count", len(convIDs))
+			break
+		}
+		totalUpdated += batchUpdated
 	}
 
 	if totalUpdated > 0 {

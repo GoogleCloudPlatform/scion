@@ -782,8 +782,8 @@ func (s *MessageStore) MarkAllMessagesRead(ctx context.Context, recipientID stri
 
 // SetMessageConversationID updates the conversation_id on an existing message
 // and re-allocates conversation_seq in the target conversation within a single
-// transaction so the (conversation_id, conversation_seq) unique index never
-// collides and commit-order guarantees hold (ptone/scion#8136).
+// transaction so conversation_seq stays monotonic without duplicate sequences
+// and commit-order guarantees hold (ptone/scion#8136).
 // Returns ErrNotFound if the message doesn't exist.
 func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, conversationID string) error {
 	mid, err := parseUUID(messageID)
