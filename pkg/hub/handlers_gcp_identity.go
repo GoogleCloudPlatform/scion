@@ -909,9 +909,9 @@ func projectIDFromServiceAccountEmail(email string) string {
 	if at < 0 {
 		return ""
 	}
-	domain := email[at+1:]
+	domain := strings.ToLower(email[at+1:])
 	suffix := ".iam.gserviceaccount.com"
-	if !strings.HasSuffix(strings.ToLower(domain), suffix) {
+	if !strings.HasSuffix(domain, suffix) {
 		return ""
 	}
 	return domain[:len(domain)-len(suffix)]
