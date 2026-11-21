@@ -896,6 +896,8 @@ func RunInit(args []string, opts InitRunOptions) int {
 		firewallInstalled, fwErr = setupInitFirewall()
 		if fwErr != nil {
 			reportInitFailure(agentHome, fwErr)
+			removeTransportTokenOnRefusal()
+			stagedTokenCleanExit = true
 			return 1
 		}
 	}

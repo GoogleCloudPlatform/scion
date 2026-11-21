@@ -1159,5 +1159,39 @@ func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, errNetAdminDropFailed.Error())
 			}
 		})
+
+		t.Run(mode+"/firewall failure cleans up staged tokens and refuses harness", func(t *testing.T) {
+			f := newNetAdminFixture(t, mode, false, nil)
+			observeReExec(t)
+			withPreflightEUID(t, 0)
+			withPreflightNetAdminUsable(t, true, nil)
+			t.Setenv(metadata.InterceptionEnvVar, metadata.InterceptionRequired)
+			t.Setenv(metadata.InterceptionSourceEnvVar, "")
+			t.Setenv(initFirewallEnv, "1")
+			creds := newCredentialFixture(t, f.agentHome)
+			withRunInitFirewall(t, func() error {
+				f.order = append(f.order, "firewall")
+				return errors.New("iptables-restore failed")
+			})
+			if got := f.run(); got != 1 {
+				t.Fatalf("RunInit() = %d, want 1", got)
+			}
+			if want := []string{"firewall"}; !reflect.DeepEqual(f.order, want) {
+				t.Fatalf("order = %v, want %v", f.order, want)
+			}
+			if netAdminPathExists(creds.transportPath) {
+				t.Error("transport token file still present after firewall failure")
+			}
+			if netAdminPathExists(creds.hubTokenPath) {
+				t.Error("staged hub credential still present after firewall failure")
+			}
+			if netAdminPathExists(f.harnessFile) {
+				t.Error("harness ran after firewall failure")
+			}
+			phase, msg := readAgentInfoMessage(t, f.agentHome)
+			if phase != string(state.PhaseError) || msg != errInitFirewallFailed.Error() {
+				t.Errorf("agent-info = (%q, %q), want (%q, %q)", phase, msg, state.PhaseError, errInitFirewallFailed.Error())
+			}
+		})
 	}
 }

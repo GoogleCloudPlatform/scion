@@ -219,9 +219,7 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 	if config.MetadataInterception {
-		if err := checkImageNetnsSetupSupport(ctx, r.Command, config.Image); err != nil {
-			return "", err
-		}
+		checkImageNetnsSetupSupport(ctx, r.Command, config.Image)
 	}
 	// Rootless podman that starts its user namespace's pause process
 	// (catatonit -P) hands it its own environment, and the pause process

@@ -436,9 +436,9 @@ func TestImageHasCapability(t *testing.T) {
 	}
 }
 
-func TestDockerRuntime_Run_ImageLacksNetnsSetupRefusedBeforeStart(t *testing.T) {
+func TestDockerRuntime_Run_UnlabeledImageWithNetnsSetupSucceeds(t *testing.T) {
 	for _, inspectOut := range []string{
-		`{"org.opencontainers.image.revision":"128ce1ed"}`,
+		`{"org.opencontainers.image.revision":"fd6981b9"}`,
 		`null`,
 		`{}`,
 	} {
@@ -453,25 +453,37 @@ if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
   echo '%s'
   exit 0
 fi
-echo "unexpected invocation: $@" >&2
-exit 99
+if [ "$1" = "run" ]; then
+  case "$*" in
+    *"netns-setup"*)
+      exit 0
+      ;;
+    *)
+      echo "deadbeef2222"
+      exit 0
+      ;;
+  esac
+fi
 `, callLog, inspectOut)
 			if err := os.WriteFile(mockDocker, []byte(script), 0o755); err != nil {
 				t.Fatal(err)
 			}
 
 			rt := &DockerRuntime{Command: mockDocker}
-			_, err := rt.Run(context.Background(), RunConfig{
+			id, err := rt.Run(context.Background(), RunConfig{
 				Harness:              &harness.Generic{},
 				Name:                 "test-agent",
 				UnixUsername:         "scion",
-				Image:                "scion-agent:old",
+				Image:                "scion-agent:post5246-unlabeled",
 				Task:                 "hello",
 				Env:                  []string{"SCION_METADATA_MODE=block"},
 				MetadataInterception: true,
 			})
-			if !errors.Is(err, ErrImageLacksNetnsSetup) {
-				t.Fatalf("Run() error = %v, want ErrImageLacksNetnsSetup", err)
+			if err != nil {
+				t.Fatalf("Run() error = %v, want nil for unlabeled image with working netns-setup", err)
+			}
+			if id != "deadbeef2222" {
+				t.Fatalf("Run() id = %q, want %q", id, "deadbeef2222")
 			}
 
 			raw, err := os.ReadFile(callLog)
@@ -479,14 +491,14 @@ exit 99
 				t.Fatalf("read calls.log: %v", err)
 			}
 			lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-			if len(lines) != 1 || !strings.HasPrefix(lines[0], "image inspect ") {
-				t.Fatalf("expected only image inspect before refusal, got:\n%s", string(raw))
+			if len(lines) != 3 {
+				t.Fatalf("got %d invocations, want 3 (inspect, run, sidecar):\n%s", len(lines), string(raw))
 			}
 		})
 	}
 }
 
-func TestPodmanRuntime_Run_RootfulImageLacksNetnsSetupRefusedBeforeStart(t *testing.T) {
+func TestPodmanRuntime_Run_RootfulUnlabeledImageWithNetnsSetupSucceeds(t *testing.T) {
 	tmpDir := t.TempDir()
 	mockPodman := filepath.Join(tmpDir, "mock-podman")
 	callLog := filepath.Join(tmpDir, "calls.log")
@@ -494,49 +506,65 @@ func TestPodmanRuntime_Run_RootfulImageLacksNetnsSetupRefusedBeforeStart(t *test
 	script := fmt.Sprintf(`#!/bin/sh
 echo "$@" >> %q
 if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-  echo '{"org.opencontainers.image.revision":"128ce1ed"}'
+  echo '{"org.opencontainers.image.revision":"fd6981b9"}'
   exit 0
 fi
-echo "unexpected invocation: $@" >&2
-exit 99
-`, callLog)
+if [ "$1" = "run" ]; then
+  case "$*" in
+    *"netns-setup"*)
+      exit 0
+      ;;
+    *)
+      echo %q
+      exit 0
+      ;;
+  esac
+fi
+`, callLog, mockPodmanID)
 	if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	rt := &PodmanRuntime{Command: mockPodman, Rootless: false}
-	_, err := rt.Run(context.Background(), RunConfig{
+	id, err := rt.Run(context.Background(), RunConfig{
 		Harness:              &harness.Generic{},
 		Name:                 "test-agent",
 		UnixUsername:         "scion",
-		Image:                "scion-agent:old",
+		Image:                "scion-agent:post5246-unlabeled",
 		Task:                 "hello",
 		Env:                  []string{"SCION_METADATA_MODE=block"},
 		MetadataInterception: true,
 	})
-	if !errors.Is(err, ErrImageLacksNetnsSetup) {
-		t.Fatalf("Run() error = %v, want ErrImageLacksNetnsSetup", err)
-	}
-
-	raw, err := os.ReadFile(callLog)
 	if err != nil {
-		t.Fatalf("read calls.log: %v", err)
+		t.Fatalf("Run() error = %v, want nil for unlabeled image with working netns-setup", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(lines) != 1 || !strings.HasPrefix(lines[0], "image inspect ") {
-		t.Fatalf("expected only image inspect before refusal, got:\n%s", string(raw))
+	if id != mockPodmanID {
+		t.Fatalf("Run() id = %q, want %q", id, mockPodmanID)
 	}
 }
 
-func TestDockerRuntime_Run_UncachedOldImageClassifiesNetnsSetupSkew(t *testing.T) {
-	tmpDir := t.TempDir()
-	mockDocker := filepath.Join(tmpDir, "mock-docker")
-	rmLog := filepath.Join(tmpDir, "rm.log")
+func TestDockerRuntime_Run_OldImageClassifiesNetnsSetupSkew(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		inspectScript string
+	}{
+		{
+			name:          "cached unlabeled old image",
+			inspectScript: `echo '{"org.opencontainers.image.revision":"128ce1ed"}'; exit 0`,
+		},
+		{
+			name:          "uncached old image",
+			inspectScript: `echo "Error: No such image: scion-agent:old" >&2; exit 1`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			mockDocker := filepath.Join(tmpDir, "mock-docker")
+			rmLog := filepath.Join(tmpDir, "rm.log")
 
-	script := fmt.Sprintf(`#!/bin/sh
+			script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
-  echo "Error: No such image: scion-agent:old" >&2
-  exit 1
+  %s
 fi
 if [ "$1" = "rm" ]; then
   echo "$@" >> %q
@@ -554,12 +582,75 @@ if [ "$1" = "run" ]; then
       ;;
   esac
 fi
-`, rmLog)
-	if err := os.WriteFile(mockDocker, []byte(script), 0o755); err != nil {
+`, tc.inspectScript, rmLog)
+			if err := os.WriteFile(mockDocker, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			rt := &DockerRuntime{Command: mockDocker}
+			_, err := rt.Run(context.Background(), RunConfig{
+				Harness:              &harness.Generic{},
+				Name:                 "test-agent",
+				UnixUsername:         "scion",
+				Image:                "scion-agent:old",
+				Task:                 "hello",
+				Env:                  []string{"SCION_METADATA_MODE=block"},
+				MetadataInterception: true,
+			})
+			if !errors.Is(err, ErrImageLacksNetnsSetup) {
+				t.Fatalf("Run() error = %v, want ErrImageLacksNetnsSetup", err)
+			}
+			var lf *LaunchFailure
+			if !errors.As(err, &lf) {
+				t.Fatalf("Run() error = %v, want wrapped *LaunchFailure", err)
+			}
+			if lf.Code != api.LaunchCodeImageLacksNetnsSetup || lf.Step != api.LaunchStepContainerStart {
+				t.Fatalf("LaunchFailure = (%q, %q), want (%q, %q)", lf.Code, lf.Step, api.LaunchCodeImageLacksNetnsSetup, api.LaunchStepContainerStart)
+			}
+
+			raw, readErr := os.ReadFile(rmLog)
+			if readErr != nil {
+				t.Fatalf("expected docker rm -f after sidecar skew failure: %v", readErr)
+			}
+			if got := strings.TrimSpace(string(raw)); got != "rm -f deadbeef0001" {
+				t.Errorf("cleanup invocation = %q, want %q", got, "rm -f deadbeef0001")
+			}
+		})
+	}
+}
+
+func TestPodmanRuntime_Run_RootfulOldImageClassifiesNetnsSetupSkew(t *testing.T) {
+	tmpDir := t.TempDir()
+	mockPodman := filepath.Join(tmpDir, "mock-podman")
+	rmLog := filepath.Join(tmpDir, "rm.log")
+
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  echo "Error: image not known" >&2
+  exit 1
+fi
+if [ "$1" = "rm" ]; then
+  echo "$@" >> %q
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  case "$*" in
+    *"netns-setup"*)
+      echo 'Error: unknown command "netns-setup" for "sciontool"' >&2
+      exit 1
+      ;;
+    *)
+      echo %q
+      exit 0
+      ;;
+  esac
+fi
+`, rmLog, mockPodmanID)
+	if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	rt := &DockerRuntime{Command: mockDocker}
+	rt := &PodmanRuntime{Command: mockPodman, Rootless: false}
 	_, err := rt.Run(context.Background(), RunConfig{
 		Harness:              &harness.Generic{},
 		Name:                 "test-agent",
@@ -572,12 +663,19 @@ fi
 	if !errors.Is(err, ErrImageLacksNetnsSetup) {
 		t.Fatalf("Run() error = %v, want ErrImageLacksNetnsSetup", err)
 	}
+	var lf *LaunchFailure
+	if !errors.As(err, &lf) {
+		t.Fatalf("Run() error = %v, want wrapped *LaunchFailure", err)
+	}
+	if lf.Code != api.LaunchCodeImageLacksNetnsSetup || lf.Step != api.LaunchStepContainerStart {
+		t.Fatalf("LaunchFailure = (%q, %q), want (%q, %q)", lf.Code, lf.Step, api.LaunchCodeImageLacksNetnsSetup, api.LaunchStepContainerStart)
+	}
 
 	raw, readErr := os.ReadFile(rmLog)
 	if readErr != nil {
-		t.Fatalf("expected docker rm -f after sidecar skew failure: %v", readErr)
+		t.Fatalf("expected podman rm -f after sidecar skew failure: %v", readErr)
 	}
-	if got := strings.TrimSpace(string(raw)); got != "rm -f deadbeef0001" {
-		t.Errorf("cleanup invocation = %q, want %q", got, "rm -f deadbeef0001")
+	if got := strings.TrimSpace(string(raw)); got != "rm -f "+mockPodmanID {
+		t.Errorf("cleanup invocation = %q, want %q", got, "rm -f "+mockPodmanID)
 	}
 }

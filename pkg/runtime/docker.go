@@ -108,9 +108,7 @@ func (r *DockerRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		return "", err
 	}
 	if config.MetadataInterception {
-		if err := checkImageNetnsSetupSupport(ctx, r.Command, config.Image); err != nil {
-			return "", err
-		}
+		checkImageNetnsSetupSupport(ctx, r.Command, config.Image)
 	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {

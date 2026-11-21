@@ -84,6 +84,9 @@ func agentErrorStage(message string) (stage, hook, exitStatus string) {
 	case strings.Contains(message, failureStageMetadataInterceptionMarkerMissing):
 		stage = failureStageMetadataInterceptionMarkerMissing
 	case strings.Contains(message, failureStageImageLacksNetnsSetup):
+		// Primary channel for image_lacks_netns_setup is the broker's typed
+		// LaunchFailure code (api.LaunchCodeImageLacksNetnsSetup); classify it
+		// here too if it reaches an agent phase message.
 		stage = failureStageImageLacksNetnsSetup
 	case strings.Contains(message, failureStageMetadataProtectionUnavailable),
 		strings.HasPrefix(message, legacyMetadataProtectionRefusedPrefix):

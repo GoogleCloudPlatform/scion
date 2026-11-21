@@ -3098,39 +3098,40 @@ func isUnknownNetnsSetupOutput(output string) bool {
 
 // checkImageNetnsSetupSupport inspects the local image's labels before
 // launching a container that requires runtime-managed metadata interception.
-// When the image is locally present and does not advertise the netns-setup
-// capability in ImageSciontoolCapabilitiesLabel, it returns
-// ErrImageLacksNetnsSetup so broker/image version skew fails cleanly before
-// container start. When the image is not yet cached locally (the container
-// engine will pull it during run), it returns nil and runNetnsSetup classifies
-// any missing-subcommand failure afterwards.
-func checkImageNetnsSetupSupport(ctx context.Context, command, image string) error {
+//
+// This check is diagnostic only and is not a security control: fail-closed
+// enforcement lives in runNetnsSetup (which removes the container on failure)
+// and in sciontool init's redirect probe. Because images built between
+// GoogleCloudPlatform/scion#5246 and the introduction of
+// ImageSciontoolCapabilitiesLabel support `sciontool netns-setup` without
+// carrying the label, a missing label is treated as unknown (logged as a
+// warning) rather than refused pre-start; definitive skew is classified in
+// runNetnsSetup when `sciontool netns-setup` reports an unknown command.
+func checkImageNetnsSetupSupport(ctx context.Context, command, image string) {
 	if strings.TrimSpace(image) == "" {
-		return nil
+		return
 	}
 	out, err := runSimpleCommand(ctx, command, "image", "inspect", "--format", "{{json .Config.Labels}}", image)
 	if err != nil {
 		if isImageNotFoundOutput(out) || isImageNotFoundOutput(err.Error()) {
-			return nil
+			return
 		}
-		// Let the subsequent container run surface the underlying daemon error
-		// rather than masking it as version skew.
 		runtimeLog().Debug("image capability inspect skipped due to inspect error", "image", image, "error", err)
-		return nil
+		return
 	}
 	trimmed := strings.TrimSpace(out)
 	if trimmed == "" {
-		return nil
+		return
 	}
 	var labels map[string]string
 	if err := json.Unmarshal([]byte(trimmed), &labels); err != nil {
 		runtimeLog().Debug("image capability inspect output was not JSON labels", "image", image, "error", err)
-		return nil
+		return
 	}
 	if !imageHasCapability(labels, SciontoolCapNetnsSetup) {
-		return ErrImageLacksNetnsSetup
+		runtimeLog().Warn("agent image does not advertise netns-setup capability label; continuing and relying on netns-setup sidecar to verify support",
+			"image", image, "label", ImageSciontoolCapabilitiesLabel)
 	}
-	return nil
 }
 
 // buildNetnsSetupArgs builds the container CLI argv for the short-lived
@@ -3183,7 +3184,12 @@ func runNetnsSetup(ctx context.Context, command, containerID string, cfg RunConf
 		}
 		if trimmed := strings.TrimSpace(out); trimmed != "" {
 			if isUnknownNetnsSetupOutput(trimmed) {
-				return fmt.Errorf("%w: %s", ErrImageLacksNetnsSetup, truncateForError(trimmed))
+				return newLaunchFailure(
+					api.LaunchCodeImageLacksNetnsSetup,
+					api.LaunchStepContainerStart,
+					"",
+					fmt.Errorf("%w: %s", ErrImageLacksNetnsSetup, truncateForError(trimmed)),
+				)
 			}
 			return fmt.Errorf("netns-setup failed: %w (output: %s)", err, truncateForError(trimmed))
 		}

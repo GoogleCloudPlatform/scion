@@ -56,6 +56,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchCodeHostedConfigRefused, "hosted_config_refused"},
 		{LaunchCodeImagePullFailed, "image_pull_failed"},
 		{LaunchCodeInvalidImage, "invalid_image"},
+		{LaunchCodeImageLacksNetnsSetup, "image_lacks_netns_setup"},
 		{LaunchCodeContainerConfig, "container_config"},
 		{LaunchCodeCrashLoop, "crash_loop"},
 		{LaunchCodeInitContainerFailed, "init_container_failed"},

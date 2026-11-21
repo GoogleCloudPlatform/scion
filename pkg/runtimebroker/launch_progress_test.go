@@ -655,6 +655,8 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodeImagePullFailed, api.LaunchStepImagePull, "", "the agent image could not be pulled"},
 		{api.LaunchCodeInvalidImage, api.LaunchStepContainerCreate, "InvalidImageName", "the agent image reference is not valid (InvalidImageName)"},
 		{api.LaunchCodeInvalidImage, api.LaunchStepImagePull, "", "the agent image reference is not valid"},
+		{api.LaunchCodeImageLacksNetnsSetup, api.LaunchStepContainerStart, "", "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough"},
+		{api.LaunchCodeImageLacksNetnsSetup, api.LaunchStepLaunching, "", "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough"},
 		{api.LaunchCodeContainerConfig, api.LaunchStepContainerCreate, "CreateContainerConfigError", "the agent container could not be configured (CreateContainerConfigError)"},
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "CrashLoopBackOff", "the agent container keeps crashing on start (CrashLoopBackOff)"},
 		{api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error", "an init container of the agent pod failed (Error)"},
@@ -698,6 +700,22 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		_, step, _ := classifyStartError(context.Background(), errors.New("boom"), "", "", store.LaunchKindCreate)
 		if step != api.LaunchStepLaunching {
 			t.Fatalf("step = %q, want launching", step)
+		}
+	})
+	t.Run("wrapped post-run image_lacks_netns_setup failure", func(t *testing.T) {
+		inner := &scionrt.LaunchFailure{
+			Code: api.LaunchCodeImageLacksNetnsSetup,
+			Step: api.LaunchStepContainerStart,
+			Err:  fmt.Errorf("%w: Error: unknown command \"netns-setup\" for \"sciontool\" (image gcr.io/secret-proj/secret-image:old)", scionrt.ErrImageLacksNetnsSetup),
+		}
+		wrapped := fmt.Errorf("metadata network setup failed: %w", inner)
+		code, step, msg := classifyStartError(context.Background(), wrapped, "", api.LaunchStepLaunching, store.LaunchKindStart)
+		wantMsg := launchFailureText[api.LaunchCodeImageLacksNetnsSetup]
+		if code != api.LaunchCodeImageLacksNetnsSetup || step != api.LaunchStepContainerStart || msg != wantMsg {
+			t.Fatalf("got (%q, %q, %q), want (%q, %q, %q)", code, step, msg, api.LaunchCodeImageLacksNetnsSetup, api.LaunchStepContainerStart, wantMsg)
+		}
+		if strings.Contains(msg, "secret-image") || strings.Contains(msg, "secret-proj") {
+			t.Fatalf("message %q leaked raw image reference", msg)
 		}
 	})
 }
