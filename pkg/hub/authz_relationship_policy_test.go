@@ -118,6 +118,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 	{"hub_association", "agent", "env_var"}:     {},
 	{"broker_association", "agent", "secret"}:   {"secret.use"},
 	{"broker_association", "agent", "env_var"}:  {},
+	{"agent_association", "agent", "secret"}:    {"secret.use"},
 }
 
 func policyCellPermissions() map[relationshipAllowKey]map[string]bool {

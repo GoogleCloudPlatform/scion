@@ -1106,6 +1106,7 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 	{"hub_association", "agent", "env_var"}:     {"env_var.deliver"},
 	{"broker_association", "agent", "secret"}:   {"secret.deliver"},
 	{"broker_association", "agent", "env_var"}:  {"env_var.deliver"},
+	{"agent_association", "agent", "secret"}:    {"secret.deliver"},
 
 	// An agent may read its origin user's personal (user-scoped) skills,
 	// through the same progeny relationship as opted-in secrets, keyed on
@@ -1169,6 +1170,7 @@ var knownRelationshipNames = map[string]bool{
 	"project_association":  true,
 	"hub_association":      true,
 	"broker_association":   true,
+	"agent_association":    true,
 }
 
 // relationshipPolicyPrincipalKinds is the principal-kind vocabulary rows use.
