@@ -2528,9 +2528,10 @@ func applyDefaultUserRoleGrants(ctx context.Context, st store.Store, userID, use
 		return syncHubRoleGrants(ctx, st, userID, store.UserRoleAdmin, store.SystemReconcileCreatedBy)
 	}
 	res := resolveDefaultUserRole(ctx, st, defaultRole, customEnabled, true)
-	// Fail closed on transient store lookup errors rather than falling back to
-	// built-in hub-members (which would grant hub-member privileges permanently
-	// without a sentinel binding).
+	// On transient store lookup errors, return the error instead of granting
+	// hub-members immediately; the user remains without hub-level grants on
+	// this attempt until a subsequent login or startup backfill reconciles
+	// built-in hub-member membership (since no sentinel binding exists).
 	if res.Warning != nil && res.Warning.Code == DefaultUserRoleWarningLookupError {
 		return fmt.Errorf("resolve custom default user role %q: %s", defaultRole, res.Warning.Message)
 	}
