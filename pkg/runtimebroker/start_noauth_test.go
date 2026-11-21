@@ -260,10 +260,10 @@ func TestBuildStartContext_ADCAutoInjectWorkstationOnly(t *testing.T) {
 			srv.hubConnections["hub-1"] = &HubConnection{Name: "hub-1", IsColocated: true, Hydrator: newTestHydrator(t)}
 			srv.hubMu.Unlock()
 
-			home, err := os.UserHomeDir()
-			if err != nil {
-				t.Fatal(err)
-			}
+			// A home of its own, so the auto-inject setting written below
+			// does not stay on for later tests in the package.
+			home := t.TempDir()
+			t.Setenv("HOME", home)
 			naEnableADCAutoInject(t, home)
 
 			r := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
