@@ -29,6 +29,11 @@ five modes:
 The default mode is **`project`**, which preserves pre-mode behavior: any
 project member with the `agent.message` permission can message any agent.
 No tightening occurs until someone explicitly sets a non-default mode. A
+Hub operator can change the default for new agents with
+[`server.hub.default_message_mode`](/scion/reference/server-config/#hub-settings-serverhub)
+(`none`, `lineage`, `branch` or `project`). It applies only when neither the
+create request, the template nor the parent agent sets a mode, and it does not
+change existing agents. A
 soft-deleted agent (`deletedAt` set) cannot receive messages in any mode and
 returns the same `404` as an unknown target. A suspended (held) agent also
 refuses every message send in any mode (`409 agent_not_running`) before any wake,

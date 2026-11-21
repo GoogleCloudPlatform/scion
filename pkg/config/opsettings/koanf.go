@@ -123,6 +123,8 @@ var layer0Prefixes = []string{
 	"server.hub.system_one",
 	// Recurring schedule limits — read into ServerConfig at startup.
 	"server.hub.schedules",
+	// Default message mode of new agents — read into ServerConfig at startup.
+	"server.hub.default_message_mode",
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",

@@ -239,6 +239,7 @@
     "server.hub.chat",
     "server.hub.system_one",
     "server.hub.schedules",
+    "server.hub.default_message_mode",
     "server.relay"
   ],
   "file_keys": [

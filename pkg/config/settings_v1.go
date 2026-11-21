@@ -1994,6 +1994,10 @@ type V1ServerHubConfig struct {
 	// Schedules holds the limits on recurring schedules
 	// (server.hub.schedules). Read at startup.
 	Schedules *V1ServerHubSchedulesConfig `json:"schedules,omitempty" yaml:"schedules,omitempty" koanf:"schedules"`
+	// DefaultMessageMode is the message mode of a new agent when neither the
+	// create request, its template nor its parent agent sets one ("" =
+	// "project"; one of none, lineage, branch, project). Read at startup.
+	DefaultMessageMode string `json:"default_message_mode,omitempty" yaml:"default_message_mode,omitempty" koanf:"default_message_mode"`
 }
 
 // V1ServerHubSchedulesConfig holds the limits on recurring schedules
@@ -4873,6 +4877,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.Schedules.MaxActivePerProject = &n
 			}
 		}
+		gc.Hub.DefaultMessageMode = v1.Hub.DefaultMessageMode
 	}
 
 	if r := v1.Relay; r != nil {
@@ -5324,6 +5329,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			v1Hub.Schedules.MaxActivePerProject = &n
 		}
 	}
+	v1Hub.DefaultMessageMode = gc.Hub.DefaultMessageMode
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
 	}
