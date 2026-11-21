@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -184,18 +185,202 @@ func TestServerGitHubSourceSeams_WireVerifierParity(t *testing.T) {
 		})
 	}
 
-	// AppID == 0 must fail closed in both production ingress and seam verifier.
-	srv.mu.Lock()
-	srv.config.GitHubAppConfig.AppID = 0
-	srv.mu.Unlock()
+	// Step 1–2 parity table against production handleGitHubContentWebhook.
+	step12Cases := []struct {
+		name           string
+		appID          int64
+		mutateHeaders  func(h http.Header)
+		eventArg       string
+		deliveryArg    string
+		wantSeamErr    error
+		wantSupported  bool
+		wantProdStatus int
+		wantProdBody   string
+	}{
+		{
+			name:           "valid supported event passes steps 1-2",
+			appID:          4242,
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    nil,
+			wantSupported:  true,
+			wantProdStatus: http.StatusBadRequest, // advances past steps 1-2 to step 4 payload envelope check
+			wantProdBody:   "invalid payload",
+		},
+		{
+			name:           "AppID 0 fails closed",
+			appID:          0,
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrWebhookTargetMismatch,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "wrong target",
+		},
+		{
+			name:  "wrong target type",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Set("X-GitHub-Hook-Installation-Target-Type", "repository")
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrWebhookTargetMismatch,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "wrong target",
+		},
+		{
+			name:  "wrong target ID",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Set("X-GitHub-Hook-Installation-Target-ID", "9999")
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrWebhookTargetMismatch,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "wrong target",
+		},
+		{
+			name:  "duplicate target type header",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Add("X-GitHub-Hook-Installation-Target-Type", "integration")
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrWebhookTargetMismatch,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "wrong target",
+		},
+		{
+			name:  "duplicate target ID header",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Add("X-GitHub-Hook-Installation-Target-ID", "4242")
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrWebhookTargetMismatch,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "wrong target",
+		},
+		{
+			name:  "duplicate event header",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Add("X-GitHub-Event", triggithub.EventIssues)
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrInvalidWebhookHeaders,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "invalid event header",
+		},
+		{
+			name:  "missing event header",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Del("X-GitHub-Event")
+			},
+			eventArg:       "",
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrInvalidWebhookHeaders,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "invalid event header",
+		},
+		{
+			name:  "single empty event header ignored",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Set("X-GitHub-Event", "")
+				h.Del("X-GitHub-Delivery")
+			},
+			eventArg:       "",
+			deliveryArg:    "",
+			wantSeamErr:    nil,
+			wantSupported:  false,
+			wantProdStatus: http.StatusOK,
+			wantProdBody:   `"status":"ignored"`,
+		},
+		{
+			name:  "unsupported event family ignored",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Set("X-GitHub-Event", "push")
+				h.Del("X-GitHub-Delivery")
+			},
+			eventArg:       "push",
+			deliveryArg:    "",
+			wantSeamErr:    nil,
+			wantSupported:  false,
+			wantProdStatus: http.StatusOK,
+			wantProdBody:   `"status":"ignored"`,
+		},
+		{
+			name:  "missing delivery header",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Del("X-GitHub-Delivery")
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "",
+			wantSeamErr:    triggithub.ErrInvalidDeliveryID,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "invalid delivery id",
+		},
+		{
+			name:  "duplicate delivery header",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Add("X-GitHub-Delivery", "22222222-2222-3333-4444-555555555555")
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "11111111-2222-3333-4444-555555555555",
+			wantSeamErr:    triggithub.ErrInvalidDeliveryID,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "invalid delivery id",
+		},
+		{
+			name:  "malformed delivery GUID",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Set("X-GitHub-Delivery", "not-a-guid")
+			},
+			eventArg:       triggithub.EventIssueComment,
+			deliveryArg:    "not-a-guid",
+			wantSeamErr:    triggithub.ErrInvalidDeliveryID,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "invalid delivery id",
+		},
+	}
 
-	req := makeReq(validSig, "integration", "4242")
-	_, seamErr := srv.GitHubSourceWireVerifier().Verify(req, body, secrets)
-	assert.ErrorIs(t, seamErr, triggithub.ErrWebhookTargetMismatch)
+	// Held verifier must observe live AppID changes across subtests (O1).
+	heldVerifier := srv.GitHubSourceWireVerifier()
+	for _, tc := range step12Cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv.mu.Lock()
+			srv.config.GitHubAppConfig.AppID = tc.appID
+			srv.mu.Unlock()
 
-	rr := httptest.NewRecorder()
-	srv.handleGitHubContentWebhook(rr, req, triggithub.EventIssueComment, "11111111-2222-3333-4444-555555555555", body)
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
+			req := makeReq(validSig, "integration", "4242")
+			if tc.mutateHeaders != nil {
+				tc.mutateHeaders(req.Header)
+			}
+
+			d, seamErr := heldVerifier.Verify(req, body, secrets)
+			if tc.wantSeamErr != nil {
+				assert.ErrorIs(t, seamErr, tc.wantSeamErr)
+			} else {
+				require.NoError(t, seamErr)
+				assert.Equal(t, tc.wantSupported, triggithub.IsSupportedEvent(d.Event))
+			}
+
+			rr := httptest.NewRecorder()
+			srv.handleGitHubContentWebhook(rr, req, tc.eventArg, tc.deliveryArg, body)
+			assert.Equal(t, tc.wantProdStatus, rr.Code)
+			assert.Contains(t, rr.Body.String(), tc.wantProdBody)
+		})
+	}
 }
 
 func TestServerGitHubSourceSeams_NormalizerPeekNoIO(t *testing.T) {
@@ -408,7 +593,7 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	// 3. Comment ProviderAction parity against registered githubCommentAction / s.fireAction.
 	ev, err := srv.GitHubSourceNormalizer().Normalize(ctx, delivery, body, targets[0])
 	require.NoError(t, err)
-	ev.ID = "evt-seam-1"
+	ev.ID = uuid.NewString()
 
 	userTrigger := &store.Trigger{
 		ID:            "11111111-1111-4111-8111-111111111111",
@@ -432,6 +617,52 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 		},
 	}
 	require.NoError(t, st.CreateTrigger(ctx, userTrigger))
+
+	messageTrigger := &store.Trigger{
+		ID:            "44444444-4444-4444-8444-444444444444",
+		ProjectID:     projA.ID,
+		Name:          "seam-user-message",
+		Status:        store.TriggerStatusActive,
+		SourceKind:    store.TriggerSourceKindGitHub,
+		MatchTypes:    []string{"github.issue_comment.created"},
+		SubjectMode:   store.TriggerSubjectModeNew,
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"target":"agent-1","message":"hello"}`,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+			InitiatorPrincipalID:    admin.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{
+			Kind: store.EffectCeilingPrincipal,
+		},
+	}
+	require.NoError(t, st.CreateTrigger(ctx, messageTrigger))
+
+	pausedTrigger := &store.Trigger{
+		ID:            "55555555-5555-4555-8555-555555555555",
+		ProjectID:     projA.ID,
+		Name:          "seam-user-paused",
+		Status:        store.TriggerStatusPaused,
+		SourceKind:    store.TriggerSourceKindGitHub,
+		MatchTypes:    []string{"github.issue_comment.created"},
+		SubjectMode:   store.TriggerSubjectModeNew,
+		ActionType:    store.TriggerActionGitHubComment,
+		ActionPayload: `{"body":"Should not post while paused"}`,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+			InitiatorPrincipalID:    admin.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{
+			Kind: store.EffectCeilingPrincipal,
+		},
+	}
+	require.NoError(t, st.CreateTrigger(ctx, pausedTrigger))
 
 	agentTrigger := &store.Trigger{
 		ID:            "22222222-2222-4222-8222-222222222222",
@@ -458,6 +689,30 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	}
 	require.NoError(t, st.CreateTrigger(ctx, agentTrigger))
 
+	// Helper to claim a real TriggerFire row in "firing" state, matching the
+	// production dispatcher's claim-before-fire invariant.
+	claimFire := func(t *testing.T, tr *store.Trigger, srcEv source.Event) (string, source.Event) {
+		t.Helper()
+		evCopy := srcEv
+		evCopy.ID = uuid.NewString()
+		fireID := uuid.NewString()
+		claimed, _, err := st.ClaimTriggerFire(ctx, &store.TriggerFire{
+			ID:                   fireID,
+			ProjectID:            tr.ProjectID,
+			TriggerID:            tr.ID,
+			EventID:              evCopy.ID,
+			Subject:              evCopy.Subject,
+			ActionType:           tr.ActionType,
+			Status:               store.TriggerFireStatusFiring,
+			LeaseUntil:           now.Add(5 * time.Minute),
+			StartedAt:            now,
+			InitiatorAttribution: tr.InitiatorAttribution,
+		})
+		require.NoError(t, err)
+		require.True(t, claimed)
+		return fireID, evCopy
+	}
+
 	action := srv.GitHubSourceCommentAction()
 	assert.Equal(t, store.TriggerActionGitHubComment, action.Kind())
 
@@ -470,7 +725,7 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	// 3a. Missing TriggerID refuses (fail closed, never posts without trigger authority).
 	noTrigRes, err := action.Fire(ctx, source.ActionFireRequest{
 		ProjectID: projA.ID,
-		FireID:    "fire-no-trig",
+		FireID:    uuid.NewString(),
 		Payload:   normPayload,
 		Event:     ev,
 		Target:    targets[0],
@@ -481,13 +736,77 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	assert.Equal(t, "github.comment refused", noTrigRes.Error)
 	assert.Equal(t, int64(0), commentPosted.Load())
 
+	// 3a-2. Unclaimed FireID refuses (no trigger_fires claim row).
+	unclaimedRes, err := action.Fire(ctx, source.ActionFireRequest{
+		ProjectID: projA.ID,
+		TriggerID: userTrigger.ID,
+		FireID:    uuid.NewString(),
+		Payload:   normPayload,
+		Event:     ev,
+		Target:    targets[0],
+		Attempts:  1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(hubfire.FireStatusRefused), unclaimedRes.Status)
+	assert.Equal(t, "github.comment refused", unclaimedRes.Error)
+	assert.Equal(t, int64(0), commentPosted.Load())
+
+	// 3a-3. Non-comment trigger (ActionType == "message") refuses with no post.
+	msgFireID, msgEv := claimFire(t, messageTrigger, ev)
+	nonCommentRes, err := action.Fire(ctx, source.ActionFireRequest{
+		ProjectID: projA.ID,
+		TriggerID: messageTrigger.ID,
+		FireID:    msgFireID,
+		Payload:   normPayload,
+		Event:     msgEv,
+		Target:    targets[0],
+		Attempts:  1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(hubfire.FireStatusRefused), nonCommentRes.Status)
+	assert.Equal(t, "github.comment refused", nonCommentRes.Error)
+	assert.Equal(t, int64(0), commentPosted.Load())
+
+	// 3a-4. Paused trigger refuses with no post (dispatcher fires active triggers only).
+	pausedFireID, pausedEv := claimFire(t, pausedTrigger, ev)
+	pausedRes, err := action.Fire(ctx, source.ActionFireRequest{
+		ProjectID: projA.ID,
+		TriggerID: pausedTrigger.ID,
+		FireID:    pausedFireID,
+		Payload:   pausedTrigger.ActionPayload,
+		Event:     pausedEv,
+		Target:    targets[0],
+		Attempts:  1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(hubfire.FireStatusRefused), pausedRes.Status)
+	assert.Equal(t, "github.comment refused", pausedRes.Error)
+	assert.Equal(t, int64(0), commentPosted.Load())
+
+	// 3a-5. Caller-supplied payload differing from stored tr.ActionPayload refuses with no post.
+	mismatchFireID, mismatchEv := claimFire(t, userTrigger, ev)
+	mismatchRes, err := action.Fire(ctx, source.ActionFireRequest{
+		ProjectID: projA.ID,
+		TriggerID: userTrigger.ID,
+		FireID:    mismatchFireID,
+		Payload:   `{"body":"caller override payload"}`,
+		Event:     mismatchEv,
+		Target:    targets[0],
+		Attempts:  1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(hubfire.FireStatusRefused), mismatchRes.Status)
+	assert.Equal(t, "github.comment refused", mismatchRes.Error)
+	assert.Equal(t, int64(0), commentPosted.Load())
+
 	// 3b. Posted (with Attempts=2 so marker scan verifies Since == ev.ReceivedAt and template vars).
+	okFireID, okEv := claimFire(t, userTrigger, ev)
 	fireRes, err := action.Fire(ctx, source.ActionFireRequest{
 		ProjectID: projA.ID,
 		TriggerID: userTrigger.ID,
-		FireID:    "fire-ok-1",
+		FireID:    okFireID,
 		Payload:   normPayload,
-		Event:     ev,
+		Event:     okEv,
 		Target:    targets[0],
 		Attempts:  2,
 	})
@@ -495,7 +814,7 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	assert.Equal(t, string(hubfire.FireStatusFired), fireRes.Status)
 	assert.Equal(t, "9876", fireRes.ResultRef)
 	assert.Equal(t, int64(1), commentPosted.Load())
-	assert.Contains(t, lastCommentBody.Load().(string), "Event evt-seam-1 at 2026-11-21T12:00:00Z")
+	assert.Contains(t, lastCommentBody.Load().(string), "Event "+okEv.ID+" at 2026-11-21T12:00:00Z")
 	assert.Equal(t, now.Format(time.RFC3339), lastListSince.Load())
 
 	// Helper to compare seam outcome against direct s.fireAction on the same trigger & event.
@@ -509,8 +828,8 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 				DefinitionID:   tr.ID,
 				FireID:         fireID,
 			},
-			ActionType: store.TriggerActionGitHubComment,
-			Payload:    normPayload,
+			ActionType: tr.ActionType,
+			Payload:    tr.ActionPayload,
 			Event: &hubfire.FireEvent{
 				ID:         srcEv.ID,
 				ProjectID:  tr.ProjectID,
@@ -539,13 +858,14 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 		"number":     "7",
 		"stale":      "true",
 	}
-	wantStale := fireDirect(userTrigger, "fire-stale-prod", staleEv)
+	staleFireID, staleEvClaimed := claimFire(t, userTrigger, staleEv)
+	wantStale := fireDirect(userTrigger, "fire-stale-prod", staleEvClaimed)
 	gotStale, err := action.Fire(ctx, source.ActionFireRequest{
 		ProjectID: projA.ID,
 		TriggerID: userTrigger.ID,
-		FireID:    "fire-stale-seam",
+		FireID:    staleFireID,
 		Payload:   normPayload,
-		Event:     staleEv,
+		Event:     staleEvClaimed,
 		Target:    targets[0],
 		Attempts:  1,
 	})
@@ -555,13 +875,14 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	assert.Equal(t, "stale event", gotStale.Error)
 
 	// 3d. Agent principal parity: both refuse with "github.comment refused".
-	wantAgent := fireDirect(agentTrigger, "fire-agent-prod", ev)
+	agentFireID, agentEv := claimFire(t, agentTrigger, ev)
+	wantAgent := fireDirect(agentTrigger, "fire-agent-prod", agentEv)
 	gotAgent, err := action.Fire(ctx, source.ActionFireRequest{
 		ProjectID: projA.ID,
 		TriggerID: agentTrigger.ID,
-		FireID:    "fire-agent-seam",
-		Payload:   normPayload,
-		Event:     ev,
+		FireID:    agentFireID,
+		Payload:   agentTrigger.ActionPayload,
+		Event:     agentEv,
 		Target:    targets[0],
 		Attempts:  1,
 	})
@@ -573,13 +894,14 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	// 3e. Rate-limited parity: exhaust per-project bucket, both return skipped / "comment rate limited".
 	for srv.AllowGitHubComment(projA.ID) == nil {
 	}
-	wantRL := fireDirect(userTrigger, "fire-rl-prod", ev)
+	rlFireID, rlEv := claimFire(t, userTrigger, ev)
+	wantRL := fireDirect(userTrigger, "fire-rl-prod", rlEv)
 	gotRL, err := action.Fire(ctx, source.ActionFireRequest{
 		ProjectID: projA.ID,
 		TriggerID: userTrigger.ID,
-		FireID:    "fire-rl-seam",
+		FireID:    rlFireID,
 		Payload:   normPayload,
-		Event:     ev,
+		Event:     rlEv,
 		Target:    targets[0],
 		Attempts:  1,
 	})
@@ -593,13 +915,14 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	now = now.Add(time.Minute) // refill comment bucket
 	projA.GitHubPermissions = &store.GitHubTokenPermissions{Contents: "read", Metadata: "read"}
 	require.NoError(t, st.UpdateProject(ctx, projA))
-	wantMintRefused := fireDirect(userTrigger, "fire-perm-prod", ev)
+	permFireID, permEv := claimFire(t, userTrigger, ev)
+	wantMintRefused := fireDirect(userTrigger, "fire-perm-prod", permEv)
 	gotMintRefused, err := action.Fire(ctx, source.ActionFireRequest{
 		ProjectID: projA.ID,
 		TriggerID: userTrigger.ID,
-		FireID:    "fire-perm-seam",
+		FireID:    permFireID,
 		Payload:   normPayload,
-		Event:     ev,
+		Event:     permEv,
 		Target:    targets[0],
 		Attempts:  1,
 	})

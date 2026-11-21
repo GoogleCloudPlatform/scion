@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -25,17 +26,18 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	triggithub "github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/github"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // GitHubSourceWireVerifier returns GitHub's source.WireVerifier backed by the
-// Server's configured AppID and clock.
+// Server's live configured AppID and clock.
 func (s *Server) GitHubSourceWireVerifier() source.WireVerifier {
 	return &triggithub.WireVerifier{
-		ExpectedAppID: s.githubAppConfiguredID(),
-		Now:           s.githubWebhookIngress.now,
+		ExpectedAppIDFn: s.githubAppConfiguredID,
+		Now:             s.githubWebhookIngress.now,
 	}
 }
 
@@ -191,7 +193,7 @@ func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 					Error:  "github comment failed",
 				}, nil
 			}
-			if strings.TrimSpace(req.TriggerID) == "" {
+			if strings.TrimSpace(req.TriggerID) == "" || strings.TrimSpace(req.FireID) == "" {
 				return source.ActionFireResult{
 					Status: string(hubfire.FireStatusRefused),
 					Error:  "github.comment refused",
@@ -210,7 +212,48 @@ func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 					Error:  "github comment failed",
 				}, nil
 			}
-			if tr.ProjectID != req.ProjectID {
+			if tr.ProjectID != req.ProjectID ||
+				tr.Status != store.TriggerStatusActive ||
+				tr.ActionType != store.TriggerActionGitHubComment {
+				return source.ActionFireResult{
+					Status: string(hubfire.FireStatusRefused),
+					Error:  "github.comment refused",
+				}, nil
+			}
+			// Always bind to the trigger's stored ActionPayload; refuse if a
+			// caller supplies a payload that differs after normalisation.
+			if req.Payload != "" && req.Payload != tr.ActionPayload {
+				storedP, _, storedErr := parseAndValidateGitHubCommentPayload(tr.ActionPayload)
+				reqP, _, reqErr := parseAndValidateGitHubCommentPayload(req.Payload)
+				storedNorm, mErr1 := json.Marshal(storedP)
+				reqNorm, mErr2 := json.Marshal(reqP)
+				if storedErr != nil || reqErr != nil || mErr1 != nil || mErr2 != nil || string(storedNorm) != string(reqNorm) {
+					return source.ActionFireResult{
+						Status: string(hubfire.FireStatusRefused),
+						Error:  "github.comment refused",
+					}, nil
+				}
+			}
+			// Require a claimed TriggerFire record for this trigger, project,
+			// action type, and event (matching the production dispatcher).
+			fire, err := s.store.GetTriggerFire(ctx, req.FireID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+					return source.ActionFireResult{
+						Status: string(hubfire.FireStatusRefused),
+						Error:  "github.comment refused",
+					}, nil
+				}
+				return source.ActionFireResult{
+					Status: string(hubfire.FireStatusFailed),
+					Error:  "github comment failed",
+				}, nil
+			}
+			if fire.TriggerID != tr.ID ||
+				fire.ProjectID != tr.ProjectID ||
+				fire.ActionType != store.TriggerActionGitHubComment ||
+				fire.Status != store.TriggerFireStatusFiring ||
+				(fire.EventID != "" && req.Event.ID != "" && fire.EventID != req.Event.ID) {
 				return source.ActionFireResult{
 					Status: string(hubfire.FireStatusRefused),
 					Error:  "github.comment refused",
@@ -232,10 +275,10 @@ func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 					Ceiling:        tr.AuthorityCeiling,
 					DefinitionKind: hubfire.DefinitionKindTrigger,
 					DefinitionID:   tr.ID,
-					FireID:         req.FireID,
+					FireID:         fire.ID,
 				},
-				ActionType: store.TriggerActionGitHubComment,
-				Payload:    req.Payload,
+				ActionType: tr.ActionType,
+				Payload:    tr.ActionPayload,
 				Event: &hubfire.FireEvent{
 					ID:         req.Event.ID,
 					ProjectID:  tr.ProjectID,
@@ -252,6 +295,10 @@ func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 						ID:   tr.ID,
 						Name: tr.Name,
 					},
+				},
+				Executor: hubfire.ExecutorContext{
+					Kind: trigger.ExecutorKindTriggerDrainer,
+					ID:   trigger.ExecutorIDPrefixTriggerEvent + req.Event.ID,
 				},
 				FireAt:   req.Event.ReceivedAt,
 				Attempts: req.Attempts,
