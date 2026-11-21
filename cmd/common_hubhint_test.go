@@ -293,3 +293,35 @@ func TestHintHubEndpoint_Resolves(t *testing.T) {
 		t.Errorf("from the environment: got %q", got)
 	}
 }
+
+func TestWrapHubError_MissingScopeHint(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "agent-uuid-123")
+	t.Setenv("SCION_AGENT_SLUG", "worker-1")
+	base := &apiclient.APIError{
+		StatusCode: 403,
+		Code:       apiclient.ErrCodeMissingScope,
+		Message:    "the credential does not carry the project:template:write scope",
+		Details: map[string]interface{}{
+			"scope":  "project:template:write",
+			"scopes": []interface{}{"project:template:write"},
+		},
+	}
+	got := wrapHubError(fmt.Errorf("failed to update template via Hub: %w", base))
+	if got == nil {
+		t.Fatal("expected non-nil error")
+	}
+	msg := got.Error()
+	for _, want := range []string{
+		"failed to update template via Hub",
+		"does not carry the project:template:write scope.",
+		"scope ceiling of the agent's creator",
+		"scion reset-auth worker-1 --reissue-scopes",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("expected %q in %q", want, msg)
+		}
+	}
+	if strings.Contains(strings.ToLower(msg), "artifact") {
+		t.Errorf("generic missing_scope hint must not mention artifacts: %q", msg)
+	}
+}

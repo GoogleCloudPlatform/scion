@@ -275,6 +275,13 @@ func TestMissingScopeHint(t *testing.T) {
 	older := missingScopeHint(map[string]any{"scope": "project:artifact:write"})
 	assert.Contains(t, older, "the project:artifact:write scope.")
 
+	nonArtifact := missingScopeHint(map[string]any{
+		"scope":  "project:template:write",
+		"scopes": []any{"project:template:write"},
+	})
+	assert.Contains(t, nonArtifact, "the project:template:write scope.")
+	assert.NotContains(t, strings.ToLower(nonArtifact), "artifact", "missingScopeHint must stay generic across scopes")
+
 	assert.Contains(t, missingScopeHint(nil), "a required scope")
 
 	t.Setenv("SCION_AGENT_SLUG", "")

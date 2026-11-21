@@ -179,6 +179,11 @@ const (
 	// broker was deregistered). Brokers treat this as a terminal response and
 	// stop retrying until re-registered.
 	ErrCodeBrokerDeregistered = "broker_deregistered"
+	// ErrCodeMissingScope is the hub's 403 code when an agent credential
+	// lacks one or more ceiling-optional scopes required for an operation.
+	// Details carry every missing scope under "scopes" (and the first under
+	// "scope").
+	ErrCodeMissingScope = "missing_scope"
 )
 
 // errorResponse matches the API error response format.

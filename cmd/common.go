@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -680,16 +681,63 @@ func wrapHubError(err error) error {
 		return &hubError{msg: msg, err: err}
 	}
 	var apiErr *apiclient.APIError
-	if errors.As(err, &apiErr) && apiErr.Code == api.ErrCodeRuntimeProfileUnsupported {
-		return &hubError{
-			msg: err.Error() + "; select the target Runtime Broker directly with --broker instead (--profile applies only to legacy profile-based Runtime Brokers)",
-			err: err,
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusForbidden && apiErr.Code == apiclient.ErrCodeMissingScope {
+			return &hubError{
+				msg: err.Error() + missingScopeHint(apiErr.Details),
+				err: err,
+			}
+		}
+		if apiErr.Code == api.ErrCodeRuntimeProfileUnsupported {
+			return &hubError{
+				msg: err.Error() + "; select the target Runtime Broker directly with --broker instead (--profile applies only to legacy profile-based Runtime Brokers)",
+				err: err,
+			}
 		}
 	}
 	if config.IsHubManagedAgent() || !shouldSuggestHubCheck(err) {
 		return &hubError{msg: err.Error(), err: err}
 	}
 	return &hubError{msg: err.Error() + hubCheckHint(hintHubEndpoint()), err: err}
+}
+
+// missingScopeHint is the hint for a 403 missing_scope (ptone/scion#4571,
+// ptone/scion#8324). It names every scope the hub reported: details.scopes,
+// or the single details.scope an older hub sends. Any ceiling-optional role
+// scope may be omitted from an agent's token when the creator's scope ceiling
+// lacks its permission, so recreating the agent from the same parent does not
+// help; a scope re-issue by a hub super-admin does, once the creator holds
+// the scopes.
+func missingScopeHint(details map[string]any) string {
+	var scopes []string
+	if list, ok := details["scopes"].([]any); ok {
+		for _, v := range list {
+			if s, ok := v.(string); ok && s != "" && !slices.Contains(scopes, s) {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+	if len(scopes) == 0 {
+		if v, ok := details["scope"].(string); ok && v != "" {
+			scopes = []string{v}
+		}
+	}
+	what := "a required scope"
+	switch len(scopes) {
+	case 0:
+	case 1:
+		what = "the " + scopes[0] + " scope"
+	default:
+		what = "the " + strings.Join(scopes, " and ") + " scopes"
+	}
+	agent := os.Getenv("SCION_AGENT_SLUG")
+	if agent == "" {
+		agent = "<agent>"
+	}
+	return "\nThis agent's credential does not carry " + what + ". The usual cause is the scope ceiling of the " +
+		"agent's creator; recreating the agent from the same parent gives it the same scopes. Ask the agent's user " +
+		"to have a hub super-admin re-issue its scopes once its creator holds them: scion reset-auth " + agent +
+		" --reissue-scopes (parents before children)."
 }
 
 // printDeleteInProgressWarnings writes each string in details.warnings of a

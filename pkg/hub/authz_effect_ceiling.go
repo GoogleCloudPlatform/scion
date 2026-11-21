@@ -177,8 +177,9 @@ var recordedProvenanceRequiredIDs = []string{
 
 var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 
-// legacyChainExcludedPermissions are the permissions covered by the
-// ceilingOptionalRoleScopes (the artifact permissions). A chain with no
+// legacyChainExcludedPermissions are the permissions covered by
+// ceilingOptionalRoleScopes (every additive scope added to existing role
+// bundles, starting with the artifact permissions). A chain with no
 // recorded bound (an unrecorded ceiling or a migration-sentinel edge) never
 // held them, so it is not issued those scopes and is denied these
 // permissions at use. Principal chains are unaffected: their authority is
@@ -379,12 +380,16 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 }
 
 // ceilingOptionalRoleScopes are role scopes that do not decide whether a
-// role fits a ceiling. A child whose ceiling does not allow one still gets
-// the role; the mint filter (ceilingAllowsScope at issue time) leaves the
-// scope out of its tokens. The artifact scopes joined the agent roles after
-// UAT selector sets were in use, so making them optional keeps every token
-// that fit a role before still fitting it, while a child only uses the
-// artifact service when its source could.
+// role fits a ceiling (roleFitsCeiling) or may be delegated
+// (canAgentDelegateToAgent). Every scope added to an existing agent role
+// bundle (ScopesForRole) must be listed here (enforced by
+// TestScopesForRole_NonOptionalScopesAreFrozen, reviewed in
+// TestCeilingOptionalRoleScopesAreReviewed): a child whose ceiling does not
+// allow one still gets the role, and the mint filter (ceilingAllowsScope at
+// issue time) leaves the scope out of its tokens with droppedScopesWarning
+// until a top-down 'scion reset-auth --reissue-scopes'. This prevents a deploy
+// that adds a role scope from breaking delegation for pre-deploy agent JWTs,
+// frozen bounded agent chains, or existing UAT selector sets (ptone/scion#8324).
 var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
 	ScopeProjectArtifactRead:  true,
 	ScopeProjectArtifactWrite: true,

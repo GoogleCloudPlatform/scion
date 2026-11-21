@@ -168,9 +168,10 @@ func droppedCeilingOptionalScopes(candidates, issued []AgentTokenScope) []AgentT
 
 // droppedScopesWarning is the create and start warning for a grant whose
 // chain ceiling left out ceiling-optional role scopes, or "" when it left
-// out none (ptone/scion#4569). An agent created by a parent whose ceiling
-// lacks the artifact scopes still gets its role, but its first artifact
-// command fails with missing_scope; this says so up front.
+// out none (ptone/scion#4569, ptone/scion#8324). An agent created by a parent
+// whose ceiling lacks a ceiling-optional scope still gets its role, while
+// operations requiring that scope fail with missing_scope; this says so up
+// front.
 func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 	if grant == nil || len(grant.DroppedScopes) == 0 {
 		return ""
@@ -190,9 +191,9 @@ func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 		noun, verb = "scopes", "them"
 	}
 	return fmt.Sprintf("agent token issued without the %s %s: the scope ceiling of the agent's creator does not allow %s, "+
-		"so artifact commands will fail with missing_scope. Recreating the agent from the same parent gives it the same scopes; "+
-		"once the creator holds them, a hub super-admin can run 'scion reset-auth %s --reissue-scopes'",
-		strings.Join(names, " and "), noun, verb, agentName)
+		"so operations requiring %s will fail with missing_scope. Recreating the agent from the same parent gives it the same scopes; "+
+		"once the creator holds %s, a hub super-admin can run 'scion reset-auth %s --reissue-scopes'",
+		strings.Join(names, " and "), noun, verb, verb, verb, agentName)
 }
 
 // SignAgentToken signs grant for runID with the server's token service.

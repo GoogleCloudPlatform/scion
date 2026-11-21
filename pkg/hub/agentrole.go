@@ -14,6 +14,8 @@
 
 package hub
 
+import "testing"
+
 // AgentRole represents a named authorization tier for agents.
 // Each role maps to a fixed bundle of JWT scopes.
 type AgentRole string
@@ -35,13 +37,50 @@ func ValidAgentRole(r AgentRole) bool {
 }
 
 // ScopesForRole returns the JWT scopes granted by a named agent role.
-// Scopes in ceilingOptionalRoleScopes (project:artifact:read, project:artifact:write) are part of the
-// bundle but never decide whether a role fits a ceiling or may be delegated;
-// a mint drops them when the source ceiling lacks their permission.
+//
+// Additive-scope rule (ptone/scion#8324): every scope added to an existing
+// role bundle MUST also be listed in ceilingOptionalRoleScopes
+// (authz_effect_ceiling.go), enforced by
+// TestScopesForRole_NonOptionalScopesAreFrozen. Adding a non-optional scope to
+// an existing role causes canAgentDelegateToAgent to reject delegation with
+// 403 for running agents whose pre-deploy JWTs lack the scope, and permanently
+// blocks agent-created chains whose frozen EffectCeilingBounded edge predates
+// the scope until a hub super-admin runs 'scion reset-auth --reissue-scopes'
+// top-down (see docs-site/src/content/docs/reference/permissions-policy.md).
+//
+// Scopes in ceilingOptionalRoleScopes are part of the bundle but never decide
+// whether a role fits a ceiling (roleFitsCeiling) or may be delegated
+// (canAgentDelegateToAgent); a mint drops them with droppedScopesWarning when
+// the source ceiling lacks their permission.
+//
 // Returns nil for AgentRoleNone (caller should set NoAuth=true instead).
 // GCP token scopes and identity token scopes are NOT included here —
 // they are appended dynamically at dispatch time based on agent config.
 func ScopesForRole(role AgentRole) []AgentTokenScope {
+	return filterWithheldRoleScopesForTest(testing.Testing(), scopesForRole(role))
+}
+
+// roleScopesWithheldForTest holds scopes omitted by a test simulating a
+// pre-deploy binary whose role bundle predates an additive scope
+// (ptone/scion#8324). Only _test.go code writes it, and
+// filterWithheldRoleScopesForTest ignores it outside a test binary
+// (testing.Testing()), so no production path can alter role bundles.
+var roleScopesWithheldForTest map[AgentTokenScope]bool
+
+func filterWithheldRoleScopesForTest(inTestBinary bool, scopes []AgentTokenScope) []AgentTokenScope {
+	if !inTestBinary || len(roleScopesWithheldForTest) == 0 || len(scopes) == 0 {
+		return scopes
+	}
+	out := make([]AgentTokenScope, 0, len(scopes))
+	for _, s := range scopes {
+		if !roleScopesWithheldForTest[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func scopesForRole(role AgentRole) []AgentTokenScope {
 	switch role {
 	case AgentRoleNone:
 		return nil
@@ -84,9 +123,9 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeProjectArtifactWrite,
 		}
 	case "":
-		return ScopesForRole(AgentRoleNone)
+		return nil
 	default:
-		return ScopesForRole(AgentRoleNone)
+		return nil
 	}
 }
 

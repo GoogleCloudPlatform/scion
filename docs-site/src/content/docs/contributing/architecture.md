@@ -532,6 +532,8 @@ Broker -> Hub API: HMAC-SHA256 Signed Request
 CLI -> Hub API: UAT (scion_pat_...)
 ```
 
+For authorization evaluation, agent role bundles, delegation ceilings, and developer conventions when adding permissions or agent role scopes, see [Permissions & Access Constraints Reference](/scion/reference/permissions-policy/#adding-permissions-developer-conventions).
+
 ---
 
 ## Data Flow: Agent Creation (Hosted)
