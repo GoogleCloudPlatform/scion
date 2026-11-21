@@ -87,6 +87,11 @@ type signInPolicyDeps struct {
 	// not fail the sign-in, matching the existing best-effort treatment.
 	syncGrants func(ctx context.Context, userID, role string) error
 
+	// applyDefaultGrants applies the configured server.auth.default_user_role
+	// grants (built-in or custom) on invited-user activation and admin
+	// demotion. Optional: when nil, falls back to syncGrants.
+	applyDefaultGrants func(ctx context.Context, userID, role string) error
+
 	// auditActivated / auditDenied record invite-lifecycle audit events.
 	// Optional no-ops when nil. auditDenied receives the denial code from
 	// signInDenial, or "" when the decision came from authorize.
@@ -172,11 +177,12 @@ func applyLiveSignInPolicy(
 	// user.Role.
 	var bindingSuperAdmin string // "", "ensure", or "delete"
 
-	// activated / roleChanged / profileChanged track what actually changed,
-	// so a caller invoked on every request can persist only when it matters
-	// (see signInPolicyPersistOpts). activated implies a role/grant sync
-	// regardless of AlwaysPersist; profileChanged alone does not.
-	var activated, roleChanged, profileChanged bool
+	// activated / roleChanged / demotedFromAdmin / profileChanged track what
+	// actually changed, so a caller invoked on every request can persist only
+	// when it matters (see signInPolicyPersistOpts). activated implies a
+	// role/grant sync regardless of AlwaysPersist; profileChanged alone does
+	// not.
+	var activated, roleChanged, demotedFromAdmin, profileChanged bool
 
 	if user.Status == store.UserStatusInvited {
 		activated = true
@@ -220,6 +226,7 @@ func applyLiveSignInPolicy(
 				roleChanged = true
 				if oldRole == store.UserRoleAdmin {
 					bindingSuperAdmin = "delete"
+					demotedFromAdmin = true
 				} else if newRole == store.UserRoleAdmin {
 					bindingSuperAdmin = "ensure"
 				}
@@ -255,10 +262,17 @@ func applyLiveSignInPolicy(
 		}
 	}
 
-	if shouldSyncGrants && deps.syncGrants != nil {
-		if err := deps.syncGrants(ctx, user.ID, user.Role); err != nil {
-			slog.Warn("failed to sync hub role grants on sign-in",
-				"email", user.Email, "user_id", user.ID, "role", user.Role, "error", err)
+	if shouldSyncGrants {
+		if (activated || demotedFromAdmin) && deps.applyDefaultGrants != nil {
+			if err := deps.applyDefaultGrants(ctx, user.ID, user.Role); err != nil {
+				slog.Warn("failed to apply default user role grants on sign-in",
+					"email", user.Email, "user_id", user.ID, "role", user.Role, "error", err)
+			}
+		} else if deps.syncGrants != nil {
+			if err := deps.syncGrants(ctx, user.ID, user.Role); err != nil {
+				slog.Warn("failed to sync hub role grants on sign-in",
+					"email", user.Email, "user_id", user.ID, "role", user.Role, "error", err)
+			}
 		}
 	}
 

@@ -1671,6 +1671,19 @@ func backfillSuperAdminBinding(ctx context.Context, s store.Store, userID string
 	return true, nil
 }
 
+// reconcileApplyDefaultUserRoleGrants applies the configured default user role
+// grants after the startup reconciler demotes an admin. Invited users are
+// skipped (placeholder role). Best-effort: errors are logged.
+func reconcileApplyDefaultUserRoleGrants(ctx context.Context, s store.Store, u *store.User, defaultRole string, customDefaultRoleEnabled bool) {
+	if u.Status == store.UserStatusInvited {
+		return
+	}
+	if err := applyDefaultUserRoleGrants(ctx, s, u.ID, u.Role, defaultRole, customDefaultRoleEnabled); err != nil {
+		slog.Warn("failed to apply default user role grants during super-admin reconciliation",
+			"user_id", u.ID, "role", u.Role, "default_role", defaultRole, "error", err)
+	}
+}
+
 // reconcileSyncHubRoleGrants syncs hub role grants after the startup
 // reconciler changed a user's role. Invited users are skipped (placeholder
 // role). Best-effort: errors are logged.
@@ -1871,6 +1884,10 @@ func reconcileSkipsUser(u *store.User) bool {
 //
 // This is called after BackfillRoleBindings and is idempotent.
 func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails []string, defaultRole string) (demotionSafe bool, err error) {
+	return reconcileSuperAdminBindings(ctx, s, adminEmails, defaultRole, false)
+}
+
+func reconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails []string, defaultRole string, customDefaultRoleEnabled bool) (demotionSafe bool, err error) {
 	// Demotion lands on the configured default role, exactly like login-time
 	// demotion in determineUserRole.
 	demoteTo := normalizedDefaultRole(defaultRole)
@@ -2066,7 +2083,7 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 							"user_id", u.ID, "error", err)
 					} else {
 						demoted++
-						reconcileSyncHubRoleGrants(ctx, s, u)
+						reconcileApplyDefaultUserRoleGrants(ctx, s, u, defaultRole, customDefaultRoleEnabled)
 					}
 				}
 				// Delete orphaned super-admin bindings for users NOT in adminEmails.
@@ -2387,9 +2404,15 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 // role, and is idempotent. Call it after (or in the same transaction as)
 // persisting User.Role. st may be a transaction store.
 //
-//	member → ensure hub-members membership; delete hub-viewer binding(s)
-//	viewer → remove hub-members membership; ensure an unconditional hub-viewer binding
-//	admin  → delete hub-viewer binding(s); hub-members membership is left as-is
+//	member (non-admin-API) → if user holds an unconditional SystemDefaultRoleCreatedBy
+//	                         custom system-scope binding, skip ensureHubMembershipTx;
+//	                         otherwise ensure hub-members membership. Delete hub-viewer bindings.
+//	member (admin-API)     → delete SystemDefaultRoleCreatedBy bindings; ensure hub-members
+//	                         membership; delete hub-viewer binding(s).
+//	viewer                 → remove hub-members membership; delete SystemDefaultRoleCreatedBy
+//	                         bindings; ensure an unconditional hub-viewer binding.
+//	admin                  → delete hub-viewer binding(s) and SystemDefaultRoleCreatedBy
+//	                         bindings; hub-members membership is left as-is.
 //
 // The super-admin binding is NOT handled here; the existing super-admin
 // ensure/delete paths own it. createdBy records provenance on a newly created
@@ -2401,20 +2424,137 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 func syncHubRoleGrants(ctx context.Context, st store.Store, userID, role, createdBy string) error {
 	switch role {
 	case store.UserRoleMember:
-		if err := ensureHubMembershipTx(ctx, st, userID); err != nil {
+		if createdBy == store.AdminAPICreatedBy {
+			if err := deleteSystemDefaultRoleBindingsTx(ctx, st, userID); err != nil {
+				return err
+			}
+			if err := ensureHubMembershipTx(ctx, st, userID); err != nil {
+				return err
+			}
+			return deleteHubViewerBindingsTx(ctx, st, userID)
+		}
+		hasCustomDefault, err := hasActiveSystemDefaultRoleBinding(ctx, st, userID)
+		if err != nil {
 			return err
+		}
+		if !hasCustomDefault {
+			if err := ensureHubMembershipTx(ctx, st, userID); err != nil {
+				return err
+			}
 		}
 		return deleteHubViewerBindingsTx(ctx, st, userID)
 	case store.UserRoleViewer:
 		if err := removeHubMembershipTx(ctx, st, userID); err != nil {
 			return err
 		}
+		if err := deleteSystemDefaultRoleBindingsTx(ctx, st, userID); err != nil {
+			return err
+		}
 		return ensureHubViewerBindingTx(ctx, st, userID, createdBy)
 	case store.UserRoleAdmin:
-		return deleteHubViewerBindingsTx(ctx, st, userID)
+		if err := deleteHubViewerBindingsTx(ctx, st, userID); err != nil {
+			return err
+		}
+		return deleteSystemDefaultRoleBindingsTx(ctx, st, userID)
 	default:
 		return fmt.Errorf("sync hub role grants: unsupported role %q", role)
 	}
+}
+
+// deleteSystemDefaultRoleBindingsTx removes every system-scope direct
+// RoleBinding for userID carrying the SystemDefaultRoleCreatedBy provenance
+// sentinel. Idempotent.
+func deleteSystemDefaultRoleBindingsTx(ctx context.Context, st store.Store, userID string) error {
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return fmt.Errorf("list role bindings for user: %w", err)
+	}
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem || b.CreatedBy != store.SystemDefaultRoleCreatedBy {
+			continue
+		}
+		if err := st.DeleteRoleBinding(ctx, b.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("delete system default role binding %s: %w", b.ID, err)
+		}
+	}
+	return nil
+}
+
+// hasActiveSystemDefaultRoleBinding reports whether userID holds an
+// unconditional direct system-scope RoleBinding with
+// CreatedBy == store.SystemDefaultRoleCreatedBy whose RoleDefinition is a
+// non-system custom system-scope role.
+func hasActiveSystemDefaultRoleBinding(ctx context.Context, st store.Store, userID string) (bool, error) {
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return false, fmt.Errorf("list role bindings for user: %w", err)
+	}
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem ||
+			b.CreatedBy != store.SystemDefaultRoleCreatedBy ||
+			b.NotBefore != nil ||
+			b.ExpiresAt != nil {
+			continue
+		}
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return false, fmt.Errorf("lookup role definition %s: %w", b.RoleDefinitionID, err)
+		}
+		if rd != nil && !rd.System && rd.ScopeType == store.RoleScopeSystem {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// applyDefaultUserRoleGrants applies the configured server.auth.default_user_role
+// grants on initial user creation, invited-user activation, or admin demotion.
+//
+// For admin users, it delegates to syncHubRoleGrants(admin). For non-admin
+// users, it resolves defaultRole against the store (rechecking eligibility at
+// runtime and logging a warning on fallback):
+//   - If an eligible custom system-scope role is active: removes hub-members
+//     membership, deletes any hub-viewer or prior SystemDefaultRoleCreatedBy
+//     bindings, and creates an unconditional direct system-scope RoleBinding
+//     tagged with store.SystemDefaultRoleCreatedBy.
+//   - Otherwise (built-in member/viewer, experiment off, or missing/ineligible
+//     role fallback): clears any prior SystemDefaultRoleCreatedBy bindings and
+//     delegates to syncHubRoleGrants for the resolved built-in role.
+func applyDefaultUserRoleGrants(ctx context.Context, st store.Store, userID, userRole, defaultRole string, customEnabled bool) error {
+	if userRole == store.UserRoleAdmin {
+		return syncHubRoleGrants(ctx, st, userID, store.UserRoleAdmin, store.SystemReconcileCreatedBy)
+	}
+	res := resolveDefaultUserRole(ctx, st, defaultRole, customEnabled, true)
+	if res.CustomRole != nil {
+		if err := removeHubMembershipTx(ctx, st, userID); err != nil {
+			return err
+		}
+		if err := deleteHubViewerBindingsTx(ctx, st, userID); err != nil {
+			return err
+		}
+		if err := deleteSystemDefaultRoleBindingsTx(ctx, st, userID); err != nil {
+			return err
+		}
+		_, err := st.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: res.CustomRole.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      userID,
+			ScopeType:        store.RoleScopeSystem,
+			ScopeID:          "",
+			CreatedBy:        store.SystemDefaultRoleCreatedBy,
+		})
+		if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+			return fmt.Errorf("create custom default role binding: %w", err)
+		}
+		return nil
+	}
+	if err := deleteSystemDefaultRoleBindingsTx(ctx, st, userID); err != nil {
+		return err
+	}
+	return syncHubRoleGrants(ctx, st, userID, res.BuiltinRole, store.SystemReconcileCreatedBy)
 }
 
 // hubViewerBindingsForUser returns the user's system-scoped hub-viewer role

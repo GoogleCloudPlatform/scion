@@ -71,3 +71,7 @@ func (s *inviteFlowStore) GetGroupBySlug(_ context.Context, _ string) (*store.Gr
 func (s *inviteFlowStore) AddGroupMember(_ context.Context, _ *store.GroupMember) error {
 	return nil
 }
+
+func (s *inviteFlowStore) ListRoleBindingsForPrincipal(_ context.Context, _ string, _ string) ([]*store.RoleBinding, error) {
+	return nil, nil
+}

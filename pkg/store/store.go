@@ -175,6 +175,13 @@ const SystemBackfillCreatedBy = "system-backfill"
 // UI-promoted admins immune to AdminEmails config changes.
 const AdminAPICreatedBy = "admin-api"
 
+// SystemDefaultRoleCreatedBy is the CreatedBy sentinel for direct system-scope
+// custom default user role bindings granted on user creation, invited-user
+// activation, or admin demotion when server.auth.default_user_role names a
+// custom role. Routine login sync and startup backfill recognize this sentinel
+// and skip adding the user to hub-members.
+const SystemDefaultRoleCreatedBy = "system-default-role"
+
 // IsSuperAdminBindingAllowed reports whether the given CreatedBy value is
 // permitted to create a super-admin role binding. Only the system reconciler,
 // the startup backfill, and the admin API are allowed.

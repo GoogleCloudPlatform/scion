@@ -617,12 +617,17 @@ func (s *Server) updateRoleDefinition(w http.ResponseWriter, r *http.Request, id
 
 	// Guard against adding unsupported catalog permissions to a custom
 	// system-scope role that is currently configured as server.auth.default_user_role
-	// (ptone/scion#8288, ptone/scion#7779).
-	if existing.ScopeType == store.RoleScopeSystem &&
+	// (ptone/scion#8288, ptone/scion#7779). Compare against the configured
+	// custom role name (skipping built-in member/viewer so an unrelated custom
+	// role sharing a reserved name is unaffected) and check both existing.Name
+	// and req.Name so renaming an ineligible role onto the active name is also
+	// rejected.
+	if activeDefault := s.configuredCustomDefaultUserRole(); existing.ScopeType == store.RoleScopeSystem &&
 		s.experimentEnabled(experiments.CustomDefaultUserRole) &&
-		existing.Name == s.DefaultUserRole() {
+		activeDefault != "" &&
+		(existing.Name == activeDefault || req.Name == activeDefault) {
 		if bad := unsupportedPermissionsForDefaultUserRole(req.Permissions); len(bad) > 0 {
-			BadRequest(w, fmt.Sprintf("cannot add permissions %s to role %q while it is configured as server.auth.default_user_role", strings.Join(bad, ", "), existing.Name))
+			BadRequest(w, fmt.Sprintf("cannot add permissions %s to role %q while it is configured as server.auth.default_user_role", strings.Join(bad, ", "), activeDefault))
 			return
 		}
 	}

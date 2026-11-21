@@ -119,10 +119,11 @@ func newProxyAuthStoreWithRoles() *proxyAuthStore {
 // staticAccessSettings is a test implementation of AccessSettingsProvider
 // with mutable fields for simulating live config changes in tests.
 type staticAccessSettings struct {
-	adminEmails       []string
-	authorizedDomains []string
-	userAccessMode    string
-	defaultUserRole   string
+	adminEmails              []string
+	authorizedDomains        []string
+	userAccessMode           string
+	defaultUserRole          string
+	customDefaultRoleEnabled bool
 }
 
 func newTestWebServer(t *testing.T, cfg WebServerConfig) *WebServer {
@@ -351,6 +352,9 @@ func (s *staticAccessSettings) DefaultUserRole() string {
 		return "member"
 	}
 	return s.defaultUserRole
+}
+func (s *staticAccessSettings) CustomDefaultRoleEnabled() bool {
+	return s.customDefaultRoleEnabled
 }
 
 func (t *mockOAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
