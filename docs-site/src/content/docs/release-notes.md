@@ -13,6 +13,14 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## GitHub App installation association authorization and refusal logging
+
+GitHub App installation associations are now re-validated on every token mint and refused unless the project's `gitRemote` is on the configured GitHub host, the installation is active and owned by the remote's account, and either an active Hub administrator bound the installation (`PUT /api/v1/projects/{id}/github-installation`, requiring `hub.github_app.update`) or the project creator's user-scope `GITHUB_TOKEN` secret has repository access on GitHub.
+
+- **Existing associations on upgrade:** Associations recorded before authorization enforcement are not migrated and stop yielding tokens (`association_unauthorized`) at their next mint if neither proof holds. Administrators holding `hub.github_app.read` can list all associated projects and see which ones are unauthorized via `GET /api/v1/github-app/installations/association-report` (optional `?refresh=true`).
+- **Automation-created projects and binder re-validation:** Projects created by service accounts or creators without a user-scope `GITHUB_TOKEN` cannot be auto-associated by `POST /api/v1/github-app/installations/discover` or webhooks and require an explicit admin binding via `PUT /api/v1/projects/{id}/github-installation`. Admin bindings are re-validated on every token mint—if the binder is deactivated, deleted, or loses `hub.github_app.update` (or the project's remote changes), minting stops until another authorized administrator re-binds the installation.
+- **Refusal log volume:** Repeated identical token-mint association refusals for the same project, installation, and reason are now logged once per state change rather than on every broker poll. See [GitHub App Integration — Project Association](/scion/hosted/single-node/auth/#project-association).
+
 ## Message schedules now require a live target agent at authoring, resume, and dispatch-changing updates
 
 Creating a one-shot message scheduled event or a recurring message schedule for an agent that does not exist yet (or is deleted, has a payload `agentId` whose `agentName` disagrees with the agent's slug, or is unreadable and not permitted to message — including an unreadable cross-project target while cross-project messaging is disabled) now fails with `404` (`Agent not found`), matching the trigger authoring rule. An unreadable target that the caller *may* message is accepted, and a conflict between the raw `payload` target and the convenience target fields returns `400`. Previously, unresolved or unreadable targets were accepted at authoring and refused only at fire time.

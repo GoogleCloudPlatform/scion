@@ -1035,13 +1035,16 @@ func (s *Server) mintGitHubAppTokenInternal(
 	// project status.
 	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, project, *project.GitHubInstallationID)
 	if authzErr != nil {
-		slog.WarnContext(ctx, "GitHub App token refused: installation association not authorized",
-			"project_id", project.ID, "installation_id", *project.GitHubInstallationID, "error", authzErr)
+		if s.githubAssociationRefusalLog.shouldLog(project.ID, *project.GitHubInstallationID, authzErr.Error()) {
+			slog.WarnContext(ctx, "GitHub App token refused: installation association not authorized",
+				"project_id", project.ID, "installation_id", *project.GitHubInstallationID, "error", authzErr)
+		}
 		errCode := githubAssociationErrorCode(authzErr)
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 			errCode, githubAppStatusMessage(errCode))
 		return "", "", authzErr
 	}
+	s.githubAssociationRefusalLog.clear(project.ID)
 
 	var perms githubapp.TokenPermissions
 	var usedDefaults bool
