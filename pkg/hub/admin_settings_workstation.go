@@ -703,6 +703,34 @@ var startupCheckedFileBlocks = []struct {
 	{[]string{"server", "relay"}, func(gc *config.GlobalConfig) error { return gc.Relay.Validate() }},
 }
 
+// filterStartupFileBlockKeys returns the subset of keys (preserving order)
+// that fall under any startupCheckedFileBlocks prefix.
+func filterStartupFileBlockKeys(keys []string) []string {
+	var sent []string
+	for _, k := range keys {
+		for _, b := range startupCheckedFileBlocks {
+			if prefix := strings.Join(b.path, "."); k == prefix || strings.HasPrefix(k, prefix+".") {
+				sent = append(sent, k)
+				break
+			}
+		}
+	}
+	return sent
+}
+
+// startupFileBlockSentKeys returns the sorted koanf keys under
+// startupCheckedFileBlocks that rawServer (the PUT body's "server" object)
+// sends, matching keys with the same case-folding rule as encoding/json.
+func startupFileBlockSentKeys(rawServer json.RawMessage) []string {
+	var serverObj map[string]json.RawMessage
+	if json.Unmarshal(rawServer, &serverObj) != nil {
+		return nil
+	}
+	leaves := leafKeys(presentBodyLeaves(serverObj, reflect.TypeOf(config.V1ServerConfig{}), []string{"server"}, nil))
+	sort.Strings(leaves)
+	return filterStartupFileBlockKeys(leaves)
+}
+
 // validateStartupCheckedFileBlocks checks each startupCheckedFileBlocks
 // block the PUT sends a key under. Startup validates the whole block as
 // loaded, so the check runs on the block settings.yaml would hold after the
@@ -714,15 +742,7 @@ var startupCheckedFileBlocks = []struct {
 // only change the leaves this PUT does not send, and every sent leaf is
 // checked whatever the rest of the block holds.
 func validateStartupCheckedFileBlocks(req *ServerConfigUpdateRequest, fileKeys []string) error {
-	var sent []string
-	for _, k := range fileKeys {
-		for _, b := range startupCheckedFileBlocks {
-			if prefix := strings.Join(b.path, "."); k == prefix || strings.HasPrefix(k, prefix+".") {
-				sent = append(sent, k)
-				break
-			}
-		}
-	}
+	sent := filterStartupFileBlockKeys(fileKeys)
 	if len(sent) == 0 {
 		return nil
 	}

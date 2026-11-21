@@ -824,6 +824,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 				return
 			}
+			var fieldErr *serverConfigFileFieldError
+			if errors.As(err, &fieldErr) {
+				writeSettingsFieldError(w, fieldErr.field, fieldErr.Error())
+				return
+			}
 			writeSettingsValidation(w, err.Error(), projectStorageEntries(err), nil)
 			return
 		}
