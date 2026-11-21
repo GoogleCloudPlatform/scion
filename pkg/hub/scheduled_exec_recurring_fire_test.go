@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -666,4 +668,107 @@ func TestScheduledExecP2O1_RecurringFiredAtUsesCreationTime(t *testing.T) {
 
 	close(gate)
 	waitScheduleRunCount(t, f.store, sc.ID, 1)
+}
+
+type recoverBeforeRunInsertStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	srv   atomic.Pointer[Server]
+	fired atomic.Bool
+}
+
+func (s *recoverBeforeRunInsertStore) CreateScheduledExecRun(ctx context.Context, run *store.ScheduledExecRun) error {
+	if s.fault.Active() && s.fired.CompareAndSwap(false, true) {
+		// Simulate another replica's unadmitted-event sweeper running after the
+		// event was claimed fired and before this fire inserts its run row
+		// (for example under out-of-spec inter-replica clock skew; ptone/scion#8210).
+		s.srv.Load().recoverUnadmittedExecEvents(context.Background(), 10, 10)
+	}
+	return s.Store.CreateScheduledExecRun(ctx, run)
+}
+
+// TestScheduledExec_UnadmittedRecoveryBeforeRunInsertClosesAdmission (ptone/scion#8210)
+// verifies that if unadmitted-event recovery marks an exec event failed before
+// CreateScheduledExecRun inserts its run row, admission is refused
+// transactionally: no run row is written, exec-start is never sent, the command
+// does not run, the event retains execReasonNotDispatched, and recurring
+// schedule run_count is incremented only once.
+func TestScheduledExec_UnadmittedRecoveryBeforeRunInsertClosesAdmission(t *testing.T) {
+	t.Run("recurring", func(t *testing.T) {
+		var wrapped *recoverBeforeRunInsertStore
+		var fault *storeFaultSwitch
+		f := newExecRouteFixtureWith(t, func(srv *Server) {
+			wrapped, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *recoverBeforeRunInsertStore {
+				return &recoverBeforeRunInsertStore{Store: inner, fault: sw}
+			})
+			wrapped.srv.Store(srv)
+		})
+		setExecTiming(t, &scheduledExecAdmitWindow, -time.Minute)
+		fault.Arm()
+		f.startAgent(t)
+		logs := captureDefaultLog(t)
+
+		argv, marker := f.markerCommand(t)
+		now := time.Now().UTC()
+		sc := f.createExecSchedule(t, "race-8210-recurring", now.Add(-time.Second), 10, argv...)
+		f.srv.executeSchedule(context.Background(), sc, now)
+
+		evt := latestScheduleEvent(t, f.store, f.launched.ProjectID, sc.ID)
+		require.Eventually(t, func() bool {
+			return len(f.srv.runningDetachedFires.snapshot()) == 0 && !f.srv.execRuns.owns(evt.ID)
+		}, 5*time.Second, 10*time.Millisecond, "detached recurring fire finished")
+
+		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "lost admission race must not send exec-start")
+		_, statErr := os.Stat(marker)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "command must not have run")
+
+		_, runErr := f.store.GetScheduledExecRun(context.Background(), evt.ID)
+		assert.ErrorIs(t, runErr, store.ErrNotFound, "no run row may be inserted after event was closed")
+
+		gotEvt := f.getEvent(t, evt.ID)
+		assert.Equal(t, store.ScheduledEventFailed, gotEvt.Status)
+		assert.Equal(t, execReasonNotDispatched, gotEvt.Error)
+
+		gotSc, err := f.store.GetSchedule(context.Background(), sc.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, gotSc.RunCount, "one fire must count once")
+		assert.Equal(t, 1, gotSc.ErrorCount)
+		assert.Equal(t, store.ScheduleRunError, gotSc.LastRunStatus)
+		assert.Equal(t, execReasonNotDispatched, gotSc.LastRunError)
+		assert.NotContains(t, logs.String(), "audit_action=schedule.exec.admit")
+		assert.Equal(t, 1, strings.Count(logs.String(), "audit_action=schedule.exec.outcome"))
+	})
+
+	t.Run("one-shot", func(t *testing.T) {
+		var wrapped *recoverBeforeRunInsertStore
+		var fault *storeFaultSwitch
+		f := newExecRouteFixtureWith(t, func(srv *Server) {
+			wrapped, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *recoverBeforeRunInsertStore {
+				return &recoverBeforeRunInsertStore{Store: inner, fault: sw}
+			})
+			wrapped.srv.Store(srv)
+		})
+		setExecTiming(t, &scheduledExecAdmitWindow, -time.Minute)
+		fault.Arm()
+		f.startAgent(t)
+		logs := captureDefaultLog(t)
+
+		argv, marker := f.markerCommand(t)
+		evt := f.event(t, 10, argv...)
+		f.fire(evt)
+		f.waitUntracked(t, evt.ID)
+
+		assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "lost admission race must not send exec-start")
+		_, statErr := os.Stat(marker)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "command must not have run")
+
+		_, runErr := f.store.GetScheduledExecRun(context.Background(), evt.ID)
+		assert.ErrorIs(t, runErr, store.ErrNotFound, "no run row may be inserted after event was closed")
+
+		gotEvt := f.getEvent(t, evt.ID)
+		assert.Equal(t, store.ScheduledEventFailed, gotEvt.Status)
+		assert.Equal(t, execReasonNotDispatched, gotEvt.Error, "one-shot event must preserve recovery failure reason")
+		assert.NotContains(t, logs.String(), "audit_action=schedule.exec.admit")
+		assert.Equal(t, 1, strings.Count(logs.String(), "audit_action=schedule.exec.outcome"))
+	})
 }

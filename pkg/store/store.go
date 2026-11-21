@@ -151,6 +151,12 @@ var (
 	// recurring schedule already has an unfinished exec run whose DB lease
 	// has not ended (ptone/scion#7884).
 	ErrScheduledExecOverlap = errors.New("scheduled exec run overlap")
+
+	// ErrScheduledExecEventClosed is returned by CreateScheduledExecRun when
+	// the parent scheduled event is not in a claimed (fired or expired) state,
+	// for example after unadmitted-event recovery or shutdown already marked
+	// it failed (ptone/scion#8210).
+	ErrScheduledExecEventClosed = errors.New("scheduled exec event is not open for admission")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -3606,9 +3612,10 @@ type ScheduledExecQuotaSnapshot struct {
 type ScheduledExecRunStore interface {
 	// CreateScheduledExecRun inserts the run record of an admitted exec
 	// event, with Outcome starting (when empty) and FinishedAt nil unless
-	// set. Returns ErrAlreadyExists when the event already has a run, or
-	// ErrScheduledExecOverlap when ScheduleID is set and another unfinished
-	// run of that schedule still holds an unexpired DB lease.
+	// set. Returns ErrAlreadyExists when the event already has a run,
+	// ErrScheduledExecEventClosed when the event is not in status fired or
+	// expired, or ErrScheduledExecOverlap when ScheduleID is set and another
+	// unfinished run of that schedule still holds an unexpired DB lease.
 	CreateScheduledExecRun(ctx context.Context, run *ScheduledExecRun) error
 
 	// GetScheduledExecRun returns the run of an event, or ErrNotFound.
