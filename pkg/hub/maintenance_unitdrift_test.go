@@ -109,6 +109,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 echo '#!/bin/sh' > "$out"
+echo 'if [ "$1" = "server" ] && [ "$2" = "preflight" ]; then' >> "$out"
+echo '  if [ "$3" = "--help" ]; then echo "Usage: scion server preflight --colocated-broker-id"; exit 0; fi' >> "$out"
+echo '  echo "{\"version\":1,\"checks\":[\"settings.profiles\"],\"findings\":[],\"blocking\":0,\"warnings\":0}"' >> "$out"
+echo '  exit 0' >> "$out"
+echo 'fi' >> "$out"
 echo "echo '{\"version\":\"\",\"commit\":\"%[2]s\"}'" >> "$out"
 /bin/chmod 755 "$out"
 echo 'exited go' >> '%[1]s'
@@ -157,6 +162,11 @@ func (f *rebuildUnitFixture) options(locate unitdrift.Locator) RebuildServerOpti
 		Installer:    f.installer,
 		UnitLocator:  locate,
 		UnitRevision: func(context.Context, string) (string, error) { return "abc1234", nil },
+		ColocatedBrokerID: func(context.Context) (string, bool, error) {
+			return "broker-test", true, nil
+		},
+		DatabaseDSN:    ":memory:",
+		DatabaseDriver: "sqlite",
 	}
 }
 

@@ -79,6 +79,11 @@ report='%s'
 [ -n "$report" ] && commit="$report"
 {
   echo '#!/bin/sh'
+  echo 'if [ "$1" = "server" ] && [ "$2" = "preflight" ]; then'
+  echo '  if [ "$3" = "--help" ]; then echo "Usage: scion server preflight --colocated-broker-id"; exit 0; fi'
+  echo '  echo "{\"version\":1,\"checks\":[\"settings.profiles\"],\"findings\":[],\"blocking\":0,\"warnings\":0}"'
+  echo '  exit 0'
+  echo 'fi'
   echo "echo '{\"version\":\"\",\"commit\":\"$commit\"}'"
 } > "$out"
 chmod 755 "$out"
@@ -96,6 +101,10 @@ func (f *rebuildFixture) callLog(t *testing.T) string {
 	return string(data)
 }
 
+func testReadyColocatedBroker(context.Context) (string, bool, error) {
+	return "broker-test", true, nil
+}
+
 func (f *rebuildFixture) executor(inst Installer) *RebuildServerExecutor {
 	return NewRebuildServerExecutor(RebuildServerOptions{
 		RepoPath:       f.repo,
@@ -104,7 +113,10 @@ func (f *rebuildFixture) executor(inst Installer) *RebuildServerExecutor {
 		UnitLocator: func(context.Context, string) (unitdrift.UnitInfo, error) {
 			return unitdrift.UnitInfo{}, errors.New("no systemd in tests")
 		},
-		UnitRevision: func(context.Context, string) (string, error) { return "abc1234", nil },
+		UnitRevision:      func(context.Context, string) (string, error) { return "abc1234", nil },
+		ColocatedBrokerID: testReadyColocatedBroker,
+		DatabaseDSN:       ":memory:",
+		DatabaseDriver:    "sqlite",
 	})
 }
 
@@ -457,10 +469,11 @@ func TestRebuildServer_FromPublishedAtForTheGuard(t *testing.T) {
 			f := newRebuildFixture(t, "")
 			src := &datedReleases{at: published}
 			e := NewRebuildServerExecutor(RebuildServerOptions{
-				RepoPath:       f.repo,
-				Installer:      &fakeInstaller{},
-				CurrentRelease: tc.current,
-				Releases:       src,
+				RepoPath:          f.repo,
+				Installer:         &fakeInstaller{},
+				CurrentRelease:    tc.current,
+				Releases:          src,
+				ColocatedBrokerID: testReadyColocatedBroker,
 			})
 			var got PendingRestart
 			if err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, nil,
@@ -497,10 +510,11 @@ func TestRebuildServer_SymlinkClearsUnitDriftRecord(t *testing.T) {
 	inst, _, _ := symlinkInstallerForRebuild(t, "nightly-20261022")
 	st := &unitDriftStore{}
 	e := NewRebuildServerExecutor(RebuildServerOptions{
-		RepoPath:       f.repo,
-		Installer:      inst,
-		CurrentRelease: "nightly-20261022",
-		Store:          st,
+		RepoPath:          f.repo,
+		Installer:         inst,
+		CurrentRelease:    "nightly-20261022",
+		Store:             st,
+		ColocatedBrokerID: testReadyColocatedBroker,
 	})
 	var log bytes.Buffer
 	if err := e.Run(context.Background(), &log, nil); err != nil {
@@ -522,10 +536,11 @@ func TestRebuildServer_SnapshotBeforeActivation(t *testing.T) {
 	inst := &fakeInstaller{}
 	snaps := &fakeDBSnapshotter{calls: &inst.calls}
 	e := NewRebuildServerExecutor(RebuildServerOptions{
-		RepoPath:       f.repo,
-		Installer:      inst,
-		CurrentRelease: "git-89abcdef0123",
-		Snapshotter:    snaps,
+		RepoPath:          f.repo,
+		Installer:         inst,
+		CurrentRelease:    "git-89abcdef0123",
+		Snapshotter:       snaps,
+		ColocatedBrokerID: testReadyColocatedBroker,
 	})
 	var got PendingRestart
 	var log bytes.Buffer
@@ -561,9 +576,10 @@ func TestRebuildServer_SnapshotFailureInstallsNothing(t *testing.T) {
 	f := newRebuildFixture(t, "")
 	inst := &fakeInstaller{}
 	e := NewRebuildServerExecutor(RebuildServerOptions{
-		RepoPath:    f.repo,
-		Installer:   inst,
-		Snapshotter: &fakeDBSnapshotter{calls: &inst.calls, err: errors.New("disk full")},
+		RepoPath:          f.repo,
+		Installer:         inst,
+		Snapshotter:       &fakeDBSnapshotter{calls: &inst.calls, err: errors.New("disk full")},
+		ColocatedBrokerID: testReadyColocatedBroker,
 	})
 	hooked := false
 	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, nil,
@@ -582,9 +598,10 @@ func TestRebuildServer_UnsupportedSnapshotStillRebuilds(t *testing.T) {
 	f := newRebuildFixture(t, "")
 	inst := &fakeInstaller{}
 	e := NewRebuildServerExecutor(RebuildServerOptions{
-		RepoPath:    f.repo,
-		Installer:   inst,
-		Snapshotter: &fakeDBSnapshotter{calls: &inst.calls, unsupported: "PostgreSQL databases are not snapshotted"},
+		RepoPath:          f.repo,
+		Installer:         inst,
+		Snapshotter:       &fakeDBSnapshotter{calls: &inst.calls, unsupported: "PostgreSQL databases are not snapshotted"},
+		ColocatedBrokerID: testReadyColocatedBroker,
 	})
 	var got PendingRestart
 	var log bytes.Buffer
@@ -609,9 +626,10 @@ func TestRebuildServer_SettingsCheckWarnsOnly(t *testing.T) {
 	inst := &fakeInstaller{}
 	calls := 0
 	e := NewRebuildServerExecutor(RebuildServerOptions{
-		RepoPath:   f.repo,
-		RepoBranch: "main",
-		Installer:  inst,
+		RepoPath:          f.repo,
+		RepoBranch:        "main",
+		Installer:         inst,
+		ColocatedBrokerID: testReadyColocatedBroker,
 		SettingsCheck: func() []preflight.Finding {
 			calls++
 			return unsetTrustedProxiesFinding()
@@ -640,7 +658,7 @@ func TestRebuildServer_SettingsCheckWarnsOnly(t *testing.T) {
 
 	// Without a settings check there is no section.
 	var plain bytes.Buffer
-	e2 := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, RepoBranch: "main", Installer: &fakeInstaller{}})
+	e2 := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, RepoBranch: "main", Installer: &fakeInstaller{}, ColocatedBrokerID: testReadyColocatedBroker})
 	if err := e2.Run(context.Background(), &plain, nil); err != nil {
 		t.Fatalf("Run: %v\n%s", err, plain.String())
 	}
@@ -694,7 +712,7 @@ func TestRebuildServer_DetachedHeadWithoutBranchRefused(t *testing.T) {
 
 	// A requested branch (or a configured one) does not need the lookup.
 	inst2 := &fakeInstaller{}
-	e2 := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, Installer: inst2})
+	e2 := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, Installer: inst2, ColocatedBrokerID: testReadyColocatedBroker})
 	if err := e2.Run(context.Background(), &bytes.Buffer{}, map[string]string{"branch": "main"}); err != nil {
 		t.Fatalf("Run with branch=main: %v", err)
 	}
@@ -737,7 +755,7 @@ func (b *binPathInstaller) Stage(ctx context.Context, tag, bin string) (string, 
 func TestRebuildServer_TempBuildRemovedBeforeRestart(t *testing.T) {
 	f := newRebuildFixture(t, "")
 	inst := &binPathInstaller{}
-	e := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, RepoBranch: "main", Installer: inst})
+	e := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, RepoBranch: "main", Installer: inst, ColocatedBrokerID: testReadyColocatedBroker})
 	hooked := false
 	err := e.RunWithBeforeRestart(context.Background(), &bytes.Buffer{}, nil, func(context.Context, PendingRestart) error {
 		hooked = true

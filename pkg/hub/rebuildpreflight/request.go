@@ -66,13 +66,13 @@ func CheckRunRequest(key string, rawBody map[string]any) (ForceRequest, *Reject)
 	params, _ := rawBody["params"].(map[string]any)
 
 	var (
-		forceCount   int
-		rawForce     any
-		rerunCount   int
-		rawRerun     any
-		branchCount  int
-		rawBranch    any
-		otherKeys    int
+		forceCount  int
+		rawForce    any
+		rerunCount  int
+		rawRerun    any
+		branchCount int
+		rawBranch   any
+		otherKeys   int
 	)
 	for k, v := range params {
 		switch strings.TrimSpace(k) {

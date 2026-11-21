@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -67,9 +68,16 @@ func auditRecordWithMsg(t *testing.T, buf *bytes.Buffer, msg string) map[string]
 
 // mockAuditLogger captures audit events for testing.
 type mockAuditLogger struct {
-	brokerEvents []*BrokerAuthEvent
-	gcpEvents    []*GCPTokenEvent
-	saEvents     []*store.SAAssignmentEvent
+	brokerEvents              []*BrokerAuthEvent
+	gcpEvents                 []*GCPTokenEvent
+	saEvents                  []*store.SAAssignmentEvent
+	maintenanceOverrideEvents []*rebuildpreflight.MaintenanceOverrideEvent
+	maintenanceOverrideErr    error
+}
+
+func (m *mockAuditLogger) LogMaintenanceOverrideEvent(_ context.Context, event *rebuildpreflight.MaintenanceOverrideEvent) error {
+	m.maintenanceOverrideEvents = append(m.maintenanceOverrideEvents, event)
+	return m.maintenanceOverrideErr
 }
 
 func (m *mockAuditLogger) RecordSAAssignment(_ context.Context, event *store.SAAssignmentEvent) error {

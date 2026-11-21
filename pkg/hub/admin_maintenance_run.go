@@ -35,7 +35,7 @@ import (
 // it accepts. Operations not listed here accept free-form parameters.
 var operationParamAllowlist = map[string][]string{
 	"update-binary":  maintenance.UpdateBinaryParams,
-	"rebuild-server": {"branch"},
+	"rebuild-server": {"branch", "force", "rerunOf"},
 	"rebuild-web":    {"branch"},
 	// The star reconciliation takes no parameters.
 	entadapter.ChatStarReconcileKey: {},
@@ -316,11 +316,17 @@ func maintenanceCleanupContext(parent context.Context) (context.Context, context
 // racing the shutdown. If the run fails after the hook (the restart could
 // not be requested), the pending update is cleared again.
 func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, executor MaintenanceExecutor, params map[string]string) {
+	s.launchMaintenanceRunWithBuf(run, executor, params, &runLogBuffer{})
+}
+
+func (s *Server) launchMaintenanceRunWithBuf(run *store.MaintenanceOperationRun, executor MaintenanceExecutor, params map[string]string, buf *runLogBuffer) {
 	log := s.maintenanceLog
 	key, runID := run.OperationKey, run.ID
+	if buf == nil {
+		buf = &runLogBuffer{}
+	}
 
 	go func() {
-		buf := &runLogBuffer{}
 		restarting := false
 
 		runCtx, cancel := maintenanceRunContext(key)
@@ -373,7 +379,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 		if re, ok := executor.(maintenance.RestartingExecutor); ok {
 			execErr = re.RunWithBeforeRestart(runCtx, buf, params,
 				func(ctx context.Context, p maintenance.PendingRestart) error {
-					if err := s.markRunRestarting(ctx, run, buf, p); err != nil {
+					if err := s.markRunRestartingWithResult(ctx, run, buf, p, reportedRunResult(executor)); err != nil {
 						return err
 					}
 					restarting = true
@@ -437,11 +443,23 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 // from/to/strategy. It runs as the before-restart hook, so a failure of
 // either write aborts the restart (the runner then fails the run).
 func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOperationRun, buf *runLogBuffer, p maintenance.PendingRestart) error {
-	result := map[string]interface{}{
-		"from":     p.From,
-		"to":       p.To,
-		"strategy": p.Strategy,
+	return s.markRunRestartingWithResult(ctx, run, buf, p, nil)
+}
+
+func (s *Server) markRunRestartingWithResult(ctx context.Context, run *store.MaintenanceOperationRun, buf *runLogBuffer, p maintenance.PendingRestart, reported map[string]any) error {
+	result := map[string]interface{}{}
+	if run.Result != "" {
+		_ = json.Unmarshal([]byte(run.Result), &result)
 	}
+	for k, v := range reported {
+		if k == rebuildpreflight.ErrorKey {
+			continue
+		}
+		result[k] = v
+	}
+	result["from"] = p.From
+	result["to"] = p.To
+	result["strategy"] = p.Strategy
 	if p.Snapshot != "" {
 		result["snapshot"] = p.Snapshot
 	}

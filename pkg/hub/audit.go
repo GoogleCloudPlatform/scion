@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -325,12 +326,19 @@ type AuditLogger interface {
 	// this method exists to satisfy: pkg/lifecyclehooks emits these too and
 	// cannot import pkg/hub.
 	RecordSAAssignment(ctx context.Context, event *store.SAAssignmentEvent) error
+	// LogMaintenanceOverrideEvent logs a forced rebuild-server preflight
+	// override to the hub.audit stream (S4-S6). The audit stream is an index
+	// and may be incomplete; the maintenance run rows are authoritative.
+	LogMaintenanceOverrideEvent(ctx context.Context, event *rebuildpreflight.MaintenanceOverrideEvent) error
 }
 
 // Compile-time assertion that an AuditLogger is usable as the store-side sink.
 // If these drift, the lifecycle-hook surface silently loses its audit trail —
 // it would fall back to the nil-sink warning path rather than fail to build.
 var _ store.SAAssignmentAuditSink = AuditLogger(nil)
+
+// Compile-time assertion that AuditLogger satisfies rebuildpreflight.OverrideSink.
+var _ rebuildpreflight.OverrideSink = AuditLogger(nil)
 
 // ---------------------------------------------------------------------------
 // Pending secret audit events
@@ -647,6 +655,46 @@ func (l *LogAuditLogger) LogGCSLinkFetchEvent(ctx context.Context, event *GCSLin
 
 	l.logger().LogAttrs(ctx, level, "gcs link fetch audit event", attrs...)
 
+	return nil
+}
+
+// LogMaintenanceOverrideEvent logs a forced rebuild-server preflight override
+// to the hub.audit slog stream (S4-S6). The record and authoritative fields
+// are always emitted from event.Authority() (never call-site literals).
+func (l *LogAuditLogger) LogMaintenanceOverrideEvent(ctx context.Context, event *rebuildpreflight.MaintenanceOverrideEvent) error {
+	if l == nil || event == nil {
+		return nil
+	}
+	record, authoritative := event.Authority()
+	eventType := event.EventType
+	if eventType == "" {
+		eventType = rebuildpreflight.MaintenanceOverrideEventType
+	}
+	op := event.Operation
+	if op == "" {
+		op = rebuildpreflight.RebuildServerKey
+	}
+	attrs := []slog.Attr{
+		slog.String("event_type", eventType),
+		slog.String("actor_id", event.ActorID),
+		slog.String("actor_email", event.ActorEmail),
+		slog.String("timestamp", event.Timestamp.UTC().Format(time.RFC3339)),
+		slog.String("run_id", event.RunID),
+		slog.String("rerun_of", event.RerunOf),
+		slog.String("operation", op),
+		slog.String("commit", event.Commit),
+		slog.String("branch", event.Branch),
+		slog.Int("blocking", event.Blocking),
+		slog.String("record", record),
+		slog.String("authoritative", authoritative),
+	}
+	if event.CouldNotRunKind != "" {
+		attrs = append(attrs, slog.String("could_not_run_kind", event.CouldNotRunKind))
+	}
+	if event.CouldNotRunClass != "" {
+		attrs = append(attrs, slog.String("could_not_run_class", event.CouldNotRunClass))
+	}
+	l.logger().LogAttrs(ctx, slog.LevelWarn, "maintenance preflight override audit event", attrs...)
 	return nil
 }
 

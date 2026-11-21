@@ -494,9 +494,12 @@ func (s *Server) failStaleRestartingRuns(ctx context.Context) error {
 		now := time.Now()
 		run.Status = store.MaintenanceStatusFailed
 		run.CompletedAt = &now
-		resultJSON, _ := json.Marshal(map[string]string{
-			"error": "the hub restarted without a pending update record for this run; the update could not be verified",
-		})
+		result := map[string]any{}
+		if run.Result != "" {
+			_ = json.Unmarshal([]byte(run.Result), &result)
+		}
+		result["error"] = "the hub restarted without a pending update record for this run; the update could not be verified"
+		resultJSON, _ := json.Marshal(result)
 		run.Result = string(resultJSON)
 		if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
 			return fmt.Errorf("fail stale restarting run %s: %w", run.ID, err)

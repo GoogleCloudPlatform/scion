@@ -275,6 +275,23 @@ type RebuildServerExecutor struct {
 	// settings check section.
 	settings func() []preflight.Finding
 
+	// Preflight stage configuration (Slice 2b).
+	colocatedBroker       ColocatedBrokerFunc
+	databaseDSN           string
+	databaseDriver        string
+	configPath            string
+	audit                 rebuildpreflight.OverrideSink
+	runID                 string
+	nowFn                 func() time.Time
+	preflightProbeTimeout time.Duration
+	preflightRunTimeout   time.Duration
+	preflightWaitDelay    time.Duration
+
+	// Per-run state (single-goroutine owned, no mutex per C4).
+	grant      *rebuildpreflight.ForceGrant
+	checkpoint func(map[string]any) error
+	state      rebuildpreflight.RunState
+
 	preflightTimeout time.Duration
 	installTimeout   time.Duration
 	hookTimeout      time.Duration
@@ -316,27 +333,57 @@ type RebuildServerOptions struct {
 	// (preflight.LoadRequiredSettingsFindings); Run writes them to the log
 	// as warnings and goes on. nil skips the section.
 	SettingsCheck func() []preflight.Finding
+	// ColocatedBrokerID waits for and returns the legacy co-located broker
+	// ID for preflight. nil means not_ready (fails closed, CN7).
+	ColocatedBrokerID ColocatedBrokerFunc
+	// DatabaseDSN and DatabaseDriver are passed to the preflight subprocess
+	// via SCION_PREFLIGHT_DB (never argv) and used for DSN redaction.
+	DatabaseDSN    string
+	DatabaseDriver string
+	// ConfigPath is the absolute server config path the hub was started with.
+	ConfigPath string
+	// Audit receives maintenance_preflight_override events (S4-S6).
+	Audit rebuildpreflight.OverrideSink
+	// RunID is the maintenance run's ID, used in audit and Warn records.
+	RunID string
+	// Now overrides time.Now in tests.
+	Now func() time.Time
+	// PreflightProbeTimeout, PreflightRunTimeout, PreflightWaitDelay override
+	// the default preflight subprocess timeouts in tests.
+	PreflightProbeTimeout time.Duration
+	PreflightRunTimeout   time.Duration
+	PreflightWaitDelay    time.Duration
 }
 
 // NewRebuildServerExecutor returns a RebuildServerExecutor configured from opts.
 func NewRebuildServerExecutor(opts RebuildServerOptions) *RebuildServerExecutor {
 	e := &RebuildServerExecutor{
-		repoPath:         opts.RepoPath,
-		repoBranch:       opts.RepoBranch,
-		serviceName:      opts.ServiceName,
-		installer:        opts.Installer,
-		current:          opts.CurrentRelease,
-		releases:         opts.Releases,
-		snapshots:        opts.Snapshotter,
-		unitLocator:      unitdrift.SystemctlLocator,
-		unitRevision:     unitdrift.GitRevision,
-		unitTimeout:      opts.UnitTimeout,
-		store:            opts.Store,
-		settings:         opts.SettingsCheck,
-		preflightTimeout: preflightTimeout,
-		installTimeout:   installTimeout,
-		hookTimeout:      hookTimeout,
-		restartTimeout:   restartTimeout,
+		repoPath:              opts.RepoPath,
+		repoBranch:            opts.RepoBranch,
+		serviceName:           opts.ServiceName,
+		installer:             opts.Installer,
+		current:               opts.CurrentRelease,
+		releases:              opts.Releases,
+		snapshots:             opts.Snapshotter,
+		unitLocator:           unitdrift.SystemctlLocator,
+		unitRevision:          unitdrift.GitRevision,
+		unitTimeout:           opts.UnitTimeout,
+		store:                 opts.Store,
+		settings:              opts.SettingsCheck,
+		colocatedBroker:       opts.ColocatedBrokerID,
+		databaseDSN:           opts.DatabaseDSN,
+		databaseDriver:        opts.DatabaseDriver,
+		configPath:            opts.ConfigPath,
+		audit:                 opts.Audit,
+		runID:                 opts.RunID,
+		nowFn:                 opts.Now,
+		preflightProbeTimeout: opts.PreflightProbeTimeout,
+		preflightRunTimeout:   opts.PreflightRunTimeout,
+		preflightWaitDelay:    opts.PreflightWaitDelay,
+		preflightTimeout:      preflightTimeout,
+		installTimeout:        installTimeout,
+		hookTimeout:           hookTimeout,
+		restartTimeout:        restartTimeout,
 	}
 	if e.serviceName == "" {
 		e.serviceName = DefaultServiceName
@@ -377,6 +424,13 @@ type rebuildStep struct {
 func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger io.Writer, params map[string]string, before BeforeRestartFunc) error {
 	log := logging.Subsystem("hub.maintenance.rebuild-server")
 
+	// Reset per-run state up front so even early failures (non-Linux, missing
+	// repoPath, relative ConfigPath) keep rerunOf on RunResult() (CN5-c).
+	e.state = rebuildpreflight.RunState{}
+	if e.grant != nil {
+		e.state.RerunOf = e.grant.RerunOf
+	}
+
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("rebuild-server is only supported on Linux (requires systemd); restart the server manually on %s", runtime.GOOS)
 	}
@@ -386,19 +440,35 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		return fmt.Errorf("no repository path configured for rebuild-server")
 	}
 
-	// A "branch" param on the API request overrides the configured default.
+	// R2: ConfigPath must already be absolute (absolutized at server startup).
+	if err := rebuildpreflight.AbsCheck(e.configPath); err != nil {
+		return err
+	}
+
+	// A "branch" param on the API request overrides the configured default
+	// for unforced runs. Forced runs ignore params["branch"] and use the
+	// grant's pins (3.2, CN5-b).
 	branch := e.repoBranch
-	if v := params["branch"]; v != "" {
-		branch = v
+	if e.grant == nil {
+		if v := params["branch"]; v != "" {
+			branch = v
+		}
+	} else {
+		branch = e.grant.PinnedBranch
 	}
 
 	log.Debug("Starting rebuild-server",
-		"repo_path", repoPath, "branch", branch,
+		"repo_path", repoPath, "branch", branch, "forced_grant", e.grant != nil,
 		"installer", e.installer.Name(), "service_name", e.serviceName)
 
-	// Refuse a branch git would not accept before anything runs (#6987).
-	if err := validateBranchName(ctx, repoPath, branch); err != nil {
-		return err
+	// Refuse a branch git would not accept before anything runs (#6987, R1).
+	if e.grant == nil && branch != "" {
+		if err := validateBranchName(ctx, repoPath, branch); err != nil {
+			return err
+		}
+		if err := rebuildpreflight.ValidBranch(branch); err != nil {
+			return err
+		}
 	}
 
 	// ── Preflight: before anything is fetched or built ──────────────────
@@ -419,7 +489,13 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 
 	// ── Update the checkout ─────────────────────────────────────────────
 	plan := rebuildPlan{repoPath: repoPath, branch: branch}
-	if branch != "" {
+	if e.grant != nil {
+		plan.pin = &rebuildpreflight.Pin{
+			Branch:   e.grant.PinnedBranch,
+			Commit:   e.grant.PinnedCommit,
+			Detached: e.grant.Detached,
+		}
+	} else if branch != "" {
 		plan.endOfOptions = gitSupportsEndOfOptions(ctx, repoPath)
 	} else {
 		// Determine the current branch to reset against its remote tracking ref.
@@ -436,10 +512,22 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		return err
 	}
 
-	commit, err := gitOutput(ctx, repoPath, "rev-parse", "HEAD")
+	commitOut, err := gitOutput(ctx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("failed to read the checked-out commit: %w", err)
 	}
+	effBranch, effDetached := rebuildpreflight.EffectiveBranch(params["branch"], e.repoBranch, plan.currentBranch)
+	rec, err := rebuildpreflight.RecordForRun(e.grant, effBranch, effDetached, commitOut)
+	if err != nil {
+		return err
+	}
+	commit := rec.Commit
+	pinnable := rec.BranchPinnable
+	e.state.Branch = rec.Branch
+	e.state.Detached = rec.Detached
+	e.state.BranchPinnable = &pinnable
+	e.state.Commit = commit
+
 	name := GitReleaseName(commit)
 	if name == "" {
 		return fmt.Errorf("git rev-parse HEAD returned %q, not a commit id", commit)
@@ -465,6 +553,11 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 	_, _ = fmt.Fprintf(logger, "==> Verifying the build\n")
 	if err := VerifyGitBuild(ctx, plan.bin, commit, logger); err != nil {
 		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	// ── Preflight checks on the newly built binary (Slice 2b) ───────────
+	if err := e.runPreflightStage(ctx, logger, plan.bin); err != nil {
+		return err
 	}
 
 	// ── Database snapshot, before anything changes ──────────────────────
@@ -500,6 +593,15 @@ func (e *RebuildServerExecutor) RunWithBeforeRestart(ctx context.Context, logger
 		return fmt.Errorf("activate %s: %w", name, err)
 	}
 	_, _ = fmt.Fprintf(logger, "Installed %s.\n\n", name)
+	// Write 3 (RQ2, CN4-d): set installed: true in memory BEFORE the
+	// best-effort checkpoint so the final merge carries it even if write 3
+	// fails. A write-3 error is logged as Warn and does not stop restart.
+	e.state.Installed = true
+	if e.checkpoint != nil {
+		if cpErr := e.checkpoint(e.RunResult()); cpErr != nil {
+			log.Warn("Best-effort installed checkpoint failed; continuing to restart", "error", cpErr)
+		}
+	}
 	// The build was copied into place by Stage, so its temporary directory
 	// is no longer needed. Removed now: the restart below can end this
 	// process before the deferred cleanup runs (the defer still covers the
@@ -572,7 +674,7 @@ func (e *RebuildServerExecutor) checkUnit(ctx context.Context, logger io.Writer,
 	if unitBranch == "" {
 		unitBranch = currentBranch
 	}
-	if unitBranch == "HEAD" { // detached checkout: no branch to name
+	if e.state.Detached || unitBranch == "HEAD" { // detached checkout: no branch to name (CN4-b)
 		unitBranch = ""
 	}
 	rep := unitdrift.Check(ctx, unitdrift.CheckOptions{
@@ -606,11 +708,12 @@ const (
 // rebuildPlan carries what the step tables need.
 type rebuildPlan struct {
 	repoPath      string
-	branch        string // configured or requested branch; "" = currentBranch
-	currentBranch string // the checkout's branch, when branch is ""
-	endOfOptions  bool   // pass --end-of-options before branch (git >= 2.24)
-	bin           string // build output (rebuildBuild)
-	ldflags       string // -ldflags value (rebuildBuild)
+	branch        string                // configured or requested branch; "" = currentBranch
+	currentBranch string                // the checkout's branch, when branch is ""
+	pin           *rebuildpreflight.Pin // non-nil on a forced pinned build
+	endOfOptions  bool                  // pass --end-of-options before branch (git >= 2.24)
+	bin           string                // build output (rebuildBuild)
+	ldflags       string                // -ldflags value (rebuildBuild)
 }
 
 // runRebuildSteps builds the step table of phase and runs it in order,
@@ -622,12 +725,18 @@ func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, 
 	var steps []rebuildStep
 	switch phase {
 	case rebuildCheckout:
-		steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, p.repoPath})
-		if p.branch != "" {
-			steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", branchArgs(p.endOfOptions, p.branch, "checkout"), p.repoPath})
-			steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", branchArgs(p.endOfOptions, "origin/"+p.branch, "reset", "--hard"), p.repoPath})
+		if p.pin != nil {
+			for _, gs := range rebuildpreflight.GitSteps(p.branch, p.pin) {
+				steps = append(steps, rebuildStep{gs.Name, "git", gs.Args, p.repoPath})
+			}
 		} else {
-			steps = append(steps, rebuildStep{"Resetting to origin/" + p.currentBranch, "git", []string{"reset", "--hard", "origin/" + p.currentBranch}, p.repoPath})
+			steps = append(steps, rebuildStep{"Fetching latest code", "git", []string{"fetch", "origin"}, p.repoPath})
+			if p.branch != "" {
+				steps = append(steps, rebuildStep{"Checking out branch " + p.branch, "git", branchArgs(p.endOfOptions, p.branch, "checkout"), p.repoPath})
+				steps = append(steps, rebuildStep{"Resetting to origin/" + p.branch, "git", branchArgs(p.endOfOptions, "origin/"+p.branch, "reset", "--hard"), p.repoPath})
+			} else {
+				steps = append(steps, rebuildStep{"Resetting to origin/" + p.currentBranch, "git", []string{"reset", "--hard", "origin/" + p.currentBranch}, p.repoPath})
+			}
 		}
 	case rebuildBuild:
 		steps = append(steps,
@@ -656,6 +765,9 @@ func runRebuildSteps(ctx context.Context, logger io.Writer, phase rebuildPhase, 
 				"step", i+1, "name", step.name,
 				"cmd", step.cmd, "args", fmt.Sprint(step.args),
 				"error", err, "stderr", errDetail)
+			if p.pin != nil && !p.pin.Detached && len(step.args) > 0 && step.args[0] == "merge-base" {
+				return fmt.Errorf("the failed run's commit is no longer on %s; review and re-run", p.pin.Branch)
+			}
 			if errDetail != "" {
 				return fmt.Errorf("%s failed: %s", step.name, errDetail)
 			}
