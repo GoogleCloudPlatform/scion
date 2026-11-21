@@ -447,6 +447,7 @@ func stopManagedInteraction(ctx context.Context, interactionID string) error {
 // handleManagedAgentLifecycle handles lifecycle actions (start, stop, restart) for managed agents.
 func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Request, agent *store.Agent, action string) {
 	ctx := r.Context()
+	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
 
 	var newPhase string
 	var actionErr error
@@ -544,7 +545,8 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	if !heldMessageTargetPhaseEligible(agent.Phase) {
 		s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
 	}
-	if action == api.AgentActionStop && agent.DeletedAt.IsZero() {
+	if action == api.AgentActionStop && agent.DeletedAt.IsZero() &&
+		isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionStop) {
 		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, lifecycleStopReasonFromContext(ctx))
 	}
 	s.events.PublishAgentStatus(ctx, agent)

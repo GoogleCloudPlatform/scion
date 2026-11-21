@@ -408,6 +408,11 @@ var asyncStartPhaseReadAllowlist = map[string]int{
 	"handlers_agent_lifecycle.go:handleStopAllAgents: if agent.Phase != string(state.PhaseRunning) && !wasIdleSuspending {":                            1,
 	"handlers_agent_lifecycle.go:handleStopAllAgents: if startInFlightPhase(agent.Phase) {":                                                            1,
 	"handlers_agent_lifecycle.go:updateAgentStatus: oldPhase := agent.Phase":                                                                           1,
+	// Pre-action snapshots for third-party notice dedup (ptone/scion#8695);
+	// not start-path selectors.
+	"handlers_agent_lifecycle.go:handleAgentLifecycle: preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason": 1,
+	"handlers_agent_lifecycle.go:queueOfflineStop: preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason":     1,
+	"handlers_agent_lifecycle.go:suspendAgent: preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason":         1,
 	// A write guard, not a branch selector: the message reapply after a
 	// refined report writes only while the row is still in the phase it read.
 	"start_claim.go:reapplyStartLaunchFailureMessage: err := s.store.UpdateAgentStatus(wctx, a.ID, store.AgentStatusUpdate{Message: msg, IfPhase: a.Phase})": 1,

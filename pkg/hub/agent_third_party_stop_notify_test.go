@@ -70,6 +70,51 @@ func (e *thirdPartyNotifyEnv) createUser(t *testing.T, id, displayName, email st
 	return u
 }
 
+// waitForNotificationDispatcherDrain publishes a status event for a probe
+// agent on pub and waits until NotificationDispatcher has persisted the probe
+// notification. Because NotificationDispatcher consumes the subscription
+// channel sequentially in FIFO order, every status event published before this
+// call has been completely handled once the probe notification lands.
+func waitForNotificationDispatcherDrain(t *testing.T, s store.Store, pub EventPublisher, projectID string) {
+	t.Helper()
+	ctx := context.Background()
+	probeUserID := api.NewUUID()
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          probeUserID,
+		Email:       probeUserID + "@probe.test",
+		DisplayName: "Probe User",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+	}))
+	probeAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "drain-probe-" + probeUserID[:8],
+		Slug:      "drain-probe-" + probeUserID[:8],
+		ProjectID: projectID,
+		Phase:     string(state.PhaseStopped),
+		Template:  "claude",
+	}
+	require.NoError(t, s.CreateAgent(ctx, probeAgent))
+	probeSub := &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		AgentID:           probeAgent.ID,
+		SubscriberType:    store.SubscriberTypeUser,
+		SubscriberID:      probeUserID,
+		ProjectID:         projectID,
+		TriggerActivities: []string{"STOPPED"},
+		CreatedAt:         time.Now().Add(-time.Minute),
+		CreatedBy:         probeUserID,
+	}
+	require.NoError(t, s.CreateNotificationSubscription(ctx, probeSub))
+
+	pub.PublishAgentStatus(ctx, probeAgent)
+	require.Eventually(t, func() bool {
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, probeUserID, false)
+		return err == nil && len(notifs) == 1
+	}, 5*time.Second, 5*time.Millisecond, "timed out waiting for NotificationDispatcher to drain status events")
+}
+
 func TestThirdPartyLifecycleNotify_UserActorSuspendsAndStops(t *testing.T) {
 	ctx := context.Background()
 	creatorID := tid("tp-creator-user")
@@ -145,8 +190,7 @@ func TestThirdPartyLifecycleNotify_UserActorSuspendsAndStops(t *testing.T) {
 		e.pub.PublishAgentStatus(ctx, e.watched)
 		e.srv.thirdPartyStopDispatches.Wait()
 
-		// Give the event bus goroutine a moment to process the status event.
-		time.Sleep(100 * time.Millisecond)
+		waitForNotificationDispatcherDrain(t, e.store, e.pub, e.project.ID)
 
 		notifs, err := e.store.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
 		require.NoError(t, err)
@@ -267,6 +311,9 @@ func TestThirdPartyLifecycleNotify_Exclusions(t *testing.T) {
 
 func TestThirdPartyLifecycleNotify_HTTPHandlers(t *testing.T) {
 	srv, s := testServer(t)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.events = pub
 	nd := NewNotificationDispatcher(s, srv.events, srv.GetDispatcher, slog.Default())
 	nd.Start()
 	t.Cleanup(nd.Stop)
@@ -380,8 +427,7 @@ func TestThirdPartyLifecycleNotify_HTTPHandlers(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	srv.thirdPartyStopDispatches.Wait()
 
-	// Allow async event bus delivery to settle.
-	time.Sleep(100 * time.Millisecond)
+	waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
 
 	creatorNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
 	require.NoError(t, err)
@@ -495,4 +541,395 @@ func TestThirdPartyLifecycleNotify_StopAll(t *testing.T) {
 	adminNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, adminID, false)
 	require.NoError(t, err)
 	assert.Empty(t, adminNotifs, "admin's own agent stopped in stop-all must not emit a third-party notice")
+}
+
+func TestThirdPartyLifecycleNotify_NoRepeatWhenAlreadyInTargetState(t *testing.T) {
+	srv, s := testServer(t)
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	srv.events = pub
+	nd := NewNotificationDispatcher(s, srv.events, srv.GetDispatcher, slog.Default())
+	nd.Start()
+	t.Cleanup(nd.Stop)
+	srv.notificationDispatcher = nd
+	ctx := context.Background()
+
+	creatorID := tid("tp-noop-creator")
+	adminID := tid("tp-noop-admin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: creatorID, Email: "creator-noop@example.com", DisplayName: "Creator", Role: store.UserRoleMember, Status: store.UserStatusActive,
+	}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: adminID, Email: "admin-noop@example.com", DisplayName: "Admin", Role: store.UserRoleAdmin, Status: store.UserStatusActive,
+	}))
+
+	project := &store.Project{
+		ID:   tid("tp-noop-proj"),
+		Name: "TP Noop Project",
+		Slug: "tp-noop-proj",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	onlineBroker := &store.RuntimeBroker{
+		ID:       tid("tp-noop-broker-on"),
+		Name:     "TP Online Broker",
+		Slug:     "tp-noop-broker-on",
+		Status:   store.BrokerStatusOnline,
+		Endpoint: "http://localhost:9801",
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, onlineBroker))
+
+	offlineBroker := &store.RuntimeBroker{
+		ID:       tid("tp-noop-broker-off"),
+		Name:     "TP Offline Broker",
+		Slug:     "tp-noop-broker-off",
+		Status:   store.BrokerStatusOffline,
+		Endpoint: "http://localhost:9802",
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, offlineBroker))
+
+	adminIdentity := NewAuthenticatedUser(adminID, "admin-noop@example.com", "Admin", store.UserRoleAdmin, "web")
+
+	t.Run("re-stopping an already stopped agent does not send another notice", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:              tid("tp-noop-restop"),
+			Name:            "worker-restop",
+			Slug:            "worker-restop",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: onlineBroker.ID,
+			Phase:           string(state.PhaseRunning),
+			Template:        "claude",
+			CreatedBy:       creatorID,
+			OwnerID:         creatorID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		// First stop: running -> stopped (real transition -> 1 notice).
+		body1, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "first stop"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(body1))
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec := httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		// Second stop: stopped -> stopped (already in target state -> 0 new notices).
+		body2, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "second stop"})
+		req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(body2))
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec = httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		var agentNotifs []store.Notification
+		for _, n := range notifs {
+			if n.AgentID == agent.ID {
+				agentNotifs = append(agentNotifs, n)
+			}
+		}
+		require.Len(t, agentNotifs, 1, "re-stopping an already-stopped agent must not send a second notice")
+		assert.Contains(t, agentNotifs[0].Message, ": first stop")
+	})
+
+	t.Run("stopping a suspended agent is a real transition and still notifies", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:              tid("tp-noop-susp-stop"),
+			Name:            "worker-susp-stop",
+			Slug:            "worker-susp-stop",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: onlineBroker.ID,
+			Phase:           string(state.PhaseSuspended),
+			SuspendReason:   string(state.SuspendReasonUser),
+			Template:        "claude",
+			CreatedBy:       creatorID,
+			OwnerID:         creatorID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		body, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "teardown"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(body))
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec := httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		var agentNotifs []store.Notification
+		for _, n := range notifs {
+			if n.AgentID == agent.ID {
+				agentNotifs = append(agentNotifs, n)
+			}
+		}
+		require.Len(t, agentNotifs, 1, "stopping a suspended agent must still emit a third-party stop notice")
+		assert.Equal(t, "STOPPED", agentNotifs[0].Status)
+		assert.Contains(t, agentNotifs[0].Message, ": teardown")
+	})
+
+	t.Run("re-stopping an already stopped agent on an offline broker does not notify", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:              tid("tp-noop-offline-restop"),
+			Name:            "worker-offline-restop",
+			Slug:            "worker-offline-restop",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: offlineBroker.ID,
+			Phase:           string(state.PhaseStopped),
+			Template:        "claude",
+			CreatedBy:       creatorID,
+			OwnerID:         creatorID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec := httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		for _, n := range notifs {
+			assert.NotEqual(t, agent.ID, n.AgentID, "offline re-stop of an already-stopped agent must not notify")
+		}
+	})
+
+	t.Run("re-suspending an already user-suspended agent does not notify", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:              tid("tp-noop-resuspend"),
+			Name:            "worker-resuspend",
+			Slug:            "worker-resuspend",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: onlineBroker.ID,
+			Phase:           string(state.PhaseSuspended),
+			SuspendReason:   string(state.SuspendReasonUser),
+			Template:        "claude",
+			CreatedBy:       creatorID,
+			OwnerID:         creatorID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec := httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionSuspend)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		// Direct suspendAgent call on an already user-suspended agent also emits no notice.
+		actorCtx := contextWithIdentity(ctx, adminIdentity)
+		require.NoError(t, srv.suspendAgent(actorCtx, agent))
+		srv.thirdPartyStopDispatches.Wait()
+
+		waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		for _, n := range notifs {
+			assert.NotEqual(t, agent.ID, n.AgentID, "re-suspending an already user-suspended agent must not notify")
+		}
+	})
+
+	t.Run("re-stopping an already stopped managed agent does not send another notice", func(t *testing.T) {
+		useManagedBackend(t, &recordingManagedBackend{})
+
+		agent := &store.Agent{
+			ID:        tid("tp-noop-managed-restop"),
+			Name:      "managed-restop",
+			Slug:      "managed-restop",
+			ProjectID: project.ID,
+			Runtime:   ManagedRuntimePrefix + "test",
+			Phase:     string(state.PhaseRunning),
+			Template:  "claude",
+			CreatedBy: creatorID,
+			OwnerID:   creatorID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		// First stop: running -> stopped (real transition -> 1 notice).
+		body1, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "first managed stop"})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(body1))
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec := httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		// Second stop: stopped -> stopped (already in target state -> 0 new notices).
+		body2, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "second managed stop"})
+		req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(body2))
+		req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+		rec = httptest.NewRecorder()
+		srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		srv.thirdPartyStopDispatches.Wait()
+
+		waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		var agentNotifs []store.Notification
+		for _, n := range notifs {
+			if n.AgentID == agent.ID {
+				agentNotifs = append(agentNotifs, n)
+			}
+		}
+		require.Len(t, agentNotifs, 1, "re-stopping an already-stopped managed agent must not send a second notice")
+		assert.Contains(t, agentNotifs[0].Message, ": first managed stop")
+	})
+}
+
+func TestThirdPartyLifecycleNotify_TerminalActivityNoStaleRefire(t *testing.T) {
+	cases := []struct {
+		name           string
+		activity       state.Activity
+		expectedStatus string
+	}{
+		{
+			name:           "LIMITS_EXCEEDED",
+			activity:       state.ActivityLimitsExceeded,
+			expectedStatus: "LIMITS_EXCEEDED",
+		},
+		{
+			name:           "CRASHED",
+			activity:       state.ActivityCrashed,
+			expectedStatus: "CRASHED",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			pub := NewChannelEventPublisher()
+			t.Cleanup(pub.Close)
+			srv.events = pub
+			nd := NewNotificationDispatcher(s, srv.events, srv.GetDispatcher, slog.Default())
+			nd.Start()
+			t.Cleanup(nd.Stop)
+			srv.notificationDispatcher = nd
+			ctx := context.Background()
+
+			creatorID := tid("tp-term-creator-" + tc.name)
+			adminID := tid("tp-term-admin-" + tc.name)
+			require.NoError(t, s.CreateUser(ctx, &store.User{
+				ID: creatorID, Email: "creator-" + tc.name + "@example.com", DisplayName: "Creator", Role: store.UserRoleMember, Status: store.UserStatusActive,
+			}))
+			require.NoError(t, s.CreateUser(ctx, &store.User{
+				ID: adminID, Email: "admin-" + tc.name + "@example.com", DisplayName: "Admin", Role: store.UserRoleAdmin, Status: store.UserStatusActive,
+			}))
+
+			project := &store.Project{
+				ID:   tid("tp-term-proj-" + tc.name),
+				Name: "TP Terminal Project " + tc.name,
+				Slug: "tp-term-proj-" + tc.name,
+			}
+			require.NoError(t, s.CreateProject(ctx, project))
+
+			broker := &store.RuntimeBroker{
+				ID:       tid("tp-term-broker-" + tc.name),
+				Name:     "TP Terminal Broker",
+				Slug:     "tp-term-broker-" + tc.name,
+				Status:   store.BrokerStatusOnline,
+				Endpoint: "http://localhost:9803",
+			}
+			require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+			agent := &store.Agent{
+				ID:                tid("tp-term-agent-" + tc.name),
+				Name:              "worker-term-" + tc.name,
+				Slug:              "worker-term-" + tc.name,
+				ProjectID:         project.ID,
+				RuntimeBrokerID:   broker.ID,
+				Phase:             string(state.PhaseRunning),
+				Activity:          string(tc.activity),
+				LastActivityEvent: time.Now(),
+				Template:          "claude",
+				CreatedBy:         creatorID,
+				OwnerID:           creatorID,
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			// Custom creator subscription watching both STOPPED and the terminal activity.
+			sub := &store.NotificationSubscription{
+				ID:                api.NewUUID(),
+				Scope:             store.SubscriptionScopeAgent,
+				AgentID:           agent.ID,
+				SubscriberType:    store.SubscriberTypeUser,
+				SubscriberID:      creatorID,
+				ProjectID:         project.ID,
+				TriggerActivities: []string{"STOPPED", tc.expectedStatus},
+				CreatedAt:         time.Now().Add(-time.Minute),
+				CreatedBy:         creatorID,
+			}
+			require.NoError(t, s.CreateNotificationSubscription(ctx, sub))
+
+			// Deliver the initial terminal notification before the third-party stop.
+			srv.events.PublishAgentStatus(ctx, agent)
+			waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+			initialNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+			require.NoError(t, err)
+			require.Len(t, initialNotifs, 1, "initial terminal notification should be delivered once")
+			require.Equal(t, tc.expectedStatus, initialNotifs[0].Status)
+			require.Equal(t, sub.ID, initialNotifs[0].SubscriptionID)
+
+			// Third-party admin stops the agent while terminal activity is preserved on the stopped row.
+			adminIdentity := NewAuthenticatedUser(adminID, "admin-"+tc.name+"@example.com", "Admin", store.UserRoleAdmin, "web")
+			stopBody, _ := json.Marshal(AgentLifecycleStopRequest{Reason: "cleanup after " + tc.name})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", bytes.NewReader(stopBody))
+			req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+			rec := httptest.NewRecorder()
+			srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			srv.thirdPartyStopDispatches.Wait()
+
+			waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+			notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+			require.NoError(t, err)
+			require.Len(t, notifs, 2, "must have only the original %s notice and one third-party STOPPED notice (no stale %s refire)", tc.expectedStatus, tc.expectedStatus)
+
+			var terminalCount, stopCount int
+			for _, n := range notifs {
+				switch n.Status {
+				case tc.expectedStatus:
+					terminalCount++
+					assert.Equal(t, sub.ID, n.SubscriptionID)
+				case "STOPPED":
+					stopCount++
+					assert.Equal(t, store.CreatorFallbackSubscriptionID, n.SubscriptionID)
+					assert.Contains(t, n.Message, "was stopped by Admin")
+					assert.Contains(t, n.Message, ": cleanup after "+tc.name)
+				default:
+					t.Fatalf("unexpected notification status %q: %s", n.Status, n.Message)
+				}
+			}
+			assert.Equal(t, 1, terminalCount, "terminal notice must not be re-fired")
+			assert.Equal(t, 1, stopCount, "third-party stop notice must be delivered once")
+
+			// Re-stopping the already-stopped agent must emit neither a second stop notice nor a stale terminal notice.
+			req = httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+			req = req.WithContext(contextWithIdentity(req.Context(), adminIdentity))
+			rec = httptest.NewRecorder()
+			srv.handleAgentLifecycle(rec, req, agent.ID, api.AgentActionStop)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			srv.thirdPartyStopDispatches.Wait()
+
+			waitForNotificationDispatcherDrain(t, s, srv.events, project.ID)
+
+			afterRestopNotifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+			require.NoError(t, err)
+			assert.Len(t, afterRestopNotifs, 2, "re-stop must not emit any additional notification")
+		})
+	}
 }

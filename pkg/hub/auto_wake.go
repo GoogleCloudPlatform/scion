@@ -459,9 +459,14 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 		writeErrorFromErr(w, err, "")
 		return true
 	}
+	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
 	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonUser))
 	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
-	s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
+	// Defensive guard: callers require AutoWakes(), so this is currently
+	// always true in production, but keeps the dedup invariant local.
+	if isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionSuspend) {
+		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
+	}
 	s.events.PublishAgentStatus(ctx, agent)
 	respAgent := *agent
 	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(
