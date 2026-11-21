@@ -388,8 +388,14 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	req.Email = strings.TrimSpace(req.Email)
 	if req.Email == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "missing required field(s): email", nil)
+		return
+	}
+	if !isValidGCPServiceAccountEmail(req.Email) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"invalid service account email: must be an email address", nil)
 		return
 	}
 
@@ -424,6 +430,11 @@ func (s *Server) createGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to manage GCP service accounts in this project", nil)
+		return
+	}
+
+	if code, msg, refused := s.gcpServiceAccountEmailRefusal(req.Email); refused {
+		writeError(w, http.StatusBadRequest, code, msg, nil)
 		return
 	}
 
@@ -772,6 +783,11 @@ func (s *Server) verifyGCPServiceAccount(w http.ResponseWriter, r *http.Request,
 // route, where a hub-scoped account is checked against every broker on the
 // hub (hubSAMappingWarnings) and other scopes get no warning.
 func (s *Server) runGCPServiceAccountVerification(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, warnProjectID string) {
+	if code, msg, refused := s.gcpServiceAccountEmailRefusal(sa.Email); refused {
+		writeError(w, http.StatusBadRequest, code, msg, nil)
+		return
+	}
+
 	// Fail-closed: if no token generator is configured, we cannot verify.
 	if s.gcpTokenGenerator == nil {
 		writeError(w, http.StatusServiceUnavailable, "gcp_not_configured",
@@ -888,11 +904,12 @@ func slugifyAccountID(s string) string {
 // projectIDFromServiceAccountEmail extracts the GCP project ID from a
 // service account email of the form <name>@<project>.iam.gserviceaccount.com.
 func projectIDFromServiceAccountEmail(email string) string {
+	email = strings.TrimSpace(email)
 	at := strings.IndexByte(email, '@')
 	if at < 0 {
 		return ""
 	}
-	domain := email[at+1:]
+	domain := strings.ToLower(email[at+1:])
 	suffix := ".iam.gserviceaccount.com"
 	if !strings.HasSuffix(domain, suffix) {
 		return ""
@@ -1278,6 +1295,9 @@ var (
 	// record that is not bound to the broker the agent runs on (bound to
 	// another broker, or carrying no broker binding).
 	errGCPSABrokerMismatch = errors.New("the assigned GCP service account is a broker host service account that is not bound to this agent's broker")
+	// errGCPSAReserved: the assigned service account matches a reserved
+	// platform identity (such as the Hub's own GCP service account).
+	errGCPSAReserved = errors.New("the assigned GCP service account matches the Hub's own identity and cannot be used by agents")
 )
 
 // isGCPAssignmentInadmissible reports whether err is one of the refusal
@@ -1285,7 +1305,7 @@ var (
 func isGCPAssignmentInadmissible(err error) bool {
 	return errors.Is(err, errGCPSANotAvailable) || errors.Is(err, errGCPSANotVerified) ||
 		errors.Is(err, errGCPSAEmailChanged) || errors.Is(err, errGCPSAHubModeOff) ||
-		errors.Is(err, errGCPSABrokerMismatch)
+		errors.Is(err, errGCPSABrokerMismatch) || errors.Is(err, errGCPSAReserved)
 }
 
 // checkGCPAssignmentAdmissible is the admissibility rule for an agent's
@@ -1320,6 +1340,9 @@ func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.G
 	if gcpID == nil {
 		return nil, errGCPSANotAvailable
 	}
+	if s.isHubOwnServiceAccountEmail(gcpID.ServiceAccountEmail) {
+		return nil, errGCPSAReserved
+	}
 	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1329,6 +1352,9 @@ func (s *Server) admissibleGCPServiceAccount(ctx context.Context, gcpID *store.G
 	}
 	if sa == nil {
 		return nil, errGCPSANotAvailable
+	}
+	if s.isHubOwnServiceAccountEmail(sa.Email) {
+		return nil, errGCPSAReserved
 	}
 	if !gcpServiceAccountVerified(sa) {
 		return nil, errGCPSANotVerified
@@ -1414,6 +1440,10 @@ func (s *Server) gcpIdentityStartRefusal(ctx context.Context, w http.ResponseWri
 // changed-email case is fixed the same way.
 func gcpIdentityStartRefusalText(action string, err error) (int, string, string) {
 	switch {
+	case errors.Is(err, errGCPSAReserved):
+		return http.StatusBadRequest, ErrCodeIdentityReserved, fmt.Sprintf(
+			"Cannot %s agent: %s. Assign the agent a dedicated GCP service account, then retry.",
+			action, err.Error())
 	case errors.Is(err, errGCPSANotVerified):
 		return http.StatusBadRequest, ErrCodeIdentityNotVerified, fmt.Sprintf(
 			"Cannot %s agent: %s: the hub cannot obtain tokens for it. %s "+

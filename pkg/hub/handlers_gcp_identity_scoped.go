@@ -613,8 +613,14 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 		return
 	}
 
+	req.Email = strings.TrimSpace(req.Email)
 	if req.Email == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "missing required field(s): email", nil)
+		return
+	}
+	if !isValidGCPServiceAccountEmail(req.Email) {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"invalid service account email: must be an email address", nil)
 		return
 	}
 
@@ -643,6 +649,11 @@ func (s *Server) createHubScopedGCPServiceAccount(w http.ResponseWriter, r *http
 				"You must be a hub member to register a hub-scoped service account", nil)
 			return
 		}
+	}
+
+	if code, msg, refused := s.gcpServiceAccountEmailRefusal(req.Email); refused {
+		writeError(w, http.StatusBadRequest, code, msg, nil)
+		return
 	}
 
 	sa := &store.GCPServiceAccount{

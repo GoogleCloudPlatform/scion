@@ -803,7 +803,15 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		}
 	})
 
+	srcToClonedID := make(map[string]string, len(accounts))
+	skippedIDs := make(map[string]bool)
 	for _, sa := range accounts {
+		if s.isHubOwnServiceAccountEmail(sa.Email) {
+			slog.Warn("project clone skipped reserved GCP service account",
+				"src_project_id", srcProjectID, "clone_id", clone.ID, "sa_id", sa.ID, "email", sa.Email)
+			skippedIDs[sa.ID] = true
+			continue
+		}
 		newSA := &store.GCPServiceAccount{
 			ID:            api.NewUUID(),
 			Scope:         store.ScopeProject,
@@ -822,19 +830,21 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 			return err
 		}
 		clonedIDs = append(clonedIDs, newSA.ID)
+		srcToClonedID[sa.ID] = newSA.ID
 	}
 
 	// Remap the per-profile default SA map's entries that reference a
-	// source SA. Entries naming other (hub-scoped) accounts are kept.
+	// source SA. Entries naming other (hub-scoped) accounts are kept;
+	// entries naming a skipped reserved account are dropped.
 	if byProfile := profileDefaultSAIDsFromAnnotations(clone.Annotations); len(byProfile) > 0 {
 		changed := false
 		for profile, saID := range byProfile {
-			for i, srcSA := range accounts {
-				if srcSA.ID == saID {
-					byProfile[profile] = clonedIDs[i]
-					changed = true
-					break
-				}
+			if newID, ok := srcToClonedID[saID]; ok {
+				byProfile[profile] = newID
+				changed = true
+			} else if skippedIDs[saID] {
+				delete(byProfile, profile)
+				changed = true
 			}
 		}
 		if changed {
@@ -849,12 +859,12 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 	if byBroker := brokerDefaultSAIDsFromAnnotations(clone.Annotations); len(byBroker) > 0 {
 		changed := false
 		for brokerID, saID := range byBroker {
-			for i, srcSA := range accounts {
-				if srcSA.ID == saID {
-					byBroker[brokerID] = clonedIDs[i]
-					changed = true
-					break
-				}
+			if newID, ok := srcToClonedID[saID]; ok {
+				byBroker[brokerID] = newID
+				changed = true
+			} else if skippedIDs[saID] {
+				delete(byBroker, brokerID)
+				changed = true
 			}
 		}
 		if changed {
@@ -868,14 +878,15 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 	// Remap default SA annotation if it references a source SA.
 	defaultSAID, ok := clone.Annotations[projectSettingDefaultGCPIdentitySAID]
 	if ok && defaultSAID != "" {
-		for i, srcSA := range accounts {
-			if srcSA.ID == defaultSAID {
-				clone.Annotations[projectSettingDefaultGCPIdentitySAID] = clonedIDs[i]
-				// Update the persisted project row.
-				if err := s.store.UpdateProject(ctx, clone); err != nil {
-					return fmt.Errorf("remap default SA annotation: %w", err)
-				}
-				break
+		if newID, remapped := srcToClonedID[defaultSAID]; remapped {
+			clone.Annotations[projectSettingDefaultGCPIdentitySAID] = newID
+			if err := s.store.UpdateProject(ctx, clone); err != nil {
+				return fmt.Errorf("remap default SA annotation: %w", err)
+			}
+		} else if skippedIDs[defaultSAID] {
+			delete(clone.Annotations, projectSettingDefaultGCPIdentitySAID)
+			if err := s.store.UpdateProject(ctx, clone); err != nil {
+				return fmt.Errorf("clear skipped default SA annotation: %w", err)
 			}
 		}
 	}

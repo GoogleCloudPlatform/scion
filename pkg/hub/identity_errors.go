@@ -54,6 +54,11 @@ const (
 	// assignment. The message names what is missing and who grants it.
 	// Status 403.
 	ErrCodeIdentityAssignDenied = "identity_assign_denied"
+
+	// ErrCodeIdentityReserved: the service account email matches a reserved
+	// platform identity (such as the Hub's own GCP service account) and cannot
+	// be registered, verified, assigned, or used by agents. Status 400.
+	ErrCodeIdentityReserved = "identity_reserved"
 )
 
 // identityVerifyRemedy is the remedy shared by every not-verified message.

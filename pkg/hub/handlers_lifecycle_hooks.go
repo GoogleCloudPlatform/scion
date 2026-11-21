@@ -178,6 +178,9 @@ func (s *Server) createLifecycleHook(w http.ResponseWriter, r *http.Request, use
 		writeForbidden(w, "You don't have permission to set a hook execution identity")
 		return
 	}
+	if s.refuseReservedHookExecutionIdentity(w, r.Context(), hook.ExecutionIdentity) {
+		return
+	}
 	resolver := &storeGCPServiceAccountResolver{store: s.store}
 	if err := lifecyclehooks.ValidateHook(r.Context(), hook, resolver, caller, s.hookIdentityCheckerFor(), s.GetAuditLogger()); err != nil {
 		if ve, ok := err.(*lifecyclehooks.ValidationError); ok {
@@ -310,6 +313,9 @@ func (s *Server) updateLifecycleHook(w http.ResponseWriter, r *http.Request, id 
 	caller, err := s.callerPrincipal(r.Context())
 	if err != nil {
 		writeForbidden(w, "You don't have permission to set a hook execution identity")
+		return
+	}
+	if s.refuseReservedHookExecutionIdentity(w, r.Context(), existing.ExecutionIdentity) {
 		return
 	}
 	resolver := &storeGCPServiceAccountResolver{store: s.store}

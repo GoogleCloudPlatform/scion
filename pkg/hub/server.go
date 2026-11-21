@@ -7356,6 +7356,12 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.startGitHubAppIdentityInit(ctx)
 	s.warnGitHubAppKeyOverride(ctx)
 
+	// Flag any existing GCP service account rows matching the Hub's own
+	// identity before serving traffic.
+	if _, err := s.ScanReservedGCPServiceAccounts(ctx); err != nil {
+		slog.Warn("startup scan for reserved GCP service accounts completed with errors", "error", err)
+	}
+
 	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
 	// run utc-timestamp-normalize once, after a snapshot. It runs in the
 	// background: on a large store the check is a full scan per time column,

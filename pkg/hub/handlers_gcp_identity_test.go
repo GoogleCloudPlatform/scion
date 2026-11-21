@@ -979,6 +979,8 @@ func TestProjectIDFromServiceAccountEmail(t *testing.T) {
 	}{
 		{"agent@my-project.iam.gserviceaccount.com", "my-project"},
 		{"fold-run-infra@foldrun-ptone-argolis.iam.gserviceaccount.com", "foldrun-ptone-argolis"},
+		{"Worker@My-Proj.IAM.GServiceAccount.COM", "my-proj"},
+		{"  worker@My-Proj-123.IAM.GSERVICEACCOUNT.COM  ", "my-proj-123"},
 		{"sa@example.com", ""},
 		{"no-at-sign", ""},
 		{"", ""},
