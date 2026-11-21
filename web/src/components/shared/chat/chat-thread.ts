@@ -7411,6 +7411,27 @@ export class ScionChatThread extends LitElement {
     </div>`;
   }
 
+  /**
+   * Non-blocking reply-bar warning when replying to an agent that is no longer
+   * present in the loaded project agent list. Returns empty while the agent
+   * list is unloaded/empty to avoid false positives during initial load.
+   */
+  private replyTargetWarning(): string {
+    if (!this.composerReplyTo) return '';
+    if (!this.agents || this.agents.length === 0) return '';
+    const replyMsg = this.messageMap.get(this.composerReplyTo.messageId);
+    const sender = this.composerReplyTo.sender || replyMsg?.sender || '';
+    if (!sender.startsWith('agent:')) return '';
+    const slug = sender.slice(6);
+    if (!slug) return '';
+    const senderId = this.composerReplyTo.senderId || replyMsg?.senderId || '';
+    const isLive = this.agents.some(
+      (a) => a.slug === slug || (senderId !== '' && a.id === senderId)
+    );
+    if (isLive) return '';
+    return `@${slug} was deleted — mention a live agent with @ or this reply won't be delivered.`;
+  }
+
   private renderComposerV2() {
     return html`
       <scion-chat-composer
@@ -7423,6 +7444,7 @@ export class ScionChatThread extends LitElement {
         .currentUserId=${this.currentUserId}
         .conversationKey=${this.conversationKey}
         .replyTo=${this.composerReplyTo}
+        .replyTargetWarning=${this.replyTargetWarning()}
         .editMessage=${this.composerEditMessage}
         ?scheduleSendEnabled=${this.scheduleSendAvailable}
         ?wakeAvailable=${conversationSupportsScheduledWake(this.conversationKey)}

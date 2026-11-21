@@ -897,3 +897,44 @@ describe('composer — conversation switch', () => {
     expect(el.uploading).toBe(false);
   });
 });
+
+describe('composer — reply target warning', () => {
+  it('renders the inline warning in the reply bar without blocking send', async () => {
+    const el = createComposer();
+    el.replyTo = { messageId: 'm-1', senderName: 'gone-bot', content: 'please review' };
+    el.replyTargetWarning =
+      "@gone-bot was deleted — mention a live agent with @ or this reply won't be delivered.";
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const warning = el.shadowRoot?.querySelector('.reply-warning');
+    expect(warning?.textContent).toContain(
+      "@gone-bot was deleted — mention a live agent with @ or this reply won't be delivered."
+    );
+    expect(warning?.querySelector('sl-icon')?.getAttribute('name')).toBe('exclamation-triangle');
+
+    // Warning is non-blocking: typing text and sending still emits chat-send.
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.text = '@live-bot please pick this up';
+    await el.updateComplete;
+    const sendBtn = el.shadowRoot?.querySelector('sl-button.send-btn') as
+      | (HTMLElement & { disabled?: boolean })
+      | null;
+    expect(sendBtn?.disabled).toBeFalsy();
+    el.handleSend();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].replyToId).toBe('m-1');
+  });
+
+  it('omits the warning element when replyTargetWarning is empty', async () => {
+    const el = createComposer();
+    el.replyTo = { messageId: 'm-2', senderName: 'live-bot', content: 'ready' };
+    el.replyTargetWarning = '';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.reply-bar')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.reply-warning')).toBeNull();
+  });
+});

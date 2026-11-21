@@ -259,6 +259,10 @@ export class ScionChatComposer extends LitElement {
   @property({ type: Object })
   replyTo: { messageId: string; senderName: string; content: string } | null = null;
 
+  /** Optional non-blocking inline warning displayed in the reply bar (e.g. deleted reply target). */
+  @property({ type: String })
+  replyTargetWarning = '';
+
   /** Edit mode: populates the textarea with existing content. */
   @property({ type: Object })
   editMessage: { messageId: string; content: string } | null = null;
@@ -901,14 +905,38 @@ export class ScionChatComposer extends LitElement {
        same height whatever the frame, so the field's cap stays monotonic. */
     .reply-bar {
       display: flex;
-      align-items: center;
-      gap: 0.5rem;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.25rem;
       padding: calc(0.375rem - 0.25rem * var(--scion-chat-kb-open, 0)) 0.75rem;
       background: var(--scion-bg, #f8fafc);
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
       border-radius: 0 var(--scion-radius-sm) var(--scion-radius-sm) 0;
       font-size: var(--chat-fs-base);
       color: var(--scion-text-secondary, #475569);
+    }
+
+    .reply-bar.has-warning {
+      border-left-color: var(--scion-warning-400, #fbbf24);
+    }
+
+    .reply-bar-main {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .reply-warning {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      font-size: var(--chat-fs-xs);
+      color: var(--scion-warning-600, #d97706);
+    }
+
+    .reply-warning sl-icon {
+      flex-shrink: 0;
+      font-size: var(--chat-fs-sm);
     }
 
     /* The sender and a one-line excerpt: on two lines normally, side by
@@ -1367,16 +1395,26 @@ export class ScionChatComposer extends LitElement {
   private renderReplyBar() {
     if (!this.replyTo) return nothing;
     return html`
-      <div class="reply-bar">
-        <div class="reply-info">
-          <span class="reply-sender">${this.replyTo.senderName}</span>
-          <span class="reply-content">${this.replyTo.content}</span>
+      <div class="reply-bar${this.replyTargetWarning ? ' has-warning' : ''}">
+        <div class="reply-bar-main">
+          <div class="reply-info">
+            <span class="reply-sender">${this.replyTo.senderName}</span>
+            <span class="reply-content">${this.replyTo.content}</span>
+          </div>
+          <sl-icon-button
+            name="x-lg"
+            label="Cancel reply"
+            @click=${this.cancelReply}
+          ></sl-icon-button>
         </div>
-        <sl-icon-button
-          name="x-lg"
-          label="Cancel reply"
-          @click=${this.cancelReply}
-        ></sl-icon-button>
+        ${this.replyTargetWarning
+          ? html`
+              <div class="reply-warning" role="status">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                <span>${this.replyTargetWarning}</span>
+              </div>
+            `
+          : nothing}
       </div>
     `;
   }

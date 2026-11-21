@@ -2010,6 +2010,68 @@ describe('scion-chat-thread dispatch state from send response', () => {
     } as unknown as Response);
     await sendPromise;
   });
+
+  it('passes a composer reply-bar warning only when replying to an agent missing from a loaded agent list', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      composerReplyTo: {
+        messageId: string;
+        senderName: string;
+        content: string;
+        sender?: string;
+        senderId?: string;
+      } | null;
+    };
+    const composerWarning = () =>
+      (
+        el.shadowRoot?.querySelector('scion-chat-composer') as
+          | (HTMLElement & { replyTargetWarning?: string })
+          | null
+      )?.replyTargetWarning ?? '';
+
+    // 1. Agent list unloaded (empty): no false-positive warning.
+    el.agents = [];
+    internals.composerReplyTo = {
+      messageId: 'm-del',
+      senderName: 'gone-agent',
+      content: 'hi',
+      sender: 'agent:gone-agent',
+      senderId: 'gone-id',
+    };
+    await el.updateComplete;
+    expect(composerWarning()).toBe('');
+
+    // 2. Agent list loaded without the target agent: warning shown.
+    el.agents = [
+      { id: 'live-id', name: 'Live Agent', slug: 'live-agent', status: 'running' } as Agent,
+    ];
+    await el.updateComplete;
+    expect(composerWarning()).toBe(
+      "@gone-agent was deleted — mention a live agent with @ or this reply won't be delivered."
+    );
+
+    // 3. Replying to a live agent in the list: no warning.
+    internals.composerReplyTo = {
+      messageId: 'm-live',
+      senderName: 'live-agent',
+      content: 'hi',
+      sender: 'agent:live-agent',
+      senderId: 'live-id',
+    };
+    await el.updateComplete;
+    expect(composerWarning()).toBe('');
+
+    // 4. Replying to a human message: no warning.
+    internals.composerReplyTo = {
+      messageId: 'm-human',
+      senderName: 'Alice',
+      content: 'hi',
+      sender: 'user:alice@example.com',
+      senderId: 'user-alice',
+    };
+    await el.updateComplete;
+    expect(composerWarning()).toBe('');
+  });
 });
 
 describe('scion-chat-thread stale send and the sending state', () => {
