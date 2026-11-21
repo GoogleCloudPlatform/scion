@@ -472,8 +472,13 @@ func TestLocalhostAuthServer_CallbackBrandingAndSecurity(t *testing.T) {
 			},
 			{
 				name:     "arbitrary Google Font family",
-				fontSans: "  Work   Sans  ",
+				fontSans: "Work   Sans",
 				want:     "font-family: 'Work Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;",
+			},
+			{
+				name:     "leading or trailing whitespace falls back to default",
+				fontSans: " Work Sans ",
+				want:     "font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;",
 			},
 			{
 				name:     "injection attempt falls back to default",

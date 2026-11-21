@@ -17,11 +17,15 @@ package config
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"image"
 	"image/color"
 	"image/png"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -1212,11 +1216,11 @@ func TestResolveBranding_FontSansPresetsGoogleFontsAndValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("arbitrary Google Font family normalizes whitespace and composes with palette and corners", func(t *testing.T) {
+	t.Run("arbitrary Google Font family normalizes internal whitespace and composes with palette and corners", func(t *testing.T) {
 		resolved, errs := ResolveBranding(&BrandingConfig{
 			AccentColor: "#0d9488",
 			Corners:     BrandCornersSquare,
-			FontSans:    "  Work   Sans  ",
+			FontSans:    "Work   Sans",
 		})
 		if len(errs) != 0 {
 			t.Fatalf("unexpected errs: %v", errs)
@@ -1250,6 +1254,9 @@ func TestResolveBranding_FontSansPresetsGoogleFontsAndValidation(t *testing.T) {
 	t.Run("injection and invalid font_sans values rejected with malformed fallback", func(t *testing.T) {
 		badValues := []string{
 			"   ",
+			" Work Sans",
+			"Work Sans ",
+			"  Work Sans  ",
 			"-LeadingHyphen",
 			"Inter'",
 			`Inter"`,
@@ -1278,4 +1285,93 @@ func TestResolveBranding_FontSansPresetsGoogleFontsAndValidation(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestBrandingFontSans_CrossBoundaryParity(t *testing.T) {
+	wantRegex := googleFontFamilyRe.String()
+
+	// 1. JSON Schema (pkg/config/schemas/settings-v1.schema.json)
+	schemaBytes, err := os.ReadFile(filepath.Join("schemas", "settings-v1.schema.json"))
+	if err != nil {
+		t.Fatalf("read settings-v1.schema.json: %v", err)
+	}
+	var schemaDoc struct {
+		Defs struct {
+			ServerHubBranding struct {
+				Properties struct {
+					FontSans struct {
+						Pattern   string `json:"pattern"`
+						MaxLength int    `json:"maxLength"`
+					} `json:"font_sans"`
+				} `json:"properties"`
+			} `json:"serverHubBranding"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(schemaBytes, &schemaDoc); err != nil {
+		t.Fatalf("parse settings-v1.schema.json: %v", err)
+	}
+	if got := schemaDoc.Defs.ServerHubBranding.Properties.FontSans.Pattern; got != wantRegex {
+		t.Errorf("JSON schema font_sans.pattern = %q, want %q", got, wantRegex)
+	}
+	if got := schemaDoc.Defs.ServerHubBranding.Properties.FontSans.MaxLength; got != MaxBrandFontSansLen {
+		t.Errorf("JSON schema font_sans.maxLength = %d, want %d", got, MaxBrandFontSansLen)
+	}
+
+	// 2. CLI localhost callback (pkg/hub/auth/localhost_server.go)
+	callbackSrc, err := os.ReadFile(filepath.Join("..", "hub", "auth", "localhost_server.go"))
+	if err != nil {
+		t.Fatalf("read pkg/hub/auth/localhost_server.go: %v", err)
+	}
+	cbReMatch := regexp.MustCompile("callbackGoogleFontFamilyRe\\s*=\\s*regexp\\.MustCompile\\(`([^`]+)`\\)").FindSubmatch(callbackSrc)
+	if len(cbReMatch) != 2 {
+		t.Fatal("could not locate callbackGoogleFontFamilyRe in pkg/hub/auth/localhost_server.go")
+	}
+	if got := string(cbReMatch[1]); got != wantRegex {
+		t.Errorf("localhost_server.go callbackGoogleFontFamilyRe = %q, want %q", got, wantRegex)
+	}
+
+	cbFallbackMatch := regexp.MustCompile(`callbackSystemFontSansFallback\s*=\s*"([^"]+)"`).FindSubmatch(callbackSrc)
+	if len(cbFallbackMatch) != 2 {
+		t.Fatal("could not locate callbackSystemFontSansFallback in pkg/hub/auth/localhost_server.go")
+	}
+	if got := string(cbFallbackMatch[1]); got != SystemFontSansFallback {
+		t.Errorf("localhost_server.go callbackSystemFontSansFallback = %q, want %q", got, SystemFontSansFallback)
+	}
+
+	cbMapBlock := regexp.MustCompile(`(?s)callbackCuratedFontSansFamilies\s*=\s*map\[string\]string\{(.*?)\}`).FindSubmatch(callbackSrc)
+	if len(cbMapBlock) != 2 {
+		t.Fatal("could not locate callbackCuratedFontSansFamilies in pkg/hub/auth/localhost_server.go")
+	}
+	cbPresets := make(map[string]string)
+	for _, m := range regexp.MustCompile(`"([^"]+)"\s*:\s*"([^"]+)"`).FindAllSubmatch(cbMapBlock[1], -1) {
+		cbPresets[string(m[1])] = string(m[2])
+	}
+	if !reflect.DeepEqual(cbPresets, curatedFontSansFamilies) {
+		t.Errorf("localhost_server.go callbackCuratedFontSansFamilies = %v, want %v", cbPresets, curatedFontSansFamilies)
+	}
+
+	// 3. Web runtime (web/src/client/branding-runtime.ts)
+	tsSrc, err := os.ReadFile(filepath.Join("..", "..", "web", "src", "client", "branding-runtime.ts"))
+	if err != nil {
+		t.Fatalf("read web/src/client/branding-runtime.ts: %v", err)
+	}
+	tsReMatch := regexp.MustCompile(`GOOGLE_FONT_FAMILY_RE\s*=\s*/([^/]+)/;`).FindSubmatch(tsSrc)
+	if len(tsReMatch) != 2 {
+		t.Fatal("could not locate GOOGLE_FONT_FAMILY_RE in web/src/client/branding-runtime.ts")
+	}
+	if got := string(tsReMatch[1]); got != wantRegex {
+		t.Errorf("branding-runtime.ts GOOGLE_FONT_FAMILY_RE = %q, want %q", got, wantRegex)
+	}
+
+	tsMapBlock := regexp.MustCompile(`(?s)CURATED_FONT_SANS_FAMILIES[^=]*=\s*\{(.*?)\};`).FindSubmatch(tsSrc)
+	if len(tsMapBlock) != 2 {
+		t.Fatal("could not locate CURATED_FONT_SANS_FAMILIES in web/src/client/branding-runtime.ts")
+	}
+	tsPresets := make(map[string]string)
+	for _, m := range regexp.MustCompile(`'([^']+)'\s*:\s*'([^']+)'`).FindAllSubmatch(tsMapBlock[1], -1) {
+		tsPresets[string(m[1])] = string(m[2])
+	}
+	if !reflect.DeepEqual(tsPresets, curatedFontSansFamilies) {
+		t.Errorf("branding-runtime.ts CURATED_FONT_SANS_FAMILIES = %v, want %v", tsPresets, curatedFontSansFamilies)
+	}
 }

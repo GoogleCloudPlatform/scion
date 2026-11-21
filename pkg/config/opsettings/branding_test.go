@@ -81,6 +81,7 @@ func TestBrandingSection_KoanfRoundTripAndValidation(t *testing.T) {
 		`{"font_sans":"<script>alert(1)</script>"}`,
 		`{"font_sans":"Inter&display=block"}`,
 		`{"font_sans":" leading-space"}`,
+		`{"font_sans":"trailing-space "}`,
 	} {
 		if errs := Validate(BrandingSectionName, json.RawMessage(badFont)); len(errs) == 0 {
 			t.Fatalf("Validate should reject invalid font_sans payload %s", badFont)

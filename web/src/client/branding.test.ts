@@ -274,18 +274,20 @@ describe('branding state & runtime DOM sync', () => {
     ).toBe(true);
   });
 
-  it('rejects injection attempts in fontSans during live DOM sync', () => {
+  it('rejects injection attempts and surrounding whitespace in fontSans during live DOM sync', () => {
     document.head.innerHTML = `
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     `;
 
-    syncBrandingDOM({
-      name: 'Scion',
-      shortName: 'Scion',
-      attribution: 'shown',
-      fontSans: "Inter'; } body { display: none",
-      themeColor: '#1e293b',
-    });
+    for (const bad of ["Inter'; } body { display: none", ' Work Sans', 'Work Sans ']) {
+      syncBrandingDOM({
+        name: 'Scion',
+        shortName: 'Scion',
+        attribution: 'shown',
+        fontSans: bad,
+        themeColor: '#1e293b',
+      });
+    }
 
     const links = document.head.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]');
     expect(links).toHaveLength(1);

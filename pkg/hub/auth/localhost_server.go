@@ -50,7 +50,14 @@ const (
 	callbackSystemFontSansFallback = "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
 )
 
-var callbackGoogleFontFamilyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 -]{0,63}$`)
+var callbackGoogleFontFamilyRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9 -]{0,62}[A-Za-z0-9-])?$`)
+
+var callbackCuratedFontSansFamilies = map[string]string{
+	"ibm-plex-sans":     "IBM Plex Sans",
+	"plus-jakarta-sans": "Plus Jakarta Sans",
+	"dm-sans":           "DM Sans",
+	"source-sans-3":     "Source Sans 3",
+}
 
 // CallbackColors holds validated #RRGGBB hex tokens for one theme mode of the
 // localhost OAuth callback HTML page.
@@ -198,27 +205,20 @@ func sanitizeCallbackFontSans(raw string) string {
 			return defaultCallbackFontSansStack
 		}
 	}
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || len(trimmed) > maxCallbackFontSansLen || !callbackGoogleFontFamilyRe.MatchString(trimmed) {
+	if len(raw) > maxCallbackFontSansLen || !callbackGoogleFontFamilyRe.MatchString(raw) {
 		return defaultCallbackFontSansStack
 	}
-	normalized := strings.Join(strings.Fields(trimmed), " ")
+	normalized := strings.Join(strings.Fields(raw), " ")
 	switch normalized {
 	case "default":
 		return defaultCallbackFontSansStack
 	case "system":
 		return callbackSystemFontSansFallback
-	case "ibm-plex-sans":
-		return "'IBM Plex Sans', " + callbackSystemFontSansFallback
-	case "plus-jakarta-sans":
-		return "'Plus Jakarta Sans', " + callbackSystemFontSansFallback
-	case "dm-sans":
-		return "'DM Sans', " + callbackSystemFontSansFallback
-	case "source-sans-3":
-		return "'Source Sans 3', " + callbackSystemFontSansFallback
-	default:
-		return "'" + normalized + "', " + callbackSystemFontSansFallback
 	}
+	if family, ok := callbackCuratedFontSansFamilies[normalized]; ok {
+		return "'" + family + "', " + callbackSystemFontSansFallback
+	}
+	return "'" + normalized + "', " + callbackSystemFontSansFallback
 }
 
 func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, heading, message string) string {

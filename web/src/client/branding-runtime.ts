@@ -30,7 +30,7 @@ const DEFAULT_THEME_COLOR = '#1e293b';
 export const BRANDING_FONT_SANS_ID = 'scion-brand-font-sans';
 const DEFAULT_FONT_SANS_URL =
   'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap';
-const GOOGLE_FONT_FAMILY_RE = /^[A-Za-z0-9][A-Za-z0-9 -]{0,63}$/;
+const GOOGLE_FONT_FAMILY_RE = /^[A-Za-z0-9]([A-Za-z0-9 -]{0,62}[A-Za-z0-9-])?$/;
 const CURATED_FONT_SANS_FAMILIES: Readonly<Record<string, string>> = {
   'ibm-plex-sans': 'IBM Plex Sans',
   'plus-jakarta-sans': 'Plus Jakarta Sans',
@@ -230,12 +230,10 @@ function syncThemeColor(themeColor: string | undefined): void {
 }
 
 function resolveFontSansStylesheetURL(fontSans: string | undefined): string | null | undefined {
-  if (!fontSans) return undefined;
-  const trimmed = fontSans.trim();
-  if (!trimmed || trimmed === 'default') return undefined;
-  if (trimmed === 'system') return null;
-  if (!GOOGLE_FONT_FAMILY_RE.test(trimmed)) return undefined;
-  const normalized = trimmed.replace(/\s+/g, ' ');
+  if (!fontSans || fontSans === 'default') return undefined;
+  if (fontSans === 'system') return null;
+  if (!GOOGLE_FONT_FAMILY_RE.test(fontSans)) return undefined;
+  const normalized = fontSans.replace(/\s+/g, ' ');
   const family = CURATED_FONT_SANS_FAMILIES[normalized] ?? normalized;
   return `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family).replace(/%20/g, '+')}:wght@400;500;600;700&display=swap`;
 }

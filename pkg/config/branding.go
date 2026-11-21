@@ -110,12 +110,23 @@ func IsValidBrandSlot(slot string) bool {
 	}
 }
 
-// googleFontFamilyRe permits only ASCII alphanumeric characters, spaces, and
-// hyphens (1..64 chars, starting with alphanumeric). Rejects quotes,
-// semicolons, braces, angle brackets, backslashes, and control characters so
-// the family name is safe in CSS single-quoted font-family strings, HTML
-// attributes, and Google Fonts query parameters (via url.QueryEscape).
-var googleFontFamilyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 -]{0,63}$`)
+// googleFontFamilyRe permits only ASCII alphanumeric characters, internal
+// spaces, and hyphens (1..64 chars, starting with alphanumeric and not ending
+// in whitespace). Rejects leading/trailing whitespace, quotes, semicolons,
+// braces, angle brackets, backslashes, and control characters so the family
+// name is safe in CSS single-quoted font-family strings, HTML attributes, and
+// Google Fonts query parameters (via url.QueryEscape).
+var googleFontFamilyRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9 -]{0,62}[A-Za-z0-9-])?$`)
+
+// curatedFontSansFamilies maps curated preset slugs to their canonical Google
+// Fonts display family names. Keep in parity with pkg/hub/auth/localhost_server.go
+// and web/src/client/branding-runtime.ts (enforced by TestBrandingFontSans_CrossBoundaryParity).
+var curatedFontSansFamilies = map[string]string{
+	BrandFontSansIBMPlexSans:     "IBM Plex Sans",
+	BrandFontSansPlusJakartaSans: "Plus Jakarta Sans",
+	BrandFontSansDMSans:          "DM Sans",
+	BrandFontSansSourceSans3:     "Source Sans 3",
+}
 
 // ScaleSteps enumerates the allowed shade keys in BrandingScale.
 var ScaleSteps = []string{"50", "100", "200", "300", "400", "500", "600", "700", "800", "900", "950"}
@@ -704,31 +715,23 @@ func resolveBrandFontSans(raw string) (fontSans, fontStack, stylesheetURL string
 	if hasControlChars(raw) {
 		return "", "", "", errors.New("must not contain control characters")
 	}
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || len(trimmed) > MaxBrandFontSansLen || !googleFontFamilyRe.MatchString(trimmed) {
+	if len(raw) > MaxBrandFontSansLen || !googleFontFamilyRe.MatchString(raw) {
 		return "", "", "", fmt.Errorf(
-			"must be %q, %q, a curated preset (%q, %q, %q, %q), or a Google Fonts family name (1..%d ASCII letters, digits, spaces, or hyphens starting with a letter or digit)",
+			"must be %q, %q, a curated preset (%q, %q, %q, %q), or a Google Fonts family name (1..%d ASCII letters, digits, internal spaces, or hyphens with no leading/trailing whitespace)",
 			BrandFontSansDefault, BrandFontSansSystem,
 			BrandFontSansIBMPlexSans, BrandFontSansPlusJakartaSans, BrandFontSansDMSans, BrandFontSansSourceSans3,
 			MaxBrandFontSansLen,
 		)
 	}
-	normalized := strings.Join(strings.Fields(trimmed), " ")
-	var family string
+	normalized := strings.Join(strings.Fields(raw), " ")
 	switch normalized {
 	case BrandFontSansDefault:
 		return BrandFontSansDefault, DefaultBrandFontSansStack, DefaultBrandFontSansURL, nil
 	case BrandFontSansSystem:
 		return BrandFontSansSystem, SystemFontSansFallback, "", nil
-	case BrandFontSansIBMPlexSans:
-		family = "IBM Plex Sans"
-	case BrandFontSansPlusJakartaSans:
-		family = "Plus Jakarta Sans"
-	case BrandFontSansDMSans:
-		family = "DM Sans"
-	case BrandFontSansSourceSans3:
-		family = "Source Sans 3"
-	default:
+	}
+	family, ok := curatedFontSansFamilies[normalized]
+	if !ok {
 		family = normalized
 	}
 	fontStack = "'" + family + "', " + SystemFontSansFallback
