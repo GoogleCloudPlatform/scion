@@ -620,6 +620,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteRoleBindingsForScope", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGroup", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteSecretsByScope", OperationID: "project.lifecycle.delete"},
+	{File: "pkg/hub/project_deletion_service.go", Function: "deleteProjectAgentSecretsTx", Symbol: "DeleteSecretsByScope", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeletePendingSecretsByProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteGCPServiceAccount", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteProjectVisitorRulesByProject", OperationID: "project.lifecycle.delete"},

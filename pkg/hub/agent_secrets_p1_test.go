@@ -532,3 +532,73 @@ func TestAgentSecrets_LifecyclePersistenceHardDeletePurgeAndCleanup(t *testing.T
 	_, err = s.GetSecret(ctx, "EXT_KEY", store.ScopeAgent, agentX.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
+
+type spyDeleteSecretBackend struct {
+	secret.SecretBackend
+	mu      sync.Mutex
+	deleted []string // "scope/scopeID/name"
+}
+
+func (b *spyDeleteSecretBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
+	b.mu.Lock()
+	b.deleted = append(b.deleted, scope+"/"+scopeID+"/"+name)
+	b.mu.Unlock()
+	return b.SecretBackend.Delete(ctx, name, scope, scopeID)
+}
+
+func TestAgentSecrets_ProjectDeletionRemovesAgentSecretsAndCallsExternalCleanup(t *testing.T) {
+	srv, s, owner, _, project, agentX, _ := setupAgentSecretsTestFixture(t, true)
+	ctx := context.Background()
+
+	spy := &spyDeleteSecretBackend{SecretBackend: srv.GetSecretBackend()}
+	srv.SetSecretBackend(spy)
+
+	// Create a second project + agent whose secrets must remain untouched.
+	otherProject := &store.Project{
+		ID:      api.NewUUID(),
+		Name:    "other-proj",
+		Slug:    "other-proj",
+		OwnerID: owner.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+	otherAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "other-agent",
+		Name:      "other-agent",
+		ProjectID: otherProject.ID,
+		OwnerID:   owner.ID,
+		CreatedBy: owner.ID,
+		Ancestry:  []string{owner.ID},
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, otherAgent))
+
+	_, _, err := spy.Set(ctx, &secret.SetSecretInput{
+		Name: "PROJ_DEL_KEY", Value: "secret-val", Scope: store.ScopeAgent, ScopeID: agentX.ID, ProjectID: project.ID,
+	})
+	require.NoError(t, err)
+	_, _, err = spy.Set(ctx, &secret.SetSecretInput{
+		Name: "OTHER_KEEP_KEY", Value: "other-val", Scope: store.ScopeAgent, ScopeID: otherAgent.ID, ProjectID: otherProject.ID,
+	})
+	require.NoError(t, err)
+
+	// Force-delete the project as owner (with agents still present).
+	rr := doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
+	require.True(t, rr.Code == http.StatusNoContent || rr.Code == http.StatusOK,
+		"expected 204 or 200 on project delete, got %d: %s", rr.Code, rr.Body.String())
+
+	// Agent-scope secret DB row for deleted project's agent must be gone.
+	_, err = s.GetSecret(ctx, "PROJ_DEL_KEY", store.ScopeAgent, agentX.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "project delete must remove agent-scope secret rows in transaction")
+
+	// External backend cleanup (Delete) must have been called for the agent secret.
+	spy.mu.Lock()
+	deletedCalls := append([]string(nil), spy.deleted...)
+	spy.mu.Unlock()
+	assert.Contains(t, deletedCalls, store.ScopeAgent+"/"+agentX.ID+"/PROJ_DEL_KEY",
+		"project delete must invoke post-commit external cleanup for agent-scope secrets")
+
+	// Other project's agent secret must remain intact.
+	_, err = s.GetSecret(ctx, "OTHER_KEEP_KEY", store.ScopeAgent, otherAgent.ID)
+	require.NoError(t, err, "other project's agent secret must not be affected")
+}
