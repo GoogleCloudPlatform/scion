@@ -70,6 +70,17 @@ var (
 	userDeletionReconcileBatch = 100
 )
 
+const (
+	// userDeletionStopGrace bounds how long shutdown waits for in-flight
+	// background user-deletion reconcile goroutines before cancelling their
+	// contexts.
+	userDeletionStopGrace = 5 * time.Second
+	// userDeletionCancelDrainGrace bounds how long shutdown waits after
+	// cancelling stuck user-deletion reconcile contexts for cooperative
+	// goroutines to unwind before returning.
+	userDeletionCancelDrainGrace = 250 * time.Millisecond
+)
+
 // userDeletionBrokerUnavailable is an agent's last error when its Runtime
 // Broker is not connected, so no delete was attempted.
 const userDeletionBrokerUnavailable = "runtime broker unavailable"
@@ -91,12 +102,33 @@ func (s *Server) userDeletionLock(id string) *sync.Mutex {
 // kickUserDeletion reconciles deletion id in the background, on a context
 // detached from any request. retryNow claims failed agents again without
 // waiting out their backoff (a repeated force request asks for that).
+// Once shutdown has closed admission, kickUserDeletion is a no-op so no
+// background reconcile races store close.
 func (s *Server) kickUserDeletion(id string, retryNow bool) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), userDeletionReconcileTimeout)
-		defer cancel()
+	s.userDeletionWork.goTracked(userDeletionReconcileTimeout, func(ctx context.Context) {
 		s.reconcileUserDeletion(ctx, id, retryNow)
-	}()
+	})
+}
+
+// stopUserDeletionWork closes admission for background user-deletion
+// reconcile work (kickUserDeletion and noteUserDeletionAgentFinished) and
+// waits for in-flight goroutines to finish before the store closes, bounded
+// by min(ctx deadline, userDeletionStopGrace). Goroutines still running at
+// that bound have their contexts cancelled and are given up to
+// userDeletionCancelDrainGrace to unwind before returning. Safe to call
+// more than once.
+func (s *Server) stopUserDeletionWork(ctx context.Context) {
+	if cancelled, remaining := s.userDeletionWork.stop(ctx, userDeletionStopGrace, userDeletionCancelDrainGrace); remaining > 0 {
+		slog.Warn("User deletion reconcile work still running after cancellation grace; proceeding with shutdown",
+			"cancelled", cancelled,
+			"running", remaining,
+			"timeout", userDeletionStopGrace,
+			"cancel_grace", userDeletionCancelDrainGrace)
+	} else if cancelled > 0 {
+		slog.Warn("Cancelled in-flight user deletion reconcile work at shutdown deadline",
+			"cancelled", cancelled,
+			"timeout", userDeletionStopGrace)
+	}
 }
 
 // userDeletionReconcileHandler is the recurring handler that reconciles
@@ -445,24 +477,28 @@ func recordUserDeletionAgentStoppedTx(ctx context.Context, tx store.Store, a *st
 // ends with a deleted or failed outcome. Every stopping deletion that lists
 // the agent is reconciled (the outcome itself is recorded in the finalize
 // transaction, recordUserDeletionAgentStoppedTx, or read from the agent
-// row). It returns at once; the work runs in the background.
+// row). It returns at once; the work runs in the background. Once shutdown
+// has closed admission, noteUserDeletionAgentFinished is a no-op so no
+// lookup races store close.
 func (s *Server) noteUserDeletionAgentFinished(plan *agentDeletionPlan, out deletionOutcome) {
 	if out.kind != deletionOutcomeDeleted && out.kind != deletionOutcomeFailed {
 		return
 	}
 	agentID := plan.snapshot.ID
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), userDeletionReconcileTimeout)
-		defer cancel()
+	logger := slog.Default()
+	s.userDeletionWork.goTracked(userDeletionReconcileTimeout, func(ctx context.Context) {
 		recs, err := s.store.ListUserDeletionAgentsForAgent(ctx, agentID)
 		if err != nil {
-			slog.WarnContext(ctx, "user deletion: engine finish lookup failed", "agent_id", agentID, "error", err)
+			logger.WarnContext(ctx, "user deletion: engine finish lookup failed", "agent_id", agentID, "error", err)
 			return
 		}
 		for i := range recs {
+			if ctx.Err() != nil {
+				return
+			}
 			s.reconcileUserDeletion(ctx, recs[i].DeletionID, false)
 		}
-	}()
+	})
 }
 
 // errTokenDeletionSystemBindingHeld is returned by the completion of a

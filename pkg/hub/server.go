@@ -2395,6 +2395,10 @@ type Server struct {
 	// userDeletionLocks holds one *sync.Mutex per forced user deletion
 	// this process is reconciling (userDeletionLock, ptone/scion#2143).
 	userDeletionLocks sync.Map
+	// userDeletionWork admits and joins background user-deletion reconcile
+	// goroutines (kickUserDeletion and noteUserDeletionAgentFinished) so
+	// shutdown drains them before the store closes (ptone/scion#8679).
+	userDeletionWork mutationAuditTracker
 
 	// auditWriter is the bounded asynchronous writer under the decision
 	// log; decisionAuditLogger is Decide's audit emitter (P1). Both are set
@@ -7675,6 +7679,7 @@ func (s *Server) CloseAuditWriter(ctx context.Context) error {
 	if s.userActivity != nil {
 		s.userActivity.Close(ctx)
 	}
+	s.stopUserDeletionWork(ctx)
 	if cancelled, remaining := s.mutationAuditWork.stop(ctx, auditWriteTimeout, auditCancelDrainGrace); remaining > 0 {
 		slog.Warn("Mutation audit writes still running after cancellation grace; proceeding with shutdown",
 			"cancelled", cancelled,
@@ -7818,6 +7823,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if scheduler != nil {
 			scheduler.Stop()
 		}
+		s.stopUserDeletionWork(ctx)
 		s.stopTriggerDrainer(ctx)
 		s.stopScheduledDetachedFires(ctx)
 		s.stopScheduledExecRuns(ctx)
