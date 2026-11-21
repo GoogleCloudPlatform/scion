@@ -214,8 +214,8 @@ scion start coordinator --project my-project --type coordinator \
 
 Or from the Web Dashboard, click **New Agent**, choose the `coordinator` template and a harness,
 enter the same prompt, and click **Start**. Continue the conversation in Web Chat or attach with
-`scion attach coordinator`. See [Templates & Roles](/scion/local/templates/) for managing and
-refreshing imported templates.
+`scion attach coordinator --project my-project`. See [Templates & Roles](/scion/local/templates/)
+for managing and refreshing imported templates.
 
 ## Collaboration
 
