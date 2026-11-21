@@ -193,8 +193,8 @@ func TestNormalizeDecisions_Rules(t *testing.T) {
 		{"blank question", []DecisionInput{{Question: " \n ", Choices: two}}, "decisions[0].question", DecisionErrRequired},
 		{"question too long", []DecisionInput{{Question: strings.Repeat("é", 2001), Choices: two}}, "decisions[0].question", DecisionErrTooLong},
 		{"question invalid utf8", []DecisionInput{{Question: "a\xffb", Choices: two}}, "decisions[0].question", DecisionErrInvalid},
-		{"one choice", []DecisionInput{{Question: "q", Choices: many(1)}}, "decisions[0].choices", DecisionErrTooFew},
 		{"no choices", []DecisionInput{{Question: "q"}}, "decisions[0].choices", DecisionErrTooFew},
+		{"empty choices slice", []DecisionInput{{Question: "q", Choices: []ChoiceInput{}}}, "decisions[0].choices", DecisionErrTooFew},
 		{"11 choices", []DecisionInput{{Question: "q", Choices: many(11)}}, "decisions[0].choices", DecisionErrTooMany},
 		{"empty label", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: " "}, {Label: "x"}}}}, "decisions[0].choices[0].label", DecisionErrRequired},
 		{"label too long", []DecisionInput{{Question: "q", Choices: []ChoiceInput{{Label: strings.Repeat("x", 101)}, {Label: "y"}}}}, "decisions[0].choices[0].label", DecisionErrTooLong},
@@ -423,7 +423,6 @@ func TestNormalizeDecisions_AllowOther_ValidationRules(t *testing.T) {
 		{"duplicate with custom Other label case-insensitive", `[{"question":"q","choices":["Another Region"],"allow_other":"another region"}]`, "decisions[0].allow_other.label", DecisionErrDuplicate},
 		{"zero fixed choices with Other on", `[{"question":"q","choices":[],"allow_other":true}]`, "decisions[0].choices", DecisionErrTooFew},
 		{"11 fixed choices with Other on", fmt.Sprintf(`[{"question":"q","choices":%s,"allow_other":true}]`, elevenChoices), "decisions[0].choices", DecisionErrTooMany},
-		{"1 fixed choice with allow_other false", `[{"question":"q","choices":["only"],"allow_other":false}]`, "decisions[0].choices", DecisionErrTooFew},
 		{"default names $other", `[{"question":"q","choices":["Yes"],"allow_other":true,"default":"$other"}]`, "decisions[0].default", DecisionErrNoMatch},
 		{"default names Other label", `[{"question":"q","choices":["Yes"],"allow_other":"Another region","default":"Another region"}]`, "decisions[0].default", DecisionErrNoMatch},
 		{"fixed choice id $other", `[{"question":"q","choices":[{"id":"$other","label":"Yes"},{"id":"no","label":"No"}]}]`, "decisions[0].choices[0].id", DecisionErrInvalid},
@@ -505,7 +504,7 @@ func TestNormalizeOtherText(t *testing.T) {
 
 func TestNormalizeDecisions_ReportsEveryError(t *testing.T) {
 	in := []DecisionInput{
-		{ID: "bad key", Question: "", Choices: []ChoiceInput{{Label: "a"}}},
+		{ID: "bad key", Question: "", Choices: nil},
 		{Question: "ok", Choices: []ChoiceInput{{Label: "x"}, {Label: "X"}}},
 	}
 	_, err := NormalizeDecisions("decisions", in)
@@ -803,5 +802,70 @@ func TestNormalizeDecisions_DefaultMatchesFixedChoiceIDBeforeRefusingOtherLabel(
 	inOtherOnly := parseDecisions(t, `[{"id":"d-other-only","question":"Proceed?","choices":["yes"],"allow_other":"Another","default":"Another"}]`)
 	if _, err := NormalizeDecisions("decisions", inOtherOnly); err == nil {
 		t.Fatal("expected default naming only Other label to fail")
+	}
+}
+
+func TestNormalizeDecisions_SingleChoice(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string
+		wantID    string
+		wantLabel string
+		wantDef   string
+	}{
+		{
+			name:      "string label without allow_other",
+			raw:       `[{"id":"confirm-deploy","question":"Approve production deploy?","choices":["Approved"]}]`,
+			wantID:    "1",
+			wantLabel: "Approved",
+		},
+		{
+			name:      "explicit object choice with description and default",
+			raw:       `[{"id":"confirm-plan","question":"Proceed with plan?","choices":[{"id":"approve","label":"Approved","description":"Start implementation"}],"default":"approve"}]`,
+			wantID:    "approve",
+			wantLabel: "Approved",
+			wantDef:   "approve",
+		},
+		{
+			name:      "single choice with allow_other false",
+			raw:       `[{"id":"ack","question":"Acknowledge rollback steps?","choices":["Confirmed"],"allow_other":false}]`,
+			wantID:    "1",
+			wantLabel: "Confirmed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := parseDecisions(t, tc.raw)
+			got, err := NormalizeDecisions("decisions", in)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != 1 || len(got[0].Choices) != 1 {
+				t.Fatalf("got %+v, want 1 decision with 1 choice", got)
+			}
+			if got[0].Choices[0].ID != tc.wantID || got[0].Choices[0].Label != tc.wantLabel {
+				t.Errorf("choice = %+v, want ID=%q Label=%q", got[0].Choices[0], tc.wantID, tc.wantLabel)
+			}
+			if got[0].DefaultChoiceID != tc.wantDef {
+				t.Errorf("DefaultChoiceID = %q, want %q", got[0].DefaultChoiceID, tc.wantDef)
+			}
+			if got[0].Other != nil {
+				t.Errorf("Other = %+v, want nil", got[0].Other)
+			}
+		})
+	}
+
+	// RenderDecisionFallback renders a single-choice decision cleanly.
+	ds := []Decision{{
+		Key:      "confirm-deploy",
+		Question: "Approve production deploy?",
+		Choices:  []Choice{{ID: "1", Label: "Approved"}},
+	}}
+	msg, _ := RenderDecisionFallback("Plan ready.", ds, "")
+	want := "Plan ready.\n\n**1 decision needed**\n\n**confirm-deploy.** Approve production deploy?\n" +
+		"  1) Approved\n\n" +
+		"_Reply here and the agent will record your answer._"
+	if msg != want {
+		t.Errorf("RenderDecisionFallback =\n%s\nwant\n%s", msg, want)
 	}
 }

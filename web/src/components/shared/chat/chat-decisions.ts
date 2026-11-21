@@ -2324,7 +2324,9 @@ export class ScionChatDecisions extends LitElement {
         ${this.renderSingleActionsAndFoot(d)}
         ${showHint && !this.submitting
           ? html`<div class="hint" id=${this.hintId}>
-              Press Enter to choose the recommended answer (outlined).
+              ${this.isSingleChoiceOnly(d)
+                ? 'Press Enter to confirm.'
+                : 'Press Enter to choose the recommended answer (outlined).'}
             </div>`
           : nothing}
       </div>
@@ -2597,6 +2599,11 @@ export class ScionChatDecisions extends LitElement {
     `;
   }
 
+  /** True when a decision has exactly one fixed choice and no Other option (confirmation/approval). */
+  private isSingleChoiceOnly(d: DecisionView): boolean {
+    return (d.choices?.length ?? 0) === 1 && !d.other;
+  }
+
   private singleChoiceAppearance(
     d: DecisionView,
     c: ChoiceOption
@@ -2676,9 +2683,10 @@ export class ScionChatDecisions extends LitElement {
 
     const chosen = d.status === 'decided' && d.decision?.choiceId === c.id;
     const disabled = !chosen && !loading && !this.actionable(d);
-    const outlined = recommended && !chosen;
+    const singleChoicePending = d.status === 'pending' && this.isSingleChoiceOnly(d);
+    const outlined = recommended && !chosen && !singleChoicePending;
     return {
-      variant: chosen || outlined ? 'primary' : 'default',
+      variant: chosen || outlined || singleChoicePending ? 'primary' : 'default',
       outlined,
       icon: chosen ? 'check-circle-fill' : '',
       loading,
@@ -2748,8 +2756,11 @@ export class ScionChatDecisions extends LitElement {
 
   private renderOptRow(d: DecisionView, c: ChoiceOption): TemplateResult {
     const s = this.singleChoiceAppearance(d, c);
-    const filled = s.variant === 'primary' && !s.outlined;
-    const cls = ['opt', s.outlined ? 'recd' : '', filled ? 'chosen' : ''].filter(Boolean).join(' ');
+    const singleChoicePending = d.status === 'pending' && this.isSingleChoiceOnly(d);
+    const filled = s.variant === 'primary' && !s.outlined && !singleChoicePending;
+    const cls = ['opt', s.outlined || singleChoicePending ? 'recd' : '', filled ? 'chosen' : '']
+      .filter(Boolean)
+      .join(' ');
     const btn = html`<button
       type="button"
       class=${cls}
@@ -2966,7 +2977,9 @@ export class ScionChatDecisions extends LitElement {
             ><sl-icon slot="prefix" name="patch-check"></sl-icon>Confirm
             “${d.decision.label}”</sl-button
           >
-          <span>or pick another answer to change it</span>
+          ${this.isSingleChoiceOnly(d)
+            ? nothing
+            : html`<span>or pick another answer to change it</span>`}
         </div>`;
     }
     const terminal = this.renderTerminalFoot(d);

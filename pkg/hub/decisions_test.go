@@ -238,7 +238,7 @@ func TestDecisionsSend_Refusals(t *testing.T) {
 		{"broadcast recipient", OutboundMessageRequest{Recipient: "broadcast", Decisions: decisionInputs(t, twoDecisions)}, ErrCodeValidationError},
 		{"update without decisions", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Msg: "x", DecisionsUpdate: true}, ErrCodeValidationError},
 		{"attachments", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, twoDecisions), Attachments: []string{"/workspace/a"}}, ErrCodeValidationError},
-		{"one choice", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"question":"q","choices":["only"]}]`)}, ErrCodeValidationError},
+		{"no choices", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"question":"q","choices":[]}]`)}, ErrCodeValidationError},
 		{"never issued number", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"id":"99","question":"q","choices":["a","b"]}]`)}, ErrCodeDecisionKeyNotIssue},
 	}
 	for _, tc := range cases {
@@ -258,6 +258,36 @@ func TestDecisionsSend_Refusals(t *testing.T) {
 	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, rows.Items, "no refused prompt is stored")
+}
+
+// Single-choice confirmation decision (ptone/scion#8786): 1 choice without
+// allow_other is accepted, stored, and answered with one click.
+func TestDecisionsSend_SingleChoice(t *testing.T) {
+	f := newDecisionsFixture(t)
+	resp := f.sendPromptToBob(t, `[{"id":"confirm-deploy","question":"Approve production deploy?","choices":[{"id":"approve","label":"Approved"}]}]`, false)
+	require.Len(t, resp.Decisions, 1)
+	rowID := resp.Decisions[0].RowID
+
+	getRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil)
+	require.Equal(t, http.StatusOK, getRR.Code, "body: %s", getRR.Body.String())
+	var view DecisionView
+	require.NoError(t, json.Unmarshal(getRR.Body.Bytes(), &view))
+	assert.Equal(t, "pending", view.Status)
+	require.Len(t, view.Choices, 1)
+	assert.Equal(t, "approve", view.Choices[0].ID)
+	assert.Equal(t, "Approved", view.Choices[0].Label)
+	assert.Nil(t, view.Other)
+
+	ansRR := f.answer(t, f.bob, rowID, map[string]interface{}{"choice_id": "approve"})
+	require.Equal(t, http.StatusOK, ansRR.Code, "body: %s", ansRR.Body.String())
+	var ansResp struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(ansRR.Body.Bytes(), &ansResp))
+	assert.Equal(t, "decided", ansResp.Decision.Status)
+	require.NotNil(t, ansResp.Decision.Decision)
+	assert.Equal(t, "approve", ansResp.Decision.Decision.ChoiceID)
+	assert.Equal(t, "Approved", ansResp.Decision.Decision.Label)
 }
 
 // Acceptance 7 (send side): reusing a key without --update is refused as a

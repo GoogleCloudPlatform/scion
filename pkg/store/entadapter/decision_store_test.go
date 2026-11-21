@@ -674,7 +674,7 @@ func TestCreateDecisionPrompt_InvalidInput(t *testing.T) {
 		"bad agent":           func(in *store.DecisionPromptInput) { in.AskerAgentID = "agent-1" },
 		"no decisions":        func(in *store.DecisionPromptInput) { in.Decisions = nil },
 		"invalid key":         func(in *store.DecisionPromptInput) { in.Decisions[0].Key = "a b" },
-		"unnormalized choice": func(in *store.DecisionPromptInput) { in.Decisions[0].Choices = in.Decisions[0].Choices[:1] },
+		"unnormalized choice": func(in *store.DecisionPromptInput) { in.Decisions[0].Choices = nil },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -684,6 +684,28 @@ func TestCreateDecisionPrompt_InvalidInput(t *testing.T) {
 			assert.ErrorIs(t, err, store.ErrInvalidInput)
 		})
 	}
+}
+
+func TestCreateDecisionPrompt_SingleChoice(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	single := messages.Decision{
+		Key:      "confirm-1",
+		Question: "Approve production deploy?",
+		Choices:  []messages.Choice{{ID: "approve", Label: "Approved"}},
+	}
+	res := f.create(t, false, single)
+	require.Len(t, res.Decisions, 1)
+
+	got, err := f.cs.GetDecision(ctx, res.Decisions[0].RowID)
+	require.NoError(t, err)
+	assert.Equal(t, []messages.Choice{{ID: "approve", Label: "Approved"}}, got.Choices)
+	assert.Nil(t, got.Other)
+
+	ans, _, err := f.cs.RecordAnswer(ctx, f.answer(res.Decisions[0].RowID, "approve", "user-1", ""))
+	require.NoError(t, err)
+	assert.Equal(t, "approve", ans.ChoiceID)
+	assert.Equal(t, "Approved", ans.ChoiceLabel)
 }
 
 func TestGetDecisionAnswersByResponseMessageIDs(t *testing.T) {
