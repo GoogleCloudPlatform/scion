@@ -1173,7 +1173,7 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	// command with adminRestartTimeout and passing -n so sudo never prompts.
 	restartCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.effectiveLegacyRestartTimeout())
 	defer cancel()
-	if stderr, err := s.runLegacyRestart(restartCtx, "sudo", "-n", "systemctl", "restart", "--no-block", serviceName); err != nil {
+	if stderr, err := s.runLegacyRestart(restartCtx, serviceName); err != nil {
 		if restartCtx.Err() == nil && maintenance.IsStopSignalExit(err) {
 			log.Info("Hub restart command terminated by stop signal; restart is under way", "service", serviceName, "user", user.Email())
 			writeRestartAccepted(w)
@@ -1225,11 +1225,11 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (s *Server) runLegacyRestart(ctx context.Context, name string, args ...string) (string, error) {
+func (s *Server) runLegacyRestart(ctx context.Context, serviceName string) (string, error) {
 	if s.legacyRestartRunner != nil {
-		return "", s.legacyRestartRunner(ctx, name, args...)
+		return "", s.legacyRestartRunner(ctx, "sudo", "-n", "systemctl", "restart", "--no-block", serviceName)
 	}
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "systemctl", "restart", "--no-block", serviceName)
 	stderr := &limitedBuffer{max: legacyRestartMaxStderrBytes}
 	cmd.Stderr = stderr
 	err := cmd.Run()
