@@ -62,6 +62,15 @@ import (
 // envTelemetryEnabled is the requester's telemetry on/off flag.
 const envTelemetryEnabled = "SCION_TELEMETRY_ENABLED"
 
+// telemetryGCPCredentialsSecretName is the well-known file secret name that
+// delivers a GCP service account key for sciontool telemetry export.
+const telemetryGCPCredentialsSecretName = "scion-telemetry-gcp-credentials"
+
+// gcpTelemetryBlockedWithoutCredentialsWarning is surfaced on dispatch when
+// GCP cloud telemetry is enabled for an agent in metadata mode block without
+// the telemetry credentials secret.
+const gcpTelemetryBlockedWithoutCredentialsWarning = "cloud telemetry is enabled for GCP, but this agent's metadata mode is block and the scion-telemetry-gcp-credentials secret is missing; cloud export will be disabled. Assign a service account (--service-account) or configure the scion-telemetry-gcp-credentials hub secret."
+
 // telemetryDispatch is the telemetry one dispatch delivers.
 type telemetryDispatch struct {
 	// hubDefault is the hub's settings telemetry; nil when none.
@@ -248,4 +257,59 @@ func (s *Server) warnBrokerWithoutTemplateTiers(brokerID, brokerName string, cap
 		name = brokerID
 	}
 	s.agentLifecycleLog.Warn(brokerWithoutTemplateTiersWarning(name), "broker_id", brokerID)
+}
+
+// isGCPCloudEnabled reports whether this dispatch has telemetry enabled and
+// configured for GCP-native cloud export.
+func (t telemetryDispatch) isGCPCloudEnabled() bool {
+	if t.hubDefault == nil || t.hubDefault.Cloud == nil {
+		return false
+	}
+	if t.hubDefault.Cloud.Enabled != nil && !*t.hubDefault.Cloud.Enabled {
+		return false
+	}
+	if t.hubDefault.Cloud.Provider != "gcp" {
+		return false
+	}
+	if t.policy != nil {
+		return *t.policy
+	}
+	if t.requester != nil && t.requester.Enabled != nil {
+		return *t.requester.Enabled
+	}
+	if t.hubDefault.Enabled != nil {
+		return *t.hubDefault.Enabled
+	}
+	return true
+}
+
+func hasTelemetryGCPCredentials(env map[string]string, secrets []ResolvedSecret) bool {
+	if env != nil && strings.TrimSpace(env["SCION_OTEL_GCP_CREDENTIALS"]) != "" {
+		return true
+	}
+	for _, s := range secrets {
+		if s.Name == telemetryGCPCredentialsSecretName && s.Type == store.SecretTypeFile {
+			return true
+		}
+	}
+	return false
+}
+
+// warnGCPTelemetryBlockedWithoutCredentials adds a dispatch warning when GCP
+// cloud telemetry is enabled for an agent running in metadata mode block
+// without the scion-telemetry-gcp-credentials secret.
+func (d *HTTPAgentDispatcher) warnGCPTelemetryBlockedWithoutCredentials(ctx context.Context, agent *store.Agent, tel telemetryDispatch, env map[string]string, secrets []ResolvedSecret) {
+	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
+		return
+	}
+	if agent.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeBlock {
+		return
+	}
+	if !tel.isGCPCloudEnabled() {
+		return
+	}
+	if hasTelemetryGCPCredentials(env, secrets) {
+		return
+	}
+	addDispatchWarnings(ctx, gcpTelemetryBlockedWithoutCredentialsWarning)
 }

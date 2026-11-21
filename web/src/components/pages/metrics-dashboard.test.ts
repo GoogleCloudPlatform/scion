@@ -495,4 +495,29 @@ describe('scion-page-metrics — day-bucket zone', () => {
     expect(requestedZones).toEqual([]);
     element = null;
   });
+
+  it('renders a warning alert when summary includes telemetryHint', async () => {
+    const hintText =
+      'Cloud telemetry is enabled for GCP, but the default metadata mode is block and the scion-telemetry-gcp-credentials secret is not configured.';
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ ...SUMMARY, telemetryHint: hintText }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    ) as unknown as typeof fetch;
+    try {
+      const el = document.createElement('scion-page-metrics') as MetricsPage;
+      document.body.appendChild(el);
+      element = el;
+      await settle(el);
+      const alert = el.shadowRoot?.querySelector('sl-alert[variant="warning"]');
+      expect(alert).toBeTruthy();
+      expect(alert?.textContent).toContain(hintText);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });
