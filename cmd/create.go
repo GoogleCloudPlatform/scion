@@ -380,7 +380,7 @@ func init() {
 	// Agent message mode flag
 	createCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
 		"Agent message mode: none, lineage, branch, project, hub\n"+
-			"Default: the template's mode, else the parent agent's, else 'project'.")
+			"Default: the template's mode, else the parent agent's, else the Hub's default message mode (server.hub.default_message_mode, 'project' unless the operator sets it).")
 
 	// GCP service account assignment flag
 	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name")
