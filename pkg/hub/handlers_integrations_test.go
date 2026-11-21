@@ -972,14 +972,14 @@ func TestUpdateConfig_NoStoredConfigStoresNewKeys(t *testing.T) {
 		mgr.plugins["discord"] = map[string]string{}
 		mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-		srv := &Server{dbDriver: "postgres"}
+		srv, _, adminCtx := integAdminServer(t, "nsc-pg")
+		srv.dbDriver = "postgres"
 		srv.pluginManager = mgr
 		srv.entClient = client
 
-		admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 		body := `{"settings":{"guild_id":"12345"}}`
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
-		req = req.WithContext(integSessionContext(req.Context(), admin))
+		req = req.WithContext(adminCtx)
 		rr := httptest.NewRecorder()
 		srv.handleAdminIntegrationByName(rr, req)
 		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -1803,13 +1803,13 @@ func TestUpdateIntegration_HA_Accepted(t *testing.T) {
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{dbDriver: "postgres"}
+	srv, admin, ctx := integAdminServer(t, "ha-accepted")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 	srv.entClient = client
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	req = req.WithContext(integSessionContext(req.Context(), admin))
+	req = req.WithContext(ctx)
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -1841,8 +1841,8 @@ func TestUpdateIntegration_HA_Accepted(t *testing.T) {
 	if string(row.State) != "requested" {
 		t.Errorf("expected state requested, got %s", row.State)
 	}
-	if row.RequestedBy != "u1" {
-		t.Errorf("expected requested_by u1, got %s", row.RequestedBy)
+	if row.RequestedBy != admin.ID() {
+		t.Errorf("expected requested_by %s, got %s", admin.ID(), row.RequestedBy)
 	}
 }
 
@@ -1856,15 +1856,14 @@ func TestGetUpdateStatus_ByID(t *testing.T) {
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{dbDriver: "postgres"}
+	srv, _, ctx := integAdminServer(t, "upd-byid")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 	srv.entClient = client
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-
 	// First create an update via the HA flow
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	createReq = createReq.WithContext(integSessionContext(createReq.Context(), admin))
+	createReq = createReq.WithContext(ctx)
 	createRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(createRR, createReq)
 
@@ -1880,7 +1879,7 @@ func TestGetUpdateStatus_ByID(t *testing.T) {
 
 	// Now GET the update status by ID
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/"+updateID, nil)
-	getReq = getReq.WithContext(integSessionContext(getReq.Context(), admin))
+	getReq = getReq.WithContext(ctx)
 	getRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(getRR, getReq)
 
@@ -1913,15 +1912,14 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{dbDriver: "postgres"}
+	srv, _, ctx := integAdminServer(t, "upd-latest")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 	srv.entClient = client
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-
 	// Create first update, then mark it completed so the 409 guard allows a second.
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	req1 = req1.WithContext(integSessionContext(req1.Context(), admin))
+	req1 = req1.WithContext(ctx)
 	rr1 := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr1, req1)
 	if rr1.Code != http.StatusAccepted {
@@ -1938,7 +1936,7 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 
 	// Create second update.
 	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	req2 = req2.WithContext(integSessionContext(req2.Context(), admin))
+	req2 = req2.WithContext(ctx)
 	rr2 := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr2, req2)
 	if rr2.Code != http.StatusAccepted {
@@ -1946,7 +1944,7 @@ func TestGetUpdateStatus_Latest(t *testing.T) {
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/discord/update/latest", nil)
-	getReq = getReq.WithContext(integSessionContext(getReq.Context(), admin))
+	getReq = getReq.WithContext(ctx)
 	getRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(getRR, getReq)
 
@@ -2035,20 +2033,21 @@ func TestUpdateConfig_HA_Integration(t *testing.T) {
 	if !enttest.Active() {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
+	t.Setenv("HOME", t.TempDir())
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{dbDriver: "postgres"}
+	srv, _, ctx := integAdminServer(t, "conf-ha")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 	srv.entClient = client
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"guild_id":"12345","application_id":"67890"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
-	req = req.WithContext(integSessionContext(req.Context(), admin))
+	req = req.WithContext(ctx)
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2115,15 +2114,14 @@ func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 	mgr.deploymentModes["telegram"] = plugin.DeploymentModeHA
 
-	srv := &Server{dbDriver: "postgres"}
+	srv, _, ctx := integAdminServer(t, "upd-cross")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 	srv.entClient = client
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-
 	// Create an update for discord
 	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
-	createReq = createReq.WithContext(integSessionContext(createReq.Context(), admin))
+	createReq = createReq.WithContext(ctx)
 	createRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(createRR, createReq)
 
@@ -2139,7 +2137,7 @@ func TestGetUpdateStatus_CrossIntegrationRejected(t *testing.T) {
 
 	// Try to GET that discord update via the telegram endpoint — should 404
 	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/integrations/telegram/update/"+discordUpdateID, nil)
-	getReq = getReq.WithContext(integSessionContext(getReq.Context(), admin))
+	getReq = getReq.WithContext(ctx)
 	getRR := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(getRR, getReq)
 
@@ -2152,20 +2150,21 @@ func TestUpdateConfig_HA_SetsUpdatedBy(t *testing.T) {
 	if !enttest.Active() {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
+	t.Setenv("HOME", t.TempDir())
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{dbDriver: "postgres"}
+	srv, admin, ctx := integAdminServer(t, "conf-ha-updby")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 	srv.entClient = client
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"guild_id":"99999"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
-	req = req.WithContext(integSessionContext(req.Context(), admin))
+	req = req.WithContext(ctx)
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
@@ -2180,8 +2179,8 @@ func TestUpdateConfig_HA_SetsUpdatedBy(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
-	if rows[0].UpdatedBy != "u1" {
-		t.Errorf("expected updated_by u1, got %q", rows[0].UpdatedBy)
+	if rows[0].UpdatedBy != admin.ID() {
+		t.Errorf("expected updated_by %s, got %q", admin.ID(), rows[0].UpdatedBy)
 	}
 }
 
@@ -2285,20 +2284,21 @@ func TestUpdateConfig_HA_SkipsReconfigure(t *testing.T) {
 	if !enttest.Active() {
 		t.Skip("requires Postgres backend; set SCION_TEST_POSTGRES_URL and build with -tags integration")
 	}
+	t.Setenv("HOME", t.TempDir())
 	client := enttest.NewClient(t)
 
 	mgr := newMockIntegrationManager()
 	mgr.plugins["discord"] = map[string]string{}
 	mgr.deploymentModes["discord"] = plugin.DeploymentModeHA
 
-	srv := &Server{dbDriver: "postgres"}
+	srv, _, ctx := integAdminServer(t, "conf-ha-skip")
+	srv.dbDriver = "postgres"
 	srv.pluginManager = mgr
 	srv.entClient = client
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
 	body := `{"settings":{"guild_id":"12345"}}`
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/integrations/discord/config", strings.NewReader(body))
-	req = req.WithContext(integSessionContext(req.Context(), admin))
+	req = req.WithContext(ctx)
 	rr := httptest.NewRecorder()
 	srv.handleAdminIntegrationByName(rr, req)
 
