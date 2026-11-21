@@ -403,8 +403,8 @@ func (w *Writer[T]) TryEnqueueWithReserve(v T, bytes int64, reserveSlots int, re
 		maxSlots = 0
 	}
 	maxBytes := w.cfg.MaxQueuedBytes - reserveBytes
-	if maxBytes < 0 {
-		maxBytes = 0
+	if reserveBytes >= w.cfg.MaxQueuedBytes {
+		maxBytes = -1
 	}
 	return w.tryEnqueue(v, bytes, maxSlots, maxBytes)
 }

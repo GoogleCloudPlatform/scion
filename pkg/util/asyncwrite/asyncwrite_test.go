@@ -995,6 +995,12 @@ func TestTryEnqueueWithReserve_EdgeCases(t *testing.T) {
 	if err := h.w.TryEnqueueWithReserve(3, 1, 0, 100); !errors.Is(err, ErrFull) {
 		t.Fatalf("reserve == maxBytes: got %v, want ErrFull", err)
 	}
+	if err := h.w.TryEnqueueWithReserve(3, 0, 0, 100); !errors.Is(err, ErrFull) {
+		t.Fatalf("reserve == maxBytes with 0 bytes: got %v, want ErrFull", err)
+	}
+	if err := h.w.TryEnqueueWithReserve(3, 0, 0, 150); !errors.Is(err, ErrFull) {
+		t.Fatalf("reserve > maxBytes with 0 bytes: got %v, want ErrFull", err)
+	}
 
 	// Negative reserves behave like zero reserve.
 	if err := h.w.TryEnqueueWithReserve(4, 10, -5, -10); err != nil {
