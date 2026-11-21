@@ -116,7 +116,7 @@ export class ScionMaximumPermissionSelector extends LitElement {
         font-weight: 500;
         border: none;
         background: none;
-        border-radius: calc(var(--scion-radius, 0.5rem) - 0.125rem);
+        border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
         cursor: pointer;
         color: var(--scion-text-muted, #64748b);
         transition: all 0.15s ease;

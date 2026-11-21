@@ -952,7 +952,7 @@ describe('PR 2d light-mode token equivalence (ptone/scion#8410)', () => {
 
 const BORDER_RADIUS_DECL_RE =
   /(?:^|[;\s{"'])border(?:-(?:top|bottom)-(?:left|right)|-(?:start|end)-(?:start|end))?-radius\s*:\s*((?:\$\{[^}]*\}|[^;{}'"])+)/gi;
-const NON_ZERO_RECT_RADIUS_RE = /^(?:\d*\.?\d+)(?:px|rem|em|%)$/i;
+const NON_ZERO_RECT_RADIUS_RE = /^[+-]?(?:\d*\.?\d+)(?:px|rem|em|%)$/i;
 const INTERPOLATED_RADIUS_UNIT_RE = /\$\{[^}]*\}\s*(?:px|rem|em|%)/i;
 const ALLOWED_RADIUS_TOKENS = new Set([
   '0',
@@ -974,45 +974,6 @@ const ALLOWED_RADIUS_TOKENS = new Set([
   '/',
 ]);
 
-/** Replace balanced CSS math functions (`calc(...)`, `min(...)`, `max(...)`, `clamp(...)`) that reference `var()`. */
-function stripTokenMathExpressions(text: string): string {
-  const fnRe = /\b(?:calc|min|max|clamp)\(/gi;
-  let out = '';
-  let i = 0;
-  while (i < text.length) {
-    fnRe.lastIndex = i;
-    const m = fnRe.exec(text);
-    if (!m || m.index !== i) {
-      out += text[i++];
-      continue;
-    }
-    let depth = 0;
-    let j = i + m[0].length - 1;
-    let found = false;
-    for (; j < text.length; j++) {
-      if (text[j] === '(') depth++;
-      else if (text[j] === ')') {
-        depth--;
-        if (depth === 0) {
-          j++;
-          found = true;
-          break;
-        }
-      }
-    }
-    if (found) {
-      const expr = text.slice(i, j);
-      if (expr.includes('var()')) {
-        out += 'var()';
-        i = j;
-        continue;
-      }
-    }
-    out += text[i++];
-  }
-  return out;
-}
-
 function findBareRadiusLiterals(text: string): string[] {
   const clean = stripVarExpressions(stripComments(text));
   const found: string[] = [];
@@ -1023,12 +984,11 @@ function findBareRadiusLiterals(text: string): string[] {
       found.push(val.replace(/\s+/g, ' '));
       continue;
     }
-    const stripped = stripTokenMathExpressions(val);
-    const tokens = stripped.split(/[\s/(),]+/).filter(Boolean);
+    const tokens = val.split(/[\s/(),+*]+/).filter(Boolean);
     const bad = tokens.filter((tok) => {
       const lower = tok.toLowerCase();
       if (ALLOWED_RADIUS_TOKENS.has(lower)) return false;
-      if (/^0+(?:\.0+)?(?:px|rem|em|%)$/i.test(lower)) return false;
+      if (/^[+-]?0+(?:\.0+)?(?:px|rem|em|%)$/i.test(lower)) return false;
       return NON_ZERO_RECT_RADIUS_RE.test(lower);
     });
     if (bad.length > 0) {
@@ -1278,7 +1238,18 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
     ).toEqual(['calc(0.5rem - 2px)', '${r}px', '6px']);
     expect(
       findBareRadiusLiterals(
-        '/* border-radius: 8px; */\n// border-radius: 4px;\n.a { border-radius: var(--scion-radius, 0.5rem); border-radius: calc(var(--scion-radius, 0.5rem) * 0.75); border-radius: calc(var(--scion-radius, 0.5rem) - 0.125rem); border-radius: 0; border-radius: 50%; border-radius: 100%; border-radius: 9999px; border-radius: none; }'
+        '.a { border-radius: max(var(--scion-radius), 6px); border-radius: min(var(--scion-radius), 12px); border-radius: clamp(4px, var(--scion-radius), 16px); border-radius: calc(var(--scion-radius) + 4px); border-radius: calc(var(--scion-radius, 0.5rem) - 0.125rem); }'
+      )
+    ).toEqual([
+      'max(var(), 6px)',
+      'min(var(), 12px)',
+      'clamp(4px, var(), 16px)',
+      'calc(var() + 4px)',
+      'calc(var() - 0.125rem)',
+    ]);
+    expect(
+      findBareRadiusLiterals(
+        '/* border-radius: 8px; */\n// border-radius: 4px;\n.a { border-radius: var(--scion-radius, 0.5rem); border-radius: calc(var(--scion-radius, 0.5rem) * 0.75); border-radius: calc(var(--scion-radius) / 2); border-radius: min(var(--scion-radius), var(--scion-radius-lg)); border-radius: clamp(0px, var(--scion-radius), var(--scion-radius-lg)); border-radius: min(var(--scion-radius), 50%); border-radius: min(var(--scion-radius), 9999px); border-radius: 0; border-radius: 50%; border-radius: 100%; border-radius: 9999px; border-radius: none; }'
       )
     ).toEqual([]);
   });
