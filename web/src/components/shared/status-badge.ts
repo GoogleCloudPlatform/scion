@@ -20,10 +20,10 @@
  * Displays status indicators with appropriate colors and icons
  */
 
-import { LitElement, html, css, nothing } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
-import { getStateDisplay } from '../../shared/agent-state-display.js';
-import type { StatusVariant } from '../../shared/agent-state-display.js';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
+import { customElement, property, state } from 'lit/decorators.js';
+import { getStateDisplay } from '../../shared/agent-state-display-core.js';
+import type { StatusVariant } from '../../shared/agent-state-display-core.js';
 
 /**
  * Supported status types
@@ -153,11 +153,82 @@ export class ScionStatusBadge extends LitElement {
   showPulse = true;
 
   /**
-   * Optional accessible tooltip text. When set, wraps the badge in a hoisted
-   * sl-tooltip and makes the badge keyboard-focusable with an aria-label.
+   * Optional accessible tooltip text. When set, makes the badge
+   * keyboard-focusable with an aria-label and lazily wraps it in a hoisted
+   * sl-tooltip on first pointerenter or focusin.
    */
   @property({ type: String })
   tooltip = '';
+
+  /**
+   * Defers mounting sl-tooltip until first hover or focus so pages with many
+   * status badges do not pay sl-tooltip's shadow DOM cost on initial render.
+   */
+  @state()
+  private tooltipMounted = false;
+
+  private tooltipTriggerActive = false;
+  private mountingTooltip = false;
+
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    if (changed.has('tooltip') && !this.tooltip) {
+      this.tooltipMounted = false;
+      this.tooltipTriggerActive = false;
+    }
+  }
+
+  private handleTooltipPointerEnter = (): void => {
+    this.tooltipTriggerActive = true;
+    void this.activateTooltip(false);
+  };
+
+  private handleTooltipPointerLeave = (): void => {
+    this.tooltipTriggerActive = false;
+  };
+
+  private handleTooltipFocusIn = (): void => {
+    this.tooltipTriggerActive = true;
+    void this.activateTooltip(true);
+  };
+
+  private handleTooltipFocusOut = (): void => {
+    if (!this.mountingTooltip) {
+      this.tooltipTriggerActive = false;
+    }
+  };
+
+  private async activateTooltip(fromFocus: boolean): Promise<void> {
+    if (this.tooltipMounted || this.mountingTooltip || !this.tooltip) {
+      return;
+    }
+    this.mountingTooltip = true;
+    this.tooltipMounted = true;
+    try {
+      await this.updateComplete;
+      if (!this.isConnected || !this.tooltip) {
+        return;
+      }
+      if (fromFocus) {
+        this.shadowRoot?.querySelector<HTMLElement>('.badge')?.focus();
+      }
+      const tip = this.shadowRoot?.querySelector('sl-tooltip') as
+        | (HTMLElement & { show?: () => Promise<void> | void; updateComplete?: Promise<unknown> })
+        | null;
+      if (tip) {
+        await tip.updateComplete;
+        if (
+          this.isConnected &&
+          this.tooltip &&
+          this.tooltipTriggerActive &&
+          typeof tip.show === 'function'
+        ) {
+          void tip.show();
+        }
+      }
+    } finally {
+      this.mountingTooltip = false;
+    }
+  }
 
   static override styles = css`
     :host {
@@ -301,12 +372,17 @@ export class ScionStatusBadge extends LitElement {
     const displayLabel = this.label || config.label || this.status.replace(/_/g, ' ');
     const shouldPulse = this.showPulse && config.pulse;
     const hasTooltip = !!this.tooltip;
+    const mountTooltip = hasTooltip && this.tooltipMounted;
 
     const badge = html`
       <span
         class="badge ${config.variant} ${this.size} ${shouldPulse ? 'pulse' : ''}"
         tabindex=${hasTooltip ? '0' : nothing}
         aria-label=${hasTooltip ? `${displayLabel}: ${this.tooltip}` : nothing}
+        @pointerenter=${hasTooltip && !mountTooltip ? this.handleTooltipPointerEnter : nothing}
+        @pointerleave=${hasTooltip && !mountTooltip ? this.handleTooltipPointerLeave : nothing}
+        @focusin=${hasTooltip && !mountTooltip ? this.handleTooltipFocusIn : nothing}
+        @focusout=${hasTooltip && !mountTooltip ? this.handleTooltipFocusOut : nothing}
       >
         ${config.emoji
           ? html`<span class="emoji" aria-hidden="true">${config.emoji}</span>`
@@ -317,7 +393,7 @@ export class ScionStatusBadge extends LitElement {
       </span>
     `;
 
-    if (hasTooltip) {
+    if (mountTooltip) {
       return html`<sl-tooltip .content=${this.tooltip} hoist>${badge}</sl-tooltip>`;
     }
     return badge;
