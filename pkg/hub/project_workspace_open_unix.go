@@ -79,7 +79,7 @@ func openAtInRoot(dir *os.Root, name string, flags int, perm uint32) (*os.File, 
 			}
 		}()
 
-		const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+		const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_CLOEXEC
 		for _, comp := range parts[:len(parts)-1] {
 			nextFD, err := openatNoIntr(curFD, comp, dirFlags, 0)
 			if err != nil {
@@ -108,7 +108,7 @@ func openAtInRoot(dir *os.Root, name string, flags int, perm uint32) (*os.File, 
 		return nil, ctrlErr
 	}
 	if openErr != nil {
-		return nil, openErr
+		return nil, &fs.PathError{Op: "openat", Path: name, Err: openErr}
 	}
 	return os.NewFile(uintptr(leafFD), name), nil
 }
