@@ -379,6 +379,37 @@ func (w *Writer[T]) Name() string { return w.cfg.Name }
 // rejects it without blocking. It returns ErrClosed after Close and ErrFull
 // when either bound would be exceeded.
 func (w *Writer[T]) TryEnqueue(v T, bytes int64) error {
+	return w.tryEnqueue(v, bytes, len(w.ring), w.cfg.MaxQueuedBytes)
+}
+
+// TryEnqueueWithReserve is like TryEnqueue, except it rejects the item with
+// ErrFull if admitting it would leave fewer than reserveSlots free slots or
+// fewer than reserveBytes free payload bytes in the queue. This lets
+// lower-priority traffic share a writer without starving callers that use
+// TryEnqueue.
+//
+// Negative reserve values are treated as zero. If reserveSlots >= Capacity
+// or reserveBytes >= MaxQueuedBytes, every call returns ErrFull (unless the
+// writer is already closed, which returns ErrClosed).
+func (w *Writer[T]) TryEnqueueWithReserve(v T, bytes int64, reserveSlots int, reserveBytes int64) error {
+	if reserveSlots < 0 {
+		reserveSlots = 0
+	}
+	if reserveBytes < 0 {
+		reserveBytes = 0
+	}
+	maxSlots := len(w.ring) - reserveSlots
+	if maxSlots < 0 {
+		maxSlots = 0
+	}
+	maxBytes := w.cfg.MaxQueuedBytes - reserveBytes
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	return w.tryEnqueue(v, bytes, maxSlots, maxBytes)
+}
+
+func (w *Writer[T]) tryEnqueue(v T, bytes int64, maxSlots int, maxBytes int64) error {
 	if bytes < 0 {
 		bytes = 0
 	}
@@ -388,7 +419,7 @@ func (w *Writer[T]) TryEnqueue(v T, bytes int64) error {
 		w.reject(ResultClosed)
 		return ErrClosed
 	}
-	if w.count >= len(w.ring) || bytes > w.cfg.MaxQueuedBytes-w.queuedBytes {
+	if w.count >= maxSlots || w.queuedBytes > maxBytes || bytes > maxBytes-w.queuedBytes {
 		w.mu.Unlock()
 		w.reject(ResultQueueFull)
 		return ErrFull

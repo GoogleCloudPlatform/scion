@@ -593,3 +593,60 @@ func TestAsyncHandler_ClonerMatchesPass1Accounting(t *testing.T) {
 		}
 	}
 }
+
+func TestAsyncHandler_WithReserveProtectsUnrestrictedCallers(t *testing.T) {
+	gate := make(chan struct{})
+	w, err := NewAsyncWriter(asyncwrite.Config{Name: "audit", Capacity: 4, AfterFunc: neverAfterFunc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newCaptureInner(gate)
+	base := NewAsyncHandler(c.handler(), w)
+	// Reserve 3 of 4 slots for unrestricted callers; low-priority views get 1 slot.
+	low := base.WithReserve(3, 0)
+	lowWithAttrs := low.WithAttrs([]slog.Attr{slog.String("src", "low")})
+	lowWithGroup := low.WithGroup("g")
+
+	// First record occupies the worker (in flight).
+	if err := low.Handle(context.Background(), rec("inflight")); err != nil {
+		t.Fatalf("inflight: %v", err)
+	}
+	<-c.entered
+
+	// Second low-priority record fills the 1 allowed low-priority slot.
+	if err := low.Handle(context.Background(), rec("low-1")); err != nil {
+		t.Fatalf("low-1: %v", err)
+	}
+	// Further low-priority records (including derived views) are rejected with ErrFull.
+	for name, h := range map[string]slog.Handler{
+		"low":       low,
+		"withAttrs": lowWithAttrs,
+		"withGroup": lowWithGroup,
+	} {
+		if err := h.Handle(context.Background(), rec("low-drop")); !errors.Is(err, asyncwrite.ErrFull) {
+			t.Fatalf("%s: Handle = %v, want ErrFull", name, err)
+		}
+	}
+
+	// Unrestricted base handler can still enqueue all 3 reserved slots.
+	for i := 0; i < 3; i++ {
+		if err := base.Handle(context.Background(), rec("high")); err != nil {
+			t.Fatalf("high %d: %v", i, err)
+		}
+	}
+	if err := base.Handle(context.Background(), rec("high-overflow")); !errors.Is(err, asyncwrite.ErrFull) {
+		t.Fatalf("high overflow: Handle = %v, want ErrFull", err)
+	}
+
+	close(gate)
+	for i := 0; i < 5; i++ {
+		<-c.out
+	}
+	if err := w.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s := w.Snapshot()
+	if s.Written != 5 || s.DroppedFull != 4 {
+		t.Fatalf("snapshot = %+v, want Written=5 DroppedFull=4", s)
+	}
+}

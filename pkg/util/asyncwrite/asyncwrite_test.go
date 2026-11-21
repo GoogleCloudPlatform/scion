@@ -883,3 +883,132 @@ func TestDeadlineExceededReturnGoesThroughTicketCAS(t *testing.T) {
 		assertConservation(t, h.w.Snapshot())
 	})
 }
+
+func TestTryEnqueueWithReserve_SlotHeadroom(t *testing.T) {
+	const capacity = 8
+	const reserveSlots = 6 // low-priority caller may fill at most 2 slots
+	h := newHarness(t, Config{Capacity: capacity}, testHooks{})
+
+	if err := h.w.TryEnqueueWithReserve(0, 1, reserveSlots, 0); err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	<-h.g.entered // item 0 is in flight; worker blocked
+	<-h.timers.writes
+
+	// Fill up to the low-priority cap (capacity - reserveSlots = 2).
+	if err := h.w.TryEnqueueWithReserve(1, 1, reserveSlots, 0); err != nil {
+		t.Fatalf("low-priority slot 1: %v", err)
+	}
+	if err := h.w.TryEnqueueWithReserve(2, 1, reserveSlots, 0); err != nil {
+		t.Fatalf("low-priority slot 2: %v", err)
+	}
+	if err := h.w.TryEnqueueWithReserve(99, 1, reserveSlots, 0); !errors.Is(err, ErrFull) {
+		t.Fatalf("low-priority overflow = %v, want ErrFull", err)
+	}
+
+	// Unrestricted caller still has all reserveSlots (6) available.
+	for i := 3; i <= capacity; i++ {
+		if err := h.w.TryEnqueue(i, 1); err != nil {
+			t.Fatalf("unrestricted enqueue %d: %v", i, err)
+		}
+	}
+	if err := h.w.TryEnqueue(100, 1); !errors.Is(err, ErrFull) {
+		t.Fatalf("unrestricted overflow = %v, want ErrFull", err)
+	}
+
+	s := h.w.Snapshot()
+	if s.Enqueued != capacity+1 || s.DroppedFull != 2 || s.Queued != capacity || s.InflightUnresolved != 1 {
+		t.Fatalf("snapshot = %+v", s)
+	}
+	assertConservation(t, s)
+
+	// Drain in FIFO order.
+	h.g.release <- nil
+	<-h.wrote
+	for i := 1; i <= capacity; i++ {
+		if v := <-h.g.entered; v != i {
+			t.Fatalf("order: got %d want %d", v, i)
+		}
+		<-h.timers.writes
+		h.g.release <- nil
+		<-h.wrote
+	}
+	h.closeWhenIdle(t)
+	s = h.w.Snapshot()
+	if s.Written != capacity+1 || s.QueuedBytes != 0 {
+		t.Fatalf("final snapshot = %+v", s)
+	}
+	assertConservation(t, s)
+}
+
+func TestTryEnqueueWithReserve_ByteHeadroom(t *testing.T) {
+	h := newHarness(t, Config{Capacity: 16, MaxQueuedBytes: 100}, testHooks{})
+
+	if err := h.w.TryEnqueue(0, 10); err != nil {
+		t.Fatal(err)
+	}
+	<-h.g.entered
+	<-h.timers.writes
+
+	// Reserve 75 bytes -> low-priority cap is 25 bytes.
+	if err := h.w.TryEnqueueWithReserve(1, 20, 0, 75); err != nil {
+		t.Fatalf("low-priority 20B: %v", err)
+	}
+	if err := h.w.TryEnqueueWithReserve(2, 6, 0, 75); !errors.Is(err, ErrFull) {
+		t.Fatalf("low-priority +6B = %v, want ErrFull", err)
+	}
+	// Unrestricted caller can use the remaining 80 bytes.
+	if err := h.w.TryEnqueue(3, 80); err != nil {
+		t.Fatalf("unrestricted 80B: %v", err)
+	}
+	// When queuedBytes (100) exceeds maxBytes (25), even a 0-byte reserved enqueue is rejected.
+	if err := h.w.TryEnqueueWithReserve(4, 0, 0, 75); !errors.Is(err, ErrFull) {
+		t.Fatalf("low-priority 0B while over byte cap = %v, want ErrFull", err)
+	}
+
+	s := h.w.Snapshot()
+	if s.Queued != 2 || s.QueuedBytes != 100 || s.DroppedFull != 2 {
+		t.Fatalf("snapshot = %+v", s)
+	}
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			<-h.g.entered
+			<-h.timers.writes
+		}
+		h.g.release <- nil
+		<-h.wrote
+	}
+	h.closeWhenIdle(t)
+	assertConservation(t, h.w.Snapshot())
+}
+
+func TestTryEnqueueWithReserve_EdgeCases(t *testing.T) {
+	h := newHarness(t, Config{Capacity: 4, MaxQueuedBytes: 100}, testHooks{})
+
+	// Reserve >= capacity rejects immediately without blocking.
+	if err := h.w.TryEnqueueWithReserve(1, 1, 4, 0); !errors.Is(err, ErrFull) {
+		t.Fatalf("reserve == capacity: got %v, want ErrFull", err)
+	}
+	if err := h.w.TryEnqueueWithReserve(2, 1, 10, 0); !errors.Is(err, ErrFull) {
+		t.Fatalf("reserve > capacity: got %v, want ErrFull", err)
+	}
+	if err := h.w.TryEnqueueWithReserve(3, 1, 0, 100); !errors.Is(err, ErrFull) {
+		t.Fatalf("reserve == maxBytes: got %v, want ErrFull", err)
+	}
+
+	// Negative reserves behave like zero reserve.
+	if err := h.w.TryEnqueueWithReserve(4, 10, -5, -10); err != nil {
+		t.Fatalf("negative reserve: %v", err)
+	}
+	<-h.g.entered
+	<-h.timers.writes
+	h.g.release <- nil
+	<-h.wrote
+
+	h.closeWhenIdle(t)
+	// Closed writer always returns ErrClosed, even when reserve >= capacity.
+	if err := h.w.TryEnqueueWithReserve(5, 1, 10, 0); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed writer: got %v, want ErrClosed", err)
+	}
+	assertConservation(t, h.w.Snapshot())
+}

@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 )
 
 // Production-constructor tests for the converted broker family
@@ -129,9 +130,11 @@ func TestBrokerEnvelope_T5_ProductionConstructor(t *testing.T) {
 }
 
 // T6 (P1-6 pattern): with the audit writer blocked inside its handler and
-// its queue full, broker request status codes are unchanged and the
-// dropped records are counted by the writer. The test finishes while the
-// handler is still blocked; it is released only in cleanup.
+// unauthenticated auth_failure traffic hitting its reserved-headroom cap,
+// broker request status codes are unchanged, excess auth_failure records
+// are counted as dropped by the writer, and broker lifecycle records
+// (register) still enqueue into the reserved headroom. The test finishes
+// while the handler is still blocked; it is released only in cleanup.
 func TestBrokerEnvelope_T6_StatusUnchangedWithWriterBlockedAndFull(t *testing.T) {
 	capture := &decisionLogCapture{block: make(chan struct{}), entered: make(chan struct{}, 1)}
 	srv, s := newDecisionLogServer(t, capture)
@@ -143,27 +146,187 @@ func TestBrokerEnvelope_T6_StatusUnchangedWithWriterBlockedAndFull(t *testing.T)
 		}
 	})
 
+	authFailureCap := asyncwrite.DefaultCapacity - brokerUnauthenticatedReserveSlots
 	require.Equal(t, http.StatusUnauthorized, sendMissingTimestampBrokerRequest(srv).Code)
 	<-capture.entered // the worker is now blocked inside the inner handler
 	for i := 1; srv.auditWriter.Snapshot().DroppedFull == 0; i++ {
-		require.Less(t, i, 3*2048, "queue never filled")
+		require.Less(t, i, 3*asyncwrite.DefaultCapacity, "auth_failure cap never reached")
 		require.Equal(t, http.StatusUnauthorized, sendMissingTimestampBrokerRequest(srv).Code, "status while filling")
 	}
-	full := srv.auditWriter.Snapshot()
-	require.Equal(t, 2048, full.Queued, "count bound reached: %+v", full)
+	capped := srv.auditWriter.Snapshot()
+	require.Equal(t, authFailureCap, capped.Queued, "auth_failure count cap reached: %+v", capped)
 
 	for i := 0; i < 5; i++ {
 		rec := sendMissingTimestampBrokerRequest(srv)
 		require.Equal(t, http.StatusUnauthorized, rec.Code)
-		assert.Contains(t, rec.Body.String(), "missing X-Scion-Timestamp header", "body unchanged while full")
+		assert.Contains(t, rec.Body.String(), "missing X-Scion-Timestamp header", "body unchanged while capped")
 	}
 	member := newHubMemberUser(t, s, "t6-register-member")
 	regRec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "t6-register-broker"})
-	require.Equal(t, http.StatusCreated, regRec.Code, "registration is not blocked by a full audit writer: %s", regRec.Body.String())
+	require.Equal(t, http.StatusCreated, regRec.Code, "registration is not blocked by an auth_failure-capped audit writer: %s", regRec.Body.String())
 
 	after := srv.auditWriter.Snapshot()
-	assert.Equal(t, full.DroppedFull+6, after.DroppedFull, "every record offered while full is counted as dropped: %+v", after)
-	assert.Equal(t, 2048, after.Queued)
+	assert.Equal(t, capped.DroppedFull+5, after.DroppedFull, "excess auth_failure records are counted as dropped, while register uses reserved headroom: %+v", after)
+	assert.Equal(t, authFailureCap+1, after.Queued, "register was admitted into reserved headroom: %+v", after)
+}
+
+// An unauthenticated broker/auth_failure flood while the audit writer is
+// stalled cannot starve authorization/decide or commit-phase broker
+// lifecycle audit records: auth_failure sheds once the reserved headroom
+// boundary is reached, and both decisions and lifecycle records are
+// admitted and written once the writer drains.
+func TestBrokerEnvelope_AuthFailureFloodDoesNotStarveDecisionsOrLifecycle(t *testing.T) {
+	capture := &decisionLogCapture{block: make(chan struct{}), entered: make(chan struct{}, 1)}
+	srv, s := newDecisionLogServer(t, capture)
+	admin := seedDecisionLogAdmin(t, s)
+	member := newHubMemberUser(t, s, "flood-register-member")
+	setDecisionLogFlag(t, srv, true)
+
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(capture.block)
+		}
+	})
+
+	authFailureCap := asyncwrite.DefaultCapacity - brokerUnauthenticatedReserveSlots
+	require.Equal(t, http.StatusUnauthorized, sendMissingTimestampBrokerRequest(srv).Code)
+	<-capture.entered // worker blocked inside the inner handler
+
+	for i := 1; srv.auditWriter.Snapshot().DroppedFull == 0; i++ {
+		require.Less(t, i, 3*asyncwrite.DefaultCapacity, "auth_failure cap never reached")
+		require.Equal(t, http.StatusUnauthorized, sendMissingTimestampBrokerRequest(srv).Code)
+	}
+	// Send additional flood requests past the cap.
+	for i := 0; i < 20; i++ {
+		require.Equal(t, http.StatusUnauthorized, sendMissingTimestampBrokerRequest(srv).Code)
+	}
+	capped := srv.auditWriter.Snapshot()
+	require.Equal(t, authFailureCap, capped.Queued, "auth_failure must stay within its share: %+v", capped)
+	require.GreaterOrEqual(t, capped.DroppedFull, uint64(21))
+
+	// Emit an in-domain authorization/decide event and a broker/register
+	// lifecycle event while auth_failure is capped.
+	decideRec, _ := userRequest(t, srv, admin, http.MethodPost, stopAllPath, nil, nil)
+	require.Equal(t, http.StatusOK, decideRec.Code, decideRec.Body.String())
+	decideID := decideRec.Header().Get("X-Request-ID")
+	require.NotEmpty(t, decideID)
+
+	regRec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "flood-register-broker"})
+	require.Equal(t, http.StatusCreated, regRec.Code, regRec.Body.String())
+	regID := regRec.Header().Get("X-Request-ID")
+	require.NotEmpty(t, regID)
+
+	counts := srv.decisionAuditLogger.counts
+	assert.Equal(t, uint64(1), counts.get(decisionAuditEnqueued, true), "decision must be enqueued into reserved headroom")
+	assert.Equal(t, uint64(0), counts.get(decisionAuditNotEnqueued, true), "decision must not be dropped")
+
+	after := srv.auditWriter.Snapshot()
+	assert.Equal(t, capped.DroppedFull, after.DroppedFull, "neither decision nor register should be dropped")
+	assert.Equal(t, authFailureCap+2, after.Queued, "both decision and register should be queued")
+
+	// Release and drain; verify both records were actually written.
+	released = true
+	close(capture.block)
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+
+	decideLines := capture.recordsFor(decideID)
+	require.Len(t, decideLines, 1, "authorization/decide record must be written")
+	assert.Equal(t, "authorization", decideLines[0]["family"])
+	assert.Equal(t, "decide", decideLines[0]["action"])
+
+	regLines := brokerFamilyRecords(capture.recordsFor(regID))
+	require.Len(t, regLines, 1, "broker/register record must be written")
+	assert.Equal(t, "register", regLines[0]["action"])
+}
+
+// An unauthenticated failed broker/join flood while the audit writer is
+// stalled is isolated to the same reserved headroom boundary as
+// broker/auth_failure: failed joins shed once the unauthenticated share is
+// full, while authorization/decide, broker/register, and successful
+// commit-phase broker/join records are still admitted and written.
+func TestBrokerEnvelope_FailedJoinFloodDoesNotStarveDecisionsOrLifecycle(t *testing.T) {
+	capture := &decisionLogCapture{block: make(chan struct{}), entered: make(chan struct{}, 1)}
+	srv, s := newDecisionLogServer(t, capture)
+	admin := seedDecisionLogAdmin(t, s)
+	member := newHubMemberUser(t, s, "join-flood-register-member")
+	setDecisionLogFlag(t, srv, true)
+
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(capture.block)
+		}
+	})
+
+	bogusJoin := BrokerJoinRequest{BrokerID: "flood-bogus-broker", JoinToken: "bogus-join-token"}
+	unauthCap := asyncwrite.DefaultCapacity - brokerUnauthenticatedReserveSlots
+
+	first := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", bogusJoin)
+	require.Equal(t, http.StatusUnauthorized, first.Code, first.Body.String())
+	<-capture.entered // worker blocked inside the inner handler
+
+	for i := 1; srv.auditWriter.Snapshot().DroppedFull == 0; i++ {
+		require.Less(t, i, 3*asyncwrite.DefaultCapacity, "failed-join cap never reached")
+		rec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", bogusJoin)
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+	}
+	for i := 0; i < 20; i++ {
+		rec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", bogusJoin)
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+	}
+	capped := srv.auditWriter.Snapshot()
+	require.Equal(t, unauthCap, capped.Queued, "failed broker/join must stay within its unauthenticated share: %+v", capped)
+	require.GreaterOrEqual(t, capped.DroppedFull, uint64(21))
+
+	// Emit an authorization/decide record, a broker/register record, and a
+	// successful broker/join commit record while failed joins are capped.
+	decideRec, _ := userRequest(t, srv, admin, http.MethodPost, stopAllPath, nil, nil)
+	require.Equal(t, http.StatusOK, decideRec.Code, decideRec.Body.String())
+	decideID := decideRec.Header().Get("X-Request-ID")
+	require.NotEmpty(t, decideID)
+
+	regRec := doRequestAsUserLoopback(t, srv, member, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: "join-flood-broker"})
+	require.Equal(t, http.StatusCreated, regRec.Code, regRec.Body.String())
+	regID := regRec.Header().Get("X-Request-ID")
+	require.NotEmpty(t, regID)
+	regResp := decodeBrokerRegistration(t, regRec.Body)
+
+	joinRec := doRequestNoAuthLoopback(t, srv, http.MethodPost, "/api/v1/brokers/join", BrokerJoinRequest{
+		BrokerID:  regResp.BrokerID,
+		JoinToken: regResp.JoinToken,
+	})
+	require.Equal(t, http.StatusOK, joinRec.Code, joinRec.Body.String())
+	joinID := joinRec.Header().Get("X-Request-ID")
+	require.NotEmpty(t, joinID)
+
+	counts := srv.decisionAuditLogger.counts
+	assert.Equal(t, uint64(1), counts.get(decisionAuditEnqueued, true), "decision must be enqueued into reserved headroom")
+	assert.Equal(t, uint64(0), counts.get(decisionAuditNotEnqueued, true), "decision must not be dropped")
+
+	after := srv.auditWriter.Snapshot()
+	assert.Equal(t, capped.DroppedFull, after.DroppedFull, "decide, register, and successful join must not be dropped")
+	assert.Equal(t, unauthCap+3, after.Queued, "decide, register, and successful join must be queued")
+
+	// Release and drain; verify all three records were written.
+	released = true
+	close(capture.block)
+	require.NoError(t, srv.CloseAuditWriter(context.Background()))
+
+	decideLines := capture.recordsFor(decideID)
+	require.Len(t, decideLines, 1, "authorization/decide record must be written")
+	assert.Equal(t, "authorization", decideLines[0]["family"])
+	assert.Equal(t, "decide", decideLines[0]["action"])
+
+	regLines := brokerFamilyRecords(capture.recordsFor(regID))
+	require.Len(t, regLines, 1, "broker/register record must be written")
+	assert.Equal(t, "register", regLines[0]["action"])
+
+	joinLines := brokerFamilyRecords(capture.recordsFor(joinID))
+	require.Len(t, joinLines, 1, "successful broker/join record must be written")
+	assert.Equal(t, "join", joinLines[0]["action"])
+	assert.Equal(t, "commit", joinLines[0]["phase"])
+	assert.Equal(t, "succeeded", joinLines[0]["outcome"])
 }
 
 // T7: the converted events are not gated on the decision experiment; with
