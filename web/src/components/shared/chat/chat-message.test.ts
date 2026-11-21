@@ -1204,6 +1204,26 @@ describe('scion-chat-message delivery state', () => {
     );
   });
 
+  // ptone/scion#8678: unknown-outcome finalization (#5058 / #8667) records
+  // dispatch_failure_reason "dispatch outcome unknown"; render the same
+  // "Delivery unconfirmed" badge and tooltip rather than generic "Failed".
+  it('shows "Delivery unconfirmed" when dispatchFailureReason is dispatch outcome unknown', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'failed',
+      dispatchFailureReason: 'dispatch outcome unknown',
+      dispatchFailureCode: '',
+    });
+
+    const state = deliveryState(el);
+    expect(state?.textContent).toContain('Delivery unconfirmed');
+    expect(state?.textContent).not.toContain('Failed');
+    expect(state?.classList.contains('failed')).toBe(true);
+    const tooltip = el.shadowRoot?.querySelector('sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe(
+      'Delivery unconfirmed: it may have been delivered; check before resending'
+    );
+  });
+
   // ptone/scion#4480: a dispatched message was accepted by the agent's
   // runtime, not confirmed read, so the receipt never claims "Delivered".
   it('shows "Accepted" for dispatchState=dispatched', async () => {
