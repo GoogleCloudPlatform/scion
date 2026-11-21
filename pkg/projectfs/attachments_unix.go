@@ -19,18 +19,19 @@ package projectfs
 import (
 	"fmt"
 	"io"
-	"os"
 	"path"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // WriteAttachment writes r as attachment file name of channel and id into
 // the resolved shared dir of Mount m, at
 // <resolved>/.attachments/<channel>/<id>/<name>, and returns the file's
 // container path (AttachmentContainerPath). Every operation goes through
-// resolved.Open(create): the shared dir is agent-writable, so a component
-// below it may be a planted symlink, and os.Root never follows one out of
-// the directory. The file is created with O_EXCL, so an existing name
-// (including a planted link) is an error, and a failed copy leaves no file.
+// resolved.Open(create) and rootopen.OpenFileForWrite (O_CREAT|O_EXCL with
+// kernel-enforced O_NOFOLLOW on every component and O_NONBLOCK on the leaf),
+// so symlink components and existing entries are refused, and a failed copy
+// leaves no file.
 func WriteAttachment(resolved Resolved, create bool, m Mount, channel, id, name string, r io.Reader) (string, error) {
 	rel, err := AttachmentRelDir(channel, id)
 	if err != nil {
@@ -50,7 +51,7 @@ func WriteAttachment(resolved Resolved, create bool, m Mount, channel, id, name 
 		return "", fmt.Errorf("create attachment dir: %w", err)
 	}
 	dest := path.Join(rel, name)
-	f, err := root.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
+	f, err := rootopen.OpenFileForWrite(root, dest, 0o644, false)
 	if err != nil {
 		return "", fmt.Errorf("create attachment file: %w", err)
 	}

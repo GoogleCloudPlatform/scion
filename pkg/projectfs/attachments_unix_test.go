@@ -21,6 +21,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -91,4 +94,96 @@ func TestWriteAttachment_RefusesSymlinkedAttachmentsDir(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("nothing may be written outside the shared dir, found %d entries", len(entries))
 	}
+}
+
+func TestWriteAttachment_OpenPolicy(t *testing.T) {
+	m := SharedDirMount(api.SharedDir{Name: ScratchpadName}, "")
+
+	t.Run("in_root_intermediate_attachments_symlink_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-target")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real-target", filepath.Join(dir, AttachmentsDir)); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-1", "a.txt", strings.NewReader("payload")); err == nil {
+			t.Fatal("WriteAttachment succeeded through in-root .attachments symlink")
+		}
+		if _, err := os.Stat(filepath.Join(target, AttachmentChannelDiscord, "id-1", "a.txt")); err == nil {
+			t.Fatal("file was written into symlink target directory")
+		}
+	})
+
+	t.Run("in_root_intermediate_id_symlink_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-id-target")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		chDir := filepath.Join(dir, AttachmentsDir, AttachmentChannelTelegram)
+		if err := os.MkdirAll(chDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../../real-id-target", filepath.Join(chDir, "tg_1")); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelTelegram, "tg_1", "a.txt", strings.NewReader("payload")); err == nil {
+			t.Fatal("WriteAttachment succeeded through in-root id symlink")
+		}
+		if _, err := os.Stat(filepath.Join(target, "a.txt")); err == nil {
+			t.Fatal("file was written into symlink target directory")
+		}
+	})
+
+	t.Run("in_root_leaf_symlink_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		idDir := filepath.Join(dir, AttachmentsDir, AttachmentChannelDiscord, "id-2")
+		if err := os.MkdirAll(idDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		victim := filepath.Join(dir, "victim.txt")
+		if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../../../victim.txt", filepath.Join(idDir, "a.txt")); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-2", "a.txt", strings.NewReader("overwrite")); err == nil {
+			t.Fatal("WriteAttachment succeeded through in-root leaf symlink")
+		}
+		got, err := os.ReadFile(victim)
+		if err != nil || string(got) != "original" {
+			t.Fatalf("victim file changed: %q, %v", got, err)
+		}
+	})
+
+	t.Run("fifo_nonblocking_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		idDir := filepath.Join(dir, AttachmentsDir, AttachmentChannelDiscord, "id-3")
+		if err := os.MkdirAll(idDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Mkfifo(filepath.Join(idDir, "pipe.txt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		done := make(chan error, 1)
+		go func() {
+			_, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-3", "pipe.txt", strings.NewReader("x"))
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("WriteAttachment succeeded on existing FIFO")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("WriteAttachment blocked on FIFO")
+		}
+	})
 }

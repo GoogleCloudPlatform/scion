@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // Project configuration identity on shared backends: the hub itself ensures that every project's
@@ -147,10 +148,10 @@ func readRootProjectID(root *os.Root) (string, error) {
 	return readRootSmallFile(root, projectkeys.ProjectIDFile)
 }
 
-// readRootSmallFile reads a one-line file in root (bounded), trimmed. A
-// symbolic link leading out of root is refused by os.Root.
+// readRootSmallFile reads a one-line regular file in root (bounded), trimmed,
+// without following symlinks or blocking on special files.
 func readRootSmallFile(root *os.Root, name string) (string, error) {
-	f, err := root.Open(name)
+	f, _, err := rootopen.OpenRegularForRead(root, name, nil)
 	if err != nil {
 		return "", err
 	}
