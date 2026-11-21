@@ -210,6 +210,10 @@ func (s *Server) authorizeEmbeddedBrokerRegistrationPolicy(w http.ResponseWriter
 		writeBrokerPolicyDenialWithRemedy(w, r, brokerPolicyOpRegister, nil, brokerPolicyEmbeddedRemedy)
 		return false
 	}
+	// Defense in depth: handleProjectRegister already refuses non-session
+	// credentials (including UATs) when req.Broker != nil via the
+	// CREDENTIAL_MANAGEMENT gate (handlers_projects_core.go), so this branch
+	// is currently unreachable from that handler but protects direct callers.
 	user := GetUserIdentityFromContext(r.Context())
 	if !brokerUserCredentialKindAdmitted(r.Context(), user, false) {
 		writeBrokerPolicyDenialWithRemedy(w, r, brokerPolicyOpReregister, existing, brokerPolicyUATRemedy)

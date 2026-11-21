@@ -36,14 +36,14 @@ func isolateJoinEnv(t *testing.T) {
 	savedProjectPath, savedGlobal, savedHubEndpoint := projectPath, globalMode, hubEndpoint
 	savedBrokerID, savedHubName := brokerJoinBrokerID, brokerHubName
 	savedTokenFile, savedForce := brokerJoinTokenFile, brokerJoinForce
-	savedTTL, savedJSON := hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON
+	savedTTL, savedJSON, savedAdminManaged := hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON, hubBrokersJoinTokenAdminManaged
 	savedProfile, savedAs, savedRun := hubProfileFlag, hubProfileAs, hubProfileRun
 	t.Cleanup(func() {
 		projectPath, globalMode, hubEndpoint = savedProjectPath, savedGlobal, savedHubEndpoint
 		brokerJoinBrokerID, brokerHubName = savedBrokerID, savedHubName
 		brokerJoinTokenFile, brokerJoinForce = savedTokenFile, savedForce
 		brokerJoinCmd.SetIn(nil)
-		hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = savedTTL, savedJSON
+		hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON, hubBrokersJoinTokenAdminManaged = savedTTL, savedJSON, savedAdminManaged
 		hubProfileFlag, hubProfileAs, hubProfileRun = savedProfile, savedAs, savedRun
 	})
 	// cobra sets a context when the command is executed; these tests call
@@ -53,7 +53,7 @@ func isolateJoinEnv(t *testing.T) {
 	globalMode, hubEndpoint = false, ""
 	brokerJoinBrokerID, brokerHubName = "", ""
 	brokerJoinTokenFile, brokerJoinForce = "", false
-	hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = 0, false
+	hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON, hubBrokersJoinTokenAdminManaged = 0, false, false
 	// No hub profile selection: with one, the mint would use the profile
 	// instead of the test hub.
 	hubProfileFlag, hubProfileAs, hubProfileRun = "", "", ""

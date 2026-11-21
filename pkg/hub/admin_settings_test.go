@@ -522,6 +522,72 @@ func TestHandlePutServerConfig_AgentSecretsUserScopeOnly_PersistedAndAppliedWith
 	}
 }
 
+// TestHandlePutServerConfig_BrokerPolicyExperimentDisabled verifies that the
+// file-mode (non-DB) PUT /api/v1/admin/server-config path returns 412
+// experiment_disabled when setting broker_policy.admin_managed_only=true while
+// experiment hub.admin_managed_brokers is off, while allowing echoes of an
+// already-stored true value and clears (ptone/scion#7829).
+func TestHandlePutServerConfig_BrokerPolicyExperimentDisabled(t *testing.T) {
+	srv := &Server{}
+
+	// Experiment is off by default: setting admin_managed_only=true returns 412.
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"broker_policy":{"admin_managed_only":true}}`)
+	if rr.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 experiment_disabled, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var errEnv struct {
+		Error struct {
+			Code    string                 `json:"code"`
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &errEnv); err != nil {
+		t.Fatalf("decode error body: %v (%s)", err, rr.Body.String())
+	}
+	if errEnv.Error.Code != ErrCodeExperimentDisabled {
+		t.Errorf("error code = %q, want %q", errEnv.Error.Code, ErrCodeExperimentDisabled)
+	}
+	if got := errEnv.Error.Details["experiment"]; got != "hub.admin_managed_brokers" {
+		t.Errorf("details.experiment = %v, want %q", got, "hub.admin_managed_brokers")
+	}
+	if srv.brokerPolicyAdminManagedOnlyConfigured() {
+		t.Error("refused PUT must not enable broker_policy.admin_managed_only in memory")
+	}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		var raw map[string]interface{}
+		if yamlv3.Unmarshal(data, &raw) == nil {
+			if _, exists := raw["broker_policy"]; exists {
+				t.Errorf("refused PUT must not write broker_policy to settings.yaml: %s", data)
+			}
+		}
+	}
+
+	// If settings.yaml already stores admin_managed_only=true, echoing true or
+	// clearing it while the experiment is off must succeed (200).
+	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nbroker_policy:\n  admin_managed_only: true\n"), 0644); err != nil {
+		t.Fatalf("seed settings.yaml: %v", err)
+	}
+	echoReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config",
+		strings.NewReader(`{"broker_policy":{"admin_managed_only":true}}`))
+	echoRR := httptest.NewRecorder()
+	srv.handlePutServerConfig(echoRR, echoReq)
+	if echoRR.Code != http.StatusOK {
+		t.Fatalf("echo of stored true expected 200, got %d: %s", echoRR.Code, echoRR.Body.String())
+	}
+
+	clearReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config",
+		strings.NewReader(`{"broker_policy":{"admin_managed_only":null}}`))
+	clearRR := httptest.NewRecorder()
+	srv.handlePutServerConfig(clearRR, clearReq)
+	if clearRR.Code != http.StatusOK {
+		t.Fatalf("clear expected 200, got %d: %s", clearRR.Code, clearRR.Body.String())
+	}
+	if srv.brokerPolicyAdminManagedOnlyConfigured() {
+		t.Error("expected broker_policy.admin_managed_only cleared after null PUT")
+	}
+}
+
 // TestApplySettingsUpdates_ClearFieldsToBlank is a regression test for
 // ptone/scion#860: clearing a field to blank in the admin UI should delete
 // the key from settings.yaml, not preserve the old value.
