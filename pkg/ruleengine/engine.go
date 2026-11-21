@@ -70,21 +70,19 @@ type Input struct {
 // ErrBudgetExhausted is returned when an aggregate BudgetTracker has no remaining time.
 var ErrBudgetExhausted = errors.New("rule budget exhausted")
 
-// maxEngineDeadlineMargin is the upper bound on the safety margin that
+// MaxEngineDeadlineMargin is the upper bound on the safety margin that
 // dialects such as System One subtract from Budget.MaxEvalTime so their own
 // internal deadline fires slightly before the engine's context deadline.
-// Keep in sync with pkg/systemone/runtime.engineDeadlineWithMargin (unification
-// tracked under ptone/scion#8033).
-const maxEngineDeadlineMargin = 10 * time.Millisecond
+const MaxEngineDeadlineMargin = 10 * time.Millisecond
 
-// engineDeadlineMargin returns the deadline safety margin min(10ms, d/20) for
-// an evaluation timeout d (0 when d <= 0). Keep in sync with
-// pkg/systemone/runtime.engineDeadlineWithMargin (ptone/scion#8033).
-func engineDeadlineMargin(d time.Duration) time.Duration {
+// EngineDeadlineMargin returns the deadline safety margin
+// min(MaxEngineDeadlineMargin, d/20) for a positive evaluation timeout d
+// (floored to 1ns), or 0 when d <= 0.
+func EngineDeadlineMargin(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
 	}
-	margin := min(maxEngineDeadlineMargin, d/20)
+	margin := min(MaxEngineDeadlineMargin, d/20)
 	if margin <= 0 {
 		return 1
 	}
@@ -623,7 +621,7 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 			}
 		}
 		trackerDeadline := errors.Is(context.Cause(evalCtx), errTrackerTimeout) ||
-			elapsed >= evalTimeout-engineDeadlineMargin(evalTimeout)
+			elapsed >= evalTimeout-EngineDeadlineMargin(evalTimeout)
 		if boundFromTracker && trackerDeadline && isTimeoutOrCancelFailure(err) {
 			budget.Tracker.Exhaust()
 			return Decision{}, fmt.Errorf("%w: %w", ErrBudgetExhausted, err)

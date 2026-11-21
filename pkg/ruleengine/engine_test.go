@@ -1719,3 +1719,29 @@ func TestEvaluate_MarginWindowTimeoutExhaustsTracker(t *testing.T) {
 		t.Fatalf("dialect invoked after margin-window exhaustion: evalCalls = %d, want 1", got)
 	}
 }
+
+func TestEngineDeadlineMargin(t *testing.T) {
+	if ruleengine.MaxEngineDeadlineMargin != 10*time.Millisecond {
+		t.Fatalf("MaxEngineDeadlineMargin = %s, want 10ms", ruleengine.MaxEngineDeadlineMargin)
+	}
+	cases := []struct {
+		in   time.Duration
+		want time.Duration
+	}{
+		{-5 * time.Millisecond, 0},
+		{0, 0},
+		{time.Nanosecond, time.Nanosecond},
+		{19 * time.Nanosecond, time.Nanosecond},
+		{20 * time.Nanosecond, time.Nanosecond},
+		{80 * time.Millisecond, 4 * time.Millisecond},
+		{160 * time.Millisecond, 8 * time.Millisecond},
+		{200 * time.Millisecond, ruleengine.MaxEngineDeadlineMargin},
+		{400 * time.Millisecond, ruleengine.MaxEngineDeadlineMargin},
+		{time.Second, ruleengine.MaxEngineDeadlineMargin},
+	}
+	for _, tc := range cases {
+		if got := ruleengine.EngineDeadlineMargin(tc.in); got != tc.want {
+			t.Errorf("EngineDeadlineMargin(%s) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+}
