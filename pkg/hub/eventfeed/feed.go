@@ -147,7 +147,11 @@ func (f *Feed) Poll(ctx context.Context, p Principal, authz Authorizer, req Poll
 				Truncated:  truncated,
 				TimedOut:   true,
 			}, nil
-		case <-wakeCh:
+		case _, ok := <-wakeCh:
+			if !ok {
+				wakeCh = nil
+				continue
+			}
 		case <-recheck.C:
 		}
 

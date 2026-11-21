@@ -510,3 +510,36 @@ func TestWatch_EmitErrorAndCancel(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, []string{"msg:m2"}, resumed)
 }
+
+type closedWaker struct{}
+
+func (closedWaker) Subscribe(_ string) (<-chan struct{}, func()) {
+	ch := make(chan struct{})
+	close(ch)
+	return ch, func() {}
+}
+
+// Regression test: if a Waker implementation closes its channel, Poll must
+// nil out wakeCh so select does not busy-spin, and still recover via recheck
+// or return cleanly at deadline.
+func TestPoll_ClosedWakeChannelDoesNotSpin(t *testing.T) {
+	st := newFakeStore()
+	feed := NewFeed(st, closedWaker{})
+	feed.RecheckInterval = 30 * time.Millisecond
+
+	convID := "conv-closed-wake"
+	res, err := feed.Poll(context.Background(), Principal{Kind: "user", ID: "u1"}, allowAuthz, PollRequest{
+		ConversationID: convID,
+		Start:          StartHead,
+		Wait:           70 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	assert.True(t, res.TimedOut)
+	assert.Empty(t, res.Events)
+	// Without the !ok -> wakeCh=nil guard, ListConversationFeed would be called
+	// thousands of times in 70ms; with it, only initial + step-4 + <=3 rechecks.
+	st.mu.Lock()
+	calls := st.lists
+	st.mu.Unlock()
+	assert.LessOrEqual(t, calls, 6, "Poll must not busy-spin on a closed wakeCh")
+}
