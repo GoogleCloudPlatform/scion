@@ -71,6 +71,10 @@ var layer0Prefixes = []string{
 	// Plugin hub_url (ptone/scion#555): read once at startup and handed to
 	// broker plugins; the server-config API refuses it in every mode.
 	"server.hub.internal_url",
+	// Hosted Hub import source allowlist (ptone/scion#8651): read once at
+	// startup from the settings file only (no env); the server-config API
+	// refuses it in every mode.
+	"server.hub.allowed_import_sources",
 	// Hub class (test admin tier gate input). Layer-0 so no DB section can
 	// hold it; the server-config API additionally refuses it in every mode,
 	// including workstation hubs where other Layer-0 keys are writable.

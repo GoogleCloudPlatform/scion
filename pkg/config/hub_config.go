@@ -90,6 +90,14 @@ type HubServerConfig struct {
 	// AdminEmails is a list of email addresses to auto-promote to admin role.
 	AdminEmails []string `json:"adminEmails" yaml:"adminEmails" koanf:"adminEmails"`
 
+	// AllowedImportSources (server.hub.allowed_import_sources) lists the
+	// sources, beyond https://github.com URLs, that a hosted Hub may fetch when
+	// it imports or discovers templates and harness-configs: https:// URL
+	// prefixes and Cloud Storage prefixes (gs://<bucket>/<prefix>). See
+	// CheckHubImportSource and NormalizeAllowedImportSources. Operator-only
+	// (settings file only, no env); read once at startup.
+	AllowedImportSources []string `json:"allowedImportSources,omitempty" yaml:"allowedImportSources,omitempty" koanf:"allowedImportSources"`
+
 	// SoftDeleteRetention is how long soft-deleted agents are retained before purging.
 	// Zero means soft-delete is disabled (hard-delete immediately).
 	SoftDeleteRetention time.Duration `json:"softDeleteRetention" yaml:"softDeleteRetention" koanf:"softDeleteRetention"`

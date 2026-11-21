@@ -47,5 +47,6 @@ import (
 // The steps live in hubtestutil.RunTestMain (internal/hubtestutil/runtestmain.go),
 // which the pkg/hub area packages' generated TestMains also call.
 func TestMain(m *testing.M) {
+	installTestImportDownload()
 	os.Exit(hubtestutil.RunTestMain(m))
 }

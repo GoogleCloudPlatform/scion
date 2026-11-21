@@ -19,70 +19,94 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // hostedRefusedImportSources are import sources a hosted hub refuses before
-// fetching.
+// fetching when server.hub.allowed_import_sources is empty.
 var hostedRefusedImportSources = []string{
 	":local:/x",
 	":local:/etc",
 	":googlecloudstorage:b",
 	":googlecloudstorage:bucket/templates",
 	":gcs:bucket/templates",
+	":gcs,endpoint=https://evil.example:bucket/templates",
+	"gs://bucket/templates",
 	":s3:bucket",
+	"myremote:templates",
 	"http://example.com/templates.tar.gz",
+	"http://github.com/acme/repo/tree/main/templates",
 	"http://169.254.169.254/latest/meta-data/",
 	"https://169.254.169.254/latest/meta-data/x.tar.gz",
 	"https://127.0.0.1/x.tar.gz",
 	"https://10.0.0.5/x.tar.gz",
 	"https://[::1]/x.tar.gz",
 	"https://[fe80::1]/x.tar.gz",
+	"https://example.com/templates.tar.gz",
+	"https://github.com/acme/repo/tree/main/templates?token=secret",
+	"https://github.com/acme/repo/tree/main/templates#frag",
 	"ftp://example.com/x.tar.gz",
 	"https:///x.tar.gz",
 }
 
-func TestCheckHostedImportSource(t *testing.T) {
+func TestCheckImportSource_HostedDefaultAndAllowlist(t *testing.T) {
+	hosted := &Server{}
 	for _, src := range hostedRefusedImportSources {
-		err := checkHostedImportSource(src)
-		var refused *importSourceRefusedError
-		require.Truef(t, errors.As(err, &refused), "%q must be refused, got %v", src, err)
+		_, err := hosted.checkImportSource(src)
+		require.ErrorIsf(t, err, config.ErrImportSourceNotAllowed, "%q must be refused", src)
 		assert.NotContainsf(t, err.Error(), src, "the refusal must not echo the source URL")
 	}
 	for _, src := range []string{
 		"https://github.com/acme/repo/tree/main/templates",
 		"https://GitHub.com/acme/repo/tree/main/templates",
-		"https://example.com/templates.tar.gz",
-		"HTTPS://example.com/templates.zip",
+		"https://github.com/acme/repo/archive/main.tar.gz",
 	} {
-		assert.NoErrorf(t, checkHostedImportSource(src), "%q must be accepted", src)
+		_, err := hosted.checkImportSource(src)
+		assert.NoErrorf(t, err, "%q must be accepted", src)
 	}
+
+	allow, err := config.NormalizeAllowedImportSources([]string{
+		"https://artifacts.example.com/scion",
+		"gs://team-bucket/templates",
+	})
+	require.NoError(t, err)
+	hosted.config.AllowedImportSources = allow
+
+	got, err := hosted.checkImportSource("https://artifacts.example.com/scion/t.tar.gz")
+	require.NoError(t, err)
+	assert.Equal(t, "https://artifacts.example.com/scion/t.tar.gz", got)
+
+	got, err = hosted.checkImportSource("gs://team-bucket/templates/dev")
+	require.NoError(t, err)
+	assert.Equal(t, ":gcs:team-bucket/templates/dev", got)
+
+	_, err = hosted.checkImportSource("https://artifacts.example.com/other/t.tar.gz")
+	require.ErrorIs(t, err, config.ErrImportSourceNotAllowed)
 }
 
 func TestCheckImportSource_WorkstationAcceptsEverySource(t *testing.T) {
 	srv := &Server{workstation: true}
 	for _, src := range hostedRefusedImportSources {
-		assert.NoErrorf(t, srv.checkImportSource(src), "workstation mode must not refuse %q", src)
+		got, err := srv.checkImportSource(src)
+		assert.NoErrorf(t, err, "workstation mode must not refuse %q", src)
+		assert.Equal(t, src, got)
 	}
-	assert.Nil(t, srv.importArchiveClient(), "workstation archive downloads keep http.DefaultClient")
 
 	hosted := &Server{}
-	assert.Error(t, hosted.checkImportSource(":local:/x"))
-	assert.NotNil(t, hosted.importArchiveClient(), "hosted archive downloads use the SSRF-safe client")
+	_, err := hosted.checkImportSource(":local:/x")
+	assert.ErrorIs(t, err, config.ErrImportSourceNotAllowed)
 }
 
-// requireInvalidRequest asserts a 400 invalid_request answer.
+// requireInvalidRequest asserts a 400 invalid_request answer that names
+// server.hub.allowed_import_sources and never echoes src.
 func requireInvalidRequest(t *testing.T, rec *httptest.ResponseRecorder, src string) {
 	t.Helper()
 	require.Equalf(t, http.StatusBadRequest, rec.Code, "%q: %s", src, rec.Body.String())
@@ -94,12 +118,13 @@ func requireInvalidRequest(t *testing.T, rec *httptest.ResponseRecorder, src str
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
 	assert.Equalf(t, ErrCodeInvalidRequest, resp.Error.Code, "%q", src)
-	assert.Containsf(t, resp.Error.Message, "hosted server", "%q", src)
+	assert.Containsf(t, resp.Error.Message, config.AllowedImportSourcesKey, "%q", src)
+	assert.NotContainsf(t, resp.Error.Message, src, "refusal must not echo %q", src)
 }
 
 // Every hub route that fetches a template or harness-config source refuses
-// rclone, plain http and internal-address sources on a hosted hub, with
-// invalid_request, and persists nothing.
+// disallowed sources on a hosted hub, with 400 invalid_request (including
+// before starting NDJSON streams), and persists nothing.
 func TestHostedImport_RefusesHostSources(t *testing.T) {
 	srv, s := testInstallSourceServer(t)
 	require.False(t, srv.workstation, "test servers are hosted")
@@ -117,8 +142,10 @@ func TestHostedImport_RefusesHostSources(t *testing.T) {
 	for _, src := range []string{
 		":local:/x",
 		":googlecloudstorage:b",
+		"gs://b/templates",
 		"http://example.com/templates.tar.gz",
 		"https://169.254.169.254/latest/meta-data/x.tar.gz",
+		"https://unlisted.example.com/templates.tar.gz",
 	} {
 		for _, kind := range []string{"template", "harness-config"} {
 			for _, scope := range []string{"global", "project"} {
@@ -175,54 +202,43 @@ func TestHostedImport_RefusesHostSources(t *testing.T) {
 // handler check still cannot reach a refused source.
 func TestFetchRemoteForImport_HostedRefusesHostSources(t *testing.T) {
 	srv, _ := testServer(t)
-	for _, src := range []string{":local:/x", ":googlecloudstorage:b", "http://example.com/x.tar.gz", "https://169.254.169.254/x.tar.gz"} {
+	for _, src := range []string{":local:/x", ":googlecloudstorage:b", "gs://b/x", "http://example.com/x.tar.gz", "https://169.254.169.254/x.tar.gz", "https://example.com/x.tar.gz"} {
 		_, err := srv.fetchRemoteForImport(context.Background(), store.TemplateScopeGlobal, "", src)
-		var refused *importSourceRefusedError
-		assert.Truef(t, errors.As(err, &refused), "%q: got %v", src, err)
+		assert.ErrorIsf(t, err, config.ErrImportSourceNotAllowed, "%q: got %v", src, err)
 	}
-}
-
-// A host name is checked when dialed: on a hosted hub an https archive whose
-// host resolves to loopback is not downloaded.
-func TestFetchRemoteForImport_HostedArchiveBlocksLoopbackHost(t *testing.T) {
-	var hits int
-	archive := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(archive.Close)
-	port := archive.URL[strings.LastIndex(archive.URL, ":")+1:]
-
-	srv, _ := testServer(t)
-	_, err := srv.fetchRemoteForImport(context.Background(), store.TemplateScopeGlobal, "",
-		"https://localhost:"+port+"/x.tar.gz")
-	var refused *importSourceRefusedError
-	require.Truef(t, errors.As(err, &refused), "got %v", err)
-	assert.Equal(t, importFetchDisallowedMessage, err.Error())
-	assert.NotContains(t, err.Error(), "localhost", "the source host must not be echoed")
-	assert.Zero(t, hits, "the hub must not reach a loopback host")
-}
-
-func TestMapImportFetchError(t *testing.T) {
-	for _, sentinel := range []error{ssrfclient.ErrBlockedAddress, ssrfclient.ErrRedirectBlocked} {
-		wrapped := &url.Error{Op: "Get", URL: "https://10.0.0.5/x.tar.gz",
-			Err: fmt.Errorf("failed to download archive: %w", sentinel)}
-		err := mapImportFetchError(fmt.Errorf("failed to fetch archive: %w", wrapped))
-		var refused *importSourceRefusedError
-		require.Truef(t, errors.As(err, &refused), "%v: got %v", sentinel, err)
-		assert.Equal(t, importFetchDisallowedMessage, err.Error())
-	}
-	other := errors.New("failed to download archive: HTTP 404")
-	assert.Same(t, other, mapImportFetchError(other), "other errors pass through")
 }
 
 // A workstation hub keeps fetching plain http sources, including loopback
 // ones.
 func TestFetchRemoteForImport_WorkstationFetchesHTTPArchive(t *testing.T) {
 	src := tarGzFilesServer(t, map[string]string{"config.yaml": "name: ws\nharness: claude\n"})
+	require.True(t, strings.HasPrefix(src.URL, "http://127.0.0.1:") || strings.HasPrefix(src.URL, "http://[::1]:"), "src.URL=%q", src.URL)
 	srv, _ := testServer(t)
 	srv.workstation = true
 	cachePath, err := srv.fetchRemoteForImport(context.Background(), store.TemplateScopeGlobal, "", src.URL+"/x.tar.gz")
 	require.NoError(t, err)
 	assert.FileExists(t, cachePath+"/config.yaml")
+}
+
+// TestImportAndDiscover_NoResourcesDoesNotEchoURL verifies that when a valid
+// remote archive contains no templates/harness-configs, the error message does
+// not echo the source URL.
+func TestImportAndDiscover_NoResourcesDoesNotEchoURL(t *testing.T) {
+	src := tarGzFilesServer(t, map[string]string{"readme.txt": "not a template"})
+	routeImportTestServer(t, src)
+	srv, s := testInstallSourceServer(t)
+	ctx := context.Background()
+	project := &store.Project{ID: tid("no-echo-project"), Name: "No Echo", Slug: "no-echo"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	sourceURL := src.URL + "/empty-sentinel-path/archive.tar.gz"
+	_, err := srv.importFromRemote(ctx, project.ID, sourceURL, store.TemplateScopeProject, srv.templateImportKind(), nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no scion templates found at the source")
+	assert.NotContains(t, err.Error(), "empty-sentinel-path")
+
+	_, _, err = srv.discoverFromRemote(ctx, store.TemplateScopeProject, project.ID, sourceURL, srv.templateImportKind())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no scion templates found at the source")
+	assert.NotContains(t, err.Error(), "empty-sentinel-path")
 }

@@ -206,3 +206,11 @@ func TestValidReimportSourceURL(t *testing.T) {
 	// The shorthand allowance is reimport-only; finalize does not accept it.
 	assert.False(t, validRecordedSourceURL("github.com/myorg/scion-harnesses/tree/main/hermes"))
 }
+
+// TestReimportSourceURL_GCSOverride: a gs:// source, which an allowlist may
+// let a hosted Hub import from, passes the override and finalize validators.
+func TestReimportSourceURL_GCSOverride(t *testing.T) {
+	const src = "gs://team-bucket/harness-configs/claude"
+	assert.True(t, validRecordedSourceURL(src))
+	assert.True(t, validReimportSourceURL(src))
+}

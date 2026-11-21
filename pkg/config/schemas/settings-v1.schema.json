@@ -1498,6 +1498,11 @@
           "description": "Email addresses to auto-promote to admin role.",
           "x-env-var": "SCION_SERVER_HUB_ADMINEMAILS"
         },
+        "allowed_import_sources": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Sources, beyond https://github.com URLs, that a hosted Hub may fetch on its own host when it imports or discovers templates and harness-configs (import, discover, harness-config reimport). Each entry is an https:// URL prefix (no username, password, port other than 443, query or fragment) or a Google Cloud Storage prefix, gs://<bucket>/<prefix> or :gcs:<bucket>/<prefix>. Entries match on whole path segments. Plain http, the rclone local backend, other rclone backends and rclone connection strings with inline options can never be allowed. HTTP downloads reach public addresses only; redirects are blocked on allowlisted non-GitHub https:// sources. Unset, a hosted Hub fetches only https://github.com URLs. Workstation hubs are exempt. The Hub fails to start with an invalid entry. Read once at startup. Settable only in the settings file (no environment variable): the server-config API refuses this key in every mode."
+        },
         "soft_delete_retention": {
           "type": "string",
           "description": "How long soft-deleted agents are retained before permanent cleanup (e.g., '72h').",

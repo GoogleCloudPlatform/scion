@@ -38,12 +38,20 @@ func TestServerEnvTableCoversRegistry(t *testing.T) {
 		table[e.Path] = e
 	}
 	for _, k := range keys {
-		if envContractStructuredKeys[k.Path] {
+		if envContractStructuredKeys[k.Path] || config.ServerEnvFileOnlyKeys[k.Path] != "" {
 			continue
 		}
 		if _, ok := table[k.Path]; !ok {
 			t.Errorf("%s: no env mapping table entry; add the key to the settings schema "+
 				"(or to serverEnvExtraKeys) and, outside server, to serverEnvTopLevelKeys", k.Path)
+		}
+	}
+	for k := range config.ServerEnvFileOnlyKeys {
+		if _, ok := table[k]; ok {
+			t.Errorf("%s is in ServerEnvFileOnlyKeys but has a table entry", k)
+		}
+		if !isLayer0Key(k) {
+			t.Errorf("%s is in ServerEnvFileOnlyKeys but is not a Layer-0 key", k)
 		}
 	}
 	for path := range table {

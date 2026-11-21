@@ -1125,7 +1125,7 @@ func TestServerEnvContract(t *testing.T) {
 		}
 	}
 	for _, k := range keys {
-		if envContractStructuredKeys[k.Path] {
+		if envContractStructuredKeys[k.Path] || config.ServerEnvFileOnlyKeys[k.Path] != "" {
 			continue
 		}
 		for _, consumer := range []string{consumerGlobalConfig, consumerVersioned} {
@@ -1160,6 +1160,37 @@ func TestServerEnvContract(t *testing.T) {
 	h := newEnvContractHarness(t)
 	for _, k := range keys {
 		if envContractStructuredKeys[k.Path] {
+			continue
+		}
+		if config.ServerEnvFileOnlyKeys[k.Path] != "" {
+			t.Run(k.Path+"/file-only", func(t *testing.T) {
+				for _, name := range []string{
+					derivedServerEnv(k.Path),
+					"SCION_SERVER_" + strings.ToUpper(strings.ReplaceAll(strings.TrimPrefix(k.Path, "server."), ".", "_")),
+				} {
+					t.Setenv(name, "https://env.example/templates")
+					if got := config.LoadEnvKoanf(); got.Exists(k.Path) {
+						t.Errorf("file-only key %s must not be set by %s in opsettings env koanf", k.Path, name)
+					}
+					t.Setenv("HOME", h.versionsHome)
+					vs, err := config.LoadVersionedSettings("")
+					if err != nil {
+						t.Fatalf("LoadVersionedSettings with %s: %v", name, err)
+					}
+					if got, ok := structLeaf(reflect.ValueOf(vs), k.Path); ok && got.Len() > 0 {
+						t.Errorf("file-only key %s must not be set by %s in VersionedSettings: %v", k.Path, name, got.Interface())
+					}
+					gc, err := config.LoadGlobalConfig(h.configDir)
+					if err != nil {
+						t.Fatalf("LoadGlobalConfig with %s: %v", name, err)
+					}
+					leafOf, _ := globalConfigLeaf(k)
+					if got, ok := leafOf(gc); ok && got.Len() > 0 {
+						t.Errorf("file-only key %s must not be set by %s in GlobalConfig: %v", k.Path, name, got.Interface())
+					}
+					_ = os.Unsetenv(name)
+				}
+			})
 			continue
 		}
 		t.Run(k.Path, func(t *testing.T) {
