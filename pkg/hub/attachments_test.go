@@ -213,21 +213,25 @@ func TestSanitizeFilename_RejectsWindowsShellIntegrationExtensions(t *testing.T)
 		{"network.diagcab.", ".diagcab"},
 	}
 	for _, tc := range cases {
-		_, err := SanitizeFilename(tc.name)
-		require.Error(t, err, "SanitizeFilename(%q) was accepted", tc.name)
-		assert.Equal(t, "files with a "+tc.wantExt+" extension are not accepted", err.Error(), "for %q", tc.name)
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := SanitizeFilename(tc.name)
+			require.Error(t, err, "SanitizeFilename(%q) was accepted", tc.name)
+			assert.Equal(t, "files with a "+tc.wantExt+" extension are not accepted", err.Error(), "for %q", tc.name)
 
-		_, err = ClassifyAttachment(tc.name, []byte("plain text content\n"))
-		require.Error(t, err, "ClassifyAttachment(%q) was accepted", tc.name)
-		assert.Equal(t, "files with a "+tc.wantExt+" extension are not accepted", err.Error(), "for %q", tc.name)
+			_, err = ClassifyAttachment(tc.name, []byte("plain text content\n"))
+			require.Error(t, err, "ClassifyAttachment(%q) was accepted", tc.name)
+			assert.Equal(t, "files with a "+tc.wantExt+" extension are not accepted", err.Error(), "for %q", tc.name)
+		})
 	}
 
 	// Only the effective final extension is blocked; benign files that happen
 	// to contain a blocked token earlier in the name remain accepted.
 	for _, allowed := range []string{"notes.lnk.txt", "readme.inf.md", "audit.msc.log", "colors.theme.json"} {
-		name, err := SanitizeFilename(allowed)
-		require.NoError(t, err, "SanitizeFilename(%q) should be accepted", allowed)
-		assert.Equal(t, allowed, name)
+		t.Run(allowed, func(t *testing.T) {
+			name, err := SanitizeFilename(allowed)
+			require.NoError(t, err, "SanitizeFilename(%q) should be accepted", allowed)
+			assert.Equal(t, allowed, name)
+		})
 	}
 }
 
