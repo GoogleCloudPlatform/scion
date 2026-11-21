@@ -270,13 +270,15 @@ func TestDecisionsSend_SingleChoice(t *testing.T) {
 
 	getRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil)
 	require.Equal(t, http.StatusOK, getRR.Code, "body: %s", getRR.Body.String())
-	var view DecisionView
-	require.NoError(t, json.Unmarshal(getRR.Body.Bytes(), &view))
-	assert.Equal(t, "pending", view.Status)
-	require.Len(t, view.Choices, 1)
-	assert.Equal(t, "approve", view.Choices[0].ID)
-	assert.Equal(t, "Approved", view.Choices[0].Label)
-	assert.Nil(t, view.Other)
+	var got struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(getRR.Body.Bytes(), &got))
+	assert.Equal(t, "pending", got.Decision.Status)
+	require.Len(t, got.Decision.Choices, 1)
+	assert.Equal(t, "approve", got.Decision.Choices[0].ID)
+	assert.Equal(t, "Approved", got.Decision.Choices[0].Label)
+	assert.Nil(t, got.Decision.Other)
 
 	ansRR := f.answer(t, f.bob, rowID, map[string]interface{}{"choice_id": "approve"})
 	require.Equal(t, http.StatusOK, ansRR.Code, "body: %s", ansRR.Body.String())
@@ -1283,7 +1285,7 @@ func TestDecisionsSend_LegacyChoicesFallbackAndConflict(t *testing.T) {
 	assert.Contains(t, logged, f.agent.ID)
 
 	// 3. Validation errors on fallback still report the primary decisions[i] root.
-	rrBadFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"One choice?","choices":["only"]}]}`))
+	rrBadFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"No choices?","choices":[]}]}`))
 	require.Equal(t, http.StatusBadRequest, rrBadFallback.Code, rrBadFallback.Body.String())
 	assert.Equal(t, ErrCodeValidationError, errorCode(t, rrBadFallback))
 	assert.Contains(t, rrBadFallback.Body.String(), "decisions[0].choices")
