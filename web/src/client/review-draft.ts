@@ -175,7 +175,8 @@ export class ReviewDraftController {
   private ackedNote: string;
   private status: DraftStatusKind;
   private inFlight = false;
-  private saveAgainImmediate = false;
+  private inFlightPromise: Promise<boolean> | null = null;
+  private submitting = false;
   private pausedReason: 'conflict' | 'too_large' | 'too_many_drafts' | 'no_access' | null = null;
   private conflict: DraftConflictInfo | null = null;
   private retryDelayMs: number;
@@ -234,7 +235,7 @@ export class ReviewDraftController {
 
   /** True when the user can click Save Draft right now. */
   get canSaveNow(): boolean {
-    if (this.disposed || this.inFlight || !this.isDirty) return false;
+    if (this.disposed || this.submitting || this.inFlight || !this.isDirty) return false;
     return (
       this.pausedReason !== 'conflict' &&
       this.pausedReason !== 'no_access' &&
@@ -258,7 +259,7 @@ export class ReviewDraftController {
    * on the first unsaved change; subsequent typing does not reset the timer.
    */
   notifyChange(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.submitting) return;
     const cur = this.opts.readState();
 
     // If autosave paused for 413 draft_too_large, resume once the text shrinks back under the cap.
@@ -303,11 +304,11 @@ export class ReviewDraftController {
 
   /**
    * Immediately saves the current buffer (Save Draft button or Save draft and
-   * close). Resets the autosave timer. Resolves true if the buffer is now
-   * acknowledged by the hub, false if saving failed or hit a conflict.
+   * close). Resets the autosave timer. If a PUT is already in flight, awaits
+   * it and saves any newer edits made during flight before returning.
    */
   async saveNow(): Promise<boolean> {
-    if (this.disposed) return false;
+    if (this.disposed || this.submitting) return false;
     if (this.pausedReason === 'conflict' || this.pausedReason === 'no_access') {
       return false;
     }
@@ -326,14 +327,43 @@ export class ReviewDraftController {
     this.clearRetryTimer();
     this.retryDelayMs = this.retryMinMs;
 
-    if (!this.isDirty && !this.inFlight) {
+    if (this.inFlightPromise) {
+      const firstOk = await this.inFlightPromise;
+      if (this.disposed || this.submitting) return false;
+      if (!this.isDirty) return firstOk;
+      if (this.pausedReason) return false;
+      return this.performSave(false);
+    }
+
+    if (!this.isDirty) {
       return true;
     }
-    if (this.inFlight) {
-      this.saveAgainImmediate = true;
-      return false;
-    }
     return this.performSave(false);
+  }
+
+  /**
+   * Stops timers, blocks new autosave or visibility PUTs, and awaits any
+   * in-flight PUT without aborting it so `currentRev` reflects the latest
+   * hub-committed revision before Submit Review runs.
+   */
+  async quiesce(): Promise<void> {
+    if (this.disposed) return;
+    this.submitting = true;
+    this.clearAutosaveTimer();
+    this.clearRetryTimer();
+    if (this.inFlightPromise) {
+      await this.inFlightPromise;
+    }
+  }
+
+  /**
+   * Releases the submitting pause after a refused submit (e.g. 422
+   * unmarked_changes or stale_review) so autosave and guards resume cleanly.
+   */
+  resumeFromQuiesce(): void {
+    if (this.disposed || !this.submitting) return;
+    this.submitting = false;
+    this.notifyChange();
   }
 
   /**
@@ -429,8 +459,16 @@ export class ReviewDraftController {
     this.win.removeEventListener('beforeunload', this.onBeforeUnload);
   }
 
-  private async performSave(keepalive: boolean): Promise<boolean> {
-    if (this.disposed || this.inFlight) return false;
+  private performSave(keepalive: boolean): Promise<boolean> {
+    if (this.disposed || this.submitting || this.inFlight) return Promise.resolve(false);
+    const run = this.runSave(keepalive);
+    this.inFlightPromise = run;
+    return run.finally(() => {
+      if (this.inFlightPromise === run) this.inFlightPromise = null;
+    });
+  }
+
+  private async runSave(keepalive: boolean): Promise<boolean> {
     const snap = this.opts.readState();
     const req: PutReviewDraftRequest = {
       rev: this.rev,
@@ -452,7 +490,6 @@ export class ReviewDraftController {
     this.clearAutosaveTimer();
     this.clearRetryTimer();
     this.inFlight = true;
-    this.saveAgainImmediate = false;
     this.status = 'saving';
     const ac = new AbortController();
     this.abortController = ac;
@@ -484,24 +521,18 @@ export class ReviewDraftController {
     if (this.disposed) return false;
 
     if (ok) {
-      if (this.isDirty) {
-        if (this.saveAgainImmediate) {
-          this.saveAgainImmediate = false;
-          return this.performSave(false);
-        }
+      if (this.isDirty && !this.submitting) {
         // Coalesced edits made while the PUT was in flight: start one fresh 30 s timer.
         this.status = 'unsaved';
         this.autosaveTimer = setTimeout(() => {
           this.autosaveTimer = null;
           void this.performSave(false);
         }, this.autosaveMs);
-      } else {
-        this.saveAgainImmediate = false;
+      } else if (!this.isDirty) {
         this.status = 'saved';
       }
       this.emit();
     } else {
-      this.saveAgainImmediate = false;
       this.emit();
     }
     return ok;
@@ -574,7 +605,7 @@ export class ReviewDraftController {
   }
 
   private onVisibility = (): void => {
-    if (this.disposed || this.doc.visibilityState !== 'hidden') return;
+    if (this.disposed || this.submitting || this.doc.visibilityState !== 'hidden') return;
     if (this.pausedReason || this.inFlight || !this.isDirty) return;
     void this.performSave(true);
   };
