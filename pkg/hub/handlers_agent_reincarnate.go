@@ -485,6 +485,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
 	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
+	resolveTag := reincarnateImageTag(dispatcher, agent.RuntimeBrokerID)
 	buildCtx, buildDispatchWarnings := withDispatchWarnings(ctx)
 	if patch != nil && patch.HarnessConfig != nil {
 		// A harness switch never falls back to no credentials on its own
@@ -492,7 +493,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		// explicitly.
 		buildCtx = withNoAuthFallbackForbidden(buildCtx)
 	}
-	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, agent.RuntimeBrokerID), patch)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, resolveTag, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -541,7 +542,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
+	imgCtx := planImageContext{
+		Registry:   imageRegistry,
+		Tag:        resolveTag(fresh.Profile),
+		SameBroker: true,
+	}
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imgCtx)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	addHarnessSwitchToPlan(&plan, agent.AppliedConfig, fresh, patch)
 	addAuthorityToPlan(&plan, auth)
@@ -819,8 +825,9 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	// The new generation runs on dst: resolve its registry there, for the
 	// new profile (ptone/scion#3916).
 	resolveRegistry := reincarnateImageRegistry(dispatcher, dst.ID)
+	resolveTag := reincarnateImageTag(dispatcher, dst.ID)
 	buildCtx, buildDispatchWarnings := withDispatchWarnings(ctx)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, dst.ID), patch)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, resolveTag, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -842,7 +849,12 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, resolveRegistry(fresh.Profile))
+	imgCtx := planImageContext{
+		Registry:   resolveRegistry(fresh.Profile),
+		Tag:        resolveTag(fresh.Profile),
+		SameBroker: false,
+	}
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imgCtx)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)

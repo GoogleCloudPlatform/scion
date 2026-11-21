@@ -420,3 +420,42 @@ func TestImageTagSettingPattern_MatchesSchemaAndValidator(t *testing.T) {
 		}
 	}
 }
+
+func TestImageBasename(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want string
+	}{
+		{"", ""},
+		{"scion-claude:latest", "scion-claude:latest"},
+		{"org/scion-claude:latest", "scion-claude:latest"},
+		{"us-docker.pkg.dev/proj/repo/scion-claude:latest", "scion-claude:latest"},
+		{"localhost:5000/scion-claude:v1", "scion-claude:v1"},
+		{"ghcr.io/org/scion-claude@" + testDigest, "scion-claude@" + testDigest},
+	}
+	for _, tc := range tests {
+		if got := ImageBasename(tc.ref); got != tc.want {
+			t.Errorf("ImageBasename(%q) = %q, want %q", tc.ref, got, tc.want)
+		}
+	}
+}
+
+func TestIsShortFormImage(t *testing.T) {
+	tests := []struct {
+		ref  string
+		want bool
+	}{
+		{"", false},
+		{"scion-claude:latest", true},
+		{"scion-claude", true},
+		{"org/scion-claude:latest", true},
+		{"us-docker.pkg.dev/proj/repo/scion-claude:latest", false},
+		{"ghcr.io/org/scion-claude:v1", false},
+		{"localhost:5000/scion-claude:latest", false},
+	}
+	for _, tc := range tests {
+		if got := IsShortFormImage(tc.ref); got != tc.want {
+			t.Errorf("IsShortFormImage(%q) = %v, want %v", tc.ref, got, tc.want)
+		}
+	}
+}

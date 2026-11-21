@@ -164,11 +164,11 @@ func TestBuildPatchedAppliedConfig_ImageTag(t *testing.T) {
 func TestComputeReincarnationPlan_ImageTagIsAChange(t *testing.T) {
 	old := &store.AgentAppliedConfig{Image: "scion-claude:latest"}
 	fresh := &store.AgentAppliedConfig{Image: "ghcr.io/org/scion-claude:v0.3.0"}
-	plan := computeReincarnationPlan(old, fresh, nil, "ghcr.io/org")
+	plan := computeReincarnationPlan(old, fresh, nil, planImageContext{Registry: "ghcr.io/org", SameBroker: true})
 	assert.Equal(t, "scion-claude:latest", plan.Image.Old)
 	assert.Equal(t, "ghcr.io/org/scion-claude:v0.3.0", plan.Image.New)
 
-	same := computeReincarnationPlan(old, &store.AgentAppliedConfig{Image: "ghcr.io/org/scion-claude:latest"}, nil, "ghcr.io/org")
+	same := computeReincarnationPlan(old, &store.AgentAppliedConfig{Image: "ghcr.io/org/scion-claude:latest"}, nil, planImageContext{Registry: "ghcr.io/org", SameBroker: true})
 	assert.Equal(t, same.Image.New, same.Image.Old, "without a tag the canonical forms still match")
 }
 

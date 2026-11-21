@@ -1437,7 +1437,7 @@ func TestReincarnateAgent_RowEnvMatchesFreshConfigAfterReprovision(t *testing.T)
 	assert.Equal(t, fresh.Env, final.AppliedConfig.Env, "the row's env must equal the fresh derivation's env")
 	assert.NotContains(t, final.AppliedConfig.Env, "STORED_VAR")
 	assert.NotContains(t, final.AppliedConfig.Env, "RESOLVED_VAR")
-	assert.Equal(t, KeyDiff{}, computeReincarnationPlan(final.AppliedConfig, fresh, nil, "").EnvKeys, "the next plan must show no env change")
+	assert.Equal(t, KeyDiff{}, computeReincarnationPlan(final.AppliedConfig, fresh, nil, planImageContext{SameBroker: true}).EnvKeys, "the next plan must show no env change")
 }
 
 // imageRegistryPlan runs a dry-run reincarnate against an agent whose image

@@ -190,6 +190,29 @@ func RewriteImageRef(image, registry, tag string) string {
 	return RewriteImageRegistry(RewriteImageTag(image, tag), registry)
 }
 
+// ImageBasename returns the last path component (e.g. "scion-claude:latest")
+// of a container image reference.
+func ImageBasename(ref string) string {
+	if i := strings.LastIndex(ref, "/"); i >= 0 {
+		return ref[i+1:]
+	}
+	return ref
+}
+
+// IsShortFormImage reports whether ref is a non-empty short-form
+// (non-fully-qualified) image reference: its first path component contains
+// neither "." nor ":". This matches the qualification check used by
+// RewriteImageRegistry and RewriteImageTag.
+func IsShortFormImage(ref string) bool {
+	if ref == "" {
+		return false
+	}
+	if firstSlash := strings.Index(ref, "/"); firstSlash >= 0 {
+		return !strings.ContainsAny(ref[:firstSlash], ".:")
+	}
+	return true
+}
+
 // retagBasename sets the tag of image (whose last path component is the
 // name[:tag]) to tag when the name starts with "scion-" and the tag is
 // "latest" or absent.

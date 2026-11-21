@@ -605,14 +605,53 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 	}, warnings
 }
 
+// planImageContext describes how the hub resolved the new generation's image
+// for computeReincarnationPlan (ptone/scion#7917).
+type planImageContext struct {
+	Registry   string // resolveRegistry(fresh.Profile): "" when the hub leaves the rewrite to the broker
+	Tag        string // resolveTag(fresh.Profile)
+	SameBroker bool   // in place (true) vs move (false)
+}
+
+// sameImageModuloBrokerRewrite reports whether oldImg and a short-form
+// freshImg name the same image when the broker owns the registry/tag rewrite.
+// It compares only the last path component (name[:tag]), tolerating the
+// broker's image_tag rewrite for scion-* images whose fresh tag is "latest"
+// or absent (mirroring config.retagBasename).
+func sameImageModuloBrokerRewrite(oldImg, freshImg string) bool {
+	if oldImg == "" || freshImg == "" {
+		return false
+	}
+	oldBase := config.ImageBasename(oldImg)
+	freshBase := config.ImageBasename(freshImg)
+	if oldBase == freshBase {
+		return true
+	}
+	if strings.Contains(oldBase, "@") || strings.Contains(freshBase, "@") {
+		return false
+	}
+	oldName, _, _ := strings.Cut(oldBase, ":")
+	freshName, freshTag, freshHasTag := strings.Cut(freshBase, ":")
+	return oldName == freshName &&
+		strings.HasPrefix(freshName, "scion-") &&
+		(!freshHasTag || freshTag == config.ImageTagLatest)
+}
+
 // computeReincarnationPlan diffs the outgoing generation's AppliedConfig
 // against the freshly resolved one, for the ReincarnateAgentResponse (design
 // §3.2). Env key names only are compared, never values.
 //
-// The image is compared in canonical (registry-qualified) form, so a row that
-// still holds the bare form of the same image shows as unchanged. An empty
-// old image is always shown as a change.
-func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []string, imageRegistry string) ReincarnationPlan {
+// Image comparison matches the ownership of the registry/tag rewrite
+// (ptone/scion#7917):
+//   - When the hub owns the rewrite (fresh.Image is qualified, or img.Registry
+//     is non-empty), old.Image is normalized with config.RewriteImageRef; if it
+//     equals fresh.Image, Old is set to New so the plan shows unchanged.
+//   - When the broker owns the rewrite (fresh.Image is short-form and
+//     img.Registry is empty), images are compared modulo the broker's rewrite:
+//     an in-place match collapses to Old = New = old.Image, while a move keeps
+//     old -> short fresh because the target broker can resolve a different
+//     registry.
+func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []string, img planImageContext) ReincarnationPlan {
 	plan := ReincarnationPlan{
 		Template:   FieldChange{Old: old.TemplateHash, New: fresh.TemplateHash},
 		Image:      FieldChange{Old: old.Image, New: fresh.Image},
@@ -622,8 +661,18 @@ func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []s
 		Branch:     fresh.Branch,
 		Warnings:   warnings,
 	}
-	if old.Image != "" && config.RewriteImageRegistry(old.Image, imageRegistry) == fresh.Image {
-		plan.Image.Old = fresh.Image
+	if old.Image == "" {
+		return plan
+	}
+	if !config.IsShortFormImage(fresh.Image) || img.Registry != "" {
+		if config.RewriteImageRef(old.Image, img.Registry, img.Tag) == fresh.Image {
+			plan.Image.Old = fresh.Image
+		}
+		return plan
+	}
+	if img.SameBroker && sameImageModuloBrokerRewrite(old.Image, fresh.Image) {
+		plan.Image.Old = old.Image
+		plan.Image.New = old.Image
 	}
 	return plan
 }
