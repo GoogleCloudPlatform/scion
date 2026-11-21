@@ -474,10 +474,19 @@ describe('ReviewDraftController', () => {
     });
     h2.setBody('pending rev-0 edit');
     const p2 = h2.controller.saveNow();
-    const quiescePromise = h2.controller.quiesce();
+    let quiesced = false;
+    const quiescePromise = h2.controller.quiesce().then(() => {
+      quiesced = true;
+    });
+    // quiesce() must remain pending until the in-flight PUT resolves.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(quiesced).toBe(false);
+
     resolveSecond({ rev: 1, savedAt: new Date(Date.now()).toISOString(), currentSeq: 1 });
     await quiescePromise;
     await p2;
+    expect(quiesced).toBe(true);
     expect(h2.controller.currentRev).toBe(1);
 
     // While quiesced, edits do not schedule autosave; resumeFromQuiesce re-arms autosave.
