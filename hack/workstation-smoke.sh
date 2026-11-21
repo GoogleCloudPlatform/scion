@@ -401,7 +401,7 @@ grep -Eq '"source"[[:space:]]*:[[:space:]]*"context"' "$WORK/use.json" || {
 log "6. scion server stop"
 stop_server || { cat "$WORK/stop.out" >&2; fail "scion server stop"; }
 
-log "7. without an image registry, scion server start stays up and prints the fix"
+log "7. without an image registry, scion server start stays up with the co-located broker"
 # The second server reuses the same ports; wait for the first to let go.
 for ((i = 1; i <= 30; i++)); do
   curl -fsS "$ENDPOINT/healthz" >/dev/null 2>&1 || break
@@ -418,11 +418,9 @@ unset SCION_IMAGE_REGISTRY
 "$SCION" server start >"$WORK/start-noreg.out" 2>&1 || {
   cat "$WORK/start-noreg.out" >&2; fail "scion server start without an image registry"; }
 cat "$WORK/start-noreg.out"
-grep -q "Runtime broker not started: image_registry is not configured" "$WORK/start-noreg.out" || {
-  fail "server start did not report the skipped broker"; }
-grep -qF "scion config set --global image_registry <your-registry>" "$WORK/start-noreg.out" || {
-  fail "server start did not print the registry fix"; }
-grep -qF "scion server restart" "$WORK/start-noreg.out" || fail "server start did not say to restart"
+if grep -q "Runtime broker not started" "$WORK/start-noreg.out"; then
+  fail "server start reported a skipped broker although co-located workstation brokers now start without image_registry"
+fi
 grep -Eq "^Web UI:  http://127\.0\.0\.1:[0-9]+/onboarding\$" "$WORK/start-noreg.out" || {
   fail "server start did not print the /onboarding URL"; }
 if ! { [ -f "$HOME/.scion/server.pid" ] && kill -0 "$(cat "$HOME/.scion/server.pid")" 2>/dev/null; }; then
@@ -432,7 +430,7 @@ ENDPOINT="$(web_endpoint "$WORK/start-noreg.out")"
 [ -n "$ENDPOINT" ] || fail "server start did not print the Web UI URL"
 # The first "status" key is the composite (top-level) status.
 curl -fsS "$ENDPOINT/healthz" | tr -d '[:space:]' | grep -o '"status":"[a-z]*"' | sed -n 1p | grep -qx '"status":"healthy"' || {
-  curl -sS "$ENDPOINT/healthz" >&2 || true; fail "/healthz is not healthy without the broker"; }
+  curl -sS "$ENDPOINT/healthz" >&2 || true; fail "/healthz is not healthy without an image registry"; }
 "$SCION" --global hub status --format json >"$WORK/status-noreg.json" 2>"$WORK/status-noreg.err" || {
   cat "$WORK/status-noreg.json" "$WORK/status-noreg.err" >&2; fail "scion hub status without an image registry"; }
 grep -Eq '"connected"[[:space:]]*:[[:space:]]*true' "$WORK/status-noreg.json" || {
