@@ -71,8 +71,9 @@ type captureBrokerPolicyAuditLogger struct {
 	events []*BrokerAuthEvent
 }
 
-func (c *captureBrokerPolicyAuditLogger) LogBrokerAuth(_ context.Context, event *BrokerAuthEvent) {
+func (c *captureBrokerPolicyAuditLogger) LogBrokerAuthEvent(_ context.Context, event *BrokerAuthEvent) error {
 	c.events = append(c.events, event)
+	return nil
 }
 
 func newHubAdminUser(t *testing.T, s store.Store, slug string) *store.User {
