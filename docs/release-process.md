@@ -497,7 +497,7 @@ an edited branch cannot read the secret:
   passes secrets, at every level of nesting. `build-preview-weekly.yml` calls `build-release.yml`
   and `build-release.yml` calls `publish-homebrew.yml`, both with `secrets: inherit`. A new caller
   on the preview path needs it too; without it the secret is empty and the jobs skip with the
-  "not set" notice. A manual run of `publish-homebrew.yml` is not nested, so it always sees the
+  "not set" notice. A manual run of `publish-homebrew.yml` from `main` is not nested, so it always sees the
   secret.
 - **Required reviewers (optional):** GitHub applies them to every run that uses the environment,
   not only to manual dispatches, so each of the three jobs then waits for approval, including on
