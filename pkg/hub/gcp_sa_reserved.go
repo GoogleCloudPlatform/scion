@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -65,9 +66,10 @@ func (s *Server) isHubOwnServiceAccountEmail(email string) bool {
 }
 
 // gcpServiceAccountEmailRefusal reports whether email is a reserved identity
-// that may not be registered, verified, assigned, or used for agent token
-// minting. Currently this covers the Hub's own GCP service account; additional
-// reserved identities (such as broker-host accounts) can be checked here.
+// that may not be registered, verified, assigned, or used for agent or
+// lifecycle-hook token minting. Currently this covers the Hub's own GCP service
+// account; additional reserved identities (such as broker-host accounts) can be
+// checked here.
 //
 // Returns ("", "", false) when email is allowed, including when the Hub's own
 // identity is unknown.
@@ -78,6 +80,25 @@ func (s *Server) gcpServiceAccountEmailRefusal(email string) (code, msg string, 
 			true
 	}
 	return "", "", false
+}
+
+// refuseReservedHookExecutionIdentity refuses a lifecycle-hook write whose
+// executionIdentity references a reserved GCP service account (such as the
+// Hub's own identity). Returns true after writing the 400 identity_reserved
+// response; lookup errors are left to lifecyclehooks.ValidateHook.
+func (s *Server) refuseReservedHookExecutionIdentity(w http.ResponseWriter, ctx context.Context, executionIdentity string) bool {
+	if executionIdentity == "" {
+		return false
+	}
+	sa, err := s.store.GetGCPServiceAccount(ctx, executionIdentity)
+	if err != nil || sa == nil {
+		return false
+	}
+	if code, msg, refused := s.gcpServiceAccountEmailRefusal(sa.Email); refused {
+		writeError(w, http.StatusBadRequest, code, msg, nil)
+		return true
+	}
+	return false
 }
 
 // ScanReservedGCPServiceAccounts scans all stored GCP service account rows at

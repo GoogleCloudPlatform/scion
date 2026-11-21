@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -617,4 +618,155 @@ func TestScanReservedGCPServiceAccounts(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestLifecycleHook_RefusesHubOwnIdentityLiveAtFireAndWrite(t *testing.T) {
+	const hubEmail = "hub-runner@hub-proj.iam.gserviceaccount.com"
+
+	srv, s := testServer(t)
+	gen := &reservedTestTokenGenerator{email: hubEmail}
+	srv.SetGCPTokenGenerator(gen)
+	ctx := context.Background()
+
+	// Seed an active admin writer who holds hub.lifecycle_hooks.update.
+	adminID := tid("user-hook-admin")
+	adminEmail := "hook-admin@test.com"
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID:          adminID,
+		Email:       adminEmail,
+		DisplayName: "Hook Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      store.UserStatusActive,
+		Created:     time.Now().Add(-time.Hour),
+	}))
+	hubAdminRole, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      adminID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	adminUser := &store.User{
+		ID:          adminID,
+		Email:       adminEmail,
+		DisplayName: "Hook Admin",
+		Role:        store.UserRoleAdmin,
+		Status:      store.UserStatusActive,
+	}
+
+	// Seed a VERIFIED hub-scoped row with a mixed-case Hub email (simulating
+	// a pre-existing row when the startup scan did not run or failed).
+	hubSA := &store.GCPServiceAccount{
+		ID:                 tid("sa-hook-hub"),
+		Scope:              store.ScopeHub,
+		ScopeID:            srv.HubID(),
+		Email:              "Hub-Runner@Hub-Proj.IAM.GServiceAccount.COM",
+		ProjectID:          "hub-proj",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          adminID,
+		CreatedAt:          time.Now(),
+	}
+	// Positive control: a normal verified hub-scoped SA.
+	normalSA := &store.GCPServiceAccount{
+		ID:                 tid("sa-hook-normal"),
+		Scope:              store.ScopeHub,
+		ScopeID:            srv.HubID(),
+		Email:              "worker@hub-proj.iam.gserviceaccount.com",
+		ProjectID:          "hub-proj",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          adminID,
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, hubSA))
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, normalSA))
+
+	// 1. Live fire-time refusal through HTTPExecutor.resolveIdentityAndToken.
+	exec := NewHTTPExecutor(s, gen, nil, slog.Default(), srv)
+	action := &store.LifecycleHookAction{
+		Type:   store.LifecycleHookActionHTTP,
+		Method: http.MethodPost,
+		URL:    "https://example.com/hook",
+	}
+
+	reservedHook := &store.LifecycleHook{
+		ID:                tid("hook-fire-reserved"),
+		Name:              "fire-reserved",
+		ScopeType:         store.LifecycleHookScopeHub,
+		ExecutionIdentity: hubSA.ID,
+		CreatedBy:         adminEmail,
+		Created:           time.Now(),
+	}
+	_, _, err = exec.resolveIdentityAndToken(ctx, reservedHook, action)
+	require.Error(t, err)
+	var denied *HookFireDeniedError
+	require.True(t, errors.As(err, &denied), "expected HookFireDeniedError, got %T: %v", err, err)
+	assert.Equal(t, HookFireIdentityNotAdmissible, denied.Cause)
+	assert.Zero(t, gen.accessCalls.Load(), "GenerateAccessToken must not be called for Hub's own SA")
+
+	// Positive control: normal SA succeeds and mints a token.
+	normalHook := &store.LifecycleHook{
+		ID:                tid("hook-fire-normal"),
+		Name:              "fire-normal",
+		ScopeType:         store.LifecycleHookScopeHub,
+		ExecutionIdentity: normalSA.ID,
+		CreatedBy:         adminEmail,
+		Created:           time.Now(),
+	}
+	gotEmail, gotTok, err := exec.resolveIdentityAndToken(ctx, normalHook, action)
+	require.NoError(t, err)
+	assert.Equal(t, normalSA.Email, gotEmail)
+	assert.NotEmpty(t, gotTok)
+	assert.Equal(t, int32(1), gen.accessCalls.Load())
+
+	// 2. Write-time refusal on POST /api/v1/admin/lifecycle-hooks.
+	createBody := map[string]any{
+		"name":              "create-reserved-hook",
+		"scopeType":         store.LifecycleHookScopeHub,
+		"trigger":           "running",
+		"action":            action,
+		"executionIdentity": hubSA.ID,
+		"enabled":           true,
+	}
+	recCreate := doRequestAsUser(t, srv, adminUser, http.MethodPost, "/api/v1/admin/lifecycle-hooks", createBody)
+	require.Equal(t, http.StatusBadRequest, recCreate.Code, "body: %s", recCreate.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(recCreate.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeIdentityReserved, errResp.Error.Code)
+
+	// 3. Write-time refusal on PUT /api/v1/admin/lifecycle-hooks/{id}.
+	existingHook := &store.LifecycleHook{
+		ID:                tid("hook-update-target"),
+		Name:              "existing-hook",
+		ScopeType:         store.LifecycleHookScopeHub,
+		Trigger:           "running",
+		Action:            action,
+		ExecutionIdentity: normalSA.ID,
+		Enabled:           true,
+		CreatedBy:         adminEmail,
+		Created:           time.Now(),
+		Updated:           time.Now(),
+		StateVersion:      1,
+	}
+	require.NoError(t, s.CreateLifecycleHook(ctx, existingHook))
+
+	updateBody := map[string]any{
+		"name":              existingHook.Name,
+		"trigger":           existingHook.Trigger,
+		"action":            action,
+		"executionIdentity": hubSA.ID,
+		"enabled":           true,
+		"stateVersion":      1,
+	}
+	recUpdate := doRequestAsUser(t, srv, adminUser, http.MethodPut, "/api/v1/admin/lifecycle-hooks/"+existingHook.ID, updateBody)
+	require.Equal(t, http.StatusBadRequest, recUpdate.Code, "body: %s", recUpdate.Body.String())
+	errResp = ErrorResponse{}
+	require.NoError(t, json.Unmarshal(recUpdate.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeIdentityReserved, errResp.Error.Code)
 }
