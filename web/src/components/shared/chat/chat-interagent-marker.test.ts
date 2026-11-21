@@ -71,29 +71,28 @@ describe('scion-chat-interagent-marker', () => {
 
   it('shows cross-project count in collapsed pill', async () => {
     const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
-    el.currentProjectId = 'proj-a';
     el.messageCount = 2;
     el.messages = [
-      makeMessage({ senderProjectId: 'proj-b' }),
-      makeMessage({ id: 'msg-2', senderProjectId: 'proj-a' }),
+      makeMessage({ senderProjectId: 'proj-b', recipientProjectId: 'proj-a' }),
+      makeMessage({ id: 'msg-2', senderProjectId: 'proj-a', recipientProjectId: 'proj-a' }),
     ];
     document.body.appendChild(el);
     await el.updateComplete;
 
-    const text = el.shadowRoot?.textContent || '';
-    expect(text).toContain('cross-project');
+    const pill = el.shadowRoot?.querySelector('.marker-pill');
+    expect(pill?.textContent).toContain('1');
+    expect(pill?.textContent).toContain('cross-project');
   });
 
   it('formats participant with project prefix for cross-project messages when expanded', async () => {
     const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
-    el.currentProjectId = 'proj-a';
     el.messageCount = 1;
     el.messages = [
       makeMessage({
         sender: 'agent:remote-bot',
         senderProjectId: 'proj-bbbb-cccc-dddd',
         recipient: 'agent:local-bot',
-        recipientProjectId: 'proj-a',
+        recipientProjectId: 'proj-aaaa-1111-2222',
       }),
     ];
     el.expanded = true;
@@ -101,13 +100,13 @@ describe('scion-chat-interagent-marker', () => {
     await el.updateComplete;
 
     const sender = el.shadowRoot?.querySelector('.ia-sender');
-    expect(sender?.textContent).toContain('proj-bbb'); // truncated project ID prefix
-    expect(sender?.textContent).toContain('remote-bot');
+    expect(sender?.textContent).toBe('proj-bbb / remote-bot');
+    const recipient = el.shadowRoot?.querySelector('.ia-recipient');
+    expect(recipient?.textContent).toBe('proj-aaa / local-bot');
   });
 
   it('does not add prefix for same-project participants', async () => {
     const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
-    el.currentProjectId = 'proj-a';
     el.messageCount = 1;
     el.messages = [
       makeMessage({
@@ -127,18 +126,101 @@ describe('scion-chat-interagent-marker', () => {
     expect(recipient?.textContent).toBe('other-bot');
   });
 
-  it('isCrossProject detects cross-project messages', async () => {
+  it('does not tag same-project messages as cross-project when current project differs (ptone/scion#8273)', async () => {
     const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
-    el.currentProjectId = 'proj-a';
+    el.setAttribute('current-project-id', 'proj-other');
     el.messageCount = 1;
-    el.messages = [makeMessage({ senderProjectId: 'proj-b' })];
+    el.messages = [
+      makeMessage({
+        sender: 'agent:local-bot',
+        senderProjectId: 'proj-aaaa-1111',
+        recipient: 'agent:other-bot',
+        recipientProjectId: 'proj-aaaa-1111',
+      }),
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Collapsed pill must not show cross-project badge.
+    expect(el.shadowRoot?.querySelector('.ia-cross-project')).toBeNull();
+    expect(el.shadowRoot?.textContent).not.toContain('cross-project');
+
+    // Expanded view must not show cross-project badge or project prefixes.
+    el.expanded = true;
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.ia-cross-project')).toBeNull();
+    expect(el.shadowRoot?.querySelector('.ia-sender')?.textContent).toBe('local-bot');
+    expect(el.shadowRoot?.querySelector('.ia-recipient')?.textContent).toBe('other-bot');
+
+    // Full-content preview dialog must also omit cross-project badge and prefixes.
+    const internals = el as unknown as {
+      openMessagePreview(msg: Message, e: Event): Promise<void>;
+    };
+    await internals.openMessagePreview(el.messages[0], new Event('click'));
+    await el.updateComplete;
+
+    const previewHeader = el.shadowRoot?.querySelector('.ia-full-header');
+    expect(previewHeader).toBeTruthy();
+    expect(previewHeader?.querySelector('.ia-cross-project')).toBeNull();
+    expect(previewHeader?.querySelector('.ia-sender')?.textContent).toBe('local-bot');
+    expect(previewHeader?.querySelector('.ia-recipient')?.textContent).toBe('other-bot');
+  });
+
+  it('tags messages with different sender and recipient projects as cross-project regardless of current project (ptone/scion#8273)', async () => {
+    const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+    // No current-project-id set (e.g. cold-loaded DM or hub view), then switched across projects.
+    el.messageCount = 1;
+    el.messages = [
+      makeMessage({
+        sender: 'agent:sender-bot',
+        senderProjectId: 'proj-aaaa-1111',
+        recipient: 'agent:recip-bot',
+        recipientProjectId: 'proj-bbbb-2222',
+      }),
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Collapsed pill shows cross-project count even without current-project-id.
+    expect(el.shadowRoot?.querySelector('.ia-cross-project')?.textContent).toMatch(
+      /1\s+cross-project/
+    );
+
+    // Expanded view shows cross-project badge and project prefixes on both participants.
+    el.expanded = true;
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.ia-cross-project')).toBeTruthy();
+    expect(el.shadowRoot?.querySelector('.ia-sender')?.textContent).toBe('proj-aaa / sender-bot');
+    expect(el.shadowRoot?.querySelector('.ia-recipient')?.textContent).toBe('proj-bbb / recip-bot');
+
+    // Full-content preview dialog also shows cross-project badge and prefixes.
+    const internals = el as unknown as {
+      openMessagePreview(msg: Message, e: Event): Promise<void>;
+    };
+    await internals.openMessagePreview(el.messages[0], new Event('click'));
+    await el.updateComplete;
+
+    const previewHeader = el.shadowRoot?.querySelector('.ia-full-header');
+    expect(previewHeader?.querySelector('.ia-cross-project')).toBeTruthy();
+    expect(previewHeader?.querySelector('.ia-sender')?.textContent).toBe('proj-aaa / sender-bot');
+    expect(previewHeader?.querySelector('.ia-recipient')?.textContent).toBe('proj-bbb / recip-bot');
+  });
+
+  it('does not tag unstamped legacy messages as cross-project', async () => {
+    const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+    el.setAttribute('current-project-id', 'proj-other');
+    el.messageCount = 2;
+    el.messages = [
+      makeMessage({ id: 'legacy-none' }),
+      makeMessage({ id: 'legacy-partial', senderProjectId: 'proj-a' }),
+    ];
     el.expanded = true;
     document.body.appendChild(el);
     await el.updateComplete;
 
-    // Cross-project badge should be present
-    const badge = el.shadowRoot?.querySelector('.ia-cross-project');
-    expect(badge).toBeTruthy();
+    expect(el.shadowRoot?.querySelector('.ia-cross-project')).toBeNull();
   });
 
   it('renders the shared date divider for each subsequent day when messages span multiple days', async () => {

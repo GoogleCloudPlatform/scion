@@ -60,14 +60,9 @@ export class ScionChatInteragentMarker extends LitElement {
   @property({ type: Boolean, attribute: 'global-expanded' })
   globalExpanded = false;
 
-  /** Current project ID — used to detect cross-project messages. */
-  @property({ type: String, attribute: 'current-project-id' })
-  currentProjectId = '';
-
   /** DM conversation key used to load a truncated message's full body on demand. */
   @property({ type: String, attribute: 'conversation-key' })
   conversationKey = '';
-
   /** Whether this marker is hidden (eye toggle off). */
   @property({ type: Boolean, reflect: true })
   override hidden = false;
@@ -335,28 +330,29 @@ export class ScionChatInteragentMarker extends LitElement {
 
   /**
    * Format a sender/recipient like "agent:slug" to just "slug".
-   * For cross-project messages, includes a project context prefix
-   * when the participant's project differs from the current project.
+   * For cross-project messages, prefixes the participant's truncated project ID.
    */
-  private formatParticipant(value: string, projectId?: string): string {
+  private formatParticipant(value: string, projectId?: string, crossProject = false): string {
     let name = value;
     if (name.startsWith('agent:')) name = name.slice(6);
     else if (name.startsWith('user:')) name = name.slice(5);
 
-    // Add cross-project context if the participant's project differs
-    if (projectId && this.currentProjectId && projectId !== this.currentProjectId) {
+    if (crossProject && projectId) {
       const shortProject = projectId.slice(0, 8);
       return `${shortProject} / ${name}`;
     }
     return name;
   }
 
-  /** True when a message crossed project boundaries. */
+  /**
+   * True when a message crossed project boundaries: its sender and recipient
+   * provenance stamps name two different, non-empty projects.
+   */
   private isCrossProject(msg: Message): boolean {
-    if (!this.currentProjectId) return false;
     return (
-      (!!msg.senderProjectId && msg.senderProjectId !== this.currentProjectId) ||
-      (!!msg.recipientProjectId && msg.recipientProjectId !== this.currentProjectId)
+      !!msg.senderProjectId &&
+      !!msg.recipientProjectId &&
+      msg.senderProjectId !== msg.recipientProjectId
     );
   }
 
@@ -497,18 +493,21 @@ export class ScionChatInteragentMarker extends LitElement {
 
   /** Render a single expanded inter-agent message row (header + body). */
   private renderInteragentMessage(m: Message): TemplateResult {
+    const crossProject = this.isCrossProject(m);
     return html`
       <div class="ia-msg">
         <div class="ia-msg-header">
           <span class="ia-time" title=${this.formatTimeTitle(m.createdAt)}
             >${this.formatTime(m.createdAt)}</span
           >
-          <span class="ia-sender">${this.formatParticipant(m.sender, m.senderProjectId)}</span>
+          <span class="ia-sender"
+            >${this.formatParticipant(m.sender, m.senderProjectId, crossProject)}</span
+          >
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"
-            >${this.formatParticipant(m.recipient, m.recipientProjectId)}</span
+            >${this.formatParticipant(m.recipient, m.recipientProjectId, crossProject)}</span
           >
-          ${this.isCrossProject(m)
+          ${crossProject
             ? html`<span class="ia-cross-project">
                 <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon>
                 cross-project
@@ -535,6 +534,7 @@ export class ScionChatInteragentMarker extends LitElement {
   private renderMessagePreview() {
     const msg = this.expandedMessage;
     if (!msg) return nothing;
+    const crossProject = this.isCrossProject(msg);
     return html`
       <sl-dialog
         class="ia-full-preview"
@@ -546,12 +546,14 @@ export class ScionChatInteragentMarker extends LitElement {
           <span class="ia-time" title=${this.formatTimeTitle(msg.createdAt)}
             >${this.formatDateTime(msg.createdAt)}</span
           >
-          <span class="ia-sender">${this.formatParticipant(msg.sender, msg.senderProjectId)}</span>
+          <span class="ia-sender"
+            >${this.formatParticipant(msg.sender, msg.senderProjectId, crossProject)}</span
+          >
           <span class="ia-arrow">&rarr;</span>
           <span class="ia-recipient"
-            >${this.formatParticipant(msg.recipient, msg.recipientProjectId)}</span
+            >${this.formatParticipant(msg.recipient, msg.recipientProjectId, crossProject)}</span
           >
-          ${this.isCrossProject(msg)
+          ${crossProject
             ? html`<span class="ia-cross-project">
                 <sl-icon name="globe" style="font-size:0.5625rem"></sl-icon> cross-project
               </span>`
