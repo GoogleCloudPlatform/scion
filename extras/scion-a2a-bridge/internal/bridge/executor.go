@@ -607,8 +607,9 @@ func mapBridgeStateToSDK(state string) a2a.TaskState {
 	}
 }
 
-// Cancel implements a2asrv.AgentExecutor. It sends an interrupt to the Scion
-// agent and emits a canceled status.
+// Cancel implements a2asrv.AgentExecutor. It sends a best-effort interrupt to
+// the Scion agent and emits a canceled status. When a per-caller Hub client
+// cannot be constructed, it fails closed without falling back to the admin client.
 func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		taskID := execCtx.TaskID
@@ -635,12 +636,13 @@ func (e *ScionExecutor) Cancel(ctx context.Context, execCtx *a2asrv.ExecutorCont
 			senderLabel := fmt.Sprintf("user:%s", e.bridge.config.Hub.User)
 			if caller != nil {
 				senderLabel = caller.SenderLabel()
-				if cc, err := e.bridge.callerHubClient(caller); err == nil {
-					cancelClient = cc
-				} else {
-					e.log.Warn("cancel: failed to create per-caller client, falling back to admin",
-						"error", err, "task_id", taskID)
+				cc, err := e.bridge.callerHubClient(caller)
+				if err != nil {
+					e.log.Error("cancel: failed to create per-caller client", "error", err, "task_id", taskID)
+					yield(nil, a2a.NewError(a2a.ErrInternalError, "failed to cancel task"))
+					return
 				}
+				cancelClient = cc
 			}
 
 			if agent := e.bridge.lookupAgent(ctx, route.ProjectSlug, route.AgentSlug); agent != nil {

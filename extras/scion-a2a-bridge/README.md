@@ -155,6 +155,8 @@ Changes saved via the admin UI take effect immediately on the running bridge —
 
 `hubBearer`/`geGoogle` set in YAML can't be overridden from the admin UI, and neither can any other scheme the dropdown doesn't offer (for example `federation`): saving A2A integration settings pushes the dropdown's `auth_scheme` value, but a scheme not offered in that dropdown is pinned and the push is ignored. The bridge logs a `WARN` naming both the YAML and the pushed scheme the first time this happens, and `DEBUG` for repeats of the same pair. (Bridges built before this protection was added should be upgraded; on those, the admin UI has no way to remove a previously pushed `auth_scheme` on its own.)
 
+Under `auth.scheme: "federation"`, federation agent callers may start new tasks to existing agents with `SendMessage` and `SendStreamingMessage` (without a `taskId`); message delivery is authenticated by the Scion Hub (the bridge does not verify agent token signatures locally and does not auto-provision agents for federation callers). Bridge-local task routes and operations that reference an existing task (`GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask`, push-notification configuration routes, `GetExtendedAgentCard`, and `SendMessage`/`SendStreamingMessage` with a `taskId`, across both JSON-RPC and v0 REST) are not available for federation agent callers and return a permission-denied error (`403` / JSON-RPC `-31403`). Federated user callers (project visitors verified with the Hub) keep full access to their own task routes.
+
 ### Project and agent exposure
 
 The admin UI provides a structured editor for controlling which projects and agents are reachable via A2A:

@@ -472,7 +472,9 @@ func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Opportunistic sweep: fire at most once per interval per instance.
-	s.bridge.maybeOpportunisticSweep(r.Context())
+	if !isFederationAgentCaller(r.Context()) {
+		s.bridge.maybeOpportunisticSweep(r.Context())
+	}
 
 	// Enforce request body size limit to prevent memory exhaustion.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB
@@ -506,7 +508,9 @@ func (s *Server) handleV0REST(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Opportunistic sweep: fire at most once per interval per instance.
-	s.bridge.maybeOpportunisticSweep(r.Context())
+	if !isFederationAgentCaller(r.Context()) {
+		s.bridge.maybeOpportunisticSweep(r.Context())
+	}
 
 	// Enforce request body size limit.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB

@@ -244,17 +244,18 @@ func main() {
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
 		a2asrv.WithTaskStore(scopedTaskStore),
 	)
-	b.SetSDKRequestHandler(sdkRequestHandler)
+	guardedRequestHandler := bridge.NewFederationTaskAuthHandler(sdkRequestHandler)
+	b.SetSDKRequestHandler(guardedRequestHandler)
 
 	// Create SDK JSON-RPC transport handler.
 	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
-		sdkRequestHandler,
+		guardedRequestHandler,
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
 	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
 	v0RESTHandler := a2av0.NewRESTHandler(
-		sdkRequestHandler,
+		guardedRequestHandler,
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
@@ -581,7 +582,8 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 		a2asrv.WithAgentInactivityTimeout(cfg.Timeouts.SendMessage),
 		a2asrv.WithTaskStore(barrierStore),
 	)
-	b.SetSDKRequestHandler(sdkRequestHandler)
+	guardedSDKHandler := bridge.NewFederationTaskAuthHandler(sdkRequestHandler)
+	b.SetSDKRequestHandler(guardedSDKHandler)
 
 	// Constraint 3: DurableRequestHandler wraps the SDK handler for
 	// ownership-enforcing durable subscribe that bypasses localManager.Resubscribe.
@@ -589,15 +591,16 @@ func serveStandalone(cfg *bridge.Config, log *slog.Logger) {
 	// Federated users: access is re-checked with the hub before a reply is
 	// streamed on a resubscribe.
 	durableHandler.SetBridge(b)
+	guardedDurableHandler := bridge.NewFederationTaskAuthHandler(durableHandler)
 
 	sdkJSONRPCHandler := a2asrv.NewJSONRPCHandler(
-		durableHandler,
+		guardedDurableHandler,
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
 	// Create v0.3 REST compat handler for legacy (GE v0.3) clients.
 	v0RESTHandler := a2av0.NewRESTHandler(
-		sdkRequestHandler,
+		guardedSDKHandler,
 		a2asrv.WithTransportKeepAlive(cfg.Timeouts.SSEKeepalive),
 	)
 
