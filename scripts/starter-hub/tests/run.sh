@@ -1610,6 +1610,7 @@ test_full_installs_rebuild_wrapper_and_sudoers() {
     ssh_cmd="$(cat "${STUB_SSH_LOG}")"
     assert_contains "$ssh_cmd" "sudo install -d -m 0755 -o root -g root /usr/local/libexec/scion" \
         "creates root-owned /usr/local/libexec/scion"
+    # shellcheck disable=SC2016 # literal remote command text captured by ssh stub
     assert_contains "$ssh_cmd" 'sudo install -m 0755 -o root -g root /tmp/scion-install-rebuild.sh "$REBUILD_HELPER"' \
         "installs root-owned rebuild helper"
     assert_contains "$ssh_cmd" 'scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh ""' \
