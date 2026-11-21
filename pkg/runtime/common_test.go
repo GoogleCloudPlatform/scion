@@ -22,7 +22,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -2940,5 +2942,158 @@ func TestQuotedTaskBytes(t *testing.T) {
 	}
 	if got := QuotedTaskBytes("'"); got != 13 {
 		t.Errorf("QuotedTaskBytes(\"'\") = %d, want 13", got)
+	}
+}
+
+func TestBuildCommonRunArgs_GCSFuseQuoting(t *testing.T) {
+	tests := []struct {
+		name   string
+		bucket string
+		prefix string
+		mode   string
+		target string
+	}{
+		{
+			name:   "spaces",
+			bucket: "my bucket",
+			prefix: "dir with spaces/sub",
+			mode:   "ro,file-mode=0644,dir mode",
+			target: "/mnt/my gcs dir",
+		},
+		{
+			name:   "single and double quotes",
+			bucket: `b'u"c`,
+			prefix: `p'r"e/f'i"x`,
+			mode:   `ro,'m'"o"`,
+			target: `/mnt/t'g"t`,
+		},
+		{
+			name:   "dollar and command substitution",
+			bucket: "$TEST_SENTINEL/$(echo bucket-injected)",
+			prefix: "$TEST_SENTINEL/$(echo prefix-injected)",
+			mode:   "$TEST_SENTINEL,$(echo mode-injected)",
+			target: "/mnt/$(echo target-injected)",
+		},
+		{
+			name:   "backticks",
+			bucket: "b`echo bucket-injected`",
+			prefix: "p`echo prefix-injected`",
+			mode:   "m`echo mode-injected`",
+			target: "/mnt/t`echo target-injected`",
+		},
+		{
+			name:   "newlines",
+			bucket: "bucket\ninjected",
+			prefix: "prefix\ninjected",
+			mode:   "ro\ninjected",
+			target: "/mnt/target\ninjected",
+		},
+		{
+			name:   "combined metacharacters",
+			bucket: "b'u\"c $(echo x) `echo y` $TEST_SENTINEL\nline2",
+			prefix: "p'r\"e $(echo x) `echo y` $TEST_SENTINEL\nline2",
+			mode:   "m'o\"d $(echo x) `echo y` $TEST_SENTINEL\nline2",
+			target: "/mnt/t'g\"t $(echo x) `echo y`\nline2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := RunConfig{
+				Harness:      &harness.Generic{},
+				Name:         "test-agent",
+				UnixUsername: "scion",
+				Image:        "scion-agent:latest",
+				Task:         "hello",
+				Volumes: []api.VolumeMount{
+					{
+						Type:   "gcs",
+						Bucket: tt.bucket,
+						Prefix: tt.prefix,
+						Mode:   tt.mode,
+						Target: tt.target,
+					},
+				},
+			}
+			args, err := buildCommonRunArgs(cfg)
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs failed: %v", err)
+			}
+			if len(args) < 3 || args[len(args)-3] != "sh" || args[len(args)-2] != "-c" {
+				t.Fatalf("expected trailing sh -c <cmd>, got %v", args[max(0, len(args)-3):])
+			}
+			shCmd := args[len(args)-1]
+
+			wantPrefix := fmt.Sprintf(
+				"mkdir -p %s && gcsfuse --only-dir %s -o %s --implicit-dirs %s %s && exec sh -c \"$SCION_START_CMD\"",
+				shellQuote(tt.target),
+				shellQuote(tt.prefix),
+				shellQuote(tt.mode),
+				shellQuote(tt.bucket),
+				shellQuote(tt.target),
+			)
+			if shCmd != wantPrefix {
+				t.Errorf("sh -c script mismatch:\ngot:  %q\nwant: %q", shCmd, wantPrefix)
+			}
+
+			if goruntime.GOOS == "windows" {
+				return
+			}
+
+			// Execute the generated sh -c command with stub mkdir and gcsfuse
+			// binaries that record their exact argv, verifying POSIX sh passes
+			// every value literally without expansion or command substitution.
+			binDir := t.TempDir()
+			mkdirDir := filepath.Join(binDir, "mkdir-args")
+			gcsfuseDir := filepath.Join(binDir, "gcsfuse-args")
+			if err := os.MkdirAll(mkdirDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(gcsfuseDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeStub := func(name, outDir string) {
+				script := fmt.Sprintf("#!/bin/sh\ni=0\nfor a in \"$@\"; do\n  i=$((i + 1))\n  printf '%%s' \"$a\" > %s/\"$i\"\ndone\n", shellQuote(outDir))
+				if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeStub("mkdir", mkdirDir)
+			writeStub("gcsfuse", gcsfuseDir)
+
+			cmd := exec.Command("/bin/sh", "-c", shCmd)
+			cmd.Env = []string{
+				"PATH=" + binDir + ":/usr/bin:/bin",
+				"SCION_START_CMD=true",
+				"TEST_SENTINEL=SHOULD_NOT_EXPAND",
+			}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("sh -c failed: %v\noutput: %s", err, out)
+			}
+
+			readArgs := func(dir string) []string {
+				var got []string
+				for i := 1; ; i++ {
+					b, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("%d", i)))
+					if os.IsNotExist(err) {
+						break
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					got = append(got, string(b))
+				}
+				return got
+			}
+
+			wantMkdir := []string{"-p", tt.target}
+			if got := readArgs(mkdirDir); !slices.Equal(got, wantMkdir) {
+				t.Errorf("mkdir argv = %q, want %q", got, wantMkdir)
+			}
+			wantGcsfuse := []string{"--only-dir", tt.prefix, "-o", tt.mode, "--implicit-dirs", tt.bucket, tt.target}
+			if got := readArgs(gcsfuseDir); !slices.Equal(got, wantGcsfuse) {
+				t.Errorf("gcsfuse argv = %q, want %q", got, wantGcsfuse)
+			}
+		})
 	}
 }

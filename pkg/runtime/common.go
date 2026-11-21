@@ -404,17 +404,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 		if v.Type == "gcs" {
 			// Do not register as docker bind mount
-			cmd := fmt.Sprintf("mkdir -p %q && gcsfuse ", tgt)
+			cmd := fmt.Sprintf("mkdir -p %s && gcsfuse ", shellQuote(tgt))
 			if v.Prefix != "" {
-				cmd += fmt.Sprintf("--only-dir %q ", v.Prefix)
+				cmd += fmt.Sprintf("--only-dir %s ", shellQuote(v.Prefix))
 			}
 			if v.Mode != "" {
-				cmd += fmt.Sprintf("-o %q ", v.Mode)
+				cmd += fmt.Sprintf("-o %s ", shellQuote(v.Mode))
 			}
 			// Add implicit dirs for better compatibility with folder structures created via UI/API
 			cmd += "--implicit-dirs "
 
-			cmd += fmt.Sprintf("%q %q", v.Bucket, tgt)
+			cmd += fmt.Sprintf("%s %s", shellQuote(v.Bucket), shellQuote(tgt))
 			fuseMounts = append(fuseMounts, cmd)
 
 			gcsVolumes = append(gcsVolumes, gcsVolumeInfo{
