@@ -34,6 +34,25 @@ const (
 	RouteWebhook       RouteClassification = "webhook"       // Webhook signature verification
 )
 
+// AgentStandingPolicy declares how delegation standing (agent_standing.go) is
+// enforced for a RouteAgentToken route.
+type AgentStandingPolicy string
+
+const (
+	// AgentStandingGuard enforces agentStandingForbidden in routeGuard for
+	// every AgentIdentity caller before the handler runs. Use this for
+	// agent-authenticated credential- or token-issuing routes.
+	AgentStandingGuard AgentStandingPolicy = "guard"
+	// AgentStandingHandler declares that the handler enforces delegation
+	// standing itself (for example, when custom error mapping or per-item
+	// admission applies). Still verified end-to-end by
+	// TestAgentStanding_CredentialRoutesEnforced.
+	AgentStandingHandler AgentStandingPolicy = "handler"
+	// AgentStandingExempt declares that the route does not issue
+	// credentials, tokens, or secrets; AgentStandingReason must explain why.
+	AgentStandingExempt AgentStandingPolicy = "exempt"
+)
+
 // RouteMetadata describes the authorization requirements for a single route.
 type RouteMetadata struct {
 	// Pattern is the HTTP method+path registered on the mux (e.g., "GET /api/v1/agents").
@@ -99,6 +118,17 @@ type RouteMetadata struct {
 	// visitorAdmittedSubRoutes lists for the pattern and method, and only
 	// when the sub-route's per-request check passes (admitVisitorSubRoute).
 	VisitorMethods []string
+
+	// AgentStanding declares how the agent delegation-standing check is
+	// enforced on a RouteAgentToken route (AgentStandingGuard,
+	// AgentStandingHandler, or AgentStandingExempt). Every RouteAgentToken
+	// route must set it; validateAgentStandingRoutes refuses to start a
+	// server otherwise. Non-RouteAgentToken routes must leave it empty.
+	AgentStanding AgentStandingPolicy
+	// AgentStandingReason documents why a RouteAgentToken route uses
+	// AgentStandingHandler or AgentStandingExempt. Required for those two
+	// policies and empty otherwise.
+	AgentStandingReason string
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -524,7 +554,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// and their sessions carry the hub's transient broker RPCs.
 	"/api/v1/conduit": {
 		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "WebSocket session endpoint (agent, broker, user); issues no credentials or tokens",
 	},
 
 	// -------------------------------------------------------------------------
@@ -1533,27 +1565,38 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// -------------------------------------------------------------------------
 	"/api/v1/agent/gcp-token": {
 		Pattern: "/api/v1/agent/gcp-token", RouteID: "agent.gcpToken",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingHandler,
+		AgentStandingReason: "handler checks rate limit and maps GetAgent lookup faults to 403 before calling agentStandingForbidden",
 	},
 	"/api/v1/agent/gcp-identity-token": {
 		Pattern: "/api/v1/agent/gcp-identity-token", RouteID: "agent.gcpIdentityToken",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingHandler,
+		AgentStandingReason: "handler checks rate limit and maps GetAgent lookup faults to 403 before calling agentStandingForbidden",
 	},
 	"POST /api/v1/agent/identity-token": {
 		Pattern: "POST /api/v1/agent/identity-token", RouteID: "agent.identityToken",
 		Classification: RouteAgentToken,
+		AgentStanding:  AgentStandingGuard,
 	},
 	"POST /api/v1/agent/secrets": {
 		Pattern: "POST /api/v1/agent/secrets", RouteID: "agent.secretFetch",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingHandler,
+		AgentStandingReason: "handler enforces agentStandingFor(secret.use) in materialRuntimePrecheck with per-item chain delegation checks",
 	},
 	"/api/v1/agent/decisions": {
 		Pattern: "/api/v1/agent/decisions", RouteID: "agent.decisions",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "reads and records agent decisions; issues no credentials, tokens, or secrets",
 	},
 	"/api/v1/agent/decisions/": {
 		Pattern: "/api/v1/agent/decisions/", RouteID: "agent.decisionsByKey",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "reads and records agent decisions; issues no credentials, tokens, or secrets",
 	},
 
 	// -------------------------------------------------------------------------
@@ -1880,6 +1923,16 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			if identity == nil {
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
 				return
+			}
+			// Enforce delegation standing structurally unless the route
+			// explicitly declares handler-level standing enforcement or an
+			// exemption (ptone/scion#8104). Fail closed when unset.
+			if meta.AgentStanding != AgentStandingHandler && meta.AgentStanding != AgentStandingExempt {
+				if agentIdent, ok := identity.(AgentIdentity); ok {
+					if s.agentStandingForbidden(r.Context(), w, agentIdent.ID()) {
+						return
+					}
+				}
 			}
 			next(w, r)
 		case RouteWebhook:

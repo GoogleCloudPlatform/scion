@@ -344,3 +344,175 @@ func TestNewRefusesVisitorMethodNotServedByPattern(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateAgentStandingRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta RouteMetadata
+		want []string // substrings of the error; nil = valid
+	}{
+		{
+			name: "agent-token guard policy with empty reason",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-token", RouteID: "agent.testToken",
+				Classification: RouteAgentToken, AgentStanding: AgentStandingGuard,
+			},
+		},
+		{
+			name: "agent-token handler policy with reason",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-handler", RouteID: "agent.testHandler",
+				Classification: RouteAgentToken, AgentStanding: AgentStandingHandler,
+				AgentStandingReason: "handler enforces custom standing check",
+			},
+		},
+		{
+			name: "agent-token exempt policy with reason",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-exempt", RouteID: "agent.testExempt",
+				Classification: RouteAgentToken, AgentStanding: AgentStandingExempt,
+				AgentStandingReason: "issues no credentials",
+			},
+		},
+		{
+			name: "agent-token missing policy",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-missing", RouteID: "agent.testMissing",
+				Classification: RouteAgentToken,
+			},
+			want: []string{"agent standing", "missing AgentStanding policy"},
+		},
+		{
+			name: "agent-token unknown policy",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-unknown", RouteID: "agent.testUnknown",
+				Classification: RouteAgentToken, AgentStanding: "bogus",
+			},
+			want: []string{"agent standing", `unknown policy "bogus"`},
+		},
+		{
+			name: "agent-token guard rejects reason",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-guard-reason", RouteID: "agent.testGuardReason",
+				Classification: RouteAgentToken, AgentStanding: AgentStandingGuard,
+				AgentStandingReason: "unnecessary",
+			},
+			want: []string{"agent standing", `AgentStandingReason must be empty for policy "guard"`},
+		},
+		{
+			name: "agent-token handler requires reason",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-handler-noreason", RouteID: "agent.testHandlerNoReason",
+				Classification: RouteAgentToken, AgentStanding: AgentStandingHandler,
+			},
+			want: []string{"agent standing", `policy "handler" requires a non-empty AgentStandingReason`},
+		},
+		{
+			name: "agent-token exempt requires reason",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/agent/test-exempt-noreason", RouteID: "agent.testExemptNoReason",
+				Classification: RouteAgentToken, AgentStanding: AgentStandingExempt,
+			},
+			want: []string{"agent standing", `policy "exempt" requires a non-empty AgentStandingReason`},
+		},
+		{
+			name: "non-agent-token route rejects policy",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/test/policy", RouteID: "test.policy",
+				Classification: RoutePolicy, AgentStanding: AgentStandingGuard,
+			},
+			want: []string{"agent standing", `classification "policy" (want "agent-token")`},
+		},
+		{
+			name: "non-agent-token route rejects reason",
+			meta: RouteMetadata{
+				Pattern: "/api/v1/test/reason", RouteID: "test.reason",
+				Classification: RouteAuthenticated, AgentStandingReason: "stray",
+			},
+			want: []string{"agent standing", "AgentStandingReason set on non-agent-token route"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAgentStandingRoutes(map[string]RouteMetadata{tc.meta.Pattern: tc.meta})
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("err = nil, want an agent standing metadata error")
+			}
+			for _, w := range append(tc.want, tc.meta.Pattern) {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %v; want it to contain %q", err, w)
+				}
+			}
+		})
+	}
+}
+
+// TestRouteMetadataTableAgentStandingRoutesAreValid verifies that every
+// RouteAgentToken route in routeMetadataTable declares a valid standing policy.
+func TestRouteMetadataTableAgentStandingRoutesAreValid(t *testing.T) {
+	var agentTokenRoutes int
+	for _, meta := range routeMetadataTable {
+		if meta.Classification == RouteAgentToken {
+			agentTokenRoutes++
+		}
+	}
+	if agentTokenRoutes == 0 {
+		t.Fatal("no RouteAgentToken routes in routeMetadataTable")
+	}
+	if err := validateAgentStandingRoutes(routeMetadataTable); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNewRefusesInvalidAgentStandingRoute verifies that New refuses to start
+// when a RouteAgentToken route omits AgentStanding or a non-agent-token route
+// sets it.
+func TestNewRefusesInvalidAgentStandingRoute(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		mod     func(m *RouteMetadata)
+	}{
+		{
+			name:    "agent-token route omits AgentStanding",
+			pattern: "POST /api/v1/agent/identity-token",
+			mod:     func(m *RouteMetadata) { m.AgentStanding = "" },
+		},
+		{
+			name:    "agent-token exempt route omits reason",
+			pattern: "/api/v1/agent/decisions",
+			mod:     func(m *RouteMetadata) { m.AgentStandingReason = "" },
+		},
+		{
+			name:    "public route sets AgentStanding",
+			pattern: "/healthz",
+			mod:     func(m *RouteMetadata) { m.AgentStanding = AgentStandingGuard },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			table := maps.Clone(routeMetadataTable)
+			m, ok := table[tc.pattern]
+			if !ok {
+				t.Fatalf("no route %q in the table", tc.pattern)
+			}
+			tc.mod(&m)
+			table[tc.pattern] = m
+			prev := startupRouteMetadata
+			startupRouteMetadata = func() map[string]RouteMetadata { return table }
+			t.Cleanup(func() { startupRouteMetadata = prev })
+
+			srv, err := New(ServerConfig{}, nil)
+			if err == nil || srv != nil {
+				t.Fatalf("New = %v, %v; want a refusal", srv, err)
+			}
+			if !strings.Contains(err.Error(), "agent standing") || !strings.Contains(err.Error(), tc.pattern) {
+				t.Fatalf("err = %v; want it to name the agent standing route %q", err, tc.pattern)
+			}
+		})
+	}
+}
