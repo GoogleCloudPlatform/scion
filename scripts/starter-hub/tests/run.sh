@@ -1501,8 +1501,8 @@ test_full_installs_rebuild_wrapper_and_sudoers() {
         "creates root-owned /usr/local/libexec/scion"
     assert_contains "$ssh_cmd" 'sudo install -m 0755 -o root -g root /tmp/scion-install-rebuild.sh "$REBUILD_HELPER"' \
         "installs root-owned rebuild helper"
-    assert_contains "$ssh_cmd" "scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh" \
-        "sudoers grants only the rebuild helper"
+    assert_contains "$ssh_cmd" 'scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh ""' \
+        "sudoers grants only the rebuild helper with no arguments"
     assert_not_contains "$ssh_cmd" "NOPASSWD: /usr/bin/install -m 755 /home/scion/scion/scion.rebuild" \
         "sudoers no longer grants raw /usr/bin/install on user-controlled path"
     assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" $'\nUser=scion\n' \
@@ -1595,6 +1595,78 @@ test_install_rebuild_wrapper_validation() {
     assert_ne 0 "$rc" "unexpected CLI arguments are rejected"
     assert_contains "$out" "unexpected arguments" "argument error names the reason"
     assert_eq "new-binary" "$(cat "${dest}")" "destination unchanged after argument rejection"
+
+    # 8. Malicious shutil.py / tempfile.py in caller's cwd are never imported.
+    local evil_cwd="${work}/evil-cwd"
+    local pwned="${work}/pwned"
+    mkdir -p "${evil_cwd}"
+    cat > "${evil_cwd}/shutil.py" <<EOF
+with open("${pwned}", "w") as f:
+    f.write("shutil-hijacked\\n")
+raise RuntimeError("shutil.py from cwd was imported")
+EOF
+    cat > "${evil_cwd}/tempfile.py" <<EOF
+with open("${pwned}", "w") as f:
+    f.write("tempfile-hijacked\\n")
+raise RuntimeError("tempfile.py from cwd was imported")
+EOF
+    printf 'new-binary-cwd\n' > "${src}"
+    out="$(cd "${evil_cwd}" && SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" \
+        SCION_REBUILD_OWNER="${me}" bash "${helper}" 2>&1)"
+    rc=$?
+    assert_eq 0 "$rc" "install succeeds despite malicious python modules in cwd (${out})"
+    if [[ ! -e "${pwned}" ]]; then
+        pass
+    else
+        fail "cwd python module was imported ($(cat "${pwned}"))"
+    fi
+    assert_eq "new-binary-cwd" "$(cat "${dest}")" "destination updated cleanly from isolated python"
+}
+
+test_install_rebuild_wrapper_sudo_root_ignores_overrides() {
+    fresh_state
+    local helper="${STARTER_DIR}/scion-install-rebuild.sh"
+    local work="${STATE_DIR}/rebuild-sudo"
+    local src="${work}/scion.rebuild"
+    local dest="${work}/scion"
+    local stub_env="${work}/stub-env.sh"
+    local me
+    me="$(id -un)"
+    mkdir -p "${work}"
+    printf 'old-binary\n' > "${dest}"
+    printf 'override-binary\n' > "${src}"
+
+    # Stub /usr/bin/id (returns uid 0) and /usr/bin/python3 (records cwd and argv)
+    # to verify the sudo/root branch ignores SCION_REBUILD_* overrides, chdirs to /,
+    # and runs python3 in isolated mode (-I) with the hardcoded starter-hub paths.
+    cat > "${stub_env}" <<'EOF'
+/usr/bin/id() { echo 0; }
+/usr/bin/python3() {
+    printf 'cwd=%s\nargs=%s\n' "$(pwd)" "$*"
+    return 0
+}
+EOF
+    local out rc
+    out="$(cd "${work}" && BASH_ENV="${stub_env}" SUDO_USER="${me}" \
+        SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_eq 0 "$rc" "sudo/root stubbed run exits 0 (${out})"
+    assert_contains "$out" "cwd=/" "sudo/root branch chdirs to / before invoking python3"
+    assert_contains "$out" "args=-I - /home/scion/scion/scion.rebuild /usr/local/bin/scion scion" \
+        "sudo/root branch ignores env overrides and passes hardcoded defaults to python3 -I"
+
+    # Also verify with real /usr/bin/python3 (only /usr/bin/id stubbed): the
+    # overridden destination is never modified.
+    cat > "${stub_env}" <<'EOF'
+/usr/bin/id() { echo 0; }
+EOF
+    out="$(cd "${work}" && BASH_ENV="${stub_env}" SUDO_USER="${me}" \
+        SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "sudo/root branch does not install overridden source when default is absent"
+    assert_eq "old-binary" "$(cat "${dest}")" "overridden destination remains untouched under sudo/root"
 }
 
 mapfile -t TESTS < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
