@@ -416,6 +416,8 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 		Name:          "seam-user-comment",
 		Status:        store.TriggerStatusActive,
 		SourceKind:    store.TriggerSourceKindGitHub,
+		MatchTypes:    []string{"github.issue_comment.created"},
+		SubjectMode:   store.TriggerSubjectModeNew,
 		ActionType:    store.TriggerActionGitHubComment,
 		ActionPayload: `{"body":"Event ${event.id} at ${event.received_at}"}`,
 		InitiatorAttribution: store.InitiatorAttribution{
@@ -437,6 +439,8 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 		Name:          "seam-agent-comment",
 		Status:        store.TriggerStatusActive,
 		SourceKind:    store.TriggerSourceKindGitHub,
+		MatchTypes:    []string{"github.issue_comment.created"},
+		SubjectMode:   store.TriggerSubjectModeNew,
 		ActionType:    store.TriggerActionGitHubComment,
 		ActionPayload: `{"body":"From agent"}`,
 		InitiatorAttribution: store.InitiatorAttribution{
@@ -447,7 +451,9 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 			AuthorizationRevision:   1,
 		},
 		AuthorityCeiling: store.EffectCeiling{
-			Kind: store.EffectCeilingPrincipal,
+			Kind:          store.EffectCeilingBounded,
+			Version:       1,
+			PermissionIDs: []string{githubTriggerCommentPermission},
 		},
 	}
 	require.NoError(t, st.CreateTrigger(ctx, agentTrigger))
