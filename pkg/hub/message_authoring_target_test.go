@@ -569,6 +569,7 @@ func TestMessageAuthoringTargetRule_OutOfRangeCallerKindFailsClosed(t *testing.T
 	outOfRangeKinds := []messageAuthoringCaller{
 		messageAuthoringCaller(0),
 		messageAuthoringCaller(-1),
+		messageAuthoringCaller(2),
 		messageAuthoringCaller(99),
 	}
 
@@ -586,5 +587,13 @@ func TestMessageAuthoringTargetRule_OutOfRangeCallerKindFailsClosed(t *testing.T
 			assert.Equal(t, http.StatusNotFound, authErr.httpStatus, "callerKind=%d case=%s", kind, tc.name)
 			assert.Equal(t, "Agent", authErr.notFoundResource, "callerKind=%d case=%s", kind, tc.name)
 		}
+
+		// Also prove out-of-range kinds take the strict trigger payload branch
+		// (400 action.message required) rather than schedule mode.
+		_, err := f.srv.validateMessageAuthoringTarget(ctx, f.ownerAuth, f.projectID, kind, `{"agentId":"`+f.targetAgent.ID+`"}`, "", "")
+		var authErr *messageAuthoringError
+		require.ErrorAs(t, err, &authErr, "callerKind=%d must take strict trigger payload validation", kind)
+		assert.Equal(t, http.StatusBadRequest, authErr.httpStatus, "callerKind=%d", kind)
+		assert.Equal(t, "action.message is required for message actions", authErr.message, "callerKind=%d", kind)
 	}
 }

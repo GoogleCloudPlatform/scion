@@ -178,7 +178,7 @@ func (s *Server) validateMessageAuthoringTarget(
 
 	var isTrigger bool
 	switch callerKind {
-	case messageAuthoringCallerScheduleNew, messageAuthoringCallerScheduleExisting:
+	case messageAuthoringCallerSchedule:
 		isTrigger = false
 	default:
 		// Fail closed to the strictest trigger mode for messageAuthoringCallerTrigger
