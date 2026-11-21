@@ -1179,7 +1179,13 @@ func TestSessionGen_IssuedAfterRevoke_CLIFlowAndOAuthCallback_Accepted(t *testin
 			claims, err := f.srv.userTokenService.ValidateUserToken(tok)
 			require.NoError(t, err, name)
 			assert.Equal(t, gen, claims.SessionGeneration, "%s token carries the users row's generation", name)
-			assert.Equal(t, http.StatusOK, f.me(t, tok).Code, "%s token is accepted", name)
+			if name == "refresh" {
+				assert.Equal(t, http.StatusUnauthorized, f.me(t, tok).Code, "refresh token refused as bearer")
+				refreshRec := f.postRefresh(t, tok)
+				assert.Equal(t, http.StatusOK, refreshRec.Code, refreshRec.Body.String())
+			} else {
+				assert.Equal(t, http.StatusOK, f.me(t, tok).Code, "%s token is accepted", name)
+			}
 		}
 	})
 
@@ -1211,7 +1217,13 @@ func TestSessionGen_IssuedAfterRevoke_CLIFlowAndOAuthCallback_Accepted(t *testin
 			claims, err := f.srv.userTokenService.ValidateUserToken(tok)
 			require.NoError(t, err, key)
 			assert.Equal(t, gen, claims.SessionGeneration, "%s carries the users row's generation", key)
-			assert.Equal(t, http.StatusOK, f.me(t, tok).Code, "%s is accepted", key)
+			if key == sessKeyHubRefreshToken {
+				assert.Equal(t, http.StatusUnauthorized, f.me(t, tok).Code, "refresh token refused as bearer")
+				refreshRec := f.postRefresh(t, tok)
+				assert.Equal(t, http.StatusOK, refreshRec.Code, refreshRec.Body.String())
+			} else {
+				assert.Equal(t, http.StatusOK, f.me(t, tok).Code, "%s is accepted", key)
+			}
 		}
 	})
 }

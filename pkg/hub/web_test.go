@@ -1348,6 +1348,98 @@ func TestSessionToBearerMiddleware_SigningKeyRotation(t *testing.T) {
 		"session cookie should be cleared (MaxAge=-1) after signing key rotation")
 }
 
+func TestSessionToBearerMiddleware_RefreshTokenInAccessSlot(t *testing.T) {
+	// A refresh token placed in the session's access-token slot must not be
+	// forwarded as a Bearer credential: when a valid refresh token is present
+	// it triggers token refresh into an access token; without one it clears
+	// the session and returns 401.
+	const secret = "test-session-secret-refresh-in-access-slot-1234567890"
+
+	t.Run("refreshes_when_valid_refresh_token_present", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{SessionSecret: secret})
+		tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+		require.NoError(t, err)
+		ws.SetUserTokenService(tokenSvc)
+
+		_, refreshTok, _, err := tokenSvc.MintTokenPair("user-1", "u@example.com", "User One", "member", 0, ClientTypeWeb)
+		require.NoError(t, err)
+
+		var capturedAuthHeader string
+		ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capturedAuthHeader = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+		}), func(ctx context.Context) error { return nil })
+
+		reqSetup := httptest.NewRequest(http.MethodGet, "/", nil)
+		recSetup := httptest.NewRecorder()
+		sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+		require.NoError(t, err)
+		sess.Values[sessKeyUserID] = "user-1"
+		sess.Values[sessKeyUserEmail] = "u@example.com"
+		sess.Values[sessKeyHubAccessToken] = refreshTok
+		sess.Values[sessKeyHubRefreshToken] = refreshTok
+		require.NoError(t, sess.Save(reqSetup, recSetup))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+		for _, c := range recSetup.Result().Cookies() {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		ws.Handler().ServeHTTP(rec, req)
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.True(t, strings.HasPrefix(capturedAuthHeader, "Bearer "), "expected Bearer header, got %q", capturedAuthHeader)
+		forwardedTok := strings.TrimPrefix(capturedAuthHeader, "Bearer ")
+		assert.NotEqual(t, refreshTok, forwardedTok, "refresh token must not be forwarded as Bearer")
+		claims, err := tokenSvc.ValidateUserToken(forwardedTok)
+		require.NoError(t, err)
+		assert.Equal(t, TokenTypeAccess, claims.TokenType)
+	})
+
+	t.Run("clears_session_when_no_refresh_token", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{SessionSecret: secret})
+		tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+		require.NoError(t, err)
+		ws.SetUserTokenService(tokenSvc)
+
+		_, refreshTok, _, err := tokenSvc.MintTokenPair("user-1", "u@example.com", "User One", "member", 0, ClientTypeWeb)
+		require.NoError(t, err)
+
+		downstreamCalled := false
+		ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			downstreamCalled = true
+			w.WriteHeader(http.StatusOK)
+		}), func(ctx context.Context) error { return nil })
+
+		reqSetup := httptest.NewRequest(http.MethodGet, "/", nil)
+		recSetup := httptest.NewRecorder()
+		sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+		require.NoError(t, err)
+		sess.Values[sessKeyUserID] = "user-1"
+		sess.Values[sessKeyUserEmail] = "u@example.com"
+		sess.Values[sessKeyHubAccessToken] = refreshTok
+		require.NoError(t, sess.Save(reqSetup, recSetup))
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml")
+		for _, c := range recSetup.Result().Cookies() {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		ws.Handler().ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.False(t, downstreamCalled, "downstream handler must not be called with a refresh token")
+		var sessionCleared bool
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == webSessionName && c.MaxAge < 0 {
+				sessionCleared = true
+			}
+		}
+		assert.True(t, sessionCleared, "session cookie should be cleared")
+	})
+}
+
 func TestSessionToBearerMiddleware_ProxyRedirect(t *testing.T) {
 	// Browser request (Accept: text/html) to a proxy route without a session
 	// should be redirected to /auth/login instead of passing through to the
