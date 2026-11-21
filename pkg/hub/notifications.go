@@ -483,8 +483,9 @@ func (nd *NotificationDispatcher) storeAndDispatchMessage(ctx context.Context, s
 			nd.createInboxMessage(ctx, sub, notif, agent)
 			if nd.brokerProxy != nil {
 				// Federated corner (see persistsViaInbox): deliverToUser
-				// will refuse to persist, but plugins still get the card.
-				_ = nd.publishToBroker(ctx, sub, notif, agent)
+				// will refuse to persist, and createInboxMessage already
+				// wrote the message record; plugins still get the card.
+				_ = nd.publishToBroker(withUserRecordLogged(ctx), sub, notif, agent)
 			}
 		} else if !nd.dispatchToBroker(ctx, sub, notif, agent) {
 			// Nothing reached the broker's persisting subscriber; fall back
@@ -784,6 +785,39 @@ func (nd *NotificationDispatcher) publishToBroker(ctx context.Context, sub *stor
 func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, agent *store.Agent) {
 	msgType := notificationMessageType(notif.Status)
 	msgBody := notificationMessageBody(notif, agent)
+	projectID := notif.ProjectID
+	if projectID == "" {
+		projectID = agent.ProjectID
+	}
+
+	recordMsg := messages.StructuredMessage{
+		Sender:      "agent:" + agent.Slug,
+		SenderID:    agent.ID,
+		Recipient:   "user:" + sub.SubscriberID,
+		RecipientID: sub.SubscriberID,
+		Msg:         msgBody,
+		Type:        msgType,
+	}
+
+	// One message record per direct-to-inbox notification (ptone/scion#4650):
+	// the success path below writes it once persisted; an early return writes
+	// it here so the notification still appears once.
+	recorded := false
+	defer func() {
+		if recorded || nd.messageLog == nil {
+			return
+		}
+		attrs := []any{
+			"agent_id", agent.ID,
+			"agent_name", agent.Name,
+			"project_id", projectID,
+			"notification_id", notif.ID,
+			"source", "notification-inbox",
+			"persisted", false,
+		}
+		attrs = append(attrs, recordMsg.LogAttrs()...)
+		nd.messageLog.Info("user notification handed to inbox", attrs...)
+	}()
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
@@ -826,6 +860,7 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 				"notification_id", notif.ID, "subscriber_id", sub.SubscriberID, "error", convErr)
 		} else {
 			storeMsg.ConversationID = convResult.ConversationID
+			recordMsg.ConversationID = convResult.ConversationID
 		}
 	}
 
@@ -836,6 +871,19 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 	}
 
 	nd.events.PublishUserMessage(ctx, storeMsg, nil, nil)
+	if nd.messageLog != nil {
+		attrs := []any{
+			"agent_id", agent.ID,
+			"agent_name", agent.Name,
+			"project_id", projectID,
+			"notification_id", notif.ID,
+			"message_id", storeMsg.ID,
+			"source", "notification-inbox",
+		}
+		attrs = append(attrs, recordMsg.LogAttrs()...)
+		nd.messageLog.Info("user notification delivered to inbox", attrs...)
+		recorded = true
+	}
 	nd.log.Debug("Inbox message created for notification",
 		"notificationID", notif.ID, "messageID", storeMsg.ID, "subscriberID", sub.SubscriberID)
 }

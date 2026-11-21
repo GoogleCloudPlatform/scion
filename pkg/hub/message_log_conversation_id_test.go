@@ -277,15 +277,17 @@ func TestDedicatedLog_UserMessageDeliveredViaBroker_HasConversationID(t *testing
 // ---------------------------------------------------------------------------
 // pkg/messages LogAttrs() sanity check at the hub integration layer: a
 // caller-asserted conversation_id must survive into the "message received
-// for delivery" dedicated log line emitted by handleAgentMessage, which logs
-// via structuredMsg.LogAttrs() before Phase 5 derivation runs. Renamed from
-// "message dispatched" (A25.6 O6, report-7-gteam-2a): this line fires before
-// the migration-gate decision, so it must not claim a dispatch outcome.
+// for delivery" dedicated log line emitted by handleAgentMessage once
+// validation passes (ptone/scion#4650). Renamed from "message dispatched"
+// (A25.6 O6, report-7-gteam-2a): this line fires before the migration-gate
+// decision, so it must not claim a dispatch outcome.
 // ---------------------------------------------------------------------------
 
 func TestDedicatedLog_MessageDispatched_CallerAssertedConversationID(t *testing.T) {
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
+	ensureHubMembership(ctx, s, user.ID)
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, user.ID))
 
 	threadRef := "thread:" + project.ID + ":test-thread-msgdispatch"
 	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
@@ -320,9 +322,9 @@ func TestDedicatedLog_MessageDispatched_CallerAssertedConversationID(t *testing.
 
 	rr := httptest.NewRecorder()
 	srv.handleAgentMessage(rr, req, agent.ID)
-	// No dispatcher is wired in this fixture, so delivery fails downstream —
-	// the audit log line under test is emitted before that point.
-	_ = rr
+	// No dispatcher is wired in this fixture, so delivery fails downstream
+	// with 503 after validation and the audit log line under test have run.
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code, "body: %s", rr.Body.String())
 
 	assertLogHasConversationID(t, buf, "message received for delivery", conv.ID)
 }

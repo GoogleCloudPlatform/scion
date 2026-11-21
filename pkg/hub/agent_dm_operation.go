@@ -179,9 +179,15 @@ type AgentDMInput struct {
 	AttachmentAddressee string
 
 	// RecordLogged reports that the adapter already wrote this message's
-	// record to the message log (handleAgentMessage does so before it
-	// reaches here). When set, the operation does not write another.
+	// record to the message log (or writes it via OnAdmitted). When set, the
+	// operation does not write another at step 8c.
 	RecordLogged bool
+
+	// OnAdmitted, when set, runs once Phase 1 and Phase 1b admission and
+	// phase checks have passed and right before Phase 2 side effects, so an
+	// HTTP adapter can log its acceptance record ("message received for
+	// delivery") only after validation succeeds (ptone/scion#4650).
+	OnAdmitted func()
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -508,6 +514,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	}
 
 	// ── Phase 2: Side effects ───────────────────────────────────────────
+	if input.OnAdmitted != nil {
+		input.OnAdmitted()
+	}
 
 	// Re-check shutdown after Phase 1b (which may have waited on a wake):
 	// refuse with retryable 503 before ingesting attachments or persisting a
