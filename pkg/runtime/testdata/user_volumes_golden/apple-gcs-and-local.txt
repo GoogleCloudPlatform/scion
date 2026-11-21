@@ -24,4 +24,4 @@ SCION_START_CMD=tmux new-session -d -s scion -n agent sh -c ''\''hello'\''; scio
 scion-agent:latest
 sh
 -c
-mkdir -p "/gcs-a" && gcsfuse --implicit-dirs "bucket-a" "/gcs-a" && mkdir -p "/home/scion/gcs-b" && gcsfuse --only-dir "pre/fix" -o "ro" --implicit-dirs "bucket-b" "/home/scion/gcs-b" && exec sh -c "$SCION_START_CMD"
+mkdir -p '/gcs-a' && gcsfuse --implicit-dirs 'bucket-a' '/gcs-a' && mkdir -p '/home/scion/gcs-b' && gcsfuse --only-dir 'pre/fix' -o 'ro' --implicit-dirs 'bucket-b' '/home/scion/gcs-b' && exec sh -c "$SCION_START_CMD"
