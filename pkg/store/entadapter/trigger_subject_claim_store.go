@@ -302,36 +302,48 @@ func (s *TriggerStore) ReleaseTriggerSubjectClaimsForAgent(ctx context.Context, 
 // newly inserted agent row invisible to the older snapshot.
 const terminalClaimReleaseGrace = time.Minute
 
-// ReleaseTerminalTriggerSubjectClaims releases every active bound claim (bound
-// at least terminalClaimReleaseGrace ago) whose agent is missing, soft-deleted
-// (deleted_at IS NOT NULL), or in a terminal phase (stopped, error, halted).
-// Active unbound claims (agent_id IS NULL) are left untouched so in-flight
-// creates are not disturbed.
+// ReleaseTerminalTriggerSubjectClaims releases:
+//  1. Every active bound claim (bound at least terminalClaimReleaseGrace ago)
+//     whose agent is missing, soft-deleted (deleted_at IS NOT NULL), or in a
+//     terminal phase (stopped, error, halted).
+//  2. Every active abandoned unbound claim (agent_id IS NULL AND
+//     claimed_at < now - TriggerSubjectAbandonedClaimTTL), so subsequent
+//     maintenance purge passes can delete it. Fresh unbound claims younger than
+//     the TTL are left untouched so in-flight creates are not disturbed.
 func (s *TriggerStore) ReleaseTerminalTriggerSubjectClaims(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC().Truncate(time.Microsecond)
 	boundBefore := now.Add(-terminalClaimReleaseGrace)
+	abandonedBefore := now.Add(-store.TriggerSubjectAbandonedClaimTTL)
 	affected, err := s.client.TriggerSubjectClaim.Update().
 		Where(
 			triggersubjectclaim.StateEQ(store.TriggerSubjectClaimStateActive),
-			triggersubjectclaim.AgentIDNotNil(),
-			triggersubjectclaim.BoundAtLT(boundBefore),
-			predicate.TriggerSubjectClaim(func(sel *entsql.Selector) {
-				d := sel.Dialect()
-				ag := entsql.Dialect(d).Table(agent.Table).As("ag")
-				liveSub := entsql.Dialect(d).Select(ag.C(agent.FieldID)).
-					From(ag).
-					Where(entsql.And(
-						entsql.ColumnsEQ(ag.C(agent.FieldID), sel.C(triggersubjectclaim.FieldAgentID)),
-						entsql.IsNull(ag.C(agent.FieldDeletedAt)),
-						entsql.NotIn(
-							ag.C(agent.FieldPhase),
-							string(state.PhaseStopped),
-							string(state.PhaseError),
-							string(state.PhaseHalted),
-						),
-					))
-				sel.Where(entsql.Not(entsql.Exists(liveSub)))
-			}),
+			triggersubjectclaim.Or(
+				triggersubjectclaim.And(
+					triggersubjectclaim.AgentIDIsNil(),
+					triggersubjectclaim.ClaimedAtLT(abandonedBefore),
+				),
+				triggersubjectclaim.And(
+					triggersubjectclaim.AgentIDNotNil(),
+					triggersubjectclaim.BoundAtLT(boundBefore),
+					predicate.TriggerSubjectClaim(func(sel *entsql.Selector) {
+						d := sel.Dialect()
+						ag := entsql.Dialect(d).Table(agent.Table).As("ag")
+						liveSub := entsql.Dialect(d).Select(ag.C(agent.FieldID)).
+							From(ag).
+							Where(entsql.And(
+								entsql.ColumnsEQ(ag.C(agent.FieldID), sel.C(triggersubjectclaim.FieldAgentID)),
+								entsql.IsNull(ag.C(agent.FieldDeletedAt)),
+								entsql.NotIn(
+									ag.C(agent.FieldPhase),
+									string(state.PhaseStopped),
+									string(state.PhaseError),
+									string(state.PhaseHalted),
+								),
+							))
+						sel.Where(entsql.Not(entsql.Exists(liveSub)))
+					}),
+				),
+			),
 		).
 		SetState(store.TriggerSubjectClaimStateReleased).
 		SetReleasedAt(now).

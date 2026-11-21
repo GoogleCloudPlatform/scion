@@ -87,6 +87,11 @@ const (
 // MaxTriggerSubjectBytes is the maximum byte length of a trigger subject claim key (§5.6).
 const MaxTriggerSubjectBytes = 256
 
+// TriggerSubjectAbandonedClaimTTL is the age after which an unbound active
+// claim (agent_id IS NULL) is considered abandoned and eligible for takeover
+// or maintenance release (Stage 2 §5.6, §18 S16).
+const TriggerSubjectAbandonedClaimTTL = 5 * time.Minute
+
 // WebhookEndpointSecretKeyPrefix returns the hub-scoped internal secret key
 // prefix for an endpoint's versioned HMAC secrets (§4.1, R1).
 func WebhookEndpointSecretKeyPrefix(projectID, endpointID string) string {

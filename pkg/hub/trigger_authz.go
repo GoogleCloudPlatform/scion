@@ -425,7 +425,6 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	projectID string,
 	sourceKind string,
 	ep *store.WebhookEndpoint,
-	_ string,
 	spec *TriggerActionSpec,
 	ceiling store.EffectCeiling,
 	prov store.AuthorityProvenance,

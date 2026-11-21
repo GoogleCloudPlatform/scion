@@ -26,8 +26,8 @@ import (
 
 // AbandonedClaimTTL is the age after which an unbound active claim
 // (agent_id IS NULL) is considered abandoned and eligible for takeover
-// (Stage 2 §5.6, §18 S16).
-const AbandonedClaimTTL = 5 * time.Minute
+// or maintenance release (Stage 2 §5.6, §18 S16).
+const AbandonedClaimTTL = store.TriggerSubjectAbandonedClaimTTL
 
 // ErrClaimNotHeld is returned by Bind when the claim row is no longer held by
 // the caller's fire (for example, it was already released or taken over after

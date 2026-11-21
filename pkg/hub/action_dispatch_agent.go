@@ -951,6 +951,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		claims := trigger.NewSubjectClaims(a.srv.store, a.srv.store, time.Now)
 		claimSubject := fireSubject
 		if claimSubject == "" {
+			// Unreachable from the dispatcher (which sets FireSubject from deriveFireSubject); kept for non-dispatcher callers.
 			claimSubject = ev.Subject
 		}
 		claim, existing, cErr := claims.Claim(ctx, triggerID, claimSubject, ev.ID, req.Authority.FireID)
