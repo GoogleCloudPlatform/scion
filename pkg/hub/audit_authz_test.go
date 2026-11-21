@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -601,6 +602,163 @@ func TestRetentionCleanup(t *testing.T) {
 		t.Errorf("expected 1 mutation audit remaining after cleanup, got %d", total)
 	}
 	_ = mutationRecords
+}
+
+func TestAuditRecordCleanup_RegisteredSingleton(t *testing.T) {
+	srv, _ := testServer(t)
+	srv.scheduler = NewScheduler(srv.store, logging.Subsystem("hub.scheduler"))
+	srv.registerSchedulerHandlers()
+
+	var handler *RecurringHandler
+	for i := range srv.scheduler.recurring {
+		if srv.scheduler.recurring[i].Name == "audit-record-cleanup" {
+			handler = &srv.scheduler.recurring[i]
+			break
+		}
+	}
+	require.NotNil(t, handler, "audit-record-cleanup must be registered in registerSchedulerHandlers")
+	assert.Equal(t, 60, handler.Interval)
+	assert.True(t, handler.Singleton, "audit-record-cleanup must be registered via RegisterRecurringSingleton")
+}
+
+func TestAuditRecordCleanup_PeriodicHandlerRetention(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+
+	t.Run("default retention 90 days removes older and keeps newer", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+		actor := tid("default-retention-user")
+
+		require.NoError(t, s.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType:       "policy_create",
+			ActorPrincipalKind: "user",
+			ActorPrincipalID:   actor,
+			TargetType:         "policy",
+			TargetID:           tid("old-91d"),
+			Timestamp:          time.Now().UTC().AddDate(0, 0, -91),
+		}))
+		require.NoError(t, s.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType:       "policy_create",
+			ActorPrincipalKind: "user",
+			ActorPrincipalID:   actor,
+			TargetType:         "policy",
+			TargetID:           tid("recent-89d"),
+			Timestamp:          time.Now().UTC().AddDate(0, 0, -89),
+		}))
+
+		srv.auditRecordCleanupHandler()(ctx)
+
+		records, total, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			ActorPrincipalID: actor,
+			Limit:            10,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, total)
+		assert.Equal(t, tid("recent-89d"), records[0].TargetID)
+	})
+
+	t.Run("custom retention window 30 days", func(t *testing.T) {
+		_, s := testServer(t)
+		srv, err := newTestHubServer(t, ServerConfig{AuditRetentionDays: intPtr(30)}, s)
+		require.NoError(t, err)
+		ctx := context.Background()
+		actor := tid("custom-retention-user")
+
+		require.NoError(t, s.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType:       "policy_create",
+			ActorPrincipalKind: "user",
+			ActorPrincipalID:   actor,
+			TargetType:         "policy",
+			TargetID:           tid("old-31d"),
+			Timestamp:          time.Now().UTC().AddDate(0, 0, -31),
+		}))
+		require.NoError(t, s.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType:       "policy_create",
+			ActorPrincipalKind: "user",
+			ActorPrincipalID:   actor,
+			TargetType:         "policy",
+			TargetID:           tid("recent-29d"),
+			Timestamp:          time.Now().UTC().AddDate(0, 0, -29),
+		}))
+
+		srv.auditRecordCleanupHandler()(ctx)
+
+		records, total, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			ActorPrincipalID: actor,
+			Limit:            10,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, total)
+		assert.Equal(t, tid("recent-29d"), records[0].TargetID)
+	})
+
+	t.Run("zero disables cleanup and retains all records", func(t *testing.T) {
+		_, s := testServer(t)
+		srv, err := newTestHubServer(t, ServerConfig{AuditRetentionDays: intPtr(0)}, s)
+		require.NoError(t, err)
+		ctx := context.Background()
+		actor := tid("disabled-retention-user")
+
+		require.NoError(t, s.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+			MutationType:       "policy_create",
+			ActorPrincipalKind: "user",
+			ActorPrincipalID:   actor,
+			TargetType:         "policy",
+			TargetID:           tid("very-old-400d"),
+			Timestamp:          time.Now().UTC().AddDate(0, 0, -400),
+		}))
+
+		srv.auditRecordCleanupHandler()(ctx)
+
+		_, total, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+			ActorPrincipalID: actor,
+			Limit:            10,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, total, "zero retention should disable cleanup and keep old records")
+	})
+}
+
+func TestNew_RejectsNegativeAuditRetentionDays(t *testing.T) {
+	_, s := testServer(t)
+	neg := -1
+	_, err := newTestHubServer(t, ServerConfig{AuditRetentionDays: &neg}, s)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audit_retention_days")
+}
+
+func TestCleanupAuditRecords_ZeroAndNegative(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	actor := tid("guard-retention-user")
+
+	require.NoError(t, s.CreateMutationAudit(ctx, &store.MutationAuditRecord{
+		MutationType:       "policy_create",
+		ActorPrincipalKind: "user",
+		ActorPrincipalID:   actor,
+		TargetType:         "policy",
+		TargetID:           tid("old-200d"),
+		Timestamp:          time.Now().UTC().AddDate(0, 0, -200),
+	}))
+
+	// 0 disables cleanup (no-op).
+	require.NoError(t, srv.CleanupAuditRecords(ctx, 0))
+	_, total, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		ActorPrincipalID: actor,
+		Limit:            10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+
+	// Negative returns error and deletes nothing.
+	err = srv.CleanupAuditRecords(ctx, -5)
+	require.Error(t, err)
+	_, total, err = s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		ActorPrincipalID: actor,
+		Limit:            10,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
 }
 
 // =============================================================================

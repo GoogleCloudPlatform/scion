@@ -167,6 +167,10 @@ server:
     #                                   # holds and stops none. Off by default
     #                                   # (enforce). For the first boot after an
     #                                   # upgrade.
+    # audit_retention_days: 90          # Layer 0 (restart required). Days to retain
+    #                                   # mutation audit records in the Hub DB
+    #                                   # before periodic cleanup. Default 90;
+    #                                   # set to 0 to retain indefinitely.
 
   # -------------------------------------------------------------------------
   # Layer 0 — Broker (restart required)

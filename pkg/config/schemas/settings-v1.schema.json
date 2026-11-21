@@ -1632,6 +1632,14 @@
           "x-env-var": "SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS",
           "x-since": "1"
         },
+        "audit_retention_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 90,
+          "description": "Number of days to retain mutation audit records in the Hub database (default 90). Set to 0 to disable automatic cleanup and retain records indefinitely. Negative values are rejected at startup. A periodic hourly maintenance job deletes records older than this window. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_AUDITRETENTIONDAYS",
+          "x-since": "1"
+        },
         "missing_agent_grace": {
           "type": "string",
           "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",

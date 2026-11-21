@@ -643,9 +643,11 @@ type ServerConfig struct {
 	// Read through Server.nativeChatEnabled(), never directly.
 	NativeChatEnabled *bool
 
-	// AuditRetentionDays is the number of days to retain authorization audit records.
-	// Default: 90. Used by CleanupAuditRecords for periodic retention cleanup.
-	AuditRetentionDays int
+	// AuditRetentionDays is the number of days to retain mutation audit records.
+	// Nil means unset (uses DefaultAuditRetentionDays = 90). Explicit 0 disables
+	// automatic cleanup (retain indefinitely). Negative values are rejected by New.
+	// Used by CleanupAuditRecords via the periodic audit-record-cleanup handler.
+	AuditRetentionDays *int
 
 	// Experiments is the compiled experiments registry used to resolve
 	// hub-wide feature flags (pkg/experiments). Production leaves this nil;
@@ -779,6 +781,9 @@ const (
 	// MinIdleSuspendAfter is the minimum allowed idle_suspend_after duration.
 	// Lower values fall back to DefaultIdleSuspendAfter with a warning.
 	MinIdleSuspendAfter = 5 * time.Minute
+	// DefaultAuditRetentionDays is the default number of days to retain
+	// mutation audit records when server.hub.audit_retention_days is unset.
+	DefaultAuditRetentionDays = 90
 )
 
 // idleSuspendSettings returns the current AutoSuspendIdle flag and
@@ -3210,6 +3215,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		return nil, err
 	}
 	cfg.ProxyDriverPrincipals = drivers
+	if cfg.AuditRetentionDays != nil {
+		if *cfg.AuditRetentionDays < 0 {
+			return nil, fmt.Errorf("invalid server.hub.audit_retention_days %d: must be >= 0 (0 disables cleanup)", *cfg.AuditRetentionDays)
+		}
+		v := *cfg.AuditRetentionDays
+		cfg.AuditRetentionDays = &v
+	}
 	// Apply defaults for zero-value fields that have meaningful defaults.
 	defaults := DefaultServerConfig()
 	if cfg.StalledThreshold == 0 || cfg.StalledThreshold < 2*time.Minute {
@@ -7245,6 +7257,9 @@ func (s *Server) registerSchedulerHandlers() {
 	// Hourly: an expired token is already refused at join, so this only
 	// keeps the table from collecting rows.
 	s.scheduler.RegisterRecurringSingleton("broker-join-token-cleanup", 60, store.LockBrokerJoinTokenCleanup, s.brokerJoinTokenCleanupHandler())
+	// Hourly: delete mutation audit records older than server.hub.audit_retention_days
+	// (default 90; 0 disables cleanup).
+	s.scheduler.RegisterRecurringSingleton("audit-record-cleanup", 60, store.LockAuditRecordCleanup, s.auditRecordCleanupHandler())
 	// Hourly: an expired or revoked delegated credential is already
 	// refused at use; this deletes its row once the retention period after
 	// its expiry has passed (.design/agent-delegation.md §18.1). Not gated

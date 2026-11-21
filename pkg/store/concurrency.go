@@ -312,6 +312,11 @@ const (
 	// the shared project storage and records kind=nfs_tree runtime_orphans.
 	LockNFSOrphanScan AdvisoryLockKey = 0x5C100031
 
+	// LockAuditRecordCleanup guards the hourly periodic cleanup of mutation
+	// audit records older than server.hub.audit_retention_days
+	// ("audit-record-cleanup", ptone/scion#2232).
+	LockAuditRecordCleanup AdvisoryLockKey = 0x5C100032
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid
