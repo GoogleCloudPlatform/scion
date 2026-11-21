@@ -10,13 +10,11 @@ You must explicitly signal your state to the orchestration system using `scionto
 
 ## Waiting for Input
 
-Before asking a user or coordinator a question, signal that you are waiting:
+Ask your question (for example with `scion message`), then run `sciontool status ask_user "<question>"` as the last action of your turn:
 
 ```bash
 sciontool status ask_user "<question>"
 ```
-
-Then proceed to ask the question.
 
 Do not use any built in "ask_user" type tool as this can present interactive tooling that can interfere with orchestration.
 

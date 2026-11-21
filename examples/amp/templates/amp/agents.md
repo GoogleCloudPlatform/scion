@@ -5,7 +5,7 @@
 You are running inside a scion-managed container. Use `sciontool` to report
 your status:
 
-- `sciontool status ask_user "<question>"` — before asking the user a question
+- `sciontool status ask_user "<question>"` — after asking the user a question, as the last action of your turn
 - `sciontool status blocked "<reason>"` — when waiting on external input
 - `sciontool status task_completed "<summary>"` — when your task is finished
 
