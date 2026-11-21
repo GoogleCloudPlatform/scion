@@ -171,7 +171,7 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Allow static assets and branding assets (required for login and maintenance pages).
-		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/shoelace/") || strings.HasPrefix(path, "/brand/") || isAppIconPath(path) {
+		if isStaticAssetPath(path) || strings.HasPrefix(path, "/brand/") || isAppIconPath(path) {
 			next.ServeHTTP(w, r)
 			return
 		}

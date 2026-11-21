@@ -73,13 +73,7 @@ var entryPathReadFuncs = map[string]map[string]int{
 // reason. None reads collected content: every reader of collected content
 // goes through the collectedDir. An entry that no longer matches a reported
 // site is stale and fails the guard.
-var entryPathJoinExceptions = map[string]string{
-	// The request's URL path (r.URL.Path, copied to name) joined under the
-	// web assets directory: static web assets served by path, not collected
-	// resource content. The path is cleaned and dot segments are refused
-	// before the join.
-	"web.go:tryServeStaticFile": "serves static web assets by request path, not collected content",
-}
+var entryPathJoinExceptions = map[string]string{}
 
 // importAliases maps the names a file uses for its imports to their paths.
 func importAliases(f *ast.File) map[string]string {

@@ -172,14 +172,26 @@ func TestStaticAsset_PrecompressedBrotli(t *testing.T) {
 
 	t.Run("encoded dot segments stay inside the root", func(t *testing.T) {
 		for _, target := range []string{"/assets/%2e%2e/.vite/manifest.json", "/assets/..%2f.vite%2fmanifest.json", "/shoelace/%2e%2e/%2e%2e/.vite/manifest.json"} {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			u, err := url.Parse(target)
-			require.NoError(t, err)
-			req.URL = u
-			req.RequestURI = target
+			newReq := func() *http.Request {
+				req := httptest.NewRequest(http.MethodGet, "/", nil)
+				u, err := url.Parse(target)
+				require.NoError(t, err)
+				req.URL = u
+				req.RequestURI = target
+				return req
+			}
+
+			// Serve layer refuses encoded traversal paths with 404.
 			rec := httptest.NewRecorder()
-			ws.Handler().ServeHTTP(rec, req)
+			ws.mux.ServeHTTP(rec, newReq())
 			assert.Equal(t, http.StatusNotFound, rec.Code, target)
+			assert.NotContains(t, rec.Body.String(), "outside-marker", target)
+			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+
+			// Unauthenticated requests do not bypass session auth.
+			rec = httptest.NewRecorder()
+			ws.Handler().ServeHTTP(rec, newReq())
+			assert.Equal(t, http.StatusUnauthorized, rec.Code, target)
 			assert.NotContains(t, rec.Body.String(), "outside-marker", target)
 			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 		}
@@ -189,7 +201,7 @@ func TestStaticAsset_PrecompressedBrotli(t *testing.T) {
 		// The mux cleans only the escaped path: an encoded slash or dot
 		// leaves dot segments in the decoded path. Cleaning them would
 		// reach the stored sibling (main.js.br) or another file, so the
-		// request is a 404.
+		// serve layer returns 404 and unauthenticated requests get 401.
 		for _, target := range []string{
 			"/assets/main.js.br%2f.",
 			"/assets/main.js.br%2F%2e",
@@ -198,14 +210,23 @@ func TestStaticAsset_PrecompressedBrotli(t *testing.T) {
 			"/assets/main.js%2f.",
 			"/assets/%2e/main.js",
 		} {
-			req := httptest.NewRequest(http.MethodGet, target, nil)
-			req.Header.Set("Accept-Encoding", "br, gzip")
-			rec := httptest.NewRecorder()
-			ws.Handler().ServeHTTP(rec, req)
-			assert.Equal(t, http.StatusNotFound, rec.Code, target)
-			assert.NotEqual(t, validatorMainBr, rec.Body.Bytes(), target)
-			assert.NotContains(t, rec.Body.String(), "console.log", target)
-			assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+			for _, tc := range []struct {
+				name   string
+				h      http.Handler
+				status int
+			}{
+				{"mux", ws.mux, http.StatusNotFound},
+				{"unauth", ws.Handler(), http.StatusUnauthorized},
+			} {
+				req := httptest.NewRequest(http.MethodGet, target, nil)
+				req.Header.Set("Accept-Encoding", "br, gzip")
+				rec := httptest.NewRecorder()
+				tc.h.ServeHTTP(rec, req)
+				assert.Equal(t, tc.status, rec.Code, "%s %s", tc.name, target)
+				assert.NotEqual(t, validatorMainBr, rec.Body.Bytes(), "%s %s", tc.name, target)
+				assert.NotContains(t, rec.Body.String(), "console.log", "%s %s", tc.name, target)
+				assert.Empty(t, rec.Header().Get("Content-Encoding"), "%s %s", tc.name, target)
+			}
 		}
 	})
 }
@@ -403,7 +424,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		{"/favicon.svg.gz", gzFav, true},
 	}
 	// check asserts that a response never carries the stored variant.
-	check := func(t *testing.T, target string, rec *httptest.ResponseRecorder, stored []byte, root bool) {
+	check := func(t *testing.T, target string, rec *httptest.ResponseRecorder, stored []byte, root, unauth bool) {
 		t.Helper()
 		body := rec.Body.Bytes()
 		assert.NotEqual(t, stored, body, target)
@@ -411,6 +432,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 		switch {
 		case !root && rec.Code == http.StatusNotFound:
+		case !root && unauth && rec.Code == http.StatusUnauthorized:
 		case rec.Code == http.StatusOK && root:
 			// The SPA shell. Under /assets/ a dot-dot form lands on the
 			// directory, which is a 404 (no listings).
@@ -426,33 +448,39 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			ws, wsAuth := servers[0], servers[1]
 			signedIn := devSignedIn(t, wsAuth)
-			srv := func(root bool) http.Handler {
-				if root {
-					return signedIn
-				}
-				return ws.Handler()
-			}
 			for _, tc := range cases {
-				for _, suffix := range []string{"", "/", "%2F", "%2f", "/.", "%2f.", "/..", "%2f..", "%2F%2E", "%2f%2e%2e"} {
-					target := tc.base + suffix
-					req := httptest.NewRequest(http.MethodGet, target, nil)
-					req.Header.Set("Accept-Encoding", "br, gzip")
-					rec := httptest.NewRecorder()
-					srv(tc.root).ServeHTTP(rec, req)
-					if isRedirect(rec.Code) {
-						// The mux cleans a literal dot segment with a
-						// redirect; follow it once and check where it lands.
-						assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
-						loc := rec.Header().Get("Location")
-						require.NotEmpty(t, loc, "%s: redirect without Location", target)
-						assert.False(t, bytes.Contains(rec.Body.Bytes(), tc.stored), "%s: redirect body holds the stored variant", target)
-						req = httptest.NewRequest(http.MethodGet, loc, nil)
+				handlers := []struct {
+					h      http.Handler
+					unauth bool
+				}{{signedIn, false}}
+				if !tc.root {
+					handlers = append(handlers, struct {
+						h      http.Handler
+						unauth bool
+					}{ws.Handler(), true})
+				}
+				for _, entry := range handlers {
+					for _, suffix := range []string{"", "/", "%2F", "%2f", "/.", "%2f.", "/..", "%2f..", "%2F%2E", "%2f%2e%2e"} {
+						target := tc.base + suffix
+						req := httptest.NewRequest(http.MethodGet, target, nil)
 						req.Header.Set("Accept-Encoding", "br, gzip")
-						rec = httptest.NewRecorder()
-						srv(tc.root).ServeHTTP(rec, req)
-						target += " -> " + loc
+						rec := httptest.NewRecorder()
+						entry.h.ServeHTTP(rec, req)
+						if isRedirect(rec.Code) {
+							// The mux cleans a literal dot segment with a
+							// redirect; follow it once and check where it lands.
+							assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
+							loc := rec.Header().Get("Location")
+							require.NotEmpty(t, loc, "%s: redirect without Location", target)
+							assert.False(t, bytes.Contains(rec.Body.Bytes(), tc.stored), "%s: redirect body holds the stored variant", target)
+							req = httptest.NewRequest(http.MethodGet, loc, nil)
+							req.Header.Set("Accept-Encoding", "br, gzip")
+							rec = httptest.NewRecorder()
+							entry.h.ServeHTTP(rec, req)
+							target += " -> " + loc
+						}
+						check(t, target, rec, tc.stored, tc.root, entry.unauth)
 					}
-					check(t, target, rec, tc.stored, tc.root)
 				}
 			}
 		})
