@@ -24,14 +24,21 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// Cloud Run CPU and memory limits, from the platform's vCPU and memory
-// table (https://cloud.google.com/run/docs/configuring/services/cpu and
-// .../memory-limits). Fractional vCPU below 1 is not offered: it requires
-// request-based billing and a concurrency of 1, and an instance serves no
-// requests.
+// Cloud Run Instances CPU and memory limits and defaults, from the Cloud Run
+// Instances documentation
+// (https://cloud.google.com/run/docs/configuring/instances/cpu and
+// https://cloud.google.com/run/docs/configuring/instances/memory-limits).
+// Cloud Run Instances default to 2 vCPU and 2 GiB (2048 MiB) when unset
+// (unlike Cloud Run Services, which default to 1 vCPU / 512 MiB). Fractional
+// vCPU below 1 is not offered: it requires request-based billing and a
+// concurrency of 1, and an instance serves no requests.
+//
+// cloudRunDefaultCPU and cloudRunDefaultMemoryMiB are the single shared
+// source of truth for unset Cloud Run Instances CPU/memory defaults in this
+// package (validation and resource logging).
 const (
-	cloudRunDefaultCPU       = 1         // vCPU an instance gets when none is set
-	cloudRunDefaultMemoryMiB = 512       // memory an instance gets when none is set
+	cloudRunDefaultCPU       = 2         // vCPU an instance gets when none is set
+	cloudRunDefaultMemoryMiB = 2 * 1024  // memory an instance gets when none is set (2Gi)
 	cloudRunMinMemoryMiB     = 512       // second generation execution environment
 	cloudRunMaxMemoryMiB     = 32 * 1024 // 32Gi
 
