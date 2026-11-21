@@ -117,10 +117,9 @@ func flatCloudRunServiceAccountUnsetRefusal(agentName, instanceKey string) *star
 // flatCloudRunNotAttachableRefusal refuses an assign dispatch whose service
 // account is not listed in the flat Cloud Run instance's
 // runtime_target.assignable_service_accounts allow-list. Status is 400 with
-// default validation_error code (matching legacy Cloud Run so Hub
+// the default validation_error code, matching legacy Cloud Run so Hub
 // relayBrokerRefusal forwards the setting path verbatim without Kubernetes
-// mapping prose; unification onto identity_not_mapped is tracked for I5,
-// ptone/scion#8187). The message never carries the service account email or
+// mapping prose. The message never carries the service account email or
 // project.
 func flatCloudRunNotAttachableRefusal(agentName, instanceKey string) *startContextError {
 	if instanceKey == "" {
