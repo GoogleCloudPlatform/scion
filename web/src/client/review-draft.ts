@@ -499,7 +499,7 @@ export class ReviewDraftController {
     try {
       const res = await this.putFn(this.artifactId, req, {
         keepalive,
-        signal: ac.signal,
+        ...(keepalive ? {} : { signal: ac.signal }),
       });
       if (this.disposed) return false;
       this.rev = res.rev;

@@ -1062,7 +1062,7 @@ export async function putReviewDraft(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
     keepalive: opts.keepalive === true,
-    ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(opts.signal && !opts.keepalive ? { signal: opts.signal } : {}),
   });
   if (!res.ok) await throwDraftError(res);
   return (await res.json()) as PutReviewDraftResponse;
@@ -1119,7 +1119,7 @@ export function downloadTextFile(filename: string, text: string): void {
     a.click();
   } finally {
     a.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 100);
   }
 }
 

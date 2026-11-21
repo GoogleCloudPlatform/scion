@@ -21,7 +21,9 @@ import {
   DraftApiError,
   DraftConflictError,
   MAX_DRAFT_BODY_BYTES,
+  downloadTextFile,
   parseRetryAfterMs,
+  putReviewDraft,
   safeReviewDownloadName,
   type PutReviewDraftRequest,
   type PutReviewDraftResponse,
@@ -83,6 +85,82 @@ describe('parseRetryAfterMs', () => {
   });
 });
 
+describe('putReviewDraft', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('omits signal when keepalive is true and forwards signal otherwise', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ rev: 1, savedAt: '2026-11-21T18:00:00Z', currentSeq: 1 }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+
+    const req: PutReviewDraftRequest = {
+      rev: 0,
+      base: 1,
+      entry: 'plan.md',
+      body: 'draft body',
+      note: '',
+      clientSavedAt: '2026-11-21T18:00:00Z',
+    };
+    const ac = new AbortController();
+
+    await putReviewDraft('art-1', req, { keepalive: true, signal: ac.signal });
+    const keepaliveInit = fetchSpy.mock.calls[0]?.[1];
+    expect(keepaliveInit?.keepalive).toBe(true);
+    expect(keepaliveInit?.signal).toBeUndefined();
+    expect('signal' in (keepaliveInit ?? {})).toBe(false);
+
+    await putReviewDraft('art-1', req, { keepalive: false, signal: ac.signal });
+    const normalInit = fetchSpy.mock.calls[1]?.[1];
+    expect(normalInit?.keepalive).toBe(false);
+    expect(normalInit?.signal).toBe(ac.signal);
+  });
+});
+
+describe('downloadTextFile', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('defers URL.revokeObjectURL after clicking the anchor', () => {
+    const origCreate = URL.createObjectURL;
+    const origRevoke = URL.revokeObjectURL;
+    const createSpy = vi.fn(() => 'blob:mock-review-url');
+    const revokeSpy = vi.fn();
+    URL.createObjectURL = createSpy;
+    URL.revokeObjectURL = revokeSpy;
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      downloadTextFile('plan-review-of-v1.md', 'Review body');
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(revokeSpy).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(99);
+      expect(revokeSpy).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1);
+      expect(revokeSpy).toHaveBeenCalledTimes(1);
+      expect(revokeSpy).toHaveBeenCalledWith('blob:mock-review-url');
+    } finally {
+      URL.createObjectURL = origCreate;
+      URL.revokeObjectURL = origRevoke;
+    }
+  });
+});
+
 describe('ReviewDraftController', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -110,13 +188,23 @@ describe('ReviewDraftController', () => {
     let body = opts?.initialBody ?? 'Original text.\n';
     let note = opts?.initialNote ?? '';
     const snapshots: DraftSnapshot[] = [];
-    const puts: Array<{ req: PutReviewDraftRequest; keepalive?: boolean | undefined }> = [];
+    const puts: Array<{
+      req: PutReviewDraftRequest;
+      keepalive?: boolean | undefined;
+      signal?: AbortSignal | undefined;
+      hasSignal: boolean;
+    }> = [];
     let revCounter = opts?.initialRev ?? 0;
 
     const put =
       opts?.put ??
       ((_id, req, o) => {
-        puts.push({ req, keepalive: o?.keepalive });
+        puts.push({
+          req,
+          keepalive: o?.keepalive,
+          signal: o?.signal,
+          hasSignal: o !== undefined && 'signal' in o,
+        });
         revCounter = req.rev + 1;
         return Promise.resolve({
           rev: revCounter,
@@ -257,12 +345,20 @@ describe('ReviewDraftController', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(h.puts).toHaveLength(1);
       expect(h.puts[0]!.keepalive).toBe(true);
+      expect(h.puts[0]!.signal).toBeUndefined();
+      expect(h.puts[0]!.hasSignal).toBe(false);
 
       // Oversize (> 60 KiB) skips keepalive fetch on visibilitychange.
       h.setBody('x'.repeat(DRAFT_KEEPALIVE_LIMIT_BYTES + 1024));
       document.dispatchEvent(new Event('visibilitychange'));
       await vi.advanceTimersByTimeAsync(0);
       expect(h.puts).toHaveLength(1);
+
+      // Non-keepalive save passes an AbortSignal.
+      await h.controller.saveNow();
+      expect(h.puts).toHaveLength(2);
+      expect(h.puts[1]!.keepalive).toBe(false);
+      expect(h.puts[1]!.signal).toBeInstanceOf(AbortSignal);
     } finally {
       if (desc) Object.defineProperty(document, 'visibilityState', desc);
       else delete (document as unknown as Record<string, unknown>).visibilityState;
