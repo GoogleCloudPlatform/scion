@@ -50,6 +50,13 @@ import type {
   UpdateRequestDetail,
   UpdateStatus,
 } from './admin-maintenance-update-card.js';
+import {
+  canForceRerun,
+  parseRebuildResult,
+  runBanner,
+  type PreflightFinding,
+  type RebuildResult,
+} from './admin-maintenance-banner.js';
 
 export type { LastUpdate, PendingUpdate, UpdateStatus };
 
@@ -582,6 +589,22 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private viewingRun: MaintenanceRun | null = null;
 
+  /** Run currently awaiting force re-run confirmation. */
+  @state()
+  private forceConfirmRun: MaintenanceRun | null = null;
+
+  /** Whether the admin ticked "I reviewed these findings" in the force confirm dialog. */
+  @state()
+  private forceConfirmChecked = false;
+
+  /** Whether a force re-run POST is in-flight. */
+  @state()
+  private forceSubmitting = false;
+
+  /** Whether info-level preflight findings are expanded in the run detail dialog. */
+  @state()
+  private infoFindingsExpanded = false;
+
   /** Whether the restart hub confirmation dialog is open. */
   @state()
   private restartDialogOpen = false;
@@ -713,6 +736,95 @@ export class ScionPageAdminMaintenance extends LitElement {
   private updateCheckResult: UpdateCheckResult | null = null;
 
   static override styles = css`
+    .preflight-banner {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.625rem;
+      padding: 0.75rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      font-size: 0.875rem;
+      line-height: 1.45;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-surface-subtle, #f8fafc);
+    }
+    .preflight-banner.primary {
+      border-color: var(--sl-color-primary-300, #93c5fd);
+      background: var(--sl-color-primary-50, #eff6ff);
+    }
+    .preflight-banner.success {
+      border-color: var(--sl-color-success-300, #86efac);
+      background: var(--sl-color-success-50, #f0fdf4);
+    }
+    .preflight-banner.warning {
+      border-color: var(--sl-color-warning-300, #fcd34d);
+      background: var(--sl-color-warning-50, #fffbeb);
+    }
+    .preflight-banner.danger {
+      border-color: var(--sl-color-danger-300, #fca5a5);
+      background: var(--sl-color-danger-50, #fef2f2);
+    }
+    .preflight-banner sl-icon {
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+    .preflight-run-link {
+      background: none;
+      border: none;
+      padding: 0;
+      color: var(--sl-color-primary-600, #2563eb);
+      text-decoration: underline;
+      cursor: pointer;
+      font: inherit;
+    }
+    .preflight-findings-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+      margin: 0.5rem 0;
+    }
+    .preflight-findings-table th,
+    .preflight-findings-table td {
+      text-align: left;
+      padding: 0.5rem 0.625rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      vertical-align: top;
+    }
+    .preflight-findings-table th {
+      font-weight: 600;
+      color: var(--scion-text-muted, #64748b);
+    }
+    .preflight-finding-code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+    .preflight-info-toggle {
+      background: none;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.375rem);
+      padding: 0.25rem 0.625rem;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      color: var(--scion-text-muted, #64748b);
+    }
+    .preflight-unpinnable {
+      font-size: 0.8125rem;
+      color: var(--scion-text-muted, #64748b);
+      font-style: italic;
+    }
+    .force-confirm-list {
+      margin: 0.5rem 0;
+      padding-left: 1.25rem;
+      font-size: 0.875rem;
+    }
+    .force-confirm-warning {
+      padding: 0.625rem 0.75rem;
+      border-radius: var(--scion-radius, 0.375rem);
+      background: var(--sl-color-warning-50, #fffbeb);
+      border: 1px solid var(--sl-color-warning-300, #fcd34d);
+      font-size: 0.875rem;
+    }
+
     :host {
       display: block;
     }
@@ -2154,6 +2266,14 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private async viewRunDetail(run: MaintenanceRun): Promise<void> {
+    this.infoFindingsExpanded = false;
+    // H2: refresh rebuild-server history whenever opening a rebuild-server
+    // run detail so both the "Re-run with force" latest-run check and BR
+    // back-references (F2/F8b) stay accurate even when opened from op.lastRun.
+    if (run.operationKey === 'rebuild-server') {
+      void this.loadRunHistory('rebuild-server');
+    }
+
     // If we already have log data, show it immediately.
     if (run.log) {
       this.viewingRun = run;
@@ -2179,15 +2299,51 @@ export class ScionPageAdminMaintenance extends LitElement {
     this.viewingRun = null;
   }
 
-  private parseMigrationResult(
-    resultStr: string | undefined
-  ): { log?: string; error?: string; dryRun?: boolean } | null {
-    if (!resultStr) return null;
+  private openForceConfirm(run: MaintenanceRun): void {
+    this.forceConfirmRun = run;
+    this.forceConfirmChecked = false;
+  }
+
+  private closeForceConfirm(): void {
+    this.forceConfirmRun = null;
+    this.forceConfirmChecked = false;
+  }
+
+  private async submitForceRerun(): Promise<void> {
+    const run = this.forceConfirmRun;
+    if (!run || !this.forceConfirmChecked || this.forceSubmitting) return;
+
+    this.forceSubmitting = true;
     try {
-      return JSON.parse(resultStr) as { log?: string; error?: string; dryRun?: boolean };
-    } catch {
-      return null;
+      const response = await apiFetch('/api/v1/admin/maintenance/operations/rebuild-server/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          params: {
+            force: 'true',
+            rerunOf: run.id,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const msg = await extractApiError(response, 'Failed to start forced re-run');
+        showToast(msg, 'danger');
+        return;
+      }
+      this.closeForceConfirm();
+      this.closeRunDetail();
+      await this.loadData(true);
+      await this.loadRunHistory('rebuild-server');
+      this.startPolling();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to start forced re-run', 'danger');
+    } finally {
+      this.forceSubmitting = false;
     }
+  }
+
+  private parseMigrationResult(resultStr: string | undefined): RebuildResult | null {
+    return parseRebuildResult(resultStr);
   }
 
   // -- Rendering ----------------------------------------------------------
@@ -2204,8 +2360,9 @@ export class ScionPageAdminMaintenance extends LitElement {
         : this.error
           ? this.renderError()
           : this.renderContent()}
-      ${this.renderRunDialog()} ${this.renderRunDetailDialog()} ${this.renderRestartDialog()}
-      ${this.renderReissueConfirmDialog()} ${this.renderUpdateConfirmDialog()}
+      ${this.renderRunDialog()} ${this.renderRunDetailDialog()} ${this.renderForceConfirmDialog()}
+      ${this.renderRestartDialog()} ${this.renderReissueConfirmDialog()}
+      ${this.renderUpdateConfirmDialog()}
     `;
   }
 
@@ -3293,15 +3450,127 @@ export class ScionPageAdminMaintenance extends LitElement {
     `;
   }
 
+  private openLinkedRun(runId: string): void {
+    const loaded = this.runHistory.get('rebuild-server') ?? [];
+    const target = loaded.find((r) => r.id === runId);
+    if (target) {
+      void this.viewRunDetail({ ...target, operationKey: 'rebuild-server' });
+    }
+  }
+
+  private renderPreflightFindings(result: RebuildResult | null) {
+    if (!result) return nothing;
+    const allFindings: PreflightFinding[] = [...(result.preflight?.findings ?? [])];
+    if (result.couldNotRun && allFindings.length === 0) {
+      allFindings.push({
+        check: 'preflight',
+        code: `preflight.could_not_run.${result.couldNotRun.kind}`,
+        severity: 'block',
+        message: result.couldNotRun.reason,
+        data: { class: result.couldNotRun.class },
+      });
+    }
+    if (allFindings.length === 0) return nothing;
+
+    const primaryFindings = allFindings.filter((f) => f.severity !== 'info');
+    const infoFindings = allFindings.filter((f) => f.severity === 'info');
+
+    const renderRow = (f: PreflightFinding) => {
+      const badgeVariant =
+        f.severity === 'block' ? 'danger' : f.severity === 'warn' ? 'warning' : 'neutral';
+      const subjects = f.subjects ?? [];
+      const more = Math.max(0, (f.subjectCount ?? subjects.length) - subjects.length);
+      return html`
+        <tr>
+          <td><sl-badge variant=${badgeVariant}>${f.severity}</sl-badge></td>
+          <td>
+            <div class="preflight-finding-code">${f.code}</div>
+            <div>${f.message}</div>
+          </td>
+          <td>
+            ${subjects.length > 0
+              ? html`${subjects.join(', ')}${more > 0 ? html` and ${more} more` : nothing}`
+              : f.subjectCount
+                ? html`${f.subjectCount}`
+                : nothing}
+          </td>
+          <td>${f.remediation ?? ''}</td>
+        </tr>
+      `;
+    };
+
+    return html`
+      <div class="preflight-findings-section">
+        ${primaryFindings.length > 0
+          ? html`
+              <table class="preflight-findings-table">
+                <thead>
+                  <tr>
+                    <th>Severity</th>
+                    <th>Finding</th>
+                    <th>Subjects</th>
+                    <th>Remediation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${primaryFindings.map(renderRow)}
+                </tbody>
+              </table>
+            `
+          : nothing}
+        ${infoFindings.length > 0
+          ? html`
+              <div>
+                <button
+                  type="button"
+                  class="preflight-info-toggle"
+                  @click=${() => {
+                    this.infoFindingsExpanded = !this.infoFindingsExpanded;
+                  }}
+                >
+                  ${infoFindings.length} info
+                </button>
+                ${this.infoFindingsExpanded
+                  ? html`
+                      <table class="preflight-findings-table">
+                        <tbody>
+                          ${infoFindings.map(renderRow)}
+                        </tbody>
+                      </table>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
   private renderRunDetailDialog() {
     if (!this.viewingRun) return nothing;
     const run = this.viewingRun;
     const result = this.parseMigrationResult(run.result);
+    const loadedRebuildRuns = this.runHistory.get('rebuild-server') ?? [];
+    // H2: fall back to op.lastRun.id while history is loading.
+    const latestRebuildRunId = loadedRebuildRuns[0]?.id ?? this.operationRun('rebuild-server')?.id;
+    const banner = runBanner(run, loadedRebuildRuns);
+    const forceEligibility = canForceRerun(run, latestRebuildRunId);
+
+    const bannerIcon =
+      banner?.variant === 'danger'
+        ? 'exclamation-octagon'
+        : banner?.variant === 'warning'
+          ? 'exclamation-triangle'
+          : 'info-circle';
+
+    const forcedByRunLoaded = Boolean(
+      result?.forcedBy?.runId && loadedRebuildRuns.some((r) => r.id === result.forcedBy?.runId)
+    );
 
     return html`
       <sl-dialog
         label="Run Detail"
-        open
+        ?open=${!this.forceConfirmRun}
         @sl-request-close=${() => this.closeRunDetail()}
         style="--width: 48rem;"
       >
@@ -3313,7 +3582,79 @@ export class ScionPageAdminMaintenance extends LitElement {
               ? html`<span>Duration: ${this.formatDuration(run.startedAt, run.completedAt)}</span>`
               : nothing}
             ${run.startedBy ? html`<span>By: ${run.startedBy}</span>` : nothing}
+            ${result?.branch ? html`<span>Branch: <code>${result.branch}</code></span>` : nothing}
+            ${result?.commit
+              ? html`<span>Commit: <code>${result.commit.slice(0, 12)}</code></span>`
+              : nothing}
           </div>
+
+          ${banner
+            ? html`
+                <div class="preflight-banner ${banner.variant}" data-banner-row=${banner.row}>
+                  <sl-icon name=${bannerIcon}></sl-icon>
+                  <div>
+                    <span>${banner.text}</span>
+                    ${banner.linkedRunId && banner.linkedRunLoaded
+                      ? html`
+                          <button
+                            type="button"
+                            class="preflight-run-link"
+                            @click=${() => this.openLinkedRun(banner.linkedRunId!)}
+                          >
+                            View run ${banner.linkedRunId}
+                          </button>
+                        `
+                      : nothing}
+                    ${result?.override?.findings?.length
+                      ? html`
+                          <ul>
+                            ${result.override.findings.map(
+                              (f) => html`
+                                <li>
+                                  <code>${f.code}</code>: ${f.message}
+                                  ${f.agents !== undefined
+                                    ? html`
+                                        — ${f.agents}
+                                        agents${f.failedRunAgents !== undefined
+                                          ? html` (was ${f.failedRunAgents})`
+                                          : nothing}
+                                      `
+                                    : nothing}
+                                </li>
+                              `
+                            )}
+                          </ul>
+                        `
+                      : nothing}
+                  </div>
+                </div>
+              `
+            : nothing}
+          ${result?.forcedBy
+            ? html`
+                <div class="preflight-banner warning" data-forced-by="true">
+                  <sl-icon name="shield-exclamation"></sl-icon>
+                  <div>
+                    Forced by ${result.forcedBy.actorEmail} at ${result.forcedBy.at} in run
+                    ${forcedByRunLoaded
+                      ? html`
+                          <button
+                            type="button"
+                            class="preflight-run-link"
+                            @click=${() => this.openLinkedRun(result.forcedBy!.runId)}
+                          >
+                            ${result.forcedBy.runId}
+                          </button>
+                        `
+                      : html`<code>${result.forcedBy.runId}</code>`}
+                  </div>
+                </div>
+              `
+            : nothing}
+          ${this.renderPreflightFindings(result)}
+          ${forceEligibility.unpinnableReason
+            ? html`<div class="preflight-unpinnable">${forceEligibility.unpinnableReason}</div>`
+            : nothing}
           ${result?.error
             ? html`<div class="result-log result-error">${result.error}</div>`
             : nothing}
@@ -3321,9 +3662,94 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? html`<div class="result-log">${run.log}</div>`
             : html`<div class="empty-inline">No log output captured.</div>`}
         </div>
+        ${forceEligibility.allowed
+          ? html`
+              <sl-button slot="footer" variant="danger" @click=${() => this.openForceConfirm(run)}>
+                <sl-icon slot="prefix" name="shield-exclamation"></sl-icon>
+                Re-run with force
+              </sl-button>
+            `
+          : nothing}
         <sl-button slot="footer" variant="default" @click=${() => this.closeRunDetail()}
           >Close</sl-button
         >
+      </sl-dialog>
+    `;
+  }
+
+  private renderForceConfirmDialog() {
+    if (!this.forceConfirmRun) return nothing;
+    const run = this.forceConfirmRun;
+    const result = this.parseMigrationResult(run.result);
+    const blockingFindings = (result?.preflight?.findings ?? []).filter(
+      (f) => f.severity === 'block'
+    );
+    const commit = result?.commit ?? 'unknown';
+    const branch = result?.branch ?? 'unknown';
+
+    return html`
+      <sl-dialog
+        label="Confirm Force Re-run"
+        open
+        @sl-request-close=${() => this.closeForceConfirm()}
+        style="--width: 40rem;"
+      >
+        <div class="dialog-body">
+          <p>
+            This builds commit <code>${commit}</code> on <code>${branch}</code>, not the branch tip.
+          </p>
+          <div class="force-confirm-warning">
+            The server restarts if the install succeeds. The forced run re-checks preflight and
+            stops if the blocking findings changed.
+          </div>
+          ${result?.couldNotRun
+            ? html`
+                <p>
+                  <strong>Preflight could not run:</strong>
+                  <code>${result.couldNotRun.kind}</code> (${result.couldNotRun.class})
+                </p>
+              `
+            : nothing}
+          ${blockingFindings.length > 0
+            ? html`
+                <ul class="force-confirm-list">
+                  ${blockingFindings.map(
+                    (f) => html`
+                      <li>
+                        <code>${f.code}</code>: ${f.message}
+                        ${f.subjectCount ? html` (${f.subjectCount} agents)` : nothing}
+                      </li>
+                    `
+                  )}
+                </ul>
+              `
+            : nothing}
+          <sl-checkbox
+            .checked=${this.forceConfirmChecked}
+            @sl-change=${(e: Event) => {
+              this.forceConfirmChecked = (e.target as HTMLInputElement).checked;
+            }}
+          >
+            I reviewed these findings
+          </sl-checkbox>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          ?disabled=${this.forceSubmitting}
+          @click=${() => this.closeForceConfirm()}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="danger"
+          ?disabled=${!this.forceConfirmChecked || this.forceSubmitting}
+          ?loading=${this.forceSubmitting}
+          @click=${() => this.submitForceRerun()}
+        >
+          <sl-icon slot="prefix" name="shield-exclamation"></sl-icon>
+          Confirm force re-run
+        </sl-button>
       </sl-dialog>
     `;
   }
