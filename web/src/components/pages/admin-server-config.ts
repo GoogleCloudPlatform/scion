@@ -103,6 +103,7 @@ import {
   renderKeysEnvBadge,
 } from '../shared/env-badge-views.js';
 import {
+  ADMIN_MANAGED_BROKERS_FLAG,
   CUSTOM_DEFAULT_USER_ROLE_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
@@ -507,6 +508,8 @@ interface ServerConfigResponse {
 
   agent_secrets?: { user_scope_only?: boolean };
 
+  broker_policy?: { admin_managed_only?: boolean };
+
   // Settings-DB metadata (DB-backed hubs, any driver; absent when the hub has no operational settings)
   settings_tier?: 'db' | 'file';
   // True on workstation hubs: Layer-0 and file-only settings are editable and
@@ -771,6 +774,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'quotas.enforce_broker_quotas': 'Enforce Broker Agent Quotas',
   // agent_secrets section
   'agent_secrets.user_scope_only': 'Agent Secrets: Profile Scope Only',
+  // broker_policy section
+  'broker_policy.admin_managed_only': 'Runtime Broker Policy: Admin-Managed Only',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -1311,6 +1316,10 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Agent Secrets (unset means permissive)
   @state() private agentSecretsUserScopeOnly: boolean | null = null;
   private loadedAgentSecretsUserScopeOnly: boolean | null = null;
+
+  // Runtime Broker Policy (unset means permissive)
+  @state() private brokerPolicyAdminManagedOnly: boolean | null = null;
+  private loadedBrokerPolicyAdminManagedOnly: boolean | null = null;
 
   // Telemetry
   @state() private telemetryEnabled: boolean | null = null;
@@ -2474,6 +2483,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? null;
     this.loadedAgentSecretsUserScopeOnly = this.agentSecretsUserScopeOnly;
 
+    // Runtime Broker Policy — absent means permissive (members may register brokers).
+    this.brokerPolicyAdminManagedOnly = data.broker_policy?.admin_managed_only ?? null;
+    this.loadedBrokerPolicyAdminManagedOnly = this.brokerPolicyAdminManagedOnly;
+
     // Hub observability export switches — absent means unset.
     const obs = data.server?.hub?.observability;
     this.hubMetricsEnabled = obs?.metrics_enabled ?? null;
@@ -3188,6 +3201,13 @@ export class ScionPageAdminServerConfig extends LitElement {
         'agent_secrets.user_scope_only',
         this.agentSecretsUserScopeOnly,
         this.loadedAgentSecretsUserScopeOnly,
+      ],
+      [
+        'broker_policy',
+        'admin_managed_only',
+        'broker_policy.admin_managed_only',
+        this.brokerPolicyAdminManagedOnly,
+        this.loadedBrokerPolicyAdminManagedOnly,
       ],
     ];
     for (const [section, field, key, value, loaded] of sections) {
@@ -5289,6 +5309,53 @@ export class ScionPageAdminServerConfig extends LitElement {
               >When on, agents (including Capture Auth) can only store secrets in the user's
               profile. Project-scope writes from agents are rejected. Existing project secrets are
               not removed. Users can still manage project secrets.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      ${this.renderBrokerPolicySection()}
+    `;
+  }
+
+  private renderBrokerPolicySection() {
+    const expEnabled = isFeatureEnabled(ADMIN_MANAGED_BROKERS_FLAG);
+    if (!expEnabled) {
+      if (this.brokerPolicyAdminManagedOnly !== true) {
+        return nothing;
+      }
+      return html`
+        <div class="section" data-section="broker-policy-mismatch">
+          <h3 class="section-title">Runtime Broker Policy</h3>
+          <sl-alert variant="warning" open data-broker-policy-mismatch>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            <code>broker_policy.admin_managed_only</code> is stored as <strong>true</strong>, but
+            experiment <code>${ADMIN_MANAGED_BROKERS_FLAG}</code> is off. The admin-managed-only
+            Runtime Broker policy is not currently enforced. Enable the experiment on
+            <a href="/admin/experiments">Admin &gt; Experiments</a> to activate enforcement.
+          </sl-alert>
+        </div>
+      `;
+    }
+    return html`
+      <!-- Card: Runtime Broker Policy -->
+      <div class="section" data-section="broker-policy">
+        <h3 class="section-title">Runtime Broker Policy</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            ${this.renderTriStateSwitch({
+              key: 'broker_policy.admin_managed_only',
+              label: 'Require admin-managed Runtime Brokers only',
+              value: this.brokerPolicyAdminManagedOnly,
+              loaded: this.loadedBrokerPolicyAdminManagedOnly,
+              unsetChecked: false,
+              unsetLabel: 'Not set (default: off)',
+              set: (v) => (this.brokerPolicyAdminManagedOnly = v),
+            })}
+            <span class="hint"
+              >When on, only hub administrators may register new Runtime Brokers (using
+              <code>--admin-managed</code>), and non-approved brokers cannot be registered or used
+              for new workloads. Embedded and auto-provide brokers remain eligible.</span
             >
           </div>
         </div>
