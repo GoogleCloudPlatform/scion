@@ -105,6 +105,13 @@ so operator-managed sections (`server.plugins`, `server.message_broker`,
 `plugins`) survive; YAML comments are not preserved across the merge round-trip
 (key order is kept).
 
+`scion-hub.service` always runs as `User=scion` and must never run as root.
+`gce-start-hub.sh --full` installs `/usr/local/libexec/scion/scion-install-rebuild.sh`
+(root-owned, `0755`) and scopes `/etc/sudoers.d/scion-rebuild-server` to that
+helper plus `systemctl restart scion-hub`; the helper verifies that
+`/home/scion/scion/scion.rebuild` is a regular, non-symlink file owned by
+`scion` before installing it to `/usr/local/bin/scion`.
+
 Behind an upstream TLS terminator, skip the Caddy/TLS step (no Caddyfile, no
 Caddy install, no HTTPS health check) and give the terminator's `https://` URL;
 the script stops without it, because the Hub refuses an `http` base URL on a
@@ -169,6 +176,7 @@ the telemetry service account.
 | `gce-demo-setup-repo.sh` | Clone the repo on the VM |
 | `gce-demo-telemetry-sa.sh` | Telemetry service account and key management |
 | `gce-start-hub.sh` | Build, deploy, and restart the hub service |
+| `scion-install-rebuild.sh` | Root-owned helper installed at `/usr/local/libexec/scion/scion-install-rebuild.sh` that validates `/home/scion/scion/scion.rebuild` is a regular, non-symlink file owned by `scion` before installing it to `/usr/local/bin/scion` |
 | `gce-certs.sh` | Cloud DNS setup and Let's Encrypt wildcard certificates |
 | `gce-demo-cloud-init.yaml` | Cloud-init config installed on the VM at provision time |
 | `gce-setup-nats.sh` | *(Archived)* Standalone NATS server setup — superseded by in-process events |
