@@ -38,14 +38,16 @@ type call struct {
 }
 
 // fakeRunner records calls and fails the one whose argv[1] (the tmux verb)
-// matches failOn, on its failAt-th occurrence (1-based; 0 means the first).
+// matches failOn, on its failAt-th occurrence (1-based; 0 means the first),
+// and every call whose verb matches failVerb.
 type fakeRunner struct {
-	mu     sync.Mutex
-	calls  []call
-	failOn string
-	failAt int
-	seen   map[string]int
-	out    string
+	mu       sync.Mutex
+	calls    []call
+	failOn   string
+	failAt   int
+	failVerb string
+	seen     map[string]int
+	out      string
 }
 
 var errStep = errors.New("step failed")
@@ -67,6 +69,9 @@ func (f *fakeRunner) Run(ctx context.Context, argv []string, stdin io.Reader) (s
 		verb = argv[1]
 	}
 	f.seen[verb]++
+	if f.failVerb != "" && verb == f.failVerb {
+		return "", errStep
+	}
 	if f.failOn != "" && verb == f.failOn {
 		at := f.failAt
 		if at == 0 {
@@ -108,10 +113,14 @@ func cat(parts ...[][]string) [][]string {
 var (
 	load  = [][]string{{"tmux", "load-buffer", "-b", buf, "-"}}
 	paste = [][]string{{"tmux", "paste-buffer", "-t", "scion:0", "-p", "-d", "-b", buf}}
+	// exitMode runs before the first keys, before the paste and before
+	// each extra submit pass.
+	exitMode = [][]string{{"tmux", "copy-mode", "-q", "-t", "scion:0"}}
 )
 
 // TestDeliver_Parity pins the command sequence of each op against what the
-// broker's deliverImmediate runs today for the same input. Parity holds for
+// broker's deliverImmediate ran for the same input, plus the step that
+// leaves copy-mode before each group of visible commands. Parity holds for
 // text without control characters; TestDeliver_SanitisedText covers the rest,
 // which Sanitize changes by design.
 func TestDeliver_Parity(t *testing.T) {
@@ -123,27 +132,27 @@ func TestDeliver_Parity(t *testing.T) {
 		{
 			name: "paste with default submit and two extra submits",
 			req:  tmuxdeliver.Request{Op: tmuxdeliver.OpPaste, Text: "hello world", SubmitKeys: []string{"Enter"}, ExtraSubmits: 2, BufferName: buf},
-			want: cat(load, paste, keys("Enter"), keys("Enter"), keys("Enter")),
+			want: cat(load, exitMode, paste, keys("Enter"), exitMode, keys("Enter"), exitMode, keys("Enter")),
 		},
 		{
 			name: "interrupt sequence then paste, one delivery",
 			req:  tmuxdeliver.Request{Op: tmuxdeliver.OpInterruptPaste, Text: "stop and do this", InterruptKeys: []string{"Escape", "C-c"}, SubmitKeys: []string{"Enter"}, ExtraSubmits: 1, BufferName: buf},
-			want: cat(keys("Escape", "C-c"), load, paste, keys("Enter"), keys("Enter")),
+			want: cat(exitMode, keys("Escape", "C-c"), load, exitMode, paste, keys("Enter"), exitMode, keys("Enter")),
 		},
 		{
 			name: "empty message sends submit keys once, no extras",
 			req:  tmuxdeliver.Request{Op: tmuxdeliver.OpSubmitOnly, SubmitKeys: []string{"Enter"}, ExtraSubmits: 2},
-			want: keys("Enter"),
+			want: cat(exitMode, keys("Enter")),
 		},
 		{
 			name: "interrupt with empty message: keys then submit once, no extras",
 			req:  tmuxdeliver.Request{Op: tmuxdeliver.OpInterruptSubmit, InterruptKeys: []string{"C-c"}, SubmitKeys: []string{"Enter"}, ExtraSubmits: 2},
-			want: keys("C-c", "Enter"),
+			want: cat(exitMode, keys("C-c", "Enter")),
 		},
 		{
 			name: "two submit keys per pass",
 			req:  tmuxdeliver.Request{Op: tmuxdeliver.OpPaste, Text: "two-key message", SubmitKeys: []string{"Escape", "Enter"}, ExtraSubmits: 1, BufferName: buf},
-			want: cat(load, paste, keys("Escape", "Enter"), keys("Escape", "Enter")),
+			want: cat(load, exitMode, paste, keys("Escape", "Enter"), exitMode, keys("Escape", "Enter")),
 		},
 	}
 	for _, tc := range cases {
@@ -261,11 +270,11 @@ func TestDeliver_Failures(t *testing.T) {
 		wantLast  []string
 		wantCalls int
 	}{
-		{name: "interrupt key fails", failOn: "send-keys", failAt: 1, wantLast: []string{"tmux", "send-keys", "-t", "scion:0", "C-c"}, wantCalls: 1},
-		{name: "load fails", failOn: "load-buffer", wantLast: []string{"tmux", "load-buffer", "-b", buf, "-"}, wantCalls: 2},
-		{name: "paste fails, buffer deleted", failOn: "paste-buffer", wantLast: []string{"tmux", "delete-buffer", "-b", buf}, wantCalls: 4},
-		{name: "submit after paste fails", failOn: "send-keys", failAt: 2, partial: tmuxdeliver.StageSubmit, wantCalls: 4},
-		{name: "extra submit fails", failOn: "send-keys", failAt: 3, partial: tmuxdeliver.StageExtraSubmit, wantCalls: 5},
+		{name: "interrupt key fails", failOn: "send-keys", failAt: 1, wantLast: []string{"tmux", "send-keys", "-t", "scion:0", "C-c"}, wantCalls: 2},
+		{name: "load fails", failOn: "load-buffer", wantLast: []string{"tmux", "load-buffer", "-b", buf, "-"}, wantCalls: 3},
+		{name: "paste fails, buffer deleted", failOn: "paste-buffer", wantLast: []string{"tmux", "delete-buffer", "-b", buf}, wantCalls: 6},
+		{name: "submit after paste fails", failOn: "send-keys", failAt: 2, partial: tmuxdeliver.StageSubmit, wantCalls: 6},
+		{name: "extra submit fails", failOn: "send-keys", failAt: 3, partial: tmuxdeliver.StageExtraSubmit, wantCalls: 8},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,6 +305,21 @@ func TestDeliver_Failures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestDeliver_ExitModeFailureIgnored: the step that leaves copy-mode is best
+// effort (a tmux before 3.1a has no copy-mode -q); the delivery goes on when
+// it fails, at every place it runs.
+func TestDeliver_ExitModeFailureIgnored(t *testing.T) {
+	f := &fakeRunner{failVerb: "copy-mode"}
+	req := tmuxdeliver.Request{Op: tmuxdeliver.OpInterruptPaste, Text: "x", InterruptKeys: []string{"C-c"}, SubmitKeys: []string{"Enter"}, ExtraSubmits: 1, BufferName: buf}
+	if err := tmuxdeliver.Deliver(context.Background(), f, req); err != nil {
+		t.Fatalf("Deliver = %v, want nil", err)
+	}
+	want := cat(exitMode, keys("C-c"), load, exitMode, paste, keys("Enter"), exitMode, keys("Enter"))
+	if !reflect.DeepEqual(f.argvs(), want) {
+		t.Errorf("commands:\n got %q\nwant %q", f.argvs(), want)
 	}
 }
 

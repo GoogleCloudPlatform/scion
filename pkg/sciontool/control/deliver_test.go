@@ -356,9 +356,12 @@ func TestDeliverPasteSteps(t *testing.T) {
 	want := [][]string{
 		{"tmux", "has-session", "-t", "scion:0"},
 		{"tmux", "load-buffer", "-b", "scion-msg-d-1-1", "-"},
+		{"tmux", "copy-mode", "-q", "-t", "scion:0"},
 		{"tmux", "paste-buffer", "-t", "scion:0", "-p", "-d", "-b", "scion-msg-d-1-1"},
 		{"tmux", "send-keys", "-t", "scion:0", "Enter"},
+		{"tmux", "copy-mode", "-q", "-t", "scion:0"},
 		{"tmux", "send-keys", "-t", "scion:0", "Enter"},
+		{"tmux", "copy-mode", "-q", "-t", "scion:0"},
 		{"tmux", "send-keys", "-t", "scion:0", "Enter"},
 	}
 	if !slices.EqualFunc(f.calls, want, slices.Equal[[]string]) {
@@ -387,16 +390,16 @@ func TestDeliverOps(t *testing.T) {
 			r.Op = agentcontrol.OpInterruptPaste
 			r.InterruptKeys = []string{"Escape", "C-c"}
 			r.ExtraSubmits = &agentcontrol.ExtraSubmits{Count: 1}
-		}, []string{"has-session", "send-keys Escape", "send-keys C-c", "load-buffer", "paste-buffer", "send-keys Enter", "send-keys Enter"}},
+		}, []string{"has-session", "copy-mode", "send-keys Escape", "send-keys C-c", "load-buffer", "copy-mode", "paste-buffer", "send-keys Enter", "copy-mode", "send-keys Enter"}},
 		"submit_only": {func(r *agentcontrol.DeliverRequest) {
 			r.Op = agentcontrol.OpSubmitOnly
 			r.Text, r.ExtraSubmits = nil, nil
-		}, []string{"has-session", "send-keys Enter"}},
+		}, []string{"has-session", "copy-mode", "send-keys Enter"}},
 		"interrupt_submit": {func(r *agentcontrol.DeliverRequest) {
 			r.Op = agentcontrol.OpInterruptSubmit
 			r.Text, r.ExtraSubmits = nil, nil
 			r.InterruptKeys = []string{"C-c"}
-		}, []string{"has-session", "send-keys C-c", "send-keys Enter"}},
+		}, []string{"has-session", "copy-mode", "send-keys C-c", "send-keys Enter"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -713,6 +716,11 @@ func TestDeliverHardStopAfterInterrupt(t *testing.T) {
 			}
 			if slices.Contains(f.verbs(), "paste-buffer") {
 				t.Fatalf("pasted after the hard stop: %v", f.verbs())
+			}
+			// Only the exit before the interrupt ran: the one before the
+			// paste would take an operator out of scrollback for nothing.
+			if n := len(slices.DeleteFunc(f.verbs(), func(v string) bool { return v != "copy-mode" })); n != 1 {
+				t.Fatalf("left copy-mode %d times, want 1: %v", n, f.verbs())
 			}
 			n := len(f.verbs())
 			if code, resp := post(t, h, r); code != http.StatusOK || !resp.Replayed || resp.Outcome != agentcontrol.OutcomePartial {

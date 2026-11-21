@@ -66,17 +66,21 @@ func TestMessage(t *testing.T) {
 		t.Fatalf("Message failed: %v", err)
 	}
 
-	if len(capturedCmd) != 6 {
-		t.Fatalf("Expected 6 commands, got %d: %v", len(capturedCmd), capturedCmd)
+	if len(capturedCmd) != 10 {
+		t.Fatalf("Expected 10 commands, got %d: %v", len(capturedCmd), capturedCmd)
 	}
 
-	bufName := bufNameFromLoadCmd(t, capturedCmd[1])
+	bufName := bufNameFromLoadCmd(t, capturedCmd[2])
 	expectedCmds := []string{
+		exitModeCmd,
 		"tmux send-keys -t scion:0 C-c",
 		"tmux load-buffer -b " + bufName + " -",
+		exitModeCmd,
 		"tmux paste-buffer -t scion:0 -p -d -b " + bufName,
 		"tmux send-keys -t scion:0 Enter",
+		exitModeCmd,
 		"tmux send-keys -t scion:0 Enter",
+		exitModeCmd,
 		"tmux send-keys -t scion:0 Enter",
 	}
 
@@ -101,6 +105,11 @@ func parseBufNameFromLoadCmd(loadCmd string) (string, error) {
 	}
 	return "", fmt.Errorf("could not find buffer name in load-buffer command: %q", loadCmd)
 }
+
+// exitModeCmd runs before the first keys of a delivery, before its paste and
+// before each extra submit pass: it leaves copy-mode, where a paste is not
+// bracketed and keys do not reach the harness (tmuxdeliver.ExitModeArgv).
+const exitModeCmd = "tmux copy-mode -q -t scion:0"
 
 // bufNameFromLoadCmd is parseBufNameFromLoadCmd for callers on the test
 // goroutine itself, where failing the test directly is safe.
@@ -183,8 +192,8 @@ func TestBroadcast(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(capturedCalls) != 10 {
-		t.Fatalf("Expected 10 calls, got %d: %v", len(capturedCalls), capturedCalls)
+	if len(capturedCalls) != 16 {
+		t.Fatalf("Expected 16 calls, got %d: %v", len(capturedCalls), capturedCalls)
 	}
 
 	// Since buffer delivery is async, agents may flush in either order.
@@ -192,8 +201,8 @@ func TestBroadcast(t *testing.T) {
 	agent1Calls := filterByPrefix(capturedCalls, "agent-1:")
 	agent2Calls := filterByPrefix(capturedCalls, "agent-2:")
 
-	if len(agent1Calls) != 5 || len(agent2Calls) != 5 {
-		t.Fatalf("Expected 5 calls per agent, got agent-1=%d agent-2=%d", len(agent1Calls), len(agent2Calls))
+	if len(agent1Calls) != 8 || len(agent2Calls) != 8 {
+		t.Fatalf("Expected 8 calls per agent, got agent-1=%d agent-2=%d", len(agent1Calls), len(agent2Calls))
 	}
 
 	// Buffer names are not required to differ across agents: each agent has
@@ -206,9 +215,12 @@ func TestBroadcast(t *testing.T) {
 
 	expectedAgent1 := []string{
 		"agent-1: tmux load-buffer -b " + buf1 + " -",
+		"agent-1: " + exitModeCmd,
 		"agent-1: tmux paste-buffer -t scion:0 -p -d -b " + buf1,
 		"agent-1: tmux send-keys -t scion:0 Enter",
+		"agent-1: " + exitModeCmd,
 		"agent-1: tmux send-keys -t scion:0 Enter",
+		"agent-1: " + exitModeCmd,
 		"agent-1: tmux send-keys -t scion:0 Enter",
 	}
 	for i, want := range expectedAgent1 {
@@ -219,9 +231,12 @@ func TestBroadcast(t *testing.T) {
 
 	expectedAgent2 := []string{
 		"agent-2: tmux load-buffer -b " + buf2 + " -",
+		"agent-2: " + exitModeCmd,
 		"agent-2: tmux paste-buffer -t scion:0 -p -d -b " + buf2,
 		"agent-2: tmux send-keys -t scion:0 Enter",
+		"agent-2: " + exitModeCmd,
 		"agent-2: tmux send-keys -t scion:0 Enter",
+		"agent-2: " + exitModeCmd,
 		"agent-2: tmux send-keys -t scion:0 Enter",
 	}
 	for i, want := range expectedAgent2 {
@@ -402,8 +417,8 @@ func TestDeliverImmediate_LargeMessageOverStdin(t *testing.T) {
 		}
 	}
 
-	if len(argvCmds) < 2 {
-		t.Fatalf("expected at least a load-buffer and a paste-buffer command, got %v", argvCmds)
+	if len(argvCmds) < 3 {
+		t.Fatalf("expected at least a load-buffer, a copy-mode and a paste-buffer command, got %v", argvCmds)
 	}
 	loadCmd := argvCmds[0]
 	if len(loadCmd) != 5 || loadCmd[0] != "tmux" || loadCmd[1] != "load-buffer" || loadCmd[2] != "-b" || loadCmd[4] != "-" {
@@ -414,9 +429,9 @@ func TestDeliverImmediate_LargeMessageOverStdin(t *testing.T) {
 		t.Fatal("expected a named buffer, got an empty name")
 	}
 
-	pasteCmd := argvCmds[1]
+	pasteCmd := argvCmds[2]
 	if pasteCmd[0] != "tmux" || pasteCmd[1] != "paste-buffer" {
-		t.Fatalf("expected the second command to be paste-buffer, got %v", pasteCmd)
+		t.Fatalf("expected the third command to be paste-buffer, got %v", pasteCmd)
 	}
 	var hasP, hasD, pastesNamedBuf bool
 	for i, arg := range pasteCmd {
@@ -803,8 +818,10 @@ func TestDeliverImmediate_CustomSubmitKeys(t *testing.T) {
 	bufName := bufNameFromLoadCmd(t, calls[0])
 	assertCalls(t, calls, []string{
 		"tmux load-buffer -b " + bufName + " -",
+		exitModeCmd,
 		"tmux paste-buffer -t scion:0 -p -d -b " + bufName,
 		"tmux send-keys -t scion:0 C-m",
+		exitModeCmd,
 		"tmux send-keys -t scion:0 C-m",
 	})
 }
@@ -823,11 +840,14 @@ func TestDeliverImmediate_MultipleSubmitKeys(t *testing.T) {
 	bufName := bufNameFromLoadCmd(t, calls[0])
 	assertCalls(t, calls, []string{
 		"tmux load-buffer -b " + bufName + " -",
+		exitModeCmd,
 		"tmux paste-buffer -t scion:0 -p -d -b " + bufName,
 		"tmux send-keys -t scion:0 Escape",
 		"tmux send-keys -t scion:0 Enter",
+		exitModeCmd,
 		"tmux send-keys -t scion:0 Escape",
 		"tmux send-keys -t scion:0 Enter",
+		exitModeCmd,
 		"tmux send-keys -t scion:0 Escape",
 		"tmux send-keys -t scion:0 Enter",
 	})
@@ -851,6 +871,7 @@ func TestDeliverImmediate_ZeroExtraSubmits(t *testing.T) {
 	bufName := bufNameFromLoadCmd(t, calls[0])
 	assertCalls(t, calls, []string{
 		"tmux load-buffer -b " + bufName + " -",
+		exitModeCmd,
 		"tmux paste-buffer -t scion:0 -p -d -b " + bufName,
 		"tmux send-keys -t scion:0 C-m",
 	})
@@ -867,6 +888,7 @@ func TestDeliverImmediate_EmptyMessageUsesSubmitKeys(t *testing.T) {
 			t.Fatalf("deliverImmediate: %v", err)
 		}
 		assertCalls(t, calls, []string{
+			exitModeCmd,
 			"tmux send-keys -t scion:0 C-m",
 			"tmux send-keys -t scion:0 C-j",
 		})
@@ -878,7 +900,7 @@ func TestDeliverImmediate_EmptyMessageUsesSubmitKeys(t *testing.T) {
 		if err := mgr.deliverImmediate(context.Background(), "test-agent", "", "", false); err != nil {
 			t.Fatalf("deliverImmediate: %v", err)
 		}
-		assertCalls(t, calls, []string{"tmux send-keys -t scion:0 Enter"})
+		assertCalls(t, calls, []string{exitModeCmd, "tmux send-keys -t scion:0 Enter"})
 	})
 }
 
@@ -897,6 +919,7 @@ func TestDeliverImmediate_ZeroValueSpecStillSubmits(t *testing.T) {
 	bufName := bufNameFromLoadCmd(t, calls[0])
 	assertCalls(t, calls, []string{
 		"tmux load-buffer -b " + bufName + " -",
+		exitModeCmd,
 		"tmux paste-buffer -t scion:0 -p -d -b " + bufName,
 		"tmux send-keys -t scion:0 Enter",
 	})

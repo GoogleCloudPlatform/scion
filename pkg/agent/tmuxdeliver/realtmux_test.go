@@ -98,3 +98,148 @@ func TestRealTmux_PasteArrivesAsText(t *testing.T) {
 		t.Errorf("buffer %s left behind: %q", name, out)
 	}
 }
+
+// startBracketedPane starts a tmux session whose pane asks for bracketed
+// paste and then writes what it receives, made visible by cat -v, to the
+// returned file. It skips the test when tmux is missing or cannot start, and
+// returns once tmux has seen the pane's request: tmux brackets a paste only
+// for a pane that asked.
+func startBracketedPane(ctx context.Context, t *testing.T) (socketRunner, string) {
+	t.Helper()
+	if _, err := exec.LookPath("tmux"); err != nil {
+		if os.Getenv("SCION_TEST_REQUIRE_TMUX") == "1" {
+			t.Fatal("tmux is required (SCION_TEST_REQUIRE_TMUX=1) but is not on PATH")
+		}
+		t.Skip("tmux not on PATH")
+	}
+	dir := t.TempDir()
+	r := socketRunner{socket: filepath.Join(dir, "sock")}
+	outFile := filepath.Join(dir, "out")
+	// -f /dev/null: the default mode keys, whatever this machine's tmux.conf
+	// says.
+	if _, err := r.Run(ctx, []string{"tmux", "-f", "/dev/null", "new-session", "-d", "-s", "scion", "-x", "200", "-y", "20",
+		fmt.Sprintf(`printf '\033[?2004hPANE-READY'; exec cat -v > %s`, outFile)}, nil); err != nil {
+		t.Skipf("cannot start tmux: %v", err)
+	}
+	t.Cleanup(func() { _, _ = r.Run(context.Background(), []string{"tmux", "kill-server"}, nil) })
+	// tmux parses the pane's output in order, so once the marker printed
+	// after the request is on the screen, the request has been seen.
+	waitFor(t, "the pane to ask for bracketed paste", func() bool {
+		out, _ := r.Run(ctx, []string{"tmux", "capture-pane", "-p", "-t", tmuxdeliver.Target}, nil)
+		_, err := os.Stat(outFile)
+		return err == nil && strings.Contains(out, "PANE-READY")
+	})
+	return r, outFile
+}
+
+// enterCopyMode puts the pane in copy-mode, as an operator scrolling back
+// does, and fails the test if it is not in a mode afterwards.
+func enterCopyMode(ctx context.Context, t *testing.T, r socketRunner) {
+	t.Helper()
+	if _, err := r.Run(ctx, []string{"tmux", "copy-mode", "-t", tmuxdeliver.Target}, nil); err != nil {
+		t.Fatalf("copy-mode: %v", err)
+	}
+	out, err := r.Run(ctx, []string{"tmux", "display-message", "-p", "-t", tmuxdeliver.Target, "#{pane_in_mode}"}, nil)
+	if err != nil || strings.TrimSpace(out) != "1" {
+		t.Fatalf("pane_in_mode = %q, %v; want 1", out, err)
+	}
+}
+
+// waitForOutput waits for the pane to have written want to outFile.
+func waitForOutput(t *testing.T, outFile, want string) {
+	t.Helper()
+	var got string
+	waitFor(t, fmt.Sprintf("the pane to receive %q", want), func() bool {
+		b, _ := os.ReadFile(outFile)
+		got = string(b)
+		return got == want
+	}, func() string { return fmt.Sprintf("pane received %q", got) })
+}
+
+// TestRealTmux_DeliversIntoCopyMode delivers into a pane an operator left in
+// copy-mode by scrolling back, running a program that asked for bracketed
+// paste. Without leaving the mode first, tmux pastes the text unbracketed
+// (each line arrives as typed, ended by a CR) and, with its default emacs
+// mode keys, swallows the submit key.
+func TestRealTmux_DeliversIntoCopyMode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r, outFile := startBracketedPane(ctx, t)
+	enterCopyMode(ctx, t, r)
+
+	name, err := tmuxdeliver.BufferName("copymode", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := tmuxdeliver.Request{
+		Op:         tmuxdeliver.OpPaste,
+		Text:       "two\nlines",
+		SubmitKeys: []string{"Enter"},
+		BufferName: name,
+	}
+	if err := tmuxdeliver.Deliver(ctx, r, req); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	waitForOutput(t, outFile, "^[[200~two\nlines^[[201~\n")
+}
+
+// scrollingRunner is an operator who scrolls back while a delivery runs: it
+// puts the pane in copy-mode after each command whose tmux verb is in after.
+type scrollingRunner struct {
+	socketRunner
+	t     *testing.T
+	after map[string]bool
+}
+
+func (s scrollingRunner) Run(ctx context.Context, argv []string, stdin io.Reader) (string, error) {
+	out, err := s.socketRunner.Run(ctx, argv, stdin)
+	if len(argv) > 1 && s.after[argv[1]] {
+		enterCopyMode(ctx, s.t, s.socketRunner)
+	}
+	return out, err
+}
+
+// TestRealTmux_OperatorScrollsDuringDelivery: the pane leaves copy-mode
+// right before the paste and before each extra submit pass, not only at the
+// start. An operator who scrolls back while the buffer loads, and again
+// during the extra submit delay, still gets a bracketed paste and both
+// submits.
+func TestRealTmux_OperatorScrollsDuringDelivery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	r, outFile := startBracketedPane(ctx, t)
+
+	name, err := tmuxdeliver.BufferName("scrolling", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := tmuxdeliver.Request{
+		Op:           tmuxdeliver.OpPaste,
+		Text:         "two\nlines",
+		SubmitKeys:   []string{"Enter"},
+		ExtraSubmits: 1,
+		BufferName:   name,
+	}
+	sr := scrollingRunner{socketRunner: r, t: t, after: map[string]bool{"load-buffer": true, "send-keys": true}}
+	if err := tmuxdeliver.Deliver(ctx, sr, req); err != nil {
+		t.Fatalf("Deliver: %v", err)
+	}
+	waitForOutput(t, outFile, "^[[200~two\nlines^[[201~\n\n")
+}
+
+// waitFor polls cond for up to 10 seconds and fails the test, naming what,
+// if it never holds. detail, when given, adds the last observed state.
+func waitFor(t *testing.T, what string, cond func() bool, detail ...func() string) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if cond() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	msg := "timed out waiting for " + what
+	for _, d := range detail {
+		msg += ": " + d()
+	}
+	t.Fatal(msg)
+}
