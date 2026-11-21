@@ -1859,6 +1859,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `federation` | `enabled`, `trusted_issuers[]`, `algorithms`, `refresh_interval`, `debounce_interval` |
 | `endpoints` | `hub.public_url`, `hub.hub_name`, `hub.monitoring_dashboard_url`, `hub.content_url`, `hub.content_url_allow_same_site`, `image_registry` |
 | `hub_observability` | `hub.observability.metrics_enabled`, `hub.observability.tracing_enabled` (restart required) |
+| `branding` | `hub.branding.*` (name, short_name, subtitle, attribution, corners, font_sans, logo, icons, accent_color, palette; live-applied, refused to user access tokens; see [Branding & White-Labeling](/scion/hosted/single-node/branding/)) |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path`, `app_slug`, `command_mention_aliases` |
 | `notifications` | `notification_channels[]` |
 | `project_defaults` | `default_scratchpad` |

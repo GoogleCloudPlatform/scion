@@ -165,7 +165,7 @@ export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTID="your-client-id"
 export SCION_SERVER_OAUTH_WEB_GITHUB_CLIENTSECRET="your-client-secret"
 ```
 
-On the web server, only `/assets/*`, `/shoelace/*`, and the exact root-level files shipped in `web/public/` (`/apple-touch-icon.png`, `/favicon.ico`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/manifest.webmanifest`, and `/scion-notification-icon.png`) skip the web session check so the sign-in page can render. Every other root-level path (with or without a file extension, including `/robots.txt` and any path containing a backslash) requires a session, redirecting browsers to the sign-in page and returning `401` to other clients.
+On the web server, only `/assets/*`, `/shoelace/*`, `/brand/*` (in-memory decoded `data:` branding assets served with a sandboxed `Content-Security-Policy` and `X-Content-Type-Options: nosniff`), and the exact root-level files shipped in `web/public/` (`/apple-touch-icon.png`, `/favicon.ico`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/icon-maskable-512.png`, `/manifest.webmanifest`, and `/scion-notification-icon.png`) skip the web session check so the sign-in page, favicons, and maintenance pages can render. `/manifest.webmanifest` is rendered dynamically from the Hub's active [`server.hub.branding`](/scion/hosted/single-node/branding/) settings (emitting the stock manifest when unconfigured). Every other root-level path (with or without a file extension, including `/robots.txt` and any path containing a backslash) requires a session, redirecting browsers to the sign-in page and returning `401` to other clients.
 
 ### CLI OAuth Setup
 
