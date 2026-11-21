@@ -116,9 +116,10 @@ var execAuditFileAllowlist = map[string]string{
 // execAuditRiskyPackageDirs flags but that has no entry here at all is
 // treated as "nothing from it is allowed yet" rather than silently passing.
 var execAuditSymbolAllowlist = map[string]map[string]bool{
-	// init.go's only uses of pkg/util: NormalizeGitRemote/ClassifyGitError
-	// are pure string/error-classification functions, and GitErrAuth is an
-	// error-kind constant compared against — none call exec.Cmd. GetHomeDir
+	// init.go's only uses of pkg/util: NormalizeGitRemote/ClassifyGitError/
+	// ClassifyGitErrorForURL are pure string/error-classification functions,
+	// and GitErrAuth is an error-kind constant compared against — none call
+	// exec.Cmd. GetHomeDir
 	// (used by pkg/sciontool/substrate for the agent-home convention) is a
 	// pure string/path join with no exec.Cmd involved either. ParseBoolEnv
 	// (pkg/util/env.go, the shared bool-env parser used by init.go and
@@ -129,7 +130,7 @@ var execAuditSymbolAllowlist = map[string]map[string]bool{
 	// fresh []string of `-c` config arguments and makes no exec.Cmd call and does
 	// no I/O; pkg/provision/host_git.go's HostCloneGitArgs delegates to it (the K1
 	// consolidation), so that pure symbol is allowed here too.
-	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true, "GetHomeDir": true, "ParseBoolEnv": true, "HostGitArgs": true},
+	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "ClassifyGitErrorForURL": true, "GitErrAuth": true, "GetHomeDir": true, "ParseBoolEnv": true, "HostGitArgs": true},
 	// init.go's uses of pkg/provision: GitTokenCredentialHelper is a
 	// string constant (the git credential helper value it writes to the
 	// agent's gitconfig); no exec.Cmd is reachable through it.
