@@ -90,7 +90,7 @@ export class ScionBackLink extends LitElement {
     }
 
     :host([truncate]) .label {
-      max-width: var(--scion-back-link-max-width, 24ch);
+      max-width: 24ch;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
