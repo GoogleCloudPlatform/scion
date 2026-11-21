@@ -355,11 +355,16 @@ func hubDefaultPassthrough(in startContextInputs) bool {
 }
 
 // resolveCloudRunIdentity resolves the service account a Cloud Run instance
-// runs as when the hub sent the hub.cloudrun_native_identity experiment. It
-// returns the zero value and no error for any other dispatch: another
-// runtime, or the experiment off.
+// runs as. For a flat Cloud Run Runtime Broker instance it delegates
+// immediately to flatCloudRunIdentityCheck(in), which resolves unset, block,
+// assign, and explicit passthrough from the flat instance's snapshotted
+// runtime_target settings without checking hub.cloudrun_native_identity. For a
+// legacy broker it runs when the hub sent the hub.cloudrun_native_identity
+// experiment, and returns the zero value and no error for any other dispatch:
+// another runtime, or the experiment off.
 //
-// GCP identity mode "assign" runs the instance as the assigned account:
+// On a legacy broker, GCP identity mode "assign" runs the instance as the
+// assigned account:
 //   - the account comes only from the hub's dispatch: the create request's
 //     GCPIdentity, or on start and restart the resolved env, accepted only
 //     when the resolved env itself carries SCION_METADATA_MODE=assign and
@@ -383,10 +388,10 @@ func hubDefaultPassthrough(in startContextInputs) bool {
 // RequireLocalRuntime flag, are refused (cloudRunPassthroughRefusal).
 //
 // A project's own settings.yaml value for either setting is ignored with a
-// warning. A flat Runtime Broker instance and a runtime entry whose
-// effective type in the global settings is cloudrun-instances have neither
-// setting, so assign and block are refused there with their own message.
-// Every refusal names the agent and never an account or the list.
+// warning. A legacy runtime entry whose effective type in the global settings
+// is cloudrun-instances has neither setting, so assign and block are refused
+// there with their own message. Every refusal names the agent and never an
+// account or the list.
 //
 // On a create the mode, the account and the marker come from the create
 // request's GCPIdentity (the mode through gcpMetadataMode). On a start or
