@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -858,6 +859,9 @@ func TestHandleAdminRestart_LegacySudo(t *testing.T) {
 	})
 
 	t.Run("hanging subprocess is terminated on timeout", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("sudo stub is a POSIX shell script")
+		}
 		srv, _ := newTestServerWithStore(t)
 		srv.legacyRestartTimeout = 100 * time.Millisecond
 
@@ -892,6 +896,9 @@ func TestHandleAdminRestart_LegacySudo(t *testing.T) {
 	})
 
 	t.Run("logs bounded stderr server-side without leaking to client", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("sudo stub is a POSIX shell script")
+		}
 		srv, _ := newTestServerWithStore(t)
 		var logBuf bytes.Buffer
 		srv.maintenanceLog = slog.New(slog.NewJSONHandler(&logBuf, nil))
