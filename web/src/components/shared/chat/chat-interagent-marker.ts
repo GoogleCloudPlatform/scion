@@ -22,12 +22,14 @@
  * default, it shows "(n agent-agent messages)". On expand it displays the
  * individual messages in a compact sender->recipient format.
  *
- * Messages are passed directly via the `.messages` property (no lazy loading).
+ * Preview rows are passed via `.messages`; server-truncated bodies are fetched
+ * on demand when the user opens the full-message dialog.
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
@@ -62,6 +64,10 @@ export class ScionChatInteragentMarker extends LitElement {
   @property({ type: String, attribute: 'current-project-id' })
   currentProjectId = '';
 
+  /** DM conversation key used to load a truncated message's full body on demand. */
+  @property({ type: String, attribute: 'conversation-key' })
+  conversationKey = '';
+
   /** Whether this marker is hidden (eye toggle off). */
   @property({ type: Boolean, reflect: true })
   override hidden = false;
@@ -77,9 +83,23 @@ export class ScionChatInteragentMarker extends LitElement {
   @state()
   private expandedContent: HTMLElement | null = null;
 
+  /** True while the full body for a server-truncated message is loading. */
+  @state()
+  private loadingFullMessage = false;
+
+  /** True when on-demand full-message fetch failed. */
+  @state()
+  private fullMessageLoadFailed = false;
+
   /** Set of message IDs whose `.ia-body` is truncated by the line clamp. */
   @state()
   private truncatedIds: ReadonlySet<string> = new Set();
+
+  /** Per-component cache of fetched full message bodies keyed by message ID. */
+  private readonly fullMessageCache = new Map<string, string>();
+
+  /** Sequence token used to discard out-of-date full-message responses. */
+  private previewRequestSeq = 0;
 
   static override styles = [
     chatDateDividerStyles,
@@ -279,10 +299,26 @@ export class ScionChatInteragentMarker extends LitElement {
         line-height: 1.6;
         color: var(--scion-text, #1e293b);
       }
+
+      .ia-full-preview .ia-full-status,
+      .ia-full-preview .ia-full-error {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-top: 0.75rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+      }
     `,
   ];
 
   override updated(changed: Map<string, unknown>): void {
+    if (changed.has('conversationKey')) {
+      const prevKey = changed.get('conversationKey') as string | undefined;
+      if (prevKey !== undefined && prevKey !== this.conversationKey) {
+        this.fullMessageCache.clear();
+      }
+    }
     // React to global expand/collapse toggle changes.
     if (changed.has('globalExpanded')) {
       const wasGlobal = changed.get('globalExpanded') as boolean | undefined;
@@ -350,33 +386,92 @@ export class ScionChatInteragentMarker extends LitElement {
     });
   }
 
+  private async renderMarkdownBody(text: string): Promise<HTMLElement | null> {
+    try {
+      const renderer = await getMarkdownRenderer();
+      const fragment = renderer.renderFragment(text);
+      if (fragment.hasChildNodes()) {
+        const content = document.createElement('div');
+        content.className = 'ia-full-body';
+        content.append(fragment);
+        return content;
+      }
+    } catch {
+      // Fall back to plain text rendering.
+    }
+    return null;
+  }
+
   /** Open the full-content popover for a message. */
   private async openMessagePreview(msg: Message, e: Event): Promise<void> {
     e.stopPropagation(); // Don't toggle the marker collapse.
-    // Await markdown rendering first, then set both expandedContent and
-    // expandedMessage in the same microtask so Lit batches into one render,
-    // avoiding a content flash from plain text to rendered HTML.
-    let content: HTMLElement | null = null;
-    try {
-      const renderer = await getMarkdownRenderer();
-      const fragment = renderer.renderFragment(msg.msg);
-      if (fragment.hasChildNodes()) {
-        content = document.createElement('div');
-        content.className = 'ia-full-body';
-        content.append(fragment);
-      }
-    } catch {
-      content = null;
+    const seq = ++this.previewRequestSeq;
+    const cached = this.fullMessageCache.get(msg.id);
+
+    if (!msg.msgTruncated || cached !== undefined) {
+      const body = cached ?? msg.msg;
+      const content = await this.renderMarkdownBody(body);
+      if (seq !== this.previewRequestSeq) return;
+      this.loadingFullMessage = false;
+      this.fullMessageLoadFailed = false;
+      this.expandedContent = content;
+      this.expandedMessage =
+        cached !== undefined ? { ...msg, msg: cached, msgTruncated: false } : msg;
+      return;
     }
-    this.expandedContent = content;
+
+    // Open the dialog immediately with the preview and a spinner while loading.
+    this.expandedContent = null;
     this.expandedMessage = msg;
+    this.loadingFullMessage = true;
+    this.fullMessageLoadFailed = false;
+
+    if (!this.conversationKey) {
+      this.loadingFullMessage = false;
+      this.fullMessageLoadFailed = true;
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams({ messageId: msg.id });
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/interagent?${params.toString()}`,
+        { suppressAccessDeniedToast: true }
+      );
+      if (seq !== this.previewRequestSeq) return;
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { messages?: Message[] };
+      if (seq !== this.previewRequestSeq) return;
+      const full = data?.messages?.[0];
+      if (!full || typeof full.msg !== 'string') {
+        throw new Error('Missing full message');
+      }
+      this.fullMessageCache.set(msg.id, full.msg);
+      const content = await this.renderMarkdownBody(full.msg);
+      if (seq !== this.previewRequestSeq) return;
+      this.expandedContent = content;
+      this.expandedMessage = { ...msg, msg: full.msg, msgTruncated: false };
+      this.loadingFullMessage = false;
+    } catch {
+      if (seq !== this.previewRequestSeq) return;
+      const previewContent = await this.renderMarkdownBody(msg.msg);
+      if (seq !== this.previewRequestSeq) return;
+      this.expandedContent = previewContent;
+      this.loadingFullMessage = false;
+      this.fullMessageLoadFailed = true;
+    }
   }
 
   /** Close the message popover. */
   private closeMessagePreview(e: Event): void {
     if (e.target === e.currentTarget) {
+      this.previewRequestSeq++;
       this.expandedMessage = null;
       this.expandedContent = null;
+      this.loadingFullMessage = false;
+      this.fullMessageLoadFailed = false;
     }
   }
 
@@ -419,7 +514,7 @@ export class ScionChatInteragentMarker extends LitElement {
                 cross-project
               </span>`
             : nothing}
-          ${this.truncatedIds.has(m.id)
+          ${this.truncatedIds.has(m.id) || Boolean(m.msgTruncated)
             ? html`
                 <span class="ia-expand">
                   <sl-icon-button
@@ -463,6 +558,15 @@ export class ScionChatInteragentMarker extends LitElement {
             : nothing}
         </div>
         ${this.expandedContent ?? html`<div class="ia-full-body-plain">${msg.msg}</div>`}
+        ${this.loadingFullMessage
+          ? html`<div class="ia-full-status" role="status">
+              <sl-spinner></sl-spinner>
+              <span>Loading full message&hellip;</span>
+            </div>`
+          : nothing}
+        ${this.fullMessageLoadFailed
+          ? html`<div class="ia-full-error" role="status">Couldn't load full message</div>`
+          : nothing}
       </sl-dialog>
     `;
   }

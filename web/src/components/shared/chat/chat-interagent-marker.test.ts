@@ -5,6 +5,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 
+const apiFetchMock = vi.fn();
+
+vi.mock('../../../client/api.js', () => ({
+  apiFetch: (...args: unknown[]) => apiFetchMock(...args),
+}));
+
 vi.mock('../../../utils/markdown.js', () => {
   const render = (markdown: string): string => `<p>${markdown}</p>`;
   return {
@@ -43,6 +49,7 @@ function makeMessage(overrides: Partial<Message> = {}): Message {
 describe('scion-chat-interagent-marker', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
+    apiFetchMock.mockReset();
   });
 
   afterEach(() => {
@@ -248,5 +255,209 @@ describe('scion-chat-interagent-marker', () => {
     } finally {
       setPreferredTimeZone('');
     }
+  });
+
+  it('shows expand icon for msgTruncated without DOM overflow', async () => {
+    const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+    el.messageCount = 2;
+    el.messages = [
+      makeMessage({ id: 'msg-trunc', msg: 'Preview text...', msgTruncated: true }),
+      makeMessage({ id: 'msg-short', msg: 'Short text' }),
+    ];
+    el.expanded = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const rows = el.shadowRoot?.querySelectorAll('.ia-msg');
+    expect(rows?.length).toBe(2);
+    expect(rows?.[0].querySelector('.ia-expand sl-icon-button')).toBeTruthy();
+    expect(rows?.[1].querySelector('.ia-expand sl-icon-button')).toBeNull();
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('fetches full message on expand click only, showing preview + spinner first, then caches on reopen', async () => {
+    let resolveFetch!: (res: Response) => void;
+    apiFetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+    el.setAttribute('conversation-key', 'dm:agent:agent-alpha-id:user:user-1');
+    el.messageCount = 1;
+    el.messages = [
+      makeMessage({
+        id: 'msg-trunc-1',
+        msg: 'Truncated preview...',
+        msgTruncated: true,
+      }),
+    ];
+    el.expanded = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    // Expanding the pill must not fetch full bodies.
+    expect(apiFetchMock).not.toHaveBeenCalled();
+
+    const expandBtn = el.shadowRoot?.querySelector(
+      '.ia-expand sl-icon-button'
+    ) as HTMLElement | null;
+    expect(expandBtn).toBeTruthy();
+    expandBtn!.click();
+    await el.updateComplete;
+
+    // Dialog opens immediately with preview + spinner while fetch is in flight.
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/conversations/dm%3Aagent%3Aagent-alpha-id%3Auser%3Auser-1/interagent?messageId=msg-trunc-1',
+      { suppressAccessDeniedToast: true }
+    );
+    const dialog = el.shadowRoot?.querySelector('sl-dialog.ia-full-preview');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain('Truncated preview...');
+    expect(dialog?.querySelector('sl-spinner')).toBeTruthy();
+
+    // Resolve full body response.
+    resolveFetch(
+      new Response(
+        JSON.stringify({
+          messages: [
+            makeMessage({
+              id: 'msg-trunc-1',
+              msg: 'Full markdown body content',
+              msgTruncated: false,
+            }),
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      expect(el.shadowRoot?.querySelector('.ia-full-body')?.textContent).toBe(
+        'Full markdown body content'
+      );
+    });
+    expect(el.shadowRoot?.querySelector('sl-dialog sl-spinner')).toBeNull();
+
+    // Close the dialog and reopen the same message -> served from cache without refetching.
+    const slDialog = el.shadowRoot?.querySelector('sl-dialog.ia-full-preview') as HTMLElement;
+    slDialog.dispatchEvent(new CustomEvent('sl-after-hide', { bubbles: false }));
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('sl-dialog.ia-full-preview')).toBeNull();
+
+    expandBtn!.click();
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      expect(el.shadowRoot?.querySelector('.ia-full-body')?.textContent).toBe(
+        'Full markdown body content'
+      );
+    });
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows preview with fallback note on 403/404 failure without refetching toast', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { code: 'NOT_FOUND', message: 'not found' } }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+    el.setAttribute('conversation-key', 'dm:agent:agent-alpha-id:user:user-1');
+    el.messageCount = 1;
+    el.messages = [
+      makeMessage({
+        id: 'msg-missing',
+        msg: 'Saved preview text...',
+        msgTruncated: true,
+      }),
+    ];
+    el.expanded = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const expandBtn = el.shadowRoot?.querySelector('.ia-expand sl-icon-button') as HTMLElement;
+    expandBtn.click();
+
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      const dialogText =
+        el.shadowRoot?.querySelector('sl-dialog.ia-full-preview')?.textContent ?? '';
+      expect(dialogText).toContain("Couldn't load full message");
+      expect(dialogText).toContain('Saved preview text...');
+    });
+    expect(el.shadowRoot?.querySelector('sl-dialog sl-spinner')).toBeNull();
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/conversations/dm%3Aagent%3Aagent-alpha-id%3Auser%3Auser-1/interagent?messageId=msg-missing',
+      { suppressAccessDeniedToast: true }
+    );
+  });
+
+  it('drops stale full-message response if dialog closed or switched to another message', async () => {
+    let resolveFirst!: (res: Response) => void;
+    let resolveSecond!: (res: Response) => void;
+    apiFetchMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          })
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSecond = resolve;
+          })
+      );
+
+    const el = document.createElement('scion-chat-interagent-marker') as ScionChatInteragentMarker;
+    el.setAttribute('conversation-key', 'dm:agent:agent-alpha-id:user:user-1');
+    el.messageCount = 2;
+    el.messages = [
+      makeMessage({ id: 'msg-1', msg: 'Preview 1...', msgTruncated: true }),
+      makeMessage({ id: 'msg-2', msg: 'Preview 2...', msgTruncated: true }),
+    ];
+    el.expanded = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const buttons = el.shadowRoot?.querySelectorAll('.ia-expand sl-icon-button');
+    expect(buttons?.length).toBe(2);
+
+    // Open msg-1, then switch to msg-2 before msg-1 resolves.
+    (buttons![0] as HTMLElement).click();
+    await el.updateComplete;
+    (buttons![1] as HTMLElement).click();
+    await el.updateComplete;
+
+    resolveSecond(
+      new Response(
+        JSON.stringify({
+          messages: [makeMessage({ id: 'msg-2', msg: 'Full body 2', msgTruncated: false })],
+        }),
+        { status: 200 }
+      )
+    );
+    await vi.waitFor(async () => {
+      await el.updateComplete;
+      expect(el.shadowRoot?.querySelector('.ia-full-body')?.textContent).toBe('Full body 2');
+    });
+
+    // Late resolution of msg-1 must not overwrite msg-2 in the dialog.
+    resolveFirst(
+      new Response(
+        JSON.stringify({
+          messages: [makeMessage({ id: 'msg-1', msg: 'Stale full body 1', msgTruncated: false })],
+        }),
+        { status: 200 }
+      )
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.ia-full-body')?.textContent).toBe('Full body 2');
   });
 });
