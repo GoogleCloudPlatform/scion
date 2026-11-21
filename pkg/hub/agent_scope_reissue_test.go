@@ -410,12 +410,13 @@ func TestScopeReissue_T4_PerScopeWithhold(t *testing.T) {
 	t.Cleanup(func() { reissueLiveCheckFault = prev })
 
 	resp := f.run(t, f.child, false)
-	assert.Equal(t, []string{string(ScopeProjectArtifactRead)}, resp.Added)
+	assert.Equal(t, []string{string(ScopeProjectArtifactRead), string(ScopeProjectSkillWrite)}, resp.Added)
 	assert.Contains(t, resp.Withheld, reissueWithheldScope{Scope: string(ScopeProjectArtifactWrite), Cause: reissueWithheldLookup})
 	assert.NotContains(t, f.activeEdge(t, f.child).PermissionIDs, "artifact.create")
 
 	after := f.grant(t, f.child)
 	assert.Contains(t, scopeStrings(after), string(ScopeProjectArtifactRead))
+	assert.Contains(t, scopeStrings(after), string(ScopeProjectSkillWrite))
 	assert.NotContains(t, scopeStrings(after), string(ScopeProjectArtifactWrite), "refresh issues the re-issued set")
 }
 

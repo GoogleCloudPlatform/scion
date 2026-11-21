@@ -292,12 +292,12 @@ func TestPreArtifactAgentParentChildHasNoArtifactAccess(t *testing.T) {
 	require.Contains(t, parentScopes, ScopeAgentCreate)
 	require.NotContains(t, parentScopes, ScopeProjectArtifactRead, "the parent's own token lacks the read scope")
 
-	// Both create responses warn that the artifact scopes were left out
-	// (ptone/scion#4569).
-	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	// Both create responses warn that the ceiling-optional scopes were left
+	// out (ptone/scion#4569).
+	assertDroppedScopesWarning(t, parentRec, "artifact-parent", ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
 	childRec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "artifact-child"})
 	child, childEdge := f.createdAgent(t, childRec, "artifact-child")
-	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
+	assertDroppedScopesWarning(t, childRec, "artifact-child", ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite)
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.read")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.create")
 	assert.NotContains(t, childEdge.PermissionIDs, "artifact.update")
@@ -354,6 +354,17 @@ func TestDroppedScopesWarningText(t *testing.T) {
 	assert.Contains(t, nonArtifact, "'scion reset-auth worker-4 --reissue-scopes'")
 	assert.NotContains(t, strings.ToLower(nonArtifact), "artifact", "warning text must be generic across scopes")
 
+	skillOnly := droppedScopesWarning(&store.Agent{Slug: "worker-skill"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite}})
+	assert.Contains(t, skillOnly, "without the project:skill:write scope:")
+	assert.Contains(t, skillOnly, "does not allow it, so operations requiring it will fail with missing_scope")
+	assert.NotContains(t, strings.ToLower(skillOnly), "artifact")
+	assert.Contains(t, skillOnly, "'scion reset-auth worker-skill --reissue-scopes'")
+
+	combined := droppedScopesWarning(&store.Agent{Slug: "worker-all"},
+		&AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
+	assert.Contains(t, combined, "without the project:skill:write and project:artifact:read and project:artifact:write scopes:")
+	assert.Contains(t, combined, "so operations requiring them will fail with missing_scope")
+
 	slugged := droppedScopesWarning(&store.Agent{Slug: "worker-3", Name: "Worker 3 (docs site)"}, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactWrite}})
 	assert.Contains(t, slugged, "'scion reset-auth worker-3 --reissue-scopes'")
 	assert.NotContains(t, slugged, "Worker 3")
@@ -383,7 +394,7 @@ func TestMintWarnsWhenCeilingDropsArtifactScopes(t *testing.T) {
 	f := newMintFixture(t, "drop-warn")
 	capped := f.agent(t, "drop-warn-capped", AgentRoleBaseline, state.PhaseStopped)
 	f.edge(t, store.DelegationPrincipalUser, f.userID, capped.ID, preArtifactReadCeiling(), provSession)
-	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
+	want := droppedScopesWarning(capped, &AgentTokenGrant{DroppedScopes: []AgentTokenScope{ScopeProjectSkillWrite, ScopeProjectArtifactRead, ScopeProjectArtifactWrite}})
 
 	for name, dispatch := range map[string]func(context.Context) error{
 		"create": func(ctx context.Context) error {
