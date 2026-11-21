@@ -532,7 +532,11 @@ func devUserContext(ctx context.Context) context.Context {
 
 func agentCreateContext(t *testing.T, srv *Server, projectID string) context.Context {
 	t.Helper()
-	tok, err := srv.agentTokenService.GenerateAgentToken(tid("nf-caller-agent"), projectID, []AgentTokenScope{ScopeAgentCreate}, nil)
+	tok, _, err := srv.agentTokenService.SignAgentToken(AgentTokenGrant{
+		AgentID:   tid("nf-caller-agent"),
+		ProjectID: projectID,
+		Scopes:    []AgentTokenScope{ScopeAgentCreate},
+	}, "")
 	require.NoError(t, err)
 	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
 	require.NoError(t, err)
