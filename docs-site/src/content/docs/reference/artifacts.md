@@ -204,6 +204,7 @@ scion://artifact/5f1c2d3e-...  (v3, review)
 A review (v3, by a user) was published on your artifact; it is now the current version.
 Artifact: v3 - scion artifact get scion://artifact/5f1c2d3e-...@3
 Without the marks: scion artifact get scion://artifact/5f1c2d3e-...@3 --clean
+Review comments: scion artifact comments scion://artifact/5f1c2d3e-...@3
 Apply or answer the marks, then publish the result as the next version: scion artifact publish <file> --version-of scion://artifact/5f1c2d3e-...
 ```
 

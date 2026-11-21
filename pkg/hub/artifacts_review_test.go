@@ -137,7 +137,7 @@ func TestArtifactsReviewOnRoutes(t *testing.T) {
 	ref := artifacts.FormatRef(id, 3)
 	assert.Contains(t, m.Msg, "A review (v3, by a user) was published")
 	assert.Contains(t, m.Msg, "Artifact: v3 - scion artifact get "+ref)
-	assert.Contains(t, m.Msg, ref+" --clean")
+	assert.Contains(t, m.Msg, "Without the marks: scion artifact get "+ref+" --clean\nReview comments: scion artifact comments "+ref+"\n")
 	assert.Contains(t, m.Msg, "scion artifact publish <file> --version-of "+artifacts.FormatRef(id, 0))
 	assert.False(t, strings.Contains(m.Msg, reviewer.Email) || strings.Contains(m.Msg, reviewer.ID), "the notice names no reviewer identity")
 }
