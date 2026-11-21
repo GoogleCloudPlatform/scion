@@ -102,11 +102,12 @@ func (c *collectedDir) agentConfigManifest() []store.TemplateFile {
 	return files
 }
 
-// harnessConfigYAML returns the collected config.yaml. present is false when
-// collection recorded no config.yaml. A file too large to parse is returned
-// as present with no content (derived as unparsable), as before.
-func (c *collectedDir) harnessConfigYAML() ([]byte, bool, error) {
-	fi, ok := c.byPath[harnessConfigYAMLPath]
+// harnessConfigFile returns the collected top-level harness-config file p
+// (e.g. config.yaml or agent-plugins.yaml). present is false when collection
+// recorded no entry at p. A file larger than maxHarnessConfigFileSize is
+// returned as present with nil content.
+func (c *collectedDir) harnessConfigFile(p string) ([]byte, bool, error) {
+	fi, ok := c.byPath[p]
 	if !ok {
 		return nil, false, nil
 	}
@@ -118,6 +119,13 @@ func (c *collectedDir) harnessConfigYAML() ([]byte, bool, error) {
 		return nil, false, err
 	}
 	return data, true, nil
+}
+
+// harnessConfigYAML returns the collected config.yaml. present is false when
+// collection recorded no config.yaml. A file too large to parse is returned
+// as present with no content (derived as unparsable), as before.
+func (c *collectedDir) harnessConfigYAML() ([]byte, bool, error) {
+	return c.harnessConfigFile(harnessConfigYAMLPath)
 }
 
 // subdirs returns the names of the immediate subdirectories of the slash

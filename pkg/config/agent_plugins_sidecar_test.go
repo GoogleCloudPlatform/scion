@@ -325,3 +325,60 @@ func TestUpgradeHarnessConfig_AgentPluginsSidecar(t *testing.T) {
 		})
 	}
 }
+
+func TestDeclaredCapabilities(t *testing.T) {
+	t.Run("nil when neither config capabilities nor sidecar declared", func(t *testing.T) {
+		entry := HarnessConfigEntry{Harness: "codex"}
+		if got := entry.DeclaredCapabilities(); got != nil {
+			t.Fatalf("DeclaredCapabilities() = %+v, want nil", got)
+		}
+	})
+
+	t.Run("nil when config capabilities block has only empty fields", func(t *testing.T) {
+		entry := HarnessConfigEntry{Harness: "codex", Capabilities: &api.HarnessAdvancedCapabilities{}}
+		if got := entry.DeclaredCapabilities(); got != nil {
+			t.Fatalf("DeclaredCapabilities() = %+v, want nil", got)
+		}
+	})
+
+	t.Run("sidecar only returns agent_plugins without mutating entry.Capabilities", func(t *testing.T) {
+		var entry HarnessConfigEntry
+		entry.Harness = "codex"
+		ApplyAgentPluginsSidecarBytes(&entry, []byte("support: \"partial\"\nreason: marketplace\n"), "codex/agent-plugins.yaml")
+		got := entry.DeclaredCapabilities()
+		if got == nil {
+			t.Fatal("DeclaredCapabilities() = nil, want non-nil")
+		}
+		if entry.Capabilities != nil {
+			t.Fatalf("entry.Capabilities mutated: %+v", entry.Capabilities)
+		}
+		if got.Harness != "codex" {
+			t.Errorf("Harness = %q, want codex", got.Harness)
+		}
+		want := api.CapabilityField{Support: api.SupportPartial, Reason: "marketplace"}
+		if got.AgentPlugins != want {
+			t.Errorf("AgentPlugins = %+v, want %+v", got.AgentPlugins, want)
+		}
+	})
+
+	t.Run("combines config.yaml capabilities with sidecar agent_plugins", func(t *testing.T) {
+		entry := HarnessConfigEntry{
+			Harness: "claude",
+			Capabilities: &api.HarnessAdvancedCapabilities{
+				Resume:       api.CapabilityField{Support: api.SupportYes},
+				AgentPlugins: api.CapabilityField{Support: api.SupportNo, Reason: "legacy"},
+			},
+		}
+		ApplyAgentPluginsSidecarBytes(&entry, []byte("support: \"yes\"\n"), "claude/agent-plugins.yaml")
+		got := entry.DeclaredCapabilities()
+		if got == nil {
+			t.Fatal("DeclaredCapabilities() = nil, want non-nil")
+		}
+		if got.Resume.Support != api.SupportYes {
+			t.Errorf("Resume = %+v, want yes", got.Resume)
+		}
+		if got.AgentPlugins != (api.CapabilityField{Support: api.SupportYes}) {
+			t.Errorf("AgentPlugins = %+v, want yes from sidecar", got.AgentPlugins)
+		}
+	})
+}
