@@ -135,6 +135,23 @@ func setupMetadataBlock() (blockMethod, error) {
 	return blockNone, fmt.Errorf("metadata blocking failed: iptables: %v", err)
 }
 
+// InstallInterceptionRules installs the iptables rules for metadata
+// interception in the current network namespace: a nat OUTPUT REDIRECT
+// to port, plus a filter OUTPUT REJECT for every mode other than assign.
+// Intended for the runtime's short-lived netns-setup container.
+func InstallInterceptionRules(mode string, port int) error {
+	if err := runSetupIPTablesRedirect(port); err != nil {
+		return fmt.Errorf("%w: redirect: %v", ErrInterceptionUnavailable, err)
+	}
+	if mode == modeAssign {
+		return nil
+	}
+	if _, err := runSetupMetadataBlock(); err != nil {
+		return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
+	}
+	return nil
+}
+
 // cleanupMetadataBlock removes the metadata block installed by setupMetadataBlock.
 func cleanupMetadataBlock(method blockMethod) {
 	switch method {

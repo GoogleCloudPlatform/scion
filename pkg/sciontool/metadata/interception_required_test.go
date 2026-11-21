@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 )
@@ -106,106 +108,6 @@ func stubInterception(t *testing.T, redirectErr, blockErr error) (redirectCalled
 	return &r, &b
 }
 
-func TestConfigureMetadataInterception_Required(t *testing.T) {
-	failure := errors.New("exit status 4")
-	tests := []struct {
-		name        string
-		mode        string
-		networkMode string
-		uid         int
-		required    bool
-		redirectErr error
-		blockErr    error
-		wantErr     bool
-		wantBlock   bool
-	}{
-		{name: "required block all in place", mode: modeBlock, required: true, wantBlock: true},
-		{name: "required assign redirect in place", mode: modeAssign, required: true},
-		{name: "required block redirect fails", mode: modeBlock, required: true, redirectErr: failure, wantErr: true},
-		{name: "required assign redirect fails", mode: modeAssign, required: true, redirectErr: failure, wantErr: true},
-		{name: "required block filter rule fails", mode: modeBlock, required: true, blockErr: failure, wantErr: true, wantBlock: true},
-		{name: "required non-root", mode: modeBlock, uid: 1000, required: true, wantErr: true},
-		{name: "required host network", mode: modeBlock, networkMode: "host", required: true, wantErr: true},
-		{name: "not required redirect fails", mode: modeBlock, redirectErr: failure, wantBlock: true},
-		{name: "not required filter rule fails", mode: modeBlock, blockErr: failure, wantBlock: true},
-		{name: "not required non-root", mode: modeAssign, uid: 1000},
-		{name: "not required host network", mode: modeBlock, networkMode: "host"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			redirectCalled, blockCalled := stubInterception(t, tt.redirectErr, tt.blockErr)
-			s := New(Config{Mode: tt.mode, NetworkMode: tt.networkMode, InterceptionRequired: tt.required, Port: 18380})
-			err := s.configureMetadataInterception(tt.uid)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("configureMetadataInterception() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if err != nil && !errors.Is(err, ErrInterceptionUnavailable) {
-				t.Errorf("error %v is not ErrInterceptionUnavailable", err)
-			}
-			attempted := tt.uid == 0 && tt.networkMode != "host"
-			if *redirectCalled != attempted {
-				t.Errorf("redirect attempted = %v, want %v", *redirectCalled, attempted)
-			}
-			if *blockCalled != tt.wantBlock {
-				t.Errorf("filter rule attempted = %v, want %v", *blockCalled, tt.wantBlock)
-			}
-		})
-	}
-}
-
-// TestStart_InterceptionRequiredUnavailable_ReleasesPort checks that a Start
-// that fails on a required interception returns ErrInterceptionUnavailable
-// and leaves no listener behind. The redirect is stubbed to fail, so the
-// result is the same whether or not the test process is root.
-func TestStart_InterceptionRequiredUnavailable_ReleasesPort(t *testing.T) {
-	stubInterception(t, errors.New("exit status 4"), nil)
-	port := freePort(t)
-	s := New(Config{Mode: modeBlock, Port: port, ProjectID: "test-project", InterceptionRequired: true})
-	err := s.Start(context.Background())
-	if !errors.Is(err, ErrInterceptionUnavailable) {
-		t.Fatalf("Start() error = %v, want ErrInterceptionUnavailable", err)
-	}
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		t.Fatalf("port %d still held after the failed Start: %v", port, err)
-	}
-	_ = ln.Close()
-}
-
-// TestInterceptionInstalled pins what init's CAP_NET_ADMIN drop keys its
-// fail-closed decision on: true once any rule is in place, false when
-// interception was skipped or nothing could be installed.
-func TestInterceptionInstalled(t *testing.T) {
-	failure := errors.New("exit status 4")
-	tests := []struct {
-		name                  string
-		mode                  string
-		networkMode           string
-		uid                   int
-		redirectErr, blockErr error
-		want                  bool
-	}{
-		{name: "assign redirect", mode: modeAssign, want: true},
-		{name: "assign redirect fails", mode: modeAssign, redirectErr: failure, want: false},
-		{name: "block both", mode: modeBlock, want: true},
-		{name: "block redirect fails, filter in place", mode: modeBlock, redirectErr: failure, want: true},
-		{name: "block filter fails, redirect in place", mode: modeBlock, blockErr: failure, want: true},
-		{name: "block both fail", mode: modeBlock, redirectErr: failure, blockErr: failure, want: false},
-		{name: "non-root skipped", mode: modeAssign, uid: 1000, want: false},
-		{name: "host network skipped", mode: modeBlock, networkMode: "host", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stubInterception(t, tt.redirectErr, tt.blockErr)
-			s := New(Config{Mode: tt.mode, NetworkMode: tt.networkMode, Port: 18380})
-			_ = s.configureMetadataInterception(tt.uid)
-			if got := s.InterceptionInstalled(); got != tt.want {
-				t.Errorf("InterceptionInstalled() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestStop_Idempotent: sciontool init stops the server from a deferred call
 // on every return path and again on normal shutdown, so a second Stop on a
 // started server, and Stop on a server that never started, must be safe and
@@ -233,6 +135,18 @@ func TestStop_Idempotent(t *testing.T) {
 		s.Stop()
 		s.Stop()
 	})
+}
+
+// freePort returns an available loopback TCP port.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	_ = l.Close()
+	return port
 }
 
 // portFree reports whether 127.0.0.1:port can be bound right now.
@@ -281,9 +195,6 @@ func TestStart_AfterStop(t *testing.T) {
 	if *redirectCalled || *blockCalled {
 		t.Errorf("interception attempted on a stopped server (redirect %v, block %v)", *redirectCalled, *blockCalled)
 	}
-	if s.InterceptionInstalled() {
-		t.Error("interception installed on a stopped server")
-	}
 	if !portFree(t, port) {
 		t.Fatalf("port %d bound by Start on a stopped server", port)
 	}
@@ -291,8 +202,7 @@ func TestStart_AfterStop(t *testing.T) {
 
 // TestStart_StopBeforeServe_Backstop: a Stop that lands after Start's entry
 // check but before it installs the server (forced here through
-// startBeforeServeHook) makes Start refuse, release the port and remove
-// any interception it installed.
+// startBeforeServeHook) makes Start refuse and release the port.
 func TestStart_StopBeforeServe_Backstop(t *testing.T) {
 	stubInterception(t, nil, nil)
 	orig := startBeforeServeHook
@@ -304,10 +214,102 @@ func TestStart_StopBeforeServe_Backstop(t *testing.T) {
 	if err := s.Start(context.Background()); !errors.Is(err, errStartAfterStop) {
 		t.Fatalf("Start with a Stop before serve = %v, want errStartAfterStop", err)
 	}
-	if s.InterceptionInstalled() {
-		t.Error("interception left installed after the backstop refused")
-	}
 	if !portFree(t, port) {
 		t.Fatalf("port %d still bound after the backstop refused", port)
+	}
+}
+
+func TestConfigFromEnv_InterceptionSource(t *testing.T) {
+	t.Setenv("SCION_METADATA_MODE", "block")
+	t.Setenv(InterceptionEnvVar, InterceptionRequired)
+	t.Setenv(InterceptionSourceEnvVar, InterceptionSourceRuntime)
+	cfg := ConfigFromEnv()
+	if cfg == nil {
+		t.Fatal("ConfigFromEnv() = nil")
+	}
+	if !cfg.InterceptionRequired {
+		t.Error("InterceptionRequired = false, want true")
+	}
+	if cfg.InterceptionSource != InterceptionSourceRuntime {
+		t.Errorf("InterceptionSource = %q, want %q", cfg.InterceptionSource, InterceptionSourceRuntime)
+	}
+}
+
+func TestProbeHandler_ExactPathEveryMode(t *testing.T) {
+	for _, mode := range []string{modeAssign, modeBlock, "unknown-coerced"} {
+		t.Run(mode, func(t *testing.T) {
+			s := New(Config{Mode: mode, Port: 18380})
+			path := s.ProbePath()
+			if len(path) != 65 || path[0] != '/' {
+				t.Fatalf("ProbePath() = %q, want leading '/' + 64 hex chars", path)
+			}
+			h := s.buildMux()
+
+			// Exact probe path answers 204 without Metadata-Flavor.
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+			if rec.Code != http.StatusNoContent {
+				t.Errorf("GET %s status = %d, want 204", path, rec.Code)
+			}
+
+			// Other paths do not answer 204.
+			for _, other := range []string{path + "/extra", "/not-the-probe", "/computeMetadata/v1/"} {
+				rec2 := httptest.NewRecorder()
+				h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, other, nil))
+				if rec2.Code == http.StatusNoContent {
+					t.Errorf("GET %s unexpectedly returned 204", other)
+				}
+			}
+		})
+	}
+}
+
+func TestStart_RuntimeSourceSkipsInContainerInterception(t *testing.T) {
+	redirectCalled, blockCalled := stubInterception(t, errors.New("should not run"), errors.New("should not run"))
+	port := freePort(t)
+	s := New(Config{
+		Mode:                 modeBlock,
+		Port:                 port,
+		InterceptionRequired: true,
+		InterceptionSource:   InterceptionSourceRuntime,
+	})
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	t.Cleanup(s.Stop)
+	if *redirectCalled || *blockCalled {
+		t.Errorf("in-container interception ran under runtime source (redirect=%v, block=%v)", *redirectCalled, *blockCalled)
+	}
+}
+
+func TestInstallInterceptionRules(t *testing.T) {
+	failure := errors.New("exit status 4")
+	tests := []struct {
+		name        string
+		mode        string
+		redirectErr error
+		blockErr    error
+		wantErr     bool
+		wantBlock   bool
+	}{
+		{name: "block succeeds", mode: modeBlock, wantBlock: true},
+		{name: "assign succeeds", mode: modeAssign, wantBlock: false},
+		{name: "redirect fails", mode: modeBlock, redirectErr: failure, wantErr: true, wantBlock: false},
+		{name: "filter fails", mode: modeBlock, blockErr: failure, wantErr: true, wantBlock: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			redirectCalled, blockCalled := stubInterception(t, tt.redirectErr, tt.blockErr)
+			err := InstallInterceptionRules(tt.mode, 18380)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("InstallInterceptionRules() = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !*redirectCalled {
+				t.Error("redirect was not called")
+			}
+			if *blockCalled != tt.wantBlock {
+				t.Errorf("block called = %v, want %v", *blockCalled, tt.wantBlock)
+			}
+		})
 	}
 }

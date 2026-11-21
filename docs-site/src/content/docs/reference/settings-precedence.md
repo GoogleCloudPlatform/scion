@@ -596,7 +596,7 @@ The runtimes differ in their own keys and in when they apply resolved-auth env:
 - Docker, Podman and Apple containers set `SCION_HOST_UID`, `SCION_HOST_GID`, `SCION_PROJECT`,
   `SCION_PROJECT_ID` and `SCION_WORKSPACE_BACKEND` before the merged environment, so a
   merged-environment value for one of those names is used. Only the runtime sets
-  `SCION_METADATA_INTERCEPTION` and `SCION_SUPPLEMENTAL_GIDS`; a merged-environment or secret value
+  `SCION_METADATA_INTERCEPTION`, `SCION_METADATA_INTERCEPTION_SOURCE` and `SCION_SUPPLEMENTAL_GIDS`; a merged-environment or secret value
   for them is dropped. These runtimes apply resolved-auth env only when the agent has a harness.
 - Kubernetes sets `SCION_HOST_UID`, `SCION_HOST_GID`, `HOME`, `USER`, `LOGNAME`,
   `SCION_OTEL_GCP_CREDENTIALS` (when a telemetry credential is configured), the NFS-home directory

@@ -195,18 +195,20 @@ func runMetadataStatus() int {
 		}
 	}
 
-	// iptables check (best-effort, requires root). Reading the nat table needs
-	// CAP_NET_ADMIN. When this process cannot use it, the rule cannot be
-	// checked, so report that instead of "not found". Init drops the
-	// capability once network setup is done; some runtimes never grant it,
-	// so not-usable alone does not show which case applies.
+	// iptables check. When the runtime owns network-namespace setup
+	// (SCION_METADATA_INTERCEPTION=required with SOURCE=runtime), the rules
+	// were installed by the short-lived setup container and verified by
+	// sciontool init's redirect probe before the workload started; the agent
+	// container itself has no CAP_NET_ADMIN.
 	fmt.Println("\n=== iptables ===")
-	if metadataStatusGetuid() != 0 {
+	if cfg.InterceptionRequired && cfg.InterceptionSource == metadata.InterceptionSourceRuntime {
+		fmt.Println("[INFO] iptables rules installed by runtime; verified by probe")
+	} else if metadataStatusGetuid() != 0 {
 		fmt.Println("[INFO] Not running as root — skipping iptables check")
 	} else if usable, err := metadataStatusNetAdminUsable(); err != nil {
 		fmt.Printf("[WARN] skipping the iptables check: %v\n", err)
 	} else if !usable {
-		fmt.Printf("[INFO] iptables rule not verifiable: %s is not usable by this process (init drops it once network setup is done)\n", netcap.CapabilityName)
+		fmt.Printf("[INFO] iptables rule not verifiable: %s is not usable by this process\n", netcap.CapabilityName)
 	} else {
 		metadataStatusIPTablesCheck(strconv.Itoa(cfg.Port))
 	}
