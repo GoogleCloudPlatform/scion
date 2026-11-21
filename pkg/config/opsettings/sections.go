@@ -576,6 +576,7 @@ var BrandingKoanfPaths = []string{
 	"server.hub.branding.subtitle",
 	"server.hub.branding.attribution",
 	"server.hub.branding.corners",
+	"server.hub.branding.font_sans",
 	"server.hub.branding.logo",
 	"server.hub.branding.logo.light",
 	"server.hub.branding.logo.dark",

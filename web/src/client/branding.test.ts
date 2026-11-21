@@ -30,7 +30,7 @@ import {
   isCustomBranding,
   shouldShowAttribution,
 } from './branding.js';
-import { buildBrandingCSS, syncBrandingDOM } from './branding-runtime.js';
+import { BRANDING_FONT_SANS_ID, buildBrandingCSS, syncBrandingDOM } from './branding-runtime.js';
 import { getAppName } from './page-title.js';
 
 describe('branding state & runtime DOM sync', () => {
@@ -202,5 +202,95 @@ describe('branding state & runtime DOM sync', () => {
     expect(css).toContain('@media (prefers-color-scheme: dark)');
     expect(css).toContain('--scion-primary: #2dd4bf;');
     expect(css).not.toContain('display: none');
+  });
+
+  it('swaps #scion-brand-font-sans live for curated/custom Google Fonts, omits Inter on system, and restores Inter on reset', () => {
+    document.head.innerHTML = `
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+      <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+      <style id="theme-css-stub">html:root { --scion-font-sans: 'Inter', sans-serif; }</style>
+    `;
+
+    // 1. Curated preset swaps the Inter link in place and leaves JetBrains Mono untouched.
+    syncBrandingDOM({
+      name: 'Scion',
+      shortName: 'Scion',
+      attribution: 'shown',
+      fontSans: 'ibm-plex-sans',
+      themeColor: '#1e293b',
+      cssText:
+        "html:root, :host, .sl-theme-light {\n  --scion-font-sans: 'IBM Plex Sans', sans-serif;\n}\n",
+    });
+
+    const curatedLink = document.getElementById(BRANDING_FONT_SANS_ID) as HTMLLinkElement | null;
+    expect(curatedLink?.getAttribute('href')).toBe(
+      'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap'
+    );
+    expect(document.head.querySelector('link[href*="JetBrains+Mono"]')).not.toBeNull();
+
+    // 2. Arbitrary validated Google Font family updates href with URL encoding.
+    syncBrandingDOM({
+      name: 'Scion',
+      shortName: 'Scion',
+      attribution: 'shown',
+      fontSans: 'Work Sans',
+      themeColor: '#1e293b',
+      cssText:
+        "html:root, :host, .sl-theme-light {\n  --scion-font-sans: 'Work Sans', sans-serif;\n}\n",
+    });
+    expect(
+      (document.getElementById(BRANDING_FONT_SANS_ID) as HTMLLinkElement | null)?.getAttribute(
+        'href'
+      )
+    ).toBe('https://fonts.googleapis.com/css2?family=Work+Sans:wght@400;500;600;700&display=swap');
+
+    // 3. "system" removes the sans Google Font link while preserving JetBrains Mono.
+    syncBrandingDOM({
+      name: 'Scion',
+      shortName: 'Scion',
+      attribution: 'shown',
+      fontSans: 'system',
+      themeColor: '#1e293b',
+      cssText:
+        'html:root, :host, .sl-theme-light {\n  --scion-font-sans: ui-sans-serif, system-ui, sans-serif;\n}\n',
+    });
+    expect(document.getElementById(BRANDING_FONT_SANS_ID)).toBeNull();
+    expect(document.head.querySelector('link[href*="family=Inter"]')).toBeNull();
+    expect(document.head.querySelector('link[href*="JetBrains+Mono"]')).not.toBeNull();
+
+    // 4. Resetting back to stock restores the Inter link before JetBrains Mono.
+    syncBrandingDOM(null);
+    const restored = document.getElementById(BRANDING_FONT_SANS_ID) as HTMLLinkElement | null;
+    expect(restored?.getAttribute('href')).toBe(
+      'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap'
+    );
+    const mono = document.head.querySelector('link[href*="JetBrains+Mono"]');
+    expect(
+      Boolean(
+        restored &&
+        mono &&
+        restored.compareDocumentPosition(mono) & Node.DOCUMENT_POSITION_FOLLOWING
+      )
+    ).toBe(true);
+  });
+
+  it('rejects injection attempts in fontSans during live DOM sync', () => {
+    document.head.innerHTML = `
+      <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    `;
+
+    syncBrandingDOM({
+      name: 'Scion',
+      shortName: 'Scion',
+      attribution: 'shown',
+      fontSans: "Inter'; } body { display: none",
+      themeColor: '#1e293b',
+    });
+
+    const links = document.head.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]');
+    expect(links).toHaveLength(1);
+    expect(links[0].getAttribute('href')).toBe(
+      'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap'
+    );
   });
 });

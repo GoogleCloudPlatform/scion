@@ -31,6 +31,7 @@ func TestBrandingSection_KoanfRoundTripAndValidation(t *testing.T) {
 		"server.hub.branding.short_name":      "Acme",
 		"server.hub.branding.attribution":     "shown",
 		"server.hub.branding.corners":         "square",
+		"server.hub.branding.font_sans":       "ibm-plex-sans",
 		"server.hub.branding.accent_color":    "#0d9488",
 		"server.hub.branding.logo.light":      "https://cdn.example.com/acme.svg",
 		"server.hub.branding.palette.primary": map[string]interface{}{"600": "#0f766e"},
@@ -65,10 +66,29 @@ func TestBrandingSection_KoanfRoundTripAndValidation(t *testing.T) {
 	if got := merged.String("server.hub.branding.corners"); got != "square" {
 		t.Errorf("merged corners = %q, want square", got)
 	}
+	if got := merged.String("server.hub.branding.font_sans"); got != "ibm-plex-sans" {
+		t.Errorf("merged font_sans = %q, want ibm-plex-sans", got)
+	}
 
 	// Invalid corners enum value is rejected by JSON schema.
 	if errs := Validate(BrandingSectionName, json.RawMessage(`{"corners":"pill"}`)); len(errs) == 0 {
 		t.Fatal("Validate should reject unknown corners value pill")
+	}
+
+	// Invalid font_sans (CSS/URL injection characters) is rejected by JSON schema.
+	for _, badFont := range []string{
+		`{"font_sans":"Inter'; } body { display: none"}`,
+		`{"font_sans":"<script>alert(1)</script>"}`,
+		`{"font_sans":"Inter&display=block"}`,
+		`{"font_sans":" leading-space"}`,
+	} {
+		if errs := Validate(BrandingSectionName, json.RawMessage(badFont)); len(errs) == 0 {
+			t.Fatalf("Validate should reject invalid font_sans payload %s", badFont)
+		}
+	}
+	// Arbitrary validated Google Font family name passes schema + Validate.
+	if errs := Validate(BrandingSectionName, json.RawMessage(`{"font_sans":"Work Sans"}`)); len(errs) > 0 {
+		t.Fatalf("Validate should accept Google Font family name Work Sans, got: %v", errs)
 	}
 
 	// Failing WCAG AA contrast is rejected by Validate, while ValidateSchema passes syntax.

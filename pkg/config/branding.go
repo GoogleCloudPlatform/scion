@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -50,9 +51,30 @@ const (
 	BrandCornersSquare  = "square"
 	BrandCornersRounded = "rounded"
 
+	// BrandFontSansDefault, BrandFontSansSystem, and the curated preset slugs
+	// are built-in values for BrandingConfig.FontSans. Any other string matching
+	// googleFontFamilyRe is treated as a Google Fonts family name.
+	BrandFontSansDefault         = "default"
+	BrandFontSansSystem          = "system"
+	BrandFontSansIBMPlexSans     = "ibm-plex-sans"
+	BrandFontSansPlusJakartaSans = "plus-jakarta-sans"
+	BrandFontSansDMSans          = "dm-sans"
+	BrandFontSansSourceSans3     = "source-sans-3"
+
+	// DefaultBrandFontSansURL is stock Scion's Inter Google Fonts stylesheet URL.
+	DefaultBrandFontSansURL = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+
+	// SystemFontSansFallback is the OS sans-serif fallback stack used directly
+	// for BrandFontSansSystem and appended after custom Google Fonts families.
+	SystemFontSansFallback = "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
+
+	// DefaultBrandFontSansStack is stock Scion's sans-serif font-family stack.
+	DefaultBrandFontSansStack = "'Inter', " + SystemFontSansFallback
+
 	MaxBrandNameRunes      = 64
 	MaxBrandShortNameRunes = 24
 	MaxBrandSubtitleRunes  = 80
+	MaxBrandFontSansLen    = 64
 	MaxBrandHTTPSURLLen    = 2048
 	MaxBrandPathLen        = 512
 
@@ -87,6 +109,13 @@ func IsValidBrandSlot(slot string) bool {
 		return false
 	}
 }
+
+// googleFontFamilyRe permits only ASCII alphanumeric characters, spaces, and
+// hyphens (1..64 chars, starting with alphanumeric). Rejects quotes,
+// semicolons, braces, angle brackets, backslashes, and control characters so
+// the family name is safe in CSS single-quoted font-family strings, HTML
+// attributes, and Google Fonts query parameters (via url.QueryEscape).
+var googleFontFamilyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 -]{0,63}$`)
 
 // ScaleSteps enumerates the allowed shade keys in BrandingScale.
 var ScaleSteps = []string{"50", "100", "200", "300", "400", "500", "600", "700", "800", "900", "950"}
@@ -241,6 +270,7 @@ type BrandingConfig struct {
 	Subtitle    string                 `json:"subtitle,omitempty" yaml:"subtitle,omitempty" koanf:"subtitle"`
 	Attribution string                 `json:"attribution,omitempty" yaml:"attribution,omitempty" koanf:"attribution"`
 	Corners     string                 `json:"corners,omitempty" yaml:"corners,omitempty" koanf:"corners"`
+	FontSans    string                 `json:"font_sans,omitempty" yaml:"font_sans,omitempty" koanf:"font_sans"`
 	Logo        *BrandingLogoConfig    `json:"logo,omitempty" yaml:"logo,omitempty" koanf:"logo"`
 	Icons       *BrandingIconsConfig   `json:"icons,omitempty" yaml:"icons,omitempty" koanf:"icons"`
 	AccentColor string                 `json:"accent_color,omitempty" yaml:"accent_color,omitempty" koanf:"accent_color"`
@@ -254,6 +284,7 @@ func (c BrandingConfig) IsZero() bool {
 		c.Subtitle == "" &&
 		c.Attribution == "" &&
 		c.Corners == "" &&
+		c.FontSans == "" &&
 		c.Logo.IsZero() &&
 		c.Icons.IsZero() &&
 		c.AccentColor == "" &&
@@ -271,6 +302,7 @@ func (c *BrandingConfig) Clone() *BrandingConfig {
 		Subtitle:    c.Subtitle,
 		Attribution: c.Attribution,
 		Corners:     c.Corners,
+		FontSans:    c.FontSans,
 		Logo:        c.Logo.Clone(),
 		Icons:       c.Icons.Clone(),
 		AccentColor: c.AccentColor,
@@ -307,6 +339,7 @@ type PublicBranding struct {
 	Subtitle            string                   `json:"subtitle,omitempty"`
 	Attribution         string                   `json:"attribution"`
 	Corners             string                   `json:"corners,omitempty"`
+	FontSans            string                   `json:"fontSans,omitempty"`
 	LogoLight           string                   `json:"logoLight,omitempty"`
 	LogoDark            string                   `json:"logoDark,omitempty"`
 	FaviconURL          string                   `json:"faviconUrl,omitempty"`
@@ -321,41 +354,47 @@ type PublicBranding struct {
 
 // ResolvedBranding holds the validated, immutable in-memory Hub branding snapshot.
 type ResolvedBranding struct {
-	Name                string
-	ShortName           string
-	Subtitle            string
-	Attribution         string
-	Corners             string
-	LogoLight           string
-	LogoDark            string
-	FaviconURL          string
-	FaviconMediaType    string
-	AppleTouchIconURL   string
-	Icon192URL          string
-	Icon512URL          string
-	IconMaskable512URL  string
-	NotificationIconURL string
-	ThemeColor          string
-	HasCustomPalette    bool
-	HasCustomStyle      bool
-	CSSText             string
-	Light               BrandingSemanticMode
-	Dark                BrandingSemanticMode
-	Scales              map[string]BrandingScale
-	Assets              map[string]ResolvedBrandAsset
-	Malformed           bool
+	Name                  string
+	ShortName             string
+	Subtitle              string
+	Attribution           string
+	Corners               string
+	FontSans              string
+	FontSansStack         string
+	FontSansStylesheetURL string
+	LogoLight             string
+	LogoDark              string
+	FaviconURL            string
+	FaviconMediaType      string
+	AppleTouchIconURL     string
+	Icon192URL            string
+	Icon512URL            string
+	IconMaskable512URL    string
+	NotificationIconURL   string
+	ThemeColor            string
+	HasCustomPalette      bool
+	HasCustomStyle        bool
+	CSSText               string
+	Light                 BrandingSemanticMode
+	Dark                  BrandingSemanticMode
+	Scales                map[string]BrandingScale
+	Assets                map[string]ResolvedBrandAsset
+	Malformed             bool
 }
 
 // DefaultResolvedBranding returns the compiled stock Scion branding snapshot.
 func DefaultResolvedBranding() *ResolvedBranding {
 	return &ResolvedBranding{
-		Name:        DefaultBrandName,
-		ShortName:   DefaultBrandName,
-		Attribution: AttributionShown,
-		Corners:     BrandCornersDefault,
-		ThemeColor:  DefaultBrandThemeColor,
-		Light:       DefaultLightSemanticMode(),
-		Dark:        DefaultDarkSemanticMode(),
+		Name:                  DefaultBrandName,
+		ShortName:             DefaultBrandName,
+		Attribution:           AttributionShown,
+		Corners:               BrandCornersDefault,
+		FontSans:              BrandFontSansDefault,
+		FontSansStack:         DefaultBrandFontSansStack,
+		FontSansStylesheetURL: DefaultBrandFontSansURL,
+		ThemeColor:            DefaultBrandThemeColor,
+		Light:                 DefaultLightSemanticMode(),
+		Dark:                  DefaultDarkSemanticMode(),
 		Scales: map[string]BrandingScale{
 			"primary": DefaultPrimaryScale(),
 			"neutral": DefaultNeutralScale(),
@@ -407,6 +446,9 @@ func (r *ResolvedBranding) Public() *PublicBranding {
 	}
 	if r.Corners != "" && r.Corners != BrandCornersDefault {
 		out.Corners = r.Corners
+	}
+	if r.FontSans != "" && r.FontSans != BrandFontSansDefault {
+		out.FontSans = r.FontSans
 	}
 	if r.HasCustomPalette || r.HasCustomStyle {
 		out.CSSText = r.CSSText
@@ -536,7 +578,15 @@ func resolveBrandingInternal(cfg *BrandingConfig) (*ResolvedBranding, []Validati
 			})
 		}
 	}
-	hasCustomStyle := corners != BrandCornersDefault
+
+	fontSans, fontSansStack, fontSansURL, fontErr := resolveBrandFontSans(cfg.FontSans)
+	if fontErr != nil {
+		errs = append(errs, ValidationError{
+			Path:    BrandingSectionKey + ".font_sans",
+			Message: fontErr.Error(),
+		})
+	}
+	hasCustomStyle := corners != BrandCornersDefault || fontSans != BrandFontSansDefault
 
 	// 2. Assets (logos and icons)
 	assets := make(map[string]ResolvedBrandAsset)
@@ -612,36 +662,78 @@ func resolveBrandingInternal(cfg *BrandingConfig) (*ResolvedBranding, []Validati
 	}
 	cssText := ""
 	if hasCustomPalette || hasCustomStyle {
-		cssText = buildBrandingCSSText(hasCustomPalette, scales, light, dark, corners)
+		cssText = buildBrandingCSSText(hasCustomPalette, scales, light, dark, corners, fontSans, fontSansStack)
 	}
 	if len(assets) == 0 {
 		assets = nil
 	}
 
 	return &ResolvedBranding{
-		Name:                name,
-		ShortName:           shortName,
-		Subtitle:            subtitle,
-		Attribution:         attribution,
-		Corners:             corners,
-		LogoLight:           logoLight,
-		LogoDark:            logoDark,
-		FaviconURL:          faviconURL,
-		FaviconMediaType:    faviconMediaType,
-		AppleTouchIconURL:   appleTouchURL,
-		Icon192URL:          icon192URL,
-		Icon512URL:          icon512URL,
-		IconMaskable512URL:  iconMaskable512URL,
-		NotificationIconURL: notificationIconURL,
-		ThemeColor:          themeColor,
-		HasCustomPalette:    hasCustomPalette,
-		HasCustomStyle:      hasCustomStyle,
-		CSSText:             cssText,
-		Light:               light,
-		Dark:                dark,
-		Scales:              scales,
-		Assets:              assets,
+		Name:                  name,
+		ShortName:             shortName,
+		Subtitle:              subtitle,
+		Attribution:           attribution,
+		Corners:               corners,
+		FontSans:              fontSans,
+		FontSansStack:         fontSansStack,
+		FontSansStylesheetURL: fontSansURL,
+		LogoLight:             logoLight,
+		LogoDark:              logoDark,
+		FaviconURL:            faviconURL,
+		FaviconMediaType:      faviconMediaType,
+		AppleTouchIconURL:     appleTouchURL,
+		Icon192URL:            icon192URL,
+		Icon512URL:            icon512URL,
+		IconMaskable512URL:    iconMaskable512URL,
+		NotificationIconURL:   notificationIconURL,
+		ThemeColor:            themeColor,
+		HasCustomPalette:      hasCustomPalette,
+		HasCustomStyle:        hasCustomStyle,
+		CSSText:               cssText,
+		Light:                 light,
+		Dark:                  dark,
+		Scales:                scales,
+		Assets:                assets,
 	}, nil
+}
+
+func resolveBrandFontSans(raw string) (fontSans, fontStack, stylesheetURL string, err error) {
+	if raw == "" {
+		return BrandFontSansDefault, DefaultBrandFontSansStack, DefaultBrandFontSansURL, nil
+	}
+	if hasControlChars(raw) {
+		return "", "", "", errors.New("must not contain control characters")
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || len(trimmed) > MaxBrandFontSansLen || !googleFontFamilyRe.MatchString(trimmed) {
+		return "", "", "", fmt.Errorf(
+			"must be %q, %q, a curated preset (%q, %q, %q, %q), or a Google Fonts family name (1..%d ASCII letters, digits, spaces, or hyphens starting with a letter or digit)",
+			BrandFontSansDefault, BrandFontSansSystem,
+			BrandFontSansIBMPlexSans, BrandFontSansPlusJakartaSans, BrandFontSansDMSans, BrandFontSansSourceSans3,
+			MaxBrandFontSansLen,
+		)
+	}
+	normalized := strings.Join(strings.Fields(trimmed), " ")
+	var family string
+	switch normalized {
+	case BrandFontSansDefault:
+		return BrandFontSansDefault, DefaultBrandFontSansStack, DefaultBrandFontSansURL, nil
+	case BrandFontSansSystem:
+		return BrandFontSansSystem, SystemFontSansFallback, "", nil
+	case BrandFontSansIBMPlexSans:
+		family = "IBM Plex Sans"
+	case BrandFontSansPlusJakartaSans:
+		family = "Plus Jakarta Sans"
+	case BrandFontSansDMSans:
+		family = "DM Sans"
+	case BrandFontSansSourceSans3:
+		family = "Source Sans 3"
+	default:
+		family = normalized
+	}
+	fontStack = "'" + family + "', " + SystemFontSansFallback
+	stylesheetURL = "https://fonts.googleapis.com/css2?family=" + url.QueryEscape(family) + ":wght@400;500;600;700&display=swap"
+	return normalized, fontStack, stylesheetURL, nil
 }
 
 func isBidiControl(r rune) bool {

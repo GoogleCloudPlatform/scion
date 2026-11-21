@@ -60,7 +60,7 @@ func suspendedPageHTMLWithBranding(b *config.ResolvedBranding, email string) str
 
         html, body {
             height: 100%%;
-            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+            font-family: %s;
             background: var(--bg);
             color: var(--text);
             -webkit-font-smoothing: antialiased;
@@ -162,6 +162,7 @@ func suspendedPageHTMLWithBranding(b *config.ResolvedBranding, email string) str
 </html>`,
 		html.EscapeString(brandPageTitle(b, "Account Suspended")),
 		brandPageColorsCSS(b),
+		brandPageFontSansStack(b),
 		brandPageControlRadius(b),
 		brandLogoHTML(b),
 		html.EscapeString(b.Name),

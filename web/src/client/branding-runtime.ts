@@ -27,6 +27,17 @@ import type { BrandingSemanticMode, PublicBranding } from '../shared/types.js';
 import { BRANDING_STYLE_ID } from './branding.js';
 
 const DEFAULT_THEME_COLOR = '#1e293b';
+export const BRANDING_FONT_SANS_ID = 'scion-brand-font-sans';
+const DEFAULT_FONT_SANS_URL =
+  'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap';
+const GOOGLE_FONT_FAMILY_RE = /^[A-Za-z0-9][A-Za-z0-9 -]{0,63}$/;
+const CURATED_FONT_SANS_FAMILIES: Readonly<Record<string, string>> = {
+  'ibm-plex-sans': 'IBM Plex Sans',
+  'plus-jakarta-sans': 'Plus Jakarta Sans',
+  'dm-sans': 'DM Sans',
+  'source-sans-3': 'Source Sans 3',
+};
+let hadCustomFontSans = false;
 const SCALE_RAMPS = ['primary', 'neutral', 'success', 'warning', 'danger'] as const;
 const SCALE_STEPS = [
   '50',
@@ -218,13 +229,95 @@ function syncThemeColor(themeColor: string | undefined): void {
   }
 }
 
+function resolveFontSansStylesheetURL(fontSans: string | undefined): string | null | undefined {
+  if (!fontSans) return undefined;
+  const trimmed = fontSans.trim();
+  if (!trimmed || trimmed === 'default') return undefined;
+  if (trimmed === 'system') return null;
+  if (!GOOGLE_FONT_FAMILY_RE.test(trimmed)) return undefined;
+  const normalized = trimmed.replace(/\s+/g, ' ');
+  const family = CURATED_FONT_SANS_FAMILIES[normalized] ?? normalized;
+  return `https://fonts.googleapis.com/css2?family=${encodeURIComponent(family).replace(/%20/g, '+')}:wght@400;500;600;700&display=swap`;
+}
+
+function findSansFontLink(): HTMLLinkElement | null {
+  const byId = document.getElementById(BRANDING_FONT_SANS_ID);
+  if (byId && byId.tagName === 'LINK') {
+    return byId as HTMLLinkElement;
+  }
+  return document.head.querySelector<HTMLLinkElement>(
+    'link[rel="stylesheet"][href^="https://fonts.googleapis.com/css2?family=Inter"]'
+  );
+}
+
+function syncFontSansLink(fontSans: string | undefined): void {
+  const existing = findSansFontLink();
+  const nextURL = resolveFontSansStylesheetURL(fontSans);
+
+  if (nextURL === null) {
+    // "system" preset: omit Google Fonts sans stylesheet while keeping JetBrains Mono untouched.
+    if (existing) {
+      existing.remove();
+      hadCustomFontSans = true;
+    } else if (fontSans?.trim() === 'system') {
+      hadCustomFontSans = true;
+    }
+    return;
+  }
+
+  if (typeof nextURL === 'string') {
+    const link = existing ?? document.createElement('link');
+    link.id = BRANDING_FONT_SANS_ID;
+    link.rel = 'stylesheet';
+    if (link.getAttribute('href') !== nextURL) {
+      link.href = nextURL;
+    }
+    if (!link.parentNode) {
+      const monoLink = document.head.querySelector<HTMLLinkElement>(
+        'link[rel="stylesheet"][href*="JetBrains+Mono"]'
+      );
+      if (monoLink) {
+        document.head.insertBefore(link, monoLink);
+      } else {
+        document.head.appendChild(link);
+      }
+    }
+    hadCustomFontSans = true;
+    return;
+  }
+
+  // Default or unset: restore stock Inter only if a custom font was previously applied or present.
+  if (existing && existing.id === BRANDING_FONT_SANS_ID) {
+    if (existing.getAttribute('href') !== DEFAULT_FONT_SANS_URL) {
+      existing.href = DEFAULT_FONT_SANS_URL;
+    }
+    hadCustomFontSans = false;
+  } else if (!existing && hadCustomFontSans) {
+    const link = document.createElement('link');
+    link.id = BRANDING_FONT_SANS_ID;
+    link.rel = 'stylesheet';
+    link.href = DEFAULT_FONT_SANS_URL;
+    const monoLink = document.head.querySelector<HTMLLinkElement>(
+      'link[rel="stylesheet"][href*="JetBrains+Mono"]'
+    );
+    if (monoLink) {
+      document.head.insertBefore(link, monoLink);
+    } else {
+      document.head.appendChild(link);
+    }
+    hadCustomFontSans = false;
+  }
+}
+
 /**
  * Synchronizes document.head branding tags (<style id="scion-branding-tokens">,
- * favicons, and <meta name="theme-color">) with the active PublicBranding.
+ * <link id="scion-brand-font-sans">, favicons, and <meta name="theme-color">)
+ * with the active PublicBranding.
  */
 export function syncBrandingDOM(branding: PublicBranding | null): void {
   if (typeof document === 'undefined' || !document.head) return;
   syncStyleElement(branding);
+  syncFontSansLink(branding?.fontSans);
   syncFavicon(branding?.faviconUrl);
   syncAppleTouchIcon(branding?.appleTouchIconUrl);
   syncThemeColor(branding?.themeColor);

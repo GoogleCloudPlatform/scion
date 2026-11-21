@@ -1065,10 +1065,11 @@ func lighterPrimaryStep(scale BrandingScale, baseHex, fallbackStep string) strin
 
 // buildBrandingCSSText renders validated CSS custom property declarations for
 // custom palettes (light, explicit dark, and system dark modes) and/or
-// mode-independent style overrides (such as corner radius presets).
-func buildBrandingCSSText(hasCustomPalette bool, scales map[string]BrandingScale, light, dark BrandingSemanticMode, corners string) string {
+// mode-independent style overrides (such as corner radius and sans-serif font).
+func buildBrandingCSSText(hasCustomPalette bool, scales map[string]BrandingScale, light, dark BrandingSemanticMode, corners, fontSans, fontSansStack string) string {
 	hasCustomCorners := corners != "" && corners != BrandCornersDefault
-	if !hasCustomPalette && !hasCustomCorners {
+	hasCustomFontSans := fontSans != "" && fontSans != BrandFontSansDefault && fontSansStack != ""
+	if !hasCustomPalette && !hasCustomCorners && !hasCustomFontSans {
 		return ""
 	}
 	var b strings.Builder
@@ -1087,6 +1088,9 @@ func buildBrandingCSSText(hasCustomPalette bool, scales map[string]BrandingScale
 	}
 	if hasCustomCorners {
 		writeCornerVars(&b, corners)
+	}
+	if hasCustomFontSans {
+		fmt.Fprintf(&b, "  --scion-font-sans: %s;\n", fontSansStack)
 	}
 	b.WriteString("}\n")
 

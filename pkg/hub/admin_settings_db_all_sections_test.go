@@ -112,6 +112,7 @@ var layer1RoundTripSamples = map[string]string{
 	"server.hub.branding.subtitle":                     `"Engineering Platform"`,
 	"server.hub.branding.attribution":                  `"hidden"`,
 	"server.hub.branding.corners":                      `"square"`,
+	"server.hub.branding.font_sans":                    `"ibm-plex-sans"`,
 	"server.hub.branding.logo":                         `{"light":"https://cdn.example.com/logo.svg"}`,
 	"server.hub.branding.logo.light":                   `"https://cdn.example.com/logo-light.svg"`,
 	"server.hub.branding.logo.dark":                    `"https://cdn.example.com/logo-dark.svg"`,

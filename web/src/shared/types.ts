@@ -191,6 +191,7 @@ export interface PublicBranding {
   subtitle?: string;
   attribution: 'shown' | 'hidden';
   corners?: 'default' | 'square' | 'rounded';
+  fontSans?: string;
   logoLight?: string;
   logoDark?: string;
   faviconUrl?: string;

@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -39,12 +40,17 @@ const (
 	// DefaultTimeout is the default timeout for waiting for authentication.
 	DefaultTimeout = 5 * time.Minute
 
-	defaultCallbackBrandName  = "Scion"
-	callbackAttributionShown  = "shown"
-	callbackAttributionHidden = "hidden"
-	maxCallbackBrandNameRunes = 64
-	maxCallbackLogoURLLen     = 2048
+	defaultCallbackBrandName       = "Scion"
+	callbackAttributionShown       = "shown"
+	callbackAttributionHidden      = "hidden"
+	maxCallbackBrandNameRunes      = 64
+	maxCallbackLogoURLLen          = 2048
+	maxCallbackFontSansLen         = 64
+	defaultCallbackFontSansStack   = "'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif"
+	callbackSystemFontSansFallback = "ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif"
 )
+
+var callbackGoogleFontFamilyRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 -]{0,63}$`)
 
 // CallbackColors holds validated #RRGGBB hex tokens for one theme mode of the
 // localhost OAuth callback HTML page.
@@ -64,6 +70,7 @@ type CallbackBranding struct {
 	Name        string
 	Attribution string
 	Corners     string
+	FontSans    string
 	LogoLight   string
 	LogoDark    string
 	Light       CallbackColors
@@ -181,10 +188,44 @@ func sanitizeCallbackContainerRadius(corners string) string {
 	}
 }
 
+func sanitizeCallbackFontSans(raw string) string {
+	if raw == "" || !utf8.ValidString(raw) {
+		return defaultCallbackFontSansStack
+	}
+	for _, r := range raw {
+		if unicode.IsControl(r) || r == 0x061C || r == 0x200E || r == 0x200F ||
+			(r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069) {
+			return defaultCallbackFontSansStack
+		}
+	}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || len(trimmed) > maxCallbackFontSansLen || !callbackGoogleFontFamilyRe.MatchString(trimmed) {
+		return defaultCallbackFontSansStack
+	}
+	normalized := strings.Join(strings.Fields(trimmed), " ")
+	switch normalized {
+	case "default":
+		return defaultCallbackFontSansStack
+	case "system":
+		return callbackSystemFontSansFallback
+	case "ibm-plex-sans":
+		return "'IBM Plex Sans', " + callbackSystemFontSansFallback
+	case "plus-jakarta-sans":
+		return "'Plus Jakarta Sans', " + callbackSystemFontSansFallback
+	case "dm-sans":
+		return "'DM Sans', " + callbackSystemFontSansFallback
+	case "source-sans-3":
+		return "'Source Sans 3', " + callbackSystemFontSansFallback
+	default:
+		return "'" + normalized + "', " + callbackSystemFontSansFallback
+	}
+}
+
 func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, heading, message string) string {
 	name := defaultCallbackBrandName
 	attribution := callbackAttributionShown
 	containerRadius := sanitizeCallbackContainerRadius("")
+	fontSansStack := defaultCallbackFontSansStack
 	var logoLight, logoDark string
 	light := defaultCallbackLightColors()
 	dark := defaultCallbackDarkColors()
@@ -195,6 +236,7 @@ func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, h
 			attribution = callbackAttributionHidden
 		}
 		containerRadius = sanitizeCallbackContainerRadius(b.Corners)
+		fontSansStack = sanitizeCallbackFontSans(b.FontSans)
 		logoLight = sanitizeCallbackLogoURL(b.LogoLight)
 		logoDark = sanitizeCallbackLogoURL(b.LogoDark)
 		if logoLight == "" && logoDark != "" {
@@ -269,7 +311,7 @@ func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, h
 
         html, body {
             height: 100%%;
-            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+            font-family: %s;
             background: var(--bg);
             color: var(--text);
             -webkit-font-smoothing: antialiased;
@@ -354,6 +396,7 @@ func renderCallbackPage(b *CallbackBranding, pageTitle, iconClass, iconEntity, h
 		html.EscapeString(fullTitle),
 		light.Bg, light.Surface, light.Text, light.TextMuted, light.Border, light.Accent,
 		dark.Bg, dark.Surface, dark.Text, dark.TextMuted, dark.Border, dark.Accent,
+		fontSansStack,
 		containerRadius,
 		logoHTML,
 		iconClass,

@@ -443,4 +443,59 @@ func TestLocalhostAuthServer_CallbackBrandingAndSecurity(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("applies font_sans presets, Google Font families, and sanitizes injection attempts", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			fontSans string
+			want     string
+		}{
+			{
+				name:     "default empty",
+				fontSans: "",
+				want:     "font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;",
+			},
+			{
+				name:     "default explicit",
+				fontSans: "default",
+				want:     "font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;",
+			},
+			{
+				name:     "system preset",
+				fontSans: "system",
+				want:     "font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;",
+			},
+			{
+				name:     "curated ibm-plex-sans",
+				fontSans: "ibm-plex-sans",
+				want:     "font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;",
+			},
+			{
+				name:     "arbitrary Google Font family",
+				fontSans: "  Work   Sans  ",
+				want:     "font-family: 'Work Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;",
+			},
+			{
+				name:     "injection attempt falls back to default",
+				fontSans: "Inter'; } body { display: none; }",
+				want:     "font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := NewLocalhostAuthServer().WithBranding(&CallbackBranding{FontSans: tc.fontSans})
+				srv.state = "st"
+				req := httptest.NewRequest(http.MethodGet, CallbackPath+"?state=st&code=abc", nil)
+				rec := httptest.NewRecorder()
+				srv.handleCallback(rec, req)
+				body := rec.Body.String()
+				if !strings.Contains(body, tc.want) {
+					t.Errorf("body missing %q:\n%s", tc.want, body)
+				}
+				if strings.Contains(body, "display: none") {
+					t.Errorf("unsanitized fontSans value leaked into CSS:\n%s", body)
+				}
+			})
+		}
+	})
 }
