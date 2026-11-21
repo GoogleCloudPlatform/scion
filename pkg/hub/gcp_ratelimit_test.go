@@ -79,3 +79,37 @@ func TestGCPTokenRateLimiter_CleanupExitsOnCancel(t *testing.T) {
 		t.Fatal("limiter should still work after cleanup exits")
 	}
 }
+
+func TestGCPTokenRateLimiter_AllowWithRetryAfter(t *testing.T) {
+	rl := NewGCPTokenRateLimiter(1, 2) // 1/sec, burst 2
+	agentID := tid("agent-retry-after")
+
+	for i := 0; i < 2; i++ {
+		allowed, retryAfter := rl.AllowWithRetryAfter(agentID)
+		if !allowed || retryAfter != 0 {
+			t.Fatalf("request %d: allowed=%v retryAfter=%v, want true 0", i, allowed, retryAfter)
+		}
+	}
+
+	allowed, retryAfter := rl.AllowWithRetryAfter(agentID)
+	if allowed {
+		t.Fatal("3rd request should be denied")
+	}
+	if retryAfter < time.Second {
+		t.Fatalf("retryAfter = %v, want >= 1s", retryAfter)
+	}
+
+	// Slow rate (0.2/s = 1 token per 5s) should return >= 5s Retry-After.
+	slow := NewGCPTokenRateLimiter(0.2, 1)
+	slowAgent := tid("agent-slow")
+	if ok, _ := slow.AllowWithRetryAfter(slowAgent); !ok {
+		t.Fatal("first request on slow limiter should be allowed")
+	}
+	allowed, retryAfter = slow.AllowWithRetryAfter(slowAgent)
+	if allowed {
+		t.Fatal("second request on slow limiter should be denied")
+	}
+	if retryAfter < 4*time.Second || retryAfter > 6*time.Second {
+		t.Fatalf("slow limiter retryAfter = %v, want ~5s", retryAfter)
+	}
+}
