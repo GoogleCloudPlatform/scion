@@ -381,6 +381,27 @@ func (m *memTriggerStore) ReapExpiredTriggerFires(context.Context, time.Time, in
 func (m *memTriggerStore) PurgeOldTriggerHistory(context.Context, time.Time) (int, int, error) {
 	return 0, 0, nil
 }
+func (m *memTriggerStore) ClaimTriggerSubject(context.Context, string, string, string, string, time.Time, time.Time) (*store.TriggerSubjectClaim, *store.TriggerSubjectClaim, error) {
+	return nil, nil, nil
+}
+func (m *memTriggerStore) BindTriggerSubjectClaim(context.Context, string, string, string, time.Time) (bool, error) {
+	return false, nil
+}
+func (m *memTriggerStore) ReleaseTriggerSubjectClaim(context.Context, string, string, time.Time) (bool, error) {
+	return false, nil
+}
+func (m *memTriggerStore) GetActiveTriggerSubjectClaim(context.Context, string, string) (*store.TriggerSubjectClaim, error) {
+	return nil, store.ErrNotFound
+}
+func (m *memTriggerStore) ReleaseTriggerSubjectClaimsForAgent(context.Context, string, time.Time) (int, error) {
+	return 0, nil
+}
+func (m *memTriggerStore) ReleaseTerminalTriggerSubjectClaims(context.Context, time.Time) (int, error) {
+	return 0, nil
+}
+func (m *memTriggerStore) PurgeOldTriggerSubjectClaims(context.Context, time.Time) (int, error) {
+	return 0, nil
+}
 
 func TestDispatcher_WakeFireDetachAndPerFireBudget(t *testing.T) {
 	ms := newMemTriggerStore()
@@ -3030,4 +3051,69 @@ func TestDispatcher_GitHubSubjectModeSkip_UnauthorizedRefusesWithoutSkipClaimAnd
 
 	assert.Equal(t, store.TriggerFireStatusFired, byEv[evAuth3].Status)
 	assert.Equal(t, "github:octo-org/octo-repo#43", byEv[evAuth3].Subject)
+}
+
+func TestDispatcher_DispatchAgentSkipUsesSubjectClaimsNotFireSkip(t *testing.T) {
+	ctx := context.Background()
+	ms := newMemTriggerStore()
+	core := &fakeCore{}
+	core.enabled.Store(true)
+
+	projID := uuid.NewString()
+	epID := uuid.NewString()
+	t0 := time.Date(2026, 11, 21, 1, 0, 0, 0, time.UTC)
+
+	dispTrigID := uuid.NewString()
+	require.NoError(t, ms.CreateTrigger(ctx, &store.Trigger{
+		ID:          dispTrigID,
+		ProjectID:   projID,
+		Name:        "disp-skip",
+		SourceKind:  store.TriggerSourceKindWebhook,
+		SourceID:    epID,
+		MatchTypes:  []string{"webhook.run"},
+		ActionType:  store.TriggerActionDispatchAgent,
+		SubjectMode: store.TriggerSubjectModeSkip,
+		Status:      store.TriggerStatusActive,
+	}))
+	msgTrigID := uuid.NewString()
+	require.NoError(t, ms.CreateTrigger(ctx, &store.Trigger{
+		ID:          msgTrigID,
+		ProjectID:   projID,
+		Name:        "msg-skip",
+		SourceKind:  store.TriggerSourceKindWebhook,
+		SourceID:    epID,
+		MatchTypes:  []string{"webhook.run"},
+		ActionType:  store.TriggerActionMessage,
+		SubjectMode: store.TriggerSubjectModeSkip,
+		Status:      store.TriggerStatusActive,
+	}))
+
+	evID := uuid.NewString()
+	require.NoError(t, ms.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epID,
+		Type:       "webhook.run",
+		Subject:    "webhook:" + epID + "/sub-1",
+		Status:     store.TriggerEventStatusPending,
+		ReceivedAt: t0,
+	}))
+
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return t0 },
+	})
+	require.NoError(t, err)
+
+	raw, err := json.Marshal(trigger.EventQueuePayload{Version: trigger.EventQueuePayloadVersion, EventID: evID})
+	require.NoError(t, err)
+	res := disp.HandleItem(ctx, durablequeue.Item{Seq: 1, Kind: trigger.EventQueueKind, DedupKey: evID, Payload: raw}, nopLease{})
+	require.NoError(t, res.Err)
+	assert.True(t, res.Done)
+
+	// Only the message trigger uses PR 4's ClaimTriggerFireSubjectSkip;
+	// dispatch_agent uses ClaimTriggerFire and delegates skip to SubjectClaims.
+	assert.Equal(t, int32(1), ms.claimSubjectSkipCalls.Load(), "only message+skip must call ClaimTriggerFireSubjectSkip")
 }

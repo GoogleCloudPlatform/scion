@@ -144,6 +144,7 @@ func (f *triggerDispatchAgentFixture) drainOneTriggerEvent(t *testing.T) {
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
 		Store: f.sched.store,
 		Core:  serverTriggerCore{srv: f.sched.srv},
+		Rules: f.sched.srv.TriggerRules(),
 	})
 	require.NoError(t, err)
 
@@ -493,15 +494,17 @@ func TestTriggerDispatchAgent_AuthoringValidationAndAuthz(t *testing.T) {
 		assert.Equal(t, "message", details["slot"])
 	})
 
-	t.Run("subject_mode_skip_refused", func(t *testing.T) {
-		// dispatch_agent + subject.mode=skip is refused until P1c-2 subject claims.
+	t.Run("subject_mode_skip_allowed_for_dispatch_agent", func(t *testing.T) {
+		// dispatch_agent + subject.mode=skip is accepted (P1c-2 subject claims).
 		reqSkip := baseReq("skip-mode")
 		reqSkip.Subject = &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip}
 		recSkip := postTrigger(userCtx, reqSkip)
-		assertErrCode(t, recSkip, http.StatusBadRequest, "dispatch_agent_skip_unsupported")
-		assert.Contains(t, recSkip.Body.String(), "P1c-2")
+		require.Equal(t, http.StatusCreated, recSkip.Code, recSkip.Body.String())
+		var resp TriggerResponse
+		require.NoError(t, json.Unmarshal(recSkip.Body.Bytes(), &resp))
+		assert.Equal(t, store.TriggerSubjectModeSkip, resp.Subject.Mode)
 
-		// dispatch_agent + subject.mode=reuse remains refused until P1c-2.
+		// dispatch_agent + subject.mode=reuse remains refused until Stage 3.
 		reqReuse := baseReq("reuse-mode")
 		reqReuse.Subject = &TriggerSubjectSpec{Mode: "reuse"}
 		assertErrCode(t, postTrigger(userCtx, reqReuse), http.StatusBadRequest, ErrCodeValidationError)
@@ -1492,8 +1495,10 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recPatch.Code, recPatch.Body.String())
 	assert.Contains(t, recPatch.Body.String(), "dispatch_agent_github_unsupported")
 
-	// 3. webhook + dispatch_agent remains accepted (201), and PATCHing it into
-	// github source or subject.mode=skip is refused (security Info I4).
+	// 3. webhook + dispatch_agent remains accepted (201); PATCHing it into
+	// github source is refused (security Info I4), while PATCHing
+	// subject.mode=skip is accepted now that dispatch_agent subject claims
+	// are implemented.
 	recEP := f.doJSON(t, adminCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/webhook-endpoints", ghProj.ID),
 		CreateWebhookEndpointRequest{Name: "wh-still-ok"})
@@ -1526,14 +1531,17 @@ func TestTriggerDispatchAgent_GitHubSourceUnsupported(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recPatchSrc.Code, recPatchSrc.Body.String())
 	assert.Contains(t, recPatchSrc.Body.String(), "dispatch_agent_github_unsupported")
 
-	// PATCH webhook dispatch_agent trigger's subject.mode to skip -> 400 dispatch_agent_skip_unsupported.
+	// PATCH webhook dispatch_agent trigger's subject.mode to skip -> 200 OK.
 	recPatchSkip := f.doJSON(t, adminCtx, http.MethodPatch,
 		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", ghProj.ID, whTrig.ID),
 		map[string]any{
 			"subject": map[string]any{"mode": store.TriggerSubjectModeSkip},
 		})
-	require.Equal(t, http.StatusBadRequest, recPatchSkip.Code, recPatchSkip.Body.String())
-	assert.Contains(t, recPatchSkip.Body.String(), "dispatch_agent_skip_unsupported")
+	require.Equal(t, http.StatusOK, recPatchSkip.Code, recPatchSkip.Body.String())
+	var patchedTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recPatchSkip.Body.Bytes(), &patchedTrig))
+	require.NotNil(t, patchedTrig.Subject)
+	assert.Equal(t, store.TriggerSubjectModeSkip, patchedTrig.Subject.Mode)
 }
 
 func TestScheduleDispatchAgent_IgnoresStrayAgentRoleAndCleanCollisionError(t *testing.T) {

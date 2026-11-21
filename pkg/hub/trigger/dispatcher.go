@@ -544,8 +544,9 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			Revision:  int64(tr.AuthorizationRevision),
 		}
 		trigRef := hubfire.FireTriggerRef{
-			ID:   tr.ID,
-			Name: tr.Name,
+			ID:          tr.ID,
+			Name:        tr.Name,
+			SubjectMode: tr.SubjectMode,
 		}
 		trigAct := baseAct.WithTrigger(trigRef)
 
@@ -672,6 +673,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				}
 			}
 		}
+		trigRef.FireSubject = fireSubject
 
 		if lease != nil {
 			held, lErr := lease.Renew(ctx)
@@ -708,7 +710,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			existing    *store.TriggerFire
 			cErr        error
 		)
-		if tr.SubjectMode == store.TriggerSubjectModeSkip {
+		// Stage 1 PR 4 fire-level skip applies to non-dispatch_agent triggers
+		// (message); dispatch_agent triggers with subject mode "skip" use
+		// persistent subject claims (§5.6) inside dispatchAgentAction.Fire so
+		// the claim outlives the firing row for the lifetime of the agent.
+		if tr.SubjectMode == store.TriggerSubjectModeSkip && tr.ActionType != store.TriggerActionDispatchAgent {
 			claimed, skippedBusy, existing, cErr = d.store.ClaimTriggerFireSubjectSkip(ctx, &fire, ErrFireSubjectBusy, claimNow)
 		} else {
 			claimed, existing, cErr = d.store.ClaimTriggerFire(ctx, &fire)
@@ -1085,15 +1091,20 @@ type MaintenanceResult struct {
 	EventsReconciled int
 	EventsPurged     int
 	FiresPurged      int
+	ClaimsReleased   int
+	ClaimsPurged     int
 }
 
 // RunMaintenance executes the hourly trigger maintenance pass (§4.3, §6.4,
-// rev 7.4):
+// rev 7.4; Stage 2 §5.6):
 //  1. Reaps expired firing rows (lease_until <= now) to failed "hub restarted during fire".
 //  2. Reconciles pending trigger_events older than DefaultMaxAge (72h) with no
 //     trigger.event queue item to failed "dropped by queue limits".
 //  3. Purges terminal trigger_fires and trigger_events older than
 //     HistoryRetention (7 days).
+//  4. Releases active trigger_subject_claims whose agent is terminal
+//     (stopped|error|halted) or deleted.
+//  5. Deletes released trigger_subject_claims older than HistoryRetention (7 days).
 func RunMaintenance(ctx context.Context, ts store.TriggerStore, now time.Time) (MaintenanceResult, error) {
 	var out MaintenanceResult
 	if ts == nil {
@@ -1126,6 +1137,18 @@ func RunMaintenance(ctx context.Context, ts store.TriggerStore, now time.Time) (
 	out.FiresPurged = firesPurged
 	if err != nil {
 		errs = append(errs, fmt.Errorf("purge old trigger history: %w", err))
+	}
+
+	claimsReleased, err := ts.ReleaseTerminalTriggerSubjectClaims(ctx, now)
+	out.ClaimsReleased = claimsReleased
+	if err != nil {
+		errs = append(errs, fmt.Errorf("release terminal trigger subject claims: %w", err))
+	}
+
+	claimsPurged, err := ts.PurgeOldTriggerSubjectClaims(ctx, now.Add(-HistoryRetention))
+	out.ClaimsPurged = claimsPurged
+	if err != nil {
+		errs = append(errs, fmt.Errorf("purge old trigger subject claims: %w", err))
 	}
 
 	return out, errors.Join(errs...)

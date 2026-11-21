@@ -131,6 +131,15 @@ type HeadlessCreate struct {
 	// precedence; non-empty values are refused until Stage 2 P1c lands).
 	GitHubToken string
 
+	// OnCommitTx, when non-nil, runs inside commitAgentCreate's transaction
+	// with the newly created agent's ID before commit (e.g. binding a trigger
+	// subject claim atomically with the agent create audit, Stage 2 §5.3).
+	OnCommitTx func(ctx context.Context, tx store.Store, agentID string) error
+
+	// OnCommitted, when non-nil, runs immediately after commitAgentCreate's
+	// transaction commits successfully (and never on rollback).
+	OnCommitted func(agentID string)
+
 	// Data-only channels (never material, never participating in secret/env
 	// resolution).
 	EventEnv  map[string]string // allow-listed keys only: SCION_TRIGGER_EVENT_ID, SCION_TRIGGER_ID
@@ -620,6 +629,13 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		}
 	}
 
+	var onCommitTx func(ctx context.Context, tx store.Store) error
+	if hc.OnCommitTx != nil {
+		onCommitTx = func(ctx context.Context, tx store.Store) error {
+			return hc.OnCommitTx(ctx, tx, agent.ID)
+		}
+	}
+
 	if err := s.commitAgentCreate(ctx, agentCreateWrite{
 		Ceiling:    edgeCeiling,
 		Provenance: edgeProvenance,
@@ -634,10 +650,14 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			Role:          agent.AppliedConfig.AgentRole,
 			Active:        true,
 		},
-		Audit:    scheduledDispatchAudit,
-		SAOrigin: saOrigin,
+		Audit:      scheduledDispatchAudit,
+		SAOrigin:   saOrigin,
+		OnCommitTx: onCommitTx,
 	}); err != nil {
 		return nil, fmt.Errorf("failed to create agent %q: %w", slug, err)
+	}
+	if hc.OnCommitted != nil {
+		hc.OnCommitted(agent.ID)
 	}
 
 	rollback := func(rb createRollback) error {

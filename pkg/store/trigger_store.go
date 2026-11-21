@@ -78,6 +78,20 @@ const (
 	TriggerFireStatusSkipped = "skipped"
 )
 
+// TriggerSubjectClaim states (Stage 2 §5.6).
+const (
+	TriggerSubjectClaimStateActive   = "active"
+	TriggerSubjectClaimStateReleased = "released"
+)
+
+// MaxTriggerSubjectBytes is the maximum byte length of a trigger subject claim key (§5.6).
+const MaxTriggerSubjectBytes = 256
+
+// TriggerSubjectAbandonedClaimTTL is the age after which an unbound active
+// claim (agent_id IS NULL) is considered abandoned and eligible for takeover
+// or maintenance release (Stage 2 §5.6, §18 S16).
+const TriggerSubjectAbandonedClaimTTL = 5 * time.Minute
+
 // WebhookEndpointSecretKeyPrefix returns the hub-scoped internal secret key
 // prefix for an endpoint's versioned HMAC secrets (§4.1, R1).
 func WebhookEndpointSecretKeyPrefix(projectID, endpointID string) string {
@@ -276,6 +290,21 @@ type TriggerFireFilter struct {
 	Status    string
 }
 
+// TriggerSubjectClaim represents the per-(trigger, subject) live-subject claim
+// row used by dispatch_agent triggers in mode "skip" (Stage 2 §5.6) and Stage 3 "reuse".
+type TriggerSubjectClaim struct {
+	ID         string     `json:"id"`
+	TriggerID  string     `json:"triggerId"`
+	Subject    string     `json:"subject"`
+	State      string     `json:"state"`
+	AgentID    string     `json:"agentId,omitempty"`
+	EventID    string     `json:"eventId"`
+	FireID     string     `json:"fireId"`
+	ClaimedAt  time.Time  `json:"claimedAt"`
+	BoundAt    *time.Time `json:"boundAt,omitempty"`
+	ReleasedAt *time.Time `json:"releasedAt,omitempty"`
+}
+
 // TriggerStore manages webhook endpoints, triggers, trigger events, and
 // trigger fires (ptone/scion#7961).
 type TriggerStore interface {
@@ -332,4 +361,13 @@ type TriggerStore interface {
 	EventHasTriggerFireForResultRef(ctx context.Context, eventID, resultRef string) (bool, error)
 	ReapExpiredTriggerFires(ctx context.Context, now time.Time, limit int) (int, error)
 	PurgeOldTriggerHistory(ctx context.Context, olderThan time.Time) (eventsDeleted int, firesDeleted int, err error)
+
+	// Trigger subject claims (Stage 2 §5.6)
+	ClaimTriggerSubject(ctx context.Context, triggerID, subject, eventID, fireID string, now, abandonedBefore time.Time) (claimed *TriggerSubjectClaim, existing *TriggerSubjectClaim, err error)
+	BindTriggerSubjectClaim(ctx context.Context, claimID, fireID, agentID string, boundAt time.Time) (bool, error)
+	ReleaseTriggerSubjectClaim(ctx context.Context, claimID, fireID string, releasedAt time.Time) (bool, error)
+	GetActiveTriggerSubjectClaim(ctx context.Context, triggerID, subject string) (*TriggerSubjectClaim, error)
+	ReleaseTriggerSubjectClaimsForAgent(ctx context.Context, agentID string, releasedAt time.Time) (int, error)
+	ReleaseTerminalTriggerSubjectClaims(ctx context.Context, now time.Time) (int, error)
+	PurgeOldTriggerSubjectClaims(ctx context.Context, olderThan time.Time) (int, error)
 }

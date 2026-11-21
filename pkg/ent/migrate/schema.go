@@ -4049,6 +4049,42 @@ var (
 			},
 		},
 	}
+	// TriggerSubjectClaimsColumns holds the columns for the "trigger_subject_claims" table.
+	TriggerSubjectClaimsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "trigger_id", Type: field.TypeUUID},
+		{Name: "subject", Type: field.TypeString, Size: 256},
+		{Name: "state", Type: field.TypeString, Default: "active"},
+		{Name: "agent_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "event_id", Type: field.TypeUUID},
+		{Name: "fire_id", Type: field.TypeUUID},
+		{Name: "claimed_at", Type: field.TypeTime},
+		{Name: "bound_at", Type: field.TypeTime, Nullable: true},
+		{Name: "released_at", Type: field.TypeTime, Nullable: true},
+	}
+	// TriggerSubjectClaimsTable holds the schema information for the "trigger_subject_claims" table.
+	TriggerSubjectClaimsTable = &schema.Table{
+		Name:       "trigger_subject_claims",
+		Columns:    TriggerSubjectClaimsColumns,
+		PrimaryKey: []*schema.Column{TriggerSubjectClaimsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "triggersubjectclaim_trigger_id_subject",
+				Unique:  true,
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[1], TriggerSubjectClaimsColumns[2]},
+			},
+			{
+				Name:    "triggersubjectclaim_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[4]},
+			},
+			{
+				Name:    "triggersubjectclaim_state_released_at",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerSubjectClaimsColumns[3], TriggerSubjectClaimsColumns[9]},
+			},
+		},
+	}
 	// UsageReservationsColumns holds the columns for the "usage_reservations" table.
 	UsageReservationsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -4448,6 +4484,7 @@ var (
 		TriggersTable,
 		TriggerEventsTable,
 		TriggerFiresTable,
+		TriggerSubjectClaimsTable,
 		UsageReservationsTable,
 		UsersTable,
 		UserAccessTokensTable,
@@ -4720,6 +4757,9 @@ func init() {
 	}
 	TriggerFiresTable.Annotation = &entsql.Annotation{
 		Table: "trigger_fires",
+	}
+	TriggerSubjectClaimsTable.Annotation = &entsql.Annotation{
+		Table: "trigger_subject_claims",
 	}
 	UsageReservationsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	UsersTable.Annotation = &entsql.Annotation{

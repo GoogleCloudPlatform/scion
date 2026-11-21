@@ -359,12 +359,14 @@ func (s *Server) runTriggerMaintenance(ctx context.Context) {
 	if err != nil {
 		slog.Error("Scheduler: trigger maintenance failed", "error", err)
 	}
-	if res.FiresReaped > 0 || res.EventsReconciled > 0 || res.EventsPurged > 0 || res.FiresPurged > 0 {
+	if res.FiresReaped > 0 || res.EventsReconciled > 0 || res.EventsPurged > 0 || res.FiresPurged > 0 || res.ClaimsReleased > 0 || res.ClaimsPurged > 0 {
 		slog.Info("Scheduler: completed trigger maintenance",
 			"fires_reaped", res.FiresReaped,
 			"events_reconciled", res.EventsReconciled,
 			"events_purged", res.EventsPurged,
-			"fires_purged", res.FiresPurged)
+			"fires_purged", res.FiresPurged,
+			"claims_released", res.ClaimsReleased,
+			"claims_purged", res.ClaimsPurged)
 	}
 }
 

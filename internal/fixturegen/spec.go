@@ -62,10 +62,11 @@ const (
 	visitorIssuer = "https://issuer.fixture.example"
 	visitorDomain = "partner.example"
 
-	webhookEndpointID = "e0100000-0000-0000-0000-000000000001"
-	triggerID         = "e0200000-0000-0000-0000-000000000001"
-	triggerEventID    = "e0300000-0000-0000-0000-000000000001"
-	triggerFireID     = "e0400000-0000-0000-0000-000000000001"
+	webhookEndpointID     = "e0100000-0000-0000-0000-000000000001"
+	triggerID             = "e0200000-0000-0000-0000-000000000001"
+	triggerEventID        = "e0300000-0000-0000-0000-000000000001"
+	triggerFireID         = "e0400000-0000-0000-0000-000000000001"
+	triggerSubjectClaimID = "e0500000-0000-0000-0000-000000000001"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -1345,6 +1346,14 @@ func Spec() []TableFixture {
 				"initiator_credential_snapshot": "", "attribution_version": 1, "authorization_revision": 1,
 				"lease_until": baseTime.Add(time.Minute), "started_at": baseTime,
 				"finished_at": baseTime.Add(time.Second), "created": baseTime,
+			},
+		}},
+		{Table: "trigger_subject_claims", Rows: []row{
+			{
+				"id": triggerSubjectClaimID, "trigger_id": triggerID,
+				"subject": "webhook:" + webhookEndpointID, "state": "active",
+				"agent_id": agentID, "event_id": triggerEventID, "fire_id": triggerFireID,
+				"claimed_at": baseTime, "bound_at": baseTime.Add(time.Second), "released_at": nil,
 			},
 		}},
 

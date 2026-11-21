@@ -64,6 +64,9 @@ type agentCreateWrite struct {
 	// required when Agent carries an assign-mode GCP identity, and is
 	// recorded on the assignment row only as a description.
 	SAOrigin store.SAAssignmentOrigin
+	// OnCommitTx, when non-nil, runs inside the same transaction as the agent
+	// row and create audit write (after Audit is written, before commit).
+	OnCommitTx func(ctx context.Context, tx store.Store) error
 }
 
 // agentAssignedServiceAccountID returns the service account ID of agent's
@@ -204,6 +207,11 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 			w.Subscription.AgentID = agent.ID
 			if err := tx.CreateNotificationSubscription(ctx, w.Subscription); err != nil {
 				return fmt.Errorf("agent create notification subscription: %w", err)
+			}
+		}
+		if w.OnCommitTx != nil {
+			if err := w.OnCommitTx(ctx, tx); err != nil {
+				return err
 			}
 		}
 		return nil

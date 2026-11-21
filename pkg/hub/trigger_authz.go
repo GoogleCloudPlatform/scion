@@ -425,7 +425,6 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	projectID string,
 	sourceKind string,
 	ep *store.WebhookEndpoint,
-	subjectMode string,
 	spec *TriggerActionSpec,
 	ceiling store.EffectCeiling,
 	prov store.AuthorityProvenance,
@@ -434,15 +433,6 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
-		return "", false
-	}
-
-	// TODO(P1c-2): remove this refusal once P1c-2 implements subject claims
-	// (Stage 2 §5.6: Stage 1's fire-level skip finishes as soon as the agent is
-	// created and would not block a second agent on the same subject).
-	if subjectMode == store.TriggerSubjectModeSkip {
-		writeError(w, http.StatusBadRequest, "dispatch_agent_skip_unsupported",
-			"subject mode skip for dispatch_agent requires subject claims (Stage 2 P1c-2)", nil)
 		return "", false
 	}
 

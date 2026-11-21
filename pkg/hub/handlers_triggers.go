@@ -455,7 +455,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	case store.TriggerActionMessage:
 		actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &req.Action)
 	case store.TriggerActionDispatchAgent:
-		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &req.Action, ceiling, prov)
+		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &req.Action, ceiling, prov)
 	case store.TriggerActionGitHubComment:
 		actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &req.Action)
 	default:
@@ -623,7 +623,6 @@ func (s *Server) authorizeStoredTriggerAction(
 	projectID string,
 	sourceKind string,
 	ep *store.WebhookEndpoint,
-	subjectMode string,
 	matchTypes []string,
 	actionType string,
 	rawPayload string,
@@ -635,7 +634,7 @@ func (s *Server) authorizeStoredTriggerAction(
 	case store.TriggerActionMessage:
 		return s.authorizeTriggerMessageAuthoring(w, r, projectID, sourceKind, &spec)
 	case store.TriggerActionDispatchAgent:
-		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &spec, ceiling, prov)
+		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &spec, ceiling, prov)
 	case store.TriggerActionGitHubComment:
 		return s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &spec)
 	default:
@@ -954,7 +953,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			case store.TriggerActionMessage:
 				actionPayload, ok = s.authorizeTriggerMessageAuthoring(w, r, projectID, tr.SourceKind, req.Action)
 			case store.TriggerActionDispatchAgent:
-				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, req.Action, ceiling, prov)
+				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, req.Action, ceiling, prov)
 			case store.TriggerActionGitHubComment:
 				actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, tr.SourceKind, tr.MatchTypes, req.Action)
 			}
@@ -963,7 +962,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 			tr.ActionPayload = actionPayload
 		} else {
-			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
+			normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, resolvedEP, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
 			if !ok {
 				return
 			}
@@ -1134,7 +1133,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
-	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.SubjectMode, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
+	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
 	if !ok {
 		return
 	}
