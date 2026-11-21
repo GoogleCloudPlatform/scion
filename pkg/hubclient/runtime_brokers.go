@@ -501,7 +501,8 @@ type CreateBrokerRequest struct {
 	Name         string            `json:"name"`
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
-	AutoProvide  bool              `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
+	AutoProvide  bool              `json:"autoProvide,omitempty"`  // Automatically add as provider for new projects
+	AdminManaged bool              `json:"adminManaged,omitempty"` // Mark broker as admin-managed (requires broker.manage)
 	// RuntimeTarget is the flat Runtime Broker registration descriptor
 	// (.design/flat-runtime-brokers-contract.md section 6); nil is legacy.
 	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`

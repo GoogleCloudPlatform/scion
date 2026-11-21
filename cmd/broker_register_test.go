@@ -149,3 +149,21 @@ func TestRegisterBrokerWithHub_DeniedRegistrationSavesNothing(t *testing.T) {
 	assert.Empty(t, hub.joined, "no join without a join token")
 	assert.False(t, store.Exists("test-hub"), "a denied registration saves no credentials")
 }
+
+func TestRegisterBrokerWithHub_AdminManagedFlagSent(t *testing.T) {
+	hub, srv := newRegisterHub(t, http.StatusCreated)
+	client := hubTokenClient(t, srv.URL, "scion_dev_admin_managed_test")
+	store := brokercredentials.NewMultiStore(filepath.Join(t.TempDir(), "broker-credentials"))
+
+	_, err := registerBrokerWithHub(context.Background(), client, store, brokerHubRegistration{
+		BrokerID:     registerHubBrokerID,
+		Name:         "register-admin-managed-host",
+		AdminManaged: true,
+		HubName:      "test-hub",
+		Endpoint:     srv.URL,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, hub.created, 1)
+	assert.True(t, hub.created[0].AdminManaged, "AdminManaged must be forwarded to POST /api/v1/brokers")
+}

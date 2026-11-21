@@ -171,18 +171,19 @@ func registerConfiguredFlatInstance(ctx context.Context, settings *config.Settin
 	}
 	hostname, _ := os.Hostname()
 
-	creds, err := registerFlatInstance(ctx, client, inst, id, hubName, brokerregistration.InstanceCredentialsDir(globalDir, key),
-		flatInstanceRegistrationOptions(
-			inst,
-			hostname,
-			runtimebroker.StaticCapabilityNames(rt),
-			brokerAutoProvide,
-			loadBrokerRegistrationWorkspaceStorage(),
-			transportMode,
-			transportAudience,
-			endpoint,
-			out,
-		))
+	opts := flatInstanceRegistrationOptions(
+		inst,
+		hostname,
+		runtimebroker.StaticCapabilityNames(rt),
+		brokerAutoProvide,
+		loadBrokerRegistrationWorkspaceStorage(),
+		transportMode,
+		transportAudience,
+		endpoint,
+		out,
+	)
+	opts.AdminManaged = brokerAdminManaged
+	creds, err := registerFlatInstance(ctx, client, inst, id, hubName, brokerregistration.InstanceCredentialsDir(globalDir, key), opts)
 	if err != nil {
 		return nil, nil, err
 	}

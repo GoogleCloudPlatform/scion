@@ -36,8 +36,9 @@ const (
 )
 
 var (
-	hubBrokersJoinTokenTTL  time.Duration
-	hubBrokersJoinTokenJSON bool
+	hubBrokersJoinTokenTTL          time.Duration
+	hubBrokersJoinTokenJSON         bool
+	hubBrokersJoinTokenAdminManaged bool
 )
 
 var hubBrokersJoinTokenCmd = &cobra.Command{
@@ -90,6 +91,7 @@ func init() {
 
 	hubBrokersJoinTokenCreateCmd.Flags().DurationVar(&hubBrokersJoinTokenTTL, "ttl", 0, "Token lifetime, between 5m and 24h (default: the hub default, 1h)")
 	hubBrokersJoinTokenCreateCmd.Flags().BoolVar(&hubBrokersJoinTokenJSON, "json", false, "Output in JSON format")
+	hubBrokersJoinTokenCreateCmd.Flags().BoolVar(&hubBrokersJoinTokenAdminManaged, "admin-managed", false, "Register this broker as admin-managed (requires the broker.manage permission and experiment hub.admin_managed_brokers)")
 }
 
 // brokerJoinTokenOutput is the --json output of 'hub brokers join-token create'.
@@ -143,6 +145,7 @@ func runHubBrokersJoinTokenCreate(cmd *cobra.Command, args []string) error {
 		Name:                brokerName,
 		JoinTokenTTLSeconds: ttlSeconds,
 		PreserveSettings:    true,
+		AdminManaged:        hubBrokersJoinTokenAdminManaged,
 		// The same role label 'runtime-broker register' sets.
 		Labels: map[string]string{
 			brokerownership.LabelBrokerRole: "remote",
