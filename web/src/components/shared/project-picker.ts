@@ -275,7 +275,7 @@ export class ScionProjectPicker extends LitElement {
             this.lastSelectedDisplay = display;
             this.selectedViaDropdown = true;
           }
-        } else if (!this.selectedViaDropdown) {
+        } else {
           void this.resolveSingleProject(this.value);
         }
       }
@@ -324,7 +324,12 @@ export class ScionProjectPicker extends LitElement {
     try {
       const proj = await this.fetchProjectById(id);
       if (this.value !== id) return; // value changed while resolving
-      if (!proj) return;
+      if (!proj) {
+        if (this.requireSelection) {
+          this.clearDisallowedSelection();
+        }
+        return;
+      }
       this.resolvedProjects.set(proj.id, proj);
       if (this.filterProject && !this.filterProject(proj)) {
         this.clearDisallowedSelection();
@@ -540,7 +545,19 @@ export class ScionProjectPicker extends LitElement {
       ? this.values.filter((id) => id !== project.id)
       : [...this.values, project.id];
     this.values = nextIds;
+    const hadSearchQuery = this.searchQuery.trim().length > 0;
+    if (this.searchQuery) {
+      if (this.searchDebounceTimer) {
+        clearTimeout(this.searchDebounceTimer);
+        this.searchDebounceTimer = null;
+      }
+      this.searchQuery = '';
+      this.activeDescendantIndex = -1;
+    }
     this.emitMultiChange(nextIds);
+    if (hadSearchQuery) {
+      void this.searchProjects('');
+    }
   }
 
   private removeProject(projectId: string): void {
@@ -615,7 +632,14 @@ export class ScionProjectPicker extends LitElement {
           this.blurTimeoutId = setTimeout(() => {
             this.searchOpen = false;
             this.activeDescendantIndex = -1;
-            if (this.multiple) return;
+            if (this.multiple) {
+              if (this.searchDebounceTimer) {
+                clearTimeout(this.searchDebounceTimer);
+                this.searchDebounceTimer = null;
+              }
+              this.searchQuery = '';
+              return;
+            }
             if (this.requireSelection) {
               if (!this.selectedViaDropdown) {
                 this.searchQuery = this.lastSelectedDisplay;

@@ -562,13 +562,80 @@ describe('scion-project-picker', () => {
     el.addEventListener('project-change', (e: Event) => {
       events.push((e as CustomEvent).detail);
     });
-    (el as Record<string, unknown>)['selectedViaDropdown'] = false;
     el.value = 'proj-denied';
     await el.updateComplete;
     await new Promise((r) => setTimeout(r, 20));
     await el.updateComplete;
 
     expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+    expect(events[events.length - 1]?.projectId).toBe('');
+  });
+
+  it('resolves new uncached value after dropdown selection', async () => {
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/projects/proj-uncached')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'proj-uncached',
+              name: 'Uncached Project',
+              slug: 'uncached-project',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(createProjectsResponse());
+    };
+
+    const el = await createElement(handler);
+    el.browseOnFocus = true;
+    el.requireSelection = true;
+    await el.updateComplete;
+
+    // Select a project via dropdown (sets selectedViaDropdown = true)
+    (el as Record<string, (...args: unknown[]) => void>)['selectProject'](MOCK_PROJECTS[0]);
+    el.value = MOCK_PROJECTS[0].id;
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Alpha Project (alpha-project)');
+
+    // Programmatically update value to an uncached project ID
+    el.value = 'proj-uncached';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe(
+      'Uncached Project (uncached-project)'
+    );
+  });
+
+  it('clears invalid preselected value on 404 when requireSelection is true', async () => {
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/projects/proj-missing')) {
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      }
+      return Promise.resolve(createProjectsResponse());
+    };
+
+    const el = await createElement(handler);
+    el.browseOnFocus = true;
+    el.requireSelection = true;
+
+    const events: Array<{ projectId: string }> = [];
+    el.addEventListener('project-change', (e: Event) => {
+      events.push((e as CustomEvent).detail);
+    });
+
+    el.value = 'proj-missing';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+    expect(events.length).toBeGreaterThan(0);
     expect(events[events.length - 1]?.projectId).toBe('');
   });
 
@@ -652,5 +719,56 @@ describe('scion-project-picker', () => {
 
     expect(events[events.length - 1]?.projectIds).toEqual(['proj-uuid-1']);
     expect(el.shadowRoot?.querySelectorAll('.selected-tags sl-tag').length).toBe(1);
+  });
+
+  it('clears typed search query and refreshes results after multi-select toggle', async () => {
+    const { handler, calls } = makeFetchHandler();
+    const el = await createElement(handler);
+    el.multiple = true;
+    await el.updateComplete;
+
+    // Simulate user typing a query and getting results
+    (el as Record<string, unknown>)['searchQuery'] = 'alpha';
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    (el as Record<string, unknown>)['searchResults'] = [MOCK_PROJECTS[0]];
+    el.requestUpdate();
+    await el.updateComplete;
+
+    calls.length = 0;
+    const option = el.shadowRoot?.querySelector('.project-search-option');
+    option?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+    expect(calls.some((c) => c.includes('/api/v1/projects?limit=50'))).toBe(true);
+
+    // Toggling again when searchQuery is already empty does not re-fetch
+    calls.length = 0;
+    const nextOption = el.shadowRoot?.querySelector('.project-search-option');
+    nextOption?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await el.updateComplete;
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('clears partial search query on blur in multi-select mode', async () => {
+    const el = await createElement();
+    el.multiple = true;
+    await el.updateComplete;
+
+    (el as Record<string, unknown>)['searchQuery'] = 'partial';
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    el.requestUpdate();
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('sl-input');
+    expect(input).not.toBeNull();
+    input?.dispatchEvent(new Event('sl-blur'));
+    await new Promise((r) => setTimeout(r, 250));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchOpen']).toBe(false);
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
   });
 });
