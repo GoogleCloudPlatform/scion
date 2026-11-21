@@ -3421,3 +3421,16 @@ func TestDispatcher_CompileBudgetExhaustionSkipsMissesKeepsHitsAndRecordsMetric(
 	assert.True(t, foundMissMetric, "expected %s metric to be exported", trigger.MetricTriggerRuleCompileMissesTotal)
 	assert.Equal(t, int64(1), missVal)
 }
+
+func TestNormalizeFireSkipReason_CompileBudgetExhaustedAndAgentNameInUse(t *testing.T) {
+	assert.Equal(t, trigger.FireSkipReasonRuleCompileBudgetExhausted,
+		trigger.NormalizeFireSkipReason(trigger.ErrFireRuleCompileBudgetExhausted))
+	assert.Equal(t, trigger.FireSkipReasonRuleCompileBudgetExhausted,
+		trigger.NormalizeFireSkipReason("  rule compile budget exhausted  "))
+	assert.Equal(t, trigger.FireSkipReasonAgentNameInUse,
+		trigger.NormalizeFireSkipReason("agent name in use"))
+	assert.Equal(t, trigger.FireSkipReasonAgentNameInUse,
+		trigger.NormalizeFireSkipReason("  agent name in use  "))
+	assert.Equal(t, trigger.FireSkipReasonOther,
+		trigger.NormalizeFireSkipReason("some free-text error"))
+}

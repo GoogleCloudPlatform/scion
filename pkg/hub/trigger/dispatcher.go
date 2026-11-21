@@ -76,12 +76,14 @@ const (
 
 	// Closed-set skipped-fire metric reasons (§6.5). Free-text errors are
 	// never emitted as metric labels.
-	FireSkipReasonRuleBudgetExhausted  = "rule_budget_exhausted"
-	FireSkipReasonRuleEvaluationFailed = "rule_evaluation_failed"
-	FireSkipReasonRuleUncertain        = "rule_uncertain"
-	FireSkipReasonRuleNoLongerCompiles = "rule_no_longer_compiles"
-	FireSkipReasonSubjectBusy          = "subject_busy"
-	FireSkipReasonOther                = "other"
+	FireSkipReasonRuleBudgetExhausted        = "rule_budget_exhausted"
+	FireSkipReasonRuleCompileBudgetExhausted = "rule_compile_budget_exhausted"
+	FireSkipReasonRuleEvaluationFailed       = "rule_evaluation_failed"
+	FireSkipReasonRuleUncertain              = "rule_uncertain"
+	FireSkipReasonRuleNoLongerCompiles       = "rule_no_longer_compiles"
+	FireSkipReasonSubjectBusy                = "subject_busy"
+	FireSkipReasonAgentNameInUse             = "agent_name_in_use"
+	FireSkipReasonOther                      = "other"
 )
 
 // NormalizeFireSkipReason maps a skipped trigger fire's persisted error text
@@ -90,6 +92,8 @@ func NormalizeFireSkipReason(errMsg string) string {
 	switch strings.TrimSpace(errMsg) {
 	case ErrFireRuleBudgetExhausted:
 		return FireSkipReasonRuleBudgetExhausted
+	case ErrFireRuleCompileBudgetExhausted:
+		return FireSkipReasonRuleCompileBudgetExhausted
 	case ErrFireRuleEvaluationFailed:
 		return FireSkipReasonRuleEvaluationFailed
 	case ErrFireRuleUncertain:
@@ -98,6 +102,8 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonRuleNoLongerCompiles
 	case "subject busy":
 		return FireSkipReasonSubjectBusy
+	case "agent name in use":
+		return FireSkipReasonAgentNameInUse
 	default:
 		return FireSkipReasonOther
 	}

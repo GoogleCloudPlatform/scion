@@ -312,6 +312,11 @@ type CachedDialect interface {
 // CachedCompileGateDialect is an optional extension of CachedDialect that
 // reports whether CachedCompile hit the cache and invokes beforeCompile (when
 // non-nil) only on a cache miss before compiling.
+//
+// Any CachedDialect used by a compile-budgeted consumer must implement this
+// interface so cache hits are not charged to the compile budget or counted as
+// compile misses; today only the CEL dialect is granted to the trigger
+// consumer, and it implements CachedCompileGateDialect.
 type CachedCompileGateDialect interface {
 	CachedDialect
 	CachedCompileWithGate(ctx context.Context, scope celengine.CacheScope, rule string, kind Kind, env EnvironmentRef, beforeCompile func() error) (Compiled, bool, error)
@@ -517,6 +522,11 @@ func (e *Engine) CachedCompileWithGate(
 		}
 	}
 	if cd, ok := d.(CachedDialect); ok {
+		// Fallback for CachedDialects that do not implement CachedCompileGateDialect:
+		// always reports hit=false (after running beforeCompile above), so lookups
+		// are charged to any compile budget and counted as misses. Cached dialects
+		// used by budgeted consumers must implement CachedCompileGateDialect (today
+		// only the CEL dialect is granted to the trigger consumer, and it implements it).
 		c, err := cd.CachedCompile(ctx, scope, rule, kind, env)
 		return c, false, err
 	}
