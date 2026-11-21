@@ -235,3 +235,104 @@ func TestAgentGet_ResolvedTimezoneGatedOnEnvView(t *testing.T) {
 		assert.True(t, found, "expected the agent in the list")
 	})
 }
+
+// TestAgentPatch_ResolvedTimezoneGatedOnEnvView covers ptone/scion#5655: the
+// agent PATCH response (both routes) carries resolvedTimezone and
+// timezoneSource only for a caller who may view the agent's env, matching the
+// single-agent GET gate in TestAgentGet_ResolvedTimezoneGatedOnEnvView. A
+// project member who can update the agent but cannot view its env receives
+// neither key on PATCH, while an env-view caller still receives both (including
+// "" / "none" when no rung supplies a zone).
+func TestAgentPatch_ResolvedTimezoneGatedOnEnvView(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	agent := &store.Agent{
+		ID:            tid("agent-patch-tz"),
+		Slug:          "agent-patch-tz",
+		Name:          "Patch TZ Agent",
+		ProjectID:     project.ID,
+		OwnerID:       alice.ID,
+		Phase:         string(state.PhaseStopped),
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	require.NoError(t, s.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser,
+		DelegatorID:   alice.ID,
+		DelegateType:  store.DelegationPrincipalAgent,
+		DelegateID:    agent.ID,
+		ScopeType:     store.RoleScopeProject,
+		ScopeID:       project.ID,
+		Role:          string(AgentRoleFull),
+		Active:        true,
+		AuthorityProvenance: store.AuthorityProvenance{
+			ProvenanceVersion:    store.ProvenanceVersionV1,
+			SourcePrincipalKind:  store.DelegationPrincipalUser,
+			SourcePrincipalID:    alice.ID,
+			SourceCredentialKind: store.SourceCredentialSession,
+		},
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}))
+
+	// Bob holds the project-owner role so he can update the agent, but he is
+	// not its owner and holds no attach-equivalent grant on it, so he may not
+	// view its env.
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-patch-tz"), "Bob", store.GroupMemberRoleOwner)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleOwner)
+
+	routes := []string{
+		"/api/v1/agents/" + agent.ID,
+		"/api/v1/projects/" + project.ID + "/agents/" + agent.ID,
+	}
+	patchAs := func(t *testing.T, user *store.User, path, summary string) (map[string]json.RawMessage, string) {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, user, http.MethodPatch, path, map[string]any{"taskSummary": summary})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, `"`+summary+`"`, string(body["taskSummary"]), "%s: PATCH mutation applied", path)
+		return body, rec.Body.String()
+	}
+
+	t.Run("user-scope TZ resolved: env-view caller gets both keys, updater without env view gets neither", func(t *testing.T) {
+		tzTestEnvVar(t, s, store.EnvVar{Scope: store.ScopeUser, ScopeID: alice.ID, Value: "Europe/Lisbon"})
+		t.Cleanup(func() {
+			require.NoError(t, s.DeleteEnvVar(ctx, agentTZEnvKey, store.ScopeUser, alice.ID))
+		})
+		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: "Asia/Tokyo"})
+
+		for _, path := range routes {
+			aliceBody, _ := patchAs(t, alice, path, "alice summary "+path)
+			zone, hasZone := aliceBody["resolvedTimezone"]
+			source, hasSource := aliceBody["timezoneSource"]
+			require.True(t, hasZone, "%s: env-view caller must receive resolvedTimezone", path)
+			require.True(t, hasSource, "%s: env-view caller must receive timezoneSource", path)
+			assert.Equal(t, `"Europe/Lisbon"`, string(zone), "%s: PATCH resolvedTimezone", path)
+			assert.Equal(t, `"`+TZSourceUser+`"`, string(source), "%s: PATCH timezoneSource", path)
+
+			bobBody, raw := patchAs(t, bob, path, "bob summary "+path)
+			assert.NotContains(t, bobBody, "resolvedTimezone", "%s: updater without env view must not receive resolvedTimezone", path)
+			assert.NotContains(t, bobBody, "timezoneSource", "%s: updater without env view must not receive timezoneSource", path)
+			assert.NotContains(t, raw, "Europe/Lisbon", "%s: owner's TZ value must not appear in response", path)
+		}
+	})
+
+	t.Run("no zone configured: env-view caller still gets empty zone and none source, updater without env view gets neither", func(t *testing.T) {
+		setHubAgentDefaults(srv, opsettings.AgentDefaultsSettings{DefaultTimezone: ""})
+
+		for _, path := range routes {
+			aliceBody, _ := patchAs(t, alice, path, "alice none "+path)
+			zone, hasZone := aliceBody["resolvedTimezone"]
+			source, hasSource := aliceBody["timezoneSource"]
+			require.True(t, hasZone, "%s: env-view caller must receive resolvedTimezone even when empty", path)
+			require.True(t, hasSource, "%s: env-view caller must receive timezoneSource", path)
+			assert.Equal(t, `""`, string(zone), "%s: empty resolvedTimezone reaches the wire", path)
+			assert.Equal(t, `"`+TZSourceNone+`"`, string(source), "%s: PATCH timezoneSource", path)
+
+			bobBody, _ := patchAs(t, bob, path, "bob none "+path)
+			assert.NotContains(t, bobBody, "resolvedTimezone", "%s: updater without env view must not receive resolvedTimezone", path)
+			assert.NotContains(t, bobBody, "timezoneSource", "%s: updater without env view must not receive timezoneSource", path)
+		}
+	})
+}
