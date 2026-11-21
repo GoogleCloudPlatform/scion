@@ -546,17 +546,21 @@ const brokerProvideDeniedMessage = "only the broker's owner or a super-admin may
 
 // brokerProvideDecision decides the broker side of associating broker with a
 // project: the caller must present an admitted user credential (see
-// brokerUserCredentialKindAdmitted, user access tokens included) and hold
-// broker.update on this broker, which its owner and super-admins hold and
-// no hub role grants. Project-side authority (project.update) is checked
-// separately by each caller. It writes no response; it returns the denial
-// reason and stage for the caller's log and 403.
+// brokerUserCredentialKindAdmitted, user access tokens included), the broker
+// must satisfy broker_policy.admin_managed_only when active, and the caller
+// must hold broker.update on this broker, which its owner and super-admins
+// hold and no hub role grants. Project-side authority (project.update) is
+// checked separately by each caller. It writes no response; it returns the
+// denial reason and stage for the caller's log and 403.
 func (s *Server) brokerProvideDecision(ctx context.Context, identity Identity, broker *store.RuntimeBroker) (bool, string, DeniedBy) {
 	if isNilIdentity(identity) || broker == nil {
 		return false, "no identity or broker", ""
 	}
 	if !brokerUserCredentialKindAdmitted(ctx, identity, true) {
 		return false, "credential kind not admitted for broker association", ""
+	}
+	if s.brokerPolicyRefuses(broker) {
+		return false, brokerPolicyDenialReason, DeniedByBrokerPolicy
 	}
 	decision := s.authzService.CheckAccess(ctx, identity, brokerResource(broker), ActionUpdate)
 	return decision.Allowed, decision.Reason, decision.DeniedBy
@@ -565,6 +569,10 @@ func (s *Server) brokerProvideDecision(ctx context.Context, identity Identity, b
 // writeBrokerProvideDenial logs and writes the 403 for a denied broker
 // association. r may be nil when the caller has no request at hand.
 func writeBrokerProvideDenial(w http.ResponseWriter, r *http.Request, identity Identity, broker *store.RuntimeBroker, reason string, deniedBy DeniedBy) {
+	if deniedBy == DeniedByBrokerPolicy {
+		writeBrokerPolicyDenialForIdentity(w, r, identity, brokerPolicyOpAttach, broker, "")
+		return
+	}
 	logAuthzDenial(r, identity, brokerResource(broker), ActionUpdate, reason)
 	writeForbiddenStructuredDenial(w, brokerProvideDeniedMessage, "broker", ActionUpdate, deniedBy)
 }

@@ -3388,8 +3388,11 @@ func (s *Server) authorizeProviderUnlink(w http.ResponseWriter, r *http.Request,
 	if decision.Allowed {
 		return true
 	}
+	// Unlinking a provider is always allowed under broker_policy.admin_managed_only,
+	// so check broker.update directly here (identity and credential kind were
+	// already verified above) rather than going through brokerProvideDecision.
 	if broker, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil && broker != nil {
-		if allowed, _, _ := s.brokerProvideDecision(ctx, identity, broker); allowed {
+		if s.authzService.CheckAccess(ctx, identity, brokerResource(broker), ActionUpdate).Allowed {
 			return true
 		}
 	}

@@ -17,9 +17,12 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -154,4 +157,111 @@ func TestProjectProviders_BrokerCallerDenied(t *testing.T) {
 	}
 	assert.ElementsMatch(t, []string{f.linked.ID}, f.providerIDs(t, f.target.ID))
 	assert.Empty(t, f.defaultBroker(t, f.target.ID))
+}
+
+func TestProjectProviders_BrokerPolicyAdminManagedOnly(t *testing.T) {
+	t.Run("unmanaged refused for owner", func(t *testing.T) {
+		f := providersAuthzSetup(t)
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+		logs := captureBrokerPolicyWarnLogs(t)
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, f.path(),
+			AddProviderRequest{BrokerID: f.unlinked.ID})
+
+		assertAttachBrokerPolicyDenial(t, rec, f.unlinked)
+		assert.ElementsMatch(t, []string{f.linked.ID}, f.providerIDs(t, f.target.ID))
+		assert.Empty(t, f.defaultBroker(t, f.target.ID))
+		assert.Contains(t, logs.String(), "reason="+brokerPolicyDenialReason)
+		assert.Contains(t, logs.String(), "action="+brokerPolicyOpAttach)
+	})
+
+	t.Run("unmanaged refused for super-admin", func(t *testing.T) {
+		f := providersAuthzSetup(t)
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+		admin := newSuperAdminUser(t, f.store, "providers-policy-super")
+
+		rec := doRequestAsUser(t, f.srv, admin, http.MethodPost, f.path(),
+			AddProviderRequest{BrokerID: f.unlinked.ID})
+
+		assertAttachBrokerPolicyDenial(t, rec, f.unlinked)
+		assert.ElementsMatch(t, []string{f.linked.ID}, f.providerIDs(t, f.target.ID))
+		assert.Empty(t, f.defaultBroker(t, f.target.ID))
+	})
+
+	t.Run("managed embedded and auto-provide brokers allowed", func(t *testing.T) {
+		f := providersAuthzSetup(t)
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+		ctx := context.Background()
+		admin := newSuperAdminUser(t, f.store, "providers-policy-allowed-super")
+
+		managed := &store.RuntimeBroker{
+			ID:           uuid.New().String(),
+			Name:         "providers-managed",
+			Slug:         "providers-managed",
+			Status:       store.BrokerStatusOnline,
+			CreatedBy:    f.owner.ID,
+			AdminManaged: true,
+		}
+		require.NoError(t, f.store.CreateRuntimeBroker(ctx, managed))
+
+		embedded := &store.RuntimeBroker{
+			ID:        uuid.New().String(),
+			Name:      "providers-embedded",
+			Slug:      "providers-embedded",
+			Status:    store.BrokerStatusOnline,
+			CreatedBy: "",
+		}
+		require.NoError(t, f.store.CreateRuntimeBroker(ctx, embedded))
+
+		autoProvide := &store.RuntimeBroker{
+			ID:          uuid.New().String(),
+			Name:        "providers-autoprovide",
+			Slug:        "providers-autoprovide",
+			Status:      store.BrokerStatusOnline,
+			CreatedBy:   f.owner.ID,
+			AutoProvide: true,
+		}
+		require.NoError(t, f.store.CreateRuntimeBroker(ctx, autoProvide))
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, f.path(), AddProviderRequest{BrokerID: managed.ID})
+		require.Equal(t, http.StatusCreated, rec.Code, "managed: %s", rec.Body.String())
+
+		rec = doRequestAsUser(t, f.srv, admin, http.MethodPost, f.path(), AddProviderRequest{BrokerID: embedded.ID})
+		require.Equal(t, http.StatusCreated, rec.Code, "embedded: %s", rec.Body.String())
+
+		rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPost, f.path(), AddProviderRequest{BrokerID: autoProvide.ID})
+		require.Equal(t, http.StatusCreated, rec.Code, "auto-provide: %s", rec.Body.String())
+
+		assert.ElementsMatch(t, []string{f.linked.ID, managed.ID, embedded.ID, autoProvide.ID}, f.providerIDs(t, f.target.ID))
+	})
+
+	t.Run("unlink stays allowed for unmanaged broker", func(t *testing.T) {
+		f := providersAuthzSetup(t)
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.path()+"/"+f.linked.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+		assert.Empty(t, f.providerIDs(t, f.target.ID))
+	})
+
+	t.Run("policy off or experiment off keeps existing behavior", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			expOn    bool
+			policyOn bool
+		}{
+			{"experiment on policy off", true, false},
+			{"experiment off policy on", false, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := providersAuthzSetup(t)
+				setAttachBrokerPolicyState(t, f.srv, f.store, tc.expOn, tc.policyOn)
+
+				rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, f.path(),
+					AddProviderRequest{BrokerID: f.unlinked.ID})
+				require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+				assert.ElementsMatch(t, []string{f.linked.ID, f.unlinked.ID}, f.providerIDs(t, f.target.ID))
+			})
+		}
+	})
 }

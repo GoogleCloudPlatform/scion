@@ -350,3 +350,114 @@ func TestBrokerAssociation_ProjectOwnerUnlinksOtherUsersBroker(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assertNoProvider(t, f.store, f.project.ID, f.otherBroker.ID)
 }
+
+func TestBrokerAssociation_BrokerPolicyRefusesRegisterWithUnmanagedBroker(t *testing.T) {
+	t.Run("existing project refused for owner and super-admin", func(t *testing.T) {
+		f := brokerAssocSetup(t, "assoc-policy-reg-existing")
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+		admin := newSuperAdminUser(t, f.store, "assoc-policy-reg-existing-super")
+
+		for _, actor := range []*store.User{f.projectOwner, admin} {
+			rec := doRequestAsUser(t, f.srv, actor, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+				ID:       f.project.ID,
+				Name:     f.project.Name,
+				BrokerID: f.ownBroker.ID,
+			})
+			assertAttachBrokerPolicyDenial(t, rec, f.ownBroker)
+			assertNoProvider(t, f.store, f.project.ID, f.ownBroker.ID)
+			assertDefaultBroker(t, f.store, f.project.ID, "")
+		}
+	})
+
+	t.Run("new project refused for owner and super-admin without creating project", func(t *testing.T) {
+		f := brokerAssocSetup(t, "assoc-policy-reg-new")
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+		admin := newSuperAdminUser(t, f.store, "assoc-policy-reg-new-super")
+		ctx := context.Background()
+
+		for i, actor := range []*store.User{f.brokerOwner, admin} {
+			name := "Assoc Policy Register New " + string(rune('A'+i))
+			rec := doRequestAsUser(t, f.srv, actor, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+				Name:     name,
+				BrokerID: f.otherBroker.ID,
+			})
+			assertAttachBrokerPolicyDenial(t, rec, f.otherBroker)
+			_, err := f.store.GetProjectBySlugCaseInsensitive(ctx, api.Slugify(name))
+			assert.True(t, errors.Is(err, store.ErrNotFound), "no project may be created, got %v", err)
+			links, err := f.store.GetBrokerProjects(ctx, f.otherBroker.ID)
+			require.NoError(t, err)
+			assert.Empty(t, links)
+		}
+	})
+
+	t.Run("managed embedded and auto-provide brokers allowed on register", func(t *testing.T) {
+		f := brokerAssocSetup(t, "assoc-policy-reg-ok")
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+		ctx := context.Background()
+		admin := newSuperAdminUser(t, f.store, "assoc-policy-reg-ok-super")
+
+		f.ownBroker.AdminManaged = true
+		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, f.ownBroker))
+
+		embedded := createReregistrationTestBroker(t, f.store, "assoc-policy-reg-embedded", "")
+		autoProvide := createReregistrationTestBroker(t, f.store, "assoc-policy-reg-auto", f.projectOwner.ID)
+		autoProvide.AutoProvide = true
+		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, autoProvide))
+
+		rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			ID:       f.project.ID,
+			Name:     f.project.Name,
+			BrokerID: f.ownBroker.ID,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "managed: %s", rec.Body.String())
+
+		rec = doRequestAsUser(t, f.srv, admin, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			ID:       f.project.ID,
+			Name:     f.project.Name,
+			BrokerID: embedded.ID,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "embedded: %s", rec.Body.String())
+
+		rec = doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+			ID:       f.project.ID,
+			Name:     f.project.Name,
+			BrokerID: autoProvide.ID,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "auto-provide: %s", rec.Body.String())
+	})
+
+	t.Run("policy off or experiment off keeps existing register behavior", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			expOn    bool
+			policyOn bool
+		}{
+			{"experiment on policy off", true, false},
+			{"experiment off policy on", false, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := brokerAssocSetup(t, "assoc-policy-reg-off-"+tc.name)
+				setAttachBrokerPolicyState(t, f.srv, f.store, tc.expOn, tc.policyOn)
+
+				rec := doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+					ID:       f.project.ID,
+					Name:     f.project.Name,
+					BrokerID: f.ownBroker.ID,
+				})
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			})
+		}
+	})
+}
+
+func TestBrokerAssociation_BrokerPolicyAllowsUnlinkByBrokerOwner(t *testing.T) {
+	f := brokerAssocSetup(t, "assoc-policy-unlink-owner")
+	f.link(t, f.otherBroker)
+	setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+
+	// Broker owner does not hold project.update, so unlink relies on the
+	// broker.update arm in authorizeProviderUnlink; policy must not block it.
+	rec := doRequestAsUser(t, f.srv, f.brokerOwner, http.MethodDelete, f.providersPath()+"/"+f.otherBroker.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assertNoProvider(t, f.store, f.project.ID, f.otherBroker.ID)
+}

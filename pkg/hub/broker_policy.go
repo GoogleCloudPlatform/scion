@@ -28,6 +28,8 @@ const (
 	brokerPolicyDenialReason   = "broker_policy"
 	brokerPolicyOpRegister     = "register"
 	brokerPolicyOpReregister   = "reregister"
+	brokerPolicyOpAttach       = "attach"
+	brokerPolicyOpMove         = "move"
 	brokerPolicyRegisterRemedy = "Ask a hub administrator to register the broker with --admin-managed."
 	brokerPolicyUATRemedy      = "Sign in as a hub administrator and run 'scion runtime-broker register --admin-managed', or mint a join token with 'scion hub broker join-token --admin-managed' from a signed-in machine and run '/brokers/join' on the host."
 	brokerPolicyEmbeddedRemedy = "Use 'scion runtime-broker register --admin-managed' from a signed-in hub administrator account."
@@ -85,6 +87,31 @@ func (s *Server) brokerPolicyRefuses(b *store.RuntimeBroker) bool {
 	return s.adminManagedBrokersOnly() && !isAdminManagedBroker(b)
 }
 
+func brokerPolicyRemedy(op string, b *store.RuntimeBroker) string {
+	switch op {
+	case brokerPolicyOpRegister:
+		return brokerPolicyRegisterRemedy
+	case brokerPolicyOpReregister:
+		if b != nil && b.Name != "" {
+			return fmt.Sprintf("Ask a hub administrator to approve broker %s, or register an admin-managed broker with --admin-managed.", b.Name)
+		}
+		return brokerPolicyRegisterRemedy
+	default:
+		if b != nil && b.Name != "" {
+			return fmt.Sprintf("Ask a hub administrator to approve broker %s, or choose an admin-managed broker.", b.Name)
+		}
+		return "Ask a hub administrator to approve the broker, or choose an admin-managed broker."
+	}
+}
+
+func brokerPolicyMessage(op string, b *store.RuntimeBroker, remedy string) string {
+	if remedy == "" {
+		remedy = brokerPolicyRemedy(op, b)
+	}
+	return fmt.Sprintf("%s refused: this hub only allows admin-managed Runtime Brokers (setting %s). %s",
+		op, brokerPolicySettingKey, remedy)
+}
+
 // writeBrokerPolicyDenial logs and writes the structured 403 refusal for a
 // broker policy denial (design ptone/scion#7829 §4.4).
 func writeBrokerPolicyDenial(w http.ResponseWriter, r *http.Request, op string, b *store.RuntimeBroker) {
@@ -92,25 +119,14 @@ func writeBrokerPolicyDenial(w http.ResponseWriter, r *http.Request, op string, 
 }
 
 func writeBrokerPolicyDenialWithRemedy(w http.ResponseWriter, r *http.Request, op string, b *store.RuntimeBroker, remedy string) {
-	if remedy == "" {
-		switch op {
-		case brokerPolicyOpRegister:
-			remedy = brokerPolicyRegisterRemedy
-		case brokerPolicyOpReregister:
-			if b != nil && b.Name != "" {
-				remedy = fmt.Sprintf("Ask a hub administrator to approve broker %s, or register an admin-managed broker with --admin-managed.", b.Name)
-			} else {
-				remedy = brokerPolicyRegisterRemedy
-			}
-		default:
-			if b != nil && b.Name != "" {
-				remedy = fmt.Sprintf("Ask a hub administrator to approve broker %s, or choose an admin-managed broker.", b.Name)
-			} else {
-				remedy = "Ask a hub administrator to approve the broker, or choose an admin-managed broker."
-			}
-		}
-	}
+	writeBrokerPolicyDenialForIdentity(w, r, nil, op, b, remedy)
+}
 
+// writeBrokerPolicyDenialForIdentity logs and writes the structured 403 refusal
+// for a broker policy denial. r may be nil when the caller has no request at
+// hand (such as agent-create auto-link), in which case identity is still logged
+// via logAuthzDenial with reason broker_policy.
+func writeBrokerPolicyDenialForIdentity(w http.ResponseWriter, r *http.Request, identity Identity, op string, b *store.RuntimeBroker, remedy string) {
 	details := map[string]interface{}{
 		"setting":   brokerPolicySettingKey,
 		"operation": op,
@@ -120,11 +136,11 @@ func writeBrokerPolicyDenialWithRemedy(w http.ResponseWriter, r *http.Request, o
 		details["brokerId"] = b.ID
 		res = brokerResource(b)
 	}
-	if r != nil {
-		logAuthzDenial(r, GetIdentityFromContext(r.Context()), res, Action(op), brokerPolicyDenialReason)
+	if identity == nil && r != nil {
+		identity = GetIdentityFromContext(r.Context())
 	}
-	msg := fmt.Sprintf("%s refused: this hub only allows admin-managed Runtime Brokers (setting %s). %s",
-		op, brokerPolicySettingKey, remedy)
+	logAuthzDenial(r, identity, res, Action(op), brokerPolicyDenialReason)
+	msg := brokerPolicyMessage(op, b, remedy)
 	writeError(w, http.StatusForbidden, ErrCodeBrokerPolicyAdminManagedOnly, msg, details)
 }
 

@@ -421,6 +421,92 @@ func TestLinkMoveTargetProvider_SelfMoveNeverLinks(t *testing.T) {
 	assert.Equal(t, "agent-move", p.LinkedBy)
 }
 
+func TestLinkMoveTargetProvider_BrokerPolicyRefusesUnmanaged(t *testing.T) {
+	t.Run("unmanaged target refused under policy", func(t *testing.T) {
+		f := setupMoveFixture(t, false, func(dst *store.RuntimeBroker) {
+			dst.CreatedBy = "move-user-owner"
+			dst.AdminManaged = false
+			dst.AutoProvide = false
+		})
+		ctx := context.Background()
+		setAttachBrokerPolicyState(t, f.srv, f.s, true, true)
+		logs := captureBrokerPolicyWarnLogs(t)
+
+		mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID}
+		err := f.srv.linkMoveTargetProvider(ctx, mv)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), brokerPolicyOpMove+" refused")
+		assert.Contains(t, err.Error(), brokerPolicySettingKey)
+		assert.Contains(t, err.Error(), f.dst.Name)
+		_, pErr := f.s.GetProjectProvider(ctx, f.project.ID, f.dst.ID)
+		assert.ErrorIs(t, pErr, store.ErrNotFound, "no provider row may be created when policy refuses")
+		assert.Contains(t, logs.String(), "reason="+brokerPolicyDenialReason)
+		assert.Contains(t, logs.String(), "action="+brokerPolicyOpMove)
+	})
+
+	t.Run("managed embedded and auto-provide targets allowed under policy", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			setup func(b *store.RuntimeBroker)
+		}{
+			{"admin_managed", func(b *store.RuntimeBroker) {
+				b.CreatedBy = "move-user-owner"
+				b.AdminManaged = true
+				b.AutoProvide = false
+			}},
+			{"embedded", func(b *store.RuntimeBroker) {
+				b.CreatedBy = ""
+				b.AdminManaged = false
+				b.AutoProvide = false
+			}},
+			{"auto_provide", func(b *store.RuntimeBroker) {
+				b.CreatedBy = "move-user-owner"
+				b.AdminManaged = false
+				b.AutoProvide = true
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := setupMoveFixture(t, false, tc.setup)
+				ctx := context.Background()
+				setAttachBrokerPolicyState(t, f.srv, f.s, true, true)
+
+				mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID}
+				require.NoError(t, f.srv.linkMoveTargetProvider(ctx, mv))
+				p, err := f.s.GetProjectProvider(ctx, f.project.ID, f.dst.ID)
+				require.NoError(t, err)
+				assert.Equal(t, "agent-move", p.LinkedBy)
+			})
+		}
+	})
+
+	t.Run("policy off or experiment off allows unmanaged target", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			expOn    bool
+			policyOn bool
+		}{
+			{"experiment on policy off", true, false},
+			{"experiment off policy on", false, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := setupMoveFixture(t, false, func(dst *store.RuntimeBroker) {
+					dst.CreatedBy = "move-user-owner"
+					dst.AdminManaged = false
+					dst.AutoProvide = false
+				})
+				ctx := context.Background()
+				setAttachBrokerPolicyState(t, f.srv, f.s, tc.expOn, tc.policyOn)
+
+				mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID}
+				require.NoError(t, f.srv.linkMoveTargetProvider(ctx, mv))
+				p, err := f.s.GetProjectProvider(ctx, f.project.ID, f.dst.ID)
+				require.NoError(t, err)
+				assert.Equal(t, "agent-move", p.LinkedBy)
+			})
+		}
+	})
+}
+
 // The worker re-checks eligibility before its first side effect: when the
 // facts changed after the request was accepted (here the target stopped
 // advertising AgentMove), the move fails from pending without stopping or

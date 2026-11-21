@@ -219,6 +219,10 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 	if err != nil {
 		return err
 	}
+	if s.brokerPolicyRefuses(dst) {
+		logAuthzDenial(nil, GetIdentityFromContext(ctx), brokerResource(dst), Action(brokerPolicyOpMove), brokerPolicyDenialReason)
+		return errors.New(brokerPolicyMessage(brokerPolicyOpMove, dst, ""))
+	}
 	if err := s.linkProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  mv.ProjectID,
 		BrokerID:   dst.ID,
