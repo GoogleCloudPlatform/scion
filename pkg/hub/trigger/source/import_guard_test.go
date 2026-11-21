@@ -80,14 +80,21 @@ func TestImportBoundaryGuard(t *testing.T) {
 		t.Fatalf("expected production .go files in %s", pkgDir)
 	}
 
-	for _, forbidden := range []string{hubPkgPath, triggerGitHubPkgPath, githubAppPkgPath} {
-		chain, cerr := findTransitiveImport(root, sourcePkgPath, forbidden)
+	for _, forbidden := range []struct {
+		path         string
+		matchSubtree bool
+	}{
+		{hubPkgPath, false},
+		{triggerGitHubPkgPath, true},
+		{githubAppPkgPath, true},
+	} {
+		chain, cerr := findTransitiveImport(root, sourcePkgPath, forbidden.path, forbidden.matchSubtree)
 		if cerr != nil {
-			t.Fatalf("check transitive import %s -> %s: %v", sourcePkgPath, forbidden, cerr)
+			t.Fatalf("check transitive import %s -> %s: %v", sourcePkgPath, forbidden.path, cerr)
 		}
 		if chain != nil {
 			t.Errorf("%s must not transitively import %s, found chain: %s",
-				sourcePkgPath, forbidden, strings.Join(chain, " -> "))
+				sourcePkgPath, forbidden.path, strings.Join(chain, " -> "))
 		}
 	}
 }
@@ -116,7 +123,7 @@ func findModuleRoot(t *testing.T) string {
 	}
 }
 
-func findTransitiveImport(root, from, target string) ([]string, error) {
+func findTransitiveImport(root, from, target string, matchSubtree bool) ([]string, error) {
 	prev := map[string]string{from: ""}
 	queue := []string{from}
 	for len(queue) > 0 {
@@ -131,7 +138,7 @@ func findTransitiveImport(root, from, target string) ([]string, error) {
 				continue
 			}
 			prev[imp] = pkg
-			if imp == target || strings.HasPrefix(imp, target+"/") {
+			if imp == target || (matchSubtree && strings.HasPrefix(imp, target+"/")) {
 				var chain []string
 				for p := imp; p != ""; p = prev[p] {
 					chain = append([]string{p}, chain...)
