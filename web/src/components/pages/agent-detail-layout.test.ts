@@ -245,6 +245,24 @@ describe('agent detail layout', () => {
       true,
       'checkout-svc',
     ],
+    [
+      'URL-encodes project.id with special characters',
+      { id: 'org/p 1', name: 'Payments' },
+      {},
+      '/projects/org%2Fp%201',
+      'To Payments',
+      true,
+      'Payments',
+    ],
+    [
+      'URL-encodes agent.projectId with special characters',
+      null,
+      { projectId: 'org/p 2', project: 'Checkout' },
+      '/projects/org%2Fp%202',
+      'To Checkout',
+      true,
+      'Checkout',
+    ],
   ])(
     'hands the back link to the back slot (%s)',
     (_label, project, agentOverrides, href, text, truncate, tooltip) => {

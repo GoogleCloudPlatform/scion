@@ -283,4 +283,75 @@ describe('project back links (ptone/scion#8731)', () => {
       expect(link.getAttribute('tooltip')).toBe('Design Docs');
     });
   });
+
+  describe('URL-encodes projectId in back-link hrefs', () => {
+    const rawId = 'org/my project?v=1';
+    const encodedId = encodeURIComponent(rawId);
+
+    it('encodes projectId in project-settings loaded and error back links', () => {
+      const el = document.createElement('scion-page-project-settings');
+      Object.assign(el, {
+        loading: false,
+        projectId: rawId,
+        project: makeProject({ id: rawId, name: 'My Project' }),
+      });
+      const host = document.createElement('div');
+      render((el as unknown as { render: () => TemplateResult }).render(), host);
+      expect(host.querySelector<HTMLAnchorElement>('a.back-link')!.getAttribute('href')).toBe(
+        `/projects/${encodedId}`
+      );
+
+      Object.assign(el, { project: null, error: 'boom' });
+      render((el as unknown as { render: () => TemplateResult }).render(), host);
+      expect(host.querySelector<HTMLAnchorElement>('a.back-link')!.getAttribute('href')).toBe(
+        `/projects/${encodedId}`
+      );
+    });
+
+    it('encodes projectId in template-detail and harness-config-detail back links', () => {
+      const tplEl = document.createElement('scion-page-template-detail');
+      Object.assign(tplEl, {
+        loading: false,
+        projectId: rawId,
+        template: {
+          id: 't-1',
+          name: 'default',
+          slug: 'default',
+          harness: 'claude',
+          status: 'active',
+          scope: 'project',
+        },
+      });
+      const tplHost = document.createElement('div');
+      render((tplEl as unknown as { renderHeader: () => TemplateResult }).renderHeader(), tplHost);
+      expect(
+        Array.from(tplHost.querySelectorAll('scion-back-link')).map((l) => l.getAttribute('href'))
+      ).toEqual([
+        `/projects/${encodedId}/settings?tab=templates`,
+        `/projects/${encodedId}/settings`,
+      ]);
+
+      const hcEl = document.createElement('scion-page-harness-config-detail');
+      Object.assign(hcEl, {
+        loading: false,
+        projectId: rawId,
+        harnessConfig: {
+          id: 'h-1',
+          name: 'claude',
+          slug: 'claude',
+          harness: 'claude',
+          status: 'active',
+          scope: 'project',
+        },
+      });
+      const hcHost = document.createElement('div');
+      render((hcEl as unknown as { renderHeader: () => TemplateResult }).renderHeader(), hcHost);
+      expect(
+        Array.from(hcHost.querySelectorAll('scion-back-link')).map((l) => l.getAttribute('href'))
+      ).toEqual([
+        `/projects/${encodedId}/settings?tab=harness-configs`,
+        `/projects/${encodedId}/settings`,
+      ]);
+    });
+  });
 });

@@ -533,13 +533,14 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     if (this.projectId) {
       const projectName = cachedProjectLabel(this.projectId);
       const settingsLabel = projectName ? `${projectName} Settings` : 'Project Settings';
+      const encodedProjectId = encodeURIComponent(this.projectId);
       return [
         {
-          href: `/projects/${this.projectId}/settings?tab=harness-configs`,
+          href: `/projects/${encodedProjectId}/settings?tab=harness-configs`,
           label: 'Harness Configs',
         },
         {
-          href: `/projects/${this.projectId}/settings`,
+          href: `/projects/${encodedProjectId}/settings`,
           label: settingsLabel,
           truncate: !!projectName,
           tooltip: projectName ? settingsLabel : '',

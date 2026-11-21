@@ -209,10 +209,11 @@ export class ScionPageTemplateDetail extends LitElement {
     if (this.projectId) {
       const projectName = cachedProjectLabel(this.projectId);
       const settingsLabel = projectName ? `${projectName} Settings` : 'Project Settings';
+      const encodedProjectId = encodeURIComponent(this.projectId);
       return [
-        { href: `/projects/${this.projectId}/settings?tab=templates`, label: 'Templates' },
+        { href: `/projects/${encodedProjectId}/settings?tab=templates`, label: 'Templates' },
         {
-          href: `/projects/${this.projectId}/settings`,
+          href: `/projects/${encodedProjectId}/settings`,
           label: settingsLabel,
           truncate: !!projectName,
           tooltip: projectName ? settingsLabel : '',

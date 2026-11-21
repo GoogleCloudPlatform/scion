@@ -2771,7 +2771,11 @@ export class ScionPageProjectSettings extends LitElement {
     const backLabel = projectLabel || 'Project';
 
     return html`
-      <a href="/projects/${this.projectId}" class="back-link" title=${projectLabel || nothing}>
+      <a
+        href="/projects/${encodeURIComponent(this.projectId)}"
+        class="back-link"
+        title=${projectLabel || nothing}
+      >
         <sl-icon name="arrow-left"></sl-icon>
         ${backLabel}
       </a>
@@ -4351,7 +4355,11 @@ export class ScionPageProjectSettings extends LitElement {
     }
     const cachedLabel = cachedProjectLabel(this.projectId);
     return html`
-      <a href="/projects/${this.projectId}" class="back-link" title=${cachedLabel || nothing}>
+      <a
+        href="/projects/${encodeURIComponent(this.projectId)}"
+        class="back-link"
+        title=${cachedLabel || nothing}
+      >
         <sl-icon name="arrow-left"></sl-icon>
         ${cachedLabel || 'Back to Project'}
       </a>

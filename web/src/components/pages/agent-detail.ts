@@ -990,7 +990,7 @@ export class ScionPageAgentDetail extends LitElement {
     if (this.project) {
       const display = projectLabel || 'Project';
       return {
-        href: `/projects/${this.project.id}`,
+        href: `/projects/${encodeURIComponent(this.project.id)}`,
         label: `To ${display}`,
         deletedLabel: `Go to ${display}`,
         truncate: true,
@@ -999,7 +999,7 @@ export class ScionPageAgentDetail extends LitElement {
     }
     if (this.agent?.projectId && projectLabel) {
       return {
-        href: `/projects/${this.agent.projectId}`,
+        href: `/projects/${encodeURIComponent(this.agent.projectId)}`,
         label: `To ${projectLabel}`,
         deletedLabel: `Go to ${projectLabel}`,
         truncate: true,
