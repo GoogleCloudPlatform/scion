@@ -80,15 +80,20 @@ func newFakeRepairRuntime(t *testing.T, o fakeRepairOpts) *fakeRepairRuntime {
 	if o.psFails {
 		psExit = 1
 	}
+	// Write args via a temp file and mv so readers polling os.Stat (such as
+	// ran()) never observe a created-but-empty file if the process is killed
+	// mid-write.
+	psTmp := f.psArgs + ".tmp"
+	runTmp := f.runArgs + ".tmp"
 	script := fmt.Sprintf(`#!/bin/sh
 case "$1" in
 info) %s ;;
-ps) printf '%%s\n' "$@" > %q; printf '%%b\n' %q; exit %d ;;
+ps) printf '%%s\n' "$@" > %q && mv %q %q; printf '%%b\n' %q; exit %d ;;
 rm) echo "$*" >> %q; exit %d ;;
-run) printf '%%s\n' "$@" > %q; echo helper-output; %s ;;
+run) printf '%%s\n' "$@" > %q && mv %q %q; echo helper-output; %s ;;
 esac
 exit 99
-`, info, f.psArgs, o.psOut, psExit, f.rmCalls, rmExit, f.runArgs, runTail)
+`, info, psTmp, psTmp, f.psArgs, o.psOut, psExit, f.rmCalls, rmExit, runTmp, runTmp, f.runArgs, runTail)
 	if err := os.WriteFile(f.bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
