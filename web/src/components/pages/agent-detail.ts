@@ -98,6 +98,7 @@ import '../shared/agent-log-viewer.js';
 import type { ScionAgentLogViewer } from '../shared/agent-log-viewer.js';
 import '../shared/agent-message-viewer.js';
 import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js';
+import '../shared/agent-suspend-screen.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
 import { idleSuspendEnabled, isFeatureEnabled } from '../../utils/feature-flags.js';
@@ -2176,10 +2177,23 @@ export class ScionPageAgentDetail extends LitElement {
   private renderStatusTab() {
     const agent = this.agent!;
     return html`
-      ${this.renderCurrentStateCard(agent)} ${this.renderCurrentTaskCard(agent)}
-      ${this.renderLimitsUsageCard(agent)} ${this.renderPlacementCard(agent)}
-      ${this.renderConnectivityCard(agent)} ${this.renderExposedPortsCard(agent)}
-      ${this.renderNotificationsCard()}
+      ${this.renderCurrentStateCard(agent)} ${this.renderLastScreenCard(agent)}
+      ${this.renderCurrentTaskCard(agent)} ${this.renderLimitsUsageCard(agent)}
+      ${this.renderPlacementCard(agent)} ${this.renderConnectivityCard(agent)}
+      ${this.renderExposedPortsCard(agent)} ${this.renderNotificationsCard()}
+    `;
+  }
+
+  private renderLastScreenCard(agent: Agent) {
+    if (agent.phase !== 'suspended' || !can(agent._capabilities, 'attach')) {
+      return nothing;
+    }
+    return html`
+      <scion-agent-suspend-screen
+        .agentId=${agent.id}
+        .projectId=${agent.projectId || ''}
+        .phase=${agent.phase}
+      ></scion-agent-suspend-screen>
     `;
   }
 
