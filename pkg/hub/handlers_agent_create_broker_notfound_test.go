@@ -529,3 +529,232 @@ func devUserContext(ctx context.Context) context.Context {
 		Email:       "dev@localhost",
 	}))
 }
+
+func agentCreateContext(t *testing.T, srv *Server, projectID string) context.Context {
+	t.Helper()
+	tok, err := srv.agentTokenService.GenerateAgentToken(tid("nf-caller-agent"), projectID, []AgentTokenScope{ScopeAgentCreate}, nil)
+	require.NoError(t, err)
+	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
+	require.NoError(t, err)
+	return contextWithIdentity(context.Background(), &agentIdentityWrapper{AgentTokenClaims: claims})
+}
+
+// ptone/scion#8453: an unambiguous broker name or slug prefix resolves to the
+// matching broker (case-insensitively), reusing an existing provider link
+// without relinking for admin, member, and agent callers, and auto-linking an
+// unlinked broker when authorized.
+func TestResolveRuntimeBroker_UniqueNamePrefix(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("nf-pfx-project"), Slug: "nf-pfx", Name: "NF Prefix"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	linked := &store.RuntimeBroker{
+		ID: tid("nf-pfx-linked"), Name: "GPU US Central", Slug: "gpu-us-central",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, linked))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: linked.ID, BrokerName: linked.Name,
+		LocalPath: "/srv/gpu-linked", LinkedBy: "cli", Status: store.BrokerStatusOnline,
+	}))
+
+	callers := map[string]context.Context{
+		"admin":     devUserContext(ctx),
+		"non-admin": memberContext(ctx),
+		"agent":     agentCreateContext(t, srv, project.ID),
+	}
+	for caller, cctx := range callers {
+		for _, ref := range []string{"GPU US", "gpu us", "gpu-us"} {
+			w := httptest.NewRecorder()
+			brokerID, err := srv.resolveRuntimeBroker(cctx, w, ref, project)
+			require.NoError(t, err, "caller=%s ref=%q body=%s", caller, ref, w.Body.String())
+			assert.Equal(t, linked.ID, brokerID, "caller=%s ref=%q", caller, ref)
+
+			provider, err := s.GetProjectProvider(ctx, project.ID, linked.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "/srv/gpu-linked", provider.LocalPath, "caller=%s ref=%q", caller, ref)
+			assert.Equal(t, "cli", provider.LinkedBy, "caller=%s ref=%q", caller, ref)
+		}
+	}
+
+	// An unlinked broker matched by a unique prefix auto-links for an authorized caller.
+	unlinked := &store.RuntimeBroker{
+		ID: tid("nf-pfx-unlinked"), Name: "TPU Europe West", Slug: "tpu-europe-west",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, unlinked))
+
+	w := httptest.NewRecorder()
+	brokerID, err := srv.resolveRuntimeBroker(devUserContext(ctx), w, "TPU Europe", project)
+	require.NoError(t, err, w.Body.String())
+	assert.Equal(t, unlinked.ID, brokerID)
+	_, err = s.GetProjectProvider(ctx, project.ID, unlinked.ID)
+	require.NoError(t, err, "unique prefix on unlinked broker should auto-link")
+}
+
+// End-to-end through the project-scoped create route used by `scion start --broker`.
+func TestCreateProjectAgent_UniqueBrokerNamePrefix_Resolves(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, _, project := setupCreateAgentServer(t, disp)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:            "prefix-broker-agent",
+		Task:            "do something",
+		RuntimeBrokerID: "Create Test",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+}
+
+// An exact canonical name or slug match always wins even when it is a prefix
+// of another broker's name.
+func TestResolveRuntimeBroker_ExactMatchBeatsPrefix(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("nf-exact-project"), Slug: "nf-exact", Name: "NF Exact"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	shortBroker := &store.RuntimeBroker{
+		ID: tid("nf-exact-short"), Name: "gpu", Slug: "gpu",
+		Status: store.BrokerStatusOnline, AutoProvide: true,
+	}
+	longBroker := &store.RuntimeBroker{
+		ID: tid("nf-exact-long"), Name: "gpu-large", Slug: "gpu-large",
+		Status: store.BrokerStatusOnline, AutoProvide: true,
+	}
+	for _, b := range []*store.RuntimeBroker{shortBroker, longBroker} {
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status,
+		}))
+	}
+
+	// "gpu" matches shortBroker exactly, so it is not rejected as ambiguous.
+	w := httptest.NewRecorder()
+	brokerID, err := srv.resolveRuntimeBroker(devUserContext(ctx), w, "gpu", project)
+	require.NoError(t, err, w.Body.String())
+	assert.Equal(t, shortBroker.ID, brokerID)
+
+	// "gpu-" only matches longBroker by prefix.
+	w = httptest.NewRecorder()
+	brokerID, err = srv.resolveRuntimeBroker(devUserContext(ctx), w, "gpu-", project)
+	require.NoError(t, err, w.Body.String())
+	assert.Equal(t, longBroker.ID, brokerID)
+}
+
+// An ambiguous prefix fails with 409 runtime_broker_ambiguous and suggests
+// only the canonical names of matching brokers the caller may use (excluding
+// private unusable brokers and message-broker plugins).
+func TestResolveRuntimeBroker_AmbiguousPrefix_Returns409(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("nf-amb-project"), Slug: "nf-amb", Name: "NF Ambiguous"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("nf-member"), Email: "member@example.com", DisplayName: "Member",
+		Role: store.UserRoleMember, Status: "active",
+	}))
+	grantProjectRole(t, s, tid("nf-member"), project.ID, "project-admin")
+
+	alpha := &store.RuntimeBroker{
+		ID: tid("nf-amb-alpha"), Name: "gpu-us-central1", Slug: "gpu-us-central1",
+		Status: store.BrokerStatusOnline, AutoProvide: true,
+	}
+	beta := &store.RuntimeBroker{
+		ID: tid("nf-amb-beta"), Name: "gpu-us-west1", Slug: "gpu-us-west1",
+		Status: store.BrokerStatusOnline, AutoProvide: true,
+	}
+	// Owned by another user and not AutoProvide: invisible/unusable to member.
+	private := &store.RuntimeBroker{
+		ID: tid("nf-amb-private"), Name: "gpu-us-secret", Slug: "gpu-us-secret",
+		Status: store.BrokerStatusOnline, CreatedBy: tid("nf-amb-other-owner"),
+	}
+	// Message-broker plugin record: never a runtime broker candidate.
+	plugin := &store.RuntimeBroker{
+		ID: tid("nf-amb-plugin"), Name: "gpu-us-plugin", Slug: "gpu-us-plugin",
+		Status: store.BrokerStatusOnline, AutoProvide: true,
+		Labels: map[string]string{pluginBrokerLabel: "slack"},
+	}
+	for _, b := range []*store.RuntimeBroker{alpha, beta, private, plugin} {
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+	}
+
+	w := httptest.NewRecorder()
+	brokerID, err := srv.resolveRuntimeBroker(memberContext(ctx), w, "gpu-us", project)
+	require.Error(t, err)
+	assert.Empty(t, brokerID)
+	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeRuntimeBrokerAmbiguous, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, `"gpu-us"`)
+	assert.Contains(t, resp.Error.Message, `"gpu-us-central1"`)
+	assert.Contains(t, resp.Error.Message, `"gpu-us-west1"`)
+	assert.NotContains(t, resp.Error.Message, "gpu-us-secret", "must not disclose unusable private broker")
+	assert.NotContains(t, resp.Error.Message, "gpu-us-plugin", "must not include plugin broker")
+
+	// When only one usable broker shares a prefix with an unusable private
+	// broker, the usable broker resolves unambiguously instead of failing, and
+	// a prefix matching only the private broker returns 404.
+	solo := &store.RuntimeBroker{
+		ID: tid("nf-amb-solo"), Name: "priv-shared", Slug: "priv-shared",
+		Status: store.BrokerStatusOnline, AutoProvide: true,
+	}
+	hidden := &store.RuntimeBroker{
+		ID: tid("nf-amb-hidden"), Name: "priv-hidden", Slug: "priv-hidden",
+		Status: store.BrokerStatusOnline, CreatedBy: tid("nf-amb-other-owner"),
+	}
+	for _, b := range []*store.RuntimeBroker{solo, hidden} {
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status,
+		}))
+	}
+
+	w = httptest.NewRecorder()
+	brokerID, err = srv.resolveRuntimeBroker(memberContext(ctx), w, "priv-", project)
+	require.NoError(t, err, w.Body.String())
+	assert.Equal(t, solo.ID, brokerID)
+
+	w = httptest.NewRecorder()
+	brokerID, err = srv.resolveRuntimeBroker(memberContext(ctx), w, "priv-hid", project)
+	require.Error(t, err)
+	assert.Empty(t, brokerID)
+	require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	assert.NotContains(t, w.Body.String(), "priv-hidden")
+}
+
+// End-to-end through the create route: an ambiguous broker prefix returns 409
+// suggesting the matching canonical names without creating an agent row.
+func TestCreateProjectAgent_AmbiguousBrokerPrefix_Returns409NoAgentRow(t *testing.T) {
+	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	ctx := context.Background()
+
+	sibling := &store.RuntimeBroker{
+		ID: tid("create-sibling-broker"), Name: "Create Test Sibling", Slug: "create-test-sibling",
+		Status: store.BrokerStatusOnline, AutoProvide: true,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, sibling))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: sibling.ID, BrokerName: sibling.Name,
+		Status: store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:            "ambiguous-prefix-agent",
+		Task:            "do something",
+		RuntimeBrokerID: "Create Test",
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeRuntimeBrokerAmbiguous, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, `"Create Test Broker"`)
+	assert.Contains(t, resp.Error.Message, `"Create Test Sibling"`)
+
+	_, err := s.GetAgentBySlug(ctx, project.ID, "ambiguous-prefix-agent")
+	assert.True(t, errors.Is(err, store.ErrNotFound), "no agent row may be created, got %v", err)
+}

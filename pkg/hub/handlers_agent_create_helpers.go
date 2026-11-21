@@ -2189,6 +2189,23 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// to the project as a provider. This is common for hub-managed projects where
 		// providers aren't established via CLI registration.
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
+		if errors.Is(err, store.ErrNotFound) {
+			// Exact ID, name, and slug all missed — check for a unique prefix
+			// match on Name or Slug among brokers the caller may use for this
+			// project (ptone/scion#8453). Hidden/unusable brokers and message-
+			// broker plugins are excluded so prefix resolution never acts as an
+			// existence oracle.
+			var candidates []store.RuntimeBroker
+			broker, candidates, err = s.findBrokerByPrefix(ctx, requestedBrokerID, project)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				writeErrorFromErr(w, err, "")
+				return "", err
+			}
+			if len(candidates) > 1 {
+				writeRuntimeBrokerPrefixAmbiguous(w, requestedBrokerID, candidates, project.DefaultRuntimeBrokerID)
+				return "", store.ErrNotFound
+			}
+		}
 		if err == nil && broker != nil {
 			// The lookup can find a broker that already is a provider even
 			// though the passes above missed it, e.g. by its current name
@@ -2682,6 +2699,109 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 	}
 
 	return nil, store.ErrNotFound
+}
+
+const brokerPrefixListPageSize = 200
+
+// findBrokerByPrefix resolves a runtime broker name or slug prefix (case-
+// insensitive) among non-plugin runtime brokers usable by the caller in
+// project. Returns:
+//   - (broker, nil, nil) when exactly one broker matches;
+//   - (nil, candidates, nil) when more than one broker matches, sorted by
+//     case-folded Name, Name, and ID;
+//   - (nil, nil, store.ErrNotFound) when nothing matches or prefix is blank.
+func (s *Server) findBrokerByPrefix(ctx context.Context, prefix string, project *store.Project) (*store.RuntimeBroker, []store.RuntimeBroker, error) {
+	if strings.TrimSpace(prefix) == "" {
+		return nil, nil, store.ErrNotFound
+	}
+	prefixLower := strings.ToLower(prefix)
+	var matches []store.RuntimeBroker
+	seenIDs := make(map[string]struct{})
+	seenCursors := make(map[string]struct{})
+	cursor := ""
+	for {
+		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{},
+			store.ListOptions{Limit: brokerPrefixListPageSize, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, nil, err
+		}
+		if page == nil {
+			break
+		}
+		for i := range page.Items {
+			b := &page.Items[i]
+			if isPluginBroker(b) {
+				continue
+			}
+			if _, dup := seenIDs[b.ID]; dup {
+				continue
+			}
+			nameMatch := b.Name != "" && strings.HasPrefix(strings.ToLower(b.Name), prefixLower)
+			slugMatch := b.Slug != "" && strings.HasPrefix(strings.ToLower(b.Slug), prefixLower)
+			if (!nameMatch && !slugMatch) || !s.canUseBrokerForProject(ctx, b, project) {
+				continue
+			}
+			seenIDs[b.ID] = struct{}{}
+			matches = append(matches, *b)
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		if _, dup := seenCursors[page.NextCursor]; dup {
+			return nil, nil, fmt.Errorf("listing runtime brokers for prefix match: pagination returned repeated cursor %q", page.NextCursor)
+		}
+		seenCursors[page.NextCursor] = struct{}{}
+		cursor = page.NextCursor
+	}
+	switch len(matches) {
+	case 0:
+		return nil, nil, store.ErrNotFound
+	case 1:
+		return &matches[0], nil, nil
+	default:
+		sort.Slice(matches, func(i, j int) bool {
+			li, lj := strings.ToLower(matches[i].Name), strings.ToLower(matches[j].Name)
+			if li != lj {
+				return li < lj
+			}
+			if matches[i].Name != matches[j].Name {
+				return matches[i].Name < matches[j].Name
+			}
+			return matches[i].ID < matches[j].ID
+		})
+		return nil, matches, nil
+	}
+}
+
+// writeRuntimeBrokerPrefixAmbiguous writes a 409 runtime_broker_ambiguous
+// response when a broker prefix matches multiple usable brokers, suggesting
+// their canonical names (and IDs when two candidates share a case-folded name).
+func writeRuntimeBrokerPrefixAmbiguous(w http.ResponseWriter, requested string, candidates []store.RuntimeBroker, defaultBrokerID string) {
+	nameCounts := make(map[string]int, len(candidates))
+	for _, b := range candidates {
+		nameCounts[strings.ToLower(b.Name)]++
+	}
+	labels := make([]string, 0, len(candidates))
+	summaries := make([]RuntimeBrokerSummary, 0, len(candidates))
+	for _, b := range candidates {
+		if nameCounts[strings.ToLower(b.Name)] > 1 {
+			labels = append(labels, fmt.Sprintf("%q (%s)", b.Name, b.ID))
+		} else {
+			labels = append(labels, fmt.Sprintf("%q", b.Name))
+		}
+		summaries = append(summaries, RuntimeBrokerSummary{
+			ID:        b.ID,
+			Name:      b.Name,
+			Status:    b.Status,
+			IsDefault: defaultBrokerID != "" && b.ID == defaultBrokerID,
+		})
+	}
+	message := fmt.Sprintf("Runtime broker prefix %q is ambiguous; matching brokers: %s",
+		requested, strings.Join(labels, ", "))
+	writeError(w, http.StatusConflict, ErrCodeRuntimeBrokerAmbiguous, message, map[string]interface{}{
+		"requestedBrokerId": requested,
+		"candidates":        summaries,
+	})
 }
 
 // agentHasGCPIdentityAssigned returns true when the agent's own GCPIdentity
