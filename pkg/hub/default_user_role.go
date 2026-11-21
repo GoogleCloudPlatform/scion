@@ -33,6 +33,7 @@ const (
 	DefaultUserRoleWarningExperimentDisabled = "experiment_disabled"
 	DefaultUserRoleWarningRoleNotFound       = "role_not_found"
 	DefaultUserRoleWarningRoleIneligible     = "role_ineligible"
+	DefaultUserRoleWarningLookupError        = "lookup_error"
 )
 
 // DefaultUserRoleWarning describes an active fallback when the configured
@@ -166,14 +167,29 @@ func resolveDefaultUserRole(ctx context.Context, st store.Store, configured stri
 	default:
 		rd, err := st.GetRoleDefinitionByName(ctx, configured, store.RoleScopeSystem)
 		if err != nil {
-			res = resolvedDefaultUserRole{
-				BuiltinRole: store.UserRoleMember,
-				Warning: &DefaultUserRoleWarning{
-					Code:           DefaultUserRoleWarningRoleNotFound,
-					ConfiguredRole: configured,
-					EffectiveRole:  store.UserRoleMember,
-					Message:        fmt.Sprintf("Configured default_user_role %q was not found as a system-scope role; falling back to %q.", configured, store.UserRoleMember),
-				},
+			if errors.Is(err, store.ErrNotFound) {
+				res = resolvedDefaultUserRole{
+					BuiltinRole: store.UserRoleMember,
+					Warning: &DefaultUserRoleWarning{
+						Code:           DefaultUserRoleWarningRoleNotFound,
+						ConfiguredRole: configured,
+						EffectiveRole:  store.UserRoleMember,
+						Message:        fmt.Sprintf("Configured default_user_role %q was not found as a system-scope role; falling back to %q.", configured, store.UserRoleMember),
+					},
+				}
+			} else {
+				slog.Error("default_user_role store lookup failed; falling back to member",
+					"configured_role", configured,
+					"error", err)
+				res = resolvedDefaultUserRole{
+					BuiltinRole: store.UserRoleMember,
+					Warning: &DefaultUserRoleWarning{
+						Code:           DefaultUserRoleWarningLookupError,
+						ConfiguredRole: configured,
+						EffectiveRole:  store.UserRoleMember,
+						Message:        fmt.Sprintf("Failed to look up configured default_user_role %q; falling back to %q.", configured, store.UserRoleMember),
+					},
+				}
 			}
 		} else if eligErr := checkCustomDefaultUserRoleEligible(rd); eligErr != nil {
 			res = resolvedDefaultUserRole{
@@ -192,7 +208,7 @@ func resolveDefaultUserRole(ctx context.Context, st store.Store, configured stri
 			}
 		}
 	}
-	if logWarning && res.Warning != nil {
+	if logWarning && res.Warning != nil && res.Warning.Code != DefaultUserRoleWarningLookupError {
 		slog.Warn("default_user_role falling back to member",
 			"code", res.Warning.Code,
 			"configured_role", res.Warning.ConfiguredRole,
@@ -282,16 +298,19 @@ func (s *Server) validateDefaultUserRoleSave(w http.ResponseWriter, r *http.Requ
 		return false
 	}
 	if rd != nil && s.authzService != nil {
-		if user := GetUserIdentityFromContext(r.Context()); user != nil {
-			decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
-				Type:                  GrantTypeCustomRole,
-				CustomRolePermissions: rd.Permissions,
-				ScopeType:             store.RoleScopeSystem,
-			})
-			if !decision.Allowed {
-				writeForbidden(w, "cannot set server.auth.default_user_role: "+decision.Reason)
-				return false
-			}
+		user := GetUserIdentityFromContext(r.Context())
+		if user == nil {
+			writeForbidden(w, "cannot set server.auth.default_user_role: unauthenticated")
+			return false
+		}
+		decision := s.authzService.CanDelegate(r.Context(), user, GrantDescriptor{
+			Type:                  GrantTypeCustomRole,
+			CustomRolePermissions: rd.Permissions,
+			ScopeType:             store.RoleScopeSystem,
+		})
+		if !decision.Allowed {
+			writeForbidden(w, "cannot set server.auth.default_user_role: "+decision.Reason)
+			return false
 		}
 	}
 	return true

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -439,4 +440,46 @@ func TestApplySnapshot_DefaultUserRole_PreservedWhenExperimentEnabled(t *testing
 	ApplySnapshot(srv, Layer1Snapshot{DefaultUserRole: ""})
 	assert.Equal(t, "", srv.config.DefaultUserRole)
 	assert.Equal(t, store.UserRoleMember, srv.DefaultUserRole())
+}
+
+func TestValidateDefaultUserRoleSave_NilIdentityFailsClosed(t *testing.T) {
+	srv, st := testServer(t)
+	require.NotNil(t, srv.authzService)
+
+	_ = seedCustomRoleDef(t, st, "custom-nil-actor", store.RoleScopeSystem, []string{"user.read"})
+	enableCustomDefaultRoleExperiment(t, srv, nil, true)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config", nil)
+	rr := httptest.NewRecorder()
+
+	ok := srv.validateDefaultUserRoleSave(rr, req, "custom-nil-actor", "member")
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "unauthenticated")
+}
+
+type roleLookupErrorStore struct {
+	store.Store
+	err error
+}
+
+func (s *roleLookupErrorStore) GetRoleDefinitionByName(_ context.Context, _, _ string) (*store.RoleDefinition, error) {
+	return nil, s.err
+}
+
+func TestResolveDefaultUserRole_LookupErrorDistinctFromNotFound(t *testing.T) {
+	_, st := testServer(t)
+	faultStore := &roleLookupErrorStore{
+		Store: st,
+		err:   errors.New("transient database timeout"),
+	}
+
+	res := resolveDefaultUserRole(context.Background(), faultStore, "custom-role", true, true)
+	assert.Equal(t, store.UserRoleMember, res.BuiltinRole)
+	assert.Nil(t, res.CustomRole)
+	require.NotNil(t, res.Warning)
+	assert.Equal(t, DefaultUserRoleWarningLookupError, res.Warning.Code)
+	assert.NotEqual(t, DefaultUserRoleWarningRoleNotFound, res.Warning.Code)
+	assert.Equal(t, "custom-role", res.Warning.ConfiguredRole)
+	assert.Equal(t, store.UserRoleMember, res.Warning.EffectiveRole)
 }
