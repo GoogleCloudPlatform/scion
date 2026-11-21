@@ -1019,7 +1019,7 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 		}
 
 		if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
-			slog.Error("Failed to update project after permission sync",
+			slog.ErrorContext(ctx, "Failed to update project after permission sync",
 				"project_id", project.ID, "error", err)
 			return
 		}

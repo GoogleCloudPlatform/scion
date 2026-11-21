@@ -197,7 +197,7 @@ func (s *Server) fireAction(ctx context.Context, req hubfire.FireRequest) hubfir
 	}
 	out := s.fireActionWith(ctx, req, action)
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger && out.Status == hubfire.FireStatusFailed && out.Error != "" {
-		out.Error = sanitizeTriggerFireError(action, req, out.Status, out.Error)
+		out.Error = sanitizeTriggerFireError(ctx, action, req, out.Status, out.Error)
 	}
 	return out
 }
@@ -208,7 +208,7 @@ func (s *Server) fireAction(ctx context.Context, req hubfire.FireRequest) hubfir
 // never leak through trigger history (1b-3 review N4). Refusals and skips
 // already carry generic reasons by contract; schedule fires are never passed
 // here and retain their existing scheduled_events.error text unchanged.
-func sanitizeTriggerFireError(action FireAction, req hubfire.FireRequest, status hubfire.FireStatus, raw string) string {
+func sanitizeTriggerFireError(ctx context.Context, action FireAction, req hubfire.FireRequest, status hubfire.FireStatus, raw string) string {
 	if raw == "" {
 		return ""
 	}
@@ -225,7 +225,7 @@ func sanitizeTriggerFireError(action FireAction, req hubfire.FireRequest, status
 		if mapped == "" {
 			mapped = "fire failed"
 		}
-		slog.Warn("trigger fire error mapped to generic text",
+		slog.WarnContext(ctx, "trigger fire error mapped to generic text",
 			"actionType", req.ActionType,
 			"status", status,
 			"fireID", req.Authority.FireID,
@@ -305,7 +305,7 @@ func sanitizeTriggerFireError(action FireAction, req hubfire.FireRequest, status
 		}
 	}
 
-	slog.Warn("trigger fire error mapped to generic text",
+	slog.WarnContext(ctx, "trigger fire error mapped to generic text",
 		"actionType", req.ActionType,
 		"status", status,
 		"fireID", req.Authority.FireID,

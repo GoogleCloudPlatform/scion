@@ -620,7 +620,7 @@ func (s *Server) updateProjectsForInstallation(ctx context.Context, installation
 		}
 
 		if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
-			slog.Error("Failed to update project GitHub App status",
+			slog.ErrorContext(ctx, "Failed to update project GitHub App status",
 				"project_id", project.ID, "error", err)
 		} else if s.events != nil {
 			s.events.PublishProjectUpdated(ctx, project)
@@ -679,7 +679,7 @@ func (s *Server) resetPermissionDeniedProjectsForInstallation(ctx context.Contex
 			}
 
 			if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
-				slog.Error("Failed to reset project GitHub App status after new_permissions_accepted",
+				slog.ErrorContext(ctx, "Failed to reset project GitHub App status after new_permissions_accepted",
 					"project_id", project.ID, "error", err)
 				continue
 			}
@@ -724,7 +724,7 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 		}
 
 		if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
-			slog.Error("Failed to update project after repo removal",
+			slog.ErrorContext(ctx, "Failed to update project after repo removal",
 				"project_id", project.ID, "error", err)
 		} else {
 			s.invalidateGitHubAssociation(project.ID)
@@ -824,7 +824,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 	// project status.
 	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, project, *project.GitHubInstallationID)
 	if authzErr != nil {
-		slog.Warn("GitHub App token refused: installation association not authorized",
+		slog.WarnContext(ctx, "GitHub App token refused: installation association not authorized",
 			"project_id", project.ID, "installation_id", *project.GitHubInstallationID, "error", authzErr)
 		errCode := githubAssociationErrorCode(authzErr)
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
@@ -929,7 +929,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 		LastChecked:   now,
 	}
 	if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
-		slog.Warn("Failed to update project status after successful token mint", "error", err)
+		slog.WarnContext(ctx, "Failed to update project status after successful token mint", "error", err)
 	} else if s.events != nil {
 		s.events.PublishProjectUpdated(ctx, project)
 	}
@@ -949,7 +949,7 @@ func (s *Server) updateProjectGitHubAppStatus(ctx context.Context, project *stor
 		LastError:    &now,
 	}
 	if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
-		slog.Warn("Failed to update project GitHub App status", "project_id", project.ID, "error", err)
+		slog.WarnContext(ctx, "Failed to update project GitHub App status", "project_id", project.ID, "error", err)
 	} else if s.events != nil {
 		s.events.PublishProjectUpdated(ctx, project)
 	}
