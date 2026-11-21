@@ -1047,6 +1047,10 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	if !s.authorizeTemplateReadRoute(w, r, template) {
 		return
 	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && s.agentStanding(ctx, agentIdent.ID()) != nil {
+		NotFound(w, "Template")
+		return
+	}
 
 	stor := s.GetStorage()
 	if stor == nil {

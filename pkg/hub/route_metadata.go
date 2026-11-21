@@ -46,7 +46,7 @@ const (
 	// AgentStandingHandler declares that the handler enforces delegation
 	// standing itself (for example, when custom error mapping or per-item
 	// admission applies). Still verified end-to-end by
-	// TestAgentStanding_CredentialRoutesEnforced.
+	// TestAgentStanding_CredentialRoutesCoverage.
 	AgentStandingHandler AgentStandingPolicy = "handler"
 	// AgentStandingExempt declares that the route does not issue
 	// credentials, tokens, or secrets; AgentStandingReason must explain why.
@@ -1577,8 +1577,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"POST /api/v1/agent/identity-token": {
 		Pattern: "POST /api/v1/agent/identity-token", RouteID: "agent.identityToken",
-		Classification: RouteAgentToken,
-		AgentStanding:  AgentStandingGuard,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingHandler,
+		AgentStandingReason: "handler checks rate limit and maps missing agent to 404 before calling AgentStandingForbidden",
 	},
 	"POST /api/v1/agent/secrets": {
 		Pattern: "POST /api/v1/agent/secrets", RouteID: "agent.secretFetch",

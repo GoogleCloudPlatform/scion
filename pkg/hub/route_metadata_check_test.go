@@ -481,7 +481,10 @@ func TestNewRefusesInvalidAgentStandingRoute(t *testing.T) {
 		{
 			name:    "agent-token route omits AgentStanding",
 			pattern: "POST /api/v1/agent/identity-token",
-			mod:     func(m *RouteMetadata) { m.AgentStanding = "" },
+			mod: func(m *RouteMetadata) {
+				m.AgentStanding = ""
+				m.AgentStandingReason = ""
+			},
 		},
 		{
 			name:    "agent-token exempt route omits reason",

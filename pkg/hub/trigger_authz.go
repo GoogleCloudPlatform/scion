@@ -146,6 +146,9 @@ func (s *Server) webhookEndpointAccessDecision(ctx context.Context, projectID st
 	}
 	switch identity.Type() {
 	case "agent":
+		if s.agentStanding(ctx, identity.ID()) != nil {
+			return webhookEndpointAccess{reason: "agent not in good standing"}
+		}
 		if ep == nil || action == ActionCreate {
 			return webhookEndpointAccess{allowed: true}
 		}
