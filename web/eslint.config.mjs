@@ -185,6 +185,7 @@ export default defineConfig([
       'e2e/groups/*.ts',
       'e2e/harness/*.ts',
       'e2e/roles/*.ts',
+      'e2e/system-one/*.ts',
       'e2e/terminal-coordinator/*.ts',
       'e2e/tokens/*.ts',
     ],
