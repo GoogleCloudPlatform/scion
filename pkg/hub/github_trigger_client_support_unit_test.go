@@ -160,9 +160,25 @@ func TestScopeRequestedGitHubTokenPermissions(t *testing.T) {
 		})
 	}
 
-	// When stored == nil and appPermissions has no overlap with defaults (ok == false), refuse with ErrGitHubPermissionNotPermitted.
-	if _, err := scopeRequestedGitHubTokenPermissions(githubapp.TokenPermissions{Issues: "write", Metadata: "read"}, nil, writeGrant, nil); !errors.Is(err, ErrGitHubPermissionNotPermitted) {
-		t.Fatalf("nil appPermissions with nil stored err = %v, want ErrGitHubPermissionNotPermitted", err)
+	// When stored == nil and appPermissions is unknown (nil), empty, or disjoint
+	// with defaults (ok == false), refuse EVERY request — including {Metadata: "read"} —
+	// with ErrGitHubPermissionNotPermitted before any implicit metadata:read bump.
+	for _, appGrant := range []struct {
+		name  string
+		perms map[string]string
+	}{
+		{"nil", nil},
+		{"empty", map[string]string{}},
+		{"disjoint", map[string]string{"deployments": "read"}},
+	} {
+		for _, req := range []githubapp.TokenPermissions{
+			{Issues: "write", Metadata: "read"},
+			{Metadata: "read"},
+		} {
+			if _, err := scopeRequestedGitHubTokenPermissions(req, nil, writeGrant, appGrant.perms); !errors.Is(err, ErrGitHubPermissionNotPermitted) {
+				t.Fatalf("%s appPermissions with stored=nil req=%+v err = %v, want ErrGitHubPermissionNotPermitted", appGrant.name, req, err)
+			}
+		}
 	}
 	// When stored == nil and App only grants issues:read, issues:write is refused while issues:read + metadata:read succeeds.
 	readOnlyIssuesApp := map[string]string{"issues": "read", "metadata": "read"}
