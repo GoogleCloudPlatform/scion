@@ -259,7 +259,7 @@ export class ScionHeader extends LitElement {
       padding: 0.5rem;
       background: transparent;
       border: none;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       cursor: pointer;
       color: var(--scion-text, #1e293b);
     }
@@ -335,7 +335,7 @@ export class ScionHeader extends LitElement {
       gap: 0.25rem;
       padding: 0.25rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       background: var(--scion-bg-subtle, #f1f5f9);
     }
 
@@ -345,7 +345,7 @@ export class ScionHeader extends LitElement {
       gap: 0.375rem;
       padding: 0.5rem 0.75rem;
       border: none;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -398,7 +398,7 @@ export class ScionHeader extends LitElement {
       min-width: 16px;
       height: 16px;
       padding: 0 4px;
-      border-radius: 8px;
+      border-radius: var(--scion-radius-full, 9999px);
       background: var(--sl-color-danger-600, #dc2626);
       box-shadow: 0 0 0 1px var(--scion-surface, #ffffff);
       color: var(--sl-color-neutral-0, #fff);
@@ -441,7 +441,7 @@ export class ScionHeader extends LitElement {
       height: 2rem;
       padding: 0;
       border: none;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -507,7 +507,7 @@ export class ScionHeader extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.5rem 1rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       background: var(--scion-bg-subtle, #f1f5f9);
       color: var(--scion-text, #1e293b);
       text-decoration: none;
@@ -529,7 +529,7 @@ export class ScionHeader extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.5rem 1rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
@@ -569,7 +569,7 @@ export class ScionHeader extends LitElement {
       width: 36px;
       height: 20px;
       background: var(--scion-border, #e2e8f0);
-      border-radius: 10px;
+      border-radius: var(--scion-radius-full, 9999px);
       cursor: pointer;
       transition: background 0.2s ease;
       border: none;
@@ -627,7 +627,7 @@ export class ScionHeader extends LitElement {
       gap: 0.375rem;
       padding: 0.375rem 0.625rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text, #1e293b);
       cursor: pointer;
@@ -667,7 +667,7 @@ export class ScionHeader extends LitElement {
       gap: 0.25rem;
       padding: 0.375rem 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75);
       background: transparent;
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
@@ -713,7 +713,7 @@ export class ScionHeader extends LitElement {
       width: auto;
       height: 16px;
       padding: 0 4px;
-      border-radius: 8px;
+      border-radius: var(--scion-radius-full, 9999px);
       background: var(--sl-color-danger-600, #dc2626);
       color: var(--sl-color-neutral-0, #fff);
       font-size: 10px;
@@ -732,7 +732,7 @@ export class ScionHeader extends LitElement {
       min-width: 18px;
       height: 18px;
       padding: 0 5px;
-      border-radius: 9px;
+      border-radius: var(--scion-radius-full, 9999px);
       background: var(--scion-primary, #3b82f6);
       color: var(--scion-primary-text, #ffffff);
       font-size: 0.6875rem;
@@ -756,7 +756,7 @@ export class ScionHeader extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.5rem 1rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius, 0.5rem);
       background: var(--scion-primary, #3b82f6);
       color: var(--scion-primary-text, #ffffff);
       text-decoration: none;

@@ -966,3 +966,142 @@ func TestValidateBranding_SVGAllowlistAndExternalRefs(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveBranding_CornersPresetsAndComposition(t *testing.T) {
+	t.Run("default corners stays uncustomized", func(t *testing.T) {
+		def := DefaultResolvedBranding()
+		if def.Corners != BrandCornersDefault || def.HasCustomStyle {
+			t.Fatalf("DefaultResolvedBranding corners=%q hasCustomStyle=%v", def.Corners, def.HasCustomStyle)
+		}
+		resolved, errs := ResolveBranding(&BrandingConfig{Corners: BrandCornersDefault})
+		if len(errs) != 0 {
+			t.Fatalf("unexpected errs: %v", errs)
+		}
+		if resolved.IsCustomized() || resolved.HasCustomStyle || resolved.HasCustomPalette {
+			t.Fatalf("explicit default corners should remain uncustomized: %+v", resolved)
+		}
+		if resolved.Public() != nil || resolved.CSSText != "" {
+			t.Fatalf("explicit default corners should have nil Public() and empty CSSText")
+		}
+	})
+
+	t.Run("square corners without custom palette emits mode-independent radius CSS only", func(t *testing.T) {
+		cfg := BrandingConfig{Corners: BrandCornersSquare}
+		if cfg.IsZero() {
+			t.Fatal("BrandingConfig with Corners set must not report IsZero()")
+		}
+		if cloned := cfg.Clone(); cloned == nil || cloned.Corners != BrandCornersSquare {
+			t.Fatalf("Clone() did not preserve Corners: %+v", cloned)
+		}
+
+		resolved, errs := ResolveBranding(&cfg)
+		if len(errs) != 0 {
+			t.Fatalf("unexpected errs: %v", errs)
+		}
+		if !resolved.IsCustomized() || !resolved.HasCustomStyle || resolved.HasCustomPalette {
+			t.Fatalf("unexpected flags: IsCustomized=%v HasCustomStyle=%v HasCustomPalette=%v",
+				resolved.IsCustomized(), resolved.HasCustomStyle, resolved.HasCustomPalette)
+		}
+		if resolved.ThemeColor != DefaultBrandThemeColor {
+			t.Errorf("ThemeColor = %q, want default %q", resolved.ThemeColor, DefaultBrandThemeColor)
+		}
+		for _, want := range []string{
+			"html:root, :host, .sl-theme-light {",
+			"--scion-radius-sm: 0;",
+			"--scion-radius: 0;",
+			"--scion-radius-md: 0;",
+			"--scion-radius-lg: 0;",
+			"--scion-radius-xl: 0;",
+		} {
+			if !strings.Contains(resolved.CSSText, want) {
+				t.Errorf("CSSText missing %q:\n%s", want, resolved.CSSText)
+			}
+		}
+		for _, forbidden := range []string{"--scion-primary:", "sl-theme-dark", "prefers-color-scheme: dark"} {
+			if strings.Contains(resolved.CSSText, forbidden) {
+				t.Errorf("corners-only CSSText must not contain %q:\n%s", forbidden, resolved.CSSText)
+			}
+		}
+		pub := resolved.Public()
+		if pub == nil {
+			t.Fatal("expected non-nil PublicBranding")
+		}
+		if pub.Corners != BrandCornersSquare {
+			t.Errorf("Public().Corners = %q, want %q", pub.Corners, BrandCornersSquare)
+		}
+		if pub.CSSText != resolved.CSSText {
+			t.Errorf("Public().CSSText mismatch")
+		}
+		if pub.Light != nil || pub.Dark != nil || pub.Scales != nil {
+			t.Errorf("corners-only PublicBranding must omit palette fields: %+v", pub)
+		}
+	})
+
+	t.Run("rounded corners emits rounded radius scale", func(t *testing.T) {
+		resolved, errs := ResolveBranding(&BrandingConfig{Corners: BrandCornersRounded})
+		if len(errs) != 0 {
+			t.Fatalf("unexpected errs: %v", errs)
+		}
+		for _, want := range []string{
+			"--scion-radius-sm: 0.375rem;",
+			"--scion-radius: 0.75rem;",
+			"--scion-radius-md: 0.75rem;",
+			"--scion-radius-lg: 1rem;",
+			"--scion-radius-xl: 1.25rem;",
+		} {
+			if !strings.Contains(resolved.CSSText, want) {
+				t.Errorf("CSSText missing %q:\n%s", want, resolved.CSSText)
+			}
+		}
+		if pub := resolved.Public(); pub == nil || pub.Corners != BrandCornersRounded {
+			t.Fatalf("Public().Corners = %+v, want %q", pub, BrandCornersRounded)
+		}
+	})
+
+	t.Run("corners composes with custom palette across light and dark blocks", func(t *testing.T) {
+		resolved, errs := ResolveBranding(&BrandingConfig{
+			AccentColor: "#0d9488",
+			Corners:     BrandCornersSquare,
+		})
+		if len(errs) != 0 {
+			t.Fatalf("unexpected errs: %v", errs)
+		}
+		if !resolved.HasCustomPalette || !resolved.HasCustomStyle {
+			t.Fatal("expected both HasCustomPalette and HasCustomStyle to be true")
+		}
+		for _, want := range []string{
+			"--scion-primary:",
+			"--scion-radius: 0;",
+			"html:root.sl-theme-dark",
+			"prefers-color-scheme: dark",
+		} {
+			if !strings.Contains(resolved.CSSText, want) {
+				t.Errorf("combined CSSText missing %q:\n%s", want, resolved.CSSText)
+			}
+		}
+		pub := resolved.Public()
+		if pub == nil || pub.Corners != BrandCornersSquare || pub.Light == nil || pub.Dark == nil || len(pub.Scales) != 5 {
+			t.Fatalf("combined PublicBranding incomplete: %+v", pub)
+		}
+	})
+
+	t.Run("invalid corners rejected and triggers malformed fallback", func(t *testing.T) {
+		for _, bad := range []string{"pill", "SQUARE", "0; } body { color: red; }"} {
+			fallback, errs := ResolveBranding(&BrandingConfig{Corners: bad})
+			if len(errs) == 0 {
+				t.Fatalf("expected validation error for corners=%q", bad)
+			}
+			if errs[0].Path != BrandingSectionKey+".corners" {
+				t.Errorf("err.Path = %q, want %q", errs[0].Path, BrandingSectionKey+".corners")
+			}
+			for _, allowed := range []string{BrandCornersDefault, BrandCornersSquare, BrandCornersRounded} {
+				if !strings.Contains(errs[0].Message, allowed) {
+					t.Errorf("err.Message %q should name allowed enum value %q", errs[0].Message, allowed)
+				}
+			}
+			if !fallback.Malformed || fallback.IsCustomized() || fallback.Corners != BrandCornersDefault {
+				t.Fatalf("malformed fallback unexpected: %+v", fallback)
+			}
+		}
+	})
+}

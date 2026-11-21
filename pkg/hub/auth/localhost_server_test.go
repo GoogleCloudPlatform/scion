@@ -410,4 +410,37 @@ func TestLocalhostAuthServer_CallbackBrandingAndSecurity(t *testing.T) {
 			t.Errorf("invalid hex colors must fall back to stock defaults:\n%s", body)
 		}
 	})
+
+	t.Run("applies corner radius presets and sanitizes invalid values", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			corners string
+			want    string
+		}{
+			{name: "default empty", corners: "", want: "border-radius: 12px;"},
+			{name: "default explicit", corners: "default", want: "border-radius: 12px;"},
+			{name: "square", corners: "square", want: "border-radius: 0;"},
+			{name: "rounded", corners: "rounded", want: "border-radius: 16px;"},
+			{name: "invalid injection falls back", corners: "0; } body { display: none; }", want: "border-radius: 12px;"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := NewLocalhostAuthServer().WithBranding(&CallbackBranding{Corners: tc.corners})
+				srv.state = "st"
+				req := httptest.NewRequest(http.MethodGet, CallbackPath+"?state=st&code=abc", nil)
+				rec := httptest.NewRecorder()
+				srv.handleCallback(rec, req)
+				body := rec.Body.String()
+				if !strings.Contains(body, tc.want) {
+					t.Errorf("body missing %q:\n%s", tc.want, body)
+				}
+				if !strings.Contains(body, "border-radius: 9999px;") {
+					t.Errorf("pill badge radius must remain 9999px:\n%s", body)
+				}
+				if strings.Contains(body, "display: none") {
+					t.Errorf("unsanitized corners value leaked into CSS:\n%s", body)
+				}
+			})
+		}
+	})
 }

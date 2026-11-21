@@ -254,6 +254,30 @@ func TestSPAShell_BrandedHeadIconsThemeColorAndCriticalTokens(t *testing.T) {
 	assert.Contains(t, brandedHTML, `<style id="scion-branding-tokens">`)
 	assert.Contains(t, brandedHTML, `--scion-primary:`)
 	assert.NotContains(t, brandedHTML, "ZgotmplZ")
+
+	// Corners-only branding (no custom colors) injects <style id="scion-branding-tokens">
+	// with radius overrides and preserves stock colors.
+	cornersOnly, errs := config.ResolveBranding(&config.BrandingConfig{
+		Corners: config.BrandCornersSquare,
+	})
+	require.Empty(t, errs)
+	ws.SetBrandingSettingsProvider(staticBrandingProvider{resolved: cornersOnly})
+
+	req = httptest.NewRequest(http.MethodGet, "/login", nil)
+	rec = httptest.NewRecorder()
+	ws.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	cornersHTML := rec.Body.String()
+	const tokenTag = `<style id="scion-branding-tokens">`
+	tokenStart := strings.Index(cornersHTML, tokenTag)
+	require.GreaterOrEqual(t, tokenStart, 0, "expected <style id=\"scion-branding-tokens\"> in shell HTML")
+	tokenBlock := cornersHTML[tokenStart:]
+	tokenEnd := strings.Index(tokenBlock, "</style>")
+	require.Greater(t, tokenEnd, 0, "expected closing </style> for branding tokens")
+	tokenBlock = tokenBlock[:tokenEnd]
+	assert.Contains(t, tokenBlock, `--scion-radius: 0;`)
+	assert.NotContains(t, tokenBlock, `--scion-primary:`)
+	assert.NotContains(t, cornersHTML, "ZgotmplZ")
 }
 
 func TestHubGoPages_BrandingAndAttribution(t *testing.T) {
@@ -341,4 +365,26 @@ func TestHubGoPages_BrandingAndAttribution(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.Contains(t, rec.Body.String(), "<title>Acme Cloud - Maintenance</title>")
 	assert.Contains(t, rec.Body.String(), `<span class="badge">Acme Cloud</span>`)
+
+	// 5. Corner radius presets apply to suspended and no-assets Go pages while keeping pill badges 9999px.
+	assert.Contains(t, defSusp, "border-radius: 6px;")
+	assert.Contains(t, defSusp, "border-radius: 9999px;")
+
+	squareResolved, errs := config.ResolveBranding(&config.BrandingConfig{Corners: config.BrandCornersSquare})
+	require.Empty(t, errs)
+	squareSusp := suspendedPageHTMLWithBranding(squareResolved, "alice@example.com")
+	assert.Contains(t, squareSusp, "border-radius: 0;")
+	assert.Contains(t, squareSusp, "border-radius: 9999px;")
+	squareNoAssets := renderNoAssetsPage(squareResolved)
+	assert.Contains(t, squareNoAssets, "padding: 0.15em 0.4em; border-radius: 0;")
+	assert.Contains(t, squareNoAssets, "border-radius: 0; text-align: left;")
+
+	roundedResolved, errs := config.ResolveBranding(&config.BrandingConfig{Corners: config.BrandCornersRounded})
+	require.Empty(t, errs)
+	roundedSusp := suspendedPageHTMLWithBranding(roundedResolved, "alice@example.com")
+	assert.Contains(t, roundedSusp, "border-radius: 10px;")
+	assert.Contains(t, roundedSusp, "border-radius: 9999px;")
+	roundedNoAssets := renderNoAssetsPage(roundedResolved)
+	assert.Contains(t, roundedNoAssets, "padding: 0.15em 0.4em; border-radius: 6px;")
+	assert.Contains(t, roundedNoAssets, "border-radius: 12px; text-align: left;")
 }

@@ -1063,31 +1063,60 @@ func lighterPrimaryStep(scale BrandingScale, baseHex, fallbackStep string) strin
 	return scale[fallbackStep]
 }
 
-// buildBrandingCSSText renders the validated --scion-* and --sl-color-* CSS
-// custom property declarations for light, explicit dark, and system dark modes.
-func buildBrandingCSSText(scales map[string]BrandingScale, light, dark BrandingSemanticMode) string {
+// buildBrandingCSSText renders validated CSS custom property declarations for
+// custom palettes (light, explicit dark, and system dark modes) and/or
+// mode-independent style overrides (such as corner radius presets).
+func buildBrandingCSSText(hasCustomPalette bool, scales map[string]BrandingScale, light, dark BrandingSemanticMode, corners string) string {
+	hasCustomCorners := corners != "" && corners != BrandCornersDefault
+	if !hasCustomPalette && !hasCustomCorners {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("html:root, :host, .sl-theme-light {\n")
-	for _, ramp := range []string{"primary", "neutral", "success", "warning", "danger"} {
-		sc := scales[ramp]
-		for _, step := range ScaleSteps {
-			if v := sc[step]; v != "" {
-				fmt.Fprintf(&b, "  --scion-%s-%s: %s;\n", ramp, step, v)
-				fmt.Fprintf(&b, "  --sl-color-%s-%s: %s;\n", ramp, step, v)
+	if hasCustomPalette {
+		for _, ramp := range []string{"primary", "neutral", "success", "warning", "danger"} {
+			sc := scales[ramp]
+			for _, step := range ScaleSteps {
+				if v := sc[step]; v != "" {
+					fmt.Fprintf(&b, "  --scion-%s-%s: %s;\n", ramp, step, v)
+					fmt.Fprintf(&b, "  --sl-color-%s-%s: %s;\n", ramp, step, v)
+				}
 			}
 		}
+		writeSemanticVars(&b, light)
 	}
-	writeSemanticVars(&b, light)
+	if hasCustomCorners {
+		writeCornerVars(&b, corners)
+	}
 	b.WriteString("}\n")
 
-	b.WriteString("html:root.sl-theme-dark, html:root[data-theme='dark'], :root.dark {\n")
-	writeSemanticVars(&b, dark)
-	b.WriteString("}\n")
+	if hasCustomPalette {
+		b.WriteString("html:root.sl-theme-dark, html:root[data-theme='dark'], :root.dark {\n")
+		writeSemanticVars(&b, dark)
+		b.WriteString("}\n")
 
-	b.WriteString("@media (prefers-color-scheme: dark) {\n  html:root:not([data-theme='light']) {\n")
-	writeSemanticVarsIndented(&b, dark, "    ")
-	b.WriteString("  }\n}\n")
+		b.WriteString("@media (prefers-color-scheme: dark) {\n  html:root:not([data-theme='light']) {\n")
+		writeSemanticVarsIndented(&b, dark, "    ")
+		b.WriteString("  }\n}\n")
+	}
 	return b.String()
+}
+
+func writeCornerVars(b *strings.Builder, corners string) {
+	switch corners {
+	case BrandCornersSquare:
+		b.WriteString("  --scion-radius-sm: 0;\n")
+		b.WriteString("  --scion-radius: 0;\n")
+		b.WriteString("  --scion-radius-md: 0;\n")
+		b.WriteString("  --scion-radius-lg: 0;\n")
+		b.WriteString("  --scion-radius-xl: 0;\n")
+	case BrandCornersRounded:
+		b.WriteString("  --scion-radius-sm: 0.375rem;\n")
+		b.WriteString("  --scion-radius: 0.75rem;\n")
+		b.WriteString("  --scion-radius-md: 0.75rem;\n")
+		b.WriteString("  --scion-radius-lg: 1rem;\n")
+		b.WriteString("  --scion-radius-xl: 1.25rem;\n")
+	}
 }
 
 func writeSemanticVars(b *strings.Builder, m BrandingSemanticMode) {

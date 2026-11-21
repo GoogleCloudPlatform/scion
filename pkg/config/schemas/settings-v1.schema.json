@@ -3269,6 +3269,12 @@
           "description": "Whether 'Powered by Scion' attribution is shown ('shown', default) or hidden ('hidden') when custom branding is active.",
           "x-env-var": "SCION_SERVER_HUB_BRANDING_ATTRIBUTION"
         },
+        "corners": {
+          "type": "string",
+          "enum": ["default", "square", "rounded"],
+          "description": "Corner radius preset for UI controls and containers ('default', 'square', or 'rounded').",
+          "x-env-var": "SCION_SERVER_HUB_BRANDING_CORNERS"
+        },
         "logo": {
           "type": "object",
           "description": "Light and dark theme brand logo URIs.",

@@ -190,6 +190,7 @@ export interface PublicBranding {
   shortName: string;
   subtitle?: string;
   attribution: 'shown' | 'hidden';
+  corners?: 'default' | 'square' | 'rounded';
   logoLight?: string;
   logoDark?: string;
   faviconUrl?: string;

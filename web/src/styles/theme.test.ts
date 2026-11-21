@@ -949,3 +949,412 @@ describe('PR 2d light-mode token equivalence (ptone/scion#8410)', () => {
     }
   });
 });
+
+const BORDER_RADIUS_DECL_RE =
+  /(?:^|[;\s{"'])border(?:-(?:top|bottom)-(?:left|right)|-(?:start|end)-(?:start|end))?-radius\s*:\s*((?:\$\{[^}]*\}|[^;{}'"])+)/gi;
+const NON_ZERO_RECT_RADIUS_RE = /^(?:\d*\.?\d+)(?:px|rem|em|%)$/i;
+const INTERPOLATED_RADIUS_UNIT_RE = /\$\{[^}]*\}\s*(?:px|rem|em|%)/i;
+const ALLOWED_RADIUS_TOKENS = new Set([
+  '0',
+  '0px',
+  '0rem',
+  '0em',
+  '0%',
+  'none',
+  'inherit',
+  'initial',
+  'unset',
+  'revert',
+  'var()',
+  '50%',
+  '100%',
+  '9999px',
+  '999px',
+  '!important',
+  '/',
+]);
+
+/** Replace balanced CSS math functions (`calc(...)`, `min(...)`, `max(...)`, `clamp(...)`) that reference `var()`. */
+function stripTokenMathExpressions(text: string): string {
+  const fnRe = /\b(?:calc|min|max|clamp)\(/gi;
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    fnRe.lastIndex = i;
+    const m = fnRe.exec(text);
+    if (!m || m.index !== i) {
+      out += text[i++];
+      continue;
+    }
+    let depth = 0;
+    let j = i + m[0].length - 1;
+    let found = false;
+    for (; j < text.length; j++) {
+      if (text[j] === '(') depth++;
+      else if (text[j] === ')') {
+        depth--;
+        if (depth === 0) {
+          j++;
+          found = true;
+          break;
+        }
+      }
+    }
+    if (found) {
+      const expr = text.slice(i, j);
+      if (expr.includes('var()')) {
+        out += 'var()';
+        i = j;
+        continue;
+      }
+    }
+    out += text[i++];
+  }
+  return out;
+}
+
+function findBareRadiusLiterals(text: string): string[] {
+  const clean = stripVarExpressions(stripComments(text));
+  const found: string[] = [];
+  for (const m of clean.matchAll(BORDER_RADIUS_DECL_RE)) {
+    const val = m[1].trim();
+    if (!val) continue;
+    if (INTERPOLATED_RADIUS_UNIT_RE.test(val)) {
+      found.push(val.replace(/\s+/g, ' '));
+      continue;
+    }
+    const stripped = stripTokenMathExpressions(val);
+    const tokens = stripped.split(/[\s/(),]+/).filter(Boolean);
+    const bad = tokens.filter((tok) => {
+      const lower = tok.toLowerCase();
+      if (ALLOWED_RADIUS_TOKENS.has(lower)) return false;
+      if (/^0+(?:\.0+)?(?:px|rem|em|%)$/i.test(lower)) return false;
+      return NON_ZERO_RECT_RADIUS_RE.test(lower);
+    });
+    if (bad.length > 0) {
+      found.push(val.replace(/\s+/g, ' '));
+    }
+  }
+  return found;
+}
+
+/**
+ * Ratcheting allowlist of remaining hard-coded rectangular `border-radius`
+ * declarations outside `styles/theme.css`. Shell and pre-auth chrome were
+ * migrated in PR 3a; remaining component families are swept in PR 3b.
+ */
+const BARE_RADIUS_ALLOWLIST: Record<string, { max: number; reason: string }> = {
+  'client/artifact-preview.ts': { max: 6, reason: 'Pending PR 3b radius token migration' },
+  'client/terminal-workspace-root.ts': { max: 12, reason: 'Pending PR 3b radius token migration' },
+  'components/artifact-review/review-editor-styles.ts': {
+    max: 9,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/artifact-review/review-note-dialog.ts': {
+    max: 2,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/pages/admin-group-detail.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/pages/admin-groups.ts': { max: 2, reason: 'Pending PR 3b radius token migration' },
+  'components/pages/admin-integrations.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/pages/admin-maintenance.ts': {
+    max: 2,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/pages/admin-server-config.ts': {
+    max: 7,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/pages/agent-detail.ts': { max: 5, reason: 'Pending PR 3b radius token migration' },
+  'components/pages/artifact-detail.ts': { max: 5, reason: 'Pending PR 3b radius token migration' },
+  'components/pages/chat.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
+  'components/pages/diagnostics.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
+  'components/pages/health-dashboard.ts': {
+    max: 2,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/pages/profile-discord.ts': { max: 2, reason: 'Pending PR 3b radius token migration' },
+  'components/pages/profile-settings.ts': {
+    max: 2,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/pages/profile-teams.ts': { max: 2, reason: 'Pending PR 3b radius token migration' },
+  'components/pages/profile-telegram.ts': {
+    max: 4,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/agent-badges.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
+  'components/shared/agent-log-viewer.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/agent-message-viewer.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/agent-tree-view.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/artifact-list.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
+  'components/shared/artifact-publish-dialog.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/artifact-share-dialog.ts': {
+    max: 3,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-action-sheet.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-composer.ts': {
+    max: 9,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-decision-response.ts': {
+    max: 2,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-decisions.ts': {
+    max: 4,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-interagent-marker.ts': {
+    max: 3,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-members.ts': {
+    max: 4,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-message.ts': {
+    max: 23,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-scheduled-list.ts': {
+    max: 2,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-search.ts': {
+    max: 4,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-space-rail.ts': {
+    max: 5,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-starred-list.ts': {
+    max: 3,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/chat-thread.ts': {
+    max: 3,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/mention-autocomplete.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/chat/slash-autocomplete.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/decisions-filter-panel.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/decisions-views.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/dir-browser.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
+  'components/shared/facet-combobox.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
+  'components/shared/gcp-service-account-list.ts': {
+    max: 3,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/gcp-service-account-status.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/markdown-preview.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/notification-tray.ts': {
+    max: 8,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/palette/quick-palette.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/project-members-editor.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/resource-styles.ts': {
+    max: 1,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/shared/token-list.ts': { max: 3, reason: 'Pending PR 3b radius token migration' },
+  'components/shared/unified-log-viewer.ts': {
+    max: 3,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'components/terminal/terminal-pane.ts': {
+    max: 10,
+    reason: 'Pending PR 3b radius token migration',
+  },
+  'styles/utilities.css': { max: 1, reason: 'Scrollbar thumb radius (3px)' },
+};
+
+describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
+  const srcDir = resolve(__dirname, '..');
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const name of readdirSync(dir)) {
+      if (name === '__fixtures__') continue;
+      const p = join(dir, name);
+      if (statSync(p).isDirectory()) out.push(...walk(p));
+      else if (
+        /\.(ts|css)$/.test(name) &&
+        !/\.test\.ts$/.test(name) &&
+        !/\.d\.ts$/.test(name) &&
+        name !== 'theme.css'
+      ) {
+        out.push(p);
+      }
+    }
+    return out;
+  };
+
+  it('rejects new bare rectangular border-radius literals outside the explicit allowlist', () => {
+    const sourceFiles = walk(srcDir).sort();
+    const seen = new Set<string>();
+    const violations: string[] = [];
+
+    for (const file of sourceFiles) {
+      const rel = relative(srcDir, file).split(sep).join('/');
+      seen.add(rel);
+      const hits = findBareRadiusLiterals(readFileSync(file, 'utf8'));
+      const entry = BARE_RADIUS_ALLOWLIST[rel];
+      const maxAllowed = entry?.max ?? 0;
+      if (hits.length > maxAllowed) {
+        violations.push(
+          `${rel}: found ${hits.length} bare border-radius literal(s) (allowed ${maxAllowed}): ${hits.join(', ')}`
+        );
+      } else if (hits.length < maxAllowed) {
+        violations.push(
+          `${rel}: allowlist entry has max ${maxAllowed} but only found ${hits.length} bare border-radius literal(s); tighten BARE_RADIUS_ALLOWLIST to prevent decay`
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+    for (const allowedFile of Object.keys(BARE_RADIUS_ALLOWLIST)) {
+      expect(seen.has(allowedFile), `stale allowlist entry: ${allowedFile}`).toBe(true);
+    }
+  });
+
+  it('flags planted rectangular radii while allowing var() tokens, zeroes, pills, circles, and comments', () => {
+    expect(
+      findBareRadiusLiterals(
+        '.a { border-radius: 0.5rem; border-top-left-radius: 6px; border-radius: 0 0 0.25rem 0.25rem; }'
+      )
+    ).toEqual(['0.5rem', '6px', '0 0 0.25rem 0.25rem']);
+    expect(
+      findBareRadiusLiterals(
+        '.a { border-radius: calc(0.5rem - 2px); } .b { border-radius: ${r}px; } <div style="border-radius: 6px"></div>'
+      )
+    ).toEqual(['calc(0.5rem - 2px)', '${r}px', '6px']);
+    expect(
+      findBareRadiusLiterals(
+        '/* border-radius: 8px; */\n// border-radius: 4px;\n.a { border-radius: var(--scion-radius, 0.5rem); border-radius: calc(var(--scion-radius, 0.5rem) * 0.75); border-radius: calc(var(--scion-radius, 0.5rem) - 0.125rem); border-radius: 0; border-radius: 50%; border-radius: 100%; border-radius: 9999px; border-radius: none; }'
+      )
+    ).toEqual([]);
+  });
+
+  it('preserves exact default-preset computed radii for all PR 3a migrated shell/pre-auth sites', () => {
+    const defaultVars = cascade([shoelaceLightCss, shoelaceDarkCss, themeCss], {
+      isRoot: true,
+      classes: new Set(['sl-theme-light']),
+      dataTheme: 'light',
+      prefersDark: false,
+    });
+    const toPx = (raw: string): number => {
+      const s = raw.trim();
+      const rem = /^(-?\d*\.?\d+)rem$/i.exec(s);
+      if (rem) return parseFloat(rem[1]) * 16;
+      const px = /^(-?\d*\.?\d+)px$/i.exec(s);
+      if (px) return parseFloat(px[1]);
+      if (s === '0') return 0;
+      throw new Error(`Unsupported length: ${raw}`);
+    };
+    const evalDefaultRadiusPx = (expr: string): number => {
+      const resolved = expr.replace(
+        /var\(\s*(--[\w-]+)(?:\s*,\s*([^)]+))?\s*\)/g,
+        (_, name, fb) => {
+          return defaultVars.get(name) ?? fb?.trim() ?? '';
+        }
+      );
+      const calcMul = /^calc\(\s*([^\s*]+)\s*\*\s*(-?\d*\.?\d+)\s*\)$/i.exec(resolved.trim());
+      if (calcMul) {
+        return toPx(calcMul[1]) * parseFloat(calcMul[2]);
+      }
+      return toPx(resolved);
+    };
+
+    // Every migrated site in PR 3a: [relativePath, cssSelector, originalDefaultPx]
+    const expectedDefaults: Array<[string, string, number]> = [
+      ['components/pages/login.ts', '.login-container', 16],
+      ['components/pages/login.ts', '.error-alert', 8],
+      ['components/pages/login.ts', '.provider-btn', 8],
+      ['components/pages/unauthorized.ts', '.container', 16],
+      ['components/pages/unauthorized.ts', '.help-text', 8],
+      ['components/shared/nav.ts', '.nav-link', 8],
+      ['components/shared/nav.ts', '.collapse-toggle', 8],
+      ['components/profile/profile-nav.ts', '.return-link', 8],
+      ['components/profile/profile-nav.ts', '.nav-link', 8],
+      ['components/profile/profile-nav.ts', '.nav-link-external', 8],
+      ['components/profile/profile-nav.ts', '.collapse-toggle', 8],
+      ['components/shared/header.ts', '.mobile-menu-btn', 6],
+      ['components/shared/header.ts', '.mode-switch', 8],
+      ['components/shared/header.ts', '.mode-switch button', 6],
+      ['components/shared/header.ts', '.chat-unread-badge', 9999],
+      ['components/shared/header.ts', '.palette-button', 6],
+      ['components/shared/header.ts', '.profile-link', 8],
+      ['components/shared/header.ts', '.sign-out-button', 8],
+      ['components/shared/header.ts', '.toggle-track', 9999],
+      ['components/shared/header.ts', '.mode-trigger', 6],
+      ['components/shared/header.ts', '.user-trigger', 6],
+      ['components/shared/header.ts', '.icon-badge-wrapper .trigger-badge', 9999],
+      ['components/shared/header.ts', '.count-badge', 9999],
+      ['components/shared/header.ts', '.sign-in-link', 8],
+    ];
+
+    const fileCache = new Map<string, string>();
+    for (const [rel, selector, wantPx] of expectedDefaults) {
+      let src = fileCache.get(rel);
+      if (src === undefined) {
+        src = stripComments(readFileSync(join(srcDir, rel), 'utf8'));
+        fileCache.set(rel, src);
+      }
+      const escapedSel = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const ruleRe = new RegExp(`(?:^|\\n)\\s*${escapedSel}\\s*\\{([^{}]*)\\}`, 'm');
+      const ruleMatch = ruleRe.exec(src);
+      expect(ruleMatch, `${rel} missing rule for ${selector}`).not.toBeNull();
+      const radMatch = /border-radius\s*:\s*([^;]+)/i.exec(ruleMatch![1]);
+      expect(radMatch, `${rel} ${selector} missing border-radius`).not.toBeNull();
+      expect(evalDefaultRadiusPx(radMatch![1]), `${rel} ${selector} default radius`).toBe(wantPx);
+    }
+  });
+});

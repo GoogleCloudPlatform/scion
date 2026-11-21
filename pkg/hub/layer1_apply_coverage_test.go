@@ -205,6 +205,7 @@ var brandingProbeDocs = map[string]string{
 	"server.hub.branding.short_name":                   `{"short_name":"Probe"}`,
 	"server.hub.branding.subtitle":                     `{"subtitle":"Probe Subtitle"}`,
 	"server.hub.branding.attribution":                  `{"attribution":"hidden"}`,
+	"server.hub.branding.corners":                      `{"corners":"square"}`,
 	"server.hub.branding.logo":                         `{"logo":{"light":"https://cdn.example.com/logo.svg"}}`,
 	"server.hub.branding.logo.light":                   `{"logo":{"light":"https://cdn.example.com/logo-light.svg"}}`,
 	"server.hub.branding.logo.dark":                    `{"logo":{"dark":"https://cdn.example.com/logo-dark.svg"}}`,
