@@ -33,7 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -394,23 +393,25 @@ func TestDispatchAgentTrigger_SubjectModeNew_NoClaimRowsAndMessageSkipUnchanged(
 	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigNew.ID, "webhook:"+ep.ID+"/same-sub")
 	assert.ErrorIs(t, err, store.ErrNotFound, "mode new must never create claim rows")
 
-	// 2. Message trigger with mode "skip" keeps Stage 1 authoring refusal, and
-	// PATCHing a dispatch_agent(skip) trigger to action=message is also refused.
+	// 2. Message trigger with mode "skip" (Stage 1 PR 4) is accepted at authoring,
+	// uses PR 4's fire-level skip, and never creates trigger_subject_claims rows.
 	targetAgent := &store.Agent{
 		ID:        uuid.NewString(),
 		Slug:      "msg-target",
 		Name:      "msg-target",
 		ProjectID: f.sched.proj.ID,
 		Phase:     string(state.PhaseRunning),
+		CreatedBy: f.sched.creator.ID,
+		OwnerID:   f.sched.creator.ID,
 	}
 	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAgent))
 
 	recMsg := f.doJSON(t, userCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
 		CreateTriggerRequest{
-			Name:    "msg-skip-refused",
+			Name:    "msg-skip-ok",
 			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
-			Match:   &TriggerMatchSpec{Types: []string{"webhook.ping"}},
+			Match:   &TriggerMatchSpec{Types: []string{"webhook.msg_skip_test"}},
 			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip},
 			Action: TriggerActionSpec{
 				Type:    store.TriggerActionMessage,
@@ -418,41 +419,15 @@ func TestDispatchAgentTrigger_SubjectModeNew_NoClaimRowsAndMessageSkipUnchanged(
 				Message: "hello",
 			},
 		})
-	assert.Equal(t, http.StatusBadRequest, recMsg.Code, recMsg.Body.String())
-	assert.Contains(t, recMsg.Body.String(), `subject_mode \"skip\" is not yet supported`)
+	require.Equal(t, http.StatusCreated, recMsg.Code, recMsg.Body.String())
+	var trigMsg TriggerResponse
+	require.NoError(t, json.Unmarshal(recMsg.Body.Bytes(), &trigMsg))
+	assert.Equal(t, store.TriggerSubjectModeSkip, trigMsg.Subject.Mode)
 
-	// Create a dispatch_agent trigger with skip, then try to PATCH action to message -> refused.
-	recDisp := f.doJSON(t, userCtx, http.MethodPost,
-		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
-		CreateTriggerRequest{
-			Name:    "disp-skip-patch-test",
-			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
-			Match:   &TriggerMatchSpec{Types: []string{"webhook.other"}},
-			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeSkip},
-			Action: TriggerActionSpec{
-				Type: store.TriggerActionDispatchAgent,
-				Task: "hi",
-			},
-		})
-	require.Equal(t, http.StatusCreated, recDisp.Code, recDisp.Body.String())
-	var trigDisp TriggerResponse
-	require.NoError(t, json.Unmarshal(recDisp.Body.Bytes(), &trigDisp))
-
-	adminUser := hubMemberUser(t, f.sched.store, api.NewUUID())
-	grantProjectRole(t, f.sched.store, adminUser.ID, f.sched.proj.ID, store.ProjectRoleAdmin)
-	adminCtx := f.userAuth(t, adminUser)
-
-	patchRec := f.doJSON(t, adminCtx, http.MethodPatch,
-		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", f.sched.proj.ID, trigDisp.ID),
-		map[string]any{
-			"action": map[string]any{
-				"type":    store.TriggerActionMessage,
-				"agentId": targetAgent.ID,
-				"message": "switched",
-			},
-		})
-	assert.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
-	assert.Contains(t, patchRec.Body.String(), `subject_mode \"skip\" is not yet supported`)
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "msg-skip-1", "msg_skip_test", "msg-sub", []byte(`{}`)).Code)
+	f.drainOneTriggerEvent(t)
+	_, err = f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigMsg.ID, "webhook:"+ep.ID+"/msg-sub")
+	assert.ErrorIs(t, err, store.ErrNotFound, "message skip must not create trigger_subject_claims rows")
 }
 
 func TestDispatchAgentTrigger_SubjectModeSkip_UsesDerivedSubjectRule(t *testing.T) {

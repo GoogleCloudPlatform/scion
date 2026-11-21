@@ -610,7 +610,7 @@ func (s *Server) writeAndValidateTriggerMatch(
 // writeAndValidateTriggerSubject normalizes and compiles a trigger's subject
 // block at authoring time (create, PATCH, or resume). When explicitDialect is
 // true, an empty expr is refused as a malformed request.
-func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx context.Context, actionType string, spec *TriggerSubjectSpec, explicitDialect bool) (string, string, string, bool) {
+func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx context.Context, spec *TriggerSubjectSpec, explicitDialect bool) (string, string, string, bool) {
 	dialect := ruleengine.DialectCEL
 	expr := ""
 	mode := store.TriggerSubjectModeNew

@@ -710,7 +710,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			existing    *store.TriggerFire
 			cErr        error
 		)
-		if tr.SubjectMode == store.TriggerSubjectModeSkip {
+		// Stage 1 PR 4 fire-level skip applies to non-dispatch_agent triggers
+		// (message); dispatch_agent triggers with subject mode "skip" use
+		// persistent subject claims (§5.6) inside dispatchAgentAction.Fire so
+		// the claim outlives the firing row for the lifetime of the agent.
+		if tr.SubjectMode == store.TriggerSubjectModeSkip && tr.ActionType != store.TriggerActionDispatchAgent {
 			claimed, skippedBusy, existing, cErr = d.store.ClaimTriggerFireSubjectSkip(ctx, &fire, ErrFireSubjectBusy, claimNow)
 		} else {
 			claimed, existing, cErr = d.store.ClaimTriggerFire(ctx, &fire)

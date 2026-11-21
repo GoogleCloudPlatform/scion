@@ -421,9 +421,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 			return
 		}
 	}
-	actionType := strings.TrimSpace(req.Action.Type)
 	explicitSubjectDialect := req.Subject != nil && strings.TrimSpace(req.Subject.Dialect) != ""
-	subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, actionType, req.Subject, explicitSubjectDialect)
+	subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, req.Subject, explicitSubjectDialect)
 	if !ok {
 		return
 	}
@@ -450,6 +449,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	actionType := strings.TrimSpace(req.Action.Type)
 	var actionPayload string
 	switch actionType {
 	case store.TriggerActionMessage:
@@ -863,12 +863,8 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			merged.Mode = *req.Subject.Mode
 			fields.SubjectMode = true
 		}
-		targetActionType := tr.ActionType
-		if req.Action != nil {
-			targetActionType = strings.TrimSpace(req.Action.Type)
-		}
 		explicitSubjectDialect := req.Subject.Dialect != nil && strings.TrimSpace(*req.Subject.Dialect) != ""
-		subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, targetActionType, &merged, explicitSubjectDialect)
+		subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, &merged, explicitSubjectDialect)
 		if !ok {
 			return
 		}
@@ -940,7 +936,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 		}
 		if req.Subject == nil {
-			if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, tr.ActionType, &TriggerSubjectSpec{
+			if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
 				Dialect: tr.SubjectDialect,
 				Expr:    tr.SubjectRule,
 				Mode:    tr.SubjectMode,
@@ -1127,7 +1123,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}, false, false); !ok {
 		return
 	}
-	if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, tr.ActionType, &TriggerSubjectSpec{
+	if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
 		Dialect: tr.SubjectDialect,
 		Expr:    tr.SubjectRule,
 		Mode:    tr.SubjectMode,
