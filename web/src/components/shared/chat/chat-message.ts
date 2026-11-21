@@ -1053,25 +1053,56 @@ export function knownMentionSlugsKey(set: ReadonlySet<string>): string {
 
 const CODE_SPAN_BOUNDARY_WORD_RE = /[\p{L}\p{N}_-]/u;
 
+const BLOCK_BOUNDARY_TAGS = new Set([
+  'p',
+  'div',
+  'li',
+  'pre',
+  'blockquote',
+  'td',
+  'th',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'dd',
+  'dt',
+]);
+
+function getAdjacentBoundaryText(code: Element, direction: 'prev' | 'next'): string {
+  let cur: Element | null = code;
+  while (cur) {
+    let sibling = direction === 'prev' ? cur.previousSibling : cur.nextSibling;
+    while (sibling && sibling.nodeType === Node.TEXT_NODE && (sibling as Text).data.length === 0) {
+      sibling = direction === 'prev' ? sibling.previousSibling : sibling.nextSibling;
+    }
+    if (sibling) {
+      return sibling.nodeType === Node.TEXT_NODE ? (sibling as Text).data : '';
+    }
+    const parent: Element | null = cur.parentElement;
+    if (!parent || BLOCK_BOUNDARY_TAGS.has(parent.localName.toLowerCase())) {
+      break;
+    }
+    cur = parent;
+  }
+  return '';
+}
+
 function hasAdjacentWordChar(code: Element): boolean {
-  const prev = code.previousSibling;
-  if (prev && prev.nodeType === Node.TEXT_NODE) {
-    const text = (prev as Text).data;
-    if (text.length > 0) {
-      const last = text.charAt(text.length - 1);
-      if (CODE_SPAN_BOUNDARY_WORD_RE.test(last) || last === '@') {
-        return true;
-      }
+  const prevText = getAdjacentBoundaryText(code, 'prev');
+  if (prevText.length > 0) {
+    const last = prevText.charAt(prevText.length - 1);
+    if (CODE_SPAN_BOUNDARY_WORD_RE.test(last) || last === '@') {
+      return true;
     }
   }
-  const next = code.nextSibling;
-  if (next && next.nodeType === Node.TEXT_NODE) {
-    const text = (next as Text).data;
-    if (text.length > 0) {
-      const first = text.charAt(0);
-      if (CODE_SPAN_BOUNDARY_WORD_RE.test(first) || first === '@') {
-        return true;
-      }
+  const nextText = getAdjacentBoundaryText(code, 'next');
+  if (nextText.length > 0) {
+    const first = nextText.charAt(0);
+    if (CODE_SPAN_BOUNDARY_WORD_RE.test(first) || first === '@') {
+      return true;
     }
   }
   return false;

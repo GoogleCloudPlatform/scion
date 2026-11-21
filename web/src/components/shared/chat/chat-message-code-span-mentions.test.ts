@@ -151,4 +151,10 @@ describe('scion-chat-message code-span mentions (shared vectors + real marked)',
     );
     expect(remainingCode).toEqual(['@state']);
   });
+
+  it('rejects intraword underscore wrappers around code-span mentions', async () => {
+    setFeatureFlag(CODE_SPAN_MENTIONS_FLAG, true);
+    const el = await mountWithRoster('Not foo_`@alice`_ or _`@bob`_bar.');
+    expect(renderedMentionSlugs(el)).toEqual([]);
+  });
 });
