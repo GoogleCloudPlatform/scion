@@ -223,3 +223,165 @@ func TestArtifactHostPrincipalDisplayNames(t *testing.T) {
 	got := newArtifactHost(srv).PrincipalDisplayNames(ctx, []string{named, emailOnly, agentRef, unknown, "user:not-a-uuid"})
 	assert.Equal(t, map[string]string{named: "Nora Named", agentRef: agent.Name}, got)
 }
+
+// TestArtifactsOpenReviewAccessLostAndRegained proves, through the hub's
+// artifactHost and real store/authz wiring, that an open review session is
+// dropped (neither counted nor named in 409 review_open or forced warnings)
+// when its principal loses read access to the artifact, and counts and is
+// named again when read access returns (ptone/scion#7650).
+func TestArtifactsOpenReviewAccessLostAndRegained(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	setOpenReviewCheckForTest(t, srv, true)
+
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "open-review-access.db")+"?_pragma=busy_timeout(5000)")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	st := artifacts.NewStore(db, "sqlite")
+	require.NoError(t, st.Init(context.Background()))
+	srv.SetArtifactStore(st)
+
+	ctx := context.Background()
+	p1 := artifactProject(t, s, "open-review-acc-p1")
+	p2 := artifactProject(t, s, "open-review-acc-p2")
+	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "open-review-acc-owner", AgentRoleBaseline)
+	extAgent, extAgentTok := artifactAgent(t, srv, s, p2.ID, "open-review-acc-ext-agent", AgentRoleBaseline)
+	extAgent.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleBaseline)}
+	require.NoError(t, s.UpdateAgent(ctx, extAgent))
+
+	// External user reviewer (not a member of p1) and member user reviewer.
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("art-acc-ext"), Email: "cora@test.com", DisplayName: "Cora Collaborator", Role: "member", Status: "active",
+	}))
+	extReviewer, err := s.GetUser(ctx, tid("art-acc-ext"))
+	require.NoError(t, err)
+
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: tid("art-acc-mem"), Email: "milo@test.com", DisplayName: "Milo Member", Role: "member", Status: "active",
+	}))
+	createTestUserWithProjectRole(t, s, tid("art-acc-mem"), "milo@test.com", p1.ID, store.ProjectRoleMember)
+	memReviewer, err := s.GetUser(ctx, tid("art-acc-mem"))
+	require.NoError(t, err)
+
+	manifest := func(body string, force bool) []byte {
+		sum := sha256.Sum256([]byte(body))
+		b, err := json.Marshal(artifacts.CreateVersionRequest{Key: "plan", Entry: "plan.md", Force: force,
+			Files: []artifacts.ManifestFile{{Path: "plan.md", Size: int64(len(body)), SHA256: hex.EncodeToString(sum[:])}}})
+		require.NoError(t, err)
+		return b
+	}
+	const v1 = "# Plan\n"
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts", manifest(v1, false), ownerTok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var pend artifacts.PendingVersionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pend))
+	id := pend.Artifact.ID
+	require.Equal(t, http.StatusNoContent, doRawAgentRequest(t, srv, http.MethodPut, "/api/v1/artifacts/"+id+"/versions/1/files/plan.md", []byte(v1), ownerTok).Code)
+	require.Equal(t, http.StatusOK, doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts/"+id+"/versions/1/finalize", nil, ownerTok).Code)
+
+	nowStr := time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
+	insertGrant := func(gid, subjRef, perm, createdBy string) {
+		t.Helper()
+		_, err := db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_by_ref, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			gid, id, artifacts.SubjectPrincipal, subjRef, perm, createdBy, nowStr)
+		require.NoError(t, err)
+	}
+	extRef := artifacts.PrincipalRef(artifacts.PrincipalKindUser, extReviewer.ID)
+	memRef := artifacts.PrincipalRef(artifacts.PrincipalKindUser, memReviewer.ID)
+	extAgentRef := artifacts.PrincipalRef(artifacts.PrincipalKindAgent, extAgent.ID)
+
+	// Give Cora an explicit review grant, Milo an automatic sponsor review
+	// grant (which counts only while Milo reads in p1 through a role), and
+	// extAgent a write grant.
+	insertGrant("g-ext", extRef, artifacts.GrantReview, "")
+	insertGrant("g-mem", memRef, artifacts.GrantReview, artifacts.SponsorReviewCreator)
+	insertGrant("g-agent", extAgentRef, artifacts.GrantWrite, "")
+
+	const sid = "tab-0123456789abcdefABCDEF"
+	beatPath := "/api/v1/artifacts/" + id + "/review-sessions/" + sid
+	beat := []byte(`{"base":1,"edited":true,"dirty":true}`)
+	require.Equal(t, http.StatusOK, userArtifactRequest(t, srv, extReviewer, http.MethodPut, beatPath, beat).Code)
+	require.Equal(t, http.StatusOK, userArtifactRequest(t, srv, memReviewer, http.MethodPut, beatPath, beat).Code)
+	require.Equal(t, http.StatusOK, doRawAgentRequest(t, srv, http.MethodPut, beatPath, beat, extAgentTok).Code)
+
+	refusedReviewers := func() []string {
+		t.Helper()
+		r := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts", manifest("# Plan v2\n", false), ownerTok)
+		require.Equal(t, http.StatusConflict, r.Code, r.Body.String())
+		var refusal struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+				Details struct {
+					Reviews []artifacts.ReviewOpenEntry `json:"reviews"`
+				} `json:"details"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(r.Body.Bytes(), &refusal))
+		require.Equal(t, artifacts.CodeReviewOpen, refusal.Error.Code)
+		names := make([]string, len(refusal.Error.Details.Reviews))
+		for i, e := range refusal.Error.Details.Reviews {
+			names[i] = e.Reviewer
+		}
+		return names
+	}
+
+	// Initially all three reviewers have read access.
+	assert.ElementsMatch(t, []string{"Cora Collaborator", "Milo Member", extAgent.Name}, refusedReviewers())
+
+	// 1. External user loses their explicit grant -> dropped from open-review list.
+	_, err = db.Exec(`DELETE FROM artifact_grant WHERE id = ?`, "g-ext")
+	require.NoError(t, err)
+	got := refusedReviewers()
+	assert.ElementsMatch(t, []string{"Milo Member", extAgent.Name}, got)
+
+	// External user regains read access via a read grant -> counted and named again.
+	insertGrant("g-ext-read", extRef, artifacts.GrantRead, "")
+	assert.ElementsMatch(t, []string{"Cora Collaborator", "Milo Member", extAgent.Name}, refusedReviewers())
+
+	// 2. Member with automatic sponsor review grant loses project membership ->
+	// automatic grant no longer counts for read -> dropped; re-adding the
+	// project role binding restores access -> counted and named again.
+	bindings, err := s.ListRoleBindingsForPrincipals(ctx,
+		[]store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: memReviewer.ID}},
+		[]string{store.RoleScopeProject}, []string{p1.ID})
+	require.NoError(t, err)
+	require.NotEmpty(t, bindings)
+	for _, rb := range bindings {
+		require.NoError(t, s.DeleteRoleBinding(ctx, rb.ID))
+	}
+	assert.ElementsMatch(t, []string{"Cora Collaborator", extAgent.Name}, refusedReviewers())
+
+	readded := make([]*store.RoleBinding, 0, len(bindings))
+	for _, rb := range bindings {
+		rbCopy := *rb
+		rbCopy.ID = ""
+		created, err := s.CreateRoleBinding(ctx, &rbCopy)
+		require.NoError(t, err)
+		readded = append(readded, created)
+	}
+	assert.ElementsMatch(t, []string{"Cora Collaborator", "Milo Member", extAgent.Name}, refusedReviewers())
+
+	// 3. User suspension drops the session; reactivation restores it.
+	memReviewer.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, memReviewer))
+	assert.ElementsMatch(t, []string{"Cora Collaborator", extAgent.Name}, refusedReviewers())
+
+	memReviewer.Status = store.UserStatusActive
+	require.NoError(t, s.UpdateUser(ctx, memReviewer))
+	assert.ElementsMatch(t, []string{"Cora Collaborator", "Milo Member", extAgent.Name}, refusedReviewers())
+
+	// 4. Remove access from all three reviewers (delete Cora's and extAgent's
+	// grants, remove Milo's project role): publish is no longer blocked and
+	// names no reviewer.
+	_, err = db.Exec(`DELETE FROM artifact_grant WHERE id IN (?, ?)`, "g-ext-read", "g-agent")
+	require.NoError(t, err)
+	for _, rb := range readded {
+		require.NoError(t, s.DeleteRoleBinding(ctx, rb.ID))
+	}
+	rec = doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts", manifest("# Plan v2\n", false), ownerTok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var v2Pend artifacts.PendingVersionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &v2Pend))
+	assert.Empty(t, v2Pend.Warnings)
+}
