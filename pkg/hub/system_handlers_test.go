@@ -759,3 +759,154 @@ func TestFSList_DefaultsToHome(t *testing.T) {
 		t.Error("expected 'subdir' in entries")
 	}
 }
+
+func TestSystemCheck_RuntimeDaemonReachability(t *testing.T) {
+	findRuntime := func(t *testing.T, results []DiagnosticResult) DiagnosticResult {
+		t.Helper()
+		for _, r := range results {
+			if r.Name == "runtime" {
+				return r
+			}
+		}
+		t.Fatalf("runtime diagnostic missing from results: %+v", results)
+		return DiagnosticResult{}
+	}
+
+	setupHome := func(t *testing.T) {
+		t.Helper()
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		globalDir := filepath.Join(tmpHome, ".scion")
+		require.NoError(t, os.MkdirAll(globalDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"),
+			[]byte("schema_version: \"1\"\n"), 0o600))
+	}
+
+	t.Run("binary present and daemon reachable", func(t *testing.T) {
+		srv, _ := testWorkstationServer(t)
+		setupHome(t)
+		restore := config.OverrideRuntimeDetection(
+			func(bin string) (string, error) {
+				if bin == "docker" {
+					return "/usr/bin/docker", nil
+				}
+				return "", errors.New("not found")
+			},
+			func(bin string, args []string) error {
+				if bin == "docker" {
+					return nil
+				}
+				return errors.New("not found")
+			},
+		)
+		t.Cleanup(restore)
+
+		rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/check", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp systemCheckResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		rt := findRuntime(t, resp.Results)
+		assert.Equal(t, "pass", rt.Status)
+		assert.Equal(t, "detected runtime: docker", rt.Message)
+		assert.True(t, resp.Ready)
+	})
+
+	t.Run("binary present and daemon unreachable then re-checked after daemon starts", func(t *testing.T) {
+		srv, _ := testWorkstationServer(t)
+		setupHome(t)
+		daemonRunning := false
+		restore := config.OverrideRuntimeDetection(
+			func(bin string) (string, error) {
+				if bin == "docker" {
+					return "/usr/bin/docker", nil
+				}
+				return "", errors.New("not found")
+			},
+			func(bin string, args []string) error {
+				if bin != "docker" {
+					return errors.New("not found")
+				}
+				if len(args) == 1 && args[0] == "info" && !daemonRunning {
+					return errors.New("Cannot connect to the Docker daemon")
+				}
+				return nil
+			},
+		)
+		t.Cleanup(restore)
+
+		// First check: daemon stopped -> fail with actionable message and ready=false.
+		rec1 := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/check", nil)
+		require.Equal(t, http.StatusOK, rec1.Code, rec1.Body.String())
+		var resp1 systemCheckResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+
+		rt1 := findRuntime(t, resp1.Results)
+		assert.Equal(t, "fail", rt1.Status)
+		assert.Contains(t, rt1.Message, "docker daemon is not running")
+		assert.Contains(t, rt1.Message, "Re-check")
+		assert.False(t, resp1.Ready)
+
+		// Start daemon and re-check -> immediately reflects live state (no caching).
+		daemonRunning = true
+		rec2 := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/check", nil)
+		require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+		var resp2 systemCheckResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+
+		rt2 := findRuntime(t, resp2.Results)
+		assert.Equal(t, "pass", rt2.Status)
+		assert.Equal(t, "detected runtime: docker", rt2.Message)
+		assert.True(t, resp2.Ready)
+	})
+
+	t.Run("no runtime binary present preserves existing error", func(t *testing.T) {
+		srv, _ := testWorkstationServer(t)
+		setupHome(t)
+		restore := config.OverrideRuntimeDetection(
+			func(string) (string, error) { return "", errors.New("not found") },
+			func(string, []string) error { return errors.New("not found") },
+		)
+		t.Cleanup(restore)
+
+		rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/check", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp systemCheckResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		rt := findRuntime(t, resp.Results)
+		assert.Equal(t, "fail", rt.Status)
+		assert.Contains(t, rt.Message, config.ErrNoLocalRuntime.Error())
+		assert.False(t, resp.Ready)
+	})
+
+	t.Run("falls back to secondary runtime whose daemon is reachable", func(t *testing.T) {
+		srv, _ := testWorkstationServer(t)
+		setupHome(t)
+		restore := config.OverrideRuntimeDetection(
+			func(bin string) (string, error) {
+				if bin == "podman" || bin == "docker" {
+					return "/usr/bin/" + bin, nil
+				}
+				return "", errors.New("not found")
+			},
+			func(bin string, args []string) error {
+				if bin == "podman" && len(args) == 1 && args[0] == "info" {
+					return errors.New("podman machine not running")
+				}
+				return nil
+			},
+		)
+		t.Cleanup(restore)
+
+		rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/check", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp systemCheckResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		rt := findRuntime(t, resp.Results)
+		assert.Equal(t, "pass", rt.Status)
+		assert.Equal(t, "detected runtime: docker", rt.Message)
+		assert.True(t, resp.Ready)
+	})
+}
