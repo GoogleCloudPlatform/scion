@@ -1203,12 +1203,13 @@ for (const theme of ['light', 'dark'] as const) {
     test('set header omits key inventory and rows stack key above question on mobile (ptone/scion#8739, ptone/scion#8740)', async ({
       page,
     }, testInfo) => {
+      const longKey = 'tv-d4-schema-normalization-and-backfill-key';
       const keys = [
         'channels',
         'default-channel',
         'url-scheme',
         'hosting-storage',
-        'retention-backfill',
+        longKey,
         'cache-control',
       ];
       const decisions = keys.map((key, idx) =>
@@ -1296,6 +1297,20 @@ for (const theme of ['light', 'dark'] as const) {
       if (isPhone(page)) {
         expect(rowQBox.y).toBeGreaterThanOrEqual(rowKeyBox.y + rowKeyBox.height - 1);
         expect(rowQBox.width).toBeGreaterThanOrEqual(rowTopBox.width - 2);
+
+        // Very long keys (> ~35 chars) must wrap inside the row without overflowing the card.
+        const longRowTop = c.locator(`.row[data-row="prompt-many-${longKey}"] .row-top`);
+        const longRowTopBox = (await longRowTop.boundingBox())!;
+        const longKeyBox = (await longRowTop.locator('.key').boundingBox())!;
+        expect(longRowTopBox).not.toBeNull();
+        expect(longKeyBox).not.toBeNull();
+        expect(longKeyBox.x + longKeyBox.width).toBeLessThanOrEqual(
+          longRowTopBox.x + longRowTopBox.width + 1
+        );
+        const cardOverflow = await c
+          .locator('.card')
+          .evaluate((el) => el.scrollWidth - el.clientWidth);
+        expect(cardOverflow).toBeLessThanOrEqual(0);
       } else {
         expect(rowQBox.x).toBeGreaterThanOrEqual(rowKeyBox.x + rowKeyBox.width - 1);
         expect(Math.abs(rowQBox.y - rowKeyBox.y)).toBeLessThan(12);

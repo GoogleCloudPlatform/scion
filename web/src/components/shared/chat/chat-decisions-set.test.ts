@@ -259,6 +259,15 @@ describe('set card, pending, preselect setting on', () => {
     const qRule = rules.get('@media (max-width: 600px) .row-top .q');
     expect(qRule).toContain('order: 1');
     expect(qRule).toContain('flex: 1 0 100%');
+    for (const sel of [
+      '@media (max-width: 600px) .row-top .key',
+      '@media (max-width: 600px) .card-head-lead .key',
+    ]) {
+      const keyRule = rules.get(sel);
+      expect(keyRule).toContain('max-width: 100%');
+      expect(keyRule).toContain('white-space: normal');
+      expect(keyRule).toContain('overflow-wrap: anywhere');
+    }
   });
 
   it('treats 2+ decisions as a set even without answerMode', async () => {

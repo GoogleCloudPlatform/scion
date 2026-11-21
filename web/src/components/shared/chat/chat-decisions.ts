@@ -708,6 +708,15 @@ export class ScionChatDecisions extends LitElement {
         gap: 0.25rem 0.5rem;
       }
 
+      .row-top .key,
+      .card-head-lead .key {
+        box-sizing: border-box;
+        max-width: 100%;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        line-height: 1.25;
+      }
+
       .row-top .q {
         order: 1;
         flex: 1 0 100%;
