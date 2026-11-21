@@ -102,12 +102,17 @@ func TestSanitizeFilename_LongNamesPreserveExtensionAndCheckFinalName(t *testing
 		assert.True(t, strings.HasSuffix(reduceAttachmentName(safe), ".txt"))
 	})
 
-	t.Run("reduced fallback exposing dangerous extension is rejected", func(t *testing.T) {
+	t.Run("truncation or reduction exposing refused extension is rejected", func(t *testing.T) {
 		cases := []struct {
 			name    string
 			input   string
 			wantExt string
 		}{
+			{
+				name:    "stored-name truncation exposes .sh before trailing dot",
+				input:   strings.Repeat("y", 251) + ".sh" + "zzzz" + ".",
+				wantExt: ".sh",
+			},
 			{
 				name:    "overlong extension falls back onto .sh",
 				input:   strings.Repeat("x", 117) + ".sh." + strings.Repeat("b", 125),
