@@ -3006,6 +3006,44 @@ func TestResolveIntegrationMergedConfig_TransportKeysComeFromHub(t *testing.T) {
 	assert.Equal(t, "/projects/1/global/backendServices/2", merged["transport_audience"])
 }
 
+func TestResolveIntegrationMergedConfig_NoConfigFileDropsStaleHubKeys(t *testing.T) {
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{
+		"guild_id":           "inline-guild",
+		"transport_mode":     "stale-mode",
+		"transport_audience": "stale-audience",
+		"database_driver":    "stale-driver",
+		"database_url":       "stale-dsn",
+		"public_url":         "https://stale.example.com",
+		"plugin_name":        "stale-plugin",
+	}
+	srv, _ := testServer(t)
+
+	// No config file and empty live hub values: non-hub inline keys survive,
+	// stale hub-supplied keys are dropped rather than carried over from cache.
+	merged := srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "inline-guild", merged["guild_id"])
+	assert.NotContains(t, merged, "transport_mode")
+	assert.NotContains(t, merged, "transport_audience")
+	assert.NotContains(t, merged, "database_driver")
+	assert.NotContains(t, merged, "database_url")
+	assert.NotContains(t, merged, "public_url")
+	assert.Equal(t, "discord", merged["plugin_name"])
+	// Verify the manager's cached map was not mutated in place.
+	assert.Equal(t, "stale-mode", mgr.plugins["discord"]["transport_mode"])
+
+	// Live hub values are still applied when non-empty.
+	srv.transportMode = "iap"
+	srv.transportAudience = "/projects/1/global/backendServices/2"
+	merged = srv.resolveIntegrationMergedConfig(context.Background(), mgr, "discord")
+	assert.Equal(t, "inline-guild", merged["guild_id"])
+	assert.Equal(t, "iap", merged["transport_mode"])
+	assert.Equal(t, "/projects/1/global/backendServices/2", merged["transport_audience"])
+	assert.NotContains(t, merged, "database_driver")
+	assert.NotContains(t, merged, "database_url")
+	assert.NotContains(t, merged, "public_url")
+}
+
 // replayFailingBus is an EventBus whose Subscribe fails.
 type replayFailingBus struct{}
 

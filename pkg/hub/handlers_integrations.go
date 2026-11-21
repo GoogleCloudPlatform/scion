@@ -1837,10 +1837,16 @@ func (s *Server) resolveIntegrationMergedConfigChecked(ctx context.Context, mgr 
 	// manager's boot-resolved map as "inline" config, because it contains
 	// the file's own keys and would trigger spurious deprecation warnings (B2).
 	// When no config file exists, pass the manager map as inline config so
-	// that inline-only deployments retain their configuration keys.
+	// that inline-only deployments retain their configuration keys, but drop
+	// hub-supplied keys so they come only from live hub state below.
 	var inlineToPass map[string]string
-	if configFile == "" {
-		inlineToPass = pluginCfg
+	if configFile == "" && len(pluginCfg) > 0 {
+		inlineToPass = make(map[string]string, len(pluginCfg))
+		for k, v := range pluginCfg {
+			if !hubKeys[k] {
+				inlineToPass[k] = v
+			}
+		}
 	}
 	merged, err := config.ResolvePluginConfig(configFile, inlineToPass)
 	if err != nil {
