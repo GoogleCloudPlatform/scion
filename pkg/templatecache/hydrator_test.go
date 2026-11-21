@@ -62,6 +62,10 @@ func (m *mockTemplateService) Reimport(ctx context.Context, templateID string, s
 	return nil, nil
 }
 
+func (m *mockTemplateService) ImportResources(ctx context.Context, req *hubclient.ImportResourcesRequest) (*hubclient.ImportResourcesResponse, error) {
+	return nil, nil
+}
+
 func (m *mockTemplateService) RequestUploadURLs(ctx context.Context, templateID string, files []hubclient.FileUploadRequest) (*hubclient.UploadResponse, error) {
 	return nil, nil
 }

@@ -47,6 +47,9 @@ type TemplateService interface {
 	// sourceURL when it is non-empty (which then becomes the stored source).
 	Reimport(ctx context.Context, templateID string, sourceURL string) (*ReimportTemplateResponse, error)
 
+	// ImportResources imports resources (templates) from a remote URL on the Hub.
+	ImportResources(ctx context.Context, req *ImportResourcesRequest) (*ImportResourcesResponse, error)
+
 	// RequestUploadURLs requests signed URLs for uploading template files.
 	RequestUploadURLs(ctx context.Context, templateID string, files []FileUploadRequest) (*UploadResponse, error)
 
