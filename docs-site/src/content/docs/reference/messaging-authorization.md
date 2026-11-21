@@ -296,6 +296,10 @@ This is a quarantine kill-switch independent of the agent's role.
 - Delivery to a newly-quarantined agent fails closed. The sender receives a
   system-plane notice about the delivery failure.
 - **Super-admin** can still reach quarantined agents.
+- An agent created in `none` mode still runs the task given at creation: the
+  task is passed to the harness when the agent starts, not delivered on the
+  message plane. A task sent afterwards as a message is refused like any
+  other message unless a super-admin sends it.
 - **Attach/PTY, and the keys operation (`POST /:id/keys`),** remain available
   to holders of `agent.attach`. Mode governs only the message plane. This
   includes the `scion keys` CLI, which uses the keys operation.

@@ -46,10 +46,23 @@ claude/
 
 `init-firewall.sh` restricts outbound traffic to GitHub, the npm registry,
 Anthropic endpoints and the host network. It runs only at container start:
-set `SCION_INIT_FIREWALL=1` in the agent or template environment and
-`sciontool init` runs the script as root before anything else starts. If the
-script fails, the agent does not start. Unset, empty or a false value
-(`0`, `false`) means no firewall; any other value is an error.
+when the agent's environment has `SCION_INIT_FIREWALL=1`, `sciontool init`
+runs the script as root before anything else starts. If the script fails,
+the agent does not start. Unset, empty or a false value (`0`, `false`)
+means no firewall; any other value is an error.
+
+Set the variable in one of these places:
+
+- the agent's own config: the `env` of an inline `--config` file, or
+  `config.env` in the agent-create request;
+- harness-config env: the `env:` block of this harness-config's
+  `config.yaml`, `harness_configs.<name>.env` in `settings.yaml`, or
+  `profiles.<profile>.harness_overrides.<name>.env`.
+
+A template's `env:` block cannot set it: templates may not set `SCION_*`
+keys, so the key is dropped with a warning and the firewall stays off. Hub
+env (`scion hub env set`) and environment-type secrets cannot set it either,
+because the Hub refuses and drops every `SCION_*` name.
 
 With native identity (the agent uses its runtime platform's own GCP
 identity, for example a Cloud Run service account) the metadata mode is
