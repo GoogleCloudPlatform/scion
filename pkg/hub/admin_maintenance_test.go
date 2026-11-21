@@ -22,6 +22,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -746,8 +749,8 @@ func TestHandleAdminRestart_MethodNotAllowed(t *testing.T) {
 func TestHandleAdminRestart_ExecFailure(t *testing.T) {
 	srv, _ := newTestServerWithStore(t)
 
-	// Clear PATH so that exec.Command("sudo", ...) fails at Start()
-	// because the binary cannot be found.
+	// Clear PATH so that exec.CommandContext(..., "sudo", "-n", ...) fails at
+	// Start() because the binary cannot be found.
 	t.Setenv("PATH", t.TempDir())
 
 	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
@@ -772,6 +775,119 @@ func TestHandleAdminRestart_ExecFailure(t *testing.T) {
 	if resp.Error.Message != "Failed to initiate restart" {
 		t.Errorf("expected generic error message, got %q", resp.Error.Message)
 	}
+}
+
+func TestHandleAdminRestart_LegacySudo(t *testing.T) {
+	t.Run("invokes sudo -n with detached bounded context", func(t *testing.T) {
+		srv, _ := newTestServerWithStore(t)
+		srv.config.MaintenanceConfig.ServiceName = "custom-hub"
+
+		reqCtx, cancelReq := context.WithCancel(context.Background())
+		defer cancelReq()
+
+		var gotName string
+		var gotArgs []string
+		var hadDeadline bool
+		var ctxErrAfterReqCancel error
+		srv.legacyRestartRunner = func(ctx context.Context, name string, args ...string) error {
+			gotName = name
+			gotArgs = append([]string(nil), args...)
+			_, hadDeadline = ctx.Deadline()
+			// Cancelling the HTTP request context must not cancel the restart command.
+			cancelReq()
+			ctxErrAfterReqCancel = ctx.Err()
+			return nil
+		}
+
+		admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
+		req = req.WithContext(contextWithIdentity(reqCtx, admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminRestart(rr, req)
+
+		if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"restarting"`) {
+			t.Fatalf("expected 200 restarting, got %d: %s", rr.Code, rr.Body.String())
+		}
+		if gotName != "sudo" {
+			t.Errorf("command name = %q, want %q", gotName, "sudo")
+		}
+		wantArgs := []string{"-n", "systemctl", "restart", "--no-block", "custom-hub"}
+		if !slices.Equal(gotArgs, wantArgs) {
+			t.Errorf("command args = %v, want %v", gotArgs, wantArgs)
+		}
+		if !hadDeadline {
+			t.Error("expected bounded context with deadline")
+		}
+		if ctxErrAfterReqCancel != nil {
+			t.Errorf("restart context should be detached from request cancellation, got err=%v", ctxErrAfterReqCancel)
+		}
+	})
+
+	t.Run("hanging runner times out and releases reservation", func(t *testing.T) {
+		srv, _ := newTestServerWithStore(t)
+		srv.legacyRestartTimeout = 50 * time.Millisecond
+
+		srv.legacyRestartRunner = func(ctx context.Context, _ string, _ ...string) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+
+		admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), admin))
+		rr := httptest.NewRecorder()
+
+		start := time.Now()
+		srv.handleAdminRestart(rr, req)
+		elapsed := time.Since(start)
+
+		if elapsed > 2*time.Second {
+			t.Errorf("handler did not time out promptly: elapsed=%v", elapsed)
+		}
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "Failed to initiate restart") {
+			t.Errorf("expected generic error message, got %s", rr.Body.String())
+		}
+		if got := srv.hubRestartReservedAt.Load(); got != 0 {
+			t.Errorf("expected hub restart reservation to be released, got %d", got)
+		}
+	})
+
+	t.Run("hanging subprocess is terminated on timeout", func(t *testing.T) {
+		srv, _ := newTestServerWithStore(t)
+		srv.legacyRestartTimeout = 100 * time.Millisecond
+
+		stubDir := t.TempDir()
+		stubPath := filepath.Join(stubDir, "sudo")
+		if err := os.WriteFile(stubPath, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+			t.Fatalf("write sudo stub: %v", err)
+		}
+		t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/restart", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), admin))
+		rr := httptest.NewRecorder()
+
+		start := time.Now()
+		srv.handleAdminRestart(rr, req)
+		elapsed := time.Since(start)
+
+		if elapsed > 5*time.Second {
+			t.Errorf("hanging subprocess was not terminated promptly: elapsed=%v", elapsed)
+		}
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500, got %d: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "Failed to initiate restart") {
+			t.Errorf("expected generic error message, got %s", rr.Body.String())
+		}
+		if got := srv.hubRestartReservedAt.Load(); got != 0 {
+			t.Errorf("expected hub restart reservation to be released, got %d", got)
+		}
+	})
 }
 
 func TestListMaintenanceOperations_HidesContainerBinariesByDefault(t *testing.T) {

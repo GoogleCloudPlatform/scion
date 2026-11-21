@@ -3078,6 +3078,12 @@ type Server struct {
 	updateDaterOnce   sync.Once
 	updateDater       maintenance.ReleaseSource
 
+	// Test hooks for the legacy unsupported-installer Restart Hub path
+	// (admin_maintenance.go). Zero values use exec.CommandContext and
+	// adminRestartTimeout.
+	legacyRestartRunner  func(ctx context.Context, name string, args ...string) error
+	legacyRestartTimeout time.Duration
+
 	// System One runtime and optional test overrides (system_one_wiring.go;
 	// gated on experiments.SystemOne). Guarded by mu.
 	systemOneRuntime     *systemoneruntime.Runtime

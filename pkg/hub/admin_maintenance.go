@@ -1071,7 +1071,7 @@ func (s *Server) handleUpdateAvailable(w http.ResponseWriter, r *http.Request) {
 // symlink layout exits the hub (SIGTERM to itself; systemd Restart=always
 // starts it again), which is requested only after the response is written;
 // sudo-install runs its allowed `sudo -n systemctl restart` rule. Where the
-// installer is unsupported the previous behaviour is kept: `sudo systemctl
+// installer is unsupported the previous behaviour is kept: `sudo -n systemctl
 // restart --no-block <service>`, which works only where the hub user has
 // such a sudo rule.
 //
@@ -1168,15 +1168,23 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	// deadlock.  With --no-block, systemd returns immediately, cmd.Run()
 	// completes, and we can send the response before the process is
 	// killed.
-	cmd := exec.Command("sudo", "systemctl", "restart", "--no-block", serviceName)
-	if err := cmd.Run(); err != nil {
-		if maintenance.IsStopSignalExit(err) {
+	// Detach from request cancellation (as with StrategySudoInstall) so a
+	// client disconnect does not abort a queued restart, while bounding the
+	// command with adminRestartTimeout and passing -n so sudo never prompts.
+	restartCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.effectiveLegacyRestartTimeout())
+	defer cancel()
+	if err := s.runLegacyRestart(restartCtx, "sudo", "-n", "systemctl", "restart", "--no-block", serviceName); err != nil {
+		if restartCtx.Err() == nil && maintenance.IsStopSignalExit(err) {
 			log.Info("Hub restart command terminated by stop signal; restart is under way", "service", serviceName, "user", user.Email())
 			writeRestartAccepted(w)
 			return
 		}
 		s.releaseHubRestart(stamp)
-		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
+		if restartCtx.Err() != nil {
+			log.Error("Failed to initiate hub restart", "error", restartCtx.Err(), "cause", err, "user", user.Email())
+		} else {
+			log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to initiate restart", nil)
 		return
@@ -1191,6 +1199,20 @@ const adminRestartSignalDelay = 250 * time.Millisecond
 
 // adminRestartTimeout bounds the installer's Restart for Restart Hub.
 const adminRestartTimeout = 30 * time.Second
+
+func (s *Server) runLegacyRestart(ctx context.Context, name string, args ...string) error {
+	if s.legacyRestartRunner != nil {
+		return s.legacyRestartRunner(ctx, name, args...)
+	}
+	return exec.CommandContext(ctx, name, args...).Run()
+}
+
+func (s *Server) effectiveLegacyRestartTimeout() time.Duration {
+	if s.legacyRestartTimeout > 0 {
+		return s.legacyRestartTimeout
+	}
+	return adminRestartTimeout
+}
 
 // writeRestartAccepted writes the Restart Hub response and flushes it.
 func writeRestartAccepted(w http.ResponseWriter) {
