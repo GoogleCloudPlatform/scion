@@ -491,6 +491,13 @@ func TestCloudRunRun_ExistingInstanceSpecDiffRecreated(t *testing.T) {
 			}},
 		{field: "image", existingCfg: readyRunCfg(), runCfg: readyRunCfg(),
 			mutate: func(inst *runpb.Instance) { inst.Containers[0].Image = "docker.io/scion/agent:earlier" }},
+		{field: "working_dir", existingCfg: readyRunCfg(), runCfg: readyRunCfg(),
+			mutate: func(inst *runpb.Instance) { inst.Containers[0].WorkingDir = "" },
+			check: func(t *testing.T, created *runpb.Instance) {
+				if got := created.GetContainers()[0].GetWorkingDir(); got != "/workspace" {
+					t.Errorf("created working_dir = %q, want /workspace", got)
+				}
+			}},
 		{field: "service_account", existingCfg: readyRunCfg(), runCfg: readyRunCfg(),
 			mutate: func(inst *runpb.Instance) { inst.ServiceAccount = "other-sa@test-project.iam.gserviceaccount.com" },
 			check: func(t *testing.T, created *runpb.Instance) {
@@ -626,6 +633,9 @@ func TestCloudRunSpecDiff_Resources(t *testing.T) {
 		{name: "cpu_idle difference ignored", existing: &runpb.ResourceRequirements{Limits: map[string]string{"cpu": "2"}, CpuIdle: true}, want: lim(map[string]string{"cpu": "2"}), wantDiff: false},
 		{name: "cpu changed 1 to 2", existing: lim(map[string]string{"cpu": "1", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "2", "memory": "2Gi"}), wantDiff: true},
 		{name: "cpu changed from nil default", existing: nil, want: lim(map[string]string{"cpu": nonDefaultCPU}), wantDiff: true},
+		{name: "nil vs legacy services defaults 1 cpu 512Mi", existing: nil, want: lim(map[string]string{"cpu": "1", "memory": "512Mi"}), wantDiff: true},
+		{name: "unset cpu does not match legacy 1 vCPU", existing: lim(map[string]string{"cpu": "1", "memory": defaultMem}), want: lim(map[string]string{"memory": defaultMem}), wantDiff: true},
+		{name: "unset memory does not match legacy 512Mi", existing: lim(map[string]string{"cpu": defaultCPU, "memory": "512Mi"}), want: lim(map[string]string{"cpu": defaultCPU}), wantDiff: true},
 		{name: "memory changed 2Gi to 4Gi", existing: lim(map[string]string{"cpu": "2", "memory": "2Gi"}), want: lim(map[string]string{"cpu": "2", "memory": "4Gi"}), wantDiff: true},
 		{name: "memory changed decimal 1G vs binary 1Gi", existing: lim(map[string]string{"cpu": "1", "memory": "1G"}), want: lim(map[string]string{"cpu": "1", "memory": "1Gi"}), wantDiff: true},
 		{name: "extra limit key added", existing: lim(map[string]string{"cpu": "4", "memory": "16Gi"}), want: lim(map[string]string{"cpu": "4", "memory": "16Gi", "nvidia.com/gpu": "1"}), wantDiff: true},
@@ -638,6 +648,38 @@ func TestCloudRunSpecDiff_Resources(t *testing.T) {
 			var want []string
 			if tc.wantDiff {
 				want = []string{"resources"}
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("cloudRunSpecDiff() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// ptone/scion#8511: cloudRunSpecDiff compares container WorkingDir so a
+// stopped instance created with a different (or unset) working directory
+// is recreated rather than reused.
+func TestCloudRunSpecDiff_WorkingDir(t *testing.T) {
+	instWith := func(dir string) *runpb.Instance {
+		return &runpb.Instance{Containers: []*runpb.Container{{WorkingDir: dir}}}
+	}
+	for _, tc := range []struct {
+		name     string
+		existing string
+		want     string
+		wantDiff bool
+	}{
+		{name: "both empty", existing: "", want: "", wantDiff: false},
+		{name: "both workspace", existing: "/workspace", want: "/workspace", wantDiff: false},
+		{name: "unset vs workspace", existing: "", want: "/workspace", wantDiff: true},
+		{name: "root vs workspace", existing: "/", want: "/workspace", wantDiff: true},
+		{name: "custom workspace changed", existing: "/workspace", want: "/custom/workspace", wantDiff: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cloudRunSpecDiff(instWith(tc.existing), instWith(tc.want), nil)
+			var want []string
+			if tc.wantDiff {
+				want = []string{"working_dir"}
 			}
 			if !slices.Equal(got, want) {
 				t.Errorf("cloudRunSpecDiff() = %v, want %v", got, want)
