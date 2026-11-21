@@ -305,3 +305,58 @@ func TestIsUserTemplateOwner(t *testing.T) {
 		})
 	}
 }
+
+func TestUserTemplateFinalize_AgentConfigValidation(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		name := "flag_off"
+		if on {
+			name = "flag_on"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, s, alice, _ := setupUserTemplateTest(t)
+			srv.SetStorage(newCommitTestStorage(t))
+			setTemplateValidationExperiment(t, srv, on)
+			logs := captureSlogDefault(t)
+
+			// Create user template via API.
+			createRec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/users/me/templates", CreateTemplateRequest{
+				Name:    "user-val-tpl",
+				Harness: "claude",
+			})
+			require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+			var created CreateTemplateResponse
+			require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+
+			// Stage and finalize with valid config first.
+			validFiles := map[string]string{"scion-agent.yaml": "default_harness_config: claude\nmax_duration: 2h\n"}
+			tmpl, err := s.GetTemplate(t.Context(), created.Template.ID)
+			require.NoError(t, err)
+			stageObjects(t, srv, tmpl, validFiles)
+			rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/users/me/templates/"+tmpl.ID+"/finalize", FinalizeRequest{
+				Manifest: &TemplateManifest{Version: "1.0", Harness: "claude", Files: commitManifest(validFiles)},
+			})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			// Now stage and finalize with invalid config.
+			tmpl, err = s.GetTemplate(t.Context(), created.Template.ID)
+			require.NoError(t, err)
+			prevHash := tmpl.ContentHash
+			invalidFiles := map[string]string{"scion-agent.yaml": "default_harness_config: claude\nmax_duration: \"2 hours\"\n"}
+			stageObjects(t, srv, tmpl, invalidFiles)
+			rec = doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/users/me/templates/"+tmpl.ID+"/finalize", FinalizeRequest{
+				Manifest: &TemplateManifest{Version: "1.0", Harness: "claude", Files: commitManifest(invalidFiles)},
+			})
+			if on {
+				require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), ErrCodeInvalidAgentConfig)
+				assert.Contains(t, rec.Body.String(), "max_duration")
+				after, err := s.GetTemplate(t.Context(), tmpl.ID)
+				require.NoError(t, err)
+				assert.Equal(t, prevHash, after.ContentHash, "existing active row must remain unchanged on refusal")
+			} else {
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Contains(t, logs.String(), "agent config failed schema validation")
+			}
+		})
+	}
+}

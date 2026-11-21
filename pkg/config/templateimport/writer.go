@@ -35,6 +35,9 @@ func WriteTemplate(agent *ImportedAgent, templatesDir string, force bool) (strin
 	if agent == nil {
 		return "", fmt.Errorf("imported agent cannot be nil")
 	}
+	if agent.ParseError != nil {
+		return "", agent.ParseError
+	}
 
 	// Names come from imported metadata or --name. Validate before any writes
 	// or removals, including the scion-format copy path.

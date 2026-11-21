@@ -27,6 +27,7 @@ type ImportedAgent struct {
 	RawFrontMatter map[string]any // Full front matter for pass-through
 	SourcePath     string         // Original file path
 	ScionFormat    bool           // True if this is a native scion template (copy, don't convert)
+	ParseError     error          // Non-nil when discovery found a template whose config could not be parsed
 }
 
 // Importer parses harness-specific agent definitions.

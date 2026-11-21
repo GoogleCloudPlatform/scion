@@ -40,7 +40,22 @@ type ImportTemplatesRequest struct {
 // ImportFailure pairs a resource name with the reason it failed to import.
 type ImportFailure struct {
 	Name   string `json:"name"`
+	Code   string `json:"code,omitempty"`
 	Reason string `json:"reason"`
+}
+
+// allFailuresHaveCode reports whether failures is non-empty and every entry
+// carries the given error code.
+func allFailuresHaveCode(failures []ImportFailure, code string) bool {
+	if len(failures) == 0 {
+		return false
+	}
+	for _, f := range failures {
+		if f.Code != code {
+			return false
+		}
+	}
+	return true
 }
 
 // ImportTemplatesResponse is returned after a direct template import completes.
@@ -188,6 +203,11 @@ func (s *Server) handleProjectImportResources(
 		reasons := make([]string, len(failures))
 		for i, f := range failures {
 			reasons[i] = f.Name + ": " + f.Reason
+		}
+		if allFailuresHaveCode(failures, ErrCodeInvalidAgentConfig) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidAgentConfig,
+				strings.Join(reasons, "; "), nil)
+			return
 		}
 		writeError(w, http.StatusBadRequest, "import_failed",
 			options.validationFailurePrefix+strings.Join(reasons, "; "), nil)
@@ -385,6 +405,11 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		for i, f := range failures {
 			reasons[i] = f.Name + ": " + f.Reason
 		}
+		if allFailuresHaveCode(failures, ErrCodeInvalidAgentConfig) {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidAgentConfig,
+				strings.Join(reasons, "; "), nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "import_failed",
 			"config validation failed: "+strings.Join(reasons, "; "), nil)
 		return
@@ -405,7 +430,7 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 func failureCollector(failures *[]ImportFailure) importProgressFunc {
 	return func(ev ResourceImportEvent) {
 		if ev.Type == ImportEventFailed {
-			*failures = append(*failures, ImportFailure{Name: ev.Name, Reason: ev.Reason})
+			*failures = append(*failures, ImportFailure{Name: ev.Name, Code: ev.Code, Reason: ev.Reason})
 		}
 	}
 }
@@ -466,6 +491,10 @@ func importErrorEvent(err error) ResourceImportEvent {
 	var herr *hostedHarnessConfigImportError
 	if errors.As(err, &herr) {
 		return ResourceImportEvent{Type: ImportEventError, Code: hostedguard.ErrorCode, Reason: herr.Error()}
+	}
+	var invalidCfg *invalidAgentConfigError
+	if errors.As(err, &invalidCfg) {
+		return ResourceImportEvent{Type: ImportEventError, Code: ErrCodeInvalidAgentConfig, Reason: invalidCfg.PublicMessage()}
 	}
 	return ResourceImportEvent{Type: ImportEventError, Reason: err.Error()}
 }

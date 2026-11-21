@@ -1286,6 +1286,34 @@ func uploadTemplateURLs(ctx context.Context, up signedURLUploader, root *os.Root
 	return uploadCollectedFiles(ctx, up, root, collectedByPath(files), urls, missing, sent)
 }
 
+// warnInvalidLocalTemplateAgentConfig validates the effective agent config file
+// in root (scion-agent.yaml -> .yml -> .json) and prints a warning to stderr if
+// it fails schema validation or fails to parse.
+func warnInvalidLocalTemplateAgentConfig(root *os.Root, templateName string, files []hubclient.FileInfo) {
+	present := make(map[string]bool, len(files))
+	for _, f := range files {
+		present[f.Path] = true
+	}
+	for _, cfgName := range []string{"scion-agent.yaml", "scion-agent.yml", "scion-agent.json"} {
+		if !present[cfgName] {
+			continue
+		}
+		data, err := root.ReadFile(cfgName)
+		if err != nil {
+			return
+		}
+		findings, err := config.ValidateTemplateAgentConfig(cfgName, data)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: template %s: agent config %s is invalid: %v\n", templateName, cfgName, err)
+			return
+		}
+		if len(findings) > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", config.FormatAgentConfigValidationError(templateName, cfgName, findings))
+		}
+		return
+	}
+}
+
 // syncTemplateToHub creates or updates a template in the Hub.
 // If a template with the same name already exists, only changed files are uploaded.
 func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType string) error {
@@ -1315,6 +1343,10 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		return fmt.Errorf("failed to open template directory %s: %w", localPath, err)
 	}
 	defer func() { _ = root.Close() }()
+
+	// Pre-check the effective agent config locally before creating or uploading
+	// to the Hub (warns per D5; Hub remains the authority when enforcing).
+	warnInvalidLocalTemplateAgentConfig(root, name, files)
 
 	// Build file upload request
 	fileReqs := make([]hubclient.FileUploadRequest, len(files))
@@ -1367,6 +1399,18 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	// sends it so the Hub refuses the commit (409) if another push lands
 	// first (ptone/scion#4221).
 	var expectedHash string
+
+	// Track a newly created pending template so that if upload or finalize
+	// fails (for example, Hub 422 invalid_agent_config), we clean it up and
+	// retries do not collide with the unique (slug, scope, scope_id) index.
+	var createdPendingID string
+	defer func() {
+		if createdPendingID != "" {
+			if delErr := hubCtx.Client.Templates().Delete(ctx, createdPendingID); delErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to clean up pending template %s: %v\n", createdPendingID, delErr)
+			}
+		}
+	}()
 
 	if existingTemplate != nil {
 		templateID = existingTemplate.ID
@@ -1465,6 +1509,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 		}
 
 		templateID = resp.Template.ID
+		createdPendingID = templateID
 		expectedHash = resp.Template.ContentHash
 		fmt.Printf("Template created with ID: %s\n", templateID)
 
@@ -1529,6 +1574,9 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 			return fmt.Errorf("failed to finalize template after retry: %w", err)
 		}
 	}
+
+	// Finalize succeeded; keep the template.
+	createdPendingID = ""
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{

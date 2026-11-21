@@ -16,11 +16,13 @@ package config
 
 import (
 	"fmt"
+	"io/fs"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -695,6 +697,222 @@ max_duration: "2 hours"
 	errors, err := ValidateAgentConfig(data, "1")
 	require.NoError(t, err)
 	assert.NotEmpty(t, errors, "invalid max_duration format should produce validation error")
+}
+
+func TestValidateTemplateAgentConfig_ValidAndEdgeCases(t *testing.T) {
+	t.Run("valid yaml", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("default_harness_config: claude\nmax_duration: 2h\n"))
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+
+	t.Run("valid hyphenated yaml", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("harness-config: claude\nmax-duration: 30m\n"))
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+
+	t.Run("empty yaml accepted", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte(""))
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+
+	t.Run("comments-only yaml accepted", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("# placeholder template config\n"))
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+
+	t.Run("empty json accepted", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", []byte("  \n"))
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+
+	t.Run("open top level allows unknown keys", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("description: my template\nunknown_future_key: true\n"))
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+}
+
+// TestBundledDefaultTemplates_PassAgentConfigSchema pins every bundled and
+// embedded template agent config (scion-agent.{yaml,yml,json}) in both
+// pkg/config/embeds/templates/ and resources/templates/ against
+// ValidateTemplateAgentConfig so schema drift fails CI. Both FSes are tested
+// here because pkg/config imports resources (importing pkg/config from
+// resources/catalog_test.go would create an import cycle).
+func TestBundledDefaultTemplates_PassAgentConfigSchema(t *testing.T) {
+	isAgentConfig := func(base string) bool {
+		return base == "scion-agent.yaml" || base == "scion-agent.yml" || base == "scion-agent.json"
+	}
+
+	walkAndValidate := func(t *testing.T, fsys fs.FS, root string) int {
+		t.Helper()
+		checked := 0
+		err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || !isAgentConfig(d.Name()) {
+				return nil
+			}
+			data, readErr := fs.ReadFile(fsys, p)
+			require.NoError(t, readErr, "read %s", p)
+			findings, valErr := ValidateTemplateAgentConfig(d.Name(), data)
+			require.NoError(t, valErr, "parse %s", p)
+			assert.Empty(t, findings, "%s must pass ValidateTemplateAgentConfig", p)
+			checked++
+			return nil
+		})
+		require.NoError(t, err)
+		return checked
+	}
+
+	t.Run("pkg/config/embeds/templates", func(t *testing.T) {
+		checked := walkAndValidate(t, EmbedsFS, "embeds/templates")
+		assert.GreaterOrEqual(t, checked, 1, "expected at least embeds/templates/default/scion-agent.yaml")
+	})
+
+	t.Run("resources/templates", func(t *testing.T) {
+		templates := resources.BuiltinTemplates()
+		require.NotEmpty(t, templates)
+		checked := 0
+		for _, tmpl := range templates {
+			root := tmpl.Root
+			if root == "" {
+				root = "."
+			}
+			checked += walkAndValidate(t, tmpl.FS, root)
+		}
+		assert.GreaterOrEqual(t, checked, 1, "expected at least resources/templates/default/scion-agent.yaml")
+	})
+}
+
+func TestValidateTemplateAgentConfig_InvalidAndNormalization(t *testing.T) {
+	t.Run("hyphenated yaml bypass refused", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("auth-selectedType: none\n"))
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "auth_selectedType", findings[0].Path)
+	})
+
+	t.Run("hyphenated yml bypass refused", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yml", []byte("max-turns: -1\n"))
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "max_turns", findings[0].Path)
+	})
+
+	t.Run("json case-variant bypass refused", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", []byte(`{"AUTH_SELECTEDTYPE":"none"}`))
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "auth_selectedType", findings[0].Path)
+	})
+
+	t.Run("json duplicate case-variant last key wins matching encoding/json", func(t *testing.T) {
+		// Runtime reads "bogus" because encoding/json applies keys in document order.
+		rawAuth := []byte(`{"auth_selectedType":"api-key","AUTH_SELECTEDTYPE":"bogus"}`)
+		cfg, err := ParseScionAgentConfig("scion-agent.json", rawAuth)
+		require.NoError(t, err)
+		assert.Equal(t, "bogus", cfg.AuthSelectedType)
+
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", rawAuth)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "auth_selectedType", findings[0].Path)
+
+		rawDur := []byte(`{"max_duration":"2h","MAX_DURATION":"2 hours"}`)
+		cfg, err = ParseScionAgentConfig("scion-agent.json", rawDur)
+		require.NoError(t, err)
+		assert.Equal(t, "2 hours", cfg.MaxDuration)
+
+		findings, err = ValidateTemplateAgentConfig("scion-agent.json", rawDur)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "max_duration", findings[0].Path)
+
+		// Reverse order: valid key comes last, runtime reads valid value -> accepted.
+		rawValidLast := []byte(`{"AUTH_SELECTEDTYPE":"bogus","auth_selectedType":"api-key"}`)
+		cfg, err = ParseScionAgentConfig("scion-agent.json", rawValidLast)
+		require.NoError(t, err)
+		assert.Equal(t, "api-key", cfg.AuthSelectedType)
+
+		findings, err = ValidateTemplateAgentConfig("scion-agent.json", rawValidLast)
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+	})
+
+	t.Run("json unicode simple case-folding bypass refused", func(t *testing.T) {
+		// U+017F (ſ, Latin small letter long s) folds to 's' under encoding/json.
+		raw := []byte("{\"auth_\u017felectedType\":\"bogus\"}")
+		cfg, err := ParseScionAgentConfig("scion-agent.json", raw)
+		require.NoError(t, err)
+		assert.Equal(t, "bogus", cfg.AuthSelectedType)
+
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", raw)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "auth_selectedType", findings[0].Path)
+	})
+
+	t.Run("yaml duplicate key after hyphen normalization refused", func(t *testing.T) {
+		raw := []byte("auth_selectedType: api-key\nauth-selectedType: none\n")
+		_, parseErr := ParseScionAgentConfig("scion-agent.yaml", raw)
+		require.Error(t, parseErr)
+
+		_, valErr := ValidateTemplateAgentConfig("scion-agent.yaml", raw)
+		require.Error(t, valErr)
+		assert.Contains(t, valErr.Error(), "failed to parse agent config scion-agent.yaml")
+	})
+
+	t.Run("missing required nested property names field", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("services:\n  - name: web\n"))
+		require.NoError(t, err)
+		require.Len(t, findings, 1)
+		assert.Equal(t, "services/0/command", findings[0].Path)
+		assert.Equal(t, "missing required property", findings[0].Message)
+		assert.Equal(t, "services/0/command: missing required property", findings[0].Error())
+	})
+
+	t.Run("parse error wording names agent config file", func(t *testing.T) {
+		_, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte(": invalid: yaml: ["))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to parse agent config scion-agent.yaml")
+		assert.NotContains(t, err.Error(), "failed to parse settings")
+	})
+
+	t.Run("json parse error wording names agent config file", func(t *testing.T) {
+		_, err := ValidateTemplateAgentConfig("scion-agent.json", []byte(`{"max_turns":`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to parse agent config scion-agent.json")
+	})
+}
+
+func TestFormatAgentConfigValidationError(t *testing.T) {
+	t.Run("document level finding uses (document)", func(t *testing.T) {
+		got := FormatAgentConfigValidationError("my-tpl", "scion-agent.yaml", []ValidationError{
+			{Path: "", Message: "got array, want object"},
+		})
+		assert.Equal(t, "template my-tpl: agent config scion-agent.yaml is invalid: (document): got array, want object", got)
+	})
+
+	t.Run("caps at 5 findings with (+K more)", func(t *testing.T) {
+		var findings []ValidationError
+		for i := 0; i < 7; i++ {
+			findings = append(findings, ValidationError{
+				Path:    fmt.Sprintf("field_%d", i),
+				Message: "bad",
+			})
+		}
+		got := FormatAgentConfigValidationError("t", "scion-agent.yaml", findings)
+		assert.Equal(t,
+			"template t: agent config scion-agent.yaml is invalid: field_0: bad; field_1: bad; field_2: bad; field_3: bad; field_4: bad (+2 more)",
+			got,
+		)
+	})
 }
 
 func TestValidateAgentConfig_InvalidPriorityClassName(t *testing.T) {

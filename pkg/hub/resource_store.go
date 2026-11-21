@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -385,15 +386,16 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	defer func() { _ = cd.root.Close() }()
 	files, root := cd.files, cd.root
 
-	// Pre-upload content check: a refusal writes nothing (no row, no
-	// storage change).
-	if err := rs.checkDir(ctx, name, cd); err != nil {
-		return false, err
-	}
-
 	slug := api.Slugify(name)
 	existing, err := p.GetBySlug(ctx, slug, scope, scopeID)
 	if err != nil {
+		return false, err
+	}
+
+	// Pre-upload content check: runs after GetBySlug so templatePersistence
+	// sees the existing row's manifest (change-only validation per D1/D3) and
+	// before Create/upload so a refusal writes nothing.
+	if err := rs.checkDir(ctx, name, cd); err != nil {
 		return false, err
 	}
 
@@ -491,6 +493,7 @@ func (p *templatePersistence) Kind() storage.ResourceKind { return storage.Resou
 func (p *templatePersistence) Label() string              { return "template bootstrap" }
 
 func (p *templatePersistence) GetBySlug(ctx context.Context, slug, scope, scopeID string) (*ResourceRecord, error) {
+	p.model = nil
 	t, err := p.s.store.GetTemplateBySlug(ctx, slug, scope, scopeID)
 	if err == store.ErrNotFound {
 		return nil, nil
@@ -752,11 +755,23 @@ func blobPathSet(written map[string]bool) map[string]struct{} {
 }
 
 // CheckDir refuses a template directory that bundles a harness-config with
-// an unusable provisioner, before the shared store uploads anything. The
-// commit path runs the same check again (defence in depth).
-func (p *templatePersistence) CheckDir(ctx context.Context, _ string, cd *collectedDir) error {
-	if err := checkBundledHarnessConfigs(ctx, cd.fileReader(), toResourceFiles(cd.files)); err != nil {
+// an unusable provisioner or (when hub.template_config_validation is enabled)
+// has a schema-invalid agent config, before the shared store uploads anything.
+// The commit path runs the same checks again (defence in depth) and handles
+// warn-logging when the experiment is off.
+func (p *templatePersistence) CheckDir(ctx context.Context, name string, cd *collectedDir) error {
+	manifest := toResourceFiles(cd.files)
+	if err := checkBundledHarnessConfigs(ctx, cd.fileReader(), manifest); err != nil {
 		return fmt.Errorf("%s: template in %q not imported: %w", p.Label(), cd.base(), err)
+	}
+	if p.s != nil && p.s.experimentEnabled(experiments.TemplateConfigValidation) {
+		var prevFiles []store.TemplateFile
+		if p.model != nil {
+			prevFiles = p.model.Files
+		}
+		if err := p.s.checkTemplateAgentConfig(ctx, name, cd.fileReader(), prevFiles, manifest); err != nil {
+			return err
+		}
 	}
 	return nil
 }

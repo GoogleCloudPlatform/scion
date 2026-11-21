@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -206,6 +207,110 @@ func checkBundledHarnessConfigContent(p, name string, data []byte) error {
 	return nil
 }
 
+// ErrCodeInvalidAgentConfig is the HTTP 422 / NDJSON error code returned when
+// a template's agent config file fails schema validation.
+const ErrCodeInvalidAgentConfig = "invalid_agent_config"
+
+// invalidAgentConfigError reports a template whose effective agent config file
+// (scion-agent.{yaml,yml,json}) fails schema validation or fails to parse.
+type invalidAgentConfigError struct {
+	templateName string
+	fileName     string
+	findings     []config.ValidationError
+	parseErr     error
+}
+
+// PublicMessage returns the user-facing error message naming the template,
+// config file, and failing field(s).
+func (e *invalidAgentConfigError) PublicMessage() string {
+	if e.parseErr != nil {
+		return fmt.Sprintf("template %s: agent config %s is invalid: %s", e.templateName, e.fileName, e.parseErr.Error())
+	}
+	return config.FormatAgentConfigValidationError(e.templateName, e.fileName, e.findings)
+}
+
+func (e *invalidAgentConfigError) Error() string { return e.PublicMessage() }
+
+func (e *invalidAgentConfigError) Unwrap() error { return e.parseErr }
+
+// Details returns the structured details map for HTTP error responses.
+func (e *invalidAgentConfigError) Details() map[string]interface{} {
+	if len(e.findings) > 0 {
+		return map[string]interface{}{"findings": e.findings}
+	}
+	if e.parseErr != nil {
+		return map[string]interface{}{
+			"findings": []config.ValidationError{{Path: "", Message: e.parseErr.Error()}},
+		}
+	}
+	return nil
+}
+
+// effectiveAgentConfigFile returns the manifest entry for the template's
+// effective agent config file (scion-agent.yaml -> .yml -> .json), or false
+// when the manifest lists none.
+func effectiveAgentConfigFile(files []store.TemplateFile) (store.TemplateFile, bool) {
+	byPath := make(map[string]store.TemplateFile, len(files))
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+	for _, name := range scionAgentConfigNames {
+		if f, ok := byPath[name]; ok {
+			return f, true
+		}
+	}
+	return store.TemplateFile{}, false
+}
+
+// checkTemplateAgentConfig validates the effective agent config file in next
+// when its (path, hash) differs from prev's effective agent config file.
+// When hub.template_config_validation is on, invalid configs are refused with
+// *invalidAgentConfigError; when off, each finding is logged as a warning and
+// the commit is allowed to proceed.
+func (s *Server) checkTemplateAgentConfig(ctx context.Context, templateName string, read templateFileReader, prev, next []store.TemplateFile) error {
+	nextEff, ok := effectiveAgentConfigFile(next)
+	if !ok {
+		return nil
+	}
+	if prevEff, hasPrev := effectiveAgentConfigFile(prev); hasPrev && prevEff.Path == nextEff.Path && prevEff.Hash == nextEff.Hash {
+		return nil
+	}
+	data, err := read(ctx, nextEff.Path)
+	if errors.Is(err, errTemplateFileTooLarge) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", nextEff.Path, err)
+	}
+	return s.validateTemplateAgentConfigBytes(ctx, templateName, nextEff.Path, data)
+}
+
+// validateTemplateAgentConfigBytes validates raw agent config bytes for
+// templateName/fileName, enforcing refusal when hub.template_config_validation
+// is enabled and logging a warning per finding when it is off.
+func (s *Server) validateTemplateAgentConfigBytes(ctx context.Context, templateName, fileName string, data []byte) error {
+	findings, err := config.ValidateTemplateAgentConfig(fileName, data)
+	if err == nil && len(findings) == 0 {
+		return nil
+	}
+	if s.experimentEnabled(experiments.TemplateConfigValidation) {
+		if err != nil {
+			return &invalidAgentConfigError{templateName: templateName, fileName: fileName, parseErr: err}
+		}
+		return &invalidAgentConfigError{templateName: templateName, fileName: fileName, findings: findings}
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "template commit: agent config failed schema validation (experiment off)",
+			"template", templateName, "file", fileName, "error", err)
+		return nil
+	}
+	for _, f := range findings {
+		slog.WarnContext(ctx, "template commit: agent config failed schema validation (experiment off)",
+			"template", templateName, "file", fileName, "path", f.Path, "finding", f.Message)
+	}
+	return nil
+}
+
 // refuseUnusableBundledHarnessConfig writes 422 and returns true when p is a
 // bundled harness-config config.yaml whose provisioner is unusable.
 func refuseUnusableBundledHarnessConfig(w http.ResponseWriter, p string, data []byte) bool {
@@ -336,6 +441,18 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 		}
 	}
 
+	// 4b. Validate the effective agent config file when its (path, hash)
+	// differs from the previous row's (clones inherit their source's files
+	// as unchanged). Refuses behind hub.template_config_validation; logs
+	// warnings when off.
+	prevFiles := tmpl.Files
+	if opts.copyFrom != nil {
+		prevFiles = opts.copyFrom.Files
+	}
+	if err := s.checkTemplateAgentConfig(ctx, tmpl.Name, read, prevFiles, next); err != nil {
+		return err
+	}
+
 	// 5. One row write, in the blob layout.
 	prevState := *tmpl
 	migratedFrom := ""
@@ -427,6 +544,11 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 	if writeHostedHarnessConfigRefusal(w, err) {
 		return
 	}
+	var invalidCfg *invalidAgentConfigError
+	if errors.As(err, &invalidCfg) {
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidAgentConfig, invalidCfg.PublicMessage(), invalidCfg.Details())
+		return
+	}
 	if errors.Is(err, errTemplateStorageNotConfigured) {
 		RuntimeError(w, "Storage not configured")
 		return
@@ -440,14 +562,15 @@ func writeTemplateCommitError(w http.ResponseWriter, err error) {
 }
 
 // isTemplateCommitRefusal reports whether err is a commit refused for its
-// content (an unusable bundled harness-config, or on a hosted hub a bundled
-// harness config naming host resources), which callers outside the
-// template handlers map with writeTemplateCommitError rather than as an
-// internal error.
+// content (an unusable bundled harness-config, on a hosted hub a bundled
+// harness config naming host resources, or an invalid agent config), which
+// callers outside the template handlers map with writeTemplateCommitError
+// rather than as an internal error.
 func isTemplateCommitRefusal(err error) bool {
 	var unusable *unusableBundledHarnessConfigError
 	var hosted *hostedHarnessConfigError
-	return errors.As(err, &unusable) || errors.As(err, &hosted)
+	var invalidCfg *invalidAgentConfigError
+	return errors.As(err, &unusable) || errors.As(err, &hosted) || errors.As(err, &invalidCfg)
 }
 
 // upsertTemplateFile returns a copy of files with entry added, or replacing

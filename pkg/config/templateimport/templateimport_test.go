@@ -790,6 +790,43 @@ model: sonnet
 	}
 }
 
+func TestDiscoverScionTemplates_ReportsUnparseableDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	goodDir := filepath.Join(dir, "good")
+	require.NoError(t, os.MkdirAll(goodDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(goodDir, "scion-agent.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: claude\n"), 0644))
+
+	badDir := filepath.Join(dir, "broken")
+	require.NoError(t, os.MkdirAll(badDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(badDir, "scion-agent.yaml"), []byte(": invalid: yaml: ["), 0644))
+
+	agents, err := DiscoverScionTemplates(dir)
+	require.NoError(t, err)
+	require.Len(t, agents, 2)
+
+	byName := map[string]*ImportedAgent{}
+	for _, a := range agents {
+		byName[a.Name] = a
+	}
+	require.Contains(t, byName, "good")
+	assert.NoError(t, byName["good"].ParseError)
+	require.Contains(t, byName, "broken")
+	assert.Error(t, byName["broken"].ParseError)
+}
+
+func TestValidateScionTemplateConfig(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "scion-agent.yaml"), []byte("default_harness_config: claude\nmax_duration: 2h\n"), 0644))
+	assert.Empty(t, ValidateScionTemplateConfig(dir, "ok"))
+
+	badDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(badDir, "scion-agent.yaml"), []byte("default_harness_config: claude\nmax_duration: \"2 hours\"\n"), 0644))
+	warnings := ValidateScionTemplateConfig(badDir, "bad")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "max_duration")
+}
+
 func TestParseScionTemplate(t *testing.T) {
 	dir := t.TempDir()
 	templateDir := filepath.Join(dir, "my-agent")
