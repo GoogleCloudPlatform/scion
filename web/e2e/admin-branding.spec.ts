@@ -48,19 +48,21 @@ test.describe('Admin Branding (/admin/branding)', () => {
         timeout: 15_000,
       });
 
-      // Verify accessible ARIA roles on radio groups
+      // Verify accessible ARIA roles and names on controls
       await expect(page.getByRole('radiogroup', { name: 'Scion Attribution' })).toBeVisible();
       await expect(page.getByRole('radiogroup', { name: 'Corner Style' })).toBeVisible();
+      await expect(page.getByRole('combobox', { name: 'Sans-Serif Font' })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Upload Light Logo' })).toBeVisible();
 
-      // Fill Product Name
-      const nameInput = page.locator('[data-field="name"] input');
+      // Fill Product Name by accessible name
+      const nameInput = page.getByRole('textbox', { name: 'Product Name' });
       await nameInput.fill('Acme Cloud');
 
       // Select Square corners
       await page.locator('[data-field="corners"] sl-radio-button[value="square"]').click();
 
-      // Set Accent Color
-      const accentInput = page.locator('[data-field="accent_color"] input');
+      // Set Accent Color by accessible name
+      const accentInput = page.getByRole('textbox', { name: 'Accent Color', exact: true });
       await accentInput.fill('#0d9488');
 
       // Upload a small valid PNG logo into logo.light
@@ -72,7 +74,7 @@ test.describe('Admin Branding (/admin/branding)', () => {
       await expect(page.locator('[data-data-uri-chip="logo.light"]')).toContainText('image/png');
 
       // Save Branding
-      await page.locator('[data-save-btn]').click();
+      await page.getByRole('button', { name: 'Save Branding' }).click();
       await expect(page.getByText('Branding settings saved and applied live')).toBeVisible({
         timeout: 15_000,
       });
@@ -87,26 +89,30 @@ test.describe('Admin Branding (/admin/branding)', () => {
 
       // Hard reload and confirm persistence
       await page.reload({ waitUntil: 'domcontentloaded' });
-      await expect(page.locator('[data-field="name"] input')).toHaveValue('Acme Cloud', {
+      await expect(page.getByRole('textbox', { name: 'Product Name' })).toHaveValue('Acme Cloud', {
         timeout: 15_000,
       });
       await expect(page.locator('[data-data-uri-chip="logo.light"]')).toBeVisible();
       await expect(page).toHaveTitle(/Acme Cloud/);
 
-      // Inline http:// URL validation guard on logo.dark
-      const darkLogoInput = page.locator('[data-field="logo.dark"] input');
+      // Inline http:// URL validation guard on Dark Logo (selected by accessible name)
+      const darkLogoInput = page.getByRole('textbox', { name: 'Dark Logo' });
       await darkLogoInput.fill('http://example.com/logo.png');
       await expect(page.locator('[data-client-error="logo.dark"]')).toContainText('http://');
       await darkLogoInput.fill('');
 
       // Reset All Branding via Shoelace <sl-dialog>
-      await page.locator('[data-reset-all-btn]').click();
-      await expect(page.locator('[data-reset-dialog]')).toHaveAttribute('open', '');
-      await page.locator('[data-confirm-reset-btn]').click();
+      await page.getByRole('button', { name: 'Reset All Branding' }).click();
+      await expect(page.getByRole('dialog', { name: 'Reset All Branding' })).toBeVisible();
+      await page.getByRole('button', { name: 'Reset Branding' }).click();
 
       await expect(page.getByText('Branding reset to defaults')).toBeVisible({ timeout: 15_000 });
+      await expect(page).not.toHaveTitle(/Acme Cloud/);
       await expect(page).toHaveTitle(/Scion/);
-      await expect(page.locator('[data-field="name"] input')).toHaveValue('');
+      await expect
+        .poll(() => page.evaluate(() => document.getElementById('scion-branding-tokens')))
+        .toBeNull();
+      await expect(page.getByRole('textbox', { name: 'Product Name' })).toHaveValue('');
     } finally {
       // Ensure clean stock state even if an assertion failed mid-test
       await page.request

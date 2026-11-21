@@ -346,8 +346,10 @@ export function buildBrandingDiff(
     'accent_color',
   ];
   for (const key of topStrings) {
-    if (!isLocked(key) && draft[key] !== baseline[key]) {
-      diff[key] = draft[key];
+    const nextVal = key === 'accent_color' ? draft[key].trim() : draft[key];
+    const baseVal = key === 'accent_color' ? baseline[key].trim() : baseline[key];
+    if (!isLocked(key) && nextVal !== baseVal) {
+      diff[key] = nextVal;
     }
   }
 
@@ -507,14 +509,19 @@ export function validateAssetFile(
   const mimeOk = mime !== '' && slot.allowedMimes.includes(mime);
 
   if (slot.pngOnly) {
-    if (!mimeOk && !extOk) {
-      return `${slot.label} must be a PNG image (.png).`;
-    }
     if (mime !== '' && mime !== 'image/png') {
       return `${slot.label} must be a PNG image (.png), got ${mime}.`;
     }
-  } else if (!mimeOk && !extOk) {
-    return `Unsupported file format for ${slot.label}. Allowed: ${slot.allowedExtensions.join(', ')}.`;
+    if (!mimeOk && !extOk) {
+      return `${slot.label} must be a PNG image (.png).`;
+    }
+  } else {
+    if (mime !== '' && !mimeOk) {
+      return `Unsupported file type ${mime} for ${slot.label}. Allowed: ${slot.allowedExtensions.join(', ')}.`;
+    }
+    if (!mimeOk && !extOk) {
+      return `Unsupported file format for ${slot.label}. Allowed: ${slot.allowedExtensions.join(', ')}.`;
+    }
   }
 
   if (file.size === 0) {
@@ -531,6 +538,39 @@ export function validateAssetFile(
   }
 
   return null;
+}
+
+const EXT_TO_MIME: Readonly<Record<string, string>> = {
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+};
+
+/**
+ * Rewrites generic `data:application/octet-stream;base64,...` or empty-MIME
+ * `data:;base64,...` headers produced by FileReader when the OS/browser omits
+ * `file.type`, using the allowed extension on `fileName`.
+ */
+export function normalizeAssetDataUrl(
+  dataUrl: string,
+  fileName: string,
+  slot: AssetSlotDef
+): string {
+  const lower = dataUrl.toLowerCase();
+  const genericPrefix = lower.startsWith('data:application/octet-stream;base64,')
+    ? 'data:application/octet-stream;base64,'
+    : lower.startsWith('data:;base64,')
+      ? 'data:;base64,'
+      : null;
+  if (!genericPrefix) return dataUrl;
+  const lowerName = fileName.toLowerCase();
+  for (const ext of slot.allowedExtensions) {
+    if (lowerName.endsWith(ext) && EXT_TO_MIME[ext]) {
+      return `data:${EXT_TO_MIME[ext]};base64,${dataUrl.slice(genericPrefix.length)}`;
+    }
+  }
+  return dataUrl;
 }
 
 export function validateAssetUrlInput(raw: string): string | null {
