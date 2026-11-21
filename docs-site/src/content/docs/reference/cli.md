@@ -554,6 +554,17 @@ Manages bidirectional communication and persistent messages sent by agents to hu
     - `--agent <string>`: Filter messages by a specific agent.
     - `--all`: Show all messages, including those already marked as read.
 
+### `scion message-policy`
+
+Author, inspect, dry-run test, and audit project CEL message policies on the Hub (requires the `hub.message_policies` [experiment](/scion/reference/experiments/) on the Hub; while it is off, every subcommand fails with an error saying the experiment must be enabled). Policies evaluate only outbound agent sends on the surfaces this Hub enforces, currently `agent_to_user` and `agent_to_conversation`. Other agent paths (`agent_dm`, `group_post`, `group_set`, `mention_fanout`, `mention_delivery`, `broadcast`), scheduled deliveries, user-originated sends, and inbound external bridges are not evaluated. `list` and `get` print this Hub's coverage (`enforced_surfaces` and `uncovered_agent_paths`). In agent mode only `list` and `get` are available; the other subcommands need project owner/admin or Hub admin permissions. Every subcommand accepts `--json`.
+
+- `scion message-policy create [name]`: Create a policy from flags, from a YAML or JSON spec file (`-f`/`--file <path|->`, at most 64 KiB, unknown fields refused), or both (flags override the file). Requires a name, at least one `--surface`, a CEL violation rule (`--rule <cel>` or `--rule-file <path|->`, mutually exclusive; a `true` result is a violation), and `--on-failed admit|reject`. Other flags: `--description`, `--mode shadow|enforce` (Hub default `shadow`), `--enabled` (default `true`), repeatable `--sender-agent <uuid>` or `--all-agents`, repeatable `--recipient-kind user|conversation`, `--on-uncertain admit|reject`, repeatable `--on-failed-reason REASON=OUTCOME`, and the `--reject-reason` and `--reject-remediation` templates returned with an enforced rejection (`422`). An uncovered surface returns `400 surface_not_covered`. Messages longer than 16 KiB fail every matching policy with `body_truncated`, which `--on-failed` handles.
+- `scion message-policy list`: List the project's policies (`--mode shadow|enforce`, `--enabled true|false`, `--limit 1..200`, `--cursor`).
+- `scion message-policy get <id-or-name>`: Show a policy, including its CEL rule and fallback behavior.
+- `scion message-policy delete <id-or-name>`: Delete a policy.
+- `scion message-policy test [id-or-name]`: Dry-run a stored policy, or an inline rule (`--rule`, `--rule-file`, or `-f`/`--file`), against a synthetic sample message. Nothing is stored, and the sample body is never echoed back. A sample body is required (`--body`, `--body-file <path|->`, or `--file`). Sample flags: `--surface` (default: the policy's first surface, else `agent_to_user`), `--type`, `--has-choices`, `--urgent`, `--attachment-count`, `--sender-id`, `--sender-slug`, `--recipient-kind`, `--recipient-id`, `--recipient-slug`, and `--conv-kind`. Inline or override policy flags: `--name`, `--mode`, repeatable `--policy-surface`, `--on-uncertain`, `--on-failed`, repeatable `--on-failed-reason`, `--reject-reason`, and `--reject-remediation`.
+- `scion message-policy decisions [policy-id-or-name]`: List content-free evaluation decisions, which never include the message body (`--policy` as an alternative to the positional argument, `--mode`, `--surface agent_to_user|agent_to_conversation`, `--class pass|violation|uncertain|failed`, `--action admitted|rejected|shadow`, `--limit 1..200`, `--cursor`).
+
 ### `scion conversation` (alias: `conv`)
 
 Manages conversations — the surface-agnostic containers for message threads. Running `scion conversation` without a subcommand defaults to `list`. It also works inside Hub-connected agent containers, as does `scion notifications`; this requires a harness image built from this release or later.
@@ -1659,17 +1670,20 @@ When an agent caller looks up an unknown ID prefix or receives `409`, `404`, or 
 
 ### `scion trigger`
 
-Manage project event triggers, received trigger events, and signed webhook ingress endpoints on the Hub (requires the `hub.triggers` [experiment](/scion/reference/experiments/) on the Hub; available in both human and agent mode, and every subcommand accepts `--json` / `--format json`).
+Manage project event triggers, received trigger events, signed webhook ingress endpoints, and trigger rule presets on the Hub (requires the `hub.triggers` [experiment](/scion/reference/experiments/) on the Hub; GitHub triggers and `scion trigger preset` also require `hub.github_triggers`; available in both human and agent mode, and every subcommand accepts `--json` / `--format json`).
 
-- `scion trigger create`: Create an event trigger attached to a webhook endpoint (`--name`, `--webhook <id|name>`, `--agent <name|id>`, `--message <text>`, repeatable `--type`, repeatable `--where [<dialect>:]<expr>` or `--where-file <path>`, `--subject <cel>`, `--on-subject`, `--interrupt`, `--wake`, `--plain`). Note: `--on-subject` currently accepts `new` (`skip` returns `400` until subject-skip support lands).
+- `scion trigger create`: Create an event trigger attached to a webhook endpoint (`--webhook <id|name>`) or to the project's GitHub App source (`--github`, which requires at least one `--type`, such as `github.issue_comment.created`; the two are mutually exclusive). Flags: `--name`, `--description`, `--agent <name|id>`, `--message <text>`, repeatable `--type`, repeatable `--where [<dialect>:]<expr>` or `--where-file <path>`, `--subject <cel>`, `--on-subject`, `--interrupt`, `--wake`, `--plain`). Note: `--on-subject` currently accepts `new` (`skip` returns `400` until subject-skip support lands).
 - `scion trigger get <id|name>`: Display configuration and numbered match rules (`1/N .. N/N`) for a trigger.
-- `scion trigger list`: List triggers in the project (`--source`, `--webhook`, `--status`).
+- `scion trigger list`: List triggers in the project (`--source webhook|github`, `--webhook`, `--status active|paused`).
 - `scion trigger pause <id|name>`, `scion trigger resume <id|name>`, `scion trigger delete <id|name>`: Pause, resume, or delete a trigger.
-- `scion trigger history <id|name>`: List fire history records for a trigger (`--limit`, `--cursor`).
+- `scion trigger history <id|name>`: List fire history records for a trigger (`--limit`, `--cursor`, and `--verbose` for a content-free per-rule evaluation trace).
 - `scion trigger event list`: List received trigger events, newest first (`--source`, `--webhook`, `--status`, `--since <RFC3339>`, `--limit`, `--cursor`).
 - `scion trigger event get <id> [--payload]`: Inspect a received trigger event's metadata, extracted `attributes`, `lists`, `headers`, and JSON `payload` (or `--payload` for the JSON payload alone). Terminal output escapes C0/DEL/C1 control characters and Unicode `Cf` format characters.
 - `scion trigger webhook create`: Create a signed (`scion_v1`) webhook endpoint and print its one-time HMAC signing secret (`--name`, `--description`). Optionally pass `--agent <name|id> --message <text>` or `--to-self --message <text>` (with optional `--interrupt`, `--wake`) to create the endpoint and a default `webhook.received` message trigger together in one transaction (`--to-self` resolves the target strictly from the calling agent's authenticated Hub identity).
 - `scion trigger webhook get <id|name>`, `scion trigger webhook list [--status]`, `scion trigger webhook delete <id|name>`: Inspect, list, or delete webhook endpoints (never returning the signing secret).
+- `scion trigger preset list [--source <kind>]`: List the trigger rule presets defined on the Hub (currently the GitHub presets `github.command`, `github.pr_opened`, `github.pr_updated`, `github.issue_opened`, `github.label_added`, and `github.review_submitted`).
+- `scion trigger preset show <id>`: Show a preset's description, supported action kinds, and field schema.
+- `scion trigger preset apply <id>`: Compile a preset on the Hub from repeatable `--field key=value` inputs and create a trigger with the compiled event types, match rules, and subject policy (`--name`, `--description`, `--agent <name|id>`, `--message <text>`, `--interrupt`, `--wake`, `--plain`). `--dry-run` prints the compiled rule without creating a trigger and does not need `--name`, `--agent`, or `--message`. Only the `message` action is supported: `--action` accepts only `message`, and `--dispatch` and `--comment` are refused as not yet available.
 
 ## Infrastructure
 
