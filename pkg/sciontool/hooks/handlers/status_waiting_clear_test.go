@@ -87,11 +87,10 @@ func waitClearClaudeStop(t *testing.T) *hooks.Event {
 }
 
 // waitClearAskUser applies the status write that sciontool status ask_user
-// (cmd/sciontool/commands/status.go runStatusUpdate) and the legacy
-// runAskUser (hook.go) both make.
+// (pkg/sciontool/agentstatus) and the legacy runAskUser (hook.go) both make.
 func waitClearAskUser(t *testing.T, h *StatusHandler) {
 	t.Helper()
-	require.NoError(t, h.UpdateActivity(state.ActivityWaitingForInput, ""))
+	require.NoError(t, h.UpdateActivityWithSource(state.ActivityWaitingForInput, "", ActivitySourceAskUser))
 }
 
 func TestStatusWaitingClear_ClaudeNotificationThenEndEvent(t *testing.T) {
@@ -155,7 +154,7 @@ func TestStatusWaitingClear_AskUserAfterNotificationStaysSticky(t *testing.T) {
 
 	require.NoError(t, h.Handle(waitClearClaudeNotification(t)))
 	waitClearAskUser(t, h)
-	assert.NotContains(t, readAgentInfoMap(t, statusPath), activitySourceKey)
+	assert.Equal(t, ActivitySourceAskUser, readAgentInfoMap(t, statusPath)[activitySourceKey])
 
 	require.NoError(t, h.Handle(waitClearClaudeToolEnd(t)))
 	require.NoError(t, h.Handle(waitClearClaudeStop(t)))

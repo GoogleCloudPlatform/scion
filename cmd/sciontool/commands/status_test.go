@@ -128,6 +128,14 @@ func TestStatusCommand(t *testing.T) {
 				t.Errorf("activity = %q, want %q", got, tt.wantActivity)
 			}
 
+			if tt.args[1] == "ask_user" {
+				if got := info["activitySource"]; got != "ask-user" {
+					t.Errorf("activitySource = %q, want %q", got, "ask-user")
+				}
+			} else if got, hasSource := info["activitySource"]; hasSource {
+				t.Errorf("activitySource should not be set for %s, got %q", tt.args[1], got)
+			}
+
 			if _, hasStatus := info["status"]; hasStatus {
 				t.Errorf("status field should not exist (legacy field removed), but found %q", info["status"])
 			}

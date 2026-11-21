@@ -27,7 +27,13 @@ func Run(definition Definition, message string) {
 	statusHandler := handlers.NewStatusHandler()
 	loggingHandler := handlers.NewLoggingHandler()
 
-	if err := statusHandler.UpdateActivity(definition.Activity, ""); err != nil {
+	var err error
+	if definition.isAskUser {
+		err = statusHandler.UpdateActivityWithSource(definition.Activity, "", handlers.ActivitySourceAskUser)
+	} else {
+		err = statusHandler.UpdateActivity(definition.Activity, "")
+	}
+	if err != nil {
 		log.Error("Failed to update status: %v", err)
 	}
 

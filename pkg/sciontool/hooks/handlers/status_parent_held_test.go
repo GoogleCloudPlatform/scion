@@ -118,11 +118,14 @@ func parentHeldStep(t *testing.T, sh *StatusHandler, hh *HubHandler, sent func()
 // ask_user write), a notification-set wait, or any other activity.
 func parentHeldHold(t *testing.T, sh *StatusHandler, held string) {
 	t.Helper()
-	if held == "notification" {
+	switch held {
+	case "notification":
 		require.NoError(t, sh.setWaitingFromNotification())
-		return
+	case "ask_user":
+		require.NoError(t, sh.UpdateActivityWithSource(state.ActivityWaitingForInput, "", ActivitySourceAskUser))
+	default:
+		require.NoError(t, sh.UpdateActivity(state.Activity(held), ""))
 	}
-	require.NoError(t, sh.UpdateActivity(state.Activity(held), ""))
 }
 
 func waitOwnersOf(info map[string]interface{}) []string {
@@ -150,6 +153,7 @@ func TestParentHeld_ToolStartHubMatchesLocal(t *testing.T) {
 			{"crashed", "crashed", ""},
 			{"completed", "completed", ""},
 			{"limits_exceeded", "limits_exceeded", ""},
+			{"ask_user", "waiting_for_input", ""},
 			{"waiting_for_input", "executing", parentHeldExecuting},
 			{"notification", "executing", parentHeldExecuting},
 			{"working", "executing", parentHeldExecuting},
