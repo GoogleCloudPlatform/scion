@@ -348,7 +348,7 @@ func (s *conversationService) Watch(ctx context.Context, conversationID string, 
 	if err != nil {
 		return nil, err
 	}
-	result, err := apiclient.DecodeResponse[WatchResult](resp)
+	result, err := apiclient.DecodeRequired[WatchResult](resp)
 	if err != nil {
 		var apiErr *apiclient.APIError
 		if errors.As(err, &apiErr) {
@@ -360,9 +360,6 @@ func (s *conversationService) Watch(ctx context.Context, conversationID string, 
 			}
 		}
 		return nil, err
-	}
-	if result == nil {
-		return &WatchResult{Events: []WatchEvent{}}, nil
 	}
 	if result.Events == nil {
 		result.Events = []WatchEvent{}
