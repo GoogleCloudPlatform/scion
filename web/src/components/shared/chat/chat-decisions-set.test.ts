@@ -27,6 +27,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
 import type { DecisionAnsweredDetail } from '../../../client/decision-prompts.js';
 import { setPreselectRecommendedChoices } from '../../../client/decision-preferences.js';
+import { elementStyleRules } from '../../pages/__fixtures__/css-rules.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -240,18 +241,24 @@ describe('set card, highlight only (default, ptone/scion#7842)', () => {
 });
 
 describe('set card, pending, preselect setting on', () => {
-  it('renders the header with the count and every key badge', async () => {
+  it('renders the header with the count and icon, without key badges (ptone/scion#8740)', async () => {
     const el = await mount(set());
     const head = root(el).querySelector('.card-head')!;
     expect(text(head.querySelector('.title'))).toBe('3 decisions');
-    expect(Array.from(head.querySelectorAll('.key')).map((k) => k.textContent)).toEqual([
-      'D234',
-      '17',
-      'ship-now',
-    ]);
+    expect(head.querySelectorAll('.key')).toHaveLength(0);
     expect(head.querySelector('sl-icon')?.getAttribute('name')).toBe('list-check');
-    // Each row carries its own key badge.
+    // Each row keeps its own key badge next to its question.
+    expect(text(rowEl(el, 'r1').querySelector('.row-top .key'))).toBe('D234');
     expect(text(rowEl(el, 'r2').querySelector('.row-top .key'))).toBe('17');
+    expect(text(rowEl(el, 'r3').querySelector('.row-top .key'))).toBe('ship-now');
+  });
+
+  it('stacks row key above full-width question at phone widths via CSS (ptone/scion#8739)', () => {
+    const rules = elementStyleRules('scion-chat-decisions');
+    expect(rules.get('@media (max-width: 600px) .row-top')).toContain('flex-wrap: wrap');
+    const qRule = rules.get('@media (max-width: 600px) .row-top .q');
+    expect(qRule).toContain('order: 1');
+    expect(qRule).toContain('flex: 1 0 100%');
   });
 
   it('treats 2+ decisions as a set even without answerMode', async () => {
