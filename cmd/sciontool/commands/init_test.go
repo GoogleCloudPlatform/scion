@@ -744,6 +744,35 @@ func TestFormatCloneError(t *testing.T) {
 			t.Errorf("ADO no-token error should name dev.azure.com, got: %v", noTokErr)
 		}
 	})
+
+	t.Run("prefers clone URL host over host in remote stderr", func(t *testing.T) {
+		stderr := "remote: See https://docs.github.com/en/authentication for help.\nfatal: Authentication failed for 'https://dev.azure.com/org/proj/_git/repo/'"
+
+		for _, tc := range []struct {
+			name  string
+			token string
+		}{
+			{name: "with token", token: "ado-pat-token"},
+			{name: "without token", token: ""},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				err := formatCloneErrorForURL(stderr, "https://dev.azure.com/org/proj/_git/repo", tc.token)
+				hint, _, ok := strings.Cut(err.Error(), "): ")
+				if !ok {
+					t.Fatalf("unexpected error format: %v", err)
+				}
+				if !strings.Contains(hint, "dev.azure.com") {
+					t.Errorf("expected hint to name dev.azure.com, got: %s", hint)
+				}
+				if strings.Contains(hint, "docs.github.com") {
+					t.Errorf("hint must not name host from remote stderr, got: %s", hint)
+				}
+				if strings.Contains(hint, "GITHUB_TOKEN") || strings.Contains(hint, "GitHub") {
+					t.Errorf("hint must not mention GitHub/GITHUB_TOKEN, got: %s", hint)
+				}
+			})
+		}
+	})
 }
 
 func TestIsClaude(t *testing.T) {

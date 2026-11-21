@@ -4218,12 +4218,7 @@ func formatCloneError(sanitizedStderr, token string) error {
 // formatCloneErrorForURL builds a descriptive error from sanitized git stderr
 // and the clone URL being fetched so guidance names the actual remote host.
 func formatCloneErrorForURL(sanitizedStderr, cloneURL, token string) error {
-	gitErr := util.ClassifyGitError(sanitizedStderr)
-	if gitErr.RemoteHost == "" && cloneURL != "" {
-		if u, err := url.Parse(normalizeCloneURL(cloneURL)); err == nil && u.Hostname() != "" {
-			gitErr.RemoteHost = strings.ToLower(u.Hostname())
-		}
-	}
+	gitErr := util.ClassifyGitErrorForURL(sanitizedStderr, cloneURL)
 	if token == "" {
 		return fmt.Errorf("git clone failed (%s): %s", gitErr.NoTokenGuidance(), sanitizedStderr)
 	}
