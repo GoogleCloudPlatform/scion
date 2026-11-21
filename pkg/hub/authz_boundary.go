@@ -929,7 +929,7 @@ var validRealProjectScopeKinds = map[string][]string{
 	permissions.ResourceSkill:          {store.SkillScopeProject},
 	permissions.ResourceTemplate:       {store.TemplateScopeProject},
 	permissions.ResourceHarnessConfig:  {store.HarnessConfigScopeProject},
-	permissions.ResourceSecret:         {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
+	permissions.ResourceSecret:         {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker, store.ScopeAgent},
 	permissions.ResourceEnvVar:         {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
 	permissions.ResourceSkillInjection: {store.ScopeProject, store.ScopeHub, store.ScopeUser, store.ScopeRuntimeBroker},
 }

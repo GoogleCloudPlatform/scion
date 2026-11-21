@@ -359,6 +359,9 @@ type HTTPAgentDispatcher struct {
 	gitHubWebHost func() string
 	// conduitPolicyProvider returns the agent conduit policy value, "" for none.
 	conduitPolicyProvider func() string
+	// agentSecretsEnabledProvider reports whether the hub.agent_secrets
+	// experiment is enabled, read at each dispatch. Nil means disabled.
+	agentSecretsEnabledProvider func() bool
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -584,6 +587,21 @@ func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool)
 // (applyAgentExperiments).
 func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string) {
 	d.dispatchExperimentsProvider = fn
+}
+
+// SetAgentSecretsEnabledProvider registers the accessor reporting whether
+// the hub.agent_secrets experiment is enabled at dispatch time.
+func (d *HTTPAgentDispatcher) SetAgentSecretsEnabledProvider(fn func() bool) {
+	d.agentSecretsEnabledProvider = fn
+}
+
+// agentSecretsEnabled reports whether hub.agent_secrets is enabled for this
+// dispatcher.
+func (d *HTTPAgentDispatcher) agentSecretsEnabled() bool {
+	if d.agentSecretsEnabledProvider == nil {
+		return false
+	}
+	return d.agentSecretsEnabledProvider()
 }
 
 // SetConduitPolicyProvider sets the source of the agent conduit policy.
@@ -3523,6 +3541,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// 2. Check secrets (all scopes via backend.Resolve).
 	// Only environment-type secrets can be mapped to env key=value pairs.
 	if d.secretBackend != nil {
+		if resolveOpts == nil && d.agentSecretsEnabled() && agent != nil && agent.ID != "" {
+			resolveOpts = &secret.ResolveOpts{AgentID: agent.ID}
+		}
 		resolved, err := d.secretBackend.Resolve(
 			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 		if err == nil {
@@ -3573,7 +3594,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 					if secret.IsReservedEnvTarget(resultKey) {
 						continue
 					}
-					if _, alreadySet := result[resultKey]; !alreadySet {
+					if _, alreadySet := result[resultKey]; !alreadySet || sv.Scope == store.ScopeAgent {
 						result[resultKey] = sv.Value
 					}
 				}
@@ -4023,10 +4044,16 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		tokenGrant:      tokenGrant,
 		experiments:     experiments,
 		// The warning's audience is this request's: the agent's owner
-		// sees user-scope names, everyone else a count.
-		skippedSecrets:       skippedSecrets,
-		skippedSecretWarning: formatSkippedSecretWarning(skippedSecrets, startedVerb, skippedSecretAudienceIsOwner(ctx, agent)),
-		purpose:              purpose,
+		// sees user-scope names, requesters who can edit the agent see
+		// agent-scope names, and everyone else sees counts.
+		skippedSecrets: skippedSecrets,
+		skippedSecretWarning: formatSkippedSecretWarningFor(
+			skippedSecrets,
+			startedVerb,
+			skippedSecretAudienceIsOwner(ctx, agent),
+			d.skippedSecretAudienceCanEditAgent(ctx, agent),
+		),
+		purpose: purpose,
 	}, nil
 }
 
@@ -5621,7 +5648,37 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			return ceiling.Allowed
 		}
 	}
+	if d.agentSecretsEnabled() && agentID != "" {
+		opts.AgentID = agentID
+	}
 	return opts, gate
+}
+
+// skippedSecretAudienceCanEditAgent reports whether the requester of this
+// dispatch can edit agent (agent.update), so skipped agent-scope secrets can
+// be listed by name instead of counted.
+func (d *HTTPAgentDispatcher) skippedSecretAudienceCanEditAgent(ctx context.Context, agent *store.Agent) bool {
+	if agent == nil || ctx == nil {
+		return false
+	}
+	if skippedSecretAudienceIsOwner(ctx, agent) {
+		return true
+	}
+	if d.authzService == nil {
+		return false
+	}
+	identity := GetIdentityFromContext(ctx)
+	userIdent, ok := identity.(UserIdentity)
+	if !ok || isNilIdentity(userIdent) {
+		return false
+	}
+	return d.authzService.CheckAccess(ctx, userIdent, Resource{
+		Type:       "agent",
+		ID:         agent.ID,
+		OwnerID:    agent.OwnerID,
+		ParentType: "project",
+		ParentID:   agent.ProjectID,
+	}, ActionUpdate).Allowed
 }
 
 // resolveSecrets queries secrets from all applicable scopes and merges them
@@ -5651,6 +5708,9 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	// start-time checks' keep decision and the restriction itself.
 	ta := d.testAdminScopesFor(ctx, agent)
 	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
+	if resolveOpts == nil && d.agentSecretsEnabled() && agent != nil && agent.ID != "" {
+		resolveOpts = &secret.ResolveOpts{AgentID: agent.ID}
+	}
 
 	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
 	gate.flush(ctx, ownerMaterialSiteResolveSecrets)

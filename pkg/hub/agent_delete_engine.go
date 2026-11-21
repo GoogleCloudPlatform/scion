@@ -1591,8 +1591,16 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		return deletionOutcome{}, true
 	}
 
-	// Hard delete: publish deleted BEFORE removing the record (the
-	// documented order), then delete, retried once.
+	// Hard delete: capture agent-scope secret names before the transaction
+	// deletes the DB rows so post-commit cleanup can remove any external
+	// (GCP Secret Manager) values. Publish deleted BEFORE removing the
+	// record (the documented order), then delete, retried once.
+	var agentSecretKeys []string
+	if s.GetSecretBackend() != nil {
+		kctx, kcancel := e.step(deleteShortStep)
+		agentSecretKeys = s.listAgentSecretNames(kctx, agent.ID)
+		kcancel()
+	}
 	e.stopRenewal()
 	s.events.PublishAgentDeleted(e.base, agent.ID, agent.ProjectID)
 	var err error
@@ -1604,6 +1612,9 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		if err == nil {
 			if n == 1 || e.rowGone() {
 				e.finished = true
+				if len(agentSecretKeys) > 0 {
+					e.tailStep("remove agent secrets", func() { s.removeAgentScopedSecrets(e.base, agent.ID, agentSecretKeys) })
+				}
 				return deletionOutcome{}, true
 			}
 			return e.lost(), false

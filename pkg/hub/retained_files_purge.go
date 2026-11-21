@@ -101,6 +101,10 @@ func (s *Server) purgeExpiredAgents(ctx context.Context, cutoff time.Time) (int,
 			if s.settleRetainedFiles(ctx, a, cutoff) != retainedPurgeRemove {
 				continue
 			}
+			// Capture agent-scope secret names before the purge transaction
+			// removes the DB rows so post-commit cleanup can remove external
+			// (GCP Secret Manager) values.
+			agentSecretKeys := s.listAgentSecretNames(ctx, a.ID)
 			// Purged at once, while the claim taken for its dispatch is
 			// still live, so the claim's lease never lapses between the
 			// broker removing the files and the record going away (a
@@ -117,6 +121,12 @@ func (s *Server) purgeExpiredAgents(ctx context.Context, cutoff time.Time) (int,
 				// directory on the shared project storage and its
 				// object-storage prefix), audited (ptone/scion#5835).
 				s.startAgentStorageCleanup(a, false)
+				// Best-effort post-commit cleanup of any external (GCP)
+				// agent-scope secrets; local DB rows were deleted in the
+				// purge transaction.
+				if len(agentSecretKeys) > 0 {
+					s.removeAgentScopedSecrets(ctx, a.ID, agentSecretKeys)
+				}
 			}
 		}
 		if len(page) < retainedPurgePageSize {

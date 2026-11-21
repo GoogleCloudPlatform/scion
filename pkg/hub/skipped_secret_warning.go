@@ -63,26 +63,35 @@ func skippedSecretScopeKind(scope string) (kind string, ok bool) {
 		return "project", true
 	case store.ScopeUser:
 		return "user", true
+	case store.ScopeAgent:
+		return "agent", true
 	}
 	return "", false
 }
 
 // skippedSecretCountOrder is the order count entries follow the named
 // entries in.
-var skippedSecretCountOrder = []string{"hub", "broker", "user"}
+var skippedSecretCountOrder = []string{"hub", "broker", "user", "agent"}
 
-// formatSkippedSecretWarning is the only producer of the skipped-secret
+// formatSkippedSecretWarning is formatSkippedSecretWarningFor where
+// audienceCanEditAgent equals audienceIsOwner.
+func formatSkippedSecretWarning(skipped []skippedSecret, verb string, audienceIsOwner bool) string {
+	return formatSkippedSecretWarningFor(skipped, verb, audienceIsOwner, audienceIsOwner)
+}
+
+// formatSkippedSecretWarningFor is the only producer of the skipped-secret
 // warning text. It returns "" when nothing was skipped. An item whose scope
-// is none of the four kinds is left out (the WARN log still lists it). verb is "started",
+// is none of the five kinds is left out (the WARN log still lists it). verb is "started",
 // "restarted" or "created".
 //
 // Audience: a project-scope item is listed by name for every requester; a
 // user-scope item is listed by name only when audienceIsOwner (the
-// requester is the agent's owner), else counted; hub- and broker-scope
-// items are always counted. Named entries are de-duplicated and sorted by
-// name then scope kind; count entries follow in the order hub, broker,
-// user.
-func formatSkippedSecretWarning(skipped []skippedSecret, verb string, audienceIsOwner bool) string {
+// requester is the agent's owner), else counted; an agent-scope item is
+// listed by name only when audienceCanEditAgent (the requester can edit
+// the agent), else counted; hub- and broker-scope items are always counted.
+// Named entries are de-duplicated and sorted by name then scope kind; count
+// entries follow in the order hub, broker, user, agent.
+func formatSkippedSecretWarningFor(skipped []skippedSecret, verb string, audienceIsOwner, audienceCanEditAgent bool) string {
 	type entry struct{ name, kind string }
 	seen := make(map[entry]bool)
 	var named []entry
@@ -97,7 +106,7 @@ func formatSkippedSecretWarning(skipped []skippedSecret, verb string, audienceIs
 			continue
 		}
 		seen[e] = true
-		if kind == "project" || (kind == "user" && audienceIsOwner) {
+		if kind == "project" || (kind == "user" && audienceIsOwner) || (kind == "agent" && audienceCanEditAgent) {
 			named = append(named, e)
 		} else {
 			counts[kind]++

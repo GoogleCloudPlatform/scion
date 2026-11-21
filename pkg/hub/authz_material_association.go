@@ -86,6 +86,8 @@ func materialAssociationRule(scope string) (RelationshipRuleID, bool) {
 		return RelationshipRuleHubAssociation, true
 	case store.ScopeRuntimeBroker:
 		return RelationshipRuleBrokerAssociation, true
+	case store.ScopeAgent:
+		return RelationshipRuleAgentAssociation, true
 	default:
 		return "", false
 	}
@@ -192,6 +194,8 @@ func (a *AuthzService) materialAssociationFact(ctx context.Context, h *hubDelive
 		scopeID = agent.ProjectID
 	case RelationshipRuleBrokerAssociation:
 		scopeID = agent.RuntimeBrokerID
+	case RelationshipRuleAgentAssociation:
+		scopeID = agent.ID
 	case RelationshipRuleHubAssociation:
 		// Trusted caller input (see A3 above): the hub ID the hub-internal
 		// caller named. There is no stored agent field to compare it with.
@@ -218,7 +222,7 @@ func (a *AuthzService) materialAssociationFact(ctx context.Context, h *hubDelive
 
 	// A5.
 	switch rule {
-	case RelationshipRuleProjectAssociation, RelationshipRuleHubAssociation:
+	case RelationshipRuleProjectAssociation, RelationshipRuleHubAssociation, RelationshipRuleAgentAssociation:
 		p, err := a.store.GetProject(ctx, agent.ProjectID)
 		if errors.Is(err, store.ErrNotFound) || (err == nil && p == nil) {
 			return false, "target agent's project does not exist"

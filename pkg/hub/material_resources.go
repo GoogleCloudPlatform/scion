@@ -49,6 +49,8 @@ func scopeToResourceType(scope string) string {
 		return permissions.ResourceHub
 	case store.ScopeUser:
 		return permissions.ResourceUser
+	case store.ScopeAgent:
+		return permissions.ResourceAgent
 	default:
 		return scopeUnknownResourceType
 	}
@@ -79,6 +81,8 @@ func grantForDeliveryScope(scope string) (GrantKind, bool) {
 		return GrantHubAssociation, true
 	case store.ScopeRuntimeBroker:
 		return GrantBrokerAssociation, true
+	case store.ScopeAgent:
+		return GrantAgentAssociation, true
 	default:
 		return "", false
 	}

@@ -61,13 +61,14 @@ const (
 	RelationshipRuleProgeny           RelationshipRuleID = "progeny"
 	RelationshipRuleHubMemberSAAssign RelationshipRuleID = "hub_member_sa_assign"
 
-	// Association relationships admit launch delivery of a project-, hub-
-	// or broker-scope secret or env var to the delivery credential's agent
-	// (authz_material_association.go). Their policy rows name only
-	// secret.deliver and env_var.deliver.
+	// Association relationships admit launch delivery of a project-, hub-,
+	// broker- or agent-scope secret or env var to the delivery credential's
+	// agent (authz_material_association.go). Their policy rows name only
+	// secret.deliver and env_var.deliver (agent_association names secret.deliver).
 	RelationshipRuleProjectAssociation RelationshipRuleID = "project_association"
 	RelationshipRuleHubAssociation     RelationshipRuleID = "hub_association"
 	RelationshipRuleBrokerAssociation  RelationshipRuleID = "broker_association"
+	RelationshipRuleAgentAssociation   RelationshipRuleID = "agent_association"
 )
 
 // Rejection kinds recorded on relationship candidates. Restriction kinds
