@@ -1200,15 +1200,16 @@ for (const theme of ['light', 'dark'] as const) {
       expect(bg).not.toBe('rgba(0, 0, 0, 0)');
     });
 
-    test('set header with many keys wraps key pills without crushing title or icon (ptone/scion#8132)', async ({
+    test('set header omits key inventory and rows stack key above question on mobile (ptone/scion#8739, ptone/scion#8740)', async ({
       page,
     }, testInfo) => {
+      const longKey = 'tv-d4-schema-normalization-and-backfill-key';
       const keys = [
         'channels',
         'default-channel',
         'url-scheme',
         'hosting-storage',
-        'retention-backfill',
+        longKey,
         'cache-control',
       ];
       const decisions = keys.map((key, idx) =>
@@ -1265,7 +1266,9 @@ for (const theme of ['light', 'dark'] as const) {
       await shot(page, testInfo, theme, '14-set-many-keys', ['prompt-many']);
 
       await expect(title).toHaveText('6 decisions');
-      await expect(keyPills).toHaveCount(keys.length);
+      // Set header keeps count and icon only; per-row keys remain on each decision row (ptone/scion#8740).
+      await expect(keyPills).toHaveCount(0);
+      await expect(c.locator('.row .row-top .key')).toHaveCount(keys.length);
 
       const headBox = (await head.boundingBox())!;
       const iconBox = (await icon.boundingBox())!;
@@ -1281,17 +1284,37 @@ for (const theme of ['light', 'dark'] as const) {
       const titleLineCount = await title.evaluate((el) => el.getClientRects().length);
       expect(titleLineCount).toBe(1);
 
-      // Every key pill stays horizontally within the header (wrapped onto additional rows, never clipped).
-      const pillBoxes = await Promise.all(
-        Array.from({ length: keys.length }, (_, i) => keyPills.nth(i).boundingBox())
-      );
-      for (let i = 0; i < pillBoxes.length; i++) {
-        const box = pillBoxes[i]!;
-        expect(box, `key pill ${keys[i]}`).not.toBeNull();
-        expect(box.x).toBeGreaterThanOrEqual(headBox.x - 1);
-        expect(box.x + box.width).toBeLessThanOrEqual(headBox.x + headBox.width + 1);
+      // Row header layout (ptone/scion#8739): stacked on phone (key above full-width question),
+      // two-column side-by-side on desktop.
+      const firstRowTop = c.locator('.row[data-row="prompt-many-channels"] .row-top');
+      const rowTopBox = (await firstRowTop.boundingBox())!;
+      const rowKeyBox = (await firstRowTop.locator('.key').boundingBox())!;
+      const rowQBox = (await firstRowTop.locator('.q').boundingBox())!;
+      expect(rowTopBox).not.toBeNull();
+      expect(rowKeyBox).not.toBeNull();
+      expect(rowQBox).not.toBeNull();
+
+      if (isPhone(page)) {
+        expect(rowQBox.y).toBeGreaterThanOrEqual(rowKeyBox.y + rowKeyBox.height - 1);
+        expect(rowQBox.width).toBeGreaterThanOrEqual(rowTopBox.width - 2);
+
+        // Very long keys (> ~35 chars) must wrap inside the row without overflowing the card.
+        const longRowTop = c.locator(`.row[data-row="prompt-many-${longKey}"] .row-top`);
+        const longRowTopBox = (await longRowTop.boundingBox())!;
+        const longKeyBox = (await longRowTop.locator('.key').boundingBox())!;
+        expect(longRowTopBox).not.toBeNull();
+        expect(longKeyBox).not.toBeNull();
+        expect(longKeyBox.x + longKeyBox.width).toBeLessThanOrEqual(
+          longRowTopBox.x + longRowTopBox.width + 1
+        );
+        const cardOverflow = await c
+          .locator('.card')
+          .evaluate((el) => el.scrollWidth - el.clientWidth);
+        expect(cardOverflow).toBeLessThanOrEqual(0);
+      } else {
+        expect(rowQBox.x).toBeGreaterThanOrEqual(rowKeyBox.x + rowKeyBox.width - 1);
+        expect(Math.abs(rowQBox.y - rowKeyBox.y)).toBeLessThan(12);
       }
-      expect(pillBoxes[pillBoxes.length - 1]!.y).toBeGreaterThan(pillBoxes[0]!.y + 4);
     });
   });
 }

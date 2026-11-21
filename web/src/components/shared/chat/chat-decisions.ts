@@ -701,6 +701,28 @@ export class ScionChatDecisions extends LitElement {
       min-width: 0;
     }
 
+    @media (max-width: 600px) {
+      .row-top {
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.25rem 0.5rem;
+      }
+
+      .row-top .key,
+      .card-head-lead .key {
+        box-sizing: border-box;
+        max-width: 100%;
+        white-space: normal;
+        overflow-wrap: anywhere;
+        line-height: 1.25;
+      }
+
+      .row-top .q {
+        order: 1;
+        flex: 1 0 100%;
+      }
+    }
+
     .row.replaced .q,
     .row.replaced .choices,
     .row.dismissed .q,
@@ -3378,7 +3400,6 @@ export class ScionChatDecisions extends LitElement {
             <sl-icon name="list-check"></sl-icon>
             <span class="title">${n} decisions</span>
             ${wholeDismissed ? html`<span class="tag-wd">Dismissed</span>` : nothing}
-            ${views.map((d) => (d.key ? html`<span class="key">${d.key}</span>` : nothing))}
           </span>
           ${this.renderCardMenu(views)}
         </div>
