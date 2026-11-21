@@ -461,8 +461,8 @@ func runAskUser(message string) {
 	loggingHandler := handlers.NewLoggingHandler()
 	hubHandler := handlers.NewHubHandler()
 
-	// Update activity to waiting_for_input (sticky)
-	if err := statusHandler.UpdateActivity(state.ActivityWaitingForInput, ""); err != nil {
+	// Update activity to waiting_for_input (sticky, marked as ask-user)
+	if err := statusHandler.UpdateActivityWithSource(state.ActivityWaitingForInput, "", handlers.ActivitySourceAskUser); err != nil {
 		log.Error("Failed to update status: %v", err)
 	}
 
