@@ -443,6 +443,65 @@ func TestBrokerQuota_StartAtCapRejected_NamesLimitInError(t *testing.T) {
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+candidate.ID+"/start", nil)
 	assertBrokerQuotaExceeded(t, rec)
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, brokerRefusalMessage(broker.ID, 1, 1), resp.Error.Message)
+	assert.Equal(t, broker.ID, resp.Error.Details["runtimeBrokerId"])
+	assert.EqualValues(t, 1, resp.Error.Details["count"])
+	assert.EqualValues(t, 1, resp.Error.Details["limit"])
+}
+
+// TestBrokerQuota_StoppedAndSuspendedDoNotCountTowardCap verifies
+// ptone/scion#8682 end-to-end: stopped and suspended agents on a broker do not
+// consume max_agents_per_broker slots, and once running agents fill the cap,
+// the 429 message reports the running count, the limit, and how to free a slot.
+func TestBrokerQuota_StoppedAndSuspendedDoNotCountTowardCap(t *testing.T) {
+	disp := &quotaLifecycleDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	brokerID := project.DefaultRuntimeBrokerID
+	ctx := context.Background()
+
+	createAgent := func(name string) string {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name: name, ProjectID: project.ID,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var cr CreateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &cr))
+		return cr.Agent.ID
+	}
+
+	// Create two agents, stop one and suspend the other: neither should count.
+	stoppedID := createAgent("cap-stopped")
+	require.NoError(t, s.UpdateAgentStatus(ctx, stoppedID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	recStop := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stoppedID+"/stop", nil)
+	require.Equal(t, http.StatusOK, recStop.Code, recStop.Body.String())
+
+	suspendedID := createAgent("cap-suspended")
+	require.NoError(t, s.UpdateAgentStatus(ctx, suspendedID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+	recSuspend := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+suspendedID+"/suspend", nil)
+	require.Equal(t, http.StatusOK, recSuspend.Code, recSuspend.Body.String())
+
+	require.EqualValues(t, 0, brokerReservationCount(t, s, brokerID),
+		"stopped and suspended agents must not hold broker capacity")
+
+	// Fill both slots with running agents.
+	_ = createAgent("cap-running-1")
+	_ = createAgent("cap-running-2")
+	require.EqualValues(t, 2, brokerReservationCount(t, s, brokerID))
+
+	// A 3rd start is refused with 429 naming 2 of 2 running agents (not 4 of 2).
+	recRefused := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stoppedID+"/start", nil)
+	assertBrokerQuotaExceeded(t, recRefused)
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(recRefused.Body.Bytes(), &errResp))
+	assert.Equal(t, brokerRefusalMessage(brokerID, 2, 2), errResp.Error.Message)
+	assert.Equal(t, brokerID, errResp.Error.Details["runtimeBrokerId"])
+	assert.EqualValues(t, 2, errResp.Error.Details["count"])
+	assert.EqualValues(t, 2, errResp.Error.Details["limit"])
 }
 
 // ptone/scion#1978: every path refused at the broker cap reports the same
@@ -477,6 +536,9 @@ func TestBrokerQuota_AtCapRejectionIsUniform(t *testing.T) {
 		require.NotNil(t, dmErr)
 		assert.Equal(t, http.StatusTooManyRequests, dmErr.HTTPStatus)
 		assert.Equal(t, ErrCodeQuotaExceeded, dmErr.Code)
-		assert.Equal(t, "quota exceeded: max_agents_per_broker", dmErr.Message)
+		assert.Equal(t, brokerRefusalMessage(broker.ID, 1, 1), dmErr.Message)
+		assert.Equal(t, broker.ID, dmErr.Details["runtimeBrokerId"])
+		assert.EqualValues(t, 1, dmErr.Details["count"])
+		assert.EqualValues(t, 1, dmErr.Details["limit"])
 	})
 }

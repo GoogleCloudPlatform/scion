@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -281,15 +282,29 @@ func reserveStaleBrokerSlot(t *testing.T, s store.Store, broker *store.RuntimeBr
 	require.NoError(t, err)
 }
 
+// brokerRefusalMessage is the expected broker-limit refusal message
+// (ptone/scion#8682).
+func brokerRefusalMessage(brokerID string, count, max int64) string {
+	return fmt.Sprintf("quota exceeded: max_agents_per_broker (broker %s: %d of %d running agents); stop, suspend, or delete a running agent on this broker to free a slot",
+		brokerID, count, max)
+}
+
 // assertBrokerQuotaExceeded checks rec is the broker-cap rejection, with the
-// exact code and message every path uses.
+// exact code, details, and message every path uses.
 func assertBrokerQuotaExceeded(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
 	assert.Equal(t, ErrCodeQuotaExceeded, resp.Error.Code)
-	assert.Equal(t, "quota exceeded: max_agents_per_broker", resp.Error.Message)
+	brokerID, ok := resp.Error.Details["runtimeBrokerId"].(string)
+	require.True(t, ok, "details must include runtimeBrokerId: %v", resp.Error.Details)
+	require.NotEmpty(t, brokerID)
+	count, ok := resp.Error.Details["count"].(float64)
+	require.True(t, ok, "details must include count: %v", resp.Error.Details)
+	limit, ok := resp.Error.Details["limit"].(float64)
+	require.True(t, ok, "details must include limit: %v", resp.Error.Details)
+	assert.Equal(t, brokerRefusalMessage(brokerID, int64(count), int64(limit)), resp.Error.Message)
 }
 
 // fakeHTTPClient records calls to MessageAgent so we can verify the HTTP

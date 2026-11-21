@@ -326,7 +326,10 @@ func TestBrokerQuota_WakeAtCapRejected(t *testing.T) {
 	require.NotNil(t, dmErr, "wake at cap must fail")
 	assert.Equal(t, http.StatusTooManyRequests, dmErr.HTTPStatus)
 	assert.Equal(t, ErrCodeQuotaExceeded, dmErr.Code)
-	assert.Equal(t, "quota exceeded: max_agents_per_broker", dmErr.Message)
+	assert.Equal(t, brokerRefusalMessage(broker.ID, 1, 1), dmErr.Message)
+	assert.Equal(t, broker.ID, dmErr.Details["runtimeBrokerId"])
+	assert.EqualValues(t, 1, dmErr.Details["count"])
+	assert.EqualValues(t, 1, dmErr.Details["limit"])
 	assert.Len(t, disp.getStartCalls(), 0, "no resume dispatch at cap")
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
 
