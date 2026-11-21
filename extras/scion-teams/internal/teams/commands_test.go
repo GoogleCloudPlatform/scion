@@ -22,6 +22,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +85,7 @@ func testBrokerWithStore(t *testing.T, hubHandler http.HandlerFunc) (*TeamsBroke
 	}
 
 	broker.commandHandler = NewCommandHandler(broker, log)
+	t.Cleanup(broker.commandHandler.Close)
 	broker.callbackHandler = NewCallbackHandler(broker, log)
 
 	return broker, ms
@@ -97,10 +102,13 @@ func testTokenProvider(t *testing.T) *TokenProvider {
 
 // mockSender captures activities sent via the sender.
 type mockSender struct {
+	mu   sync.Mutex
 	sent []Activity
 }
 
 func (m *mockSender) addSent(a Activity) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.sent = append(m.sent, a)
 }
 
@@ -658,7 +666,7 @@ func TestUnregisterCommand_Success(t *testing.T) {
 
 func TestRegisterCommand_PollConfirmation(t *testing.T) {
 	// Track number of status poll requests so we can respond differently.
-	pollCount := 0
+	var pollCount atomic.Int32
 
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -666,8 +674,7 @@ func TestRegisterCommand_PollConfirmation(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
 		case r.URL.Path == "/api/v1/teams/link/status":
-			pollCount++
-			if pollCount >= 2 {
+			if pollCount.Add(1) >= 2 {
 				// Second poll: confirmed.
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"status": "confirmed",
@@ -750,55 +757,107 @@ func TestRegisterCommand_CancelsPreviousPending(t *testing.T) {
 	assert.NotEqual(t, firstCode, secondPending.Code, "second registration should have a new code")
 }
 
+func TestRegisterCommand_CleanupCancelsPendingPoll(t *testing.T) {
+	var handler *CommandHandler
+	defer func() {
+		if handler != nil {
+			handler.Close()
+		}
+	}()
+
+	t.Run("register", func(t *testing.T) {
+		hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/v1/teams/link":
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
+			case "/api/v1/teams/link/status":
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "pending"})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+
+		broker, _ := testBrokerWithStore(t, hubHandler)
+		handler = broker.commandHandler
+
+		handled, err := handler.Handle(context.Background(), testActivity("register"))
+		require.True(t, handled)
+		require.NoError(t, err)
+
+		handler.pendingMu.Lock()
+		require.Len(t, handler.pendingLinks, 1, "expected one pending link during test")
+		handler.pendingMu.Unlock()
+	})
+
+	handler.pendingMu.Lock()
+	pendingCount := len(handler.pendingLinks)
+	handler.pendingMu.Unlock()
+	assert.Zero(t, pendingCount, "expected testBrokerWithStore cleanup to clear pending links")
+
+	require.Eventually(t, func() bool {
+		buf := make([]byte, 1<<20)
+		for {
+			n := runtime.Stack(buf, true)
+			if n < len(buf) {
+				return !strings.Contains(string(buf[:n]), "pollForConfirmation")
+			}
+			buf = make([]byte, len(buf)*2)
+		}
+	}, 2*time.Second, 10*time.Millisecond, "expected no pollForConfirmation goroutine to outlive test cleanup")
+}
+
 func TestPollForConfirmation_SavesMapping(t *testing.T) {
-	confirmed := false
+	var confirmed atomic.Bool
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/api/v1/teams/link/status":
-			if !confirmed {
-				confirmed = true
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"status": "confirmed",
-					"user": map[string]string{
-						"id":    "scion-user-42",
-						"email": "confirmed@example.com",
-					},
-				})
-			}
+			confirmed.Store(true)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "confirmed",
+				"user": map[string]string{
+					"id":    "scion-user-42",
+					"email": "confirmed@example.com",
+				},
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	})
 
-	broker, _ := testBrokerWithStore(t, hubHandler)
+	broker, ms := testBrokerWithStore(t, hubHandler)
 	handler := broker.commandHandler
 
 	activity := testActivity("register")
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 
-	// Directly call pollForConfirmation to test it in isolation
-	// (bypasses the 10s ticker by calling it directly).
-	go handler.pollForConfirmation(ctx, activity, "aad-user-1", "TESTCODE", cancel)
+	// Directly call pollForConfirmation to test it in isolation.
+	go func() {
+		defer close(done)
+		handler.pollForConfirmation(ctx, activity, "aad-user-1", "TESTCODE", cancel)
+	}()
 
-	// Wait for the goroutine to process.
-	deadline := time.After(15 * time.Second)
-	for {
-		select {
-		case <-deadline:
-			t.Fatal("Timed out waiting for user mapping to be created")
-		default:
-			mapping, err := broker.store.GetUserMapping(context.Background(), "aad-user-1")
-			require.NoError(t, err)
-			if mapping != nil {
-				assert.Equal(t, "scion-user-42", mapping.ScionUserID)
-				assert.Equal(t, "confirmed@example.com", mapping.ScionEmail)
-				assert.Equal(t, "Test User", mapping.TeamsDisplayName)
-				return
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
+	// Wait for the goroutine to save the mapping, send the confirmation reply, and exit.
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Timed out waiting for pollForConfirmation to complete")
 	}
+
+	assert.True(t, confirmed.Load())
+	mapping, err := broker.store.GetUserMapping(context.Background(), "aad-user-1")
+	require.NoError(t, err)
+	require.NotNil(t, mapping)
+	assert.Equal(t, "scion-user-42", mapping.ScionUserID)
+	assert.Equal(t, "confirmed@example.com", mapping.ScionEmail)
+	assert.Equal(t, "Test User", mapping.TeamsDisplayName)
+	require.Len(t, ms.sent, 1)
+	assert.Contains(t, ms.sent[0].Text, "Linked!")
 }
 
 func TestCheckTeamsLinkStatus_ReturnsEmail(t *testing.T) {
