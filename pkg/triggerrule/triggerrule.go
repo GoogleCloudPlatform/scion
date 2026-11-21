@@ -42,7 +42,7 @@ import (
 const (
 	ConsumerName       = "trigger"
 	EnvironmentName    = "trigger"
-	EnvironmentVersion = 1
+	EnvironmentVersion = 2
 )
 
 // Stage 1 trigger rule limits (§7.2, §4.2, §4.4, §8.1; mixed-rule-arrays §2.1, §6).
@@ -305,7 +305,8 @@ func (r Rule) normalizedDialect() string {
 	return d
 }
 
-// Env returns the load-bearing Stage 1 trigger CEL Environment (Version 1, §7.1).
+// Env returns the load-bearing trigger CEL Environment (Version 2, Stage 1 §7.1;
+// Stage 3 §4.3 adds event.lists).
 func Env() celengine.Environment {
 	return celengine.Environment{
 		Name:    EnvironmentName,
@@ -470,6 +471,13 @@ func NewEventActivation(ev hubfire.FireEvent) (Activation, error) {
 	attrs := make(map[string]string, len(ev.Attributes))
 	maps.Copy(attrs, ev.Attributes)
 
+	lists := make(map[string][]string, len(ev.Lists))
+	for k, vals := range ev.Lists {
+		cp := make([]string, len(vals))
+		copy(cp, vals)
+		lists[k] = cp
+	}
+
 	eventMap := map[string]any{
 		"id":   ev.ID,
 		"type": ev.Type,
@@ -481,6 +489,7 @@ func NewEventActivation(ev hubfire.FireEvent) (Activation, error) {
 		"occurred_at": ev.OccurredAt.UTC(),
 		"received_at": ev.ReceivedAt.UTC(),
 		"attributes":  attrs,
+		"lists":       lists,
 	}
 
 	if trimmed := bytes.TrimSpace(ev.Payload); len(trimmed) > 0 {

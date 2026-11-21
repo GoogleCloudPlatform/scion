@@ -712,6 +712,7 @@ func TestGitHubTriggerE2E_InconclusiveAssociationCheckRetriesUntilRecovered(t *t
 	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
 	f.srv.config.GitHubAppConfig.AppID = appID
 	f.srv.config.GitHubAppConfig.AppSlug = "octo-app"
+	f.srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
 	f.srv.config.GitHubAppConfig.WebhookSecret = webhookSecret
 	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
 	f.srv.mu.Unlock()

@@ -184,6 +184,19 @@ type PostEvaluationHook interface {
 	OnEventEvaluated(ctx context.Context, ev *store.TriggerEvent, outcome EventEvaluationOutcome, attempts int)
 }
 
+// SourceEnricher is an optional interface Core implementations may satisfy to
+// enrich a trigger event with source-fetched facts once per event before rule
+// evaluation (Stage 3 §5.5).
+type SourceEnricher interface {
+	// NeedsEnrichment reports whether ev lacks facts the source can fetch.
+	NeedsEnrichment(ev *hubfire.FireEvent) bool
+	// Enrich fetches and returns the attribute/list updates; the dispatcher
+	// persists them on the event row (UpdateTriggerEventAttributes) before
+	// evaluating any rule, so rules, history, the envelope and the agent file
+	// all see the same facts. Bounded: one call, 5 s, errors content-free.
+	Enrich(ctx context.Context, ev *hubfire.FireEvent) (attrs map[string]string, lists map[string][]string, err error)
+}
+
 // DispatcherConfig configures a trigger event Dispatcher.
 type DispatcherConfig struct {
 	Core           Core
@@ -488,10 +501,6 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		return durablequeue.Result{Err: errors.New("trigger: list candidates failed")}
 	}
 
-	// Parse payload JSON once per event via NewEventActivation so every candidate
-	// trigger rule shares one parsed activation and one aggregate per-event
-	// BudgetTracker (§6.3, F5, N3; mixed-rule-arrays §3, §6).
-	parseStart := d.now()
 	var rawPayload []byte
 	if ev.Payload != "" {
 		rawPayload = []byte(ev.Payload)
@@ -509,9 +518,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		Lists:      ev.Lists,
 		Payload:    rawPayload,
 	}
-	baseAct, actErr := triggerrule.NewEventActivation(baseEvent)
 	budget := ruleengine.NewBudgetTracker(d.ruleBudget)
-	budget.Charge(max(d.now().Sub(parseStart), time.Duration(0)))
 	// SEC-3b2-01: separate per-event compile budget charged only on cache misses
 	// (never charged to eval budget, preserving F2).
 	compileBudget := ruleengine.NewBudgetTracker(d.compileBudget)
@@ -525,6 +532,10 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		hadAnyFire        bool
 		sourceAuthChecked bool
 		sourceAuthorized  bool
+		enrichmentChecked bool
+		baseActBuilt      bool
+		baseAct           triggerrule.Activation
+		actErr            error
 	)
 
 	for i := range candidates {
@@ -540,11 +551,12 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			continue
 		}
 
-		// Stage 3 §4.2 step 4: before any rule evaluation or fire on a github
-		// event, verify once per event that the project's GitHub App installation
-		// association is authorized now. Running this ahead of rule evaluation
-		// ensures a refused or retrying github event never evaluates rules or
-		// records rule-skip outcomes that mask the refusal.
+		// Stage 3 §4.2 step 4: before any enrichment, rule evaluation, or fire on a
+		// github event, verify once per event that the project's GitHub App
+		// installation association is authorized now. Running this ahead of
+		// enrichment and rule evaluation ensures an unauthorized event never mints
+		// a token, never calls out to GitHub, and never records rule-skip outcomes
+		// that mask the refusal.
 		if ev.SourceKind == store.TriggerSourceKindGitHub {
 			if !sourceAuthChecked {
 				if lease != nil {
@@ -583,6 +595,76 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				}
 				continue
 			}
+		}
+
+		// Stage 3 §5.5: consult optional SourceEnricher once per event after
+		// MatchTypes prefiltering and AuthorizeEventSource succeed, and persist
+		// updated attributes/lists on the event row BEFORE any rule is evaluated.
+		if !enrichmentChecked {
+			enrichmentChecked = true
+			if enricher, ok := d.core.(SourceEnricher); ok && enricher.NeedsEnrichment(&baseEvent) {
+				if lease != nil {
+					held, lErr := lease.Renew(ctx)
+					if lErr != nil {
+						return durablequeue.Result{Err: errors.New("trigger: renew queue lease failed")}
+					}
+					if !held {
+						return durablequeue.Result{Err: errors.New("trigger: queue lease lost")}
+					}
+				}
+				enrichedAttrs, enrichedLists, enrichErr := enricher.Enrich(ctx, &baseEvent)
+				if ctx.Err() != nil {
+					return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
+				}
+				if enrichErr != nil {
+					d.logger.Warn("trigger: source enrichment failed",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "sourceKind", ev.SourceKind, "error", enrichErr)
+					if enrichedAttrs != nil {
+						// Use the enricher's ceiling-checked failure attributes (normally
+						// carrying enriched="failed", or preserving existing attributes if
+						// adding enriched="failed" would exceed the 8 KiB bound).
+						ev.Attributes = enrichedAttrs
+						if enrichedLists != nil {
+							ev.Lists = enrichedLists
+						}
+					} else {
+						// Generic enricher error with no returned attribute map: mark
+						// enriched="failed" so lost-lease re-handles short-circuit.
+						if ev.Attributes == nil {
+							ev.Attributes = map[string]string{"enriched": "failed"}
+						} else if _, already := ev.Attributes["enriched"]; !already {
+							updated := maps.Clone(ev.Attributes)
+							updated["enriched"] = "failed"
+							ev.Attributes = updated
+						}
+					}
+				} else {
+					if enrichedAttrs != nil {
+						ev.Attributes = enrichedAttrs
+					}
+					if enrichedLists != nil {
+						ev.Lists = enrichedLists
+					}
+				}
+				if uErr := d.store.UpdateTriggerEventAttributes(ctx, ev.ID, ev.Attributes, ev.Lists); uErr != nil &&
+					!errors.Is(uErr, store.ErrNotFound) {
+					d.logger.Warn("trigger: failed to persist enriched event attributes",
+						"eventID", ev.ID, "projectID", ev.ProjectID, "error", uErr)
+					return durablequeue.Result{Err: errors.New("trigger: persist enriched attributes failed")}
+				}
+				baseEvent.Attributes = ev.Attributes
+				baseEvent.Lists = ev.Lists
+			}
+		}
+
+		// Parse payload JSON once per event via NewEventActivation (after any
+		// enrichment has persisted) so every candidate trigger rule shares one
+		// parsed activation and one aggregate per-event BudgetTracker (§6.3, F5).
+		if !baseActBuilt {
+			parseStart := d.now()
+			baseAct, actErr = triggerrule.NewEventActivation(baseEvent)
+			budget.Charge(max(d.now().Sub(parseStart), time.Duration(0)))
+			baseActBuilt = true
 		}
 
 		// SEC-3b1rw-01: fail closed on corrupt stored match_rules before any fire.
