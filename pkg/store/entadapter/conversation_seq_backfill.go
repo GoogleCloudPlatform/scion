@@ -98,17 +98,51 @@ func backfillOneConversationSeq(ctx context.Context, db *sql.DB, isPostgres bool
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	updated, err := BackfillConversationSeqInTx(ctx, tx, isPostgres, "messages", "conversations", convID.String())
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return updated, nil
+}
+
+// BackfillConversationSeqInTx locks the target conversation row inside tx,
+// assigns last_message_seq + ROW_NUMBER() OVER (PARTITION BY conversation_id
+// ORDER BY created ASC, id ASC) to every message in convID whose
+// conversation_seq IS NULL, and advances conversations.last_message_seq to the
+// new maximum.
+//
+// Shared by BackfillConversationMessageSeqs and PromoteDM (both SQLite and
+// Postgres) so all re-sequencing logic lives in one place (ptone/scion#8136).
+// messagesTable and conversationsTable must be trusted SQL identifiers (either
+// literals or schema-qualified table names returned by the store).
+func BackfillConversationSeqInTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	isPostgres bool,
+	messagesTable string,
+	conversationsTable string,
+	convID string,
+) (int64, error) {
 	ph := func(n int) string {
 		if isPostgres {
 			return fmt.Sprintf("$%d", n)
 		}
 		return "?"
 	}
+	idExpr := func(n int) string {
+		if isPostgres {
+			return fmt.Sprintf("$%d::uuid", n)
+		}
+		return "?"
+	}
 
 	// Lock the conversation row (FOR UPDATE on Postgres) and read its current
-	// last_message_seq so concurrent writers and backfills serialize in the
+	// last_message_seq so concurrent writers and re-sequencers serialize in the
 	// same lock order as CreateMessage.
-	lockQuery := "SELECT last_message_seq FROM conversations WHERE id = " + ph(1)
+	lockQuery := "SELECT last_message_seq FROM " + conversationsTable + " WHERE id = " + idExpr(1)
 	if isPostgres {
 		lockQuery += " FOR UPDATE"
 	}
@@ -122,7 +156,7 @@ func backfillOneConversationSeq(ctx context.Context, db *sql.DB, isPostgres bool
 
 	// Guard against last_message_seq lagging behind existing non-NULL seqs.
 	var maxExisting sql.NullInt64
-	maxQuery := "SELECT MAX(conversation_seq) FROM messages WHERE conversation_id = " + ph(1)
+	maxQuery := "SELECT MAX(conversation_seq) FROM " + messagesTable + " WHERE conversation_id = " + idExpr(1)
 	if err := tx.QueryRowContext(ctx, maxQuery, convID).Scan(&maxExisting); err != nil {
 		return 0, err
 	}
@@ -132,21 +166,21 @@ func backfillOneConversationSeq(ctx context.Context, db *sql.DB, isPostgres bool
 	}
 
 	// Assign base + ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY created ASC, id ASC)
-	// to all NULL-seq rows in this conversation. Supported on SQLite ≥ 3.33 and Postgres.
+	// to all NULL-seq rows in this conversation. Supported on SQLite >= 3.33 and Postgres.
 	updateMsgs := fmt.Sprintf(`
-		UPDATE messages
+		UPDATE %s
 		SET conversation_seq = sub.seq
 		FROM (
 			SELECT id, %s + ROW_NUMBER() OVER (
 				PARTITION BY conversation_id
 				ORDER BY created ASC, id ASC
 			) AS seq
-			FROM messages
+			FROM %s
 			WHERE conversation_id = %s
 			  AND conversation_seq IS NULL
 		) AS sub
-		WHERE messages.id = sub.id
-	`, ph(1), ph(2))
+		WHERE %s.id = sub.id
+	`, messagesTable, ph(1), messagesTable, idExpr(2), messagesTable)
 
 	res, err := tx.ExecContext(ctx, updateMsgs, base, convID)
 	if err != nil {
@@ -159,14 +193,11 @@ func backfillOneConversationSeq(ctx context.Context, db *sql.DB, isPostgres bool
 
 	newHead := base + updated
 	if newHead > lastSeq {
-		updateConv := fmt.Sprintf("UPDATE conversations SET last_message_seq = %s WHERE id = %s", ph(1), ph(2))
+		updateConv := fmt.Sprintf("UPDATE %s SET last_message_seq = %s WHERE id = %s", conversationsTable, ph(1), idExpr(2))
 		if _, err := tx.ExecContext(ctx, updateConv, newHead, convID); err != nil {
 			return 0, err
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
 	return updated, nil
 }

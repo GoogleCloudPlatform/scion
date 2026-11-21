@@ -341,3 +341,74 @@ func TestListConversationFeed_FiltersAndNamespaceIsolation(t *testing.T) {
 	assert.True(t, gapPage.Truncated)
 	assert.Equal(t, []string{m3.ID, m4.ID, m5.ID, m6.ID}, ids(gapPage.Messages))
 }
+
+// Regression test: SetMessageConversationID must re-allocate conversation_seq
+// in the target conversation so moving or merging messages never collides on
+// the (conversation_id, conversation_seq) unique index.
+func TestSetMessageConversationID_ReallocatesSeqWithoutCollision(t *testing.T) {
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	projectID := uuid.NewString()
+
+	convA := seedFeedConversation(t, cs, projectID)
+	convB := seedFeedConversation(t, cs, projectID)
+	convC := seedFeedConversation(t, cs, projectID)
+
+	newMsg := func(convID, body string) *store.Message {
+		m := &store.Message{
+			ID:             uuid.NewString(),
+			ProjectID:      projectID,
+			ConversationID: convID,
+			Sender:         "user:alice",
+			SenderID:       "u1",
+			Recipient:      "agent:a",
+			RecipientID:    "a1",
+			Msg:            body,
+			Type:           "chat",
+			DispatchState:  store.MessageDispatchDispatched,
+		}
+		require.NoError(t, cs.CreateMessage(ctx, m))
+		return m
+	}
+
+	// Case 1: Move msgA1 (seq 1 in A) into empty conv B, then CreateMessage in B.
+	msgA1 := newMsg(convA.ID, "from-A")
+	require.Equal(t, int64(1), msgA1.ConversationSeq)
+
+	require.NoError(t, cs.SetMessageConversationID(ctx, msgA1.ID, convB.ID))
+	seqInB, err := cs.MessageConversationSeq(ctx, convB.ID, msgA1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), seqInB)
+	headB, err := cs.ConversationHeadSeq(ctx, convB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), headB)
+
+	msgB2 := newMsg(convB.ID, "new-in-B")
+	assert.Equal(t, int64(2), msgB2.ConversationSeq)
+
+	// Case 2: Merge msgC1 (seq 1 in C) into conv B which already has seqs 1..2.
+	msgC1 := newMsg(convC.ID, "from-C")
+	require.Equal(t, int64(1), msgC1.ConversationSeq)
+
+	require.NoError(t, cs.SetMessageConversationID(ctx, msgC1.ID, convB.ID))
+	seqCInB, err := cs.MessageConversationSeq(ctx, convB.ID, msgC1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), seqCInB)
+	headB, err = cs.ConversationHeadSeq(ctx, convB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), headB)
+
+	// Idempotent call for a message already in conv B is a no-op.
+	require.NoError(t, cs.SetMessageConversationID(ctx, msgC1.ID, convB.ID))
+	headB2, err := cs.ConversationHeadSeq(ctx, convB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), headB2)
+
+	// Nonexistent message returns ErrNotFound without bumping head.
+	err = cs.SetMessageConversationID(ctx, uuid.NewString(), convB.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	headB3, err := cs.ConversationHeadSeq(ctx, convB.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), headB3)
+}

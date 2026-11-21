@@ -265,6 +265,10 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 		return markTransient(fmt.Errorf("begin transaction: %w", err))
 	}
 	txStore := c.newTxStore(tx)
+	var pendingMsgs []*store.Message
+	if c.MessageStore.publisher != nil {
+		txStore.MessageStore.pendingPublish = &pendingMsgs
+	}
 
 	defer func() {
 		// Safety net: if Commit was not called (i.e. fn panicked or returned
@@ -281,6 +285,11 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	}
 	if err := tx.Commit(); err != nil {
 		return markTransient(fmt.Errorf("commit transaction: %w", err))
+	}
+	if c.MessageStore.publisher != nil {
+		for _, m := range pendingMsgs {
+			_ = c.MessageStore.publisher.PublishUserMessage(ctx, m)
+		}
 	}
 	return nil
 }

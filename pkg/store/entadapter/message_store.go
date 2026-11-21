@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -57,6 +58,10 @@ type MessageStore struct {
 	// publisher, when non-nil, is notified after each successful CreateMessage.
 	// See MessagePublisher.
 	publisher MessagePublisher
+	// pendingPublish, when non-nil (inside CompositeStore.WithTx), collects
+	// newly created messages so CompositeStore.WithTx invokes publisher only
+	// after tx.Commit() succeeds (ptone/scion#8136).
+	pendingPublish *[]*store.Message
 	// pendingLogger receives the entered-pending line for a row that took the
 	// schema default dispatch_state (ptone/scion#4827). Nil means
 	// slog.Default(). Tests set it to capture the line.
@@ -333,17 +338,28 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 
 	// Design-in: announce the new message after commit for LISTEN/NOTIFY /
 	// feed wakeup subscribers. Best-effort — a publish failure must not fail
-	// the write that succeeded.
-	if s.publisher != nil {
+	// the write that succeeded. Inside WithTx, defer publication until the
+	// enclosing transaction commits so wakeups never arrive before visibility.
+	if s.inTx {
+		if s.pendingPublish != nil {
+			cp := *msg
+			*s.pendingPublish = append(*s.pendingPublish, &cp)
+		}
+	} else if s.publisher != nil {
 		_ = s.publisher.PublishUserMessage(ctx, msg)
 	}
 	return nil
 }
 
+// lastMissingConvWarnUnix rate-limits missing-conversation warnings from
+// bumpConversationSeq to at most once per minute across the process.
+var lastMissingConvWarnUnix atomic.Int64
+
 // bumpConversationSeq atomically increments conversations.last_message_seq for
 // cid and returns the new sequence number. When no conversation row exists for
 // cid (for example synthetic messages in tests that do not seed a conversation),
-// it returns (0, false, nil) so CreateMessage leaves conversation_seq NULL.
+// it logs a rate-limited warning and returns (0, false, nil) so CreateMessage
+// leaves conversation_seq NULL.
 func bumpConversationSeq(ctx context.Context, drv dialect.Driver, cid uuid.UUID) (int64, bool, error) {
 	ph := "?"
 	if drv.Dialect() == dialect.Postgres {
@@ -358,6 +374,12 @@ func bumpConversationSeq(ctx context.Context, drv dialect.Driver, cid uuid.UUID)
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return 0, false, err
+		}
+		now := time.Now().Unix()
+		prev := lastMissingConvWarnUnix.Load()
+		if now-prev >= 60 && lastMissingConvWarnUnix.CompareAndSwap(prev, now) {
+			slog.WarnContext(ctx, "bumpConversationSeq: conversation row not found; leaving conversation_seq NULL",
+				"conversation_id", cid.String())
 		}
 		return 0, false, nil
 	}
@@ -758,8 +780,11 @@ func (s *MessageStore) MarkAllMessagesRead(ctx context.Context, recipientID stri
 	return err
 }
 
-// SetMessageConversationID updates the conversation_id on an existing message.
-// Used by Phase 4 backfill to link legacy messages to Conversation records.
+// SetMessageConversationID updates the conversation_id on an existing message
+// and re-allocates conversation_seq in the target conversation within a single
+// transaction so the (conversation_id, conversation_seq) unique index never
+// collides and commit-order guarantees hold (ptone/scion#8136).
+// Returns ErrNotFound if the message doesn't exist.
 func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, conversationID string) error {
 	mid, err := parseUUID(messageID)
 	if err != nil {
@@ -769,15 +794,52 @@ func (s *MessageStore) SetMessageConversationID(ctx context.Context, messageID, 
 	if err != nil {
 		return err
 	}
-	n, err := s.client.Message.Update().
-		Where(message.IDEQ(mid)).
-		SetConversationID(cid).
-		Save(ctx)
-	if err != nil {
-		return mapError(err)
+
+	apply := func(mc *ent.MessageClient, drv dialect.Driver) error {
+		existing, getErr := mc.Query().
+			Where(message.IDEQ(mid)).
+			Select(message.FieldID, message.FieldConversationID, message.FieldConversationSeq).
+			Only(ctx)
+		if getErr != nil {
+			return mapError(getErr)
+		}
+		// Already in the target conversation with an allocated sequence: no-op.
+		if existing.ConversationID != nil && *existing.ConversationID == cid && existing.ConversationSeq != nil {
+			return nil
+		}
+
+		seq, hasSeq, bumpErr := bumpConversationSeq(ctx, drv, cid)
+		if bumpErr != nil {
+			return markTransient(mapError(bumpErr))
+		}
+
+		upd := mc.UpdateOneID(mid).SetConversationID(cid)
+		if hasSeq {
+			upd.SetConversationSeq(seq)
+		} else {
+			upd.ClearConversationSeq()
+		}
+		if _, saveErr := upd.Save(ctx); saveErr != nil {
+			return markTransient(mapError(saveErr))
+		}
+		return nil
 	}
-	if n == 0 {
-		return store.ErrNotFound
+
+	if s.inTx {
+		return apply(s.client.Message, s.client.Driver())
+	}
+
+	tx, txErr := s.client.Tx(ctx)
+	if txErr != nil {
+		return markTransient(fmt.Errorf("begin set message conversation tx: %w", txErr))
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := apply(tx.Message, tx.Client().Driver()); err != nil {
+		return err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return markTransient(fmt.Errorf("commit set message conversation tx: %w", commitErr))
 	}
 	return nil
 }

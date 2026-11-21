@@ -2364,7 +2364,7 @@ var (
 			},
 			{
 				Name:    "message_conversation_id_conversation_seq",
-				Unique:  true,
+				Unique:  false,
 				Columns: []*schema.Column{MessagesColumns[25], MessagesColumns[26]},
 			},
 			{

@@ -196,9 +196,11 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("created"),
 		index.Fields("conversation_id"),
 		// Per-conversation commit-ordered sequence for conversation watch
-		// feeds (ptone/scion#8136). Serves feed range queries in seq order.
-		index.Fields("conversation_id", "conversation_seq").
-			Unique(),
+		// feeds (ptone/scion#8136). Non-unique so older binaries re-stamping
+		// conversation_id after a downgrade cannot hit a unique violation
+		// (preserving additive-only compatibility with no DowngradeFloor bump);
+		// uniqueness is enforced by the transactional allocator and re-stampers.
+		index.Fields("conversation_id", "conversation_seq"),
 		// Native chat tail and history reads must not sort the entire DM on
 		// every unread refresh. Both read-switch paths order by created, id.
 		index.Fields("conversation_id", "channel", "created", "id"),
