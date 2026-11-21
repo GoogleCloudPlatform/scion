@@ -1580,7 +1580,7 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     }));
   }
 
-  it('renders the split-button chevron only in the wide tier and keeps medium and narrow unchanged', async () => {
+  it('renders the split-button chevron in wide and medium tiers and keeps dropdowns lazily unmounted', async () => {
     const el = await mountHeader({ currentPath: '/projects/p1' });
 
     const chevron = wideChevron(el);
@@ -1591,25 +1591,24 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     expect(chevron?.hasAttribute('aria-keyshortcuts')).toBe(false);
     expect(chevron?.querySelector('sl-icon')?.getAttribute('name')).toBe('chevron-down');
 
-    // Natural tab order inside the wide segmented group: Console -> Chat -> Terminals -> Open terminals menu.
-    const wideButtons = Array.from(
-      el.shadowRoot?.querySelectorAll<HTMLButtonElement>('.wide-center .mode-switch button') ?? []
-    );
-    expect(wideButtons.map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Console',
-      'Chat',
-      'Terminals (0)',
-      'Open terminals menu',
-    ]);
+    // Natural tab order inside the wide and medium segmented groups: Console -> Chat -> Terminals -> Open terminals menu.
+    for (const scope of ['.wide-center', '.compact-mode-segments']) {
+      const buttons = Array.from(
+        el.shadowRoot?.querySelectorAll<HTMLButtonElement>(`${scope} .mode-switch button`) ?? []
+      );
+      expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
+        'Console',
+        'Chat',
+        'Terminals (0)',
+        'Open terminals menu',
+      ]);
+      // Dropdown and menu stay unmounted until the user opens the chevron (keeps closed DOM lean).
+      expect(el.shadowRoot?.querySelector(`${scope} .terminals-dropdown`)).toBeNull();
+      expect(el.shadowRoot?.querySelector(`${scope} .terminals-menu`)).toBeNull();
+    }
 
-    // Medium compact segments and narrow mode dropdown have no terminals chevron trigger.
-    expect(
-      el.shadowRoot?.querySelector('.compact-mode-segments .terminals-menu-trigger')
-    ).toBeNull();
-    expect(el.shadowRoot?.querySelector('.compact-mode-segments .terminals-dropdown')).toBeNull();
-    expect(el.shadowRoot?.querySelector('.compact-mode-dropdown .terminals-dropdown')).toBeNull();
-    // Wide dropdown and menu stay unmounted until the user opens the chevron (keeps closed DOM lean).
-    expect(el.shadowRoot?.querySelector('.wide-center .terminals-dropdown')).toBeNull();
+    // Narrow mode dropdown stays unmounted of the Open terminals section until first sl-show.
+    expect(el.shadowRoot?.querySelector('.compact-mode-dropdown sl-menu-label')).toBeNull();
     expect(wideMenu(el)).toBeNull();
   });
 
@@ -1966,10 +1965,181 @@ describe('mode switcher: wide Terminals chevron dropdown (ptone/scion#8284)', ()
     ]);
   });
 
-  it('defines a >=44px coarse-pointer touch target rule for the chevron trigger', () => {
+  it('defines a >=44px coarse-pointer touch target rule for the chevron and narrow mode triggers', () => {
     const cssText = String((customElements.get('scion-header') as { styles?: unknown })?.styles);
     expect(cssText).toContain('.terminals-menu-trigger');
+    expect(cssText).toContain('.mode-trigger');
     expect(cssText).toContain('min-width: 44px');
     expect(cssText).toContain('min-height: 44px');
+  });
+
+  it('supports the medium-tier split-button chevron dropdown (ptone/scion#8440)', async () => {
+    publishTerminalWorkspaceSnapshot({
+      count: 1,
+      sessions: [
+        { agentId: AGENT_1, name: 'worker-alpha', dot: { colour: 'green', meaning: 'Connected' } },
+      ],
+      focusedAgentId: null,
+    });
+    setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'current-dev' });
+
+    const el = await mountHeader({ currentPath: `/agents/${AGENT_CUR}` });
+    const mediumChevron = (): HTMLButtonElement | null =>
+      el.shadowRoot?.querySelector<HTMLButtonElement>(
+        '.compact-mode-segments .terminals-menu-trigger'
+      ) ?? null;
+    const mediumMenu = (): HTMLElement | null =>
+      el.shadowRoot?.querySelector<HTMLElement>('.compact-mode-segments .terminals-menu') ?? null;
+
+    const initialTrigger = mediumChevron()!;
+    expect(initialTrigger).not.toBeNull();
+    expect(mediumMenu()).toBeNull();
+
+    initialTrigger.click();
+    await Promise.resolve();
+    await el.updateComplete;
+    await Promise.resolve();
+
+    expect(mediumMenu()).not.toBeNull();
+    expect(el.shadowRoot?.activeElement).toBe(mediumChevron());
+
+    const items = Array.from(mediumMenu()!.querySelectorAll<HTMLElement>('sl-menu-item'));
+    expect(items.map((i) => i.getAttribute('value'))).toEqual([AGENT_CUR, AGENT_1]);
+    expect(items[0].getAttribute('aria-label')).toBe('current-dev, not open');
+    expect(items[1].getAttribute('aria-label')).toBe('worker-alpha, Connected');
+
+    const selectedEvents: string[] = [];
+    const onDropdownSelect = (e: Event): void => {
+      selectedEvents.push((e as CustomEvent<TerminalDropdownSelectDetail>).detail.agentId);
+    };
+    window.addEventListener(TERMINAL_DROPDOWN_SELECT_EVENT, onDropdownSelect);
+    try {
+      mediumMenu()!.dispatchEvent(
+        new CustomEvent('sl-select', { detail: { item: items[0] }, bubbles: true })
+      );
+      await Promise.resolve();
+      expect(navTargets).toEqual([`/terminals/${AGENT_CUR}`]);
+      expect(selectedEvents).toEqual([AGENT_CUR]);
+    } finally {
+      window.removeEventListener(TERMINAL_DROPDOWN_SELECT_EVENT, onDropdownSelect);
+    }
+  });
+
+  it('renders the narrow-tier Open terminals section lazily with current agent first, empty state, and selection (ptone/scion#8440)', async () => {
+    const el = await mountHeader({ currentPath: '/projects/p1' });
+    const narrowDd = el.shadowRoot?.querySelector('.compact-mode-dropdown sl-dropdown');
+    const narrowMenu = el.shadowRoot?.querySelector('.compact-mode-dropdown sl-menu');
+    expect(narrowMenu?.querySelector('sl-menu-label')).toBeNull();
+
+    // First sl-show lazily mounts the section with the disabled empty state.
+    narrowDd?.dispatchEvent(new CustomEvent('sl-show'));
+    await Promise.resolve();
+    await el.updateComplete;
+
+    expect(narrowMenu?.querySelector('sl-divider')).not.toBeNull();
+    expect(narrowMenu?.querySelector('sl-menu-label')?.textContent?.trim()).toBe('Open terminals');
+    const emptyItem = narrowMenu?.querySelector('sl-menu-item.terminals-empty-item');
+    expect(emptyItem?.hasAttribute('disabled')).toBe(true);
+    expect(emptyItem?.textContent?.trim()).toBe('No open terminals');
+
+    // Populating snapshot + current agent lists current agent first as not open, then open rail sessions.
+    publishTerminalWorkspaceSnapshot({
+      count: 1,
+      sessions: [
+        { agentId: AGENT_1, name: 'worker-alpha', dot: { colour: 'green', meaning: 'Connected' } },
+      ],
+      focusedAgentId: null,
+    });
+    setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'current-dev' });
+    el.currentPath = `/agents/${AGENT_CUR}`;
+    await el.updateComplete;
+
+    const terminalItems = Array.from(
+      narrowMenu?.querySelectorAll<HTMLElement>('sl-menu-item[value^="terminal:"]') ?? []
+    );
+    expect(terminalItems.map((i) => i.getAttribute('value'))).toEqual([
+      `terminal:${AGENT_CUR}`,
+      `terminal:${AGENT_1}`,
+    ]);
+    expect(terminalItems[0].getAttribute('aria-label')).toBe('current-dev, not open');
+    expect(terminalItems[1].getAttribute('aria-label')).toBe('worker-alpha, Connected');
+
+    const selectedEvents: string[] = [];
+    const onDropdownSelect = (e: Event): void => {
+      selectedEvents.push((e as CustomEvent<TerminalDropdownSelectDetail>).detail.agentId);
+    };
+    window.addEventListener(TERMINAL_DROPDOWN_SELECT_EVENT, onDropdownSelect);
+    try {
+      narrowMenu?.dispatchEvent(
+        new CustomEvent('sl-select', {
+          detail: { item: { value: `terminal:${AGENT_1}` } },
+          bubbles: true,
+        })
+      );
+      await Promise.resolve();
+      expect(navTargets).toEqual([`/terminals/${AGENT_1}`]);
+      expect(selectedEvents).toEqual([AGENT_1]);
+    } finally {
+      window.removeEventListener(TERMINAL_DROPDOWN_SELECT_EVENT, onDropdownSelect);
+    }
+  });
+
+  it('keeps aria-expanded scoped per tier so opening medium does not mark wide expanded', async () => {
+    const el = await mountHeader({ currentPath: '/projects/p1' });
+    const medTrigger = (): HTMLButtonElement | null =>
+      el.shadowRoot?.querySelector<HTMLButtonElement>(
+        '.compact-mode-segments .terminals-menu-trigger'
+      ) ?? null;
+
+    medTrigger()!.click();
+    await Promise.resolve();
+    await el.updateComplete;
+    await Promise.resolve();
+
+    const medDd = el.shadowRoot?.querySelector('.compact-mode-segments .terminals-dropdown');
+    const wideDd = el.shadowRoot?.querySelector('.wide-center .terminals-dropdown');
+    medDd?.dispatchEvent(new CustomEvent('sl-show'));
+    await el.updateComplete;
+
+    expect(medTrigger()?.getAttribute('aria-expanded')).toBe('true');
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('false');
+
+    wideDd?.dispatchEvent(new CustomEvent('sl-show'));
+    await el.updateComplete;
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('true');
+    expect(medTrigger()?.getAttribute('aria-expanded')).toBe('false');
+
+    wideDd?.dispatchEvent(new CustomEvent('sl-hide'));
+    await el.updateComplete;
+    expect(wideChevron(el)?.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('unsubscribes on disconnect and resubscribes once when the same header instance reconnects after mount (O1)', async () => {
+    setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'initial-name' });
+    const el = await mountHeader({ currentPath: `/agents/${AGENT_CUR}` });
+    await openWideMenu(el);
+    expect(menuRows(el)[0].name).toBe('initial-name');
+
+    // Disconnect: current-agent events while detached must not trigger updates.
+    const updateSpy = vi.spyOn(el, 'requestUpdate');
+    try {
+      el.remove();
+      updateSpy.mockClear();
+      setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'while-disconnected' });
+      expect(updateSpy).not.toHaveBeenCalled();
+
+      // Reconnect the exact same header instance.
+      document.body.appendChild(el);
+      await el.updateComplete;
+      updateSpy.mockClear();
+
+      // A CURRENT_AGENT_CHANGED_EVENT after reconnect must trigger exactly one update (no double subscribe).
+      setAgentPageCurrentAgent({ agentId: AGENT_CUR, name: 'renamed-after-reconnect' });
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      await el.updateComplete;
+      expect(menuRows(el)[0].name).toBe('renamed-after-reconnect');
+    } finally {
+      updateSpy.mockRestore();
+    }
   });
 });

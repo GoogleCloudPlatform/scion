@@ -129,7 +129,8 @@ async function switchMode(page: Page, mode: 'Console' | 'Chat' | 'Terminals'): P
     return;
   }
   await header.locator('.mode-trigger').click();
-  await header.locator('.compact-mode-dropdown sl-menu-item', { hasText: mode }).click();
+  const value = mode === 'Console' ? 'dashboard' : mode.toLowerCase();
+  await header.locator(`.compact-mode-dropdown sl-menu-item[value="${value}"]`).click();
 }
 
 async function openScrolledThread(page: Page): Promise<{ messageId: string; offset: number }> {
