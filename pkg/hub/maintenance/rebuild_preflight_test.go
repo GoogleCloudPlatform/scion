@@ -302,3 +302,89 @@ exit 0
 		t.Errorf("Q-D result = %+v", res)
 	}
 }
+
+// R2 (m1): a failing forced checkpoint (e.g. write-2 race "the failed run was
+// forced meanwhile") must stop before stage/activate/restart and preserve
+// forced: true, overrideApplied: false, and override in RunResult (C5).
+func TestRebuildServer_ForcedCheckpointErrorInstallsNothing(t *testing.T) {
+	f := newPreflightFixture(t, false, `
+echo '{"version":1,"checks":["settings.profiles"],"findings":[{"check":"settings.profiles","code":"settings.profiles.missing","severity":"block","message":"missing dev","data":{"profile":"dev","project":"p1"}}],"blocking":1,"warnings":0}'
+exit 3
+`)
+	inst := &fakeInstaller{}
+	ex := f.executor(inst)
+	ex.SetForceGrant(&rebuildpreflight.ForceGrant{
+		RerunOf:      "run-failed-1",
+		ActorID:      "user-42",
+		ActorEmail:   "admin@example.com",
+		PinnedBranch: "main",
+		PinnedCommit: testCommit,
+		FailedFindings: []preflight.Finding{{
+			Check:    "settings.profiles",
+			Code:     "settings.profiles.missing",
+			Severity: preflight.SeverityBlock,
+			Message:  "missing dev",
+			Data:     map[string]any{"profile": "dev", "project": "p1"},
+		}},
+	})
+	ex.SetCheckpoint(func(map[string]any) error {
+		return errors.New("the failed run was forced meanwhile")
+	})
+
+	var log bytes.Buffer
+	err := ex.Run(context.Background(), &log, nil)
+	if err == nil || !strings.Contains(err.Error(), "the failed run was forced meanwhile") {
+		t.Fatalf("Run = %v, want checkpoint error", err)
+	}
+	// Only installer preflight ran — no stage, activate, or restart.
+	if got := strings.Join(inst.calls, ","); got != "preflight" {
+		t.Errorf("installer calls = %q, want only \"preflight\"", got)
+	}
+	res := ex.RunResult()
+	if res["forced"] != true || res["overrideApplied"] != false || res["override"] == nil {
+		t.Errorf("C5 result after checkpoint error = %+v, want forced=true overrideApplied=false override!=nil", res)
+	}
+}
+
+// R2 (m2): a forced grant whose FailedFindings do not cover a new block
+// finding fails with "findings changed", records forceRejected="findings changed"
+// without a forced key (CN6), and installs nothing.
+func TestRebuildServer_ForcedSubsetMismatchRecordsForceRejected(t *testing.T) {
+	f := newPreflightFixture(t, false, `
+echo '{"version":1,"checks":["settings.profiles"],"findings":[{"check":"settings.profiles","code":"settings.profiles.missing","severity":"block","message":"missing prod","data":{"profile":"prod","project":"p1"}}],"blocking":1,"warnings":0}'
+exit 3
+`)
+	inst := &fakeInstaller{}
+	ex := f.executor(inst)
+	ex.SetForceGrant(&rebuildpreflight.ForceGrant{
+		RerunOf:      "run-failed-1",
+		ActorID:      "user-42",
+		ActorEmail:   "admin@example.com",
+		PinnedBranch: "main",
+		PinnedCommit: testCommit,
+		FailedFindings: []preflight.Finding{{
+			Check:    "settings.profiles",
+			Code:     "settings.profiles.missing",
+			Severity: preflight.SeverityBlock,
+			Message:  "missing dev",
+			Data:     map[string]any{"profile": "dev", "project": "p1"},
+		}},
+	})
+	ex.SetCheckpoint(func(map[string]any) error { return nil })
+
+	var log bytes.Buffer
+	err := ex.Run(context.Background(), &log, nil)
+	if err == nil || !strings.Contains(err.Error(), "findings changed") {
+		t.Fatalf("Run = %v, want findings changed error", err)
+	}
+	if got := strings.Join(inst.calls, ","); got != "preflight" {
+		t.Errorf("installer calls = %q, want only \"preflight\"", got)
+	}
+	res := ex.RunResult()
+	if res["forceRejected"] != "findings changed" {
+		t.Errorf("forceRejected = %v, want \"findings changed\"", res["forceRejected"])
+	}
+	if _, hasForced := res["forced"]; hasForced {
+		t.Errorf("CN6: forceRejected run must not set forced key (got %+v)", res)
+	}
+}

@@ -328,5 +328,19 @@ describe('admin-maintenance-banner state table (768 combinations)', () => {
       []
     );
     expect(unforcedRestarting).toBeNull();
+
+    // R1: reconciled failure paths (rolled_back, version mismatch, stale restarting)
+    // set aborted: true alongside installed: true, so they land on U2/F4 rather than
+    // U1/F5 ("the restart could not be started").
+    const unforcedReconcileFail = runBanner(
+      makeRun('r2', 'failed', {
+        installed: true,
+        aborted: true,
+        error: '"git-0123456789ab" failed to start; the boot-failure guard rolled back',
+      }),
+      []
+    );
+    expect(unforcedReconcileFail?.row).toBe('U2');
+    expect(unforcedReconcileFail?.text).not.toContain('could not be started');
   });
 });

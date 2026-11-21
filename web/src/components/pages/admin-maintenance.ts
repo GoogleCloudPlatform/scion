@@ -745,7 +745,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       font-size: 0.875rem;
       line-height: 1.45;
       border: 1px solid var(--scion-border, #e2e8f0);
-      background: var(--scion-surface-subtle, #f8fafc);
+      background: var(--scion-bg-subtle, #f8fafc);
     }
     .preflight-banner.primary {
       border-color: var(--sl-color-primary-300, #93c5fd);

@@ -658,8 +658,8 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 	}
 
 	buf := &runLogBuffer{}
-	if rs, ok := executor.(interface{ SetRunID(string) }); ok {
-		rs.SetRunID(runID)
+	if rs, ok := executor.(interface{ SetMaintenanceRunID(string) }); ok {
+		rs.SetMaintenanceRunID(runID)
 	}
 	checkpoint := s.makeMaintenanceCheckpoint(run, buf, grant)
 	if err := wireMaintenanceExecutor(executor, grant, checkpoint); err != nil {

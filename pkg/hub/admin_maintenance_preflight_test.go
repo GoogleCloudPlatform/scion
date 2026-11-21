@@ -91,17 +91,20 @@ func TestExecuteOperation_ForceValidationAndCreateRerunOf(t *testing.T) {
 	t.Run("400 on malformed force request and unknown rerunOf", func(t *testing.T) {
 		srv, _ := newTestServerWithStore(t)
 		for _, tc := range []struct {
-			key, body string
+			key, body, wantCode string
 		}{
-			{"rebuild-server", `{"params":{"force":true,"rerunOf":"r1"}}`},
-			{"rebuild-server", `{"params":{"force":"yes","rerunOf":"r1"}}`},
-			{"rebuild-server", `{"params":{"force":"true","rerunOf":"r1","branch":"main"}}`},
-			{"rebuild-web", `{"params":{"force":"true","rerunOf":"r1"}}`},
-			{"rebuild-server", `{"params":{"force":"true","rerunOf":"nonexistent-run"}}`},
+			{"rebuild-server", `{"params":{"force":true,"rerunOf":"r1"}}`, ErrCodeInvalidRequest},
+			{"rebuild-server", `{"params":{"force":"yes","rerunOf":"r1"}}`, ErrCodeInvalidRequest},
+			{"rebuild-server", `{"params":{"force":"true","rerunOf":"r1","branch":"main"}}`, ErrCodeInvalidRequest},
+			{"rebuild-web", `{"params":{"force":"true","rerunOf":"r1"}}`, maintenance.CodeUnknownParam},
+			{"rebuild-server", `{"params":{"force":"true","rerunOf":"nonexistent-run"}}`, ErrCodeInvalidRequest},
 		} {
 			rr := postForce(srv, tc.key, tc.body)
 			if rr.Code != http.StatusBadRequest {
 				t.Errorf("%s %s: status = %d, want 400 (body=%s)", tc.key, tc.body, rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), `"code":"`+tc.wantCode+`"`) {
+				t.Errorf("%s %s: want code %q, got body=%s", tc.key, tc.body, tc.wantCode, rr.Body.String())
 			}
 		}
 	})
@@ -336,9 +339,49 @@ func TestOptionA_MarkRunRestartingAndFailStalePreserveResultKeys(t *testing.T) {
 	if err := json.Unmarshal([]byte(got2.Result), &m2); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"rerunOf", "forced", "overrideApplied", "installed", "error"} {
+	for _, k := range []string{"rerunOf", "forced", "overrideApplied", "installed", "aborted", "error"} {
 		if _, ok := m2[k]; !ok {
 			t.Errorf("failStaleRestartingRuns dropped key %q (result=%s)", k, got2.Result)
+		}
+	}
+	if m2["aborted"] != true {
+		t.Errorf("failStaleRestartingRuns aborted = %v, want true", m2["aborted"])
+	}
+
+	// R1: finishPendingRun non-verified branches (rolled_back and version mismatch)
+	// must also set aborted: true so runs that restarted do not render U1/F5.
+	for _, status := range []string{LastUpdateRolledBack, LastUpdateFailed} {
+		reconcileRun := &store.MaintenanceOperationRun{
+			ID:           api.NewUUID(),
+			OperationKey: "rebuild-server",
+			Status:       store.MaintenanceStatusRestarting,
+			StartedAt:    now,
+			StartedBy:    "admin@example.com",
+			Result:       `{"installed":true,"branch":"main"}`,
+		}
+		if err := s.CreateMaintenanceRun(ctx, reconcileRun); err != nil {
+			t.Fatal(err)
+		}
+		if err := srv.finishPendingRun(ctx, PendingUpdate{
+			RunID: reconcileRun.ID,
+			From:  "v0.1.0",
+			To:    "git-0123456789ab",
+		}, status, "v0.1.0"); err != nil {
+			t.Fatalf("finishPendingRun(%s): %v", status, err)
+		}
+		gotRec, err := s.GetMaintenanceRun(ctx, reconcileRun.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mRec map[string]any
+		if err := json.Unmarshal([]byte(gotRec.Result), &mRec); err != nil {
+			t.Fatal(err)
+		}
+		if mRec["aborted"] != true {
+			t.Errorf("finishPendingRun(%s) aborted = %v, want true (result=%s)", status, mRec["aborted"], gotRec.Result)
+		}
+		if mRec["installed"] != true {
+			t.Errorf("finishPendingRun(%s) lost installed=true (result=%s)", status, gotRec.Result)
 		}
 	}
 }

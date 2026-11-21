@@ -90,10 +90,7 @@ func CheckRunRequest(key string, rawBody map[string]any) (ForceRequest, *Reject)
 		}
 	}
 
-	if forceCount > 0 || rerunCount > 0 {
-		if key != RebuildServerKey {
-			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "force re-run is only supported for rebuild-server"}
-		}
+	if key == RebuildServerKey && (forceCount > 0 || rerunCount > 0) {
 		if forceCount > 1 || rerunCount > 1 {
 			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "force and rerunOf may each be given at most once"}
 		}

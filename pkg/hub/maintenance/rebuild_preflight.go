@@ -51,8 +51,8 @@ func (e *RebuildServerExecutor) SetForceGrant(grant *rebuildpreflight.ForceGrant
 	}
 }
 
-// SetRunID records the maintenance run's ID for audit and log records.
-func (e *RebuildServerExecutor) SetRunID(runID string) {
+// SetMaintenanceRunID records the maintenance run's ID for audit and log records.
+func (e *RebuildServerExecutor) SetMaintenanceRunID(runID string) {
 	e.runID = runID
 }
 
