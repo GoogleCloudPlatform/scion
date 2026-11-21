@@ -32,6 +32,12 @@ import {
   hasAnyPermission,
   NAV_PERMISSION_MAP,
 } from '../../lib/admin-permissions.js';
+import {
+  brandMarkStyles,
+  observeBranding,
+  renderAttribution,
+  renderSidebarBrand,
+} from './brand-mark.js';
 
 interface NavItem {
   path: string;
@@ -191,6 +197,8 @@ export class ScionNav extends LitElement {
   }
 
   static override styles = css`
+    ${brandMarkStyles}
+
     :host {
       display: flex;
       flex-direction: column;
@@ -340,7 +348,7 @@ export class ScionNav extends LitElement {
 
     .nav-link.active {
       background: var(--scion-primary, #3b82f6);
-      color: white;
+      color: var(--scion-primary-text, #ffffff);
     }
 
     .nav-link.active:hover {
@@ -413,22 +421,39 @@ export class ScionNav extends LitElement {
       pointer-events: none;
     }
 
+    .sidebar-attribution {
+      padding: 0.25rem 0.75rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+      text-align: center;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    :host([collapsed]) .sidebar-attribution {
+      display: none;
+    }
+
     /* Smooth width transition */
     :host {
       transition: width var(--scion-transition-normal, 250ms ease);
     }
   `;
 
+  constructor() {
+    super();
+    observeBranding(this);
+  }
+
   override render() {
     const isSuperAdmin = this.user?.role === 'admin';
 
     return html`
       <div class="logo">
-        <div class="logo-icon">🌱</div>
-        <div class="logo-text">
-          <h1>Scion</h1>
-          <span>Agent Orchestration</span>
-        </div>
+        ${renderSidebarBrand({
+          collapsed: this.collapsed,
+          subtitleFallback: 'Agent Orchestration',
+        })}
       </div>
 
       <nav class="nav-container">
@@ -530,6 +555,7 @@ export class ScionNav extends LitElement {
           : ''}
       </nav>
 
+      ${renderAttribution('sidebar-attribution')}
       ${this.hideCollapse
         ? ''
         : html`

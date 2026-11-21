@@ -30,6 +30,13 @@ import { customElement, state } from 'lit/decorators.js';
 import { browserPath, loadPage } from '../../client/navigation.js';
 
 import { apiFetch } from '../../client/api.js';
+import { getBranding, getBrandName, isCustomBranding } from '../../client/branding.js';
+import {
+  brandMarkStyles,
+  observeBranding,
+  renderAttribution,
+  renderBrandLogoImages,
+} from '../shared/brand-mark.js';
 import {
   TestHubBannerController,
   renderTestHubBanner,
@@ -58,7 +65,13 @@ export class ScionPageInvite extends LitElement {
   /** The test-hub banner's status (shared/test-hub-banner.ts). */
   private _testHubBanner = new TestHubBannerController(this, { standalone: true });
 
+  constructor() {
+    super();
+    observeBranding(this);
+  }
+
   static override styles = css`
+    ${brandMarkStyles}
     ${testHubBannerStyles}
     ${standaloneTestHubBannerStyles}
 
@@ -131,6 +144,30 @@ export class ScionPageInvite extends LitElement {
 
     .loading-state sl-spinner {
       font-size: 2rem;
+    }
+
+    .invite-brand {
+      margin-bottom: 1.25rem;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .invite-brand-logo {
+      max-height: 36px;
+      max-width: 180px;
+    }
+
+    .invite-brand-name {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--scion-primary, #3b82f6);
+    }
+
+    .invite-attribution {
+      margin-top: 1.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--scion-border, #e2e8f0);
     }
   `;
 
@@ -235,6 +272,7 @@ export class ScionPageInvite extends LitElement {
     return html`
       ${renderTestHubBanner(this._testHubBanner.status)}
       <div class="card">
+        ${this.renderBrandHeader()}
         ${this.pageState === 'loading' || this.pageState === 'redeeming'
           ? this.renderLoading()
           : this.pageState === 'unauthenticated'
@@ -244,6 +282,20 @@ export class ScionPageInvite extends LitElement {
               : this.pageState === 'error'
                 ? this.renderError()
                 : this.renderNoCode()}
+        ${renderAttribution('brand-attribution invite-attribution')}
+      </div>
+    `;
+  }
+
+  private renderBrandHeader() {
+    if (!isCustomBranding()) return nothing;
+    const b = getBranding();
+    const hasLogo = Boolean(b?.logoLight || b?.logoDark);
+    return html`
+      <div class="invite-brand">
+        ${hasLogo
+          ? renderBrandLogoImages('invite-brand-logo')
+          : html`<span class="invite-brand-name">${getBrandName()}</span>`}
       </div>
     `;
   }

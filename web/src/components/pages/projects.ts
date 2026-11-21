@@ -151,7 +151,7 @@ export class ScionPageProjects extends LitElement {
 
       .scope-toggle button.active {
         background: var(--scion-primary, #3b82f6);
-        color: white;
+        color: var(--scion-primary-text, #ffffff);
       }
 
       .scope-toggle button sl-icon {

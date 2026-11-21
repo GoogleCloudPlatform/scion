@@ -104,7 +104,7 @@ export class ScionChatInteragentMarker extends LitElement {
         padding: 0.375rem 1rem;
         margin-top: 0.25rem;
         margin-bottom: 0.25rem;
-        background: rgba(148, 163, 184, 0.1);
+        background: color-mix(in srgb, var(--scion-neutral-400, #94a3b8) 10%, transparent);
         border: 1px solid var(--scion-border, rgba(148, 163, 184, 0.2));
         border-radius: 9999px;
         cursor: pointer;
@@ -116,7 +116,7 @@ export class ScionChatInteragentMarker extends LitElement {
       }
 
       .marker-pill:hover {
-        background: rgba(148, 163, 184, 0.18);
+        background: color-mix(in srgb, var(--scion-neutral-400, #94a3b8) 18%, transparent);
       }
 
       /* Expanded state — bordered container, centered to match collapsed pill */
@@ -127,7 +127,7 @@ export class ScionChatInteragentMarker extends LitElement {
         margin-top: 0.25rem;
         margin-bottom: 0.25rem;
         padding: 0.5rem 1rem;
-        background: rgba(148, 163, 184, 0.05);
+        background: color-mix(in srgb, var(--scion-neutral-400, #94a3b8) 5%, transparent);
         border: 2px solid var(--scion-border, rgba(148, 163, 184, 0.2));
         border-radius: 0.5rem;
         cursor: pointer;
@@ -135,7 +135,7 @@ export class ScionChatInteragentMarker extends LitElement {
       }
 
       .marker-expanded:hover {
-        background: rgba(148, 163, 184, 0.1);
+        background: color-mix(in srgb, var(--scion-neutral-400, #94a3b8) 10%, transparent);
       }
 
       .ia-msg {

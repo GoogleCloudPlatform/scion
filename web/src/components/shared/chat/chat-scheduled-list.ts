@@ -109,7 +109,7 @@ export class ScionChatScheduledList extends LitElement {
     }
     .bubble {
       opacity: 0.6;
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       border: 1px dashed var(--scion-border, #cbd5e1);
       border-radius: 0.75rem 0.75rem 0 0;
       padding: 0.5rem 0.75rem;

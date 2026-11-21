@@ -1351,7 +1351,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .from-user .bubble-content {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       color: var(--scion-text, #1e293b);
       border-top-right-radius: 0.25rem;
     }
@@ -1493,8 +1493,8 @@ export class ScionChatMessage extends LitElement {
 
     /* @mention pills */
     .md-content .mention {
-      background: rgba(59, 130, 246, 0.15);
-      color: #60a5fa;
+      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
+      color: var(--scion-primary, #60a5fa);
       padding: 0 4px;
       border-radius: 3px;
       font-weight: 500;
@@ -1505,7 +1505,7 @@ export class ScionChatMessage extends LitElement {
     }
 
     .md-content .mention.clickable:hover {
-      background: rgba(59, 130, 246, 0.25);
+      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 18%, transparent);
       text-decoration: underline;
     }
 
@@ -2214,17 +2214,17 @@ export class ScionChatMessage extends LitElement {
     }
 
     .diff-block .diff-add {
-      background: rgba(34, 197, 94, 0.15);
+      background: color-mix(in srgb, var(--scion-status-success, #22c55e) 15%, transparent);
       color: var(--scion-success-700, #15803d);
     }
 
     .diff-block .diff-remove {
-      background: rgba(239, 68, 68, 0.15);
+      background: color-mix(in srgb, var(--scion-status-danger, #ef4444) 15%, transparent);
       color: var(--scion-danger-700, #b91c1c);
     }
 
     .diff-block .diff-hunk {
-      background: rgba(59, 130, 246, 0.1);
+      background: color-mix(in srgb, var(--scion-primary, #3b82f6) 10%, transparent);
       color: var(--scion-primary-600, #2563eb);
       font-weight: 500;
     }

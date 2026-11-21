@@ -372,7 +372,7 @@ export class ScionChatMembers extends LitElement {
     }
 
     .member-item.active-peer {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       border-left: 2px solid var(--scion-primary, #3b82f6);
       padding-left: 14px;
     }
@@ -498,7 +498,7 @@ export class ScionChatMembers extends LitElement {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: #3b82f6;
+      background: var(--scion-primary, #3b82f6);
       border: 2px solid var(--scion-bg, #1e293b);
       z-index: 1;
     }

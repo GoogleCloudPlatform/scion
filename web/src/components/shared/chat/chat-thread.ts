@@ -1483,7 +1483,7 @@ export class ScionChatThread extends LitElement {
         gap: 0.375rem;
         padding: 0.375rem 0.75rem;
         background: var(--scion-primary, #3b82f6);
-        color: #fff;
+        color: var(--scion-primary-text, #ffffff);
         border: none;
         border-radius: 1rem;
         font-size: var(--chat-fs-base);
@@ -1531,7 +1531,7 @@ export class ScionChatThread extends LitElement {
 
       @keyframes permalink-fade {
         0% {
-          background-color: rgba(59, 130, 246, 0.2);
+          background-color: color-mix(in srgb, var(--scion-primary, #3b82f6) 20%, transparent);
         }
         100% {
           background-color: transparent;
@@ -1542,7 +1542,7 @@ export class ScionChatThread extends LitElement {
       @media (prefers-reduced-motion: reduce) {
         .permalink-highlight {
           animation: none;
-          background-color: rgba(59, 130, 246, 0.2);
+          background-color: color-mix(in srgb, var(--scion-primary, #3b82f6) 20%, transparent);
         }
       }
 
@@ -1817,7 +1817,7 @@ export class ScionChatThread extends LitElement {
       @keyframes highlight-flash {
         0%,
         20% {
-          background: var(--scion-primary-50, #eff6ff);
+          background: var(--scion-primary-tint, #eff6ff);
         }
         100% {
           background: transparent;
@@ -1858,7 +1858,7 @@ export class ScionChatThread extends LitElement {
 
       .context-menu-item:hover,
       .context-menu-item:focus {
-        background: var(--scion-primary-50, #eff6ff);
+        background: var(--scion-primary-tint, #eff6ff);
         outline: none;
       }
 

@@ -58,6 +58,13 @@ import {
   isGraphPaletteAvailable,
 } from '../../client/graph-palette-events.js';
 import { touchMenuItemStyles } from './touch-styles.js';
+import { getBranding, getBrandName } from '../../client/branding.js';
+import {
+  brandMarkStyles,
+  observeBranding,
+  renderBrandLogoImages,
+  renderCompactBrandMark,
+} from './brand-mark.js';
 import './notification-tray.js';
 import { isMacPlatform } from '../../utils/platform.js';
 import { hasOpenModalDescendant } from './open-modal.js';
@@ -176,8 +183,32 @@ export class ScionHeader extends LitElement {
   /** Whether the device's primary pointer is touch — hides keyboard-shortcut affordances on the palette button. */
   private touchPrimary = new TouchPrimaryController(this);
 
+  constructor() {
+    super();
+    observeBranding(this);
+  }
+
   static override styles = css`
     ${touchMenuItemStyles}
+    ${brandMarkStyles}
+
+    .header-brand-logo {
+      max-height: 24px;
+      max-width: 140px;
+      object-fit: contain;
+    }
+
+    .chat-brand-badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--scion-text-muted, #64748b);
+      padding: 0.125rem 0.5rem;
+      border-radius: var(--scion-radius-full, 9999px);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      line-height: 1.4;
+      white-space: nowrap;
+    }
 
     /* ------------------------------------------------------------------ */
     /* Grid: three-tier responsive                                         */
@@ -332,7 +363,7 @@ export class ScionHeader extends LitElement {
 
     .mode-switch button.active {
       background: var(--scion-primary, #3b82f6);
-      color: white;
+      color: var(--scion-primary-text, #ffffff);
     }
 
     .mode-switch button.active:hover {
@@ -703,7 +734,7 @@ export class ScionHeader extends LitElement {
       padding: 0 5px;
       border-radius: 9px;
       background: var(--scion-primary, #3b82f6);
-      color: #fff;
+      color: var(--scion-primary-text, #ffffff);
       font-size: 0.6875rem;
       font-weight: 700;
       line-height: 1;
@@ -727,7 +758,7 @@ export class ScionHeader extends LitElement {
       padding: 0.5rem 1rem;
       border-radius: 0.5rem;
       background: var(--scion-primary, #3b82f6);
-      color: white;
+      color: var(--scion-primary-text, #ffffff);
       text-decoration: none;
       font-size: 0.875rem;
       font-weight: 500;
@@ -829,14 +860,25 @@ export class ScionHeader extends LitElement {
             `
           : ''}
         ${this.isChatView()
-          ? html`
-              <div class="logo">
-                <div class="logo-icon">🌱</div>
-                <div class="logo-text">
-                  <h1>Scion Chat</h1>
+          ? (() => {
+              const b = getBranding();
+              const hasLogo = Boolean(b?.logoLight || b?.logoDark);
+              return html`
+                <div class="logo">
+                  ${hasLogo
+                    ? html`
+                        ${renderBrandLogoImages('header-brand-logo')}
+                        <span class="chat-brand-badge">Chat</span>
+                      `
+                    : html`
+                        <div class="logo-icon">${renderCompactBrandMark()}</div>
+                        <div class="logo-text">
+                          <h1>${getBrandName()} Chat</h1>
+                        </div>
+                      `}
                 </div>
-              </div>
-            `
+              `;
+            })()
           : html`<h1 class="page-title">${this.pageTitle}</h1>`}
       </div>
 

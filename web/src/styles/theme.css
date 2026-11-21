@@ -95,6 +95,9 @@ html .sl-theme-light,
   --scion-primary-hover: var(--scion-primary-600);
   --scion-primary-active: var(--scion-primary-700);
   --scion-primary-text: #ffffff;
+  --scion-primary-tint: var(--scion-primary-50);
+  --scion-logo-light-display: block;
+  --scion-logo-dark-display: none;
 
   --scion-bg: var(--scion-neutral-50);
   --scion-bg-subtle: var(--scion-neutral-100);
@@ -131,6 +134,7 @@ html .sl-theme-light,
   --scion-error-bg: var(--scion-danger-50);
   --scion-error-border: var(--scion-danger-300);
   --scion-error-text: var(--scion-danger-800);
+  --scion-error-text-hover: var(--scion-danger-900);
   --scion-success-bg: var(--scion-success-100);
   --scion-success-border: var(--scion-success-300);
   --scion-success-text: var(--scion-success-800);
@@ -138,10 +142,10 @@ html .sl-theme-light,
   --scion-warning-border: var(--scion-warning-300);
   --scion-warning-text: var(--scion-warning-800);
 
-  --scion-action-hover-danger-bg: rgba(239, 68, 68, 0.1);
-  --scion-action-hover-warning-bg: rgba(245, 158, 11, 0.1);
-  --scion-action-hover-success-bg: rgba(34, 197, 94, 0.1);
-  --scion-action-hover-primary-bg: rgba(59, 130, 246, 0.1);
+  --scion-action-hover-danger-bg: color-mix(in srgb, var(--scion-danger-500) 10%, transparent);
+  --scion-action-hover-warning-bg: color-mix(in srgb, var(--scion-warning-500) 10%, transparent);
+  --scion-action-hover-success-bg: color-mix(in srgb, var(--scion-success-500) 10%, transparent);
+  --scion-action-hover-primary-bg: color-mix(in srgb, var(--scion-primary-500) 10%, transparent);
 
   --scion-review-ins-text: #166534;
   --scion-review-ins-bg: #dcfce7;
@@ -309,7 +313,9 @@ html .sl-theme-dark,
   --scion-primary-hover: var(--scion-primary-300);
   --scion-primary-active: var(--scion-primary-500);
   --scion-primary-text: var(--scion-neutral-900);
-  --scion-primary-50: rgba(59, 130, 246, 0.15);
+  --scion-primary-tint: color-mix(in srgb, var(--scion-primary) 15%, transparent);
+  --scion-logo-light-display: none;
+  --scion-logo-dark-display: block;
 
   --scion-bg: var(--scion-neutral-900);
   --scion-bg-subtle: var(--scion-neutral-800);
@@ -331,32 +337,33 @@ html .sl-theme-dark,
   --scion-status-danger: var(--scion-danger-400);
   --scion-status-info: var(--scion-primary-400);
 
-  --scion-badge-success-bg: rgba(34, 197, 94, 0.2);
+  --scion-badge-success-bg: color-mix(in srgb, var(--scion-success-500) 20%, transparent);
   --scion-badge-success-text: var(--scion-success-300);
-  --scion-badge-warning-bg: rgba(245, 158, 11, 0.2);
+  --scion-badge-warning-bg: color-mix(in srgb, var(--scion-warning-500) 20%, transparent);
   --scion-badge-warning-text: var(--scion-warning-300);
-  --scion-badge-danger-bg: rgba(239, 68, 68, 0.2);
+  --scion-badge-danger-bg: color-mix(in srgb, var(--scion-danger-500) 20%, transparent);
   --scion-badge-danger-text: var(--scion-danger-300);
-  --scion-badge-danger-border: rgba(248, 113, 113, 0.4);
-  --scion-badge-primary-bg: rgba(59, 130, 246, 0.2);
+  --scion-badge-danger-border: color-mix(in srgb, var(--scion-danger-400) 40%, transparent);
+  --scion-badge-primary-bg: color-mix(in srgb, var(--scion-primary-500) 20%, transparent);
   --scion-badge-primary-text: var(--scion-primary-300);
-  --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
+  --scion-badge-neutral-bg: color-mix(in srgb, var(--scion-neutral-500) 20%, transparent);
   --scion-badge-neutral-text: var(--scion-neutral-300);
 
-  --scion-error-bg: rgba(239, 68, 68, 0.15);
-  --scion-error-border: rgba(248, 113, 113, 0.4);
+  --scion-error-bg: color-mix(in srgb, var(--scion-danger-500) 15%, transparent);
+  --scion-error-border: color-mix(in srgb, var(--scion-danger-400) 40%, transparent);
   --scion-error-text: var(--scion-danger-300);
-  --scion-success-bg: rgba(34, 197, 94, 0.15);
-  --scion-success-border: rgba(74, 222, 128, 0.4);
+  --scion-error-text-hover: var(--scion-danger-200);
+  --scion-success-bg: color-mix(in srgb, var(--scion-success-500) 15%, transparent);
+  --scion-success-border: color-mix(in srgb, var(--scion-success-400) 40%, transparent);
   --scion-success-text: var(--scion-success-300);
-  --scion-warning-bg: rgba(245, 158, 11, 0.15);
-  --scion-warning-border: rgba(251, 191, 36, 0.4);
+  --scion-warning-bg: color-mix(in srgb, var(--scion-warning-500) 15%, transparent);
+  --scion-warning-border: color-mix(in srgb, var(--scion-warning-400) 40%, transparent);
   --scion-warning-text: var(--scion-warning-300);
 
-  --scion-action-hover-danger-bg: rgba(239, 68, 68, 0.2);
-  --scion-action-hover-warning-bg: rgba(245, 158, 11, 0.2);
-  --scion-action-hover-success-bg: rgba(34, 197, 94, 0.2);
-  --scion-action-hover-primary-bg: rgba(59, 130, 246, 0.2);
+  --scion-action-hover-danger-bg: color-mix(in srgb, var(--scion-danger-500) 20%, transparent);
+  --scion-action-hover-warning-bg: color-mix(in srgb, var(--scion-warning-500) 20%, transparent);
+  --scion-action-hover-success-bg: color-mix(in srgb, var(--scion-success-500) 20%, transparent);
+  --scion-action-hover-primary-bg: color-mix(in srgb, var(--scion-primary-500) 20%, transparent);
 
   --scion-review-ins-text: #bbf7d0;
   --scion-review-ins-bg: #14532d;
@@ -391,9 +398,8 @@ html .sl-theme-dark,
   --sl-color-primary-600: var(--scion-primary-300);
   --sl-color-primary-700: var(--scion-primary-200);
   --sl-color-primary-800: var(--scion-primary-100);
-  /* Literal #eff6ff avoids dark mode's translucent --scion-primary-50 tint override. */
-  --sl-color-primary-900: #eff6ff;
-  --sl-color-primary-950: #eff6ff;
+  --sl-color-primary-900: var(--scion-primary-50);
+  --sl-color-primary-950: var(--scion-primary-50);
 
   --sl-color-success-50: var(--scion-success-900);
   --sl-color-success-100: var(--scion-success-800);
@@ -516,7 +522,9 @@ html .sl-theme-dark,
     --scion-primary-hover: var(--scion-primary-300);
     --scion-primary-active: var(--scion-primary-500);
     --scion-primary-text: var(--scion-neutral-900);
-    --scion-primary-50: rgba(59, 130, 246, 0.15);
+    --scion-primary-tint: color-mix(in srgb, var(--scion-primary) 15%, transparent);
+    --scion-logo-light-display: none;
+    --scion-logo-dark-display: block;
 
     --scion-bg: var(--scion-neutral-900);
     --scion-bg-subtle: var(--scion-neutral-800);
@@ -538,32 +546,33 @@ html .sl-theme-dark,
     --scion-status-danger: var(--scion-danger-400);
     --scion-status-info: var(--scion-primary-400);
 
-    --scion-badge-success-bg: rgba(34, 197, 94, 0.2);
+    --scion-badge-success-bg: color-mix(in srgb, var(--scion-success-500) 20%, transparent);
     --scion-badge-success-text: var(--scion-success-300);
-    --scion-badge-warning-bg: rgba(245, 158, 11, 0.2);
+    --scion-badge-warning-bg: color-mix(in srgb, var(--scion-warning-500) 20%, transparent);
     --scion-badge-warning-text: var(--scion-warning-300);
-    --scion-badge-danger-bg: rgba(239, 68, 68, 0.2);
+    --scion-badge-danger-bg: color-mix(in srgb, var(--scion-danger-500) 20%, transparent);
     --scion-badge-danger-text: var(--scion-danger-300);
-    --scion-badge-danger-border: rgba(248, 113, 113, 0.4);
-    --scion-badge-primary-bg: rgba(59, 130, 246, 0.2);
+    --scion-badge-danger-border: color-mix(in srgb, var(--scion-danger-400) 40%, transparent);
+    --scion-badge-primary-bg: color-mix(in srgb, var(--scion-primary-500) 20%, transparent);
     --scion-badge-primary-text: var(--scion-primary-300);
-    --scion-badge-neutral-bg: rgba(100, 116, 139, 0.2);
+    --scion-badge-neutral-bg: color-mix(in srgb, var(--scion-neutral-500) 20%, transparent);
     --scion-badge-neutral-text: var(--scion-neutral-300);
 
-    --scion-error-bg: rgba(239, 68, 68, 0.15);
-    --scion-error-border: rgba(248, 113, 113, 0.4);
+    --scion-error-bg: color-mix(in srgb, var(--scion-danger-500) 15%, transparent);
+    --scion-error-border: color-mix(in srgb, var(--scion-danger-400) 40%, transparent);
     --scion-error-text: var(--scion-danger-300);
-    --scion-success-bg: rgba(34, 197, 94, 0.15);
-    --scion-success-border: rgba(74, 222, 128, 0.4);
+    --scion-error-text-hover: var(--scion-danger-200);
+    --scion-success-bg: color-mix(in srgb, var(--scion-success-500) 15%, transparent);
+    --scion-success-border: color-mix(in srgb, var(--scion-success-400) 40%, transparent);
     --scion-success-text: var(--scion-success-300);
-    --scion-warning-bg: rgba(245, 158, 11, 0.15);
-    --scion-warning-border: rgba(251, 191, 36, 0.4);
+    --scion-warning-bg: color-mix(in srgb, var(--scion-warning-500) 15%, transparent);
+    --scion-warning-border: color-mix(in srgb, var(--scion-warning-400) 40%, transparent);
     --scion-warning-text: var(--scion-warning-300);
 
-    --scion-action-hover-danger-bg: rgba(239, 68, 68, 0.2);
-    --scion-action-hover-warning-bg: rgba(245, 158, 11, 0.2);
-    --scion-action-hover-success-bg: rgba(34, 197, 94, 0.2);
-    --scion-action-hover-primary-bg: rgba(59, 130, 246, 0.2);
+    --scion-action-hover-danger-bg: color-mix(in srgb, var(--scion-danger-500) 20%, transparent);
+    --scion-action-hover-warning-bg: color-mix(in srgb, var(--scion-warning-500) 20%, transparent);
+    --scion-action-hover-success-bg: color-mix(in srgb, var(--scion-success-500) 20%, transparent);
+    --scion-action-hover-primary-bg: color-mix(in srgb, var(--scion-primary-500) 20%, transparent);
 
     --scion-review-ins-text: #bbf7d0;
     --scion-review-ins-bg: #14532d;
@@ -597,8 +606,8 @@ html .sl-theme-dark,
     --sl-color-primary-600: var(--scion-primary-300);
     --sl-color-primary-700: var(--scion-primary-200);
     --sl-color-primary-800: var(--scion-primary-100);
-    --sl-color-primary-900: #eff6ff;
-    --sl-color-primary-950: #eff6ff;
+    --sl-color-primary-900: var(--scion-primary-50);
+    --sl-color-primary-950: var(--scion-primary-50);
 
     --sl-color-success-50: var(--scion-success-900);
     --sl-color-success-100: var(--scion-success-800);

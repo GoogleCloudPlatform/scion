@@ -838,7 +838,7 @@ export class ScionChatSpaceRail extends LitElement {
 
     .space-header .unread-badge {
       background: var(--scion-primary, #3b82f6);
-      color: #fff;
+      color: var(--scion-primary-text, #ffffff);
       font-size: var(--chat-fs-2xs);
       font-weight: 700;
       padding: 0.0625rem 0.3125rem;
@@ -922,7 +922,7 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     .thread-item.selected {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
       font-weight: 600;
     }
 
@@ -1246,7 +1246,7 @@ export class ScionChatSpaceRail extends LitElement {
 
     .filter-toggle button.active {
       background: var(--scion-primary, #3b82f6);
-      color: white;
+      color: var(--scion-primary-text, #ffffff);
     }
 
     .filter-toggle button sl-icon {

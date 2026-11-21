@@ -294,6 +294,14 @@ describe('theme.css dark block parity', () => {
   it('declares the exact same properties and values in explicit dark and system dark blocks', () => {
     expect(Object.fromEntries(systemDark)).toEqual(Object.fromEntries(explicitDark));
   });
+
+  it('derives dark --sl-color-primary-900/950 from --scion-primary-50 without overriding --scion-primary-50', () => {
+    for (const darkBlock of [explicitDark, systemDark]) {
+      expect(darkBlock.has('--scion-primary-50')).toBe(false);
+      expect(darkBlock.get('--sl-color-primary-900')).toBe('var(--scion-primary-50)');
+      expect(darkBlock.get('--sl-color-primary-950')).toBe('var(--scion-primary-50)');
+    }
+  });
 });
 
 describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)', () => {
@@ -318,6 +326,24 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
     expect(get('--sl-color-primary-600')).toEqual([0x25, 0x63, 0xeb, 1]);
     expect(get('--scion-bg')).toEqual([0xf8, 0xfa, 0xfc, 1]);
     expect(get('--scion-surface')).toEqual([255, 255, 255, 1]);
+    // Light-mode equivalence for tokens rewritten to semantic / color-mix() forms in PR 2c.
+    expect(get('--scion-primary')).toEqual([59, 130, 246, 1]);
+    expect(get('--scion-primary-tint')).toEqual([0xef, 0xf6, 0xff, 1]);
+    expect(get('--scion-primary-text')).toEqual([255, 255, 255, 1]);
+    expect(get('--scion-error-bg')).toEqual([0xfe, 0xf2, 0xf2, 1]);
+    expect(get('--scion-badge-danger-border')).toEqual([0xfe, 0xca, 0xca, 1]);
+    expect(get('--scion-error-text')).toEqual([0x99, 0x1b, 0x1b, 1]);
+    expect(get('--scion-error-text-hover')).toEqual([0x7f, 0x1d, 0x1d, 1]);
+    expect(get('--scion-action-hover-danger-bg')).toEqual([239, 68, 68, 0.1]);
+    expect(get('--scion-action-hover-warning-bg')).toEqual([245, 158, 11, 0.1]);
+    expect(get('--scion-action-hover-success-bg')).toEqual([34, 197, 94, 0.1]);
+    expect(get('--scion-action-hover-primary-bg')).toEqual([59, 130, 246, 0.1]);
+    // Explicit scoped light-mode contrast-improvement exceptions (PR 2c):
+    // unauthorized.ts .help-text moved from #64748b on #fef3c7 (4.27:1) to warning tokens (>= 4.5:1 AA).
+    expect(
+      contrast(get('--scion-warning-text'), get('--scion-warning-bg')),
+      'unauthorized .help-text warning-text on warning-bg (light AA improvement)'
+    ).toBeGreaterThanOrEqual(4.5);
 
     // Every non-palette --sl-* declaration in the light block must match Shoelace's light.css
     // (except Scion's intentional font-family and border-radius overrides) so light mode never
@@ -450,6 +476,20 @@ describe('Shoelace & neutral dark/light WCAG AA contrast (#7774, #6800, #3773)',
 
       it('keeps sl-tag and subtle callout pairs AA-readable', () => {
         const ground = get('--scion-surface');
+        const primaryTintBg = over(get('--scion-primary-tint'), ground);
+        expect(
+          contrast(get('--scion-text'), primaryTintBg),
+          'text on primary-tint over surface'
+        ).toBeGreaterThanOrEqual(4.5);
+        const errBg = over(get('--scion-error-bg'), ground);
+        expect(
+          contrast(get('--scion-error-text'), errBg),
+          'error-text on error-bg'
+        ).toBeGreaterThanOrEqual(4.5);
+        expect(
+          contrast(get('--scion-error-text-hover'), errBg),
+          'error-text-hover on error-bg'
+        ).toBeGreaterThanOrEqual(4.5);
         for (const v of variants) {
           const bg50 = over(get(`--sl-color-${v}-50`), ground);
           const bg100 = over(get(`--sl-color-${v}-100`), ground);
@@ -588,16 +628,19 @@ function findBareColorLiterals(text: string): string[] {
  * Categories:
  * - Intentional non-theme palettes: terminal ANSI, CodeMirror syntax tokens,
  *   deterministic avatar wheels, Chart.js categorical series, QR quiet zones,
- *   sandboxed iframe fallback tables, and neutral switch-thumb/scrim literals.
- * - Deferred branding PR 2c scope (ptone/scion#8409): brand surfaces (`login.ts`,
- *   `unauthorized.ts`, `terminal-workspace-root.ts`), `--scion-primary-text`
- *   foreground migrations, and `color-mix(...)` primary/status RGB tints.
+ *   OAuth provider SVGs, offline HTML exports, `<meta name="theme-color">`
+ *   defaults, sandboxed iframe fallback tables, and neutral switch-thumb/scrim
+ *   literals.
  */
 const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   // Intentional non-theme palettes & fallbacks
   'client/artifact-preview.ts': {
     max: 20,
     reason: 'DEFAULT_THEME fallback table for sandboxed srcdoc iframes without computed styles',
+  },
+  'client/branding-runtime.ts': {
+    max: 1,
+    reason: 'DEFAULT_THEME_COLOR (#1e293b) for <meta name="theme-color"> HTML tag reset',
   },
   'components/app-shell.ts': {
     max: 1,
@@ -606,6 +649,10 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   'components/pages/admin-maintenance.ts': {
     max: 1,
     reason: 'Switch toggle thumb knob (white)',
+  },
+  'components/pages/login.ts': {
+    max: 6,
+    reason: 'Google and GitHub OAuth provider brand SVG colors',
   },
   'components/pages/metrics-dashboard.ts': {
     max: 10,
@@ -620,6 +667,19 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
     reason:
       'Deterministic 24-hue light/dark avatar wheel (24 hsl), initials (#fff), and presence dots (#22c55e, #f59e0b)',
   },
+  'components/shared/chat/chat-message.ts': {
+    max: 2,
+    reason:
+      'Avatar initials (#fff) on deterministic HSL wheel and lightbox icon (#ffffff) on dark scrim',
+  },
+  'components/shared/chat/chat-space-rail.ts': {
+    max: 1,
+    reason: 'Mention badge foreground (#fff) on --scion-danger-500 fill',
+  },
+  'components/shared/chat/chat-thread.ts': {
+    max: 3,
+    reason: 'Standalone offline HTML export stylesheet',
+  },
   'components/shared/code-editor.ts': {
     max: 21,
     reason: 'CodeMirror One Dark syntax highlighting token palette',
@@ -628,6 +688,18 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
     max: 6,
     reason: 'AVATAR_PALETTE deterministic avatar colors',
   },
+  'components/shared/decisions-views.ts': {
+    max: 1,
+    reason: 'Avatar initials (#ffffff) on deterministic avatar background',
+  },
+  'components/shared/header.ts': {
+    max: 1,
+    reason: 'Theme switch toggle thumb knob (white)',
+  },
+  'components/shared/untrusted-view-frame.ts': {
+    max: 1,
+    reason: 'Sandboxed artifact iframe canvas background (white)',
+  },
   'components/terminal/terminal-pane.ts': {
     max: 35,
     reason: 'xterm.js ANSI color palette and terminal viewport chrome',
@@ -635,100 +707,6 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
   'client/terminal-workspace-root.ts': {
     max: 2,
     reason: 'Intentional dark terminal-pane host background (#111827) and pane border (#333)',
-  },
-
-  // Deferred to branding PR 2c (ptone/scion#8409): brand surfaces, --scion-primary-text, color-mix tints
-  'components/pages/admin-users.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/agents.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/home.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/login.ts': {
-    max: 12,
-    reason: 'PR 2c brand surface + OAuth provider brand SVGs (ptone/scion#8409)',
-  },
-  'components/pages/profile-decisions.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/project-detail.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/project-settings.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/projects.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/pages/unauthorized.ts': {
-    max: 4,
-    reason: 'PR 2c brand surface (ptone/scion#8409)',
-  },
-  'components/profile/profile-nav.ts': {
-    max: 4,
-    reason: 'PR 2c brand surface & --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-composer.ts': {
-    max: 1,
-    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-interagent-marker.ts': {
-    max: 4,
-    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-members.ts': {
-    max: 1,
-    reason: 'PR 2c color-mix/primary migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-message.ts': {
-    max: 8,
-    reason: 'PR 2c --scion-primary-text & color-mix RGB tints (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-search.ts': {
-    max: 1,
-    reason: 'PR 2c color-mix RGB tint migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-space-rail.ts': {
-    max: 3,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/chat/chat-thread.ts': {
-    max: 6,
-    reason: 'PR 2c --scion-primary-text, color-mix tints & offline HTML export (ptone/scion#8409)',
-  },
-  'components/shared/decisions-views.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/header.ts': {
-    max: 4,
-    reason: 'PR 2c brand surface, --scion-primary-text & toggle knob (ptone/scion#8409)',
-  },
-  'components/shared/nav.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/status-badge.ts': {
-    max: 6,
-    reason: 'PR 2c color-mix status pulse keyframes (ptone/scion#8409)',
-  },
-  'components/shared/untrusted-view-frame.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
-  },
-  'components/shared/view-toggle.ts': {
-    max: 1,
-    reason: 'PR 2c --scion-primary-text migration (ptone/scion#8409)',
   },
 };
 

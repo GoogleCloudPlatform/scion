@@ -111,7 +111,7 @@ export class ScionSlashAutocomplete extends LitElement {
 
     .dropdown-item:hover,
     .dropdown-item.highlighted {
-      background: var(--scion-primary-50, #eff6ff);
+      background: var(--scion-primary-tint, #eff6ff);
     }
 
     .dropdown-item .command-name {

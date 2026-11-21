@@ -24,7 +24,7 @@
 import type { PublicBranding } from '../shared/types.js';
 import { setFeatureFlag, setServerFlags } from '../utils/feature-flags.js';
 import { apiFetch } from './api.js';
-import { setAppName } from './page-title.js';
+import { applyBranding } from './branding.js';
 
 /**
  * Parses `res` as JSON, returning `null` for a non-OK status or a body that
@@ -98,7 +98,7 @@ export function getPublicSettings(): Promise<Readonly<PublicSettings> | null> {
           : null;
       if (settings && generation === publicSettingsGeneration) {
         publicSettings = settings;
-        setAppName(settings.branding?.name);
+        applyBranding(settings.branding ?? null);
       }
       return settings;
     } catch {

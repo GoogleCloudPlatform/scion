@@ -20,8 +20,15 @@
  * Provides OAuth provider selection and error handling for authentication
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { getBranding, getBrandName, getBrandSubtitle } from '../../client/branding.js';
+import {
+  brandMarkStyles,
+  observeBranding,
+  renderAttribution,
+  renderBrandLogoImages,
+} from '../shared/brand-mark.js';
 
 import {
   TestHubBannerController,
@@ -88,7 +95,13 @@ export class ScionLoginPage extends LitElement {
   /** The test-hub banner's status (shared/test-hub-banner.ts). */
   private _testHubBanner = new TestHubBannerController(this, { standalone: true });
 
+  constructor() {
+    super();
+    observeBranding(this);
+  }
+
   static override styles = css`
+    ${brandMarkStyles}
     ${testHubBannerStyles}
     ${standaloneTestHubBannerStyles}
 
@@ -127,6 +140,16 @@ export class ScionLoginPage extends LitElement {
       margin-bottom: 2rem;
     }
 
+    .login-brand-logo {
+      max-height: 48px;
+      max-width: 240px;
+      margin: 0 auto;
+    }
+
+    .login-attribution {
+      margin-top: 0.75rem;
+    }
+
     .logo-text {
       font-size: 2rem;
       font-weight: 700;
@@ -156,8 +179,8 @@ export class ScionLoginPage extends LitElement {
     }
 
     .error-alert {
-      background: #fef2f2;
-      border: 1px solid #fecaca;
+      background: var(--scion-error-bg, #fef2f2);
+      border: 1px solid var(--scion-badge-danger-border, #fecaca);
       border-radius: 0.5rem;
       padding: 1rem;
       margin-bottom: 1.5rem;
@@ -167,14 +190,14 @@ export class ScionLoginPage extends LitElement {
     }
 
     .error-alert sl-icon {
-      color: #dc2626;
+      color: var(--scion-error-text, #dc2626);
       flex-shrink: 0;
       margin-top: 0.125rem;
     }
 
     .error-message {
       font-size: 0.875rem;
-      color: #991b1b;
+      color: var(--scion-error-text, #991b1b);
     }
 
     .error-action {
@@ -183,13 +206,13 @@ export class ScionLoginPage extends LitElement {
     }
 
     .error-action a {
-      color: #991b1b;
+      color: var(--scion-error-text, #991b1b);
       font-weight: 500;
       text-decoration: underline;
     }
 
     .error-action a:hover {
-      color: #7f1d1d;
+      color: var(--scion-error-text-hover, #7f1d1d);
     }
 
     .providers {
@@ -227,7 +250,7 @@ export class ScionLoginPage extends LitElement {
 
     .provider-btn:focus {
       outline: none;
-      box-shadow: 0 0 0 2px var(--scion-primary-50, #eff6ff);
+      box-shadow: 0 0 0 2px var(--scion-primary-tint, #eff6ff);
       border-color: var(--scion-primary, #3b82f6);
     }
 
@@ -409,13 +432,19 @@ export class ScionLoginPage extends LitElement {
     const providers = this.getProviders();
     const hasProviders = providers.some((p) => p.available);
 
+    const branding = getBranding();
+    const hasLogo = Boolean(branding?.logoLight || branding?.logoDark);
+    const subtitle = getBrandSubtitle();
+
     return html`
       ${this._loading ? this.renderLoading() : ''}
 
       <div class="login-container">
         <div class="logo">
-          <div class="logo-text">Scion</div>
-          <div class="logo-subtitle">Agent Orchestration Platform</div>
+          ${hasLogo
+            ? renderBrandLogoImages('login-brand-logo')
+            : html`<div class="logo-text">${getBrandName()}</div>`}
+          ${subtitle ? html`<div class="logo-subtitle">${subtitle}</div>` : nothing}
         </div>
 
         <h1>Sign in</h1>
@@ -460,6 +489,7 @@ export class ScionLoginPage extends LitElement {
             By signing in, you agree to the
             <a href="/terms">Terms of Service</a> and <a href="/privacy">Privacy Policy</a>.
           </p>
+          ${renderAttribution('brand-attribution login-attribution')}
         </div>
       </div>
     `;

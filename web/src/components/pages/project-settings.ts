@@ -1034,7 +1034,7 @@ export class ScionPageProjectSettings extends LitElement {
       padding: 0.125rem 0.5rem;
       border-radius: 9999px;
       background: var(--scion-primary, #3b82f6);
-      color: #fff;
+      color: var(--scion-primary-text, #ffffff);
       white-space: nowrap;
     }
 

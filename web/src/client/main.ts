@@ -26,7 +26,8 @@ import '@shoelace-style/shoelace/dist/themes/dark.css';
 
 import type { AuthMeResponse, PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
-import { getAppName, setAppName, setDocumentTitle } from './page-title.js';
+import { getAppName, setDocumentTitle } from './page-title.js';
+import { applyBranding, BRANDING_STYLE_ID } from './branding.js';
 import { readInitialPageData, setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
 import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { legacyAgentRedirect } from './agent-routes.js';
@@ -93,7 +94,7 @@ const TZ_LOAD_BUDGET_MS = 1500;
 {
   const style = document.createElement('style');
   style.textContent = themeCSS;
-  const brandingStyle = document.getElementById('scion-branding-tokens');
+  const brandingStyle = document.getElementById(BRANDING_STYLE_ID);
   if (brandingStyle?.parentNode === document.head) {
     document.head.insertBefore(style, brandingStyle);
   } else {
@@ -965,8 +966,8 @@ async function init(): Promise<void> {
 
   // Get initial data from SSR
   const initialData = getInitialData();
-  if (initialData?.branding?.name) {
-    setAppName(initialData.branding.name);
+  if (initialData?.branding) {
+    applyBranding(initialData.branding);
   }
   // Fixed for this document: a change of the setting applies on the next full load.
   configureReadinessMarks(initialData?.readinessMarks === true);

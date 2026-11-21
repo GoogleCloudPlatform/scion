@@ -89,7 +89,7 @@ export class ScionViewToggle extends LitElement {
     button.active,
     a.active {
       background: var(--scion-primary, #3b82f6);
-      color: white;
+      color: var(--scion-primary-text, #ffffff);
     }
 
     button sl-icon,

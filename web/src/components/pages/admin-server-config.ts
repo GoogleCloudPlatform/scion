@@ -27,7 +27,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { isKubernetesRuntimeType } from '../../shared/runtime-kind.js';
@@ -3661,6 +3661,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       // toggle, telemetry and auto-expose defaults, hub agent defaults,
       // agent_secrets.user_scope_only); drop this tab's cached copy.
       invalidatePublicSettings();
+      void getPublicSettings();
 
       const result = (await res.json()) as {
         reload?: ReloadResult;
@@ -4149,6 +4150,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       // Like a save, a reset can change GET /api/v1/settings/public.
       invalidatePublicSettings();
+      void getPublicSettings();
       this.resetConfirmSection = null;
       await this.loadConfig();
       this.successMessage = `Section "${sectionName}" has been reset to deployment configuration.`;
