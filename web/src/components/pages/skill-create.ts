@@ -30,6 +30,8 @@ import type { Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
+import type { ProjectChangeDetail, ProjectOption } from '../shared/project-picker.js';
+import '../shared/project-picker.js';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -460,8 +462,25 @@ export class ScionPageSkillCreate extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const projectParam = (
+        params.get('projectId') ||
+        params.get('scopeId') ||
+        params.get('project') ||
+        ''
+      ).trim();
+      if (projectParam) {
+        this.scope = 'project';
+        this.scopeChosen = true;
+        this.scopeId = projectParam;
+      }
+    }
     void this.checkCapabilities();
   }
+
+  private readonly canPublishToProject = (project: ProjectOption): boolean =>
+    can(project._capabilities, 'update') || can(project._capabilities, 'manage');
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
@@ -730,7 +749,7 @@ export class ScionPageSkillCreate extends LitElement {
     if (this.validationError) return this.validationError;
     if (!this.name.trim()) return 'Skill name is required.';
     if (this.scope === 'project' && !this.scopeId.trim())
-      return 'Project ID is required for project scope.';
+      return 'Project is required for project scope.';
     if (!this.cleanVersion(this.version)) return 'Version is required.';
     if (!this.validateSemver(this.cleanVersion(this.version)))
       return 'Version must be valid semver (e.g. 1.0.0).';
@@ -750,7 +769,7 @@ export class ScionPageSkillCreate extends LitElement {
     if (this.validationError) return this.validationError;
     if (!this.name.trim()) return 'Skill name is required.';
     if (this.scope === 'project' && !this.scopeId.trim())
-      return 'Project ID is required for project scope.';
+      return 'Project is required for project scope.';
     return null;
   }
 
@@ -1101,16 +1120,23 @@ export class ScionPageSkillCreate extends LitElement {
         ${this.scope === 'project'
           ? html`
               <div class="form-field">
-                <label for="scopeId">Project ID</label>
-                <sl-input
+                <scion-project-picker
                   id="scopeId"
-                  placeholder="project-uuid"
+                  label="Project"
+                  placeholder="Search projects..."
+                  empty-text="No publishable projects found"
+                  browse-on-focus
+                  require-selection
                   .value=${this.scopeId}
-                  @sl-input=${(e: Event) => {
-                    this.scopeId = (e.target as HTMLElement & { value: string }).value;
-                  }}
+                  .filterProject=${this.canPublishToProject}
                   ?disabled=${isSubmitting}
-                ></sl-input>
+                  @project-change=${(e: CustomEvent<ProjectChangeDetail>) => {
+                    this.scopeId = e.detail.projectId;
+                  }}
+                ></scion-project-picker>
+                <div class="hint">
+                  Only projects where you have permission to publish skills are shown.
+                </div>
               </div>
             `
           : nothing}

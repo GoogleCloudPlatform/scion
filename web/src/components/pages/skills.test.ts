@@ -622,3 +622,176 @@ describe('scion-page-skills shows the hub error message (ptone/scion#2949)', () 
     expect(notice?.textContent).toContain('Rate limit exceeded; Skills request failed: 429');
   });
 });
+
+describe('scion-page-skills project filter and URL persistence (ptone/scion#8738)', () => {
+  let element: PageEl | null = null;
+
+  beforeAll(async () => {
+    await import('./skills.js');
+  }, 60_000);
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    window.history.replaceState({}, '', '/skills');
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  const PROJECTS = [
+    { id: 'proj-1', name: 'Alpha Project', slug: 'alpha-project' },
+    { id: 'proj-2', name: 'Beta Project', slug: 'beta-project' },
+    { id: 'proj-3', name: 'Gamma Project', slug: 'gamma-project' },
+  ];
+
+  function projectSkill(id: string, projectId: string) {
+    return {
+      id,
+      name: `skill-${id}`,
+      scope: 'project',
+      scopeId: projectId,
+      status: 'active',
+      created: '2026-01-01T00:00:00Z',
+      updated: '2026-01-01T00:00:00Z',
+    };
+  }
+
+  function makeHandler() {
+    const allProjectSkills = [
+      projectSkill('s1', 'proj-1'),
+      projectSkill('s2', 'proj-2'),
+      projectSkill('s3', 'proj-3'),
+    ];
+    return (url: string): Promise<Response> => {
+      if (url.includes('/api/v1/projects/')) {
+        const id = url.split('/api/v1/projects/')[1].split('?')[0];
+        const found = PROJECTS.find((p) => p.id === id);
+        return Promise.resolve(found ? jsonResponse(found) : jsonResponse({}, 404));
+      }
+      if (url.includes('/api/v1/projects')) {
+        return Promise.resolve(jsonResponse({ projects: PROJECTS }));
+      }
+      if (url.includes('/api/v1/skills')) {
+        const u = new URL(url, 'http://localhost');
+        const scope = u.searchParams.get('scope');
+        const scopeId = u.searchParams.get('scopeId');
+        let list = allProjectSkills;
+        if (scope === 'project' && scopeId) {
+          list = allProjectSkills.filter((s) => s.scopeId === scopeId);
+        }
+        return Promise.resolve(
+          jsonResponse({ skills: list, _capabilities: { actions: ['create'] } })
+        );
+      }
+      return Promise.resolve(jsonResponse({}, 404));
+    };
+  }
+
+  it('shows the multi-select project filter only when scope is project', async () => {
+    const { el } = await mountSkillsPage(makeHandler());
+    element = el;
+
+    // Hidden on default "All Scopes"
+    expect(el.shadowRoot?.querySelector('scion-project-picker.project-filter')).toBeNull();
+
+    // Switch scope to project
+    const scopeSelect = el.shadowRoot?.querySelector('sl-select') as HTMLElement & {
+      value: string;
+    };
+    scopeSelect.value = 'project';
+    scopeSelect.dispatchEvent(new Event('sl-change'));
+    await settled(el);
+
+    const picker = el.shadowRoot?.querySelector('scion-project-picker.project-filter');
+    expect(picker).not.toBeNull();
+    expect(picker?.hasAttribute('multiple')).toBe(true);
+    expect(new URLSearchParams(window.location.search).get('scope')).toBe('project');
+
+    // Switch scope to global — hides picker and clears projects param
+    scopeSelect.value = 'global';
+    scopeSelect.dispatchEvent(new Event('sl-change'));
+    await settled(el);
+
+    expect(el.shadowRoot?.querySelector('scion-project-picker.project-filter')).toBeNull();
+    const params = new URLSearchParams(window.location.search);
+    expect(params.get('scope')).toBe('global');
+    expect(params.get('projects')).toBeNull();
+  });
+
+  it('filters skills by one or multiple selected projects and persists selection in URL', async () => {
+    const { el, fetchMock } = await mountSkillsPage(makeHandler());
+    element = el;
+
+    const scopeSelect = el.shadowRoot?.querySelector('sl-select') as HTMLElement & {
+      value: string;
+    };
+    scopeSelect.value = 'project';
+    scopeSelect.dispatchEvent(new Event('sl-change'));
+    await settled(el);
+
+    // All 3 project skills shown initially
+    expect(shownSkills(el)).toEqual(['/skills/s1', '/skills/s2', '/skills/s3']);
+
+    // Select a single project
+    const picker = el.shadowRoot?.querySelector('scion-project-picker.project-filter');
+    expect(picker).not.toBeNull();
+    picker?.dispatchEvent(
+      new CustomEvent('projects-change', {
+        detail: { projectIds: ['proj-1'], projects: [PROJECTS[0]] },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settled(el);
+
+    expect(shownSkills(el)).toEqual(['/skills/s1']);
+    expect(new URLSearchParams(window.location.search).get('projects')).toBe('proj-1');
+    expect(fetchMock.mock.calls.some((c) => urlOf(c[0] as string).includes('scopeId=proj-1'))).toBe(
+      true
+    );
+    // Create Skill button carries the single selected project context
+    expect(el.shadowRoot?.querySelector('a[href="/skills/new?projectId=proj-1"]')).not.toBeNull();
+
+    // Select two projects
+    picker?.dispatchEvent(
+      new CustomEvent('projects-change', {
+        detail: { projectIds: ['proj-1', 'proj-3'], projects: [PROJECTS[0], PROJECTS[2]] },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settled(el);
+
+    expect(shownSkills(el)).toEqual(['/skills/s1', '/skills/s3']);
+    expect(new URLSearchParams(window.location.search).get('projects')).toBe('proj-1,proj-3');
+    expect(el.shadowRoot?.querySelector('a[href="/skills/new"]')).not.toBeNull();
+  });
+
+  it('restores scope and multi-project filter from URL on load', async () => {
+    window.history.replaceState({}, '', '/skills?scope=project&projects=proj-2,proj-3');
+    const { el } = await mountSkillsPage(makeHandler());
+    element = el;
+
+    expect(internals(el).scopeFilter).toBe('project');
+    expect(shownSkills(el)).toEqual(['/skills/s2', '/skills/s3']);
+
+    const picker = el.shadowRoot?.querySelector('scion-project-picker.project-filter') as
+      | (HTMLElement & { values: string[] })
+      | null;
+    expect(picker).not.toBeNull();
+    expect(picker?.values).toEqual(['proj-2', 'proj-3']);
+  });
+
+  it('defaults to project scope with current project when opened with ?projectId=', async () => {
+    window.history.replaceState({}, '', '/skills?projectId=proj-2');
+    const { el } = await mountSkillsPage(makeHandler());
+    element = el;
+
+    expect(internals(el).scopeFilter).toBe('project');
+    expect(shownSkills(el)).toEqual(['/skills/s2']);
+    const picker = el.shadowRoot?.querySelector('scion-project-picker.project-filter') as
+      | (HTMLElement & { values: string[] })
+      | null;
+    expect(picker?.values).toEqual(['proj-2']);
+  });
+});

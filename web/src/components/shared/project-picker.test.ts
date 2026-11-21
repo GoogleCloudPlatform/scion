@@ -462,4 +462,313 @@ describe('scion-project-picker', () => {
     expect((el as Record<string, unknown>)['searchOpen']).toBe(false);
     expect(outerSawEscape).toBe(false);
   });
+
+  it('filters search results through filterProject predicate', async () => {
+    const projectsWithCaps = [
+      {
+        id: 'proj-admin',
+        name: 'Admin Project',
+        slug: 'admin-project',
+        _capabilities: { actions: ['read', 'update', 'manage'] },
+      },
+      {
+        id: 'proj-member',
+        name: 'Member Project',
+        slug: 'member-project',
+        _capabilities: { actions: ['read'] },
+      },
+    ];
+    const { handler } = makeFetchHandler(projectsWithCaps);
+    const el = await createElement(handler);
+    el.browseOnFocus = true;
+    el.filterProject = (p: { _capabilities?: { actions?: string[] } }) =>
+      Boolean(p._capabilities?.actions?.includes('update'));
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('sl-input');
+    expect(input).not.toBeNull();
+    input?.dispatchEvent(new Event('sl-focus'));
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    const options = el.shadowRoot?.querySelectorAll('.project-search-option');
+    expect(options?.length).toBe(1);
+    expect(options?.[0]?.querySelector('.project-name')?.textContent?.trim()).toBe('Admin Project');
+  });
+
+  it('loads projects on focus when browseOnFocus is enabled', async () => {
+    const { handler, calls } = makeFetchHandler();
+    const el = await createElement(handler);
+    el.browseOnFocus = true;
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('sl-input');
+    expect(input).not.toBeNull();
+    input?.dispatchEvent(new Event('sl-focus'));
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect(calls.some((c) => c.includes('/api/v1/projects?limit=50'))).toBe(true);
+    expect(el.shadowRoot?.querySelectorAll('.project-search-option').length).toBe(3);
+  });
+
+  it('resolves preselected value display name and clears it if disallowed by filterProject', async () => {
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/projects/proj-allowed')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'proj-allowed',
+              name: 'Allowed Project',
+              slug: 'allowed-project',
+              _capabilities: { actions: ['read', 'update'] },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (path.includes('/api/v1/projects/proj-denied')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'proj-denied',
+              name: 'Denied Project',
+              slug: 'denied-project',
+              _capabilities: { actions: ['read'] },
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(createProjectsResponse());
+    };
+
+    const el = await createElement(handler);
+    el.browseOnFocus = true;
+    el.requireSelection = true;
+    el.filterProject = (p: { _capabilities?: { actions?: string[] } }) =>
+      Boolean(p._capabilities?.actions?.includes('update'));
+    el.value = 'proj-allowed';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe(
+      'Allowed Project (allowed-project)'
+    );
+
+    const events: Array<{ projectId: string }> = [];
+    el.addEventListener('project-change', (e: Event) => {
+      events.push((e as CustomEvent).detail);
+    });
+    el.value = 'proj-denied';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+    expect(events[events.length - 1]?.projectId).toBe('');
+  });
+
+  it('resolves new uncached value after dropdown selection', async () => {
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/projects/proj-uncached')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              id: 'proj-uncached',
+              name: 'Uncached Project',
+              slug: 'uncached-project',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      return Promise.resolve(createProjectsResponse());
+    };
+
+    const el = await createElement(handler);
+    el.browseOnFocus = true;
+    el.requireSelection = true;
+    await el.updateComplete;
+
+    // Select a project via dropdown (sets selectedViaDropdown = true)
+    (el as Record<string, (...args: unknown[]) => void>)['selectProject'](MOCK_PROJECTS[0]);
+    el.value = MOCK_PROJECTS[0].id;
+    await el.updateComplete;
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('Alpha Project (alpha-project)');
+
+    // Programmatically update value to an uncached project ID
+    el.value = 'proj-uncached';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe(
+      'Uncached Project (uncached-project)'
+    );
+  });
+
+  it('clears invalid preselected value on 404 when requireSelection is true', async () => {
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/projects/proj-missing')) {
+        return Promise.resolve(new Response('{}', { status: 404 }));
+      }
+      return Promise.resolve(createProjectsResponse());
+    };
+
+    const el = await createElement(handler);
+    el.browseOnFocus = true;
+    el.requireSelection = true;
+
+    const events: Array<{ projectId: string }> = [];
+    el.addEventListener('project-change', (e: Event) => {
+      events.push((e as CustomEvent).detail);
+    });
+
+    el.value = 'proj-missing';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+    expect(events.length).toBeGreaterThan(0);
+    expect(events[events.length - 1]?.projectId).toBe('');
+  });
+
+  it('does not emit raw typed text on blur when requireSelection is true', async () => {
+    const el = await createElement();
+    el.requireSelection = true;
+    await el.updateComplete;
+
+    const events: Array<{ projectId: string }> = [];
+    el.addEventListener('project-change', (e: Event) => {
+      events.push((e as CustomEvent).detail);
+    });
+
+    (el as Record<string, unknown>)['searchQuery'] = 'nonexistent-slug';
+    (el as Record<string, unknown>)['selectedViaDropdown'] = false;
+    const input = el.shadowRoot?.querySelector('sl-input');
+    expect(input).not.toBeNull();
+    input?.dispatchEvent(new Event('sl-blur'));
+    await new Promise((r) => setTimeout(r, 250));
+    await el.updateComplete;
+
+    expect(events).toHaveLength(0);
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+  });
+
+  it('supports multiple selection with toggle, tags, removal, and URL-loaded ID resolution', async () => {
+    const handler = (url: string | URL | Request): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/projects/proj-uuid-2')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(MOCK_PROJECTS[1]), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(createProjectsResponse());
+    };
+
+    const el = await createElement(handler);
+    el.multiple = true;
+    el.values = ['proj-uuid-2'];
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    // Preselected value resolves to project name in tag
+    let tags = el.shadowRoot?.querySelectorAll('.selected-tags sl-tag');
+    expect(tags?.length).toBe(1);
+    expect(tags?.[0]?.textContent?.trim()).toBe('Beta Project');
+
+    const events: Array<{ projectIds: string[] }> = [];
+    el.addEventListener('projects-change', (e: Event) => {
+      events.push((e as CustomEvent).detail);
+    });
+
+    // Focus opens dropdown with multiselectable listbox
+    const input = el.shadowRoot?.querySelector('sl-input');
+    expect(input).not.toBeNull();
+    input?.dispatchEvent(new Event('sl-focus'));
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    const listbox = el.shadowRoot?.querySelector('[role="listbox"]');
+    expect(listbox?.getAttribute('aria-multiselectable')).toBe('true');
+
+    // Toggle first option (Alpha Project) — keeps dropdown open and emits both IDs
+    const options = el.shadowRoot?.querySelectorAll('.project-search-option');
+    options?.[0]?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchOpen']).toBe(true);
+    expect(events[events.length - 1]?.projectIds).toEqual(['proj-uuid-2', 'proj-uuid-1']);
+
+    tags = el.shadowRoot?.querySelectorAll('.selected-tags sl-tag');
+    expect(tags?.length).toBe(2);
+
+    // Removing first tag emits remaining project ID
+    tags?.[0]?.dispatchEvent(new CustomEvent('sl-remove'));
+    await el.updateComplete;
+
+    expect(events[events.length - 1]?.projectIds).toEqual(['proj-uuid-1']);
+    expect(el.shadowRoot?.querySelectorAll('.selected-tags sl-tag').length).toBe(1);
+  });
+
+  it('clears typed search query and refreshes results after multi-select toggle', async () => {
+    const { handler, calls } = makeFetchHandler();
+    const el = await createElement(handler);
+    el.multiple = true;
+    await el.updateComplete;
+
+    // Simulate user typing a query and getting results
+    (el as Record<string, unknown>)['searchQuery'] = 'alpha';
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    (el as Record<string, unknown>)['searchResults'] = [MOCK_PROJECTS[0]];
+    el.requestUpdate();
+    await el.updateComplete;
+
+    calls.length = 0;
+    const option = el.shadowRoot?.querySelector('.project-search-option');
+    option?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+    expect(calls.some((c) => c.includes('/api/v1/projects?limit=50'))).toBe(true);
+
+    // Toggling again when searchQuery is already empty does not re-fetch
+    calls.length = 0;
+    const nextOption = el.shadowRoot?.querySelector('.project-search-option');
+    nextOption?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    await el.updateComplete;
+
+    expect(calls).toHaveLength(0);
+  });
+
+  it('clears partial search query on blur in multi-select mode', async () => {
+    const el = await createElement();
+    el.multiple = true;
+    await el.updateComplete;
+
+    (el as Record<string, unknown>)['searchQuery'] = 'partial';
+    (el as Record<string, unknown>)['searchOpen'] = true;
+    el.requestUpdate();
+    await el.updateComplete;
+
+    const input = el.shadowRoot?.querySelector('sl-input');
+    expect(input).not.toBeNull();
+    input?.dispatchEvent(new Event('sl-blur'));
+    await new Promise((r) => setTimeout(r, 250));
+    await el.updateComplete;
+
+    expect((el as Record<string, unknown>)['searchOpen']).toBe(false);
+    expect((el as Record<string, unknown>)['searchQuery']).toBe('');
+  });
 });
