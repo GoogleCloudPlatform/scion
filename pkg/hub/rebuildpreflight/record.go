@@ -96,6 +96,8 @@ func findingAgentCount(f preflight.Finding) int {
 			return int(v)
 		case int:
 			return v
+		case int64:
+			return int(v)
 		}
 	}
 	if f.SubjectCount > 0 {

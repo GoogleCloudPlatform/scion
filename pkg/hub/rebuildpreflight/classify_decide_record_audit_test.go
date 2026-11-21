@@ -245,6 +245,10 @@ func TestOverride_ForcedBy_RunResultMap_And_Emit(t *testing.T) {
 	if ov.Findings[0].Agents != 5 || ov.Findings[0].FailedRunAgents != 3 {
 		t.Errorf("override agents = %+v", ov.Findings[0])
 	}
+	// int64 agent count in Data is also handled cleanly.
+	if got := findingAgentCount(preflight.Finding{Data: map[string]any{"agents": int64(9)}}); got != 9 {
+		t.Errorf("findingAgentCount(int64(9)) = %d, want 9", got)
+	}
 
 	// R5: forcedBy minus runId deep-equals override.
 	fb := ForcedByRecord(ov, "run-2")
