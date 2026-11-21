@@ -150,6 +150,8 @@ if [[ -z "$PROJECT_ID" ]]; then
     exit 1
 fi
 
+require_non_service_ssh_user
+
 # IMAGE_REGISTRY (hub-config.sh) is written into settings.yaml (--full) as a
 # quoted YAML string, so it must be a plain registry path. With ENABLE_GKE=true
 # the registry that takes effect must not be a loopback address.
@@ -268,7 +270,7 @@ EOF
     # Upload all config files to /tmp/ on the instance; they are placed into
     # their final locations at the start of the main remote SSH session.
     substep "Uploading files to instance..."
-    gcloud compute scp "$UPLOAD_DIR"/* "${INSTANCE_NAME}:/tmp/" --zone="${ZONE}"
+    gcloud compute scp "$UPLOAD_DIR"/* "${SSH_TARGET}:/tmp/" --zone="${ZONE}"
 
     substep "Files uploaded to instance"
 fi
@@ -501,7 +503,7 @@ fi
 step "Remote: pull, build, restart..."
 
 # shellcheck disable=SC2016 # remote script: $vars must expand on the remote host, not locally
-gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
+gcloud compute ssh "${SSH_TARGET}" --zone="${ZONE}" --command '
     set -euo pipefail
     RESET_DB='"${RESET_DB}"'
     FULL_DEPLOY='"${FULL_DEPLOY}"'

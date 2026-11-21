@@ -60,6 +60,14 @@ configurable — `cloud-init.yaml`'s Docker apt-repo setup is written for this
 specific image. This is not something the operator needs to prepare locally;
 it's noted here because it affects what the deployed VM looks like.
 
+> **Warning — never use `scion` as an SSH or OS Login username:** The Hub runs as
+> the `scion` Unix service account on the VM. On GCE, SSH or OS Login as `scion`
+> (or a `scion` key in project/instance SSH metadata) causes the Compute Engine
+> guest agent to add `scion` to `google-sudoers` (passwordless root). Never run
+> `gcloud compute ssh scion@...` or run `deploy.sh` from a local user named
+> `scion` without an OS Login / distinct SSH identity; `deploy.sh` warns if
+> `scion` is detected in `google-sudoers`.
+
 ---
 
 ## 2. GCP Preflight

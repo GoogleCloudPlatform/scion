@@ -28,20 +28,30 @@ if [[ -z "$PROJECT_ID" ]]; then
     exit 1
 fi
 
+require_non_service_ssh_user
+
 wait_for_cloud_init
 
 echo "=== Ensuring scion user exists on VM ==="
-gcloud compute ssh "${INSTANCE_NAME}" \
+gcloud compute ssh "${SSH_TARGET}" \
     --project="${PROJECT_ID}" \
     --zone="${ZONE}" \
     --command "
-        if ! id scion &>/dev/null; then
+        if ! id scion >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash scion
             echo '  -> Created scion user'
         else
             echo '  -> scion user already exists'
         fi
-        if getent group docker &>/dev/null; then
+        if id -nG scion 2>/dev/null | tr ' ' '\n' | grep -qx 'google-sudoers'; then
+            echo 'Error: hub service user \"scion\" is in the google-sudoers group (passwordless root).' >&2
+            echo '  Do not use \"scion\" as an SSH or OS Login username on the Hub VM, and do not' >&2
+            echo '  include a \"scion\" key in project or instance SSH metadata.' >&2
+            echo '  To remediate on the VM: sudo gpasswd -d scion google-sudoers' >&2
+            echo '  Then remove any \"scion\" SSH key from GCP metadata and rerun with a different SSH_USER.' >&2
+            exit 1
+        fi
+        if getent group docker >/dev/null 2>&1; then
             sudo usermod -aG docker scion
             echo '  -> Added scion to docker group'
         else
@@ -50,7 +60,7 @@ gcloud compute ssh "${INSTANCE_NAME}" \
     "
 
 echo "=== Cloning Repo on GCE Instance ==="
-gcloud compute ssh "${INSTANCE_NAME}" \
+gcloud compute ssh "${SSH_TARGET}" \
     --project="${PROJECT_ID}" \
     --zone="${ZONE}" \
     --command "

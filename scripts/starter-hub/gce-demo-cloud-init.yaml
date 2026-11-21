@@ -85,7 +85,8 @@ runcmd:
     fi
 
   # Setup scion user and directories (optional, but good practice)
-  - id scion &>/dev/null || useradd -m -s /bin/bash scion
-  - getent group docker &>/dev/null && usermod -aG docker scion || true
+  # runcmd executes under /bin/sh (dash on Ubuntu) -- POSIX redirections only (no &>).
+  - id scion >/dev/null 2>&1 || useradd -m -s /bin/bash scion
+  - getent group docker >/dev/null 2>&1 && usermod -aG docker scion || true
 
 final_message: "Scion Demo Server Provisioning Complete"

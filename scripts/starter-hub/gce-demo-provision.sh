@@ -235,6 +235,7 @@ if [[ "${INSTANCE_EXISTS}" == "false" ]]; then
         --tags=https-server,scion-hub \
         --labels="env=${HUB_NAME},project=scion,type=scion-hub" \
         --create-disk="auto-delete=yes,boot=yes,device-name=${INSTANCE_NAME},image=projects/ubuntu-os-cloud/global/images/family/ubuntu-2204-lts,mode=rw,size=200,type=projects/${PROJECT_ID}/zones/${ZONE}/diskTypes/pd-balanced" \
+        --metadata="block-project-ssh-keys=TRUE" \
         --metadata-from-file="user-data=${CLOUD_INIT_FILE}"
 else
     echo "Skipping instance creation (already exists)."
