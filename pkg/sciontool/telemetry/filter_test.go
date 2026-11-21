@@ -275,6 +275,90 @@ func TestRedactor_RecursivelyAppliesNativeContentAliases(t *testing.T) {
 	}
 }
 
+func TestRedactor_MandatoryFloorCoversNativeAliases(t *testing.T) {
+	// Configure an explicit policy that omits "prompt" (and all other floor
+	// fields) from Redact and attempts to hash prompt aliases instead.
+	r := NewRedactor(RedactionConfig{
+		Redact: []string{"user.email"},
+		Hash: []string{
+			"user.email",
+			"prompt",
+			"gen_ai.prompt",
+			"gen_ai.system_instructions",
+			"gen_ai.input.messages",
+			"input.value",
+			"session_id",
+		},
+	})
+
+	explicitAliases := []string{
+		"prompt",
+		"gen_ai.prompt",
+		"gen_ai.system_instructions",
+		"gen_ai.input.messages",
+		"input.value",
+	}
+	for _, key := range explicitAliases {
+		if !r.ShouldRedact(key) {
+			t.Errorf("ShouldRedact(%q) = false, want true under mandatory floor", key)
+		}
+		if r.ShouldHash(key) {
+			t.Errorf("ShouldHash(%q) = true, want false when covered by mandatory floor", key)
+		}
+	}
+
+	// Explicitly redacted fields must also not report ShouldHash == true.
+	if r.ShouldHash("user.email") {
+		t.Error("ShouldHash(\"user.email\") = true, want false when also in Redact")
+	}
+
+	// Every alias targeting a mandatory floor field must also be redacted and never hashed.
+	for alias, target := range nativeFieldAliases {
+		if _, mandatory := mandatoryRedactFields[target]; mandatory {
+			if !r.ShouldRedact(alias) {
+				t.Errorf("ShouldRedact(%q) (alias of mandatory %q) = false, want true", alias, target)
+			}
+			if r.ShouldHash(alias) {
+				t.Errorf("ShouldHash(%q) (alias of mandatory %q) = true, want false", alias, target)
+			}
+		}
+	}
+
+	// Non-mandatory fields and aliases continue to follow the configured policy.
+	if r.ShouldRedact("output.value") {
+		t.Error("ShouldRedact(\"output.value\") = true, want false when tool_output is not configured")
+	}
+	if r.ShouldRedact("session.id") {
+		t.Error("ShouldRedact(\"session.id\") = true, want false when session_id is only hashed")
+	}
+	if !r.ShouldHash("session.id") {
+		t.Error("ShouldHash(\"session.id\") = false, want true when session_id is hashed")
+	}
+
+	attrs := []*commonpb.KeyValue{
+		{Key: "prompt", Value: stringValue("raw-prompt")},
+		{Key: "gen_ai.prompt", Value: stringValue("raw-gen-ai-prompt")},
+		{Key: "gen_ai.system_instructions", Value: stringValue("raw-system-instructions")},
+		{Key: "gen_ai.input.messages", Value: stringValue("raw-input-messages")},
+		{Key: "input.value", Value: stringValue("raw-input-value")},
+		{Key: "output.value", Value: stringValue("raw-output-value")},
+		{Key: "session.id", Value: stringValue("session-123")},
+	}
+
+	result := r.RedactProtoAttributes(attrs)
+	for i, key := range explicitAliases {
+		if got := getStringValue(result[i]); got != "[REDACTED]" {
+			t.Errorf("attribute %q = %q, want [REDACTED]", key, got)
+		}
+	}
+	if got := getStringValue(result[5]); got != "raw-output-value" {
+		t.Errorf("attribute output.value = %q, want raw-output-value", got)
+	}
+	if got := getStringValue(result[6]); got != HashValue("session-123") {
+		t.Errorf("attribute session.id = %q, want SHA-256 hash", got)
+	}
+}
+
 func TestRedactor_StructuredBodyKeepsContextForArrayScalars(t *testing.T) {
 	r := NewRedactor(RedactionConfig{Redact: []string{"log.body", "prompt"}})
 	body := &commonpb.AnyValue{Value: &commonpb.AnyValue_ArrayValue{ArrayValue: &commonpb.ArrayValue{Values: []*commonpb.AnyValue{

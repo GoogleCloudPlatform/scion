@@ -671,7 +671,7 @@ func TestReceiverSystemInstructionsCannotReachEgress(t *testing.T) {
 				Resource: &resourcepb.Resource{Attributes: append(secret("RESOURCE_SECRET"), secretKV("service.name", "safe-service"))},
 				ScopeSpans: []*tracepb.ScopeSpans{{
 					Scope: &commonpb.InstrumentationScope{Name: "safe.scope", Attributes: secret("SCOPE_SECRET")},
-					Spans: []*tracepb.Span{{Name: "safe.span", Attributes: append(secret("SPAN_SECRET"), secretKV("gen_ai.input.messages", "PROMPT_SECRET"), secretKV("safe.key", "safe-value")),
+					Spans: []*tracepb.Span{{Name: "safe.span", Attributes: append(secret("SPAN_SECRET"), secretKV("gen_ai.prompt", "PROMPT_ALIAS_SECRET"), secretKV("gen_ai.input.messages", "PROMPT_SECRET"), secretKV("input.value", "INPUT_VALUE_SECRET"), secretKV("safe.key", "safe-value")),
 						Events: []*tracepb.Span_Event{{Name: "safe.event", Attributes: append(secret("EVENT_SECRET"), &commonpb.KeyValue{Key: "nested", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_KvlistValue{KvlistValue: &commonpb.KeyValueList{Values: secret("NESTED_SECRET")}}}})}},
 						Links:  []*tracepb.Span_Link{{Attributes: secret("LINK_SECRET")}},
 					}},
@@ -697,10 +697,8 @@ func TestReceiverSystemInstructionsCannotReachEgress(t *testing.T) {
 			}
 			assertAttr(t, rs.Resource.Attributes, "service.name", "safe-service")
 			assertAttr(t, span.Attributes, "safe.key", "safe-value")
-			if tc.name == "default prompt policy" {
-				assertRedacted(t, span.Attributes, "gen_ai.input.messages")
-			} else {
-				assertAttr(t, span.Attributes, "gen_ai.input.messages", "PROMPT_SECRET")
+			for _, alias := range []string{"gen_ai.prompt", "gen_ai.input.messages", "input.value"} {
+				assertRedacted(t, span.Attributes, alias)
 			}
 		})
 	}
