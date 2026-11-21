@@ -232,8 +232,7 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		if status.Code(err) == codes.NotFound {
 			return FetchResult{Err: store.ErrNotFound}
 		}
-		// A Secret Manager access error matches ErrValueAccess, the
-		// failure Resolve skips for this backend.
+		// A Secret Manager access error matches ErrValueAccess.
 		if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
 			return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, permErr)}
 		}
@@ -555,6 +554,14 @@ func (b *GCPBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (
 	return fromStoreSecretMeta(s), nil
 }
 
+// Resolve collects and merges secrets across applicable scopes and progeny.
+//
+// Fail-closed behavior: any Secret Manager read error other than codes.NotFound
+// fails the entire resolution with an error matching ErrValueAccess (and
+// *PermissionError for codes.PermissionDenied), so an agent never starts with a
+// partial secret set. Only codes.NotFound stays soft and is skipped, matching
+// LocalBackend.Resolve's handling of store.ErrNotFound for a secret deleted
+// between metadata listing and value access.
 func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
 	merged := make(map[string]SecretWithValue)
 
@@ -626,7 +633,15 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
-				continue
+				// Only NotFound stays soft (matching LocalBackend.Resolve's
+				// store.ErrNotFound handling for a secret deleted after listing).
+				// All other Secret Manager errors (permission denied, transient
+				// failures, nil payloads, etc.) fail resolution closed so no
+				// agent starts with a partial secret set.
+				if status.Code(err) == codes.NotFound {
+					continue
+				}
+				return nil, b.wrapResolveAccessError(sc.scope, s.Key, err)
 			}
 
 			secretType := s.SecretType
@@ -699,7 +714,12 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
-				continue
+				// Only NotFound stays soft (deleted after listing); all other
+				// Secret Manager errors fail resolution closed.
+				if status.Code(err) == codes.NotFound {
+					continue
+				}
+				return nil, b.wrapResolveAccessError(s.Scope, s.Key, err)
 			}
 
 			secretType := s.SecretType
@@ -739,6 +759,17 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 		result = append(result, sv)
 	}
 	return DeduplicateByTarget(result), nil
+}
+
+// wrapResolveAccessError wraps a non-NotFound Secret Manager access error
+// returned during Resolve so callers can detect it via errors.Is(err,
+// ErrValueAccess) and, for permission failures, errors.As(err, &permErr).
+// It names only the secret scope and key, never any secret value.
+func (b *GCPBackend) wrapResolveAccessError(scope, key string, err error) error {
+	if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
+		return fmt.Errorf("%w: %s/%s: %w", ErrValueAccess, scope, key, permErr)
+	}
+	return fmt.Errorf("%w: %s/%s: %w", ErrValueAccess, scope, key, err)
 }
 
 // accessLatestVersion retrieves the latest version of a secret from GCP SM.

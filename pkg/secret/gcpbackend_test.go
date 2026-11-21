@@ -3596,7 +3596,7 @@ func TestGCPBackend_NilSecretPayload(t *testing.T) {
 		}
 	})
 
-	t.Run("Resolve_skips_nil_payload", func(t *testing.T) {
+	t.Run("Resolve_fails_on_nil_payload", func(t *testing.T) {
 		base, mock := createTestGCPBackend(t)
 		if _, _, err := base.Set(ctx, &SetSecretInput{
 			Name: "API_KEY", Value: "FAKE-secret-value", SecretType: TypeEnvironment,
@@ -3607,11 +3607,291 @@ func TestGCPBackend_NilSecretPayload(t *testing.T) {
 
 		backend := NewGCPBackendWithClient(base.store, &nilPayloadSMClient{mockSMClient: mock}, base.projectID, base.hubID)
 		resolved, err := backend.Resolve(ctx, "user-1", "", "", nil)
-		if err != nil {
-			t.Fatalf("Resolve() error = %v, want nil (broken secret skipped)", err)
+		if !errors.Is(err, ErrValueAccess) {
+			t.Fatalf("Resolve() error = %v, want ErrValueAccess", err)
 		}
-		if len(resolved) != 0 {
-			t.Fatalf("Resolve() = %+v, want broken secret omitted rather than delivered with empty value", resolved)
+		if !strings.Contains(err.Error(), "nil payload") {
+			t.Fatalf("Resolve() error = %q, want mention of nil payload", err.Error())
+		}
+		if resolved != nil {
+			t.Fatalf("Resolve() = %+v, want nil on nil payload error", resolved)
+		}
+	})
+}
+
+// accessErrSMClient returns a configured error from AccessSecretVersion for
+// any request whose Name starts with a matching key in errs.
+type accessErrSMClient struct {
+	*mockSMClient
+	errs map[string]error
+}
+
+func (m *accessErrSMClient) AccessSecretVersion(ctx context.Context, req *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	for prefix, err := range m.errs {
+		if strings.HasPrefix(req.Name, prefix) {
+			return nil, err
+		}
+	}
+	return m.mockSMClient.AccessSecretVersion(ctx, req)
+}
+
+func TestGCPBackend_Resolve_AccessErrors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("access_denied_fails_closed", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		_, _, err := base.Set(ctx, &SetSecretInput{
+			Name: "GOOD_SECRET", Value: "FAKE-good-value", SecretType: TypeEnvironment,
+			Scope: ScopeProject, ScopeID: "project-1",
+		})
+		if err != nil {
+			t.Fatalf("Set GOOD_SECRET failed: %v", err)
+		}
+		_, deniedMeta, err := base.Set(ctx, &SetSecretInput{
+			Name: "DENIED_SECRET", Value: "FAKE-denied-value", SecretType: TypeEnvironment,
+			Scope: ScopeProject, ScopeID: "project-1",
+		})
+		if err != nil {
+			t.Fatalf("Set DENIED_SECRET failed: %v", err)
+		}
+
+		deniedPath, ok := extractGCPSMPath(deniedMeta.SecretRef)
+		if !ok {
+			t.Fatalf("expected gcpsm ref, got %q", deniedMeta.SecretRef)
+		}
+		client := &accessErrSMClient{
+			mockSMClient: mock,
+			errs: map[string]error{
+				deniedPath: status.Error(codes.PermissionDenied, "iam permission denied"),
+			},
+		}
+		backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+
+		resolved, err := backend.Resolve(ctx, "", "project-1", "", nil)
+		if !errors.Is(err, ErrValueAccess) {
+			t.Fatalf("Resolve() error = %v, want ErrValueAccess", err)
+		}
+		var permErr *PermissionError
+		if !errors.As(err, &permErr) {
+			t.Fatalf("Resolve() error = %v, want *PermissionError", err)
+		}
+		if resolved != nil {
+			t.Fatalf("Resolve() = %+v, want nil on permission denied", resolved)
+		}
+		if !strings.Contains(err.Error(), "project/DENIED_SECRET") {
+			t.Errorf("Resolve() error = %q, want scope/key project/DENIED_SECRET", err.Error())
+		}
+		if strings.Contains(err.Error(), "FAKE-denied-value") || strings.Contains(err.Error(), "FAKE-good-value") {
+			t.Errorf("Resolve() error leaked secret value: %q", err.Error())
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		code codes.Code
+	}{
+		{"transient_unavailable", codes.Unavailable},
+		{"transient_deadline_exceeded", codes.DeadlineExceeded},
+	} {
+		t.Run(tc.name+"_fails_closed", func(t *testing.T) {
+			base, mock := createTestGCPBackend(t)
+			_, _, err := base.Set(ctx, &SetSecretInput{
+				Name: "GOOD_SECRET", Value: "FAKE-good-value", SecretType: TypeEnvironment,
+				Scope: ScopeProject, ScopeID: "project-1",
+			})
+			if err != nil {
+				t.Fatalf("Set GOOD_SECRET failed: %v", err)
+			}
+			_, flakyMeta, err := base.Set(ctx, &SetSecretInput{
+				Name: "FLAKY_SECRET", Value: "FAKE-flaky-value", SecretType: TypeEnvironment,
+				Scope: ScopeProject, ScopeID: "project-1",
+			})
+			if err != nil {
+				t.Fatalf("Set FLAKY_SECRET failed: %v", err)
+			}
+
+			flakyPath, _ := extractGCPSMPath(flakyMeta.SecretRef)
+			client := &accessErrSMClient{
+				mockSMClient: mock,
+				errs: map[string]error{
+					flakyPath: status.Errorf(tc.code, "transient error: %s", tc.code),
+				},
+			}
+			backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+
+			resolved, err := backend.Resolve(ctx, "", "project-1", "", nil)
+			if !errors.Is(err, ErrValueAccess) {
+				t.Fatalf("Resolve() error = %v, want ErrValueAccess", err)
+			}
+			var permErr *PermissionError
+			if errors.As(err, &permErr) {
+				t.Fatalf("Resolve() transient error must not match *PermissionError: %v", err)
+			}
+			if st, ok := status.FromError(err); !ok || st.Code() != tc.code {
+				t.Errorf("status.FromError(err) = (%v, %v), want code %s", st, ok, tc.code)
+			}
+			if resolved != nil {
+				t.Fatalf("Resolve() = %+v, want nil on transient error", resolved)
+			}
+			if !strings.Contains(err.Error(), "project/FLAKY_SECRET") {
+				t.Errorf("Resolve() error = %q, want scope/key project/FLAKY_SECRET", err.Error())
+			}
+		})
+	}
+
+	t.Run("not_found_stays_soft", func(t *testing.T) {
+		base, mock := createTestGCPBackend(t)
+		_, _, err := base.Set(ctx, &SetSecretInput{
+			Name: "PRESENT_SECRET", Value: "FAKE-present-value", SecretType: TypeEnvironment,
+			Scope: ScopeProject, ScopeID: "project-1",
+		})
+		if err != nil {
+			t.Fatalf("Set PRESENT_SECRET failed: %v", err)
+		}
+		_, missingMeta, err := base.Set(ctx, &SetSecretInput{
+			Name: "GONE_SECRET", Value: "FAKE-gone-value", SecretType: TypeEnvironment,
+			Scope: ScopeProject, ScopeID: "project-1",
+		})
+		if err != nil {
+			t.Fatalf("Set GONE_SECRET failed: %v", err)
+		}
+
+		// Simulate out-of-band or concurrent deletion in Secret Manager while DB metadata remains.
+		missingPath, _ := extractGCPSMPath(missingMeta.SecretRef)
+		if err := mock.DeleteSecret(ctx, &smpb.DeleteSecretRequest{Name: missingPath}); err != nil {
+			t.Fatalf("DeleteSecret failed: %v", err)
+		}
+
+		resolved, err := base.Resolve(ctx, "", "project-1", "", nil)
+		if err != nil {
+			t.Fatalf("Resolve() error = %v, want nil (NotFound stays soft)", err)
+		}
+		if len(resolved) != 1 || resolved[0].Name != "PRESENT_SECRET" || resolved[0].Value != "FAKE-present-value" {
+			t.Fatalf("Resolve() = %+v, want only PRESENT_SECRET", resolved)
+		}
+	})
+
+	t.Run("progeny_access_errors", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			smErr    error
+			wantErr  bool
+			wantPerm bool
+		}{
+			{"permission_denied", status.Error(codes.PermissionDenied, "denied"), true, true},
+			{"unavailable", status.Error(codes.Unavailable, "backend down"), true, false},
+			{"not_found", status.Error(codes.NotFound, "gone"), false, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				base, mock := createTestGCPBackend(t)
+				_, _, err := base.Set(ctx, &SetSecretInput{
+					Name: "PROJECT_KEY", Value: "FAKE-project-val", SecretType: TypeEnvironment,
+					Scope: ScopeProject, ScopeID: "project-1",
+				})
+				if err != nil {
+					t.Fatalf("Set PROJECT_KEY failed: %v", err)
+				}
+				_, progenyMeta, err := base.Set(ctx, &SetSecretInput{
+					Name: "PROGENY_KEY", Value: "FAKE-progeny-val", SecretType: TypeEnvironment,
+					Scope: ScopeUser, ScopeID: "ancestor-user",
+					AllowProgeny: true, CreatedBy: "ancestor-user",
+				})
+				if err != nil {
+					t.Fatalf("Set PROGENY_KEY failed: %v", err)
+				}
+
+				progenyPath, _ := extractGCPSMPath(progenyMeta.SecretRef)
+				client := &accessErrSMClient{
+					mockSMClient: mock,
+					errs:         map[string]error{progenyPath: tc.smErr},
+				}
+				backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+				opts := &ResolveOpts{
+					AgentAncestry: []string{"ancestor-user"},
+					AuthzCheck:    func(SecretMeta) bool { return true },
+				}
+
+				resolved, err := backend.Resolve(ctx, "", "project-1", "", opts)
+				if tc.wantErr {
+					if !errors.Is(err, ErrValueAccess) {
+						t.Fatalf("Resolve() error = %v, want ErrValueAccess", err)
+					}
+					var permErr *PermissionError
+					if got := errors.As(err, &permErr); got != tc.wantPerm {
+						t.Fatalf("errors.As(*PermissionError) = %v, want %v (err %v)", got, tc.wantPerm, err)
+					}
+					if resolved != nil {
+						t.Fatalf("Resolve() = %+v, want nil on error", resolved)
+					}
+				} else {
+					if err != nil {
+						t.Fatalf("Resolve() error = %v, want nil", err)
+					}
+					if len(resolved) != 1 || resolved[0].Name != "PROJECT_KEY" {
+						t.Fatalf("Resolve() = %+v, want only PROJECT_KEY", resolved)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("computed_name_without_stored_ref", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			smErr    error
+			wantErr  bool
+			wantPerm bool
+		}{
+			{"permission_denied", status.Error(codes.PermissionDenied, "denied"), true, true},
+			{"unavailable", status.Error(codes.Unavailable, "backend down"), true, false},
+			{"not_found", status.Error(codes.NotFound, "gone"), false, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				base, mock := createTestGCPBackend(t)
+				_, _, err := base.Set(ctx, &SetSecretInput{
+					Name: "GOOD_KEY", Value: "FAKE-good", SecretType: TypeEnvironment,
+					Scope: ScopeProject, ScopeID: "project-1",
+				})
+				if err != nil {
+					t.Fatalf("Set GOOD_KEY failed: %v", err)
+				}
+				// Insert a DB row with no SecretRef to exercise the computed-name path.
+				if err := base.store.CreateSecret(ctx, &store.Secret{
+					ID: tid("computed-err-" + tc.name), Key: "LEGACY_KEY",
+					SecretType: store.SecretTypeEnvironment, Target: "LEGACY_KEY",
+					Scope: ScopeProject, ScopeID: "project-1",
+				}); err != nil {
+					t.Fatalf("CreateSecret failed: %v", err)
+				}
+
+				prefixedPath := base.smSecretPath(base.gcpSecretName("LEGACY_KEY", ScopeProject, "project-1"))
+				client := &accessErrSMClient{
+					mockSMClient: mock,
+					errs:         map[string]error{prefixedPath: tc.smErr},
+				}
+				backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
+
+				resolved, err := backend.Resolve(ctx, "", "project-1", "", nil)
+				if tc.wantErr {
+					if !errors.Is(err, ErrValueAccess) {
+						t.Fatalf("Resolve() error = %v, want ErrValueAccess", err)
+					}
+					var permErr *PermissionError
+					if got := errors.As(err, &permErr); got != tc.wantPerm {
+						t.Fatalf("errors.As(*PermissionError) = %v, want %v (err %v)", got, tc.wantPerm, err)
+					}
+					if resolved != nil {
+						t.Fatalf("Resolve() = %+v, want nil on error", resolved)
+					}
+				} else {
+					if err != nil {
+						t.Fatalf("Resolve() error = %v, want nil", err)
+					}
+					if len(resolved) != 1 || resolved[0].Name != "GOOD_KEY" {
+						t.Fatalf("Resolve() = %+v, want only GOOD_KEY", resolved)
+					}
+				}
+			})
 		}
 	})
 }
