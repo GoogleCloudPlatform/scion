@@ -893,14 +893,15 @@ func stripFromProxyResponse(k string) bool {
 // writer removes them from the writer first, so each is sent once.
 // TestPortProxyPolicyHeadersMatchPolicy keeps the list equal to what the
 // policy sets.
-var portProxyPolicyHeaders = [...]string{"Content-Security-Policy", "Permissions-Policy", "X-Content-Type-Options"}
+var portProxyPolicyHeaders = [...]string{"Content-Security-Policy", "Permissions-Policy", "Referrer-Policy", "X-Content-Type-Options"}
 
 // applyPortProxyResponsePolicy sets the hub's response policy on h, the
 // headers of a proxied app response after stripFromProxyResponse, for both
 // port proxy transports: the page view rules (portViewModifyResponse) when
-// policy.portView, then the sandbox policy with its Permissions-Policy, and
-// nosniff. The last two are set unconditionally and last: nothing sets them
-// on a proxied answer after this, so the app cannot replace them.
+// policy.portView, then the sandbox policy with its Permissions-Policy and
+// Referrer-Policy, and nosniff. The last two are set unconditionally and last:
+// nothing sets them on a proxied answer after this, so the app cannot replace
+// them.
 func applyPortProxyResponsePolicy(h http.Header, policy portProxyPolicy) {
 	if policy.portView {
 		portViewModifyResponse(h)

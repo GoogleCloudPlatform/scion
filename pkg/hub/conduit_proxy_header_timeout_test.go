@@ -164,6 +164,7 @@ func TestConduitProxyErrorKeepsOnePolicy(t *testing.T) {
 	require.Equal(t, http.StatusGatewayTimeout, resp.StatusCode, string(body))
 	assert.Equal(t, []string{untrustedContentSandboxCSP}, resp.Header.Values("Content-Security-Policy"), "conduit error policies")
 	assert.Equal(t, []string{untrustedContentPermissionsPolicy}, resp.Header.Values("Permissions-Policy"), "conduit error Permissions-Policy headers")
+	assert.Equal(t, []string{"no-referrer"}, resp.Header.Values("Referrer-Policy"), "conduit error Referrer-Policy headers")
 	assert.Equal(t, []string{"nosniff"}, resp.Header.Values("X-Content-Type-Options"), "conduit error nosniff headers")
 	select {
 	case <-closed:

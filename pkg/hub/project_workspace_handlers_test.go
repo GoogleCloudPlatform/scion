@@ -348,6 +348,7 @@ func assertSandboxed(t *testing.T, rec *httptest.ResponseRecorder) {
 	csp := rec.Header().Get("Content-Security-Policy")
 	assert.Equal(t, untrustedContentSandboxCSP, csp)
 	assert.Equal(t, untrustedContentPermissionsPolicy, rec.Header().Get("Permissions-Policy"))
+	assert.Equal(t, []string{"no-referrer"}, rec.Header().Values("Referrer-Policy"))
 	assert.True(t, strings.HasPrefix(csp, "sandbox"), "CSP must start with the sandbox directive: %q", csp)
 	assert.Contains(t, csp, "allow-scripts", "scripts stay enabled so generated reports keep working")
 	assert.NotContains(t, csp, "allow-same-origin", "allow-same-origin would undo the isolation")
@@ -372,6 +373,15 @@ func TestProjectWorkspaceDownload_InlineHTMLIsSandboxed(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Header().Get("Content-Disposition"), "attachment")
 	assertSandboxed(t, rec)
+
+	// Behind the web server's security headers middleware, Referrer-Policy is
+	// replaced with no-referrer rather than left at strict-origin-when-cross-origin.
+	webReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/workspace/files/report.html?view=true", project.ID), nil)
+	webReq.Header.Set("Authorization", "Bearer "+testDevToken)
+	webRec := httptest.NewRecorder()
+	(&WebServer{}).securityHeadersMiddleware(srv.Handler()).ServeHTTP(webRec, webReq)
+	require.Equal(t, http.StatusOK, webRec.Code)
+	assertSandboxed(t, webRec)
 }
 
 func TestSharedDirFiles_InlineHTMLIsSandboxed(t *testing.T) {

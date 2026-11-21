@@ -391,6 +391,8 @@ func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
 	assert.Equal(t, []string{"'none'"}, cspDirective(rec.Header().Get("Content-Security-Policy"), "frame-ancestors"), "hub-only frame-ancestors")
 	assert.Equal(t, untrustedContentPermissionsPolicy, rec.Header().Get("Permissions-Policy"),
 		"the hub's Permissions-Policy must replace the agent's own (camera=*)")
+	assert.Equal(t, "no-referrer", rec.Header().Get("Referrer-Policy"),
+		"proxied agent content must send Referrer-Policy: no-referrer")
 	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 	assert.Empty(t, rec.Header().Values("Set-Cookie"), "the agent must not be able to set cookies on the hub origin")
 
@@ -402,6 +404,7 @@ func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
 	(&WebServer{}).securityHeadersMiddleware(srv.Handler()).ServeHTTP(webRec, req)
 	require.Equal(t, http.StatusOK, webRec.Code)
 	assert.Equal(t, []string{agentServedPageSandboxCSP}, webRec.Header().Values("Content-Security-Policy"), "tunnel response policies")
+	assert.Equal(t, []string{"no-referrer"}, webRec.Header().Values("Referrer-Policy"), "tunnel response Referrer-Policy headers")
 	assert.Equal(t, []string{"nosniff"}, webRec.Header().Values("X-Content-Type-Options"), "tunnel response nosniff headers")
 
 	// The hub's own page headers are not combined with the app's: each
@@ -1158,4 +1161,5 @@ func TestUntrustedContentPermissionsPolicy(t *testing.T) {
 	setUntrustedContentHeaders(h, agentServedPageSandboxCSP)
 	assert.Equal(t, agentServedPageSandboxCSP, h.Get("Content-Security-Policy"))
 	assert.Equal(t, untrustedContentPermissionsPolicy, h.Get("Permissions-Policy"))
+	assert.Equal(t, "no-referrer", h.Get("Referrer-Policy"))
 }
