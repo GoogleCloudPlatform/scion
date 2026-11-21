@@ -804,7 +804,7 @@ func gitHubLimitHint(err error) error {
 		return err
 	}
 	return fmt.Errorf("%w; a GitHub folder import downloads and unpacks the whole repository, "+
-		"so use a smaller repository or a release archive (.tar.gz or .zip URL) of the folder", err)
+		"so import from a smaller repository or ask a Hub administrator to allowlist a source ("+AllowedImportSourcesKey+")", err)
 }
 
 // GitHubURLParts contains parsed parts of a GitHub URL.
