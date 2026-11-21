@@ -13,6 +13,14 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Metadata interception: runtime-managed `netns-setup`, broker/image upgrade order, and skew guards
+
+For Docker and rootful Podman agents using `block` or `assign` metadata mode (outside `host` networking), metadata interception rules are now installed by a short-lived `sciontool netns-setup` setup container sharing the agent's network namespace rather than inside the agent container, so the agent container itself no longer receives `CAP_NET_ADMIN`.
+
+- **Upgrade order — update agent images before Runtime Brokers:** Newer agent images advertise `scion.sciontool.capabilities=netns-setup` and include a compatibility fallback in `sciontool init`. When launched by an older Runtime Broker (which grants `CAP_NET_ADMIN` without setting `SCION_METADATA_INTERCEPTION_SOURCE=runtime`), `sciontool init` installs the interception rules in-container and drops `CAP_NET_ADMIN` before any agent code runs, failing closed if setup or capability drop fails. Upgrading agent images first and Runtime Brokers second avoids start refusals during rolling upgrades.
+- **Broker-side version-skew guard:** Upgraded Docker and rootful Podman Runtime Brokers inspect the agent image's `scion.sciontool.capabilities` label before container start and refuse images lacking `netns-setup` with a clear version-skew error (`image_lacks_netns_setup`). Hub lifecycle error logs classify metadata interception skew under `failure_stage=metadata_interception_marker_missing`, `image_lacks_netns_setup`, and `metadata_protection_unavailable`.
+- **Pin image tags to your broker build:** Fleets that pull floating image tags (such as `:latest`) on a separate cadence from Runtime Broker binary rolls should pin agent image tags to the Runtime Broker's release tag or commit SHA so images and brokers do not cross contract boundaries independently. See [Security — Credentials Propagation](/scion/reference/security/#45-credentials-propagation).
+
 ## GitHub App installation association authorization and refusal logging
 
 GitHub App installation associations are now re-validated on every token mint and refused unless the project's `gitRemote` is on the configured GitHub host, the installation is active and owned by the remote's account, and either an active Hub administrator bound the installation (`PUT /api/v1/projects/{id}/github-installation`, requiring `hub.github_app.update`) or the project creator's user-scope `GITHUB_TOKEN` secret has repository access on GitHub.
