@@ -176,21 +176,6 @@ func (s *Server) authorizeConversationReadByID(ctx context.Context, r *http.Requ
 	return conv, nil
 }
 
-// authorizeConversationRead performs the non-HTTP-writing read authorization
-// check for an already-loaded conversation (DM key, cross-project read gate,
-// group project read, and UAT token scope check).
-func (s *Server) authorizeConversationRead(ctx context.Context, _ *http.Request, conv *store.Conversation) error {
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		return &convReadDenial{status: http.StatusForbidden}
-	}
-	cls, token := inboxCredentialOf(ctx)
-	if cls == inboxCredentialRefused {
-		return &convReadDenial{status: http.StatusForbidden}
-	}
-	return s.authorizeConversationReadChecked(ctx, identity, cls, token, conv)
-}
-
 func (s *Server) authorizeConversationReadChecked(ctx context.Context, identity Identity, cls inboxCredential, token *ScopedUserIdentity, conv *store.Conversation) error {
 	if conv.Kind == "direct" {
 		if !authorizeDMRead(conv, identity.Type(), identity.ID()) {
