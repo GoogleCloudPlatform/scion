@@ -40,7 +40,7 @@ Valid modes:
   none     - No messaging (sealed)
   lineage  - Ancestry users and project owners only
   branch   - Parent/child agents and ancestry users
-  project  - All agents and users in the project (default)
+  project  - All agents and users in the project (built-in default)
   hub      - Project messaging plus permitted agents in other projects
              on this Hub (granting it requires permission)
 
@@ -53,7 +53,8 @@ Default for a new agent (applied once, at creation):
   1. the --message-mode flag of scion create or scion start
   2. the template's message_mode
   3. the parent agent's mode, when an agent creates the agent
-  4. project
+  4. the Hub's default message mode (server.hub.default_message_mode;
+     project unless the operator sets it)
 A default that resolves to hub is still a new grant and needs permission.
 This command changes the mode of an existing agent; it does not re-run
 the defaults.

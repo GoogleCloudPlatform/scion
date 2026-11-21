@@ -34,9 +34,9 @@ func TestSetMessageModeHelp_DocumentsDefaultsAndBranchRule(t *testing.T) {
 	flag := strings.Index(long, "the --message-mode flag")
 	tmpl := strings.Index(long, "the template's message_mode")
 	parent := strings.Index(long, "the parent agent's mode")
-	proj := strings.Index(long, "  4. project")
-	require.True(t, flag >= 0 && tmpl >= 0 && parent >= 0 && proj >= 0, long)
-	assert.True(t, flag < tmpl && tmpl < parent && parent < proj, "default order must be flag, template, parent, project")
+	hubDef := strings.Index(long, "  4. the Hub's default message mode (server.hub.default_message_mode")
+	require.True(t, flag >= 0 && tmpl >= 0 && parent >= 0 && hubDef >= 0, long)
+	assert.True(t, flag < tmpl && tmpl < parent && parent < hubDef, "default order must be flag, template, parent, hub default")
 }
 
 // TestMessageModeFlagHelp_ListsHub checks that create and start list every
@@ -46,6 +46,6 @@ func TestMessageModeFlagHelp_ListsHub(t *testing.T) {
 		f := c.Flags().Lookup("message-mode")
 		require.NotNil(t, f, name)
 		assert.Contains(t, f.Usage, "none, lineage, branch, project, hub", name)
-		assert.Contains(t, f.Usage, "the template's mode, else the parent agent's, else 'project'", name)
+		assert.Contains(t, f.Usage, "the template's mode, else the parent agent's, else the Hub's default message mode (server.hub.default_message_mode", name)
 	}
 }

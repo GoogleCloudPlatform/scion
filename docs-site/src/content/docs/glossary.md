@@ -241,7 +241,7 @@ A message mode that restricts messaging to users in the agent's ancestry chain â
 A message mode that behaves like Project mode within the agent's own project and additionally permits the agent to send direct messages across project boundaries (when cross-project messaging is enabled at the Hub and receiving-project level). A project-mode agent can receive a cross-project DM but cannot reply until granted Hub mode. Hub mode is subject to a non-escalation grant guard: an agent can only grant it to another agent if the granting agent is itself in Hub mode and has the `full` authorization role.
 
 ### Message Mode
-A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: `none`, `lineage`, `branch`, `project` (the default), or `hub`. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
+A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: `none`, `lineage`, `branch`, `project` (the built-in default unless the operator sets `server.hub.default_message_mode`), or `hub`. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
 
 ### Messageability
 A server-computed assessment of whether a specific viewer can message a specific agent, considering the agent's message mode, the viewer's identity, ancestry relationship, and permissions. Exposed in API responses as `_messageability` with `canMessage` and `canReachViewer` booleans. Used by the UI to gate message buttons and show reachability indicators.
