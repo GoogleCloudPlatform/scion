@@ -151,15 +151,18 @@ func TestArtifactHostPermits_ScopedUserTokenKeepsItsLimits(t *testing.T) {
 	}
 }
 
-// TestLegacyChainsWithholdOnlyArtifactScopes: a chain with no recorded
+// TestLegacyChainsWithholdOnlyOptionalRoleScopes: a chain with no recorded
 // bound (unrecorded ceiling) keeps every scope it was issued before and is
-// only not extended the artifact scopes; a principal chain is unchanged.
-func TestLegacyChainsWithholdOnlyArtifactScopes(t *testing.T) {
-	// The ceiling-optional scopes' coverage (the artifact permissions) plus
-	// every Reserved permission. Reserved rows map to no agent scope, so
-	// they add nothing to the withheld scopes checked below.
+// only not extended the ceiling-optional role scopes (artifact and
+// project-skill-write scopes); a principal chain is unchanged.
+func TestLegacyChainsWithholdOnlyOptionalRoleScopes(t *testing.T) {
+	// The ceiling-optional scopes' coverage (the artifact and
+	// project-skill-write permissions) plus every Reserved permission.
+	// Reserved rows map to no agent scope, so they add nothing to the
+	// withheld scopes checked below.
 	assert.Equal(t, map[string]bool{
 		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true,
+		"skill.create": true, "skill.update": true,
 		"hub.federation.read": true, "hub.federation.update": true, "hub.teams_manifest.update": true,
 		"agent.log_append": true, "project.register": true,
 	}, legacyChainExcludedPermissions)
@@ -177,14 +180,23 @@ func TestLegacyChainsWithholdOnlyArtifactScopes(t *testing.T) {
 		assert.Equal(t, want, filterScopes(candidates, unrecorded, ScopeCeilings{}), "%s: every pre-existing scope is kept", role)
 		assert.Equal(t, candidates, filterScopes(candidates, principal, ScopeCeilings{}), "%s: principal chains are unchanged", role)
 	}
-	for _, p := range []string{"artifact.read", "artifact.create", "artifact.update"} {
-		assert.False(t, EffectCeilingAllows(unrecorded, p, false), "unrecorded denies %s at use", p)
-		assert.True(t, EffectCeilingAllows(principal, p, false), "principal allows %s", p)
+	for _, tc := range []struct {
+		perm string
+		res  Resource
+	}{
+		{"artifact.read", Resource{Type: "artifact", ParentType: "project", ParentID: "p"}},
+		{"artifact.create", Resource{Type: "artifact", ParentType: "project", ParentID: "p"}},
+		{"artifact.update", Resource{Type: "artifact", ParentType: "project", ParentID: "p"}},
+		{"skill.create", Resource{Type: "skill", ParentType: "project", ParentID: "p"}},
+		{"skill.update", Resource{Type: "skill", ParentType: "project", ParentID: "p"}},
+	} {
+		assert.False(t, EffectCeilingAllows(unrecorded, tc.perm, false), "unrecorded denies %s at use", tc.perm)
+		assert.True(t, EffectCeilingAllows(principal, tc.perm, false), "principal allows %s", tc.perm)
 		edge := &store.DelegationEdge{}
 		edge.EffectCeiling = unrecorded
 		edge.ProvenanceVersion = store.ProvenanceVersionV1
-		cause, _ := hopEffectCeilingDeny(edge, p, Resource{Type: "artifact", ParentType: "project", ParentID: "p"}, "a1", false)
-		assert.Equal(t, DenyCauseCeilingUnrecorded, cause, "unrecorded hop denies %s", p)
+		cause, _ := hopEffectCeilingDeny(edge, tc.perm, tc.res, "a1", false)
+		assert.Equal(t, DenyCauseCeilingUnrecorded, cause, "unrecorded hop denies %s", tc.perm)
 	}
 }
 

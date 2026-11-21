@@ -169,8 +169,8 @@ func droppedCeilingOptionalScopes(candidates, issued []AgentTokenScope) []AgentT
 // droppedScopesWarning is the create and start warning for a grant whose
 // chain ceiling left out ceiling-optional role scopes, or "" when it left
 // out none (ptone/scion#4569). An agent created by a parent whose ceiling
-// lacks the artifact scopes still gets its role, but its first artifact
-// command fails with missing_scope; this says so up front.
+// lacks a ceiling-optional scope still gets its role, but commands needing
+// that scope fail with missing_scope; this says so up front.
 func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 	if grant == nil || len(grant.DroppedScopes) == 0 {
 		return ""
@@ -190,9 +190,35 @@ func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
 		noun, verb = "scopes", "them"
 	}
 	return fmt.Sprintf("agent token issued without the %s %s: the scope ceiling of the agent's creator does not allow %s, "+
-		"so artifact commands will fail with missing_scope. Recreating the agent from the same parent gives it the same scopes; "+
+		"so %s will fail with missing_scope. Recreating the agent from the same parent gives it the same scopes; "+
 		"once the creator holds them, a hub super-admin can run 'scion reset-auth %s --reissue-scopes'",
-		strings.Join(names, " and "), noun, verb, agentName)
+		strings.Join(names, " and "), noun, verb, droppedScopesAffectedCommands(grant.DroppedScopes), agentName)
+}
+
+// droppedScopesAffectedCommands names the command families affected by the
+// dropped ceiling-optional scopes, preserving their first-seen order without
+// duplicates, and falling back to a generic phrase for any unmapped scope.
+func droppedScopesAffectedCommands(dropped []AgentTokenScope) string {
+	var families []string
+	addFamily := func(label string) {
+		if !slices.Contains(families, label) {
+			families = append(families, label)
+		}
+	}
+	for _, scope := range dropped {
+		switch scope {
+		case ScopeProjectArtifactRead, ScopeProjectArtifactWrite:
+			addFamily("artifact commands")
+		case ScopeProjectSkillWrite:
+			addFamily("skill publish commands")
+		default:
+			return "commands that need them"
+		}
+	}
+	if len(families) == 0 {
+		return "commands that need them"
+	}
+	return strings.Join(families, " and ")
 }
 
 // SignAgentToken signs grant for runID with the server's token service.

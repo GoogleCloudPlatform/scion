@@ -178,11 +178,11 @@ var recordedProvenanceRequiredIDs = []string{
 var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 
 // legacyChainExcludedPermissions are the permissions covered by the
-// ceilingOptionalRoleScopes (the artifact permissions). A chain with no
-// recorded bound (an unrecorded ceiling or a migration-sentinel edge) never
-// held them, so it is not issued those scopes and is denied these
-// permissions at use. Principal chains are unaffected: their authority is
-// the live user.
+// ceilingOptionalRoleScopes (the artifact and project-skill-write
+// permissions). A chain with no recorded bound (an unrecorded ceiling or a
+// migration-sentinel edge) never held them, so it is not issued those scopes
+// and is denied these permissions at use. Principal chains are unaffected:
+// their authority is the live user.
 //
 // Every Reserved permission is in the set too. Today that keeps
 // artifact.update excluded after it left project:artifact:write when it
@@ -381,10 +381,10 @@ func ceilingAllowsScope(c store.EffectCeiling, scope AgentTokenScope) bool {
 // ceilingOptionalRoleScopes are role scopes that do not decide whether a
 // role fits a ceiling. A child whose ceiling does not allow one still gets
 // the role; the mint filter (ceilingAllowsScope at issue time) leaves the
-// scope out of its tokens. The artifact scopes joined the agent roles after
-// UAT selector sets were in use, so making them optional keeps every token
-// that fit a role before still fitting it, while a child only uses the
-// artifact service when its source could.
+// scope out of its tokens. The artifact scopes and project:skill:write joined
+// the agent roles after UAT selector sets were in use, so making them optional
+// keeps every token that fit a role before still fitting it, while a child
+// only uses those capabilities when its source could.
 var ceilingOptionalRoleScopes = map[AgentTokenScope]bool{
 	ScopeProjectArtifactRead:  true,
 	ScopeProjectArtifactWrite: true,
