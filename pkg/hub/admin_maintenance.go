@@ -1173,18 +1173,23 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	// command with adminRestartTimeout and passing -n so sudo never prompts.
 	restartCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.effectiveLegacyRestartTimeout())
 	defer cancel()
-	if err := s.runLegacyRestart(restartCtx, "sudo", "-n", "systemctl", "restart", "--no-block", serviceName); err != nil {
+	if stderr, err := s.runLegacyRestart(restartCtx, "sudo", "-n", "systemctl", "restart", "--no-block", serviceName); err != nil {
 		if restartCtx.Err() == nil && maintenance.IsStopSignalExit(err) {
 			log.Info("Hub restart command terminated by stop signal; restart is under way", "service", serviceName, "user", user.Email())
 			writeRestartAccepted(w)
 			return
 		}
 		s.releaseHubRestart(stamp)
-		if restartCtx.Err() != nil {
-			log.Error("Failed to initiate hub restart", "error", restartCtx.Err(), "cause", err, "user", user.Email())
-		} else {
-			log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
+		attrs := []any{"user", user.Email()}
+		if stderr != "" {
+			attrs = append(attrs, "stderr", stderr)
 		}
+		if restartCtx.Err() != nil {
+			attrs = append([]any{"error", restartCtx.Err(), "cause", err}, attrs...)
+		} else {
+			attrs = append([]any{"error", err}, attrs...)
+		}
+		log.Error("Failed to initiate hub restart", attrs...)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to initiate restart", nil)
 		return
@@ -1200,11 +1205,35 @@ const adminRestartSignalDelay = 250 * time.Millisecond
 // adminRestartTimeout bounds the installer's Restart for Restart Hub.
 const adminRestartTimeout = 30 * time.Second
 
-func (s *Server) runLegacyRestart(ctx context.Context, name string, args ...string) error {
-	if s.legacyRestartRunner != nil {
-		return s.legacyRestartRunner(ctx, name, args...)
+// legacyRestartMaxStderrBytes caps stderr captured from the legacy restart
+// sudo command so a noisy subprocess cannot bloat memory or logs.
+const legacyRestartMaxStderrBytes = 1024
+
+type limitedBuffer struct {
+	buf bytes.Buffer
+	max int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if rem := b.max - b.buf.Len(); rem > 0 {
+		if len(p) > rem {
+			b.buf.Write(p[:rem])
+		} else {
+			b.buf.Write(p)
+		}
 	}
-	return exec.CommandContext(ctx, name, args...).Run()
+	return len(p), nil
+}
+
+func (s *Server) runLegacyRestart(ctx context.Context, name string, args ...string) (string, error) {
+	if s.legacyRestartRunner != nil {
+		return "", s.legacyRestartRunner(ctx, name, args...)
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	stderr := &limitedBuffer{max: legacyRestartMaxStderrBytes}
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	return strings.TrimSpace(stderr.buf.String()), err
 }
 
 func (s *Server) effectiveLegacyRestartTimeout() time.Duration {
