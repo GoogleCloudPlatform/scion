@@ -1476,6 +1476,127 @@ EOF
     assert_eq "0" "$(settings_tmp_count)" "temp files removed after --reset-db"
 }
 
+# --- scion-install-rebuild.sh source validation & sudoers wiring (ptone/scion#6155) ---
+
+test_full_installs_rebuild_wrapper_and_sudoers() {
+    fresh_state
+    EXTRA_ENV=("CURL_STUB_BODY=${HEALTHY}")
+    run_script gce-start-hub.sh --full
+    assert_eq 0 "$RC" "full deploy passes"
+
+    if [[ -f "${STUB_SCP_DIR}/scion-install-rebuild.sh" ]]; then
+        pass
+    else
+        fail "scion-install-rebuild.sh uploaded via scp"
+    fi
+    if bash -n "${STARTER_DIR}/scion-install-rebuild.sh"; then
+        pass
+    else
+        fail "scion-install-rebuild.sh is valid bash syntax"
+    fi
+
+    local ssh_cmd
+    ssh_cmd="$(cat "${STUB_SSH_LOG}")"
+    assert_contains "$ssh_cmd" "sudo install -d -m 0755 -o root -g root /usr/local/libexec/scion" \
+        "creates root-owned /usr/local/libexec/scion"
+    assert_contains "$ssh_cmd" 'sudo install -m 0755 -o root -g root /tmp/scion-install-rebuild.sh "$REBUILD_HELPER"' \
+        "installs root-owned rebuild helper"
+    assert_contains "$ssh_cmd" "scion ALL=(root) NOPASSWD: /usr/local/libexec/scion/scion-install-rebuild.sh" \
+        "sudoers grants only the rebuild helper"
+    assert_not_contains "$ssh_cmd" "NOPASSWD: /usr/bin/install -m 755 /home/scion/scion/scion.rebuild" \
+        "sudoers no longer grants raw /usr/bin/install on user-controlled path"
+    assert_contains "$(cat "${STUB_SCP_DIR}/scion-hub.service")" $'\nUser=scion\n' \
+        "hub unit runs as User=scion"
+}
+
+test_install_rebuild_wrapper_validation() {
+    fresh_state
+    local helper="${STARTER_DIR}/scion-install-rebuild.sh"
+    local work="${STATE_DIR}/rebuild"
+    local src="${work}/scion.rebuild"
+    local dest_dir="${work}/bin"
+    local dest="${dest_dir}/scion"
+    local me
+    me="$(id -un)"
+    mkdir -p "${work}" "${dest_dir}"
+
+    # 1. Valid regular file owned by expected user installs atomically with 0755.
+    printf 'old-binary\n' > "${dest}"
+    printf 'new-binary\n' > "${src}"
+    chmod 0644 "${src}"
+    local out rc
+    out="$(SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_eq 0 "$rc" "valid regular file installs (${out})"
+    assert_eq "new-binary" "$(cat "${dest}")" "destination holds installed content"
+    assert_eq "755" "$(stat -c '%a' "${dest}")" "installed binary is mode 755"
+    assert_eq "" "$(find "${dest_dir}" -name '.scion.rebuild.*')" "no leftover temp files"
+
+    # 2. Symlink to a valid regular file is rejected; destination stays untouched.
+    printf 'real-target\n' > "${work}/real-target"
+    rm -f "${src}"
+    ln -s "${work}/real-target" "${src}"
+    out="$(SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "symlink source is rejected"
+    assert_contains "$out" "must not be a symlink" "symlink error names the reason"
+    assert_eq "new-binary" "$(cat "${dest}")" "destination unchanged after symlink rejection"
+
+    # 3. Directory source is rejected; destination stays untouched.
+    rm -f "${src}"
+    mkdir -p "${src}"
+    out="$(SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "directory source is rejected"
+    assert_contains "$out" "must be a regular file" "directory error names the reason"
+    assert_eq "new-binary" "$(cat "${dest}")" "destination unchanged after directory rejection"
+    rmdir "${src}"
+
+    # 4. FIFO (named pipe) source is rejected without hanging; destination stays untouched.
+    mkfifo "${src}"
+    out="$(SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "FIFO source is rejected"
+    assert_contains "$out" "must be a regular file" "FIFO error names the reason"
+    assert_eq "new-binary" "$(cat "${dest}")" "destination unchanged after FIFO rejection"
+    rm -f "${src}"
+
+    # 5. Source file owned by a different user is rejected.
+    printf 'other-owner\n' > "${src}"
+    local wrong_owner="root"
+    if [[ "$(id -u)" -eq 0 ]]; then
+        wrong_owner="nobody"
+    fi
+    out="$(SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${wrong_owner}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "source owned by unexpected user is rejected"
+    assert_contains "$out" "must be owned by ${wrong_owner}" "owner mismatch error names expected owner"
+    assert_eq "new-binary" "$(cat "${dest}")" "destination unchanged after owner mismatch"
+
+    # 6. Missing source file is rejected cleanly.
+    rm -f "${src}"
+    out="$(SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "missing source is rejected"
+    assert_contains "$out" "source file not found" "missing file error names the reason"
+    assert_eq "new-binary" "$(cat "${dest}")" "destination unchanged after missing source"
+
+    # 7. Unexpected CLI arguments are rejected.
+    printf 'new-binary-2\n' > "${src}"
+    out="$(SCION_REBUILD_SRC="${src}" SCION_REBUILD_DEST="${dest}" SCION_REBUILD_OWNER="${me}" \
+        bash "${helper}" /etc/passwd 2>&1)"
+    rc=$?
+    assert_ne 0 "$rc" "unexpected CLI arguments are rejected"
+    assert_contains "$out" "unexpected arguments" "argument error names the reason"
+    assert_eq "new-binary" "$(cat "${dest}")" "destination unchanged after argument rejection"
+}
+
 mapfile -t TESTS < <(declare -F | awk '{print $3}' | grep '^test_' | sort)
 for t in "${TESTS[@]}"; do
     CURRENT="$t"

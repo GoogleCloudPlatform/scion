@@ -347,6 +347,88 @@ func TestSudoInstaller_StageActivate(t *testing.T) {
 	}
 }
 
+func TestSudoInstaller_WrapperRule(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("prefers wrapper when both wrapper and legacy rules exist", func(t *testing.T) {
+		opts, r := sudoOpts(t, SudoInstallWrapperPath, ruleInstall, ruleNoBlock)
+		inst := newSudoInstaller(opts)
+		inst.wrapperSrc = filepath.Join(opts.RepoPath, SudoStagingName)
+		inst.wrapperDest = opts.BinaryDest
+
+		if err := inst.Preflight(ctx); err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+		staged, err := inst.Stage(ctx, "nightly-20261023", writeBin(t, "new"))
+		if err != nil {
+			t.Fatalf("Stage: %v", err)
+		}
+		if err := inst.Activate(ctx, staged); err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		want := "sudo -n " + SudoInstallWrapperPath
+		if got := r.runs[len(r.runs)-1]; got != want {
+			t.Fatalf("Activate ran %q, want %q", got, want)
+		}
+	})
+
+	t.Run("wrapper rule alone passes preflight and activates", func(t *testing.T) {
+		opts, r := sudoOpts(t, SudoInstallWrapperPath, ruleNoBlock)
+		inst := newSudoInstaller(opts)
+		inst.wrapperSrc = filepath.Join(opts.RepoPath, SudoStagingName)
+		inst.wrapperDest = opts.BinaryDest
+
+		if err := inst.Preflight(ctx); err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+		staged, err := inst.Stage(ctx, "nightly-20261023", writeBin(t, "new"))
+		if err != nil {
+			t.Fatalf("Stage: %v", err)
+		}
+		if err := inst.Activate(ctx, staged); err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		want := "sudo -n " + SudoInstallWrapperPath
+		if got := r.runs[len(r.runs)-1]; got != want {
+			t.Fatalf("Activate ran %q, want %q", got, want)
+		}
+	})
+
+	t.Run("falls back to legacy install rule when wrapper rule is absent", func(t *testing.T) {
+		opts, r := sudoOpts(t, ruleInstall, ruleNoBlock)
+		inst := newSudoInstaller(opts)
+		inst.wrapperSrc = filepath.Join(opts.RepoPath, SudoStagingName)
+		inst.wrapperDest = opts.BinaryDest
+
+		if err := inst.Preflight(ctx); err != nil {
+			t.Fatalf("Preflight: %v", err)
+		}
+		staged, err := inst.Stage(ctx, "nightly-20261023", writeBin(t, "new"))
+		if err != nil {
+			t.Fatalf("Stage: %v", err)
+		}
+		if err := inst.Activate(ctx, staged); err != nil {
+			t.Fatalf("Activate: %v", err)
+		}
+		want := "sudo -n install -m 755 " + staged + " /usr/local/bin/scion"
+		if got := r.runs[len(r.runs)-1]; got != want {
+			t.Fatalf("Activate ran %q, want %q", got, want)
+		}
+	})
+
+	t.Run("reports both rules when neither wrapper nor legacy rule exists", func(t *testing.T) {
+		opts, _ := sudoOpts(t, ruleNoBlock)
+		inst := newSudoInstaller(opts)
+		inst.wrapperSrc = filepath.Join(opts.RepoPath, SudoStagingName)
+		inst.wrapperDest = opts.BinaryDest
+
+		err := inst.Preflight(ctx)
+		if err == nil || !strings.Contains(err.Error(), SudoInstallWrapperPath) || !strings.Contains(err.Error(), "install -m 755") {
+			t.Fatalf("Preflight = %v, want error naming both wrapper and legacy install rules", err)
+		}
+	})
+}
+
 func TestDetect(t *testing.T) {
 	ctx := context.Background()
 
