@@ -136,7 +136,10 @@ type Config struct {
 	Timeout        time.Duration
 	ConnectTimeout time.Duration
 	MaxRedirects   int
-	Logger         *slog.Logger
+	// DisableRedirects refuses every HTTP redirect (0 hops allowed),
+	// overriding MaxRedirects.
+	DisableRedirects bool
+	Logger           *slog.Logger
 	// AllowedHosts, when non-empty, is the complete set of host names the
 	// fetcher may contact, checked on the first request and on every
 	// redirect hop. Names are compared case-insensitively and exactly (no
@@ -284,6 +287,9 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode, auth
 		if isRedirect(resp.StatusCode) {
 			loc := resp.Header.Get("Location")
 			_ = resp.Body.Close()
+			if f.cfg.DisableRedirects {
+				return nil, fail(ReasonRedirects, "redirects are not allowed")
+			}
 			if hop >= f.cfg.MaxRedirects {
 				return nil, fail(ReasonRedirects, "more than %d redirects", f.cfg.MaxRedirects)
 			}

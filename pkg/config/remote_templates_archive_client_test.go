@@ -16,6 +16,7 @@ package config
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,9 +42,24 @@ func (d fixedDialer) DialContext(ctx context.Context, network, _ string) (net.Co
 	return nd.DialContext(ctx, network, d.addr)
 }
 
-// An ArchiveClient replaces http.DefaultClient for archive downloads, so a
+func clientDownloadFunc(client *http.Client) RemoteDownloadFunc {
+	return func(ctx context.Context, rawURL, _ string) ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return io.ReadAll(resp.Body)
+	}
+}
+
+// A Download hook replaces http.DefaultClient for archive downloads, so a
 // caller's destination restrictions apply.
-func TestFetchRemoteTemplateWithOptions_ArchiveClientBlocksLoopback(t *testing.T) {
+func TestFetchRemoteTemplateWithOptions_DownloadBlocksLoopback(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	var hits int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,13 +69,13 @@ func TestFetchRemoteTemplateWithOptions_ArchiveClientBlocksLoopback(t *testing.T
 	t.Cleanup(srv.Close)
 
 	_, err := FetchRemoteTemplateWithOptions(context.Background(), srv.URL+"/x.tar.gz",
-		FetchOptions{ArchiveClient: ssrfclient.NewClient(ssrfclient.Config{})})
+		FetchOptions{Download: clientDownloadFunc(ssrfclient.NewClient(ssrfclient.Config{}))})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ssrfclient.ErrBlockedAddress)
 	assert.Zero(t, hits)
 }
 
-func TestFetchRemoteTemplateWithOptions_ArchiveClientRefusesRedirect(t *testing.T) {
+func TestFetchRemoteTemplateWithOptions_DownloadRefusesRedirect(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "http://169.254.169.254/latest/x.tar.gz", http.StatusFound)
@@ -71,7 +87,7 @@ func TestFetchRemoteTemplateWithOptions_ArchiveClientRefusesRedirect(t *testing.
 		Dialer:   fixedDialer{addr: srv.Listener.Addr().String()},
 	})
 	_, err := FetchRemoteTemplateWithOptions(context.Background(), "http://archive.example/x.tar.gz",
-		FetchOptions{ArchiveClient: client})
+		FetchOptions{Download: clientDownloadFunc(client)})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ssrfclient.ErrRedirectBlocked)
 }

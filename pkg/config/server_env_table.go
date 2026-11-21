@@ -145,6 +145,14 @@ var ServerEnvExcludedKeys = map[string]string{
 	"roles": "not implemented as a setting: the settings schema and the opsettings registry have no roles key",
 }
 
+// ServerEnvFileOnlyKeys documents Layer-0 server settings that are settable
+// only in the settings file and intentionally have no SCION_SERVER_* or
+// SCION_SEED_* environment variable. None of them is in the table, and
+// serverEnvResidue refuses to map env names to them.
+var ServerEnvFileOnlyKeys = map[string]string{
+	AllowedImportSourcesKey: "operator-only import source allowlist: settings file only, no environment variable",
+}
+
 // serverEnvTable is the built table with its indexes.
 type serverEnvTable struct {
 	entries []ServerEnvEntry
@@ -274,21 +282,49 @@ func seedEnvNameFor(e ServerEnvEntry, n string) string {
 	return seedEnvPrefix + rest
 }
 
-// isServerEnvInert reports whether a SCION_SERVER_* name is listed in
-// serverEnvInertNames.
-func isServerEnvInert(name string) bool {
-	return serverEnvInertNames[strings.ToUpper(name)]
+// isServerEnvFileOnlyName reports whether name is a SCION_SERVER_* spelling
+// (collapsed or underscored) of a settings-file-only key in
+// ServerEnvFileOnlyKeys.
+func isServerEnvFileOnlyName(name string) bool {
+	upper := strings.ToUpper(name)
+	for path := range ServerEnvFileOnlyKeys {
+		rel := strings.TrimPrefix(path, "server.")
+		if upper == serverEnvPrefix+collapsedEnvSegments(rel) ||
+			upper == serverEnvPrefix+underscoredEnvSegments(rel) {
+			return true
+		}
+		if gc := globalConfigPathForSetting(path); gc != "" && upper == serverEnvPrefix+collapsedEnvSegments(gc) {
+			return true
+		}
+	}
+	return false
 }
 
-// ownsServerEnvPath reports whether path is a table entry's settings path.
+// isServerEnvInert reports whether a SCION_SERVER_* name is listed in
+// serverEnvInertNames or targets a settings-file-only key.
+func isServerEnvInert(name string) bool {
+	return serverEnvInertNames[strings.ToUpper(name)] || isServerEnvFileOnlyName(name)
+}
+
+// ownsServerEnvPath reports whether path is a table entry's settings path,
+// or a settings-file-only key that env residue must never map to.
 func ownsServerEnvPath(path string) bool {
+	if _, fileOnly := ServerEnvFileOnlyKeys[path]; fileOnly {
+		return true
+	}
 	_, ok := getServerEnvTable().byPath[path]
 	return ok
 }
 
 // ownsGlobalConfigEnvPath reports whether path is a table entry's
-// GlobalConfig path.
+// GlobalConfig path, or the GlobalConfig path of a settings-file-only key
+// that env residue must never map to.
 func ownsGlobalConfigEnvPath(path string) bool {
+	for k := range ServerEnvFileOnlyKeys {
+		if globalConfigPathForSetting(k) == path {
+			return true
+		}
+	}
 	return getServerEnvTable().gcPaths[path]
 }
 
@@ -371,8 +407,12 @@ func buildServerEnvTable() *serverEnvTable {
 }
 
 // serverEnvInScope reports whether a SCION_SERVER_* name sets the setting at
-// path: every server setting, and the settings under serverEnvTopLevelKeys.
+// path: every server setting (except ServerEnvFileOnlyKeys), and the settings
+// under serverEnvTopLevelKeys.
 func serverEnvInScope(path string) bool {
+	if _, fileOnly := ServerEnvFileOnlyKeys[path]; fileOnly {
+		return false
+	}
 	if strings.HasPrefix(path, "server.") {
 		return true
 	}

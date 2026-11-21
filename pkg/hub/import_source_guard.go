@@ -15,95 +15,205 @@
 package hub
 
 import (
+	"context"
 	"errors"
-	"net"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// importSourceRefusedError is returned for a template or harness-config
-// import source that a hosted hub does not fetch. Its message never contains
-// the source URL, which may carry credentials.
-type importSourceRefusedError struct{ msg string }
+// Limits of one hosted server-side template or harness-config source fetch
+// (import, discover, harness-config reimport and skill discovery; see
+// fetchRemoteForImport). Template "Refresh from Source" has its own fetcher
+// and limits (defaultTemplateSourceLimits).
+const (
+	// importFetchTimeout bounds the whole fetch: download, extraction, and
+	// Cloud Storage copies.
+	importFetchTimeout = 5 * time.Minute
+	// importDownloadTimeout bounds one HTTP download.
+	importDownloadTimeout = 2 * time.Minute
+	// importMaxDownloadBytes caps one HTTP download (the compressed archive
+	// or GitHub tarball).
+	importMaxDownloadBytes int64 = 64 << 20
+	// importMaxRedirects bounds redirect hops on GitHub tarball downloads
+	// (github.com/api.github.com -> codeload.github.com only). Non-GitHub
+	// allowlisted HTTPS downloads block all redirects.
+	importMaxRedirects = 3
+	// importMaxUnpackedBytes caps the decompressed bytes read from an
+	// archive in each pass over it.
+	importMaxUnpackedBytes int64 = 512 << 20
+	// importMaxTreeBytes caps the file bytes written for one fetch,
+	// including a GitHub tarball's temporary extraction of the whole
+	// repository.
+	importMaxTreeBytes int64 = 256 << 20
+	// importMaxTreeFiles caps the files and directories written for one
+	// fetch, counted the same way.
+	importMaxTreeFiles = 20000
+)
 
-func (e *importSourceRefusedError) Error() string { return e.msg }
+// importDownloadOverride, when set, replaces the SSRF-safe downloader for
+// hosted server-side import fetches. It exists for the pkg/hub tests, whose
+// sources are served by test servers on loopback; production code never
+// sets it.
+var importDownloadOverride config.RemoteDownloadFunc
 
-// checkImportSource refuses, on a hosted hub, import sources the hub must not
-// fetch on a caller's behalf, following the skills-discover precedent
-// (handlers_skills_discover.go):
+// checkImportSource returns the URI to fetch for sourceURL, or an error
+// (wrapping config.ErrImportSourceNotAllowed, without the URL) when a hosted
+// Hub may not fetch it.
 //
-//   - rclone connection strings (":local:/...", ":googlecloudstorage:...", any
-//     ":backend:"), which would read the hub's own filesystem or use its
-//     ambient cloud credentials;
-//   - anything other than https, in particular plain http;
-//   - an https URL whose host is a literal private, loopback or link-local
-//     address. Host names are checked when dialed: hosted archive downloads use
-//     importArchiveClient.
-//
-// A workstation hub accepts every remote URI, as before.
-func (s *Server) checkImportSource(sourceURL string) error {
+// A workstation Hub is exempt and accepts every remote URI as before.
+func (s *Server) checkImportSource(sourceURL string) (string, error) {
 	if s.workstation {
-		return nil
+		return sourceURL, nil
 	}
-	return checkHostedImportSource(sourceURL)
-}
-
-func checkHostedImportSource(sourceURL string) error {
-	if strings.HasPrefix(sourceURL, ":") {
-		return &importSourceRefusedError{"sourceUrl: rclone sources are not allowed on a hosted server; use an https:// URL"}
-	}
-	u, err := url.Parse(sourceURL)
-	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" {
-		return &importSourceRefusedError{"sourceUrl must be an https:// URL on a hosted server"}
-	}
-	if ip := net.ParseIP(u.Hostname()); ip != nil && ssrfclient.IsBlockedPrivateOrLocal(ip) {
-		return &importSourceRefusedError{"sourceUrl must not name a private, loopback or link-local address on a hosted server"}
-	}
-	return nil
-}
-
-// importArchiveClient returns the HTTP client for archive downloads during
-// import: nil (http.DefaultClient) on a workstation hub, and on a hosted hub an
-// SSRF-safe client that refuses private, loopback and link-local destinations
-// and redirects.
-func (s *Server) importArchiveClient() *http.Client {
-	if s.workstation {
-		return nil
-	}
-	return ssrfclient.NewClient(ssrfclient.Config{})
-}
-
-// importFetchDisallowedMessage answers a hosted archive download that the
-// SSRF-safe client stopped. It is fixed, so the resolved address and the
-// redirect target are not echoed.
-const importFetchDisallowedMessage = "sourceUrl redirected or resolved to a disallowed address; on a hosted server give the final public https URL"
-
-// mapImportFetchError replaces an error from the SSRF-safe archive client (a
-// blocked address or a refused redirect) with importFetchDisallowedMessage.
-// Other errors are returned unchanged.
-func mapImportFetchError(err error) error {
-	if errors.Is(err, ssrfclient.ErrBlockedAddress) || errors.Is(err, ssrfclient.ErrRedirectBlocked) {
-		return &importSourceRefusedError{importFetchDisallowedMessage}
-	}
-	return err
+	return config.CheckHubImportSource(sourceURL, s.config.AllowedImportSources)
 }
 
 // refuseImportSource writes a 400 invalid_request answer and returns true when
 // checkImportSource refuses sourceURL. Handlers call it before fetching, so the
 // refusal also reaches streaming (NDJSON) callers as a plain error answer.
 func (s *Server) refuseImportSource(w http.ResponseWriter, sourceURL string) bool {
-	err := s.checkImportSource(sourceURL)
+	_, err := s.checkImportSource(sourceURL)
 	if err == nil {
 		return false
 	}
-	var refused *importSourceRefusedError
-	msg := "sourceUrl is not allowed"
-	if errors.As(err, &refused) {
-		msg = refused.msg
+	msg := config.ErrImportSourceNotAllowed.Error()
+	if errors.Is(err, config.ErrImportSourceNotAllowed) {
+		msg = err.Error()
 	}
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, msg, nil)
 	return true
+}
+
+// fetchRemoteForImport fetches a remote source URL to a local cache directory,
+// authenticating against GitHub with the credential importCredential selects
+// for the import's scope ("global", "project" or "user") and scopeID. It
+// applies to both resource kinds (templates and harness-configs) and to skill
+// directory discovery. The caller owns the returned cache path and must
+// remove it.
+//
+// On a workstation Hub, fetching uses the default HTTP client without hosted
+// source restrictions. On a hosted Hub, the source must pass checkImportSource
+// (https://github.com, or a source server.hub.allowed_import_sources allows),
+// HTTP downloads go through remotefetch (https on port 443 to public addresses
+// only; redirects are blocked on non-GitHub allowlisted HTTPS sources and
+// pinned to templateSourceHosts on GitHub fetches), and the fetch is bounded
+// by the import* limits above with no sparse-checkout fallback.
+func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourceURL string) (string, error) {
+	if s.workstation {
+		return config.FetchRemoteTemplateWithOptions(ctx, sourceURL, config.FetchOptions{
+			AuthToken:       s.importCredential(ctx, scope, scopeID, sourceURL),
+			PrivateCacheDir: true,
+		})
+	}
+	fetchURI, err := s.checkImportSource(sourceURL)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, importFetchTimeout)
+	defer cancel()
+	path, err := config.FetchRemoteTemplateWithOptions(ctx, fetchURI, config.FetchOptions{
+		AuthToken:        s.importCredential(ctx, scope, scopeID, fetchURI),
+		Download:         s.importDownloader(),
+		MaxBytes:         importMaxTreeBytes,
+		MaxFiles:         importMaxTreeFiles,
+		MaxUnpackedBytes: importMaxUnpackedBytes,
+		PrivateCacheDir:  true,
+	})
+	if err != nil && strings.HasPrefix(fetchURI, ":gcs:") && !errors.Is(err, config.ErrRemoteFetchLimit) {
+		// Cloud Storage errors can name the Hub's service account and
+		// project; keep them in the Hub log.
+		if s.resourceLog != nil {
+			s.resourceLog.Warn("import fetch from cloud storage failed", "source", fetchURI, "error", err)
+		}
+		return "", errImportGCSFetchFailed
+	}
+	return path, err
+}
+
+// errImportGCSFetchFailed is the caller-facing error for a failed Cloud
+// Storage fetch.
+var errImportGCSFetchFailed = errors.New("the Cloud Storage source could not be read; check the path and that the Hub has access to it")
+
+// importDownloader returns the download hook for hosted server-side import
+// fetches.
+func (s *Server) importDownloader() config.RemoteDownloadFunc {
+	if importDownloadOverride != nil {
+		return importDownloadOverride
+	}
+	return newImportDownloader(s.resourceLog)
+}
+
+// newImportDownloader returns the SSRF-safe download hook for hosted Hubs.
+// GitHub downloads (github.com, with or without a credential) are restricted
+// to templateSourceHosts (github.com, api.github.com, codeload.github.com) on
+// every hop so GitHub's tarball redirect to codeload works while blocking any
+// redirect elsewhere. Allowlisted non-GitHub HTTPS downloads block all
+// redirects.
+func newImportDownloader(logger *slog.Logger) config.RemoteDownloadFunc {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	direct := remotefetch.New(remotefetch.Config{
+		MaxBytes:         importMaxDownloadBytes,
+		Timeout:          importDownloadTimeout,
+		DisableRedirects: true,
+		Logger:           logger,
+	})
+	github := remotefetch.New(remotefetch.Config{
+		MaxBytes:     importMaxDownloadBytes,
+		Timeout:      importDownloadTimeout,
+		MaxRedirects: importMaxRedirects,
+		AllowedHosts: templateSourceHosts,
+		Logger:       logger,
+	})
+	return func(ctx context.Context, rawURL, authorization string) ([]byte, error) {
+		var res *remotefetch.Result
+		var err error
+		if authorization != "" {
+			res, err = github.FetchBytesAuthorized(ctx, rawURL, authorization)
+		} else if isGitHubDownloadURL(rawURL) {
+			res, err = github.FetchBytes(ctx, rawURL)
+		} else {
+			res, err = direct.FetchBytes(ctx, rawURL)
+		}
+		if err != nil {
+			return nil, importDownloadError(err)
+		}
+		return res.Body, nil
+	}
+}
+
+// isGitHubDownloadURL reports whether rawURL targets github.com over https.
+func isGitHubDownloadURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Scheme, "https") && strings.EqualFold(u.Hostname(), "github.com")
+}
+
+// errImportDownloadFailed is the caller-facing error for a failed import
+// download. remotefetch logs the reason and detail server-side; the caller
+// never learns whether an address was refused, a status code, or a body.
+var errImportDownloadFailed = errors.New("the source could not be downloaded; check the URL and that the source is public or a repository credential is set")
+
+// importDownloadError maps a remotefetch error to a fixed message.
+func importDownloadError(err error) error {
+	var fe *remotefetch.Error
+	if errors.As(err, &fe) {
+		switch fe.Reason {
+		case remotefetch.ReasonTooLarge:
+			return fmt.Errorf("%w (the download is larger than %d MiB)", config.ErrRemoteFetchLimit, importMaxDownloadBytes>>20)
+		case remotefetch.ReasonTimeout:
+			return config.ErrRemoteDownloadTimeout
+		}
+	}
+	return errImportDownloadFailed
 }

@@ -889,3 +889,24 @@ func TestFetchErrorDetailsOmitQuery(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchDisableRedirects(t *testing.T) {
+	var hits int
+	env := newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path == "/start" {
+			w.Header().Set("Location", "/final")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte("final"))
+	}, Config{DisableRedirects: true})
+
+	_, err := env.fetcher.FetchBytes(context.Background(), env.url("example.com", "/start"))
+	if got := reasonOf(t, err); got != ReasonRedirects {
+		t.Fatalf("reason %q, want %q (%v)", got, ReasonRedirects, err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected 1 request (redirect not followed), got %d", hits)
+	}
+}

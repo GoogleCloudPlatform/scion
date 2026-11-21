@@ -17,9 +17,12 @@ package config
 import (
 	"archive/tar"
 	"archive/zip"
+	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -32,11 +35,16 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/fserrors"
+	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/sync"
+	"github.com/rclone/rclone/fs/walk"
 	// Import rclone backends for remote template support
 	// GCS and local are already imported in gcp/storage.go
 	// Additional backends can be added as needed
@@ -89,8 +97,11 @@ func NormalizeTemplateSourceURL(raw string) string {
 		s = strings.TrimPrefix(s, "git+")
 	}
 
-	// Add https:// scheme if missing (not rclone and not already http/https)
-	if !strings.HasPrefix(s, ":") && !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+	// Add https:// scheme if missing (not rclone, not already http/https,
+	// and not a gs:// Cloud Storage URL, which a hosted Hub accepts when its
+	// allowed_import_sources names the bucket)
+	isGS := len(s) >= len("gs://") && strings.EqualFold(s[:len("gs://")], "gs://")
+	if !strings.HasPrefix(s, ":") && !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") && !isGS {
 		s = "https://" + s
 	}
 
@@ -183,23 +194,191 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 	return FetchRemoteTemplateWithOptions(ctx, uri, FetchOptions{AuthToken: token})
 }
 
-// FetchOptions configures FetchRemoteTemplateWithOptions.
+// RemoteDownloadFunc downloads rawURL and returns its body. authorization,
+// when non-empty, is the Authorization header value for requests to
+// rawURL's own host only. It lets a caller that fetches on behalf of others
+// (a hosted Hub) constrain every HTTP download; the implementation bounds the
+// body size and the time itself.
+type RemoteDownloadFunc func(ctx context.Context, rawURL, authorization string) ([]byte, error)
+
+// FetchOptions configures FetchRemoteTemplateWithOptions. The zero value
+// fetches as FetchRemoteTemplate does without a token: HTTP downloads use
+// http.DefaultClient and nothing is limited.
 type FetchOptions struct {
 	// AuthToken authenticates GitHub folder fetches. "" fetches
 	// unauthenticated.
 	AuthToken string
-
-	// ArchiveClient, when non-nil, downloads archive URLs in place of
-	// http.DefaultClient. The URL of an archive is chosen by the caller,
-	// so a server fetching on behalf of others passes a client that
-	// restricts destinations (see pkg/util/ssrfclient). GitHub folder
-	// fetches always go to github.com and do not use it.
-	ArchiveClient *http.Client
+	// Download, when set, performs every HTTP download (GitHub tarballs and
+	// archive URLs) instead of http.DefaultClient.
+	Download RemoteDownloadFunc
+	// MaxBytes, when positive, caps the bytes of file content written while
+	// fetching, including temporary extraction and checkout copies.
+	MaxBytes int64
+	// MaxFiles, when positive, caps the files and directories written while
+	// fetching, counted the same way.
+	MaxFiles int
+	// MaxUnpackedBytes, when positive, caps the decompressed bytes read from
+	// an archive in each pass over it (a gzip bomb stops here even when most
+	// of its entries are skipped).
+	MaxUnpackedBytes int64
+	// PrivateCacheDir fetches into a new directory of this fetch's own
+	// under the cache, instead of the per-URI directory, so concurrent
+	// fetches of one URI do not share a tree. The caller removes it.
+	PrivateCacheDir bool
 }
 
-// FetchRemoteTemplateWithOptions is FetchRemoteTemplate with explicit options.
+// ErrRemoteDownloadTimeout is returned (wrapped) by a download hook when a
+// download took too long; a GitHub fetch does not try other archives after
+// it.
+var ErrRemoteDownloadTimeout = errors.New("the source download timed out")
+
+// ErrRemoteFetchLimit is returned (wrapped) when a fetch exceeds a limit
+// set in FetchOptions.
+var ErrRemoteFetchLimit = errors.New("remote template source exceeds the size or file-count limit")
+
+// fetchBudget tracks the limits of one fetch. A nil *fetchBudget is
+// unlimited.
+type fetchBudget struct {
+	maxBytes    int64
+	maxFiles    int
+	maxUnpacked int64
+	bytes       int64
+	files       int
+	// seen holds the directories already counted, keyed by destination
+	// root and relative path, so the parents a file write creates
+	// implicitly count toward maxFiles once each.
+	seen map[string]struct{}
+}
+
+// maxFetchEntryName caps the length of one entry name in a limited fetch,
+// so deep or long names cannot be used to create many directories or hold
+// much memory.
+const maxFetchEntryName = 1024
+
+// newFetchBudget returns the budget for opts, or nil when it sets no limit.
+func newFetchBudget(opts FetchOptions) *fetchBudget {
+	if opts.MaxBytes <= 0 && opts.MaxFiles <= 0 && opts.MaxUnpackedBytes <= 0 {
+		return nil
+	}
+	return &fetchBudget{maxBytes: opts.MaxBytes, maxFiles: opts.MaxFiles, maxUnpacked: opts.MaxUnpackedBytes}
+}
+
+// addEntry counts one file or directory written.
+func (b *fetchBudget) addEntry() error {
+	if b == nil {
+		return nil
+	}
+	b.files++
+	if b.maxFiles > 0 && b.files > b.maxFiles {
+		return fmt.Errorf("%w (more than %d files and directories)", ErrRemoteFetchLimit, b.maxFiles)
+	}
+	return nil
+}
+
+// addPath counts the entry rel (slash or OS separated, relative to the
+// destination root) and every parent directory of it not counted before
+// under the same root. isDir marks rel itself as a directory.
+func (b *fetchBudget) addPath(root, rel string, isDir bool) error {
+	if b == nil {
+		return nil
+	}
+	if len(rel) > maxFetchEntryName {
+		return fmt.Errorf("%w (an entry name is longer than %d bytes)", ErrRemoteFetchLimit, maxFetchEntryName)
+	}
+	if b.seen == nil {
+		b.seen = make(map[string]struct{})
+	}
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	last := len(parts) - 1
+	for i := range parts {
+		if i == last && !isDir {
+			return b.addEntry()
+		}
+		key := root + "\x00" + strings.Join(parts[:i+1], "/")
+		if _, ok := b.seen[key]; ok {
+			continue
+		}
+		b.seen[key] = struct{}{}
+		if err := b.addEntry(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// content wraps r, the content of a file being written, so that reading
+// past the byte budget fails.
+func (b *fetchBudget) content(r io.Reader) io.Reader {
+	if b == nil || b.maxBytes <= 0 {
+		return r
+	}
+	return &budgetReader{r: r, b: b}
+}
+
+// unpacked wraps r, a decompressed archive stream, so that reading more
+// than the unpacked limit fails. Each pass over an archive gets its own cap.
+func (b *fetchBudget) unpacked(r io.Reader) io.Reader {
+	if b == nil || b.maxUnpacked <= 0 {
+		return r
+	}
+	return &limitedStream{r: r, remaining: b.maxUnpacked, limit: b.maxUnpacked}
+}
+
+// rcloneLimits returns the byte and file caps for an rclone copy (0 means
+// no cap).
+func (b *fetchBudget) rcloneLimits() (int64, int) {
+	if b == nil {
+		return 0, 0
+	}
+	return b.maxBytes, b.maxFiles
+}
+
+type budgetReader struct {
+	r io.Reader
+	b *fetchBudget
+}
+
+func (br *budgetReader) Read(p []byte) (int, error) {
+	if rem := br.b.maxBytes - br.b.bytes; int64(len(p)) > rem+1 {
+		if rem < 0 {
+			rem = 0
+		}
+		p = p[:rem+1]
+	}
+	n, err := br.r.Read(p)
+	br.b.bytes += int64(n)
+	if br.b.bytes > br.b.maxBytes {
+		return n, fmt.Errorf("%w (more than %d bytes)", ErrRemoteFetchLimit, br.b.maxBytes)
+	}
+	return n, err
+}
+
+type limitedStream struct {
+	r         io.Reader
+	remaining int64
+	limit     int64
+}
+
+func (l *limitedStream) Read(p []byte) (int, error) {
+	if int64(len(p)) > l.remaining+1 {
+		p = p[:l.remaining+1]
+	}
+	n, err := l.r.Read(p)
+	l.remaining -= int64(n)
+	if l.remaining < 0 {
+		return n, fmt.Errorf("%w (archive unpacks to more than %d bytes)", ErrRemoteFetchLimit, l.limit)
+	}
+	return n, err
+}
+
+// FetchRemoteTemplateWithOptions is FetchRemoteTemplate with the download
+// hook, limits and cache directory choice of opts. When a limit is set (or
+// PrivateCacheDir) and the fetch fails, the partially filled cache
+// directory is removed. With a limit set, a GitHub folder whose tarball
+// cannot be downloaded is not retried with a git checkout.
 func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchOptions) (string, error) {
 	token := opts.AuthToken
+	budget := newFetchBudget(opts)
 	cacheDir, err := remoteCacheDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get cache directory: %w", err)
@@ -209,35 +388,35 @@ func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchO
 	cacheKey := generateCacheKey(uri)
 	templateCachePath := filepath.Join(cacheDir, cacheKey)
 
-	// For now, always fetch fresh (could add caching logic later)
-	// Clean up any existing cache for this URI. If the old directory cannot
-	// be removed, the fetch fails: populating it anyway would mix the new
-	// content with whatever is left of the old.
-	if err := removeAllCache(templateCachePath); err != nil {
-		return "", fmt.Errorf("failed to remove the old cache directory %s: %w", templateCachePath, err)
+	if opts.PrivateCacheDir {
+		// A directory of this fetch's own, so concurrent fetches of the
+		// same URI cannot remove or mix each other's trees.
+		if err := os.MkdirAll(cacheDir, 0755); err != nil {
+			return "", fmt.Errorf("failed to create cache directory: %w", err)
+		}
+		if templateCachePath, err = os.MkdirTemp(cacheDir, cacheKey+"-*"); err != nil {
+			return "", fmt.Errorf("failed to create cache directory: %w", err)
+		}
+	} else {
+		// For now, always fetch fresh (could add caching logic later)
+		// Clean up any existing cache for this URI. If the old directory cannot
+		// be removed, the fetch fails: populating it anyway would mix the new
+		// content with whatever is left of the old.
+		if err := removeAllCache(templateCachePath); err != nil {
+			return "", fmt.Errorf("failed to remove the old cache directory %s: %w", templateCachePath, err)
+		}
+
+		if err := os.MkdirAll(templateCachePath, 0755); err != nil {
+			return "", fmt.Errorf("failed to create cache directory: %w", err)
+		}
 	}
 
-	if err := os.MkdirAll(templateCachePath, 0755); err != nil {
-		return "", fmt.Errorf("failed to create cache directory: %w", err)
-	}
-
-	remoteType := DetectRemoteType(uri)
-
-	switch remoteType {
-	case RemoteTypeGitHub:
-		if err := fetchGitHubFolder(ctx, uri, templateCachePath, token); err != nil {
-			return "", fmt.Errorf("failed to fetch GitHub folder: %w", err)
+	f := &remoteFetcher{download: opts.Download, budget: budget}
+	if err := f.fetchInto(ctx, uri, templateCachePath, token); err != nil {
+		if budget != nil || opts.PrivateCacheDir {
+			_ = os.RemoveAll(templateCachePath)
 		}
-	case RemoteTypeArchive:
-		if err := fetchArchive(ctx, uri, templateCachePath, opts.ArchiveClient); err != nil {
-			return "", fmt.Errorf("failed to fetch archive: %w", err)
-		}
-	case RemoteTypeRclone:
-		if err := fetchRclone(ctx, uri, templateCachePath); err != nil {
-			return "", fmt.Errorf("failed to fetch via rclone: %w", err)
-		}
-	default:
-		return "", fmt.Errorf("unsupported remote template type: %s", uri)
+		return "", err
 	}
 
 	// Whatever the fetch path, a fetched template holds regular files and
@@ -248,6 +427,69 @@ func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchO
 	}
 
 	return templateCachePath, nil
+}
+
+// remoteFetcher carries the download hook and budget of one fetch. The
+// zero value is the unlimited http.DefaultClient fetch.
+type remoteFetcher struct {
+	download RemoteDownloadFunc
+	budget   *fetchBudget
+}
+
+// fetchInto fetches uri into the existing directory destPath.
+func (f *remoteFetcher) fetchInto(ctx context.Context, uri, destPath, token string) error {
+	switch DetectRemoteType(uri) {
+	case RemoteTypeGitHub:
+		if err := f.fetchGitHubFolder(ctx, uri, destPath, token); err != nil {
+			return fmt.Errorf("failed to fetch GitHub folder: %w", err)
+		}
+	case RemoteTypeArchive:
+		if err := f.fetchArchive(ctx, uri, destPath); err != nil {
+			return fmt.Errorf("failed to fetch archive: %w", err)
+		}
+	case RemoteTypeRclone:
+		if err := f.fetchRclone(ctx, uri, destPath); err != nil {
+			return fmt.Errorf("failed to fetch via rclone: %w", err)
+		}
+	default:
+		if f.budget != nil {
+			return errors.New("unsupported remote template type")
+		}
+		return fmt.Errorf("unsupported remote template type: %s", uri)
+	}
+	return nil
+}
+
+// get downloads rawURL with the download hook, or with http.DefaultClient
+// when there is none. A non-200 answer is an error naming its status only
+// for the default client; the hook reports its own errors.
+func (f *remoteFetcher) get(ctx context.Context, rawURL, authorization, what string) (io.ReadCloser, error) {
+	if f.download != nil {
+		body, err := f.download(ctx, rawURL, authorization)
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	if authorization != "" {
+		req.Header.Set("Authorization", authorization)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download %s: %w", what, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		if what == "archive" {
+			return nil, fmt.Errorf("failed to download archive: HTTP %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("%s download failed: HTTP %d", what, resp.StatusCode)
+	}
+	return resp.Body, nil
 }
 
 // checkRegularTree returns an error if the tree at dir contains anything
@@ -280,6 +522,10 @@ func generateCacheKey(uri string) string {
 // with a fallback to sparse git checkout. When token is non-empty it is
 // used for authentication (e.g. a GitHub App installation token).
 func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token string) error {
+	return (&remoteFetcher{}).fetchGitHubFolder(ctx, uri, destPath, token)
+}
+
+func (f *remoteFetcher) fetchGitHubFolder(ctx context.Context, uri string, destPath string, token string) error {
 	parsed, err := parseGitHubURL(uri)
 	if err != nil {
 		return err
@@ -293,13 +539,19 @@ func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token s
 	}
 
 	// Try GitHub tarball download first (works without git installed)
-	err = fetchGitHubTarball(ctx, parsed, destPath, token)
+	err = f.fetchGitHubTarball(ctx, parsed, destPath, token)
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, errRemoteContentRefused) {
-		// The content was fetched but refused; a sparse checkout of the
-		// same content would be refused too, so keep the clear error.
+	if errors.Is(err, errRemoteContentRefused) || errors.Is(err, ErrRemoteFetchLimit) {
+		// The content was fetched but refused, or is over a limit; a sparse
+		// checkout of the same content would be refused too, so keep the
+		// clear error.
+		return err
+	}
+	if f.budget != nil {
+		// A limited fetch has no git fallback: git fetches every blob of
+		// the commit, which the limits cannot bound.
 		return err
 	}
 
@@ -472,31 +724,44 @@ func matchBranchFromRefs(afterTree string, refs map[string]bool) (branch, path s
 // desired sub-path. This uses plain HTTPS and does not require git or svn.
 // When token is non-empty it is sent as a Bearer authorization header.
 func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
+	return (&remoteFetcher{}).fetchGitHubTarball(ctx, parts, destPath, token)
+}
+
+func (f *remoteFetcher) fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
 	branch := parts.Branch
 	if branch == "" {
 		branch = "main"
 	}
 
-	tarballURL := fmt.Sprintf("https://github.com/%s/%s/archive/refs/heads/%s.tar.gz",
-		parts.Owner, parts.Repo, branch)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tarballURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
+	authorization := ""
 	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		authorization = "Bearer " + token
 	}
-
-	resp, err := http.DefaultClient.Do(req)
+	// The ref may be a branch, a tag or a commit SHA; try the archive of
+	// each in turn.
+	archive := fmt.Sprintf("https://github.com/%s/%s/archive/", parts.Owner, parts.Repo)
+	var body io.ReadCloser
+	var err error
+	for _, tarballURL := range []string{
+		archive + "refs/heads/" + branch + ".tar.gz",
+		archive + "refs/tags/" + branch + ".tar.gz",
+		archive + branch + ".tar.gz",
+	} {
+		body, err = f.get(ctx, tarballURL, authorization, "tarball")
+		if err == nil || errors.Is(err, ErrRemoteFetchLimit) || errors.Is(err, ErrRemoteDownloadTimeout) || ctx.Err() != nil {
+			break
+		}
+	}
 	if err != nil {
-		return fmt.Errorf("failed to download tarball: %w", err)
+		if errors.Is(err, ErrRemoteFetchLimit) {
+			return gitHubLimitHint(err)
+		}
+		if ctx.Err() == nil && !errors.Is(err, ErrRemoteDownloadTimeout) {
+			err = fmt.Errorf("GitHub branch, tag or commit %q was not found in %s/%s: %w", branch, parts.Owner, parts.Repo, err)
+		}
+		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("tarball download failed: HTTP %d", resp.StatusCode)
-	}
+	defer func() { _ = body.Close() }()
 
 	// Save to a temp file
 	tmpFile, err := os.CreateTemp("", "scion-gh-tarball-*.tar.gz")
@@ -506,7 +771,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	tmpPath := tmpFile.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	if _, err := io.Copy(tmpFile, body); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("failed to save tarball: %w", err)
 	}
@@ -515,7 +780,7 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	// If no sub-path, extract directly to destPath
 	subPath := strings.TrimRight(parts.Path, "/")
 	if subPath == "" {
-		return extractTarGz(tmpPath, destPath)
+		return gitHubLimitHint(f.extractTarGz(tmpPath, destPath))
 	}
 
 	// Extract to a temp directory, then copy the desired sub-path
@@ -525,11 +790,21 @@ func fetchGitHubTarball(ctx context.Context, parts *GitHubURLParts, destPath str
 	}
 	defer func() { _ = os.RemoveAll(tmpExtract) }()
 
-	if err := extractTarGz(tmpPath, tmpExtract); err != nil {
-		return err
+	if err := f.extractTarGz(tmpPath, tmpExtract); err != nil {
+		return gitHubLimitHint(err)
 	}
 
-	return copyDirExcludingGit(tmpExtract, subPath, destPath)
+	return gitHubLimitHint(f.copyDirExcludingGit(tmpExtract, subPath, destPath))
+}
+
+// gitHubLimitHint adds to a limit error of a GitHub folder fetch that the
+// whole repository counts toward the limits; other errors are unchanged.
+func gitHubLimitHint(err error) error {
+	if err == nil || !errors.Is(err, ErrRemoteFetchLimit) {
+		return err
+	}
+	return fmt.Errorf("%w; a GitHub folder import downloads and unpacks the whole repository, "+
+		"so import from a smaller repository or ask a Hub administrator to allowlist a source ("+AllowedImportSourcesKey+")", err)
 }
 
 // GitHubURLParts contains parsed parts of a GitHub URL.
@@ -753,6 +1028,10 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 // Writes go through an os.Root opened at dst. The result therefore contains
 // regular files and directories only.
 func copyDirExcludingGit(baseDir, subPath, dst string) error {
+	return (&remoteFetcher{}).copyDirExcludingGit(baseDir, subPath, dst)
+}
+
+func (f *remoteFetcher) copyDirExcludingGit(baseDir, subPath, dst string) error {
 	sub, err := cleanRemoteSubPath(subPath)
 	if err != nil {
 		return err
@@ -797,9 +1076,15 @@ func copyDirExcludingGit(baseDir, subPath, dst string) error {
 			if err != nil {
 				return err
 			}
+			if err := f.budget.addPath(dst, rel, true); err != nil {
+				return err
+			}
 			return dstRoot.MkdirAll(rel, dirPerm(info.Mode()))
 		case d.Type().IsRegular():
-			return copyRegularFileNoFollow(srcRoot, srcName, dstRoot, rel)
+			if err := f.budget.addPath(dst, rel, false); err != nil {
+				return err
+			}
+			return copyRegularFileNoFollow(srcRoot, srcName, dstRoot, rel, f.budget)
 		default:
 			// Symbolic links, devices, sockets and pipes are never copied.
 			slog.Warn("Skipping non-regular file in remote template", "path", filepath.ToSlash(rel), "type", d.Type().String())
@@ -838,7 +1123,7 @@ func checkRealDirPath(root *os.Root, sub, display string) error {
 // copyRegularFileNoFollow copies the regular file srcName in srcRoot to
 // dstName in dstRoot. It refuses anything that is not a regular file at the
 // time of the Lstat, and anything that is not that same file once opened.
-func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root, dstName string) error {
+func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root, dstName string, budget *fetchBudget) error {
 	linfo, err := srcRoot.Lstat(srcName)
 	if err != nil {
 		return err
@@ -861,7 +1146,7 @@ func copyRegularFileNoFollow(srcRoot *os.Root, srcName string, dstRoot *os.Root,
 		return fmt.Errorf("file %s changed while copying the remote template: %w", filepath.ToSlash(dstName), errRemoteContentRefused)
 	}
 
-	return writeFileInRoot(dstRoot, dstName, in, linfo.Mode())
+	return writeFileInRoot(dstRoot, dstName, budget.content(in), linfo.Mode())
 }
 
 // writeFileInRoot creates (or truncates) the regular file name inside root,
@@ -891,12 +1176,8 @@ func dirPerm(mode iofs.FileMode) iofs.FileMode {
 	return mode.Perm() | 0o700
 }
 
-// fetchArchive downloads and extracts a compressed archive. client nil means
-// http.DefaultClient.
-func fetchArchive(ctx context.Context, uri string, destPath string, client *http.Client) error {
-	if client == nil {
-		client = http.DefaultClient
-	}
+// fetchArchive downloads and extracts a compressed archive.
+func (f *remoteFetcher) fetchArchive(ctx context.Context, uri string, destPath string) error {
 	// Download the archive to a temp file
 	tmpFile, err := os.CreateTemp("", "scion-archive-*")
 	if err != nil {
@@ -907,22 +1188,13 @@ func fetchArchive(ctx context.Context, uri string, destPath string, client *http
 	defer func() { _ = tmpFile.Close() }()
 
 	// Download
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
+	body, err := f.get(ctx, uri, "", "archive")
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return err
 	}
+	defer func() { _ = body.Close() }()
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to download archive: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download archive: HTTP %d", resp.StatusCode)
-	}
-
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	if _, err := io.Copy(tmpFile, body); err != nil {
 		return fmt.Errorf("failed to save archive: %w", err)
 	}
 	_ = tmpFile.Close()
@@ -930,11 +1202,14 @@ func fetchArchive(ctx context.Context, uri string, destPath string, client *http
 	// Extract based on file type
 	lower := strings.ToLower(uri)
 	if strings.HasSuffix(lower, ".zip") {
-		return extractZip(tmpPath, destPath)
+		return f.extractZip(tmpPath, destPath)
 	} else if strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") {
-		return extractTarGz(tmpPath, destPath)
+		return f.extractTarGz(tmpPath, destPath)
 	}
 
+	if f.budget != nil {
+		return errors.New("unsupported archive format")
+	}
 	return fmt.Errorf("unsupported archive format: %s", uri)
 }
 
@@ -944,6 +1219,17 @@ func fetchArchive(ctx context.Context, uri string, destPath string, client *http
 // skipped (logged). Entry names are checked by sanitizePath, and every write
 // goes through an os.Root opened at destPath, so all writes stay inside it.
 func extractZip(zipPath, destPath string) error {
+	return (&remoteFetcher{}).extractZip(zipPath, destPath)
+}
+
+func (f *remoteFetcher) extractZip(zipPath, destPath string) error {
+	if f.budget != nil {
+		// zip.OpenReader parses the whole central directory into memory,
+		// so bound it first.
+		if err := checkZipDirectory(zipPath, f.budget.maxFiles); err != nil {
+			return err
+		}
+	}
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("failed to open zip: %w", err)
@@ -958,15 +1244,15 @@ func extractZip(zipPath, destPath string) error {
 
 	// Detect if there's a common root directory
 	commonRoot := detectCommonRoot(func(yield func(string) bool) {
-		for _, f := range r.File {
-			if !yield(f.Name) {
+		for _, zf := range r.File {
+			if !yield(zf.Name) {
 				return
 			}
 		}
 	})
 
-	for _, f := range r.File {
-		name := f.Name
+	for _, zf := range r.File {
+		name := zf.Name
 
 		// Strip common root if present
 		if commonRoot != "" {
@@ -982,23 +1268,29 @@ func extractZip(zipPath, destPath string) error {
 			continue
 		}
 
-		mode := f.Mode()
+		mode := zf.Mode()
 		if mode.IsDir() {
+			if err := f.budget.addPath(destPath, name, true); err != nil {
+				return err
+			}
 			if err := root.MkdirAll(name, dirPerm(mode)); err != nil {
 				return err
 			}
 			continue
 		}
 		if !mode.IsRegular() {
-			slog.Warn("Skipping non-regular archive entry", "name", f.Name, "type", mode.Type().String())
+			slog.Warn("Skipping non-regular archive entry", "name", zf.Name, "type", mode.Type().String())
 			continue
 		}
+		if err := f.budget.addPath(destPath, name, false); err != nil {
+			return err
+		}
 
-		rc, err := f.Open()
+		rc, err := zf.Open()
 		if err != nil {
 			return err
 		}
-		err = writeFileInRoot(root, name, rc, mode)
+		err = writeFileInRoot(root, name, f.budget.content(rc), mode)
 		_ = rc.Close()
 		if err != nil {
 			return err
@@ -1008,6 +1300,114 @@ func extractZip(zipPath, destPath string) error {
 	return nil
 }
 
+// Zip record layout used by checkZipDirectory.
+const (
+	zipEndLen           = 22         // end of central directory record, without comment
+	zipEndSignature     = 0x06054b50 // end of central directory record
+	zip64LocatorLen     = 20         // ZIP64 end of central directory locator
+	zip64LocatorSig     = 0x07064b50 // ZIP64 end of central directory locator
+	zipDirLen           = 46         // central directory record, without variable fields
+	zipDirSignature     = 0x02014b50 // central directory record
+	zipMaxCommentLen    = 0xffff
+	zipMaxRecordExtra   = 256 // extra field and comment bytes allowed per record on average
+	zipMaxRecordAverage = zipDirLen + maxFetchEntryName + zipMaxRecordExtra
+)
+
+// checkZipDirectory bounds the central directory of the zip at path before
+// it is parsed: zip.OpenReader holds every record in memory, and the
+// per-entry budget checks run only after that. It refuses, with
+// ErrRemoteFetchLimit, a ZIP64 archive (not needed within a fetch budget),
+// an end record declaring more than maxFiles entries or a directory too
+// large for that many, a directory that does not end where the end record
+// begins, and a directory holding more than maxFiles records or a name
+// longer than maxFetchEntryName. The record walk is needed because the Go
+// reader checks the declared count only modulo 65536 and reads records
+// until it meets another signature. maxFiles <= 0 leaves the count
+// unbounded.
+func checkZipDirectory(path string, maxFiles int) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	size := info.Size()
+	tailLen := int64(zipEndLen + zipMaxCommentLen)
+	if tailLen > size {
+		tailLen = size
+	}
+	tail := make([]byte, tailLen)
+	if _, err := file.ReadAt(tail, size-tailLen); err != nil {
+		return fmt.Errorf("failed to read zip: %w", err)
+	}
+	// The last end-record signature, as the Go reader finds it.
+	at := -1
+	for i := len(tail) - zipEndLen; i >= 0; i-- {
+		if binary.LittleEndian.Uint32(tail[i:]) == zipEndSignature {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		return errors.New("failed to open zip: no end of central directory record")
+	}
+	end := tail[at : at+zipEndLen]
+	endOffset := size - tailLen + int64(at)
+	count := binary.LittleEndian.Uint16(end[10:])
+	dirSize := binary.LittleEndian.Uint32(end[12:])
+	dirOffset := binary.LittleEndian.Uint32(end[16:])
+	zip64 := count == 0xffff || binary.LittleEndian.Uint16(end[8:]) == 0xffff ||
+		dirSize == 0xffffffff || dirOffset == 0xffffffff
+	if !zip64 && endOffset >= zip64LocatorLen {
+		// The Go reader takes the ZIP64 record's values whenever this
+		// locator is present.
+		var sig [4]byte
+		if _, err := file.ReadAt(sig[:], endOffset-zip64LocatorLen); err == nil {
+			zip64 = binary.LittleEndian.Uint32(sig[:]) == zip64LocatorSig
+		}
+	}
+	if zip64 {
+		return fmt.Errorf("%w (ZIP64 archives are not supported)", ErrRemoteFetchLimit)
+	}
+	if maxFiles > 0 {
+		if int(count) > maxFiles {
+			return fmt.Errorf("%w (more than %d archive entries)", ErrRemoteFetchLimit, maxFiles)
+		}
+		if int64(dirSize) > int64(maxFiles)*zipMaxRecordAverage {
+			return fmt.Errorf("%w (the zip central directory is too large for %d entries)", ErrRemoteFetchLimit, maxFiles)
+		}
+	}
+	if int64(dirOffset)+int64(dirSize) != endOffset {
+		// Prepended data, or records between the directory and the end
+		// record; the Go reader would guess where the directory starts.
+		return fmt.Errorf("%w (the zip central directory is not where its end record says)", ErrRemoteFetchLimit)
+	}
+	// Walk the records as the Go reader will: from the directory offset
+	// until a record is short or has another signature. The Go reader may
+	// stop sooner (on a malformed extra field), never later.
+	br := bufio.NewReader(io.NewSectionReader(file, int64(dirOffset), size-int64(dirOffset)))
+	hdr := make([]byte, zipDirLen)
+	for records := 0; ; records++ {
+		if _, err := io.ReadFull(br, hdr); err != nil || binary.LittleEndian.Uint32(hdr) != zipDirSignature {
+			return nil
+		}
+		if maxFiles > 0 && records >= maxFiles {
+			return fmt.Errorf("%w (more than %d archive entries)", ErrRemoteFetchLimit, maxFiles)
+		}
+		nameLen := int(binary.LittleEndian.Uint16(hdr[28:]))
+		if nameLen > maxFetchEntryName {
+			return fmt.Errorf("%w (an entry name is longer than %d bytes)", ErrRemoteFetchLimit, maxFetchEntryName)
+		}
+		rest := nameLen + int(binary.LittleEndian.Uint16(hdr[30:])) + int(binary.LittleEndian.Uint16(hdr[32:]))
+		if n, _ := br.Discard(rest); n < rest {
+			return nil
+		}
+	}
+}
+
 // extractTarGz extracts a .tar.gz or .tgz archive to the destination path.
 //
 // Only directories and regular files are extracted; link, device and FIFO
@@ -1015,6 +1415,10 @@ func extractZip(zipPath, destPath string) error {
 // every write goes through an os.Root opened at destPath, so all writes stay
 // inside it.
 func extractTarGz(tarGzPath, destPath string) error {
+	return (&remoteFetcher{}).extractTarGz(tarGzPath, destPath)
+}
+
+func (rf *remoteFetcher) extractTarGz(tarGzPath, destPath string) error {
 	f, err := os.Open(tarGzPath)
 	if err != nil {
 		return fmt.Errorf("failed to open archive: %w", err)
@@ -1032,7 +1436,7 @@ func extractTarGz(tarGzPath, destPath string) error {
 	// metadata entries must be skipped or they break common-root detection
 	// (GitHub tarballs start with a pax_global_header entry whose name
 	// does not share the repo-root prefix).
-	tarReader := tar.NewReader(gzr)
+	tarReader := tar.NewReader(rf.budget.unpacked(gzr))
 	var entries []string
 	for {
 		header, err := tarReader.Next()
@@ -1043,6 +1447,15 @@ func extractTarGz(tarGzPath, destPath string) error {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeSymlink {
+			if rf.budget != nil {
+				// Bound the names held for common-root detection.
+				if len(header.Name) > maxFetchEntryName {
+					return fmt.Errorf("%w (an entry name is longer than %d bytes)", ErrRemoteFetchLimit, maxFetchEntryName)
+				}
+				if rf.budget.maxFiles > 0 && len(entries) >= rf.budget.maxFiles {
+					return fmt.Errorf("%w (more than %d archive entries)", ErrRemoteFetchLimit, rf.budget.maxFiles)
+				}
+			}
 			entries = append(entries, header.Name)
 		}
 	}
@@ -1069,7 +1482,7 @@ func extractTarGz(tarGzPath, destPath string) error {
 	}
 	defer func() { _ = gzr.Close() }()
 
-	tarReader = tar.NewReader(gzr)
+	tarReader = tar.NewReader(rf.budget.unpacked(gzr))
 
 	root, err := os.OpenRoot(destPath)
 	if err != nil {
@@ -1104,11 +1517,17 @@ func extractTarGz(tarGzPath, destPath string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
+			if err := rf.budget.addPath(destPath, name, true); err != nil {
+				return err
+			}
 			if err := root.MkdirAll(name, dirPerm(os.FileMode(header.Mode))); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := writeFileInRoot(root, name, tarReader, os.FileMode(header.Mode)); err != nil {
+			if err := rf.budget.addPath(destPath, name, false); err != nil {
+				return err
+			}
+			if err := writeFileInRoot(root, name, rf.budget.content(tarReader), os.FileMode(header.Mode)); err != nil {
 				return err
 			}
 		case tar.TypeSymlink, tar.TypeLink:
@@ -1169,25 +1588,127 @@ func sanitizePath(name string) string {
 }
 
 // fetchRclone fetches a template using rclone from a remote storage location.
-func fetchRclone(ctx context.Context, uri string, destPath string) error {
+func (f *remoteFetcher) fetchRclone(ctx context.Context, uri string, destPath string) error {
 	// uri is expected to be in rclone format, e.g., :gcs:bucket/path or :s3:bucket/path
 	srcFs, err := fs.NewFs(ctx, uri)
 	if err != nil {
+		if f.budget != nil {
+			return fmt.Errorf("failed to create source fs: %w", err)
+		}
 		return fmt.Errorf("failed to create source fs for %s: %w", uri, err)
+	}
+
+	maxBytes, maxFiles := f.budget.rcloneLimits()
+	if maxBytes > 0 || maxFiles > 0 {
+		// rclone checks the transfer cap against the stats group in ctx;
+		// without one of its own, that is the process-wide group, whose
+		// byte count never resets, so every limited fetch gets its own and
+		// deletes it on exit so groups do not accumulate.
+		groupName := fmt.Sprintf("scion-template-fetch-%d", rcloneStatsSeq.Add(1))
+		ctx = accounting.WithStatsGroup(ctx, groupName)
+		defer deleteRcloneStatsGroup(groupName)
+
+		// Pre-count the source before copying anything, stopping early as
+		// soon as maxFiles+1 objects or >maxBytes total size is seen.
+		if err := checkRcloneSourceLimits(ctx, srcFs, maxBytes, maxFiles); err != nil {
+			return err
+		}
+		if maxBytes > 0 {
+			var ci *fs.ConfigInfo
+			ctx, ci = fs.AddConfig(ctx)
+			ci.MaxTransfer = fs.SizeSuffix(maxBytes)
+			ci.CutoffMode = fs.CutoffModeHard
+		}
 	}
 
 	dstFs, err := fs.NewFs(ctx, destPath)
 	if err != nil {
-		return fmt.Errorf("failed to create destination fs for %s: %w", destPath, err)
+		return fmt.Errorf("failed to create destination fs: %w", err)
+	}
+	if maxFiles > 0 {
+		dstFs = &limitedDestFs{Fs: dstFs, maxFiles: int64(maxFiles)}
 	}
 
 	// Sync from remote to local
 	if err := sync.Sync(ctx, dstFs, srcFs, false); err != nil {
+		if errors.Is(err, accounting.ErrorMaxTransferLimitReached) || errors.Is(err, accounting.ErrorMaxTransferLimitReachedFatal) {
+			return fmt.Errorf("%w (transfer limit reached)", ErrRemoteFetchLimit)
+		}
+		if errors.Is(err, ErrRemoteFetchLimit) {
+			return err
+		}
 		return fmt.Errorf("rclone sync failed: %w", err)
 	}
 
 	return nil
 }
+
+// checkRcloneSourceLimits walks srcFs and returns ErrRemoteFetchLimit as soon
+// as more than maxFiles objects or more than maxBytes total bytes are seen,
+// without enumerating the remainder of the prefix.
+func checkRcloneSourceLimits(ctx context.Context, srcFs fs.Fs, maxBytes int64, maxFiles int) error {
+	listCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var objects int64
+	var size int64
+	var limitErr error
+	err := walk.ListR(listCtx, srcFs, "", false, -1, walk.ListObjects, func(entries fs.DirEntries) error {
+		for _, entry := range entries {
+			obj, ok := entry.(fs.Object)
+			if !ok {
+				continue
+			}
+			objects++
+			if maxFiles > 0 && objects > int64(maxFiles) {
+				limitErr = fmt.Errorf("%w (more than %d files)", ErrRemoteFetchLimit, maxFiles)
+				cancel()
+				return limitErr
+			}
+			if s := obj.Size(); s > 0 {
+				size += s
+			}
+			if maxBytes > 0 && size > maxBytes {
+				limitErr = fmt.Errorf("%w (more than %d bytes)", ErrRemoteFetchLimit, maxBytes)
+				cancel()
+				return limitErr
+			}
+		}
+		return nil
+	})
+	if limitErr != nil {
+		return limitErr
+	}
+	if err != nil {
+		return fmt.Errorf("failed to list source: %w", err)
+	}
+	return nil
+}
+
+// limitedDestFs wraps a destination fs.Fs to enforce a hard file-count cap
+// during sync.Sync (covering 0-byte objects and objects added after pre-count).
+type limitedDestFs struct {
+	fs.Fs
+	maxFiles int64
+	written  atomic.Int64
+}
+
+func (l *limitedDestFs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	if l.written.Add(1) > l.maxFiles {
+		return nil, fserrors.FatalError(fmt.Errorf("%w (more than %d files)", ErrRemoteFetchLimit, l.maxFiles))
+	}
+	return l.Fs.Put(ctx, in, src, options...)
+}
+
+// deleteRcloneStatsGroup deletes a per-fetch rclone stats group so repeated
+// fetches do not accumulate global stats entries.
+func deleteRcloneStatsGroup(groupName string) {
+	if call := rc.Calls.Get("core/stats-delete"); call != nil {
+		_, _ = call.Fn(context.Background(), rc.Params{"group": groupName})
+	}
+}
+
+// rcloneStatsSeq numbers the rclone stats groups of limited fetches.
+var rcloneStatsSeq atomic.Uint64
 
 // CleanRemoteTemplateCache cleans up the remote template cache.
 func CleanRemoteTemplateCache() error {

@@ -1914,6 +1914,10 @@ type V1ServerHubConfig struct {
 	WriteTimeout           string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
 	CORS                   *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
 	AdminEmails            []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	// AllowedImportSources is server.hub.allowed_import_sources (see
+	// HubServerConfig.AllowedImportSources). It is settings-file only (no env):
+	// the server-config API refuses it in every mode (AllowedImportSourcesKey).
+	AllowedImportSources []string `json:"allowed_import_sources,omitempty" yaml:"allowed_import_sources,omitempty" koanf:"allowed_import_sources"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -4739,6 +4743,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AdminEmails != nil {
 			gc.Hub.AdminEmails = v1.Hub.AdminEmails
 		}
+		if v1.Hub.AllowedImportSources != nil {
+			gc.Hub.AllowedImportSources = v1.Hub.AllowedImportSources
+		}
 		if v1.Hub.SoftDeleteRetention != "" {
 			if d, err := time.ParseDuration(v1.Hub.SoftDeleteRetention); err == nil {
 				gc.Hub.SoftDeleteRetention = d
@@ -5230,6 +5237,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
+		AllowedImportSources:   gc.Hub.AllowedImportSources,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,

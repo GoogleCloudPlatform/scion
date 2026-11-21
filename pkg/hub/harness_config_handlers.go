@@ -907,18 +907,20 @@ func isDisallowedSourceURLRune(r rune) bool {
 }
 
 // invalidSourceURLMessage is the validation error for a sourceUrl that fails
-// validRecordedSourceURL (finalize) or validReimportSourceURL (reimport).
+// validRecordedSourceURL (finalize) or validReimportSourceURL (reimport). It
+// names only the forms a hosted Hub imports from (CheckHubImportSource).
 var invalidSourceURLMessage = fmt.Sprintf(
-	"sourceUrl must be a single-line remote URI (http://, https://, or rclone) of at most %d bytes",
+	"sourceUrl must be a single-line https://, gs://bucket/path or :gcs:bucket/path source of at most %d bytes",
 	maxRecordedSourceURLBytes)
 
 // validRecordedSourceURL reports whether s may be recorded as a harness
-// config's source URL: a single-line remote URI (http://, https://, or an
-// rclone URI) of at most maxRecordedSourceURLBytes, with no control or
+// config's source URL: a single-line remote URI (http://, https://, gs://,
+// or an rclone URI) of at most maxRecordedSourceURLBytes, with no control or
 // invisible formatting characters. Finalize and the reimport override share
-// it.
+// it. Whether a hosted Hub may fetch it is decided when it is fetched
+// (checkImportSource): an allowlisted gs:// source is accepted there.
 func validRecordedSourceURL(s string) bool {
-	return len(s) <= maxRecordedSourceURLBytes && config.IsRemoteURI(s) &&
+	return len(s) <= maxRecordedSourceURLBytes && (config.IsRemoteURI(s) || strings.HasPrefix(s, "gs://")) &&
 		!strings.ContainsFunc(s, isDisallowedSourceURLRune)
 }
 
