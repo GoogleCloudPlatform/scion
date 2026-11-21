@@ -1292,9 +1292,10 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.fire",
 		Domain:      "trigger",
-		Description: "Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision",
+		Description: "Fire a matched event trigger's message or dispatch_agent action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:message"},
+			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:dispatch_agent"},
 		},
 		Principals:       []PrincipalKind{PrincipalSystem},
 		Credentials:      []CredentialKind{CredentialSystemInternal},
@@ -1306,6 +1307,8 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestTriggerDispatchE2E_RevokedAuthorityRecordsRefusedFire"},
 			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenCeiling"},
+			{Package: "pkg/hub", Function: "TestTriggerDispatchAgent_EndToEndWebhookToAgent"},
+			{Package: "pkg/hub", Function: "TestTriggerDispatchAgent_RenderRefusalAndCollisionMatrix"},
 		},
 		Exemptions: []Exemption{{
 			Kind: ExemptionInternalOnly,

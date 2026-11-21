@@ -281,7 +281,8 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 }
 
 // triggerDrainer constructs the trigger.event durablequeue.Drainer wired to
-// Server's fire core (catalog entry point triggerDrainer:message for trigger.fire).
+// Server's fire core (catalog entry points triggerDrainer:message and
+// triggerDrainer:dispatch_agent for trigger.fire).
 func (s *Server) triggerDrainer(dqStore store.DurableQueueStore, queue *durablequeue.StoreQueue) (*durablequeue.Drainer, error) {
 	core := serverTriggerCore{srv: s}
 	logger := logging.Subsystem("hub.trigger-drainer")

@@ -124,8 +124,11 @@ func (a *dispatchAgentAction) Detaches(_ hubfire.FireRequest) bool {
 }
 
 // Validate parses, validates, and normalizes a trigger dispatch_agent payload
-// at authoring time (Stage 2 design §5.1). Schedule authoring handlers continue
-// authorizing through authorizeScheduledDispatchAgentAuthoring.
+// at authoring time (Stage 2 design §5.1). It is not sufficient on its own to
+// authorize trigger authoring: authorizeTriggerDispatchAgentAuthoring holds
+// the replay-protected-source, github-source, subject-skip, and caller
+// delegation-ceiling checks. Schedule authoring handlers continue authorizing
+// through authorizeScheduledDispatchAgentAuthoring.
 func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, error) {
 	normalized, _, _, err := a.validateWithRole(ctx, caller, projectID, rawPayload)
 	return normalized, err

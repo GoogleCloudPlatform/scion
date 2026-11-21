@@ -81,7 +81,7 @@
 - [trigger.update](#triggerupdate) — Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source (webhook endpoint read access or authorized GitHub App association) and action target and record the caller's attribution and frozen ceiling
 - [trigger.pause](#triggerpause) — Pause an event trigger. Pausing only stops future fires, so a user access token with trigger:update is admitted
 - [trigger.delete](#triggerdelete) — Delete an event trigger in a project
-- [trigger.fire](#triggerfire) — Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision
+- [trigger.fire](#triggerfire) — Fire a matched event trigger's message or dispatch_agent action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes, one by one or as a zip of a version (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
@@ -3522,13 +3522,14 @@
 
 **Domain:** trigger
 
-**Description:** Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision
+**Description:** Fire a matched event trigger's message or dispatch_agent action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | scheduler_job | — | `triggerDrainer:message` |
+| scheduler_job | — | `triggerDrainer:dispatch_agent` |
 
 **Principals:** `system`
 
@@ -3546,6 +3547,8 @@
 
 - `pkg/hub:TestTriggerDispatchE2E_RevokedAuthorityRecordsRefusedFire`
 - `pkg/hub:TestScheduledFire_UsesRecordedTokenCeiling`
+- `pkg/hub:TestTriggerDispatchAgent_EndToEndWebhookToAgent`
+- `pkg/hub:TestTriggerDispatchAgent_RenderRefusalAndCollisionMatrix`
 
 ### Exemptions
 
