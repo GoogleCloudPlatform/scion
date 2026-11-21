@@ -39,10 +39,10 @@
  *   - relative paths in tsconfig*.json and package.json.
  *
  * The text before a template substitution or a glob character is checked
- * as a path prefix. A reference counts only if it exists on disk (for a
- * prefix: it or its parent directory), so string data that only looks like
- * a path (e.g. '../../../OTHER-PROJECT/...' in URL tests) is skipped.
- * Paths outside the repo root are skipped too.
+ * as a path prefix. A reference counts only if git tracks it (for a prefix:
+ * it or its parent directory), so local build output (e.g. build/scion) and
+ * string data that only looks like a path (e.g. '../../../OTHER-PROJECT/...'
+ * in URL tests) are skipped. Paths outside the repo root are skipped too.
  *
  * Not detected (the scanner is static and file-local):
  *   - unknown segments after a repo-root base: join(REPO_ROOT, dirVar,
@@ -59,8 +59,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { dirname, extname, join, relative, resolve, sep } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import yaml from 'js-yaml';
 import ts from 'typescript';
 
@@ -215,11 +216,44 @@ function isImportMeta(node: ts.Expression, prop: string): boolean {
 }
 
 /**
+ * Git-tracked paths in the repository, normalized to '/' separators.
+ * `dirs` holds every non-empty ancestor directory of a tracked file.
+ */
+interface TrackedPaths {
+  files: ReadonlySet<string>;
+  dirs: ReadonlySet<string>;
+}
+
+function loadTrackedPaths(repoRoot: string): TrackedPaths {
+  const out = execFileSync('git', ['ls-files', '-z'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  const files = new Set<string>();
+  const dirs = new Set<string>();
+  for (const file of out.split('\0')) {
+    if (file === '') continue;
+    files.add(file);
+    let slash = file.lastIndexOf('/');
+    while (slash > 0) {
+      const dir = file.slice(0, slash);
+      if (dirs.has(dir)) break;
+      dirs.add(dir);
+      slash = file.lastIndexOf('/', slash - 1);
+    }
+  }
+  return { files, dirs };
+}
+
+const TRACKED = loadTrackedPaths(REPO_ROOT);
+
+/**
  * Collects the out-of-tree references in one source text. `file` is the
  * absolute path the text is attributed to; relative paths resolve against
  * its directory.
  */
-function scanSource(file: string, text: string): OutOfTreeRef[] {
+function scanSource(file: string, text: string, tracked: TrackedPaths = TRACKED): OutOfTreeRef[] {
   const fileDir = dirname(file);
   const refs: OutOfTreeRef[] = [];
 
@@ -227,8 +261,9 @@ function scanSource(file: string, text: string): OutOfTreeRef[] {
     const line = sf
       ? sf.getLineAndCharacterOfPosition(pos).line + 1
       : text.slice(0, pos).split('\n').length;
-    const ref = outOfTree(abs, partial);
-    if (ref) refs.push({ ...ref, from: `${relative(REPO_ROOT, file)}:${line}` });
+    const ref = outOfTree(abs, partial, tracked);
+    if (ref)
+      refs.push({ ...ref, from: `${relative(REPO_ROOT, file).split(sep).join('/')}:${line}` });
   };
 
   if (extname(file) === '.json') {
@@ -346,23 +381,37 @@ function scanSource(file: string, text: string): OutOfTreeRef[] {
 }
 
 /**
- * The repo-relative form of `abs` when it is a reference outside web/ that
- * exists on disk, or undefined. web/ itself and its ancestors (the repo
- * root, used as a base such as REPO_ROOT) are not references.
+ * The repo-relative form of `abs` when it is a git-tracked reference outside
+ * web/, or undefined. web/ itself and its ancestors (the repo root, used as a
+ * base such as REPO_ROOT) are not references, and untracked local files (such
+ * as build/ outputs) cannot appear in a PR diff.
  */
-function outOfTree(abs: string, partial: boolean): Omit<OutOfTreeRef, 'from'> | undefined {
+function outOfTree(
+  abs: string,
+  partial: boolean,
+  tracked: TrackedPaths = TRACKED
+): Omit<OutOfTreeRef, 'from'> | undefined {
   const fromWeb = relative(WEB_ROOT, abs);
-  const insideWeb = fromWeb === '' || (!fromWeb.startsWith('..') && !fromWeb.startsWith(sep));
+  const insideWeb =
+    fromWeb === '' ||
+    (!fromWeb.startsWith('..') && !fromWeb.startsWith(sep) && !isAbsolute(fromWeb));
   if (insideWeb) return undefined;
   if ((WEB_ROOT + sep).startsWith(abs.endsWith(sep) ? abs : abs + sep)) return undefined;
   // Outside the repo (a traversal literal clamped at '/', a sibling of the
   // checkout): no repo change can touch it, and whether it exists depends on
   // the machine.
-  if (relative(REPO_ROOT, abs).startsWith('..')) return undefined;
-  if (!existsSync(abs) && !(partial && existsSync(dirname(abs)))) return undefined;
-  const path = relative(REPO_ROOT, abs).split(sep).join('/');
-  const isDir = existsSync(abs) && statSync(abs).isDirectory();
-  return { path: isDir ? `${path}/` : path, partial };
+  const rel = relative(REPO_ROOT, abs);
+  if (rel.startsWith('..') || isAbsolute(rel)) return undefined;
+  const path = rel.split(sep).join('/');
+  if (tracked.dirs.has(path)) return { path: `${path}/`, partial };
+  if (tracked.files.has(path)) return { path, partial };
+  if (partial) {
+    const slash = path.lastIndexOf('/');
+    if (slash > 0 && tracked.dirs.has(path.slice(0, slash))) {
+      return { path, partial };
+    }
+  }
+  return undefined;
 }
 
 /** Every out-of-tree reference, one per path and source line. */
@@ -478,6 +527,34 @@ describe('out-of-tree reference scanner', () => {
   it('skips paths that do not exist and the repo root itself', () => {
     expect(paths("const s = '../../../OTHER-PROJECT/workspace/files/secret.txt';")).toEqual([]);
     expect(paths("const ROOT = resolve(__dirname, '../../..');")).toEqual([]);
+  });
+
+  it('skips referenced paths that exist on disk but are untracked', () => {
+    const untrackedDir = mkdtempSync(join(REPO_ROOT, '.ci-filter-untracked-'));
+    const dirName = basename(untrackedDir);
+    const inTrackedDir = join(
+      REPO_ROOT,
+      'pkg/wsprotocol/testdata',
+      `${dirName}-local-fixture.json`
+    );
+    try {
+      const untrackedBin = join(untrackedDir, 'scion');
+      writeFileSync(untrackedBin, '');
+      writeFileSync(inTrackedDir, '{}');
+      const text = [
+        "const REPO_ROOT = resolve(__dirname, '../../..');",
+        `const BUILD_DIR = resolve(REPO_ROOT, '${dirName}');`,
+        "const HUB_BINARY = resolve(BUILD_DIR, 'scion');",
+        'const VARIANT = resolve(BUILD_DIR, `scion-${arch}`);',
+        `import local from '../../../pkg/wsprotocol/testdata/${basename(inTrackedDir)}';`,
+      ].join('\n');
+      // Reload tracked paths while the untracked files exist on disk so a
+      // filesystem walk at load time would still see them.
+      expect(scanSource(fake, text, loadTrackedPaths(REPO_ROOT))).toEqual([]);
+    } finally {
+      rmSync(inTrackedDir, { force: true });
+      rmSync(untrackedDir, { recursive: true, force: true });
+    }
   });
 
   it('skips paths outside the repo root', () => {
