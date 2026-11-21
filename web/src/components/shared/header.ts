@@ -420,17 +420,19 @@ export class ScionHeader extends LitElement {
       align-items: stretch;
     }
     .terminals-split > sl-tooltip > button {
-      border-radius: 0.375rem 0 0 0.375rem;
+      border-radius: calc(var(--scion-radius, 0.5rem) * 0.75) 0 0
+        calc(var(--scion-radius, 0.5rem) * 0.75);
       padding-right: 0.625rem;
     }
     .mode-switch button.terminals-menu-trigger {
       padding: 0.5rem 0.4375rem;
-      border-radius: 0 0.375rem 0.375rem 0;
+      border-radius: 0 calc(var(--scion-radius, 0.5rem) * 0.75)
+        calc(var(--scion-radius, 0.5rem) * 0.75) 0;
       border-left: 1px solid var(--scion-border, #e2e8f0);
       gap: 0;
     }
     .mode-switch button.terminals-menu-trigger.active {
-      border-left-color: rgba(255, 255, 255, 0.28);
+      border-left-color: color-mix(in srgb, var(--scion-primary-text, #ffffff) 28%, transparent);
     }
     .mode-switch button.terminals-menu-trigger sl-icon {
       font-size: 0.75rem;

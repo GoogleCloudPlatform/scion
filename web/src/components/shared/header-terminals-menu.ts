@@ -62,18 +62,18 @@ const MENU_CSS = `
     width: 0.5rem;
     height: 0.5rem;
     border-radius: 50%;
-    background: #94a3b8;
+    background: var(--scion-neutral-400, #94a3b8);
     display: inline-block;
     flex-shrink: 0;
   }
   .terminal-row-dot[data-dot='green'] {
-    background: #22c55e;
+    background: var(--scion-status-success, #22c55e);
   }
   .terminal-row-dot[data-dot='red'] {
-    background: #ef4444;
+    background: var(--scion-status-danger, #ef4444);
   }
   .terminal-row-dot[data-dot='amber'] {
-    background: #f59e0b;
+    background: var(--scion-status-warning, #f59e0b);
   }
   .terminal-row-dot[data-dot='neutral'] {
     background: transparent;
