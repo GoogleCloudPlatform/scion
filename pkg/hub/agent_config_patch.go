@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -135,9 +136,12 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 	}
 	// On a hosted hub the config a member stores may not name host
 	// resources (hostedguard), as at create; a stored edit would otherwise
-	// be refused only at the agent's next dispatch.
+	// be refused only at the agent's next dispatch. Env entries sent back
+	// unchanged from the stored env are not checked: the configure page
+	// sends the whole env, which can hold keys the hub wrote itself (a
+	// trigger-created agent's SCION_TRIGGER_* keys, persisted resolved env).
 	if !s.workstation {
-		if err := hostedConfigRefusal(cfg, hostedRuntimeKind(ctx, s.store, agent)); err != nil {
+		if err := hostedConfigRefusal(withChangedEnvOnly(cfg, stored), hostedRuntimeKind(ctx, s.store, agent)); err != nil {
 			writeRuntimeTargetRefusal(w, err)
 			return false
 		}
@@ -149,6 +153,65 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 		}
 	}
 	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
+}
+
+// withChangedEnvOnly returns cfg with its env narrowed to the entries that
+// add or change a value against stored, the agent's stored env, for the
+// hosted member config check of an edit. Other fields are kept. cfg is not
+// modified.
+func withChangedEnvOnly(cfg *api.ScionConfig, stored map[string]string) *api.ScionConfig {
+	if cfg == nil || len(cfg.Env) == 0 {
+		return cfg
+	}
+	cp := *cfg
+	cp.Env = make(map[string]string, len(cfg.Env))
+	for k, v := range cfg.Env {
+		if sv, ok := stored[k]; ok && sv == v {
+			continue
+		}
+		cp.Env[k] = v
+	}
+	return &cp
+}
+
+// withoutHostedEnvEchoes returns cfg without the env entries a hosted hub
+// keeps out of the agent's inline config on an edit: an entry sent back
+// unchanged from storedEnv (the agent's env before the edit) that the inline
+// config did not hold and that the member config check would refuse. Such an
+// entry was written by the hub (a trigger-created agent's SCION_TRIGGER_*
+// keys, persisted resolved env); it still reaches the broker through the
+// agent's env, and kept in the inline config it would be refused at the
+// agent's next dispatch (hostedConfigPrecheck). cfg is not modified.
+func withoutHostedEnvEchoes(cfg *api.ScionConfig, storedEnv map[string]string, oldInline *api.ScionConfig) *api.ScionConfig {
+	if cfg == nil || len(cfg.Env) == 0 {
+		return cfg
+	}
+	var inlineEnv map[string]string
+	if oldInline != nil {
+		inlineEnv = oldInline.Env
+	}
+	var drop []string
+	for k, v := range cfg.Env {
+		if sv, ok := storedEnv[k]; !ok || sv != v {
+			continue
+		}
+		if _, ok := inlineEnv[k]; ok {
+			continue
+		}
+		if hostedguard.CheckMemberEnv(map[string]string{k: v}, hostedguard.Origin{Kind: hostedguard.OriginAgentConfig}) == nil {
+			continue
+		}
+		drop = append(drop, k)
+	}
+	if len(drop) == 0 {
+		return cfg
+	}
+	cp := *cfg
+	cp.Env = maps.Clone(cfg.Env)
+	for _, k := range drop {
+		delete(cp.Env, k)
+	}
+	return &cp
 }
 
 // patchableReservedEnvKeys are the reserved env keys (by exact name, never
@@ -360,7 +423,11 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	// fixed keys, refused when they would change. So the harness check of
 	// validateAgentConfigPatch covers every key the request sends, and
 	// kept keys are left as they were.
-	merged := mergePresentInlineFields(old.InlineConfig, cfg, p.present)
+	inlineCfg := cfg
+	if !s.workstation {
+		inlineCfg = withoutHostedEnvEchoes(cfg, old.Env, old.InlineConfig)
+	}
+	merged := mergePresentInlineFields(old.InlineConfig, inlineCfg, p.present)
 	agent.AppliedConfig.InlineConfig = merged
 	// provision, cleared and removed are computed once and drive both
 	// the reincarnation warnings and the disposition, so a key warned

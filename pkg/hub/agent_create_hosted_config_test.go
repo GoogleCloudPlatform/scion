@@ -242,3 +242,101 @@ func TestRelayBrokerRefusal_HostedConfigRefused(t *testing.T) {
 	assert.Equal(t, hostedguard.ErrorCode, code)
 	assert.Equal(t, `volume "/data": host volumes in agent config are not allowed on a hosted server`, msg)
 }
+
+// hostedTriggerAgentStoredEnv is the stored env of a trigger-created agent:
+// the hub-written SCION_TRIGGER_* keys, persisted plain resolved env whose
+// values the member config check would refuse ("$" in a literal, empty), and
+// one value the member set.
+var hostedTriggerAgentStoredEnv = map[string]string{
+	"SCION_TRIGGER_ID":       "trig-1",
+	"SCION_TRIGGER_EVENT_ID": "evt-1",
+	"RESOLVED_LITERAL":       "pa$word",
+	"RESOLVED_EMPTY":         "",
+	"MEMBER_VAR":             "a",
+}
+
+// hostedTriggerAgent is a stopped trigger-created agent on a hosted hub with
+// hostedTriggerAgentStoredEnv, whose dispatches go to the returned broker.
+func hostedTriggerAgent(t *testing.T) (*Server, store.Store, *mockRuntimeBrokerClient, *store.Agent) {
+	t.Helper()
+	srv, s, project, broker := setupReincarnateTestServer(t, nil)
+	require.False(t, srv.workstation)
+	m := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, m, false, slog.Default())
+	d.SetHostedMode(true)
+	srv.SetDispatcher(d)
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.Env = map[string]string{}
+		for k, v := range hostedTriggerAgentStoredEnv {
+			a.AppliedConfig.Env[k] = v
+		}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Env: map[string]string{"MEMBER_VAR": "a"}}
+	})
+	return srv, s, m, agent
+}
+
+// TestPatchAgent_HostedTriggerAgentEnvEchoThenStart: on a hosted hub the
+// configure page's whole-env PATCH of a trigger-created agent, changing one
+// ordinary value, is accepted; the echoed hub-written entries stay out of
+// the inline config but keep reaching the broker, and the next start is
+// dispatched.
+func TestPatchAgent_HostedTriggerAgentEnvEchoThenStart(t *testing.T) {
+	srv, s, m, agent := hostedTriggerAgent(t)
+	env := map[string]string{}
+	for k, v := range hostedTriggerAgentStoredEnv {
+		env[k] = v
+	}
+	env["MEMBER_VAR"] = "b"
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"env": env},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"MEMBER_VAR": "b"}, got.AppliedConfig.InlineConfig.Env, "hub-written entries stay out of the inline config")
+	assert.Equal(t, "trig-1", got.AppliedConfig.Env["SCION_TRIGGER_ID"])
+	assert.Equal(t, "pa$word", got.AppliedConfig.Env["RESOLVED_LITERAL"])
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.True(t, m.startCalled, "the start is dispatched")
+}
+
+// TestPatchAgent_HostedTriggerAgentEnvEdits: the echo exemption covers only
+// entries sent back unchanged. Adding a refused entry or changing a
+// hub-written one is still refused on a hosted hub, and nothing is stored.
+func TestPatchAgent_HostedTriggerAgentEnvEdits(t *testing.T) {
+	for name, tc := range map[string]struct {
+		key, value string
+		hosted     bool
+	}{
+		"env reference added":     {"NEW_VAR", "${HOME}", true},
+		"empty passthrough added": {"NEW_EMPTY", "", true},
+		"reserved name added":     {"SCION_HUB_ENDPOINT", "https://x.example", false},
+		"trigger id changed":      {"SCION_TRIGGER_ID", "trig-2", false},
+		"resolved value changed":  {"RESOLVED_LITERAL", "${HOME}", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv, s, _, agent := hostedTriggerAgent(t)
+			env := map[string]string{}
+			for k, v := range hostedTriggerAgentStoredEnv {
+				env[k] = v
+			}
+			env[tc.key] = tc.value
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+				"config": map[string]interface{}{"env": env},
+			})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			if tc.hosted {
+				code, msg := decodeHostedRefusal(t, rec)
+				assert.Equal(t, hostedguard.ErrorCode, code)
+				assert.True(t, strings.HasPrefix(msg, `env "`+tc.key+`": `), msg)
+			}
+			got, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, hostedTriggerAgentStoredEnv, got.AppliedConfig.Env, "nothing stored")
+		})
+	}
+}
