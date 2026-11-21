@@ -330,10 +330,10 @@ func TestDocSyntax(t *testing.T) {
 	})
 
 	// Runnable groups whose Args reject positional args ("scion hub",
-	// "scion config", "scion artifact") must also get the unknown-subcommand
-	// check, while their real subcommands stay valid.
+	// "scion config", "scion artifact", "scion conversation") must also get
+	// the unknown-subcommand check, while their real subcommands stay valid.
 	t.Run("catches_unknown_subcommand_on_runnable_group", func(t *testing.T) {
-		for _, group := range []string{"hub", "config", "artifact"} {
+		for _, group := range []string{"hub", "config", "artifact", "conversation"} {
 			cmd, _, err := rootCmd.Find([]string{group})
 			require.NoError(t, err)
 			require.Equal(t, group, cmd.Name())
@@ -347,6 +347,8 @@ func TestDocSyntax(t *testing.T) {
 			"scion hub status",
 			"scion config list",
 			"scion hub status --json",
+			"scion conversation",
+			"scion conversation list",
 		} {
 			assert.Empty(t, findCommandProblems([]string{good}, "test"),
 				"expected no problems for %q", good)

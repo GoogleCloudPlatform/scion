@@ -85,6 +85,7 @@ Conversation references:
   <uuid>          Bare 36-character conversation ID
   @<agent-name>   Agent DM conversation
   #<thread-name>  Named thread conversation`,
+	Args: cobra.NoArgs,
 	RunE: runConversationList,
 }
 
@@ -99,6 +100,7 @@ Examples:
   scion conversation list --kind group
   scion conversation list --surface discord --json
   scion conversation list --limit 10`,
+	Args: cobra.NoArgs,
 	RunE: runConversationList,
 }
 

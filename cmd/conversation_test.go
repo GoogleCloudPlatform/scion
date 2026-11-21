@@ -198,6 +198,114 @@ func TestConversationGetRequiresArgs(t *testing.T) {
 	assert.Error(t, err, "get should require a conversation ref argument")
 }
 
+func TestConversationRejectsPositionalArgs(t *testing.T) {
+	require.NotNil(t, conversationCmd.Args, "conversationCmd must set Args to reject unknown subcommands")
+	assert.NoError(t, conversationCmd.Args(conversationCmd, []string{}))
+	assert.Error(t, conversationCmd.Args(conversationCmd, []string{"view"}))
+
+	require.NotNil(t, conversationListCmd.Args, "conversationListCmd must set Args to reject extra arguments")
+	assert.NoError(t, conversationListCmd.Args(conversationListCmd, []string{}))
+	assert.Error(t, conversationListCmd.Args(conversationListCmd, []string{"extra"}))
+}
+
+// TestConversationBareAndUnknownSubcommand covers ptone/scion#8160 through
+// rootCmd.Execute(): bare "scion conversation" still lists conversations,
+// while unknown subcommands (e.g. "scion conversation view ...") and extra
+// arguments to "scion conversation list" fail fast without hitting the hub.
+func TestConversationBareAndUnknownSubcommand(t *testing.T) {
+	restoreAllSilenceUsage(t)
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations" && r.Method == http.MethodGet {
+			sawRequest = true
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"conversations": []interface{}{}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+	convJSON = false
+	outputFormat = ""
+
+	execArgs := func(t *testing.T, args []string) (string, error) {
+		t.Helper()
+		t.Cleanup(func() {
+			resetCommandFlags(t, conversationCmd)
+			resetCommandFlags(t, conversationListCmd)
+		})
+		var buf bytes.Buffer
+		rootCmd.SetArgs(args)
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		defer func() {
+			rootCmd.SetArgs(nil)
+			rootCmd.SetOut(nil)
+			rootCmd.SetErr(nil)
+		}()
+		var execErr error
+		stdout := captureStdout(t, func() {
+			execErr = rootCmd.Execute()
+		})
+		return stdout + buf.String(), execErr
+	}
+
+	for _, bare := range [][]string{{"conversation"}, {"conv"}} {
+		t.Run("bare_"+bare[0], func(t *testing.T) {
+			sawRequest = false
+			out, err := execArgs(t, bare)
+			require.NoError(t, err)
+			assert.True(t, sawRequest, "bare %v must call the hub list endpoint", bare)
+			assert.Contains(t, out, "No conversations found.")
+		})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "unknown_view_subcommand",
+			args:    []string{"conversation", "view", "conv:abc"},
+			wantErr: `unknown command "view" for "scion conversation"`,
+		},
+		{
+			name:    "unknown_show_subcommand",
+			args:    []string{"conversation", "show", "conv:abc"},
+			wantErr: `unknown command "show" for "scion conversation"`,
+		},
+		{
+			name:    "conv_alias_unknown_subcommand",
+			args:    []string{"conv", "view", "conv:abc"},
+			wantErr: `unknown command "view" for "scion conversation"`,
+		},
+		{
+			name:    "list_extra_arg",
+			args:    []string{"conversation", "list", "extra"},
+			wantErr: `unknown command "extra" for "scion conversation list"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sawRequest = false
+			_, err := execArgs(t, tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.False(t, sawRequest, "unknown subcommand/arg must fail fast before calling the hub")
+		})
+	}
+}
+
 func TestConversationGetMessageRequiresTwoArgs(t *testing.T) {
 	err := conversationGetMessageCmd.Args(conversationGetMessageCmd, []string{})
 	assert.Error(t, err, "get-message should require two arguments")
