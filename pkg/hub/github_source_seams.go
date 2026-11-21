@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -180,92 +181,110 @@ func (s *Server) GitHubSourceIdentityMinter() source.IdentityMinter {
 // FireAction (Validate, Preauthorize, Authorize, Fire, rate bucket, token
 // minting, marker-idempotent posting with Since, outcome classification, and
 // audit).
+//
+// Fire accepts identifiers only (FireID, and optional matching ProjectID,
+// TriggerID, Event.ID) and loads the claimed TriggerFire, active Trigger (with
+// its stored ActionPayload), and TriggerEvent strictly from the store. Any
+// caller-supplied payload, event type, attributes, lists, subject, timestamps,
+// or sender are refused so the adapter cannot post anything the dispatcher
+// would not post for that fire.
 func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 	commentAction := &githubCommentAction{srv: s}
+	refused := func() (source.ActionFireResult, error) {
+		return source.ActionFireResult{
+			Status: string(hubfire.FireStatusRefused),
+			Error:  "github.comment refused",
+		}, nil
+	}
+	failed := func() (source.ActionFireResult, error) {
+		return source.ActionFireResult{
+			Status: string(hubfire.FireStatusFailed),
+			Error:  "github comment failed",
+		}, nil
+	}
 	return &triggithub.CommentAction{
 		ValidateFunc: func(ctx context.Context, req source.ActionValidateRequest) (string, error) {
 			return commentAction.Validate(ctx, nil, req.ProjectID, req.Payload)
 		},
 		FireFunc: func(ctx context.Context, req source.ActionFireRequest) (source.ActionFireResult, error) {
 			if s.store == nil {
-				return source.ActionFireResult{
-					Status: string(hubfire.FireStatusFailed),
-					Error:  "github comment failed",
-				}, nil
+				return failed()
 			}
-			if strings.TrimSpace(req.TriggerID) == "" || strings.TrimSpace(req.FireID) == "" {
-				return source.ActionFireResult{
-					Status: string(hubfire.FireStatusRefused),
-					Error:  "github.comment refused",
-				}, nil
+			// Reject any caller-supplied content fields; only identifiers
+			// (FireID, optional matching ProjectID/TriggerID/Event.ID) and
+			// Attempts are accepted.
+			if callerSuppliedFireContent(req) {
+				return refused()
 			}
-			tr, err := s.store.GetTrigger(ctx, req.TriggerID)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-					return source.ActionFireResult{
-						Status: string(hubfire.FireStatusRefused),
-						Error:  "github.comment refused",
-					}, nil
-				}
-				return source.ActionFireResult{
-					Status: string(hubfire.FireStatusFailed),
-					Error:  "github comment failed",
-				}, nil
+			if strings.TrimSpace(req.FireID) == "" {
+				return refused()
 			}
-			if tr.ProjectID != req.ProjectID ||
-				tr.Status != store.TriggerStatusActive ||
-				tr.ActionType != store.TriggerActionGitHubComment {
-				return source.ActionFireResult{
-					Status: string(hubfire.FireStatusRefused),
-					Error:  "github.comment refused",
-				}, nil
-			}
-			// Always bind to the trigger's stored ActionPayload; refuse if a
-			// caller supplies a payload that differs after normalisation.
-			if req.Payload != "" && req.Payload != tr.ActionPayload {
-				storedP, _, storedErr := parseAndValidateGitHubCommentPayload(tr.ActionPayload)
-				reqP, _, reqErr := parseAndValidateGitHubCommentPayload(req.Payload)
-				storedNorm, mErr1 := json.Marshal(storedP)
-				reqNorm, mErr2 := json.Marshal(reqP)
-				if storedErr != nil || reqErr != nil || mErr1 != nil || mErr2 != nil || string(storedNorm) != string(reqNorm) {
-					return source.ActionFireResult{
-						Status: string(hubfire.FireStatusRefused),
-						Error:  "github.comment refused",
-					}, nil
-				}
-			}
-			// Require a claimed TriggerFire record for this trigger, project,
-			// action type, and event (matching the production dispatcher).
+
+			// Load the claimed TriggerFire record.
 			fire, err := s.store.GetTriggerFire(ctx, req.FireID)
 			if err != nil {
 				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-					return source.ActionFireResult{
-						Status: string(hubfire.FireStatusRefused),
-						Error:  "github.comment refused",
-					}, nil
+					return refused()
 				}
-				return source.ActionFireResult{
-					Status: string(hubfire.FireStatusFailed),
-					Error:  "github comment failed",
-				}, nil
+				return failed()
 			}
-			if fire.TriggerID != tr.ID ||
-				fire.ProjectID != tr.ProjectID ||
+			if fire.Status != store.TriggerFireStatusFiring ||
 				fire.ActionType != store.TriggerActionGitHubComment ||
-				fire.Status != store.TriggerFireStatusFiring ||
-				(fire.EventID != "" && req.Event.ID != "" && fire.EventID != req.Event.ID) {
-				return source.ActionFireResult{
-					Status: string(hubfire.FireStatusRefused),
-					Error:  "github.comment refused",
-				}, nil
+				fire.ProjectID == "" ||
+				fire.TriggerID == "" ||
+				fire.EventID == "" {
+				return refused()
+			}
+			if req.ProjectID != "" && req.ProjectID != fire.ProjectID {
+				return refused()
+			}
+			if req.TriggerID != "" && req.TriggerID != fire.TriggerID {
+				return refused()
+			}
+			if req.Event.ID != "" && req.Event.ID != fire.EventID {
+				return refused()
+			}
+
+			// Load the trigger from fire.TriggerID; must be active and github.comment.
+			tr, err := s.store.GetTrigger(ctx, fire.TriggerID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+					return refused()
+				}
+				return failed()
+			}
+			if tr.ProjectID != fire.ProjectID ||
+				tr.Status != store.TriggerStatusActive ||
+				tr.ActionType != store.TriggerActionGitHubComment {
+				return refused()
+			}
+
+			// Load the durable TriggerEvent from fire.EventID.
+			ev, err := s.store.GetTriggerEvent(ctx, fire.EventID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+					return refused()
+				}
+				return failed()
+			}
+			if ev.ProjectID != tr.ProjectID ||
+				ev.SourceKind != store.TriggerSourceKindGitHub ||
+				(tr.SourceKind != "" && ev.SourceKind != tr.SourceKind) ||
+				(tr.SourceID != "" && ev.SourceID != tr.SourceID) ||
+				(len(tr.MatchTypes) > 0 && !slices.Contains(tr.MatchTypes, ev.Type)) {
+				return refused()
 			}
 
 			var lists map[string][]string
-			if len(req.Event.Lists) > 0 {
-				lists = make(map[string][]string, len(req.Event.Lists))
-				for k, vals := range req.Event.Lists {
+			if len(ev.Lists) > 0 {
+				lists = make(map[string][]string, len(ev.Lists))
+				for k, vals := range ev.Lists {
 					lists[k] = append([]string(nil), vals...)
 				}
+			}
+			var rawPayload json.RawMessage
+			if ev.Payload != "" {
+				rawPayload = json.RawMessage(ev.Payload)
 			}
 
 			fireReq := hubfire.FireRequest{
@@ -280,27 +299,28 @@ func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 				ActionType: tr.ActionType,
 				Payload:    tr.ActionPayload,
 				Event: &hubfire.FireEvent{
-					ID:         req.Event.ID,
-					ProjectID:  tr.ProjectID,
-					SourceKind: req.Event.SourceKind,
-					SourceID:   req.Event.SourceID,
-					Type:       req.Event.Type,
-					Subject:    req.Event.Subject,
-					OccurredAt: req.Event.OccurredAt,
-					ReceivedAt: req.Event.ReceivedAt,
-					Attributes: maps.Clone(req.Event.Attributes),
+					ID:         ev.ID,
+					ProjectID:  ev.ProjectID,
+					SourceKind: ev.SourceKind,
+					SourceID:   ev.SourceID,
+					Type:       ev.Type,
+					Subject:    ev.Subject,
+					OccurredAt: ev.OccurredAt,
+					ReceivedAt: ev.ReceivedAt,
+					Attributes: maps.Clone(ev.Attributes),
 					Lists:      lists,
-					Payload:    req.Event.Payload,
+					Payload:    rawPayload,
 					Trigger: &hubfire.FireTriggerRef{
-						ID:   tr.ID,
-						Name: tr.Name,
+						ID:          tr.ID,
+						Name:        tr.Name,
+						FireSubject: fire.Subject,
 					},
 				},
 				Executor: hubfire.ExecutorContext{
 					Kind: trigger.ExecutorKindTriggerDrainer,
-					ID:   trigger.ExecutorIDPrefixTriggerEvent + req.Event.ID,
+					ID:   trigger.ExecutorIDPrefixTriggerEvent + ev.ID,
 				},
-				FireAt:   req.Event.ReceivedAt,
+				FireAt:   ev.ReceivedAt,
 				Attempts: req.Attempts,
 			}
 
@@ -312,6 +332,31 @@ func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 			}, nil
 		},
 	}
+}
+
+// callerSuppliedFireContent reports whether req carries any caller-supplied
+// payload or event content beyond identifiers (FireID, ProjectID, TriggerID,
+// Event.ID).
+func callerSuppliedFireContent(req source.ActionFireRequest) bool {
+	if req.Payload != "" {
+		return true
+	}
+	e := req.Event
+	return e.Handled ||
+		e.SourceKind != "" ||
+		e.SourceID != "" ||
+		e.DeliveryID != "" ||
+		e.DedupKey != "" ||
+		e.Type != "" ||
+		e.Subject != "" ||
+		!e.OccurredAt.IsZero() ||
+		!e.ReceivedAt.IsZero() ||
+		len(e.Attributes) > 0 ||
+		len(e.Lists) > 0 ||
+		len(e.Payload) > 0 ||
+		e.PayloadBytes != 0 ||
+		e.Truncated ||
+		e.Sender != (source.Principal{})
 }
 
 // GitHubSourceReadiness returns GitHub's source.Readiness backed directly by

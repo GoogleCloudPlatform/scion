@@ -434,6 +434,7 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 
 	var commentPosted atomic.Int64
 	var lastCommentBody atomic.Value
+	var lastCommentPath atomic.Value
 	var lastListSince atomic.Value
 
 	mux := http.NewServeMux()
@@ -471,6 +472,7 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 				Body string `json:"body"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			lastCommentPath.Store(r.URL.Path)
 			lastCommentBody.Store(body.Body)
 			n := commentPosted.Add(1)
 			w.WriteHeader(http.StatusCreated)
@@ -689,19 +691,37 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	}
 	require.NoError(t, st.CreateTrigger(ctx, agentTrigger))
 
-	// Helper to claim a real TriggerFire row in "firing" state, matching the
-	// production dispatcher's claim-before-fire invariant.
-	claimFire := func(t *testing.T, tr *store.Trigger, srcEv source.Event) (string, source.Event) {
+	// Helper to persist a durable TriggerEvent and claim a real TriggerFire row
+	// in "firing" state, matching the production dispatcher's invariants.
+	claimFire := func(t *testing.T, tr *store.Trigger, srcEv source.Event) (string, *store.TriggerEvent) {
 		t.Helper()
-		evCopy := srcEv
-		evCopy.ID = uuid.NewString()
+		eventID := uuid.NewString()
+		storedEv := &store.TriggerEvent{
+			ID:           eventID,
+			ProjectID:    tr.ProjectID,
+			SourceKind:   srcEv.SourceKind,
+			SourceID:     srcEv.SourceID,
+			Type:         srcEv.Type,
+			Subject:      srcEv.Subject,
+			DedupKey:     "dedup-" + eventID,
+			OccurredAt:   srcEv.OccurredAt,
+			ReceivedAt:   srcEv.ReceivedAt,
+			Attributes:   srcEv.Attributes,
+			Lists:        srcEv.Lists,
+			Headers:      map[string]string{},
+			Payload:      string(srcEv.Payload),
+			PayloadBytes: len(srcEv.Payload),
+			Status:       store.TriggerEventStatusPending,
+		}
+		require.NoError(t, st.CreateTriggerEvent(ctx, storedEv))
+
 		fireID := uuid.NewString()
 		claimed, _, err := st.ClaimTriggerFire(ctx, &store.TriggerFire{
 			ID:                   fireID,
 			ProjectID:            tr.ProjectID,
 			TriggerID:            tr.ID,
-			EventID:              evCopy.ID,
-			Subject:              evCopy.Subject,
+			EventID:              storedEv.ID,
+			Subject:              storedEv.Subject,
 			ActionType:           tr.ActionType,
 			Status:               store.TriggerFireStatusFiring,
 			LeaseUntil:           now.Add(5 * time.Minute),
@@ -710,115 +730,136 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.True(t, claimed)
-		return fireID, evCopy
+		return fireID, storedEv
 	}
 
 	action := srv.GitHubSourceCommentAction()
 	assert.Equal(t, store.TriggerActionGitHubComment, action.Kind())
 
-	normPayload, err := action.Validate(ctx, source.ActionValidateRequest{
+	_, err = action.Validate(ctx, source.ActionValidateRequest{
 		ProjectID: projA.ID,
 		Payload:   userTrigger.ActionPayload,
 	})
 	require.NoError(t, err)
 
-	// 3a. Missing TriggerID refuses (fail closed, never posts without trigger authority).
-	noTrigRes, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		FireID:    uuid.NewString(),
-		Payload:   normPayload,
-		Event:     ev,
-		Target:    targets[0],
+	// 3a-1. Unknown FireID refuses with no post.
+	unknownFireRes, err := action.Fire(ctx, source.ActionFireRequest{
+		FireID:   uuid.NewString(),
+		Attempts: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(hubfire.FireStatusRefused), unknownFireRes.Status)
+	assert.Equal(t, "github.comment refused", unknownFireRes.Error)
+	assert.Equal(t, int64(0), commentPosted.Load())
+
+	// 3a-2. Mismatched ProjectID refuses with no post.
+	projMismatchFireID, _ := claimFire(t, userTrigger, ev)
+	projMismatchRes, err := action.Fire(ctx, source.ActionFireRequest{
+		ProjectID: projB.ID,
+		FireID:    projMismatchFireID,
 		Attempts:  1,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, string(hubfire.FireStatusRefused), noTrigRes.Status)
-	assert.Equal(t, "github.comment refused", noTrigRes.Error)
+	assert.Equal(t, string(hubfire.FireStatusRefused), projMismatchRes.Status)
+	assert.Equal(t, "github.comment refused", projMismatchRes.Error)
 	assert.Equal(t, int64(0), commentPosted.Load())
 
-	// 3a-2. Unclaimed FireID refuses (no trigger_fires claim row).
-	unclaimedRes, err := action.Fire(ctx, source.ActionFireRequest{
+	// 3a-3. Fire whose TriggerID does not match caller TriggerID refuses with no post.
+	otherTrigFireID, _ := claimFire(t, userTrigger, ev)
+	otherTrigRes, err := action.Fire(ctx, source.ActionFireRequest{
 		ProjectID: projA.ID,
-		TriggerID: userTrigger.ID,
-		FireID:    uuid.NewString(),
-		Payload:   normPayload,
-		Event:     ev,
-		Target:    targets[0],
+		TriggerID: pausedTrigger.ID,
+		FireID:    otherTrigFireID,
 		Attempts:  1,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, string(hubfire.FireStatusRefused), unclaimedRes.Status)
-	assert.Equal(t, "github.comment refused", unclaimedRes.Error)
+	assert.Equal(t, string(hubfire.FireStatusRefused), otherTrigRes.Status)
+	assert.Equal(t, "github.comment refused", otherTrigRes.Error)
 	assert.Equal(t, int64(0), commentPosted.Load())
 
-	// 3a-3. Non-comment trigger (ActionType == "message") refuses with no post.
-	msgFireID, msgEv := claimFire(t, messageTrigger, ev)
+	// 3a-4. Fire whose stored event has a type not matched by the trigger refuses with no post.
+	otherTypeEv := ev
+	otherTypeEv.Type = "github.pull_request.opened"
+	otherTypeFireID, _ := claimFire(t, userTrigger, otherTypeEv)
+	otherTypeRes, err := action.Fire(ctx, source.ActionFireRequest{
+		FireID:   otherTypeFireID,
+		Attempts: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(hubfire.FireStatusRefused), otherTypeRes.Status)
+	assert.Equal(t, "github.comment refused", otherTypeRes.Error)
+	assert.Equal(t, int64(0), commentPosted.Load())
+
+	// 3a-5. Non-comment trigger (ActionType == "message") refuses with no post.
+	msgFireID, _ := claimFire(t, messageTrigger, ev)
 	nonCommentRes, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: messageTrigger.ID,
-		FireID:    msgFireID,
-		Payload:   normPayload,
-		Event:     msgEv,
-		Target:    targets[0],
-		Attempts:  1,
+		FireID:   msgFireID,
+		Attempts: 1,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, string(hubfire.FireStatusRefused), nonCommentRes.Status)
 	assert.Equal(t, "github.comment refused", nonCommentRes.Error)
 	assert.Equal(t, int64(0), commentPosted.Load())
 
-	// 3a-4. Paused trigger refuses with no post (dispatcher fires active triggers only).
-	pausedFireID, pausedEv := claimFire(t, pausedTrigger, ev)
+	// 3a-6. Paused trigger refuses with no post (dispatcher fires active triggers only).
+	pausedFireID, _ := claimFire(t, pausedTrigger, ev)
 	pausedRes, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: pausedTrigger.ID,
-		FireID:    pausedFireID,
-		Payload:   pausedTrigger.ActionPayload,
-		Event:     pausedEv,
-		Target:    targets[0],
-		Attempts:  1,
+		FireID:   pausedFireID,
+		Attempts: 1,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, string(hubfire.FireStatusRefused), pausedRes.Status)
 	assert.Equal(t, "github.comment refused", pausedRes.Error)
 	assert.Equal(t, int64(0), commentPosted.Load())
 
-	// 3a-5. Caller-supplied payload differing from stored tr.ActionPayload refuses with no post.
-	mismatchFireID, mismatchEv := claimFire(t, userTrigger, ev)
-	mismatchRes, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: userTrigger.ID,
-		FireID:    mismatchFireID,
-		Payload:   `{"body":"caller override payload"}`,
-		Event:     mismatchEv,
-		Target:    targets[0],
-		Attempts:  1,
+	// 3a-7. Any caller-supplied Payload is refused with no post.
+	payloadFireID, _ := claimFire(t, userTrigger, ev)
+	payloadRes, err := action.Fire(ctx, source.ActionFireRequest{
+		FireID:   payloadFireID,
+		Payload:  `{"body":"caller override payload"}`,
+		Attempts: 1,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, string(hubfire.FireStatusRefused), mismatchRes.Status)
-	assert.Equal(t, "github.comment refused", mismatchRes.Error)
+	assert.Equal(t, string(hubfire.FireStatusRefused), payloadRes.Status)
+	assert.Equal(t, "github.comment refused", payloadRes.Error)
 	assert.Equal(t, int64(0), commentPosted.Load())
 
-	// 3b. Posted (with Attempts=2 so marker scan verifies Since == ev.ReceivedAt and template vars).
+	// 3a-8. Any caller-supplied Event Type or Attributes are refused with no post.
+	evOverrideFireID, _ := claimFire(t, userTrigger, ev)
+	evOverrideRes, err := action.Fire(ctx, source.ActionFireRequest{
+		FireID: evOverrideFireID,
+		Event: source.Event{
+			Type:       "github.issue_comment.created",
+			Attributes: map[string]string{"repo": "acme/widgets", "number": "99"},
+		},
+		Attempts: 1,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, string(hubfire.FireStatusRefused), evOverrideRes.Status)
+	assert.Equal(t, "github.comment refused", evOverrideRes.Error)
+	assert.Equal(t, int64(0), commentPosted.Load())
+
+	// 3b. Posted with identifier-only request: body, issue number (/issues/7/comments),
+	// and Since all come strictly from the stored trigger and event rows.
 	okFireID, okEv := claimFire(t, userTrigger, ev)
 	fireRes, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: userTrigger.ID,
-		FireID:    okFireID,
-		Payload:   normPayload,
-		Event:     okEv,
-		Target:    targets[0],
-		Attempts:  2,
+		FireID:   okFireID,
+		Attempts: 2,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, string(hubfire.FireStatusFired), fireRes.Status)
 	assert.Equal(t, "9876", fireRes.ResultRef)
 	assert.Equal(t, int64(1), commentPosted.Load())
+	assert.Equal(t, "/repos/acme/widgets/issues/7/comments", lastCommentPath.Load())
 	assert.Contains(t, lastCommentBody.Load().(string), "Event "+okEv.ID+" at 2026-11-21T12:00:00Z")
 	assert.Equal(t, now.Format(time.RFC3339), lastListSince.Load())
 
-	// Helper to compare seam outcome against direct s.fireAction on the same trigger & event.
-	fireDirect := func(tr *store.Trigger, fireID string, srcEv source.Event) hubfire.FireOutcome {
+	// Helper to compare seam outcome against direct s.fireAction on the same stored trigger & event.
+	fireDirect := func(tr *store.Trigger, fireID string, storedEv *store.TriggerEvent) hubfire.FireOutcome {
+		var rawPayload json.RawMessage
+		if storedEv.Payload != "" {
+			rawPayload = json.RawMessage(storedEv.Payload)
+		}
 		return srv.fireAction(ctx, hubfire.FireRequest{
 			ProjectID: tr.ProjectID,
 			Authority: hubfire.RecordedAuthority{
@@ -831,20 +872,20 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 			ActionType: tr.ActionType,
 			Payload:    tr.ActionPayload,
 			Event: &hubfire.FireEvent{
-				ID:         srcEv.ID,
-				ProjectID:  tr.ProjectID,
-				SourceKind: srcEv.SourceKind,
-				SourceID:   srcEv.SourceID,
-				Type:       srcEv.Type,
-				Subject:    srcEv.Subject,
-				OccurredAt: srcEv.OccurredAt,
-				ReceivedAt: srcEv.ReceivedAt,
-				Attributes: srcEv.Attributes,
-				Lists:      srcEv.Lists,
-				Payload:    srcEv.Payload,
+				ID:         storedEv.ID,
+				ProjectID:  storedEv.ProjectID,
+				SourceKind: storedEv.SourceKind,
+				SourceID:   storedEv.SourceID,
+				Type:       storedEv.Type,
+				Subject:    storedEv.Subject,
+				OccurredAt: storedEv.OccurredAt,
+				ReceivedAt: storedEv.ReceivedAt,
+				Attributes: storedEv.Attributes,
+				Lists:      storedEv.Lists,
+				Payload:    rawPayload,
 				Trigger:    &hubfire.FireTriggerRef{ID: tr.ID, Name: tr.Name},
 			},
-			FireAt:   srcEv.ReceivedAt,
+			FireAt:   storedEv.ReceivedAt,
 			Attempts: 1,
 		})
 	}
@@ -858,16 +899,11 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 		"number":     "7",
 		"stale":      "true",
 	}
-	staleFireID, staleEvClaimed := claimFire(t, userTrigger, staleEv)
-	wantStale := fireDirect(userTrigger, "fire-stale-prod", staleEvClaimed)
+	staleFireID, staleEvStored := claimFire(t, userTrigger, staleEv)
+	wantStale := fireDirect(userTrigger, "fire-stale-prod", staleEvStored)
 	gotStale, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: userTrigger.ID,
-		FireID:    staleFireID,
-		Payload:   normPayload,
-		Event:     staleEvClaimed,
-		Target:    targets[0],
-		Attempts:  1,
+		FireID:   staleFireID,
+		Attempts: 1,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, wantStale.Status.String(), gotStale.Status)
@@ -875,16 +911,11 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	assert.Equal(t, "stale event", gotStale.Error)
 
 	// 3d. Agent principal parity: both refuse with "github.comment refused".
-	agentFireID, agentEv := claimFire(t, agentTrigger, ev)
-	wantAgent := fireDirect(agentTrigger, "fire-agent-prod", agentEv)
+	agentFireID, agentEvStored := claimFire(t, agentTrigger, ev)
+	wantAgent := fireDirect(agentTrigger, "fire-agent-prod", agentEvStored)
 	gotAgent, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: agentTrigger.ID,
-		FireID:    agentFireID,
-		Payload:   agentTrigger.ActionPayload,
-		Event:     agentEv,
-		Target:    targets[0],
-		Attempts:  1,
+		FireID:   agentFireID,
+		Attempts: 1,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, wantAgent.Status.String(), gotAgent.Status)
@@ -894,16 +925,11 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	// 3e. Rate-limited parity: exhaust per-project bucket, both return skipped / "comment rate limited".
 	for srv.AllowGitHubComment(projA.ID) == nil {
 	}
-	rlFireID, rlEv := claimFire(t, userTrigger, ev)
-	wantRL := fireDirect(userTrigger, "fire-rl-prod", rlEv)
+	rlFireID, rlEvStored := claimFire(t, userTrigger, ev)
+	wantRL := fireDirect(userTrigger, "fire-rl-prod", rlEvStored)
 	gotRL, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: userTrigger.ID,
-		FireID:    rlFireID,
-		Payload:   normPayload,
-		Event:     rlEv,
-		Target:    targets[0],
-		Attempts:  1,
+		FireID:   rlFireID,
+		Attempts: 1,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, wantRL.Status.String(), gotRL.Status)
@@ -915,16 +941,11 @@ func TestServerGitHubSourceSeams_MinterAndCommentActionParity(t *testing.T) {
 	now = now.Add(time.Minute) // refill comment bucket
 	projA.GitHubPermissions = &store.GitHubTokenPermissions{Contents: "read", Metadata: "read"}
 	require.NoError(t, st.UpdateProject(ctx, projA))
-	permFireID, permEv := claimFire(t, userTrigger, ev)
-	wantMintRefused := fireDirect(userTrigger, "fire-perm-prod", permEv)
+	permFireID, permEvStored := claimFire(t, userTrigger, ev)
+	wantMintRefused := fireDirect(userTrigger, "fire-perm-prod", permEvStored)
 	gotMintRefused, err := action.Fire(ctx, source.ActionFireRequest{
-		ProjectID: projA.ID,
-		TriggerID: userTrigger.ID,
-		FireID:    permFireID,
-		Payload:   normPayload,
-		Event:     permEv,
-		Target:    targets[0],
-		Attempts:  1,
+		FireID:   permFireID,
+		Attempts: 1,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, wantMintRefused.Status.String(), gotMintRefused.Status)
