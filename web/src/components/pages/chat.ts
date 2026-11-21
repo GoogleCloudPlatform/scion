@@ -68,6 +68,7 @@ import {
   chatDMsLoad,
   chatLoadClock,
   chatSpacesLoad,
+  type ChatDMsBody,
 } from '../../client/chat-list-cache.js';
 import type { SharedLoadOptions } from '../../client/chat-list-cache.js';
 import { ResumeRefresh } from '../../client/resume-refresh.js';
@@ -232,6 +233,20 @@ function recentFileToPreviewTarget(file: RecentFile): PreviewTarget {
  * (unread DM state, human space membership) and re-syncs after a missed event.
  */
 const FALLBACK_POLL_INTERVAL_MS = 60_000;
+
+/**
+ * Max age passed to `chatDMsLoad` on a 60 s fallback poll tick: skips the
+ * request when an event-driven DM refresh already ran inside the interval,
+ * while staying 1 s under `FALLBACK_POLL_INTERVAL_MS` so `SharedJsonLoad`'s
+ * `<=` check and small `visibleInterval` timer jitter never skip an idle tick.
+ */
+const FALLBACK_POLL_MAX_AGE_MS = FALLBACK_POLL_INTERVAL_MS - 1_000;
+
+/** Suppresses this tab's own SSE read-watermark echo right after a local DM read. */
+const OWN_READ_ECHO_MS = 5_000;
+
+/** Shares one `/chat/dms` request between tab-resume rail catch-up and poll catch-up. */
+const RESUME_DM_MAX_AGE_MS = 2_000;
 
 /**
  * Normalise a Hub timestamp: Go marshals a zero time as year 0001 rather than
@@ -625,6 +640,17 @@ export class ScionPageChat extends LitElement {
    */
   private _resumeRefresh: ResumeRefresh | null = null;
   private _unreadDMRequestId = 0;
+  /** Perf-clock instant of the latest known DM unread/mute change on this page. */
+  private _dmListChangedAt = -Infinity;
+  /** `chatDMsLoad` request started or joined by this page after `_dmListChangedAt`. */
+  private _freshDMsLoad: { promise: Promise<ChatDMsBody | null>; startedAt: number } | null = null;
+  /** Tracks wall-clock start of the last observed `chatDMsLoad` entry across system sleep. */
+  private _dmLoadEntryStartedAt: number | undefined = undefined;
+  private _dmLoadEntryWallAt = -Infinity;
+  /** Wall-clock timestamps of local DM reads, used to suppress the immediate own-SSE echo. */
+  private _localDMReadAt = new Map<string, number>();
+  /** True while `refreshRail()` is synchronously initiating an automated catch-up refresh. */
+  private _inCatchUpRailRefresh = false;
   /**
    * Bumped whenever the user navigates within the page (opens a thread or a
    * DM, resets the view) and when the page is removed. A lookup the user
@@ -1917,14 +1943,23 @@ export class ScionPageChat extends LitElement {
     );
     // While this page is up, the badge reads the lists the rail and the DM
     // dots already load for each event, not a separate count request.
+    this._dmListChangedAt = chatLoadClock() - CHAT_STARTUP_REUSE_MS;
+    this._freshDMsLoad = null;
     chatUnread.setSource(this._unreadCountSource);
     void this.initV2();
+  }
+
+  private _noteDMListChange(at: number = chatLoadClock()): void {
+    this._dmListChangedAt = Math.max(this._dmListChangedAt, at);
+    this._freshDMsLoad = null;
   }
 
   /**
    * The unread badge's source while this page is connected: the shared
    * `/chat/spaces` and `/chat/dms` loads, joined with any request another
    * owner (the rail's reload, loadUnreadDMPeers) started after the event.
+   * Space-thread activity leaves `_dmListChangedAt` untouched, so it reuses
+   * the current `/chat/dms` load without refetching.
    */
   private readonly _unreadCountSource = async (
     startedAfter: number
@@ -1934,8 +1969,16 @@ export class ScionPageChat extends LitElement {
     // as old as the older of the two.
     const spacesLoad = chatSpacesLoad.load({ startedAfter });
     const spacesAt = chatSpacesLoad.startedAt() ?? chatLoadClock();
-    const dmsLoad = chatDMsLoad.load({ startedAfter });
-    const dmsAt = chatDMsLoad.startedAt() ?? chatLoadClock();
+    let dmsLoad: Promise<ChatDMsBody | null>;
+    let dmsAt: number;
+    const currentDMsAt = chatDMsLoad.startedAt();
+    if (this._freshDMsLoad !== null && currentDMsAt === this._freshDMsLoad.startedAt) {
+      dmsLoad = this._freshDMsLoad.promise;
+      dmsAt = this._freshDMsLoad.startedAt;
+    } else {
+      dmsLoad = chatDMsLoad.load({ startedAfter: this._dmListChangedAt });
+      dmsAt = chatDMsLoad.startedAt() ?? chatLoadClock();
+    }
     const [spaces, dms] = await Promise.all([spacesLoad, dmsLoad]);
     const count = badgeCountFromLists(spaces, dms);
     return count === null ? null : { count, startedAt: Math.min(spacesAt, dmsAt) };
@@ -1946,6 +1989,8 @@ export class ScionPageChat extends LitElement {
     this._cancelPalettePreload?.();
     this._cancelPalettePreload = null;
     chatUnread.setSource(null);
+    this._freshDMsLoad = null;
+    this._localDMReadAt.clear();
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
     ++this._initV2Generation;
@@ -2243,12 +2288,7 @@ export class ScionPageChat extends LitElement {
     // is additionally refreshed on every inbound chat message.
     // It pauses while the tab is hidden and catches up once on return.
     this._stopFallbackPoll = visibleInterval(() => {
-      // After 60 s or more hidden, the resume rail refresh also loads the DM
-      // list on return, so this catch-up sends a second /chat/dms request.
-      // Accepted: which of the two starts first is up to the rail catch-up's
-      // timing, which is not this poll's to rely on, so sharing one request
-      // could not be made reliable.
-      void this.loadUnreadDMPeers();
+      void this.loadUnreadDMPeers({ maxAgeMs: FALLBACK_POLL_MAX_AGE_MS });
       // A DM has no membership of its own, so re-syncing here would silently
       // swap the member list the user was just looking at. Leave the sidebar on
       // whatever the previous view loaded.
@@ -2285,7 +2325,13 @@ export class ScionPageChat extends LitElement {
     const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
       | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
       | null;
-    void rail?.refresh({ quiet: true });
+    if (!rail) return;
+    this._inCatchUpRailRefresh = true;
+    try {
+      void rail.refresh({ quiet: true });
+    } finally {
+      this._inCatchUpRailRefresh = false;
+    }
   }
 
   /** The SSE feed reconnected after a drop: events sent meanwhile were lost. */
@@ -2295,13 +2341,24 @@ export class ScionPageChat extends LitElement {
 
   /**
    * The rail started a full refresh. Reload the DM state the members
-   * sidebar shows (fresh, not shared with an earlier request; a failure
-   * fails the refresh), and the nav badge's count, which has the same
-   * staleness.
+   * sidebar shows (a user pull-to-refresh always fetches fresh; an automated
+   * catch-up joins a poll catch-up that started moments earlier), and the
+   * nav badge's count, which has the same staleness.
    */
   private _handleRailRefresh(e: Event): void {
     const detail = (e as CustomEvent<RailRefreshDetail>).detail;
-    detail?.waitUntil(this.loadUnreadDMPeers());
+    if (this._inCatchUpRailRefresh) {
+      this._noteDMListChange(chatLoadClock() - RESUME_DM_MAX_AGE_MS);
+      detail?.waitUntil(
+        this.loadUnreadDMPeers({
+          maxAgeMs: RESUME_DM_MAX_AGE_MS,
+          startedAfter: this._dmListChangedAt,
+        })
+      );
+    } else {
+      this._noteDMListChange();
+      detail?.waitUntil(this.loadUnreadDMPeers());
+    }
     chatUnread.scheduleRefresh();
   }
 
@@ -2977,6 +3034,8 @@ export class ScionPageChat extends LitElement {
       if (peerId && this.v2UnreadFromIds.includes(peerId)) {
         this.v2UnreadFromIds = this.v2UnreadFromIds.filter((id) => id !== peerId);
       }
+      this._localDMReadAt.set(key, Date.now());
+      this._noteDMListChange();
       void this.loadUnreadDMPeers();
       return;
     }
@@ -3002,7 +3061,12 @@ export class ScionPageChat extends LitElement {
    * list follows the badge.
    */
   private _handleOwnReadStateSSE(e: Event): void {
-    type ReadStateData = { conversationKey?: string; userId?: string; unread?: boolean };
+    type ReadStateData = {
+      conversationKey?: string;
+      userId?: string;
+      unread?: boolean;
+      muted?: boolean;
+    };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ReadStateData } & ReadStateData)
       | undefined;
@@ -3011,10 +3075,24 @@ export class ScionPageChat extends LitElement {
     const userId = this.pageData?.user?.id;
     if (!key || !userId || eventData?.userId !== userId) return;
     if (eventData?.unread !== true) {
-      // The user read a DM elsewhere (another tab or device): the badge
-      // drops on this event, so the rail's Unread DMs list must follow.
-      // A fresh /chat/dms load; the badge source's refresh joins it.
-      if (key.startsWith('dm:')) void this.loadUnreadDMPeers();
+      // The user read or muted a DM: reload so the rail's Unread DMs list
+      // follows the badge, unless this is the immediate echo of a DM read
+      // already handled locally by `_handleReadStateUpdated`.
+      if (key.startsWith('dm:')) {
+        const isMuteChange = typeof eventData?.muted === 'boolean';
+        const localReadAt = this._localDMReadAt.get(key);
+        if (
+          !isMuteChange &&
+          localReadAt !== undefined &&
+          Date.now() - localReadAt < OWN_READ_ECHO_MS
+        ) {
+          this._localDMReadAt.delete(key);
+          return;
+        }
+        const eventAt = e.timeStamp > 0 ? e.timeStamp : chatLoadClock();
+        this._noteDMListChange(eventAt);
+        void this.loadUnreadDMPeers();
+      }
       return;
     }
 
@@ -3070,6 +3148,7 @@ export class ScionPageChat extends LitElement {
         dm.peerId === peerId ? { ...dm, hasUnread: true } : dm
       );
     }
+    this._noteDMListChange();
     void this.loadUnreadDMPeers();
     if (this.v2UnreadFromIds.includes(peerId) || info?.muted) return;
     this.v2UnreadFromIds = [...this.v2UnreadFromIds, peerId];
@@ -3121,7 +3200,10 @@ export class ScionPageChat extends LitElement {
     // A DM message may create an unread DM or clear one — refresh the dots.
     // A space message cannot change DM unread state; an event without a key
     // (a lightweight one) might be a DM, so it refreshes too.
-    if (mayChangeDMUnread(eventData)) this._dmDotsRefresh.schedule(eventAt);
+    if (mayChangeDMUnread(eventData)) {
+      this._noteDMListChange(eventAt);
+      this._dmDotsRefresh.schedule(eventAt);
+    }
 
     // Reload the rail (trailing and capped, see _railReload).
     this._railReload.schedule(eventAt);
@@ -3197,6 +3279,7 @@ export class ScionPageChat extends LitElement {
     // Threads row, so mark both groups stale, and Agents recency with them.
     this._markPaletteGroupsDirty('people', 'threads');
     this._markAgentDmsStale();
+    this._noteDMListChange();
     const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
     const eventData = (detail?.data ?? detail) as Record<string, unknown> | undefined;
     const oldConversationKey = eventData?.oldConversationKey as string | undefined;
@@ -4041,8 +4124,39 @@ export class ScionPageChat extends LitElement {
   private async loadUnreadDMPeers(options: SharedLoadOptions = {}): Promise<boolean> {
     const requestId = ++this._unreadDMRequestId;
     try {
-      const body = await chatDMsLoad.load(options);
-      if (!body) return false;
+      const wallNow = Date.now();
+      if (
+        options.maxAgeMs !== undefined &&
+        chatDMsLoad.startedAt() !== undefined &&
+        chatDMsLoad.startedAt() === this._dmLoadEntryStartedAt &&
+        wallNow - this._dmLoadEntryWallAt > options.maxAgeMs
+      ) {
+        chatDMsLoad.invalidate();
+      }
+      const beforeAt = chatDMsLoad.startedAt();
+      const load = chatDMsLoad.load(options);
+      const startedAt = chatDMsLoad.startedAt() ?? chatLoadClock();
+      if (startedAt !== this._dmLoadEntryStartedAt) {
+        this._dmLoadEntryStartedAt = startedAt;
+        this._dmLoadEntryWallAt = wallNow;
+      }
+      // Record `_freshDMsLoad` only when `chatDMsLoad` started a new request
+      // right now (same-tick post-change load) or joined an entry strictly
+      // newer than `_dmListChangedAt`. A `maxAgeMs` poll joining an older
+      // entry must not pin `_unreadCountSource` to pre-change data.
+      const startedNow =
+        beforeAt === undefined ||
+        (options.maxAgeMs === undefined && options.startedAfter === undefined) ||
+        (options.startedAfter !== undefined && beforeAt <= options.startedAfter) ||
+        startedAt !== beforeAt;
+      if (startedNow || startedAt > this._dmListChangedAt) {
+        this._freshDMsLoad = { promise: load, startedAt };
+      }
+      const body = await load;
+      if (!body) {
+        if (this._freshDMsLoad?.promise === load) this._freshDMsLoad = null;
+        return false;
+      }
       const data = body as {
         dms?: Array<{
           conversationKey: string;
@@ -6694,6 +6808,7 @@ export class ScionPageChat extends LitElement {
       if (!res.ok) throw new Error('mute failed');
       // Muting changes what counts as unread and what may pop up.
       chatNotifications.invalidateConversationInfo();
+      this._noteDMListChange();
       chatUnread.scheduleRefresh();
       const data = (await res.json().catch(() => ({}))) as { muted?: boolean };
       if (typeof data.muted === 'boolean' && data.muted !== next) {

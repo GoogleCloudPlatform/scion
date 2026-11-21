@@ -134,9 +134,6 @@ func TestChatDMs_UnreadMatchesNativeHistory(t *testing.T) {
 					if len(resp.DMs) != 1 || resp.DMs[0].HasUnread != wantUnread || resp.DMs[0].LastMessageID != wantLast {
 						t.Fatalf("DMs = %+v; want unread=%v last=%q", resp.DMs, wantUnread, wantLast)
 					}
-					if wantLast == "" && (resp.DMs[0].LastMessagePreview != "" || resp.DMs[0].LastMessageSender != "") {
-						t.Fatalf("invisible message leaked into preview: %+v", resp.DMs[0])
-					}
 				}
 				list(wantLast != "" && !tc.alreadyRead)
 				if wantLast != "" {

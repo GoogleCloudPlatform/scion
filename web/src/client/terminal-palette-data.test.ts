@@ -32,6 +32,7 @@ vi.mock('./api.js', async (importOriginal) => {
 });
 
 import { apiFetch } from './api.js';
+import { chatDMsLoad } from './chat-list-cache.js';
 import {
   isTerminalPaletteAgentViable,
   buildTerminalAgentCandidates,
@@ -73,6 +74,7 @@ afterEach(() => {
   harness?.store.destroy();
   harness = null;
   apiFetchMock.mockReset();
+  chatDMsLoad.invalidate();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });

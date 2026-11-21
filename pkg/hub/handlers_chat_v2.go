@@ -4868,8 +4868,6 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 		}
 		if lastMessage := lastMessages[dm.ConversationKey]; lastMessage != nil {
 			entry.LastMessageID = lastMessage.ID
-			entry.LastMessagePreview = truncatePreview(lastMessage.Msg, 120)
-			entry.LastMessageSender = lastMessage.Sender
 		}
 
 		switch dm.PeerKind {
@@ -4877,7 +4875,6 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 			if peerUser := peerUsers[dm.PeerID]; peerUser != nil {
 				entry.PeerName = peerUser.DisplayName
 				entry.PeerEmail = peerUser.Email
-				entry.PeerAvatar = peerUser.AvatarURL
 			}
 		case "agent":
 			if peerAgent := peerAgents[dm.PeerID]; peerAgent != nil {
@@ -6352,20 +6349,17 @@ type chatDMListResponse struct {
 }
 
 type chatDMEntry struct {
-	ConversationKey    string    `json:"conversationKey"`
-	PeerID             string    `json:"peerId"`
-	PeerKind           string    `json:"peerKind"`
-	PeerName           string    `json:"peerName,omitempty"`
-	PeerEmail          string    `json:"peerEmail,omitempty"`
-	PeerSlug           string    `json:"peerSlug,omitempty"`
-	PeerAvatar         string    `json:"peerAvatar,omitempty"`
-	LastMessageID      string    `json:"lastMessageId,omitempty"`
-	LastActivityAt     time.Time `json:"lastActivityAt"`
-	LastReadMessageID  string    `json:"lastReadMessageId,omitempty"`
-	HasUnread          bool      `json:"hasUnread"`
-	Muted              bool      `json:"muted"`
-	LastMessagePreview string    `json:"lastMessagePreview,omitempty"`
-	LastMessageSender  string    `json:"lastMessageSender,omitempty"`
+	ConversationKey   string    `json:"conversationKey"`
+	PeerID            string    `json:"peerId"`
+	PeerKind          string    `json:"peerKind"`
+	PeerName          string    `json:"peerName,omitempty"`
+	PeerEmail         string    `json:"peerEmail,omitempty"`
+	PeerSlug          string    `json:"peerSlug,omitempty"`
+	LastMessageID     string    `json:"lastMessageId,omitempty"`
+	LastActivityAt    time.Time `json:"lastActivityAt"`
+	LastReadMessageID string    `json:"-"`
+	HasUnread         bool      `json:"hasUnread"`
+	Muted             bool      `json:"muted"`
 
 	// PeerDeleted is true when the peer is an agent that has been deleted
 	// (soft-deleted, or no longer has an agent row). Such a DM is kept
