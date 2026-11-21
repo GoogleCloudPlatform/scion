@@ -137,14 +137,16 @@ describe('scion-chat-members agent tooltip', () => {
 
   it('falls back to the display label, not the raw state name (ptone/scion#1571)', async () => {
     const blocked = await mount([agent({ activity: 'blocked' })]);
-    expect(tooltipContent(blocked)).toBe('waiting on others');
+    expect(tooltipContent(blocked).split('\n')[0]).toBe('waiting on others');
+    expect(tooltipContent(blocked)).toContain('expecting to hear back');
     document.body.innerHTML = '';
     const waiting = await mount([agent({ activity: 'waiting_for_input' })]);
     expect(tooltipContent(waiting)).toBe('waiting on parent');
     document.body.innerHTML = '';
     // Matched case-insensitively, like resolveAgentStatus (the badge's status source).
     const upper = await mount([agent({ activity: 'BLOCKED' as never })]);
-    expect(tooltipContent(upper)).toBe('waiting on others');
+    expect(tooltipContent(upper).split('\n')[0]).toBe('waiting on others');
+    expect(tooltipContent(upper)).toContain('expecting to hear back');
   });
 
   it('shows the last activity event as the updated time', async () => {
@@ -211,7 +213,8 @@ describe('scion-chat-members idle and suspend reason (ptone/scion#7826)', () => 
   it('shows a running idle agent with the idle badge', async () => {
     const el = await mount([agent({ phase: 'running', activity: 'idle' })]);
     expect(badgeStatus(el)).toBe('idle');
-    expect(tooltipContent(el)).toBe('idle');
+    expect(tooltipContent(el).split('\n')[0]).toBe('idle');
+    expect(tooltipContent(el)).toContain('Done with any known work.');
   });
 
   it('labels a suspended agent like the agent list, with the reason explained', async () => {

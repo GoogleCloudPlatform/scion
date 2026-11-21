@@ -18,7 +18,11 @@ import { describe, it, expect } from 'vitest';
 import { render } from 'lit';
 import {
   ACTIVITY_DISPLAY,
+  ACTIVITY_TOOLTIPS,
+  activityTooltip,
+  agentReportedStatusHint,
   agentStatusBadge,
+  agentStatusTooltip,
   harnessErrorHint,
   isProvisionedOnly,
   STALLED_NO_HOOK_ACTIVITY_HINT,
@@ -81,13 +85,15 @@ describe('provision-only status (ptone/scion#2929)', () => {
     const el = badge(po, { size: 'small' });
     expect(el.getAttribute('status')).toBe('created');
     expect(el.getAttribute('label')).toBe('created (not started)');
-    expect(el.getAttribute('title')).toContain('scion start po-agent');
+    expect(el.getAttribute('tooltip')).toContain('scion start po-agent');
+    expect(el.hasAttribute('title')).toBe(false);
     expect(el.getAttribute('size')).toBe('small');
   });
 
   it('renders other agents unchanged', () => {
     const plain = badge({ ...po, provisionedOnly: false });
     expect(plain.getAttribute('label')).toBe(stateLabel('created'));
+    expect(plain.hasAttribute('tooltip')).toBe(false);
     expect(plain.hasAttribute('title')).toBe(false);
     expect(plain.hasAttribute('size')).toBe(false);
     const busy = badge({ name: 'a', phase: 'running', activity: 'blocked' });
@@ -132,7 +138,7 @@ describe('provision-only status (ptone/scion#2929)', () => {
     });
     expect(suspHarnessErr.getAttribute('status')).toBe('suspended');
     expect(suspHarnessErr.getAttribute('label')).toBe('suspended · harness error');
-    expect(suspHarnessErr.getAttribute('title')).toBe('model API: API Error: 400 denied');
+    expect(suspHarnessErr.getAttribute('tooltip')).toBe('model API: API Error: 400 denied');
 
     const plain = badge({ name: 'a', phase: 'suspended' });
     expect(plain.getAttribute('status')).toBe('suspended');
@@ -161,7 +167,7 @@ describe('harness_error status (ptone/scion#7858)', () => {
     });
     expect(el.getAttribute('status')).toBe('harness_error');
     expect(el.getAttribute('label')).toBe('harness error');
-    expect(el.getAttribute('title')).toBe('model API: API Error: 400 denied');
+    expect(el.getAttribute('tooltip')).toBe('model API: API Error: 400 denied');
   });
 
   it('falls back to the top-level message, and has no tooltip without one', () => {
@@ -177,6 +183,7 @@ describe('harness_error status (ptone/scion#7858)', () => {
       activity: 'working',
       detail: { message: 'Ready' },
     });
+    expect(el.hasAttribute('tooltip')).toBe(false);
     expect(el.hasAttribute('title')).toBe(false);
   });
 });
@@ -188,7 +195,7 @@ describe('stalled no-hook-since-start hint (ptone/scion#4556)', () => {
     return host.querySelector('scion-status-badge')!;
   };
 
-  it('shows the no-hook-since-start hint as the badge tooltip when stalled', () => {
+  it('shows the stalled explanation and no-hook-since-start hint as the badge tooltip when stalled', () => {
     const el = badge({
       name: 'a',
       phase: 'running',
@@ -197,7 +204,9 @@ describe('stalled no-hook-since-start hint (ptone/scion#4556)', () => {
     });
     expect(el.getAttribute('status')).toBe('stalled');
     expect(el.getAttribute('label')).toBe('stalled');
-    expect(el.getAttribute('title')).toBe(STALLED_NO_HOOK_ACTIVITY_HINT);
+    expect(el.getAttribute('tooltip')).toBe(
+      `${ACTIVITY_TOOLTIPS.stalled}\n${STALLED_NO_HOOK_ACTIVITY_HINT}`
+    );
     expect(stalledHint({ message: STALLED_NO_HOOK_ACTIVITY_HINT }, 'stalled')).toBe(
       STALLED_NO_HOOK_ACTIVITY_HINT
     );
@@ -216,7 +225,7 @@ describe('stalled no-hook-since-start hint (ptone/scion#4556)', () => {
       activity: 'stalled',
       detail: { message: 'Ready' },
     });
-    expect(el.hasAttribute('title')).toBe(false);
+    expect(el.getAttribute('tooltip')).toBe(ACTIVITY_TOOLTIPS.stalled);
   });
 });
 
@@ -237,11 +246,11 @@ describe('idle status (ptone/scion#7826)', () => {
     expect(stateLabel('idle')).toBe('idle');
   });
 
-  it('renders a running idle agent as idle', () => {
+  it('renders a running idle agent as idle with the idle tooltip', () => {
     const el = badge({ name: 'a', phase: 'running', activity: 'idle' });
     expect(el.getAttribute('status')).toBe('idle');
     expect(el.getAttribute('label')).toBe('idle');
-    expect(el.hasAttribute('title')).toBe(false);
+    expect(el.getAttribute('tooltip')).toBe(ACTIVITY_TOOLTIPS.idle);
   });
 });
 
@@ -303,7 +312,7 @@ describe('suspend reason (ptone/scion#7826)', () => {
     });
     expect(el.getAttribute('status')).toBe('suspended');
     expect(el.getAttribute('label')).toBe('suspended · completed (idle)');
-    expect(el.getAttribute('title')).toBe(
+    expect(el.getAttribute('tooltip')).toBe(
       suspendReasonHint({ phase: 'suspended', suspendReason: 'idle' })
     );
 
@@ -319,7 +328,7 @@ describe('suspend reason (ptone/scion#7826)', () => {
       suspendReason: 'user',
       detail: { message: 'model API: 401' },
     });
-    expect(el.getAttribute('title')).toBe(
+    expect(el.getAttribute('tooltip')).toBe(
       `model API: 401\n${suspendReasonHint({ phase: 'suspended', suspendReason: 'user' })!}`
     );
   });
@@ -329,5 +338,96 @@ describe('suspend reason (ptone/scion#7826)', () => {
     const agent = { name: 'a', phase: 'suspended', activity: 'completed', suspendReason: 'idle' };
     render(agentStatusBadge(agent as Agent, { status: 'suspended', label: 'suspended' }), host);
     expect(host.querySelector('scion-status-badge')!.getAttribute('label')).toBe('suspended');
+  });
+});
+
+describe('status badge tooltips and agent-reported status (ptone/scion#8723)', () => {
+  const badge = (agent: Partial<Agent>, opts?: Parameters<typeof agentStatusBadge>[1]): Element => {
+    const host = document.createElement('div');
+    render(agentStatusBadge(agent as Agent, opts), host);
+    return host.querySelector('scion-status-badge')!;
+  };
+
+  it('provides one-line explanations for completed, idle, blocked, and stalled', () => {
+    expect(activityTooltip('completed')).toBe(ACTIVITY_TOOLTIPS.completed);
+    expect(activityTooltip('idle')).toBe(ACTIVITY_TOOLTIPS.idle);
+    expect(activityTooltip('blocked')).toBe(ACTIVITY_TOOLTIPS.blocked);
+    expect(activityTooltip('BLOCKED')).toBe(ACTIVITY_TOOLTIPS.blocked);
+    expect(activityTooltip('stalled')).toBe(ACTIVITY_TOOLTIPS.stalled);
+    expect(activityTooltip('working')).toBeUndefined();
+    expect(activityTooltip('running')).toBeUndefined();
+  });
+
+  it('shows completed tooltip and appends agent-reported status from taskSummary or message', () => {
+    const bare = badge({ name: 'a', phase: 'running', activity: 'completed' });
+    expect(bare.getAttribute('tooltip')).toBe(ACTIVITY_TOOLTIPS.completed);
+
+    const withTask = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'completed',
+      taskSummary: 'Opened PR #42',
+      message: 'Ready',
+    });
+    expect(withTask.getAttribute('tooltip')).toBe(
+      `${ACTIVITY_TOOLTIPS.completed}\nAgent says: Opened PR #42`
+    );
+
+    const withMessageOnly = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'completed',
+      message: 'Finished migration',
+    });
+    expect(withMessageOnly.getAttribute('tooltip')).toBe(
+      `${ACTIVITY_TOOLTIPS.completed}\nAgent says: Finished migration`
+    );
+  });
+
+  it('shows idle tooltip and appends agent-reported status message when available', () => {
+    const withMsg = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'idle',
+      detail: { message: 'Between assignments' },
+    });
+    expect(withMsg.getAttribute('tooltip')).toBe(
+      `${ACTIVITY_TOOLTIPS.idle}\nAgent says: Between assignments`
+    );
+  });
+
+  it('shows waiting on others tooltip and appends agent-reported status message when available', () => {
+    const bare = badge({ name: 'a', phase: 'running', activity: 'blocked' });
+    expect(bare.getAttribute('label')).toBe('waiting on others');
+    expect(bare.getAttribute('tooltip')).toBe(ACTIVITY_TOOLTIPS.blocked);
+
+    const withMsg = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'blocked',
+      message: 'waiting for review from X',
+    });
+    expect(withMsg.getAttribute('tooltip')).toBe(
+      `${ACTIVITY_TOOLTIPS.blocked}\nAgent says: waiting for review from X`
+    );
+  });
+
+  it('ignores whitespace-only status messages and non-signaled states', () => {
+    expect(agentReportedStatusHint({ message: '   ' }, 'blocked')).toBeUndefined();
+    expect(agentReportedStatusHint({ message: 'Ready' }, 'working')).toBeUndefined();
+    expect(agentReportedStatusHint({ message: 'Ready' }, 'stalled')).toBeUndefined();
+    expect(
+      agentStatusTooltip({ name: 'a', phase: 'running', activity: 'blocked', message: '   ' })
+    ).toBe(ACTIVITY_TOOLTIPS.blocked);
+  });
+
+  it('handles undefined and null inputs in activityTooltip and agentReportedStatusHint', () => {
+    expect(activityTooltip(undefined)).toBeUndefined();
+    expect(activityTooltip(null)).toBeUndefined();
+    expect(activityTooltip('')).toBeUndefined();
+    expect(agentReportedStatusHint(undefined, 'blocked')).toBeUndefined();
+    expect(agentReportedStatusHint(null, 'blocked')).toBeUndefined();
+    expect(agentReportedStatusHint({ message: 'waiting' }, undefined)).toBeUndefined();
+    expect(agentReportedStatusHint({ message: 'waiting' }, null)).toBeUndefined();
   });
 });

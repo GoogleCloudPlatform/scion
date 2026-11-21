@@ -285,19 +285,39 @@ describe('agent detail status badges', () => {
   it('header: a provision-only agent shows the override label and start hint', () => {
     const badge = headerBadge(provisionOnly());
     expect(badge.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
-    expect(badge.getAttribute('title')).toContain('scion start agent-1');
+    expect(badge.getAttribute('tooltip')).toContain('scion start agent-1');
   });
 
   it('Phase badge: a provision-only agent shows the override label and start hint', () => {
     const badge = phaseBadge(provisionOnly());
     expect(badge.getAttribute('label')).toBe(PROVISIONED_ONLY_LABEL);
-    expect(badge.getAttribute('title')).toContain('scion start agent-1');
+    expect(badge.getAttribute('tooltip')).toContain('scion start agent-1');
   });
 
   it('Phase badge: a running agent keeps its phase, not its activity', () => {
     const badge = phaseBadge(makeAgent({ phase: 'running', activity: 'thinking' }));
     expect(badge.getAttribute('status')).toBe('running');
     expect(badge.getAttribute('label')).toBe('running');
-    expect(badge.hasAttribute('title')).toBe(false);
+    expect(badge.hasAttribute('tooltip')).toBe(false);
+  });
+
+  it('Activity badge: shows tooltip explanation and agent-reported status', () => {
+    const agent = makeAgent({
+      phase: 'running',
+      activity: 'blocked',
+      message: 'waiting for review from X',
+    });
+    const page = makePage(agent);
+    const tpl = (
+      page as unknown as { renderCurrentStateCard(a: Agent): TemplateResult }
+    ).renderCurrentStateCard(agent);
+    const item = Array.from(renderTo(tpl).querySelectorAll('.info-item')).find(
+      (i) => i.querySelector('.info-label')?.textContent?.trim() === 'Activity'
+    );
+    const badge = item?.querySelector('scion-status-badge');
+    expect(badge?.getAttribute('status')).toBe('blocked');
+    expect(badge?.getAttribute('label')).toBe('waiting on others');
+    expect(badge?.getAttribute('tooltip')).toContain('expecting to hear back');
+    expect(badge?.getAttribute('tooltip')).toContain('Agent says: waiting for review from X');
   });
 });
