@@ -201,7 +201,18 @@ func TestSSE_AgentStatusNotificationScopedPerUser(t *testing.T) {
 
 	collect := func(ch <-chan string) []sseEnvelope {
 		var got []sseEnvelope
-		deadline := time.After(300 * time.Millisecond)
+		select {
+		case raw, ok := <-ch:
+			if !ok {
+				return got
+			}
+			var env sseEnvelope
+			require.NoError(t, json.Unmarshal([]byte(raw), &env))
+			got = append(got, env)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for expected SSE notification event")
+		}
+		quiet := time.After(50 * time.Millisecond)
 		for {
 			select {
 			case raw, ok := <-ch:
@@ -211,7 +222,7 @@ func TestSSE_AgentStatusNotificationScopedPerUser(t *testing.T) {
 				var env sseEnvelope
 				require.NoError(t, json.Unmarshal([]byte(raw), &env))
 				got = append(got, env)
-			case <-deadline:
+			case <-quiet:
 				return got
 			}
 		}
