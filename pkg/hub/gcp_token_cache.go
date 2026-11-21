@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -171,6 +172,9 @@ func (c *CachedGCPTokenGenerator) GenerateIDToken(ctx context.Context, serviceAc
 		token, err := c.inner.GenerateIDToken(fetchCtx, serviceAccountEmail, audience)
 		if err != nil {
 			return nil, err
+		}
+		if token == nil {
+			return nil, fmt.Errorf("gcp token generator returned nil ID token")
 		}
 
 		now := c.clock()
