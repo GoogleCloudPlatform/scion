@@ -247,20 +247,9 @@ To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the s
 
   The value is saved in the agent's applied configuration and kept on later restarts and resumes. To remove or change it, delete and re-create the agent. When the Hub reuses an agent that already exists (for example, resuming a suspended agent), it keeps the stored configuration and does not apply `--agent-log-level`; both `scion start` and `scion resume` print a warning in that case.
 
-- **Many agents, through the Hub**: store `SCION_LOG_LEVEL` as a Hub environment variable at the scope you want. Use `--always` so it is injected without a template requesting it.
+- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of an inline `--config` file. If you also pass `--agent-log-level`, the flag wins.
 
-  ```bash
-  # Every agent in the current project
-  scion hub env set --project --always SCION_LOG_LEVEL=debug
-
-  # Every agent you start
-  scion hub env set --always SCION_LOG_LEVEL=debug
-
-  # Turn it off again
-  scion hub env clear --project SCION_LOG_LEVEL
-  ```
-
-- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of an inline `--config` file (a template cannot set `SCION_*` keys). A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
+You cannot set `SCION_LOG_LEVEL` for many agents at once through the Hub. Names beginning with `SCION_` are [reserved](/scion/hosted/user/secrets/#reserved-names), so `scion hub env set` refuses `SCION_LOG_LEVEL` at every scope, and a template cannot set `SCION_*` keys either. Set it on each agent you want to debug.
 
 ## Telemetry Collection
 
