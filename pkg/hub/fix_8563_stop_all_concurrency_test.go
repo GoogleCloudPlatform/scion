@@ -198,9 +198,18 @@ func (d *fixedDelayStopAllDispatcher) DispatchAgentStop(ctx context.Context, _ *
 // with RunIntentStopped.
 func TestStopAll_MultiWaveWithinBudget(t *testing.T) {
 	const totalAgents = stopAllMaxConcurrency * 2 // 12 agents = 2 waves
-	disp := &fixedDelayStopAllDispatcher{delay: 200 * time.Millisecond}
+	// Preserve 2*delay > opTimeout (so a single-agent timeout would still
+	// starve wave 2) while leaving enough headroom under -race for 12 SQLite
+	// status writes within the 2-wave budget.
+	delay := 200 * time.Millisecond
+	opTimeout := 300 * time.Millisecond
+	if raceEnabled {
+		delay = 600 * time.Millisecond
+		opTimeout = 1000 * time.Millisecond
+	}
+	disp := &fixedDelayStopAllDispatcher{delay: delay}
 	srv, s, project := setupCreateAgentServer(t, disp)
-	setStopAllAgentOpTimeout(t, 300*time.Millisecond)
+	setStopAllAgentOpTimeout(t, opTimeout)
 	setAgentQuotaLimits(t, s)
 
 	var allIDs []string

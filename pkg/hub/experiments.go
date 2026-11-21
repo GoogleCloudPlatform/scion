@@ -28,10 +28,21 @@ import (
 // accessor, never the s.experiments field directly, because many pkg/hub
 // tests build &Server{...} by struct literal without New() (ptone/scion#2217).
 func (s *Server) experimentRegistry() *experiments.Registry {
-	if s.experiments == nil {
+	s.experimentsMu.RLock()
+	reg := s.experiments
+	s.experimentsMu.RUnlock()
+	if reg == nil {
 		return experiments.Default()
 	}
-	return s.experiments
+	return reg
+}
+
+// setExperimentRegistry swaps the server's compiled experiment registry
+// safely with respect to concurrent experimentRegistry() readers.
+func (s *Server) setExperimentRegistry(reg *experiments.Registry) {
+	s.experimentsMu.Lock()
+	s.experiments = reg
+	s.experimentsMu.Unlock()
 }
 
 // experimentsSnapshot returns the cached experiments settings view, or an

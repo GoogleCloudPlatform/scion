@@ -131,11 +131,26 @@ func TestDeleteProject_SharedStorageVisible_NoContent(t *testing.T) {
 func TestDeleteProject_SharedStorageProbeHangs_ReportsKept(t *testing.T) {
 	e := newNFSDeleteTestEnv(t, "kept-hung")
 	release := make(chan struct{})
+	probeCalled := make(chan struct{}, 1)
+	probeDone := make(chan struct{})
 	prevProbe, prevTimeout := projectStorageTreeProbe, projectDeleteStorageCheckTimeout
-	projectStorageTreeProbe = func(projectfs.Layout) error { <-release; return nil }
+	projectStorageTreeProbe = func(projectfs.Layout) error {
+		defer close(probeDone)
+		select {
+		case probeCalled <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	}
 	projectDeleteStorageCheckTimeout = 50 * time.Millisecond
 	t.Cleanup(func() {
 		close(release)
+		select {
+		case <-probeCalled:
+			<-probeDone
+		default:
+		}
 		projectStorageTreeProbe, projectDeleteStorageCheckTimeout = prevProbe, prevTimeout
 	})
 

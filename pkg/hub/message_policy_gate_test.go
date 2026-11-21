@@ -3112,6 +3112,10 @@ func TestMessagePolicyGate_ShadowOverheadP99Under5ms(t *testing.T) {
 	p50 := mpgPercentileDuration(durations, 0.50)
 	p99 := mpgPercentileDuration(durations, 0.99)
 	t.Logf("H2 shadow gate warm latency (N=%d, 3 shadow policies): p50=%s p99=%s", N, p50, p99)
+	if raceEnabled {
+		t.Logf("skipping 5ms p99 wall-clock budget under -race (got %s)", p99)
+		return
+	}
 	assert.Less(t, p99, 5*time.Millisecond, "shadow-only H2 gate p99 must stay under 5 ms (got %s)", p99)
 }
 

@@ -34,9 +34,8 @@ import (
 )
 
 // adtSetExperiment turns hub.agent_delegation on or off on srv by replacing
-// its registry while preserving any other experiment overrides already set on
-// srv. Callers must invoke this before background server goroutines start
-// serving requests.
+// its registry via setExperimentRegistry while preserving any other
+// experiment overrides already set on srv.
 func adtSetExperiment(t *testing.T, srv *Server, on bool) {
 	t.Helper()
 	cur := srv.experimentRegistry()
@@ -49,7 +48,7 @@ func adtSetExperiment(t *testing.T, srv *Server, on bool) {
 	}
 	reg, err := experiments.NewRegistry(active, cur.Retired())
 	require.NoError(t, err)
-	srv.experiments = reg
+	srv.setExperimentRegistry(reg)
 	require.Equal(t, on, srv.experimentEnabled(experiments.AgentDelegation))
 }
 

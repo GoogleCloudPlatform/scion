@@ -88,7 +88,8 @@ func (s *Server) projectDeleteStorageKept(ctx context.Context, projectID string)
 		return nil
 	}
 	done := make(chan error, 1)
-	go func() { done <- projectStorageTreeProbe(layout) }()
+	probe := projectStorageTreeProbe
+	go func() { done <- probe(layout) }()
 	timer := time.NewTimer(projectDeleteStorageCheckTimeout)
 	defer timer.Stop()
 	select {
