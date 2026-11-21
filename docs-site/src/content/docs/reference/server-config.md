@@ -164,7 +164,7 @@ Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when 
 
 #### Events streams (`server.hub.sse`)
 
-Settings for the browser events stream (`/events`, server-sent events), which the web UI keeps open for live updates (agent heartbeats that change no visible state do not emit status events on `/events`). Read at startup, so a change needs a restart. An invalid value is a startup error. Both are Layer 0: a hosted Hub's server-config API refuses them.
+Settings for the browser events stream (`/events`, server-sent events), which the web UI keeps open for live updates (agent heartbeats that change no visible state do not emit status events on `/events`). Read at startup, so a change needs a restart. An invalid value is a startup error. Both are Layer 0: a hosted Hub's server-config API refuses them. For concurrency, memory, and timeout sizing on request-counted platforms such as Cloud Run, see [Sizing for Long-Lived Connections](/scion/hosted/ha/sizing/).
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -188,7 +188,7 @@ server:
     platform_request_timeout: "900s"   # the Cloud Run service timeout
 ```
 
-When the Hub runs on a Cloud Run service (`K_SERVICE` is set) and `platform_request_timeout` is not set, it logs one warning at startup that names the setting. Startup continues.
+When the Hub runs on a Cloud Run service (`K_SERVICE` is set) and `platform_request_timeout` is not set, it logs one warning at startup that names the setting. Startup continues. See [Sizing for Long-Lived Connections](/scion/hosted/ha/sizing/#cloud-run-startup-warning) for the full warning text, the request-slot model, and the recommended Cloud Run concurrency, memory, and timeout pairing.
 
 #### Chat search (`server.hub.chat.search`)
 

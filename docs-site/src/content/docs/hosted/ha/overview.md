@@ -68,6 +68,7 @@ The two tiers are distinguished purely by the **availability tier** dimension �
 
 The HA admin surface is the fullest of any mode:
 
+- [Sizing for Long-Lived Connections](/scion/hosted/ha/sizing/) — request-slot accounting and recommended Cloud Run concurrency, memory, and timeout settings.
 - [Runtime Brokers & Profiles](/scion/hosted/ha/runtime-broker/) — proxy/hosted brokers and profiles.
 - [Managed Agents](/scion/hosted/single-node/managed-agents/) — cloud-managed agents that bypass brokers.
 - [Kubernetes Runtime](/scion/hosted/ha/kubernetes/) — running agents on Kubernetes.
