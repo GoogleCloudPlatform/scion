@@ -174,6 +174,8 @@ func TestMoveBrokerQuota_SourceAtCapTargetFull_ConcurrentReserveRefused(t *testi
 	var exceeded *QuotaExceededError
 	require.ErrorAs(t, err, &exceeded, "AC1: the full target refuses the move")
 	assert.Equal(t, f.dst.ID, exceeded.ScopeID)
+	assert.EqualValues(t, 1, exceeded.Count)
+	assert.EqualValues(t, 1, exceeded.Max)
 	require.True(t, ran, "the hook ran")
 	assert.ErrorIs(t, reserveErr, store.ErrQuotaExceeded, "the source had no free slot at any point")
 	assert.EqualValues(t, 1, brokerReservationCount(t, s, f.src.ID), "the source never exceeds its cap")
@@ -196,6 +198,15 @@ func TestTransferBroker_TargetAtCapRefused(t *testing.T) {
 	assert.Equal(t, store.LimitMaxAgentsPerBroker, exceeded.Limit)
 	assert.Equal(t, store.QuotaScopeBroker, exceeded.ScopeType)
 	assert.Equal(t, f.dst.ID, exceeded.ScopeID)
+	assert.EqualValues(t, 2, exceeded.Count)
+	assert.EqualValues(t, 2, exceeded.Max)
+	msg, details := quotaRefusal(store.LimitMaxAgentsPerBroker, err)
+	assert.Equal(t, brokerRefusalMessage(f.dst.ID, 2, 2), msg)
+	assert.Equal(t, map[string]interface{}{
+		"runtimeBrokerId": f.dst.ID,
+		"count":           int64(2),
+		"limit":           int64(2),
+	}, details)
 	assert.EqualValues(t, 2, brokerReservationCount(t, s, f.dst.ID), "nothing written on the target")
 	f.requireOnSource(t)
 }

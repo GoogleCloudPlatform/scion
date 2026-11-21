@@ -471,8 +471,9 @@ type TransferOpts struct {
 // ErrQuotaLockContention when enforcement is on, and proceeds unchecked when
 // it is off; with enforcement off the cap is not applied. Both unlocks are
 // deferred, so they run after the transaction has committed or rolled back.
-// A full target returns a *QuotaExceededError naming it, and the source
-// reservation is unchanged.
+// A full target returns a *QuotaExceededError naming it along with the
+// observed active count and effective limit, and the source reservation is
+// unchanged.
 func (qs *QuotaService) TransferBroker(ctx context.Context, agentID, toBroker string, o TransferOpts) (res store.BrokerReservationTransferResult, limited bool, err error) {
 	const limitName = store.LimitMaxAgentsPerBroker
 	req, limited, err := brokerTransferRequest(ctx, qs.store, agentID, toBroker, o)
@@ -514,7 +515,13 @@ func (qs *QuotaService) TransferBroker(ctx context.Context, agentID, toBroker st
 
 	res, err = qs.store.TransferBrokerReservation(ctx, req)
 	if errors.Is(err, store.ErrQuotaExceeded) {
-		return res, true, &QuotaExceededError{Limit: limitName, ScopeType: store.QuotaScopeBroker, ScopeID: toBroker}
+		return res, true, &QuotaExceededError{
+			Limit:     limitName,
+			ScopeType: store.QuotaScopeBroker,
+			ScopeID:   toBroker,
+			Count:     res.TargetCount,
+			Max:       effectiveLimit,
+		}
 	}
 	if err != nil {
 		return res, true, fmt.Errorf("quota: transfer reservation for %q: %w", limitName, err)

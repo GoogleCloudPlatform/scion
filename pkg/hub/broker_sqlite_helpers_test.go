@@ -283,9 +283,9 @@ func reserveStaleBrokerSlot(t *testing.T, s store.Store, broker *store.RuntimeBr
 }
 
 // brokerRefusalMessage is the expected broker-limit refusal message
-// (ptone/scion#8682).
+// (ptone/scion#8682, ptone/scion#8696).
 func brokerRefusalMessage(brokerID string, count, max int64) string {
-	return fmt.Sprintf("quota exceeded: max_agents_per_broker (broker %s: %d of %d running agents); stop, suspend, or delete a running agent on this broker to free a slot",
+	return fmt.Sprintf("quota exceeded: max_agents_per_broker (broker %s: %d of %d active agents (starting, running, stopping, or stop-queued)); stop, suspend, or delete an active agent on this broker to free a slot",
 		brokerID, count, max)
 }
 

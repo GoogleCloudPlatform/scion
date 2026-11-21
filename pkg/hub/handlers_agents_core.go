@@ -938,8 +938,9 @@ func quotaExceededMessage(limitName string) string {
 // quota. The limit is the one the error names (a *QuotaExceededError), else
 // limitName. A project agent limit names the project, its count and limit,
 // and how to free a slot (ptone/scion#6033); a broker agent limit names the
-// broker, its running agent count and limit, and how to free a slot
-// (ptone/scion#8682); every other limit keeps quotaExceededMessage and
+// broker, its active agent count (starting, running, stopping, or
+// stop-queued) and limit, and how to free a slot (ptone/scion#8682,
+// ptone/scion#8696); every other limit keeps quotaExceededMessage and
 // quotaExceededDetails.
 func quotaRefusal(limitName string, err error) (string, map[string]interface{}) {
 	var exceeded *QuotaExceededError
@@ -952,16 +953,19 @@ func quotaRefusal(limitName string, err error) (string, map[string]interface{}) 
 			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
 	}
 	if exceeded.Limit == store.LimitMaxAgentsPerBroker && exceeded.ScopeType == store.QuotaScopeBroker {
-		details := map[string]interface{}{"count": exceeded.Count, "limit": exceeded.Max}
-		if exceeded.ScopeID != "" {
-			details["runtimeBrokerId"] = exceeded.ScopeID
-			return fmt.Sprintf("%s (broker %s: %d of %d running agents); stop, suspend, or delete a running agent on this broker to free a slot",
-					quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
+		if exceeded.Max > 0 {
+			details := map[string]interface{}{"count": exceeded.Count, "limit": exceeded.Max}
+			if exceeded.ScopeID != "" {
+				details["runtimeBrokerId"] = exceeded.ScopeID
+				return fmt.Sprintf("%s (broker %s: %d of %d active agents (starting, running, stopping, or stop-queued)); stop, suspend, or delete an active agent on this broker to free a slot",
+						quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
+					details
+			}
+			return fmt.Sprintf("%s (%d of %d active agents (starting, running, stopping, or stop-queued)); stop, suspend, or delete an active agent on this broker to free a slot",
+					quotaExceededMessage(exceeded.Limit), exceeded.Count, exceeded.Max),
 				details
 		}
-		return fmt.Sprintf("%s (%d of %d running agents); stop, suspend, or delete a running agent on this broker to free a slot",
-				quotaExceededMessage(exceeded.Limit), exceeded.Count, exceeded.Max),
-			details
+		return quotaExceededMessage(exceeded.Limit), quotaExceededDetails(err)
 	}
 	if exceeded.Limit != "" {
 		limitName = exceeded.Limit
