@@ -218,7 +218,11 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 // (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 15, admin.Revision)
+	assert.Equal(t, 16, admin.Revision)
+	assert.Contains(t, admin.Permissions, "broker.manage")
+	assert.NotContains(t, admin.Permissions, "broker.update")
+	assert.NotContains(t, admin.Permissions, "broker.delete")
+	assert.NotContains(t, admin.Permissions, "broker.auto_provide")
 	assert.Contains(t, admin.Permissions, "project.manage_message_policies")
 	assert.Contains(t, admin.Permissions, "project.read_message_policies")
 	assert.Contains(t, admin.Permissions, "trigger.read")

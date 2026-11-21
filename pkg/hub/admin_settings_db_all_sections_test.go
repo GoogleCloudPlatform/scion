@@ -588,6 +588,7 @@ func TestPutServerConfigDB_MergedSections_ConcurrentWrite409(t *testing.T) {
 		{"auto_expose_ports", `{"enabled":true}`, `{"enabled":false}`, `{"auto_expose_ports": {"enabled": null}}`},
 		{"quotas", `{"enforce_broker_quotas":true}`, `{"enforce_broker_quotas":false}`, `{"quotas": {"enforce_broker_quotas": null}}`},
 		{"agent_secrets", `{"user_scope_only":true}`, `{"user_scope_only":false}`, `{"agent_secrets": {"user_scope_only": null}}`},
+		{"broker_policy", `{"admin_managed_only":true}`, `{"admin_managed_only":false}`, `{"broker_policy": {"admin_managed_only": null}}`},
 		{"hub_observability", `{"metrics_enabled":true}`, `{"metrics_enabled":false}`, `{"server": {"hub": {"observability": {"metrics_enabled": null}}}}`},
 		{"branding", `{"name":"Acme"}`, `{"name":"Other"}`, `{"server": {"hub": {"branding": {"subtitle": "Platform"}}}}`},
 		{"notifications", `{"notification_channels":[{"type":"slack","params":{"channel":"#a"}}]}`, `{"notification_channels":[{"type":"slack","params":{"channel":"#b"}}]}`, `{"server": {"notification_channels": []}}`},

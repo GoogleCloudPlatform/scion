@@ -1446,6 +1446,14 @@ type GlobalConfig struct {
 	// applies.
 	AgentSecretsUserScopeOnly *bool `json:"-" yaml:"-" koanf:"-"`
 
+	// BrokerPolicyAdminManagedOnly controls whether Runtime Broker
+	// registration, attachment, placement, and starts are restricted to
+	// admin-managed brokers (gated by experiment hub.admin_managed_brokers;
+	// ptone/scion#7829). Populated from settings.yaml
+	// broker_policy.admin_managed_only in file/SQLite mode. nil means unset
+	// (default false).
+	BrokerPolicyAdminManagedOnly *bool `json:"-" yaml:"-" koanf:"-"`
+
 	// DefaultHarnessConfig is the hub-level default harness config name.
 	// Populated from the top-level default_harness_config key in settings.yaml
 	// in file/SQLite mode.
@@ -2698,6 +2706,9 @@ type globalConfigEnvOverlay struct {
 	AgentSecrets struct {
 		UserScopeOnly *bool `koanf:"user_scope_only"`
 	} `koanf:"agent_secrets"`
+	BrokerPolicy struct {
+		AdminManagedOnly *bool `koanf:"admin_managed_only"`
+	} `koanf:"broker_policy"`
 	DefaultHarnessConfig               *string `koanf:"default_harness_config"`
 	DefaultTimezone                    *string `koanf:"default_timezone"`
 	DefaultGCPIdentityMode             *string `koanf:"default_gcp_identity_mode"`
@@ -2748,6 +2759,9 @@ func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	}
 	if v := ov.AgentSecrets.UserScopeOnly; v != nil {
 		gc.AgentSecretsUserScopeOnly = v
+	}
+	if v := ov.BrokerPolicy.AdminManagedOnly; v != nil {
+		gc.BrokerPolicyAdminManagedOnly = v
 	}
 	for dst, src := range map[*string]*string{
 		&gc.DefaultHarnessConfig:               ov.DefaultHarnessConfig,
@@ -3505,6 +3519,7 @@ var topLevelSettingsSectionKeys = []string{
 	"project_defaults",
 	"quotas",
 	"agent_secrets",
+	"broker_policy",
 	"default_harness_config",
 	"default_timezone",
 	"default_gcp_identity_mode",
@@ -3566,6 +3581,16 @@ func applyTopLevelSettingsSections(gc *GlobalConfig, raw map[string]interface{})
 	}
 	if decodeTopLevelSection(raw, "agent_secrets", &as) && as.UserScopeOnly != nil {
 		gc.AgentSecretsUserScopeOnly = as.UserScopeOnly
+	}
+
+	// Check for top-level "broker_policy" section — it lives outside
+	// "server" in settings.yaml and controls hub-level policy for Runtime
+	// Brokers (ptone/scion#7829).
+	var bp struct {
+		AdminManagedOnly *bool `yaml:"admin_managed_only"`
+	}
+	if decodeTopLevelSection(raw, "broker_policy", &bp) && bp.AdminManagedOnly != nil {
+		gc.BrokerPolicyAdminManagedOnly = bp.AdminManagedOnly
 	}
 
 	// Top-level default_harness_config — read from raw YAML.

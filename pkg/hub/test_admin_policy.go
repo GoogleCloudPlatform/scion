@@ -202,6 +202,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"broker.delete":       testAdminPolicyAllow,
 	"broker.list":         testAdminPolicyAllow,
 	"broker.auto_provide": testAdminPolicyAllow,
+	"broker.manage":       testAdminPolicyDeny,
 	"broker.dispatch":     testAdminPolicyAllow,
 
 	// GCP service accounts registered on this hub.
@@ -469,6 +470,7 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"quotas":            testAdminPolicyDeny,
 	"gcp_iam":           testAdminPolicyDeny,
 	"agent_secrets":     testAdminPolicyDeny,
+	"broker_policy":     testAdminPolicyDeny,
 	"agent_defaults":    testAdminPolicyDeny,
 	"endpoints":         testAdminPolicyDeny,
 	"github_app":        testAdminPolicyDeny,
@@ -596,6 +598,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"server.hub.gcp_iam_check_mode":                    testAdminPolicyDeny,
 	"server.hub.gcp_iam_deny_unknown_policy":           testAdminPolicyDeny,
 	"agent_secrets.user_scope_only":                    testAdminPolicyDeny,
+	"broker_policy.admin_managed_only":                 testAdminPolicyDeny,
 	"default_template":                                 testAdminPolicyDeny,
 	"default_harness_config":                           testAdminPolicyDeny,
 	"default_max_turns":                                testAdminPolicyDeny,
@@ -698,6 +701,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.Triggers:                     testAdminPolicyDeny,
 	experiments.MessagePolicies:              testAdminPolicyDeny,
 	experiments.EffectivePermissions:         testAdminPolicyDeny,
+	experiments.AdminManagedBrokers:          testAdminPolicyDeny,
 	experiments.CustomDefaultUserRole:        testAdminPolicyDeny,
 	experiments.TemplateConfigValidation:     testAdminPolicyDeny,
 	experiments.AgentSecrets:                 testAdminPolicyDeny,

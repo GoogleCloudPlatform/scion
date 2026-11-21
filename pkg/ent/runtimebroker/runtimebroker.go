@@ -56,6 +56,8 @@ const (
 	FieldCreatedBy = "created_by"
 	// FieldAutoProvide holds the string denoting the auto_provide field in the database.
 	FieldAutoProvide = "auto_provide"
+	// FieldAdminManaged holds the string denoting the admin_managed field in the database.
+	FieldAdminManaged = "admin_managed"
 	// FieldGcpHostServiceAccountEmail holds the string denoting the gcp_host_service_account_email field in the database.
 	FieldGcpHostServiceAccountEmail = "gcp_host_service_account_email"
 	// FieldGcpHostProjectID holds the string denoting the gcp_host_project_id field in the database.
@@ -130,6 +132,7 @@ var Columns = []string{
 	FieldEndpoint,
 	FieldCreatedBy,
 	FieldAutoProvide,
+	FieldAdminManaged,
 	FieldGcpHostServiceAccountEmail,
 	FieldGcpHostProjectID,
 	FieldGcpHostSource,
@@ -180,6 +183,8 @@ var (
 	DefaultConnectionState string
 	// DefaultAutoProvide holds the default value on creation for the "auto_provide" field.
 	DefaultAutoProvide bool
+	// DefaultAdminManaged holds the default value on creation for the "admin_managed" field.
+	DefaultAdminManaged bool
 	// DefaultGcpHostSource holds the default value on creation for the "gcp_host_source" field.
 	DefaultGcpHostSource string
 	// DefaultRuntimeTargetType holds the default value on creation for the "runtime_target_type" field.
@@ -297,6 +302,11 @@ func ByCreatedBy(opts ...sql.OrderTermOption) OrderOption {
 // ByAutoProvide orders the results by the auto_provide field.
 func ByAutoProvide(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAutoProvide, opts...).ToFunc()
+}
+
+// ByAdminManaged orders the results by the admin_managed field.
+func ByAdminManaged(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAdminManaged, opts...).ToFunc()
 }
 
 // ByGcpHostServiceAccountEmail orders the results by the gcp_host_service_account_email field.

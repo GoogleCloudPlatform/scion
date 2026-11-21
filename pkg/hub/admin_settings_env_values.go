@@ -180,6 +180,7 @@ func serverConfigResponseFromSettings(vs *config.VersionedSettings) ServerConfig
 		AutoExposePorts:      vs.AutoExposePorts,
 		Quotas:               vs.Quotas,
 		AgentSecrets:         vs.AgentSecrets,
+		BrokerPolicy:         vs.BrokerPolicy,
 
 		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
 		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,

@@ -112,6 +112,7 @@ var serverEnvCanonicalOverrides = []serverEnvCanonicalOverride{
 var serverEnvTopLevelKeys = []string{
 	"agent_secrets",
 	"auto_expose_ports",
+	"broker_policy",
 	"default_agent_role",
 	"default_gcp_identity_mode",
 	"default_gcp_identity_service_account_id",

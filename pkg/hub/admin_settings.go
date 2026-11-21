@@ -99,6 +99,9 @@ type ServerConfigResponse struct {
 	// AgentSecrets controls hub-level policy for secrets written by agents.
 	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
 
+	// BrokerPolicy controls hub-level policy for Runtime Brokers.
+	BrokerPolicy *config.BrokerPolicySettings `json:"broker_policy,omitempty"`
+
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
 
@@ -200,6 +203,9 @@ type ServerConfigUpdateRequest struct {
 
 	// AgentSecrets controls hub-level policy for secrets written by agents.
 	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
+
+	// BrokerPolicy controls hub-level policy for Runtime Brokers.
+	BrokerPolicy *config.BrokerPolicySettings `json:"broker_policy,omitempty"`
 
 	// Federation holds the federation authentication config update.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
@@ -732,6 +738,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 				DefaultUserRole string `yaml:"default_user_role"`
 			} `yaml:"auth"`
 		} `yaml:"server"`
+		BrokerPolicy *config.BrokerPolicySettings `yaml:"broker_policy"`
 	}
 	// The file as read, before the merge: the content URL audit below
 	// compares its content_url with the merged file's (S1).
@@ -767,6 +774,17 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			storedRole = stored.Server.Auth.DefaultUserRole
 		}
 		if !s.validateDefaultUserRoleSave(w, r, req.Server.Auth.DefaultUserRole, storedRole) {
+			return
+		}
+	}
+
+	// broker_policy.admin_managed_only=true requires hub.admin_managed_brokers
+	// (ptone/scion#7829). Echoing an already-stored true value or clearing it
+	// passes so other settings on the page can still be saved.
+	if req.BrokerPolicy != nil && req.BrokerPolicy.AdminManagedOnly != nil && *req.BrokerPolicy.AdminManagedOnly && !s.experimentEnabled(experiments.AdminManagedBrokers) {
+		storedEnabled := stored.BrokerPolicy != nil && stored.BrokerPolicy.AdminManagedOnly != nil && *stored.BrokerPolicy.AdminManagedOnly
+		if !storedEnabled {
+			writeBrokerPolicyExperimentDisabled(w)
 			return
 		}
 	}
@@ -1233,6 +1251,14 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			raw["agent_secrets"] = marshalToMap(req.AgentSecrets)
 		} else {
 			delete(raw, "agent_secrets")
+		}
+	}
+	if req.BrokerPolicy != nil {
+		// Section-generic zero check; see the Quotas block above.
+		if !isZeroStruct(req.BrokerPolicy) {
+			raw["broker_policy"] = marshalToMap(req.BrokerPolicy)
+		} else {
+			delete(raw, "broker_policy")
 		}
 	}
 	if req.Federation != nil {

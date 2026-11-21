@@ -465,6 +465,15 @@ type AgentSecretsSettings struct {
 	UserScopeOnly *bool `json:"user_scope_only,omitempty" koanf:"user_scope_only"`
 }
 
+// BrokerPolicySettings holds Layer-1 hub policy for Runtime Brokers
+// (ptone/scion#7829). AdminManagedOnly is nil when unset (default false).
+type BrokerPolicySettings struct {
+	// AdminManagedOnly, when true (and experiment hub.admin_managed_brokers is
+	// enabled), restricts Runtime Broker registration, attachment, placement,
+	// and agent starts to admin-managed brokers.
+	AdminManagedOnly *bool `json:"admin_managed_only,omitempty" koanf:"admin_managed_only"`
+}
+
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 //

@@ -286,6 +286,20 @@ func (_c *RuntimeBrokerCreate) SetNillableAutoProvide(v *bool) *RuntimeBrokerCre
 	return _c
 }
 
+// SetAdminManaged sets the "admin_managed" field.
+func (_c *RuntimeBrokerCreate) SetAdminManaged(v bool) *RuntimeBrokerCreate {
+	_c.mutation.SetAdminManaged(v)
+	return _c
+}
+
+// SetNillableAdminManaged sets the "admin_managed" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableAdminManaged(v *bool) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetAdminManaged(*v)
+	}
+	return _c
+}
+
 // SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
 func (_c *RuntimeBrokerCreate) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerCreate {
 	_c.mutation.SetGcpHostServiceAccountEmail(v)
@@ -677,6 +691,10 @@ func (_c *RuntimeBrokerCreate) defaults() {
 		v := runtimebroker.DefaultAutoProvide
 		_c.mutation.SetAutoProvide(v)
 	}
+	if _, ok := _c.mutation.AdminManaged(); !ok {
+		v := runtimebroker.DefaultAdminManaged
+		_c.mutation.SetAdminManaged(v)
+	}
 	if _, ok := _c.mutation.GcpHostSource(); !ok {
 		v := runtimebroker.DefaultGcpHostSource
 		_c.mutation.SetGcpHostSource(v)
@@ -735,6 +753,9 @@ func (_c *RuntimeBrokerCreate) check() error {
 	}
 	if _, ok := _c.mutation.AutoProvide(); !ok {
 		return &ValidationError{Name: "auto_provide", err: errors.New(`ent: missing required field "RuntimeBroker.auto_provide"`)}
+	}
+	if _, ok := _c.mutation.AdminManaged(); !ok {
+		return &ValidationError{Name: "admin_managed", err: errors.New(`ent: missing required field "RuntimeBroker.admin_managed"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "RuntimeBroker.created"`)}
@@ -861,6 +882,10 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
 		_node.AutoProvide = value
+	}
+	if value, ok := _c.mutation.AdminManaged(); ok {
+		_spec.SetField(runtimebroker.FieldAdminManaged, field.TypeBool, value)
+		_node.AdminManaged = value
 	}
 	if value, ok := _c.mutation.GcpHostServiceAccountEmail(); ok {
 		_spec.SetField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString, value)
@@ -1345,6 +1370,18 @@ func (u *RuntimeBrokerUpsert) SetAutoProvide(v bool) *RuntimeBrokerUpsert {
 // UpdateAutoProvide sets the "auto_provide" field to the value that was provided on create.
 func (u *RuntimeBrokerUpsert) UpdateAutoProvide() *RuntimeBrokerUpsert {
 	u.SetExcluded(runtimebroker.FieldAutoProvide)
+	return u
+}
+
+// SetAdminManaged sets the "admin_managed" field.
+func (u *RuntimeBrokerUpsert) SetAdminManaged(v bool) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldAdminManaged, v)
+	return u
+}
+
+// UpdateAdminManaged sets the "admin_managed" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateAdminManaged() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldAdminManaged)
 	return u
 }
 
@@ -2197,6 +2234,20 @@ func (u *RuntimeBrokerUpsertOne) SetAutoProvide(v bool) *RuntimeBrokerUpsertOne 
 func (u *RuntimeBrokerUpsertOne) UpdateAutoProvide() *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateAutoProvide()
+	})
+}
+
+// SetAdminManaged sets the "admin_managed" field.
+func (u *RuntimeBrokerUpsertOne) SetAdminManaged(v bool) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetAdminManaged(v)
+	})
+}
+
+// UpdateAdminManaged sets the "admin_managed" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateAdminManaged() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateAdminManaged()
 	})
 }
 
@@ -3283,6 +3334,20 @@ func (u *RuntimeBrokerUpsertBulk) SetAutoProvide(v bool) *RuntimeBrokerUpsertBul
 func (u *RuntimeBrokerUpsertBulk) UpdateAutoProvide() *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.UpdateAutoProvide()
+	})
+}
+
+// SetAdminManaged sets the "admin_managed" field.
+func (u *RuntimeBrokerUpsertBulk) SetAdminManaged(v bool) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetAdminManaged(v)
+	})
+}
+
+// UpdateAdminManaged sets the "admin_managed" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateAdminManaged() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateAdminManaged()
 	})
 }
 

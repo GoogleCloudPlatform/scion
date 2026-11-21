@@ -206,6 +206,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
 	},
+	"broker_policy": {
+		"broker_policy.admin_managed_only": "admin_managed_only",
+	},
 	"project_defaults": {
 		"project_defaults.default_scratchpad": "default_scratchpad",
 	},
@@ -275,6 +278,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",
+	},
+	"broker_policy": {
+		"admin_managed_only": "broker_policy.admin_managed_only",
 	},
 	"project_defaults": {
 		"default_scratchpad": "project_defaults.default_scratchpad",

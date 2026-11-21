@@ -406,6 +406,12 @@ type ServerConfig struct {
 	// permissive default (agents may write project scope) applies. See
 	// agentSecretsUserScopeOnly.
 	AgentSecretsUserScopeOnly *bool
+	// BrokerPolicyAdminManagedOnly controls whether Runtime Broker
+	// registration, attachment, placement, and agent starts are restricted to
+	// admin-managed brokers (gated by experiment hub.admin_managed_brokers;
+	// ptone/scion#7829). nil means unset (default false). See
+	// adminManagedBrokersOnly.
+	BrokerPolicyAdminManagedOnly *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool

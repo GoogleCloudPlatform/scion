@@ -150,6 +150,11 @@ func AutoProvide(v bool) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldAutoProvide, v))
 }
 
+// AdminManaged applies equality check predicate on the "admin_managed" field. It's identical to AdminManagedEQ.
+func AdminManaged(v bool) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldAdminManaged, v))
+}
+
 // GcpHostServiceAccountEmail applies equality check predicate on the "gcp_host_service_account_email" field. It's identical to GcpHostServiceAccountEmailEQ.
 func GcpHostServiceAccountEmail(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldGcpHostServiceAccountEmail, v))
@@ -1533,6 +1538,16 @@ func AutoProvideEQ(v bool) predicate.RuntimeBroker {
 // AutoProvideNEQ applies the NEQ predicate on the "auto_provide" field.
 func AutoProvideNEQ(v bool) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNEQ(FieldAutoProvide, v))
+}
+
+// AdminManagedEQ applies the EQ predicate on the "admin_managed" field.
+func AdminManagedEQ(v bool) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldAdminManaged, v))
+}
+
+// AdminManagedNEQ applies the NEQ predicate on the "admin_managed" field.
+func AdminManagedNEQ(v bool) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldAdminManaged, v))
 }
 
 // GcpHostServiceAccountEmailEQ applies the EQ predicate on the "gcp_host_service_account_email" field.

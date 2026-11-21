@@ -82,6 +82,9 @@
       "server.hub.branding.palette.dark.primary_active",
       "server.hub.branding.palette.dark.primary_text"
     ],
+    "broker_policy": [
+      "broker_policy.admin_managed_only"
+    ],
     "chat_retention": [],
     "endpoints": [
       "server.hub.public_url",

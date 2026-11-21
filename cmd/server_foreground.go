@@ -3874,6 +3874,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	hubSrv.WarnAuthorizedDomainsDrift(snap)
 	// A stored content URL that is not in effect (ptone/scion#7107).
 	hubSrv.WarnContentURLNotInEffect()
+	// A stored broker_policy.admin_managed_only=true while its experiment is
+	// off (ptone/scion#7829).
+	hubSrv.WarnBrokerPolicyExperimentMismatch()
 
 	if envKeys := ops.EnvOverriddenKeys(); len(envKeys) > 0 {
 		slog.Warn("Layer-1 settings overridden by SCION_SERVER_* env vars on this node — these values diverge from the shared DB",

@@ -34,6 +34,8 @@ func TestBuildLayer1SnapshotFromFile_ServerlessSettings(t *testing.T) {
   enforce_broker_quotas: false
 agent_secrets:
   user_scope_only: true
+broker_policy:
+  admin_managed_only: true
 default_timezone: Asia/Tokyo
 `
 	snapFor := func(t *testing.T, content string) Layer1Snapshot {
@@ -63,6 +65,9 @@ default_timezone: Asia/Tokyo
 		}
 		if snap.AgentSecretsUserScopeOnly == nil || !*snap.AgentSecretsUserScopeOnly {
 			t.Errorf("%s: AgentSecretsUserScopeOnly = %s, want true", name, boolPtrText(snap.AgentSecretsUserScopeOnly))
+		}
+		if snap.BrokerPolicyAdminManagedOnly == nil || !*snap.BrokerPolicyAdminManagedOnly {
+			t.Errorf("%s: BrokerPolicyAdminManagedOnly = %s, want true", name, boolPtrText(snap.BrokerPolicyAdminManagedOnly))
 		}
 		if snap.DefaultTimezone != "Asia/Tokyo" {
 			t.Errorf("%s: DefaultTimezone = %q, want Asia/Tokyo", name, snap.DefaultTimezone)

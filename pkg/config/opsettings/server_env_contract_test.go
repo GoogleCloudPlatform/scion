@@ -462,6 +462,7 @@ func structTypeHas(t reflect.Type, path string) bool {
 // checks the tag, so an entry whose field gains a koanf tag fails.
 var globalConfigOutsideKoanf = map[string]string{
 	"agent_secrets.user_scope_only":           "AgentSecretsUserScopeOnly",
+	"broker_policy.admin_managed_only":        "BrokerPolicyAdminManagedOnly",
 	"default_gcp_identity_mode":               "DefaultGCPIdentityMode",
 	"default_gcp_identity_service_account_id": "DefaultGCPIdentityServiceAccountID",
 	"default_harness_config":                  "DefaultHarnessConfig",

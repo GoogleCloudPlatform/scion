@@ -600,6 +600,15 @@ const CodeSpanMentions = "hub.code_span_mentions"
 // GET /api/v1/agents/{id}/screen and its project-scoped alias answer 404.
 const SuspendScreen = "hub.suspend_screen"
 
+// AdminManagedBrokers gates the hub-level broker_policy.admin_managed_only
+// setting and explicit admin-managed broker registration/approval
+// (ptone/scion#7829). Server layer: while off, saving
+// broker_policy.admin_managed_only=true or sending adminManaged on registration
+// returns 412 experiment_disabled and enforcement is bypassed. Web layer: shows
+// the Runtime Broker policy section in Admin > Server Config and warns when the
+// stored value is true while the experiment is off.
+const AdminManagedBrokers = "hub.admin_managed_brokers"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -635,6 +644,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8530",
 		Owner:       "hub",
+		ReviewBy:    "2027-05-21",
+	},
+	{
+		Name:        AdminManagedBrokers,
+		Title:       "Admin-managed Runtime Brokers only",
+		Description: "Enables the hub-level broker_policy.admin_managed_only setting to restrict Runtime Broker registration, attachment, placement, and starts to approved admin-managed brokers. Server layer: while off, enabling the setting or passing adminManaged returns 412 experiment_disabled and enforcement is bypassed. Web layer: shows the Runtime Broker policy section in Admin > Server Config.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7829",
+		Owner:       "auth",
 		ReviewBy:    "2027-05-21",
 	},
 	{
