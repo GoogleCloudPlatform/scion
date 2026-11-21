@@ -558,12 +558,24 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
       state.requests.some((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
     ).toBe(false);
     expect(state.draft?.rev).toBe(2);
-    expect(editor.content).toBe(editedWithComment);
+    const internals = el as unknown as {
+      reviewText: string;
+      discardedReview: string | null;
+      draftController?: { currentRev: number };
+    };
+    expect(internals.draftController?.currentRev).toBe(2);
+    expect(internals.reviewText).toBe(editedWithComment);
+    expect(internals.discardedReview).toBeNull();
+    const liveEditor = el.shadowRoot!.querySelector('scion-code-editor.review-editor') as
+      | (HTMLElement & { content: string })
+      | null;
+    expect(liveEditor).not.toBeNull();
+    expect(liveEditor!.content).toBe(editedWithComment);
     const unloadStale = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
     window.dispatchEvent(unloadStale);
     expect(unloadStale.defaultPrevented).toBe(true);
     const alertStale = Array.from(el.shadowRoot!.querySelectorAll('sl-alert')).find((a) =>
-      a.textContent?.includes('newer version was published')
+      a.textContent?.includes('Your draft and edits are kept intact.')
     );
     expect(alertStale).toBeDefined();
   });
@@ -651,8 +663,14 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     const submitBtn = findButton(el, '.edit-footer sl-button', 'Submit Review')!;
     expect(submitBtn.hasAttribute('disabled')).toBe(true);
 
-    // Trigger saveReview() while the rev-0 PUT is in flight; quiesce() awaits it.
+    // Trigger saveReview() while the rev-0 PUT is in flight; quiesce() must
+    // block publishFiles() until the in-flight PUT settles.
     const submitPromise = (el as unknown as { saveReview(): Promise<void> }).saveReview();
+    await settle(el);
+    expect(state.requests.some((r) => r.method === 'POST' && r.url.endsWith('/versions'))).toBe(
+      false
+    );
+
     releasePut();
     await submitPromise;
     await settle(el);
