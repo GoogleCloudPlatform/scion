@@ -54,6 +54,35 @@ import (
 var ErrTmuxBinaryNotFound = errors.New("tmux binary not found")
 var ErrContainerNameInUse = errors.New("agent name is already in use by a stopped container; please delete the existing agent or choose a different name")
 
+// runningContainerMatchesAgent reports whether an already-running container
+// found by slug may be reused for a no-task Start (ptone/scion#8080).
+//
+// A container whose agent_id label (or runtime-reported ID) is empty or not a
+// UUID (legacy containers label their name) is accepted for backward
+// compatibility. Otherwise, the label carries a Hub agent UUID, and the
+// container is reusable only when it matches the current agent's SCION_AGENT_ID
+// (compared in canonical UUID form). A different UUID (or a UUID when
+// SCION_AGENT_ID is unset) marks the container as stale so pre-clean deletes
+// and recreates it.
+func runningContainerMatchesAgent(a api.AgentInfo, currentAgentID string) bool {
+	containerID := a.Labels[api.LabelAgentID]
+	if containerID == "" {
+		containerID = a.ID
+	}
+	u, err := uuid.Parse(containerID)
+	if err != nil {
+		return true
+	}
+	if currentAgentID == "" {
+		return false
+	}
+	cur, err := uuid.Parse(currentAgentID)
+	if err != nil {
+		return false
+	}
+	return u == cur
+}
+
 func classifyLaunchRuntimeError(err error, resolvedImage string) error {
 	if err == nil {
 		return nil
@@ -236,8 +265,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			isRunning := a.Phase == string(state.PhaseRunning)
 			if isRunning {
 				// If a new task is provided, we might want to recreate even if running
-				// but if no task provided, we just return the running one
-				if opts.Task == "" {
+				// but if no task provided, we just return the running one — provided
+				// its agent_id label does not belong to a different agent (ptone/scion#8080).
+				if opts.Task == "" && runningContainerMatchesAgent(a, hubDispatchedAgentID) {
 					a.Detached = true
 					if opts.Detached != nil {
 						a.Detached = *opts.Detached
@@ -253,7 +283,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return &a, nil
 				}
 			}
-			// If it exists but not running (or we have a new task), we delete it so we can recreate it.
+			// If it exists but not running (or we have a new task, or it is a
+			// stale container for another agent ID), we delete it so we can
+			// recreate it.
 			// The delete is by name/ID found by name, so an async launch
 			// checkpoints first: a launch the hub has already ended must
 			// not remove a newer launch's agent.
