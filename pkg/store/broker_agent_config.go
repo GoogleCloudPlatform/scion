@@ -60,6 +60,14 @@ func ApplyBrokerAgentConfig(a *Agent, c BrokerAgentConfig) {
 		}
 		if c.Profile != "" && !a.IsPinned() {
 			a.AppliedConfig.Profile = c.Profile
+			// Record the broker-resolved profile into CreateInputs when empty
+			// so reincarnate replays the profile chosen at create rather than
+			// re-resolving against a later broker default or project active
+			// profile (ptone/scion#5149). Never overwrites an already-recorded
+			// explicit or create-time profile.
+			if a.AppliedConfig.CreateInputs != nil && a.AppliedConfig.CreateInputs.Profile == "" {
+				a.AppliedConfig.CreateInputs.Profile = c.Profile
+			}
 		}
 	}
 	if c.Runtime != "" {

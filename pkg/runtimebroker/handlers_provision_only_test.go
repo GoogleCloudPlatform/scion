@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -605,4 +606,81 @@ func TestCreateAgentProvisionOnlyWithTask(t *testing.T) {
 	if resp.Agent.Status != string(state.PhaseCreated) {
 		t.Errorf("expected status '%s', got '%s'", string(state.PhaseCreated), resp.Agent.Status)
 	}
+}
+
+func TestCreateAgentProvisionOnly_EchoesResolvedProfile(t *testing.T) {
+	t.Run("non-flat broker echoes resolved profile from Provision", func(t *testing.T) {
+		srv, mgr := newTestServerWithProvisionCapture()
+		mgr.provisionProfile = "remote"
+
+		body := `{
+			"name": "provisioned-profile-agent",
+			"id": "agent-uuid-prof-1",
+			"slug": "provisioned-profile-agent",
+			"provisionOnly": true,
+			"config": {"template": "claude"}
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+		}
+		var resp CreateAgentResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if resp.Agent == nil {
+			t.Fatal("expected agent to be present")
+		}
+		if resp.Agent.Profile != "remote" {
+			t.Errorf("expected echoed profile 'remote', got %q", resp.Agent.Profile)
+		}
+	})
+
+	t.Run("flat broker omits profile on ProvisionOnly", func(t *testing.T) {
+		srv, mgr := newTestServerWithProvisionCapture()
+		mgr.provisionProfile = "remote"
+		srv.config.FlatInstance = &FlatInstanceConfig{
+			HubInProcess: true,
+			Identity: &brokeridentity.Identity{
+				RuntimeBrokerID: "rb-flat-1",
+				RuntimeTarget: api.RuntimeTargetDescriptor{
+					ID:   "rt-flat-1",
+					Type: "docker",
+				},
+			},
+		}
+
+		body := `{
+			"name": "provisioned-flat-agent",
+			"id": "agent-uuid-prof-2",
+			"slug": "provisioned-flat-agent",
+			"provisionOnly": true,
+			"expectedRuntimeTargetId": "rt-flat-1",
+			"config": {"template": "claude"}
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+		}
+		var resp CreateAgentResponse
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("failed to decode response: %v", err)
+		}
+		if resp.Agent == nil {
+			t.Fatal("expected agent to be present")
+		}
+		if resp.Agent.Profile != "" {
+			t.Errorf("expected flat broker to omit profile, got %q", resp.Agent.Profile)
+		}
+	})
 }

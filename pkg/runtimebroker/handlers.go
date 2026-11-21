@@ -2225,6 +2225,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if cfg != nil {
 			agentResp.HarnessConfig = cfg.HarnessConfig
 			agentResp.Image = cfg.Image
+			if cfg.Info != nil && !s.isFlat() {
+				agentResp.Profile = cfg.Info.Profile
+			}
 		}
 		// Report the runtime this dispatch resolved to (its profile), not
 		// the broker's default runtime: the hub records this value as the

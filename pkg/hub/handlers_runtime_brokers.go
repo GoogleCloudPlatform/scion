@@ -1253,8 +1253,8 @@ func heartbeatResolvedConfig(hb brokerAgentHeartbeat) store.BrokerAgentConfig {
 // resolvedConfigSnapshot holds the agent fields store.ApplyBrokerAgentConfig
 // writes, so a caller can tell whether applying changed anything.
 type resolvedConfigSnapshot struct {
-	template, runtime                                               string
-	harnessConfig, harnessAuth, harnessConfigSource, image, profile string
+	template, runtime                                                                    string
+	harnessConfig, harnessAuth, harnessConfigSource, image, profile, createInputsProfile string
 }
 
 func agentResolvedConfigSnapshot(a *store.Agent) resolvedConfigSnapshot {
@@ -1262,6 +1262,9 @@ func agentResolvedConfigSnapshot(a *store.Agent) resolvedConfigSnapshot {
 	if c := a.AppliedConfig; c != nil {
 		snap.harnessConfig, snap.harnessAuth, snap.harnessConfigSource = c.HarnessConfig, c.HarnessAuth, c.HarnessConfigSource
 		snap.image, snap.profile = c.Image, c.Profile
+		if c.CreateInputs != nil {
+			snap.createInputsProfile = c.CreateInputs.Profile
+		}
 	}
 	return snap
 }

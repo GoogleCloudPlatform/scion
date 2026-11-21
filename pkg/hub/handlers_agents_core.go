@@ -2208,6 +2208,7 @@ func (s *Server) createAgentInProject(
 	// default) happens later, in deriveAgentConfig, along with the rest of
 	// create's config-resolution pipeline — not here.
 	agent.AppliedConfig = s.buildAppliedConfig(req, creatorName, effectiveRole)
+	pinResolvedCreateProfile(agent, project, resolvedBroker, req.ManagedAgent)
 
 	// Resolve message_mode (D10 spawn defaults):
 	//   1. Explicit req.MessageMode from CLI flag → use it (after validation).

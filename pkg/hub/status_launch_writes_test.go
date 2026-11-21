@@ -343,6 +343,39 @@ func TestHeartbeat_KeptCreateRecordsHarnessAuthAndProfile(t *testing.T) {
 	}
 }
 
+// TestHeartbeat_KeptCreateRecordsCreateInputsProfileWhenAppliedProfileAlreadySet
+// verifies that a kept-create heartbeat carrying only the same Profile already
+// recorded on AppliedConfig.Profile still persists CreateInputs.Profile when
+// CreateInputs.Profile is empty (ptone/scion#5149). This exercises
+// resolvedConfigSnapshot.createInputsProfile so the change triggers UpdateAgent.
+func TestHeartbeat_KeptCreateRecordsCreateInputsProfileWhenAppliedProfileAlreadySet(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "kept-ci-prof")
+	agent := keptCreateHeartbeatAgent(t, s, broker, project, "kept-ci-prof-agent", store.StartClaimCreate, store.StartClaimUnconfirmed, "", func(a *store.Agent) {
+		a.AppliedConfig.Profile = "remote"
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+		Slug:            agent.Slug,
+		Phase:           "running",
+		Activity:        "working",
+		ContainerStatus: "Up 2 seconds",
+		RunID:           "run-1",
+		Profile:         "remote",
+	})
+	require.Equal(t, http.StatusOK, code)
+
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	require.NotNil(t, got.AppliedConfig.CreateInputs)
+	assert.Equal(t, "remote", got.AppliedConfig.Profile)
+	assert.Equal(t, "remote", got.AppliedConfig.CreateInputs.Profile,
+		"kept-create heartbeat must persist CreateInputs.Profile even when AppliedConfig.Profile already matched")
+}
+
 // reincarnateWithStartAgentEcho runs a self reincarnation of an agent that
 // starts with template old-template, runtime docker, runtime state
 // container:old and container status "Up 1 hour", with a start dispatch

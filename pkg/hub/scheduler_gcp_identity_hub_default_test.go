@@ -572,9 +572,8 @@ func TestScheduledDispatch_HubDefaultPassthroughProfileAndSandboxTranslation(t *
 			profiles:             localAndSandbox,
 			brokerDefault:        "local",
 			projectActiveProfile: "sandbox",
-			// applyProjectDefaults stamps the project's active profile; the
-			// gate pins nothing on a denial, so CreateInputs stays empty.
-			wantProfile: "sandbox",
+			wantProfile:          "sandbox",
+			wantInputsProfile:    "sandbox",
 		},
 	}
 

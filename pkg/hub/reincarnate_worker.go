@@ -308,6 +308,9 @@ func copyBrokerEcho(dst, src *store.AgentAppliedConfig, includeImage bool) {
 	}
 	if src.Profile != "" {
 		dst.Profile = src.Profile
+		if dst.CreateInputs != nil && dst.CreateInputs.Profile == "" {
+			dst.CreateInputs.Profile = src.Profile
+		}
 	}
 	if includeImage && src.Image != "" {
 		dst.Image = src.Image

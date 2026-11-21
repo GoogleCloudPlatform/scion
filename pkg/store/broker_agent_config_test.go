@@ -65,8 +65,40 @@ func TestApplyBrokerAgentConfig_NilAppliedConfigSkipsAppliedFields(t *testing.T)
 }
 
 func TestApplyBrokerAgentConfig_PinnedAgentKeepsProfile(t *testing.T) {
-	a := &Agent{PinnedRuntimeTargetID: "target-1", AppliedConfig: &AgentAppliedConfig{Profile: "pinned"}}
+	a := &Agent{
+		PinnedRuntimeTargetID: "target-1",
+		AppliedConfig: &AgentAppliedConfig{
+			Profile:      "pinned",
+			CreateInputs: &AgentCreateInputs{},
+		},
+	}
 	ApplyBrokerAgentConfig(a, fullBrokerAgentConfig())
 	assert.Equal(t, "pinned", a.AppliedConfig.Profile)
+	assert.Empty(t, a.AppliedConfig.CreateInputs.Profile, "pinned agent must not record a broker profile in CreateInputs")
 	assert.Equal(t, "img:resolved", a.AppliedConfig.Image, "the other values are still written")
+}
+
+func TestApplyBrokerAgentConfig_RecordsCreateInputsProfileWhenEmpty(t *testing.T) {
+	t.Run("fills empty CreateInputs.Profile", func(t *testing.T) {
+		a := &Agent{
+			AppliedConfig: &AgentAppliedConfig{
+				CreateInputs: &AgentCreateInputs{},
+			},
+		}
+		ApplyBrokerAgentConfig(a, BrokerAgentConfig{Profile: "remote"})
+		assert.Equal(t, "remote", a.AppliedConfig.Profile)
+		assert.Equal(t, "remote", a.AppliedConfig.CreateInputs.Profile)
+	})
+
+	t.Run("does not overwrite existing CreateInputs.Profile", func(t *testing.T) {
+		a := &Agent{
+			AppliedConfig: &AgentAppliedConfig{
+				Profile:      "original",
+				CreateInputs: &AgentCreateInputs{Profile: "original"},
+			},
+		}
+		ApplyBrokerAgentConfig(a, BrokerAgentConfig{Profile: "echoed"})
+		assert.Equal(t, "echoed", a.AppliedConfig.Profile)
+		assert.Equal(t, "original", a.AppliedConfig.CreateInputs.Profile)
+	})
 }

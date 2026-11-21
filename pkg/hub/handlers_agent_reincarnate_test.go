@@ -1770,12 +1770,15 @@ func TestCopyBrokerEcho_MirrorsApplyBrokerAgentConfig(t *testing.T) {
 	base := store.AgentAppliedConfig{
 		Image: "ghcr.io/test-org/base:v1", HarnessConfig: "base-hc", HarnessAuth: "base-auth",
 		Profile: "base-profile", Model: "base-model", Task: "base-task",
+		CreateInputs: &store.AgentCreateInputs{},
 	}
 	echoed := base
+	echoed.CreateInputs = &store.AgentCreateInputs{}
 	applyBrokerAgentConfig(&store.Agent{AppliedConfig: &echoed}, info)
 	require.NotEqual(t, base, echoed, "the populated broker answer must change the config")
 
 	dst := base
+	dst.CreateInputs = &store.AgentCreateInputs{}
 	copyBrokerEcho(&dst, &echoed, true)
 	assert.Equal(t, echoed, dst, "copyBrokerEcho must copy every AppliedConfig field applyBrokerAgentConfig writes")
 }
