@@ -1016,12 +1016,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		SignatureMode: da.signatureMode,
 		EventID:       ev.ID,
 	}
-	if ev.SourceKind == store.TriggerSourceKindGitHub {
-		fc.Source = "github"
-		if fc.SignatureMode == "" {
-			fc.SignatureMode = "github_app"
-		}
-	}
 	if da.payload.GithubToken == DispatchAgentGitHubTokenInstallation && !da.projectHasGitHubInstallation {
 		fc.Notes = append(fc.Notes, "GitHub access: unavailable for this run (no GitHub App installation configured for this project).")
 	}
