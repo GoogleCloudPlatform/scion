@@ -359,6 +359,14 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the web.decisions experiment is off, and when on it filters candidate member projects by project:read rather than refusing a UAT without project:read; the dedicated test enables the experiment and drives the route across session, project-bounded and hub-bounded UATs (with and without inbox:read and project:read), agent tokens, federated users and visitors",
 		Pin:    "TestUserMeDecisions_TokenAndCallerAuthz",
 	},
+	{OperationID: "agent.screen.read", Method: "GET", Pattern: "/api/v1/agents/{id}/screen"}: {
+		Reason: "the route answers 404 while the hub.suspend_screen experiment is off, as in this fixture, so the admitting token gets 404 before authz; the dedicated test enables the experiment and drives RBAC on GET",
+		Pin:    "TestSuspendScreen_ManualSuspendAndRBACAndLook",
+	},
+	{OperationID: "agent.screen.read", Method: "GET", Pattern: "/api/v1/projects/{projectId}/agents/{id}/screen"}: {
+		Reason: "the route answers 404 while the hub.suspend_screen experiment is off, as in this fixture, so the admitting token gets 404 before authz; the dedicated test enables the experiment and drives RBAC on GET",
+		Pin:    "TestSuspendScreen_ManualSuspendAndRBACAndLook",
+	},
 	// Global catalog and project-scope branches whose refusal the generic
 	// probes cannot observe. Each is pinned by a test that drives real
 	// tokens through the branch.

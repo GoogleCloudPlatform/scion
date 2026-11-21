@@ -191,9 +191,8 @@ func formatLookRelativeAge(d time.Duration) string {
 var lookNow = time.Now
 
 func lookSavedScreenFallback(ctx context.Context, agentSvc hubclient.AgentService, agentName string, headerCh <-chan string, headerCtx context.Context, execErr error) error {
-	screenCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	screenCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_ = ctx
 
 	screen, err := agentSvc.GetScreen(screenCtx, agentName)
 	if err != nil {
