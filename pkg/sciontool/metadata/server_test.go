@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,39 +32,6 @@ import (
 	"testing"
 	"time"
 )
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port
-}
-
-func TestShouldAttemptMetadataInterception(t *testing.T) {
-	tests := []struct {
-		name        string
-		uid         int
-		networkMode string
-		want        bool
-	}{
-		{name: "root", uid: 0, networkMode: "", want: true},
-		{name: "non-root", uid: 1000, networkMode: "", want: false},
-		{name: "root-host-network", uid: 0, networkMode: "host", want: false},
-		{name: "non-root-host-network", uid: 1000, networkMode: "host", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := shouldAttemptMetadataInterception(tt.uid, tt.networkMode); got != tt.want {
-				t.Fatalf("shouldAttemptMetadataInterception(%d, %q) = %v, want %v", tt.uid, tt.networkMode, got, tt.want)
-			}
-		})
-	}
-}
 
 func TestMetadataServer_HealthCheck(t *testing.T) {
 	port := freePort(t)

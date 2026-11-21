@@ -64,13 +64,6 @@ func withChildStartupWindow(t *testing.T, window time.Duration) *[]bool {
 	return &paths
 }
 
-func withMetadataInterceptionInstalled(t *testing.T, installed bool) {
-	t.Helper()
-	orig := metadataInterceptionInstalled
-	metadataInterceptionInstalled = func(*metadata.Server) bool { return installed }
-	t.Cleanup(func() { metadataInterceptionInstalled = orig })
-}
-
 // errDropDetail stands in for the step/errno detail netcap returns; it must
 // reach the log only, never the reported failure.
 var errDropDetail = errors.New("drop CAP_NET_ADMIN from bounding set: detail-that-must-not-be-reported")
@@ -189,7 +182,6 @@ func newNetAdminFixture(t *testing.T, mode string, installed bool, dropErr error
 		f.order = append(f.order, "metadata")
 		return nil
 	})
-	withMetadataInterceptionInstalled(t, installed)
 	withRunMetadataServerStop(t, func(s *metadata.Server) {
 		f.stops++
 		s.Stop()
@@ -267,16 +259,17 @@ func TestRunInit_NetAdminDrop_BlockModeAlsoDrops(t *testing.T) {
 	}
 }
 
-// TestRunInit_NetAdminDropFailure_FailsClosed: interception installed and
-// the drop fails, so nothing workload-controlled may start, and the
-// reported failure names only the capability.
+// TestRunInit_NetAdminDropFailure_FailsClosed: when init installed the
+// opt-in firewall and the drop fails, nothing workload-controlled may start,
+// and the reported failure names only the capability.
 func TestRunInit_NetAdminDropFailure_FailsClosed(t *testing.T) {
 	f := newNetAdminFixture(t, "assign", true, errDropDetail)
+	t.Setenv(initFirewallEnv, "1")
 
 	if got := f.run(); got != 1 {
 		t.Fatalf("RunInit() = %d, want 1", got)
 	}
-	if want := []string{"metadata", "drop"}; !reflect.DeepEqual(f.order, want) {
+	if want := []string{"firewall", "metadata", "drop"}; !reflect.DeepEqual(f.order, want) {
 		t.Fatalf("order = %v, want %v (clone and sidecars must not run)", f.order, want)
 	}
 	if netAdminPathExists(f.hookRanFile) {

@@ -133,11 +133,6 @@ func setupInitFirewall() (installed bool, err error) {
 // mutation tests replace it with a no-op and expect failures.
 var runDropNetAdmin = netcap.DropNetAdmin
 
-// metadataInterceptionInstalled is (*metadata.Server).InterceptionInstalled
-// behind a seam: tests stub the metadata server start, so the real method
-// would always report false there.
-var metadataInterceptionInstalled = (*metadata.Server).InterceptionInstalled
-
 // dropNetAdmin drops CAP_NET_ADMIN from init and everything it starts
 // later. RunInit calls it after network setup whenever a metadata server
 // was configured (assign or block mode) or the opt-in firewall was

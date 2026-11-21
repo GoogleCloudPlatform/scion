@@ -310,6 +310,33 @@ func TestContainer(t *testing.T) {
 		})
 	}
 
+	// AC 5: with SCION_INIT_FIREWALL=true plus block/assign, the sidecar runs
+	// init-firewall.sh before installing the metadata redirect, so both the
+	// firewall chain and the metadata redirect are present.
+	t.Run("firewall in sidecar preserves redirect", func(t *testing.T) {
+		name := createAgent(t, sciontool, "block", false, "-e", "SCION_INIT_FIREWALL=true")
+		runNetnsSetupSidecar(t, sciontool, name, "block", "SCION_INIT_FIREWALL=true")
+		waitProbe(t, name)
+
+		if _, err := docker(t, "run", "--rm",
+			"--network", "container:"+name,
+			"--cap-add", "NET_ADMIN",
+			"--user", "0",
+			testImage,
+			"iptables", "-L", "SCION_TEST_FW"); err != nil {
+			t.Errorf("expected SCION_TEST_FW chain created by init-firewall.sh in sidecar: %v", err)
+		}
+		if !redirectPresent(t, name) {
+			t.Error("metadata REDIRECT rule is missing after init-firewall.sh ran in sidecar")
+		}
+		httpCode := mustDocker(t, "exec", "--user", "scion", name,
+			"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+			"-H", "Metadata-Flavor: Google", "http://169.254.169.254/")
+		if httpCode != "200" {
+			t.Errorf("curl http://169.254.169.254/ returned HTTP %s, want 200", httpCode)
+		}
+	})
+
 	// AC 3: missing runtime source marker refuses before writing credentials.
 	t.Run("missing source marker refused before credentials", func(t *testing.T) {
 		name := fmt.Sprintf("scion-netcap-nosrc-%d", time.Now().UnixNano())

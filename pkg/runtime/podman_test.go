@@ -37,7 +37,7 @@ func runPodmanRecorded(t *testing.T, rootless bool, config RunConfig) string {
 	dir := t.TempDir()
 	mockPodman := filepath.Join(dir, "mock-podman")
 	argvFile := filepath.Join(dir, "argv")
-	script := "#!/bin/sh\necho \"$@\" > '" + argvFile + "'\necho " + mockPodmanID + "\n"
+	script := "#!/bin/sh\ncase \"$*\" in\n  *\"netns-setup\"*) exit 0 ;;\nesac\necho \"$@\" > '" + argvFile + "'\necho " + mockPodmanID + "\n"
 	if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
 		t.Fatalf("failed to write mock podman: %v", err)
 	}

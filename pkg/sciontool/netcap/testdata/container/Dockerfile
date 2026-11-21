@@ -15,4 +15,6 @@ RUN apt-get update \
   && echo "scion ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/scion-test \
   && chmod 0440 /etc/sudoers.d/scion-test
 COPY harness.sh /usr/local/bin/netcap-harness.sh
-RUN chmod 0755 /usr/local/bin/netcap-harness.sh
+RUN chmod 0755 /usr/local/bin/netcap-harness.sh \
+  && printf '#!/bin/sh\nset -e\niptables -t nat -F OUTPUT\niptables -N SCION_TEST_FW 2>/dev/null || true\n' > /usr/local/sbin/init-firewall.sh \
+  && chmod 0755 /usr/local/sbin/init-firewall.sh

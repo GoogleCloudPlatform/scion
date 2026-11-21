@@ -248,12 +248,10 @@ type Server struct {
 	// restart, always under lnMu); Stop shuts srv down and closes ln.
 	// stopped is set by Stop so that neither Start nor a restart installs a
 	// server afterwards. Read srv through currentSrv.
-	lnMu               sync.Mutex
-	ln                 net.Listener
-	stopped            bool
-	stopOnce           sync.Once
-	iptablesConfigured bool        // whether iptables redirect was successfully set up
-	metadataBlocked    blockMethod // which blocking method was applied (block mode only)
+	lnMu     sync.Mutex
+	ln       net.Listener
+	stopped  bool
+	stopOnce sync.Once
 
 	healthMu     sync.Mutex
 	restartCount int
@@ -523,34 +521,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("metadata server shutdown token: %w", err)
 	}
 
-	// Set up network-level interception for the GCE metadata server IP.
-	//
-	// For block mode: we apply BOTH a REDIRECT (so GCP SDKs hitting the IP
-	// get a clean HTTP 403 from the sidecar) AND a filter-level REJECT as
-	// defense-in-depth.
-	//
-	// For assign mode: only the REDIRECT is needed.
-	//
-	// In non-root containers (notably hosted Kubernetes agents), iptables
-	// interception is not available. In that case the metadata env vars are the
-	// primary mechanism and we skip the interception setup entirely to avoid
-	// misleading warnings.
-	//
-	// This runs before the server starts serving, so a required interception
-	// that fails closes the listener here, synchronously, and Start leaves
-	// nothing bound behind it.
-	if s.config.InterceptionSource != InterceptionSourceRuntime {
-		if err := s.configureMetadataInterception(os.Getuid()); err != nil {
-			s.cleanupInterception()
-			cancel()
-			_ = ln.Close()
-			if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
-				log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
-			}
-			return err
-		}
-	}
-
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: s.buildMux(),
@@ -561,7 +531,6 @@ func (s *Server) Start(ctx context.Context) error {
 	// Backstop for a Stop that lands between the entry check and here:
 	// setServing then refuses and closes ln, and Start unwinds.
 	if !s.setServing(ln, srv) {
-		s.cleanupInterception()
 		cancel()
 		if rmErr := os.Remove(s.shutdownTokenPath); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
 			log.Debug("Failed to remove metadata shutdown token file %s: %v", s.shutdownTokenPath, rmErr)
@@ -590,7 +559,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		s.cleanupInterception()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		if cur := s.currentSrv(); cur != nil {
@@ -601,96 +569,11 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
-func shouldAttemptMetadataInterception(uid int, networkMode string) bool {
-	if networkMode == "host" {
-		return false
-	}
-	return uid == 0
-}
-
 // Seams for tests: the iptables helpers need root and NET_ADMIN.
 var (
 	runSetupIPTablesRedirect = setupIPTablesRedirect
 	runSetupMetadataBlock    = setupMetadataBlock
 )
-
-// cleanupInterception removes whatever configureMetadataInterception
-// installed.
-func (s *Server) cleanupInterception() {
-	if s.metadataBlocked != blockNone {
-		cleanupMetadataBlock(s.metadataBlocked)
-		s.metadataBlocked = blockNone
-	}
-	if s.iptablesConfigured {
-		cleanupIPTablesRedirect(s.config.Port)
-		s.iptablesConfigured = false
-	}
-}
-
-// configureMetadataInterception installs the metadata IP interception. With
-// InterceptionRequired it returns an ErrInterceptionUnavailable error when
-// the interception, or outside assign mode the filter rule, is not in place;
-// otherwise those failures are logged and the env vars remain the only
-// mechanism.
-func (s *Server) configureMetadataInterception(uid int) error {
-	if !shouldAttemptMetadataInterception(uid, s.config.NetworkMode) {
-		if s.config.InterceptionRequired {
-			return fmt.Errorf("%w: process is not root or shares the host network namespace", ErrInterceptionUnavailable)
-		}
-		if s.config.NetworkMode == "host" {
-			log.Warn("Metadata IP interception is not installed under host networking; mode %q applies only to clients that use GCE_METADATA_HOST", s.config.Mode)
-		} else {
-			log.Debug("Skipping metadata IP interception: process is not running as root")
-		}
-		return nil
-	}
-
-	err := runSetupIPTablesRedirect(s.config.Port)
-	if err != nil {
-		if s.config.InterceptionRequired {
-			return fmt.Errorf("%w: redirect: %v", ErrInterceptionUnavailable, err)
-		}
-		// Non-fatal: iptables may not be available (no NET_ADMIN cap, non-Docker runtime).
-		// The GCE_METADATA_HOST / GCE_METADATA_ROOT env vars are the primary mechanism.
-		log.Debug("iptables redirect not available: %v", err)
-	}
-	if err == nil {
-		s.iptablesConfigured = true
-	}
-
-	// Allow-list: assign is the only mode that legitimately wants the metadata
-	// IP left reachable at the filter level, because its REDIRECT above is
-	// already sending that traffic here. Every other mode that reaches a
-	// running server — block, or anything ConfigFromEnv had to coerce — gets
-	// the defence-in-depth block. Testing `!= modeBlock` instead meant an
-	// unrecognised mode skipped the hardening.
-	if s.config.Mode == modeAssign {
-		return nil
-	}
-
-	// Defense-in-depth: block traffic to the metadata IP at the filter level
-	// so that even if the nat REDIRECT fails or is bypassed, direct access to
-	// the real metadata server is denied.
-	method, err := runSetupMetadataBlock()
-	if err != nil {
-		if s.config.InterceptionRequired {
-			return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
-		}
-		log.Error("metadata block: failed to block metadata IP — direct access to %s may still be possible: %v", metadataIP, err)
-		return nil
-	}
-
-	s.metadataBlocked = method
-	return nil
-}
-
-// InterceptionInstalled reports whether Start installed any network-level
-// interception rule (the nat REDIRECT or the filter block). Valid after
-// Start returns; false when interception was skipped (non-root, host
-// networking) or Start failed.
-func (s *Server) InterceptionInstalled() bool {
-	return s.iptablesConfigured || s.metadataBlocked != blockNone
-}
 
 // Stop gracefully shuts down the server. It closes the listener synchronously
 // so the port is released before Stop returns. The background goroutine handles

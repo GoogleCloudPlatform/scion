@@ -258,6 +258,14 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 		}
 		return "", err
 	}
+	if config.MetadataInterception {
+		if err := runNetnsSetup(ctx, r.Command, id, config); err != nil {
+			if rmErr := removeCreatedContainer(r.Command, id); rmErr != nil {
+				return "", fmt.Errorf("metadata network setup failed: %w (container cleanup also failed: %v)", err, rmErr)
+			}
+			return "", fmt.Errorf("metadata network setup failed: %w", err)
+		}
+	}
 	reportContainerCreated(hooks, config.Name, id)
 	return id, nil
 }

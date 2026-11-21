@@ -79,11 +79,11 @@ func checkHostNetworkMetadata(agentName, runtimeName, networkMode string, env []
 	return "", nil
 }
 
-// metadataInterceptionGranted reports whether the container gets the
-// in-container metadata interception (NET_ADMIN, and the marker that tells
-// sciontool the interception is required): block or assign mode, on a runtime
-// that applies container capabilities, and never under host networking,
-// where the capability would apply to the host's network namespace.
+// metadataInterceptionGranted reports whether the runtime sets up
+// network-level metadata interception (via the netns-setup sidecar and the
+// markers that tell sciontool interception is required): block or assign
+// mode, on a container runtime that supports it, and never under host
+// networking, where rules would apply to the host's network namespace.
 func metadataInterceptionGranted(runtimeName, networkMode string, env []string) bool {
 	if networkMode == hostNetworkMode || !appliesContainerNetworkMode(runtimeName) {
 		return false

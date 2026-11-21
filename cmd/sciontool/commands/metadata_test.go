@@ -129,24 +129,23 @@ func setHealthyServerEnv(t *testing.T) {
 	t.Setenv("GCE_METADATA_ROOT", "localhost:"+port)
 }
 
-const notVerifiable = "[INFO] iptables rule not verifiable"
+const installedByRuntime = "[INFO] iptables rules installed by runtime; verified by probe"
 
-// T1: root after the capability drop: a neutral INFO, no iptables call.
+// T1: root without CAP_NET_ADMIN: a neutral INFO, no iptables call.
 func TestRunMetadataStatus_CapabilityDropped_NotVerifiable(t *testing.T) {
 	setNoServerEnv(t)
 	s := withMetadataStatusSeams(t, 0, false, nil, false)
 	var code int
 	out := captureStdout(t, func() { code = runMetadataStatus() })
-	if !strings.Contains(out, notVerifiable) {
-		t.Errorf("output lacks %q:\n%s", notVerifiable, out)
+	if !strings.Contains(out, installedByRuntime) {
+		t.Errorf("output lacks %q:\n%s", installedByRuntime, out)
 	}
-	wantLine := "[INFO] iptables rule not verifiable: " + netcap.CapabilityName +
-		" is not usable by this process (init drops it once network setup is done)\n"
+	wantLine := installedByRuntime + " (" + netcap.CapabilityName + " is not usable by this process)\n"
 	if !strings.Contains(out, wantLine) {
-		t.Errorf("output lacks the full not-verifiable line %q:\n%s", wantLine, out)
+		t.Errorf("output lacks the full runtime-installed line %q:\n%s", wantLine, out)
 	}
 	if strings.Contains(out, "REDIRECT rule not found") {
-		t.Errorf("output reports the rule missing after the capability drop:\n%s", out)
+		t.Errorf("output reports the rule missing:\n%s", out)
 	}
 	if s.iptablesCalls != 0 {
 		t.Errorf("iptables check called %d times, want 0", s.iptablesCalls)
@@ -156,21 +155,41 @@ func TestRunMetadataStatus_CapabilityDropped_NotVerifiable(t *testing.T) {
 	}
 }
 
-// T1 with a healthy server: the not-verifiable path must leave a passing
+// T1 with runtime source markers (even as non-root scion user): reports
+// installed by runtime; verified by probe, without consulting uid/netcap.
+func TestRunMetadataStatus_RuntimeSource_ReportsVerifiedByProbe(t *testing.T) {
+	setHealthyServerEnv(t)
+	t.Setenv("SCION_METADATA_INTERCEPTION", "required")
+	t.Setenv("SCION_METADATA_INTERCEPTION_SOURCE", "runtime")
+	s := withMetadataStatusSeams(t, 1000, false, nil, false)
+	var code int
+	out := captureStdout(t, func() { code = runMetadataStatus() })
+	if !strings.Contains(out, installedByRuntime) {
+		t.Errorf("output lacks %q:\n%s", installedByRuntime, out)
+	}
+	if s.usableCalls != 0 || s.iptablesCalls != 0 {
+		t.Errorf("usable calls %d, iptables calls %d; want 0 and 0", s.usableCalls, s.iptablesCalls)
+	}
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+}
+
+// T1 with a healthy server: the runtime-installed path must leave a passing
 // run at exit 0. This is the variant that catches a mutant marking it failed.
 func TestRunMetadataStatus_CapabilityDropped_HealthyServerStillPasses(t *testing.T) {
 	setHealthyServerEnv(t)
 	s := withMetadataStatusSeams(t, 0, false, nil, false)
 	var code int
 	out := captureStdout(t, func() { code = runMetadataStatus() })
-	if !strings.Contains(out, notVerifiable) {
-		t.Errorf("output lacks %q:\n%s", notVerifiable, out)
+	if !strings.Contains(out, installedByRuntime) {
+		t.Errorf("output lacks %q:\n%s", installedByRuntime, out)
 	}
 	if s.iptablesCalls != 0 {
 		t.Errorf("iptables check called %d times, want 0", s.iptablesCalls)
 	}
 	if code != 0 {
-		t.Errorf("exit code = %d, want 0 (a not-verifiable rule is not a failure)", code)
+		t.Errorf("exit code = %d, want 0 (a runtime-installed rule is not a failure)", code)
 	}
 }
 
@@ -200,8 +219,8 @@ func TestRunMetadataStatus_CapabilityUsable_RulePresent(t *testing.T) {
 	if s.iptablesCalls != 1 {
 		t.Errorf("iptables check called %d times, want 1", s.iptablesCalls)
 	}
-	if strings.Contains(out, notVerifiable) {
-		t.Errorf("output says not verifiable although the capability is usable:\n%s", out)
+	if strings.Contains(out, installedByRuntime) {
+		t.Errorf("output says installed by runtime although the capability is usable:\n%s", out)
 	}
 	if !strings.Contains(out, "REDIRECT rule present") {
 		t.Errorf("output lacks the rule-present line:\n%s", out)

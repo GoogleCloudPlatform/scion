@@ -258,3 +258,143 @@ fi
 		t.Errorf("cleanup invocation = %q, want %q", got, "rm -f deadbeef9999")
 	}
 }
+
+func TestPodmanRuntime_Run_NetnsSetupRootfulAndRootless(t *testing.T) {
+	t.Run("rootful runs sidecar", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mockPodman := filepath.Join(tmpDir, "mock-podman")
+		callLog := filepath.Join(tmpDir, "calls.log")
+
+		script := fmt.Sprintf(`#!/bin/sh
+echo "$@" >> %q
+if [ "$1" = "run" ]; then
+  case "$*" in
+    *"netns-setup"*)
+      exit 0
+      ;;
+    *)
+      echo %q
+      exit 0
+      ;;
+  esac
+fi
+`, callLog, mockPodmanID)
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		rt := &PodmanRuntime{Command: mockPodman, Rootless: false}
+		id, err := rt.Run(context.Background(), RunConfig{
+			Harness:              &harness.Generic{},
+			Name:                 "test-agent",
+			UnixUsername:         "scion",
+			Image:                "scion-agent:latest",
+			Task:                 "hello",
+			Env:                  []string{"SCION_METADATA_MODE=block", "SCION_INIT_FIREWALL=true"},
+			MetadataInterception: true,
+		})
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if id != mockPodmanID {
+			t.Fatalf("Run() id = %q, want %q", id, mockPodmanID)
+		}
+
+		raw, err := os.ReadFile(callLog)
+		if err != nil {
+			t.Fatalf("read calls.log: %v", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("got %d podman invocations, want 2:\n%s", len(lines), string(raw))
+		}
+		if !strings.Contains(lines[1], "--network container:"+mockPodmanID) || !strings.Contains(lines[1], "SCION_INIT_FIREWALL=true") || !strings.Contains(lines[1], "netns-setup") {
+			t.Errorf("sidecar invocation unexpected: %s", lines[1])
+		}
+	})
+
+	t.Run("rootful sidecar failure removes agent container", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mockPodman := filepath.Join(tmpDir, "mock-podman")
+		rmLog := filepath.Join(tmpDir, "rm.log")
+
+		script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "rm" ]; then
+  echo "$@" >> %q
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  case "$*" in
+    *"netns-setup"*)
+      echo "iptables failed" >&2
+      exit 1
+      ;;
+    *)
+      echo %q
+      exit 0
+      ;;
+  esac
+fi
+`, rmLog, mockPodmanID)
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		rt := &PodmanRuntime{Command: mockPodman, Rootless: false}
+		if _, err := rt.Run(context.Background(), RunConfig{
+			Harness:              &harness.Generic{},
+			Name:                 "test-agent",
+			UnixUsername:         "scion",
+			Image:                "scion-agent:latest",
+			Task:                 "hello",
+			Env:                  []string{"SCION_METADATA_MODE=block"},
+			MetadataInterception: true,
+		}); err == nil {
+			t.Fatal("Run() = nil on sidecar failure, want error")
+		}
+
+		raw, readErr := os.ReadFile(rmLog)
+		if readErr != nil {
+			t.Fatalf("expected podman rm -f after sidecar failure: %v", readErr)
+		}
+		if got := strings.TrimSpace(string(raw)); got != "rm -f "+mockPodmanID {
+			t.Errorf("cleanup invocation = %q, want %q", got, "rm -f "+mockPodmanID)
+		}
+	})
+
+	t.Run("rootless skips sidecar", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mockPodman := filepath.Join(tmpDir, "mock-podman")
+		callLog := filepath.Join(tmpDir, "calls.log")
+
+		script := fmt.Sprintf(`#!/bin/sh
+echo "$@" >> %q
+echo %q
+`, callLog, mockPodmanID)
+		if err := os.WriteFile(mockPodman, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		rt := &PodmanRuntime{Command: mockPodman, Rootless: true}
+		if _, err := rt.Run(context.Background(), RunConfig{
+			Harness:              &harness.Generic{},
+			Name:                 "test-agent",
+			UnixUsername:         "scion",
+			Image:                "scion-agent:latest",
+			Task:                 "hello",
+			Env:                  []string{"SCION_METADATA_MODE=block"},
+			MetadataInterception: true,
+		}); err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+
+		raw, err := os.ReadFile(callLog)
+		if err != nil {
+			t.Fatalf("read calls.log: %v", err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("rootless podman made %d invocations, want 1 (no sidecar):\n%s", len(lines), string(raw))
+		}
+	})
+}

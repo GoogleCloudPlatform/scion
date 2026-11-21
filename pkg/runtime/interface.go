@@ -100,7 +100,7 @@ type RunConfig struct {
 	NoAuthMessage        string
 	NoAuthCommand        string
 	Debug                bool
-	MetadataInterception bool     // Add NET_ADMIN cap for iptables-based metadata server interception
+	MetadataInterception bool     // Configure runtime-managed iptables metadata server interception via netns-setup sidecar
 	ExtraHosts           []string // Extra /etc/hosts entries (e.g. "host.docker.internal:host-gateway")
 	NetworkMode          string   // Container network mode (e.g. "host" for --network=host)
 	Project              string   // Project name (e.g., "global" or "my-project")

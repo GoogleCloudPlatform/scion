@@ -973,12 +973,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 		}
 	}
 
-	// Network setup is complete: drop CAP_NET_ADMIN before anything else
-	// starts (clone, pre-start hooks, services, the harness). Passthrough
-	// runs no metadata server, so it drops only when the firewall was
-	// installed. The drop is required (fatal on failure) whenever init
-	// installed network controls.
-	required := firewallInstalled || (metadataServer != nil && metadataInterceptionInstalled(metadataServer))
+	// Network setup is complete: drop CAP_NET_ADMIN if present before
+	// anything else starts (clone, pre-start hooks, services, the harness).
+	// The drop is required (fatal on failure) when init itself installed the
+	// opt-in firewall; otherwise it runs as best-effort hardening.
+	required := firewallInstalled
 	if metadataServer != nil || firewallInstalled {
 		if err := dropNetAdmin(required); err != nil {
 			reportInitFailure(agentHome, err)
