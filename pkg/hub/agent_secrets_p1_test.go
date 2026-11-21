@@ -835,7 +835,7 @@ func TestAgentSecrets_EnvGatherRecreateCarriesOverAndCleansUpOldID(t *testing.T)
 		envReqs: &RemoteEnvRequirementsResponse{Needs: []string{"CARRY_KEY"}},
 	}
 	srv, s, project := setupCreateAgentServer(t, disp)
-	spy := &spyDeleteSecretBackend{SecretBackend: secret.NewLocalBackend(s, "test-hub")}
+	spy := &spyDeleteSecretBackend{SecretBackend: secret.NewLocalBackend(s, "test-hub", "")}
 	srv.SetSecretBackend(spy)
 
 	// First create with GatherEnv=true leaves the agent in PhaseProvisioning
