@@ -372,6 +372,13 @@ func Spec() []TableFixture {
 				"created": baseTime,
 			},
 		}},
+		{Table: "agent_suspend_screens", Rows: []row{
+			{ // saved terminal screen before suspend (ptone/scion#8530)
+				"id": "5c000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"content": "\x1b[32mready>\x1b[0m last pane\n", "truncated": false,
+				"captured_at": baseTime,
+			},
+		}},
 		// ---- Choice prompt decisions ----
 		{Table: "decisions", Rows: []row{
 			{ // decided version of a hub-numbered key, in a conversation, with a default and an intro

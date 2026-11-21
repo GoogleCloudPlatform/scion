@@ -212,6 +212,12 @@ func TestFixtureLoadable(t *testing.T) {
 	hasDeliveryHold, err := composite.HasAgentDeliveryHold(ctx, agentID)
 	require.NoError(t, err, "agent_delivery_holds fixture row must be readable via MessageHoldStore")
 	assert.True(t, hasDeliveryHold)
+
+	savedScreen, err := composite.GetAgentSuspendScreen(ctx, agentID)
+	require.NoError(t, err, "agent_suspend_screens fixture row must be readable via AgentSuspendScreenStore")
+	assert.Equal(t, agentID, savedScreen.AgentID)
+	assert.Equal(t, "\x1b[32mready>\x1b[0m last pane\n", savedScreen.Content)
+	assert.False(t, savedScreen.Truncated)
 	heldMsg, err := composite.GetMessage(ctx, "88888888-8888-8888-8888-888888888889")
 	require.NoError(t, err)
 	assert.Equal(t, store.MessageDispatchAwaitingSession, heldMsg.DispatchState)

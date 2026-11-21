@@ -212,7 +212,7 @@ func lookSavedScreenFallback(ctx context.Context, agentSvc hubclient.AgentServic
 	capturedLocal := screen.CapturedAt.Local()
 	age := formatLookRelativeAge(lookNow().Sub(screen.CapturedAt))
 	banner := fmt.Sprintf("Agent '%s' is %s. Showing its screen saved at %s (%s ago), before it was suspended.",
-		agentName, phase, capturedLocal.Format("2006-01-02 15:04:05"), age)
+		agentName, phase, capturedLocal.Format("2006-01-02 15:04:05 MST"), age)
 	if screen.Truncated {
 		banner += " (truncated to the last 64 KiB)"
 	}
