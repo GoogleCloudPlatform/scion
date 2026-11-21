@@ -357,11 +357,20 @@ type LogAuditLogger struct {
 	log    *slog.Logger
 
 	// brokerEnvelopes receives the converted broker family events
-	// (auth_failure, register, join, rotate, deregister). The server sets
-	// it to a SlogSink over the shared async audit writer
+	// (register, successful join, rotate, deregister), and unauthenticated
+	// broker events (auth_failure, failed join) when no dedicated
+	// brokerUnauthenticatedEnvelopes sink is configured. The server sets it
+	// to a SlogSink over the shared async audit writer
 	// (setBrokerEnvelopeSink). Without one, a converted event is dropped
 	// with the rate-limited warning.
 	brokerEnvelopes auditevent.Sink
+	// brokerUnauthenticatedEnvelopes receives unauthenticated broker
+	// envelopes (broker/auth_failure and failed broker/join) through a
+	// reserved-headroom view of the shared async audit writer
+	// (setBrokerUnauthenticatedEnvelopeSink) so unauthenticated floods
+	// cannot starve other audit records. When nil, those events fall back
+	// to brokerEnvelopes.
+	brokerUnauthenticatedEnvelopes auditevent.Sink
 	// brokerDropWarn rate-limits the operational warning for a converted
 	// event that could not be built; nil uses defaultBrokerAuditDropWarner.
 	brokerDropWarn *auditDropWarner

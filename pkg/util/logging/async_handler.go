@@ -92,6 +92,11 @@ type AsyncHandler struct {
 	w     *asyncwrite.Writer[AsyncRecord]
 	inner slog.Handler
 
+	// Optional headroom reserved for unrestricted callers on w. When either
+	// is positive, Handle enqueues via w.TryEnqueueWithReserve.
+	reserveSlots int
+	reserveBytes int64
+
 	// Charges of the view's cloned pre-attrs and group keys, applied to
 	// every Handle against the per-record limits.
 	preBytes int
@@ -110,6 +115,22 @@ type AsyncHandler struct {
 // NewAsyncHandler wraps inner, queueing records on w.
 func NewAsyncHandler(inner slog.Handler, w *asyncwrite.Writer[AsyncRecord]) *AsyncHandler {
 	return &AsyncHandler{w: w, inner: inner}
+}
+
+// WithReserve returns a shallow copy of h that leaves at least reserveSlots
+// queue slots and reserveBytes payload bytes free for unrestricted callers on
+// the shared writer. Negative values are treated as zero.
+func (h *AsyncHandler) WithReserve(reserveSlots int, reserveBytes int64) *AsyncHandler {
+	if reserveSlots < 0 {
+		reserveSlots = 0
+	}
+	if reserveBytes < 0 {
+		reserveBytes = 0
+	}
+	cp := *h
+	cp.reserveSlots = reserveSlots
+	cp.reserveBytes = reserveBytes
+	return &cp
 }
 
 // Enabled delegates to the inner handler.
@@ -171,6 +192,9 @@ func (h *AsyncHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	item := AsyncRecord{handler: h.inner, record: out}
 	item.span = snapshotSpan(trace.SpanContextFromContext(ctx))
+	if h.reserveSlots > 0 || h.reserveBytes > 0 {
+		return h.w.TryEnqueueWithReserve(item, int64(acc.bytes), h.reserveSlots, h.reserveBytes)
+	}
 	return h.w.TryEnqueue(item, int64(acc.bytes))
 }
 
@@ -202,11 +226,13 @@ func (h *AsyncHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		return h.rejecting()
 	}
 	return &AsyncHandler{
-		w:        h.w,
-		inner:    h.inner.WithAttrs(cloned),
-		preBytes: acc.bytes,
-		preAttrs: acc.attrs,
-		depth:    h.depth,
+		w:            h.w,
+		inner:        h.inner.WithAttrs(cloned),
+		reserveSlots: h.reserveSlots,
+		reserveBytes: h.reserveBytes,
+		preBytes:     acc.bytes,
+		preAttrs:     acc.attrs,
+		depth:        h.depth,
 	}
 }
 
@@ -221,11 +247,13 @@ func (h *AsyncHandler) WithGroup(name string) slog.Handler {
 		return h.rejecting()
 	}
 	return &AsyncHandler{
-		w:        h.w,
-		inner:    h.inner.WithGroup(strings.Clone(name)),
-		preBytes: h.preBytes + len(name),
-		preAttrs: h.preAttrs,
-		depth:    h.depth + 1,
+		w:            h.w,
+		inner:        h.inner.WithGroup(strings.Clone(name)),
+		reserveSlots: h.reserveSlots,
+		reserveBytes: h.reserveBytes,
+		preBytes:     h.preBytes + len(name),
+		preAttrs:     h.preAttrs,
+		depth:        h.depth + 1,
 	}
 }
 
