@@ -1145,9 +1145,9 @@ var compiled = []Experiment{
 	{
 		Name:        SystemOne,
 		Title:       "System One message guardrails",
-		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe]] and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin routes answer 404 and stored provider instances are kept.",
+		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe]], /api/v1/admin/system-one/adapters, admin web UI, and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin routes answer 404, the admin web page is hidden, and stored provider instances are kept.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8044",
 		Owner:       "system-one",

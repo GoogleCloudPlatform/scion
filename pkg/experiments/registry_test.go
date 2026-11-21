@@ -787,7 +787,7 @@ func TestExecSchedulesExperimentRegistered(t *testing.T) {
 }
 
 // TestSystemOneExperimentRegistered pins hub.system_one (ptone/scion#8044):
-// server-layer only and ships off by default.
+// server+web layers and ships off by default.
 func TestSystemOneExperimentRegistered(t *testing.T) {
 	e, ok := Default().Lookup(SystemOne)
 	if !ok {
@@ -799,8 +799,8 @@ func TestSystemOneExperimentRegistered(t *testing.T) {
 	if e.Default {
 		t.Fatal("hub.system_one must default to off")
 	}
-	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
-		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerServer and LayerWeb, got %v", e.Layers)
 	}
 	if e.Issue != "ptone/scion#8044" || e.Stage != StageAlpha || e.Owner != "system-one" {
 		t.Fatalf("unexpected registration: %+v", e)
