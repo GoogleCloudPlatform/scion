@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // The GCP credential fetches return a StatusError, so the metadata server
@@ -64,5 +65,50 @@ func TestIsForbidden(t *testing.T) {
 		if got := IsForbidden(tt.err); got != tt.want {
 			t.Errorf("IsForbidden(%v) = %v, want %v", tt.err, got, tt.want)
 		}
+	}
+}
+
+func TestGCPFetches_Return429WithRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "12")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := NewClientWithConfig(srv.URL, "agent-credential", "agent-1")
+	ctx := context.Background()
+
+	_, tokErr := c.FetchGCPToken(ctx, []string{"https://www.googleapis.com/auth/cloud-platform"})
+	_, idErr := c.FetchGCPIdentityToken(ctx, "https://example.com")
+	for name, err := range map[string]error{"FetchGCPToken": tokErr, "FetchGCPIdentityToken": idErr} {
+		if !IsTooManyRequests(err) {
+			t.Errorf("%s: IsTooManyRequests(%v) = false, want true", name, err)
+		}
+		var ra interface{ RetryAfterDuration() time.Duration }
+		if !errors.As(err, &ra) || ra.RetryAfterDuration() != 12*time.Second {
+			t.Errorf("%s: RetryAfterDuration = %v, want 12s", name, err)
+		}
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	if got := parseRetryAfter(""); got != 0 {
+		t.Errorf("empty: got %v, want 0", got)
+	}
+	if got := parseRetryAfter("5"); got != 5*time.Second {
+		t.Errorf("seconds: got %v, want 5s", got)
+	}
+	if got := parseRetryAfter("0"); got != 0 {
+		t.Errorf("zero: got %v, want 0", got)
+	}
+	if got := parseRetryAfter("-3"); got != 0 {
+		t.Errorf("negative: got %v, want 0", got)
+	}
+	if got := parseRetryAfter("not-a-date"); got != 0 {
+		t.Errorf("invalid: got %v, want 0", got)
+	}
+	future := time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
+	if got := parseRetryAfter(future); got < 25*time.Second || got > 35*time.Second {
+		t.Errorf("http-date: got %v, want ~30s", got)
 	}
 }
