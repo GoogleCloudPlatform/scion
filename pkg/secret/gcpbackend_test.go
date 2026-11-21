@@ -3837,14 +3837,19 @@ func TestGCPBackend_Resolve_AccessErrors(t *testing.T) {
 
 	t.Run("computed_name_without_stored_ref", func(t *testing.T) {
 		for _, tc := range []struct {
-			name     string
-			smErr    error
-			wantErr  bool
-			wantPerm bool
+			name         string
+			useLegacyErr bool
+			smErr        error
+			wantErr      bool
+			wantPerm     bool
+			wantCode     codes.Code
 		}{
-			{"permission_denied", status.Error(codes.PermissionDenied, "denied"), true, true},
-			{"unavailable", status.Error(codes.Unavailable, "backend down"), true, false},
-			{"not_found", status.Error(codes.NotFound, "gone"), false, false},
+			{"permission_denied", false, status.Error(codes.PermissionDenied, "denied"), true, true, codes.PermissionDenied},
+			{"unavailable", false, status.Error(codes.Unavailable, "backend down"), true, false, codes.Unavailable},
+			{"not_found", false, status.Error(codes.NotFound, "gone"), false, false, codes.OK},
+			{"legacy_name_permission_denied", true, status.Error(codes.PermissionDenied, "legacy denied"), true, true, codes.PermissionDenied},
+			{"legacy_name_unavailable", true, status.Error(codes.Unavailable, "legacy backend down"), true, false, codes.Unavailable},
+			{"legacy_name_not_found", true, status.Error(codes.NotFound, "legacy gone"), false, false, codes.OK},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				base, mock := createTestGCPBackend(t)
@@ -3864,10 +3869,15 @@ func TestGCPBackend_Resolve_AccessErrors(t *testing.T) {
 					t.Fatalf("CreateSecret failed: %v", err)
 				}
 
-				prefixedPath := base.smSecretPath(base.gcpSecretName("LEGACY_KEY", ScopeProject, "project-1"))
+				targetPath := base.smSecretPath(base.gcpSecretName("LEGACY_KEY", ScopeProject, "project-1"))
+				if tc.useLegacyErr {
+					// Prefixed name is absent in mock SM (returns NotFound), so
+					// accessSecretByComputedName falls back to the legacy name.
+					targetPath = base.smSecretPath(base.legacyGCPSecretName("LEGACY_KEY", ScopeProject, "project-1"))
+				}
 				client := &accessErrSMClient{
 					mockSMClient: mock,
-					errs:         map[string]error{prefixedPath: tc.smErr},
+					errs:         map[string]error{targetPath: tc.smErr},
 				}
 				backend := NewGCPBackendWithClient(base.store, client, base.projectID, base.hubID)
 
@@ -3879,6 +3889,9 @@ func TestGCPBackend_Resolve_AccessErrors(t *testing.T) {
 					var permErr *PermissionError
 					if got := errors.As(err, &permErr); got != tc.wantPerm {
 						t.Fatalf("errors.As(*PermissionError) = %v, want %v (err %v)", got, tc.wantPerm, err)
+					}
+					if st, ok := status.FromError(err); !ok || st.Code() != tc.wantCode {
+						t.Errorf("status.FromError(err) = (%v, %v), want code %s", st, ok, tc.wantCode)
 					}
 					if resolved != nil {
 						t.Fatalf("Resolve() = %+v, want nil on error", resolved)

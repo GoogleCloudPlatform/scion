@@ -885,11 +885,11 @@ func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	value, legacyErr := b.accessLatestVersion(ctx, legacyName)
 	if legacyErr != nil {
-		if errors.Is(legacyErr, errNilSecretPayload) {
+		if errors.Is(legacyErr, errNilSecretPayload) || status.Code(legacyErr) != codes.NotFound {
 			return "", "", legacyErr
 		}
-		// Neither name resolved; surface the prefixed-name error since that is
-		// the current/expected name.
+		// Neither name exists; surface the prefixed-name NotFound error since
+		// that is the current/expected name.
 		return "", "", err
 	}
 	slog.Warn("resolved secret via legacy (pre hub-prefix) GCP SM name; run `scion hub secret migrate-names` to migrate",
