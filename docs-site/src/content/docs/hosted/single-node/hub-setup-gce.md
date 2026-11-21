@@ -93,6 +93,17 @@ Without `--full`, `gce-start-hub.sh` only pulls the latest code on the VM, rebui
 
 The final health check requests `https://<HUB_DOMAIN>/healthz` and verifies the TLS certificate, so it fails if the certificate is missing or not valid. For a self-signed or test certificate only, add `--insecure-health-check` (or set `HEALTH_CHECK_INSECURE=true`); the script then prints a warning that the certificate was not verified.
 
+### Installed file ownership and permissions
+
+`gce-start-hub.sh` installs `/usr/local/bin/scion` (`0755`), `/etc/systemd/system/scion-hub.service` (`0644`), and `/etc/sudoers.d/scion-rebuild-server` (`0440`) as `root:root` using `install -o root -g root -m` rather than `mv`, so neither the `scion` service user nor the operator login user owns or can modify them. On every run (including fast deploys without `--full`), it also repairs drifted ownership or mode on an existing `/etc/systemd/system/scion-hub.service` in place before verifying.
+
+Before starting the `scion-hub` service, `gce-start-hub.sh` runs `scripts/starter-hub/check-install-perms.sh` on the VM and refuses to continue unless:
+
+- `/usr/local/bin/scion` (`0755`), `/etc/systemd/system/scion-hub.service` (`0644`), and `/etc/sudoers.d/scion-rebuild-server` (`0440`, required on `--full` runs and checked if present on fast runs) are regular files owned by `root:root` with those exact modes.
+- Every command and destination path in the sudoers rules (`/usr/bin/install`, `/usr/bin/systemctl`, `/usr/local/bin/scion`, and any command paths listed in `/etc/sudoers.d/scion-rebuild-server`) and every parent directory up to `/` is root-owned and neither group- nor world-writable.
+
+If the check fails (for example, if `/usr/local/bin` is group-writable), fix the reported ownership or mode on the VM and re-run `gce-start-hub.sh`.
+
 ### Certificate renewal
 
 Caddy serves the certbot files in `/etc/letsencrypt/live/<CERT_DOMAIN>/` (the `tls` line of the Caddyfile that `gce-start-hub.sh --full` writes). It reads them only when it starts or reloads. certbot renews the files on disk twice a day through `certbot.timer`, from 30 days before expiry. Unless Caddy reloads afterwards, it keeps serving the old certificate until that certificate expires.
