@@ -549,6 +549,7 @@ Other scopes use the same names, read from their own credentials only:
 | :--- | :--- |
 | Global scope (Hub-level) | Hub-scope `GH_{OWNER}__{REPO}`, `GH_{OWNER}`, then `GITHUB_TOKEN`. There is no GitHub App step: App installations belong to projects. |
 | User scope | Your own user-scope `GH_{OWNER}__{REPO}`, `GH_{OWNER}`, then `GITHUB_TOKEN`. An import uses them only when you are the user it imports for, never for another user. |
+| `scion templates import-url` | Runs on the Hub (`POST /api/v1/resources/import`) and uses the target scope's Hub secrets in the same order above (project, global, or user). No GitHub token is sent from the CLI. |
 | `scion harness-config install` and `scion templates import` | The `GH_{OWNER}__{REPO}`, `GH_{OWNER}`, then `GITHUB_TOKEN` environment variables of the shell running the CLI. The CLI fetches the source itself. |
 
 In every scope the first match wins, and with no match the fetch is unauthenticated, which works for public repos only. A global or user-scope import never reads project credentials.
