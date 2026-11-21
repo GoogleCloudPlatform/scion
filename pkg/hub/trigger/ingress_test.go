@@ -597,13 +597,19 @@ func TestBoundedTables_ConstantWorkUnderFullTableFlood(t *testing.T) {
 			},
 		})
 		// Instantaneous 50,000-key flood at elapsed == 0 (0 buckets refilled -> worst-case probe).
+		// After the table fills (LimiterMaxEntries), overflow keys are bounded by the shared
+		// overflow bucket (PerIPOverflowBurst) rather than passing unlimited (SEC-2).
+		allowed := 0
 		for i := range totalKeys {
 			ip := fmt.Sprintf("2001:db8:flood:%04x::1", i)
 			if i >= 65536 {
 				ip = fmt.Sprintf("2001:db8:flood2:%04x::1", i-65536)
 			}
-			require.True(t, lim.AllowClientIP(ip))
+			if lim.AllowClientIP(ip) {
+				allowed++
+			}
 		}
+		assert.Equal(t, trigger.LimiterMaxEntries+trigger.PerIPOverflowBurst, allowed)
 		assert.Equal(t, trigger.LimiterMaxEntries, lim.PerIPLen())
 		assert.Equal(t, totalKeys-trigger.LimiterMaxEntries, evictCalls)
 		assert.LessOrEqual(t, maxSteps, 8, "per-IP full-table probe must do O(1) bounded work per request")
@@ -1039,4 +1045,154 @@ func TestIngress_NoBackgroundCleanupGoroutinesOrTickersOnBoundedTables(t *testin
 	cancel()
 
 	assert.Zero(t, bgTableTouches.Load(), "background loop must never scan or touch any bounded table")
+}
+
+func TestIngressLimiter_PerIPOverflowBucketBoundsFullTable(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+		PerIPRate:          0.001,
+		PerIPBurst:         2,
+		PerIPOverflowRate:  2, // 2 req/s refill on the shared overflow bucket
+		PerIPOverflowBurst: 3, // at most 3 un-tracked keys allowed immediately
+		MaxEntries:         4,
+		Now:                func() time.Time { return now },
+	})
+
+	// Fill all 4 per-IP slots so none are refilled.
+	for i := range 4 {
+		require.True(t, lim.AllowClientIP(fmt.Sprintf("2001:db8:cafe:%04x::1", i)))
+	}
+	assert.Equal(t, 4, lim.PerIPLen())
+
+	// New keys outside the full table are admitted through the shared overflow
+	// bucket (not locked out fail-closed), up to PerIPOverflowBurst = 3, then
+	// rate-limited rather than passing unlimited (SEC-2).
+	for i := range 3 {
+		assert.True(t, lim.AllowClientIP(fmt.Sprintf("2001:db8:dead:%04x::1", i)), "overflow request %d must be allowed", i)
+	}
+	assert.False(t, lim.AllowClientIP("2001:db8:dead:9999::1"), "4th overflow request must be bounded by the shared overflow bucket")
+	assert.Equal(t, 4, lim.PerIPLen(), "table size must stay bounded at MaxEntries")
+
+	// Tracked key still enforces its own per-IP burst independently of the overflow bucket.
+	assert.True(t, lim.AllowClientIP("2001:db8:cafe:0000::2"))
+	assert.False(t, lim.AllowClientIP("2001:db8:cafe:0000::3"))
+
+	// Advancing clock by 500ms refills 1 overflow token (2/s * 0.5s = 1).
+	now = now.Add(500 * time.Millisecond)
+	assert.True(t, lim.AllowClientIP("203.0.113.42"))
+	assert.False(t, lim.AllowClientIP("203.0.113.43"))
+}
+
+type countingIngressStore struct {
+	*stubCacheStore
+	getCalls atomic.Int64
+}
+
+func (s *countingIngressStore) GetWebhookEndpoint(ctx context.Context, id string) (*store.WebhookEndpoint, error) {
+	s.getCalls.Add(1)
+	return s.stubCacheStore.GetWebhookEndpoint(ctx, id)
+}
+
+func (s *countingIngressStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return errors.New("unexpected WithTx call")
+}
+
+// TestIngress_ColdActiveEndpointSurvivesJunkFlood verifies design acceptance
+// item 8 / PR6A-SEC-01: under a ~1,000 req/s unauthenticated junk flood to
+// random unknown endpoint IDs (50 distinct source IPs at the 20 req/s per-IP
+// cap, draining the 500/s hub-wide rejection bucket), a cold ACTIVE endpoint
+// (not present in the replica's positive cache) is still served and never
+// receives 429 from the rejection bucket.
+func TestIngress_ColdActiveEndpointSurvivesJunkFlood(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	coldActiveID := uuid.NewString()
+
+	backing := &countingIngressStore{
+		stubCacheStore: &stubCacheStore{
+			endpoints: map[string]*store.WebhookEndpoint{
+				coldActiveID: {
+					ID:            coldActiveID,
+					ProjectID:     "proj-1",
+					SecretVersion: 1,
+					SignatureMode: store.WebhookSignatureModeScionV1,
+					Status:        store.WebhookEndpointStatusActive,
+				},
+			},
+		},
+	}
+
+	cache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
+		Now: func() time.Time { return now },
+	})
+	// Production-default limiter parameters: per-IP 20/s burst 100,
+	// rejection 500/s burst 2000, per-endpoint 10/s burst 60.
+	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+		Now: func() time.Time { return now },
+	})
+
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      backing,
+		QueueStore: &flushNotifyStore{},
+		Queue:      &fakeEnqueueQueue{},
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) {
+			return "test-secret", nil
+		},
+		Enabled: func() bool { return true },
+		Limiter: lim,
+		Cache:   cache,
+		Logger:  slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), &slog.HandlerOptions{Level: slog.LevelError})),
+		Now:     func() time.Time { return now },
+	})
+
+	postHook := func(id, remoteIP string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+id, bytes.NewReader([]byte(`{"ok":true}`)))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = remoteIP + ":12345"
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Simulate 10 seconds at 1,000 junk req/s (50 attacker IPs x 20 req/s,
+	// sent in 100ms ticks of 100 junk requests: 2 per attacker IP per 100ms).
+	// Every 500ms, evict coldActiveID from the positive cache and send a
+	// legitimate probe to it from a distinct sender IP.
+	var junk404, junk429, legitPassed, legit429 int
+	for tick := range 100 { // 100 ticks * 100ms = 10s
+		for i := range 100 {
+			attackerIP := fmt.Sprintf("203.0.113.%d", (i%50)+1)
+			rec := postHook(uuid.NewString(), attackerIP)
+			switch rec.Code {
+			case http.StatusNotFound:
+				junk404++
+			case http.StatusTooManyRequests:
+				junk429++
+			default:
+				t.Fatalf("unexpected junk status %d at tick %d req %d", rec.Code, tick, i)
+			}
+		}
+
+		if tick%5 == 0 { // every 500ms -> 20 cold probes over 10s
+			cache.Invalidate(coldActiveID)
+			rec := postHook(coldActiveID, "198.51.100.10")
+			switch rec.Code {
+			case http.StatusUnauthorized:
+				// Passed step 3 lookup + per-endpoint bucket and reached HMAC verification.
+				legitPassed++
+			case http.StatusTooManyRequests:
+				legit429++
+			default:
+				t.Fatalf("unexpected cold active status %d at tick %d", rec.Code, tick)
+			}
+		}
+
+		now = now.Add(100 * time.Millisecond)
+	}
+
+	// The 1,000 req/s junk flood must drain the 500/s (burst 2000) rejection bucket
+	// and be rate-limited (429), while 100% of cold active endpoint requests pass step 3.
+	assert.Greater(t, junk404, 0, "initial junk requests within rejection burst should answer 404")
+	assert.Greater(t, junk429, 2000, "sustained 1,000 req/s junk flood must drain the 500/s rejection bucket")
+	assert.Equal(t, 20, legitPassed, "every cold active endpoint request must pass step 3 despite drained rejection bucket")
+	assert.Zero(t, legit429, "cold active endpoint must never receive 429 from the hub-wide rejection bucket")
 }

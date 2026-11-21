@@ -105,7 +105,7 @@ func TestTriggerAutoPause_CreatorAndTargetDeleted(t *testing.T) {
 	trUserOther := mkTrigger(f.otherProjID, epOther.ID, "tr-user-other", store.DelegationPrincipalUser, f.member.ID, f.targetAgent.ID, f.targetAgent.Slug)
 	trOwnerUnaffected := mkTrigger(f.projectID, epMain.ID, "tr-owner-keep", store.DelegationPrincipalUser, f.owner.ID, f.targetAgent.ID, f.targetAgent.Slug)
 
-	f.srv.pauseSchedulesAuthoredByUser(ctx, f.member.ID)
+	f.srv.pauseTriggersAuthoredByUser(ctx, f.member.ID)
 
 	for _, id := range []string{trUserMain.ID, trUserOther.ID} {
 		got, err := f.store.GetTrigger(ctx, id)
@@ -130,7 +130,7 @@ func TestTriggerAutoPause_CreatorAndTargetDeleted(t *testing.T) {
 
 	// Mirror agent_delete_engine.go tailStep order: target pause then creator pause.
 	f.srv.pauseTriggersTargetingAgent(ctx, f.agentA)
-	f.srv.pauseSchedulesAuthoredByAgent(ctx, f.agentA)
+	f.srv.pauseTriggersAuthoredByAgent(ctx, f.agentA)
 
 	for _, id := range []string{trTargetSame.ID, trTargetCross.ID, trSelfTargeted.ID} {
 		got, err := f.store.GetTrigger(ctx, id)
@@ -271,4 +271,79 @@ func TestTriggerAutoPause_AgentDeleteEngine(t *testing.T) {
 	gotUnrelated, err := s.GetTrigger(ctx, trUnrelated.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerStatusActive, gotUnrelated.Status)
+}
+
+// TestTriggerAutoPause_CreatorPauseIndependentOfScheduleBudget verifies that
+// trigger creator-pause does not share the schedule pass's context budget: an
+// expired context on pauseSchedulesAuthoredByAgent does not prevent
+// pauseTriggersAuthoredByAgent from pausing authored triggers in its own step.
+func TestTriggerAutoPause_CreatorPauseIndependentOfScheduleBudget(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	ep := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           f.projectID,
+		Name:                "ep-budget-indep",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    f.owner.ID,
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusActive,
+		CreatedBy:           f.owner.ID,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(ctx, ep))
+
+	trAuthored := &store.Trigger{
+		ID:             api.NewUUID(),
+		ProjectID:      f.projectID,
+		Name:           "tr-budget-authored",
+		SourceKind:     store.TriggerSourceKindWebhook,
+		SourceID:       ep.ID,
+		MatchTypes:     []string{"webhook.received"},
+		MatchDialect:   store.TriggerDialectCEL,
+		ActionType:     store.TriggerActionMessage,
+		ActionPayload:  `{"agentId":"` + f.targetAgent.ID + `","agentName":"` + f.targetAgent.Slug + `","message":"mentions ` + f.agentA.ID + `"}`,
+		SubjectDialect: store.TriggerDialectCEL,
+		SubjectMode:    store.TriggerSubjectModeNew,
+		Status:         store.TriggerStatusActive,
+		CreatedBy:      f.agentA.ID,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AttributionVersion:      1,
+			InitiatorPrincipalKind:  store.DelegationPrincipalAgent,
+			InitiatorPrincipalID:    f.agentA.ID,
+			InitiatorCredentialKind: store.InitiatorCredentialKindAgent,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{
+			Version: 1,
+			Kind:    store.EffectCeilingPrincipal,
+		},
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, trAuthored))
+
+	// A trigger whose message body mentions agentA.ID (matching the SQL
+	// pre-filter) but whose agentId is targetAgent must NOT be paused by
+	// pauseTriggersTargetingAgent (Go JSON check rejects false positives).
+	f.srv.pauseTriggersTargetingAgent(ctx, f.agentA)
+	afterTargetPass, err := f.store.GetTrigger(ctx, trAuthored.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusActive, afterTargetPass.Status,
+		"mentioning deleted agent ID in message body must not trigger target_deleted pause")
+
+	// Calling pauseSchedulesAuthoredByAgent with a live context must not pause
+	// triggers — triggers are decoupled into their own step and budget
+	// (pauseTriggersAuthoredByAgent) so schedule work cannot starve them.
+	f.srv.pauseSchedulesAuthoredByAgent(ctx, f.agentA)
+	afterSchedPass, err := f.store.GetTrigger(ctx, trAuthored.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusActive, afterSchedPass.Status)
+
+	// Independent trigger creator-pause step succeeds with its own context.
+	f.srv.pauseTriggersAuthoredByAgent(ctx, f.agentA)
+	afterTriggerPass, err := f.store.GetTrigger(ctx, trAuthored.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, afterTriggerPass.Status)
+	assert.Equal(t, store.TriggerStatusReasonCreatorDeleted, afterTriggerPass.StatusReason)
 }

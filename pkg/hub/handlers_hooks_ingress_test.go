@@ -951,6 +951,70 @@ func TestWebhookIngress_RefusesNonInternalSecretRow(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, recRecovered.Code, recRecovered.Body.String())
 }
 
+func TestWebhookIngress_MissingSecretVsWrongTypeDiagnostics(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	ep := createTestWebhookEndpointViaAPI(t, f, f.projectID, "secret-diag-ep")
+	key := store.WebhookEndpointSecretKey(f.projectID, ep.ID, 1)
+	hubID := f.srv.HubID()
+
+	var logBuf bytes.Buffer
+	dqs := f.store.(store.DurableQueueStore)
+	f.srv.webhookIngress = trigger.NewIngress(trigger.IngressConfig{
+		Store:      f.store,
+		QueueStore: dqs,
+		Queue:      f.srv.durableQueue,
+		LoadSecret: f.srv.loadWebhookEndpointSecret,
+		Enabled:    func() bool { return f.srv.experimentEnabled(experiments.Triggers) },
+		Logger:     slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelError})),
+	})
+
+	payload := []byte(`{"diag":true}`)
+	now := time.Now().Unix()
+
+	// 1. Wrong-type secret: internal error is errWebhookSecretTypeMismatch (not missing),
+	//    log records the type mismatch, external response is content-free 503.
+	sealed, err := f.srv.sealWebhookEndpointSecret(ep.Secret)
+	require.NoError(t, err)
+	require.NoError(t, f.store.UpdateSecret(ctx, &store.Secret{
+		Key:            key,
+		Scope:          store.ScopeHub,
+		ScopeID:        hubID,
+		SecretType:     store.SecretTypeEnvironment,
+		EncryptedValue: sealed,
+		UpdatedBy:      "test-admin",
+	}))
+
+	_, wrongTypeErr := f.srv.loadWebhookEndpointSecret(ctx, f.projectID, ep.ID, 1)
+	require.ErrorIs(t, wrongTypeErr, errWebhookSecretTypeMismatch)
+	assert.NotErrorIs(t, wrongTypeErr, errWebhookSecretMissing)
+
+	recWrongType := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, now, "deliv-wrong-type", "push", "", "application/json", "", nil, payload)
+	assert.Equal(t, http.StatusServiceUnavailable, recWrongType.Code)
+	wrongTypeLog := logBuf.String()
+	assert.Contains(t, wrongTypeLog, errWebhookSecretTypeMismatch.Error())
+	assert.NotContains(t, wrongTypeLog, errWebhookSecretMissing.Error())
+
+	// 2. Missing secret: delete the row -> internal error is errWebhookSecretMissing
+	//    (and wraps store.ErrNotFound, NOT errWebhookSecretTypeMismatch), log records
+	//    the missing secret, and external response is byte-identical content-free 503.
+	logBuf.Reset()
+	require.NoError(t, f.store.DeleteSecret(ctx, key, store.ScopeHub, hubID))
+
+	_, missingErr := f.srv.loadWebhookEndpointSecret(ctx, f.projectID, ep.ID, 1)
+	require.ErrorIs(t, missingErr, errWebhookSecretMissing)
+	require.ErrorIs(t, missingErr, store.ErrNotFound)
+	assert.NotErrorIs(t, missingErr, errWebhookSecretTypeMismatch)
+
+	recMissing := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, now, "deliv-missing", "push", "", "application/json", "", nil, payload)
+	assert.Equal(t, http.StatusServiceUnavailable, recMissing.Code)
+	assert.Equal(t, recWrongType.Body.String(), recMissing.Body.String(), "external 503 body must remain identical and content-free")
+	missingLog := logBuf.String()
+	assert.Contains(t, missingLog, errWebhookSecretMissing.Error())
+	assert.NotContains(t, missingLog, errWebhookSecretTypeMismatch.Error())
+}
+
 func TestWebhookIngress_BadSignatureFloodNeverChargesRejectionBucket(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	now := time.Date(2026, 11, 17, 12, 45, 0, 0, time.UTC)

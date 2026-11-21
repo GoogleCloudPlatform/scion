@@ -1064,10 +1064,12 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// msg may be a pointer shared across broker event-bus subscribers, so it
 	// is never mutated in place — a private copy is made once here (cheap:
 	// struct fields only, no deep copy needed unless a field below is
-	// reassigned) and both the "!" rewrite and the #2257 P2 metadata strip
-	// (design auto-offload-large-dm §4.2 item 1) apply to that copy.
+	// reassigned) and the inbound client-event clear (S4-6), the #2257 P2
+	// metadata strip (design auto-offload-large-dm §4.2 item 1), and the "!"
+	// rewrite apply to that copy.
 	copied := *msg
 	msg = &copied
+	clearInboundClientEvent(msg)
 	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 
 	// A leading "!" in the message body acts as an inline interrupt signal:

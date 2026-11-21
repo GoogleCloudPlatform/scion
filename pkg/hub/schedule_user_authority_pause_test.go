@@ -72,6 +72,46 @@ func requireScheduleUntouched(t *testing.T, s store.Store, id, status string) {
 	assert.Empty(t, got.StatusReason, got.Name)
 }
 
+// userAuthorityTrigger returns a trigger whose recorded authority is userID
+// (a session revision, revision 1).
+func userAuthorityTrigger(name, projectID, userID, status string) *store.Trigger {
+	rev := withSessionRevision(store.ScheduledEvent{}, userID)
+	return &store.Trigger{
+		ID:                   tid("user-pause-tr-" + name),
+		ProjectID:            projectID,
+		Name:                 name,
+		SourceKind:           store.TriggerSourceKindWebhook,
+		SourceID:             tid("user-pause-ep-" + name),
+		MatchTypes:           []string{"webhook.received"},
+		MatchDialect:         store.TriggerDialectCEL,
+		ActionType:           store.TriggerActionMessage,
+		ActionPayload:        `{"agentId":"` + tid("user-pause-target") + `","message":"hi"}`,
+		SubjectDialect:       store.TriggerDialectCEL,
+		SubjectMode:          store.TriggerSubjectModeNew,
+		Status:               status,
+		CreatedBy:            userID,
+		InitiatorAttribution: rev.InitiatorAttribution,
+		AuthorityCeiling:     rev.AuthorityCeiling,
+	}
+}
+
+func requireTriggerCreatorDeletedPause(t *testing.T, s store.Store, id string) {
+	t.Helper()
+	got, err := s.GetTrigger(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, got.Status, got.Name)
+	assert.Equal(t, store.TriggerStatusReasonCreatorDeleted, got.StatusReason, got.Name)
+	assert.Equal(t, 1, got.AuthorizationRevision, "%s: a system pause does not re-record authority", got.Name)
+}
+
+func requireTriggerUntouched(t *testing.T, s store.Store, id, status string) {
+	t.Helper()
+	got, err := s.GetTrigger(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, status, got.Status, got.Name)
+	assert.Empty(t, got.StatusReason, got.Name)
+}
+
 // A plain user delete pauses, in every project, the active schedules whose
 // recorded authority is the user. A schedule only created by the user
 // (authority re-recorded to someone else), a legacy schedule with no
@@ -97,6 +137,13 @@ func TestScheduleUserAuthorityPause_PlainDeletePauses(t *testing.T) {
 		require.NoError(t, s.CreateSchedule(ctx, sc))
 	}
 
+	heldTrigger := userAuthorityTrigger("held", projectID, dave.ID, store.TriggerStatusActive)
+	heldTriggerB := userAuthorityTrigger("held-b", projectB.ID, dave.ID, store.TriggerStatusActive)
+	otherTrigger := userAuthorityTrigger("other", projectID, other.ID, store.TriggerStatusActive)
+	for _, tr := range []*store.Trigger{heldTrigger, heldTriggerB, otherTrigger} {
+		require.NoError(t, s.CreateTrigger(ctx, tr))
+	}
+
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
@@ -107,12 +154,15 @@ func TestScheduleUserAuthorityPause_PlainDeletePauses(t *testing.T) {
 	requireScheduleUntouched(t, s, legacy.ID, store.ScheduleStatusActive)
 	requireScheduleUntouched(t, s, byAgent.ID, store.ScheduleStatusActive)
 	assert.Equal(t, 1, mustGetSchedule(t, s, byAgent.ID).AuthorizationRevision, "the agent schedule's authority is unchanged")
+	requireTriggerCreatorDeletedPause(t, s, heldTrigger.ID)
+	requireTriggerCreatorDeletedPause(t, s, heldTriggerB.ID)
+	requireTriggerUntouched(t, s, otherTrigger.ID, store.TriggerStatusActive)
 }
 
-// A forced delete pauses the user's schedules as soon as its revoke
-// commits, before the agents are stopped, and they stay paused after the
-// deletion completes. A schedule whose authority is another user's agent
-// is not touched.
+// A forced delete pauses the user's schedules and triggers as soon as its
+// revoke commits, before the agents are stopped, and they stay paused after
+// the deletion completes. A schedule or trigger whose authority is another
+// principal is not touched.
 func TestScheduleUserAuthorityPause_ForceDeletePauses(t *testing.T) {
 	f := newForceDelFixture(t, time.Hour)
 	ctx := context.Background()
@@ -123,6 +173,11 @@ func TestScheduleUserAuthorityPause_ForceDeletePauses(t *testing.T) {
 	byAgent := creatorPauseSchedule("force-by-agent", f.project.ID, other.ID, store.ScheduleStatusActive)
 	for _, sc := range []*store.Schedule{held, byAgent} {
 		require.NoError(t, f.s.CreateSchedule(ctx, sc))
+	}
+	heldTrigger := userAuthorityTrigger("force-held", f.project.ID, f.dave.ID, store.TriggerStatusActive)
+	otherTrigger := userAuthorityTrigger("force-other", f.project.ID, DevUserID, store.TriggerStatusActive)
+	for _, tr := range []*store.Trigger{heldTrigger, otherTrigger} {
+		require.NoError(t, f.s.CreateTrigger(ctx, tr))
 	}
 
 	entered := make(chan struct{})
@@ -135,6 +190,8 @@ func TestScheduleUserAuthorityPause_ForceDeletePauses(t *testing.T) {
 	// Paused while the user is deleting, before the agent is stopped.
 	requireCreatorDeletedPause(t, f.s, held.ID)
 	requireScheduleUntouched(t, f.s, byAgent.ID, store.ScheduleStatusActive)
+	requireTriggerCreatorDeletedPause(t, f.s, heldTrigger.ID)
+	requireTriggerUntouched(t, f.s, otherTrigger.ID, store.TriggerStatusActive)
 
 	<-entered
 	close(release)
@@ -143,6 +200,8 @@ func TestScheduleUserAuthorityPause_ForceDeletePauses(t *testing.T) {
 	requireCreatorDeletedPause(t, f.s, held.ID)
 	requireScheduleUntouched(t, f.s, byAgent.ID, store.ScheduleStatusActive)
 	assert.Equal(t, 1, mustGetSchedule(t, f.s, byAgent.ID).AuthorizationRevision, "the agent schedule's authority is unchanged")
+	requireTriggerCreatorDeletedPause(t, f.s, heldTrigger.ID)
+	requireTriggerUntouched(t, f.s, otherTrigger.ID, store.TriggerStatusActive)
 }
 
 // Resuming a schedule paused because its user was deleted clears the
