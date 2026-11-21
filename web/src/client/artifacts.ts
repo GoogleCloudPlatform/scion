@@ -886,6 +886,243 @@ export async function endReviewSession(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Durable artifact review drafts (ptone/scion#7116, ptone/scion#8471)
+// ---------------------------------------------------------------------------
+
+/** Maximum UTF-8 byte length of a saved draft body or carried body (1 MiB). */
+export const MAX_DRAFT_BODY_BYTES = 1 << 20;
+
+/** Maximum serialized request size sent with fetch keepalive on tab hide (60 KiB). */
+export const DRAFT_KEEPALIVE_LIMIT_BYTES = 60 * 1024;
+
+/** Read-only earlier review text kept when a draft was moved to a newer version. */
+export interface CarriedReviewDraft {
+  base: number;
+  body: string;
+}
+
+/** The caller's saved draft review of an artifact. */
+export interface ReviewDraft {
+  rev: number;
+  base: number;
+  entry: string;
+  body: string;
+  note: string;
+  carried: CarriedReviewDraft | null;
+  savedAt: string;
+  createdAt: string;
+}
+
+/** Body of GET /api/v1/artifacts/{id}/review-draft. */
+export interface ReviewDraftResponse {
+  draft: ReviewDraft | null;
+  currentSeq: number;
+}
+
+/** Body of PUT /api/v1/artifacts/{id}/review-draft. */
+export interface PutReviewDraftRequest {
+  rev: number;
+  base: number;
+  entry: string;
+  body: string;
+  note: string;
+  carried?: CarriedReviewDraft | null;
+  clientSavedAt?: string;
+}
+
+/** Body of 200 response from PUT /api/v1/artifacts/{id}/review-draft. */
+export interface PutReviewDraftResponse {
+  rev: number;
+  savedAt: string;
+  currentSeq: number;
+}
+
+/**
+ * Thrown when PUT or conditional DELETE /review-draft fails with 409
+ * draft_conflict because another device or tab wrote a newer revision.
+ * The server never returns the draft body in a 409; the client calls
+ * getReviewDraft if the user chooses to load it.
+ */
+export class DraftConflictError extends Error {
+  readonly status = 409;
+  readonly code = 'draft_conflict';
+  readonly rev: number;
+  readonly savedAt: string | null;
+  readonly base: number;
+
+  constructor(message: string, rev: number, savedAt: string | null, base: number) {
+    super(message);
+    this.name = 'DraftConflictError';
+    this.rev = rev;
+    this.savedAt = savedAt;
+    this.base = base;
+  }
+}
+
+/** Structured error for non-conflict review-draft API failures. */
+export class DraftApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly limit: number | undefined;
+  readonly retryAfterMs: number | undefined;
+
+  constructor(
+    message: string,
+    status: number,
+    code: string,
+    opts?: { limit?: number | undefined; retryAfterMs?: number | undefined }
+  ) {
+    super(message);
+    this.name = 'DraftApiError';
+    this.status = status;
+    this.code = code;
+    this.limit = opts?.limit;
+    this.retryAfterMs = opts?.retryAfterMs;
+  }
+}
+
+function reviewDraftPath(artifactId: string, rev?: number): string {
+  const base = `${artifactPath(artifactId)}/review-draft`;
+  return typeof rev === 'number' && rev > 0
+    ? `${base}?rev=${encodeURIComponent(String(rev))}`
+    : base;
+}
+
+/** Parses an HTTP Retry-After header (seconds or HTTP-date) into milliseconds. */
+export function parseRetryAfterMs(header: string | null, nowMs = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const trimmed = header.trim();
+  if (!trimmed) return undefined;
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed) * 1000;
+  }
+  const ts = Date.parse(trimmed);
+  if (Number.isFinite(ts)) {
+    return Math.max(0, ts - nowMs);
+  }
+  return undefined;
+}
+
+async function throwDraftError(res: Response): Promise<never> {
+  let body: {
+    error?: {
+      code?: string;
+      message?: string;
+      details?: {
+        rev?: unknown;
+        savedAt?: unknown;
+        base?: unknown;
+        limit?: unknown;
+      };
+    };
+  } = {};
+  try {
+    body = (await res.clone().json()) as typeof body;
+  } catch {
+    // Not JSON; fall through with status.
+  }
+  const code = body.error?.code ?? '';
+  const details = body.error?.details ?? {};
+  if (res.status === 409 && code === 'draft_conflict') {
+    throw new DraftConflictError(
+      body.error?.message || 'This draft review was changed elsewhere.',
+      typeof details.rev === 'number' ? details.rev : 0,
+      typeof details.savedAt === 'string' && details.savedAt ? details.savedAt : null,
+      typeof details.base === 'number' ? details.base : 0
+    );
+  }
+  const message = body.error?.message || (await extractApiError(res, `HTTP ${res.status}`));
+  const limit = typeof details.limit === 'number' ? details.limit : undefined;
+  const retryAfterMs = parseRetryAfterMs(res.headers.get('Retry-After'));
+  throw new DraftApiError(message, res.status, code, { limit, retryAfterMs });
+}
+
+/** Reads the caller's saved review draft for an artifact (null when none exists). */
+export async function getReviewDraft(
+  artifactId: string,
+  opts: { signal?: AbortSignal } = {}
+): Promise<ReviewDraftResponse> {
+  const res = await apiFetch(reviewDraftPath(artifactId), {
+    method: 'GET',
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  });
+  if (!res.ok) await throwDraftError(res);
+  return (await res.json()) as ReviewDraftResponse;
+}
+
+/** Creates (rev=0) or updates (rev=N) the caller's saved review draft. */
+export async function putReviewDraft(
+  artifactId: string,
+  req: PutReviewDraftRequest,
+  opts: { keepalive?: boolean; signal?: AbortSignal } = {}
+): Promise<PutReviewDraftResponse> {
+  const res = await apiFetch(reviewDraftPath(artifactId), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+    keepalive: opts.keepalive === true,
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  });
+  if (!res.ok) await throwDraftError(res);
+  return (await res.json()) as PutReviewDraftResponse;
+}
+
+/** Deletes the caller's saved review draft, optionally conditional on rev. */
+export async function deleteReviewDraft(
+  artifactId: string,
+  opts: { rev?: number; signal?: AbortSignal } = {}
+): Promise<void> {
+  const res = await apiFetch(reviewDraftPath(artifactId, opts.rev), {
+    method: 'DELETE',
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  });
+  if (res.status === 204 || res.ok) return;
+  await throwDraftError(res);
+}
+
+/**
+ * Derives a safe local download filename from an untrusted hub entry_path
+ * (security condition C6): uses only the final path element (splitting on
+ * both '/' and '\\'), refuses empty/'.'/'..'/volume/control-char names, and
+ * falls back to `review-of-v<base>.md`.
+ */
+export function safeReviewDownloadName(entryPath: string, base: number): string {
+  const fallback = `review-of-v${base}.md`;
+  if (!entryPath) return fallback;
+  // Reject control characters anywhere in the path or trailing separators.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(entryPath)) return fallback;
+  if (entryPath.endsWith('/') || entryPath.endsWith('\\')) return fallback;
+  const parts = entryPath.split(/[/\\]/);
+  const last = parts[parts.length - 1] ?? '';
+  if (!last || last === '.' || last === '..' || last.includes(':') || /^[A-Za-z]:/.test(last)) {
+    return fallback;
+  }
+  const stem = last.replace(/\.md$/i, '');
+  if (!stem || stem === '.' || stem === '..') {
+    return fallback;
+  }
+  return `${stem}-review-of-v${base}.md`;
+}
+
+/** Triggers a browser download of plain text without touching browser storage. */
+export function downloadTextFile(filename: string, text: string): void {
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  try {
+    a.click();
+  } finally {
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+}
+
 /** A file of a review the hub refused (code unmarked_changes). */
 interface UnmarkedFile {
   path?: string;
