@@ -48,6 +48,9 @@ type EventPublisher interface {
 	PublishBrokerConnected(ctx context.Context, brokerID, brokerName string, projectIDs []string)
 	PublishBrokerDisconnected(ctx context.Context, brokerID string, projectIDs []string)
 	PublishBrokerStatus(ctx context.Context, brokerID, status string)
+	// PublishNotification emits a notification addressed to one user on
+	// user.<subscriberID>.notification. A notification with no SubscriberID
+	// is dropped.
 	PublishNotification(ctx context.Context, notif *store.Notification)
 	// PublishUserNotification emits a non-chat notification addressed to one
 	// user (for example SCHEDULE_BLOCKED) on user.<subscriberID>.notification
@@ -402,15 +405,12 @@ type NotificationCreatedEvent struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// UserNotificationEvent is the payload for a non-chat notification addressed
-// to a single user (PublishUserNotification). SubscriberID is the client's
-// second gate; the subject already scopes delivery.
+// UserNotificationEvent is the payload for a notification addressed to a
+// single user (PublishUserNotification). SubscriberID is the client's second
+// gate; the subject already scopes delivery.
 //
-// Kind, ResourceType and ResourceID are fields of this event only, never of
-// the embedded NotificationCreatedEvent: that struct is also the payload of
-// the broadcast notification.created and project.<id>.notification
-// subjects, which reach other sessions. They are empty, and omitted, for a
-// notification that does not set them.
+// Kind, ResourceType, and ResourceID are optional fields on this event and
+// are omitted for notifications that do not set them.
 type UserNotificationEvent struct {
 	NotificationCreatedEvent
 	SubscriberID string `json:"subscriberId"`
@@ -842,20 +842,10 @@ func (p *eventBuilder) PublishBrokerStatus(_ context.Context, brokerID, status s
 	p.sink("broker."+brokerID+".status", evt)
 }
 
-// PublishNotification publishes a user notification event.
-func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notification) {
-	evt := NotificationCreatedEvent{
-		ID:        notif.ID,
-		AgentID:   notif.AgentID,
-		ProjectID: notif.ProjectID,
-		Status:    notif.Status,
-		Message:   notif.Message,
-		CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
-	}
-	p.sink("notification.created", evt)
-	if notif.ProjectID != "" {
-		p.sink("project."+notif.ProjectID+".notification", evt)
-	}
+// PublishNotification publishes a notification on user.<subscriberID>.notification.
+// Notifications without a SubscriberID are dropped.
+func (p *eventBuilder) PublishNotification(ctx context.Context, notif *store.Notification) {
+	p.PublishUserNotification(ctx, notif)
 }
 
 // PublishUserNotification publishes a non-chat notification addressed to one

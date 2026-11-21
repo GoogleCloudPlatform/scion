@@ -192,14 +192,14 @@ describe('StateManager own chat subject', () => {
     expect(message).not.toHaveBeenCalled();
   });
 
-  it('still routes the unscoped notification subject to notification-created', () => {
+  it('ignores removed unscoped notification subjects', () => {
     const sm = new StateManager();
     const created = vi.fn();
     sm.addEventListener('notification-created', created);
 
     emit(sm, 'notification.created', { id: 'notif-2', status: 'COMPLETED' });
 
-    expect(created).toHaveBeenCalledTimes(1);
+    expect(created).not.toHaveBeenCalled();
   });
 
   it('raises no legacy user-message-created event for user-message subjects', () => {
@@ -222,15 +222,20 @@ describe('StateManager own chat subject', () => {
 
     sm.setCurrentUserId('me');
 
-    for (const scope of [
+    const scopes: Parameters<StateManager['setScope']>[0][] = [
       { type: 'dashboard' },
+      { type: 'profile' },
       { type: 'project', projectId: 'p1' },
       { type: 'agent-detail', projectId: 'p1', agentId: 'a1' },
       { type: 'brokers-list' },
-    ] as const) {
+      { type: 'broker-detail', brokerId: 'b1' },
+      { type: 'chat', spaceIds: ['p1'], userId: 'me' },
+    ];
+    for (const scope of scopes) {
       const subjects = subjectsFor(sm, scope);
       expect(subjects).toContain('user.me.chat.>');
       expect(subjects).toContain('user.me.notification');
+      expect(subjects).not.toContain('notification.>');
     }
   });
 
@@ -249,11 +254,10 @@ describe('StateManager profile scope', () => {
   ): string[] =>
     (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
 
-  it('subscribes to project.>, notification.>, and user.<id>.chat.> for DM choice updates', () => {
+  it('subscribes to project.>, user.<id>.chat.>, and user.<id>.notification for profile scope', () => {
     const sm = new StateManager();
     expect(subjectsFor(sm, { type: 'profile', userId: 'u-1' })).toEqual([
       'project.>',
-      'notification.>',
       'user.u-1.chat.>',
       'user.u-1.notification',
     ]);
@@ -263,7 +267,7 @@ describe('StateManager profile scope', () => {
     expect(deduped.filter((s) => s === 'user.u-1.chat.>')).toHaveLength(1);
   });
 
-  it('adds user.<id>.chat.> when setCurrentUserId arrives after setScope({ type: "profile" }) and dedupes identical scopes', () => {
+  it('adds user.<id>.chat.> and user.<id>.notification when setCurrentUserId arrives after setScope and dedupes identical scopes', () => {
     const sm = new StateManager();
     const connect = vi.fn();
     (sm as unknown as { sseClient: { connect: (s: string[]) => void } }).sseClient.connect =
@@ -271,13 +275,12 @@ describe('StateManager profile scope', () => {
 
     sm.setScope({ type: 'profile' });
     expect(connect).toHaveBeenCalledTimes(1);
-    expect(connect).toHaveBeenLastCalledWith(['project.>', 'notification.>']);
+    expect(connect).toHaveBeenLastCalledWith(['project.>']);
 
     sm.setCurrentUserId('u-2');
     expect(connect).toHaveBeenCalledTimes(2);
     expect(connect).toHaveBeenLastCalledWith([
       'project.>',
-      'notification.>',
       'user.u-2.chat.>',
       'user.u-2.notification',
     ]);
@@ -286,6 +289,23 @@ describe('StateManager profile scope', () => {
     const gen = sm.scopeGeneration;
     sm.setScope({ type: 'profile', userId: 'u-2' });
     expect(sm.scopeGeneration).toBe(gen);
+  });
+
+  it('reconnects broker scopes with user.<id>.notification once currentUserId is set', () => {
+    const sm = new StateManager();
+    const connect = vi.fn();
+    (sm as unknown as { sseClient: { connect: (s: string[]) => void } }).sseClient.connect =
+      connect;
+
+    sm.setScope({ type: 'brokers-list' });
+    expect(connect).toHaveBeenLastCalledWith(['broker.>']);
+
+    sm.setCurrentUserId('u-3');
+    expect(connect).toHaveBeenLastCalledWith([
+      'broker.>',
+      'user.u-3.chat.>',
+      'user.u-3.notification',
+    ]);
   });
 });
 

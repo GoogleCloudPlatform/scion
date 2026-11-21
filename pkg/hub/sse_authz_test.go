@@ -123,9 +123,9 @@ func TestAuthorizeSSESubjects_MixedAllowedDenied_AllFail(t *testing.T) {
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
 	subjects := []string{
-		"user.user-1.chat.dm",       // allowed (own ID)
-		"user.other-user.chat.dm",   // denied (other user)
-		"notification.user-1.inbox", // pass-through (no project/user prefix check)
+		"user.user-1.chat.dm",     // allowed (own ID)
+		"user.other-user.chat.dm", // denied (other user)
+		"broker.status",           // pass-through (no project/user prefix check)
 	}
 	denied := ws.authorizeSSESubjects(req, subjects)
 	assert.Equal(t, []string{"user.other-user.chat.dm"}, denied,
@@ -173,12 +173,12 @@ func TestAuthorizeSSESubjects_PassthroughSubjects(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	// Notification and broker subjects pass through without authorization.
-	denied := ws.authorizeSSESubjects(req, []string{
-		"notification.user-1.inbox",
-		"broker.status",
-	})
-	assert.Nil(t, denied, "notification/broker subjects should pass through")
+	// Broker subjects pass through without authorization; notification.* is denied.
+	assert.Nil(t, ws.authorizeSSESubjects(req, []string{"broker.status"}),
+		"broker subjects should pass through")
+	assert.Equal(t, []string{"notification.user-1.inbox"},
+		ws.authorizeSSESubjects(req, []string{"notification.user-1.inbox"}),
+		"notification subjects must be denied")
 }
 
 // --- expandSSEWildcards: NATS wildcard expansion tests (F2) ---
@@ -201,12 +201,12 @@ func TestExpandSSEWildcards_ProjectWildcard_SingleProject(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>"})
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "broker.>"})
 
 	assert.Contains(t, expanded, "project.proj-1.>",
 		"project.> should expand to project.proj-1.>")
-	assert.Contains(t, expanded, "notification.>",
-		"notification.> should pass through unchanged")
+	assert.Contains(t, expanded, "broker.>",
+		"broker.> should pass through unchanged")
 	assert.NotContains(t, expanded, "project.>",
 		"bare project.> should not remain after expansion")
 
@@ -228,15 +228,15 @@ func TestExpandSSEWildcards_ProjectWildcard_ZeroProjects(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>"})
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "broker.>"})
 
 	// project.> should have been dropped (no accessible projects).
 	for _, sub := range expanded {
 		assert.False(t, len(sub) >= 8 && sub[:8] == "project.",
 			"no project subjects should remain when user has 0 projects")
 	}
-	assert.Contains(t, expanded, "notification.>",
-		"notification.> should pass through even when no projects")
+	assert.Contains(t, expanded, "broker.>",
+		"broker.> should pass through even when no projects")
 }
 
 func TestExpandSSEWildcards_NilListProjectsResult(t *testing.T) {
@@ -253,15 +253,15 @@ func TestExpandSSEWildcards_NilListProjectsResult(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>"})
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "broker.>"})
 
-	// project.> should be dropped (fail-closed), notification.> passes through.
+	// project.> should be dropped (fail-closed), broker.> passes through.
 	for _, sub := range expanded {
 		assert.False(t, len(sub) >= 8 && sub[:8] == "project.",
 			"no project subjects should remain when ListProjects returns nil")
 	}
-	assert.Contains(t, expanded, "notification.>",
-		"notification.> should pass through even when ListProjects returns nil")
+	assert.Contains(t, expanded, "broker.>",
+		"broker.> should pass through even when ListProjects returns nil")
 }
 
 func TestExpandSSEWildcards_ProjectWildcard_MultipleProjects(t *testing.T) {
@@ -307,15 +307,16 @@ func TestExpandSSEWildcards_SpecificProjectID_Unchanged(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	subjects := []string{"project.proj-1.>", "notification.>"}
+	subjects := []string{"project.proj-1.>", "broker.>"}
 	expanded := ws.expandSSEWildcards(req, subjects)
 
 	assert.Equal(t, subjects, expanded,
 		"subjects without wildcards in resource-ID position should pass through unchanged")
 }
 
-func TestExpandSSEWildcards_NotificationBroker_Passthrough(t *testing.T) {
-	// notification.> and broker.> pass through without modification.
+func TestExpandSSEWildcards_BrokerPassthrough_NotificationDenied(t *testing.T) {
+	// broker.> passes through and is authorized; notification.> passes through
+	// expansion unchanged so authorizeSSESubjects denies it explicitly.
 	mockStore := &mockAuthzStore{}
 	ws := &WebServer{
 		store:        mockStore,
@@ -328,7 +329,10 @@ func TestExpandSSEWildcards_NotificationBroker_Passthrough(t *testing.T) {
 	expanded := ws.expandSSEWildcards(req, []string{"notification.>", "broker.>"})
 
 	assert.Equal(t, []string{"notification.>", "broker.>"}, expanded,
-		"notification and broker wildcards should pass through unchanged")
+		"expandSSEWildcards preserves notification.> so authorizeSSESubjects can deny it")
+	denied := ws.authorizeSSESubjects(req, expanded)
+	assert.Equal(t, []string{"notification.>"}, denied,
+		"notification.> must be denied by authorizeSSESubjects while broker.> remains allowed")
 }
 
 func TestExpandSSEWildcards_MixedSubjects(t *testing.T) {
@@ -368,7 +372,7 @@ func TestExpandSSEWildcards_MixedSubjects(t *testing.T) {
 // --- expandSSEWildcards: subject deduplication tests ---
 
 func TestExpandSSEWildcards_DuplicateWildcardInput(t *testing.T) {
-	// Duplicate wildcard input: ["project.>", "project.>", "notification.>"]
+	// Duplicate wildcard input: ["project.>", "project.>", "broker.>"]
 	// Each project.> independently expands to the same project subjects.
 	// After dedup, each project.<uuid>.> should appear exactly once.
 	mockStore := &mockAuthzStore{
@@ -389,7 +393,7 @@ func TestExpandSSEWildcards_DuplicateWildcardInput(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	expanded := ws.expandSSEWildcards(req, []string{"project.>", "project.>", "notification.>"})
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "project.>", "broker.>"})
 
 	// Count occurrences of each subject.
 	counts := make(map[string]int)
@@ -400,10 +404,10 @@ func TestExpandSSEWildcards_DuplicateWildcardInput(t *testing.T) {
 		"project.proj-1.> should appear exactly once after dedup")
 	assert.Equal(t, 1, counts["project.proj-2.>"],
 		"project.proj-2.> should appear exactly once after dedup")
-	assert.Equal(t, 1, counts["notification.>"],
-		"notification.> should appear exactly once")
+	assert.Equal(t, 1, counts["broker.>"],
+		"broker.> should appear exactly once")
 
-	// Total: 2 projects + 1 notification = 3 (not 2*2 + 1 = 5)
+	// Total: 2 projects + 1 broker = 3 (not 2*2 + 1 = 5)
 	assert.Equal(t, 3, len(expanded),
 		"deduped length should be len(projects) + 1, not 2*len(projects) + 1")
 }
@@ -451,9 +455,9 @@ func TestExpandSSEWildcards_WildcardExplicitOverlap(t *testing.T) {
 	assert.Contains(t, expanded, "project.proj-1.>")
 }
 
-func TestExpandSSEWildcards_MixedNotificationDedup(t *testing.T) {
-	// Mixed with notification dedup: ["project.>", "notification.>", "notification.>"]
-	// notification.> appears twice in input — after dedup, only once.
+func TestExpandSSEWildcards_MixedBrokerDedup(t *testing.T) {
+	// Mixed with broker dedup: ["project.>", "broker.>", "broker.>"]
+	// broker.> appears twice in input — after dedup, only once.
 	mockStore := &mockAuthzStore{
 		projects: []store.Project{
 			{ID: "proj-1", OwnerID: "user-1"},
@@ -470,18 +474,18 @@ func TestExpandSSEWildcards_MixedNotificationDedup(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	expanded := ws.expandSSEWildcards(req, []string{"project.>", "notification.>", "notification.>"})
+	expanded := ws.expandSSEWildcards(req, []string{"project.>", "broker.>", "broker.>"})
 
 	counts := make(map[string]int)
 	for _, s := range expanded {
 		counts[s]++
 	}
-	assert.Equal(t, 1, counts["notification.>"],
-		"notification.> should appear exactly once after dedup")
+	assert.Equal(t, 1, counts["broker.>"],
+		"broker.> should appear exactly once after dedup")
 	assert.Equal(t, 1, counts["project.proj-1.>"],
 		"project.proj-1.> should appear exactly once")
 
-	// Total: 1 project + 1 notification = 2 (not 1 + 2 = 3)
+	// Total: 1 project + 1 broker = 2 (not 1 + 2 = 3)
 	assert.Equal(t, 2, len(expanded),
 		"deduped length should be 2")
 }

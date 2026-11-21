@@ -173,8 +173,8 @@ export function reviewSummaryLink(n: Notification): string | null {
  *
  * The user-scoped `user.{id}.notification` subject delivers the row itself
  * (UserNotificationEvent): every field the tray renders (id, status,
- * message, createdAt, agentId). The bare `notification.created` path, and
- * anything malformed, yields null and is fetched instead.
+ * message, createdAt, agentId). Missing or malformed payloads yield null
+ * and fall back to fetching.
  *
  * The payload has no `acknowledged` field: a notification that was just
  * created is unacknowledged by definition, so a missing field passes and

@@ -304,16 +304,26 @@ func runTokyoContract(t *testing.T, b backend) {
 
 	// Notifications: created by the dispatcher on an agent status change.
 	step(t, "notification", func(t *testing.T) {
+		me := h.mustJSON("GET", "/api/v1/auth/me", nil, 200)
+		userID := str(me, "id")
+		if userID == "" {
+			userID = str(obj(me, "user"), "id")
+		}
+		if userID == "" {
+			t.Fatalf("GET /auth/me: no user id in %v", me)
+		}
+		notifSubject := "user." + userID + ".notification"
+
 		notifAgentID, _ := createRunningAgent(t, h, projectID, "tzc-notify")
 		h.mustJSON("POST", "/api/v1/notifications/subscriptions", map[string]any{
 			"scope": "agent", "agentId": notifAgentID, "projectId": projectID,
 			"triggerActivities": []string{"COMPLETED"},
 		}, 200, 201)
-		sse := h.subscribe("notification.created")
+		sse := h.subscribe(notifSubject)
 		w := openWindow()
 		h.mustJSON("POST", "/api/v1/agents/"+notifAgentID+"/status",
 			map[string]any{"activity": "completed"}, 200, 204)
-		ev := sse.wait(t, "notification.created", func(d map[string]any) bool {
+		ev := sse.wait(t, notifSubject, func(d map[string]any) bool {
 			return str(d, "agentId") == notifAgentID
 		})
 		w.close()
