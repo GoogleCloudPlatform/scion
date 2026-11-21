@@ -178,6 +178,10 @@ func TestSanitizeFilename_RejectsWindowsShellIntegrationExtensions(t *testing.T)
 		{"saved.search-ms", ".search-ms"},
 		{"clickonce.application", ".application"},
 		{"clickonce.appref-ms", ".appref-ms"},
+		{"desktop.theme", ".theme"},
+		{"winter.themepack", ".themepack"},
+		{"corporate.desktopthemepackfile", ".desktopthemepackfile"},
+		{"network.diagcab", ".diagcab"},
 		// Case-insensitivity.
 		{"SHORTCUT.LNK", ".lnk"},
 		{"Setup.INF", ".inf"},
@@ -186,6 +190,10 @@ func TestSanitizeFilename_RejectsWindowsShellIntegrationExtensions(t *testing.T)
 		{"Query.searchConnector-ms", ".searchconnector-ms"},
 		{"Saved.SEARCH-MS", ".search-ms"},
 		{"Pinned.Website", ".website"},
+		{"Desktop.THEME", ".theme"},
+		{"Winter.ThemePack", ".themepack"},
+		{"Corp.DesktopThemePackFile", ".desktopthemepackfile"},
+		{"Network.DIAGCAB", ".diagcab"},
 		// Double extensions.
 		{"report.pdf.lnk", ".lnk"},
 		{"invoice.docx.url", ".url"},
@@ -195,10 +203,14 @@ func TestSanitizeFilename_RejectsWindowsShellIntegrationExtensions(t *testing.T)
 		{"results.pdf.searchConnector-ms", ".searchconnector-ms"},
 		{"notes.md.scf", ".scf"},
 		{"export.csv.reg", ".reg"},
+		{"photo.jpg.theme", ".theme"},
+		{"logs.txt.diagcab", ".diagcab"},
 		// Trailing/invisible normalisation.
 		{"setup.inf ", ".inf"},
 		{"console.msc.", ".msc"},
 		{"docs.library-ms\u200b", ".library-ms"},
+		{"desktop.theme ", ".theme"},
+		{"network.diagcab.", ".diagcab"},
 	}
 	for _, tc := range cases {
 		_, err := SanitizeFilename(tc.name)
@@ -212,7 +224,7 @@ func TestSanitizeFilename_RejectsWindowsShellIntegrationExtensions(t *testing.T)
 
 	// Only the effective final extension is blocked; benign files that happen
 	// to contain a blocked token earlier in the name remain accepted.
-	for _, allowed := range []string{"notes.lnk.txt", "readme.inf.md", "audit.msc.log"} {
+	for _, allowed := range []string{"notes.lnk.txt", "readme.inf.md", "audit.msc.log", "colors.theme.json"} {
 		name, err := SanitizeFilename(allowed)
 		require.NoError(t, err, "SanitizeFilename(%q) should be accepted", allowed)
 		assert.Equal(t, allowed, name)

@@ -154,6 +154,8 @@ var DangerousExtensions = map[string]bool{
 	".settingcontent-ms": true, ".library-ms": true,
 	".searchconnector-ms": true, ".search-ms": true,
 	".application": true, ".appref-ms": true,
+	".theme": true, ".themepack": true, ".desktopthemepackfile": true,
+	".diagcab": true,
 }
 
 // attachmentExt returns the lower-cased extension that the blocklist above and
