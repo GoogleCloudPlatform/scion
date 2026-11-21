@@ -1012,8 +1012,13 @@ func TestToHTTPSCloneURL(t *testing.T) {
 		{"https://dev.azure.com/org/project/_git/repo", "https://dev.azure.com/org/project/_git/repo"},
 		// ADO with erroneous .git suffix — must be stripped
 		{"https://dev.azure.com/org/project/_git/repo.git", "https://dev.azure.com/org/project/_git/repo"},
-		// ADO via visualstudio.com
+		// ADO with org@ userinfo and .git suffix
+		{"https://org@dev.azure.com/org/project/_git/repo.git", "https://dev.azure.com/org/project/_git/repo"},
+		// ADO via visualstudio.com (with and without .git)
 		{"https://myorg.visualstudio.com/project/_git/repo", "https://myorg.visualstudio.com/project/_git/repo"},
+		{"https://myorg.visualstudio.com/project/_git/repo.git", "https://myorg.visualstudio.com/project/_git/repo"},
+		// ADO SSH shorthand
+		{"git@ssh.dev.azure.com:v3/org/project/repo.git", "https://ssh.dev.azure.com/v3/org/project/repo"},
 
 		// Empty
 		{"", ""},
@@ -1405,6 +1410,11 @@ func TestClassifyGitError(t *testing.T) {
 		{"could not read username", "fatal: could not read Username for 'https://github.com'", GitErrAuth},
 		{"not found", "fatal: repository 'https://github.com/org/repo.git/' not found", GitErrNotFound},
 		{"404", "ERROR: Repository not found. 404", GitErrNotFound},
+		{"ado TF401019 with not found", "remote: TF401019: The Git repository with name or identifier repo.git does not exist or you do not have permissions for the operation you are attempting.\nfatal: repository 'https://dev.azure.com/org/proj/_git/repo.git/' not found", GitErrNotFound},
+		{"ado TF401019 alone", "remote: TF401019: The Git repository with name or identifier repo.git does not exist.", GitErrNotFound},
+		{"embedded 401 digits not auth", "fatal: commit 12340156 not found", GitErrNotFound},
+		{"embedded 403 digits not auth", "remote: TF403000: something does not exist", GitErrNotFound},
+		{"standalone 401 still auth", "fatal: unable to access 'https://dev.azure.com/org/proj/_git/repo/': The requested URL returned error: 401", GitErrAuth},
 		{"network error", "fatal: unable to access: Could not resolve host: github.com", GitErrNetwork},
 		{"connection refused", "fatal: unable to connect: connection refused", GitErrNetwork},
 		{"timed out", "fatal: unable to access: timed out", GitErrNetwork},
@@ -1423,6 +1433,98 @@ func TestClassifyGitError(t *testing.T) {
 				t.Errorf("ClassifyGitError(%q).Message = %q, want %q", tt.stderr, gitErr.Message, tt.stderr)
 			}
 		})
+	}
+}
+
+func TestClassifyGitError_RemoteHostAndGuidance(t *testing.T) {
+	t.Run("ADO TF401019 not found names dev.azure.com without GitHub", func(t *testing.T) {
+		stderr := "remote: TF401019: The Git repository with name or identifier repo.git does not exist.\nfatal: repository 'https://dev.azure.com/org/proj/_git/repo.git/' not found"
+		gitErr := ClassifyGitError(stderr)
+		if gitErr.Kind != GitErrNotFound {
+			t.Fatalf("Kind = %v, want GitErrNotFound", gitErr.Kind)
+		}
+		if gitErr.RemoteHost != "dev.azure.com" {
+			t.Fatalf("RemoteHost = %q, want %q", gitErr.RemoteHost, "dev.azure.com")
+		}
+		guidance := gitErr.UserGuidance()
+		if !strings.Contains(guidance, "dev.azure.com") {
+			t.Errorf("UserGuidance() = %q, want it to name dev.azure.com", guidance)
+		}
+		if strings.Contains(guidance, "GitHub") || strings.Contains(guidance, "GITHUB_TOKEN") {
+			t.Errorf("UserGuidance() = %q, must not mention GitHub/GITHUB_TOKEN for ADO", guidance)
+		}
+	})
+
+	t.Run("ADO auth failure names dev.azure.com without GitHub", func(t *testing.T) {
+		stderr := "fatal: Authentication failed for 'https://dev.azure.com/org/proj/_git/repo/'"
+		gitErr := ClassifyGitError(stderr)
+		if gitErr.Kind != GitErrAuth {
+			t.Fatalf("Kind = %v, want GitErrAuth", gitErr.Kind)
+		}
+		if gitErr.RemoteHost != "dev.azure.com" {
+			t.Fatalf("RemoteHost = %q, want %q", gitErr.RemoteHost, "dev.azure.com")
+		}
+		guidance := gitErr.UserGuidance()
+		if !strings.Contains(guidance, "dev.azure.com") {
+			t.Errorf("UserGuidance() = %q, want it to name dev.azure.com", guidance)
+		}
+		if strings.Contains(guidance, "GitHub") || strings.Contains(guidance, "GITHUB_TOKEN") {
+			t.Errorf("UserGuidance() = %q, must not mention GitHub/GITHUB_TOKEN for ADO", guidance)
+		}
+	})
+
+	t.Run("GitHub auth failure names github.com and GitHub credentials", func(t *testing.T) {
+		stderr := "fatal: Authentication failed for 'https://github.com/org/repo.git/'"
+		gitErr := ClassifyGitError(stderr)
+		if gitErr.Kind != GitErrAuth {
+			t.Fatalf("Kind = %v, want GitErrAuth", gitErr.Kind)
+		}
+		if gitErr.RemoteHost != "github.com" {
+			t.Fatalf("RemoteHost = %q, want %q", gitErr.RemoteHost, "github.com")
+		}
+		guidance := gitErr.UserGuidance()
+		if !strings.Contains(guidance, "github.com") || !strings.Contains(guidance, "GITHUB_TOKEN") {
+			t.Errorf("UserGuidance() = %q, want github.com and GITHUB_TOKEN", guidance)
+		}
+	})
+
+	t.Run("ClassifyGitErrorForURL sets host when stderr omits URL", func(t *testing.T) {
+		gitErr := ClassifyGitErrorForURL("fatal: Invalid credentials", "https://myorg.visualstudio.com/proj/_git/repo")
+		if gitErr.Kind != GitErrAuth {
+			t.Fatalf("Kind = %v, want GitErrAuth", gitErr.Kind)
+		}
+		if gitErr.RemoteHost != "myorg.visualstudio.com" {
+			t.Fatalf("RemoteHost = %q, want %q", gitErr.RemoteHost, "myorg.visualstudio.com")
+		}
+		guidance := gitErr.UserGuidance()
+		if !strings.Contains(guidance, "myorg.visualstudio.com") {
+			t.Errorf("UserGuidance() = %q, want myorg.visualstudio.com", guidance)
+		}
+		if strings.Contains(guidance, "GitHub") || strings.Contains(guidance, "GITHUB_TOKEN") {
+			t.Errorf("UserGuidance() = %q, must not mention GitHub/GITHUB_TOKEN", guidance)
+		}
+	})
+}
+
+func TestCloneURLHost(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"https://dev.azure.com/org/proj/_git/repo", "dev.azure.com"},
+		{"https://org@dev.azure.com:443/org/proj/_git/repo", "dev.azure.com"},
+		{"https://MyOrg.VisualStudio.com/proj/_git/repo", "myorg.visualstudio.com"},
+		{"https://github.com/org/repo.git", "github.com"},
+		{"git@gitlab.com:org/repo.git", "gitlab.com"},
+		{"ssh://git@ssh.dev.azure.com:22/v3/org/proj/repo", "ssh.dev.azure.com"},
+		{"dev.azure.com/org/proj/_git/repo", "dev.azure.com"},
+		{"/tmp/local-repo", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := CloneURLHost(tt.input); got != tt.want {
+			t.Errorf("CloneURLHost(%q) = %q, want %q", tt.input, got, tt.want)
+		}
 	}
 }
 

@@ -1628,7 +1628,7 @@ func ToHTTPSCloneURL(gitURL string) string {
 	// appending .git would break them. For ADO we strip any erroneous
 	// .git suffix. For every other host we ensure the .git suffix is present.
 	if isAzureDevOpsURL(result) {
-		result = strings.TrimSuffix(result, ".git")
+		result = stripADOGitSuffix(result)
 	} else if !strings.HasSuffix(result, ".git") {
 		result += ".git"
 	}
@@ -1637,25 +1637,64 @@ func ToHTTPSCloneURL(gitURL string) string {
 }
 
 // isAzureDevOpsURL reports whether hostAndPath (without scheme) looks like an
-// Azure DevOps clone URL. It matches dev.azure.com, *.visualstudio.com hosts,
-// and any path containing the /_git/ segment that ADO uses.
+// Azure DevOps clone URL. It matches dev.azure.com, ssh.dev.azure.com,
+// *.visualstudio.com hosts, and any path containing the /_git/ segment that
+// ADO (including on-prem Azure DevOps Server / TFS) uses.
 func isAzureDevOpsURL(hostAndPath string) bool {
 	lower := strings.ToLower(hostAndPath)
-	if strings.HasPrefix(lower, "dev.azure.com/") {
+	authority, _, _ := strings.Cut(lower, "/")
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		authority = authority[at+1:]
+	}
+	host := authority
+	if isHostAndPort(authority) {
+		host = authority[:strings.LastIndex(authority, ":")]
+	}
+	if host == "dev.azure.com" || host == "ssh.dev.azure.com" {
 		return true
 	}
-	// <org>.visualstudio.com/...
-	if dotIdx := strings.Index(lower, "."); dotIdx > 0 {
-		rest := lower[dotIdx:]
-		if strings.HasPrefix(rest, ".visualstudio.com/") || rest == ".visualstudio.com" {
-			return true
-		}
+	if len(host) > len(".visualstudio.com") && strings.HasSuffix(host, ".visualstudio.com") {
+		return true
 	}
 	// Catch-all: any URL with the /_git/ path segment is ADO-style.
 	if strings.Contains(lower, "/_git/") {
 		return true
 	}
 	return false
+}
+
+// stripADOGitSuffix removes a trailing ".git" (case-insensitive, ignoring any
+// trailing slashes) from an Azure DevOps URL path.
+func stripADOGitSuffix(s string) string {
+	trimmed := strings.TrimRight(s, "/")
+	if len(trimmed) >= 4 && strings.EqualFold(trimmed[len(trimmed)-4:], ".git") {
+		return trimmed[:len(trimmed)-4]
+	}
+	return s
+}
+
+// StripADOCloneURLGitSuffix removes an erroneous trailing ".git" from an Azure
+// DevOps clone URL while leaving all non-ADO URLs and local paths unchanged.
+func StripADOCloneURLGitSuffix(rawURL string) string {
+	if rawURL == "" || isLocalPath(rawURL) {
+		return rawURL
+	}
+	if scheme, rest, ok := splitScheme(rawURL); ok {
+		if (scheme == "https" || scheme == "http" || isSSHScheme(scheme)) && isAzureDevOpsURL(rest) {
+			return rawURL[:len(rawURL)-len(rest)] + stripADOGitSuffix(rest)
+		}
+		return rawURL
+	}
+	if login, host, path, ok := splitSCP(rawURL); ok {
+		if isAzureDevOpsURL(host + "/" + path) {
+			return login + "@" + host + ":" + stripADOGitSuffix(path)
+		}
+		return rawURL
+	}
+	if isAzureDevOpsURL(rawURL) {
+		return stripADOGitSuffix(rawURL)
+	}
+	return rawURL
 }
 
 // ExtractOrgRepo extracts the organization and repository name from a git URL.
@@ -1762,11 +1801,11 @@ func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostG
 		output, err = runClone(append(append([]string{}, gitArgs...), "clone", "--", cloneURL, workspacePath)...)
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
-			gitErr := ClassifyGitError(sanitized)
+			gitErr := ClassifyGitErrorForURL(sanitized, cloneURL)
 			if guidance := gitErr.UserGuidance(); guidance != "" {
-				return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s (%s)", sanitized, guidance)}
+				return &GitError{Kind: gitErr.Kind, RemoteHost: gitErr.RemoteHost, Message: fmt.Sprintf("git clone failed: %s (%s)", sanitized, guidance)}
 			}
-			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
+			return &GitError{Kind: gitErr.Kind, RemoteHost: gitErr.RemoteHost, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
 		}
 
 		// Create the requested branch locally. The checkout gets the remote
@@ -1782,11 +1821,11 @@ func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostG
 		}
 	} else if err != nil {
 		sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
-		gitErr := ClassifyGitError(sanitized)
+		gitErr := ClassifyGitErrorForURL(sanitized, cloneURL)
 		if guidance := gitErr.UserGuidance(); guidance != "" {
-			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s (%s)", sanitized, guidance)}
+			return &GitError{Kind: gitErr.Kind, RemoteHost: gitErr.RemoteHost, Message: fmt.Sprintf("git clone failed: %s (%s)", sanitized, guidance)}
 		}
-		return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
+		return &GitError{Kind: gitErr.Kind, RemoteHost: gitErr.RemoteHost, Message: fmt.Sprintf("git clone failed: %s", sanitized)}
 	}
 
 	if err := gitConfig(workspacePath, "user.name", "Scion"); err != nil {
@@ -1852,11 +1891,11 @@ func PullSharedWorkspaceHardened(workspacePath, cloneURL, token string, h HostGi
 func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardening) (*PullResult, error) {
 	pullErr := func(msg string) error {
 		msg = sanitizeGitOutput(msg, token)
-		gitErr := ClassifyGitError(msg)
+		gitErr := ClassifyGitErrorForURL(msg, cloneURL)
 		if guidance := gitErr.UserGuidance(); guidance != "" {
-			return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git pull failed: %s (%s)", msg, guidance)}
+			return &GitError{Kind: gitErr.Kind, RemoteHost: gitErr.RemoteHost, Message: fmt.Sprintf("git pull failed: %s (%s)", msg, guidance)}
 		}
-		return &GitError{Kind: gitErr.Kind, Message: fmt.Sprintf("git pull failed: %s", msg)}
+		return &GitError{Kind: gitErr.Kind, RemoteHost: gitErr.RemoteHost, Message: fmt.Sprintf("git pull failed: %s", msg)}
 	}
 	if cloneURL == "" {
 		return nil, pullErr("the shared workspace has no clone URL")
@@ -2025,14 +2064,114 @@ const (
 	GitErrNonFastForward
 )
 
-// GitError wraps a git operation error with a classified kind and sanitized message.
+// GitError wraps a git operation error with a classified kind, sanitized
+// message, and optional remote host (lowercase, without port or userinfo).
 type GitError struct {
-	Kind    GitErrorKind
-	Message string
+	Kind       GitErrorKind
+	Message    string
+	RemoteHost string
 }
 
 func (e *GitError) Error() string {
 	return e.Message
+}
+
+// IsGitHubHost reports whether host is github.com (case-insensitive).
+func IsGitHubHost(host string) bool {
+	return strings.EqualFold(host, "github.com")
+}
+
+// CloneURLHost returns the lowercase hostname (without userinfo or port) for a
+// git clone URL, or "" for local paths and unparseable values.
+func CloneURLHost(rawURL string) string {
+	rawURL = trimSpaceEdges(rawURL)
+	if rawURL == "" || isLocalPath(rawURL) {
+		return ""
+	}
+	if _, rest, ok := splitScheme(rawURL); ok {
+		authority, _, _ := strings.Cut(rest, "/")
+		if at := strings.LastIndex(authority, "@"); at >= 0 {
+			authority = authority[at+1:]
+		}
+		if authority == "" {
+			return ""
+		}
+		if isHostAndPort(authority) {
+			authority = authority[:strings.LastIndex(authority, ":")]
+		}
+		return strings.ToLower(authority)
+	}
+	if _, host, _, ok := splitSCP(rawURL); ok {
+		return strings.ToLower(host)
+	}
+	authority, _, hasSlash := strings.Cut(rawURL, "/")
+	if !hasSlash || authority == "" {
+		return ""
+	}
+	if at := strings.LastIndex(authority, "@"); at >= 0 {
+		authority = authority[at+1:]
+	}
+	if isHostAndPort(authority) {
+		authority = authority[:strings.LastIndex(authority, ":")]
+	}
+	if authority == "" || strings.ContainsAny(authority, " \t\r\n") {
+		return ""
+	}
+	return strings.ToLower(authority)
+}
+
+// extractHostFromGitStderr extracts the first remote hostname referenced in git
+// stderr output (e.g. "fatal: repository 'https://dev.azure.com/...' not found"
+// or "git@gitlab.com: Permission denied"), or "" if none is found.
+func extractHostFromGitStderr(stderr string) string {
+	for _, field := range strings.Fields(stderr) {
+		token := strings.Trim(field, "'\"()[]<>.,;:")
+		if token == "" {
+			continue
+		}
+		if _, _, ok := splitScheme(token); ok {
+			if host := CloneURLHost(token); host != "" {
+				return host
+			}
+			continue
+		}
+		// Match scp-style "git@host:..." (git may include trailing colon with no path,
+		// e.g. "git@gitlab.com: Permission denied").
+		if _, host, _, ok := splitSCP(token); ok && host != "" {
+			return strings.ToLower(host)
+		}
+		// Handle "git@host:" where Trim stripped the trailing ':'.
+		if strings.HasPrefix(field, "git@") && strings.Contains(field, ":") {
+			if _, host, _, ok := splitSCP(strings.Trim(field, "'\"()[]<>.,;")); ok && host != "" {
+				return strings.ToLower(host)
+			}
+		}
+	}
+	return ""
+}
+
+// containsStatusCode reports whether s contains code as a standalone token
+// (not embedded in a larger alphanumeric identifier such as Azure DevOps's
+// "TF401019" error code).
+func containsStatusCode(s, code string) bool {
+	isAlnum := func(b byte) bool {
+		return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+	}
+	for start := 0; start < len(s); {
+		idx := strings.Index(s[start:], code)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(code)
+		leftOK := pos == 0 || !isAlnum(s[pos-1])
+		rightOK := end == len(s) || !isAlnum(s[end])
+		if leftOK && rightOK {
+			return true
+		}
+		start = pos + 1
+	}
+	return false
 }
 
 // ClassifyGitError inspects sanitized git stderr and returns a classified GitError.
@@ -2044,13 +2183,13 @@ func ClassifyGitError(sanitizedStderr string) *GitError {
 	case strings.Contains(lower, "authentication failed") ||
 		strings.Contains(lower, "could not read username") ||
 		strings.Contains(lower, "invalid credentials") ||
-		strings.Contains(lower, "403") ||
-		strings.Contains(lower, "401"):
+		containsStatusCode(lower, "403") ||
+		containsStatusCode(lower, "401"):
 		kind = GitErrAuth
 	case strings.Contains(lower, "repository not found") ||
 		strings.Contains(lower, "not found") ||
 		strings.Contains(lower, "does not exist") ||
-		strings.Contains(lower, "404"):
+		containsStatusCode(lower, "404"):
 		kind = GitErrNotFound
 	case strings.Contains(lower, "could not resolve host") ||
 		strings.Contains(lower, "unable to access") ||
@@ -2063,23 +2202,65 @@ func ClassifyGitError(sanitizedStderr string) *GitError {
 		kind = GitErrNonFastForward
 	}
 
-	return &GitError{Kind: kind, Message: sanitizedStderr}
+	return &GitError{
+		Kind:       kind,
+		Message:    sanitizedStderr,
+		RemoteHost: extractHostFromGitStderr(sanitizedStderr),
+	}
 }
 
-// UserGuidance returns a user-facing hint for the error kind.
+// ClassifyGitErrorForURL classifies sanitized git stderr and records the
+// remote host from cloneURL (falling back to any host parsed from stderr).
+func ClassifyGitErrorForURL(sanitizedStderr, cloneURL string) *GitError {
+	gitErr := ClassifyGitError(sanitizedStderr)
+	if host := CloneURLHost(cloneURL); host != "" {
+		gitErr.RemoteHost = host
+	}
+	return gitErr
+}
+
+// UserGuidance returns a user-facing hint for the error kind, tailored to
+// RemoteHost when known.
 func (e *GitError) UserGuidance() string {
+	host := e.RemoteHost
 	switch e.Kind {
 	case GitErrAuth:
-		return "Check that GITHUB_TOKEN (or GitHub App credentials) are valid and have repository read access."
+		if host != "" && !IsGitHubHost(host) {
+			return fmt.Sprintf("Check that the project's git credentials for %s are valid and have repository read access.", host)
+		}
+		if host != "" {
+			return fmt.Sprintf("Check that GITHUB_TOKEN (or GitHub App credentials) for %s are valid and have repository read access.", host)
+		}
+		return "Check that the project's git credentials (GITHUB_TOKEN or GitHub App for GitHub) are valid and have repository read access."
 	case GitErrNotFound:
-		return "Verify the repository URL exists and that the token has access to it (private repos require explicit access)."
+		if host != "" {
+			return fmt.Sprintf("Verify the repository URL on %s exists and that the project's git credentials have access to it (private repos require explicit access).", host)
+		}
+		return "Verify the repository URL exists and that the project's git credentials have access to it (private repos require explicit access)."
 	case GitErrNetwork:
+		if host != "" {
+			return fmt.Sprintf("A network error occurred reaching %s. Check connectivity and try again.", host)
+		}
 		return "A network error occurred. Check connectivity and try again."
 	case GitErrNonFastForward:
 		return "The workspace has local commits that diverge from the remote. Merge or reset manually before pulling."
 	default:
 		return ""
 	}
+}
+
+// NoTokenGuidance returns a user-facing hint when a clone fails without a
+// configured git token. Repository-not-found errors keep their not-found
+// guidance instead of being misreported as a missing credential, and
+// non-GitHub hosts name the actual remote host.
+func (e *GitError) NoTokenGuidance() string {
+	if e.Kind == GitErrNotFound {
+		return e.UserGuidance()
+	}
+	if e.RemoteHost != "" && !IsGitHubHost(e.RemoteHost) {
+		return fmt.Sprintf("no git credentials configured for %s — the repository may require authentication", e.RemoteHost)
+	}
+	return "no GITHUB_TOKEN secret configured — the repository may require authentication"
 }
 
 // sanitizeGitOutput removes a token from git output to prevent credential leaks.

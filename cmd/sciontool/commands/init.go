@@ -3719,7 +3719,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 			log.Info("Successfully fetched agent branch %s from origin", agentBranch)
 		} else {
 			if isAuthError(errOutput) {
-				return formatCloneError(errOutput, token)
+				return formatCloneErrorForURL(errOutput, cloneURLNoCredential, token)
 			}
 			log.Info("Agent branch %s not found on origin, falling back to %s", agentBranch, branch)
 		}
@@ -3731,7 +3731,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		if ok {
 			clonedBranch = branch
 		} else if isAuthError(errOutput) {
-			return formatCloneError(errOutput, token)
+			return formatCloneErrorForURL(errOutput, cloneURLNoCredential, token)
 		} else {
 			// The configured branch doesn't exist. Try to detect the
 			// remote's default branch via ls-remote and fetch that instead.
@@ -3743,10 +3743,10 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 				if ok2 {
 					clonedBranch = detected
 				} else {
-					return formatCloneError(errOutput2, token)
+					return formatCloneErrorForURL(errOutput2, cloneURLNoCredential, token)
 				}
 			} else {
-				return formatCloneError(errOutput, token)
+				return formatCloneErrorForURL(errOutput, cloneURLNoCredential, token)
 			}
 		}
 	}
@@ -4210,12 +4210,22 @@ func isAuthError(sanitizedStderr string) bool {
 }
 
 // formatCloneError builds a descriptive error from sanitized git stderr.
-// When no GITHUB_TOKEN is set, the message calls that out specifically.
-// Also includes user-facing guidance from the error classification.
+// Also includes host-aware user-facing guidance from the error classification.
 func formatCloneError(sanitizedStderr, token string) error {
+	return formatCloneErrorForURL(sanitizedStderr, "", token)
+}
+
+// formatCloneErrorForURL builds a descriptive error from sanitized git stderr
+// and the clone URL being fetched so guidance names the actual remote host.
+func formatCloneErrorForURL(sanitizedStderr, cloneURL, token string) error {
 	gitErr := util.ClassifyGitError(sanitizedStderr)
+	if gitErr.RemoteHost == "" && cloneURL != "" {
+		if u, err := url.Parse(normalizeCloneURL(cloneURL)); err == nil && u.Hostname() != "" {
+			gitErr.RemoteHost = strings.ToLower(u.Hostname())
+		}
+	}
 	if token == "" {
-		return fmt.Errorf("git clone failed (no GITHUB_TOKEN secret configured — the repository may require authentication): %s", sanitizedStderr)
+		return fmt.Errorf("git clone failed (%s): %s", gitErr.NoTokenGuidance(), sanitizedStderr)
 	}
 	if guidance := gitErr.UserGuidance(); guidance != "" {
 		return fmt.Errorf("git clone failed (%s): %s", guidance, sanitizedStderr)

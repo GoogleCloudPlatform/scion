@@ -3054,12 +3054,21 @@ func cloneError(rawURL, output string, runErr error, withToken bool, token strin
 	if token != "" {
 		detail = strings.ReplaceAll(detail, token, redactedCredential)
 	}
-	kind := util.ClassifyGitError(detail).Kind
+	classified := util.ClassifyGitErrorForURL(detail, rawURL)
+	kind := classified.Kind
+	host := classified.RemoteHost
 	if withToken {
 		switch kind {
 		case util.GitErrAuth:
+			if host != "" && !util.IsGitHubHost(host) {
+				return fmt.Errorf("git clone %s: the repository on %s did not accept the project's git credential: %s", safeURL, host, detail)
+			}
 			return fmt.Errorf("git clone %s: the repository did not accept the project's git credential (GITHUB_TOKEN): %s", safeURL, detail)
 		case util.GitErrNotFound:
+			if host != "" && !util.IsGitHubHost(host) {
+				return fmt.Errorf("git clone %s: repository or branch not found on %s, "+
+					"or the project's git credential has no access to it: %s", safeURL, host, detail)
+			}
 			return fmt.Errorf("git clone %s: repository or branch not found, "+
 				"or the project's git credential (GITHUB_TOKEN) has no access to it: %s", safeURL, detail)
 		default:
