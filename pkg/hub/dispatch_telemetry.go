@@ -295,14 +295,62 @@ func hasTelemetryGCPCredentials(env map[string]string, secrets []ResolvedSecret)
 	return false
 }
 
+// dispatchRuntimeType returns the resolved runtime type for agent's dispatch
+// target, using the broker's stored profile when available and falling back to
+// agent.Runtime.
+func (d *HTTPAgentDispatcher) dispatchRuntimeType(ctx context.Context, agent *store.Agent) string {
+	if agent == nil {
+		return ""
+	}
+	var profileName string
+	if agent.AppliedConfig != nil {
+		profileName = agent.AppliedConfig.Profile
+	}
+	if d.store != nil && agent.RuntimeBrokerID != "" {
+		if broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil && broker != nil {
+			if _, typ, ok := resolveAgentRuntimeProfileType(broker, profileName); ok && typ != "" {
+				return typ
+			}
+		}
+	}
+	return agent.Runtime
+}
+
+// effectiveDispatchGCPMetadataMode mirrors the broker's effectiveGCPMetadataMode
+// resolution: nil or empty MetadataMode defaults to block on non-Kubernetes
+// runtimes and passthrough on Kubernetes. A passthrough grant constrained by
+// RequireLocalRuntime folds to block on non-local runtimes.
+func (d *HTTPAgentDispatcher) effectiveDispatchGCPMetadataMode(ctx context.Context, agent *store.Agent) string {
+	if agent == nil {
+		return ""
+	}
+	runtimeType := d.dispatchRuntimeType(ctx, agent)
+	var mode string
+	var requireLocal bool
+	if agent.AppliedConfig != nil && agent.AppliedConfig.GCPIdentity != nil {
+		mode = agent.AppliedConfig.GCPIdentity.MetadataMode
+		requireLocal = agent.AppliedConfig.GCPIdentity.RequireLocalRuntime
+	}
+	if mode == "" {
+		if isKubernetesRuntimeType(runtimeType) {
+			return store.GCPMetadataModePassthrough
+		}
+		return store.GCPMetadataModeBlock
+	}
+	if mode == store.GCPMetadataModePassthrough && requireLocal && runtimeType != "" && !localOnlyProfileTypes[runtimeType] {
+		return store.GCPMetadataModeBlock
+	}
+	return mode
+}
+
 // warnGCPTelemetryBlockedWithoutCredentials adds a dispatch warning when GCP
-// cloud telemetry is enabled for an agent running in metadata mode block
-// without the scion-telemetry-gcp-credentials secret.
+// cloud telemetry is enabled for an agent whose effective metadata mode is
+// block without the scion-telemetry-gcp-credentials secret.
 func (d *HTTPAgentDispatcher) warnGCPTelemetryBlockedWithoutCredentials(ctx context.Context, agent *store.Agent, tel telemetryDispatch, env map[string]string, secrets []ResolvedSecret) {
-	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
+	if agent == nil {
 		return
 	}
-	if agent.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeBlock {
+	if d.effectiveDispatchGCPMetadataMode(ctx, agent) != store.GCPMetadataModeBlock {
 		return
 	}
 	if !tel.isGCPCloudEnabled() {

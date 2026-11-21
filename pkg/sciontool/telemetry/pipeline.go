@@ -781,7 +781,7 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	// and transport calls may have their own retry policy within the caller's
 	// context; this count is not a network-attempt guarantee.
 	if p.exporter != nil {
-		allow, isProbe := p.allowCloudExport()
+		allow, isProbe := p.allowCloudExport("spans")
 		if !allow {
 			p.spanDiagnostics.dropped.Add(int64(spanCount))
 			return nil
@@ -1057,7 +1057,7 @@ func (p *Pipeline) flushMetricsOnStop(ctx context.Context) {
 		if p.exporter == nil {
 			return
 		}
-		if p.isAuthStandingDown() {
+		if p.isAuthStandingDown("metrics") {
 			p.metricStateMu.Lock()
 			dropped := p.metricPendingRecords + p.metricDirtyRecords
 			if dropped > 0 {
@@ -1183,7 +1183,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		return false
 	}
 
-	allow, isProbe := p.allowCloudExport()
+	allow, isProbe := p.allowCloudExport("metrics")
 	if !allow {
 		p.metricStateMu.Lock()
 		p.metricLastFlush = p.now()
@@ -1199,6 +1199,14 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		}
 		p.metricStateMu.Unlock()
 		return false
+	}
+	probeCompleted := false
+	if isProbe {
+		defer func() {
+			if !probeCompleted {
+				p.releaseCloudExportProbe("metrics")
+			}
+		}()
 	}
 
 	metricCount := 0
@@ -1248,6 +1256,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		if !metricBatchContains(batch, pipelineMetricScope, "scion.telemetry.export.errors") {
 			p.recordExportError(ctx, "metrics", err)
 		}
+		probeCompleted = true
 		if !p.recordCloudExportOutcome("metrics", err, isProbe) {
 			log.Error("Failed to export %d metric streams to cloud: %v", metricCount, err)
 		}
@@ -1271,6 +1280,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		}
 		return false
 	}
+	probeCompleted = true
 	p.recordCloudExportOutcome("metrics", nil, isProbe)
 	p.metricStateMu.Lock()
 	p.metricDiagnostics.success(p.metricPendingRecords)
@@ -1386,7 +1396,7 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	// Pipeline-level retry on top of gRPC/SDK transport retry — see
 	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
-		allow, isProbe := p.allowCloudExport()
+		allow, isProbe := p.allowCloudExport("logs")
 		if !allow {
 			p.logDiagnostics.dropped.Add(int64(logCount))
 			return nil

@@ -418,7 +418,7 @@ Settings for forwarding telemetry to Google Cloud or a generic OTLP backend.
 | `provider` | string | — | Cloud provider name. Set `gcp` to export via GCP-native SDKs (Cloud Monitoring, Cloud Trace, Cloud Logging); leave unset for generic OTLP export. |
 | `gcp_project_id` | string | — | GCP project ID for GCP-native export and the Hub metrics dashboard. |
 | `endpoint` | string | — | Generic OTLP gRPC collector address (for example `host.docker.internal:4317`). Ignored when `provider` is `gcp`. |
-| `protocol` | string | `grpc` | Transport protocol for generic OTLP export (`grpc`). |
+| `protocol` | string | `grpc` | Transport protocol for generic OTLP export (`grpc` or `http`). |
 | `cloud_logging` | bool | `false` | Send the Scion server's (Hub's) own logs directly to Google Cloud Logging. Read once at server startup; `SCION_CLOUD_LOGGING`, when set (even to `false`), takes precedence over the file. Agents do not use it: the value is carried into the agent's resolved telemetry config (`telemetry.cloud.cloud_logging`) but is not passed to the agent as an environment variable. On a database-backed Hub it cannot be changed through `PUT /api/v1/admin/server-config` (`422 startup_only_key_rejected`). |
 | `headers` | map | — | Additional headers for OTLP export (e.g., `Authorization`). |
 | `tls.enabled` | bool | `true` | Enable TLS for the connection. |

@@ -135,6 +135,9 @@ func (e *GCPExporter) reportAsyncLogError(err error) {
 	e.asyncLogErrors.Add(1)
 	if e.onAsyncLogError != nil {
 		e.onAsyncLogError(err)
+		if isPermanentAuthError(err) {
+			return
+		}
 	}
 	log.Error("Cloud Logging asynchronous delivery failed: %v", err)
 }

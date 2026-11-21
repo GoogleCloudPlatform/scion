@@ -1267,12 +1267,15 @@ func (s *Server) metricsTelemetryHint(ctx context.Context, projectID string) str
 	if mode != "" && mode != store.GCPMetadataModeBlock {
 		return ""
 	}
+	if mode == "" && s.allBrokersKubernetesOnly(ctx) {
+		return ""
+	}
 
 	if s.secretBackend == nil {
 		return ""
 	}
 	meta, err := s.secretBackend.GetMeta(ctx, telemetryGCPCredentialsSecretName, store.ScopeHub, s.hubID)
-	if err == nil && meta != nil && secret.HubSecretDeliverable(*meta) {
+	if err == nil && meta != nil && meta.SecretType == store.SecretTypeFile && secret.HubSecretDeliverable(*meta) {
 		return ""
 	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1287,6 +1290,41 @@ func (s *Server) metricsTelemetryHint(ctx context.Context, projectID string) str
 			return ""
 		}
 	}
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil && userIdent.ID() != "" {
+		uMeta, uErr := s.secretBackend.GetMeta(ctx, telemetryGCPCredentialsSecretName, store.ScopeUser, userIdent.ID())
+		if uErr == nil && uMeta != nil && uMeta.SecretType == store.SecretTypeFile {
+			return ""
+		}
+		if uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+			return ""
+		}
+	}
 
 	return missingGCPTelemetryCredentialsHint
+}
+
+// allBrokersKubernetesOnly reports whether the hub has at least one registered
+// runtime broker and every registered broker profile is a Kubernetes runtime
+// (where an unset GCP identity mode defaults to passthrough rather than block).
+func (s *Server) allBrokersKubernetesOnly(ctx context.Context) bool {
+	if s.store == nil {
+		return false
+	}
+	res, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{})
+	if err != nil || res == nil || len(res.Items) == 0 {
+		return false
+	}
+	sawProfile := false
+	for _, b := range res.Items {
+		if len(b.Profiles) == 0 {
+			return false
+		}
+		for _, p := range b.Profiles {
+			sawProfile = true
+			if !isKubernetesRuntimeType(p.Type) {
+				return false
+			}
+		}
+	}
+	return sawProfile
 }

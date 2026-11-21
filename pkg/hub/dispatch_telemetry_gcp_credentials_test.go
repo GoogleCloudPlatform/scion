@@ -28,6 +28,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+type fakeTelemetryBrokerStore struct {
+	store.Store
+	brokers map[string]*store.RuntimeBroker
+	list    []store.RuntimeBroker
+}
+
+func (f *fakeTelemetryBrokerStore) GetRuntimeBroker(_ context.Context, id string) (*store.RuntimeBroker, error) {
+	if b, ok := f.brokers[id]; ok {
+		return b, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (f *fakeTelemetryBrokerStore) ListRuntimeBrokers(_ context.Context, _ store.RuntimeBrokerFilter, _ store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	return &store.ListResult[store.RuntimeBroker]{Items: f.list, TotalCount: len(f.list)}, nil
+}
+
 func TestWarnGCPTelemetryBlockedWithoutCredentials(t *testing.T) {
 	boolPtr := func(v bool) *bool { return &v }
 	gcpHubDefault := &api.TelemetryConfig{
@@ -59,6 +76,65 @@ func TestWarnGCPTelemetryBlockedWithoutCredentials(t *testing.T) {
 			GCPIdentity: &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign},
 		},
 	}
+	nilIdentityLocalAgent := &store.Agent{
+		ID:              "agent-3",
+		Name:            "a3",
+		RuntimeBrokerID: "broker-local",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "local"},
+	}
+	nilIdentityK8sAgent := &store.Agent{
+		ID:              "agent-4",
+		Name:            "a4",
+		RuntimeBrokerID: "broker-k8s",
+		AppliedConfig:   &store.AgentAppliedConfig{Profile: "gke"},
+	}
+	nilAppliedConfigAgent := &store.Agent{
+		ID:   "agent-5",
+		Name: "a5",
+	}
+	passthroughRequireLocalCloudRunAgent := &store.Agent{
+		ID:              "agent-6",
+		Name:            "a6",
+		RuntimeBrokerID: "broker-cloudrun",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Profile: "cr",
+			GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModePassthrough,
+				RequireLocalRuntime: true,
+			},
+		},
+	}
+	passthroughRequireLocalDockerAgent := &store.Agent{
+		ID:              "agent-7",
+		Name:            "a7",
+		RuntimeBrokerID: "broker-local",
+		AppliedConfig: &store.AgentAppliedConfig{
+			Profile: "local",
+			GCPIdentity: &store.GCPIdentityConfig{
+				MetadataMode:        store.GCPMetadataModePassthrough,
+				RequireLocalRuntime: true,
+			},
+		},
+	}
+	brokerStore := &fakeTelemetryBrokerStore{
+		brokers: map[string]*store.RuntimeBroker{
+			"broker-local": {
+				ID:             "broker-local",
+				DefaultProfile: "local",
+				Profiles:       []store.BrokerProfile{{Name: "local", Type: "docker"}},
+			},
+			"broker-k8s": {
+				ID:             "broker-k8s",
+				DefaultProfile: "gke",
+				Profiles:       []store.BrokerProfile{{Name: "gke", Type: "kubernetes"}},
+			},
+			"broker-cloudrun": {
+				ID:             "broker-cloudrun",
+				DefaultProfile: "cr",
+				Profiles:       []store.BrokerProfile{{Name: "cr", Type: "cloudrun"}},
+			},
+		},
+	}
 	credsSecret := []ResolvedSecret{{
 		Name:   telemetryGCPCredentialsSecretName,
 		Type:   store.SecretTypeFile,
@@ -79,6 +155,36 @@ func TestWarnGCPTelemetryBlockedWithoutCredentials(t *testing.T) {
 			agent:    blockAgent,
 			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
 			wantWarn: true,
+		},
+		{
+			name:     "warns when GCPIdentity is nil on non-Kubernetes runtime (default block)",
+			agent:    nilIdentityLocalAgent,
+			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
+			wantWarn: true,
+		},
+		{
+			name:     "warns when AppliedConfig is nil (default block)",
+			agent:    nilAppliedConfigAgent,
+			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
+			wantWarn: true,
+		},
+		{
+			name:     "no warning when GCPIdentity is nil on Kubernetes runtime (default passthrough)",
+			agent:    nilIdentityK8sAgent,
+			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
+			wantWarn: false,
+		},
+		{
+			name:     "warns when passthrough with RequireLocalRuntime targets Cloud Run (folds to block)",
+			agent:    passthroughRequireLocalCloudRunAgent,
+			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
+			wantWarn: true,
+		},
+		{
+			name:     "no warning when passthrough with RequireLocalRuntime targets docker",
+			agent:    passthroughRequireLocalDockerAgent,
+			tel:      telemetryDispatch{hubDefault: gcpHubDefault},
+			wantWarn: false,
 		},
 		{
 			name:     "no warning when credentials file secret is present",
@@ -134,7 +240,7 @@ func TestWarnGCPTelemetryBlockedWithoutCredentials(t *testing.T) {
 		},
 	}
 
-	d := &HTTPAgentDispatcher{}
+	d := &HTTPAgentDispatcher{store: brokerStore}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, collector := withDispatchWarnings(context.Background())
@@ -275,6 +381,49 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 		}
 		if got.TelemetryHint != "" {
 			t.Fatalf("expected empty telemetryHint for OTLP collector, got %q", got.TelemetryHint)
+		}
+	})
+
+	t.Run("hides hint on Kubernetes-only hub when default metadata mode is empty", func(t *testing.T) {
+		srv := newServer(gcpTel, "", nil)
+		srv.store = &fakeTelemetryBrokerStore{
+			list: []store.RuntimeBroker{{
+				ID:       "broker-k8s",
+				Profiles: []store.BrokerProfile{{Name: "gke", Type: "kubernetes"}},
+			}},
+		}
+		rec := httptest.NewRecorder()
+		srv.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil))
+		var got DashboardSummary
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.TelemetryHint != "" {
+			t.Fatalf("expected empty telemetryHint on Kubernetes-only hub, got %q", got.TelemetryHint)
+		}
+	})
+
+	t.Run("hides hint when user-scope credentials file secret is configured", func(t *testing.T) {
+		metas := map[string]*secret.SecretMeta{
+			"user:user-1:" + telemetryGCPCredentialsSecretName: {
+				Name:       telemetryGCPCredentialsSecretName,
+				Scope:      store.ScopeUser,
+				ScopeID:    "user-1",
+				SecretType: store.SecretTypeFile,
+				Target:     "~/.scion/telemetry-gcp-credentials.json",
+			},
+		}
+		srv := newServer(gcpTel, store.GCPMetadataModeBlock, metas)
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil)
+		req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser("user-1", "u@example.com", "User", "member", "web")))
+		rec := httptest.NewRecorder()
+		srv.serveMetricsDashboard(rec, req)
+		var got DashboardSummary
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got.TelemetryHint != "" {
+			t.Fatalf("expected empty telemetryHint when user secret is configured, got %q", got.TelemetryHint)
 		}
 	})
 }
