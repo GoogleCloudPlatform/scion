@@ -319,6 +319,26 @@ func TestTemplatesDelete_ScopeUser(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to search Hub user templates")
 	})
+
+	t.Run("same-named local templates are untouched by --scope user delete", func(t *testing.T) {
+		hub, srv := newUserScopeHub(t, allTemplates)
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		tuHubSettings(t, srv.URL)
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+		projTpl := createProjectTestTemplate(t, cwd, "base")
+		globTpl := createTestTemplate(t, home, "base")
+
+		err = runTemplatesRoot(t, "--non-interactive", "templates", "delete", "base", "--scope", "user")
+		require.NoError(t, err)
+
+		assert.DirExists(t, projTpl, "--scope user delete must not touch local project template")
+		assert.DirExists(t, globTpl, "--scope user delete must not touch local global template")
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Equal(t, []string{tuUserTemplateID}, hub.deleted)
+	})
 }
 
 func TestFindTemplateAllLocations_HubUserScope(t *testing.T) {
