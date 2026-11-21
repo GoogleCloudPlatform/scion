@@ -2686,9 +2686,10 @@ describe('scion-page-admin-server-config', () => {
       const buttons = queryAll(element, 'sl-button[variant="primary"]');
       const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
       (saveBtn as HTMLElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await vi.waitFor(() => {
+        expect(capturedPayload).not.toBeNull();
+      });
 
-      expect(capturedPayload).not.toBeNull();
       const server = capturedPayload!.server as Record<string, unknown> | undefined;
       const auth = server?.auth as Record<string, unknown> | undefined;
       expect(auth?.default_user_role).toBe('contractor');
