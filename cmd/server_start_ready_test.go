@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -219,9 +218,7 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 		args []string
 		mode string
 		cfg  *config.GlobalConfig
-		// noRegistry: no image registry is configured.
-		noRegistry bool
-		want       []serverReadyTarget
+		want []serverReadyTarget
 	}{
 		{
 			name: "workstation combo",
@@ -281,23 +278,13 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 			},
 		},
 		{
-			name:       "workstation without an image registry skips the broker",
-			args:       with("--enable-hub", "--enable-runtime-broker", "--enable-web"),
-			noRegistry: true,
-			want: []serverReadyTarget{
-				{Name: "hub API and web", URL: "http://127.0.0.1:8080/healthz", NeedsHub: true},
-			},
+			name: "workstation broker only still waits on the broker",
+			args: with("--enable-hub=false", "--enable-web=false"),
+			want: []serverReadyTarget{{Name: "runtime broker", URL: "http://127.0.0.1:9800/healthz"}},
 		},
 		{
-			name:       "workstation broker only without an image registry still waits on the broker",
-			args:       with("--enable-hub=false", "--enable-web=false"),
-			noRegistry: true,
-			want:       []serverReadyTarget{{Name: "runtime broker", URL: "http://127.0.0.1:9800/healthz"}},
-		},
-		{
-			name:       "hosted ignores the image registry",
-			args:       with("--hosted", "--enable-hub", "--enable-runtime-broker"),
-			noRegistry: true,
+			name: "hosted hub and broker",
+			args: with("--hosted", "--enable-hub", "--enable-runtime-broker"),
 			want: []serverReadyTarget{
 				{Name: "hub API", URL: "http://127.0.0.1:9810/healthz"},
 				{Name: "runtime broker", URL: "http://127.0.0.1:9800/healthz"},
@@ -351,11 +338,7 @@ func TestServerReadyTargetsFromArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			registryCheck := func() error { return nil }
-			if tt.noRegistry {
-				registryCheck = func() error { return errors.New("image registry not configured") }
-			}
-			got := serverReadyTargetsFromArgs(tt.args, tt.cfg, tt.mode, registryCheck)
+			got := serverReadyTargetsFromArgs(tt.args, tt.cfg, tt.mode)
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %+v, want %+v", got, tt.want)
 			}
@@ -380,47 +363,6 @@ func TestServerConfigPathFromArgs(t *testing.T) {
 		if got := serverConfigPathFromArgs(tt.args); got != tt.want {
 			t.Errorf("serverConfigPathFromArgs(%v) = %q, want %q", tt.args, got, tt.want)
 		}
-	}
-}
-
-// TestDaemonRegistryCheck_UsesGlobalDirNotCwdProject: the daemon child runs
-// in the global directory, so an image registry set only in the project the
-// user started from does not keep its broker on. The wait must use that
-// global-scoped answer and not wait for a broker the child skips.
-func TestDaemonRegistryCheck_UsesGlobalDirNotCwdProject(t *testing.T) {
-	_, globalDir := brokerTestHome(t)
-	for _, k := range []string{"SCION_IMAGE_REGISTRY", "SCION_MAINTENANCE_IMAGE_REGISTRY"} {
-		t.Setenv(k, "")
-	}
-	project := t.TempDir()
-	projectScion := filepath.Join(project, ".scion")
-	if err := os.MkdirAll(projectScion, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	settings := "schema_version: \"1\"\nimage_registry: registry.example.com/project-only\n"
-	if err := os.WriteFile(filepath.Join(projectScion, "settings.yaml"), []byte(settings), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(project)
-
-	// The working-directory check sees the project-only registry ...
-	if err := requireImageRegistryForBroker(); err != nil {
-		t.Fatalf("cwd-scoped check should see the project registry: %v", err)
-	}
-	// ... the child's (global-scoped) check does not.
-	check := daemonRegistryCheck(globalDir)
-	if err := check(); err == nil {
-		t.Fatal("global-scoped check must not see a project-only registry")
-	}
-	args := []string{"server", "start", "--foreground", "--enable-hub", "--enable-runtime-broker", "--enable-web"}
-	targets := serverReadyTargetsFromArgs(args, nil, "", check)
-	for _, tg := range targets {
-		if tg.Name == "runtime broker" {
-			t.Fatalf("targets %+v include the broker the child skips", targets)
-		}
-	}
-	if len(targets) != 1 {
-		t.Fatalf("targets = %+v, want only the web port", targets)
 	}
 }
 

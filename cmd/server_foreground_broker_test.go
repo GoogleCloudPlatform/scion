@@ -94,15 +94,12 @@ func TestRequireImageRegistryForBroker_MaintenanceEnvVarIsNotASource(t *testing.
 		assert.Contains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds; set SCION_IMAGE_REGISTRY or image_registry in settings.yaml")
 		assert.NotContains(t, err.Error(), "wizard")
 	}
-	assert.Contains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY now applies only to maintenance builds")
-	assert.Contains(t, workstationRegistryDegradeWarning(), "setup wizard")
 
 	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
 	err = requireImageRegistryForBroker()
 	if assert.Error(t, err) {
 		assert.NotContains(t, err.Error(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
 	}
-	assert.NotContains(t, workstationRegistryDegradeWarning(), "SCION_MAINTENANCE_IMAGE_REGISTRY")
 }
 
 func TestRequireImageRegistryForBroker_Settings(t *testing.T) {

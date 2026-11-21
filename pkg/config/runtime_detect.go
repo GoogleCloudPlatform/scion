@@ -33,6 +33,7 @@ type runtimeCandidate struct {
 	Binary     string
 	DarwinOnly bool
 	CheckArgs  []string
+	DaemonArgs []string
 }
 
 // localRuntimeCandidates lists container runtimes in preference order.
@@ -40,8 +41,8 @@ type runtimeCandidate struct {
 // platforms the darwin-only container entry is skipped. An explicitly
 // configured runtime always takes precedence over auto-detection.
 var localRuntimeCandidates = []runtimeCandidate{
-	{Name: "podman", Binary: "podman", CheckArgs: []string{"--version"}},
-	{Name: "docker", Binary: "docker", CheckArgs: []string{"--version"}},
+	{Name: "podman", Binary: "podman", CheckArgs: []string{"--version"}, DaemonArgs: []string{"info"}},
+	{Name: "docker", Binary: "docker", CheckArgs: []string{"--version"}, DaemonArgs: []string{"info"}},
 	{Name: "container", Binary: "container", DarwinOnly: true, CheckArgs: []string{"--version"}},
 }
 
@@ -104,6 +105,29 @@ func DetectAllLocalRuntimes() []string {
 		available = append(available, c.Name)
 	}
 	return available
+}
+
+// CheckRuntimeDaemon verifies that the daemon or backend for the named
+// container runtime is reachable (for example, by running `docker info` or
+// `podman info` with a short timeout). Runtimes without a separate daemon
+// probe (such as the macOS `container` CLI) return nil. Results are never
+// cached so callers always observe the live daemon state.
+func CheckRuntimeDaemon(ctx context.Context, runtimeName string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	for _, c := range localRuntimeCandidates {
+		if c.Name != runtimeName {
+			continue
+		}
+		if len(c.DaemonArgs) == 0 {
+			return nil
+		}
+		return runCheckFunc(c.Binary, c.DaemonArgs)
+	}
+	return fmt.Errorf("unknown container runtime %q", runtimeName)
 }
 
 // OverrideRuntimeDetection replaces the functions used by DetectLocalRuntime

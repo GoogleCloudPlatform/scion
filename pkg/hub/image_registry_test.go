@@ -700,3 +700,35 @@ func TestDispatchImageRegistry_ColocatedEmptyProfileNotRewritten(t *testing.T) {
 	assert.True(t, ok, "a saved profile is still rewritten by the hub")
 	assert.Equal(t, "file.example", r.Value)
 }
+
+// TestPutSystemRegistry_UpdatesLiveOverlayWithoutRestart verifies that a
+// co-located workstation broker started without an image_registry immediately
+// receives the registry saved via PUT /api/v1/system/registry through the
+// global settings overlay, without requiring a server restart.
+func TestPutSystemRegistry_UpdatesLiveOverlayWithoutRestart(t *testing.T) {
+	tempSettingsHome(t)
+	prev := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
+	overlay := config.NewSettingsOverlay()
+	config.SetGlobalSettingsOverlay(overlay)
+
+	srv, _, ops := newTestDBServer(t)
+	ops.server = srv
+	srv.SetEmbeddedBrokerID("colocated-broker-1")
+	feedImageRegistryOverlay(ops)
+
+	// Before saving, the co-located overlay sees no image_registry.
+	vsBefore, _, err := config.LoadGlobalSettingsWithOverlay()
+	require.NoError(t, err)
+	assert.Equal(t, config.ResolvedImageRegistry{Source: config.ImageRegistrySourceDefault},
+		config.ResolveImageRegistryLayers(vsBefore.ImageRegistryLayers("", "")))
+
+	// Saving via PUT /api/v1/system/registry updates the live overlay immediately.
+	rr := putSystemRegistry(t, srv, "ghcr.io/homebrew-scion")
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	vsAfter, _, err := config.LoadGlobalSettingsWithOverlay()
+	require.NoError(t, err)
+	assert.Equal(t, config.ResolvedImageRegistry{Value: "ghcr.io/homebrew-scion", Source: config.ImageRegistrySourceHubDB},
+		config.ResolveImageRegistryLayers(vsAfter.ImageRegistryLayers("", "")))
+}

@@ -84,7 +84,7 @@ func convertHost(globalDir string) (colocatedHost, string, string, error) {
 		host = colocatedHost{Config: cfg}
 		if mode == brokerconvert.HostModeColocated {
 			host.Colocated = true
-			host.Listeners = serverListenersFromArgs(nil, cfg, config.LoadServerMode(), func() error { return nil })
+			host.Listeners = serverListenersFromArgs(nil, cfg, config.LoadServerMode())
 		}
 	}
 	if mode == brokerconvert.HostModeColocated {

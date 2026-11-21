@@ -683,3 +683,87 @@ describe('onboarding welcome project step', () => {
     expect(welcomeResultNote(null)).toBe('');
   });
 });
+
+describe('onboarding system check step: runtime daemon reachability', () => {
+  async function mountStep1(el: OnboardingPage): Promise<void> {
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      expect(el.shadowRoot?.querySelector('.wizard')).not.toBeNull();
+    });
+    el.loading = false;
+    el.currentStep = 1;
+    await el.updateComplete;
+  }
+
+  it('shows fail pill and disables Next when daemon is unreachable, then passes on Re-check', async () => {
+    const el = createPage();
+    let checkCalls = 0;
+    vi.mocked(apiFetch).mockImplementation((path: string): Promise<Response> => {
+      if (path === '/api/v1/system/check') {
+        checkCalls++;
+        if (checkCalls === 1) {
+          return Promise.resolve(
+            jsonResponse({
+              ready: false,
+              results: [
+                { name: 'git', status: 'pass', message: 'git version 2.48.0' },
+                {
+                  name: 'runtime',
+                  status: 'fail',
+                  message:
+                    'docker daemon is not running or not accessible — start the docker daemon and click Re-check',
+                },
+              ],
+            })
+          );
+        }
+        return Promise.resolve(
+          jsonResponse({
+            ready: true,
+            results: [
+              { name: 'git', status: 'pass', message: 'git version 2.48.0' },
+              { name: 'runtime', status: 'pass', message: 'detected runtime: docker' },
+            ],
+          })
+        );
+      }
+      return Promise.resolve(jsonResponse({}, 404));
+    });
+
+    try {
+      await mountStep1(el);
+      await (el as unknown as { loadSystemCheck: () => Promise<void> }).loadSystemCheck();
+      await el.updateComplete;
+
+      const pills = Array.from(el.shadowRoot?.querySelectorAll('.check-item .pill') ?? []).map(
+        (p) => p.textContent?.trim()
+      );
+      expect(pills).toEqual(['pass', 'fail']);
+      const messages = Array.from(
+        el.shadowRoot?.querySelectorAll('.check-item .message') ?? []
+      ).map((m) => m.textContent?.trim());
+      expect(messages[1]).toContain('docker daemon is not running');
+
+      const findBtn = (label: string): Element | undefined =>
+        Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find(
+          (b) => b.textContent?.trim() === label
+        );
+      expect(findBtn('Next')?.hasAttribute('disabled')).toBe(true);
+
+      // Click Re-check and verify live state update
+      findBtn('Re-check')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await vi.waitFor(async () => {
+        await el.updateComplete;
+        expect(findBtn('Next')?.hasAttribute('disabled')).toBe(false);
+      });
+
+      const updatedPills = Array.from(
+        el.shadowRoot?.querySelectorAll('.check-item .pill') ?? []
+      ).map((p) => p.textContent?.trim());
+      expect(updatedPills).toEqual(['pass', 'pass']);
+      expect(checkCalls).toBe(2);
+    } finally {
+      el.remove();
+    }
+  });
+});

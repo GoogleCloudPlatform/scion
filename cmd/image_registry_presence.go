@@ -15,18 +15,12 @@
 package cmd
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // maintenanceRegistryOnlyNote is appended to a missing-registry message when
@@ -93,98 +87,6 @@ func requireImageRegistryForBrokerAt(projectPath string) error {
 		return nil
 	}
 	return brokerRegistryMissingError()
-}
-
-// workstationRegistryDegradeWarning is the warning a workstation server logs
-// when it starts without its co-located broker for lack of a registry.
-func workstationRegistryDegradeWarning() string {
-	msg := "image_registry is not configured; starting without the runtime broker. Set the registry in the setup wizard or with 'scion config set --global image_registry <registry>', then run 'scion server restart'."
-	if maintenanceOnlyRegistrySet() {
-		msg += " " + maintenanceRegistryOnlyNote + "."
-	}
-	return msg
-}
-
-// disableWorkstationBrokerForRegistry starts a workstation server without
-// its co-located broker for lack of an image registry, and says so.
-func disableWorkstationBrokerForRegistry(cfg *config.GlobalConfig) {
-	slog.Warn(workstationRegistryDegradeWarning())
-	fmt.Fprintln(os.Stderr, "Warning: "+brokerSkippedNotice)
-	cfg.RuntimeBroker.Enabled = false
-}
-
-// managedImageRegistryConfigured reports whether the hub database holds a
-// saved image_registry the co-located broker resolves with: a managed
-// endpoints value, or a managed value of the broker's default profile
-// (config.EffectiveDefaultProfile over activeProfile and the stored
-// profile names). It runs before the settings sync that backfills row
-// origins, so managed-ness uses opsettings.EffectiveOrigin. A read error
-// counts as not configured.
-func managedImageRegistryConfigured(ctx context.Context, s store.HubSettingStore, activeProfile string) bool {
-	if s == nil {
-		return false
-	}
-	managed := func(section string) (json.RawMessage, bool) {
-		row, err := s.GetHubSetting(ctx, section)
-		if err != nil || row == nil {
-			return nil, false
-		}
-		updatedBy := row.UpdatedBy
-		if opsettings.EffectiveOrigin(section, row.Origin, &updatedBy) != opsettings.OriginManaged {
-			return nil, false
-		}
-		return row.Value, true
-	}
-	if doc, ok := managed("endpoints"); ok {
-		var ep struct {
-			ImageRegistry string `json:"image_registry"`
-		}
-		if json.Unmarshal(doc, &ep) == nil && strings.TrimSpace(ep.ImageRegistry) != "" {
-			return true
-		}
-	}
-	if doc, ok := managed("profiles"); ok {
-		var profiles map[string]struct {
-			ImageRegistry string `json:"image_registry"`
-		}
-		if json.Unmarshal(doc, &profiles) == nil && len(profiles) > 0 {
-			names := make([]string, 0, len(profiles))
-			for name := range profiles {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			p := config.EffectiveDefaultProfile(activeProfile, names)
-			if strings.TrimSpace(profiles[p].ImageRegistry) != "" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// bootstrapImageRegistryConfigured reports whether the hub's file tier
-// (its bootstrap merge for configPath: defaults < SCION_SEED_* <
-// settings.yaml < SCION_SERVER_*) gives the co-located broker a registry:
-// the top-level value, or the value of activeProfile. The co-located
-// broker resolves with this tier through the settings overlay, so a
-// registry set only through SCION_SERVER_IMAGEREGISTRY or
-// SCION_SEED_IMAGEREGISTRY counts.
-func bootstrapImageRegistryConfigured(configPath, activeProfile string) bool {
-	tier := config.ImageRegistryFileTierFromKoanf(config.LoadBootstrapKoanfWithConfigPath(configPath))
-	return tier.Top != "" || (activeProfile != "" && tier.Profiles[activeProfile] != "")
-}
-
-// colocatedActiveProfile returns active_profile as the co-located broker
-// loads it for an agent with no project (the global settings file plus
-// SCION_ACTIVE_PROFILE; "" when the settings cannot be loaded). Like the
-// server's other startup loads it never merges a project found from the
-// working directory (ptone/scion#5362).
-func colocatedActiveProfile() string {
-	vs, _, err := loadServerEffectiveSettings()
-	if err != nil || vs == nil {
-		return ""
-	}
-	return vs.ActiveProfile
 }
 
 // flatInstanceImageRegistries returns the agent_defaults.image_registry of
