@@ -18,14 +18,18 @@ approve or hold a step, pick one of two designs, choose a target. Keep prose
 for open questions, for options you cannot list in a short label, or when you
 need a discussion rather than a pick.
 
-- **Single-choice confirmation:** a decision with **1 choice** (such as
-  `"Approved"` or `"Confirmed"`) renders as a single primary button and records
-  the sign-off in the decision log. Use it when you need a person's explicit
-  confirmation or approval before proceeding (for example approving a plan,
-  deploy, or destructive action) and there is no meaningful second button — the
-  user can click to approve, dismiss it, or reply in words if they want
-  changes. Use plain prose instead for FYI updates or open-ended feedback that
-  does not need recorded sign-off.
+**Single-choice confirmation:** a decision with **1 choice** (such as
+`"Approved"` or `"Confirmed"`) lets the user confirm or approve with one click
+and records the sign-off in the decision log.
+Use it when you need a person's explicit confirmation or approval before
+proceeding (for example approving a plan, deploy, or destructive action) and
+there is no meaningful second button — the user can click to approve, dismiss
+it, or reply in words if they want changes. If the reply asks for changes, do
+not record it as the choice; withdraw the decision with
+`scion decisions withdraw <key>` (or re-ask with `--update`) after acting on
+their feedback. Use plain prose instead for FYI updates or open-ended feedback
+that does not need recorded sign-off.
+
 - Send it to a user or a conversation: `@<email>`, `user:<email>`, `conv:<id>` or
   `#<thread>`. Decision prompts cannot go to an agent or a `group[...]`.
 - Only an agent can send one (agent mode, inside an agent container).
