@@ -18,7 +18,8 @@
 #
 # LIMITATIONS
 # Syntactic (go/ast) analysis. Unmodeled shapes (silent negatives): local
-# variables, closures inside a builder body, zero-arg entsql.P().Append(...),
+# variables, closures inside a builder body, named functions passed to entsql.P
+# (entsql.P(namedFn)), zero-arg entsql.P().Append(...),
 # b.Join(entsql.Expr(...)), defer/go/return/labeled/select/type-switch
 # statements in a builder closure, method helpers taking *entsql.Builder, and
 # cross-package helpers.
