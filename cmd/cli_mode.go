@@ -355,6 +355,9 @@ func checkFlagsForMode(cmd *cobra.Command, mode CLIMode) error {
 }
 
 func applyAgentMode(root *cobra.Command) {
+	// Prevent Cobra's ExecuteC from lazily re-adding the built-in "completion"
+	// command after removeCommands strips it in agent mode.
+	root.CompletionOptions.DisableDefaultCmd = true
 	removeCommands(root, "", func(path string) bool {
 		return !agentAllowed[path]
 	})
@@ -362,7 +365,10 @@ func applyAgentMode(root *cobra.Command) {
 
 // removeCommands walks the command tree and removes commands where shouldRemove
 // returns true. It processes children recursively before deciding whether to
-// remove a parent.
+// remove a parent. Surviving non-Runnable command groups get
+// rejectUnknownSubcommands so that invoking a removed or unknown subcommand
+// fails with an unknown-command error instead of printing parent help and
+// exiting 0.
 func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(string) bool) {
 	for _, child := range parent.Commands() {
 		name := child.Name()
@@ -375,15 +381,34 @@ func removeCommands(parent *cobra.Command, prefix string, shouldRemove func(stri
 			continue
 		}
 
-		if child.HasSubCommands() {
+		hadSubcommands := child.HasSubCommands()
+		if hadSubcommands {
 			removeCommands(child, path, shouldRemove)
 		}
 
 		if shouldRemove(path) {
 			parent.RemoveCommand(child)
 			parent.Long = dropCommandLines(parent.Long, parent.CommandPath()+" "+name)
+		} else if hadSubcommands && !child.Runnable() {
+			rejectUnknownSubcommands(child)
 		}
 	}
+}
+
+// rejectUnknownSubcommands makes a non-Runnable command group Runnable with an
+// Args validator (matching hubCmd, configCmd, artifactCmd, and messagePolicyCmd)
+// so Cobra rejects removed or unknown subcommands with "unknown command" and a
+// non-zero exit instead of falling through to parent help with exit 0. Bare
+// "<group>" and "<group> help ..." still print help via pflag.ErrHelp before
+// PersistentPreRunE runs.
+func rejectUnknownSubcommands(cmd *cobra.Command) {
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if len(args) == 0 || args[0] == "help" {
+			return pflag.ErrHelp
+		}
+		return cobra.NoArgs(c, args)
+	}
+	cmd.Run = func(*cobra.Command, []string) {}
 }
 
 // dropCommandLines removes the lines of a command's long help that show
