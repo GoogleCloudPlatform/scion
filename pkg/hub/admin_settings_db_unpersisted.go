@@ -93,6 +93,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "trusted_proxies"},
 	// Likewise server.hub.internal_url (never API-writable; ptone/scion#555).
 	{"server", "hub", "internal_url"},
+	// Likewise server.hub.allowed_import_sources (never API-writable; ptone/scion#8651).
+	{"server", "hub", "allowed_import_sources"},
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},
