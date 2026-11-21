@@ -43,6 +43,21 @@ type ImportResourcesResponse struct {
 	Failed   []ResourceImportFailure `json:"failed,omitempty"`
 }
 
+// DiscoverResourcesRequest is the request body for POST /api/v1/resources/discover.
+type DiscoverResourcesRequest struct {
+	Kind      string `json:"kind"`
+	Scope     string `json:"scope"`
+	ScopeID   string `json:"scopeId,omitempty"`
+	SourceURL string `json:"sourceUrl"`
+}
+
+// DiscoverResourcesResponse is the response from POST /api/v1/resources/discover.
+type DiscoverResourcesResponse struct {
+	Resources []string `json:"resources"`
+	Skipped   []string `json:"skipped,omitempty"`
+	Count     int      `json:"count"`
+}
+
 // ImportResources imports resources from a remote URL through the Hub.
 // It always requests plain application/json (never the NDJSON stream).
 func (s *templateService) ImportResources(ctx context.Context, req *ImportResourcesRequest) (*ImportResourcesResponse, error) {
@@ -51,4 +66,14 @@ func (s *templateService) ImportResources(ctx context.Context, req *ImportResour
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ImportResourcesResponse](resp)
+}
+
+// DiscoverResources discovers resources at a remote URL through the Hub
+// without writing anything.
+func (s *templateService) DiscoverResources(ctx context.Context, req *DiscoverResourcesRequest) (*DiscoverResourcesResponse, error) {
+	resp, err := s.c.post(ctx, "/api/v1/resources/discover", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[DiscoverResourcesResponse](resp)
 }

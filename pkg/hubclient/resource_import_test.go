@@ -201,3 +201,90 @@ func TestTemplateService_ImportResources_AllFailedReturnsAPIError(t *testing.T) 
 		t.Errorf("apiErr = {StatusCode:%d Code:%q}, want {400 import_failed}", apiErr.StatusCode, apiErr.Code)
 	}
 }
+
+func TestTemplateService_DiscoverResources_SuccessAndMarshal(t *testing.T) {
+	var gotPath, gotMethod string
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resources": []string{"alpha", "beta"},
+			"skipped":   []string{"README"},
+			"count":     2,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatalf("New client: %v", err)
+	}
+
+	resp, err := c.Templates().DiscoverResources(context.Background(), &DiscoverResourcesRequest{
+		Kind:      "template",
+		Scope:     "project",
+		ScopeID:   "proj-123",
+		SourceURL: "https://github.com/org/repo/tree/main/.scion/templates",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverResources failed: %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Errorf("method = %q, want POST", gotMethod)
+	}
+	if gotPath != "/api/v1/resources/discover" {
+		t.Errorf("path = %q, want /api/v1/resources/discover", gotPath)
+	}
+	wantKeys := map[string]any{
+		"kind":      "template",
+		"scope":     "project",
+		"scopeId":   "proj-123",
+		"sourceUrl": "https://github.com/org/repo/tree/main/.scion/templates",
+	}
+	if !reflect.DeepEqual(gotBody, wantKeys) {
+		t.Errorf("request body = %#v, want %#v", gotBody, wantKeys)
+	}
+	if resp.Count != 2 || !reflect.DeepEqual(resp.Resources, []string{"alpha", "beta"}) || !reflect.DeepEqual(resp.Skipped, []string{"README"}) {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+func TestTemplateService_DiscoverResources_OmitEmptyScopeID(t *testing.T) {
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resources": []string{"alpha"},
+			"count":     1,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatalf("New client: %v", err)
+	}
+
+	_, err = c.Templates().DiscoverResources(context.Background(), &DiscoverResourcesRequest{
+		Kind:      "template",
+		Scope:     "global",
+		SourceURL: "https://github.com/org/repo/tree/main/.scion/templates",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverResources failed: %v", err)
+	}
+	if _, ok := gotBody["scopeId"]; ok {
+		t.Errorf("scopeId should be omitted when empty, got %v", gotBody["scopeId"])
+	}
+}

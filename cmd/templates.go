@@ -383,6 +383,10 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 	}
 
 	// Hub template - display hub info
+	return displayHubTemplateShow(match)
+}
+
+func displayHubTemplateShow(match *TemplateMatch) error {
 	t := match.HubTemplate
 
 	if isJSONOutput() {
@@ -402,6 +406,9 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 		if t.Description != "" {
 			output["description"] = t.Description
 		}
+		if t.SourceURL != "" {
+			output["sourceUrl"] = displaySourceURL(t.SourceURL)
+		}
 		return outputJSON(output)
 	}
 
@@ -416,6 +423,9 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 	}
 	if t.Description != "" {
 		fmt.Printf("Description: %s\n", t.Description)
+	}
+	if t.SourceURL != "" {
+		fmt.Printf("Source URL: %s\n", displaySourceURL(t.SourceURL))
 	}
 	fmt.Printf("Created:  %s\n", clitime.Format(t.Created, clitime.Full))
 	fmt.Printf("Updated:  %s\n", clitime.Format(t.Updated, clitime.Full))
