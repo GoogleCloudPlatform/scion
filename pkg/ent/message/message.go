@@ -64,6 +64,8 @@ const (
 	FieldThreadID = "thread_id"
 	// FieldConversationID holds the string denoting the conversation_id field in the database.
 	FieldConversationID = "conversation_id"
+	// FieldConversationSeq holds the string denoting the conversation_seq field in the database.
+	FieldConversationSeq = "conversation_seq"
 	// FieldSenderProjectID holds the string denoting the sender_project_id field in the database.
 	FieldSenderProjectID = "sender_project_id"
 	// FieldRecipientProjectID holds the string denoting the recipient_project_id field in the database.
@@ -108,6 +110,7 @@ var Columns = []string{
 	FieldChannel,
 	FieldThreadID,
 	FieldConversationID,
+	FieldConversationSeq,
 	FieldSenderProjectID,
 	FieldRecipientProjectID,
 	FieldAuthorizingUserID,
@@ -292,6 +295,11 @@ func ByThreadID(opts ...sql.OrderTermOption) OrderOption {
 // ByConversationID orders the results by the conversation_id field.
 func ByConversationID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldConversationID, opts...).ToFunc()
+}
+
+// ByConversationSeq orders the results by the conversation_seq field.
+func ByConversationSeq(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConversationSeq, opts...).ToFunc()
 }
 
 // BySenderProjectID orders the results by the sender_project_id field.

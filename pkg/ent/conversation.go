@@ -36,6 +36,8 @@ type Conversation struct {
 	DriftState conversation.DriftState `json:"drift_state,omitempty"`
 	// LastActivityAt holds the value of the "last_activity_at" field.
 	LastActivityAt time.Time `json:"last_activity_at,omitempty"`
+	// LastMessageSeq holds the value of the "last_message_seq" field.
+	LastMessageSeq int64 `json:"last_message_seq,omitempty"`
 	// CreatedAt holds the value of the "created_at" field.
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	// ArchivedAt holds the value of the "archived_at" field.
@@ -52,6 +54,8 @@ func (*Conversation) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case conversation.FieldProjectID, conversation.FieldDefaultAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
+		case conversation.FieldLastMessageSeq:
+			values[i] = new(sql.NullInt64)
 		case conversation.FieldKind, conversation.FieldSurface, conversation.FieldExternalRef, conversation.FieldParentRef, conversation.FieldDisplayName, conversation.FieldDriftState:
 			values[i] = new(sql.NullString)
 		case conversation.FieldLastActivityAt, conversation.FieldCreatedAt, conversation.FieldArchivedAt, conversation.FieldDeletedAt:
@@ -134,6 +138,12 @@ func (_m *Conversation) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field last_activity_at", values[i])
 			} else if value.Valid {
 				_m.LastActivityAt = value.Time
+			}
+		case conversation.FieldLastMessageSeq:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field last_message_seq", values[i])
+			} else if value.Valid {
+				_m.LastMessageSeq = value.Int64
 			}
 		case conversation.FieldCreatedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -221,6 +231,9 @@ func (_m *Conversation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("last_activity_at=")
 	builder.WriteString(_m.LastActivityAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("last_message_seq=")
+	builder.WriteString(fmt.Sprintf("%v", _m.LastMessageSeq))
 	builder.WriteString(", ")
 	builder.WriteString("created_at=")
 	builder.WriteString(_m.CreatedAt.Format(time.ANSIC))

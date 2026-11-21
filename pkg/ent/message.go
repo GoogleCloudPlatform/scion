@@ -68,6 +68,8 @@ type Message struct {
 	ThreadID string `json:"thread_id,omitempty"`
 	// ConversationID holds the value of the "conversation_id" field.
 	ConversationID *uuid.UUID `json:"conversation_id,omitempty"`
+	// ConversationSeq holds the value of the "conversation_seq" field.
+	ConversationSeq *int64 `json:"conversation_seq,omitempty"`
 	// SenderProjectID holds the value of the "sender_project_id" field.
 	SenderProjectID *uuid.UUID `json:"sender_project_id,omitempty"`
 	// RecipientProjectID holds the value of the "recipient_project_id" field.
@@ -92,6 +94,8 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
+		case message.FieldConversationSeq:
+			values[i] = new(sql.NullInt64)
 		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldDeliveryID, message.FieldDeliveryOutcome, message.FieldHoldLaunchID, message.FieldNotReached, message.FieldChannel, message.FieldThreadID, message.FieldAuthorizingUserID, message.FieldDelegationGrantID, message.FieldScheduledEventID:
 			values[i] = new(sql.NullString)
 		case message.FieldDispatchedAt, message.FieldDeliveringAt, message.FieldHoldUntil, message.FieldNotReachedAt, message.FieldCreated:
@@ -279,6 +283,13 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 				_m.ConversationID = new(uuid.UUID)
 				*_m.ConversationID = *value.S.(*uuid.UUID)
 			}
+		case message.FieldConversationSeq:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field conversation_seq", values[i])
+			} else if value.Valid {
+				_m.ConversationSeq = new(int64)
+				*_m.ConversationSeq = value.Int64
+			}
 		case message.FieldSenderProjectID:
 			if value, ok := values[i].(*sql.NullScanner); !ok {
 				return fmt.Errorf("unexpected type %T for field sender_project_id", values[i])
@@ -448,6 +459,11 @@ func (_m *Message) String() string {
 	builder.WriteString(", ")
 	if v := _m.ConversationID; v != nil {
 		builder.WriteString("conversation_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.ConversationSeq; v != nil {
+		builder.WriteString("conversation_seq=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
 	builder.WriteString(", ")

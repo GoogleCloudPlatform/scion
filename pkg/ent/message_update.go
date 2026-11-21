@@ -475,6 +475,33 @@ func (_u *MessageUpdate) ClearConversationID() *MessageUpdate {
 	return _u
 }
 
+// SetConversationSeq sets the "conversation_seq" field.
+func (_u *MessageUpdate) SetConversationSeq(v int64) *MessageUpdate {
+	_u.mutation.ResetConversationSeq()
+	_u.mutation.SetConversationSeq(v)
+	return _u
+}
+
+// SetNillableConversationSeq sets the "conversation_seq" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableConversationSeq(v *int64) *MessageUpdate {
+	if v != nil {
+		_u.SetConversationSeq(*v)
+	}
+	return _u
+}
+
+// AddConversationSeq adds value to the "conversation_seq" field.
+func (_u *MessageUpdate) AddConversationSeq(v int64) *MessageUpdate {
+	_u.mutation.AddConversationSeq(v)
+	return _u
+}
+
+// ClearConversationSeq clears the value of the "conversation_seq" field.
+func (_u *MessageUpdate) ClearConversationSeq() *MessageUpdate {
+	_u.mutation.ClearConversationSeq()
+	return _u
+}
+
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdate) Mutation() *MessageMutation {
 	return _u.mutation
@@ -686,6 +713,15 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.ConversationSeq(); ok {
+		_spec.SetField(message.FieldConversationSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedConversationSeq(); ok {
+		_spec.AddField(message.FieldConversationSeq, field.TypeInt64, value)
+	}
+	if _u.mutation.ConversationSeqCleared() {
+		_spec.ClearField(message.FieldConversationSeq, field.TypeInt64)
 	}
 	if _u.mutation.SenderProjectIDCleared() {
 		_spec.ClearField(message.FieldSenderProjectID, field.TypeUUID)
@@ -1168,6 +1204,33 @@ func (_u *MessageUpdateOne) ClearConversationID() *MessageUpdateOne {
 	return _u
 }
 
+// SetConversationSeq sets the "conversation_seq" field.
+func (_u *MessageUpdateOne) SetConversationSeq(v int64) *MessageUpdateOne {
+	_u.mutation.ResetConversationSeq()
+	_u.mutation.SetConversationSeq(v)
+	return _u
+}
+
+// SetNillableConversationSeq sets the "conversation_seq" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableConversationSeq(v *int64) *MessageUpdateOne {
+	if v != nil {
+		_u.SetConversationSeq(*v)
+	}
+	return _u
+}
+
+// AddConversationSeq adds value to the "conversation_seq" field.
+func (_u *MessageUpdateOne) AddConversationSeq(v int64) *MessageUpdateOne {
+	_u.mutation.AddConversationSeq(v)
+	return _u
+}
+
+// ClearConversationSeq clears the value of the "conversation_seq" field.
+func (_u *MessageUpdateOne) ClearConversationSeq() *MessageUpdateOne {
+	_u.mutation.ClearConversationSeq()
+	return _u
+}
+
 // Mutation returns the MessageMutation object of the builder.
 func (_u *MessageUpdateOne) Mutation() *MessageMutation {
 	return _u.mutation
@@ -1409,6 +1472,15 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.ConversationSeq(); ok {
+		_spec.SetField(message.FieldConversationSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedConversationSeq(); ok {
+		_spec.AddField(message.FieldConversationSeq, field.TypeInt64, value)
+	}
+	if _u.mutation.ConversationSeqCleared() {
+		_spec.ClearField(message.FieldConversationSeq, field.TypeInt64)
 	}
 	if _u.mutation.SenderProjectIDCleared() {
 		_spec.ClearField(message.FieldSenderProjectID, field.TypeUUID)

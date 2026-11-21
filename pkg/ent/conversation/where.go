@@ -85,6 +85,11 @@ func LastActivityAt(v time.Time) predicate.Conversation {
 	return predicate.Conversation(sql.FieldEQ(FieldLastActivityAt, v))
 }
 
+// LastMessageSeq applies equality check predicate on the "last_message_seq" field. It's identical to LastMessageSeqEQ.
+func LastMessageSeq(v int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldEQ(FieldLastMessageSeq, v))
+}
+
 // CreatedAt applies equality check predicate on the "created_at" field. It's identical to CreatedAtEQ.
 func CreatedAt(v time.Time) predicate.Conversation {
 	return predicate.Conversation(sql.FieldEQ(FieldCreatedAt, v))
@@ -523,6 +528,46 @@ func LastActivityAtLT(v time.Time) predicate.Conversation {
 // LastActivityAtLTE applies the LTE predicate on the "last_activity_at" field.
 func LastActivityAtLTE(v time.Time) predicate.Conversation {
 	return predicate.Conversation(sql.FieldLTE(FieldLastActivityAt, v))
+}
+
+// LastMessageSeqEQ applies the EQ predicate on the "last_message_seq" field.
+func LastMessageSeqEQ(v int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldEQ(FieldLastMessageSeq, v))
+}
+
+// LastMessageSeqNEQ applies the NEQ predicate on the "last_message_seq" field.
+func LastMessageSeqNEQ(v int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldNEQ(FieldLastMessageSeq, v))
+}
+
+// LastMessageSeqIn applies the In predicate on the "last_message_seq" field.
+func LastMessageSeqIn(vs ...int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldIn(FieldLastMessageSeq, vs...))
+}
+
+// LastMessageSeqNotIn applies the NotIn predicate on the "last_message_seq" field.
+func LastMessageSeqNotIn(vs ...int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldNotIn(FieldLastMessageSeq, vs...))
+}
+
+// LastMessageSeqGT applies the GT predicate on the "last_message_seq" field.
+func LastMessageSeqGT(v int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldGT(FieldLastMessageSeq, v))
+}
+
+// LastMessageSeqGTE applies the GTE predicate on the "last_message_seq" field.
+func LastMessageSeqGTE(v int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldGTE(FieldLastMessageSeq, v))
+}
+
+// LastMessageSeqLT applies the LT predicate on the "last_message_seq" field.
+func LastMessageSeqLT(v int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldLT(FieldLastMessageSeq, v))
+}
+
+// LastMessageSeqLTE applies the LTE predicate on the "last_message_seq" field.
+func LastMessageSeqLTE(v int64) predicate.Conversation {
+	return predicate.Conversation(sql.FieldLTE(FieldLastMessageSeq, v))
 }
 
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.

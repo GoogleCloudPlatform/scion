@@ -33,6 +33,8 @@ const (
 	FieldDriftState = "drift_state"
 	// FieldLastActivityAt holds the string denoting the last_activity_at field in the database.
 	FieldLastActivityAt = "last_activity_at"
+	// FieldLastMessageSeq holds the string denoting the last_message_seq field in the database.
+	FieldLastMessageSeq = "last_message_seq"
 	// FieldCreatedAt holds the string denoting the created_at field in the database.
 	FieldCreatedAt = "created_at"
 	// FieldArchivedAt holds the string denoting the archived_at field in the database.
@@ -55,6 +57,7 @@ var Columns = []string{
 	FieldDefaultAgentID,
 	FieldDriftState,
 	FieldLastActivityAt,
+	FieldLastMessageSeq,
 	FieldCreatedAt,
 	FieldArchivedAt,
 	FieldDeletedAt,
@@ -79,6 +82,8 @@ var (
 	DefaultDisplayName string
 	// DefaultLastActivityAt holds the default value on creation for the "last_activity_at" field.
 	DefaultLastActivityAt func() time.Time
+	// DefaultLastMessageSeq holds the default value on creation for the "last_message_seq" field.
+	DefaultLastMessageSeq int64
 	// DefaultCreatedAt holds the default value on creation for the "created_at" field.
 	DefaultCreatedAt func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -213,6 +218,11 @@ func ByDriftState(opts ...sql.OrderTermOption) OrderOption {
 // ByLastActivityAt orders the results by the last_activity_at field.
 func ByLastActivityAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLastActivityAt, opts...).ToFunc()
+}
+
+// ByLastMessageSeq orders the results by the last_message_seq field.
+func ByLastMessageSeq(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastMessageSeq, opts...).ToFunc()
 }
 
 // ByCreatedAt orders the results by the created_at field.

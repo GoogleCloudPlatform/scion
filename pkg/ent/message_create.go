@@ -342,6 +342,20 @@ func (_c *MessageCreate) SetNillableConversationID(v *uuid.UUID) *MessageCreate 
 	return _c
 }
 
+// SetConversationSeq sets the "conversation_seq" field.
+func (_c *MessageCreate) SetConversationSeq(v int64) *MessageCreate {
+	_c.mutation.SetConversationSeq(v)
+	return _c
+}
+
+// SetNillableConversationSeq sets the "conversation_seq" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableConversationSeq(v *int64) *MessageCreate {
+	if v != nil {
+		_c.SetConversationSeq(*v)
+	}
+	return _c
+}
+
 // SetSenderProjectID sets the "sender_project_id" field.
 func (_c *MessageCreate) SetSenderProjectID(v uuid.UUID) *MessageCreate {
 	_c.mutation.SetSenderProjectID(v)
@@ -717,6 +731,10 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ConversationID(); ok {
 		_spec.SetField(message.FieldConversationID, field.TypeUUID, value)
 		_node.ConversationID = &value
+	}
+	if value, ok := _c.mutation.ConversationSeq(); ok {
+		_spec.SetField(message.FieldConversationSeq, field.TypeInt64, value)
+		_node.ConversationSeq = &value
 	}
 	if value, ok := _c.mutation.SenderProjectID(); ok {
 		_spec.SetField(message.FieldSenderProjectID, field.TypeUUID, value)
@@ -1187,6 +1205,30 @@ func (u *MessageUpsert) UpdateConversationID() *MessageUpsert {
 // ClearConversationID clears the value of the "conversation_id" field.
 func (u *MessageUpsert) ClearConversationID() *MessageUpsert {
 	u.SetNull(message.FieldConversationID)
+	return u
+}
+
+// SetConversationSeq sets the "conversation_seq" field.
+func (u *MessageUpsert) SetConversationSeq(v int64) *MessageUpsert {
+	u.Set(message.FieldConversationSeq, v)
+	return u
+}
+
+// UpdateConversationSeq sets the "conversation_seq" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateConversationSeq() *MessageUpsert {
+	u.SetExcluded(message.FieldConversationSeq)
+	return u
+}
+
+// AddConversationSeq adds v to the "conversation_seq" field.
+func (u *MessageUpsert) AddConversationSeq(v int64) *MessageUpsert {
+	u.Add(message.FieldConversationSeq, v)
+	return u
+}
+
+// ClearConversationSeq clears the value of the "conversation_seq" field.
+func (u *MessageUpsert) ClearConversationSeq() *MessageUpsert {
+	u.SetNull(message.FieldConversationSeq)
 	return u
 }
 
@@ -1715,6 +1757,34 @@ func (u *MessageUpsertOne) UpdateConversationID() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearConversationID() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearConversationID()
+	})
+}
+
+// SetConversationSeq sets the "conversation_seq" field.
+func (u *MessageUpsertOne) SetConversationSeq(v int64) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetConversationSeq(v)
+	})
+}
+
+// AddConversationSeq adds v to the "conversation_seq" field.
+func (u *MessageUpsertOne) AddConversationSeq(v int64) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.AddConversationSeq(v)
+	})
+}
+
+// UpdateConversationSeq sets the "conversation_seq" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateConversationSeq() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateConversationSeq()
+	})
+}
+
+// ClearConversationSeq clears the value of the "conversation_seq" field.
+func (u *MessageUpsertOne) ClearConversationSeq() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearConversationSeq()
 	})
 }
 
@@ -2410,6 +2480,34 @@ func (u *MessageUpsertBulk) UpdateConversationID() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearConversationID() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearConversationID()
+	})
+}
+
+// SetConversationSeq sets the "conversation_seq" field.
+func (u *MessageUpsertBulk) SetConversationSeq(v int64) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetConversationSeq(v)
+	})
+}
+
+// AddConversationSeq adds v to the "conversation_seq" field.
+func (u *MessageUpsertBulk) AddConversationSeq(v int64) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.AddConversationSeq(v)
+	})
+}
+
+// UpdateConversationSeq sets the "conversation_seq" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateConversationSeq() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateConversationSeq()
+	})
+}
+
+// ClearConversationSeq clears the value of the "conversation_seq" field.
+func (u *MessageUpsertBulk) ClearConversationSeq() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearConversationSeq()
 	})
 }
 

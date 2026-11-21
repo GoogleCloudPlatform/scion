@@ -137,6 +137,13 @@ func (Message) Fields() []ent.Field {
 		field.UUID("conversation_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
+		// conversation_seq is a commit-ordered, per-conversation monotonic
+		// sequence allocated under the conversation row lock in CreateMessage
+		// (ptone/scion#8136). Nullable for legacy/non-conversation rows;
+		// backfilled on startup for existing conversation messages.
+		field.Int64("conversation_seq").
+			Optional().
+			Nillable(),
 		// sender_project_id / recipient_project_id carry server-derived
 		// cross-project provenance (store.Message.SenderProjectID /
 		// RecipientProjectID). Nullable: human senders and legacy rows have
@@ -188,6 +195,10 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("recipient", "recipient_id"),
 		index.Fields("created"),
 		index.Fields("conversation_id"),
+		// Per-conversation commit-ordered sequence for conversation watch
+		// feeds (ptone/scion#8136). Serves feed range queries in seq order.
+		index.Fields("conversation_id", "conversation_seq").
+			Unique(),
 		// Native chat tail and history reads must not sort the entire DM on
 		// every unread refresh. Both read-switch paths order by created, id.
 		index.Fields("conversation_id", "channel", "created", "id"),

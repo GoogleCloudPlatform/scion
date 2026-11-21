@@ -185,6 +185,27 @@ func (_u *ConversationUpdate) SetNillableLastActivityAt(v *time.Time) *Conversat
 	return _u
 }
 
+// SetLastMessageSeq sets the "last_message_seq" field.
+func (_u *ConversationUpdate) SetLastMessageSeq(v int64) *ConversationUpdate {
+	_u.mutation.ResetLastMessageSeq()
+	_u.mutation.SetLastMessageSeq(v)
+	return _u
+}
+
+// SetNillableLastMessageSeq sets the "last_message_seq" field if the given value is not nil.
+func (_u *ConversationUpdate) SetNillableLastMessageSeq(v *int64) *ConversationUpdate {
+	if v != nil {
+		_u.SetLastMessageSeq(*v)
+	}
+	return _u
+}
+
+// AddLastMessageSeq adds value to the "last_message_seq" field.
+func (_u *ConversationUpdate) AddLastMessageSeq(v int64) *ConversationUpdate {
+	_u.mutation.AddLastMessageSeq(v)
+	return _u
+}
+
 // SetArchivedAt sets the "archived_at" field.
 func (_u *ConversationUpdate) SetArchivedAt(v time.Time) *ConversationUpdate {
 	_u.mutation.SetArchivedAt(v)
@@ -330,6 +351,12 @@ func (_u *ConversationUpdate) sqlSave(ctx context.Context) (_node int, err error
 	}
 	if value, ok := _u.mutation.LastActivityAt(); ok {
 		_spec.SetField(conversation.FieldLastActivityAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.LastMessageSeq(); ok {
+		_spec.SetField(conversation.FieldLastMessageSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedLastMessageSeq(); ok {
+		_spec.AddField(conversation.FieldLastMessageSeq, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.ArchivedAt(); ok {
 		_spec.SetField(conversation.FieldArchivedAt, field.TypeTime, value)
@@ -519,6 +546,27 @@ func (_u *ConversationUpdateOne) SetNillableLastActivityAt(v *time.Time) *Conver
 	return _u
 }
 
+// SetLastMessageSeq sets the "last_message_seq" field.
+func (_u *ConversationUpdateOne) SetLastMessageSeq(v int64) *ConversationUpdateOne {
+	_u.mutation.ResetLastMessageSeq()
+	_u.mutation.SetLastMessageSeq(v)
+	return _u
+}
+
+// SetNillableLastMessageSeq sets the "last_message_seq" field if the given value is not nil.
+func (_u *ConversationUpdateOne) SetNillableLastMessageSeq(v *int64) *ConversationUpdateOne {
+	if v != nil {
+		_u.SetLastMessageSeq(*v)
+	}
+	return _u
+}
+
+// AddLastMessageSeq adds value to the "last_message_seq" field.
+func (_u *ConversationUpdateOne) AddLastMessageSeq(v int64) *ConversationUpdateOne {
+	_u.mutation.AddLastMessageSeq(v)
+	return _u
+}
+
 // SetArchivedAt sets the "archived_at" field.
 func (_u *ConversationUpdateOne) SetArchivedAt(v time.Time) *ConversationUpdateOne {
 	_u.mutation.SetArchivedAt(v)
@@ -694,6 +742,12 @@ func (_u *ConversationUpdateOne) sqlSave(ctx context.Context) (_node *Conversati
 	}
 	if value, ok := _u.mutation.LastActivityAt(); ok {
 		_spec.SetField(conversation.FieldLastActivityAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.LastMessageSeq(); ok {
+		_spec.SetField(conversation.FieldLastMessageSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedLastMessageSeq(); ok {
+		_spec.AddField(conversation.FieldLastMessageSeq, field.TypeInt64, value)
 	}
 	if value, ok := _u.mutation.ArchivedAt(); ok {
 		_spec.SetField(conversation.FieldArchivedAt, field.TypeTime, value)
