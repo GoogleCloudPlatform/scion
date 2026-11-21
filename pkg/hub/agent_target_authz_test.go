@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -491,8 +492,11 @@ func TestAgentFullHistory_MessageLogs(t *testing.T) {
 // lookups succeed while the caller-preference check fails closed.
 type crossAgentCallerFaultStore struct {
 	store.Store
-	armed bool
+	fault    *storeFaultSwitch
+	disarmed atomic.Bool
 }
+
+func (s *crossAgentCallerFaultStore) Disarm() { s.disarmed.Store(true) }
 
 func crossAgentCalledFrom(fn string) bool {
 	pcs := make([]uintptr, 64)
@@ -510,7 +514,7 @@ func crossAgentCalledFrom(fn string) bool {
 }
 
 func (s *crossAgentCallerFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if s.armed && crossAgentCalledFrom("agentHasInstallationGitHubTokenPreference") {
+	if s.fault.Active() && !s.disarmed.Load() && crossAgentCalledFrom("agentHasInstallationGitHubTokenPreference") {
 		return nil, errors.New("injected caller preference lookup fault")
 	}
 	return s.Store.GetAgent(ctx, id)
@@ -591,20 +595,93 @@ func TestInstallationAgent_CrossAgentAttachAndLifecycleRefused(t *testing.T) {
 		assert.NotEqual(t, http.StatusForbidden, rec.Code, "user_preferred caller start on peer: %s", rec.Body.String())
 	})
 
-	t.Run("caller_lookup_fault_fails_closed", func(t *testing.T) {
+	t.Run("caller_lookup_fault_returns_503_and_deleted_caller_returns_403", func(t *testing.T) {
 		f := bypassAgentsSetup(t)
 		markEdgeBackfillComplete(t, f.store)
 		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
 		connectFixtureBroker(t, f, f.sibling)
 
-		fs := &crossAgentCallerFaultStore{Store: f.srv.store}
-		f.srv.store = fs
-		fs.armed = true
+		fs, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *crossAgentCallerFaultStore {
+			return &crossAgentCallerFaultStore{Store: inner, fault: sw}
+		})
+		fault.Arm()
 		recExec := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
 		recStart := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/start", nil, scopes...)
-		fs.armed = false
+		fs.Disarm()
 
-		assert.Equal(t, http.StatusForbidden, recExec.Code, "exec must fail closed on caller lookup fault: %s", recExec.Body.String())
-		assert.Equal(t, http.StatusForbidden, recStart.Code, "start must fail closed on caller lookup fault: %s", recStart.Body.String())
+		assert.Equal(t, http.StatusServiceUnavailable, recExec.Code, "exec must return 503 on transient caller lookup fault: %s", recExec.Body.String())
+		assert.Equal(t, http.StatusServiceUnavailable, recStart.Code, "start must return 503 on transient caller lookup fault: %s", recStart.Body.String())
+
+		// Deleted caller (store.ErrNotFound) stays 403.
+		require.NoError(t, f.store.DeleteAgent(ctx, f.caller.ID))
+		recDeleted := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
+		assert.Equal(t, http.StatusForbidden, recDeleted.Code, "deleted caller must be refused with 403: %s", recDeleted.Body.String())
+	})
+
+	t.Run("peer_env_redacted_in_list_and_get_for_installation_caller", func(t *testing.T) {
+		const peerGHToken = "plainval_peer_gh_token_pat"
+		const childAllowedEnv = "child_allowed_env_val"
+
+		f := bypassAgentsSetup(t)
+		markEdgeBackfillComplete(t, f.store)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+
+		f.sibling.AppliedConfig = &store.AgentAppliedConfig{
+			Env: map[string]string{
+				"GITHUB_TOKEN": "ghp_peer_pat_never_serialized",
+				"GH_TOKEN":     peerGHToken,
+			},
+		}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.sibling))
+
+		f.child.AppliedConfig = &store.AgentAppliedConfig{
+			GitHubTokenPreference: DispatchAgentGitHubTokenInstallation,
+			Env:                   map[string]string{"ALLOWED_CHILD_ENV": childAllowedEnv},
+		}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.child))
+
+		// Control: user_preferred caller sees peer GH_TOKEN in project agent list.
+		recCtrl := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil, scopes...)
+		require.Equal(t, http.StatusOK, recCtrl.Code, recCtrl.Body.String())
+		assert.Contains(t, recCtrl.Body.String(), peerGHToken, "control user_preferred caller sees peer env")
+
+		// Switch caller to installation-only: peer env is redacted in project list,
+		// global list, and single-agent GET, while own installation child env stays visible.
+		f.caller.AppliedConfig = &store.AgentAppliedConfig{GitHubTokenPreference: DispatchAgentGitHubTokenInstallation}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.caller))
+
+		recList := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil, scopes...)
+		require.Equal(t, http.StatusOK, recList.Code, recList.Body.String())
+		assert.NotContains(t, recList.Body.String(), peerGHToken, "installation caller must not see peer GH_TOKEN in project list")
+		assert.NotContains(t, recList.Body.String(), "ghp_peer_pat_never_serialized")
+		assert.Contains(t, recList.Body.String(), childAllowedEnv, "installation caller still sees own installation child env")
+
+		recGlobal := f.asAgent(t, http.MethodGet, "/api/v1/agents", nil, scopes...)
+		require.Equal(t, http.StatusOK, recGlobal.Code, recGlobal.Body.String())
+		assert.NotContains(t, recGlobal.Body.String(), peerGHToken, "installation caller must not see peer GH_TOKEN in global list")
+
+		// Direct helper parity check for single-agent GET / PendingConfig / EffectiveNextRun
+		// and indeterminate propagation on transient lookup fault.
+		callerIdent := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.caller.ID},
+			ProjectID: f.proj.ID,
+			Scopes:    scopes,
+		}}
+		attachCap := &Capabilities{Actions: []string{string(ActionAttach)}}
+		assert.False(t, f.srv.envViewAllowed(ctx, callerIdent, f.sibling, attachCap), "envViewAllowed must deny installation caller viewing non-installation peer")
+		assert.True(t, f.srv.envViewAllowed(ctx, callerIdent, f.child, attachCap), "envViewAllowed must allow installation caller viewing own installation child")
+
+		allowed, indet := canIdentityViewAgentEnv(ctx, f.srv, callerIdent, f.sibling)
+		assert.False(t, allowed)
+		assert.False(t, indet)
+
+		fs2, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *crossAgentCallerFaultStore {
+			return &crossAgentCallerFaultStore{Store: inner, fault: sw}
+		})
+		fault.Arm()
+		allowedFault, indetFault := canIdentityViewAgentEnv(ctx, f.srv, callerIdent, f.sibling)
+		fs2.Disarm()
+		assert.False(t, allowedFault)
+		assert.True(t, indetFault, "transient caller lookup fault must report indeterminate=true")
 	})
 }

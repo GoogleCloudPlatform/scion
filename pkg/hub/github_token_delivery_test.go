@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1193,8 +1194,12 @@ func TestTriggerDispatchAgent_GitHubSourceDefaultInstallationEndToEnd(t *testing
 // role-ceiling reads, and owner/ancestry resolution succeed normally.
 type githubTokenInheritFaultStore struct {
 	store.Store
-	armed bool
+	fault    *storeFaultSwitch
+	disarmed atomic.Bool
 }
+
+func (s *githubTokenInheritFaultStore) Arm()    { s.disarmed.Store(false); s.fault.Arm() }
+func (s *githubTokenInheritFaultStore) Disarm() { s.disarmed.Store(true) }
 
 func githubTokenTestCalledFrom(fn string) bool {
 	pcs := make([]uintptr, 64)
@@ -1212,7 +1217,7 @@ func githubTokenTestCalledFrom(fn string) bool {
 }
 
 func (s *githubTokenInheritFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
-	if s.armed && githubTokenTestCalledFrom("agentHasInstallationGitHubTokenPreference") {
+	if s.fault.Active() && !s.disarmed.Load() && githubTokenTestCalledFrom("agentHasInstallationGitHubTokenPreference") {
 		return nil, errors.New("injected transient parent lookup fault")
 	}
 	return s.Store.GetAgent(ctx, id)
@@ -1252,22 +1257,23 @@ func TestGitHubTokenInheritance_FailClosedOnParentLookupFault(t *testing.T) {
 		}))
 
 		parentToken := mintRecordedMaterialToken(t, f.Server, f.Store, parent.ID, f.ProjectID, ScopesForRole(AgentRoleFull), parent.Ancestry)
-		fs := &githubTokenInheritFaultStore{Store: f.Server.store}
-		f.Server.store = fs
+		fs, _ := installStoreFault(t, f.Server, func(inner store.Store, sw *storeFaultSwitch) *githubTokenInheritFaultStore {
+			return &githubTokenInheritFaultStore{Store: inner, fault: sw}
+		})
 		return f, parent, parentToken, fs
 	}
 
 	t.Run("interactive_create_fails_closed_on_parent_lookup_error", func(t *testing.T) {
-		f, _, parentToken, fs := setupParent(t, "inherit-fault-int", DispatchAgentGitHubTokenInstallation)
+		f, _, parentToken, fault := setupParent(t, "inherit-fault-int", DispatchAgentGitHubTokenInstallation)
 
 		beforeAudits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentDelegation})
 		require.NoError(t, err)
 
-		fs.armed = true
+		fault.Arm()
 		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost,
 			fmt.Sprintf("/api/v1/projects/%s/agents", f.ProjectID),
 			CreateAgentRequest{Name: "fault-child-int", Task: "subtask"}, parentToken)
-		fs.armed = false
+		fault.Disarm()
 
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), ErrCodeUnavailable)
@@ -1348,14 +1354,14 @@ func TestGitHubTokenInheritance_FailClosedOnParentLookupFault(t *testing.T) {
 	}
 
 	t.Run("headless_create_fails_closed_on_parent_lookup_error", func(t *testing.T) {
-		f, parent, _, fs := setupParent(t, "inherit-fault-hl", DispatchAgentGitHubTokenInstallation)
+		f, parent, _, fault := setupParent(t, "inherit-fault-hl", DispatchAgentGitHubTokenInstallation)
 
 		beforeAudits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentDelegation})
 		require.NoError(t, err)
 
-		fs.armed = true
+		fault.Arm()
 		hcChild, err := f.Server.createAgentHeadless(ctx, headlessReq(f, parent, "fault-child-hl", DispatchAgentGitHubTokenUserPreferred))
-		fs.armed = false
+		fault.Disarm()
 
 		require.Error(t, err)
 		assert.ErrorIs(t, err, errAgentCreatorUnreadable)
@@ -1451,13 +1457,14 @@ func TestGitHubTokenInstallation_EnvAndSecretMetadataDoorsGuarded(t *testing.T) 
 			require.NoError(t, err)
 		}
 
-		fs := &githubTokenInheritFaultStore{Store: f.Server.store}
-		f.Server.store = fs
+		fs, _ := installStoreFault(t, f.Server, func(inner store.Store, sw *storeFaultSwitch) *githubTokenInheritFaultStore {
+			return &githubTokenInheritFaultStore{Store: inner, fault: sw}
+		})
 		return f, fs
 	}
 
 	t.Run("installation_agent_blocked_across_all_env_and_secret_metadata_doors", func(t *testing.T) {
-		f, fs := setupFixture(t, "inst-env-doors", DispatchAgentGitHubTokenInstallation)
+		f, fault := setupFixture(t, "inst-env-doors", DispatchAgentGitHubTokenInstallation)
 
 		// 1. Project env by key (nested + flat) -> 404 for blocked keys & aliased env secret fallback; 200 for allowed.
 		for _, path := range []string{
@@ -1550,10 +1557,10 @@ func TestGitHubTokenInstallation_EnvAndSecretMetadataDoorsGuarded(t *testing.T) 
 		}
 
 		// 5. Fail-closed on transient caller lookup error -> HTTP 503 ErrCodeUnavailable, no leak.
-		fs.armed = true
+		fault.Arm()
 		recFault := doRequestWithAgentToken(t, f.Server, http.MethodGet,
 			fmt.Sprintf("/api/v1/projects/%s/env/GITHUB_TOKEN", f.ProjectID), nil, f.Token)
-		fs.armed = false
+		fault.Disarm()
 		assert.Equal(t, http.StatusServiceUnavailable, recFault.Code, recFault.Body.String())
 		assert.Contains(t, recFault.Body.String(), ErrCodeUnavailable)
 		assert.NotContains(t, recFault.Body.String(), "ghp_plain_proj_pat")

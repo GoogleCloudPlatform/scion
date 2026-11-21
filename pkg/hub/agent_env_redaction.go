@@ -86,12 +86,15 @@ func canViewAgentEnv(ctx context.Context, s *Server, agent *store.Agent) bool {
 	return allowed
 }
 
-// canIdentityViewAgentEnv is canViewAgentEnv's rule for any identity: attach
-// on the agent, and never for an agent delegated credential. indeterminate
-// reports a deny the check could not decide (Decision.IsIndeterminate), so
-// a held edit's fold, which asks it for the env saver's rebuilt identity,
-// can refuse rather than fold an env edit on a fault (ptone/scion#5864).
-func canIdentityViewAgentEnv(ctx context.Context, s *Server, identity Identity, agent *store.Agent) (allowed, indeterminate bool) {
+// crossAgentEnvViewAllowed is the single shared helper used by both
+// canIdentityViewAgentEnv and envViewAllowed to enforce non-delegated and
+// Stage 2 §5.1a cross-agent installation isolation before admitting persisted
+// env into any response (project list, global list, single-agent GET,
+// PendingConfig, EffectiveNextRun, or lifecycle responses). Caller preference
+// is memoized per request context so list endpoints perform at most one store
+// lookup. indeterminate is true when the caller-preference lookup hits a
+// transient store error (non-ErrNotFound).
+func (s *Server) crossAgentEnvViewAllowed(ctx context.Context, identity Identity, agent *store.Agent) (allowed, indeterminate bool) {
 	if identity == nil || agent == nil {
 		return false, false
 	}
@@ -101,9 +104,23 @@ func canIdentityViewAgentEnv(ctx context.Context, s *Server, identity Identity, 
 		return false, false
 	}
 	if s != nil {
-		if denied, _ := s.installationAgentCrossAgentDenied(ctx, identity, agent); denied {
-			return false, false
+		if denied, indet, _ := s.installationAgentCrossAgentDenied(ctx, identity, agent); denied {
+			return false, indet
 		}
+	}
+	return true, false
+}
+
+// canIdentityViewAgentEnv is canViewAgentEnv's rule for any identity: attach
+// on the agent, and never for an agent delegated credential or an
+// installation-only agent viewing a non-installation peer. indeterminate
+// reports a deny the check could not decide (Decision.IsIndeterminate or a
+// transient caller-preference lookup fault), so a held edit's fold, which asks
+// it for the env saver's rebuilt identity, can refuse rather than fold an env
+// edit on a fault (ptone/scion#5864).
+func canIdentityViewAgentEnv(ctx context.Context, s *Server, identity Identity, agent *store.Agent) (allowed, indeterminate bool) {
+	if ok, indet := s.crossAgentEnvViewAllowed(ctx, identity, agent); !ok {
+		return false, indet
 	}
 	d := s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionAttach)
 	return d.Allowed, d.IsIndeterminate()
@@ -126,15 +143,12 @@ func redactedAgentCopy(ctx context.Context, s *Server, agent *store.Agent) *stor
 
 // envViewAllowed decides whether a response for identity may include
 // agent's persisted env, given the capability set the handler already
-// computed for identity on agent. Env is included only when that set
-// allows attach; a nil set includes nothing. Every list and single-agent
-// response that computes capabilities decides env visibility here.
+// computed for identity on agent. Env is included only when cross-agent
+// isolation allows it (crossAgentEnvViewAllowed) and the capability set allows
+// attach; a nil set includes nothing. Every list and single-agent response
+// that computes capabilities decides env visibility here.
 func (s *Server) envViewAllowed(ctx context.Context, identity Identity, agent *store.Agent, cap *Capabilities) bool {
-	if identity == nil || agent == nil {
-		return false
-	}
-	// See canViewAgentEnv: never for an agent delegated credential.
-	if isDelegatedAgentIdentity(identity) {
+	if ok, _ := s.crossAgentEnvViewAllowed(ctx, identity, agent); !ok {
 		return false
 	}
 	return capabilityAllows(cap, ActionAttach)

@@ -376,7 +376,14 @@ func TestReincarnateMove_AgentServesProjectWithoutScope(t *testing.T) {
 	require.NotNil(t, resp.MoveVerdict)
 	assert.True(t, resp.MoveVerdict.Eligible)
 
-	rec = do(agentIdentityFor(tid("coordinator"), f.project.ID, ScopeAgentLifecycle))
+	coordID := tid("coordinator")
+	require.NoError(t, f.s.CreateAgent(context.Background(), &store.Agent{
+		ID: coordID, Slug: "coordinator", Name: "coordinator",
+		ProjectID: f.project.ID, Phase: "running",
+	}))
+	count = f.agentCount(t)
+
+	rec = do(agentIdentityFor(coordID, f.project.ID, ScopeAgentLifecycle))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "Cannot delegate agent authority you do not hold")
 	assert.NotContains(t, rec.Body.String(), `"verdict"`, "refused before the move checks")

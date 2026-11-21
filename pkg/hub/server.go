@@ -8495,6 +8495,13 @@ func (s *Server) registerRoutes() {
 func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply middleware in reverse order (last applied runs first)
 
+	// Per-request memoization for caller agent GitHub token preference so
+	// agent-list and multi-target handlers perform at most one store lookup.
+	next := h
+	h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(withCallerGitHubTokenPrefCache(r.Context())))
+	})
+
 	// Innermost: the per-request performance trace, only when
 	// server.hub.perf_trace is on (perftrace_middleware.go).
 	if s.config.PerfTrace {

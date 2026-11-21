@@ -484,7 +484,15 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 			}
 		}
 		if action == ActionAttach || action == ActionLifecycle {
-			if denied, reason := s.installationAgentCrossAgentDenied(ctx, identity, target); denied {
+			if denied, indeterminate, reason := s.installationAgentCrossAgentDenied(ctx, identity, target); denied {
+				if indeterminate {
+					return &agentTargetDenial{
+						status:        http.StatusServiceUnavailable,
+						message:       "Could not verify caller agent GitHub token preference; retry",
+						reason:        reason,
+						indeterminate: true,
+					}
+				}
 				return &agentTargetDenial{
 					status:  http.StatusForbidden,
 					message: agentTargetDenyMessage,
@@ -533,6 +541,14 @@ func writeAgentTargetDenial(w http.ResponseWriter, r *http.Request, identity Ide
 		resource = agentResource(target)
 	}
 	logAuthzDenial(r, identity, resource, action, denial.reason)
+	if denial.status == http.StatusServiceUnavailable {
+		msg := denial.message
+		if msg == "" {
+			msg = "Service temporarily unavailable; retry"
+		}
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, msg, nil)
+		return
+	}
 	writeForbiddenDenialCause(w, denial.message, denial.deniedBy, denial.cause)
 }
 
@@ -603,7 +619,7 @@ func (s *Server) agentLifecycleAllowed(ctx context.Context, identity Identity, t
 // through Decide. A caller without it sees only history it participates in,
 // subject to agent.read.
 func (s *Server) agentFullHistoryDecision(ctx context.Context, identity Identity, agent *store.Agent) Decision {
-	if denied, reason := s.installationAgentCrossAgentDenied(ctx, identity, agent); denied {
+	if denied, _, reason := s.installationAgentCrossAgentDenied(ctx, identity, agent); denied {
 		return Decision{Allowed: false, Reason: reason}
 	}
 	return agentFullHistoryDecide(ctx, s.authzService, identity, agent)

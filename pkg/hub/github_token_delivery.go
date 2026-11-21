@@ -19,6 +19,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -92,17 +93,26 @@ import (
 //     Server.listSecrets, Server.handleProjectSecrets, Server.handleBrokerSecrets
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
 //     (fail-closed), omit blocked secrets by Name or Target.
-//   - Cross-agent observation and control (ActionAttach and ActionLifecycle):
+//   - Cross-agent observation and control (ActionAttach, ActionLifecycle, and
+//     response env visibility):
 //     Server.authorizeAgentTargetAction (authorize.go) -> calls
-//     installationAgentCrossAgentDenied (fail-closed on caller lookup error) to
-//     refuse ActionAttach (exec on both routes, PTY upgrade, .../env, .../keys,
-//     scheduled exec authoring/reveal) and ActionLifecycle (start, stop,
-//     suspend, restart, restore, reincarnate, existing-agent resume-with-task
-//     via agentLifecycleAllowed, DM/scheduled wake) when an installation-only
-//     agent targets a non-installation peer. Server.agentFullHistoryDecision
-//     (authorize.go) and canIdentityViewAgentEnv (agent_env_redaction.go) apply
-//     the same check for full message/log history and applied-env reads. Own
-//     descendants inherit "installation" at create time and are unaffected.
+//     installationAgentCrossAgentDenied (fail-closed: 403 on deleted caller,
+//     indeterminate 503 on transient store error) to refuse ActionAttach (exec
+//     on both routes, PTY upgrade, .../env, .../keys, scheduled exec
+//     authoring/reveal) and ActionLifecycle (start, stop, suspend, restart,
+//     restore, reincarnate, existing-agent resume-with-task via
+//     agentLifecycleAllowed, DM/scheduled wake) when an installation-only agent
+//     targets a non-installation peer. Server.agentFullHistoryDecision
+//     (authorize.go) applies the same check for full message/log history.
+//     Server.crossAgentEnvViewAllowed (agent_env_redaction.go) is the single
+//     shared helper used by both envViewAllowed and canIdentityViewAgentEnv
+//     (with per-request caller-preference memoization) guarding AppliedConfig,
+//     PendingConfig, and EffectiveNextRun env across every response site:
+//     GET /api/v1/projects/{id}/agents (agent_sorted_project_list.go,
+//     agent_sorted_project_list_jwt.go, handlers_projects_core.go),
+//     GET /api/v1/agents (agent_sorted_global_list.go), single-agent GET
+//     (handlers_agents_core.go), and lifecycle responses (redactedAgentCopy).
+//     Own descendants inherit "installation" at create time and are unaffected.
 //   - Descendants (interactive agent-created create):
 //     Server.createAgentInProject (handlers_agents_core.go) ->
 //     agentHasInstallationGitHubTokenPreference (tri-state; fails closed with
@@ -216,35 +226,87 @@ func (s *Server) callerAgentUsesInstallationGitHubToken(w http.ResponseWriter, c
 	return usesInst, true
 }
 
+type callerGitHubTokenPrefCacheKey struct{}
+
+type callerGitHubTokenPrefEntry struct {
+	usesInst bool
+	err      error
+}
+
+type callerGitHubTokenPrefCache struct {
+	mu      sync.Mutex
+	entries map[string]callerGitHubTokenPrefEntry
+}
+
+// withCallerGitHubTokenPrefCache attaches a per-request memoization cache for
+// agentHasInstallationGitHubTokenPreference so list and multi-target handlers
+// perform at most one store lookup per calling agent per request.
+func withCallerGitHubTokenPrefCache(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(callerGitHubTokenPrefCacheKey{}).(*callerGitHubTokenPrefCache); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, callerGitHubTokenPrefCacheKey{}, &callerGitHubTokenPrefCache{})
+}
+
+func (s *Server) agentHasInstallationGitHubTokenPreferenceCached(ctx context.Context, agentID string) (bool, error) {
+	if agentID == "" {
+		return false, nil
+	}
+	cache, _ := ctx.Value(callerGitHubTokenPrefCacheKey{}).(*callerGitHubTokenPrefCache)
+	if cache != nil {
+		cache.mu.Lock()
+		if entry, ok := cache.entries[agentID]; ok {
+			cache.mu.Unlock()
+			return entry.usesInst, entry.err
+		}
+		cache.mu.Unlock()
+	}
+	usesInst, err := s.agentHasInstallationGitHubTokenPreference(ctx, agentID)
+	if cache != nil {
+		cache.mu.Lock()
+		if cache.entries == nil {
+			cache.entries = make(map[string]callerGitHubTokenPrefEntry, 1)
+		}
+		cache.entries[agentID] = callerGitHubTokenPrefEntry{usesInst: usesInst, err: err}
+		cache.mu.Unlock()
+	}
+	return usesInst, err
+}
+
 // installationAgentCrossAgentDenied reports whether an agent caller using
-// GitHubTokenPreference == "installation" must be refused ActionAttach or
-// ActionLifecycle on target because target does not also carry
-// GitHubTokenPreference == "installation" (Stage 2 §5.1a).
+// GitHubTokenPreference == "installation" must be refused ActionAttach,
+// ActionLifecycle, or cross-agent env views on target because target does not
+// also carry GitHubTokenPreference == "installation" (Stage 2 §5.1a).
 //
 // Own descendants inherit "installation" at create time and are unaffected.
-// Any store lookup failure for the caller fails closed (returns denied=true).
-func (s *Server) installationAgentCrossAgentDenied(ctx context.Context, identity Identity, target *store.Agent) (denied bool, reason string) {
+// Lookup errors fail closed: store.ErrNotFound (deleted caller) returns
+// (denied=true, indeterminate=false); any other store error returns
+// (denied=true, indeterminate=true) so callers can answer 503/retryable.
+func (s *Server) installationAgentCrossAgentDenied(ctx context.Context, identity Identity, target *store.Agent) (denied, indeterminate bool, reason string) {
 	if identity == nil || identity.Type() != "agent" {
-		return false, ""
+		return false, false, ""
 	}
 	agentIdent, ok := identity.(AgentIdentity)
 	if !ok {
-		return false, ""
+		return false, false, ""
 	}
 	if target != nil && target.ID == agentIdent.ID() {
-		return false, ""
+		return false, false, ""
 	}
 	if usesInstallationGitHubToken(target) {
-		return false, ""
+		return false, false, ""
 	}
-	callerInst, err := s.agentHasInstallationGitHubTokenPreference(ctx, agentIdent.ID())
+	callerInst, err := s.agentHasInstallationGitHubTokenPreferenceCached(ctx, agentIdent.ID())
 	if err != nil {
-		return true, "installation github token caller lookup failed: " + err.Error()
+		if errors.Is(err, store.ErrNotFound) {
+			return true, false, "installation github token caller record not found"
+		}
+		return true, true, "installation github token caller lookup failed: " + err.Error()
 	}
 	if callerInst {
-		return true, "installation-only agent may not attach to or control non-installation peer agent"
+		return true, false, "installation-only agent may not attach to or control non-installation peer agent"
 	}
-	return false, ""
+	return false, false, ""
 }
 
 // withoutInstallationBlockedEnvVars omits env vars whose key is blocked for
@@ -281,8 +343,9 @@ func withoutInstallationBlockedSecrets(metas []secret.SecretMeta) []secret.Secre
 
 // hasGitHubMintProjectForHeadless reports whether the hub dispatcher can
 // resolve a GitHub App mint project for a prospective headless agent using the
-// exact same resolver as deliverGitHubToken (resolveGitHubMintProject). Returns
-// false when no HTTP dispatcher or GitHub App minter is configured, or when
+// exact same resolver as deliverGitHubToken (resolveGitHubMintProject).
+// Treated as "no GitHub access" (returns false) when no HTTP dispatcher is
+// wired (never happens in production), no GitHub App minter is configured, or
 // resolveGitHubMintProject returns nil.
 func (s *Server) hasGitHubMintProjectForHeadless(
 	ctx context.Context,
