@@ -25,6 +25,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
@@ -610,12 +611,15 @@ func cleanupSecretsRecordTmp(agentDir string) error {
 	if err != nil {
 		return err
 	}
-	matches, err := filepath.Glob(filepath.Join(agentDir, secretsRecordTmpPrefix+"*"))
+	entries, err := os.ReadDir(agentDir)
 	if err != nil {
 		return err
 	}
-	for _, m := range matches {
-		if err := os.RemoveAll(m); err != nil {
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), secretsRecordTmpPrefix) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(agentDir, e.Name())); err != nil {
 			return err
 		}
 	}

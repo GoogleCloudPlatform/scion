@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -2744,6 +2745,75 @@ func TestRecordSecrets_CleansLeftoverTmpDirs(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(agentDir); err != nil || len(entries) != 1 || entries[0].Name() != config.HarnessSecretsRecordDirName {
 		t.Fatalf("unexpected agentDir entries after replace (err=%v): %v", err, entries)
+	}
+}
+
+func TestRecordSecrets_CleansLeftoverTmpDirs_GlobMetacharacters(t *testing.T) {
+	cases := []struct {
+		name        string
+		dirName     string
+		skipWindows bool
+	}{
+		{name: "unclosed bracket", dirName: "a[b"},
+		{name: "character class", dirName: "x[1]"},
+		{name: "class and wildcard", dirName: "x[1]*", skipWindows: true},
+	}
+	id := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:r1"}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.skipWindows && goruntime.GOOS == "windows" {
+				t.Skip("glob wildcard '*' is not a valid filename character on Windows")
+			}
+			agentDir := filepath.Join(t.TempDir(), tc.dirName)
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+
+			recordPath := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
+			oldPath := filepath.Join(agentDir, secretsRecordOldDirName)
+			writeSecretMap(t, recordPath, map[string]string{"TOKEN_KEEP": "val-keep"})
+			writeSecretMap(t, oldPath, map[string]string{"TOKEN_OLD": "val-old"})
+			recordBefore := snapshotDirBytes(t, recordPath)
+			oldBefore := snapshotDirBytes(t, oldPath)
+
+			tmp1 := filepath.Join(agentDir, secretsRecordTmpPrefix+"crash1")
+			tmp2 := filepath.Join(agentDir, secretsRecordTmpPrefix+"crash2")
+			writeSecretMap(t, tmp1, map[string]string{"LEAK": "v1"})
+			writeSecretMap(t, tmp2, map[string]string{"LEAK": "v2"})
+
+			if err := cleanupSecretsRecordTmp(agentDir); err != nil {
+				t.Fatalf("cleanupSecretsRecordTmp(%q) = %v, want nil", agentDir, err)
+			}
+			for _, p := range []string{tmp1, tmp2} {
+				if _, err := os.Lstat(p); !os.IsNotExist(err) {
+					t.Errorf("leftover tmp dir %q still exists (err=%v)", p, err)
+				}
+			}
+			if got := snapshotDirBytes(t, recordPath); !reflect.DeepEqual(got, recordBefore) {
+				t.Errorf("real record modified by cleanupSecretsRecordTmp: got %v, want %v", got, recordBefore)
+			}
+			if got := snapshotDirBytes(t, oldPath); !reflect.DeepEqual(got, oldBefore) {
+				t.Errorf(".old record modified by cleanupSecretsRecordTmp: got %v, want %v", got, oldBefore)
+			}
+
+			// Verify recordSecrets also succeeds and sweeps leftover tmp dirs in this agentDir.
+			home := filepath.Join(t.TempDir(), "home")
+			writeSecretMap(t, stagedSecretsDir(home), map[string]string{"TOKEN_NEW": "val-new"})
+			tmp3 := filepath.Join(agentDir, secretsRecordTmpPrefix+"crash3")
+			writeSecretMap(t, tmp3, map[string]string{"LEAK": "v3"})
+			if replaced, err := recordSecrets(agentDir, home, "a", recordUpdate{
+				Names: []string{"TOKEN_NEW"}, Current: id, FreshSatisfied: true,
+			}); err != nil || !replaced {
+				t.Fatalf("recordSecrets(%q) = (%v, %v), want (true, nil)", agentDir, replaced, err)
+			}
+			if _, err := os.Lstat(tmp3); !os.IsNotExist(err) {
+				t.Errorf("leftover tmp dir %q still exists after recordSecrets (err=%v)", tmp3, err)
+			}
+			if entries, err := os.ReadDir(agentDir); err != nil || len(entries) != 1 || entries[0].Name() != config.HarnessSecretsRecordDirName {
+				t.Fatalf("unexpected agentDir entries after recordSecrets (err=%v): %v", err, entries)
+			}
+		})
 	}
 }
 
