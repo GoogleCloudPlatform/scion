@@ -356,7 +356,7 @@ func waitCloudRunInstanceGone(ctx context.Context, c cloudrun.InstancesAPI, name
 // at start, differs from want, the instance this start computed
 // (ptone/scion#7297). The Instances API has no update, so an instance
 // that differs in any of them is recreated, never reused. Compared:
-//   - the container Args and Image;
+//   - the container Args, Image, and WorkingDir;
 //   - the instance service account;
 //   - the secret-backed env: every env var in secretEnv (the staged
 //     secrets and env-type secrets), by name and value, and every env var
@@ -376,6 +376,9 @@ func cloudRunSpecDiff(existing, want *runpb.Instance, secretEnv map[string]bool)
 	}
 	if ec.GetImage() != wc.GetImage() {
 		diff = append(diff, "image")
+	}
+	if ec.GetWorkingDir() != wc.GetWorkingDir() {
+		diff = append(diff, "working_dir")
 	}
 	if existing.GetServiceAccount() != want.GetServiceAccount() {
 		diff = append(diff, "service_account")
