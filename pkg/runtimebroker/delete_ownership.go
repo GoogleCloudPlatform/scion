@@ -37,7 +37,12 @@ var (
 // maxOwnershipWalkEntries bounds the read-only walk inside an os.Root when
 // os.Root.RemoveAll fails with fs.ErrPermission (os.Root.RemoveAll reports
 // only the top-level relative path, not the nested entry that failed).
-const maxOwnershipWalkEntries = 10000
+// ownershipWalkReadDirBatch caps how many directory entries are read per
+// ReadDir call so a single huge directory cannot defeat the entry bound.
+const (
+	maxOwnershipWalkEntries   = 10000
+	ownershipWalkReadDirBatch = 128
+)
 
 // deleteOwnershipMismatch describes a filesystem permission error during
 // agent or project deletion caused by files owned by a different host UID
@@ -102,23 +107,29 @@ func findForeignOwnerInRoot(root *os.Root, rootDir, rel string) *deleteOwnership
 		if err != nil {
 			continue
 		}
-		entries, readErr := f.ReadDir(-1)
-		_ = f.Close()
-		if readErr != nil {
-			continue
+		limitReached := false
+		for {
+			entries, readErr := f.ReadDir(ownershipWalkReadDirBatch)
+			for _, de := range entries {
+				visited++
+				if visited > maxOwnershipWalkEntries {
+					limitReached = true
+					break
+				}
+				if de.Type()&fs.ModeSymlink != 0 {
+					continue
+				}
+				if de.IsDir() {
+					queue = append(queue, filepath.Join(cur, de.Name()))
+				}
+			}
+			if limitReached || readErr != nil {
+				break
+			}
 		}
-
-		for _, de := range entries {
-			visited++
-			if visited > maxOwnershipWalkEntries {
-				return nil
-			}
-			if de.Type()&fs.ModeSymlink != 0 {
-				continue
-			}
-			if de.IsDir() {
-				queue = append(queue, filepath.Join(cur, de.Name()))
-			}
+		_ = f.Close()
+		if limitReached {
+			return nil
 		}
 	}
 	return nil

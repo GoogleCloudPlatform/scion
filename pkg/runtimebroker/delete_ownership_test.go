@@ -241,6 +241,44 @@ func TestFindForeignOwnerInRoot_DoesNotFollowSymlink(t *testing.T) {
 	}
 }
 
+// TestFindForeignOwnerInRoot_ChunkedReadDir verifies that the bounded walk
+// reads directories spanning multiple ReadDir batches and still locates a
+// foreign-owned subdirectory.
+func TestFindForeignOwnerInRoot_ChunkedReadDir(t *testing.T) {
+	globalDir := filepath.Join(t.TempDir(), config.DotScion)
+	rootDir := filepath.Join(globalDir, config.ProjectConfigsDir)
+	entryName := "proj-batch__22222222"
+	baseDir := filepath.Join(rootDir, entryName)
+	foreignDir := filepath.Join(baseDir, "z-foreign")
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < ownershipWalkReadDirBatch+50; i++ {
+		name := filepath.Join(baseDir, fmt.Sprintf("f-%03d", i))
+		if err := os.WriteFile(name, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stubDeleteOwnership(t, 1002, 1002, map[string][2]int{
+		foreignDir: {1000, 1000},
+	})
+
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+
+	m := findForeignOwnerInRoot(root, rootDir, entryName)
+	if m == nil {
+		t.Fatal("expected ownership mismatch across multi-batch ReadDir, got nil")
+	}
+	if m.OwnerPath != foreignDir || m.OwnerUID != 1000 {
+		t.Errorf("got %+v, want OwnerPath=%q OwnerUID=1000", m, foreignDir)
+	}
+}
+
 type deleteErrMockManager struct {
 	*filteringMockManager
 	deleteErr error
