@@ -368,9 +368,9 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// List repos for this installation
-	repos, err := client.ListInstallationRepos(ctx, installationID)
-	if err != nil {
-		slog.Warn("Failed to list installation repos", "error", upstreamText(err.Error()), "installation_id", installationID)
+	repos, repoErr := client.ListInstallationRepos(ctx, installationID)
+	if repoErr != nil {
+		slog.Warn("Failed to list installation repos", "error", upstreamText(repoErr.Error()), "installation_id", installationID)
 		// Continue without repos — we can still record the installation
 	}
 
@@ -379,7 +379,9 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 		repoNames[i] = repo.FullName
 	}
 
-	// Record the installation (idempotent)
+	// Record the installation (create if missing, update if already present).
+	// CreateGitHubInstallation uses ON CONFLICT DO NOTHING and returns nil on
+	// an existing row, so check explicitly rather than relying on a create error.
 	installation := &store.GitHubInstallation{
 		InstallationID: installationID,
 		AccountLogin:   ghInstallation.Account.Login,
@@ -393,17 +395,31 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 		installation.Status = store.GitHubInstallationStatusSuspended
 	}
 
-	if err := s.store.CreateGitHubInstallation(ctx, installation); err != nil {
-		// Idempotent — update if already exists
-		if existing, getErr := s.store.GetGitHubInstallation(ctx, installationID); getErr == nil {
-			existing.AccountLogin = installation.AccountLogin
-			existing.AccountType = installation.AccountType
+	existing, getErr := s.store.GetGitHubInstallation(ctx, installationID)
+	switch {
+	case getErr == nil:
+		existing.AccountLogin = installation.AccountLogin
+		existing.AccountType = installation.AccountType
+		if repoErr == nil {
 			existing.Repositories = installation.Repositories
-			existing.Status = installation.Status
-			if updateErr := s.store.UpdateGitHubInstallation(ctx, existing); updateErr != nil {
-				slog.Error("Failed to update existing installation", "error", updateErr)
-			}
 		}
+		existing.Status = installation.Status
+		if updateErr := s.store.UpdateGitHubInstallation(ctx, existing); updateErr != nil {
+			slog.Error("Failed to update existing installation", "installation_id", installationID, "error", updateErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save GitHub App installation", nil)
+			return
+		}
+		installation = existing
+	case errors.Is(getErr, store.ErrNotFound):
+		if createErr := s.store.CreateGitHubInstallation(ctx, installation); createErr != nil {
+			slog.Error("Failed to create installation", "installation_id", installationID, "error", createErr)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save GitHub App installation", nil)
+			return
+		}
+	default:
+		slog.Error("Failed to load existing installation", "installation_id", installationID, "error", getErr)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save GitHub App installation", nil)
+		return
 	}
 
 	// Auto-match projects
