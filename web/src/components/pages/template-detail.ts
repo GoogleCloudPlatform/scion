@@ -29,6 +29,7 @@ import { can } from '../../shared/types.js';
 import { describeSourceUrl, isTemplateSourceRefreshable } from '../../shared/source-url.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { cachedProjectLabel } from '../../client/project-label.js';
 import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
@@ -199,11 +200,23 @@ export class ScionPageTemplateDetail extends LitElement {
   }
 
   /** Back-navigation links — project scope returns to project settings, user scope to profile templates, hub scope to Hub Resources. */
-  private backLinks(): Array<{ href: string; label: string }> {
+  private backLinks(): Array<{
+    href: string;
+    label: string;
+    truncate?: boolean;
+    tooltip?: string;
+  }> {
     if (this.projectId) {
+      const projectName = cachedProjectLabel(this.projectId);
+      const settingsLabel = projectName ? `${projectName} Settings` : 'Project Settings';
       return [
         { href: `/projects/${this.projectId}/settings?tab=templates`, label: 'Templates' },
-        { href: `/projects/${this.projectId}/settings`, label: 'Project Settings' },
+        {
+          href: `/projects/${this.projectId}/settings`,
+          label: settingsLabel,
+          truncate: !!projectName,
+          tooltip: projectName ? settingsLabel : '',
+        },
       ];
     }
     if (this.scope === 'user') {
@@ -299,7 +312,13 @@ export class ScionPageTemplateDetail extends LitElement {
       <scion-detail-header heading=${t.displayName || t.name}>
         ${this.backLinks().map(
           (link) =>
-            html`<scion-back-link slot="back" href=${link.href}>${link.label}</scion-back-link>`
+            html`<scion-back-link
+              slot="back"
+              href=${link.href}
+              ?truncate=${!!link.truncate}
+              tooltip=${link.tooltip ?? ''}
+              >${link.label}</scion-back-link
+            >`
         )}
         <sl-icon slot="icon" name="file-earmark-code"></sl-icon>
         ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}

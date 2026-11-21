@@ -44,16 +44,34 @@ export class ScionBackLink extends LitElement {
   /** Link target. */
   @property() href = '';
 
+  /**
+   * Truncate a long label with an ellipsis (ptone/scion#8731). Pair with
+   * `tooltip` so the full plain-text name remains readable on hover/focus.
+   */
+  @property({ type: Boolean, reflect: true }) truncate = false;
+
+  /** Optional plain-text tooltip shown on hover/focus (e.g. full project name). */
+  @property() tooltip = '';
+
   static override styles = css`
     :host {
       display: inline-flex;
+      max-width: 100%;
+      min-width: 0;
       margin-bottom: 1rem;
+    }
+
+    sl-tooltip {
+      max-width: 100%;
+      min-width: 0;
     }
 
     a {
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
+      max-width: 100%;
+      min-width: 0;
       color: var(--scion-text-muted, #64748b);
       text-decoration: none;
       font-size: 0.875rem;
@@ -62,15 +80,33 @@ export class ScionBackLink extends LitElement {
     a:hover {
       color: var(--scion-primary, #3b82f6);
     }
+
+    sl-icon {
+      flex-shrink: 0;
+    }
+
+    .label {
+      min-width: 0;
+    }
+
+    :host([truncate]) .label {
+      max-width: var(--scion-back-link-max-width, 24ch);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   `;
 
   override render() {
-    return html`
+    const link = html`
       <a href=${this.href} part="link">
         <sl-icon name="arrow-left" aria-hidden="true"></sl-icon>
-        <slot></slot>
+        <span class="label" part="label"><slot></slot></span>
       </a>
     `;
+    const tip = this.tooltip.trim();
+    if (!tip) return link;
+    return html`<sl-tooltip content=${tip}>${link}</sl-tooltip>`;
   }
 }
 

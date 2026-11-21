@@ -81,4 +81,34 @@ describe('scion-back-link', () => {
   it('keeps 1rem of space below the link', () => {
     expect(rules.get(':host') ?? '').toMatch(/margin-bottom:\s*1rem/);
   });
+
+  it('truncates long labels with ellipsis when truncate is set and keeps icon fixed', async () => {
+    const el = await mount(
+      '/projects/p-1',
+      'a-very-long-project-display-name-that-should-truncate'
+    );
+    el.truncate = true;
+    await el.updateComplete;
+
+    expect(el.hasAttribute('truncate')).toBe(true);
+    const label = el.shadowRoot!.querySelector('.label');
+    expect(label).not.toBeNull();
+    const truncateRule = rules.get(':host([truncate]) .label') ?? '';
+    expect(truncateRule).toMatch(/overflow:\s*hidden/);
+    expect(truncateRule).toMatch(/text-overflow:\s*ellipsis/);
+    expect(truncateRule).toMatch(/white-space:\s*nowrap/);
+    expect(rules.get('sl-icon') ?? '').toMatch(/flex-shrink:\s*0/);
+  });
+
+  it('wraps the anchor in a plain-text sl-tooltip only when tooltip is set', async () => {
+    const el = await mount('/projects/p-1', 'My Project');
+    expect(el.shadowRoot!.querySelector('sl-tooltip')).toBeNull();
+
+    el.tooltip = 'My Project <script>';
+    await el.updateComplete;
+    const tip = el.shadowRoot!.querySelector('sl-tooltip');
+    expect(tip).not.toBeNull();
+    expect(tip!.getAttribute('content')).toBe('My Project <script>');
+    expect(tip!.querySelector('a')?.getAttribute('href')).toBe('/projects/p-1');
+  });
 });

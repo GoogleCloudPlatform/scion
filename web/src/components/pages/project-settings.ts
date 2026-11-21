@@ -38,6 +38,7 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { cachedProjectLabel, projectDisplayName } from '../../client/project-label.js';
 import { projectVisitorsVisible } from '../../shared/project-visitors.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
@@ -2766,15 +2767,18 @@ export class ScionPageProjectSettings extends LitElement {
       return this.renderError();
     }
 
+    const projectLabel = projectDisplayName(this.project);
+    const backLabel = projectLabel || 'Project';
+
     return html`
-      <a href="/projects/${this.projectId}" class="back-link">
+      <a href="/projects/${this.projectId}" class="back-link" title=${projectLabel || nothing}>
         <sl-icon name="arrow-left"></sl-icon>
-        Back to Project
+        ${backLabel}
       </a>
 
       <div class="header">
         <sl-icon name="gear"></sl-icon>
-        <h1>${this.project.name} Settings</h1>
+        <h1>${backLabel} Settings</h1>
       </div>
 
       ${this.renderConfigSection()} ${this.renderMembersSection()} ${this.renderResourcesSection()}
@@ -2815,9 +2819,9 @@ export class ScionPageProjectSettings extends LitElement {
           `}
 
       <div class="done-footer">
-        <sl-button variant="default" href="/projects/${this.projectId}">
+        <sl-button variant="default" href="/projects/${encodeURIComponent(this.projectId)}">
           <sl-icon slot="prefix" name="arrow-left"></sl-icon>
-          Back to ${this.project.name}
+          Back to ${backLabel}
         </sl-button>
       </div>
     `;
@@ -4345,10 +4349,11 @@ export class ScionPageProjectSettings extends LitElement {
         </div>
       `;
     }
+    const cachedLabel = cachedProjectLabel(this.projectId);
     return html`
-      <a href="/projects/${this.projectId}" class="back-link">
+      <a href="/projects/${this.projectId}" class="back-link" title=${cachedLabel || nothing}>
         <sl-icon name="arrow-left"></sl-icon>
-        Back to Project
+        ${cachedLabel || 'Back to Project'}
       </a>
 
       <div class="error-state">

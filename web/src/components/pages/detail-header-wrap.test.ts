@@ -305,7 +305,7 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[file-earmark-richtext]',
-      back: [['/projects/p-1', 'Project']],
+      back: [['/projects/p-1', 'p-1']],
       badges: [],
       meta: ['meta'],
       // The actions hide while the artifact is being edited.
@@ -533,14 +533,14 @@ describe('project-scoped template and harness config back links', () => {
       'template',
       [
         ['/projects/p-1/settings?tab=templates', 'Templates'],
-        ['/projects/p-1/settings', 'Project Settings'],
+        ['/projects/p-1/settings', 'p-1 Settings'],
       ],
     ],
     [
       'harness config',
       [
         ['/projects/p-1/settings?tab=harness-configs', 'Harness Configs'],
-        ['/projects/p-1/settings', 'Project Settings'],
+        ['/projects/p-1/settings', 'p-1 Settings'],
       ],
     ],
   ])('%s hands both links to the back slot in order', (label, expected) => {

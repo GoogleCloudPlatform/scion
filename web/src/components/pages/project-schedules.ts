@@ -26,6 +26,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { projectDisplayName } from '../../client/project-label.js';
 import '../shared/schedule-list.js';
 
 interface Project {
@@ -193,7 +194,7 @@ export class ScionPageProjectSchedules extends LitElement {
       `;
     }
 
-    const projectName = this.project?.name || this.project?.slug || this.projectId;
+    const projectName = projectDisplayName(this.project, this.projectId) || 'Project';
 
     return html`
       <a class="back-link" href="/projects/${encodeURIComponent(this.projectId)}">

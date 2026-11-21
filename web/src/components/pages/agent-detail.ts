@@ -53,6 +53,7 @@ import {
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
+import { projectDisplayName } from '../../client/project-label.js';
 
 interface AgentNotificationsResponse {
   userNotifications: Notification[];
@@ -973,8 +974,49 @@ export class ScionPageAgentDetail extends LitElement {
    * after the delete but before the 1s redirect still wins. The two can only
    * differ in that window, and both destinations are valid.
    */
+  private get projectBackInfo(): {
+    href: string;
+    label: string;
+    deletedLabel: string;
+    truncate: boolean;
+    tooltip: string;
+  } {
+    const projectLabel =
+      projectDisplayName(this.project) ||
+      projectDisplayName({
+        name: this.agent?.project,
+        slug: this.agent?.projectSlug,
+      });
+    if (this.project) {
+      const display = projectLabel || 'Project';
+      return {
+        href: `/projects/${this.project.id}`,
+        label: `To ${display}`,
+        deletedLabel: `Go to ${display}`,
+        truncate: true,
+        tooltip: projectLabel,
+      };
+    }
+    if (this.agent?.projectId && projectLabel) {
+      return {
+        href: `/projects/${this.agent.projectId}`,
+        label: `To ${projectLabel}`,
+        deletedLabel: `Go to ${projectLabel}`,
+        truncate: true,
+        tooltip: projectLabel,
+      };
+    }
+    return {
+      href: '/agents',
+      label: 'Back to Agents',
+      deletedLabel: 'Go to Agents',
+      truncate: false,
+      tooltip: '',
+    };
+  }
+
   private get redirectTarget(): string {
-    return this.project ? `/projects/${this.project.id}` : '/agents';
+    return this.projectBackInfo.href;
   }
 
   /**
@@ -1904,12 +1946,15 @@ export class ScionPageAgentDetail extends LitElement {
     // complete, which the hub refuses to start or resume (409
     // agent_create_incomplete); the launch banner offers delete instead.
     const startOk = lifecycleOk && !isAgentLaunching(agent) && !isIncompleteCreate(agent);
+    const back = this.projectBackInfo;
     return html`
       <scion-detail-header heading=${agent.name}>
         <scion-back-link
           slot="back"
-          href="${this.project ? `/projects/${this.project.id}` : '/agents'}"
-          >${this.project ? `To ${this.project.name}` : 'Back to Agents'}</scion-back-link
+          href="${back.href}"
+          ?truncate=${back.truncate}
+          tooltip=${back.tooltip}
+          >${back.label}</scion-back-link
         >
         <sl-icon slot="icon" name="cpu"></sl-icon>
         ${agentStatusBadge(agent)}
@@ -3532,22 +3577,27 @@ export class ScionPageAgentDetail extends LitElement {
    * the user always has a way out.
    */
   private renderDeletedState(): TemplateResult {
-    const targetLabel = this.project ? `Go to ${this.project.name}` : 'Go to Agents';
+    const back = this.projectBackInfo;
     return html`
       <div class="loading-state" data-testid="agent-deleted-state">
         <sl-icon name="trash"></sl-icon>
         <p>Agent deleted.${this.deleteRedirectTimer ? ' Redirecting…' : ''}</p>
-        <scion-back-link href="${this.redirectTarget}" data-testid="agent-deleted-link"
-          >${targetLabel}</scion-back-link
+        <scion-back-link
+          href="${back.href}"
+          ?truncate=${back.truncate}
+          tooltip=${back.tooltip}
+          data-testid="agent-deleted-link"
+          >${back.deletedLabel}</scion-back-link
         >
       </div>
     `;
   }
 
   private renderError() {
+    const back = this.projectBackInfo;
     return html`
-      <scion-back-link href="${this.redirectTarget}"
-        >${this.project ? `To ${this.project.name}` : 'Back to Agents'}</scion-back-link
+      <scion-back-link href="${back.href}" ?truncate=${back.truncate} tooltip=${back.tooltip}
+        >${back.label}</scion-back-link
       >
 
       <div class="error-state">

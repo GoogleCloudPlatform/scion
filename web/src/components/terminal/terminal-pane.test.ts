@@ -1713,6 +1713,45 @@ describe('compact pane header (ptone/scion#4324)', () => {
     expect(toolbar().querySelector('sl-tooltip > a.back-link')).toBeNull();
   });
 
+  it('shows project display name or slug with tooltip in full and compact back links (#8731)', async () => {
+    await withProject(false);
+    (page as unknown as { agent: { project?: string; projectSlug?: string } }).agent = {
+      project: 'Billing Service',
+      projectSlug: 'billing-service',
+    };
+    page.requestUpdate();
+    await page.updateComplete;
+
+    const fullLink = toolbar().querySelector<HTMLAnchorElement>('a.back-link.project-back-link')!;
+    expect(fullLink).not.toBeNull();
+    expect(fullLink.textContent!.trim()).toBe('← Billing Service');
+    expect(fullLink.getAttribute('href')).toBe('/projects/proj-1');
+    expect(fullLink.closest('sl-tooltip')!.getAttribute('content')).toBe('Billing Service');
+
+    // Falls back to slug when display name is blank.
+    (page as unknown as { agent: { project?: string; projectSlug?: string } }).agent = {
+      project: '   ',
+      projectSlug: 'billing-service',
+    };
+    page.requestUpdate();
+    await page.updateComplete;
+    expect(
+      toolbar()
+        .querySelector<HTMLAnchorElement>('a.back-link.project-back-link')!
+        .textContent!.trim()
+    ).toBe('← billing-service');
+
+    // Compact mode uses project name in tooltip and aria-label.
+    page.compactHeader = true;
+    page.requestUpdate();
+    await page.updateComplete;
+    const compactLink = toolbar().querySelector<HTMLAnchorElement>('a.back-link.compact')!;
+    expect(compactLink.getAttribute('aria-label')).toBe('Back to billing-service');
+    expect(compactLink.closest('sl-tooltip')!.getAttribute('content')).toBe(
+      'Back to billing-service'
+    );
+  });
+
   it('keeps the agent name readable and the header buttons full size', async () => {
     await withProject(true);
     const styles = (

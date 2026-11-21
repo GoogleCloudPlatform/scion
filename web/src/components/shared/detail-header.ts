@@ -70,6 +70,7 @@ export class ScionDetailHeader extends LitElement {
       flex-wrap: wrap;
       align-items: center;
       column-gap: 1rem;
+      min-width: 0;
     }
 
     .header {
