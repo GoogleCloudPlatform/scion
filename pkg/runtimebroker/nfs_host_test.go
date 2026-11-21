@@ -47,7 +47,11 @@ func newHostNFSServer(t *testing.T, m *HostNFSMounter, brokerID, rtName string, 
 	t.Helper()
 	cfg := ServerConfig{Host: "127.0.0.1", Port: 0, BrokerID: brokerID, StateDir: t.TempDir(),
 		NFSConfig: nfs, NFSMountChecker: mc, NFSHostMounter: m}
-	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return rtName }}, config.RuntimeBuildRecord{})
+	rt := &runtime.MockRuntime{NameFunc: func() string { return rtName }}
+	srv := New(cfg, &mockManager{}, rt, config.RuntimeBuildRecord{})
+	srv.resolveAuxiliaryRuntime = func(_, _, _ string) (runtime.Runtime, config.RuntimeBuildRecord) {
+		return rt, config.RuntimeBuildRecord{}
+	}
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv
 }

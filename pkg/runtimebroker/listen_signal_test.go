@@ -82,4 +82,52 @@ func TestServerStart_ListeningNeverClosesOnBindError(t *testing.T) {
 		t.Fatal("Listening closed although the bind failed")
 	default:
 	}
+	srv.auxDiscoveryMu.Lock()
+	stopped := srv.auxDiscoveryStopped
+	srv.auxDiscoveryMu.Unlock()
+	assert.True(t, stopped, "Start must stop background services when listener bind fails")
+}
+
+// TestNewTestServer_StartDoesNotProbeHostRuntimes verifies that a mock test
+// server created with newTestServer never falls back to host runtime
+// auto-detection (such as `podman info` on Linux) during Start's background
+// auxiliary runtime discovery, even when a profile's project directory is
+// missing or torn down (ptone/scion#8570).
+func TestNewTestServer_StartDoesNotProbeHostRuntimes(t *testing.T) {
+	srv := newTestServer(t)
+	srv.config.Host = "127.0.0.1"
+	srv.config.Port = 0
+
+	// Even for a missing project path and the built-in "remote" profile,
+	// the test server's auxiliary resolver must stay on the mock runtime
+	// instead of calling agent.ResolveRuntimeWithRecord (which falls back
+	// to auto-detecting podman/docker/kubernetes on the host).
+	require.NotNil(t, srv.resolveAuxiliaryRuntime)
+	rt, _ := srv.resolveAuxiliaryRuntime(t.TempDir()+"-missing", "", "remote")
+	require.NotNil(t, rt)
+	assert.Equal(t, "mock", rt.Name(), "newTestServer must not probe host runtimes for auxiliary profiles")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			assert.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Error("Start did not return")
+		}
+	})
+
+	select {
+	case <-srv.Listening():
+	case err := <-done:
+		t.Fatalf("Start returned before the bind: %v", err)
+	case <-time.After(20 * time.Second):
+		t.Fatal("Listening not closed after the bind")
+	}
+
+	require.True(t, srv.waitAuxiliaryRuntimeDiscovery(5*time.Second), "auxiliary runtime discovery did not finish")
+	assert.Zero(t, auxRuntimeCount(srv), "mock test server should not register host auxiliary runtimes")
 }
