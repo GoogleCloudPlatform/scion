@@ -348,7 +348,10 @@ describe('scion-chat-thread highlighted @agent mention context menu (ptone/scion
       defaultAgent: 'coder',
     });
 
-    // Once coder is the thread default, "Make this agent thread default" hides on @coder too.
+    // Once the parent applies default-agent-changed and coder is the thread
+    // default, "Make this agent thread default" hides on @coder too.
+    el.defaultAgent = 'coder';
+    await el.updateComplete;
     await rightClick(el, mentionSpan(el, 'm-lead', 'coder'));
     expect(itemLabels(popupItems(el))).toEqual(['Open terminal', 'Open in graph']);
   });
