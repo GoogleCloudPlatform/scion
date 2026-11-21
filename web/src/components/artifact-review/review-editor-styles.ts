@@ -89,7 +89,7 @@ export const reviewEditorStyles = css`
   .ProseMirror:focus-visible {
     outline: 2px solid var(--sl-color-primary-500, #0ea5e9);
     outline-offset: -2px;
-    border-radius: 0.25rem;
+    border-radius: var(--scion-radius-sm);
   }
   .ProseMirror h1,
   .ProseMirror h2,
@@ -165,13 +165,13 @@ export const reviewEditorStyles = css`
     background: var(--scion-bg-subtle, #f1f5f9);
     border: 1px solid var(--scion-border, #e2e8f0);
     padding: 0.1em 0.35em;
-    border-radius: 0.25rem;
+    border-radius: var(--scion-radius-sm);
   }
   .ProseMirror pre {
     position: relative;
     background: var(--scion-bg-subtle, #f1f5f9);
     border: 1px solid var(--scion-border, #e2e8f0);
-    border-radius: 0.5rem;
+    border-radius: var(--scion-radius);
     padding: 0.75rem 1rem;
     font-size: 0.8125rem;
     margin: 0 0 1em;
@@ -234,7 +234,7 @@ export const reviewEditorStyles = css`
     gap: 0.4rem;
     padding: 0.25em 0.6em;
     border: 1px dashed var(--scion-border, #cbd5e1);
-    border-radius: 0.3rem;
+    border-radius: calc(var(--scion-radius) * 0.6);
     color: var(--scion-text-muted, #64748b);
     background: var(--scion-bg-subtle, #f8fafc);
     font-size: 0.8125rem;
@@ -263,7 +263,7 @@ export const reviewEditorStyles = css`
     text-decoration: underline;
     text-decoration-color: var(--scion-review-ins-line, #16a34a);
     text-underline-offset: 0.18em;
-    border-radius: 0.15rem;
+    border-radius: calc(var(--scion-radius-sm) * 0.6);
   }
   del.critic-del,
   del.critic-sub-old {
@@ -271,13 +271,13 @@ export const reviewEditorStyles = css`
     background: var(--scion-review-del-bg, #fee2e2);
     text-decoration: line-through;
     text-decoration-color: var(--scion-review-del-line, #dc2626);
-    border-radius: 0.15rem;
+    border-radius: calc(var(--scion-radius-sm) * 0.6);
   }
   mark.critic-hl {
     background: var(--scion-review-hl-bg, #fef08a);
     color: var(--scion-review-hl-text, #0f172a);
     border-bottom: 2px solid var(--scion-review-hl-line, #ca8a04);
-    border-radius: 0.15rem;
+    border-radius: calc(var(--scion-radius-sm) * 0.6);
   }
   .critic-comment {
     counter-increment: critic-note;
@@ -290,7 +290,8 @@ export const reviewEditorStyles = css`
     color: var(--scion-review-note-text, #6d28d9);
     background: var(--scion-review-note-bg, #ede9fe);
     border: 1px solid var(--scion-review-note-line, #8b5cf6);
-    border-radius: 0.6rem 0.6rem 0.6rem 0.1rem;
+    border-radius: calc(var(--scion-radius-lg) * 0.8) calc(var(--scion-radius-lg) * 0.8)
+      calc(var(--scion-radius-lg) * 0.8) calc(var(--scion-radius-sm) * 0.4);
     min-width: 1.15rem;
     height: 1.05rem;
     padding: 0 0.25rem;
@@ -336,7 +337,7 @@ export const reviewEditorStyles = css`
     background: var(--scion-surface, #fff);
     color: var(--scion-text, #0f172a);
     border: 1px solid var(--scion-review-note-line, #8b5cf6);
-    border-radius: 0.45rem;
+    border-radius: calc(var(--scion-radius) * 0.9);
     box-shadow: var(--sl-shadow-large, 0 10px 30px rgba(15, 23, 42, 0.25));
     padding: 0.55rem 0.7rem;
     font-size: 0.8125rem;

@@ -88,7 +88,7 @@ export class ScionActionSheet extends LitElement {
       padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
         env(safe-area-inset-left, 0px);
       border: none;
-      border-radius: 0.875rem 0.875rem 0 0;
+      border-radius: calc(var(--scion-radius-xl) * 0.875) calc(var(--scion-radius-xl) * 0.875) 0 0;
       background: var(--scion-surface, #ffffff);
       color: var(--scion-text, #1e293b);
       box-shadow: 0 -4px 24px rgba(0, 0, 0, 0.18);

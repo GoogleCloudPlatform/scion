@@ -45,7 +45,7 @@ export class ScionReviewNoteDialog extends LitElement {
       background: var(--scion-review-hl-bg, #fef08a);
       color: var(--scion-review-hl-text, #0f172a);
       padding: 0.3rem 0.55rem;
-      border-radius: 0 0.25rem 0.25rem 0;
+      border-radius: 0 var(--scion-radius-sm) var(--scion-radius-sm) 0;
       margin-bottom: 0.6rem;
       font-size: 0.8125rem;
       overflow-wrap: anywhere;
@@ -95,7 +95,7 @@ export class ScionReviewNoteDialog extends LitElement {
       font-size: 0.6875rem;
       border: 1px solid var(--scion-border, #cbd5e1);
       border-bottom-width: 2px;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       padding: 0 0.3rem;
     }
     .footer {

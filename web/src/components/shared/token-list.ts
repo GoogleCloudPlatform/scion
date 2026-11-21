@@ -1455,7 +1455,7 @@ export class ScionTokenList extends LitElement {
         align-items: flex-start;
         gap: 0.375rem;
         padding: 0.25rem 0.25rem;
-        border-radius: 0.25rem;
+        border-radius: var(--scion-radius-sm);
       }
 
       .scope-checkbox-item:hover {
@@ -1481,7 +1481,7 @@ export class ScionTokenList extends LitElement {
       .scope-alias-item {
         background: var(--sl-color-primary-50, #eff6ff);
         border: 1px solid var(--sl-color-primary-200, #bfdbfe);
-        border-radius: 0.375rem;
+        border-radius: calc(var(--scion-radius) * 0.75);
         margin: 0.25rem 0.5rem;
         padding: 0.375rem 0.5rem;
       }
@@ -1573,7 +1573,7 @@ export class ScionTokenList extends LitElement {
         display: inline-flex;
         align-items: center;
         padding: 0 0.375rem;
-        border-radius: 0.25rem;
+        border-radius: var(--scion-radius-sm);
         font-size: 0.6875rem;
         font-family: var(--scion-font-mono, monospace);
         background: var(--scion-bg-subtle, #f1f5f9);

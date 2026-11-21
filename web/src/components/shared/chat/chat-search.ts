@@ -207,7 +207,7 @@ export class ScionChatSearch extends LitElement {
       width: 100%;
       padding: 0.375rem 0.5rem 0.375rem 1.75rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 6px;
+      border-radius: calc(var(--scion-radius) * 0.75);
       font-size: var(--chat-fs-md);
       outline: none;
       background: var(--scion-bg, #f8fafc);
@@ -249,7 +249,7 @@ export class ScionChatSearch extends LitElement {
 
     .scope-btn {
       padding: 0.25rem 0.5rem;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       cursor: pointer;
       border: 1px solid transparent;
       background: none;
@@ -329,7 +329,7 @@ export class ScionChatSearch extends LitElement {
     .result-snippet mark {
       background: var(--scion-review-hl-bg, #fef08a);
       color: inherit;
-      border-radius: 2px;
+      border-radius: calc(var(--scion-radius-sm) * 0.5);
       padding: 0 1px;
     }
 
@@ -359,7 +359,7 @@ export class ScionChatSearch extends LitElement {
     .load-more button {
       padding: 0.375rem 1rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 6px;
+      border-radius: calc(var(--scion-radius) * 0.75);
       background: var(--scion-surface, #ffffff);
       color: var(--scion-text, #1e293b);
       font-size: var(--chat-fs-base);

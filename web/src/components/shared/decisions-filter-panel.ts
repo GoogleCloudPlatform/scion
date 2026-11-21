@@ -232,7 +232,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
     .kbd {
       font: 0.72rem var(--scion-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       padding: 0.05rem 0.35rem;
       color: var(--scion-text-muted, #64748b);
       line-height: 1.3;

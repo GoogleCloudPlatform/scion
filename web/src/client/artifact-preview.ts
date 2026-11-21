@@ -238,6 +238,8 @@ export interface PreviewTheme {
   reviewNoteBlockBg: string;
   reviewNoteLine: string;
   fontMono: string;
+  radiusSm: string;
+  radius: string;
 }
 
 const DEFAULT_THEME: PreviewTheme = {
@@ -262,6 +264,8 @@ const DEFAULT_THEME: PreviewTheme = {
   reviewNoteBlockBg: '#f5f3ff',
   reviewNoteLine: '#8b5cf6',
   fontMono: "'SF Mono', 'Fira Code', monospace",
+  radiusSm: '0.25rem',
+  radius: '0.5rem',
 };
 
 /** Keeps a CSS value from closing its declaration or the style element. */
@@ -280,11 +284,11 @@ function criticCss(t: PreviewTheme): string {
   return `ins.critic-ins{color:${t.reviewInsText};background:${t.reviewInsBg};text-decoration:underline}
 del.critic-del{color:${t.reviewDelText};background:${t.reviewDelBg};text-decoration:line-through}
 mark.critic-hl{background:${t.reviewHlBg};color:inherit}
-sup.critic-ref{font-size:.7em;font-weight:600;color:${t.reviewNoteText};background:${t.reviewNoteBg};border-radius:.25rem;padding:0 .25em;margin-left:.1em}
-.critic-note{display:block;margin:.35em 0 .6em;padding:.4em .6em;font-size:.8125rem;line-height:1.45;color:${t.reviewNoteBlockText};background:${t.reviewNoteBlockBg};border-left:3px solid ${t.reviewNoteLine};border-radius:.25rem}
+sup.critic-ref{font-size:.7em;font-weight:600;color:${t.reviewNoteText};background:${t.reviewNoteBg};border-radius:${t.radiusSm};padding:0 .25em;margin-left:.1em}
+.critic-note{display:block;margin:.35em 0 .6em;padding:.4em .6em;font-size:.8125rem;line-height:1.45;color:${t.reviewNoteBlockText};background:${t.reviewNoteBlockBg};border-left:3px solid ${t.reviewNoteLine};border-radius:${t.radiusSm}}
 .critic-note-n{font-weight:600;margin-right:.25em}
 .critic-side{display:block;margin:0 0 1em;font-size:.8125rem;line-height:1.45;color:${t.muted}}
-.critic-side.empty{padding:.75em 1em;border:1px dashed ${t.borderHover};border-radius:.5rem;text-align:center}
+.critic-side.empty{padding:.75em 1em;border:1px dashed ${t.borderHover};border-radius:${t.radius};text-align:center}
 body.notes-margin{padding-right:17rem}
 body.notes-margin .critic-note,body.notes-margin .critic-side{float:right;clear:right;width:14rem;margin:0 -16rem .5em 0}`;
 }
@@ -328,8 +332,8 @@ h2{font-size:1.375rem;border-bottom:1px solid ${t.border};padding-bottom:.3em}
 h3{font-size:1.125rem}h4{font-size:1rem}
 p{margin:0 0 1em}
 a{color:${t.link};text-decoration:none}a:hover{text-decoration:underline}
-code{font-family:${t.fontMono};font-size:.85em;background:${t.subtle};padding:.15em .35em;border-radius:.25rem;border:1px solid ${t.border}}
-pre{background:${t.subtle};border:1px solid ${t.border};border-radius:.5rem;padding:1rem;overflow-x:auto;margin:0 0 1em}
+code{font-family:${t.fontMono};font-size:.85em;background:${t.subtle};padding:.15em .35em;border-radius:${t.radiusSm};border:1px solid ${t.border}}
+pre{background:${t.subtle};border:1px solid ${t.border};border-radius:${t.radius};padding:1rem;overflow-x:auto;margin:0 0 1em}
 pre code{background:none;border:none;padding:0;font-size:.8125rem}
 blockquote{border-left:4px solid ${t.border};margin:0 0 1em;padding:.5em 1em;color:${t.muted};background:${t.subtle}}
 ul,ol{margin:0 0 1em;padding-left:1.5em}li{margin-bottom:.25em}
@@ -337,7 +341,7 @@ table{border-collapse:collapse;width:100%;margin:0 0 1em}
 th,td{border:1px solid ${t.border};padding:.5em .75em;text-align:left}th{background:${t.subtle};font-weight:600}
 hr{border:none;border-top:1px solid ${t.border};margin:1.5em 0}
 img{max-width:100%;height:auto}
-.image-placeholder{display:inline-block;padding:.2em .5em;border:1px dashed ${t.border};border-radius:.25rem;color:${t.muted};background:${t.subtle};font-size:.8125rem}
+.image-placeholder{display:inline-block;padding:.2em .5em;border:1px dashed ${t.border};border-radius:${t.radiusSm};color:${t.muted};background:${t.subtle};font-size:.8125rem}
 .image-placeholder.failed{border-color:${t.errorBorder};color:${t.errorText};background:${t.errorBg}}
 ${criticCss(t)}
 </style></head><body${options.marginNotes ? ' class="notes-margin"' : ''}>${

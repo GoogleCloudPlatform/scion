@@ -190,7 +190,7 @@ export class ScionArtifactList extends LitElement {
       font-size: 0.75rem;
       background: var(--scion-bg-subtle, #f8fafc);
       padding: 0.5rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
     }
     .error-state,
     .loading-state {

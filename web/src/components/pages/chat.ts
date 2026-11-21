@@ -1352,7 +1352,7 @@ export class ScionPageChat extends LitElement {
       gap: 0.5rem;
       padding: 0 0.625rem;
       border: 0;
-      border-radius: 6px;
+      border-radius: calc(var(--scion-radius) * 0.75);
       background: transparent;
       color: var(--scion-text, #1e293b);
       font: inherit;

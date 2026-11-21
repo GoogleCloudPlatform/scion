@@ -132,7 +132,7 @@ export class ScionChatDecisionResponse extends LitElement {
       background: var(--scion-badge-neutral-bg, #f1f5f9);
       color: var(--scion-badge-neutral-text, #334155);
       padding: 0.2rem 0.4rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       white-space: nowrap;
     }
 
@@ -175,7 +175,7 @@ export class ScionChatDecisionResponse extends LitElement {
     summary:focus-visible {
       outline: 2px solid var(--scion-primary, #3b82f6);
       outline-offset: 2px;
-      border-radius: 0.2rem;
+      border-radius: calc(var(--scion-radius-sm) * 0.8);
     }
 
     details summary {

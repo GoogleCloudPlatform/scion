@@ -73,7 +73,7 @@ export class ScionDirBrowser extends LitElement {
       border: none;
       background: none;
       padding: 0.125rem 0.25rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: inherit;
       font-family: inherit;
     }

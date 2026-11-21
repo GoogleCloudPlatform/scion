@@ -577,7 +577,7 @@ export class ScionAgentTreeView extends LitElement {
       line-height: 16px;
       white-space: nowrap;
       border: 1px dashed var(--sl-color-neutral-400);
-      border-radius: 8px;
+      border-radius: var(--scion-radius);
       background: var(--sl-color-neutral-50);
       color: var(--sl-color-neutral-700);
     }

@@ -1642,7 +1642,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.8125rem;
       background: var(--scion-bg, #f8fafc);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       border: 1px solid var(--scion-border, #e2e8f0);
     }
 
@@ -1821,7 +1821,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.75rem;
       background: var(--sl-color-warning-100, #fef3c7);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
     }
 
     /* ── Settings-DB: section metadata caption ── */
@@ -1937,7 +1937,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.75rem;
       background: var(--sl-color-primary-100, #dbeafe);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
     }
 
     .superseded-source {
@@ -1984,7 +1984,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.75rem;
       background: var(--sl-color-warning-100, #fef3c7);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
     }
 
     /* ── Settings-DB: reset confirm dialog ── */
@@ -2041,7 +2041,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.75rem;
       background: var(--sl-color-neutral-100, #f1f5f9);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
     }
 
     /* ── Structured error handling (§3.6) ── */
@@ -2091,7 +2091,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.75rem;
       background: var(--sl-color-neutral-100, #f1f5f9);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
     }
 
     .validation-errors {
@@ -2142,7 +2142,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.75rem;
       background: rgba(0, 0, 0, 0.05);
       padding: 0.125rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       margin-right: 0.25rem;
     }
 

@@ -178,7 +178,7 @@ export class ScionMentionAutocomplete extends LitElement {
       z-index: 100;
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
       max-width: 280px;
       min-width: 200px;

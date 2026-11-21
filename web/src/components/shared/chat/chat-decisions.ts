@@ -356,7 +356,7 @@ export class ScionChatDecisions extends LitElement {
       background: var(--scion-badge-neutral-bg, #f1f5f9);
       color: var(--scion-badge-neutral-text, #334155);
       padding: 0.2rem 0.4rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       white-space: nowrap;
     }
 
@@ -405,7 +405,7 @@ export class ScionChatDecisions extends LitElement {
       font-size: 0.85em;
       background: var(--scion-bg-subtle, #f1f5f9);
       padding: 0 0.25rem;
-      border-radius: 0.2rem;
+      border-radius: calc(var(--scion-radius-sm) * 0.8);
     }
 
     .choices {
@@ -765,7 +765,7 @@ export class ScionChatDecisions extends LitElement {
     .wd a.jump:focus-visible {
       outline: 2px solid var(--scion-primary, #3b82f6);
       outline-offset: 1px;
-      border-radius: 0.2rem;
+      border-radius: calc(var(--scion-radius-sm) * 0.8);
     }
 
     .wd-reason {
@@ -914,7 +914,7 @@ export class ScionChatDecisions extends LitElement {
     .row-foot a.jump:focus-visible {
       outline: 2px solid var(--scion-primary, #3b82f6);
       outline-offset: 1px;
-      border-radius: 0.2rem;
+      border-radius: calc(var(--scion-radius-sm) * 0.8);
     }
 
     .card-foot {

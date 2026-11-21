@@ -24,6 +24,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { previewDocument } from '../client/artifact-preview.js';
+
 import {
   block,
   contrast,
@@ -1003,179 +1005,7 @@ function findBareRadiusLiterals(text: string): string[] {
  * declarations outside `styles/theme.css`. Shell and pre-auth chrome were
  * migrated in PR 3a; remaining component families are swept in PR 3b.
  */
-const BARE_RADIUS_ALLOWLIST: Record<string, { max: number; reason: string }> = {
-  'client/artifact-preview.ts': { max: 6, reason: 'Pending PR 3b radius token migration' },
-  'client/terminal-workspace-root.ts': { max: 12, reason: 'Pending PR 3b radius token migration' },
-  'components/artifact-review/review-editor-styles.ts': {
-    max: 9,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/artifact-review/review-note-dialog.ts': {
-    max: 2,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/pages/admin-group-detail.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/pages/admin-groups.ts': { max: 2, reason: 'Pending PR 3b radius token migration' },
-  'components/pages/admin-integrations.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/pages/admin-maintenance.ts': {
-    max: 2,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/pages/admin-server-config.ts': {
-    max: 7,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/pages/agent-detail.ts': { max: 5, reason: 'Pending PR 3b radius token migration' },
-  'components/pages/artifact-detail.ts': { max: 5, reason: 'Pending PR 3b radius token migration' },
-  'components/pages/chat.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
-  'components/pages/diagnostics.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
-  'components/pages/health-dashboard.ts': {
-    max: 2,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/pages/profile-discord.ts': { max: 2, reason: 'Pending PR 3b radius token migration' },
-  'components/pages/profile-settings.ts': {
-    max: 2,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/pages/profile-teams.ts': { max: 2, reason: 'Pending PR 3b radius token migration' },
-  'components/pages/profile-telegram.ts': {
-    max: 4,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/agent-badges.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
-  'components/shared/agent-log-viewer.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/agent-message-viewer.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/agent-tree-view.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/artifact-list.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
-  'components/shared/artifact-publish-dialog.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/artifact-share-dialog.ts': {
-    max: 3,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-action-sheet.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-composer.ts': {
-    max: 9,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-decision-response.ts': {
-    max: 2,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-decisions.ts': {
-    max: 4,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-interagent-marker.ts': {
-    max: 3,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-members.ts': {
-    max: 4,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-message.ts': {
-    max: 23,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-scheduled-list.ts': {
-    max: 2,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-search.ts': {
-    max: 4,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-space-rail.ts': {
-    max: 5,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-starred-list.ts': {
-    max: 3,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/chat-thread.ts': {
-    max: 3,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/mention-autocomplete.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/chat/slash-autocomplete.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/decisions-filter-panel.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/decisions-views.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/dir-browser.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
-  'components/shared/facet-combobox.ts': { max: 1, reason: 'Pending PR 3b radius token migration' },
-  'components/shared/gcp-service-account-list.ts': {
-    max: 3,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/gcp-service-account-status.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/markdown-preview.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/notification-tray.ts': {
-    max: 8,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/palette/quick-palette.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/project-members-editor.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/resource-styles.ts': {
-    max: 1,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/shared/token-list.ts': { max: 3, reason: 'Pending PR 3b radius token migration' },
-  'components/shared/unified-log-viewer.ts': {
-    max: 3,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'components/terminal/terminal-pane.ts': {
-    max: 10,
-    reason: 'Pending PR 3b radius token migration',
-  },
-  'styles/utilities.css': { max: 1, reason: 'Scrollbar thumb radius (3px)' },
-};
+const BARE_RADIUS_ALLOWLIST: Record<string, { max: number; reason: string }> = {};
 
 describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
   const srcDir = resolve(__dirname, '..');
@@ -1327,5 +1157,461 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
       expect(radMatch, `${rel} ${selector} missing border-radius`).not.toBeNull();
       expect(evalDefaultRadiusPx(radMatch![1]), `${rel} ${selector} default radius`).toBe(wantPx);
     }
+  });
+
+  it('preserves exact default-preset computed radii and square-mode behavior for all PR 3b migrated sites', () => {
+    const defaultVars = cascade([shoelaceLightCss, shoelaceDarkCss, themeCss], {
+      isRoot: true,
+      classes: new Set(['sl-theme-light']),
+      dataTheme: 'light',
+      prefersDark: false,
+    });
+    const squareVars = new Map(defaultVars);
+    for (const k of [
+      '--scion-radius-sm',
+      '--scion-radius',
+      '--scion-radius-md',
+      '--scion-radius-lg',
+      '--scion-radius-xl',
+    ]) {
+      squareVars.set(k, '0');
+    }
+
+    const toPx = (raw: string): number => {
+      const s = raw.trim();
+      const rem = /^(-?\d*\.?\d+)rem$/i.exec(s);
+      if (rem) return parseFloat(rem[1]) * 16;
+      const px = /^(-?\d*\.?\d+)px$/i.exec(s);
+      if (px) return parseFloat(px[1]);
+      if (s === '0') return 0;
+      throw new Error(`Unsupported length: ${raw}`);
+    };
+
+    const splitTopLevel = (expr: string): string[] => {
+      const parts: string[] = [];
+      let cur = '';
+      let depth = 0;
+      for (const ch of expr.trim()) {
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        if (/\s/.test(ch) && depth === 0) {
+          if (cur) {
+            parts.push(cur);
+            cur = '';
+          }
+        } else {
+          cur += ch;
+        }
+      }
+      if (cur) parts.push(cur);
+      return parts;
+    };
+
+    const evalRadiusListPx = (expr: string, vars: Map<string, string>): number[] =>
+      splitTopLevel(expr).map((part) => {
+        const resolved = part.replace(
+          /var\(\s*(--[\w-]+)(?:\s*,\s*([^)]+))?\s*\)/g,
+          (_, name, fb) => vars.get(name) ?? fb?.trim() ?? ''
+        );
+        const calcMul = /^calc\(\s*([^\s*]+)\s*\*\s*(-?\d*\.?\d+)\s*\)$/i.exec(resolved.trim());
+        if (calcMul) {
+          return Number((toPx(calcMul[1]) * parseFloat(calcMul[2])).toFixed(4));
+        }
+        return Number(toPx(resolved).toFixed(4));
+      });
+
+    // Every migrated CSS site in PR 3b (171 from BARE_RADIUS_ALLOWLIST + 1 from
+    // maximum-permission-selector.ts): [relativePath, selectorOrInlineAnchor, cssProp, expectedDefaultPxList]
+    const expectedDefaults: Array<[string, string, string, number[]]> = [
+      ['client/terminal-workspace-root.ts', '.terminal-jump-btn', 'border-radius', [6]],
+      ['client/terminal-workspace-root.ts', '.terminal-rail-item', 'border-radius', [6]],
+      [
+        'client/terminal-workspace-root.ts',
+        '.terminal-rail-select:focus-visible',
+        'border-radius',
+        [6],
+      ],
+      ['client/terminal-workspace-root.ts', '.terminal-icon-action', 'border-radius', [4]],
+      ['client/terminal-workspace-root.ts', '.terminal-layout-btn', 'border-radius', [4]],
+      ['client/terminal-workspace-root.ts', '.terminal-layout-restore', 'border-radius', [4]],
+      ['client/terminal-workspace-root.ts', '.terminal-pane', 'border-radius', [4]],
+      ['client/terminal-workspace-root.ts', '.terminal-slot-placeholder', 'border-radius', [8]],
+      ['client/terminal-workspace-root.ts', '.terminal-place-menu', 'border-radius', [6]],
+      ['client/terminal-workspace-root.ts', '.terminal-place-menu-item', 'border-radius', [4]],
+      ['client/terminal-workspace-root.ts', '.terminal-status-help-panel', 'border-radius', [6]],
+      ['client/terminal-workspace-root.ts', '.terminal-status-action', 'border-radius', [6]],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        '.ProseMirror:focus-visible',
+        'border-radius',
+        [4],
+      ],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        '.ProseMirror code',
+        'border-radius',
+        [4],
+      ],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        '.ProseMirror pre',
+        'border-radius',
+        [8],
+      ],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        '.ProseMirror .image-placeholder',
+        'border-radius',
+        [4.8],
+      ],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        'ins.critic-sub-new',
+        'border-radius',
+        [2.4],
+      ],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        'del.critic-sub-old',
+        'border-radius',
+        [2.4],
+      ],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        'mark.critic-hl',
+        'border-radius',
+        [2.4],
+      ],
+      [
+        'components/artifact-review/review-editor-styles.ts',
+        '.critic-comment',
+        'border-radius',
+        [9.6, 9.6, 9.6, 1.6],
+      ],
+      ['components/artifact-review/review-editor-styles.ts', '.card', 'border-radius', [7.2]],
+      ['components/artifact-review/review-note-dialog.ts', '.quote', 'border-radius', [0, 4, 4, 0]],
+      ['components/artifact-review/review-note-dialog.ts', 'kbd', 'border-radius', [4]],
+      ['components/pages/admin-group-detail.ts', '.group-icon', 'border-radius', [8]],
+      ['components/pages/admin-groups.ts', '.group-icon', 'border-radius', [8]],
+      ['components/pages/admin-groups.ts', '.group-name-link:focus-visible', 'border-radius', [2]],
+      ['components/pages/admin-integrations.ts', '.required-tag', 'border-radius', [4]],
+      [
+        'components/pages/admin-maintenance.ts',
+        '.maintenance-mode-toggle .toggle-track',
+        'border-radius',
+        [9999],
+      ],
+      ['components/pages/admin-maintenance.ts', '.update-check-banner', 'border-radius', [6]],
+      ['components/pages/admin-server-config.ts', '.version-value code', 'border-radius', [4]],
+      [
+        'components/pages/admin-server-config.ts',
+        '.env-override-banner-keys code',
+        'border-radius',
+        [4],
+      ],
+      [
+        'components/pages/admin-server-config.ts',
+        '.superseded-panel-list code',
+        'border-radius',
+        [4],
+      ],
+      [
+        'components/pages/admin-server-config.ts',
+        '.deprecated-notice-list code',
+        'border-radius',
+        [4],
+      ],
+      [
+        'components/pages/admin-server-config.ts',
+        '.ignored-keys-notice code',
+        'border-radius',
+        [4],
+      ],
+      ['components/pages/admin-server-config.ts', '.safety-net-notice code', 'border-radius', [4]],
+      [
+        'components/pages/admin-server-config.ts',
+        '.validation-errors-list li code',
+        'border-radius',
+        [4],
+      ],
+      ['components/pages/agent-detail.ts', '.progress-bar-track', 'border-radius', [9999]],
+      ['components/pages/agent-detail.ts', '.progress-bar-fill', 'border-radius', [9999]],
+      ['components/pages/agent-detail.ts', '.notif-truncation-badge', 'border-radius', [8]],
+      ['components/pages/agent-detail.ts', 'inline:alert alert-warning', 'border-radius', [4]],
+      ['components/pages/agent-detail.ts', 'inline:alert alert-danger', 'border-radius', [4]],
+      ['components/pages/artifact-detail.ts', '.g-toolbar', 'border-radius', [7.2, 7.2, 0, 0]],
+      ['components/pages/artifact-detail.ts', '.hint-strip', 'border-radius', [5.6]],
+      ['components/pages/artifact-detail.ts', '.g-work', 'border-radius', [0, 0, 7.2, 7.2]],
+      ['components/pages/artifact-detail.ts', '.skeleton div', 'border-radius', [4.8]],
+      ['components/pages/artifact-detail.ts', '.help-panel kbd', 'border-radius', [4]],
+      ['components/pages/chat.ts', '.palette-footer-btn', 'border-radius', [6]],
+      ['components/pages/diagnostics.ts', '.degradation-panel code', 'border-radius', [4]],
+      ['components/pages/health-dashboard.ts', '.refresh-btn', 'border-radius', [6]],
+      ['components/pages/health-dashboard.ts', '.error-banner', 'border-radius', [6]],
+      ['components/pages/profile-discord.ts', '.settings-card', 'border-radius', [12]],
+      ['components/pages/profile-discord.ts', '.result-message', 'border-radius', [6]],
+      ['components/pages/profile-settings.ts', '.settings-card', 'border-radius', [12]],
+      ['components/pages/profile-settings.ts', '.permission-status', 'border-radius', [6]],
+      ['components/pages/profile-teams.ts', '.settings-card', 'border-radius', [12]],
+      ['components/pages/profile-teams.ts', '.result-message', 'border-radius', [6]],
+      ['components/pages/profile-telegram.ts', '.settings-card', 'border-radius', [12]],
+      ['components/pages/profile-telegram.ts', '.result-message', 'border-radius', [6]],
+      ['components/pages/profile-telegram.ts', '.qr-code', 'border-radius', [8]],
+      ['components/pages/profile-telegram.ts', '.registration-link', 'border-radius', [6]],
+      ['components/shared/agent-badges.ts', '.size', 'border-radius', [4]],
+      ['components/shared/agent-log-viewer.ts', '.sev', 'border-radius', [4]],
+      ['components/shared/agent-message-viewer.ts', '.msg-badge', 'border-radius', [4]],
+      ['components/shared/agent-tree-view.ts', '.node .ancestor-missing', 'border-radius', [8]],
+      ['components/shared/artifact-list.ts', '.help-panel pre', 'border-radius', [4]],
+      ['components/shared/artifact-publish-dialog.ts', '.picked', 'border-radius', [6]],
+      ['components/shared/artifact-share-dialog.ts', 'table', 'border-radius', [6]],
+      ['components/shared/artifact-share-dialog.ts', '.suggestions', 'border-radius', [6]],
+      ['components/shared/artifact-share-dialog.ts', '.authority', 'border-radius', [6]],
+      ['components/shared/chat/chat-action-sheet.ts', 'dialog', 'border-radius', [14, 14, 0, 0]],
+      ['components/shared/chat/chat-composer.ts', 'sl-textarea::part(base)', 'border-radius', [12]],
+      ['components/shared/chat/chat-composer.ts', '.send-context-menu', 'border-radius', [8]],
+      [
+        'components/shared/chat/chat-composer.ts',
+        '.destination-chip',
+        'border-radius',
+        [8, 8, 0, 0],
+      ],
+      ['components/shared/chat/chat-composer.ts', '.pending-artifact', 'border-radius', [8]],
+      ['components/shared/chat/chat-composer.ts', '.pending-file', 'border-radius', [6]],
+      ['components/shared/chat/chat-composer.ts', '.pending-file img', 'border-radius', [4]],
+      ['components/shared/chat/chat-composer.ts', '.reply-bar', 'border-radius', [0, 4, 4, 0]],
+      ['components/shared/chat/chat-composer.ts', '.edit-bar', 'border-radius', [0, 4, 4, 0]],
+      ['components/shared/chat/chat-composer.ts', '.drop-zone-overlay', 'border-radius', [12]],
+      ['components/shared/chat/chat-decision-response.ts', '.key', 'border-radius', [4]],
+      [
+        'components/shared/chat/chat-decision-response.ts',
+        'summary:focus-visible',
+        'border-radius',
+        [3.2],
+      ],
+      ['components/shared/chat/chat-decisions.ts', '.key', 'border-radius', [4]],
+      ['components/shared/chat/chat-decisions.ts', '.desc code', 'border-radius', [3.2]],
+      [
+        'components/shared/chat/chat-decisions.ts',
+        '.wd a.jump:focus-visible',
+        'border-radius',
+        [3.2],
+      ],
+      [
+        'components/shared/chat/chat-decisions.ts',
+        '.row-foot a.jump:focus-visible',
+        'border-radius',
+        [3.2],
+      ],
+      [
+        'components/shared/chat/chat-interagent-marker.ts',
+        '.marker-expanded',
+        'border-radius',
+        [8],
+      ],
+      [
+        'components/shared/chat/chat-interagent-marker.ts',
+        '.ia-cross-project',
+        'border-radius',
+        [3],
+      ],
+      [
+        'components/shared/chat/chat-interagent-marker.ts',
+        '.ia-full-preview .ia-full-body pre',
+        'border-radius',
+        [6],
+      ],
+      ['components/shared/chat/chat-members.ts', '.member-item', 'border-radius', [4]],
+      ['components/shared/chat/chat-members.ts', '.people-search input', 'border-radius', [6]],
+      ['components/shared/chat/chat-members.ts', '.typing-overlay', 'border-radius', [6]],
+      ['components/shared/chat/chat-members.ts', '.context-menu', 'border-radius', [8]],
+      ['components/shared/chat/chat-message.ts', '.cross-project-label', 'border-radius', [4]],
+      ['components/shared/chat/chat-message.ts', '.bubble-content', 'border-radius', [12]],
+      [
+        'components/shared/chat/chat-message.ts',
+        '.from-agent .bubble-content',
+        'border-top-left-radius',
+        [4],
+      ],
+      [
+        'components/shared/chat/chat-message.ts',
+        '.from-user .bubble-content',
+        'border-top-right-radius',
+        [4],
+      ],
+      ['components/shared/chat/chat-message.ts', '.md-content code', 'border-radius', [4]],
+      ['components/shared/chat/chat-message.ts', '.md-content pre', 'border-radius', [6]],
+      ['components/shared/chat/chat-message.ts', '.code-block-editor', 'border-radius', [6]],
+      ['components/shared/chat/chat-message.ts', '.copy-btn', 'border-radius', [4]],
+      ['components/shared/chat/chat-message.ts', '.md-content .mention', 'border-radius', [3]],
+      ['components/shared/chat/chat-message.ts', '.badge', 'border-radius', [4]],
+      ['components/shared/chat/chat-message.ts', '.attachment-chip', 'border-radius', [6]],
+      ['components/shared/chat/chat-message.ts', '.image-actions', 'border-radius', [6]],
+      ['components/shared/chat/chat-message.ts', '.image-expand', 'border-radius', [8]],
+      ['components/shared/chat/chat-message.ts', '.attachment-image', 'border-radius', [8]],
+      ['components/shared/chat/chat-message.ts', '.artifact-chip', 'border-radius', [8]],
+      ['components/shared/chat/chat-message.ts', '.download-chip', 'border-radius', [8]],
+      ['components/shared/chat/chat-message.ts', '.attachment-preview', 'border-radius', [8]],
+      ['components/shared/chat/chat-message.ts', '.trace-block details', 'border-radius', [6]],
+      ['components/shared/chat/chat-message.ts', '.reply-preview', 'border-radius', [0, 4, 4, 0]],
+      ['components/shared/chat/chat-message.ts', '.msg-actions', 'border-radius', [4]],
+      ['components/shared/chat/chat-message.ts', '.diff-block', 'border-radius', [6]],
+      [
+        'components/shared/chat/chat-message.ts',
+        '.collapsible-toggle',
+        'border-radius',
+        [0, 0, 6, 6],
+      ],
+      ['components/shared/chat/chat-message.ts', '.test-results', 'border-radius', [6]],
+      ['components/shared/chat/chat-scheduled-list.ts', '.bubble', 'border-radius', [12, 12, 0, 0]],
+      ['components/shared/chat/chat-scheduled-list.ts', '.banner', 'border-radius', [0, 0, 12, 12]],
+      ['components/shared/chat/chat-search.ts', '.search-input', 'border-radius', [6]],
+      ['components/shared/chat/chat-search.ts', '.scope-btn', 'border-radius', [4]],
+      ['components/shared/chat/chat-search.ts', '.result-snippet mark', 'border-radius', [2]],
+      ['components/shared/chat/chat-search.ts', '.load-more button', 'border-radius', [6]],
+      [
+        'components/shared/chat/chat-space-rail.ts',
+        '.space-header .unread-badge',
+        'border-radius',
+        [9999],
+      ],
+      [
+        'components/shared/chat/chat-space-rail.ts',
+        '.space-header .mention-badge',
+        'border-radius',
+        [9999],
+      ],
+      ['components/shared/chat/chat-space-rail.ts', '.context-menu', 'border-radius', [8]],
+      ['components/shared/chat/chat-space-rail.ts', '.filter-toggle', 'border-radius', [6]],
+      ['components/shared/chat/chat-space-rail.ts', '.emoji-grid button', 'border-radius', [4]],
+      [
+        'components/shared/chat/chat-starred-list.ts',
+        'dialog.sheet',
+        'border-radius',
+        [14, 14, 0, 0],
+      ],
+      ['components/shared/chat/chat-starred-list.ts', '.close', 'border-radius', [6]],
+      ['components/shared/chat/chat-starred-list.ts', 'a.entry', 'border-radius', [6]],
+      ['components/shared/chat/chat-thread.ts', '.jump-btn', 'border-radius', [9999]],
+      ['components/shared/chat/chat-thread.ts', '.context-menu', 'border-radius', [8]],
+      ['components/shared/chat/chat-thread.ts', '.system-info-message', 'border-radius', [6]],
+      ['components/shared/chat/mention-autocomplete.ts', '.dropdown', 'border-radius', [8]],
+      ['components/shared/chat/slash-autocomplete.ts', '.dropdown', 'border-radius', [8]],
+      ['components/shared/decisions-filter-panel.ts', '.kbd', 'border-radius', [4]],
+      ['components/shared/decisions-views.ts', '.key', 'border-radius', [4]],
+      ['components/shared/dir-browser.ts', '.breadcrumb-segment', 'border-radius', [4]],
+      ['components/shared/facet-combobox.ts', '.icon-btn', 'border-radius', [3.2]],
+      [
+        'components/shared/gcp-service-account-list.ts',
+        '.verify-failed-content code',
+        'border-radius',
+        [4],
+      ],
+      [
+        'components/shared/gcp-service-account-list.ts',
+        '.mint-result-content .gcloud-command',
+        'border-radius',
+        [6],
+      ],
+      [
+        'components/shared/gcp-service-account-list.ts',
+        '.mint-result-content code',
+        'border-radius',
+        [4],
+      ],
+      ['components/shared/gcp-service-account-status.ts', 'code', 'border-radius', [4]],
+      ['components/shared/markdown-preview.ts', '.preview-container code', 'border-radius', [4]],
+      ['components/shared/maximum-permission-selector.ts', '.filter-tab', 'border-radius', [6]],
+      ['components/shared/notification-tray.ts', '.bell-btn', 'border-radius', [8]],
+      ['components/shared/notification-tray.ts', '.badge', 'border-radius', [9999]],
+      ['components/shared/notification-tray.ts', '.panel', 'border-radius', [12]],
+      ['components/shared/notification-tray.ts', '.mark-all-btn', 'border-radius', [4]],
+      ['components/shared/notification-tray.ts', '.truncation-badge', 'border-radius', [8]],
+      ['components/shared/notification-tray.ts', '.push-toggle', 'border-radius', [4]],
+      ['components/shared/notification-tray.ts', '.manage-link', 'border-radius', [4]],
+      ['components/shared/notification-tray.ts', '.panel', 'border-radius', [12, 12, 0, 0]],
+      ['components/shared/palette/quick-palette.ts', '.palette-help kbd', 'border-radius', [2]],
+      ['components/shared/project-members-editor.ts', '.option-error', 'border-radius', [4]],
+      ['components/shared/resource-styles.ts', '.key-icon', 'border-radius', [6]],
+      ['components/shared/token-list.ts', '.scope-checkbox-item', 'border-radius', [4]],
+      ['components/shared/token-list.ts', '.scope-alias-item', 'border-radius', [6]],
+      ['components/shared/token-list.ts', '.label-chip', 'border-radius', [4]],
+      ['components/shared/unified-log-viewer.ts', '.source-toggle', 'border-radius', [4]],
+      ['components/shared/unified-log-viewer.ts', '.source-badge', 'border-radius', [4]],
+      ['components/shared/unified-log-viewer.ts', '.sev', 'border-radius', [4]],
+      ['components/terminal/terminal-pane.ts', '.back-link.compact', 'border-radius', [4]],
+      ['components/terminal/terminal-pane.ts', '.reconnect-btn', 'border-radius', [4]],
+      ['components/terminal/terminal-pane.ts', '.pane-action-btn', 'border-radius', [4]],
+      ['components/terminal/terminal-pane.ts', '.capture-auth-btn', 'border-radius', [4]],
+      ['components/terminal/terminal-pane.ts', '.toggle-group', 'border-radius', [4]],
+      [
+        'components/terminal/terminal-pane.ts',
+        '.disconnected-overlay .overlay-reconnect',
+        'border-radius',
+        [6],
+      ],
+      ['components/terminal/terminal-pane.ts', '.error-state button', 'border-radius', [6]],
+      ['components/terminal/terminal-pane.ts', '.port-btn', 'border-radius', [4]],
+      ['components/terminal/terminal-pane.ts', '.port-dropdown-trigger', 'border-radius', [4]],
+      ['components/terminal/terminal-pane.ts', '.port-dropdown-menu', 'border-radius', [6]],
+      ['styles/utilities.css', '.scion-scrollbar::-webkit-scrollbar-thumb', 'border-radius', [3]],
+    ];
+
+    const fileCache = new Map<string, string>();
+    const matchCounts = new Map<string, number>();
+
+    for (const [rel, selector, prop, wantPx] of expectedDefaults) {
+      let fileSrc = fileCache.get(rel);
+      if (fileSrc === undefined) {
+        fileSrc = stripComments(readFileSync(join(srcDir, rel), 'utf8'));
+        fileCache.set(rel, fileSrc);
+      }
+
+      let rawExpr: string;
+      if (selector.startsWith('inline:')) {
+        const cls = selector.slice('inline:'.length).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const inlineRe = new RegExp(
+          `class="${cls}"[^>]*?style="[^"]*?${prop}\\s*:\\s*([^;"]+)`,
+          'is'
+        );
+        const m = inlineRe.exec(fileSrc);
+        expect(m, `${rel} missing inline ${selector} ${prop}`).not.toBeNull();
+        rawExpr = m![1];
+      } else {
+        const key = `${rel}|${selector}|${prop}`;
+        const occurrence = matchCounts.get(key) ?? 0;
+        matchCounts.set(key, occurrence + 1);
+        const escapedSel = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const ruleRe = new RegExp(`(?:^|\\n)[^\\n{]*${escapedSel}\\s*\\{([^{}]*)\\}`, 'gm');
+        const propRe = new RegExp(`${prop}\\s*:\\s*([^;]+)`, 'i');
+        const matches: string[] = [];
+        for (const rm of fileSrc.matchAll(ruleRe)) {
+          const pm = propRe.exec(rm[1]);
+          if (pm) matches.push(pm[1]);
+        }
+        expect(
+          matches.length,
+          `${rel} missing rule #${occurrence} for ${selector} (${prop})`
+        ).toBeGreaterThan(occurrence);
+        rawExpr = matches[occurrence];
+      }
+
+      expect(
+        evalRadiusListPx(rawExpr, defaultVars),
+        `${rel} ${selector} ${prop} default radius`
+      ).toEqual(wantPx);
+
+      const expectedSquare = wantPx.map((v) => (v === 9999 ? 9999 : 0));
+      expect(
+        evalRadiusListPx(rawExpr, squareVars),
+        `${rel} ${selector} ${prop} square radius`
+      ).toEqual(expectedSquare);
+    }
+
+    // Verify sandboxed iframe previewDocument (client/artifact-preview.ts, 6 sites)
+    // preserves exact default radii (0.25rem / 0.5rem) when no theme overrides are passed.
+    const defaultPreview = previewDocument('<pre><code>x</code></pre>');
+    expect((defaultPreview.match(/border-radius:0\.25rem/g) ?? []).length).toBe(4);
+    expect((defaultPreview.match(/border-radius:0\.5rem/g) ?? []).length).toBe(2);
   });
 });

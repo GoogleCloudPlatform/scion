@@ -362,7 +362,7 @@ export class ScionChatMembers extends LitElement {
       gap: 10px;
       padding: 6px 16px;
       cursor: pointer;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       margin: 0 8px;
       transition: background 0.15s;
     }
@@ -467,7 +467,7 @@ export class ScionChatMembers extends LitElement {
       height: 1.75rem;
       padding: 0 0.5rem;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       background: var(--scion-surface, #ffffff);
       color: var(--scion-text, #1e293b);
       font-size: var(--chat-fs-sm);
@@ -517,7 +517,7 @@ export class ScionChatMembers extends LitElement {
       align-items: center;
       gap: 1.5px;
       background: var(--scion-surface, #ffffff);
-      border-radius: 6px;
+      border-radius: calc(var(--scion-radius) * 0.75);
       padding: 2px 3px;
       box-shadow: 0 0 0 1.5px var(--scion-surface, #ffffff);
     }
@@ -576,7 +576,7 @@ export class ScionChatMembers extends LitElement {
       z-index: 1000;
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
       min-width: 160px;
       padding: 0.25rem 0;

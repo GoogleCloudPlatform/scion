@@ -76,7 +76,7 @@ export class ScionAgentBadges extends LitElement {
       align-items: center;
       height: 16px;
       padding: 0 4px;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       border: 1px solid var(--sl-color-neutral-300, #d4d4d8);
       background: var(--sl-color-neutral-100, #f4f4f5);
       color: var(--sl-color-neutral-700, #3f3f46);

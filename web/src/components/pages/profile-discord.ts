@@ -125,7 +125,7 @@ export class ScionPageProfileDiscord extends LitElement {
     .settings-card {
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.75rem;
+      border-radius: var(--scion-radius-lg);
       padding: 1.5rem;
       margin-bottom: 1.5rem;
     }
@@ -195,7 +195,7 @@ export class ScionPageProfileDiscord extends LitElement {
       gap: 0.5rem;
       margin-top: 1rem;
       padding: 0.625rem 0.875rem;
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       font-size: 0.8125rem;
     }
 

@@ -237,7 +237,7 @@ export class ScionUnifiedLogViewer extends LitElement {
       align-items: center;
       gap: 0.25rem;
       padding: 0.25rem 0.5rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.75rem;
       font-weight: 600;
       font-family: var(--scion-font-mono, monospace);
@@ -335,7 +335,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     .source-badge {
       display: inline-block;
       padding: 0.0625rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.6875rem;
       font-weight: 600;
       letter-spacing: 0.03em;
@@ -347,7 +347,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     .sev {
       display: inline-block;
       padding: 0.0625rem 0.375rem;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.6875rem;
       font-weight: 600;
       text-transform: uppercase;

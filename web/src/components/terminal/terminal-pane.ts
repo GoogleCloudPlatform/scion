@@ -312,7 +312,7 @@ export class ScionTerminalPane extends LitElement {
       justify-content: center;
       width: 32px;
       height: 32px;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       font-size: 1rem;
       line-height: 1;
     }
@@ -379,7 +379,7 @@ export class ScionTerminalPane extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       color: var(--scion-text-muted, #64748b);
       padding: 0.25rem 0.75rem;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       cursor: pointer;
       font-size: 0.75rem;
     }
@@ -403,7 +403,7 @@ export class ScionTerminalPane extends LitElement {
       color: var(--scion-text-muted, #64748b);
       width: 32px;
       height: 32px;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       cursor: pointer;
       padding: 0;
       line-height: 1;
@@ -420,7 +420,7 @@ export class ScionTerminalPane extends LitElement {
       border: 1px solid var(--scion-border, #e2e8f0);
       color: var(--scion-badge-warning-text, #92400e);
       padding: 0.25rem 0.75rem;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       cursor: pointer;
       font-size: 0.75rem;
       display: inline-flex;
@@ -460,7 +460,7 @@ export class ScionTerminalPane extends LitElement {
     .toggle-group {
       display: inline-flex;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       overflow: hidden;
     }
 
@@ -575,7 +575,7 @@ export class ScionTerminalPane extends LitElement {
       color: #fff;
       border: none;
       padding: 0.5rem 1.5rem;
-      border-radius: 6px;
+      border-radius: calc(var(--scion-radius) * 0.75);
       cursor: pointer;
       font-size: 0.875rem;
     }
@@ -707,7 +707,7 @@ export class ScionTerminalPane extends LitElement {
       color: var(--scion-primary-text, #ffffff);
       border: none;
       padding: 0.5rem 1.5rem;
-      border-radius: 6px;
+      border-radius: calc(var(--scion-radius) * 0.75);
       cursor: pointer;
       font-size: 0.875rem;
     }
@@ -768,7 +768,7 @@ export class ScionTerminalPane extends LitElement {
       border: 1px solid var(--scion-status-success, #22c55e);
       color: var(--scion-badge-success-text, #166534);
       padding: 0.25rem 0.75rem;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.75rem;
       text-decoration: none;
       white-space: nowrap;
@@ -809,7 +809,7 @@ export class ScionTerminalPane extends LitElement {
       border: 1px solid var(--scion-status-success, #22c55e);
       color: var(--scion-badge-success-text, #166534);
       padding: 0.25rem 0.75rem;
-      border-radius: 4px;
+      border-radius: var(--scion-radius-sm);
       font-size: 0.75rem;
       cursor: pointer;
       white-space: nowrap;
@@ -828,7 +828,7 @@ export class ScionTerminalPane extends LitElement {
       margin-top: 4px;
       background: var(--scion-surface-raised, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 6px;
+      border-radius: calc(var(--scion-radius) * 0.75);
       padding: 0.25rem 0;
       min-width: 180px;
       z-index: 100;

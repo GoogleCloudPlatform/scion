@@ -253,7 +253,7 @@ export class ScionFacetCombobox extends LitElement {
       cursor: pointer;
       font-size: 0.85rem;
       line-height: 1;
-      border-radius: 0.2rem;
+      border-radius: calc(var(--scion-radius-sm) * 0.8);
       flex-shrink: 0;
     }
 

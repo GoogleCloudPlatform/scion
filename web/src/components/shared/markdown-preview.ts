@@ -111,7 +111,7 @@ export class ScionMarkdownPreview extends LitElement {
       font-size: 0.85em;
       background: var(--scion-bg-subtle, #f8fafc);
       padding: 0.15em 0.35em;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       border: 1px solid var(--scion-border, #e2e8f0);
     }
 

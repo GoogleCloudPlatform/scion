@@ -985,7 +985,7 @@ export class ScionProjectMembersEditor extends LitElement {
       .option-error {
         outline: 2px solid var(--sl-color-danger-500, #ef4444);
         outline-offset: 2px;
-        border-radius: 0.25rem;
+        border-radius: var(--scion-radius-sm);
       }
 
       .custom-role-list {

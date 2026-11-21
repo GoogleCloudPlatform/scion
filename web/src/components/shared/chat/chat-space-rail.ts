@@ -842,7 +842,7 @@ export class ScionChatSpaceRail extends LitElement {
       font-size: var(--chat-fs-2xs);
       font-weight: 700;
       padding: 0.0625rem 0.3125rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius-full);
       min-width: 1rem;
       text-align: center;
     }
@@ -853,7 +853,7 @@ export class ScionChatSpaceRail extends LitElement {
       font-size: var(--chat-fs-2xs);
       font-weight: 700;
       padding: 0.0625rem 0.3125rem;
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius-full);
       min-width: 1rem;
       text-align: center;
     }
@@ -1103,7 +1103,7 @@ export class ScionChatSpaceRail extends LitElement {
       z-index: 1000;
       background: var(--scion-surface, #ffffff);
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.5rem;
+      border-radius: var(--scion-radius);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
       min-width: 160px;
       padding: 0.25rem 0;
@@ -1212,7 +1212,7 @@ export class ScionChatSpaceRail extends LitElement {
     .filter-toggle {
       display: inline-flex;
       border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
+      border-radius: calc(var(--scion-radius) * 0.75);
       overflow: hidden;
       flex: 1;
     }
@@ -1327,7 +1327,7 @@ export class ScionChatSpaceRail extends LitElement {
     .emoji-grid button {
       background: none;
       border: 1px solid transparent;
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       font-size: 1.25rem;
       line-height: 1;
       padding: 0.375rem;

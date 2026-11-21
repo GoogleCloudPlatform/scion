@@ -251,7 +251,7 @@ export class ScionPageHealthDashboard extends LitElement {
       .refresh-btn {
         background: none;
         border: 1px solid var(--scion-border);
-        border-radius: 0.375rem;
+        border-radius: calc(var(--scion-radius) * 0.75);
         padding: 0.25rem 0.5rem;
         font-size: 0.75rem;
         cursor: pointer;
@@ -308,7 +308,7 @@ export class ScionPageHealthDashboard extends LitElement {
       .error-banner {
         margin-bottom: 1rem;
         padding: 0.75rem;
-        border-radius: 0.375rem;
+        border-radius: calc(var(--scion-radius) * 0.75);
         font-size: 0.875rem;
         background: var(--scion-badge-danger-bg);
         color: var(--scion-badge-danger-text);

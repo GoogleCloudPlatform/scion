@@ -851,7 +851,7 @@ export class ScionPageAdminIntegrations extends LitElement {
       color: var(--scion-error-text, #991b1b);
       background: var(--scion-error-bg, #fef2f2);
       border: 1px solid var(--scion-error-border, #fca5a5);
-      border-radius: 0.25rem;
+      border-radius: var(--scion-radius-sm);
       padding: 0.0625rem 0.375rem;
       margin-left: 0.375rem;
       text-transform: uppercase;

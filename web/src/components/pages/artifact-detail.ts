@@ -769,7 +769,7 @@ export class ScionPageArtifactDetail extends LitElement {
         padding: 0.45rem 0.6rem;
         background: var(--scion-surface, #fff);
         border: 1px solid var(--scion-border, #e2e8f0);
-        border-radius: 0.45rem 0.45rem 0 0;
+        border-radius: calc(var(--scion-radius) * 0.9) calc(var(--scion-radius) * 0.9) 0 0;
       }
       .g-toolbar .sep {
         width: 1px;
@@ -802,7 +802,7 @@ export class ScionPageArtifactDetail extends LitElement {
         align-items: flex-start;
         border: 1px solid var(--scion-border, #e2e8f0);
         border-top: 3px solid var(--sl-color-neutral-500, #64748b);
-        border-radius: 0.35rem;
+        border-radius: calc(var(--scion-radius) * 0.7);
         margin: 0.45rem 0.6rem;
         padding: 0.5rem 0.75rem;
         font-size: 0.8125rem;
@@ -827,7 +827,7 @@ export class ScionPageArtifactDetail extends LitElement {
       .g-work {
         border: 1px solid var(--scion-border, #e2e8f0);
         border-top: none;
-        border-radius: 0 0 0.45rem 0.45rem;
+        border-radius: 0 0 calc(var(--scion-radius) * 0.9) calc(var(--scion-radius) * 0.9);
         background: var(--scion-surface, #fff);
         min-height: 20rem;
       }
@@ -839,7 +839,7 @@ export class ScionPageArtifactDetail extends LitElement {
       }
       .skeleton div {
         height: 0.8rem;
-        border-radius: 0.3rem;
+        border-radius: calc(var(--scion-radius) * 0.6);
         background: var(--scion-border, #e2e8f0);
         margin-bottom: 0.7rem;
       }
@@ -865,7 +865,7 @@ export class ScionPageArtifactDetail extends LitElement {
         font-size: 0.6875rem;
         border: 1px solid var(--scion-border, #cbd5e1);
         border-bottom-width: 2px;
-        border-radius: 0.25rem;
+        border-radius: var(--scion-radius-sm);
         padding: 0 0.3rem;
       }
       @media (max-width: 640px) {
