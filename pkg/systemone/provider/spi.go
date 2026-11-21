@@ -196,15 +196,22 @@ func SecretRefModeFromOptions(opts map[string]string) (scope string, isNamedRef 
 	return strings.TrimSpace(raw), true
 }
 
+var secretRefScopes = []string{
+	SecretScopeHub,
+	SecretScopeProject,
+	SecretScopeProjectOrHub,
+}
+
+// SecretRefScopes returns a copy of the allowed named-secret resolution scopes
+// ("hub", "project", and "project_or_hub").
+func SecretRefScopes() []string {
+	return slices.Clone(secretRefScopes)
+}
+
 // IsValidSecretRefScope reports whether scope is one of the allowed named-secret
 // resolution scopes ("hub", "project", or "project_or_hub").
 func IsValidSecretRefScope(scope string) bool {
-	switch scope {
-	case SecretScopeHub, SecretScopeProject, SecretScopeProjectOrHub:
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(secretRefScopes, scope)
 }
 
 func isSecretRefStartByte(b byte) bool {

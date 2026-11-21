@@ -4514,6 +4514,15 @@ func TestSystemOneInstances_L1_ProbeProjectRequiresSecretRead(t *testing.T) {
 	}
 }
 
+type systemOneCountingFailingDialer struct {
+	dials atomic.Int32
+}
+
+func (d *systemOneCountingFailingDialer) DialContext(_ context.Context, _, addr string) (net.Conn, error) {
+	d.dials.Add(1)
+	return nil, fmt.Errorf("outbound provider dial to %s must not occur during GET /adapters", addr)
+}
+
 type systemOneCountingSecretBackend struct {
 	secret.SecretBackend
 	getCalls atomic.Int32
@@ -4621,14 +4630,21 @@ func TestSystemOneAdapters_CapabilitiesAndNoIO(t *testing.T) {
 			return nil, errors.New("ADC discovery must not be called by /adapters")
 		})
 
+		// Install counting, failing egress dialer so any outbound provider I/O fails and is counted.
+		egressDialer := &systemOneCountingFailingDialer{}
+		srv.SetSystemOneRuntimeOptionsForTesting(t, systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(testSystemOnePublicResolver{}, egressDialer),
+		))
+
 		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, systemOneAdaptersPath, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-		// Assert zero secret reads, zero ADC discovery, and content-free response.
+		// Assert zero secret reads, zero ADC discovery, zero outbound provider dials, and content-free response.
 		assert.Zero(t, countingBackend.getCalls.Load(), "GET /adapters must not read secrets")
 		assert.Zero(t, countingBackend.setCalls.Load(), "GET /adapters must not write secrets")
 		assert.Zero(t, countingBackend.delCalls.Load(), "GET /adapters must not delete secrets")
 		assert.Zero(t, adcCalls.Load(), "GET /adapters must not trigger ADC discovery")
+		assert.Zero(t, egressDialer.dials.Load(), "GET /adapters must not perform outbound provider I/O")
 		assert.NotContains(t, rec.Body.String(), secretCanary)
 
 		var resp ListSystemOneAdaptersResponse

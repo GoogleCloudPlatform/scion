@@ -405,6 +405,13 @@ func (s *Server) handleAdminSystemOneAdapters(w http.ResponseWriter, r *http.Req
 		}
 		caps, err := adapter.Capabilities(systemoneprovider.InstanceView{})
 		if err != nil {
+			s.logSystemOneAudit().Debug("Skipping System One adapter whose Capabilities returned an error",
+				"adapter", name,
+				"error", err,
+			)
+			continue
+		}
+		if !caps.SideEffectFree {
 			continue
 		}
 		defaultEndpoint := defaultSystemOneAdapterEndpoint(adapter)
@@ -450,11 +457,7 @@ func (s *Server) handleAdminSystemOneAdapters(w http.ResponseWriter, r *http.Req
 		}
 		if len(allowedSecretNames) > 0 {
 			dto.AllowedSecretNames = slices.Clone(allowedSecretNames)
-			dto.AllowedSecretScopes = []string{
-				systemoneprovider.SecretScopeHub,
-				systemoneprovider.SecretScopeProject,
-				systemoneprovider.SecretScopeProjectOrHub,
-			}
+			dto.AllowedSecretScopes = systemoneprovider.SecretRefScopes()
 			dto.DefaultSecretScope = systemoneprovider.DefaultSecretRefScope
 			if defRefer, ok := adapter.(systemoneprovider.DefaultSecretRefer); ok {
 				if defName := strings.TrimSpace(defRefer.DefaultSecretRefName()); defName != "" && slices.Contains(allowedSecretNames, defName) {
@@ -481,6 +484,12 @@ func systemOneAdapterDisplayName(id string) string {
 	}
 }
 
+// adapterRequiresModel infers whether an adapter requires a model identifier by
+// probing InstanceValidator.ValidateInstance with an empty model and then with
+// the placeholder "example-model". Note: this assumes the adapter accepts an
+// arbitrary non-empty model string in ValidateInstance; an adapter that
+// validates strict model-ID formats (e.g. regex or allowlist) could be
+// misreported as not requiring a model without a dedicated SPI field.
 func adapterRequiresModel(adapter systemoneprovider.Adapter, defaultEndpoint string) bool {
 	validator, ok := adapter.(systemoneprovider.InstanceValidator)
 	if !ok {
