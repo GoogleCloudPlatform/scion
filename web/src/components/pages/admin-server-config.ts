@@ -103,6 +103,7 @@ import {
   renderKeysEnvBadge,
 } from '../shared/env-badge-views.js';
 import {
+  CUSTOM_DEFAULT_USER_ROLE_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
   FLAT_BROKERS_FLAG,
   isFeatureEnabled,
@@ -528,6 +529,21 @@ interface ServerConfigResponse {
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
+  default_user_role_warning?: DefaultUserRoleWarning;
+  eligible_default_roles?: EligibleDefaultRole[];
+}
+
+interface DefaultUserRoleWarning {
+  code: string;
+  configured_role: string;
+  effective_role: string;
+  message: string;
+}
+
+interface EligibleDefaultRole {
+  id: string;
+  name: string;
+  description?: string;
 }
 
 interface HarnessConfigEntry {
@@ -1265,6 +1281,8 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private authAuthorizedDomains = '';
   @state() private authUserAccessMode = 'open';
   @state() private authDefaultUserRole = 'member';
+  @state() private defaultUserRoleWarning: DefaultUserRoleWarning | null = null;
+  @state() private eligibleDefaultRoles: EligibleDefaultRole[] = [];
 
   // Storage
   @state() private storageProvider = '';
@@ -2402,6 +2420,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.authAuthorizedDomains = (authBlock.authorized_domains || []).join(', ');
     this.authUserAccessMode = authBlock.user_access_mode || 'open';
     this.authDefaultUserRole = authBlock.default_user_role || 'member';
+    this.defaultUserRoleWarning = data.default_user_role_warning ?? null;
+    this.eligibleDefaultRoles = Array.isArray(data.eligible_default_roles)
+      ? data.eligible_default_roles
+      : [];
 
     // Storage
     const storageBlock = srv.storage ?? {};
@@ -7378,6 +7400,62 @@ export class ScionPageAdminServerConfig extends LitElement {
     );
   }
 
+  private renderDefaultUserRoleControl() {
+    const customDefaultRoleEnabled = isFeatureEnabled(CUSTOM_DEFAULT_USER_ROLE_FLAG);
+    const eligibleRoles = customDefaultRoleEnabled ? this.eligibleDefaultRoles : [];
+    const isBuiltinRole =
+      !this.authDefaultUserRole ||
+      this.authDefaultUserRole === 'member' ||
+      this.authDefaultUserRole === 'viewer';
+    const hasUnavailableConfiguredRole =
+      !isBuiltinRole && !eligibleRoles.some((r) => r.name === this.authDefaultUserRole);
+
+    return html`
+      ${this.renderFieldValue(
+        'server.auth.default_user_role',
+        this.authDefaultUserRole,
+        html`${this.renderEnvBadge('server.auth.default_user_role')}<sl-select
+            class="default-user-role-select"
+            value=${this.authDefaultUserRole}
+            @sl-change=${(e: Event) => {
+              this.authDefaultUserRole = (e.target as HTMLSelectElement).value;
+            }}
+          >
+            <sl-option value="member">Member</sl-option>
+            <sl-option value="viewer">Viewer</sl-option>
+            ${eligibleRoles.length > 0 || hasUnavailableConfiguredRole
+              ? html`<sl-divider></sl-divider>`
+              : nothing}
+            ${eligibleRoles.map(
+              (role) => html`
+                <sl-option value=${role.name}>
+                  ${role.name}${role.description ? ` — ${role.description}` : ''}
+                </sl-option>
+              `
+            )}
+            ${hasUnavailableConfiguredRole
+              ? html`
+                  <sl-option value=${this.authDefaultUserRole} disabled>
+                    ${this.authDefaultUserRole} (unavailable)
+                  </sl-option>
+                `
+              : nothing}
+          </sl-select>`
+      )}
+      ${this.defaultUserRoleWarning
+        ? html`<sl-alert
+            class="default-user-role-warning"
+            variant="warning"
+            open
+            style="margin-top: 0.75rem"
+          >
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            <strong>Fallback active:</strong> ${this.defaultUserRoleWarning.message}
+          </sl-alert>`
+        : nothing}
+    `;
+  }
+
   private renderBrokerInstancesSection() {
     if (
       !isFeatureEnabled(FLAT_BROKERS_FLAG) &&
@@ -8005,25 +8083,24 @@ export class ScionPageAdminServerConfig extends LitElement {
                   <strong>cannot create projects</strong> (including cloning). Viewers can still be
                   added to projects and work there according to their project role.
                 </li>
+                ${isFeatureEnabled(CUSTOM_DEFAULT_USER_ROLE_FLAG)
+                  ? html`
+                      <li>
+                        <strong>Custom system roles:</strong> eligible custom system-scope roles can
+                        be selected instead of Member or Viewer. A custom default role replaces the
+                        built-in <code>hub-member</code> grant rather than adding to it. If a
+                        configured custom role is removed or becomes ineligible, new users fall back
+                        to Member.
+                      </li>
+                    `
+                  : nothing}
               </ul>
               <p>
                 This is also the role given to an admin who is removed from Admin Emails. Change an
                 individual user's role on <a href="/admin/users">Admin &gt; Users</a>.
               </p>
             </div>
-            ${this.renderFieldValue(
-              'server.auth.default_user_role',
-              this.authDefaultUserRole,
-              html`${this.renderEnvBadge('server.auth.default_user_role')}<sl-select
-                  value=${this.authDefaultUserRole}
-                  @sl-change=${(e: Event) => {
-                    this.authDefaultUserRole = (e.target as HTMLSelectElement).value;
-                  }}
-                >
-                  <sl-option value="member">Member</sl-option>
-                  <sl-option value="viewer">Viewer</sl-option>
-                </sl-select>`
-            )}
+            ${this.renderDefaultUserRoleControl()}
           </div>
         </div>
       </div>

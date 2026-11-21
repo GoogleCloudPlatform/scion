@@ -328,3 +328,12 @@ export function idleSuspendEnabled(): boolean {
  * Default OFF.
  */
 export const EFFECTIVE_PERMISSIONS_FLAG = 'hub.effective_permissions';
+
+/**
+ * Custom default user role (hub.custom_default_user_role): shows eligible
+ * custom system-scope roles in the Default User Role selector on Admin > Server
+ * Config and documents custom-role behavior. Presentation only: the hub
+ * enforces eligibility, CanDelegate, and experiment gating on save and at
+ * runtime. Default OFF.
+ */
+export const CUSTOM_DEFAULT_USER_ROLE_FLAG = 'hub.custom_default_user_role';
