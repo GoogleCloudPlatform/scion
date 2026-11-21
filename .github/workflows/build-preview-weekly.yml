@@ -100,5 +100,10 @@ jobs:
       contents: write
       pull-requests: write    # Needed by update-manifest job
     uses: ./.github/workflows/build-release.yml
+    # A secret reaches a nested reusable workflow only when every level
+    # passes it: build-release.yml passes it on to publish-homebrew.yml,
+    # whose jobs read HOMEBREW_SCION_TOKEN from the homebrew environment.
+    secrets:
+      HOMEBREW_SCION_TOKEN: ${{ secrets.HOMEBREW_SCION_TOKEN }}
     with:
       ref: ${{ needs.select-and-tag.outputs.tag }}
