@@ -28,14 +28,60 @@ import (
 
 type fakeTemplateImportURLService struct {
 	hubclient.TemplateService
-	lastImportReq *hubclient.ImportResourcesRequest
-	importResp    *hubclient.ImportResourcesResponse
-	importErr     error
+	lastImportReq   *hubclient.ImportResourcesRequest
+	importResp      *hubclient.ImportResourcesResponse
+	importErr       error
+	lastDiscoverReq *hubclient.DiscoverResourcesRequest
+	discoverResp    *hubclient.DiscoverResourcesResponse
+	discoverErr     error
 }
 
 func (f *fakeTemplateImportURLService) ImportResources(_ context.Context, req *hubclient.ImportResourcesRequest) (*hubclient.ImportResourcesResponse, error) {
 	f.lastImportReq = req
 	return f.importResp, f.importErr
+}
+
+func (f *fakeTemplateImportURLService) DiscoverResources(_ context.Context, req *hubclient.DiscoverResourcesRequest) (*hubclient.DiscoverResourcesResponse, error) {
+	f.lastDiscoverReq = req
+	return f.discoverResp, f.discoverErr
+}
+
+func TestResolveImportURLScope(t *testing.T) {
+	tests := []struct {
+		name       string
+		flagScope  string
+		globalFlag bool
+		agentMode  bool
+		hasProject bool
+		want       string
+		wantErr    string
+	}{
+		{name: "explicit project", flagScope: "project", want: "project"},
+		{name: "explicit global", flagScope: "global", want: "global"},
+		{name: "explicit user", flagScope: "user", want: "user"},
+		{name: "invalid scope", flagScope: "org", wantErr: "--scope must be global, project or user"},
+		{name: "root global flag", globalFlag: true, want: "global"},
+		{name: "root global matches explicit global", flagScope: "global", globalFlag: true, want: "global"},
+		{name: "root global conflicts with project", flagScope: "project", globalFlag: true, wantErr: "--global conflicts with --scope project"},
+		{name: "root global conflicts with user", flagScope: "user", globalFlag: true, wantErr: "--global conflicts with --scope user"},
+		{name: "agent mode defaults to project without project flag", agentMode: true, hasProject: false, want: "project"},
+		{name: "agent mode defaults to project with project", agentMode: true, hasProject: true, want: "project"},
+		{name: "human with project context defaults to project", hasProject: true, want: "project"},
+		{name: "human without project context errors", hasProject: false, wantErr: "specify --scope (no project context)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveImportURLScope(tt.flagScope, tt.globalFlag, tt.agentMode, tt.hasProject)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestExecuteTemplatesImportURL_Success(t *testing.T) {
@@ -48,7 +94,7 @@ func TestExecuteTemplatesImportURL_Success(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		err := executeTemplatesImportURL(context.Background(), svc, "project", "proj-1", "https://github.com/org/repo/tree/main/.scion/templates", []string{"alpha", "beta"})
+		err := executeTemplatesImportURL(context.Background(), svc, "project", "proj-1", "https://github.com/org/repo/tree/main/.scion/templates", []string{"alpha", "beta"}, false)
 		require.NoError(t, err)
 	})
 
@@ -81,7 +127,7 @@ func TestExecuteTemplatesImportURL_PartialFailureTextAndJSON(t *testing.T) {
 
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = executeTemplatesImportURL(context.Background(), svc, "project", "proj-1", "https://github.com/org/repo/tree/main/.scion/templates", nil)
+			runErr = executeTemplatesImportURL(context.Background(), svc, "project", "proj-1", "https://github.com/org/repo/tree/main/.scion/templates", nil, false)
 		})
 		require.Error(t, runErr)
 		assert.Contains(t, out, "Imported: good")
@@ -96,7 +142,7 @@ func TestExecuteTemplatesImportURL_PartialFailureTextAndJSON(t *testing.T) {
 
 		var runErr error
 		out := captureStdout(t, func() {
-			runErr = executeTemplatesImportURL(context.Background(), svc, "project", "proj-1", "https://github.com/org/repo/tree/main/.scion/templates", nil)
+			runErr = executeTemplatesImportURL(context.Background(), svc, "project", "proj-1", "https://github.com/org/repo/tree/main/.scion/templates", nil, false)
 		})
 		require.Error(t, runErr)
 
@@ -108,6 +154,51 @@ func TestExecuteTemplatesImportURL_PartialFailureTextAndJSON(t *testing.T) {
 		require.Len(t, got.Failed, 1)
 		assert.Equal(t, "bad", got.Failed[0].Name)
 		assert.Equal(t, "template exists; agents can only create new templates", got.Failed[0].Reason)
+	})
+}
+
+func TestExecuteTemplatesImportURLDryRun(t *testing.T) {
+	svc := &fakeTemplateImportURLService{
+		discoverResp: &hubclient.DiscoverResourcesResponse{
+			Resources: []string{"alpha", "beta", "gamma"},
+			Count:     3,
+		},
+	}
+
+	t.Run("text without name filter", func(t *testing.T) {
+		prev := outputFormat
+		outputFormat = ""
+		t.Cleanup(func() { outputFormat = prev })
+
+		out := captureStdout(t, func() {
+			err := executeTemplatesImportURLDryRun(context.Background(), svc, "project", "proj-1", "https://github.com/org/repo/tree/main/.scion/templates", nil, false)
+			require.NoError(t, err)
+		})
+		assert.Nil(t, svc.lastImportReq, "dry-run must never call ImportResources")
+		require.NotNil(t, svc.lastDiscoverReq)
+		assert.Equal(t, "template", svc.lastDiscoverReq.Kind)
+		assert.Equal(t, "project", svc.lastDiscoverReq.Scope)
+		assert.Equal(t, "proj-1", svc.lastDiscoverReq.ScopeID)
+		assert.Contains(t, out, "Would import: alpha")
+		assert.Contains(t, out, "Would import: beta")
+		assert.Contains(t, out, "Would import: gamma")
+		assert.Contains(t, out, "Found 3 template(s)")
+	})
+
+	t.Run("json with name filter", func(t *testing.T) {
+		prev := outputFormat
+		outputFormat = "json"
+		t.Cleanup(func() { outputFormat = prev })
+
+		out := captureStdout(t, func() {
+			err := executeTemplatesImportURLDryRun(context.Background(), svc, "user", "", "https://github.com/org/repo/tree/main/.scion/templates", []string{"beta"}, false)
+			require.NoError(t, err)
+		})
+		assert.Nil(t, svc.lastImportReq, "dry-run must never call ImportResources")
+		var got hubclient.DiscoverResourcesResponse
+		require.NoError(t, json.Unmarshal([]byte(out), &got))
+		assert.Equal(t, []string{"beta"}, got.Resources)
+		assert.Equal(t, 1, got.Count)
 	})
 }
 
