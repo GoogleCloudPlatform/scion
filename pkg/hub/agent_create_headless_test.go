@@ -1706,3 +1706,66 @@ func TestHeadlessCreate_GetAgentBySlugErrorFailsClosed(t *testing.T) {
 	_, err = s.GetAgentBySlug(ctx, project.ID, targetSlug)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
+
+// TestHeadlessCreate_HubDefaultMessageMode verifies that createAgentHeadless
+// applies server.hub.default_message_mode when neither template nor parent sets
+// a message mode, while preserving template precedence and refusing "hub".
+func TestHeadlessCreate_HubDefaultMessageMode(t *testing.T) {
+	cases := []struct {
+		name       string
+		hubDefault string
+		tmplMode   string
+		wantMode   string
+	}{
+		{name: "unset hub default: project", wantMode: store.MessageModeProject},
+		{name: "hub default applies", hubDefault: store.MessageModeNone, wantMode: store.MessageModeNone},
+		{name: "template wins over hub default", hubDefault: store.MessageModeNone, tmplMode: store.MessageModeBranch, wantMode: store.MessageModeBranch},
+		{name: "hub value never applies as a default", hubDefault: store.MessageModeHub, wantMode: store.MessageModeProject},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newSchedFire(t, fmt.Sprintf("hc-dmm-%d", i))
+			_ = installHeadlessGatherDispatcher(t, f)
+			f.srv.config.DefaultMessageMode = tc.hubDefault
+
+			tmplSlug := fmt.Sprintf("hc-dmm-tmpl-%d", i)
+			require.NoError(t, f.store.CreateTemplate(ctx, &store.Template{
+				ID:          tid(tmplSlug),
+				Name:        tmplSlug,
+				Slug:        tmplSlug,
+				Harness:     "claude",
+				ContentHash: "d00dfeed",
+				Scope:       store.TemplateScopeGlobal,
+				Status:      store.TemplateStatusActive,
+				AgentConfig: &api.ScionConfig{MessageMode: tc.tmplMode},
+			}))
+
+			evt := withSessionRevision(f.event(fmt.Sprintf("dmm-agent-%d", i)), f.creator.ID)
+			auth, identity, err := f.srv.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), f.proj.ID, "agent.create")
+			require.NoError(t, err)
+			edgeCeiling, edgeProv, err := f.srv.fireEffectCeiling(ctx, auth)
+			require.NoError(t, err)
+
+			rr := headlessResolvedRole{preCapRole: AgentRoleFull}
+			agent, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+				ProjectID:      f.proj.ID,
+				Authority:      auth,
+				Identity:       identity,
+				EdgeCeiling:    edgeCeiling,
+				EdgeProvenance: edgeProv,
+				resolvedRole:   &rr,
+				Name:           fmt.Sprintf("dmm-agent-%d", i),
+				Template:       tmplSlug,
+				Detached:       true,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMode, agent.MessageMode)
+
+			stored, err := f.store.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMode, stored.MessageMode)
+		})
+	}
+}

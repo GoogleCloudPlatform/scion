@@ -1884,6 +1884,9 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.Schedules.Validate(); err != nil {
 		return err
 	}
+	if err := config.ValidateDefaultMessageMode(cfg.Hub.DefaultMessageMode); err != nil {
+		return err
+	}
 	if err := validateLongLivedRequestSettings(cfg); err != nil {
 		return err
 	}
@@ -3026,6 +3029,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		MembershipSweepReportOnly:    cfg.Hub.MembershipSweepReportOnly,
 		ScheduleMinInterval:          scheduleMinIntervalSetting(cfg),
 		ScheduleMaxActivePerProject:  scheduleMaxActivePerProjectSetting(cfg),
+		DefaultMessageMode:           cfg.Hub.DefaultMessageMode,
 		LaunchTimeout:                cfg.Hub.LaunchTimeout,
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),

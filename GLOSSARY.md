@@ -345,7 +345,7 @@ _Avoid_: group, set, group chat, room, thread
 _See also_: Group (different concept — hub users, not recipients), Thread Group (different concept — a project's threads, not recipients)
 
 **Message Mode**:
-A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: **none**, **lineage**, **branch**, **project** (the default), or **hub**. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
+A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: **none**, **lineage**, **branch**, **project** (the built-in default unless the operator sets `server.hub.default_message_mode`), or **hub**. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
 _Avoid_: messaging mode, communication mode, access mode
 _See also_: Ancestry chain, Piercing, Hub mode
 
@@ -381,7 +381,7 @@ The ability of a privileged user to bypass an agent's message mode restrictions.
 _Avoid_: override, bypass (too generic)
 
 **Project mode** (message mode):
-The default message mode. Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode.
+The built-in default message mode (unless the operator sets `server.hub.default_message_mode`). Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode.
 _Avoid_: open mode, public mode
 
 **Thread Group**:

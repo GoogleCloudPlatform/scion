@@ -79,6 +79,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "system_one"},
 	// Recurring schedule limits: Layer 0, read at startup.
 	{"server", "hub", "schedules"},
+	// Default message mode of new agents: Layer 0, read at startup.
+	{"server", "hub", "default_message_mode"},
 	{"server", "hub", "disable_legacy_storage_fallback"},
 	{"server", "relay"},
 	// server.keyring_file is never API-writable: rejectGateProtectedSettingsKeys

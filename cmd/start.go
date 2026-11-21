@@ -100,7 +100,7 @@ func init() {
 	startCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
 		"Agent message mode: none, lineage, branch, project, hub\n"+
 			"Controls which agents and users this agent can message.\n"+
-			"Default: the template's mode, else the parent agent's, else 'project'.")
+			"Default: the template's mode, else the parent agent's, else the Hub's default message mode (server.hub.default_message_mode, 'project' unless the operator sets it).")
 
 	// Hub launch wait flags
 	startCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Return once the Hub accepts the agent, without waiting for it to be running")

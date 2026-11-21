@@ -453,7 +453,7 @@ The available modes are:
 - **Lineage Mode**: Strictly restricts messaging to users in the agent's ancestry chain (its creator and their ancestors). No agent-to-agent messaging is permitted.
 - **None Mode**: Seals the agent from all messaging except system-plane notices and a super-admin's messages (see [Piercing](#piercing)). No other user and no agent can message a none-mode agent, so a task sent later as a message is refused and the agent stays idle. Give a none-mode agent its task when you create it: the creation-time task is passed to the harness when the agent starts, not delivered as a message, so the seal does not block it.
 
-A new agent's mode is set once, at creation: the `--message-mode` flag of `scion create` or `scion start` if given, else the template's `message_mode`, else the parent agent's mode when an agent creates it, else `project`. A default that resolves to `hub` still needs a hub-mode grant.
+A new agent's mode is set once, at creation: the `--message-mode` flag of `scion create` or `scion start` if given, else the template's `message_mode`, else the parent agent's mode when an agent creates it, else the Hub's default message mode ([`server.hub.default_message_mode`](/scion/reference/server-config/#hub-settings-serverhub), `project` unless the operator sets it). A default that resolves to `hub` still needs a hub-mode grant.
 
 To see modes:
 
