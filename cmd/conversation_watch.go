@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -287,7 +288,7 @@ func writeCompactJSON(out io.Writer, v any) error {
 
 func writeWatchOncePlain(stdout, stderr io.Writer, res *hubclient.WatchResult) error {
 	for _, evt := range res.Events {
-		ts := evt.OccurredAt.UTC().Format("2006-01-02 15:04:05Z")
+		ts := clitime.Format(evt.OccurredAt, clitime.Full)
 		sender, recipient, body := "", "", ""
 		if evt.Data != nil {
 			sender = evt.Data.Sender
