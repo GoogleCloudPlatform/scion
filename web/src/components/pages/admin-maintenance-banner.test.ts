@@ -329,18 +329,65 @@ describe('admin-maintenance-banner state table (768 combinations)', () => {
     );
     expect(unforcedRestarting).toBeNull();
 
-    // R1: reconciled failure paths (rolled_back, version mismatch, stale restarting)
-    // set aborted: true alongside installed: true, so they land on U2/F4 rather than
-    // U1/F5 ("the restart could not be started").
-    const unforcedReconcileFail = runBanner(
+    // R1/R2: reconciled failure paths (rolled_back, version mismatch, stale restarting)
+    // set aborted: true alongside installed: true, so they land on U2/F4/F12a rather than
+    // U1/F5/F12b ("the restart could not be started"), and branch on verification so
+    // rolled-back/mismatched updates never render a green "Installed" success banner.
+    const unforcedRollback = runBanner(
       makeRun('r2', 'failed', {
         installed: true,
         aborted: true,
+        verification: 'rolled_back',
         error: '"git-0123456789ab" failed to start; the boot-failure guard rolled back',
       }),
       []
     );
-    expect(unforcedReconcileFail?.row).toBe('U2');
-    expect(unforcedReconcileFail?.text).not.toContain('could not be started');
+    expect(unforcedRollback?.row).toBe('U2');
+    expect(unforcedRollback?.variant).toBe('warning');
+    expect(unforcedRollback?.text).toContain('Installed, but the new binary did not stay up:');
+    expect(unforcedRollback?.text).not.toContain('could not be started');
+
+    const forcedRollback = runBanner(
+      makeRun('r2', 'failed', {
+        rerunOf: 'run-failed-1',
+        override: sampleOverride,
+        overrideApplied: true,
+        installed: true,
+        aborted: true,
+        verification: 'rolled_back',
+        error: 'boot-failure guard rolled back',
+      }),
+      []
+    );
+    expect(forcedRollback?.row).toBe('F4');
+    expect(forcedRollback?.variant).toBe('danger');
+    expect(forcedRollback?.text).toContain(
+      'Force applied and installed, but the new binary did not stay up: boot-failure guard rolled back'
+    );
+
+    const qdMismatch = runBanner(
+      makeRun('r2', 'failed', {
+        rerunOf: 'run-failed-1',
+        forceNotNeeded: true,
+        installed: true,
+        aborted: true,
+        verification: 'failed',
+        error: 'the hub restarted on "v0.1.0", not the installed "git-0123456789ab"',
+      }),
+      []
+    );
+    expect(qdMismatch?.row).toBe('F12a');
+    expect(qdMismatch?.variant).toBe('warning');
+    expect(qdMismatch?.text).toContain(
+      'Force not needed; installed, but the new binary did not stay up:'
+    );
+
+    // Unforced U2 without verification is also warning (never success).
+    const unforcedAborted = runBanner(
+      makeRun('r2', 'failed', { installed: true, aborted: true }),
+      []
+    );
+    expect(unforcedAborted?.row).toBe('U2');
+    expect(unforcedAborted?.variant).toBe('warning');
   });
 });

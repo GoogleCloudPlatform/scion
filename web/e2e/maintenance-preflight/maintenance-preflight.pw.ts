@@ -40,7 +40,8 @@ function failedPreflightRun(): MockRun {
       branch: 'main',
       branchPinnable: true,
       commit: COMMIT_SHA,
-      error: 'preflight found 1 blocking finding(s); review them on the run detail and re-run with force',
+      error:
+        'preflight found 1 blocking finding(s); review them on the run detail and re-run with force',
       preflight: {
         version: 1,
         checks: ['settings.profiles'],
@@ -171,8 +172,11 @@ async function setupMockHub(page: Page, runs: MockRun[], onForcePost: (body: unk
         body: JSON.stringify(found),
       });
     }
-    if (path === '/api/v1/admin/maintenance/operations/rebuild-server/run' && req.method() === 'POST') {
-      const parsed = JSON.parse(req.postData() ?? '{}');
+    if (
+      path === '/api/v1/admin/maintenance/operations/rebuild-server/run' &&
+      req.method() === 'POST'
+    ) {
+      const parsed: unknown = JSON.parse(req.postData() ?? '{}');
       onForcePost(parsed);
       return route.fulfill({
         status: 200,
@@ -185,7 +189,12 @@ async function setupMockHub(page: Page, runs: MockRun[], onForcePost: (body: unk
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
-          current: { version: 'git-old', channel: 'nightly', commit: '111111111111', isGitBuild: true },
+          current: {
+            version: 'git-old',
+            channel: 'nightly',
+            commit: '111111111111',
+            isGitBuild: true,
+          },
           mode: { effective: 'git', repoConfigured: false, repoBranch: 'main' },
           channel: { effective: 'nightly', source: 'default' },
           pin: '',
@@ -221,7 +230,9 @@ test('admin reviews blocking preflight findings and confirms force re-run', asyn
 
   // Click "Re-run with force" to open confirm dialog.
   await page.getByRole('button', { name: /Re-run with force/i }).click();
-  await expect(page.getByText(`This builds commit ${COMMIT_SHA} on main, not the branch tip.`)).toBeVisible();
+  await expect(
+    page.getByText(`This builds commit ${COMMIT_SHA} on main, not the branch tip.`)
+  ).toBeVisible();
 
   // Confirm button is disabled until checkbox is checked.
   const confirmBtn = page.getByRole('button', { name: /Confirm force re-run/i });
@@ -231,7 +242,9 @@ test('admin reviews blocking preflight findings and confirms force re-run', asyn
   await expect(confirmBtn).toBeEnabled();
 
   await confirmBtn.click();
-  await expect.poll(() => postedBody).toEqual({
-    params: { force: 'true', rerunOf: 'run-fail-1' },
-  });
+  await expect
+    .poll(() => postedBody)
+    .toEqual({
+      params: { force: 'true', rerunOf: 'run-fail-1' },
+    });
 });

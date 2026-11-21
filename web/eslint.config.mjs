@@ -170,6 +170,7 @@ export default defineConfig([
       'e2e/terminal-pane/*.ts',
       'e2e/terminal-workspace/*.ts',
       'e2e/test-hub-banner/*.ts',
+      'e2e/maintenance-preflight/*.ts',
       'e2e/broker-area/*.ts',
       'e2e/test-identity-session/*.ts',
       'e2e/page-policy/*.ts',

@@ -86,6 +86,7 @@ export interface RebuildResult {
   override?: OverrideRecord;
   forcedBy?: ForcedByRecord;
   aborted?: boolean;
+  verification?: string;
 }
 
 export interface MaintenanceRunLike {
@@ -290,6 +291,7 @@ export function runBanner(
   const ov = result?.override;
   const rerunOf = result?.rerunOf;
   const rerunOfLoaded = Boolean(rerunOf && loadedRuns.some((r) => r.id === rerunOf));
+  const reconcileFailed = Boolean(result?.verification && result.verification !== 'verified');
 
   switch (row) {
     case 'F1':
@@ -318,8 +320,10 @@ export function runBanner(
     case 'F4':
       return {
         row,
-        variant: 'warning',
-        text: 'Force applied and installed; the server restarted before this run recorded its end',
+        variant: reconcileFailed ? 'danger' : 'warning',
+        text: reconcileFailed
+          ? `Force applied and installed, but the new binary did not stay up: ${errText}`
+          : 'Force applied and installed; the server restarted before this run recorded its end',
         linkedRunId: rerunOf,
         linkedRunLoaded: rerunOfLoaded,
       };
@@ -386,8 +390,10 @@ export function runBanner(
     case 'F12a':
       return {
         row,
-        variant: 'success',
-        text: 'Force not needed; installed, and the server restarted before this run recorded its end',
+        variant: reconcileFailed ? 'warning' : 'success',
+        text: reconcileFailed
+          ? `Force not needed; installed, but the new binary did not stay up: ${errText}`
+          : 'Force not needed; installed, and the server restarted before this run recorded its end',
         linkedRunId: rerunOf,
         linkedRunLoaded: rerunOfLoaded,
       };
@@ -422,8 +428,10 @@ export function runBanner(
     case 'U2':
       return {
         row,
-        variant: 'success',
-        text: 'Installed; the server restarted before this run recorded its end',
+        variant: 'warning',
+        text: reconcileFailed
+          ? `Installed, but the new binary did not stay up: ${errText}`
+          : 'Installed; the server restarted before this run recorded its end',
       };
   }
 }
