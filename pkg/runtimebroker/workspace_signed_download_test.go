@@ -650,3 +650,52 @@ func TestSignedDownload_WriteSideRefusesIdentityAnyCase(t *testing.T) {
 		t.Fatalf("control: a nested name is ordinary content, class %q", class)
 	}
 }
+
+// TestSignedDownload_ConcurrentRoundDoneMap exercises a multi-file page with
+// concurrent workers and a refresh round so the feeder goroutine and result
+// loop overlap while reading and updating the done set.
+func TestSignedDownload_ConcurrentRoundDoneMap(t *testing.T) {
+	const numFiles = 64
+	objs := make(map[string]string, numFiles)
+	for i := 0; i < numFiles; i++ {
+		objs[fmt.Sprintf("dir/file-%03d.txt", i)] = fmt.Sprintf("payload-%03d", i)
+	}
+	h := newFakeSignedHub(t, objs)
+	// Refuse every odd-numbered file on its first attempt so round 1 completes
+	// half the page and triggers a refresh, and round 2 skips completed files
+	// while completing the rest concurrently.
+	h.objectStatus = func(p string, attempt int) int {
+		if attempt == 1 && (p[len(p)-5]-'0')%2 == 1 {
+			return http.StatusForbidden
+		}
+		return 0
+	}
+	dir, written, err := runSignedDownload(t, h, func(st *signedDownloadSettings) {
+		st.concurrency = 8
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.pageCalls != 2 {
+		t.Fatalf("page calls = %d, want 2", h.pageCalls)
+	}
+	if len(written) != numFiles {
+		t.Fatalf("written = %d, want %d", len(written), numFiles)
+	}
+	got := readTree(t, dir)
+	if len(got) != numFiles {
+		t.Fatalf("tree has %d files, want %d", len(got), numFiles)
+	}
+	for p, want := range objs {
+		if got[p] != want {
+			t.Errorf("file %q = %q, want %q", p, got[p], want)
+		}
+		wantGets := 1
+		if (p[len(p)-5]-'0')%2 == 1 {
+			wantGets = 2
+		}
+		if c := h.getCount(p); c != wantGets {
+			t.Errorf("file %q getCount = %d, want %d", p, c, wantGets)
+		}
+	}
+}
