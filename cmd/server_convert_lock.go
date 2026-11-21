@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerconvert"
@@ -23,9 +25,18 @@ import (
 
 // acquireConvertStartLock is the server start check against
 // 'runtime-broker convert' (brokerconvert.AcquireServerStartLock): a
-// refusing try-lock, never a blocking wait. A variable so tests can
-// observe the call.
-var acquireConvertStartLock = brokerconvert.AcquireServerStartLock
+// refusing try-lock, never a blocking wait. On a clean HOME with no
+// ~/.scion yet, it creates globalDir with the same permissions as
+// `scion init --machine` (0o755) before opening the owner-only convert
+// tree beneath it. A variable so tests can observe the call.
+var acquireConvertStartLock = acquireServerConvertStartLock
+
+func acquireServerConvertStartLock(globalDir string) (*brokerconvert.HostLock, error) {
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create global directory: %w", err)
+	}
+	return brokerconvert.AcquireServerStartLock(globalDir)
+}
 
 // brokerListeners collects the Listening channels of the broker listeners
 // this process starts (the legacy Runtime Broker server, or the flat
