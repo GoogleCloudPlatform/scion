@@ -4504,3 +4504,110 @@ describe('open terminals rail: a click fills the next free slot (ptone/scion#432
     expect(state.four).toEqual([null, null, null, null]);
   });
 });
+
+describe('openPaletteIfEmpty (ptone/scion#8468)', () => {
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  // Load the palette module up front so a wrongly-triggered lazy mount finishes
+  // quickly even if a negative test is run in isolation.
+  beforeAll(async () => {
+    await import('../components/shared/palette/quick-palette.js');
+  });
+
+  /** Wait past the lazy palette import and mount microtasks/macrotask. */
+  async function waitPastLazyPaletteMount(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubWebSocketAndEventSource();
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r-empty' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    paletteLoad.override = null;
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('opens the Jump to agent palette when shown with zero terminals and restores focus to the footer button on dismiss', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'alpha' }]);
+    root.show(true);
+
+    root.openPaletteIfEmpty();
+
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => {
+      expect(palette.open).toBe(true);
+      expect(palette.label).toBe('Jump to agent');
+      expect(palette.groups.agents?.status).toBe('ready');
+    });
+
+    palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
+    fireFromDialog(palette, 'sl-after-hide');
+    expect(document.activeElement).toBe(jumpButton(root));
+  });
+
+  it('does not open the palette when at least one terminal session is open', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'alpha' }]);
+    root.show(true);
+    root.create(reg, AGENT_A);
+    await flush();
+
+    root.openPaletteIfEmpty();
+    await waitPastLazyPaletteMount();
+
+    expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
+  });
+
+  it('does not open the palette when a restored idle terminal entry is present', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'alpha' }]);
+    root.show(true);
+    root.withAutoSelectSuspended(() => root.create(reg, AGENT_A, { deferConnect: true }));
+    await flush();
+
+    root.openPaletteIfEmpty();
+    await waitPastLazyPaletteMount();
+
+    expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
+  });
+
+  it('does not open the palette when terminals are open in another window (status action active)', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'alpha' }]);
+    root.show(true);
+    root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, {
+      label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+      text: TERMINALS_OPEN_ELSEWHERE_HELP,
+    });
+    root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+    await flush();
+
+    root.openPaletteIfEmpty();
+    await waitPastLazyPaletteMount();
+
+    expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
+  });
+
+  it('does not open the palette when the workspace is hidden', async () => {
+    stubFetchForPalette([{ id: AGENT_A, name: 'alpha' }]);
+    root.show(false);
+
+    root.openPaletteIfEmpty();
+    await waitPastLazyPaletteMount();
+
+    expect(root.element.querySelector('scion-quick-palette')).toBeNull();
+    expect(agentListLoads()).toBe(0);
+  });
+});

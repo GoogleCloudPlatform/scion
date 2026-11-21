@@ -789,6 +789,22 @@ export class TerminalWorkspaceRoot {
   }
 
   /**
+   * Opens the "Jump to agent" palette when no terminals are open in this
+   * window and no cross-window status action is active (used by the Dashboard
+   * "Open Terminal" quick action, ptone/scion#8468). Focuses the rail footer's
+   * "Jump to agent" button first so a non-selection dismiss (Escape) restores
+   * focus to a visible control inside the workspace.
+   */
+  openPaletteIfEmpty(): void {
+    if (this.element.hidden) return;
+    if (this.entries.size > 0) return;
+    if (this.statusAction.dataset.active === 'true') return;
+    if (this.paletteHost.hasUnrelatedModalOpen()) return;
+    this.jumpButton?.focus({ preventScroll: true });
+    this.openPalette();
+  }
+
+  /**
    * Removes the document-level listeners this root installs. The root lives
    * for the whole tab in production; tests call this between instances.
    */

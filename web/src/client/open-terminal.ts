@@ -56,6 +56,33 @@ export function openTerminal(agentId: string): void {
   );
 }
 
+export interface OpenTerminalWorkspaceOptions {
+  /**
+   * Auto-open the "Jump to agent" picker when no terminals are open (used by
+   * the Dashboard "Open Terminal" quick action, ptone/scion#8468).
+   */
+  openPickerWhenEmpty?: boolean;
+}
+
+/**
+ * Programmatically open the persistent terminal workspace (`/terminals`).
+ *
+ * When `openPickerWhenEmpty` is true and no terminals are open (after saved
+ * workspace restoration), the "Jump to agent" picker opens automatically.
+ */
+export function openTerminalWorkspace(options?: OpenTerminalWorkspaceOptions): void {
+  document.dispatchEvent(
+    new CustomEvent('nav-click', {
+      detail: {
+        path: '/terminals',
+        openPickerWhenEmpty: options?.openPickerWhenEmpty === true,
+      },
+      bubbles: true,
+      composed: true,
+    })
+  );
+}
+
 /**
  * Return the graph-view URL for an agent, focused on that agent within its
  * project.

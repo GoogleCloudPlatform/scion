@@ -40,6 +40,7 @@ import {
 } from '../../client/hub-capabilities.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { openTerminalWorkspace } from '../../client/open-terminal.js';
 
 /**
  * Home's agents request: one agent, plus the complete set when it fits in
@@ -666,7 +667,11 @@ export class ScionPageHome extends LitElement {
             <p>Browse project workspaces</p>
           </div>
         </a>
-        <a href="/agents" class="action-card">
+        <a
+          href="/terminals"
+          class="action-card"
+          @click=${(e: MouseEvent): void => this.handleOpenTerminalClick(e)}
+        >
           <div class="action-icon">
             <sl-icon name="terminal"></sl-icon>
           </div>
@@ -755,6 +760,14 @@ export class ScionPageHome extends LitElement {
   private onCountsChip(): void {
     if (this.countsLoading) return;
     void this.loadAgentCounts();
+  }
+
+  private handleOpenTerminalClick(e: MouseEvent): void {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) {
+      return;
+    }
+    e.preventDefault();
+    openTerminalWorkspace({ openPickerWhenEmpty: true });
   }
 
   private formatRelativeTime(dateStr: string): string {

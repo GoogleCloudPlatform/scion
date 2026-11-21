@@ -42,6 +42,7 @@ export class FakeTerminalWorkspaceRoot {
   readonly element = document.createElement('div');
   readonly shown: boolean[] = [];
   readonly paths: string[] = [];
+  openPaletteIfEmptyCalls = 0;
   readonly layoutManager = { restore: (): void => undefined };
   constructor() {
     this.element.dataset['fakeTerminalWorkspace'] = '';
@@ -53,6 +54,9 @@ export class FakeTerminalWorkspaceRoot {
   }
   show(visible: boolean): void {
     this.shown.push(visible);
+  }
+  openPaletteIfEmpty(): void {
+    this.openPaletteIfEmptyCalls++;
   }
   setStatus(): void {}
   setStatusAction(): void {}

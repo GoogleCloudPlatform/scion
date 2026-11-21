@@ -1218,13 +1218,18 @@ let activeShell: { type: ShellType; element: HTMLElement } | null = null;
 /** Navigation counter to cancel stale renders when rapid navigations occur */
 let navigationId = 0;
 
+interface RouteNavigationOptions {
+  /** Auto-open the "Jump to agent" picker when /terminals has no open terminals. */
+  openPickerWhenEmpty?: boolean;
+}
+
 /**
  * Renders the page component for the given path into #app.
  * Lazily imports the page module before creating the element.
  * Reuses the shell element (sidebar, header, etc.) when possible
  * to avoid full-page redraws on navigation.
  */
-async function renderRoute(path: string): Promise<void> {
+async function renderRoute(path: string, options?: RouteNavigationOptions): Promise<void> {
   const appContainer = ensureRoots();
   if (!appContainer) return;
   const thisNav = ++navigationId;
@@ -1363,16 +1368,23 @@ async function renderRoute(path: string): Promise<void> {
           if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
         }
       }
-    } else if (terminalPersistence && !terminalMoveRunning) {
-      // A bare /terminals in a window that does not own the terminals
-      // (for example a new window): show the same "open in another
-      // window" state as the other non-owner screens, not the empty one.
-      const elsewhere = await t.terminalsOpenElsewhere({
-        coordinator,
-        persistence: terminalPersistence,
-      });
-      if (elsewhere && thisNav === navigationId && !terminalMoveRunning) {
-        showTerminalsOpenElsewhere();
+    } else {
+      let elsewhere = false;
+      if (terminalPersistence && !terminalMoveRunning) {
+        // A bare /terminals in a window that does not own the terminals
+        // (for example a new window): show the same "open in another
+        // window" state as the other non-owner screens, not the empty one.
+        elsewhere = await t.terminalsOpenElsewhere({
+          coordinator,
+          persistence: terminalPersistence,
+        });
+        if (thisNav !== navigationId) return;
+        if (elsewhere && !terminalMoveRunning) {
+          showTerminalsOpenElsewhere();
+        }
+      }
+      if (options?.openPickerWhenEmpty && !elsewhere && !terminalMoveRunning && !accountTornDown) {
+        terminalWorkspace?.openPaletteIfEmpty();
       }
     }
     return;
@@ -1594,10 +1606,12 @@ function setupRouter(): void {
 
   // Handle nav-click events from shadow DOM components (e.g. sidebar nav)
   // These events use composed:true to cross shadow boundaries.
-  document.addEventListener('nav-click', ((e: CustomEvent<{ path: string }>) => {
+  document.addEventListener('nav-click', ((
+    e: CustomEvent<{ path: string; openPickerWhenEmpty?: boolean }>
+  ) => {
     const path = e.detail?.path;
     if (path) {
-      navigateTo(path);
+      navigateTo(path, e.detail?.openPickerWhenEmpty ? { openPickerWhenEmpty: true } : undefined);
     }
   }) as EventListener);
 
@@ -1669,10 +1683,10 @@ function leavesPage(path: string): boolean {
 /**
  * Navigates to a new path using the History API
  */
-function navigateTo(path: string): void {
+function navigateTo(path: string, options?: RouteNavigationOptions): void {
   const currentAppPath = stripBasePath(window.location.pathname);
   if (path === currentAppPath) {
-    if (path === '/terminals' || terminalAgentRoute.test(path)) void renderRoute(path);
+    if (path === '/terminals' || terminalAgentRoute.test(path)) void renderRoute(path, options);
     return;
   }
   // A page with unsaved changes may veto being removed.
@@ -1681,7 +1695,7 @@ function navigateTo(path: string): void {
   // Prefix app-relative paths with the base path for the browser URL bar
   window.history.pushState({}, '', browserPath(path));
   noteShownEntry();
-  void renderRoute(path);
+  void renderRoute(path, options);
 }
 
 /**
