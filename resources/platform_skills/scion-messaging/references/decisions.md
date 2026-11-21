@@ -31,6 +31,65 @@ list in a short label, or when you need a discussion rather than a pick.
   submit. Use a set for questions that belong together and that you will act on
   as a group. Send separate prompts for decisions that are independent.
 
+## Keep questions and choices short
+
+Keep decision cards scannable so the user can answer at a glance:
+
+- **Question:** one short sentence. Do not pack build SHAs, multi-item scope
+  lists, links, or caveats into `question`.
+- **Choice labels:** a few words (for example `"Approve window"` / `"Hold"`, or
+  `"Staging"` / `"Canary"`). Use `description` only for a brief one-line
+  trade-off when the label alone is not enough.
+- **Message body:** put the briefing — build details, scope lists, links,
+  caveats, and your recommendation — in the message body (the intro above the
+  decisions), where it renders as full Markdown.
+
+The CLI emits a soft warning on stderr (without blocking the send) when a
+`question` exceeds **200 characters** or a choice `label` exceeds **40
+characters**.
+
+**Bad — briefing crammed into the question and choice labels:**
+
+```json
+[
+  {
+    "id": "deploy-window",
+    "question": "Release build abc1234 (PR #410 auth migration, PR #412 cache TTL fix, PR #415 metrics cleanup; see https://example.com/run/987) is green on staging, though rollback requires re-seeding the cache. Should we open the 14:00 UTC production deploy window now or hold until tomorrow?",
+    "choices": [
+      "Approve the 14:00 UTC production deploy window for build abc1234 now",
+      "Hold the release until tomorrow's window after the cache-warming check"
+    ]
+  }
+]
+```
+
+**Good — context in the message body, short question and choice labels:**
+
+```json
+[
+  {
+    "id": "deploy-window",
+    "question": "Open the 14:00 UTC production deploy window?",
+    "choices": [
+      {"id": "approve", "label": "Approve window", "description": "Deploy build abc1234 at 14:00 UTC"},
+      {"id": "hold", "label": "Hold", "description": "Wait for tomorrow's window"}
+    ],
+    "default": "approve"
+  }
+]
+```
+
+```bash
+scion message "conv:<conversation-id>" --decisions-file <file> - <<'EOF_MESSAGE'
+Build `abc1234` passed staging ([CI run](https://example.com/run/987)) and includes:
+- Auth migration (PR #410)
+- Cache TTL fix (PR #412)
+- Metrics cleanup (PR #415)
+
+**Caveat:** rollback requires re-seeding the cache. I recommend approving the 14:00 UTC window.
+EOF_MESSAGE
+```
+
 ## Send it from a file
 
 Write the decisions to a JSON file and pass `--decisions-file`. This avoids
@@ -68,8 +127,8 @@ The JSON is an array of decisions:
 | Field | Meaning |
 |---|---|
 | `id` | Optional decision key. Use a short key you will recognize, such as `deploy-target`: `[A-Za-z0-9_-]`, at most 32 characters, with at least one non-digit. Leave it out and the Hub assigns your next number (`1`, `2`, ...). Keys compare case-insensitively. |
-| `question` | Required. Markdown, at most 2000 characters. |
-| `choices` | Required, 2 to 10 (1 to 10 when `allow_other` is enabled). Each is a string label, or an object with `label` (one line, at most 100 characters), optional `id` (`[A-Za-z0-9_-]`, at most 32 characters) and optional `description` (one line, at most 300 characters). A choice without an `id` gets its position (`1`, `2`, ...). Choice ids and labels must each be unique within the decision, compared case-insensitively. |
+| `question` | Required. Markdown, at most 2000 characters (the CLI warns above 200 characters; keep it to one short sentence and put context in the message body). |
+| `choices` | Required, 2 to 10 (1 to 10 when `allow_other` is enabled). Each is a string label, or an object with `label` (one line, at most 100 characters; the CLI warns above 40 characters — keep labels to a few words), optional `id` (`[A-Za-z0-9_-]`, at most 32 characters) and optional `description` (one line, at most 300 characters). A choice without an `id` gets its position (`1`, `2`, ...). Choice ids and labels must each be unique within the decision, compared case-insensitively. |
 | `default` | Optional. Marks your recommended choice, by its `id` or `label` (cannot name Other). |
 | `allow_other` | Optional. Lets the user type a short free-form answer; use sparingly (see [Let the user answer in their own words](#let-the-user-answer-in-their-own-words-allow_other)). |
 

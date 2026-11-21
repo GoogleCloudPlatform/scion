@@ -143,11 +143,14 @@ under "delivered".
 Decision prompts (--decisions or --decisions-file, from an agent to a user or a
 conversation) print one line per decision with its key and version. With
 --format json the output is the Hub's full send result: message_id and
-decisions, plus every other field of an ordinary send. With --update, only
-keys included in the new payload are replaced; to revise an unanswered
-multi-decision set on a single card, resend all still-pending keys of that
-set together. To retire a decision without a replacement, use scion decisions
-withdraw.
+decisions, plus every other field of an ordinary send. Keep questions to one
+short sentence and choice labels to a few words, putting background details,
+links, and caveats in the message body; questions over 200 characters or choice
+labels over 40 characters print a soft warning on stderr without blocking the
+send. With --update, only keys included in the new payload are replaced; to
+revise an unanswered multi-decision set on a single card, resend all
+still-pending keys of that set together.
+To retire a decision without a replacement, use scion decisions withdraw.
 
 Exit codes:
   0  Sent. For a group, every recipient was accepted or deferred.
@@ -258,6 +261,7 @@ Examples:
 				return err
 			}
 			msgDecisionsPayload = payload
+			warnDecisionLengths(os.Stderr, payload)
 		}
 
 		// Resolve body from --body-file or stdin
