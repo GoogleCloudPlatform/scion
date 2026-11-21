@@ -136,13 +136,17 @@ individual choice objects):
     in the body; envelope metadata `decision_answers` carries `$other`
     (`region@1=$other,proceed@1=1`) and no free text.
 - **Recording a prose reply:** when the user replies in prose instead of
-  clicking Other, record it with
-  `scion decisions record --from <message-id> --other region="europe-west4 canary"`
-  (repeatable, and combinable with `<key>=<choice-id>` pairs in one batch; do
-  not pass `$other` positionally or mix with the two-argument `<key> <choice-id>`
-  form). If the user answers directly afterwards, submitting `$other` with the
-  exact same trimmed text confirms the interpreted answer (not delivered back
-  to you); a different choice or different text overrides it and delivers a
+  clicking Other, record it with `--other` (repeatable, and combinable with
+  `<key>=<choice-id>` pairs in one batch; do not pass `$other` positionally or
+  mix with the two-argument `<key> <choice-id>` form):
+
+  ```bash
+  scion decisions record --from <message-id> --other region="europe-west4 canary"
+  ```
+
+  If the user answers directly afterwards, submitting `$other` with the exact
+  same trimmed text confirms the interpreted answer (not delivered back to you);
+  a different choice or different text overrides it and delivers a
   `decision-response` naming the previous answer (for example
   `, overriding interpreted answer Another region text="europe-west4"`).
 - **Do not ask for secrets:** Other answers are stored permanently in the
