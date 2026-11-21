@@ -1001,9 +1001,9 @@ function findBareRadiusLiterals(text: string): string[] {
 }
 
 /**
- * Ratcheting allowlist of remaining hard-coded rectangular `border-radius`
- * declarations outside `styles/theme.css`. Shell and pre-auth chrome were
- * migrated in PR 3a; remaining component families are swept in PR 3b.
+ * Ratcheting allowlist for bare rectangular `border-radius` declarations
+ * outside `styles/theme.css`. Must remain empty after PR 3b (ptone/scion#8602);
+ * any new entry requires an explicit justification and follow-up issue.
  */
 const BARE_RADIUS_ALLOWLIST: Record<string, { max: number; reason: string }> = {};
 
@@ -1473,13 +1473,13 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
         'components/shared/chat/chat-space-rail.ts',
         '.space-header .unread-badge',
         'border-radius',
-        [9999],
+        [8],
       ],
       [
         'components/shared/chat/chat-space-rail.ts',
         '.space-header .mention-badge',
         'border-radius',
-        [9999],
+        [8],
       ],
       ['components/shared/chat/chat-space-rail.ts', '.context-menu', 'border-radius', [8]],
       ['components/shared/chat/chat-space-rail.ts', '.filter-toggle', 'border-radius', [6]],
@@ -1613,5 +1613,21 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
     const defaultPreview = previewDocument('<pre><code>x</code></pre>');
     expect((defaultPreview.match(/border-radius:0\.25rem/g) ?? []).length).toBe(4);
     expect((defaultPreview.match(/border-radius:0\.5rem/g) ?? []).length).toBe(2);
+
+    // Coarse-pointer chat-rail badges grow to ~18.5px tall (12px font + 0.125rem
+    // vertical padding), so their effective border-radius must resolve to 8px
+    // (0.5rem, not 9999px) in the default preset to stay pixel-identical on
+    // mobile while scaling cleanly under square (0) and rounded (12px).
+    const railSrc = fileCache.get('components/shared/chat/chat-space-rail.ts')!;
+    const coarseMatch =
+      /@media\s*\(pointer:\s*coarse\)\s*\{[\s\S]*?\.space-header\s+\.unread-badge,\s*\.space-header\s+\.mention-badge\s*\{([^{}]*)\}/.exec(
+        railSrc
+      );
+    expect(coarseMatch, 'chat-space-rail.ts missing coarse-pointer badge rule').not.toBeNull();
+    const coarseRadius = /border-radius\s*:\s*([^;]+)/i.exec(coarseMatch![1]);
+    if (coarseRadius) {
+      expect(evalRadiusListPx(coarseRadius[1], defaultVars)).toEqual([8]);
+      expect(evalRadiusListPx(coarseRadius[1], squareVars)).toEqual([0]);
+    }
   });
 });

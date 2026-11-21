@@ -842,7 +842,7 @@ export class ScionChatSpaceRail extends LitElement {
       font-size: var(--chat-fs-2xs);
       font-weight: 700;
       padding: 0.0625rem 0.3125rem;
-      border-radius: var(--scion-radius-full);
+      border-radius: var(--scion-radius);
       min-width: 1rem;
       text-align: center;
     }
@@ -853,7 +853,7 @@ export class ScionChatSpaceRail extends LitElement {
       font-size: var(--chat-fs-2xs);
       font-weight: 700;
       padding: 0.0625rem 0.3125rem;
-      border-radius: var(--scion-radius-full);
+      border-radius: var(--scion-radius);
       min-width: 1rem;
       text-align: center;
     }
