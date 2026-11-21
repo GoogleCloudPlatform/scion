@@ -600,6 +600,55 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	}
 }
 
+func TestTryProvisionWorktree_SlashBranchJoinResolvesSharedPath(t *testing.T) {
+	requireWorktreeGit(t)
+	t.Setenv("SCION_HOST_UID", "")
+
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	bare := initBareRepoWithCommit(t)
+	gc := &api.GitCloneConfig{URL: bare, Branch: "main"}
+
+	projectPath := filepath.Join(t.TempDir(), "proj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	optsA := &api.StartOptions{}
+	ok, base, err := srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-a", AgentID: "agent-a",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc, Branch: "feature/x"},
+	}, optsA, map[string]string{}, srv.runtime.Name())
+	if err != nil || !ok {
+		t.Fatalf("tryProvisionWorktree(agent-a) = (ok=%v, err=%v), want ok=true, err=nil", ok, err)
+	}
+
+	optsB := &api.StartOptions{}
+	ok, _, err = srv.tryProvisionWorktree(context.Background(), startContextInputs{
+		Name: "agent-b", AgentID: "agent-b",
+		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
+		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		Config:        &CreateAgentConfig{GitClone: gc, Branch: "feature/x"},
+	}, optsB, map[string]string{}, srv.runtime.Name())
+	if err != nil || !ok {
+		t.Fatalf("tryProvisionWorktree(agent-b) = (ok=%v, err=%v), want ok=true, err=nil", ok, err)
+	}
+	if optsB.Workspace != optsA.Workspace {
+		t.Errorf("optsB.Workspace = %q, want %q (agent-a's worktree)", optsB.Workspace, optsA.Workspace)
+	}
+	if !existingNonLocalWorkspace(startContextInputs{
+		Name: "agent-b", AgentID: "agent-b",
+		ProjectID: "p1", ProjectPath: projectPath,
+		Config: &CreateAgentConfig{Branch: "feature/x"},
+	}) {
+		t.Errorf("existingNonLocalWorkspace should detect joined worktree for branch feature/x in %s", base)
+	}
+}
+
 // TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback
 // covers a JOIN agent whose own WorktreePath(base, "agent-b") never exists
 // (it shares agent-a's worktree instead): the preExisted check also
