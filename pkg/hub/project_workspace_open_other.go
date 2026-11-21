@@ -17,22 +17,20 @@
 package hub
 
 import (
-	"errors"
-	"fmt"
 	"io/fs"
 	"os"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
-// openWorkspaceRegularForRead always fails with errors.ErrUnsupported on this
-// platform: workspace file opens require O_NONBLOCK and O_NOFOLLOW (see
-// project_workspace_open_unix.go), and the hub server does not run here.
+// openWorkspaceRegularForRead delegates to rootopen.OpenRegularForRead, which
+// fails closed with errors.ErrUnsupported on platforms without openat(2).
 func openWorkspaceRegularForRead(dir *os.Root, name string, expected fs.FileInfo) (*os.File, fs.FileInfo, error) {
-	return nil, nil, fmt.Errorf("open workspace file %s: %w on this platform", name, errors.ErrUnsupported)
+	return rootopen.OpenRegularForRead(dir, name, expected)
 }
 
-// openWorkspaceFileForWrite always fails with errors.ErrUnsupported on this
-// platform: workspace file opens require O_NONBLOCK and O_NOFOLLOW (see
-// project_workspace_open_unix.go), and the hub server does not run here.
+// openWorkspaceFileForWrite delegates to rootopen.OpenFileForWrite, which
+// fails closed with errors.ErrUnsupported on platforms without openat(2).
 func openWorkspaceFileForWrite(dir *os.Root, name string, exists bool) (*os.File, error) {
-	return nil, fmt.Errorf("open workspace file %s for write: %w on this platform", name, errors.ErrUnsupported)
+	return rootopen.OpenFileForWrite(dir, name, 0o644, exists)
 }

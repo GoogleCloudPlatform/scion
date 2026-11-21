@@ -17,13 +17,30 @@
 package projectfs
 
 import (
+	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
+
+type failingSwapReader struct {
+	onRead func() error
+}
+
+func (r failingSwapReader) Read(_ []byte) (int, error) {
+	if err := r.onRead(); err != nil {
+		return 0, err
+	}
+	return 0, io.ErrUnexpectedEOF
+}
 
 func TestWriteAttachment_Local(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "scratchpad")
@@ -91,4 +108,158 @@ func TestWriteAttachment_RefusesSymlinkedAttachmentsDir(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("nothing may be written outside the shared dir, found %d entries", len(entries))
 	}
+}
+
+func TestWriteAttachment_OpenPolicy(t *testing.T) {
+	m := SharedDirMount(api.SharedDir{Name: ScratchpadName}, "")
+
+	t.Run("in_root_intermediate_attachments_symlink_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-target")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("real-target", filepath.Join(dir, AttachmentsDir)); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-1", "a.txt", strings.NewReader("payload")); err == nil {
+			t.Fatal("WriteAttachment succeeded through in-root .attachments symlink")
+		}
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("directories or files were created inside symlink target: %v", entries)
+		}
+	})
+
+	t.Run("in_root_intermediate_channel_symlink_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-ch-target")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		attDir := filepath.Join(dir, AttachmentsDir)
+		if err := os.MkdirAll(attDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../real-ch-target", filepath.Join(attDir, AttachmentChannelDiscord)); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-ch", "a.txt", strings.NewReader("payload")); err == nil {
+			t.Fatal("WriteAttachment succeeded through in-root channel symlink")
+		}
+		entries, err := os.ReadDir(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("directories or files were created inside channel symlink target: %v", entries)
+		}
+	})
+
+	t.Run("failed_copy_cleanup_stays_in_pinned_dir", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-target")
+		victim := filepath.Join(target, AttachmentChannelDiscord, "id-swap", "a.txt")
+		if err := os.MkdirAll(filepath.Dir(victim), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(victim, []byte("do-not-delete"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		r := failingSwapReader{
+			onRead: func() error {
+				if err := os.Rename(filepath.Join(dir, AttachmentsDir), filepath.Join(dir, AttachmentsDir+".moved")); err != nil {
+					return err
+				}
+				return os.Symlink("real-target", filepath.Join(dir, AttachmentsDir))
+			},
+		}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-swap", "a.txt", r); err == nil {
+			t.Fatal("WriteAttachment should fail when reader returns error")
+		}
+		got, err := os.ReadFile(victim)
+		if err != nil || string(got) != "do-not-delete" {
+			t.Fatalf("cleanup affected symlink target file: %q, %v", got, err)
+		}
+		movedFile := filepath.Join(dir, AttachmentsDir+".moved", AttachmentChannelDiscord, "id-swap", "a.txt")
+		if _, err := os.Stat(movedFile); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("partial file in pinned dir was not removed, stat err = %v", err)
+		}
+	})
+
+	t.Run("in_root_intermediate_id_symlink_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "real-id-target")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		chDir := filepath.Join(dir, AttachmentsDir, AttachmentChannelTelegram)
+		if err := os.MkdirAll(chDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../../real-id-target", filepath.Join(chDir, "tg_1")); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelTelegram, "tg_1", "a.txt", strings.NewReader("payload")); err == nil {
+			t.Fatal("WriteAttachment succeeded through in-root id symlink")
+		}
+		if _, err := os.Stat(filepath.Join(target, "a.txt")); err == nil {
+			t.Fatal("file was written into symlink target directory")
+		}
+	})
+
+	t.Run("in_root_leaf_symlink_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		idDir := filepath.Join(dir, AttachmentsDir, AttachmentChannelDiscord, "id-2")
+		if err := os.MkdirAll(idDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		victim := filepath.Join(dir, "victim.txt")
+		if err := os.WriteFile(victim, []byte("original"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../../../victim.txt", filepath.Join(idDir, "a.txt")); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		if _, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-2", "a.txt", strings.NewReader("overwrite")); err == nil {
+			t.Fatal("WriteAttachment succeeded through in-root leaf symlink")
+		}
+		got, err := os.ReadFile(victim)
+		if err != nil || string(got) != "original" {
+			t.Fatalf("victim file changed: %q, %v", got, err)
+		}
+	})
+
+	t.Run("fifo_nonblocking_refused", func(t *testing.T) {
+		dir := t.TempDir()
+		idDir := filepath.Join(dir, AttachmentsDir, AttachmentChannelDiscord, "id-3")
+		if err := os.MkdirAll(idDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Mkfifo(filepath.Join(idDir, "pipe.txt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		res := Resolved{Backend: BackendLocal, HostPath: dir, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		done := make(chan error, 1)
+		go func() {
+			_, err := WriteAttachment(res, false, m, AttachmentChannelDiscord, "id-3", "pipe.txt", strings.NewReader("x"))
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatal("WriteAttachment succeeded on existing FIFO")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("WriteAttachment blocked on FIFO")
+		}
+	})
 }

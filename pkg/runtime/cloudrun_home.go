@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // A Cloud Run instance's home is always the agent's home leaf on the NFS
@@ -396,7 +397,7 @@ func readCloudRunHarnessSecrets(homeDir, agentID string) ([]stagedsecrets.Harnes
 			return nil, errCloudRunHomeConflict
 		}
 	}
-	dir, err := root.Open(harnessBundleSecretsRel)
+	dir, err := rootopen.OpenDir(root, harnessBundleSecretsRel)
 	if err != nil {
 		return nil, errCloudRunHarnessSecrets
 	}
@@ -439,20 +440,17 @@ func readCloudRunHarnessSecrets(homeDir, agentID string) ([]stagedsecrets.Harnes
 var errHarnessSecretTooLarge = errors.New("file too large")
 
 // readRegularInRoot reads the regular file rel in root (fi is its Lstat),
-// up to max bytes, refusing a file replaced since the Lstat.
+// up to max bytes, without following symlinks or blocking on special files,
+// refusing a file replaced since the Lstat.
 func readRegularInRoot(root *os.Root, rel string, fi fs.FileInfo, max int64) ([]byte, error) {
-	f, err := root.Open(rel)
+	f, _, err := rootopen.OpenRegularForRead(root, rel, fi)
 	if err != nil {
+		if errors.Is(err, rootopen.ErrRefused) {
+			return nil, errors.New("changed while being read")
+		}
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !st.Mode().IsRegular() || !os.SameFile(fi, st) {
-		return nil, errors.New("changed while being read")
-	}
 	data, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
 		return nil, err
