@@ -322,7 +322,7 @@ func TestBrokerPolicy_RegistrationMatrix(t *testing.T) {
 func TestBrokerPolicy_FlatRegistrationAndPreserveSettings(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	auditCap := &captureBrokerPolicyAuditLogger{}
+	auditCap := &captureBrokerPolicyAuditLogger{AuditLogger: srv.auditLogger}
 	srv.auditLogger = auditCap
 
 	member := newHubMemberUser(t, s, "bp-flat-member")
@@ -486,7 +486,8 @@ func TestBrokerPolicy_DeprecatedProjectsRegisterBrokerPath(t *testing.T) {
 	assert.Equal(t, "reregister", details["operation"])
 	assert.Equal(t, unmanaged.ID, details["brokerId"])
 
-	// Existing managed broker: refused for UAT while policy is on.
+	// Existing managed broker: refused for UAT (the deprecated embedded-broker
+	// path is session-only under CREDENTIAL_MANAGEMENT and never admits UATs).
 	managed := &store.RuntimeBroker{
 		ID:           api.NewUUID(),
 		Name:         "bp-embed-managed",
@@ -504,10 +505,8 @@ func TestBrokerPolicy_DeprecatedProjectsRegisterBrokerPath(t *testing.T) {
 		},
 	}, adminUATAuth)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	code, details = decodeBrokerPolicyErrorCode(t, rec)
-	assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
-	assert.Equal(t, "reregister", details["operation"])
-	assert.Equal(t, managed.ID, details["brokerId"])
+	code, _ = decodeBrokerPolicyErrorCode(t, rec)
+	assert.Equal(t, ErrCodeForbidden, code)
 
 	// Existing managed broker: allowed for interactive super-admin.
 	rec = doBrokerRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
@@ -566,10 +565,8 @@ func TestBrokerPolicy_AdminServerConfigDB_ExperimentGateAndLiveApply(t *testing.
 	ops := NewOperationalSettings(s, emptyKoanf(), emptyKoanf())
 	_, err := ops.Refresh(ctx)
 	require.NoError(t, err)
+	ops.server = srv
 	srv.SetOperationalSettings(ops)
-	propCtx, cancelProp := context.WithCancel(ctx)
-	t.Cleanup(cancelProp)
-	ops.StartPropagation(propCtx, srv)
 
 	superAdmin := newSuperAdminUser(t, s, "bp-cfg-admin")
 	hubAdmin := newHubAdminUser(t, s, "bp-cfg-hub-admin")
