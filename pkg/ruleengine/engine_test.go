@@ -1668,7 +1668,7 @@ func TestEvaluate_BoundFromTrackerTimeoutExhaustsTracker(t *testing.T) {
 func TestEvaluate_MarginWindowTimeoutExhaustsTracker(t *testing.T) {
 	eng := ruleengine.NewEngine()
 	// Tracker limit 200ms (< 500ms dialect MaxEvalTime => boundFromTracker is true).
-	// engineDeadlineMargin(200ms) is 10ms, so returning 5ms before evalCtx.Deadline()
+	// EngineDeadlineMargin(200ms) is 10ms, so returning 5ms before evalCtx.Deadline()
 	// lands inside [190ms, 200ms): elapsed >= evalTimeout - margin while elapsed < evalTimeout.
 	// Charge(elapsed) alone would leave ~5ms remaining, so this test directly guards
 	// budget.Tracker.Exhaust() on the margin-window exhaustion path.
