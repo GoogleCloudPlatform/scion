@@ -26,10 +26,16 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync/atomic"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// resourceImportBeforeOpenHook, when set (tests only), runs immediately before
+// snapshotWorkspaceDir opens a walked file entry.
+var resourceImportBeforeOpenHook atomic.Pointer[func(name string)]
 
 // snapshotWorkspaceDir copies the directory workspacePath (relative to the
 // project's workspace root, e.g. "/.scion/templates") into a private
@@ -104,13 +110,16 @@ func (s *Server) snapshotWorkspaceDir(ctx context.Context, project *store.Projec
 		if files > workspaceSnapshotMaxFiles {
 			return errWorkspaceSnapshotTooLarge
 		}
-		// Opened non-blocking and without following a final symlink, and
-		// checked to still be a regular file: an entry swapped for a FIFO
-		// or a link after the walk classified it is skipped, never read
-		// (a FIFO would block the open or the read).
-		in, err := sub.OpenFile(p, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+		// Opened through openAtInRoot (kernel-enforced O_NOFOLLOW on every
+		// component and O_NONBLOCK on the leaf) and checked to still be a
+		// regular file: an entry replaced with a non-regular file or a
+		// symbolic link after the walk classified it is skipped, never read.
+		if hook := resourceImportBeforeOpenHook.Load(); hook != nil {
+			(*hook)(p)
+		}
+		in, err := openAtInRoot(sub, p, unix.O_RDONLY, 0)
 		if err != nil {
-			if errors.Is(err, syscall.ELOOP) {
+			if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ENXIO) || errors.Is(err, unix.EOPNOTSUPP) {
 				return nil
 			}
 			return err

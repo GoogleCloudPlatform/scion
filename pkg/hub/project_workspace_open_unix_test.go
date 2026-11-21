@@ -19,10 +19,13 @@ package hub
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -31,6 +34,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 func runWithinTimeout(t *testing.T, timeout time.Duration, fn func()) {
@@ -557,5 +561,384 @@ func TestWorkspaceWrite_SwappedFIFORefused(t *testing.T) {
 		buf := make([]byte, 64)
 		n, _ := readerFile.Read(buf)
 		assert.Equal(t, 0, n, "unexpected bytes written to FIFO: %q", string(buf[:n]))
+	})
+}
+
+func TestWorkspaceWrite_OpenErrnoMapsToBadRequest(t *testing.T) {
+	t.Run("openAtInRoot_wraps_errno_in_path_error", func(t *testing.T) {
+		dir := t.TempDir()
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		f, err := openAtInRoot(root, "missing.txt", unix.O_RDONLY, 0)
+		if f != nil {
+			_ = f.Close()
+		}
+		require.Error(t, err)
+		var pathErr *fs.PathError
+		assert.ErrorAs(t, err, &pathErr)
+		assert.ErrorIs(t, err, fs.ErrNotExist)
+	})
+
+	t.Run("writeWorkspaceFileError_maps_eacces_path_error_to_400", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		writeWorkspaceFileError(rec, "workspace", "readonly.txt", &fs.PathError{
+			Op:   "openat",
+			Path: "readonly.txt",
+			Err:  unix.EACCES,
+		})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("concurrently_removed_file_returns_400", func(t *testing.T) {
+		srv, _ := testServer(t)
+		project, workspacePath := createTestHubManagedProject(t, srv, "Open Write Concurrent Remove")
+		filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+		targetPath := filepath.Join(workspacePath, "vanish.txt")
+		require.NoError(t, os.WriteFile(targetPath, []byte("before"), 0o644))
+
+		unlink := func(name string) {
+			if name == "vanish.txt" {
+				_ = os.Remove(targetPath)
+			}
+		}
+		workspaceBeforeOpenHook.Store(&unlink)
+		t.Cleanup(func() { workspaceBeforeOpenHook.Store(nil) })
+
+		rec := doRequest(t, srv, http.MethodPut, filesURL+"/vanish.txt",
+			ProjectWorkspaceWriteRequest{Content: "after"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("readonly_file_returns_400", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root bypasses read-only file mode")
+		}
+		srv, _ := testServer(t)
+		project, workspacePath := createTestHubManagedProject(t, srv, "Open Write Readonly")
+		filesURL := fmt.Sprintf("/api/v1/projects/%s/workspace/files", project.ID)
+		targetPath := filepath.Join(workspacePath, "readonly.txt")
+		require.NoError(t, os.WriteFile(targetPath, []byte("before"), 0o444))
+		t.Cleanup(func() { _ = os.Chmod(targetPath, 0o644) })
+
+		rec := doRequest(t, srv, http.MethodPut, filesURL+"/readonly.txt",
+			ProjectWorkspaceWriteRequest{Content: "after"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	})
+}
+
+func TestSnapshotWorkspaceDir_OpenHardening(t *testing.T) {
+	t.Run("regular_files_and_steady_specials", func(t *testing.T) {
+		srv, _ := testServer(t)
+		project, workspacePath := createTestHubManagedProject(t, srv, "Snapshot Regular And Specials")
+		src := filepath.Join(workspacePath, "import-src")
+		require.NoError(t, os.MkdirAll(filepath.Join(src, "sub", "nested"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "top.txt"), []byte("top-ok"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "nested", "deep.txt"), []byte("deep-ok"), 0o644))
+		require.NoError(t, os.Symlink("top.txt", filepath.Join(src, "link.txt")))
+		if err := syscall.Mkfifo(filepath.Join(src, "pipe"), 0o600); err != nil {
+			t.Skipf("mkfifo: %v", err)
+		}
+
+		runWithinTimeout(t, 2*time.Second, func() {
+			dst, cleanup, err := srv.snapshotWorkspaceDir(context.Background(), project, "/import-src")
+			require.NoError(t, err)
+			defer cleanup()
+
+			gotTop, err := os.ReadFile(filepath.Join(dst, "top.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "top-ok", string(gotTop))
+
+			gotDeep, err := os.ReadFile(filepath.Join(dst, "sub", "nested", "deep.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "deep-ok", string(gotDeep))
+
+			_, err = os.Lstat(filepath.Join(dst, "link.txt"))
+			assert.ErrorIs(t, err, fs.ErrNotExist)
+			_, err = os.Lstat(filepath.Join(dst, "pipe"))
+			assert.ErrorIs(t, err, fs.ErrNotExist)
+		})
+	})
+
+	t.Run("swapped_in_root_symlink_leaf_skipped", func(t *testing.T) {
+		srv, _ := testServer(t)
+		project, workspacePath := createTestHubManagedProject(t, srv, "Snapshot Swap Leaf Symlink")
+		src := filepath.Join(workspacePath, "import-src")
+		require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "keep.txt"), []byte("kept"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "other.txt"), []byte("other-content"), 0o644))
+		leafTop := filepath.Join(src, "swap-top.txt")
+		leafNested := filepath.Join(src, "sub", "swap-nested.txt")
+		require.NoError(t, os.WriteFile(leafTop, []byte("orig-top"), 0o644))
+		require.NoError(t, os.WriteFile(leafNested, []byte("orig-nested"), 0o644))
+
+		swap := func(name string) {
+			switch name {
+			case "swap-top.txt":
+				_ = os.Remove(leafTop)
+				_ = os.Symlink("other.txt", leafTop)
+			case "sub/swap-nested.txt":
+				_ = os.Remove(leafNested)
+				_ = os.Symlink("../other.txt", leafNested)
+			}
+		}
+		resourceImportBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { resourceImportBeforeOpenHook.Store(nil) })
+
+		dst, cleanup, err := srv.snapshotWorkspaceDir(context.Background(), project, "/import-src")
+		require.NoError(t, err)
+		defer cleanup()
+
+		gotKeep, err := os.ReadFile(filepath.Join(dst, "keep.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "kept", string(gotKeep))
+		_, err = os.Lstat(filepath.Join(dst, "swap-top.txt"))
+		assert.ErrorIs(t, err, fs.ErrNotExist, "swapped single-component symlink must be skipped")
+		_, err = os.Lstat(filepath.Join(dst, "sub", "swap-nested.txt"))
+		assert.ErrorIs(t, err, fs.ErrNotExist, "swapped multi-component symlink must be skipped")
+	})
+
+	t.Run("swapped_in_root_symlink_intermediate_dir_skipped", func(t *testing.T) {
+		srv, _ := testServer(t)
+		project, workspacePath := createTestHubManagedProject(t, srv, "Snapshot Swap Dir Symlink")
+		src := filepath.Join(workspacePath, "import-src")
+		swapDir := filepath.Join(src, "swapdir")
+		otherDir := filepath.Join(src, "otherdir")
+		require.NoError(t, os.MkdirAll(swapDir, 0o755))
+		require.NoError(t, os.MkdirAll(otherDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "keep.txt"), []byte("kept"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(otherDir, "entry.txt"), []byte("other-dir-content"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(swapDir, "entry.txt"), []byte("orig"), 0o644))
+
+		swap := func(name string) {
+			if name != "swapdir/entry.txt" {
+				return
+			}
+			_ = os.RemoveAll(swapDir)
+			_ = os.Symlink("otherdir", swapDir)
+		}
+		resourceImportBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { resourceImportBeforeOpenHook.Store(nil) })
+
+		dst, cleanup, err := srv.snapshotWorkspaceDir(context.Background(), project, "/import-src")
+		require.NoError(t, err)
+		defer cleanup()
+
+		gotKeep, err := os.ReadFile(filepath.Join(dst, "keep.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "kept", string(gotKeep))
+		_, err = os.Lstat(filepath.Join(dst, "swapdir", "entry.txt"))
+		assert.ErrorIs(t, err, fs.ErrNotExist, "swapped intermediate directory symlink must be skipped")
+	})
+
+	t.Run("swapped_fifo_does_not_block", func(t *testing.T) {
+		srv, _ := testServer(t)
+		project, workspacePath := createTestHubManagedProject(t, srv, "Snapshot Swap FIFO")
+		src := filepath.Join(workspacePath, "import-src")
+		require.NoError(t, os.MkdirAll(src, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "keep.txt"), []byte("kept"), 0o644))
+		fifoTarget := filepath.Join(src, "swap-fifo.txt")
+		require.NoError(t, os.WriteFile(fifoTarget, []byte("orig"), 0o644))
+
+		swap := func(name string) {
+			if name != "swap-fifo.txt" {
+				return
+			}
+			_ = os.Remove(fifoTarget)
+			_ = syscall.Mkfifo(fifoTarget, 0o600)
+		}
+		resourceImportBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { resourceImportBeforeOpenHook.Store(nil) })
+
+		runWithinTimeout(t, 2*time.Second, func() {
+			dst, cleanup, err := srv.snapshotWorkspaceDir(context.Background(), project, "/import-src")
+			require.NoError(t, err)
+			defer cleanup()
+
+			gotKeep, err := os.ReadFile(filepath.Join(dst, "keep.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "kept", string(gotKeep))
+			_, err = os.Lstat(filepath.Join(dst, "swap-fifo.txt"))
+			assert.ErrorIs(t, err, fs.ErrNotExist)
+		})
+	})
+
+	t.Run("swapped_unix_socket_skipped", func(t *testing.T) {
+		srv, _ := testServer(t)
+		project, workspacePath := createTestHubManagedProject(t, srv, "Snapshot Swap Socket")
+		src := filepath.Join(workspacePath, "import-src")
+		require.NoError(t, os.MkdirAll(src, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(src, "keep.txt"), []byte("kept"), 0o644))
+		sockTarget := filepath.Join(src, "swap-sock")
+		require.NoError(t, os.WriteFile(sockTarget, []byte("orig"), 0o644))
+
+		var ln net.Listener
+		t.Cleanup(func() {
+			if ln != nil {
+				_ = ln.Close()
+			}
+		})
+		var sockErr error
+		swap := func(name string) {
+			if name != "swap-sock" {
+				return
+			}
+			_ = os.Remove(sockTarget)
+			ln, sockErr = net.Listen("unix", sockTarget)
+		}
+		resourceImportBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { resourceImportBeforeOpenHook.Store(nil) })
+
+		runWithinTimeout(t, 2*time.Second, func() {
+			dst, cleanup, err := srv.snapshotWorkspaceDir(context.Background(), project, "/import-src")
+			if sockErr != nil {
+				t.Skipf("unix socket listen: %v", sockErr)
+			}
+			require.NoError(t, err)
+			defer cleanup()
+
+			gotKeep, err := os.ReadFile(filepath.Join(dst, "keep.txt"))
+			require.NoError(t, err)
+			assert.Equal(t, "kept", string(gotKeep))
+			_, err = os.Lstat(filepath.Join(dst, "swap-sock"))
+			assert.ErrorIs(t, err, fs.ErrNotExist)
+		})
+	})
+}
+
+func TestWriteRootFile_SwappedSymlinkAndSpecialFile(t *testing.T) {
+	t.Run("swapped_in_root_symlink_refused_in_kernel", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "sibling"), []byte("keep-sibling\n"), 0o644))
+		targetPath := filepath.Join(dir, "target")
+		require.NoError(t, os.WriteFile(targetPath, []byte("orig\n"), 0o644))
+
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		swap := func(name string) {
+			if name != "target" {
+				return
+			}
+			_ = os.Remove(targetPath)
+			_ = os.Symlink("sibling", targetPath)
+		}
+		rootFileBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { rootFileBeforeOpenHook.Store(nil) })
+
+		err = writeRootFile(root, "target", "new-val\n")
+		require.Error(t, err)
+		assert.ErrorIs(t, err, unix.ELOOP, "in-root symlink must be refused directly by openat(O_NOFOLLOW)")
+
+		gotSibling, err := os.ReadFile(filepath.Join(dir, "sibling"))
+		require.NoError(t, err)
+		assert.Equal(t, "keep-sibling\n", string(gotSibling))
+
+		fi, err := os.Lstat(targetPath)
+		require.NoError(t, err)
+		assert.NotZero(t, fi.Mode()&os.ModeSymlink)
+
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		assert.ElementsMatch(t, []string{"sibling", "target"}, names, "no temp file left behind")
+	})
+
+	t.Run("swapped_fifo_no_reader_does_not_block", func(t *testing.T) {
+		dir := t.TempDir()
+		targetPath := filepath.Join(dir, "target")
+		require.NoError(t, os.WriteFile(targetPath, []byte("orig\n"), 0o644))
+
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		swap := func(name string) {
+			if name != "target" {
+				return
+			}
+			_ = os.Remove(targetPath)
+			_ = syscall.Mkfifo(targetPath, 0o600)
+		}
+		rootFileBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { rootFileBeforeOpenHook.Store(nil) })
+
+		runWithinTimeout(t, 2*time.Second, func() {
+			err := writeRootFile(root, "target", "new-val\n")
+			require.Error(t, err)
+		})
+
+		entries, err := os.ReadDir(dir)
+		require.NoError(t, err)
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		assert.ElementsMatch(t, []string{"target"}, names, "no temp file left behind")
+	})
+
+	t.Run("swapped_fifo_with_reader_refused_without_writing", func(t *testing.T) {
+		dir := t.TempDir()
+		targetPath := filepath.Join(dir, "target")
+		require.NoError(t, os.WriteFile(targetPath, []byte("orig\n"), 0o644))
+
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		var readerFile *os.File
+		t.Cleanup(func() {
+			if readerFile != nil {
+				_ = readerFile.Close()
+			}
+		})
+
+		swap := func(name string) {
+			if name != "target" {
+				return
+			}
+			_ = os.Remove(targetPath)
+			if err := syscall.Mkfifo(targetPath, 0o600); err != nil {
+				return
+			}
+			f, err := os.OpenFile(targetPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+			if err == nil {
+				readerFile = f
+			}
+		}
+		rootFileBeforeOpenHook.Store(&swap)
+		t.Cleanup(func() { rootFileBeforeOpenHook.Store(nil) })
+
+		runWithinTimeout(t, 2*time.Second, func() {
+			err := writeRootFile(root, "target", "new-val\n")
+			require.Error(t, err)
+		})
+
+		require.NotNil(t, readerFile)
+		buf := make([]byte, 64)
+		n, _ := readerFile.Read(buf)
+		assert.Equal(t, 0, n, "unexpected bytes written to FIFO")
+	})
+
+	t.Run("regular_create_and_replace", func(t *testing.T) {
+		dir := t.TempDir()
+		root, err := os.OpenRoot(dir)
+		require.NoError(t, err)
+		defer func() { _ = root.Close() }()
+
+		require.NoError(t, writeRootFile(root, "item", "first\n"))
+		got, err := os.ReadFile(filepath.Join(dir, "item"))
+		require.NoError(t, err)
+		assert.Equal(t, "first\n", string(got))
+
+		require.NoError(t, writeRootFile(root, "item", "second\n"))
+		got, err = os.ReadFile(filepath.Join(dir, "item"))
+		require.NoError(t, err)
+		assert.Equal(t, "second\n", string(got))
 	})
 }
