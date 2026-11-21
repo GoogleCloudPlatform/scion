@@ -153,6 +153,12 @@ func (s *Server) handleProjectImportResources(
 		return
 	}
 
+	// Agents can only create new project templates; existing templates and
+	// bundled harness-configs are refused without writing.
+	if options.authzResourceType == "template" && GetAgentIdentityFromContext(ctx) != nil {
+		options.kind.createOnly = true
+	}
+
 	run := func(progress importProgressFunc) ([]string, error) {
 		if req.WorkspacePath != "" {
 			return s.importFromWorkspace(ctx, project, req.WorkspacePath, options.scope, options.kind, progress, req.Names)
@@ -349,6 +355,10 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if authzType == "template" && scope == store.TemplateScopeProject && GetAgentIdentityFromContext(ctx) != nil {
+		kind.createOnly = true
+	}
+
 	run := func(progress importProgressFunc) ([]string, error) {
 		return s.importFromRemote(ctx, projectID, sourceURL, scope, kind, progress, req.Names)
 	}
@@ -461,6 +471,14 @@ func importErrorEvent(err error) ResourceImportEvent {
 // response and returns false when access is denied.
 func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWriter, projectID, noun, authzResourceType string) bool {
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if authzResourceType == "template" {
+			decision := s.projectImportDecision(ctx, agentIdent, projectID, authzResourceType)
+			if !decision.Allowed {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden, decision.Reason, nil)
+				return false
+			}
+			return true
+		}
 		if !agentIdent.HasScope(ScopeAgentCreate) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
 			return false
@@ -483,13 +501,13 @@ func (s *Server) authorizeProjectImport(ctx context.Context, w http.ResponseWrit
 	return false
 }
 
-// projectImportDecision decides whether a user may discover or import
-// resources of authzResourceType ("template" or "harness_config") into an
-// existing project. Both actions create catalog records in the project, so
-// the check is the resource's create permission (template.create or
-// harness_config.create) on a collection-level request inside that project.
-// Any other resource type is refused.
-func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, projectID, authzResourceType string) Decision {
+// projectImportDecision decides whether an identity (user or agent) may
+// discover or import resources of authzResourceType ("template" or
+// "harness_config") into an existing project. Both actions create catalog
+// records in the project, so the check is the resource's create permission
+// (template.create or harness_config.create) on a collection-level request
+// inside that project. Any other resource type is refused.
+func (s *Server) projectImportDecision(ctx context.Context, ident Identity, projectID, authzResourceType string) Decision {
 	var target Resource
 	var permissionID string
 	switch authzResourceType {
@@ -500,7 +518,7 @@ func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, p
 	default:
 		return Decision{Allowed: false, Reason: "unsupported import resource type"}
 	}
-	return s.authzService.CheckAccessWithEvidence(ctx, user, target, ActionCreate,
+	return s.authzService.CheckAccessWithEvidence(ctx, ident, target, ActionCreate,
 		projectCollectionEvidence(permissionID, projectID))
 }
 
@@ -573,24 +591,7 @@ func (s *Server) handleProjectDiscoverResources(
 
 	ctx := r.Context()
 
-	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		if !agentIdent.HasScope(ScopeAgentCreate) {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: project:agent:create", nil)
-			return
-		}
-		if projectID != agentIdent.ProjectID() {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Agents can only discover "+kind.noun+" within their own project", nil)
-			return
-		}
-	} else if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		if !s.projectImportDecision(ctx, userIdent, projectID, authzResourceType).Allowed {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"You don't have permission to discover "+kind.noun+" in this project", nil)
-			return
-		}
-	} else {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Authentication required", nil)
+	if !s.authorizeProjectImport(ctx, w, projectID, kind.noun, authzResourceType) {
 		return
 	}
 

@@ -13592,9 +13592,9 @@
 |------|--------|---------|
 | http_route | POST | `/api/v1/templates/{id}/reimport` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
 

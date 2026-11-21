@@ -179,6 +179,10 @@ type ResourceStore struct {
 	// it collected to be that subdirectory of within's root.
 	within     *collectedDir
 	withinPath string
+	// createOnly, when true, refuses to overwrite an existing resource in
+	// Bootstrap's existing-row branch (used for agent-initiated template
+	// imports).
+	createOnly bool
 }
 
 // templateStore returns a ResourceStore for templates.
@@ -211,6 +215,18 @@ func (rs *ResourceStore) requireConfigName() {
 		p.nameFromConfig = true
 	case *targetHarnessConfigPersistence:
 		p.nameFromConfig = true
+	}
+}
+
+// setCreateOnly restricts Bootstrap to creating new resources only: existing
+// resources and templates bundling already-existing harness-configs are
+// refused without writing.
+func (rs *ResourceStore) setCreateOnly(scope, scopeID string) {
+	rs.createOnly = true
+	if p, ok := rs.pers.(*templatePersistence); ok {
+		p.createOnly = true
+		p.createOnlyScope = scope
+		p.createOnlyScopeID = scopeID
 	}
 }
 
@@ -434,6 +450,11 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		return true, nil
 	}
 
+	// Existing resource — refuse under createOnly (agent template import).
+	if rs.createOnly {
+		return false, errors.New("template exists; agents can only create new templates")
+	}
+
 	// Existing resource — short-circuit on unchanged content unless forced.
 	if !force {
 		if rs.srv.computeContentHash(toResourceFiles(files)) == existing.ContentHash {
@@ -485,6 +506,12 @@ type templatePersistence struct {
 	// written lists the blob objects UploadFiles wrote, which the commit in
 	// Update does not check again.
 	written map[string]bool
+	// createOnly, when true, refuses templates that bundle a harness-config
+	// whose slug already exists in the target scope (CheckDir) and never
+	// overwrites existing bundled harness-configs in PostFinalize.
+	createOnly        bool
+	createOnlyScope   string
+	createOnlyScopeID string
 }
 
 func (p *templatePersistence) Kind() storage.ResourceKind { return storage.ResourceKindTemplate }
@@ -752,11 +779,29 @@ func blobPathSet(written map[string]bool) map[string]struct{} {
 }
 
 // CheckDir refuses a template directory that bundles a harness-config with
-// an unusable provisioner, before the shared store uploads anything. The
-// commit path runs the same check again (defence in depth).
+// an unusable provisioner, before the shared store uploads anything. Under
+// createOnly (agent imports), it also refuses the whole template if any
+// bundled harness-config slug already exists in the target scope. The
+// commit path runs the provisioner check again (defence in depth).
 func (p *templatePersistence) CheckDir(ctx context.Context, _ string, cd *collectedDir) error {
 	if err := checkBundledHarnessConfigs(ctx, cd.fileReader(), toResourceFiles(cd.files)); err != nil {
 		return fmt.Errorf("%s: template in %q not imported: %w", p.Label(), cd.base(), err)
+	}
+	if p.createOnly {
+		hcScope := store.HarnessConfigScopeGlobal
+		if p.createOnlyScope == string(store.TemplateScopeProject) {
+			hcScope = store.HarnessConfigScopeProject
+		}
+		for _, hcName := range cd.subdirs("harness-configs") {
+			slug := api.Slugify(hcName)
+			existing, err := p.s.store.GetHarnessConfigBySlug(ctx, slug, hcScope, p.createOnlyScopeID)
+			if err != nil && err != store.ErrNotFound {
+				return fmt.Errorf("%s: failed to check bundled harness-config %q: %w", p.Label(), hcName, err)
+			}
+			if existing != nil {
+				return fmt.Errorf("bundled harness-config %q already exists; agents can only create new templates and bundled harness configs", hcName)
+			}
+		}
 	}
 	return nil
 }
@@ -788,7 +833,7 @@ func templateIndexMatches(t *store.Template, idx templateIndex) bool {
 }
 
 func (p *templatePersistence) PostFinalize(ctx context.Context, rec *ResourceRecord, cd *collectedDir) {
-	p.s.importTemplateHarnessConfigs(ctx, cd, rec.Scope, rec.ScopeID)
+	p.s.importTemplateHarnessConfigsWithOptions(ctx, cd, rec.Scope, rec.ScopeID, p.createOnly)
 }
 
 func templateToRecord(t *store.Template) *ResourceRecord {
