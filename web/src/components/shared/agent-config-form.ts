@@ -66,6 +66,7 @@ import type {
   TelemetryConfig,
 } from '../../shared/types.js';
 import type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
+import { isZeroDurationLimit } from '../../shared/duration-limit.js';
 import type { GcpIdentityState, GcpMetadataMode } from '../../shared/gcp-identity-state.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { isValidTimeZone } from '../../utils/time.js';
@@ -1186,11 +1187,12 @@ export class ScionAgentConfigForm extends LitElement {
   }
 
   /**
-   * Whether the stored value of a limit is Unlimited: "0" for a duration, 0
-   * for a count limit (absent or null is inherit).
+   * Whether the stored value of a limit is Unlimited: any Go zero-duration
+   * spelling ("0", "0s", "0m", "0h", etc.) for a duration, 0 for a count limit
+   * (absent or null is inherit).
    */
   private storedUnlimited(f: AgentConfigFieldDef): boolean {
-    if (f.control === 'limit-duration') return this.values?.[f.configKey] === '0';
+    if (f.control === 'limit-duration') return isZeroDurationLimit(this.values?.[f.configKey]);
     if (f.control === 'limit-count') return this.values?.[f.configKey] === 0;
     return false;
   }

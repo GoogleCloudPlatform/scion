@@ -132,9 +132,25 @@ describe('agent detail Limits card', () => {
       { max_turns: 25, max_model_calls: 0 },
       { 'Max Turns': '25', 'Max Model Calls': 'Unlimited', 'Max Duration': 'Inherited' },
     ],
+    [
+      'a composite positive duration with leading zero hours',
+      { max_duration: '0h1m' },
+      { 'Max Turns': 'Inherited', 'Max Model Calls': 'Inherited', 'Max Duration': '0h1m' },
+    ],
   ])('shows %s', (_name, inline, want) => {
     expect(values(renderCard(inline))).toEqual(want);
   });
+
+  it.each(['0', '0s', '0m', '0h', '0ms', '0us', '0µs', '0μs', '0ns', '0h0m0s', '-0s', '0.0m'])(
+    'shows zero-duration spelling %j as Unlimited',
+    (maxDuration) => {
+      expect(values(renderCard({ max_duration: maxDuration }))).toEqual({
+        'Max Turns': 'Inherited',
+        'Max Model Calls': 'Inherited',
+        'Max Duration': 'Unlimited',
+      });
+    }
+  );
 });
 
 describe('agent detail Limits & Usage card', () => {
