@@ -148,7 +148,7 @@ func (s *Server) agentListUserSecrets(
 		if kind != "" {
 			src = &SourceRef{Kind: kind, ID: m.CreatedBy}
 		}
-		secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
+		secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target, Scope: store.ScopeUser})
 		items = append(items, materialSelectionItem(ItemResult{
 			Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, SharingSource: src, Meta: m},
 			Allowed:   true,

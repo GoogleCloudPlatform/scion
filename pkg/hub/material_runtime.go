@@ -46,6 +46,14 @@ const actionProjectSecretRead Action = Action("secret_read")
 // production. It is accepted as a possibly-nil parameter only so this
 // function can be unit-tested directly.
 func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentity) (*TargetFacts, string, int) {
+	return s.materialRuntimePrecheckOpts(ctx, ident, true)
+}
+
+// materialRuntimePrecheckOpts is materialRuntimePrecheck with an option to
+// defer check 4 (ScopeProjectSecretRead) to project/user scope branches so
+// an agent can read its own agent-scoped secrets without holding
+// project:secret:read (ptone/scion#8742).
+func (s *Server) materialRuntimePrecheckOpts(ctx context.Context, ident AgentIdentity, requireProjectReadScope bool) (*TargetFacts, string, int) {
 	if ident == nil {
 		return nil, ReasonTargetUnresolved, http.StatusForbidden
 	}
@@ -95,8 +103,10 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 		return nil, ReasonTargetUnresolved, http.StatusForbidden
 	}
 
-	// Check 4: credential capability.
-	if !ident.HasScope(ScopeProjectSecretRead) {
+	// Check 4: credential capability. Agent-scope reads do not require
+	// ScopeProjectSecretRead; when requireProjectReadScope is false, project
+	// and user branches still enforce it per-scope.
+	if requireProjectReadScope && !ident.HasScope(ScopeProjectSecretRead) {
 		return nil, ReasonCapabilityRequired, http.StatusForbidden
 	}
 
@@ -250,6 +260,36 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 	}
 	cand.Meta = *meta
 	return ItemResult{Candidate: cand, Allowed: true, Reason: ReasonAllowed}, ""
+}
+
+// authorizeRuntimeAgentItem is the per-item check for an agent's own
+// agent-scoped secret. It requires only that the secret exists at scope=agent
+// with scope_id == facts.Agent.ID and is not internal; it does not require
+// project:secret:read or project.secret_read.
+func (s *Server) authorizeRuntimeAgentItem(ctx context.Context, key string, facts *TargetFacts) ItemResult {
+	cand := Candidate{
+		Kind:    MaterialKindSecret,
+		Key:     key,
+		Scope:   store.ScopeAgent,
+		ScopeID: facts.Agent.ID,
+		Grant:   GrantAgentSelfRead,
+	}
+
+	meta, err := s.secretBackend.GetMeta(ctx, key, store.ScopeAgent, facts.Agent.ID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ItemResult{Candidate: cand, Reason: ReasonNotFound}
+		}
+		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
+	}
+	if meta == nil {
+		return ItemResult{Candidate: cand, Reason: ReasonBackendError}
+	}
+	if meta.SecretType == store.SecretTypeInternal {
+		return ItemResult{Candidate: cand, Reason: ReasonNotFound}
+	}
+	cand.Meta = *meta
+	return ItemResult{Candidate: cand, Allowed: true, Reason: ReasonAllowed}
 }
 
 // authorizeRuntimeUserItem is check 8, the per-item user-scope check.

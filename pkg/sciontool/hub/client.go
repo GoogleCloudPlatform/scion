@@ -802,17 +802,28 @@ type GetSecretResponse struct {
 	Value  string `json:"value"` // base64-encoded
 	Type   string `json:"type"`
 	Target string `json:"target"`
+	Scope  string `json:"scope,omitempty"`
 }
 
-// GetSecret retrieves a project-scoped secret via the Hub API.
-// Returns the secret key, value (base64-encoded), type and target.
+// GetSecret retrieves a secret via the Hub API using the default scope
+// resolution (agent scope first when enabled, then project scope).
+// Returns the secret key, value (base64-encoded), type, target and scope.
 func (c *Client) GetSecret(ctx context.Context, key string) (*GetSecretResponse, error) {
+	return c.GetSecretWithScope(ctx, key, "")
+}
+
+// GetSecretWithScope retrieves a secret via the Hub API, optionally pinning
+// the lookup to a specific scope ("agent", "project", or "user").
+func (c *Client) GetSecretWithScope(ctx context.Context, key, scope string) (*GetSecretResponse, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets/%s",
-		strings.TrimSuffix(c.hubURL, "/"), c.agentID, key)
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID, url.PathEscape(key))
+	if scope != "" {
+		endpoint += "?scope=" + url.QueryEscape(scope)
+	}
 
 	c.tokenMu.RLock()
 	currentToken := c.token
@@ -849,6 +860,7 @@ type ListSecretsSecretMeta struct {
 	Key    string `json:"key"`
 	Type   string `json:"type"`
 	Target string `json:"target"`
+	Scope  string `json:"scope,omitempty"`
 }
 
 // ListSecretsResponse is the response from the agent secret LIST endpoint.
@@ -856,14 +868,23 @@ type ListSecretsResponse struct {
 	Secrets []ListSecretsSecretMeta `json:"secrets"`
 }
 
-// ListSecrets lists metadata for all project-scoped secrets via the Hub API.
+// ListSecrets lists metadata for all secrets accessible to the agent via the Hub API.
 func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) {
+	return c.ListSecretsWithScope(ctx, "")
+}
+
+// ListSecretsWithScope lists metadata for secrets accessible to the agent,
+// optionally filtered by scope ("agent", "project", "user", or "all").
+func (c *Client) ListSecretsWithScope(ctx context.Context, scope string) (*ListSecretsResponse, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets",
 		strings.TrimSuffix(c.hubURL, "/"), c.agentID)
+	if scope != "" {
+		endpoint += "?scope=" + url.QueryEscape(scope)
+	}
 
 	c.tokenMu.RLock()
 	currentToken := c.token

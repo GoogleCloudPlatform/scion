@@ -397,6 +397,8 @@
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access or identity token for the agent's assigned service account
 - [secret.read](#secretread) — Read project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.read and secret.hub.read
 - [secret.write](#secretwrite) — Create, update or delete project or broker secrets (scope=project or runtime_broker). User and hub scope are the session-only operations secret.user.write and secret.hub.write
+- [agent.secret.read](#agentsecretread) — Read agent-scoped secret metadata (scope=agent&scopeId=<agentID>). Values are never readable by humans; gated on hub.agent_secrets.
+- [agent.secret.write](#agentsecretwrite) — Create, update or delete agent-scoped secrets (scope=agent&scopeId=<agentID>). Values are write-only for humans; gated on hub.agent_secrets.
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
 - [gcp.identity.verify](#gcpidentityverify) — Verify a GCP service account's IAM configuration
 - [env.read](#envread) — Read project or broker environment variables (scope=project or runtime_broker). User and hub scope are the session-only operations env.user.read, env.hub.read and env.hub.list
@@ -14857,6 +14859,86 @@
 
 - **Event Type:** `secret.write`
 - **Context Fields:** actor_id, project_id
+- **Before Fields:** secret_key
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.secret.read
+
+**Domain:** agent
+
+**Description:** Read agent-scoped secret metadata (scope=agent&scopeId=<agentID>). Values are never readable by humans; gated on hub.agent_secrets.
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/secrets` |
+| http_route | GET | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent-from-query
+
+**Effects:** `read-secret`
+
+### Audit
+
+- **Event Type:** `agent.secret.read`
+- **Context Fields:** actor_id, agent_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.secret.write
+
+**Domain:** agent
+
+**Description:** Create, update or delete agent-scoped secrets (scope=agent&scopeId=<agentID>). Values are write-only for humans; gated on hub.agent_secrets.
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/secrets/{key}` |
+| http_route | PATCH | `/api/v1/secrets/{key}` |
+| http_route | DELETE | `/api/v1/secrets/{key}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-query
+
+**Effects:** `create-resource`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `agent.secret.write`
+- **Context Fields:** actor_id, agent_id
 - **Before Fields:** secret_key
 - **Atomic:** Yes
 

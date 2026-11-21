@@ -285,8 +285,36 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 			return "", err
 		}
 		return broker.ID, nil
+	case "agent":
+		return resolveAgentScopeID(ctx, client, scopeID)
 	}
 	return scopeID, nil
+}
+
+// resolveAgentScopeID resolves an agent name, slug, or ID to its UUID.
+func resolveAgentScopeID(ctx context.Context, client hubclient.Client, agentRef string) (string, error) {
+	if agent, err := client.Agents().Get(ctx, agentRef); err == nil && agent != nil && agent.ID != "" {
+		return agent.ID, nil
+	}
+	resp, err := client.Agents().List(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve agent %q: %w", agentRef, err)
+	}
+	var matches []*hubclient.Agent
+	for i := range resp.Agents {
+		a := &resp.Agents[i]
+		if a.ID == agentRef || a.Slug == agentRef || a.Name == agentRef {
+			matches = append(matches, a)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("agent %q not found", agentRef)
+	case 1:
+		return matches[0].ID, nil
+	default:
+		return "", fmt.Errorf("agent %q is ambiguous (%d matches across projects); specify the agent UUID instead", agentRef, len(matches))
+	}
 }
 
 func runEnvSet(cmd *cobra.Command, args []string) error {

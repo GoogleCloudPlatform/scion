@@ -39,6 +39,8 @@ var (
 	agentSecretTarget      string
 	agentSecretGetMetadata bool
 	agentSecretGetValue    bool
+	agentSecretGetScope    string
+	agentSecretListScope   string
 )
 
 // agentSecretCmd is the top-level `scion secret` command group.
@@ -150,7 +152,10 @@ func init() {
 
 	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetMetadata, "metadata", false, "Print the secret's metadata (the default)")
 	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetValue, "value", false, "Print the secret's decoded value (requires an agent's hub identity)")
+	agentSecretGetCmd.Flags().StringVar(&agentSecretGetScope, "scope", "", "Pin lookup to a scope: agent or project (default: agent then project)")
 	agentSecretGetCmd.MarkFlagsMutuallyExclusive("metadata", "value")
+
+	agentSecretListCmd.Flags().StringVar(&agentSecretListScope, "scope", "", "Filter by scope: agent, project, or all (default: all)")
 
 	agentSecretSetCmd.Flags().StringVar(&agentSecretType, "type", "", "Secret type: environment (default), variable, file")
 	agentSecretSetCmd.Flags().StringVar(&agentSecretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
@@ -175,6 +180,11 @@ func secretGetWantsValue(metadata, value, jsonOutput bool) (bool, error) {
 }
 
 func runAgentSecretGet(cmd *cobra.Command, args []string) error {
+	switch agentSecretGetScope {
+	case "", "agent", "project":
+	default:
+		return newUsageError("invalid --scope %q: must be 'agent' or 'project'", agentSecretGetScope)
+	}
 	wantValue, err := secretGetWantsValue(agentSecretGetMetadata, agentSecretGetValue, isJSONOutput())
 	if err != nil {
 		return err
@@ -196,7 +206,7 @@ func runAgentSecretGetValue(cmd *cobra.Command, key string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	resp, err := client.GetSecret(ctx, key)
+	resp, err := client.GetSecretWithScope(ctx, key, agentSecretGetScope)
 	if err != nil {
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
@@ -424,6 +434,47 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentSecretList(cmd *cobra.Command, _ []string) error {
+	switch agentSecretListScope {
+	case "", "agent", "project", "all":
+	default:
+		return newUsageError("invalid --scope %q: must be 'agent', 'project', or 'all'", agentSecretListScope)
+	}
+
+	// Inside an agent container, use the agent-scoped endpoint so agent-scope
+	// secrets are listed alongside project-scope secrets with their scope.
+	if agentClient := newSecretValueHubClient(); agentClient != nil && agentClient.IsConfigured() {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+		defer cancel()
+
+		resp, err := agentClient.ListSecretsWithScope(ctx, agentSecretListScope)
+		if err != nil {
+			return fmt.Errorf("failed to list secrets: %w", err)
+		}
+		if isJSONOutput() {
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			return enc.Encode(resp)
+		}
+		if len(resp.Secrets) == 0 {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No secrets found")
+			return nil
+		}
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-30s  %-10s  %-12s  %s\n", "KEY", "SCOPE", "TYPE", "TARGET")
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-30s  %-10s  %-12s  %s\n", "------------------------------", "----------", "------------", "------------------------------")
+		for _, s := range resp.Secrets {
+			scopeLabel := s.Scope
+			if scopeLabel == "" {
+				scopeLabel = "project"
+			}
+			typeLabel := s.Type
+			if typeLabel == "" {
+				typeLabel = "environment"
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-30s  %-10s  %-12s  %s\n", truncate(s.Key, 30), scopeLabel, typeLabel, s.Target)
+		}
+		return nil
+	}
+
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
@@ -456,14 +507,18 @@ func runAgentSecretList(cmd *cobra.Command, _ []string) error {
 	}
 
 	fmt.Println("Secrets (scope: project):")
-	fmt.Printf("%-30s  %-12s  %-8s  %s\n", "KEY", "TYPE", "VERSION", "UPDATED")
-	fmt.Printf("%-30s  %-12s  %-8s  %s\n", "------------------------------", "------------", "--------", "-----------------------")
+	fmt.Printf("%-30s  %-10s  %-12s  %-8s  %s\n", "KEY", "SCOPE", "TYPE", "VERSION", "UPDATED")
+	fmt.Printf("%-30s  %-10s  %-12s  %-8s  %s\n", "------------------------------", "----------", "------------", "--------", "-----------------------")
 	for _, s := range resp.Secrets {
+		scopeLabel := s.Scope
+		if scopeLabel == "" {
+			scopeLabel = "project"
+		}
 		typeLabel := s.SecretType
 		if typeLabel == "" {
 			typeLabel = "environment"
 		}
-		fmt.Printf("%-30s  %-12s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, s.Version, clitime.Format(s.Updated, clitime.Full))
+		fmt.Printf("%-30s  %-10s  %-12s  v%-7d  %s\n", truncate(s.Key, 30), scopeLabel, typeLabel, s.Version, clitime.Format(s.Updated, clitime.Full))
 	}
 
 	return nil

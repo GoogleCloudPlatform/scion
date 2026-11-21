@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -223,6 +224,53 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 			return "", false
 		}
 		return s.hubID, true
+
+	case store.ScopeAgent:
+		// Agent scope is secrets-only (not plain env vars) and gated on hub.agent_secrets.
+		if !s.experimentEnabled(experiments.AgentSecrets) || !strings.HasPrefix(r.URL.Path, "/api/v1/secrets") {
+			BadRequest(w, "invalid scope: "+scope)
+			return "", false
+		}
+		if clientScopeID == "" {
+			BadRequest(w, "scopeId is required for agent scope")
+			return "", false
+		}
+		agent, err := s.store.GetAgent(ctx, clientScopeID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				NotFound(w, "Agent")
+			} else {
+				writeErrorFromErr(w, err, "")
+			}
+			return "", false
+		}
+		identity := GetIdentityFromContext(ctx)
+		if identity == nil {
+			Unauthorized(w)
+			return "", false
+		}
+		userIdent, ok := identity.(UserIdentity)
+		if !ok {
+			// Agents access their own secrets via /api/v1/agents/{id}/secrets.
+			Forbidden(w)
+			return "", false
+		}
+		action := ActionRead
+		if isWrite {
+			action = ActionUpdate
+		}
+		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
+			Type:       "agent",
+			ID:         agent.ID,
+			OwnerID:    agent.OwnerID,
+			ParentType: "project",
+			ParentID:   agent.ProjectID,
+		}, action)
+		if !decision.Allowed {
+			Forbidden(w)
+			return "", false
+		}
+		return agent.ID, true
 
 	default:
 		BadRequest(w, "invalid scope: "+scope)
@@ -1249,6 +1297,11 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 			input.UserEmail = userIdent.Email()
 		}
 	}
+	if scope == store.ScopeAgent {
+		if agent, err := s.store.GetAgent(ctx, scopeID); err == nil && agent != nil {
+			input.ProjectID = agent.ProjectID
+		}
+	}
 
 	created, meta, err := s.secretBackend.Set(ctx, input)
 	if err != nil {
@@ -1461,9 +1514,10 @@ type AgentSetSecretResponse struct {
 // AgentGetSecretResponse is returned when an agent retrieves a single secret.
 type AgentGetSecretResponse struct {
 	Key    string `json:"key"`
-	Value  string `json:"value"`  // base64-encoded secret value
-	Type   string `json:"type"`   // environment, variable, file
-	Target string `json:"target"` // injection target
+	Value  string `json:"value"` // base64-encoded secret value
+	Type   string `json:"type"`  // environment, variable, file
+	Target string `json:"target"`
+	Scope  string `json:"scope,omitempty"` // agent, project, user
 }
 
 // AgentListSecretsResponse is returned when an agent lists available secrets.
@@ -1476,6 +1530,7 @@ type AgentSecretMeta struct {
 	Key    string `json:"key"`
 	Type   string `json:"type"`   // environment, variable, file
 	Target string `json:"target"` // injection target
+	Scope  string `json:"scope,omitempty"`
 }
 
 // handleAgentSecrets handles agent secret operations:
@@ -1812,8 +1867,13 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 
 	ident := GetAgentIdentityFromContext(ctx)
 	correlationID := newMaterialCorrelationID()
+	agentSecretsOn := s.experimentEnabled(experiments.AgentSecrets)
 
-	facts, reason, status := s.materialRuntimePrecheck(ctx, ident)
+	rawScope := r.URL.Query().Get("scope")
+	// Agent-scope reads (or default agent-then-project when experiment is on)
+	// do not require project:secret:read at the precheck stage.
+	requireProjectReadScope := !agentSecretsOn || rawScope == store.ScopeProject || rawScope == store.ScopeUser
+	facts, reason, status := s.materialRuntimePrecheckOpts(ctx, ident, requireProjectReadScope)
 	if status != 0 {
 		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, nil, reason, nil))
 		if status == http.StatusInternalServerError {
@@ -1824,27 +1884,64 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 		return
 	}
 
-	// Determine scope (check 6: unchanged).
-	scope := r.URL.Query().Get("scope")
+	// Determine scope (check 6).
+	scope := rawScope
+	defaultAgentThenProject := false
 	if scope == "" {
-		scope = store.ScopeProject
+		if agentSecretsOn {
+			defaultAgentThenProject = true
+		} else {
+			scope = store.ScopeProject
+		}
 	}
-	switch scope {
-	case store.ScopeProject, store.ScopeUser:
-	default:
-		// An invalid scope parameter still emits the request's
-		// MaterialSelectionEvent rather than exiting silently.
-		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, facts, ReasonInvalidScope, nil))
-		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
-			"field":   "scope",
-			"value":   scope,
-			"allowed": []string{"project", "user"},
-		})
-		return
+	if !defaultAgentThenProject {
+		valid := false
+		switch scope {
+		case store.ScopeProject, store.ScopeUser:
+			valid = true
+		case store.ScopeAgent:
+			valid = agentSecretsOn
+		}
+		if !valid {
+			// An invalid scope parameter still emits the request's
+			// MaterialSelectionEvent rather than exiting silently.
+			s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, facts, ReasonInvalidScope, nil))
+			if scope == store.ScopeAgent && !agentSecretsOn {
+				BadRequest(w, "invalid scope: "+scope)
+				return
+			}
+			allowed := []string{"project", "user"}
+			msg := "scope must be \"project\" or \"user\""
+			if agentSecretsOn {
+				allowed = []string{"agent", "project", "user"}
+				msg = "scope must be \"agent\", \"project\", or \"user\""
+			}
+			ValidationError(w, msg, map[string]interface{}{
+				"field":   "scope",
+				"value":   scope,
+				"allowed": allowed,
+			})
+			return
+		}
 	}
 
-	var decisionCache projectDecisionCache
-	item, sv, permission, detail := s.selectRuntimeMaterial(ctx, ident, facts, scope, key, &decisionCache)
+	var (
+		decisionCache projectDecisionCache
+		item          ItemResult
+		sv            *secret.SecretWithValue
+		permission    string
+		detail        string
+	)
+	if defaultAgentThenProject {
+		agentItem, agentSV, agentPerm, agentDetail := s.selectRuntimeMaterial(ctx, ident, facts, store.ScopeAgent, key, &decisionCache)
+		if agentItem.Selected || agentItem.Allowed || agentItem.Reason == ReasonBackendError {
+			item, sv, permission, detail = agentItem, agentSV, agentPerm, agentDetail
+		} else {
+			item, sv, permission, detail = s.selectRuntimeMaterial(ctx, ident, facts, store.ScopeProject, key, &decisionCache)
+		}
+	} else {
+		item, sv, permission, detail = s.selectRuntimeMaterial(ctx, ident, facts, scope, key, &decisionCache)
+	}
 
 	emit := func() {
 		items := []MaterialSelectionEventItem{materialSelectionItem(item, permission, detail)}
@@ -1853,13 +1950,14 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 
 	switch {
 	case item.Selected:
-		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, true, "", true, correlationID)
+		s.logAgentSecretReadCompatVersion(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, sv.Version, true, "", true, correlationID)
 		emit()
 		writeJSON(w, http.StatusOK, AgentGetSecretResponse{
 			Key:    sv.Name,
 			Value:  base64.StdEncoding.EncodeToString([]byte(sv.Value)),
 			Type:   sv.SecretType,
 			Target: sv.Target,
+			Scope:  sv.Scope,
 		})
 	case !item.Allowed && item.Reason != ReasonBackendError:
 		// Check 7 or 8 denied the item for a reason other than an
@@ -1895,8 +1993,11 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 
 	ident := GetAgentIdentityFromContext(ctx)
 	correlationID := newMaterialCorrelationID()
+	agentSecretsOn := s.experimentEnabled(experiments.AgentSecrets)
 
-	facts, reason, status := s.materialRuntimePrecheck(ctx, ident)
+	scope := r.URL.Query().Get("scope")
+	requireProjectReadScope := !agentSecretsOn || scope == store.ScopeProject || scope == store.ScopeUser
+	facts, reason, status := s.materialRuntimePrecheckOpts(ctx, ident, requireProjectReadScope)
 	if status != 0 {
 		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, nil, reason, nil))
 		if status == http.StatusInternalServerError {
@@ -1919,79 +2020,126 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, "", []MaterialSelectionEventItem{item}))
 	}
 
-	scope := r.URL.Query().Get("scope")
+	validScope := false
 	switch scope {
 	case "", store.ScopeProject, store.ScopeUser:
-	default:
+		validScope = true
+	case store.ScopeAgent, "all":
+		validScope = agentSecretsOn
+	}
+	if !validScope {
 		// An invalid scope parameter still emits the request's
 		// MaterialSelectionEvent rather than exiting silently.
 		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, ReasonInvalidScope, nil))
-		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
+		if scope == store.ScopeAgent && !agentSecretsOn {
+			BadRequest(w, "invalid scope: "+scope)
+			return
+		}
+		allowed := []string{"project", "user"}
+		msg := "scope must be \"project\" or \"user\""
+		if agentSecretsOn {
+			allowed = []string{"agent", "project", "user", "all"}
+			msg = "scope must be \"agent\", \"project\", \"user\", or \"all\""
+		}
+		ValidationError(w, msg, map[string]interface{}{
 			"field":   "scope",
 			"value":   scope,
-			"allowed": []string{"project", "user"},
+			"allowed": allowed,
 		})
 		return
 	}
 
-	includeProject := scope == "" || scope == store.ScopeProject
-	includeUser := scope == "" || scope == store.ScopeUser
+	includeAgent := agentSecretsOn && (scope == "" || scope == "all" || scope == store.ScopeAgent)
+	includeProject := scope == "" || scope == "all" || scope == store.ScopeProject
+	includeUser := scope == "" || scope == "all" || scope == store.ScopeUser
 
 	secrets := make([]AgentSecretMeta, 0)
 	items := make([]MaterialSelectionEventItem, 0)
 
-	if includeProject {
-		var cache projectDecisionCache
-		decision, decErr := s.projectReadDecision(ctx, ident, facts, &cache)
-		if decErr != nil {
-			// A decision error still emits the request's
-			// MaterialSelectionEvent, with a request-level item recording
-			// the failure, rather than exiting silently.
-			emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
+	if includeAgent {
+		metas, err := s.secretBackend.List(ctx, secret.Filter{
+			Scope:   store.ScopeAgent,
+			ScopeID: facts.Agent.ID,
+		})
+		if err != nil {
+			emitListExitItem(store.ScopeAgent, facts.Agent.ID, GrantAgentSelfRead, "")
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 			return
 		}
-		// Decision first, then metadata: a denial leaves the project part
-		// of the list empty and makes no GetMeta/List call.
-		if decision.Allowed {
-			metas, err := s.secretBackend.List(ctx, secret.Filter{
-				Scope:   store.ScopeProject,
-				ScopeID: facts.ProjectID,
-			})
-			if err != nil {
+		for _, m := range metas {
+			if m.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target, Scope: store.ScopeAgent})
+			items = append(items, materialSelectionItem(ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeAgent, ScopeID: facts.Agent.ID, Grant: GrantAgentSelfRead, Meta: m},
+				Allowed:   true,
+				Reason:    ReasonAllowed,
+			}, "", ""))
+		}
+	}
+
+	if includeProject {
+		if !ident.HasScope(ScopeProjectSecretRead) {
+			items = append(items, materialSelectionItem(ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonCapabilityRequired,
+			}, "project.secret_read", ""))
+		} else {
+			var cache projectDecisionCache
+			decision, decErr := s.projectReadDecision(ctx, ident, facts, &cache)
+			if decErr != nil {
+				// A decision error still emits the request's
+				// MaterialSelectionEvent, with a request-level item recording
+				// the failure, rather than exiting silently.
 				emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
 				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 				return
 			}
-			for _, m := range metas {
-				if m.SecretType == store.SecretTypeInternal {
-					continue
+			// Decision first, then metadata: a denial leaves the project part
+			// of the list empty and makes no GetMeta/List call.
+			if decision.Allowed {
+				metas, err := s.secretBackend.List(ctx, secret.Filter{
+					Scope:   store.ScopeProject,
+					ScopeID: facts.ProjectID,
+				})
+				if err != nil {
+					emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
+					writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
+					return
 				}
-				secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
+				for _, m := range metas {
+					if m.SecretType == store.SecretTypeInternal {
+						continue
+					}
+					secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target, Scope: store.ScopeProject})
+					items = append(items, materialSelectionItem(ItemResult{
+						Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead, Meta: m},
+						Allowed:   true,
+						Reason:    ReasonAllowed,
+					}, "project.secret_read", ""))
+				}
+			} else {
+				// The project part of the list is empty, but the denial and its
+				// Detail are still recorded as a request-level item, rather than
+				// leaving no trace of the project scope having been evaluated.
 				items = append(items, materialSelectionItem(ItemResult{
-					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead, Meta: m},
-					Allowed:   true,
-					Reason:    ReasonAllowed,
-				}, "project.secret_read", ""))
+					Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+					Reason:    ReasonDeniedByPolicy,
+				}, "project.secret_read", decision.Reason))
 			}
-		} else {
-			// The project part of the list is empty, but the denial and its
-			// Detail are still recorded as a request-level item, rather than
-			// leaving no trace of the project scope having been evaluated.
-			items = append(items, materialSelectionItem(ItemResult{
-				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
-				Reason:    ReasonDeniedByPolicy,
-			}, "project.secret_read", decision.Reason))
 		}
 	}
 
 	if includeUser {
-		var userOK bool
-		secrets, items, userOK = s.agentListUserSecrets(ctx, agentID, ident, facts, secrets, items)
-		if !userOK {
-			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
-			return
+		if ident.HasScope(ScopeProjectSecretRead) {
+			var userOK bool
+			secrets, items, userOK = s.agentListUserSecrets(ctx, agentID, ident, facts, secrets, items)
+			if !userOK {
+				emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
+				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
+				return
+			}
 		}
 	}
 
