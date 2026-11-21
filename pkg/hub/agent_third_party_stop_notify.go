@@ -74,6 +74,25 @@ func parseLifecycleStopReason(r *http.Request) string {
 	return req.Reason
 }
 
+// isRealThirdPartyLifecycleTransition reports whether applying action to an
+// agent that was in prevPhase (with prevSuspendReason) represents a real state
+// transition worth emitting a third-party creator notice for (ptone/scion#8695).
+//
+// Re-stopping an already-stopped agent and re-suspending an already
+// user-suspended agent are no-ops and return false. Stopping a suspended agent
+// (suspended -> stopped) and converting a hub auto-suspension to a user
+// suspension are real transitions and return true.
+func isRealThirdPartyLifecycleTransition(prevPhase, prevSuspendReason, action string) bool {
+	switch action {
+	case api.AgentActionStop:
+		return prevPhase != string(state.PhaseStopped)
+	case api.AgentActionSuspend:
+		return prevPhase != string(state.PhaseSuspended) || state.SuspendReason(prevSuspendReason).AutoWakes()
+	default:
+		return false
+	}
+}
+
 // notifyThirdPartyLifecycleAction notifies an agent's creator when a third
 // party (an authenticated actor other than the creator and other than the
 // agent itself) stops or suspends the agent (ptone/scion#8683).
@@ -119,7 +138,24 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 		status = "SUSPENDED"
 	}
 
-	sub := nd.resolveThirdPartyCreatorSubscription(ctx, agent, status)
+	// Only attach the third-party notification to an existing creator
+	// subscription when the subsequent PublishAgentStatus event will compute
+	// the same notification status. When a stopped agent retains a terminal
+	// activity (such as limits_exceeded or crashed), handleEvent computes that
+	// terminal activity rather than STOPPED; storing a STOPPED row on a
+	// subscription matching both would overwrite GetLastNotification and cause
+	// handleEvent to re-fire a stale terminal notice. Using the creator-fallback
+	// subscription delivers the third-party notice while leaving the real
+	// subscription's deduplication history intact (ptone/scion#8695).
+	postWriteStatus := notificationEventStatus(AgentStatusEvent{
+		AgentID:   agent.ID,
+		ProjectID: agent.ProjectID,
+		Phase:     agent.Phase,
+		Activity:  agent.Activity,
+	})
+	matchExistingSub := strings.EqualFold(postWriteStatus, status)
+
+	sub := nd.resolveThirdPartyCreatorSubscription(ctx, agent, status, matchExistingSub)
 	if sub == nil {
 		return
 	}
@@ -158,13 +194,14 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 // resolveThirdPartyCreatorSubscription resolves the notification subscription
 // to use when notifying agent's creator of a third-party stop/suspend.
 //
-// If the creator already has an agent-scoped or project-scoped subscription
-// matching status, that subscription is returned (checked in the same
-// agent-before-project order as handleEvent so handleEvent deduplicates
-// against the stored row). Otherwise a synthetic creator-fallback subscription
-// (store.CreatorFallbackSubscriptionID) is returned. Returns nil if the
-// creator cannot be resolved to a user or a live agent in the same project.
-func (nd *NotificationDispatcher) resolveThirdPartyCreatorSubscription(ctx context.Context, agent *store.Agent, status string) *store.NotificationSubscription {
+// When matchExistingSub is true and the creator already has an agent-scoped or
+// project-scoped subscription matching status, that subscription is returned
+// (checked in the same agent-before-project order as handleEvent so handleEvent
+// deduplicates against the stored row). Otherwise a synthetic creator-fallback
+// subscription (store.CreatorFallbackSubscriptionID) is returned. Returns nil
+// if the creator cannot be resolved to a user or a live agent in the same
+// project.
+func (nd *NotificationDispatcher) resolveThirdPartyCreatorSubscription(ctx context.Context, agent *store.Agent, status string, matchExistingSub bool) *store.NotificationSubscription {
 	var subscriberType, subscriberID string
 	_, err := nd.store.GetUser(ctx, agent.CreatedBy)
 	switch {
@@ -186,25 +223,27 @@ func (nd *NotificationDispatcher) resolveThirdPartyCreatorSubscription(ctx conte
 		subscriberID = creator.Slug
 	}
 
-	agentSubs, err := nd.store.GetNotificationSubscriptions(ctx, agent.ID)
-	if err != nil {
-		nd.log.Warn("Failed to get agent notification subscriptions for third-party lifecycle notice",
-			"agent_id", agent.ID, "error", err)
-		agentSubs = nil
-	}
-	projectSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, agent.ProjectID)
-	if err != nil {
-		nd.log.Warn("Failed to get project notification subscriptions for third-party lifecycle notice",
-			"project_id", agent.ProjectID, "error", err)
-		projectSubs = nil
-	}
+	if matchExistingSub {
+		agentSubs, err := nd.store.GetNotificationSubscriptions(ctx, agent.ID)
+		if err != nil {
+			nd.log.Warn("Failed to get agent notification subscriptions for third-party lifecycle notice",
+				"agent_id", agent.ID, "error", err)
+			agentSubs = nil
+		}
+		projectSubs, err := nd.store.GetNotificationSubscriptionsByProjectScope(ctx, agent.ProjectID)
+		if err != nil {
+			nd.log.Warn("Failed to get project notification subscriptions for third-party lifecycle notice",
+				"project_id", agent.ProjectID, "error", err)
+			projectSubs = nil
+		}
 
-	allSubs := append(agentSubs, projectSubs...)
-	for i := range allSubs {
-		sub := &allSubs[i]
-		if sub.SubscriberType == subscriberType && sub.SubscriberID == subscriberID && sub.MatchesActivity(status) {
-			matched := *sub
-			return &matched
+		allSubs := append(agentSubs, projectSubs...)
+		for i := range allSubs {
+			sub := &allSubs[i]
+			if sub.SubscriberType == subscriberType && sub.SubscriberID == subscriberID && sub.MatchesActivity(status) {
+				matched := *sub
+				return &matched
+			}
 		}
 	}
 

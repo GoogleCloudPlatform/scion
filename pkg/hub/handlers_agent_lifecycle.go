@@ -598,6 +598,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	if ok, _, reason := s.harnessSupportsResume(ctx, agent); !ok {
 		return &errHarnessNoResume{reason: reason}
 	}
+	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
 
 	// The container is stopped before phase=suspended is written; see
 	// beginLifecycleOp.
@@ -676,7 +677,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// max_agents_per_project one (ptone/scion#6033).
 	s.releaseBrokerQuota(ctx, agent)
 	s.releaseProjectQuota(ctx, agent)
-	s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
+	if isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionSuspend) {
+		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
+	}
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
 }
@@ -807,6 +810,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
 
 	// Start gate (design ptone/scion#2483 §2.1). Authz already ran in the
 	// caller. This runs before the managed-runtime branch so managed agents
@@ -1525,7 +1529,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		s.reassertBrokerReservation(ctx, agent)
 		s.reassertProjectReservation(ctx, agent, backstopSiteRestart)
 	}
-	if action == api.AgentActionStop && agent.DeletedAt.IsZero() {
+	if action == api.AgentActionStop && agent.DeletedAt.IsZero() &&
+		isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionStop) {
 		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, lifecycleStopReasonFromContext(ctx))
 	}
 	s.events.PublishAgentStatus(ctx, agent)
@@ -1589,12 +1594,15 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	s.agentLifecycleLog.Info("Stop queued for offline broker",
 		"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "dispatch_id", dispatch.ID)
 
+	preActionPhase, preActionSuspendReason := agent.Phase, agent.SuspendReason
 	agent.Phase = newPhase
 	agent.ContainerStatus = containerStatusStopQueued
 	agent.Activity = ""
 	agent.Message = offlineStopMessage
 	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
-	s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, lifecycleStopReasonFromContext(ctx))
+	if isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionStop) {
+		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, lifecycleStopReasonFromContext(ctx))
+	}
 	s.events.PublishAgentStatus(ctx, agent)
 
 	// The broker may have reconnected after the reachability check, in which
