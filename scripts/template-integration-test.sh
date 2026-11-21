@@ -194,10 +194,14 @@ start_server() {
     mkdir -p "$STORAGE_DIR"
     mkdir -p "$TEST_DIR/cache/templates"
 
-    # Build command as array for proper handling
-    local cmd=("$TEST_DIR/scion" "server" "start" "--foreground" "--production"
+    # Build command as array for proper handling. Workstation mode: dev auth is
+    # refused in hosted mode. The Hub (on --port) and the Runtime Broker run,
+    # without web or auto-provide, as before.
+    local cmd=("$TEST_DIR/scion" "server" "start" "--foreground"
         "--enable-hub"
         "--enable-runtime-broker"
+        "--enable-web=false"
+        "--auto-provide=false"
         "--dev-auth"
         "--port" "$HUB_PORT"
         "--runtime-broker-port" "$RUNTIME_HOST_PORT"
