@@ -661,6 +661,11 @@ export class ScionPageAgentDetail extends LitElement {
       color: var(--scion-text, #1e293b);
       font-weight: 500;
     }
+    .limit-inherited {
+      font-size: 0.875rem;
+      font-weight: 400;
+      color: var(--scion-text-muted, #64748b);
+    }
     .progress-bar-track {
       width: 100%;
       height: 6px;
@@ -2219,34 +2224,63 @@ export class ScionPageAgentDetail extends LitElement {
 
   private renderLimitsUsageCard(agent: Agent) {
     const cfg = agent.appliedConfig?.inlineConfig;
-    const maxTurns = cfg?.max_turns ?? 0;
-    const maxModelCalls = cfg?.max_model_calls ?? 0;
-    const maxDurationStr = cfg?.max_duration ?? '';
-    const maxDurationSec = parseDuration(maxDurationStr);
+    const rawTurns = cfg?.max_turns;
+    const rawModelCalls = cfg?.max_model_calls;
+    const rawDuration = cfg?.max_duration;
 
-    if (!maxTurns && !maxModelCalls && !maxDurationSec) return nothing;
+    // Distinguish unset (inherited from template/hub/broker defaults, cap
+    // unknown to the hub) from explicit 0 / "0" (Unlimited, no cap applies).
+    const turnsInherited = rawTurns == null;
+    const modelCallsInherited = rawModelCalls == null;
+    const durationInherited = !rawDuration;
+
+    const maxTurns = turnsInherited ? 0 : rawTurns;
+    const maxModelCalls = modelCallsInherited ? 0 : rawModelCalls;
+    const maxDurationSec =
+      durationInherited || rawDuration === '0' ? 0 : parseDuration(rawDuration);
+
+    const showTurns = turnsInherited || maxTurns > 0;
+    const showModelCalls = modelCallsInherited || maxModelCalls > 0;
+    const showDuration = durationInherited || maxDurationSec > 0;
+
+    if (!showTurns && !showModelCalls && !showDuration) return nothing;
 
     const currentTurns = agent.currentTurns ?? 0;
     const currentModelCalls = agent.currentModelCalls ?? 0;
 
     let timeRemainingSec = 0;
     let elapsedSec = 0;
-    if (maxDurationSec > 0 && agent.startedAt) {
-      elapsedSec = (Date.now() - new Date(agent.startedAt).getTime()) / 1000;
-      timeRemainingSec = Math.max(0, maxDurationSec - elapsedSec);
+    const startedAt =
+      agent.startedAt && !this.isZeroDate(agent.startedAt) ? agent.startedAt : undefined;
+    if (startedAt) {
+      elapsedSec = Math.max(0, (Date.now() - new Date(startedAt).getTime()) / 1000);
+      if (maxDurationSec > 0) {
+        timeRemainingSec = Math.max(0, maxDurationSec - elapsedSec);
+      }
     }
+
+    const showInheritedElapsed =
+      Boolean(startedAt) && (agent.phase === 'running' || agent.phase === 'stopping');
 
     return html`
       <div class="card">
         <h3 class="card-title">Limits & Usage</h3>
         <div class="limits-grid">
-          ${maxTurns > 0 ? this.renderLimitItem('Turns', currentTurns, maxTurns) : nothing}
-          ${maxModelCalls > 0
-            ? this.renderLimitItem('Model Calls', currentModelCalls, maxModelCalls)
-            : nothing}
-          ${maxDurationSec > 0
-            ? this.renderTimeLimitItem(timeRemainingSec, elapsedSec, maxDurationSec)
-            : nothing}
+          ${turnsInherited
+            ? this.renderInheritedLimitItem('Turns', currentTurns)
+            : maxTurns > 0
+              ? this.renderLimitItem('Turns', currentTurns, maxTurns)
+              : nothing}
+          ${modelCallsInherited
+            ? this.renderInheritedLimitItem('Model Calls', currentModelCalls)
+            : maxModelCalls > 0
+              ? this.renderLimitItem('Model Calls', currentModelCalls, maxModelCalls)
+              : nothing}
+          ${durationInherited
+            ? this.renderInheritedTimeLimitItem(showInheritedElapsed ? elapsedSec : null)
+            : maxDurationSec > 0
+              ? this.renderTimeLimitItem(timeRemainingSec, elapsedSec, maxDurationSec)
+              : nothing}
         </div>
       </div>
     `;
@@ -2266,6 +2300,15 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
+  private renderInheritedLimitItem(label: string, current: number) {
+    return html`
+      <div class="limit-item">
+        <span class="limit-label">${label}</span>
+        <span class="limit-value">${current} <span class="limit-inherited">/ Inherited</span></span>
+      </div>
+    `;
+  }
+
   private renderTimeLimitItem(remainingSec: number, elapsedSec: number, totalSec: number) {
     const pct = Math.min(100, (elapsedSec / totalSec) * 100);
     const remainPct = 100 - pct;
@@ -2277,6 +2320,20 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="progress-bar-track">
           <div class="progress-bar-fill ${colorClass}" style="width: ${pct}%"></div>
         </div>
+      </div>
+    `;
+  }
+
+  private renderInheritedTimeLimitItem(elapsedSec: number | null) {
+    return html`
+      <div class="limit-item">
+        <span class="limit-label">${elapsedSec !== null ? 'Elapsed' : 'Max Duration'}</span>
+        <span class="limit-value"
+          >${elapsedSec !== null
+            ? html`${formatDurationHMS(elapsedSec)}
+                <span class="limit-inherited">/ Inherited</span>`
+            : html`<span class="limit-inherited">Inherited</span>`}</span
+        >
       </div>
     `;
   }
