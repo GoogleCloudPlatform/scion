@@ -3118,6 +3118,7 @@ const (
 	ScopeUser          = "user"
 	ScopeProject       = "project"
 	ScopeRuntimeBroker = "runtime_broker"
+	ScopeAgent         = "agent"
 )
 
 // ScopeIDHub was previously a fixed sentinel "hub". It is now the hub's

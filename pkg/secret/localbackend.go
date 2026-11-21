@@ -197,24 +197,19 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 		scopeID string
 	}
 
-	// Scope precedence, lowest first: runtime_broker < hub < project < user.
+	// Scope precedence, lowest first: runtime_broker < hub < project < user < agent.
 	// Later entries in this slice overwrite earlier ones in the merge loop
 	// below, so this order must match envScopePrecedence in
-	// pkg/hub/httpdispatcher.go — broker is the most infrastructural and
-	// least specific of the four scopes, so it is intentionally the
-	// weakest, not an override nobody can escape. (Previously this listed
-	// hub, user, project, broker, which put broker last and therefore
-	// strongest — the opposite of every other precedence-ordered resolver
-	// in this codebase, and the reason a stale broker-scoped secret could
-	// silently shadow a project-scoped one regardless of which was meant
-	// to win.)
+	// pkg/hub/httpdispatcher.go (with agent scope above user for secrets) —
+	// broker is the most infrastructural and least specific of the scopes, so
+	// it is intentionally the weakest, not an override nobody can escape.
 	// Decrypt failures are collected and fail the whole resolution
 	// (ptone/scion#1530 §5): a value that cannot be read is never treated
 	// as a missing secret, so no agent starts with an apparently complete
 	// but partial set.
 	var failures []ResolveFailure
 
-	scopes := make([]scopeEntry, 0, 4)
+	scopes := make([]scopeEntry, 0, 5)
 	if brokerID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
 	}
@@ -224,6 +219,9 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 	}
 	if userID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeUser, scopeID: userID})
+	}
+	if opts != nil && opts.AgentID != "" {
+		scopes = append(scopes, scopeEntry{scope: store.ScopeAgent, scopeID: opts.AgentID})
 	}
 
 	for _, sc := range scopes {
