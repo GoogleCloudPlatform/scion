@@ -408,7 +408,7 @@ func (s *Server) agentSendReachesAgents(ctx context.Context, sender *store.Agent
 	if toAgent || groupPost {
 		return true
 	}
-	names := dropSelfMentionName(messages.ExtractProseMentions(body), sender.Slug)
+	names := dropSelfMentionName(messages.ExtractProseMentionsWithOptions(body, s.mentionOptions()), sender.Slug)
 	if len(names) == 0 {
 		return false
 	}

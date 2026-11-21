@@ -345,3 +345,18 @@ export const EFFECTIVE_PERMISSIONS_FLAG = 'hub.effective_permissions';
  * runtime. Default OFF.
  */
 export const CUSTOM_DEFAULT_USER_ROLE_FLAG = 'hub.custom_default_user_role';
+
+/**
+ * Code-span mentions (hub.code_span_mentions, ptone/scion#8783): promotes
+ * standalone single-mention inline code spans (such as `` `@coordinator` ``)
+ * to mention pills when the token resolves to a known project agent or human
+ * member, and includes them in Reply all. Presentation only: the hub enforces
+ * notification dispatch, routing, and translation under the same flag.
+ * Default OFF.
+ */
+export const CODE_SPAN_MENTIONS_FLAG = 'hub.code_span_mentions';
+
+/** Whether standalone inline code-span mentions are enabled in this session. */
+export function codeSpanMentionsEnabled(): boolean {
+  return isFeatureEnabled(CODE_SPAN_MENTIONS_FLAG);
+}

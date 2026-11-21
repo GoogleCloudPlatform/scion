@@ -20,10 +20,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// mentionOptions returns the current hub-wide mention parsing options,
+// reflecting whether the hub.code_span_mentions experiment is enabled.
+func (s *Server) mentionOptions() messages.MentionOptions {
+	return messages.MentionOptions{
+		CodeSpanMentions: s.experimentEnabled(experiments.CodeSpanMentions),
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Server-side @mention fan-out for agent-authored sends.
@@ -169,7 +178,7 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 		return nil
 	}
 
-	names := messages.DedupMentionNames(in.Explicit, messages.ExtractProseMentions(in.Msg))
+	names := messages.DedupMentionNames(in.Explicit, messages.ExtractProseMentionsWithOptions(in.Msg, s.mentionOptions()))
 	if len(names) == 0 {
 		return nil
 	}

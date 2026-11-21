@@ -15,9 +15,12 @@
 package messages
 
 import (
+	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtractMentions(t *testing.T) {
@@ -419,4 +422,92 @@ func TestReplaceProseMention(t *testing.T) {
 			assert.Equal(t, tc.want, ReplaceProseMention(tc.content, tc.old, tc.new))
 		})
 	}
+}
+
+func TestCodeSpanMentions_SharedVectors(t *testing.T) {
+	type vectorCase struct {
+		Name          string   `json:"name"`
+		Text          string   `json:"text"`
+		CodeSpanOff   []string `json:"codeSpanOff"`
+		CodeSpanOn    []string `json:"codeSpanOn"`
+		LeadingTarget string   `json:"leadingTarget"`
+		IsLeadingOff  *bool    `json:"isLeadingOff"`
+		IsLeadingOn   *bool    `json:"isLeadingOn"`
+	}
+	type vectorFile struct {
+		Cases []vectorCase `json:"cases"`
+	}
+
+	raw, err := os.ReadFile("testdata/code_span_mentions_vectors.json")
+	require.NoError(t, err)
+	var vf vectorFile
+	require.NoError(t, json.Unmarshal(raw, &vf))
+	require.NotEmpty(t, vf.Cases)
+
+	normalize := func(s []string) []string {
+		if len(s) == 0 {
+			return []string{}
+		}
+		return s
+	}
+
+	for _, tc := range vf.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			offOpts := MentionOptions{CodeSpanMentions: false}
+			onOpts := MentionOptions{CodeSpanMentions: true}
+
+			assert.Equal(t, normalize(tc.CodeSpanOff), normalize(ExtractProseMentionsWithOptions(tc.Text, offOpts)),
+				"ExtractProseMentionsWithOptions(off)")
+			assert.Equal(t, normalize(tc.CodeSpanOn), normalize(ExtractProseMentionsWithOptions(tc.Text, onOpts)),
+				"ExtractProseMentionsWithOptions(on)")
+			assert.Equal(t, normalize(tc.CodeSpanOff), normalize(ExtractProseWrappedMentionsWithOptions(tc.Text, offOpts)),
+				"ExtractProseWrappedMentionsWithOptions(off)")
+			assert.Equal(t, normalize(tc.CodeSpanOn), normalize(ExtractProseWrappedMentionsWithOptions(tc.Text, onOpts)),
+				"ExtractProseWrappedMentionsWithOptions(on)")
+			assert.Equal(t, normalize(tc.CodeSpanOn), normalize(ExtractMentionsWithOptions(tc.Text, onOpts)),
+				"ExtractMentionsWithOptions(on)")
+
+			if tc.IsLeadingOff != nil {
+				assert.Equal(t, *tc.IsLeadingOff, IsLeadingMentionWithOptions(tc.Text, tc.LeadingTarget, offOpts),
+					"IsLeadingMentionWithOptions(off)")
+			}
+			if tc.IsLeadingOn != nil {
+				assert.Equal(t, *tc.IsLeadingOn, IsLeadingMentionWithOptions(tc.Text, tc.LeadingTarget, onOpts),
+					"IsLeadingMentionWithOptions(on)")
+			}
+		})
+	}
+}
+
+func TestCodeSpanMentions_EscapedBackticksAndPathPrefixes(t *testing.T) {
+	// Odd backslashes escape the opening backtick (CommonMark §6.1), so it is
+	// not a code span and never promotes to a mention.
+	assert.Empty(t, ExtractProseMentionsWithOptions(`\@alice`, MentionOptions{CodeSpanMentions: true}))
+	assert.Empty(t, ExtractProseMentionsWithOptions("\\`@alice\\`", MentionOptions{CodeSpanMentions: true}))
+	// Even backslashes escape the backslash itself, leaving an unescaped code span.
+	assert.Equal(t, []string{"alice"}, ExtractProseMentionsWithOptions("\\\\`@alice`", MentionOptions{CodeSpanMentions: true}))
+	// Inside a code span, a trailing backslash is literal and does not escape
+	// the closing backtick; the span is closed and does not swallow the next mention.
+	assert.Equal(t, []string{"bob"}, ExtractProseMentionsWithOptions("`foo\\` then @bob", MentionOptions{CodeSpanMentions: true}))
+
+	// Path-like @./, @../, @/, @. tokens are skipped in ExtractMentions (ptone/scion#7476).
+	assert.Equal(t, []string{"alice"}, ExtractMentions("see @./local @../parent @/etc/hosts @.env and @alice"))
+	assert.Equal(t, []string{"alice"}, ExtractProseMentions("see @./local @../parent @/etc/hosts @.env and @alice"))
+	assert.False(t, IsLeadingMention("@./local check", "./local"))
+	assert.False(t, IsLeadingMention("@/etc/hosts check", "/etc/hosts"))
+
+	// RewriteAgentMentions leaves `@agent:slug` untouched in code spans.
+	assert.Equal(t, "format is `@agent:alice`", RewriteAgentMentions("format is `@agent:alice`"))
+}
+
+func TestReplaceProseMentionWithOptions_CodeSpanMentions(t *testing.T) {
+	on := MentionOptions{CodeSpanMentions: true}
+	off := MentionOptions{CodeSpanMentions: false}
+
+	in := "Ask `@john@example.com`, ` @JOHN@EXAMPLE.COM `, ``@john@example.com``, `` `@john@example.com` ``, `@john@example.com please`, and \\`@john@example.com\\`.\n```\n`@john@example.com`\n```\n> `@john@example.com`"
+
+	assert.Equal(t, in, ReplaceProseMentionWithOptions(in, "john@example.com", "john-smith", off))
+
+	wantOn := "Ask `@john-smith`, ` @john-smith `, ``@john-smith``, `` `@john@example.com` ``, `@john@example.com please`, and \\`@john@example.com\\`.\n```\n`@john@example.com`\n```\n> `@john@example.com`"
+	assert.Equal(t, wantOn, ReplaceProseMentionWithOptions(in, "john@example.com", "john-smith", on))
 }

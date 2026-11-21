@@ -174,8 +174,8 @@ func TestParseQualifiedAgentRef(t *testing.T) {
 		}
 	}
 
-	// O3: Malformed inputs should return errors.
-	malformedCases := []string{"", "@", "@/agent", "@project/", "/"}
+	// O3 + ptone/scion#7476: Malformed and path-like inputs should return errors.
+	malformedCases := []string{"", "@", "@/agent", "@project/", "/", "@./local", "@../parent", "@scope/pkg/sub", "@proj/.hidden"}
 	for _, input := range malformedCases {
 		_, err := ParseQualifiedAgentRef(input)
 		if err == nil {

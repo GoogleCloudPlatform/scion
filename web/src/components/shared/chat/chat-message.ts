@@ -54,7 +54,12 @@ import {
   ARTIFACT_REF_PATTERN,
   buildArtifactLinkElement,
 } from '../../../utils/chat-file-links.js';
-import { decisionsEnabled, isFeatureEnabled } from '../../../utils/feature-flags.js';
+import {
+  codeSpanMentionsEnabled,
+  decisionsEnabled,
+  FEATURE_FLAGS_CHANGED_EVENT,
+  isFeatureEnabled,
+} from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
   orderArtifactRefs,
@@ -64,7 +69,12 @@ import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
-import { userMentionSlug } from './prose-mentions.js';
+import {
+  parseCodeSpanMention,
+  toMentionSlug,
+  userMentionSlug,
+  type MentionRosterAgent,
+} from './prose-mentions.js';
 import './chat-decisions.js';
 import './chat-decision-response.js';
 import { ANSWERABLE } from '../../../client/decision-prompts.js';
@@ -113,12 +123,13 @@ export interface AttachmentRefInfo {
   height?: number;
 }
 
-/** Roster entry used to resolve `@<email>` mentions to known Scion users (ptone/scion#8133). */
+/** Roster entry used to resolve `@<email>` and code-span `@<slug>` mentions (ptone/scion#8133, ptone/scion#8783). */
 export interface ChatMessageMember {
   name?: string;
   displayName?: string;
   email?: string;
   kind?: string;
+  slug?: string;
 }
 
 /** Detail emitted when a highlighted `@mention` requests its context menu. */
@@ -967,6 +978,150 @@ export function knownUsersByEmailKey(map: ReadonlyMap<string, string>): string {
     .join('\n');
 }
 
+/** Shared empty set for memoized `knownMentionSlugs` props. */
+export const EMPTY_KNOWN_MENTION_SLUGS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Build a set of lowercased known mention slugs (project agents and human
+ * members) used to roster-gate inline code-span mention promotion
+ * (ptone/scion#8783). Only tokens resolving to a known project agent or human
+ * member are promoted from inline `<code>@token</code>` to mention pills;
+ * unknown tokens like `` `@state` `` stay plain code.
+ */
+export function buildKnownMentionSlugs(
+  members: readonly ChatMessageMember[],
+  agentMembers: readonly MentionRosterAgent[] = [],
+  currentUserId = ''
+): ReadonlySet<string> {
+  const slugs = new Set<string>();
+  const add = (value: string | undefined): void => {
+    const trimmed = value?.trim().toLowerCase() ?? '';
+    if (trimmed) slugs.add(trimmed);
+  };
+  for (const a of agentMembers) {
+    add(a.slug);
+    add(a.name);
+    add(a.displayName);
+    if (a.slug) add(toMentionSlug(a.slug));
+    if (a.name) add(toMentionSlug(a.name));
+    if (a.displayName) add(toMentionSlug(a.displayName));
+  }
+  for (const m of members) {
+    if (m.kind === 'agent') {
+      add(m.slug);
+      add(m.name);
+      add(m.displayName);
+      if (m.slug) add(toMentionSlug(m.slug));
+      if (m.name) add(toMentionSlug(m.name));
+      if (m.displayName) add(toMentionSlug(m.displayName));
+      continue;
+    }
+    const name = (m.name || m.displayName || '').trim();
+    const email = (m.email || '').trim().toLowerCase();
+    if (name) {
+      add(name);
+      add(toMentionSlug(name));
+    }
+    if (email) {
+      add(userMentionSlug({ name, email }));
+      const at = email.indexOf('@');
+      if (at > 0) add(email.slice(0, at));
+    }
+  }
+  if (currentUserId) {
+    const self = peekUser(currentUserId);
+    const selfName = self?.displayName?.trim() ?? '';
+    const selfEmail = self?.email?.trim().toLowerCase() ?? '';
+    if (selfName) {
+      add(selfName);
+      add(toMentionSlug(selfName));
+    }
+    if (selfEmail) {
+      add(userMentionSlug({ name: selfName, email: selfEmail }));
+      const at = selfEmail.indexOf('@');
+      if (at > 0) add(selfEmail.slice(0, at));
+    }
+  }
+  return slugs;
+}
+
+/** Deterministic content key for a `knownMentionSlugs` set so unchanged rosters skip markdown re-renders. */
+export function knownMentionSlugsKey(set: ReadonlySet<string>): string {
+  if (set.size === 0) return '';
+  return [...set].sort().join('\n');
+}
+
+const CODE_SPAN_BOUNDARY_WORD_RE = /[\p{L}\p{N}_-]/u;
+
+function hasAdjacentWordChar(code: Element): boolean {
+  const prev = code.previousSibling;
+  if (prev && prev.nodeType === Node.TEXT_NODE) {
+    const text = (prev as Text).data;
+    if (text.length > 0) {
+      const last = text.charAt(text.length - 1);
+      if (CODE_SPAN_BOUNDARY_WORD_RE.test(last) || last === '@') {
+        return true;
+      }
+    }
+  }
+  const next = code.nextSibling;
+  if (next && next.nodeType === Node.TEXT_NODE) {
+    const text = (next as Text).data;
+    if (text.length > 0) {
+      const first = text.charAt(0);
+      if (CODE_SPAN_BOUNDARY_WORD_RE.test(first) || first === '@') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+const SKIP_CODE_SPAN_ANCESTORS = new Set(['pre', 'blockquote', 'a']);
+
+function hasAncestorTag(el: Element, tags: ReadonlySet<string>): boolean {
+  for (let cur: Element | null = el.parentElement; cur; cur = cur.parentElement) {
+    if (tags.has(cur.localName.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/**
+ * Promote standalone inline `<code>@token</code>` elements (outside `<pre>`,
+ * `<blockquote>`, and `<a>`) to clickable mention pills when `token` matches
+ * the exact single-mention grammar AND resolves to a known project agent or
+ * human member (ptone/scion#8783). Unknown tokens (e.g. `` `@state` ``) and
+ * multi-token spans stay plain `<code>`.
+ */
+function promoteCodeSpanMentions(
+  root: DocumentFragment,
+  knownUsersByEmail: ReadonlyMap<string, string>,
+  knownMentionSlugs: ReadonlySet<string>
+): void {
+  const codes = Array.from(root.querySelectorAll('code'));
+  for (const code of codes) {
+    if (hasAncestorTag(code, SKIP_CODE_SPAN_ANCESTORS)) continue;
+    if (code.childNodes.length !== 1 || code.firstChild?.nodeType !== Node.TEXT_NODE) continue;
+    if (hasAdjacentWordChar(code)) continue;
+
+    const token = parseCodeSpanMention(code.textContent ?? '');
+    if (!token) continue;
+
+    const lower = token.toLowerCase();
+    if (token.includes('@')) {
+      const resolvedSlug = knownUsersByEmail.get(lower);
+      if (resolvedSlug) {
+        code.replaceWith(mentionSpan(resolvedSlug));
+      }
+      continue;
+    }
+
+    if (knownMentionSlugs.has(lower)) {
+      code.replaceWith(mentionSpan(token));
+    }
+  }
+}
+
 /**
  * Turn references in rendered, sanitized markdown into links, in this
  * order: artifact references (when `artifacts`), @mentions, entity
@@ -976,7 +1131,9 @@ export function knownUsersByEmailKey(map: ReadonlyMap<string, string>): string {
  * - Artifact references: code (`<pre>`, `<code>`) and existing links.
  * - @mentions: code, `mailto:` links, and the artifact links just built.
  *   Non-`mailto:` links are not stepped over, so an `@name` in a markdown
- *   link's text is still styled.
+ *   link's text is still styled. When `codeSpanMentions` is enabled, standalone
+ *   inline `<code>@token</code>` elements whose token resolves against
+ *   `knownMentionSlugs` / `knownUsersByEmail` are also promoted to mention pills.
  * - Entity references: `<pre>` fences and existing links. Inline `<code>`
  *   is not stepped over, so a file path inside backticks still links.
  * - GitHub refs: code and existing links; a ref inside backticks is
@@ -987,7 +1144,13 @@ export function knownUsersByEmailKey(map: ReadonlyMap<string, string>): string {
  */
 function linkifyRenderedFragment(
   root: DocumentFragment,
-  opts: { artifacts: boolean; gcs: boolean; knownUsersByEmail: ReadonlyMap<string, string> }
+  opts: {
+    artifacts: boolean;
+    gcs: boolean;
+    knownUsersByEmail: ReadonlyMap<string, string>;
+    codeSpanMentions: boolean;
+    knownMentionSlugs: ReadonlySet<string>;
+  }
 ): void {
   const isCode = elementsNamed('pre', 'code');
   const artifactLinks = new WeakSet<Element>();
@@ -1002,6 +1165,9 @@ function linkifyRenderedFragment(
     (el) => isCode(el) || artifactLinks.has(el) || isMailtoLink(el),
     (text) => styleMentionsInText(text, opts.knownUsersByEmail)
   );
+  if (opts.codeSpanMentions) {
+    promoteCodeSpanMentions(root, opts.knownUsersByEmail, opts.knownMentionSlugs);
+  }
   for (const el of root.querySelectorAll('.mention[data-mention]')) {
     if (!el.closest('a, button')) {
       el.setAttribute('tabindex', '0');
@@ -1326,6 +1492,15 @@ export class ScionChatMessage extends LitElement {
    */
   @property({ attribute: false })
   knownUsersByEmail: ReadonlyMap<string, string> | null = null;
+
+  /**
+   * Pre-computed lowercased known-mention-slug set (agents + human members)
+   * supplied by `<scion-chat-thread>` to roster-gate inline code-span mention
+   * promotion when `hub.code_span_mentions` is enabled. When null, derived
+   * from `members` and `currentUserId`.
+   */
+  @property({ attribute: false })
+  knownMentionSlugs: ReadonlySet<string> | null = null;
 
   /**
    * The rendered body: a `.md-content` element holding the markdown
@@ -2505,12 +2680,30 @@ export class ScionChatMessage extends LitElement {
     }
   };
 
+  private readonly handleFeatureFlagsChanged = (): void => {
+    const codeSpans = codeSpanMentionsEnabled();
+    const cardMode = this.showsDecisionCard;
+    if (codeSpans !== this.renderedCodeSpanMentions || cardMode !== this.renderedCardMode) {
+      this.renderedCodeSpanMentions = codeSpans;
+      this.renderedCardMode = cardMode;
+      this.renderedKnownMentionSlugsKey = codeSpans
+        ? knownMentionSlugsKey(this.effectiveKnownMentionSlugs())
+        : '';
+      void this.renderContent();
+    }
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     this.renderRoot.addEventListener('pointerdown', this.boundRecordContextPress, true);
     this.addEventListener('pointerdown', this.boundHostContextPress, true);
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFeatureFlagsChanged);
     this.renderedCardMode = this.showsDecisionCard;
+    this.renderedCodeSpanMentions = codeSpanMentionsEnabled();
     this.renderedKnownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
+    this.renderedKnownMentionSlugsKey = this.renderedCodeSpanMentions
+      ? knownMentionSlugsKey(this.effectiveKnownMentionSlugs())
+      : '';
     void this.renderContent();
   }
 
@@ -2519,6 +2712,7 @@ export class ScionChatMessage extends LitElement {
     this.renderRoot.removeEventListener('pointerdown', this.boundRecordContextPress, true);
     this.removeEventListener('pointerdown', this.boundHostContextPress, true);
     this._contextPress = null;
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFeatureFlagsChanged);
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
@@ -2626,16 +2820,24 @@ export class ScionChatMessage extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     const cardMode = this.showsDecisionCard;
+    const codeSpans = codeSpanMentionsEnabled();
     const knownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
+    const knownMentionSlugsKeyNow = codeSpans
+      ? knownMentionSlugsKey(this.effectiveKnownMentionSlugs())
+      : '';
     if (
       changed.has('body') ||
       changed.has('plain') ||
       changed.has('decisionIntro') ||
       knownUsersKey !== this.renderedKnownUsersKey ||
+      codeSpans !== this.renderedCodeSpanMentions ||
+      knownMentionSlugsKeyNow !== this.renderedKnownMentionSlugsKey ||
       cardMode !== this.renderedCardMode
     ) {
       this.renderedCardMode = cardMode;
+      this.renderedCodeSpanMentions = codeSpans;
       this.renderedKnownUsersKey = knownUsersKey;
+      this.renderedKnownMentionSlugsKey = knownMentionSlugsKeyNow;
       void this.renderContent();
     }
     if (changed.has('renderedContent')) {
@@ -2943,8 +3145,18 @@ export class ScionChatMessage extends LitElement {
   /** Content key of the `knownUsersByEmail` map the rendered body was built for. */
   private renderedKnownUsersKey = '';
 
+  /** Whether `hub.code_span_mentions` was enabled when the rendered body was built. */
+  private renderedCodeSpanMentions = false;
+
+  /** Content key of the `knownMentionSlugs` set the rendered body was built for. */
+  private renderedKnownMentionSlugsKey = '';
+
   private effectiveKnownUsersByEmail(): ReadonlyMap<string, string> {
     return this.knownUsersByEmail ?? buildKnownUsersByEmail(this.members, this.currentUserId);
+  }
+
+  private effectiveKnownMentionSlugs(): ReadonlySet<string> {
+    return this.knownMentionSlugs ?? buildKnownMentionSlugs(this.members, [], this.currentUserId);
   }
 
   /**
@@ -2976,10 +3188,15 @@ export class ScionChatMessage extends LitElement {
       // gs:// links are gated on the server-reported feature flag AND the
       // message being agent-sent — a user-sent message never links, however
       // the body happens to be spelled.
+      const codeSpans = codeSpanMentionsEnabled();
       linkifyRenderedFragment(fragment, {
         artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
         gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
         knownUsersByEmail: this.effectiveKnownUsersByEmail(),
+        codeSpanMentions: codeSpans,
+        knownMentionSlugs: codeSpans
+          ? this.effectiveKnownMentionSlugs()
+          : EMPTY_KNOWN_MENTION_SLUGS,
       });
       this.renderedContent = fragment.hasChildNodes() ? this.contentElement(fragment) : null;
     } catch {

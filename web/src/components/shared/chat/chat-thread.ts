@@ -125,7 +125,10 @@ import {
 } from './chat-wake.js';
 import './chat-message.js';
 import {
+  buildKnownMentionSlugs,
   buildKnownUsersByEmail,
+  EMPTY_KNOWN_MENTION_SLUGS,
+  knownMentionSlugsKey,
   knownUsersByEmailKey,
   selectionCoversNode,
   type MentionContextMenuDetail,
@@ -942,6 +945,18 @@ export class ScionChatThread extends LitElement {
         this._knownUsersByEmailKey = nextKey;
       }
     }
+    if (
+      changedProperties.has('members') ||
+      changedProperties.has('agentMembers') ||
+      changedProperties.has('currentUserId')
+    ) {
+      const nextSlugs = buildKnownMentionSlugs(this.members, this.agentMembers, this.currentUserId);
+      const nextSlugsKey = knownMentionSlugsKey(nextSlugs);
+      if (nextSlugsKey !== this._knownMentionSlugsKey) {
+        this._knownMentionSlugs = nextSlugs.size === 0 ? EMPTY_KNOWN_MENTION_SLUGS : nextSlugs;
+        this._knownMentionSlugsKey = nextSlugsKey;
+      }
+    }
   }
 
   /**
@@ -960,6 +975,9 @@ export class ScionChatThread extends LitElement {
   /** Memoized lowercase-email -> canonical-mention-slug map passed to bubbles. */
   private _knownUsersByEmail: ReadonlyMap<string, string> = EMPTY_KNOWN_USERS_BY_EMAIL;
   private _knownUsersByEmailKey = '';
+  /** Memoized lowercased known-mention-slug set passed to bubbles for code-span mention gating. */
+  private _knownMentionSlugs: ReadonlySet<string> = EMPTY_KNOWN_MENTION_SLUGS;
+  private _knownMentionSlugsKey = '';
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
@@ -8054,6 +8072,7 @@ export class ScionChatThread extends LitElement {
             .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
             .currentUserId=${this.currentUserId}
             .knownUsersByEmail=${this._knownUsersByEmail}
+            .knownMentionSlugs=${this._knownMentionSlugs}
             routedTo=${msgRoutedTo}
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}

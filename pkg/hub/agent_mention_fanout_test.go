@@ -244,6 +244,40 @@ func TestMentionFanout_PossessiveMentionDeliversToAgent(t *testing.T) {
 	require.Len(t, dispatchesTo(dispatcher, bystander.ID), 1)
 }
 
+// hub.code_span_mentions (ptone/scion#8783): default off keeps standalone
+// `@slug` inline code spans non-notifying; enabling the experiment dispatches
+// them while keeping multi-token spans and double-backtick wrappers silent.
+func TestMentionFanout_CodeSpanMentionsExperimentGated(t *testing.T) {
+	srv, _, _, sender, target, bystander, _, dispatcher := mentionFanoutSetup(t)
+
+	body := "check `" + "@" + bystander.Slug + "` please"
+	in := mentionFanoutBaseInput(sender, target, body)
+
+	// Default off: no delivery.
+	require.Empty(t, srv.fanOutAgentMentions(context.Background(), in))
+	require.Empty(t, dispatchesTo(dispatcher, bystander.ID))
+
+	// Enable hub.code_span_mentions via operational settings override.
+	fakeSettings := newFakeHubSettingStore()
+	fakeSettings.seed("experiments", json.RawMessage(`{"overrides":{"hub.code_span_mentions":true}}`))
+	ops := NewOperationalSettings(fakeSettings, emptyKoanf(), emptyKoanf())
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+
+	results := srv.fanOutAgentMentions(context.Background(), in)
+	require.Len(t, results, 1)
+	require.Equal(t, bystander.Slug, results[0].Slug)
+	require.Equal(t, "delivered", results[0].Status)
+	require.Len(t, dispatchesTo(dispatcher, bystander.ID), 1)
+
+	// Escape hatch (double-backtick wrapper) and multi-token code stay silent.
+	silentBody := "use `` `@" + bystander.Slug + "` `` or `@" + bystander.Slug + " status`"
+	silentIn := mentionFanoutBaseInput(sender, target, silentBody)
+	require.Empty(t, srv.fanOutAgentMentions(context.Background(), silentIn))
+	require.Len(t, dispatchesTo(dispatcher, bystander.ID), 1)
+}
+
 // A mention to an agent the sender may not DM is unauthorized, creates no
 // row/conversation, and the primary is unaffected.
 func TestMentionFanout_Unauthorized(t *testing.T) {

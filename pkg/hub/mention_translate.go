@@ -46,6 +46,12 @@ func translateMentionsOutbound(content string, members []chatMemberEntry) string
 // code spans, fenced code blocks, and '>' blockquote lines so only prose
 // mentions are rewritten for human-facing display.
 func translateMentionsInbound(content string, members []chatMemberEntry) string {
+	return translateMentionsInboundWithOptions(content, members, messages.MentionOptions{})
+}
+
+// translateMentionsInboundWithOptions is translateMentionsInbound with
+// configurable mention options (such as CodeSpanMentions).
+func translateMentionsInboundWithOptions(content string, members []chatMemberEntry, opts messages.MentionOptions) string {
 	if !strings.Contains(content, "@") {
 		return content
 	}
@@ -57,7 +63,7 @@ func translateMentionsInbound(content string, members []chatMemberEntry) string 
 		if slug == "" {
 			continue
 		}
-		content = messages.ReplaceProseMention(content, m.Email, slug)
+		content = messages.ReplaceProseMentionWithOptions(content, m.Email, slug, opts)
 	}
 	return content
 }

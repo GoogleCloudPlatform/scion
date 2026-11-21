@@ -575,6 +575,16 @@ const CustomDefaultUserRole = "hub.custom_default_user_role"
 // Secrets management and create-form tabs and secret-request UI while off.
 const AgentSecrets = "hub.agent_secrets"
 
+// CodeSpanMentions gates treating a standalone single-mention inline code span
+// (such as `@coordinator` or `@user@example.com`) as a mention across both
+// Hub dispatch/routing/translation and Web chat rendering/reply-all
+// (ptone/scion#8783). Fenced code blocks, '>' blockquote lines, multi-token
+// inline code, double-backtick literal-backtick wrappers, and slash-containing
+// tokens (such as `@scope/name`) stay plain code. On the web, code-span
+// mentions render as mention pills only when the token resolves to a known
+// project agent or human member. Default off.
+const CodeSpanMentions = "hub.code_span_mentions"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -588,6 +598,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8742",
 		Owner:       "auth",
+		ReviewBy:    "2027-05-21",
+	},
+	{
+		Name:        CodeSpanMentions,
+		Title:       "Code-span mentions",
+		Description: "Treats a standalone single-mention inline code span (such as `@coordinator`) on a prose line as a mention for both Hub notification dispatch/routing/translation and Web chat rendering/reply-all. Fenced code blocks, blockquote lines, multi-token inline code, escaped backticks, and slash-containing tokens stay plain code. Web rendering promotes a code-span mention only when it resolves to a known project agent or human member.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8783",
+		Owner:       "native-chat",
 		ReviewBy:    "2027-05-21",
 	},
 	{

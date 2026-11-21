@@ -1440,7 +1440,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			humanMembers = s.resolveProjectHumanMembers(ctx, agent.ProjectID)
 		}
 		if len(humanMembers) > 0 {
-			req.Msg = translateMentionsInbound(req.Msg, humanMembers)
+			req.Msg = translateMentionsInboundWithOptions(req.Msg, humanMembers, s.mentionOptions())
 		}
 	}
 
@@ -1544,7 +1544,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// message, matched against the member list resolved above.
 	var mentionedHumans []string
 	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
-		if names := messages.ExtractProseWrappedMentions(req.Msg); len(names) > 0 {
+		if names := messages.ExtractProseWrappedMentionsWithOptions(req.Msg, s.mentionOptions()); len(names) > 0 {
 			mentionedHumans = mentionedHumanIDs(humanMembers, names, "")
 		}
 	}
@@ -2462,7 +2462,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		for _, slug := range req.Mentions {
 			ref, refErr := ParseQualifiedAgentRef(slug)
 			if refErr != nil {
-				s.messageLog.Warn("malformed mention reference, skipping", "slug", slug, "error", refErr)
+				s.messageLog.Debug("ignoring non-agent mention reference", "slug", slug, "error", refErr)
 				continue
 			}
 			if ref.ProjectSlug != "" {
@@ -2493,9 +2493,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				return
 			}
 			result := s.EvaluateFanOutTargets(ctx, senderIdentity, targets)
-			// Log denied fan-out targets for audit (D7).
+			// Log denied fan-out targets for audit (D7). Skip targets whose
+			// project did not exist (ProjectID == ""): those are typically
+			// non-mention prose tokens like @playwright/test rather than
+			// genuine cross-project policy denials (ptone/scion#7476).
 			for _, t := range result.Targets {
-				if !t.Decision.Allowed {
+				if !t.Decision.Allowed && t.ProjectID != "" {
 					LogCrossProjectDecision(CrossProjectAuditEntry{
 						Timestamp:        time.Now(),
 						Action:           "deny",

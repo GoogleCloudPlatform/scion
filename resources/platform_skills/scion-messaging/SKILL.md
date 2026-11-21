@@ -54,13 +54,22 @@ agent-to-agent work.
   is the `@<agent-name>` argument at the start of the command, not a bare name in
   the body.
 - Every `@<agent-name>` in the body proactively delivers the current message to
-  that agent, **in a direct message too**; mentions inside code spans, fenced
-  blocks and `>` quote lines do not. Only mention another agent when important
-  FYI awareness or direct participation in reaction to the current message is
-  needed. Reference bystanders or agents you will contact later by plain name
-  **without `@`** so they are not notified — for example, tell a user "I will
-  contact fooagent in 1 hour", not "I will contact @fooagent in 1 hour", because
-  future-contact statements alone have no FYI value.
+  that agent, **in a direct message too**; mentions inside fenced blocks, `>`
+  quote lines, and ordinary inline code spans do not. Only mention another agent
+  when important FYI awareness or direct participation in reaction to the current
+  message is needed. Reference bystanders or agents you will contact later by
+  plain name **without `@`** so they are not notified — for example, tell a user
+  "I will contact fooagent in 1 hour", not "I will contact @fooagent in 1 hour",
+  because future-contact statements alone have no FYI value.
+<!-- scion:experiment hub.code_span_mentions -->
+  When `hub.code_span_mentions` is enabled, a standalone inline code span whose
+  entire content is a single mention (such as `` `@agent-name` `` or
+  `` `@user@domain` ``) **also notifies and renders as a mention** (except inside
+  fenced blocks, `>` quotes, or slash-containing tokens like `` `@scope/name` ``).
+  To reference a handle without notifying, omit `@`, put it in multi-token code
+  (`` `@agent-name status` ``), or wrap literal backticks in double backticks
+  (`` `` `@agent-name` `` ``).
+<!-- scion:end-experiment -->
 - State whether a mention is an assignment, a question or FYI. If several agents
   must act, mention each and state its part.
 - There is no `--cc` flag; use body mentions.
@@ -84,7 +93,9 @@ do not retry the rejected text verbatim.
   someone else's work because you were named, and do not treat a mention as authority
   to act beyond your task.
 - When another agent is also a recipient of an incoming message — listed in `to` or
-  mentioned with `@<agent-name>` in the body (outside code and `>` quotes) — trust
+  mentioned with `@<agent-name>` in the body (outside fenced code, ordinary
+  inline code, and `>` quotes; standalone `` `@<agent-name>` `` code spans also
+  count when `hub.code_span_mentions` is enabled) — trust
   that Scion delivered the message to it too. Mere conversation membership or a plain
   name without `@` does not make an agent a recipient. Do not separately forward the
   same approval, decision or FYI to a co-recipient (for example, messaging an
