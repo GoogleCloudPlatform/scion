@@ -35,7 +35,8 @@ import (
 // successful upload and a malformed query string (x=%zz), which makes
 // ParseMultipartForm fail after it has spooled the part. Both send a part over
 // the in-memory limit, so it spools, and check no temporary file remains. The
-// bulk invite route is the exception: its body cap equals that limit.
+// two admin CSV import routes are the exceptions: their body cap equals that
+// limit.
 
 // malformedUploadQuery is a query string that url.ParseQuery refuses.
 const malformedUploadQuery = "?x=%zz"
@@ -85,12 +86,20 @@ func requireUploadStatus(t *testing.T, rec *httptest.ResponseRecorder, want int)
 
 // --- Admin allow-list import (2 MiB) ---
 
+// Both admin CSV import routes set their body cap equal to the in-memory limit
+// (inviteBulkMaxMultipartBytes, 2 MiB), so no part can spool here: the success
+// tests keep their CSV under the cap, and the malformed-query tests are
+// rejected by the cap (400) before any part spools; all still check that no
+// temporary file remains. Spooled-part removal is covered by the other upload
+// handlers below, TestParseMultipartUpload_FormReadableUntilCleanup and
+// TestParseMultipartUpload_ParseErrorStillCleansUp (the helper), and
+// TestMultipartFormSourcePin (both handlers defer the cleanup).
 func TestAdminAllowListImportUpload_SpoolRemoved_Success(t *testing.T) {
 	srv, s := testServer(t)
 	dir := redirectMultipartTemp(t)
 
 	rec := serveUpload(srv, adminCSVUploadRequest(t, "/api/v1/admin/allow-list/import",
-		adminSpoolingCSV("spool-allow@example.com")))
+		[]byte("email,note\nspool-allow@example.com,spool\n")))
 	requireUploadStatus(t, rec, http.StatusOK)
 
 	user, err := s.GetUserByEmail(context.Background(), "spool-allow@example.com")
@@ -115,15 +124,6 @@ func TestAdminAllowListImportUpload_SpoolRemoved_MalformedQuery(t *testing.T) {
 
 // --- Admin bulk user invite (2 MiB) ---
 
-// This route's body cap equals the in-memory limit (both
-// inviteBulkMaxMultipartBytes), so no part can spool here: this CSV is kept
-// under the cap, and TestAdminUserInviteUpload_SpoolRemoved_MalformedQuery is
-// rejected by the cap (400) before any part spools; both still check that no
-// temporary file remains. Spooled-part removal is covered by
-// TestAdminAllowListImportUpload_SpoolRemoved_Success (same 2 MiB call, other
-// route), TestParseMultipartUpload_FormReadableUntilCleanup and
-// TestParseMultipartUpload_ParseErrorStillCleansUp (the helper), and
-// TestMultipartFormSourcePin (decodeInviteBatchMultipart defers the cleanup).
 func TestAdminUserInviteUpload_SpoolRemoved_Success(t *testing.T) {
 	srv, s := testServer(t)
 	dir := redirectMultipartTemp(t)

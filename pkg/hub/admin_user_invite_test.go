@@ -1123,10 +1123,32 @@ func TestAdminUserInviteBulk_CountsMatchRowsForEachCallerClass(t *testing.T) {
 	}
 }
 
+// buildSizedMultipartCSV builds a multipart/form-data body of exact total size
+// totalBytes containing a single "file" CSV part with the given email.
+func buildSizedMultipartCSV(t *testing.T, email string, totalBytes int) ([]byte, string) {
+	t.Helper()
+	build := func(padLen int) ([]byte, string) {
+		var buf bytes.Buffer
+		w := multipart.NewWriter(&buf)
+		require.NoError(t, w.SetBoundary("scion-csv-cap-boundary"))
+		part, err := w.CreateFormFile("file", "emails.csv")
+		require.NoError(t, err)
+		_, err = part.Write([]byte("email\n" + email + "\n" + strings.Repeat("x", padLen)))
+		require.NoError(t, err)
+		require.NoError(t, w.Close())
+		return buf.Bytes(), w.FormDataContentType()
+	}
+	base, _ := build(0)
+	require.GreaterOrEqual(t, totalBytes, len(base), "target size must fit multipart envelope")
+	body, contentType := build(totalBytes - len(base))
+	require.Len(t, body, totalBytes)
+	return body, contentType
+}
+
 // TestAdminUserInviteBulk_BodyCapBoundaries: a JSON body of exactly
 // inviteBulkMaxBodyBytes is decoded and one byte more is refused with 400;
-// a multipart body over inviteBulkMaxMultipartBytes is refused with 400.
-// Neither refusal writes.
+// a multipart body of exactly inviteBulkMaxMultipartBytes is decoded and one
+// byte more is refused with 400. Neither refusal writes.
 func TestAdminUserInviteBulk_BodyCapBoundaries(t *testing.T) {
 	srv, s := testServer(t)
 	body := `{"emails":[{"email":"cap-edge@example.com"}]}`
@@ -1142,18 +1164,41 @@ func TestAdminUserInviteBulk_BodyCapBoundaries(t *testing.T) {
 	rec := postBulkRaw(t, srv, over)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "request body too large", parseErrorResponse(t, rec.Body.Bytes()).Error.Message)
+	assert.Equal(t, before, countUsers(t, s), "refused JSON body writes nothing")
 
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-	part, err := w.CreateFormFile("file", "big.csv")
-	require.NoError(t, err)
-	_, err = part.Write([]byte("email\ncap-mp@example.com\n" + strings.Repeat("#", inviteBulkMaxMultipartBytes)))
-	require.NoError(t, err)
-	require.NoError(t, w.Close())
-	rec = doRequestRaw(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", buf.Bytes(), w.FormDataContentType())
+	mpAtCap, mpAtCapCT := buildSizedMultipartCSV(t, "cap-mp-edge@example.com", inviteBulkMaxMultipartBytes)
+	resp = decodeBulk(t, doRequestRaw(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", mpAtCap, mpAtCapCT))
+	assert.Equal(t, 1, resp.Counts.Created, "a multipart body of exactly the cap is decoded")
+
+	before = countUsers(t, s)
+	mpOver, mpOverCT := buildSizedMultipartCSV(t, "cap-mp@example.com", inviteBulkMaxMultipartBytes+1)
+	rec = doRequestRaw(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", mpOver, mpOverCT)
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Equal(t, "failed to parse multipart form", parseErrorResponse(t, rec.Body.Bytes()).Error.Message)
-	assert.Equal(t, before, countUsers(t, s), "refused bodies write nothing")
+	assert.Equal(t, before, countUsers(t, s), "refused multipart body writes nothing")
+}
+
+// TestDeprecatedAllowListImport_MultipartBodyCapBoundaries: a multipart CSV
+// body of exactly inviteBulkMaxMultipartBytes (2 MiB) is imported, and one byte
+// more is refused with 400 without creating any user.
+func TestDeprecatedAllowListImport_MultipartBodyCapBoundaries(t *testing.T) {
+	srv, s := testServer(t)
+
+	mpAtCap, mpAtCapCT := buildSizedMultipartCSV(t, "allow-cap-edge@example.com", inviteBulkMaxMultipartBytes)
+	rec := doRequestRaw(t, srv, http.MethodPost, "/api/v1/admin/allow-list/import", mpAtCap, mpAtCapCT)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp AllowListBulkAddResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, 1, resp.Added, "a multipart body of exactly the cap is imported")
+	_, err := s.GetUserByEmail(context.Background(), "allow-cap-edge@example.com")
+	require.NoError(t, err)
+
+	before := countUsers(t, s)
+	mpOver, mpOverCT := buildSizedMultipartCSV(t, "allow-cap-over@example.com", inviteBulkMaxMultipartBytes+1)
+	rec = doRequestRaw(t, srv, http.MethodPost, "/api/v1/admin/allow-list/import", mpOver, mpOverCT)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, "failed to parse multipart form", parseErrorResponse(t, rec.Body.Bytes()).Error.Message)
+	assert.Equal(t, before, countUsers(t, s), "refused multipart body writes nothing")
 }
 
 // TestAdminUserInviteBulk_InvalidThenValidSameAddress: an entry refused for
