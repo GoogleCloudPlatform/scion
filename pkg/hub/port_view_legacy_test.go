@@ -252,6 +252,7 @@ func TestPortProxyResponsePolicyParity(t *testing.T) {
 		assert.Equal(t, a, got["tunnel"][key], "the transports disagree on %s", key)
 		assert.Equal(t, []string{agentServedPageSandboxCSP}, a["Content-Security-Policy"], key)
 		assert.Equal(t, []string{untrustedContentPermissionsPolicy}, a["Permissions-Policy"], key)
+		assert.Equal(t, []string{"no-referrer"}, a["Referrer-Policy"], key)
 		assert.Equal(t, []string{"nosniff"}, a["X-Content-Type-Options"], key)
 		assert.Empty(t, a["Set-Cookie"], key)
 		assert.Empty(t, a["Clear-Site-Data"], key)

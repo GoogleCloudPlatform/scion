@@ -396,11 +396,12 @@ func hubPageHeaderValues(t *testing.T) map[string]string {
 
 // proxiedPageHeaderValues is hubPageHeaderValues for a page served from an
 // agent's port: the hub's own values, except that the untrusted-content
-// Permissions-Policy replaces the web pages' one.
+// Permissions-Policy and Referrer-Policy replace the web pages' ones.
 func proxiedPageHeaderValues(t *testing.T) map[string]string {
 	t.Helper()
 	out := hubPageHeaderValues(t)
 	out["Permissions-Policy"] = untrustedContentPermissionsPolicy
+	out["Referrer-Policy"] = "no-referrer"
 	return out
 }
 

@@ -125,11 +125,12 @@ const untrustedContentPermissionsPolicy = "accelerometer=(), gyroscope=(), magne
 	"usb=(), serial=(), hid=(), bluetooth=(), payment=(), " +
 	"publickey-credentials-get=(), publickey-credentials-create=(), clipboard-read=()"
 
-// setUntrustedContentHeaders sets the sandbox csp and the Permissions-Policy
-// on a hub response whose bytes are written by users or agents.
+// setUntrustedContentHeaders sets the sandbox csp, Permissions-Policy and
+// Referrer-Policy on a hub response whose bytes are written by users or agents.
 func setUntrustedContentHeaders(h http.Header, csp string) {
 	h.Set("Content-Security-Policy", csp)
 	h.Set("Permissions-Policy", untrustedContentPermissionsPolicy)
+	h.Set("Referrer-Policy", "no-referrer")
 }
 
 // contentDisposition builds a Content-Disposition header value with

@@ -630,6 +630,9 @@ func TestAttachmentDownload_SetsNosniffAndDisposition(t *testing.T) {
 		if h := got.Header().Get("Permissions-Policy"); h != untrustedContentPermissionsPolicy {
 			t.Errorf("%s: Permissions-Policy = %q, want %q", att.Name, h, untrustedContentPermissionsPolicy)
 		}
+		if h := got.Header().Get("Referrer-Policy"); h != "no-referrer" {
+			t.Errorf("%s: Referrer-Policy = %q, want no-referrer", att.Name, h)
+		}
 		if h := got.Header().Get("Content-Type"); h != expected.mime {
 			t.Errorf("%s: Content-Type = %q, want %q", att.Name, h, expected.mime)
 		}

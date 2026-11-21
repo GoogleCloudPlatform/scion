@@ -328,10 +328,10 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		}, route...)...)
 	}()
 	// ReverseProxy adds the upstream response headers to the ones already
-	// on w. Drop the web pages' policy, Permissions-Policy and nosniff
-	// header set further up the handler chain, so the sandbox headers set
-	// in ModifyResponse are the only ones and pages served from an agent's
-	// port keep working as on the tunnel path.
+	// on w. Drop the web pages' policy, Permissions-Policy, Referrer-Policy
+	// and nosniff header set further up the handler chain, so the sandbox
+	// headers set in ModifyResponse are the only ones and pages served from
+	// an agent's port keep working as on the tunnel path.
 	for _, k := range portProxyPolicyHeaders {
 		w.Header().Del(k)
 	}

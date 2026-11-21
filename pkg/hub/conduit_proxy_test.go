@@ -101,6 +101,7 @@ func TestConduitProxyThroughSession(t *testing.T) {
 	assert.Empty(t, resp.Header.Get("Set-Cookie"), "the app cannot set hub-origin cookies")
 	assert.Equal(t, agentServedPageSandboxCSP, resp.Header.Get("Content-Security-Policy"))
 	assert.Equal(t, untrustedContentPermissionsPolicy, resp.Header.Get("Permissions-Policy"))
+	assert.Equal(t, "no-referrer", resp.Header.Get("Referrer-Policy"))
 	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 
 	got := <-f.app.got
@@ -128,6 +129,7 @@ func TestConduitProxyReplacesThePagePolicy(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
 	assert.Equal(t, []string{agentServedPageSandboxCSP}, resp.Header.Values("Content-Security-Policy"), "conduit response policies")
 	assert.Equal(t, []string{untrustedContentPermissionsPolicy}, resp.Header.Values("Permissions-Policy"), "conduit response Permissions-Policy headers")
+	assert.Equal(t, []string{"no-referrer"}, resp.Header.Values("Referrer-Policy"), "conduit response Referrer-Policy headers")
 	assert.Equal(t, []string{"nosniff"}, resp.Header.Values("X-Content-Type-Options"), "conduit response nosniff headers")
 
 	// Positive control: the same wrapper does put the page policy on a hub
