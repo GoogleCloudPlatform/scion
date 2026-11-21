@@ -44,7 +44,7 @@
 # an unjustified requirement here becomes an unnecessary install over there.
 #
 # Usage: verify-base-contract.sh
-#   GO_MIN_VERSION   minimum acceptable Go (default 1.26.1; see go.mod)
+#   GO_MIN_VERSION   minimum acceptable Go (default 1.26.11; see go.mod)
 #   NODE_MIN_VERSION minimum acceptable Node major (default 24)
 #   HELM_VERSION     exact helm version the build pinned (unset: presence and
 #                    a working binary are checked, the version is not)
@@ -61,7 +61,7 @@
 
 set -uo pipefail
 
-GO_MIN_VERSION="${GO_MIN_VERSION:-1.26.1}"
+GO_MIN_VERSION="${GO_MIN_VERSION:-1.26.11}"
 NODE_MIN_VERSION="${NODE_MIN_VERSION:-24}"
 GIT_MIN_VERSION="2.48.0" # pkg/util/git.go CheckGitVersion — hard floor, not a preference
 

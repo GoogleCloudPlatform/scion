@@ -371,7 +371,7 @@ if $FULL_DEPLOY; then
     fi
     if [ ! -d /usr/local/go ]; then
         echo "  -> Installing Go..."
-        curl -L https://go.dev/dl/go1.26.1.linux-amd64.tar.gz -o /tmp/go.tar.gz
+        curl -L https://go.dev/dl/go1.26.11.linux-amd64.tar.gz -o /tmp/go.tar.gz
         sudo tar -C /usr/local -xzf /tmp/go.tar.gz
         sudo ln -sf /usr/local/go/bin/go /usr/bin/go
         sudo ln -sf /usr/local/go/bin/gofmt /usr/bin/gofmt

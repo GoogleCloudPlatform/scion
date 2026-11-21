@@ -39,10 +39,11 @@ func openTestRoot(t *testing.T, dir string) *os.Root {
 
 // A subdirectory replaced between the walk reading its entry and opening it
 // fails the walk without blocking, in both users of the walk: by a FIFO
-// (ENOTDIR, never opened); by a link (the trailing separator follows it, and
-// the SameFile check refuses it: ErrDirReplaced); by another directory inside
-// the root (only the SameFile check refuses it: ErrDirReplaced). An
-// unchanged tree walks normally.
+// (ENOTDIR, never opened); by a link outside the root (refused by os.Root
+// before opening); by a link inside the root (the trailing separator follows
+// it within the root, and the SameFile check refuses it: ErrDirReplaced); by
+// another directory inside the root (only the SameFile check refuses it:
+// ErrDirReplaced). An unchanged tree walks normally.
 func TestWalkRoot_SubdirectorySwappedDuringWalk(t *testing.T) {
 	swaps := map[string]func(t *testing.T, p string){
 		"FIFO": func(t *testing.T, p string) {
@@ -53,13 +54,23 @@ func TestWalkRoot_SubdirectorySwappedDuringWalk(t *testing.T) {
 				t.Errorf("mkfifo: %v", err)
 			}
 		},
-		"link": func(t *testing.T, p string) {
+		"link outside": func(t *testing.T, p string) {
 			outside := t.TempDir()
 			writeReadTestFile(t, outside, "outside.txt", "outside\r\n")
 			if err := os.RemoveAll(p); err != nil {
 				t.Error(err)
 			}
 			if err := os.Symlink(outside, p); err != nil {
+				t.Error(err)
+			}
+		},
+		"link inside": func(t *testing.T, p string) {
+			other := filepath.Join(filepath.Dir(p), "other")
+			writeReadTestFile(t, other, "other.txt", "other\r\n")
+			if err := os.RemoveAll(p); err != nil {
+				t.Error(err)
+			}
+			if err := os.Symlink("other", p); err != nil {
 				t.Error(err)
 			}
 		},
@@ -103,7 +114,7 @@ func TestWalkRoot_SubdirectorySwappedDuringWalk(t *testing.T) {
 					err := walk(root, dir)
 					if err == nil {
 						t.Errorf("%s succeeded with sub replaced by a %s during the walk", wname, sname)
-					} else if sname != "FIFO" && !errors.Is(err, ErrDirReplaced) {
+					} else if (sname == "link inside" || sname == "replaced") && !errors.Is(err, ErrDirReplaced) {
 						t.Errorf("%s with sub replaced by a %s: err = %v, want ErrDirReplaced (the SameFile refusal)", wname, sname, err)
 					}
 				})

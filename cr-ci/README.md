@@ -130,7 +130,7 @@ README has the removal plan for when a golangci-lint release ships the fix.
 ## Go module
 
 `cr-ci/` is its own Go module (`github.com/GoogleCloudPlatform/scion/cr-ci`,
-Go 1.26.1), like `extras/*`. It does not import the scion product packages, and
+Go 1.26.11), like `extras/*`. It does not import the scion product packages, and
 the root module's `./...` does not include it. From `cr-ci/`:
 
 ```bash
