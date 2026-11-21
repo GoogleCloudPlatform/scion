@@ -171,6 +171,10 @@ func relayPeerAuthOptions(cfg *config.GlobalConfig, id string, onGCP bool) (rela
 // openRelayDB opens the relay's database access (a var for tests).
 var openRelayDB = relaydb.Open
 
+// Ensure *relaydb.SettingsReader satisfies relayserver.StartupExperimentSource
+// so fresh-install relay startup waits for hub_settings bootstrap.
+var _ relayserver.StartupExperimentSource = (*relaydb.SettingsReader)(nil)
+
 // relayServerConfig builds the relay's configuration from cfg. It reads
 // the relay and conduit settings and builds the relay-peer authenticator
 // from server.hub.conduit.peer_secret; there is no session secret input.

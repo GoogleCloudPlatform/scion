@@ -335,13 +335,14 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Exec" && len(n.Args) >= 2 && listensOn(n.Args[1]) != "" && listensOn(n.Args[1]) != "ConduitChannel" {
 					bad = append(bad, fmt.Sprintf("%s LISTENs on %s (only ConduitChannel)", e.Name(), listensOn(n.Args[1])))
 				}
-				// The settings query names only the experiments section.
-				if hs := experimentsQuery(n, names); hs != nil {
+				// The settings query names only the allowlisted sections
+				// (experimentsSection, and metaSection for existence check).
+				if hs := allowedSettingsQuery(n, names); hs != nil {
 					inQuery[hs] = true
 				}
 				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SectionEQ" {
-					if len(n.Args) != 1 || !isIdent(n.Args[0], "experimentsSection") {
-						bad = append(bad, fmt.Sprintf("%s queries a settings section other than experimentsSection", e.Name()))
+					if len(n.Args) != 1 || (!isIdent(n.Args[0], "experimentsSection") && !isIdent(n.Args[0], "metaSection")) {
+						bad = append(bad, fmt.Sprintf("%s queries a settings section other than experimentsSection/metaSection", e.Name()))
 					}
 				}
 			case *ast.ValueSpec:
@@ -353,6 +354,9 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 				for i, name := range n.Names {
 					if name.Name == "experimentsSection" && (i >= len(n.Values) || !isString(n.Values[i], "experiments")) {
 						bad = append(bad, fmt.Sprintf("%s: experimentsSection is not \"experiments\"", e.Name()))
+					}
+					if name.Name == "metaSection" && (i >= len(n.Values) || !isString(n.Values[i], "_meta")) {
+						bad = append(bad, fmt.Sprintf("%s: metaSection is not \"_meta\"", e.Name()))
 					}
 				}
 			case *ast.SelectorExpr:
@@ -392,7 +396,7 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 		})
 		for _, sel := range settingSels {
 			if !inQuery[sel] {
-				bad = append(bad, fmt.Sprintf("%s uses HubSetting outside X.HubSetting.Query().Where(hubsetting.SectionEQ(experimentsSection))", e.Name()))
+				bad = append(bad, fmt.Sprintf("%s uses HubSetting outside X.HubSetting.Query().Where(hubsetting.SectionEQ(experimentsSection|metaSection))", e.Name()))
 			}
 		}
 	}
@@ -430,10 +434,10 @@ func (s *importScan) entClientFields(t *testing.T) map[string]bool {
 	return out
 }
 
-// experimentsQuery returns the HubSetting selector of call when call is
-// exactly X.HubSetting.Query().Where(hubsetting.SectionEQ(experimentsSection)),
-// else nil.
-func experimentsQuery(call *ast.CallExpr, names map[string]string) *ast.SelectorExpr {
+// allowedSettingsQuery returns the HubSetting selector of call when call is
+// exactly X.HubSetting.Query().Where(hubsetting.SectionEQ(experimentsSection))
+// or X.HubSetting.Query().Where(hubsetting.SectionEQ(metaSection)), else nil.
+func allowedSettingsQuery(call *ast.CallExpr, names map[string]string) *ast.SelectorExpr {
 	where, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok || where.Sel.Name != "Where" || len(call.Args) != 1 {
 		return nil
@@ -451,7 +455,7 @@ func experimentsQuery(call *ast.CallExpr, names map[string]string) *ast.Selector
 		return nil
 	}
 	filter, ok := call.Args[0].(*ast.CallExpr)
-	if !ok || len(filter.Args) != 1 || !isIdent(filter.Args[0], "experimentsSection") {
+	if !ok || len(filter.Args) != 1 || (!isIdent(filter.Args[0], "experimentsSection") && !isIdent(filter.Args[0], "metaSection")) {
 		return nil
 	}
 	eq, ok := filter.Fun.(*ast.SelectorExpr)
@@ -731,6 +735,10 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 		},
 		"relaydb redefines the experiments section": {
 			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nconst experimentsSection = \"server\"\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb redefines the meta section": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nconst metaSection = \"server\"\n"},
 			check: func(s *importScan) []string { return s.relayDBViolations(t) },
 		},
 		"relaydb listens on the global channel": {

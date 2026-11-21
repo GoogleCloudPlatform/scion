@@ -3742,6 +3742,18 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	opsettings.LogDeprecatedServerEnv(envKoanf, slog.Default())
 
 	// --- Every-boot re-sync under advisory lock ---
+	// In external relay mode, seed hub.conduit=true before writing the _meta
+	// bootstrap sentinel so a concurrently starting --role relay never observes
+	// _meta present while experiments is still absent.
+	var beforeMeta func(context.Context) error
+	if cfg != nil && cfg.Hub.Conduit.ExternalRelay() {
+		beforeMeta = func(ctx context.Context) error {
+			if err := seedExternalRelayConduitExperiment(ctx, settingStore); err != nil {
+				return fmt.Errorf("bootstrapping hub.conduit for external relay mode: %w", err)
+			}
+			return nil
+		}
+	}
 	locker, hasLocker := s.(store.AdvisoryLocker)
 	if hasLocker {
 		acquired, release, err := locker.TryAdvisoryLock(ctx, store.LockHubSettingsSeed)
@@ -3749,7 +3761,7 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 			return fmt.Errorf("acquiring hub_settings_seed advisory lock: %w", err)
 		}
 		if acquired {
-			syncErr := syncHubSettings(ctx, settingStore, bootstrapKoanf)
+			syncErr := syncHubSettingsBeforeMeta(ctx, settingStore, bootstrapKoanf, beforeMeta)
 			if rerr := release(); rerr != nil {
 				slog.Error("Failed to release hub_settings_seed advisory lock", "error", rerr)
 			}
@@ -3760,7 +3772,7 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 			log.Println("Hub settings seed lock held by another replica; skipping sync")
 		}
 	} else {
-		if err := syncHubSettings(ctx, settingStore, bootstrapKoanf); err != nil {
+		if err := syncHubSettingsBeforeMeta(ctx, settingStore, bootstrapKoanf, beforeMeta); err != nil {
 			return fmt.Errorf("syncing hub settings: %w", err)
 		}
 	}
@@ -3862,6 +3874,10 @@ func startSettingsPropagation(ctx context.Context, hubSrv *hub.Server, eventPub 
 //
 // Also runs BackfillOrigin for pre-origin rows and writes the _meta sentinel.
 func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoanf *koanf.Koanf) error {
+	return syncHubSettingsBeforeMeta(ctx, s, bootstrapKoanf, nil)
+}
+
+func syncHubSettingsBeforeMeta(ctx context.Context, s store.HubSettingStore, bootstrapKoanf *koanf.Koanf, beforeMeta func(context.Context) error) error {
 	// Backfill origin for rows created before the origin column existed.
 	if err := s.BackfillOrigin(ctx); err != nil {
 		return fmt.Errorf("backfilling origin: %w", err)
@@ -3929,6 +3945,12 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 			return fmt.Errorf("re-syncing section %q: %w", sec.Name, err)
 		}
 		log.Printf("  Re-synced section: %s (content changed)", sec.Name)
+	}
+
+	if beforeMeta != nil {
+		if err := beforeMeta(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Write/update _meta sentinel.

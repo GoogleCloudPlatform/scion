@@ -19,6 +19,7 @@ package relaydb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -77,6 +78,118 @@ func TestSettingsReaderResolvesConduit(t *testing.T) {
 		_ = client.Close()
 		if _, err := (&SettingsReader{client: client}).ConduitEnabled(ctx); err == nil {
 			t.Fatal("no error from a closed database")
+		}
+	})
+}
+
+// TestSettingsReaderConduitEnabledAtStartup verifies that ConduitEnabledAtStartup
+// distinguishes a freshly migrated, unseeded database (neither experiments nor
+// _meta row present) from an initialized hub where hub.conduit is off.
+func TestSettingsReaderConduitEnabledAtStartup(t *testing.T) {
+	ctx := context.Background()
+	exp := func(def bool) *experiments.Registry {
+		r, err := experiments.NewRegistry([]experiments.Experiment{{
+			Name: conduitExperiment, Title: "T", Description: "D", Default: def,
+			Layers: []experiments.Layer{experiments.LayerServer}, Stage: experiments.StageAlpha,
+			Issue: "ptone/scion#1", Owner: "o", ReviewBy: "2027-01-01",
+		}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+
+	for _, tc := range []struct {
+		name    string
+		def     bool
+		expVal  string // "" = no experiments row
+		hasMeta bool
+		want    bool
+		wantErr error
+	}{
+		{
+			name:    "fresh migrated DB (no experiments, no _meta), default off",
+			def:     false,
+			wantErr: ErrHubSettingsNotSeeded,
+		},
+		{
+			name: "fresh migrated DB (no experiments, no _meta), default on",
+			def:  true,
+			want: true,
+		},
+		{
+			name:    "initialized DB (_meta only, e.g. in_process mode), default off",
+			def:     false,
+			hasMeta: true,
+			want:    false,
+		},
+		{
+			name:   "explicit hub.conduit=false without _meta refuses immediately",
+			def:    false,
+			expVal: `{"overrides":{"hub.conduit":false}}`,
+			want:   false,
+		},
+		{
+			name:    "explicit hub.conduit=false with _meta refuses immediately",
+			def:     true,
+			expVal:  `{"overrides":{"hub.conduit":false}}`,
+			hasMeta: true,
+			want:    false,
+		},
+		{
+			name:   "malformed experiments row fails closed immediately",
+			def:    true,
+			expVal: `{"overrides":"yes"}`,
+			want:   false,
+		},
+		{
+			name:   "hub.conduit=true without _meta starts immediately",
+			def:    false,
+			expVal: `{"overrides":{"hub.conduit":true}}`,
+			want:   true,
+		},
+		{
+			name:    "hub.conduit=true with _meta starts immediately",
+			def:     false,
+			expVal:  `{"overrides":{"hub.conduit":true}}`,
+			hasMeta: true,
+			want:    true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := enttest.NewClient(t)
+			if tc.expVal != "" {
+				client.HubSetting.Create().SetSection(experimentsSection).SetValue(json.RawMessage(tc.expVal)).SaveX(ctx)
+			}
+			if tc.hasMeta {
+				client.HubSetting.Create().SetSection(metaSection).SetValue(json.RawMessage(`{"seed_version":"2"}`)).SaveX(ctx)
+			}
+			r := &SettingsReader{client: client, reg: exp(tc.def)}
+			got, err := r.ConduitEnabledAtStartup(ctx)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("ConduitEnabledAtStartup err = %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ConduitEnabledAtStartup unexpected err = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("ConduitEnabledAtStartup = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("unreadable database returns error", func(t *testing.T) {
+		client := enttest.NewClient(t)
+		_ = client.Close()
+		_, err := (&SettingsReader{client: client, reg: exp(false)}).ConduitEnabledAtStartup(ctx)
+		if err == nil {
+			t.Fatal("no error from a closed database")
+		}
+		if errors.Is(err, ErrHubSettingsNotSeeded) {
+			t.Fatalf("closed database returned ErrHubSettingsNotSeeded: %v", err)
 		}
 	})
 }

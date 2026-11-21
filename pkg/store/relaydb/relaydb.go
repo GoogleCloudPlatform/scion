@@ -138,32 +138,43 @@ func Open(ctx context.Context, o Options) (*DB, error) {
 }
 
 // experimentsSection is the hub settings section holding the experiment
-// overrides: the only row the relay reads.
+// overrides.
 const experimentsSection = "experiments"
+
+// metaSection is the hub settings sentinel written by the hub once initial
+// hub_settings bootstrap (including external-relay hub.conduit seeding) has
+// completed. ConduitEnabledAtStartup checks only whether this row exists so
+// the relay can distinguish a freshly migrated, unseeded database from an
+// initialized hub where hub.conduit is off.
+const metaSection = "_meta"
 
 // conduitExperiment is the only experiment the relay reads.
 const conduitExperiment = "hub.conduit"
 
+// ErrHubSettingsNotSeeded is returned by ConduitEnabledAtStartup when
+// hub_settings has neither an experiments row nor the hub's _meta bootstrap
+// sentinel yet, indicating a freshly migrated database whose hub has not
+// finished initial settings bootstrap.
+var ErrHubSettingsNotSeeded = errors.New("hub settings not yet seeded")
+
 // SettingsReader reads the settings on the relay's allowlist: today only
-// hub.conduit. It has no general settings access.
+// hub.conduit (and _meta existence during startup). It has no general settings
+// access.
 type SettingsReader struct {
 	client *ent.Client
 	reg    *experiments.Registry // nil: experiments.Default()
 }
 
-// ConduitEnabled reports whether hub.conduit is on, resolved as the hub
-// resolves it: the experiments section's overrides document (parsed with
-// opsettings.ParseExperimentsDoc) through experiments.Registry.Resolve. No
-// row means no overrides.
-func (r *SettingsReader) ConduitEnabled(ctx context.Context) (bool, error) {
+func (r *SettingsReader) readConduit(ctx context.Context) (enabled, found bool, err error) {
 	row, err := r.client.HubSetting.Query().Where(hubsetting.SectionEQ(experimentsSection)).Only(ctx)
 	var overrides map[string]bool
 	malformed := false
 	switch {
 	case ent.IsNotFound(err):
 	case err != nil:
-		return false, fmt.Errorf("reading hub.conduit: %w", err)
+		return false, false, fmt.Errorf("reading hub.conduit: %w", err)
 	default:
+		found = true
 		doc, bad := opsettings.ParseExperimentsDoc(row.Value)
 		overrides, malformed = doc.Overrides, bad
 	}
@@ -171,5 +182,38 @@ func (r *SettingsReader) ConduitEnabled(ctx context.Context) (bool, error) {
 	if reg == nil {
 		reg = experiments.Default()
 	}
-	return reg.Resolve(conduitExperiment, overrides, malformed), nil
+	return reg.Resolve(conduitExperiment, overrides, malformed), found, nil
+}
+
+// ConduitEnabled reports whether hub.conduit is on, resolved as the hub
+// resolves it: the experiments section's overrides document (parsed with
+// opsettings.ParseExperimentsDoc) through experiments.Registry.Resolve. No
+// row means no overrides.
+func (r *SettingsReader) ConduitEnabled(ctx context.Context) (bool, error) {
+	on, _, err := r.readConduit(ctx)
+	return on, err
+}
+
+// ConduitEnabledAtStartup reports whether hub.conduit is on for relay startup.
+// When the experiments row is present, or when hub.conduit defaults to on, it
+// resolves immediately like ConduitEnabled. When the experiments row is absent
+// and the default is off, it checks whether the hub has written its _meta
+// bootstrap sentinel: if _meta is also absent, it returns
+// ErrHubSettingsNotSeeded so startup retries while the hub finishes first
+// boot; if _meta is present, it re-reads experiments once (closing the window
+// where the hub wrote experiments and _meta concurrently) before reporting off.
+func (r *SettingsReader) ConduitEnabledAtStartup(ctx context.Context) (bool, error) {
+	on, found, err := r.readConduit(ctx)
+	if err != nil || found || on {
+		return on, err
+	}
+	seeded, err := r.client.HubSetting.Query().Where(hubsetting.SectionEQ(metaSection)).Exist(ctx)
+	if err != nil {
+		return false, fmt.Errorf("checking hub settings bootstrap: %w", err)
+	}
+	if !seeded {
+		return false, ErrHubSettingsNotSeeded
+	}
+	on, _, err = r.readConduit(ctx)
+	return on, err
 }
