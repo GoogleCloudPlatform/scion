@@ -132,13 +132,14 @@ type ArtifactLinkCreated struct {
 
 // CreateVersionRequest mirrors the hub's version manifest.
 type CreateVersionRequest struct {
-	Title string         `json:"title,omitempty"`
-	Key   string         `json:"key,omitempty"`
-	Scope string         `json:"scope,omitempty"`
-	Kind  string         `json:"kind,omitempty"`
-	Entry string         `json:"entry"`
-	Note  string         `json:"note,omitempty"`
-	Files []ManifestFile `json:"files"`
+	Title     string         `json:"title,omitempty"`
+	Key       string         `json:"key,omitempty"`
+	Scope     string         `json:"scope,omitempty"`
+	Kind      string         `json:"kind,omitempty"`
+	Entry     string         `json:"entry"`
+	Note      string         `json:"note,omitempty"`
+	Files     []ManifestFile `json:"files"`
+	ExpiresIn string         `json:"expiresIn,omitempty"`
 }
 
 // ManifestFile is one file of a version manifest.
@@ -177,6 +178,9 @@ type PublishArtifactRequest struct {
 	// ContentType is the declared media type; the hub prefers the type
 	// implied by Name's extension.
 	ContentType string
+	// ExpiresIn optionally sets the artifact's retention at publish time
+	// (e.g. "720h", "30d", or "never").
+	ExpiresIn string
 }
 
 // ListArtifactsOptions filters and pages List.
@@ -285,17 +289,18 @@ type ArtifactResponse struct {
 
 // Artifact describes an artifact.
 type Artifact struct {
-	ID         string    `json:"id"`
-	Ref        string    `json:"ref"`
-	ScopeKind  string    `json:"scopeKind"`
-	ScopeRef   string    `json:"scopeRef"`
-	OwnerKind  string    `json:"ownerKind"`
-	OwnerRef   string    `json:"ownerRef"`
-	Key        string    `json:"key,omitempty"`
-	Title      string    `json:"title"`
-	CurrentSeq int       `json:"currentSeq"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	ID         string     `json:"id"`
+	Ref        string     `json:"ref"`
+	ScopeKind  string     `json:"scopeKind"`
+	ScopeRef   string     `json:"scopeRef"`
+	OwnerKind  string     `json:"ownerKind"`
+	OwnerRef   string     `json:"ownerRef"`
+	Key        string     `json:"key,omitempty"`
+	Title      string     `json:"title"`
+	CurrentSeq int        `json:"currentSeq"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	UpdatedAt  time.Time  `json:"updatedAt"`
 	// OwnerDeleted is true when the hub found the artifact's owner gone.
 	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
 }
@@ -357,6 +362,9 @@ func (s *artifactService) Publish(ctx context.Context, req *PublishArtifactReque
 	}
 	if req.Scope != "" {
 		q.Set("scope", req.Scope)
+	}
+	if req.ExpiresIn != "" {
+		q.Set("expires_in", req.ExpiresIn)
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		s.c.transport.BaseURL+"/api/v1/artifacts?"+q.Encode(), req.Content)

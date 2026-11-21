@@ -120,11 +120,18 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("title must be valid UTF-8 of at most %d characters", maxTitleRunes))
 		return
 	}
+	now := time.Now().UTC()
+	limits := b.currentLimits(ctx)
+	expiresAt, explicitExpiry, expErr := resolvePublishExpiry(kind, req.ExpiresIn, limits, now)
+	if expErr != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", expErr)
+		return
+	}
 
 	if key != "" {
 		existing, err := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
 		if err == nil {
-			s.appendVersion(w, r, b, existing, req, &permitted)
+			s.appendVersionWithExpiry(w, r, b, existing, req, &permitted, explicitExpiry, expiresAt, limits.DefaultRetention)
 			return
 		}
 		if !errors.Is(err, ErrNotFound) {
@@ -138,11 +145,10 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
 		return
 	}
-	now := time.Now().UTC()
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
-		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
+		ExpiresAt: retentionExpiry(limits, now),
 	}
 	// The delegating user of an agent creating the artifact, resolved by
 	// the host from the agent's delegation chain (ptone/scion#6028); never
@@ -165,7 +171,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// Another publish took the key first: append to its artifact.
 		existing, lookErr := b.store.GetArtifactByKey(ctx, ScopeKindProject, scope, kind, ref, key)
 		if lookErr == nil {
-			s.appendVersion(w, r, b, existing, req, &permitted)
+			s.appendVersionWithExpiry(w, r, b, existing, req, &permitted, explicitExpiry, expiresAt, limits.DefaultRetention)
 			return
 		}
 		err = lookErr
@@ -175,6 +181,15 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		s.logVersionError(r, a, v.Seq, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
+	}
+	if explicitExpiry {
+		updated, err := s.applyPublishExpiry(ctx, r, b, a, expiresAt, kind, ref)
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: set publish expiry failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not set the artifact expiry")
+			return
+		}
+		a = updated
 	}
 	s.logAllowed(r, logEntry{action: logActionCreated, artifact: a, seq: v.Seq, authority: logAuthorityOwner})
 	s.logSponsorReviewGrants(r, a, grants)
@@ -189,6 +204,10 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 	}
 	if req.Title != "" || req.Key != "" || req.Scope != "" {
 		writeError(w, http.StatusBadRequest, "bad_request", "title, key and scope apply only when creating an artifact")
+		return
+	}
+	if req.ExpiresIn != "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "expiresIn applies only when creating an artifact or publishing by key")
 		return
 	}
 	b, a, _, ok := s.writableArtifact(w, r, id)
@@ -208,6 +227,10 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 // permitted, when not nil, is the caller's Host.Permits answer for
 // artifact.create in a's home scope, already asked.
 func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest, permitted *bool) {
+	s.appendVersionWithExpiry(w, r, b, a, req, permitted, false, nil, 0)
+}
+
+func (s *Service) appendVersionWithExpiry(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest, permitted *bool, explicitExpiry bool, expiresAt *time.Time, defaultRetention time.Duration) {
 	ctx := r.Context()
 	kind, ref, _, _ := s.host.Principal(ctx)
 	var access writeAccess
@@ -234,6 +257,16 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 	if req.Kind == VersionKindReview && a.CurrentSeq == 0 {
 		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
 		return
+	}
+	if explicitExpiry {
+		if a.OwnerKind != kind || a.OwnerRef != ref {
+			writeError(w, http.StatusForbidden, "forbidden", "only the artifact owner may set expiry at publish time")
+			return
+		}
+		if kind == PrincipalKindAgent && defaultRetention > 0 && expiryLengthens(a.ExpiresAt, expiresAt) {
+			writeError(w, http.StatusBadRequest, "bad_request", "cannot lengthen an artifact's expiry when the hub has a default retention")
+			return
+		}
 	}
 	// The open-review check runs after authorization and before the
 	// version number is taken (ptone/scion#6849); reviews are not checked.
@@ -275,6 +308,15 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		s.logVersionError(r, a, v.Seq, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the version")
 		return
+	}
+	if explicitExpiry {
+		updated, err := s.applyPublishExpiry(ctx, r, b, a, expiresAt, kind, ref)
+		if err != nil {
+			slog.ErrorContext(ctx, "artifacts: set publish expiry failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal", "could not set the artifact expiry")
+			return
+		}
+		a = updated
 	}
 	s.logVersion(r, logActionVersionCreated, a, v.Seq, access)
 	writePending(w, a, v, files, warnings...)

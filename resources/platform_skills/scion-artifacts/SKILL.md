@@ -42,6 +42,12 @@ https://hub.example.com/projects/<project-id>/artifacts/5f1c2d3e-6b1a-4c55-9f3e-
   name). It is ignored when a publish adds a version.
 - `--key` is how later publishes find the same artifact. Readers can see it, so
   name the content (`q3-report`), not yourself.
+- `--expires-in` sets how long the artifact is kept (for example `720h`, `30d`,
+  or `never`). It applies when creating an artifact or publishing a new version
+  under `--key`. For agents, the minimum is `24h`, and `never`, a duration
+  longer than the Hub's default retention, or lengthening an existing artifact's
+  expiry under `--key` is allowed only when the Hub has no default retention
+  (`default_retention_days` is `0`).
 - **Folders** are published as a bundle of their regular files. Files and
   folders whose names start with `.` are left out; symbolic links inside the
   folder are refused. Keep sources and build tools outside the folder.
@@ -183,7 +189,9 @@ scion message @reviewer "Design ready for review." --artifact scion://artifact/<
 
 ## What agents cannot do
 
-Sharing, grants, deleting, expiry and moving are for users. In an agent,
+Sharing, grants, deleting and moving are for users (agents can set publish-time
+retention with `--expires-in`, subject to the Hub's limits, but cannot change
+expiry afterwards). In an agent,
 `scion artifact share`, `scion artifact grants` and `scion artifact delete`
 do not exist: they fail with `unknown command "share" for "scion artifact"`
 (or `"grants"`, `"delete"`). That is expected, not an old CLI.
