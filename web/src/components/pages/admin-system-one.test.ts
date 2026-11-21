@@ -346,11 +346,28 @@ describe('scion-page-admin-system-one', () => {
     expect(dialogText).toContain('project.read');
     expect(dialogText).toContain('project.secret_read');
 
-    // Click Run Test
+    const projectSelect = el.shadowRoot?.querySelector('sl-select[name="testProject"]') as
+      | (HTMLElement & { value: string })
+      | null;
+    expect(projectSelect).not.toBeNull();
+    expect(projectSelect?.getAttribute('label')).toBe('Project (required)');
+
+    // Run Test must be disabled until a project is chosen for project_or_hub
     const runBtn = Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find((b) =>
       b.textContent?.includes('Run Test')
     ) as HTMLElement | undefined;
     expect(runBtn).toBeDefined();
+    expect(runBtn?.hasAttribute('disabled')).toBe(true);
+
+    // Choose a project -> Run Test becomes enabled
+    if (projectSelect) {
+      projectSelect.value = 'proj-1';
+      projectSelect.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    }
+    await settle();
+    expect(runBtn?.hasAttribute('disabled')).toBe(false);
+
+    // Click Run Test
     runBtn?.click();
     await settle();
 
@@ -363,5 +380,32 @@ describe('scion-page-admin-system-one', () => {
     expect(resText).toContain('Model unreported');
     expect(resText).toContain('Usage unavailable');
     expect(resText).toContain('resolved: project v2');
+  });
+
+  it('hides project selector and enables Run Test immediately for ADC and owned-key instances', async () => {
+    setFeatureFlag(SYSTEM_ONE_FLAG, true);
+    apiFetch.mockImplementation((path: string) => {
+      if (path === '/api/v1/admin/system-one/adapters') {
+        return Promise.resolve(json({ adapters: SAMPLE_ADAPTERS }));
+      }
+      if (path === '/api/v1/admin/system-one/instances') {
+        return Promise.resolve(json({ instances: SAMPLE_INSTANCES, totalCount: 3 }));
+      }
+      return Promise.reject(new Error(`Unexpected request: ${path}`));
+    });
+
+    const el = await mount();
+    const adcRow = el.shadowRoot?.querySelector('tr[data-instance-name="gemini-adc"]');
+    const testBtn = Array.from(adcRow?.querySelectorAll('sl-button') ?? []).find((b) =>
+      b.textContent?.includes('Test')
+    ) as HTMLElement | undefined;
+    testBtn?.click();
+    await settle();
+
+    expect(el.shadowRoot?.querySelector('sl-select[name="testProject"]')).toBeNull();
+    const runBtn = Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find((b) =>
+      b.textContent?.includes('Run Test')
+    ) as HTMLElement | undefined;
+    expect(runBtn?.hasAttribute('disabled')).toBe(false);
   });
 });

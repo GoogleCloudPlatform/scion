@@ -375,28 +375,31 @@ export class ScionPageAdminSystemOne extends LitElement {
 
     table {
       width: 100%;
+      table-layout: fixed;
       border-collapse: collapse;
     }
 
     th {
       text-align: left;
-      padding: 0.625rem 0.75rem;
-      font-size: 0.75rem;
+      padding: 0.625rem 0.5rem;
+      font-size: 0.7rem;
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.04em;
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-bg-subtle, #f1f5f9);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
-      white-space: nowrap;
+      white-space: normal;
+      line-height: 1.3;
     }
 
     td {
-      padding: 0.75rem 0.75rem;
+      padding: 0.625rem 0.5rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       color: var(--scion-text, #1e293b);
-      font-size: 0.875rem;
+      font-size: 0.8125rem;
       vertical-align: top;
+      overflow-wrap: break-word;
     }
 
     tr:last-child td {
@@ -416,6 +419,10 @@ export class ScionPageAdminSystemOne extends LitElement {
       color: var(--scion-primary, #3b82f6);
       cursor: pointer;
       text-align: left;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100%;
     }
 
     .instance-name-btn:hover {
@@ -424,30 +431,52 @@ export class ScionPageAdminSystemOne extends LitElement {
 
     .mono {
       font-family: var(--scion-font-mono, monospace);
-      font-size: 0.8125rem;
-      overflow-wrap: anywhere;
+      font-size: 0.75rem;
     }
 
-    .endpoint-cell {
-      max-width: 14rem;
+    .endpoint-cell sl-tooltip {
+      display: block;
+      max-width: 100%;
+    }
+
+    .endpoint-text {
+      display: block;
+      width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .actions-cell {
+      white-space: nowrap;
     }
 
     .muted {
       color: var(--scion-text-muted, #64748b);
-      font-size: 0.8125rem;
+      font-size: 0.75rem;
     }
 
     .cell-stack {
       display: flex;
       flex-direction: column;
-      gap: 0.25rem;
+      gap: 0.2rem;
+      min-width: 0;
     }
 
     .row-actions {
       display: flex;
-      gap: 0.375rem;
+      gap: 0.25rem;
       flex-wrap: nowrap;
       align-items: center;
+    }
+
+    .row-actions sl-button::part(base) {
+      padding: 0;
+      font-size: 0.75rem;
+    }
+
+    .row-actions sl-button::part(label) {
+      padding: 0 0.45rem;
     }
 
     .loading-state,
@@ -912,7 +941,7 @@ export class ScionPageAdminSystemOne extends LitElement {
       return;
     }
 
-    if (inst.auth.secretRef?.scope === 'project' && !this.testProjectId) {
+    if (instanceNeedsProjectSelectorForTest(inst) && !this.testProjectId) {
       this.testError = 'Select a project to test a project-scoped named secret.';
       return;
     }
@@ -1091,13 +1120,21 @@ export class ScionPageAdminSystemOne extends LitElement {
     return html`
       <div class="table-container">
         <table>
+          <colgroup>
+            <col style="width: 13%;" />
+            <col style="width: 12%;" />
+            <col style="width: 13%;" />
+            <col style="width: 18%;" />
+            <col style="width: 21%;" />
+            <col style="width: 23%;" />
+          </colgroup>
           <thead>
             <tr>
               <th>Name</th>
               <th>Adapter</th>
               <th>Configured Model</th>
               <th>Endpoint</th>
-              <th>Authentication &amp; Credential Status</th>
+              <th>Auth &amp; Credential Status</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -1134,7 +1171,9 @@ export class ScionPageAdminSystemOne extends LitElement {
                     <span class="mono">${inst.model || '—'}</span>
                   </td>
                   <td class="endpoint-cell">
-                    <span class="mono">${inst.endpoint}</span>
+                    <sl-tooltip content=${inst.endpoint} hoist>
+                      <span class="mono endpoint-text">${inst.endpoint}</span>
+                    </sl-tooltip>
                   </td>
                   <td>
                     <div class="cell-stack">
@@ -1152,18 +1191,16 @@ export class ScionPageAdminSystemOne extends LitElement {
                         : nothing}
                     </div>
                   </td>
-                  <td>
+                  <td class="actions-cell">
                     <div class="row-actions">
                       <sl-button
                         size="small"
                         variant="default"
                         @click=${() => void this.openInspect(inst)}
                       >
-                        <sl-icon slot="prefix" name="eye"></sl-icon>
                         Inspect
                       </sl-button>
                       <sl-button size="small" variant="default" @click=${() => this.openTest(inst)}>
-                        <sl-icon slot="prefix" name="play-circle"></sl-icon>
                         Test
                       </sl-button>
                       <sl-button
@@ -1172,7 +1209,6 @@ export class ScionPageAdminSystemOne extends LitElement {
                         outline
                         @click=${() => this.openDelete(inst)}
                       >
-                        <sl-icon slot="prefix" name="trash"></sl-icon>
                         Delete
                       </sl-button>
                     </div>
@@ -1585,7 +1621,7 @@ export class ScionPageAdminSystemOne extends LitElement {
   private renderTestDialog(): TemplateResult {
     const inst = this.testInstance;
     const needsProject = instanceNeedsProjectSelectorForTest(inst);
-    const projectRequired = inst?.auth.secretRef?.scope === 'project';
+    const runDisabled = this.testRunning || !inst || (needsProject && !this.testProjectId);
 
     return html`
       <sl-dialog
@@ -1595,7 +1631,7 @@ export class ScionPageAdminSystemOne extends LitElement {
       >
         ${inst
           ? html`
-              <div class="form-fields">
+              <div class="form-fields" style="gap: 0.75rem;">
                 <div class="notice-box warning" role="note">
                   <strong>Provider request notice:</strong> This sends one request to the provider
                   and may incur charges.
@@ -1616,13 +1652,11 @@ export class ScionPageAdminSystemOne extends LitElement {
                   ? html`
                       <div>
                         <sl-select
-                          label=${projectRequired
-                            ? 'Project Context (Required)'
-                            : 'Project Context (Optional)'}
+                          label="Project (required)"
                           name="testProject"
                           hoist
                           clearable
-                          ?required=${projectRequired}
+                          required
                           ?disabled=${this.testProjectsLoading}
                           placeholder=${this.testProjectsLoading
                             ? 'Loading visible projects…'
@@ -1643,9 +1677,9 @@ export class ScionPageAdminSystemOne extends LitElement {
                         <p class="field-note">
                           Only projects visible to your account are listed. Testing a
                           <code>project</code> or <code>project_or_hub</code> named secret requires
-                          both <code>project.read</code> and <code>project.secret_read</code>
-                          permission on the selected project before credential access or provider
-                          I/O.
+                          a selected project and both <code>project.read</code> and
+                          <code>project.secret_read</code> permission before credential access or
+                          provider I/O.
                         </p>
                         ${this.testProjectsError
                           ? html`<div class="notice-box danger" role="alert">
@@ -1655,15 +1689,11 @@ export class ScionPageAdminSystemOne extends LitElement {
                       </div>
                     `
                   : nothing}
-                ${this.testError
-                  ? html`<div class="notice-box danger" role="alert">${this.testError}</div>`
-                  : nothing}
-                ${this.testResult ? this.renderProbeResult(inst, this.testResult) : nothing}
 
                 <sl-textarea
                   label="Synthetic Probe Input Text"
                   name="probeText"
-                  rows="2"
+                  rows="1"
                   .value=${this.testProbeText}
                   @sl-input=${(e: Event) => {
                     this.testProbeText = (e.target as HTMLTextAreaElement).value;
@@ -1673,12 +1703,17 @@ export class ScionPageAdminSystemOne extends LitElement {
                 <sl-textarea
                   label="Synthetic Spec (JSON)"
                   name="probeSpec"
-                  rows="4"
+                  rows="3"
                   .value=${this.testSpecText}
                   @sl-input=${(e: Event) => {
                     this.testSpecText = (e.target as HTMLTextAreaElement).value;
                   }}
                 ></sl-textarea>
+
+                ${this.testError
+                  ? html`<div class="notice-box danger" role="alert">${this.testError}</div>`
+                  : nothing}
+                ${this.testResult ? this.renderProbeResult(inst, this.testResult) : nothing}
               </div>
             `
           : nothing}
@@ -1688,7 +1723,7 @@ export class ScionPageAdminSystemOne extends LitElement {
           <sl-button
             variant="primary"
             ?loading=${this.testRunning}
-            ?disabled=${this.testRunning || !inst}
+            ?disabled=${runDisabled}
             @click=${() => void this.runTest()}
           >
             <sl-icon slot="prefix" name="play-circle"></sl-icon>
