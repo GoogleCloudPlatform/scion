@@ -960,9 +960,9 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			tr.SourceKind == store.TriggerSourceKindGitHub &&
 			oldActionType == store.TriggerActionDispatchAgent &&
 			tr.ActionType == store.TriggerActionDispatchAgent &&
-			(req.Action == nil || strings.TrimSpace(req.Action.GithubToken) == "") {
+			req.Action == nil {
 			writeError(w, http.StatusBadRequest, "github_token_required",
-				"set githubToken explicitly to installation or user_preferred when changing a dispatch_agent trigger source to github",
+				"set action.githubToken explicitly to installation or user_preferred when changing a dispatch_agent trigger source to github without an action payload",
 				map[string]any{"field": "action.githubToken"})
 			return
 		}

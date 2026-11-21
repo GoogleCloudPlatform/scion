@@ -1058,7 +1058,11 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		EventID:       ev.ID,
 	}
 	effectiveGitHubToken := da.payload.GithubToken
-	if a.srv.parentAgentUsesInstallationGitHubToken(ctx, da.auth) {
+	parentUsesInst, err := a.srv.parentAgentUsesInstallationGitHubToken(ctx, da.auth)
+	if err != nil {
+		return hubfire.FireOutcome{}, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, da.auth.PrincipalID, err)
+	}
+	if parentUsesInst {
 		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
 	}
 	if effectiveGitHubToken == DispatchAgentGitHubTokenInstallation &&

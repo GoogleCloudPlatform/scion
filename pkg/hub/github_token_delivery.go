@@ -16,10 +16,57 @@ package hub
 
 import (
 	"context"
+	"errors"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// GitHub token delivery policy (Stage 2 design §5.1a).
+//
+// When an agent has AppliedConfig.GitHubTokenPreference == "installation",
+// non-installation GitHub token material (matched by the shared predicate
+// isBlockedInstallationGitHubEnvKey: GITHUB_TOKEN, GH_TOKEN,
+// GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN, SCION_USER_GITHUB_TOKEN)
+// must never reach the agent or its descendants. Every door and its guard:
+//
+//   - Push (create / provision / reprovision):
+//     HTTPAgentDispatcher.buildCreateRequestFor (httpdispatcher.go) ->
+//     deliverGitHubToken (strips blocked env, classifications, resolved
+//     secrets, and as-needed keys before minting) + defense-in-depth noAuth
+//     token guard and noAuthProjectToken reset before
+//     restrictCreateRequestTokenRemote.
+//   - Push (start / restart / resume):
+//     HTTPAgentDispatcher.buildStartEnv (httpdispatcher.go) ->
+//     deliverGitHubToken + defense-in-depth noAuth token guard and
+//     projectToken reset before restrictPersonalTokenRemote.
+//   - Push (env-gather finalize):
+//     HTTPAgentDispatcher.DispatchFinalizeEnv (httpdispatcher.go) ->
+//     filters gathered env keys with isBlockedInstallationGitHubEnvKey.
+//   - Push (as-needed secret second pass):
+//     HTTPAgentDispatcher.resolveAsNeededForKeys (httpdispatcher.go) ->
+//     filters requested keys and resolved secrets with
+//     isBlockedInstallationGitHubEnvKey.
+//   - Pull (runtime secret fetch: GET /api/v1/agents/{id}/secrets/{key} and
+//     POST /api/v1/agent/secrets):
+//     Server.selectRuntimeMaterial (material_selection.go) -> refuses blocked
+//     keys before backend read and again by item.Meta.Target after lookup
+//     (ReasonGitHubTokenInstallationOnly, not_found-indistinguishable across
+//     project and user scopes).
+//   - Pull (secret list endpoints):
+//     Server.agentListSecrets (handlers_env_secrets.go) and
+//     Server.agentListUserSecrets (material_list_user.go) -> omit blocked keys
+//     by Name or Target.
+//   - Descendants (interactive agent-created create):
+//     Server.createAgentInProject (handlers_agents_core.go) ->
+//     agentHasInstallationGitHubTokenPreference (tri-state; fails closed with
+//     HTTP 503 on store lookup error, inherits "installation" otherwise).
+//   - Descendants (headless / trigger-dispatched create):
+//     Server.createAgentHeadless (agent_create_headless.go) and
+//     fireTriggerDispatchAgent (action_dispatch_agent.go) ->
+//     parentAgentUsesInstallationGitHubToken (tri-state; fails closed with
+//     errAgentCreatorUnreadable on store lookup error, forces "installation"
+//     otherwise).
 
 // isGitHubTokenEnvKey reports whether key is a GitHub token environment
 // variable that git's credential helper, gh CLI, or sciontool gh-wrapper
@@ -57,30 +104,37 @@ func usesInstallationGitHubToken(agent *store.Agent) bool {
 }
 
 // agentHasInstallationGitHubTokenPreference reports whether the stored agent
-// with ID agentID carries GitHubTokenPreference == "installation". Used by
-// child-create paths so descendants of an installation-preference agent inherit
-// the preference (fail-closed on lookup error is not needed here because
-// standing checks already refuse unreadable callers, and a missing row has no
-// preference).
-func (s *Server) agentHasInstallationGitHubTokenPreference(ctx context.Context, agentID string) bool {
-	if s == nil || s.store == nil || agentID == "" {
-		return false
+// with ID agentID carries GitHubTokenPreference == "installation".
+//
+// Tri-state: returns (true, nil) when the parent requires installation-only
+// tokens, (false, nil) when agentID is empty or the parent has no installation
+// preference, and (false, err) on any store read failure (including a missing
+// row for a non-empty agentID) so callers fail closed rather than silently
+// dropping inheritance across a transient fault.
+func (s *Server) agentHasInstallationGitHubTokenPreference(ctx context.Context, agentID string) (bool, error) {
+	if agentID == "" {
+		return false, nil
+	}
+	if s == nil || s.store == nil {
+		return false, errors.New("store unavailable")
 	}
 	ag, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
-		return false
+		return false, err
 	}
-	return usesInstallationGitHubToken(ag)
+	return usesInstallationGitHubToken(ag), nil
 }
 
 // parentAgentUsesInstallationGitHubToken reports whether a headless create's
-// agent principal carries GitHubTokenPreference == "installation".
-func (s *Server) parentAgentUsesInstallationGitHubToken(ctx context.Context, auth FireAuthority) bool {
+// agent principal carries GitHubTokenPreference == "installation". Reuses
+// auth.agent when already loaded and falls back to reading the store; any
+// lookup error is returned so callers fail closed.
+func (s *Server) parentAgentUsesInstallationGitHubToken(ctx context.Context, auth FireAuthority) (bool, error) {
 	if auth.PrincipalKind != store.DelegationPrincipalAgent {
-		return false
+		return false, nil
 	}
 	if auth.agent != nil {
-		return usesInstallationGitHubToken(auth.agent)
+		return usesInstallationGitHubToken(auth.agent), nil
 	}
 	return s.agentHasInstallationGitHubTokenPreference(ctx, auth.PrincipalID)
 }

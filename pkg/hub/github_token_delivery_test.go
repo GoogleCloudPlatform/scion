@@ -20,9 +20,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -1068,4 +1071,209 @@ func TestTriggerDispatchAgent_GitHubSourceDefaultInstallationEndToEnd(t *testing
 	require.NotNil(t, ag.AppliedConfig)
 	assert.Equal(t, DispatchAgentGitHubTokenInstallation, ag.AppliedConfig.GitHubTokenPreference)
 	assert.NotContains(t, ag.AppliedConfig.Task, "GitHub access: unavailable")
+}
+
+// githubTokenInheritFaultStore injects a transient GetAgent failure scoped
+// strictly to agentHasInstallationGitHubTokenPreference so standing checks,
+// role-ceiling reads, and owner/ancestry resolution succeed normally.
+type githubTokenInheritFaultStore struct {
+	store.Store
+	armed bool
+}
+
+func githubTokenTestCalledFrom(fn string) bool {
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, fn) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+func (s *githubTokenInheritFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.armed && githubTokenTestCalledFrom("agentHasInstallationGitHubTokenPreference") {
+		return nil, errors.New("injected transient parent lookup fault")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+func TestGitHubTokenInheritance_FailClosedOnParentLookupFault(t *testing.T) {
+	ctx := t.Context()
+
+	setupParent := func(t *testing.T, name, pref string) (*materialFixture, *store.Agent, string, *githubTokenInheritFaultStore) {
+		t.Helper()
+		f := newMaterialFixture(t, name)
+		f.recordAgentEdge(t)
+
+		parent, err := f.Store.GetAgent(ctx, f.AgentID)
+		require.NoError(t, err)
+		if parent.AppliedConfig == nil {
+			parent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		parent.AppliedConfig.AgentRole = string(AgentRoleFull)
+		parent.AppliedConfig.GitHubTokenPreference = pref
+		require.NoError(t, f.Store.UpdateAgent(ctx, parent))
+
+		broker := &store.RuntimeBroker{
+			ID:       api.NewUUID(),
+			Name:     name + "-broker",
+			Slug:     name + "-broker",
+			Endpoint: "http://localhost:9801",
+			Status:   store.BrokerStatusOnline,
+		}
+		require.NoError(t, f.Store.CreateRuntimeBroker(ctx, broker))
+		require.NoError(t, f.Store.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID:  f.ProjectID,
+			BrokerID:   broker.ID,
+			BrokerName: broker.Name,
+			LocalPath:  t.TempDir(),
+			Status:     store.BrokerStatusOnline,
+		}))
+
+		parentToken := mintRecordedMaterialToken(t, f.Server, f.Store, parent.ID, f.ProjectID, ScopesForRole(AgentRoleFull), parent.Ancestry)
+		fs := &githubTokenInheritFaultStore{Store: f.Server.store}
+		f.Server.store = fs
+		return f, parent, parentToken, fs
+	}
+
+	t.Run("interactive_create_fails_closed_on_parent_lookup_error", func(t *testing.T) {
+		f, _, parentToken, fs := setupParent(t, "inherit-fault-int", DispatchAgentGitHubTokenInstallation)
+
+		beforeAudits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentDelegation})
+		require.NoError(t, err)
+
+		fs.armed = true
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost,
+			fmt.Sprintf("/api/v1/projects/%s/agents", f.ProjectID),
+			CreateAgentRequest{Name: "fault-child-int", Task: "subtask"}, parentToken)
+		fs.armed = false
+
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeUnavailable)
+
+		_, err = f.Store.GetAgentBySlug(ctx, f.ProjectID, "fault-child-int")
+		assert.ErrorIs(t, err, store.ErrNotFound, "no child row may be persisted on parent lookup fault")
+
+		afterAudits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentDelegation})
+		require.NoError(t, err)
+		assert.Len(t, afterAudits, len(beforeAudits), "no create audit may be written when child create is refused")
+	})
+
+	t.Run("interactive_create_parent_preference_matrix", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			parentPref string
+			wantPref   string
+		}{
+			{name: "installation_parent_inherits", parentPref: DispatchAgentGitHubTokenInstallation, wantPref: DispatchAgentGitHubTokenInstallation},
+			{name: "user_preferred_parent_unchanged", parentPref: DispatchAgentGitHubTokenUserPreferred, wantPref: ""},
+			{name: "empty_parent_unchanged", parentPref: "", wantPref: ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f, _, parentToken, _ := setupParent(t, "int-mat-"+tc.name[:8], tc.parentPref)
+				rec := doRequestWithAgentToken(t, f.Server, http.MethodPost,
+					fmt.Sprintf("/api/v1/projects/%s/agents", f.ProjectID),
+					CreateAgentRequest{Name: "child-ok", Task: "subtask"}, parentToken)
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+				child, err := f.Store.GetAgentBySlug(ctx, f.ProjectID, "child-ok")
+				require.NoError(t, err)
+				require.NotNil(t, child.AppliedConfig)
+				assert.Equal(t, tc.wantPref, child.AppliedConfig.GitHubTokenPreference)
+			})
+		}
+	})
+
+	headlessReq := func(f *materialFixture, parent *store.Agent, childName, hcToken string) HeadlessCreate {
+		parentClaims := &AgentTokenClaims{
+			ProjectID: f.ProjectID,
+			Scopes:    ScopesForRole(AgentRoleFull),
+			Ancestry:  parent.Ancestry,
+		}
+		parentClaims.Subject = parent.ID
+		parentIdent := &agentIdentityWrapper{parentClaims}
+		resolved := headlessResolvedRole{preCapRole: AgentRoleFull}
+		return HeadlessCreate{
+			ProjectID: f.ProjectID,
+			Authority: FireAuthority{
+				PrincipalKind: store.DelegationPrincipalAgent,
+				PrincipalID:   parent.ID,
+				Revision:      1,
+				// Deliberately leave agent nil to exercise the store-lookup fallback path.
+				Recorded: hubfire.RecordedAuthority{
+					DefinitionKind: hubfire.DefinitionKindTrigger,
+					DefinitionID:   api.NewUUID(),
+					FireID:         api.NewUUID(),
+				},
+			},
+			Identity:    parentIdent,
+			CreatorName: parent.Name,
+			EdgeCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			EdgeProvenance: store.AuthorityProvenance{
+				ProvenanceVersion:           1,
+				SourcePrincipalKind:         store.DelegationPrincipalAgent,
+				SourcePrincipalID:           parent.ID,
+				SourceCredentialKind:        store.SourceCredentialScheduler,
+				SourceEventID:               api.NewUUID(),
+				SourceAuthorizationRevision: 1,
+			},
+			resolvedRole: &resolved,
+			Name:         childName,
+			Task:         "headless subtask",
+			GitHubToken:  hcToken,
+			Detached:     true,
+		}
+	}
+
+	t.Run("headless_create_fails_closed_on_parent_lookup_error", func(t *testing.T) {
+		f, parent, _, fs := setupParent(t, "inherit-fault-hl", DispatchAgentGitHubTokenInstallation)
+
+		beforeAudits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentDelegation})
+		require.NoError(t, err)
+
+		fs.armed = true
+		hcChild, err := f.Server.createAgentHeadless(ctx, headlessReq(f, parent, "fault-child-hl", DispatchAgentGitHubTokenUserPreferred))
+		fs.armed = false
+
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errAgentCreatorUnreadable)
+		assert.Nil(t, hcChild)
+
+		_, err = f.Store.GetAgentBySlug(ctx, f.ProjectID, "fault-child-hl")
+		assert.ErrorIs(t, err, store.ErrNotFound, "no child row may be persisted on parent lookup fault")
+
+		afterAudits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{TargetType: "agent", MutationType: mutationTypeAgentDelegation})
+		require.NoError(t, err)
+		assert.Len(t, afterAudits, len(beforeAudits), "no create audit may be written when headless child create is refused")
+	})
+
+	t.Run("headless_create_parent_preference_matrix", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			parentPref string
+			hcToken    string
+			wantPref   string
+		}{
+			{name: "installation_parent_overrides_user_preferred", parentPref: DispatchAgentGitHubTokenInstallation, hcToken: DispatchAgentGitHubTokenUserPreferred, wantPref: DispatchAgentGitHubTokenInstallation},
+			{name: "user_preferred_parent_keeps_hc_token", parentPref: DispatchAgentGitHubTokenUserPreferred, hcToken: DispatchAgentGitHubTokenUserPreferred, wantPref: DispatchAgentGitHubTokenUserPreferred},
+			{name: "empty_parent_keeps_empty", parentPref: "", hcToken: "", wantPref: ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f, parent, _, _ := setupParent(t, "hl-mat-"+tc.name[:8], tc.parentPref)
+				hcChild, err := f.Server.createAgentHeadless(ctx, headlessReq(f, parent, "hl-child-ok", tc.hcToken))
+				require.NoError(t, err)
+				require.NotNil(t, hcChild)
+				require.NotNil(t, hcChild.AppliedConfig)
+				assert.Equal(t, tc.wantPref, hcChild.AppliedConfig.GitHubTokenPreference)
+			})
+		}
+	})
 }

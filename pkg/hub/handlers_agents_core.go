@@ -1741,7 +1741,15 @@ func (s *Server) createAgentInProject(
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 		// Agent caller: read parent agent's stored role for no-escalation ceiling.
 		parentRole, parentMessageMode = s.callerAgentRoleCeiling(ctx, agentIdent.ID())
-		if s.agentHasInstallationGitHubTokenPreference(ctx, agentIdent.ID()) {
+		parentUsesInst, err := s.agentHasInstallationGitHubTokenPreference(ctx, agentIdent.ID())
+		if err != nil {
+			slog.Warn("Agent create refused: failed to verify parent GitHub token preference",
+				"parent_agent_id", agentIdent.ID(), "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Could not verify parent agent GitHub token preference; retry", nil)
+			return
+		}
+		if parentUsesInst {
 			parentGitHubTokenPref = DispatchAgentGitHubTokenInstallation
 		}
 
