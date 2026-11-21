@@ -208,7 +208,7 @@ func runMetadataStatus() int {
 	} else if usable, err := metadataStatusNetAdminUsable(); err != nil {
 		fmt.Printf("[WARN] skipping the iptables check: %v\n", err)
 	} else if !usable {
-		fmt.Printf("[INFO] iptables rules installed by runtime; verified by probe (%s is not usable by this process)\n", netcap.CapabilityName)
+		fmt.Printf("[INFO] iptables rule not verifiable: %s is not usable by this process\n", netcap.CapabilityName)
 	} else {
 		metadataStatusIPTablesCheck(strconv.Itoa(cfg.Port))
 	}

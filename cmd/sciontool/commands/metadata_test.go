@@ -129,20 +129,24 @@ func setHealthyServerEnv(t *testing.T) {
 	t.Setenv("GCE_METADATA_ROOT", "localhost:"+port)
 }
 
-const installedByRuntime = "[INFO] iptables rules installed by runtime; verified by probe"
+const (
+	installedByRuntime = "[INFO] iptables rules installed by runtime; verified by probe"
+	notVerifiable      = "[INFO] iptables rule not verifiable"
+)
 
-// T1: root without CAP_NET_ADMIN: a neutral INFO, no iptables call.
+// T1: root without CAP_NET_ADMIN and without runtime-managed interception: a
+// neutral INFO, no iptables call.
 func TestRunMetadataStatus_CapabilityDropped_NotVerifiable(t *testing.T) {
 	setNoServerEnv(t)
 	s := withMetadataStatusSeams(t, 0, false, nil, false)
 	var code int
 	out := captureStdout(t, func() { code = runMetadataStatus() })
-	if !strings.Contains(out, installedByRuntime) {
-		t.Errorf("output lacks %q:\n%s", installedByRuntime, out)
+	if !strings.Contains(out, notVerifiable) {
+		t.Errorf("output lacks %q:\n%s", notVerifiable, out)
 	}
-	wantLine := installedByRuntime + " (" + netcap.CapabilityName + " is not usable by this process)\n"
+	wantLine := notVerifiable + ": " + netcap.CapabilityName + " is not usable by this process\n"
 	if !strings.Contains(out, wantLine) {
-		t.Errorf("output lacks the full runtime-installed line %q:\n%s", wantLine, out)
+		t.Errorf("output lacks the full not-verifiable line %q:\n%s", wantLine, out)
 	}
 	if strings.Contains(out, "REDIRECT rule not found") {
 		t.Errorf("output reports the rule missing:\n%s", out)
@@ -175,21 +179,21 @@ func TestRunMetadataStatus_RuntimeSource_ReportsVerifiedByProbe(t *testing.T) {
 	}
 }
 
-// T1 with a healthy server: the runtime-installed path must leave a passing
+// T1 with a healthy server: the not-verifiable path must leave a passing
 // run at exit 0. This is the variant that catches a mutant marking it failed.
 func TestRunMetadataStatus_CapabilityDropped_HealthyServerStillPasses(t *testing.T) {
 	setHealthyServerEnv(t)
 	s := withMetadataStatusSeams(t, 0, false, nil, false)
 	var code int
 	out := captureStdout(t, func() { code = runMetadataStatus() })
-	if !strings.Contains(out, installedByRuntime) {
-		t.Errorf("output lacks %q:\n%s", installedByRuntime, out)
+	if !strings.Contains(out, notVerifiable) {
+		t.Errorf("output lacks %q:\n%s", notVerifiable, out)
 	}
 	if s.iptablesCalls != 0 {
 		t.Errorf("iptables check called %d times, want 0", s.iptablesCalls)
 	}
 	if code != 0 {
-		t.Errorf("exit code = %d, want 0 (a runtime-installed rule is not a failure)", code)
+		t.Errorf("exit code = %d, want 0 (a not-verifiable rule is not a failure)", code)
 	}
 }
 
@@ -219,8 +223,8 @@ func TestRunMetadataStatus_CapabilityUsable_RulePresent(t *testing.T) {
 	if s.iptablesCalls != 1 {
 		t.Errorf("iptables check called %d times, want 1", s.iptablesCalls)
 	}
-	if strings.Contains(out, installedByRuntime) {
-		t.Errorf("output says installed by runtime although the capability is usable:\n%s", out)
+	if strings.Contains(out, notVerifiable) {
+		t.Errorf("output says not verifiable although the capability is usable:\n%s", out)
 	}
 	if !strings.Contains(out, "REDIRECT rule present") {
 		t.Errorf("output lacks the rule-present line:\n%s", out)
