@@ -171,10 +171,10 @@ type ResolveOpts struct {
 	UserScopeCheck func(secret SecretMeta) bool
 }
 
-// ErrValueAccess matches (errors.Is) a FetchResult.Err for a value the
-// backend's external secret store (GCP Secret Manager) could not return,
-// other than not found. GCPBackend.Resolve skips such a secret; a caller
-// that selects through FetchValues may do the same.
+// ErrValueAccess matches (errors.Is) an error for a value the backend's
+// external secret store (GCP Secret Manager) could not return, other than not
+// found. GCPBackend.Resolve fails closed with an error matching ErrValueAccess;
+// a caller that selects through FetchValues sees it per item in FetchResult.Err.
 var ErrValueAccess = errors.New("secret value could not be read from the external secret store")
 
 // FetchResult holds the outcome of fetching one secret's value by its
@@ -267,6 +267,12 @@ type SecretBackend interface {
 	// The opts parameter is optional; pass nil for the current behavior.
 	// When opts.AgentAncestry is present, user-scoped secrets marked allowProgeny
 	// whose creator appears in the ancestry chain are included in the result.
+	//
+	// Resolve fails closed on value read/decrypt errors (returning
+	// *ResolveDecryptError on local decrypt failures and an error matching
+	// ErrValueAccess on external secret store access failures). Only a secret
+	// not found after listing (store.ErrNotFound on local, gRPC codes.NotFound
+	// on GCP Secret Manager) is skipped.
 	Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error)
 
 	// HubID returns the hub instance ID used for hub-scoped secret namespacing.

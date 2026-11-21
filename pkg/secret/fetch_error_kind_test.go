@@ -104,8 +104,8 @@ func (m *unavailableSMClient) AccessSecretVersion(_ context.Context, _ *smpb.Acc
 // TestGCPBackend_FetchValues_AccessErrorIsValueAccess: a Secret Manager
 // value access that fails other than not found is reported by FetchValues
 // as an error matching ErrValueAccess (a permission failure still matches
-// *PermissionError too), the failure GCPBackend.Resolve skips: Resolve
-// returns no error and leaves the secret out.
+// *PermissionError too), and GCPBackend.Resolve fails closed with the same
+// error kind.
 func TestGCPBackend_FetchValues_AccessErrorIsValueAccess(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -151,13 +151,15 @@ func TestGCPBackend_FetchValues_AccessErrorIsValueAccess(t *testing.T) {
 			}
 
 			resolved, err := backend.Resolve(ctx, "", "project-1", "", nil)
-			if err != nil {
-				t.Fatalf("Resolve err = %v, want nil (an access error is skipped)", err)
+			if !errors.Is(err, ErrValueAccess) {
+				t.Fatalf("Resolve err = %v, want ErrValueAccess", err)
 			}
-			for _, r := range resolved {
-				if r.Name == "SM_KEY" {
-					t.Fatalf("Resolve returned SM_KEY despite the access error")
-				}
+			if resolved != nil {
+				t.Fatalf("Resolve returned %d secrets on access error, want nil", len(resolved))
+			}
+			var resolvePermErr *PermissionError
+			if got := errors.As(err, &resolvePermErr); got != tc.permission {
+				t.Fatalf("Resolve errors.As(*PermissionError) = %v, want %v (err %v)", got, tc.permission, err)
 			}
 		})
 	}

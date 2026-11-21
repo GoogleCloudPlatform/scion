@@ -133,6 +133,15 @@ func (b *GCPBackend) Get(ctx context.Context, name, scope, scopeID string) (*Sec
 			if status.Code(err) == codes.NotFound {
 				return nil, store.ErrNotFound
 			}
+			// Under least-privilege prefix-conditioned IAM (legacy grant
+			// removed), every legacy name returns PermissionDenied even when
+			// no secret exists. With no DB record claiming the secret exists,
+			// prefixed NotFound followed by legacy PermissionDenied means not
+			// found.
+			var legacyErr *legacyLookupError
+			if errors.As(err, &legacyErr) && status.Code(err) == codes.PermissionDenied {
+				return nil, store.ErrNotFound
+			}
 		} else {
 			slog.Info("Recovered secret from GCP SM without DB record", "name", name, "scope", scope)
 		}
@@ -232,8 +241,7 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		if status.Code(err) == codes.NotFound {
 			return FetchResult{Err: store.ErrNotFound}
 		}
-		// A Secret Manager access error matches ErrValueAccess, the
-		// failure Resolve skips for this backend.
+		// A Secret Manager access error matches ErrValueAccess.
 		if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
 			return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, permErr)}
 		}
@@ -555,6 +563,14 @@ func (b *GCPBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (
 	return fromStoreSecretMeta(s), nil
 }
 
+// Resolve collects and merges secrets across applicable scopes and progeny.
+//
+// Fail-closed behavior: any Secret Manager read error other than codes.NotFound
+// fails the entire resolution with an error matching ErrValueAccess (and
+// *PermissionError for codes.PermissionDenied), so an agent never starts with a
+// partial secret set. Only codes.NotFound stays soft and is skipped, matching
+// LocalBackend.Resolve's handling of store.ErrNotFound for a secret deleted
+// between metadata listing and value access.
 func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID string, opts *ResolveOpts) ([]SecretWithValue, error) {
 	merged := make(map[string]SecretWithValue)
 
@@ -626,7 +642,15 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
-				continue
+				// Only NotFound stays soft (matching LocalBackend.Resolve's
+				// store.ErrNotFound handling for a secret deleted after listing).
+				// All other Secret Manager errors (permission denied, transient
+				// failures, nil payloads, etc.) fail resolution closed so no
+				// agent starts with a partial secret set.
+				if status.Code(err) == codes.NotFound {
+					continue
+				}
+				return nil, b.wrapResolveAccessError(sc.scope, s.Key, err)
 			}
 
 			secretType := s.SecretType
@@ -699,7 +723,12 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 				secretRef = b.smSecretPath(smName)
 			}
 			if err != nil {
-				continue
+				// Only NotFound stays soft (deleted after listing); all other
+				// Secret Manager errors fail resolution closed.
+				if status.Code(err) == codes.NotFound {
+					continue
+				}
+				return nil, b.wrapResolveAccessError(s.Scope, s.Key, err)
 			}
 
 			secretType := s.SecretType
@@ -739,6 +768,17 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 		result = append(result, sv)
 	}
 	return DeduplicateByTarget(result), nil
+}
+
+// wrapResolveAccessError wraps a non-NotFound Secret Manager access error
+// returned during Resolve so callers can detect it via errors.Is(err,
+// ErrValueAccess) and, for permission failures, errors.As(err, &permErr).
+// It names only the secret scope and key, never any secret value.
+func (b *GCPBackend) wrapResolveAccessError(scope, key string, err error) error {
+	if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
+		return fmt.Errorf("%w: %s/%s: %w", ErrValueAccess, scope, key, permErr)
+	}
+	return fmt.Errorf("%w: %s/%s: %w", ErrValueAccess, scope, key, err)
 }
 
 // accessLatestVersion retrieves the latest version of a secret from GCP SM.
@@ -835,12 +875,26 @@ func (b *GCPBackend) legacyGCPSecretName(name, scope, scopeID string) string {
 	return sanitizeSecretID(fmt.Sprintf("scion-%s-%s-%s", scope, shortHash, name))
 }
 
+// legacyLookupError wraps an error returned from the legacy (pre-prefix)
+// Secret Manager name fallback in accessSecretByComputedName so callers with
+// no DB record claiming the secret exists can distinguish a legacy-name IAM
+// denial (expected under least-privilege prefix-conditioned IAM) from a
+// prefixed-name failure.
+type legacyLookupError struct {
+	err error
+}
+
+func (e *legacyLookupError) Error() string { return e.err.Error() }
+func (e *legacyLookupError) Unwrap() error { return e.err }
+
 // accessSecretByComputedName tries the current hub-prefixed GCP SM name first
 // and, only if that is not found, falls back to the legacy (pre-prefix) name,
 // logging a WARN on a legacy hit. It is used whenever a secret must be looked
 // up without a stored DB SecretRef to guide the lookup (a DB-less recovery
 // read, or a Resolve() pass over a record that predates SecretRef being
-// persisted). Returns the value and the GCP SM secret ID that resolved it.
+// persisted). Only a NotFound on both names is reported as NotFound; any
+// non-NotFound legacy lookup error is returned wrapped in *legacyLookupError.
+// Returns the value and the GCP SM secret ID that resolved it.
 func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope, scopeID string) (value, smName string, err error) {
 	prefixedName := b.gcpSecretName(name, scope, scopeID)
 	value, err = b.accessLatestVersion(ctx, prefixedName)
@@ -854,11 +908,11 @@ func (b *GCPBackend) accessSecretByComputedName(ctx context.Context, name, scope
 	legacyName := b.legacyGCPSecretName(name, scope, scopeID)
 	value, legacyErr := b.accessLatestVersion(ctx, legacyName)
 	if legacyErr != nil {
-		if errors.Is(legacyErr, errNilSecretPayload) {
-			return "", "", legacyErr
+		if status.Code(legacyErr) != codes.NotFound {
+			return "", "", &legacyLookupError{err: legacyErr}
 		}
-		// Neither name resolved; surface the prefixed-name error since that is
-		// the current/expected name.
+		// Neither name exists; surface the prefixed-name NotFound error since
+		// that is the current/expected name.
 		return "", "", err
 	}
 	slog.Warn("resolved secret via legacy (pre hub-prefix) GCP SM name; run `scion hub secret migrate-names` to migrate",
