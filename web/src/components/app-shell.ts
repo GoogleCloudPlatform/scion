@@ -59,6 +59,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/admin/users': 'Users',
   '/admin/groups': 'Groups',
   '/admin/server-config': 'Server Config',
+  '/admin/branding': 'Branding',
   '/admin/federation': 'Federation',
   '/admin/integrations': 'Integrations',
   '/admin/roles': 'Roles',
