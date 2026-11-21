@@ -1372,24 +1372,141 @@ class CopilotAgentPluginsTest(BaseTelemetryTest):
         provision.provision(self.ctx())
         self.assertEqual(self.cli.calls, [])
 
-    def test_auth_file_config_rewrite_reinstalls(self) -> None:
-        # An auth-file provision writes the staged COPILOT_CONFIG over
-        # config.json on every start, dropping installedPlugins.
+    def _stage_auth_file_secret(self, payload: dict | str) -> str:
         secret = os.path.join(self.bundle, "secrets", "COPILOT_CONFIG")
-        os.makedirs(os.path.dirname(secret))
+        os.makedirs(os.path.dirname(secret), exist_ok=True)
         with open(secret, "w", encoding="utf-8") as f:
-            json.dump({"copilot_tokens": {"https://github.com:octo": "placeholder-token"}}, f)
-        with open(os.path.join(self.inputs, "auth-candidates.json"), "w") as f:
+            if isinstance(payload, str):
+                f.write(payload)
+            else:
+                json.dump(payload, f)
+        with open(os.path.join(self.inputs, "auth-candidates.json"), "w", encoding="utf-8") as f:
             json.dump({"schema_version": 1, "file_secret_files": {
                 "COPILOT_CONFIG": "$HOME/.scion/harness/secrets/COPILOT_CONFIG"}}, f)
+        return secret
+
+    def test_auth_file_config_rewrite_carries_installed_plugins(self) -> None:
+        # Regression (ptone/scion#5024): an auth-file provision rewrites
+        # config.json from COPILOT_CONFIG on every start, but carries
+        # installedPlugins across so plugins do not reinstall each start.
+        self._stage_auth_file_secret({"copilot_tokens": {"https://github.com:octo": "placeholder-token-1"}})
         self.stage({"a": "d1"})
         provision.provision(self.ctx())
-        self.assertIn("installedPlugins", self.config())
-        self.assertIn("copilot_tokens", self.config())
+        self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["a"])
+        self.assertEqual(self.config()["copilot_tokens"], {"https://github.com:octo": "placeholder-token-1"})
+
+        # A subsequent start (even with a refreshed secret) takes the fast path.
+        self._stage_auth_file_secret({"copilot_tokens": {"https://github.com:octo": "placeholder-token-2"}})
         self.cli.calls.clear()
         provision.provision(self.ctx())
-        self.assertEqual(self.cli.calls[-1], ["copilot", "plugin", "install", self.bundle_dir("a")])
-        self.assertIn("copilot_tokens", self.config())
+        self.assertEqual(self.cli.calls, [])
+        self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["a"])
+        self.assertEqual(self.config()["copilot_tokens"], {"https://github.com:octo": "placeholder-token-2"})
+        self.assertIn(os.path.join(self.tmp, "workspace"), self.config()["trustedFolders"])
+
+    def test_auth_file_deferred_tail_plugins_complete_on_next_start(self) -> None:
+        # Regression (ptone/scion#5024): when the plugin time budget defers
+        # tail plugins on start 1, start 2 keeps start 1's installedPlugins and
+        # installs only the deferred tail rather than reinstalling from scratch.
+        self._stage_auth_file_secret({"copilot_tokens": {"https://github.com:octo": "placeholder-token"}})
+        self.stage({"a": "d1", "b": "d1"})
+        provision._write_copilot_config_file(self.ctx())
+        provision._ensure_settings(self.ctx())
+        # Start 1: clock advances past budget after installing "a", deferring "b".
+        ticks = iter([0.0, 0.0, 1.0, 25.0, 25.0])
+        self.reconcile(budget_s=20.0, clock=lambda: next(ticks))
+        self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["a"])
+        self.assertEqual([s["name"] for s in self.status()["skipped"]], ["b"])
+
+        # Start 2: full provision() preserves "a" and installs only "b".
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual(self.cli.calls, [
+            ["copilot", "--version"],
+            ["copilot", "plugin", "install", self.bundle_dir("b")],
+        ])
+        self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["a", "b"])
+
+        # Start 3: steady state makes zero CLI calls.
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual(self.cli.calls, [])
+
+    def test_auth_file_carries_empty_installed_plugins_over_stale_secret(self) -> None:
+        # When COPILOT_CONFIG itself was captured with a stale installedPlugins
+        # (including case-variant spelling or leading // comment lines), the
+        # container's live installedPlugins list (including [] after uninstall)
+        # wins, and 0600 permissions on config.json are preserved.
+        ws = os.path.join(self.tmp, "workspace")
+        raw_secret = (
+            "// captured config\n"
+            + json.dumps({
+                "copilot_tokens": {"https://github.com:octo": "placeholder-token"},
+                "trustedFolders": [ws],
+                "InstalledPlugins": [{"name": "stale", "marketplace": "", "enabled": True}],
+            })
+        )
+        self._stage_auth_file_secret(raw_secret)
+        self.stage({"a": "d1"})
+        provision.provision(self.ctx())
+        self.assertIn("a", [e["name"] for e in self.config()["installedPlugins"]])
+
+        # Removing "a" cleanly uninstalls via the CLI (registration survived
+        # _write_copilot_config_file) rather than hitting "not installed".
+        self.stage({})
+        self.cli.calls.clear()
+        infos: list[str] = []
+        provision.provision(self.ctx(infos=infos))
+        self.assertEqual(self.cli.calls, [
+            ["copilot", "--version"],
+            ["copilot", "plugin", "uninstall", "a@"],
+        ])
+        self.assertFalse(any("plugin no longer registered" in m for m in infos), infos)
+
+        # Clear any stale entry too, leaving installedPlugins: [], then restart:
+        # the empty list overrides InstalledPlugins from the staged secret.
+        data = self.config()
+        data["installedPlugins"] = []
+        self.cli._save(self.copilot_home, data)
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual(self.cli.calls, [])
+        self.assertEqual(self.config()["installedPlugins"], [])
+        self.assertNotIn("InstalledPlugins", self.config())
+        self.assertEqual(os.stat(self.config_path).st_mode & 0o777, 0o600)
+
+    def test_auth_file_unreadable_existing_config_reinstalls(self) -> None:
+        self._stage_auth_file_secret({"copilot_tokens": {"https://github.com:octo": "placeholder-token"}})
+        self.stage({"a": "d1"})
+        provision.provision(self.ctx())
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write('{"copilot_tokens": ')
+        self.cli.calls.clear()
+        provision.provision(self.ctx())
+        self.assertEqual(self.cli.calls, [
+            ["copilot", "--version"],
+            ["copilot", "plugin", "install", self.bundle_dir("a")],
+        ])
+        self.assertEqual([e["name"] for e in self.config()["installedPlugins"]], ["a"])
+
+    def test_auth_file_long_int_secret_with_existing_plugins_falls_back_cleanly(self) -> None:
+        # A staged secret with an integer past Python's 4300-digit conversion
+        # limit cannot be re-serialized by json.dumps; _write_copilot_config_file
+        # copies it unchanged rather than raising ValueError.
+        self._stage_auth_file_secret({"copilot_tokens": {"https://github.com:octo": "placeholder-token"}})
+        self.stage({"a": "d1"})
+        provision.provision(self.ctx())
+        long_int_secret = (
+            '{"copilot_tokens": {"https://github.com:octo": "placeholder-token"}, "n": '
+            + "1" * 5000 + "}"
+        )
+        self._stage_auth_file_secret(long_int_secret)
+        self.stage({})
+        # Clear plugin state so Copilot CLI is not invoked on the long-int file.
+        os.remove(os.path.join(self.home, ".scion", "agent-plugins", "state-copilot.json"))
+        provision.provision(self.ctx())
+        with open(self.config_path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), long_int_secret)
 
     def test_provision_reconciles_after_ensure_settings(self) -> None:
         self.stage({"a": "d1"})
