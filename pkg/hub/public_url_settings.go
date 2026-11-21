@@ -233,7 +233,7 @@ func (s *Server) auditEndpointURLChange(ctx context.Context, key, surface, befor
 func (s *Server) auditEndpointURLNotApplied(ctx context.Context, key, surface, before, after string, cause error) {
 	slog.Error("Hub endpoint setting change was recorded but not written",
 		"key", key, "new", after, "error", cause)
-	rec := &store.MutationAuditRecord{
+	s.emitMutationAuditSync(ctx, &store.MutationAuditRecord{
 		MutationType:  gcpIAMNotAppliedMutation, // hub_setting_update_not_applied
 		TargetType:    gcpIAMAuditTarget,
 		TargetID:      key,
@@ -241,18 +241,5 @@ func (s *Server) auditEndpointURLNotApplied(ctx context.Context, key, surface, b
 		AfterSummary:  after,
 		ExecutorKind:  gcpIAMSurfaceKind,
 		ExecutorID:    surface,
-	}
-	auditActorFromContext(ctx).ApplyActor(rec)
-	rec.Timestamp = time.Now().UTC()
-	if s.store == nil {
-		slog.Warn("failed to emit mutation audit record",
-			"mutation_type", rec.MutationType, "error", "no store")
-		return
-	}
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
-	defer cancel()
-	if err := s.store.CreateMutationAudit(writeCtx, rec); err != nil {
-		slog.Warn("failed to emit mutation audit record",
-			"mutation_type", rec.MutationType, "error", err)
-	}
+	})
 }
