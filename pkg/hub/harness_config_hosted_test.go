@@ -523,15 +523,21 @@ func TestDispatch_HostedGCSByBrokerProfileType(t *testing.T) {
 		profiles map[string]string
 		profile  string
 		refused  bool
+		// unknown: the hub cannot tell the runtime. gcs in agent config is
+		// left to the broker, which checks it again with its real runtime;
+		// a project harness config's hydrated copy is not checked by the
+		// broker, so the hub refuses it.
+		unknown bool
 	}{
-		{"docker profile", map[string]string{"local": "docker"}, "local", true},
-		{"podman default profile", map[string]string{"only": "podman"}, "", true},
-		{"kubernetes profile", map[string]string{"k8s-prod": "kubernetes"}, "k8s-prod", false},
-		{"k8s alias", map[string]string{"gke": "k8s"}, "gke", false},
-		{"remote alias", map[string]string{"r": "remote"}, "r", false},
-		{"profile type not reported", map[string]string{"blank": ""}, "blank", false},
-		{"profile not on the broker", map[string]string{"local": "docker"}, "missing", false},
-		{"broker reports no profiles", nil, "", false},
+		{"docker profile", map[string]string{"local": "docker"}, "local", true, false},
+		{"podman default profile", map[string]string{"only": "podman"}, "", true, false},
+		{"kubernetes profile", map[string]string{"k8s-prod": "kubernetes"}, "k8s-prod", false, false},
+		{"k8s alias", map[string]string{"gke": "k8s"}, "gke", false, false},
+		{"remote alias", map[string]string{"r": "remote"}, "r", false, false},
+		{"profile type not reported", map[string]string{"blank": ""}, "blank", false, true},
+		{"profile not on the broker", map[string]string{"local": "docker"}, "missing", false, true},
+		{"broker reports no profiles", nil, "", false, true},
+		{"several profiles, none named", map[string]string{"a": "docker", "b": "kubernetes"}, "", false, true},
 	}
 	for _, src := range []string{"agent config", "harness config"} {
 		for _, tc := range cases {
@@ -547,9 +553,12 @@ func TestDispatch_HostedGCSByBrokerProfileType(t *testing.T) {
 				err := d.DispatchAgentStart(ctx, a, "task", false)
 				var refusal *RuntimeTargetRefusal
 				isRefusal := errors.As(err, &refusal) && refusal.Code == hostedguard.ErrorCode
-				if tc.refused {
+				if tc.refused || (tc.unknown && src == "harness config") {
 					require.True(t, isRefusal, "refused: %v", err)
 					assert.Contains(t, refusal.Message, "only for agents run on Kubernetes")
+					if tc.unknown {
+						assert.Contains(t, refusal.Message, "runtime could not be determined")
+					}
 					assert.Contains(t, refusal.Message, src)
 					assert.NotContains(t, refusal.Message, "member-bucket")
 					assert.False(t, m.startCalled, "no broker call")

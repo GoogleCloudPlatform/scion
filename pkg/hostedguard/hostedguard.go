@@ -42,8 +42,15 @@ const (
 )
 
 // RuntimeKubernetes is the runtime kind for agents run on Kubernetes.
-// Pass "" as the runtime kind when the runtime is not known (Hub side).
+// Pass "" as the runtime kind when the runtime is not known (Hub side) and
+// the Runtime Broker checks the same content again with its real runtime.
 const RuntimeKubernetes = "kubernetes"
+
+// RuntimeUndetermined is the runtime kind for content no later check sees
+// when the runtime could not be determined (a Hub-hydrated harness config,
+// which the Runtime Broker does not check): gcs is refused, since nothing
+// would decide it with the real runtime.
+const RuntimeUndetermined = "undetermined"
 
 // Origin names where checked content came from, for the error message.
 type Origin struct {
@@ -102,8 +109,9 @@ func CheckMemberConfig(cfg *api.ScionConfig, o Origin, runtimeKind string) error
 const volumeRemedy = "use a project shared directory or ask the server operator to configure the volume"
 
 // checkVolumes applies the volume rule: every member-written volume is
-// refused except gcs on Kubernetes. When the runtime is not known, gcs is
-// let through and the Runtime Broker decides.
+// refused except gcs on Kubernetes. When the runtime is not known (""), gcs
+// is let through and the Runtime Broker decides; RuntimeUndetermined refuses
+// it.
 func checkVolumes(vols []api.VolumeMount, o Origin, runtimeKind string) error {
 	for _, v := range vols {
 		reason := volumeRefusal(v, o, runtimeKind)
@@ -127,6 +135,9 @@ func volumeRefusal(v api.VolumeMount, o Origin, runtimeKind string) string {
 		}
 		if runtimeKind == "" || runtimeKind == RuntimeKubernetes {
 			return ""
+		}
+		if runtimeKind == RuntimeUndetermined {
+			return fmt.Sprintf("gcs volumes in %s are allowed on a hosted server only for agents run on Kubernetes, and this agent's runtime could not be determined; %s", o, volumeRemedy)
 		}
 		return fmt.Sprintf("gcs volumes in %s are allowed on a hosted server only for agents run on Kubernetes; %s", o, volumeRemedy)
 	case "nfs", "cloudrun-volume", "gke-shared-volume":

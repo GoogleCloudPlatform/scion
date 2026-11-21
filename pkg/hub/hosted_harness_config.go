@@ -206,14 +206,19 @@ func writeImportContentRefusal(w http.ResponseWriter, err error) bool {
 
 // checkStoredHostedHarnessConfig checks, at dispatch, the stored config.yaml
 // of the hub harness config id an agent is dispatched with, for runtimeKind
-// ("" when not known; hostedRuntimeKind). Only a
-// project-scope harness config on a hosted hub is checked. A record that no
-// longer exists, has no config.yaml, or a hub without storage is left to the
-// dispatch (the broker cannot hydrate it either); a storage read error fails
-// the dispatch.
+// (hostedRuntimeKind). Only a project-scope harness config on a hosted hub is
+// checked. The broker does not check the copy it hydrates from the hub, so
+// this is the only runtime-dependent check of it: when the runtime kind is
+// not known ("") the check fails closed (hostedguard.RuntimeUndetermined, so
+// gcs is refused). A record that no longer exists, has no config.yaml, or a
+// hub without storage is left to the dispatch (the broker cannot hydrate it
+// either); a storage read error fails the dispatch.
 func (s *Server) checkStoredHostedHarnessConfig(ctx context.Context, id, runtimeKind string) error {
 	if s.workstation || id == "" {
 		return nil
+	}
+	if runtimeKind == "" {
+		runtimeKind = hostedguard.RuntimeUndetermined
 	}
 	hc, err := s.store.GetHarnessConfig(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {

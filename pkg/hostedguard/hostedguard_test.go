@@ -53,6 +53,8 @@ func TestCheckMemberConfig_Volumes(t *testing.T) {
 		{name: "gcs mixed case on docker", vol: api.VolumeMount{Type: "Gcs", Bucket: "b", Target: "/b"}, runtimeKind: "docker", wantRefused: true, wantReason: "volume type must be spelled"},
 		{name: "gcs padded runtime unknown", vol: api.VolumeMount{Type: " gcs", Bucket: "b", Target: "/b"}, wantRefused: true, wantReason: "volume type must be spelled"},
 		{name: "gcs runtime unknown", vol: api.VolumeMount{Type: "gcs", Bucket: "b", Target: "/b"}},
+		{name: "gcs runtime undetermined", vol: api.VolumeMount{Type: "gcs", Bucket: "b", Target: "/b"}, runtimeKind: RuntimeUndetermined, wantRefused: true, wantReason: "runtime could not be determined"},
+		{name: "host bind runtime undetermined", vol: api.VolumeMount{Source: "/etc", Target: "/e"}, runtimeKind: RuntimeUndetermined, wantRefused: true, wantReason: "host volumes"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
