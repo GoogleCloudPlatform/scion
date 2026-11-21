@@ -3431,6 +3431,10 @@ func TestNormalizeFireSkipReason_CompileBudgetExhaustedAndAgentNameInUse(t *test
 		trigger.NormalizeFireSkipReason("agent name in use"))
 	assert.Equal(t, trigger.FireSkipReasonAgentNameInUse,
 		trigger.NormalizeFireSkipReason("  agent name in use  "))
+	assert.Equal(t, trigger.FireSkipReasonCommentRateLimited,
+		trigger.NormalizeFireSkipReason("comment rate limited"))
+	assert.Equal(t, trigger.FireSkipReasonCommentRateLimited,
+		trigger.NormalizeFireSkipReason("  comment rate limited  "))
 	assert.Equal(t, trigger.FireSkipReasonOther,
 		trigger.NormalizeFireSkipReason("some free-text error"))
 }

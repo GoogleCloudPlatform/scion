@@ -83,6 +83,7 @@ const (
 	FireSkipReasonRuleNoLongerCompiles       = "rule_no_longer_compiles"
 	FireSkipReasonSubjectBusy                = "subject_busy"
 	FireSkipReasonAgentNameInUse             = "agent_name_in_use"
+	FireSkipReasonCommentRateLimited         = "comment_rate_limited"
 	FireSkipReasonOther                      = "other"
 )
 
@@ -98,6 +99,7 @@ func FireSkipReasons() []string {
 		FireSkipReasonRuleNoLongerCompiles,
 		FireSkipReasonSubjectBusy,
 		FireSkipReasonAgentNameInUse,
+		FireSkipReasonCommentRateLimited,
 		FireSkipReasonOther,
 	}
 }
@@ -120,6 +122,8 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonSubjectBusy
 	case "agent name in use":
 		return FireSkipReasonAgentNameInUse
+	case "comment rate limited":
+		return FireSkipReasonCommentRateLimited
 	default:
 		return FireSkipReasonOther
 	}

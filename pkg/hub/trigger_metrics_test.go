@@ -245,15 +245,21 @@ func TestOTelTriggerMetrics_SkippedFireReasonsCompileBudgetAndAgentNameInUse(t *
 		trigger.NormalizeFireSkipReason("agent name in use"),
 	)
 	rec.RecordTriggerFire(
+		store.TriggerActionGitHubComment,
+		store.TriggerFireStatusSkipped,
+		trigger.NormalizeFireSkipReason("comment rate limited"),
+	)
+	rec.RecordTriggerFire(
 		store.TriggerActionMessage,
 		store.TriggerFireStatusSkipped,
 		"unrecognized free-text skip reason",
 	)
 
-	// Verify snapshot counts preserve both new reasons and bucket unknown text as "other".
+	// Verify snapshot counts preserve all new reasons and bucket unknown text as "other".
 	s := snap.GetSnapshot()
 	assert.Equal(t, int64(1), s.Fires.SkippedByReason[trigger.FireSkipReasonRuleCompileBudgetExhausted])
 	assert.Equal(t, int64(1), s.Fires.SkippedByReason[trigger.FireSkipReasonAgentNameInUse])
+	assert.Equal(t, int64(1), s.Fires.SkippedByReason[trigger.FireSkipReasonCommentRateLimited])
 	assert.Equal(t, int64(1), s.Fires.SkippedByReason[trigger.FireSkipReasonOther])
 
 	// Verify OTel counter exports the exact same reason labels.
@@ -271,5 +277,6 @@ func TestOTelTriggerMetrics_SkippedFireReasonsCompileBudgetAndAgentNameInUse(t *
 	}
 	assert.Equal(t, int64(1), gotByReason[trigger.FireSkipReasonRuleCompileBudgetExhausted])
 	assert.Equal(t, int64(1), gotByReason[trigger.FireSkipReasonAgentNameInUse])
+	assert.Equal(t, int64(1), gotByReason[trigger.FireSkipReasonCommentRateLimited])
 	assert.Equal(t, int64(1), gotByReason[trigger.FireSkipReasonOther])
 }
