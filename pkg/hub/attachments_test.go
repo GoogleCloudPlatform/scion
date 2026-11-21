@@ -154,6 +154,71 @@ func TestSanitizeFilename_RejectsPeersOfBlockedExtensions(t *testing.T) {
 	}
 }
 
+// Windows shell-integration files trigger system actions (shortcut resolution,
+// registry merge, setup/console execution, Explorer search/library handlers) on
+// open rather than acting as passive documents. Pin the full class across
+// case variants, double extensions, and trailing-character normalisation.
+func TestSanitizeFilename_RejectsWindowsShellIntegrationExtensions(t *testing.T) {
+	cases := []struct {
+		name    string
+		wantExt string
+	}{
+		// Base extensions (existing and newly added).
+		{"shortcut.lnk", ".lnk"},
+		{"bookmark.url", ".url"},
+		{"pinned.website", ".website"},
+		{"desktop.scf", ".scf"},
+		{"merge.reg", ".reg"},
+		{"setup.inf", ".inf"},
+		{"applet.cpl", ".cpl"},
+		{"console.msc", ".msc"},
+		{"prefs.settingcontent-ms", ".settingcontent-ms"},
+		{"docs.library-ms", ".library-ms"},
+		{"connector.searchconnector-ms", ".searchconnector-ms"},
+		{"saved.search-ms", ".search-ms"},
+		{"clickonce.application", ".application"},
+		{"clickonce.appref-ms", ".appref-ms"},
+		// Case-insensitivity.
+		{"SHORTCUT.LNK", ".lnk"},
+		{"Setup.INF", ".inf"},
+		{"Console.MSC", ".msc"},
+		{"Docs.Library-MS", ".library-ms"},
+		{"Query.searchConnector-ms", ".searchconnector-ms"},
+		{"Saved.SEARCH-MS", ".search-ms"},
+		{"Pinned.Website", ".website"},
+		// Double extensions.
+		{"report.pdf.lnk", ".lnk"},
+		{"invoice.docx.url", ".url"},
+		{"setup.txt.inf", ".inf"},
+		{"admin.log.msc", ".msc"},
+		{"archive.zip.library-ms", ".library-ms"},
+		{"results.pdf.searchConnector-ms", ".searchconnector-ms"},
+		{"notes.md.scf", ".scf"},
+		{"export.csv.reg", ".reg"},
+		// Trailing/invisible normalisation.
+		{"setup.inf ", ".inf"},
+		{"console.msc.", ".msc"},
+		{"docs.library-ms\u200b", ".library-ms"},
+	}
+	for _, tc := range cases {
+		_, err := SanitizeFilename(tc.name)
+		require.Error(t, err, "SanitizeFilename(%q) was accepted", tc.name)
+		assert.Equal(t, "files with a "+tc.wantExt+" extension are not accepted", err.Error(), "for %q", tc.name)
+
+		_, err = ClassifyAttachment(tc.name, []byte("plain text content\n"))
+		require.Error(t, err, "ClassifyAttachment(%q) was accepted", tc.name)
+		assert.Equal(t, "files with a "+tc.wantExt+" extension are not accepted", err.Error(), "for %q", tc.name)
+	}
+
+	// Only the effective final extension is blocked; benign files that happen
+	// to contain a blocked token earlier in the name remain accepted.
+	for _, allowed := range []string{"notes.lnk.txt", "readme.inf.md", "audit.msc.log"} {
+		name, err := SanitizeFilename(allowed)
+		require.NoError(t, err, "SanitizeFilename(%q) should be accepted", allowed)
+		assert.Equal(t, allowed, name)
+	}
+}
+
 // SanitizeFilename is the gate both entry points share, so the markup refusal
 // has to be enforced here and not only in ClassifyAttachment — otherwise the
 // agent --attach path, which never classifies, still accepts .html.

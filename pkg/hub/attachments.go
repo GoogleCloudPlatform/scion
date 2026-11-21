@@ -146,10 +146,13 @@ var DangerousExtensions = map[string]bool{
 	// double-click.
 	".sh": true, ".bash": true, ".zsh": true, ".ksh": true, ".csh": true,
 	".command": true, ".desktop": true,
-	// Windows shortcut and settings files that can execute commands or modify
-	// the system on open — none has a legitimate chat attachment use.
-	".lnk": true, ".url": true, ".scf": true, ".reg": true,
-	".settingcontent-ms": true, ".cpl": true,
+	// Windows shell-integration, shortcut, setup, console, and settings files
+	// that trigger system actions or execute commands on open — none has a
+	// legitimate chat attachment use.
+	".lnk": true, ".url": true, ".website": true, ".scf": true,
+	".reg": true, ".inf": true, ".cpl": true, ".msc": true,
+	".settingcontent-ms": true, ".library-ms": true,
+	".searchconnector-ms": true, ".search-ms": true,
 	".application": true, ".appref-ms": true,
 }
 
