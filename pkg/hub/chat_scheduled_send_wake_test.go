@@ -90,25 +90,25 @@ func attachScheduledWakeBroker(t *testing.T, f *scheduledSendFixture, phase stri
 // racing wakeAgentForDM under -race slowdown.
 func (wf *scheduledWakeFixture) markReadyOnStart(t *testing.T, agentID string) {
 	t.Helper()
-	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(1)
-	t.Cleanup(func() { close(done); wg.Wait() })
+	t.Cleanup(func() { cancel(); wg.Wait() })
 	go func() {
 		defer wg.Done()
 		ticker := time.NewTicker(20 * time.Millisecond)
 		defer ticker.Stop()
 		for {
-			a, err := wf.store.GetAgent(context.Background(), agentID)
+			a, err := wf.store.GetAgent(ctx, agentID)
 			if err == nil && a.Phase == string(state.PhaseStarting) {
-				_ = wf.store.UpdateAgentStatus(context.Background(), agentID, store.AgentStatusUpdate{
+				_ = wf.store.UpdateAgentStatus(ctx, agentID, store.AgentStatusUpdate{
 					Phase:    string(state.PhaseRunning),
 					Activity: "idle",
 				})
 				return
 			}
 			select {
-			case <-done:
+			case <-ctx.Done():
 				return
 			case <-ticker.C:
 			}
