@@ -84,6 +84,56 @@ func TestSanitizeFilename_TruncateLong(t *testing.T) {
 	assert.True(t, strings.HasSuffix(name, ".txt"))
 }
 
+func TestSanitizeFilename_LongNamesPreserveExtensionAndCheckFinalName(t *testing.T) {
+	t.Run("long safe name preserves extension when reduced", func(t *testing.T) {
+		input := strings.Repeat("x", 117) + ".sh_notes.txt"
+		safe, err := SanitizeFilename(input)
+		require.NoError(t, err)
+		reduced := reduceAttachmentName(safe)
+		assert.Equal(t, strings.Repeat("x", 116)+".txt", reduced)
+	})
+
+	t.Run("over-255 safe name preserves extension through sanitize and reduce", func(t *testing.T) {
+		input := strings.Repeat("x", 252) + ".sh_notes.txt"
+		safe, err := SanitizeFilename(input)
+		require.NoError(t, err)
+		assert.LessOrEqual(t, len(safe), MaxFilenameLength)
+		assert.True(t, strings.HasSuffix(safe, ".txt"))
+		assert.True(t, strings.HasSuffix(reduceAttachmentName(safe), ".txt"))
+	})
+
+	t.Run("reduced fallback exposing dangerous extension is rejected", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			input   string
+			wantExt string
+		}{
+			{
+				name:    "overlong extension falls back onto .sh",
+				input:   strings.Repeat("x", 117) + ".sh." + strings.Repeat("b", 125),
+				wantExt: ".sh",
+			},
+			{
+				name:    "overlong extension falls back onto .html",
+				input:   strings.Repeat("x", 115) + ".html." + strings.Repeat("b", 125),
+				wantExt: ".html",
+			},
+			{
+				name:    "leading dot prefix shifts fallback onto .sh",
+				input:   "." + strings.Repeat("x", 105) + ".sh." + strings.Repeat("b", 125),
+				wantExt: ".sh",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := SanitizeFilename(tc.input)
+				require.Error(t, err, "SanitizeFilename(%q) was accepted", tc.input)
+				assert.Equal(t, "files with a "+tc.wantExt+" extension are not accepted", err.Error())
+			})
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // attachmentExt / blocklist normalisation tests
 // ---------------------------------------------------------------------------
