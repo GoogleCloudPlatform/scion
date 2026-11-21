@@ -100,6 +100,11 @@ func canIdentityViewAgentEnv(ctx context.Context, s *Server, identity Identity, 
 	if isDelegatedAgentIdentity(identity) {
 		return false, false
 	}
+	if s != nil {
+		if denied, _ := s.installationAgentCrossAgentDenied(ctx, identity, agent); denied {
+			return false, false
+		}
+	}
 	d := s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionAttach)
 	return d.Allowed, d.IsIndeterminate()
 }

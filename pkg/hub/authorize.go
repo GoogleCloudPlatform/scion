@@ -483,6 +483,15 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 				reason:  "agent project mismatch",
 			}
 		}
+		if action == ActionAttach || action == ActionLifecycle {
+			if denied, reason := s.installationAgentCrossAgentDenied(ctx, identity, target); denied {
+				return &agentTargetDenial{
+					status:  http.StatusForbidden,
+					message: agentTargetDenyMessage,
+					reason:  reason,
+				}
+			}
+		}
 	case "user", "dev":
 		if _, ok := identity.(UserIdentity); !ok {
 			return &agentTargetDenial{status: http.StatusForbidden, reason: "invalid user identity"}
@@ -594,6 +603,9 @@ func (s *Server) agentLifecycleAllowed(ctx context.Context, identity Identity, t
 // through Decide. A caller without it sees only history it participates in,
 // subject to agent.read.
 func (s *Server) agentFullHistoryDecision(ctx context.Context, identity Identity, agent *store.Agent) Decision {
+	if denied, reason := s.installationAgentCrossAgentDenied(ctx, identity, agent); denied {
+		return Decision{Allowed: false, Reason: reason}
+	}
 	return agentFullHistoryDecide(ctx, s.authzService, identity, agent)
 }
 

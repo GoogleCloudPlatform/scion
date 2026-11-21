@@ -549,9 +549,11 @@ type AgentAppliedConfig struct {
 	// GitHubTokenPreference controls GitHub token delivery precedence for
 	// trigger-dispatched agents (Stage 2 design §5.1a): "" or "user_preferred"
 	// keeps the default user-PAT-over-App precedence; "installation" drops all
-	// user-scope GITHUB_TOKEN and GH_* aliases so only the project's GitHub App
-	// installation token (or no GitHub token at all when none is installed) is
-	// delivered. Immutable after creation and preserved across reincarnation.
+	// blocked GitHub token keys (GITHUB_TOKEN, GH_* aliases,
+	// SCION_USER_GITHUB_TOKEN) from every scope (user, project, hub, broker) so
+	// only the project's GitHub App installation token (or no GitHub token at
+	// all when none is installed) is delivered. Immutable after creation and
+	// preserved across reincarnation.
 	GitHubTokenPreference string `json:"githubTokenPreference,omitempty"`
 
 	// AgentRoleGrandfathered records that AgentRole was assigned by the

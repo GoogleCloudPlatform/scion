@@ -1549,7 +1549,7 @@ func TestGitHubTokenInstallation_EnvAndSecretMetadataDoorsGuarded(t *testing.T) 
 			assert.True(t, foundAllowed, "path=%s missing allowed secret %s", tc.path, tc.wantAllowed)
 		}
 
-		// 5. Fail-closed on parent/self lookup error -> HTTP 503 ErrCodeUnavailable, no leak.
+		// 5. Fail-closed on transient caller lookup error -> HTTP 503 ErrCodeUnavailable, no leak.
 		fs.armed = true
 		recFault := doRequestWithAgentToken(t, f.Server, http.MethodGet,
 			fmt.Sprintf("/api/v1/projects/%s/env/GITHUB_TOKEN", f.ProjectID), nil, f.Token)
@@ -1557,6 +1557,14 @@ func TestGitHubTokenInstallation_EnvAndSecretMetadataDoorsGuarded(t *testing.T) 
 		assert.Equal(t, http.StatusServiceUnavailable, recFault.Code, recFault.Body.String())
 		assert.Contains(t, recFault.Body.String(), ErrCodeUnavailable)
 		assert.NotContains(t, recFault.Body.String(), "ghp_plain_proj_pat")
+
+		// 6. Deleted caller (store.ErrNotFound) -> HTTP 403 without retry advice.
+		require.NoError(t, f.Store.DeleteAgent(ctx, f.AgentID))
+		recDeleted := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			fmt.Sprintf("/api/v1/projects/%s/env/GITHUB_TOKEN", f.ProjectID), nil, f.Token)
+		assert.Equal(t, http.StatusForbidden, recDeleted.Code, recDeleted.Body.String())
+		assert.NotContains(t, recDeleted.Body.String(), "retry")
+		assert.NotContains(t, recDeleted.Body.String(), "ghp_plain_proj_pat")
 	})
 
 	t.Run("user_preferred_agent_unchanged", func(t *testing.T) {

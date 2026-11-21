@@ -62,30 +62,47 @@ import (
 //     by Name or Target.
 //   - Pull (env var by key: GET /api/v1/env/{key}?scope=...,
 //     GET /api/v1/projects/{id}/env/{key},
-//     GET /api/v1/runtime-brokers/{id}/env/{key}):
+//     GET /api/v1/runtime-brokers/{id}/env/{key} [not agent-reachable
+//     (authorizeBrokerMaterial refuses non-user identities); defence in depth]):
 //     Server.serveEnvVarByKey (handlers_env_secrets.go) -> checks
-//     callerAgentUsesInstallationGitHubToken (fail-closed 503 on store error),
-//     returns 404 before lookup for blocked key names and before returning an
-//     aliased environment-secret fallback whose Target is blocked.
+//     callerAgentUsesInstallationGitHubToken (fail-closed: 403 on deleted
+//     caller, 503 on transient store error), returns 404 before lookup for
+//     blocked key names and before returning an aliased environment-secret
+//     fallback whose Target is blocked.
 //   - Pull (env var lists: GET /api/v1/env?scope=...,
-//     GET /api/v1/projects/{id}/env, GET /api/v1/runtime-brokers/{id}/env):
+//     GET /api/v1/projects/{id}/env,
+//     GET /api/v1/runtime-brokers/{id}/env [not agent-reachable
+//     (authorizeBrokerMaterial refuses non-user identities); defence in depth]):
 //     Server.listEnvVars, Server.handleProjectEnvVars, Server.handleBrokerEnvVars
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
-//     (fail-closed 503), omit blocked env keys and blocked merged environment
+//     (fail-closed), omit blocked env keys and blocked merged environment
 //     secrets (by Name or Target).
 //   - Pull (secret metadata by key: GET /api/v1/secrets/{key}?scope=...,
 //     GET /api/v1/projects/{id}/secrets/{key},
-//     GET /api/v1/runtime-brokers/{id}/secrets/{key}):
+//     GET /api/v1/runtime-brokers/{id}/secrets/{key} [not agent-reachable
+//     (authorizeBrokerMaterial refuses non-user identities); defence in depth]):
 //     Server.getSecret and Server.handleScopedSecretByKey
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
-//     (fail-closed 503), return 404 for blocked key names (before lookup) or
+//     (fail-closed), return 404 for blocked key names (before lookup) or
 //     blocked Meta.Target (after lookup).
 //   - Pull (secret metadata lists: GET /api/v1/secrets?scope=...,
 //     GET /api/v1/projects/{id}/secrets,
-//     GET /api/v1/runtime-brokers/{id}/secrets):
+//     GET /api/v1/runtime-brokers/{id}/secrets [not agent-reachable
+//     (authorizeBrokerMaterial refuses non-user identities); defence in depth]):
 //     Server.listSecrets, Server.handleProjectSecrets, Server.handleBrokerSecrets
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
-//     (fail-closed 503), omit blocked secrets by Name or Target.
+//     (fail-closed), omit blocked secrets by Name or Target.
+//   - Cross-agent observation and control (ActionAttach and ActionLifecycle):
+//     Server.authorizeAgentTargetAction (authorize.go) -> calls
+//     installationAgentCrossAgentDenied (fail-closed on caller lookup error) to
+//     refuse ActionAttach (exec on both routes, PTY upgrade, .../env, .../keys,
+//     scheduled exec authoring/reveal) and ActionLifecycle (start, stop,
+//     suspend, restart, restore, reincarnate, existing-agent resume-with-task
+//     via agentLifecycleAllowed, DM/scheduled wake) when an installation-only
+//     agent targets a non-installation peer. Server.agentFullHistoryDecision
+//     (authorize.go) and canIdentityViewAgentEnv (agent_env_redaction.go) apply
+//     the same check for full message/log history and applied-env reads. Own
+//     descendants inherit "installation" at create time and are unaffected.
 //   - Descendants (interactive agent-created create):
 //     Server.createAgentInProject (handlers_agents_core.go) ->
 //     agentHasInstallationGitHubTokenPreference (tri-state; fails closed with
@@ -174,8 +191,9 @@ func (s *Server) parentAgentUsesInstallationGitHubToken(ctx context.Context, aut
 // callerAgentUsesInstallationGitHubToken reports whether the HTTP request
 // caller is an agent carrying GitHubTokenPreference == "installation".
 // Non-agent callers return (false, true). If the caller is an agent and the
-// store lookup fails, this fails closed by writing HTTP 503 ErrCodeUnavailable
-// and returning (false, false) so the handler aborts immediately.
+// store lookup fails, this fails closed: store.ErrNotFound (deleted caller)
+// writes HTTP 403 without retry advice; other lookup errors write HTTP 503
+// ErrCodeUnavailable, returning (false, false) so the handler aborts.
 func (s *Server) callerAgentUsesInstallationGitHubToken(w http.ResponseWriter, ctx context.Context) (installationOnly bool, ok bool) {
 	agentIdent := GetAgentIdentityFromContext(ctx)
 	if agentIdent == nil {
@@ -183,6 +201,12 @@ func (s *Server) callerAgentUsesInstallationGitHubToken(w http.ResponseWriter, c
 	}
 	usesInst, err := s.agentHasInstallationGitHubTokenPreference(ctx, agentIdent.ID())
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			slog.Warn("Refusing material read: calling agent record no longer exists",
+				"agent_id", agentIdent.ID())
+			Forbidden(w)
+			return false, false
+		}
 		slog.Warn("Refusing material read: failed to verify calling agent GitHub token preference",
 			"agent_id", agentIdent.ID(), "error", err)
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
@@ -190,6 +214,37 @@ func (s *Server) callerAgentUsesInstallationGitHubToken(w http.ResponseWriter, c
 		return false, false
 	}
 	return usesInst, true
+}
+
+// installationAgentCrossAgentDenied reports whether an agent caller using
+// GitHubTokenPreference == "installation" must be refused ActionAttach or
+// ActionLifecycle on target because target does not also carry
+// GitHubTokenPreference == "installation" (Stage 2 §5.1a).
+//
+// Own descendants inherit "installation" at create time and are unaffected.
+// Any store lookup failure for the caller fails closed (returns denied=true).
+func (s *Server) installationAgentCrossAgentDenied(ctx context.Context, identity Identity, target *store.Agent) (denied bool, reason string) {
+	if identity == nil || identity.Type() != "agent" {
+		return false, ""
+	}
+	agentIdent, ok := identity.(AgentIdentity)
+	if !ok {
+		return false, ""
+	}
+	if target != nil && target.ID == agentIdent.ID() {
+		return false, ""
+	}
+	if usesInstallationGitHubToken(target) {
+		return false, ""
+	}
+	callerInst, err := s.agentHasInstallationGitHubTokenPreference(ctx, agentIdent.ID())
+	if err != nil {
+		return true, "installation github token caller lookup failed: " + err.Error()
+	}
+	if callerInst {
+		return true, "installation-only agent may not attach to or control non-installation peer agent"
+	}
+	return false, ""
 }
 
 // withoutInstallationBlockedEnvVars omits env vars whose key is blocked for

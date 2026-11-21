@@ -161,9 +161,10 @@ const (
 	// chain has no recorded provenance (it cannot be fully evaluated).
 	// Re-delegating the agent records the chain.
 	ReasonChainUnrecorded = "chain_unrecorded"
-	// ReasonGitHubTokenInstallationOnly: the requesting agent (or an ancestor)
-	// has GitHubTokenPreference == "installation", so user/project GITHUB_TOKEN
-	// and GH_* alias secrets are withheld from runtime reads (Stage 2 §5.1a).
+	// ReasonGitHubTokenInstallationOnly: the requesting agent (descendants
+	// inherit the preference at create time) has GitHubTokenPreference ==
+	// "installation", so user/project GITHUB_TOKEN and GH_* alias secrets are
+	// withheld from runtime reads (Stage 2 §5.1a).
 	ReasonGitHubTokenInstallationOnly = "github_token_installation_only"
 )
 
