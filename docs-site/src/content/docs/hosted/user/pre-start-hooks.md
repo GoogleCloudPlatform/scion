@@ -99,7 +99,7 @@ Pre-start hooks are also fully supported in the Scion Web Dashboard, matching ex
 ### For Project Owners (Project Settings)
 1. Navigate to the project page on the Web UI.
 2. Go to the **Project Settings** tab.
-3. Under the **Resources** section, select the **Pre-Start Hooks** tab.
+3. Under the **Project Resources** section, select the **Pre-Start Hooks** tab.
 4. Here you can view, create, activate, or archive project-scoped hooks. You can also view the inherited Hub-scoped default hook (if any) and see whether it is currently active or overridden.
 
 ### For Hub Administrators (Hub Resources)

@@ -127,8 +127,9 @@ Once your project is created, you can configure its settings via the Web Dashboa
 3. Click the **Settings** gear icon to configure:
    - **General**: Update the project description or default branch.
    - **Limits**: Set maximum concurrency, maximum execution duration, and workspace storage limits. These limits automatically prepopulate the agent creation form.
-   - **Resources**: Manage runtime brokers and message broker plugins available to agents in this project.
-   - **Secrets**: Manage project-scoped secrets, such as API keys and PATs.
+   - **Agent Resources**: Set default CPU, memory, and disk requests and limits for new agents.
+   - **Runtime Brokers**: Manage Runtime Brokers available to agents in this project.
+   - **Project Resources** (**Secrets** tab): Manage project-scoped secrets, such as API keys and PATs.
 
 ---
 
