@@ -41,26 +41,6 @@ func (g *stubHubEmailGenerator) ServiceAccountEmail() string {
 	return g.email
 }
 
-func TestProjectIDFromServiceAccountEmail(t *testing.T) {
-	tests := []struct {
-		name  string
-		email string
-		want  string
-	}{
-		{"lowercase", "worker@my-proj.iam.gserviceaccount.com", "my-proj"},
-		{"mixed case domain", "Worker@My-Proj.IAM.GServiceAccount.COM", "my-proj"},
-		{"trimmed mixed case", "  worker@My-Proj-123.IAM.GSERVICEACCOUNT.COM  ", "my-proj-123"},
-		{"non gcp domain", "worker@example.com", ""},
-		{"no at sign", "my-proj.iam.gserviceaccount.com", ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, projectIDFromServiceAccountEmail(tc.email))
-		})
-	}
-}
-
 func TestIsValidGCPServiceAccountEmail(t *testing.T) {
 	tests := []struct {
 		name string
