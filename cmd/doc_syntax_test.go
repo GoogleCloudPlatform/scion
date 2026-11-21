@@ -375,6 +375,28 @@ func fencedScionLinesWithPlaceholders(t *testing.T, path string) []string {
 	return lines
 }
 
+// resolveCommandBeforeFlags resolves the cobra command from tokens (the fields
+// after "scion") stopping before the first flag. When Find leaves tokens
+// unconsumed on a command that has subcommands and takes no positional
+// arguments, the first unconsumed token is reported as an unknown subcommand.
+func resolveCommandBeforeFlags(tokens []string, line, source string) (*cobra.Command, string) {
+	var path []string
+	for _, tok := range tokens {
+		if strings.HasPrefix(tok, "-") {
+			break
+		}
+		path = append(path, tok)
+	}
+	cmd, rest, err := rootCmd.Find(path)
+	if err != nil {
+		return nil, fmt.Sprintf("command not found: %s (from %s)", line, source)
+	}
+	if len(rest) > 0 && cmd.HasSubCommands() && !acceptsPositionalArgs(cmd) {
+		return nil, fmt.Sprintf("unknown subcommand %q for %q: %s (from %s)", rest[0], cmd.CommandPath(), line, source)
+	}
+	return cmd, ""
+}
+
 // placeholderFlagProblems checks the --flag names of fenced scion lines that
 // use placeholders: the command is resolved from the tokens before the first
 // flag, and every flag must exist on it.
@@ -382,16 +404,9 @@ func placeholderFlagProblems(lines []string, source string) []string {
 	var problems []string
 	for _, line := range lines {
 		tokens := strings.Fields(line)[1:]
-		var path []string
-		for _, tok := range tokens {
-			if strings.HasPrefix(tok, "-") {
-				break
-			}
-			path = append(path, tok)
-		}
-		cmd, _, err := rootCmd.Find(path)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("command not found: %s (from %s)", line, source))
+		cmd, prob := resolveCommandBeforeFlags(tokens, line, source)
+		if prob != "" {
+			problems = append(problems, prob)
 			continue
 		}
 		for _, tok := range tokens {
@@ -481,6 +496,32 @@ func TestDocSyntax_PlatformSkillArtifacts(t *testing.T) {
 		assert.NotEmpty(t, agentHelpProblems([]string{"scion artifact share <ref>"}, "test"))
 		assert.Empty(t, agentHelpProblems([]string{"scion artifact publish plan.md --review <ref> --note x"}, "test"))
 	})
+
+	t.Run("catches_unknown_subcommand_on_placeholder_line", func(t *testing.T) {
+		for _, bad := range []string{
+			"scion artifact pubish <ref>",
+			"scion artifact pubish <file> --key <key>",
+			"scion decisions shwo <key>",
+			"scion conversation group craete <name>",
+		} {
+			p1 := placeholderFlagProblems([]string{bad}, "test")
+			if assert.Len(t, p1, 1, "expected placeholderFlagProblems to reject %q", bad) {
+				assert.Contains(t, p1[0], "unknown subcommand")
+			}
+			p2 := agentHelpProblems([]string{bad}, "test")
+			if assert.Len(t, p2, 1, "expected agentHelpProblems to reject %q", bad) {
+				assert.Contains(t, p2[0], "unknown subcommand")
+			}
+		}
+		for _, good := range []string{
+			"scion artifact get scion://artifact/<id>",
+			"scion decisions show <key>",
+			"scion conversation group create <name>",
+		} {
+			assert.Empty(t, placeholderFlagProblems([]string{good}, "test"), "expected no placeholderFlagProblems for %q", good)
+			assert.Empty(t, agentHelpProblems([]string{good}, "test"), "expected no agentHelpProblems for %q", good)
+		}
+	})
 }
 
 // agentHelpProblems reports fenced scion lines whose command is not
@@ -490,16 +531,9 @@ func agentHelpProblems(lines []string, source string) []string {
 	var problems []string
 	for _, line := range lines {
 		tokens := strings.Fields(line)[1:]
-		var path []string
-		for _, tok := range tokens {
-			if strings.HasPrefix(tok, "-") {
-				break
-			}
-			path = append(path, tok)
-		}
-		cmd, _, err := rootCmd.Find(path)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("command not found: %s (from %s)", line, source))
+		cmd, prob := resolveCommandBeforeFlags(tokens, line, source)
+		if prob != "" {
+			problems = append(problems, prob)
 			continue
 		}
 		key := strings.ReplaceAll(strings.TrimPrefix(cmd.CommandPath(), rootCmd.Name()+" "), " ", ".")
