@@ -30,6 +30,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -650,7 +651,11 @@ func (c *Client) ListPorts(ctx context.Context) ([]ExposedPort, error) {
 	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return nil, &StatusError{
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 	var out ListPortsResponse
 	if err := json.Unmarshal(respBody, &out); err != nil {
@@ -691,6 +696,7 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 type StatusError struct {
 	StatusCode int
 	Body       string
+	RetryAfter time.Duration
 }
 
 func (e *StatusError) Error() string {
@@ -700,6 +706,10 @@ func (e *StatusError) Error() string {
 // HTTPStatusCode returns the hub's HTTP status. Packages that cannot import
 // this one (the metadata server) classify hub errors through it.
 func (e *StatusError) HTTPStatusCode() int { return e.StatusCode }
+
+// RetryAfterDuration returns the parsed Retry-After duration from the hub's
+// response header, or 0 if absent or unparseable.
+func (e *StatusError) RetryAfterDuration() time.Duration { return e.RetryAfter }
 
 // IsForbidden reports whether err carries an HTTP 403 from the hub, meaning
 // the hub refused the request for this agent.
@@ -713,6 +723,36 @@ func IsForbidden(err error) bool {
 func IsUnauthorized(err error) bool {
 	var se *StatusError
 	return errors.As(err, &se) && se.StatusCode == http.StatusUnauthorized
+}
+
+// IsTooManyRequests reports whether err carries an HTTP 429 from the hub,
+// meaning the agent exceeded the hub's rate limit.
+func IsTooManyRequests(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusTooManyRequests
+}
+
+// parseRetryAfter parses an HTTP Retry-After header (delta-seconds or
+// HTTP-date) into a positive duration, returning 0 if absent, invalid, or
+// non-positive.
+func parseRetryAfter(val string) time.Duration {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(val); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(val); err == nil {
+		d := time.Until(t)
+		if d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func (c *Client) absoluteURL(path string) string {
@@ -2656,7 +2696,11 @@ func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccess
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return nil, &StatusError{
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 
 	var token GCPAccessTokenResponse
@@ -2700,7 +2744,11 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+		return "", &StatusError{
+			StatusCode: resp.StatusCode,
+			Body:       string(respBody),
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 
 	var result struct {

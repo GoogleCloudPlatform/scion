@@ -19,7 +19,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,7 +50,66 @@ var logRefusal = log.Error
 const (
 	refusalBackoffBase = 10 * time.Second
 	refusalBackoffMax  = 5 * time.Minute
+
+	rateLimitBackoffBase   = 2 * time.Second
+	rateLimitBackoffMax    = 60 * time.Second
+	rateLimitMaxRetryAfter = 5 * time.Minute
 )
+
+// rateLimitState tracks a shared HTTP 429 backoff window for GCP token
+// fetches. Both access and identity token endpoints share the Hub's per-agent
+// token bucket, so a 429 on either opens a backoff window with exponential
+// backoff + jitter while honoring the Hub's Retry-After header when larger.
+type rateLimitState struct {
+	mu      sync.Mutex
+	backoff backoff.Backoff
+	until   time.Time
+}
+
+func newRateLimitState() *rateLimitState {
+	return &rateLimitState{
+		backoff: backoff.Backoff{
+			Base:   rateLimitBackoffBase,
+			Max:    rateLimitBackoffMax,
+			Jitter: backoff.DefaultJitter,
+		},
+	}
+}
+
+func (rl *rateLimitState) active(now time.Time) (time.Duration, bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if rl.until.IsZero() || !now.Before(rl.until) {
+		return 0, false
+	}
+	return rl.until.Sub(now), true
+}
+
+func (rl *rateLimitState) limited(now time.Time, retryAfter time.Duration) (left time.Duration, stepped bool) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if !rl.until.IsZero() && now.Before(rl.until) {
+		return rl.until.Sub(now), false
+	}
+	d := rl.backoff.Failure()
+	if retryAfter > 0 {
+		if retryAfter > rateLimitMaxRetryAfter {
+			retryAfter = rateLimitMaxRetryAfter
+		}
+		if retryAfter > d {
+			d = retryAfter
+		}
+	}
+	rl.until = now.Add(d)
+	return d, true
+}
+
+func (rl *rateLimitState) succeeded() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	rl.backoff.Reset()
+	rl.until = time.Time{}
+}
 
 // refusalState is the back-off state of one credential kind (the access
 // token, or the identity tokens of every audience).
@@ -119,8 +181,9 @@ func (r *refusalState) clearLocked() {
 
 // hubStatusError is the direct HTTP path's error for a non-200 hub answer.
 type hubStatusError struct {
-	code int
-	body string
+	code       int
+	body       string
+	retryAfter time.Duration
 }
 
 func (e *hubStatusError) Error() string { return fmt.Sprintf("hub returned %d: %s", e.code, e.body) }
@@ -128,12 +191,53 @@ func (e *hubStatusError) Error() string { return fmt.Sprintf("hub returned %d: %
 // HTTPStatusCode returns the hub's HTTP status.
 func (e *hubStatusError) HTTPStatusCode() int { return e.code }
 
+// RetryAfterDuration returns the parsed Retry-After duration, if present.
+func (e *hubStatusError) RetryAfterDuration() time.Duration { return e.retryAfter }
+
+// parseRetryAfter parses an HTTP Retry-After header (delta-seconds or
+// HTTP-date) relative to now.
+func parseRetryAfter(val string, now time.Time) time.Duration {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(val); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(val); err == nil {
+		d := t.Sub(now)
+		if d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // isHubRefusal reports whether err carries an HTTP 403 from the hub: the
 // direct path's hubStatusError, or the hub client's StatusError (both have
 // HTTPStatusCode).
 func isHubRefusal(err error) bool {
 	var sc interface{ HTTPStatusCode() int }
 	return errors.As(err, &sc) && sc.HTTPStatusCode() == http.StatusForbidden
+}
+
+// isHubRateLimited reports whether err carries an HTTP 429 from the hub.
+func isHubRateLimited(err error) bool {
+	var sc interface{ HTTPStatusCode() int }
+	return errors.As(err, &sc) && sc.HTTPStatusCode() == http.StatusTooManyRequests
+}
+
+// hubRetryAfter extracts a Retry-After duration from err if the error type
+// implements RetryAfterDuration().
+func hubRetryAfter(err error) time.Duration {
+	var ra interface{ RetryAfterDuration() time.Duration }
+	if errors.As(err, &ra) {
+		return ra.RetryAfterDuration()
+	}
+	return 0
 }
 
 // assignmentKey identifies the agent's current assignment: its service
@@ -151,17 +255,25 @@ func (s *Server) clock() time.Time {
 	return time.Now()
 }
 
-// noteFetchResult updates r after a hub fetch for what (a log label): a
-// success clears it; a hub 403 opens or extends the window and logs one line
-// with the next retry delay.
+// noteFetchResult updates r and the shared rate-limit state after a hub fetch
+// for what (a log label): a success clears both; a hub 403 opens or extends
+// the refusal window; a hub 429 opens or extends the rate-limit backoff window
+// (honoring Retry-After if present).
 func (s *Server) noteFetchResult(r *refusalState, what string, err error) {
 	if err == nil {
 		r.succeeded()
+		s.rateLimit.succeeded()
 		return
 	}
 	if isHubRefusal(err) {
 		if d, stepped := r.refused(s.clock(), s.assignmentKey()); stepped {
 			logRefusal("GCP %s: credential refused by hub (403); next attempt in %s", what, d.Round(time.Second))
+		}
+		return
+	}
+	if isHubRateLimited(err) {
+		if d, stepped := s.rateLimit.limited(s.clock(), hubRetryAfter(err)); stepped {
+			logRefusal("GCP %s: rate limited by hub (429); next attempt in %s", what, d.Round(time.Second))
 		}
 	}
 }
@@ -172,9 +284,22 @@ func (s *Server) refusalLeft(r *refusalState) (time.Duration, bool) {
 	return r.active(s.clock(), s.assignmentKey)
 }
 
+// rateLimitLeft reports whether the shared 429 backoff window is open, and
+// the time left.
+func (s *Server) rateLimitLeft() (time.Duration, bool) {
+	return s.rateLimit.active(s.clock())
+}
+
 // writeRefusal answers with the cached refusal.
 func writeRefusal(w http.ResponseWriter, left time.Duration) {
 	http.Error(w, fmt.Sprintf("credential refused by hub; retry after %s", left.Round(time.Second)), http.StatusForbidden)
+}
+
+// writeRateLimit answers with 429 Too Many Requests and a Retry-After header.
+func writeRateLimit(w http.ResponseWriter, left time.Duration) {
+	secs := max(1, int(math.Ceil(left.Seconds())))
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	http.Error(w, fmt.Sprintf("rate limited by hub; retry after %s", left.Round(time.Second)), http.StatusTooManyRequests)
 }
 
 // serveRefusal answers with the cached refusal while r's window is open,
@@ -183,6 +308,16 @@ func (s *Server) serveRefusal(w http.ResponseWriter, r *refusalState) bool {
 	left, ok := s.refusalLeft(r)
 	if ok {
 		writeRefusal(w, left)
+	}
+	return ok
+}
+
+// serveRateLimit answers with 429 + Retry-After while the shared rate-limit
+// backoff window is open, and reports whether it did.
+func (s *Server) serveRateLimit(w http.ResponseWriter) bool {
+	left, ok := s.rateLimitLeft()
+	if ok {
+		writeRateLimit(w, left)
 	}
 	return ok
 }
