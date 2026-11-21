@@ -168,7 +168,11 @@ func TestDispatchFailureResult_HomeFilesSentinelsRoundTrip(t *testing.T) {
 				Result: res,
 			})
 			assert.ErrorIs(t, rebuilt, tc.sentinel)
-			assert.NotErrorIs(t, rebuilt, errStartRequestNotSent)
+			if tc.requestNotSent {
+				assert.ErrorIs(t, rebuilt, errStartRequestNotSent)
+			} else {
+				assert.NotErrorIs(t, rebuilt, errStartRequestNotSent, "deferral sentinel must not masquerade as errStartRequestNotSent")
+			}
 			assert.True(t, isConfirmedStartNotActedOnError(rebuilt), "rebuilt cross-node error must remain confirmed not-acted-on")
 			assert.False(t, isUnknownDispatchOutcome(rebuilt))
 		})

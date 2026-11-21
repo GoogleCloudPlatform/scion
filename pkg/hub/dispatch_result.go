@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -119,6 +120,9 @@ var dispatchHubSentinels = []struct {
 	{"broker_lacks_home_files", ErrBrokerLacksHomeFiles},
 	{"home_files_env_gather_deferred", ErrHomeFilesEnvGatherDeferred},
 	{"home_files_create_not_deferrable", ErrHomeFilesCreateNotDeferrable},
+	{"start_broker_not_connected", errStartBrokerNotConnected},
+	{"start_request_not_sent", errStartRequestNotSent},
+	{"start_run_not_begun", errStartRunNotBegun},
 }
 
 // dispatchHubError is a failure the executing node returned with hub
@@ -156,6 +160,12 @@ func dispatchFailureResult(execErr error) string {
 	for _, hs := range dispatchHubSentinels {
 		if errors.Is(execErr, hs.err) {
 			env.HubErrors = append(env.HubErrors, hs.name)
+		}
+	}
+	if !errors.Is(execErr, errStartRequestNotSent) {
+		var opErr *net.OpError
+		if errors.As(execErr, &opErr) && opErr.Op == "dial" {
+			env.HubErrors = append(env.HubErrors, "start_request_not_sent")
 		}
 	}
 	var refusal *RuntimeTargetRefusal

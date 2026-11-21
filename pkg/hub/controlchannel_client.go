@@ -91,7 +91,7 @@ func (c *ControlChannelBrokerClient) CreateAgent(ctx context.Context, brokerID, 
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w (%w)", err, errStartRequestNotSent)
 	}
 
 	resp, err := c.doRequest(ctx, brokerID, "POST", "/api/v1/agents", "", body)
@@ -404,7 +404,7 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, nil, fmt.Errorf("failed to marshal request: %w (%w)", err, errStartRequestNotSent)
 	}
 
 	resp, err := c.doRequestRaw(ctx, brokerID, "POST", "/api/v1/agents", "", body)

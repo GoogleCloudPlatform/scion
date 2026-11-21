@@ -2149,7 +2149,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	runID, _, token, recorded, err := d.beginRun(ctx, agent, req.tokenGrant)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	}
 	req.RunID = runID
 	req.AgentToken = token
@@ -2554,7 +2554,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	// on the owning node, which mints its own.
 	runID, _, token, recorded, err := d.beginRun(ctx, agent, req.tokenGrant)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	}
 	req.RunID = runID
 	req.AgentToken = token
@@ -2771,7 +2771,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// mints the run ID the new entry carries.
 	runID, _, token, recorded, err := d.beginRun(ctx, agent, req.tokenGrant)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errStartRunNotBegun, err)
 	}
 	req.RunID = runID
 	req.AgentToken = token

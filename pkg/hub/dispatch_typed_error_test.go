@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -656,6 +657,25 @@ func TestDispatchFailureError_HubSentinels(t *testing.T) {
 		var missing *ErrEnvStillMissing
 		assert.ErrorAs(t, err, &missing)
 		assert.NotErrorIs(t, err, store.ErrDeleteInProgress)
+	})
+
+	t.Run("pre-send start sentinels and dial failure round trip", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			exec error
+			want error
+		}{
+			{"broker not connected", fmt.Errorf("broker b1 not connected: %w", errStartBrokerNotConnected), errStartBrokerNotConnected},
+			{"request not sent", fmt.Errorf("failed to send: %w (%w)", context.DeadlineExceeded, errStartRequestNotSent), errStartRequestNotSent},
+			{"run not begun", fmt.Errorf("%w: %w", errStartRunNotBegun, errors.New("store down")), errStartRunNotBegun},
+			{"bare dial OpError", fmt.Errorf("failed to send: %w", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}), errStartRequestNotSent},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				err := dispatchFailureError(row(dispatchFailureResult(tc.exec)))
+				assert.ErrorIs(t, err, tc.want)
+				assert.Equal(t, startReleased, startOutcomeOf(err))
+			})
+		}
 	})
 }
 
