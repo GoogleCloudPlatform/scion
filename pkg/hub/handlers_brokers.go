@@ -167,6 +167,15 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Enforce broker_policy.admin_managed_only and explicit adminManaged
+	// registration (ptone/scion#7829). Runs after authorizeBrokerCreate and
+	// existing-broker lookup/remint check, covering both legacy and flat paths.
+	stampAdminManaged, ok := s.authorizeBrokerRegistrationPolicy(w, r, existingBroker, req.AdminManaged)
+	if !ok {
+		return
+	}
+	req.AdminManaged = stampAdminManaged
+
 	// Turning auto-provide on offers the broker to every project on the
 	// hub, so it needs broker.auto_provide in addition to registration.
 	// Keeping an existing auto-provide setting, or turning it off, needs
@@ -311,8 +320,14 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 			}
 			if !preserve {
 				b.AutoProvide = req.AutoProvide
+				if req.AdminManaged {
+					b.AdminManaged = true
+				}
 			}
 			if created {
+				if req.AdminManaged {
+					b.AdminManaged = true
+				}
 				// A new row takes the GCP host pair and labels from the
 				// request; the Hub sets the broker role.
 				if !preserve && (saEmail != "" || req.GCPHostProjectID != "") {

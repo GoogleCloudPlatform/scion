@@ -2173,6 +2173,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+
+		// Enforce broker_policy.admin_managed_only on the deprecated embedded
+		// broker registration path before any project mutation (ptone/scion#7829).
+		if !s.authorizeEmbeddedBrokerRegistrationPolicy(w, r, embeddedBroker) {
+			return
+		}
 	}
 
 	// RegisterProject with brokerId never links a flat Runtime Broker: flat
