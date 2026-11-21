@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,13 +80,13 @@ func TestDecisionsCLIModesAndWindowsGate(t *testing.T) {
 
 func TestParseDecisionsRecordArgs(t *testing.T) {
 	t.Run("positional form", func(t *testing.T) {
-		got, err := parseDecisionsRecordArgs([]string{"D234", "1"})
+		got, err := parseDecisionsRecordArgs([]string{"D234", "1"}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []hubclient.InterpretedAnswerInput{{Key: "D234", ChoiceID: "1"}}, got)
 	})
 
 	t.Run("key=choice form single and batch", func(t *testing.T) {
-		got, err := parseDecisionsRecordArgs([]string{"D234=1", "17=a", "ship-now=yes"})
+		got, err := parseDecisionsRecordArgs([]string{"D234=1", "17=a", "ship-now=yes"}, nil)
 		require.NoError(t, err)
 		assert.Equal(t, []hubclient.InterpretedAnswerInput{
 			{Key: "D234", ChoiceID: "1"},
@@ -107,7 +108,7 @@ func TestParseDecisionsRecordArgs(t *testing.T) {
 			{"k1=1", "k2=1", "k3=1", "k4=1", "k5=1", "k6=1", "k7=1", "k8=1", "k9=1", "k10=1", "k11=1"},
 		}
 		for _, tc := range badCases {
-			_, err := parseDecisionsRecordArgs(tc)
+			_, err := parseDecisionsRecordArgs(tc, nil)
 			assert.Error(t, err, "args=%v", tc)
 		}
 	})
@@ -1079,4 +1080,202 @@ func TestDecisionDismissedSummary_TruncatesReasonOnlyInList(t *testing.T) {
 
 	show := decisionDismissedSummary(d, 0)
 	assert.True(t, strings.HasSuffix(show, " · "+collapseSingleLine(reason)))
+}
+
+func TestDecisionsOther_RecordShowListAndValidation(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	fixedNow := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
+	defer restoreNow()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(nil)
+
+	var recorded []hubclient.RecordInterpretedRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions/interpreted", func(w http.ResponseWriter, r *http.Request) {
+		var req hubclient.RecordInterpretedRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		recorded = append(recorded, req)
+		decs := make([]hubclient.DecisionView, len(req.Answers))
+		for i, a := range req.Answers {
+			lbl := "Yes"
+			if a.ChoiceID == messages.ChoiceIDOther {
+				lbl = "Another region"
+			}
+			decs[i] = hubclient.DecisionView{
+				RowID:   fmt.Sprintf("row-%d", i+1),
+				Key:     a.Key,
+				Version: 1,
+				Status:  "decided",
+				Decision: &hubclient.DecisionAnswerView{
+					ChoiceID:   a.ChoiceID,
+					Label:      lbl,
+					OtherText:  a.OtherText,
+					Provenance: "agent_interpreted",
+					Outcome:    "answer",
+					Surface:    "slack",
+					At:         fixedNow,
+				},
+			}
+		}
+		batchID := ""
+		if len(decs) > 1 {
+			batchID = "batch-other-1"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.RecordInterpretedResponse{
+			ResponseMessageID: "resp-other-1",
+			BatchID:           batchID,
+			Decisions:         decs,
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions/region", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionShowResponse{
+			Key: "region",
+			Ref: "ag/region",
+			Versions: []hubclient.AgentDecisionVersionView{
+				{
+					RowID:           "row-reg-1",
+					Key:             "region",
+					Ref:             "ag/region",
+					Version:         1,
+					Status:          "decided",
+					Question:        "Which region for the canary?",
+					ConversationID:  "conv-rel",
+					PromptMessageID: "prompt-reg-1",
+					Choices:         []messages.Choice{{ID: "1", Label: "us-central1"}},
+					DefaultChoiceID: "1",
+					Other: &messages.OtherOption{
+						Label:       "Another region",
+						Placeholder: "e.g. europe-west4",
+					},
+					CreatedAt: fixedNow.Add(-10 * time.Minute),
+					Answers: []hubclient.DecisionAnswerView{
+						{
+							ChoiceID:        messages.ChoiceIDOther,
+							Label:           "Another region",
+							OtherText:       "europe-west4",
+							AnsweredByName:  "Alice",
+							Provenance:      "agent_interpreted",
+							Outcome:         "answer",
+							SourceMessageID: "src-1",
+							Surface:         "slack",
+							At:              fixedNow.Add(-5 * time.Minute),
+						},
+						{
+							ChoiceID:            messages.ChoiceIDOther,
+							Label:               "Another region",
+							OtherText:           "asia-east1 canary",
+							PreviousChoiceLabel: "Another region",
+							PreviousOtherText:   "europe-west4",
+							AnsweredByName:      "Alice",
+							Provenance:          "direct",
+							Outcome:             "override",
+							Surface:             "native",
+							At:                  fixedNow,
+						},
+					},
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+			Items: []hubclient.AgentDecisionListItem{
+				{
+					RowID:          "row-reg-1",
+					Key:            "region",
+					Ref:            "ag/region",
+					Version:        1,
+					Status:         "decided",
+					Question:       "Which region for the canary?",
+					ConversationID: "conv-rel",
+					CreatedAt:      fixedNow.Add(-10 * time.Minute),
+					Answer: &hubclient.DecisionAnswerView{
+						ChoiceID:       messages.ChoiceIDOther,
+						Label:          "Another region",
+						OtherText:      "europe-west4 canary",
+						AnsweredByName: "Alice",
+						Provenance:     "direct",
+						Outcome:        "answer",
+						Surface:        "native",
+						At:             fixedNow,
+					},
+				},
+			},
+			Query: strings.TrimSpace(r.URL.Query().Get("q")),
+		})
+	})
+	withMockDecisionsServer(t, mux)
+
+	// 1. Client-side validation rejects positional $other (with --other hint), mixing, duplicates, and bad --other values.
+	for name, args := range map[string][]string{
+		"positional $other":    {"decisions", "record", "region", "$other", "--from", "msg-1"},
+		"key=$other pair":      {"decisions", "record", "region=$other", "--from", "msg-1"},
+		"mix positional other": {"decisions", "record", "proceed", "1", "--other", "region=eu", "--from", "msg-1"},
+		"duplicate key":        {"decisions", "record", "region=1", "--other", "REGION=eu", "--from", "msg-1"},
+		"missing equals":       {"decisions", "record", "--other", "region", "--from", "msg-1"},
+		"empty text":           {"decisions", "record", "--other", "region=   ", "--from", "msg-1"},
+		"newline text":         {"decisions", "record", "--other", "region=a\nb", "--from", "msg-1"},
+		"too long text":        {"decisions", "record", "--other", "region=" + strings.Repeat("a", 201), "--from", "msg-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := runDecisionsTestCmd(t, args...)
+			require.Error(t, err)
+			assert.True(t, isUsageError(err), "err=%v", err)
+			if strings.Contains(name, "$other") {
+				assert.Contains(t, err.Error(), "--other")
+			}
+		})
+	}
+	assert.Empty(t, recorded, "client-side validation sends no HTTP request")
+
+	// 2. Single --other flag succeeds and prints label + quoted text.
+	outSingle, err := runDecisionsTestCmd(t, "decisions", "record", "--from", "msg-1", "--other", "region=europe-west4 canary")
+	require.NoError(t, err)
+	assert.Contains(t, outSingle, `region v1 -> Another region "europe-west4 canary" ($other)`)
+	require.Len(t, recorded, 1)
+	require.Len(t, recorded[0].Answers, 1)
+	assert.Equal(t, messages.ChoiceIDOther, recorded[0].Answers[0].ChoiceID)
+	assert.Equal(t, "europe-west4 canary", recorded[0].Answers[0].OtherText)
+
+	// 3. Batch combining <key>=<choice-id> and --other preserves commas in text (StringArray).
+	outBatch, err := runDecisionsTestCmd(t, "decisions", "record", "--from", "msg-2", "proceed=1", "--other", "region=europe-west4, after 6 PM")
+	require.NoError(t, err)
+	assert.Contains(t, outBatch, `proceed v1 -> Yes (1)`)
+	assert.Contains(t, outBatch, `region v1 -> Another region "europe-west4, after 6 PM" ($other)`)
+	require.Len(t, recorded, 2)
+	require.Len(t, recorded[1].Answers, 2)
+	assert.Equal(t, "europe-west4, after 6 PM", recorded[1].Answers[1].OtherText)
+
+	// 4. show text prints "$other  Another region (free-form)" and quoted answer text; --json carries other, otherText, previousOtherText.
+	showOut, err := runDecisionsTestCmd(t, "decisions", "show", "region")
+	require.NoError(t, err)
+	assert.Contains(t, showOut, "    - $other  Another region (free-form)\n")
+	assert.Contains(t, showOut, `Another region "europe-west4" ($other) [interpreted]`)
+	assert.Contains(t, showOut, `Another region "asia-east1 canary" ($other) [overridden]`)
+
+	showJSON, err := runDecisionsTestCmd(t, "decisions", "show", "region", "--json")
+	require.NoError(t, err)
+	var parsedShow hubclient.AgentDecisionShowResponse
+	require.NoError(t, json.Unmarshal([]byte(showJSON), &parsedShow))
+	require.NotNil(t, parsedShow.Versions[0].Other)
+	assert.Equal(t, "Another region", parsedShow.Versions[0].Other.Label)
+	assert.Equal(t, "asia-east1 canary", parsedShow.Versions[0].Answers[1].OtherText)
+	assert.Equal(t, "europe-west4", parsedShow.Versions[0].Answers[1].PreviousOtherText)
+
+	// 5. list text prints `<label>: "<text>"` and --json carries otherText.
+	listOut, err := runDecisionsTestCmd(t, "decisions", "list", "--decided")
+	require.NoError(t, err)
+	assert.Contains(t, listOut, `Another region: "europe-west4 canary"`)
+
+	listJSON, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "--json")
+	require.NoError(t, err)
+	var parsedList hubclient.AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal([]byte(listJSON), &parsedList))
+	require.Len(t, parsedList.Items, 1)
+	require.NotNil(t, parsedList.Items[0].Answer)
+	assert.Equal(t, "europe-west4 canary", parsedList.Items[0].Answer.OtherText)
 }

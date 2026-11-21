@@ -29,70 +29,114 @@ import (
 
 func newDecisionsRecordCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "record (<key> <choice-id> | <key>=<choice-id>...) --from <message-id>",
+		Use:   "record (<key> <choice-id> | <key>=<choice-id>... | --other <key>=<text>...) --from <message-id>",
 		Short: "Record interpreted Decision answer(s) from a user free-text reply",
 		Long: `Record one or more interpreted answers from a user's free-text reply message.
 
-Supports either a single positional pair or 1 to 10 key=choice-id pairs in one
-atomic batch (do not mix the two forms in one command).
+Supports a single positional pair (<key> <choice-id>), 1 to 10 <key>=<choice-id>
+pairs, or repeatable --other <key>=<text> flags for decisions with Other enabled
+(combinable with <key>=<choice-id> pairs in one atomic batch; do not mix the
+two-argument positional form with <key>=<choice-id> or --other).
 
 Examples:
   scion decisions record D234 1 --from <message-id>
-  scion decisions record --from <message-id> D234=1 17=a`,
+  scion decisions record --from <message-id> D234=1 17=a
+  scion decisions record --from <message-id> --other region="europe-west4 canary"
+  scion decisions record --from <message-id> proceed=1 --other region="europe-west4 canary"`,
 		RunE: runDecisionsRecord,
 	}
 	cmd.Flags().String("from", "", "Message ID of the user reply being interpreted (required)")
+	cmd.Flags().StringArray("other", nil, "Record a free-form Other answer as <key>=<text> (repeatable)")
 	cmd.Flags().Bool("json", false, "Output in JSON format")
 	return cmd
 }
 
-func parseDecisionsRecordArgs(args []string) ([]hubclient.InterpretedAnswerInput, error) {
-	if len(args) == 0 {
-		return nil, newUsageError("provide either '<key> <choice-id>' or one or more '<key>=<choice-id>' pairs")
+func parseDecisionsRecordArgs(args []string, otherFlags []string) ([]hubclient.InterpretedAnswerInput, error) {
+	if len(args) == 0 && len(otherFlags) == 0 {
+		return nil, newUsageError("provide '<key> <choice-id>', one or more '<key>=<choice-id>' pairs, or '--other <key>=<text>'")
 	}
 
-	withEq := 0
-	for _, a := range args {
-		if strings.Contains(a, "=") {
-			withEq++
+	var pairs []hubclient.InterpretedAnswerInput
+	if len(args) > 0 {
+		withEq := 0
+		for _, a := range args {
+			if strings.Contains(a, "=") {
+				withEq++
+			}
+		}
+
+		if withEq > 0 && withEq < len(args) {
+			return nil, newUsageError("cannot mix positional '<key> <choice-id>' arguments with '<key>=<choice-id>' pairs")
+		}
+
+		if withEq == 0 {
+			if len(otherFlags) > 0 {
+				return nil, newUsageError("cannot mix positional '<key> <choice-id>' arguments with --other; use '<key>=<choice-id>' pairs instead")
+			}
+			if len(args) != 2 {
+				return nil, newUsageError("positional form requires '<key> <choice-id>'; for multiple answers pass '<key>=<choice-id> ...'")
+			}
+			key := strings.TrimSpace(args[0])
+			choiceID := strings.TrimSpace(args[1])
+			if key == "" || choiceID == "" {
+				return nil, newUsageError("both <key> and <choice-id> must be non-empty")
+			}
+			if choiceID == messages.ChoiceIDOther {
+				return nil, newUsageError("use --other %s=\"<text>\" to record a free-form Other answer", key)
+			}
+			pairs = append(pairs, hubclient.InterpretedAnswerInput{
+				Key:      key,
+				ChoiceID: choiceID,
+			})
+		} else {
+			for _, arg := range args {
+				rawKey, rawChoice, _ := strings.Cut(arg, "=")
+				key := strings.TrimSpace(rawKey)
+				choiceID := strings.TrimSpace(rawChoice)
+				if key == "" || choiceID == "" {
+					return nil, newUsageError("invalid pair %q: expected <key>=<choice-id>", arg)
+				}
+				if choiceID == messages.ChoiceIDOther {
+					return nil, newUsageError("use --other %s=\"<text>\" to record a free-form Other answer", key)
+				}
+				pairs = append(pairs, hubclient.InterpretedAnswerInput{
+					Key:      key,
+					ChoiceID: choiceID,
+				})
+			}
 		}
 	}
 
-	if withEq > 0 && withEq < len(args) {
-		return nil, newUsageError("cannot mix positional '<key> <choice-id>' arguments with '<key>=<choice-id>' pairs")
-	}
-
-	if withEq == 0 {
-		if len(args) != 2 {
-			return nil, newUsageError("positional form requires '<key> <choice-id>'; for multiple answers pass '<key>=<choice-id> ...'")
-		}
-		key := strings.TrimSpace(args[0])
-		choiceID := strings.TrimSpace(args[1])
-		if key == "" || choiceID == "" {
-			return nil, newUsageError("both <key> and <choice-id> must be non-empty")
-		}
-		return []hubclient.InterpretedAnswerInput{
-			{Key: key, ChoiceID: choiceID},
-		}, nil
-	}
-
-	if len(args) > messages.MaxDecisionsPerMessage {
-		return nil, newUsageError("at most %d <key>=<choice-id> pairs may be recorded at once", messages.MaxDecisionsPerMessage)
-	}
-
-	pairs := make([]hubclient.InterpretedAnswerInput, 0, len(args))
-	for _, arg := range args {
-		rawKey, rawChoice, _ := strings.Cut(arg, "=")
+	for _, raw := range otherFlags {
+		rawKey, rawText, hasEq := strings.Cut(raw, "=")
 		key := strings.TrimSpace(rawKey)
-		choiceID := strings.TrimSpace(rawChoice)
-		if key == "" || choiceID == "" {
-			return nil, newUsageError("invalid pair %q: expected <key>=<choice-id>", arg)
+		if !hasEq || key == "" {
+			return nil, newUsageError("invalid --other %q: expected <key>=<text>", raw)
+		}
+		text, verr := messages.NormalizeOtherText(messages.ChoiceIDOther, rawText)
+		if verr != nil {
+			return nil, newUsageError("--other %s: %s", key, verr.Message)
 		}
 		pairs = append(pairs, hubclient.InterpretedAnswerInput{
-			Key:      key,
-			ChoiceID: choiceID,
+			Key:       key,
+			ChoiceID:  messages.ChoiceIDOther,
+			OtherText: text,
 		})
 	}
+
+	if len(pairs) > messages.MaxDecisionsPerMessage {
+		return nil, newUsageError("at most %d answers may be recorded at once", messages.MaxDecisionsPerMessage)
+	}
+
+	seen := make(map[string]bool, len(pairs))
+	for _, p := range pairs {
+		norm := messages.DecisionKeyNorm(p.Key)
+		if seen[norm] {
+			return nil, newUsageError("duplicate decision key %q", p.Key)
+		}
+		seen[norm] = true
+	}
+
 	return pairs, nil
 }
 
@@ -103,7 +147,8 @@ func runDecisionsRecord(cmd *cobra.Command, args []string) error {
 		return newUsageError("--from <message-id> is required")
 	}
 
-	pairs, err := parseDecisionsRecordArgs(args)
+	otherFlags, _ := cmd.Flags().GetStringArray("other")
+	pairs, err := parseDecisionsRecordArgs(args, otherFlags)
 	if err != nil {
 		return err
 	}
@@ -146,6 +191,9 @@ func writeDecisionsRecordResult(out io.Writer, sourceMessageID string, resp *hub
 		choiceID := ""
 		if d.Decision != nil {
 			label = collapseSingleLine(d.Decision.Label)
+			if d.Decision.ChoiceID == messages.ChoiceIDOther && d.Decision.OtherText != "" {
+				label = fmt.Sprintf("%s \"%s\"", label, safeText(d.Decision.OtherText))
+			}
 			choiceID = safeText(d.Decision.ChoiceID)
 		}
 		_, _ = fmt.Fprintf(out, "  %s v%d -> %s (%s)\n", safeText(d.Key), d.Version, label, choiceID)

@@ -57,6 +57,7 @@ type ListAgentDecisionsOptions struct {
 type DecisionAnswerView struct {
 	ChoiceID             string    `json:"choiceId"`
 	Label                string    `json:"label"`
+	OtherText            string    `json:"otherText,omitempty"`
 	AnsweredByUserID     string    `json:"answeredByUserId,omitempty"`
 	AnsweredByName       string    `json:"answeredByName,omitempty"`
 	AnsweredByEmail      string    `json:"answeredByEmail,omitempty"`
@@ -69,6 +70,8 @@ type DecisionAnswerView struct {
 	ResponseMessageID    string    `json:"responseMessageId"`
 	BatchID              string    `json:"batchId,omitempty"`
 	MatchedDefault       bool      `json:"matchedDefault,omitempty"`
+	PreviousChoiceLabel  string    `json:"previousChoiceLabel,omitempty"`
+	PreviousOtherText    string    `json:"previousOtherText,omitempty"`
 	At                   time.Time `json:"at"`
 }
 
@@ -110,6 +113,7 @@ type DecisionView struct {
 	Question        string                  `json:"question"`
 	DefaultChoiceID string                  `json:"defaultChoiceId,omitempty"`
 	Choices         []messages.Choice       `json:"choices"`
+	Other           *messages.OtherOption   `json:"other,omitempty"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
 	Dismissed       *DecisionDismissedView  `json:"dismissed,omitempty"`
@@ -152,6 +156,7 @@ type AgentDecisionVersionView struct {
 	PromptMessageID string                  `json:"promptMessageId"`
 	Choices         []messages.Choice       `json:"choices"`
 	DefaultChoiceID string                  `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption   `json:"other,omitempty"`
 	ReplacedBy      *DecisionReplacedByView `json:"replacedBy,omitempty"`
 	Withdrawn       *DecisionWithdrawnView  `json:"withdrawn,omitempty"`
 	Dismissed       *DecisionDismissedView  `json:"dismissed,omitempty"`
@@ -169,8 +174,9 @@ type AgentDecisionShowResponse struct {
 
 // InterpretedAnswerInput is one key=choice_id pair in RecordInterpretedRequest.
 type InterpretedAnswerInput struct {
-	Key      string `json:"key"`
-	ChoiceID string `json:"choice_id"`
+	Key       string `json:"key"`
+	ChoiceID  string `json:"choice_id"`
+	OtherText string `json:"other_text,omitempty"`
 }
 
 // RecordInterpretedRequest is the body of POST /api/v1/agent/decisions/interpreted.

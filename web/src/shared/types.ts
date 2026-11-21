@@ -1858,6 +1858,7 @@ export interface AnswerView {
   batchId?: string;
   matchedDefault?: boolean;
   previousChoiceLabel?: string;
+  previousOtherText?: string;
   at: string;
 }
 
@@ -1906,6 +1907,7 @@ export interface DecisionResponseView {
   promptMessageId: string;
   sourceMessageId?: string;
   previousChoiceLabel?: string;
+  previousOtherText?: string;
 }
 
 /** One answer of a DecisionResponseSetView. */
@@ -1928,6 +1930,7 @@ export interface DecisionResponseSetAnswer {
   sourceMessageId?: string;
   promptMessageId?: string;
   previousChoiceLabel?: string;
+  previousOtherText?: string;
 }
 
 /** What the decision-response row of a set submit carries, in position order. */

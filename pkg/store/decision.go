@@ -229,6 +229,7 @@ type ProjectDecisionAnswerEntry struct {
 	Answer                 *DecisionAnswer
 	Decision               *Decision
 	PreviousChoiceLabel    string
+	PreviousOtherText      string
 	PromptExistsInMessages bool
 	SourceExistsInMessages bool
 }
@@ -447,7 +448,11 @@ func (e ExistingDecisionKey) Hint() string {
 		if who == "" {
 			who = "a user"
 		}
-		state = fmt.Sprintf("decided by %s: %s", who, e.Answer.ChoiceLabel)
+		ansText := e.Answer.ChoiceLabel
+		if e.Answer.ChoiceID == messages.ChoiceIDOther && e.Answer.OtherText != "" {
+			ansText = fmt.Sprintf("%s %q", e.Answer.ChoiceLabel, e.Answer.OtherText)
+		}
+		state = fmt.Sprintf("decided by %s: %s", who, ansText)
 	case e.Status == DecisionStatusDismissed && e.Dismissal != nil:
 		who := e.Dismissal.AnsweredByName
 		if who == "" {
@@ -756,15 +761,18 @@ type InterpretedAnswerPair struct {
 	DecisionRowID string
 	Key           string
 	ChoiceID      string
+	OtherText     string // required iff ChoiceID == messages.ChoiceIDOther; trimmed by store
 }
 
-// InterpretedFormattedItem carries the canonical key and choice label of one
-// validated pair so RecordInterpretedInput.FormatMessage can render the
-// single decision-response message text inside the transaction.
+// InterpretedFormattedItem carries the canonical key, choice label, and
+// optional Other text of one validated pair so
+// RecordInterpretedInput.FormatMessage can render the single decision-response
+// message text inside the transaction.
 type InterpretedFormattedItem struct {
 	Key         string
 	ChoiceID    string
 	ChoiceLabel string
+	OtherText   string
 }
 
 // RecordInterpretedInput records 1 to MaxDecisionsPerMessage agent-interpreted

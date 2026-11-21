@@ -234,6 +234,10 @@ export class ScionChatDecisions extends LitElement {
   @state()
   private otherDraft = '';
 
+  /** Single mode: row/response key whose interpreted Other text seeded `otherDraft`. */
+  @state()
+  private interpretedOtherSeedKey = '';
+
   /** Rendered question/description markdown, keyed by source text. */
   @state()
   private rendered = new Map<string, DocumentFragment>();
@@ -1355,21 +1359,29 @@ export class ScionChatDecisions extends LitElement {
     }
     if (
       !this.isSet &&
-      (this.otherOpen || this.otherDraft) &&
       (changed.has('decisions') || changed.has('currentUserId') || changed.has('answerability'))
     ) {
       const row = this.views[0];
-      if (
-        !row ||
-        !isOpenDecision(row) ||
-        row.status !== 'pending' ||
-        !this.rowActionable(row) ||
-        !row.other
-      ) {
-        this.otherOpen = false;
-        this.otherDraft = '';
-      } else if (this.answerBlocked) {
-        this.otherOpen = false;
+      if (row && this.isActionableInterpretedOther(row)) {
+        const seedKey = `${row.rowId}:${row.decision?.responseMessageId ?? ''}`;
+        if (this.interpretedOtherSeedKey !== seedKey) {
+          this.interpretedOtherSeedKey = seedKey;
+          this.otherDraft = row.decision?.otherText ?? '';
+          this.otherOpen = false;
+        }
+      } else {
+        if (this.interpretedOtherSeedKey !== '') {
+          this.interpretedOtherSeedKey = '';
+          this.otherDraft = '';
+          this.otherOpen = false;
+        } else if (this.otherOpen || this.otherDraft) {
+          if (!row || !isOpenDecision(row) || !this.rowActionable(row) || !row.other) {
+            this.otherOpen = false;
+            this.otherDraft = '';
+          } else if (this.answerBlocked) {
+            this.otherOpen = false;
+          }
+        }
       }
     }
   }
@@ -2001,6 +2013,19 @@ export class ScionChatDecisions extends LitElement {
     return this.rowActionable(d) && !this.submitting && !this.answerBlocked;
   }
 
+  private isActionableInterpreted(d: DecisionView): boolean {
+    return (
+      d.status === 'decided' &&
+      d.decision?.provenance === 'agent_interpreted' &&
+      this.rowActionable(d) &&
+      !this.answerBlocked
+    );
+  }
+
+  private isActionableInterpretedOther(d: DecisionView): boolean {
+    return this.isActionableInterpreted(d) && isOtherAnswer(d.decision);
+  }
+
   /** Enter on the focused card (not on a control inside it) picks the recommended choice on pending cards only. */
   private onCardKeydown(e: KeyboardEvent, d: DecisionView): void {
     if (e.key !== 'Enter' || e.target !== e.currentTarget || this.otherOpen) return;
@@ -2012,6 +2037,10 @@ export class ScionChatDecisions extends LitElement {
   private onSingleChoiceClick(d: DecisionView, choiceId: string): void {
     if (!this.actionable(d)) return;
     if (d.status === 'decided' && d.decision?.provenance === 'agent_interpreted') {
+      this.otherOpen = false;
+      if (!isOtherAnswer(d.decision)) {
+        this.otherDraft = '';
+      }
       if (choiceId === d.decision.choiceId) {
         if (this.pendingChange?.rowId === d.rowId) {
           this.pendingChange = null;
@@ -2027,8 +2056,15 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private async openOther(d: DecisionView): Promise<void> {
-    if (!this.actionable(d) || d.status !== 'pending' || !d.other) return;
-    this.otherOpen = true;
+    const canOpen =
+      this.actionable(d) &&
+      (d.status === 'pending' || this.isActionableInterpreted(d)) &&
+      (!!d.other || isOtherAnswer(d.decision));
+    if (!canOpen) return;
+    this.pendingChange = null;
+    if (!this.isActionableInterpretedOther(d)) {
+      this.otherOpen = true;
+    }
     await this.updateComplete;
     const input = this.shadowRoot?.querySelector<
       HTMLElement & { updateComplete?: Promise<unknown> }
@@ -2039,16 +2075,24 @@ export class ScionChatDecisions extends LitElement {
     focusElement(input);
   }
 
-  private async cancelOther(): Promise<void> {
-    this.otherOpen = false;
-    this.otherDraft = '';
+  private async cancelOther(d?: DecisionView): Promise<void> {
+    if (d && this.isActionableInterpretedOther(d)) {
+      this.otherDraft = d.decision?.otherText ?? '';
+    } else {
+      this.otherOpen = false;
+      this.otherDraft = '';
+    }
     await this.updateComplete;
     const btn = this.shadowRoot?.querySelector<HTMLElement>(`[data-choice="${OTHER_CHOICE_ID}"]`);
     focusElement(btn);
   }
 
   private async submitOther(d: DecisionView): Promise<void> {
-    if (!this.actionable(d) || d.status !== 'pending' || !d.other) return;
+    const canSubmit =
+      this.actionable(d) &&
+      (d.status === 'pending' || this.isActionableInterpreted(d)) &&
+      (!!d.other || isOtherAnswer(d.decision));
+    if (!canSubmit) return;
     const trimmed = this.otherDraft.trim();
     if (!trimmed || [...trimmed].length > 200) return;
     await this.choose(d, OTHER_CHOICE_ID, trimmed);
@@ -2222,12 +2266,24 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private renderRow(d: DecisionView, showHint: boolean): TemplateResult {
-    const chosenOther = d.status === 'decided' && isOtherAnswer(d.decision);
+    const interpreted = d.status === 'decided' && d.decision?.provenance === 'agent_interpreted';
+    const interpretedOther = interpreted && isOtherAnswer(d.decision);
+    const chosenOther = d.status === 'decided' && isOtherAnswer(d.decision) && !interpreted;
     const otherOpt: OtherOption | undefined =
-      d.other ?? (chosenOther ? { label: d.decision?.label || 'Other' } : undefined);
+      d.other ??
+      (chosenOther || interpretedOther ? { label: d.decision?.label || 'Other' } : undefined);
     const stacked = (d.choices ?? []).some((c) => !!c.description) || !!otherOpt?.description;
-    const editorOpen =
-      this.otherOpen && d.status === 'pending' && !!otherOpt && !this.answerBlocked;
+    const stagingFixedFromInterpOther = interpretedOther && this.pendingChange?.rowId === d.rowId;
+    const showInterpretedOtherEditor =
+      this.isActionableInterpretedOther(d) && !stagingFixedFromInterpOther;
+    const showPendingOrFixedToOtherEditor =
+      this.otherOpen &&
+      !this.answerBlocked &&
+      !!otherOpt &&
+      (d.status === 'pending' || (this.isActionableInterpreted(d) && !interpretedOther));
+    const editorOpen = showInterpretedOtherEditor || showPendingOrFixedToOtherEditor;
+    const showStaticOtherText =
+      (chosenOther || (interpretedOther && !showInterpretedOtherEditor)) && !!d.decision?.otherText;
     return html`
       <div class="row${this.rowStatusClass(d)}" data-row=${d.rowId} data-status=${d.status}>
         <div class="q">${this.markdown(d.question, false)}</div>
@@ -2237,14 +2293,12 @@ export class ScionChatDecisions extends LitElement {
           )}
           ${otherOpt
             ? stacked
-              ? this.renderOtherOptRow(d, otherOpt, editorOpen, chosenOther)
-              : this.renderOtherButton(d, otherOpt, editorOpen, chosenOther)
+              ? this.renderOtherOptRow(d, otherOpt, editorOpen, chosenOther, interpretedOther)
+              : this.renderOtherButton(d, otherOpt, editorOpen, chosenOther, interpretedOther)
             : nothing}
         </div>
         ${!stacked && editorOpen && otherOpt ? this.renderOtherEditor(d, otherOpt) : nothing}
-        ${chosenOther && d.decision?.otherText
-          ? html`<div class="otext">“${d.decision.otherText}”</div>`
-          : nothing}
+        ${showStaticOtherText ? html`<div class="otext">“${d.decision!.otherText}”</div>` : nothing}
         ${this.renderSingleActionsAndFoot(d)}
         ${showHint && !this.submitting
           ? html`<div class="hint" id=${this.hintId}>
@@ -2259,7 +2313,8 @@ export class ScionChatDecisions extends LitElement {
     d: DecisionView,
     other: OtherOption,
     editorOpen: boolean,
-    chosenOther: boolean
+    chosenOther: boolean,
+    interpretedOther: boolean
   ): TemplateResult {
     if (chosenOther) {
       const label = d.decision?.label || other.label;
@@ -2274,7 +2329,47 @@ export class ScionChatDecisions extends LitElement {
     }
     const loading =
       this.submitting?.rowId === d.rowId && this.submitting.choiceId === OTHER_CHOICE_ID;
-    const canOpen = d.status === 'pending' && this.actionable(d);
+    if (interpretedOther) {
+      const label = d.decision?.label || other.label;
+      const reason = actionableReason(d, this.currentUserId);
+      const notOwner = reason === 'not_recorded_answerer';
+      if (notOwner) {
+        const tip = this.notOwnerTooltip(d);
+        return html`<sl-tooltip content=${tip}
+          ><sl-button
+            size="small"
+            data-choice=${OTHER_CHOICE_ID}
+            variant="primary"
+            disabled
+            aria-disabled="true"
+            title=${tip}
+            ><sl-icon slot="prefix" name="robot"></sl-icon>${label}</sl-button
+          ></sl-tooltip
+        >`;
+      }
+      const disabled = (!loading && !!this.submitting) || this.answerBlocked;
+      const stagingFixed = this.pendingChange?.rowId === d.rowId;
+      return html`<sl-button
+        size="small"
+        data-choice=${OTHER_CHOICE_ID}
+        variant=${stagingFixed ? 'default' : 'primary'}
+        ?outline=${!stagingFixed || this.answerBlocked}
+        ?loading=${loading}
+        ?disabled=${disabled}
+        aria-disabled=${disabled ? 'true' : nothing}
+        title=${label}
+        @click=${() => {
+          if (!disabled) void this.openOther(d);
+        }}
+        ><sl-icon
+          slot="prefix"
+          name=${stagingFixed || this.answerBlocked ? 'robot' : 'pencil'}
+        ></sl-icon
+        >${label}</sl-button
+      >`;
+    }
+    const canOpen =
+      (d.status === 'pending' || this.isActionableInterpreted(d)) && this.actionable(d);
     const disabled = !canOpen && !loading;
     return html`<sl-button
       size="small"
@@ -2297,7 +2392,8 @@ export class ScionChatDecisions extends LitElement {
     d: DecisionView,
     other: OtherOption,
     editorOpen: boolean,
-    chosenOther: boolean
+    chosenOther: boolean,
+    interpretedOther: boolean
   ): TemplateResult {
     const loading =
       this.submitting?.rowId === d.rowId && this.submitting.choiceId === OTHER_CHOICE_ID;
@@ -2310,7 +2406,9 @@ export class ScionChatDecisions extends LitElement {
               : html`<sl-icon name="pencil"></sl-icon>`}</span
           >
           <span>
-            <span class="lbl">${other.label}…</span>
+            <span class="lbl"
+              >${interpretedOther ? d.decision?.label || other.label : `${other.label}…`}</span
+            >
             ${other.description
               ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
               : nothing}
@@ -2338,7 +2436,37 @@ export class ScionChatDecisions extends LitElement {
         </span>
       </button>`;
     }
-    const canOpen = d.status === 'pending' && this.actionable(d);
+    if (interpretedOther) {
+      const label = d.decision?.label || other.label;
+      const reason = actionableReason(d, this.currentUserId);
+      const notOwner = reason === 'not_recorded_answerer';
+      const disabled = notOwner || (!loading && !!this.submitting) || this.answerBlocked;
+      const tip = notOwner ? this.notOwnerTooltip(d) : label;
+      const cls = notOwner ? 'opt chosen' : 'opt recd';
+      const btn = html`<button
+        type="button"
+        class=${cls}
+        data-choice=${OTHER_CHOICE_ID}
+        ?disabled=${notOwner}
+        aria-disabled=${disabled || loading ? 'true' : 'false'}
+        aria-busy=${loading ? 'true' : nothing}
+        title=${tip}
+        @click=${() => {
+          if (!disabled) void this.openOther(d);
+        }}
+      >
+        <span class="mark"><sl-icon name="robot"></sl-icon></span>
+        <span>
+          <span class="lbl">${label}</span>
+          ${other.description
+            ? html`<span class="desc">${this.markdown(other.description, true)}</span>`
+            : nothing}
+        </span>
+      </button>`;
+      return notOwner ? html`<sl-tooltip content=${tip}>${btn}</sl-tooltip>` : btn;
+    }
+    const canOpen =
+      (d.status === 'pending' || this.isActionableInterpreted(d)) && this.actionable(d);
     const disabled = !canOpen && !loading;
     const notOwner = actionableReason(d, this.currentUserId) === 'not_recorded_answerer';
     return html`<button
@@ -2385,6 +2513,7 @@ export class ScionChatDecisions extends LitElement {
     const loading =
       this.submitting?.rowId === d.rowId && this.submitting.choiceId === OTHER_CHOICE_ID;
     const canSend = trimmedLen > 0 && trimmedLen <= 200 && !this.submitting;
+    const isInterpreted = d.status === 'decided' && d.decision?.provenance === 'agent_interpreted';
     const counter = showCounter
       ? html`<span
           class="cnt${overCounter ? ' over' : warnCounter ? ' warn' : ''}"
@@ -2394,9 +2523,10 @@ export class ScionChatDecisions extends LitElement {
         >`
       : nothing;
     return html`
-      ${!inset || showCounter
+      ${(!inset && !isInterpreted) || showCounter
         ? html`<div class="editor-head">
-            ${!inset ? html`<span class="lab">${other.label}</span>` : nothing} ${counter}
+            ${!inset && !isInterpreted ? html`<span class="lab">${other.label}</span>` : nothing}
+            ${counter}
           </div>`
         : nothing}
       <div class="ctl">
@@ -2417,28 +2547,30 @@ export class ScionChatDecisions extends LitElement {
             } else if (e.key === 'Escape') {
               e.preventDefault();
               e.stopPropagation();
-              void this.cancelOther();
+              void this.cancelOther(d);
             }
           }}
         ></sl-input>
-        <sl-button
-          size="small"
-          variant="primary"
-          data-action="send-other"
-          ?loading=${loading}
-          ?disabled=${!canSend}
-          aria-disabled=${!canSend ? 'true' : nothing}
-          @click=${() => void this.submitOther(d)}
-          >Send</sl-button
-        >
-        <sl-button
-          size="small"
-          variant="text"
-          data-action="cancel-other"
-          ?disabled=${!!this.submitting}
-          @click=${() => void this.cancelOther()}
-          >Cancel</sl-button
-        >
+        ${isInterpreted
+          ? nothing
+          : html`<sl-button
+                size="small"
+                variant="primary"
+                data-action="send-other"
+                ?loading=${loading}
+                ?disabled=${!canSend}
+                aria-disabled=${!canSend ? 'true' : nothing}
+                @click=${() => void this.submitOther(d)}
+                >Send</sl-button
+              >
+              <sl-button
+                size="small"
+                variant="text"
+                data-action="cancel-other"
+                ?disabled=${!!this.submitting}
+                @click=${() => void this.cancelOther(d)}
+                >Cancel</sl-button
+              >`}
       </div>
     `;
   }
@@ -2680,13 +2812,17 @@ export class ScionChatDecisions extends LitElement {
       if (this.answerBlocked) {
         return html`${this.renderTerminalFoot(d)}${this.renderAnswerBlocked()}`;
       }
+      const origIsOther = isOtherAnswer(d.decision);
+      const origDisplay = html`<b>${d.decision.label}</b>${origIsOther && d.decision.otherText
+          ? html` “${d.decision.otherText}”`
+          : nothing}`;
       if (this.pendingChange?.rowId === d.rowId) {
         const target = d.choices.find((c) => c.id === this.pendingChange?.choiceId);
         if (target) {
           return html`<div class="confirmbar" role="region" aria-label="Confirm answer change">
             <sl-icon name="arrow-left-right" aria-hidden="true"></sl-icon>
             <span role="status" aria-live="polite"
-              >Change your answer from <b>${d.decision.label}</b> to <b>${target.label}</b>?
+              >Change your answer from ${origDisplay} to <b>${target.label}</b>?
               ${d.askerAgentName || 'The agent'} will be told.</span
             >
             <span class="spacer"></span>
@@ -2711,6 +2847,91 @@ export class ScionChatDecisions extends LitElement {
             >
           </div>`;
         }
+      }
+      if (!origIsOther && this.otherOpen && d.other) {
+        const trimmed = this.otherDraft.trim();
+        const trimmedLen = [...trimmed].length;
+        const canSubmit = trimmedLen > 0 && trimmedLen <= 200 && !this.submitting;
+        return html`${this.renderTerminalFoot(d)}
+          <div class="confirmbar" role="region" aria-label="Confirm answer change">
+            <sl-icon name="arrow-left-right" aria-hidden="true"></sl-icon>
+            <span role="status" aria-live="polite"
+              >Change your answer from ${origDisplay} to <b>${d.other.label}</b>${trimmed
+                ? html` “${trimmed}”`
+                : nothing}?
+              ${trimmed
+                ? `${d.askerAgentName || 'The agent'} will be told.`
+                : 'Type your answer above.'}</span
+            >
+            <span class="spacer"></span>
+            <sl-button
+              size="small"
+              data-action="cancel-change"
+              @click=${() => void this.cancelOther(d)}
+              >Cancel</sl-button
+            >
+            <sl-button
+              size="small"
+              variant="primary"
+              data-action="confirm-change"
+              ?disabled=${!canSubmit}
+              aria-disabled=${!canSubmit ? 'true' : nothing}
+              @click=${() => void this.submitOther(d)}
+              >Change answer</sl-button
+            >
+          </div>`;
+      }
+      if (origIsOther) {
+        const origText = d.decision.otherText ?? '';
+        const trimmed = this.otherDraft.trim();
+        const trimmedLen = [...trimmed].length;
+        const otherLabel = d.other?.label || d.decision.label;
+        if (trimmed !== origText) {
+          const canSubmit = trimmedLen > 0 && trimmedLen <= 200 && !this.submitting;
+          return html`${this.renderTerminalFoot(d)}
+            <div class="confirmbar" role="region" aria-label="Confirm answer change">
+              <sl-icon name="arrow-left-right" aria-hidden="true"></sl-icon>
+              <span role="status" aria-live="polite"
+                >Change your answer from ${origDisplay} to <b>${otherLabel}</b>${trimmed
+                  ? html` “${trimmed}”`
+                  : nothing}?
+                ${trimmed
+                  ? `${d.askerAgentName || 'The agent'} will be told.`
+                  : 'Type your answer above.'}</span
+              >
+              <span class="spacer"></span>
+              <sl-button
+                size="small"
+                data-action="cancel-change"
+                @click=${() => {
+                  this.otherDraft = origText;
+                }}
+                >Cancel</sl-button
+              >
+              <sl-button
+                size="small"
+                variant="primary"
+                data-action="confirm-change"
+                ?disabled=${!canSubmit}
+                aria-disabled=${!canSubmit ? 'true' : nothing}
+                @click=${() => void this.submitOther(d)}
+                >Change answer</sl-button
+              >
+            </div>`;
+        }
+        return html`${this.renderTerminalFoot(d)}
+          <div class="confirm-row">
+            <sl-button
+              size="small"
+              variant="success"
+              outline
+              data-action="confirm"
+              @click=${() => void this.choose(d, OTHER_CHOICE_ID, origText)}
+              ><sl-icon slot="prefix" name="patch-check"></sl-icon>Confirm
+              “${d.decision.label}”</sl-button
+            >
+            <span>or edit your answer or pick another choice to change it</span>
+          </div>`;
       }
       return html`${this.renderTerminalFoot(d)}
         <div class="confirm-row">
@@ -2778,12 +2999,18 @@ export class ScionChatDecisions extends LitElement {
       }
       if (d.decision.provenance === 'direct' && d.decision.outcome === 'override') {
         const prev = d.decision.previousChoiceLabel;
+        const prevOther = d.decision.previousOtherText;
         return html`<div class="row-foot" role="status">
           <sl-icon class="ok" name="check-circle-fill"></sl-icon>
           <span>Answered by <b>${this.answeredBy(d)}</b></span>
           ${this.renderAt(d.decision.at)}
           <span aria-hidden="true">·</span>
-          <span>changed from the interpreted answer${prev ? html` <i>${prev}</i>` : nothing}</span>
+          <span
+            >changed from the interpreted
+            answer${prev
+              ? html` <i>${prev}</i>${prevOther ? html` “${prevOther}”` : nothing}`
+              : nothing}</span
+          >
         </div>`;
       }
       return html`<div class="row-foot" role="status">

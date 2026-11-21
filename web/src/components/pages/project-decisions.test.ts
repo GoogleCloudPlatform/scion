@@ -3158,4 +3158,47 @@ describe('<scion-page-project-decisions>', () => {
     await settle(el, 90);
     expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
   });
+
+  it('renders Other answers with bold label, quoted plain text, two-line clamp + title, and previousOtherText on Made tab', async () => {
+    enableDecisionsFlag();
+    const literalText = '<b>europe-west4</b>, only after 6 PM freeze lifts @bystander';
+    const otherEntry = makeLogEntry({
+      answerId: 'ans-other-1',
+      choiceId: '$other',
+      label: 'Another region',
+      otherText: literalText,
+      provenance: 'direct',
+      outcome: 'override',
+      previousChoiceLabel: 'Another region',
+      previousOtherText: 'europe-west1',
+    });
+    madeResponses = [
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        entries: [otherEntry],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+    const row = root.querySelector('[data-answer-row="ans-other-1"]')!;
+    expect(row).not.toBeNull();
+    const clamp = row.querySelector<HTMLElement>('td.ans .ans-clamp')!;
+    expect(clamp).not.toBeNull();
+    expect(clamp.getAttribute('title')).toBe(`Another region: “${literalText}”`);
+    expect(clamp.querySelector('b')?.textContent).toBe('Another region:');
+    expect(clamp.textContent).toContain(`“${literalText}”`);
+    // Literal plain text: no nested <b> element parsed from literalText.
+    expect(clamp.querySelectorAll('b').length).toBe(1);
+    expect(row.querySelector('[data-provenance]')?.textContent).toContain(
+      'from Another region “europe-west1”'
+    );
+
+    const mobile = root.querySelector('[data-mobile-answer="ans-other-1"]')!;
+    expect(mobile.textContent).toContain(`Another region: “${literalText}”`);
+    expect(mobile.textContent).toContain('from Another region “europe-west1”');
+  });
 });

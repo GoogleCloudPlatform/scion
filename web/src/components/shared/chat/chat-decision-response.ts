@@ -269,13 +269,16 @@ export class ScionChatDecisionResponse extends LitElement {
   }
 
   private renderSingle(r: DecisionResponseView): TemplateResult {
+    const otherText = isOtherAnswer(r) ? r.otherText : undefined;
     if (r.provenance === INTERPRETED) {
       const agent = this.agentName || 'the agent';
       const whose = this.own ? 'your' : `${this.who}'s`;
       const pronoun = this.own ? 'your' : 'their';
       return html`<div class="line" data-kind="single" data-state="interpreted">
         <sl-icon class="robot" name="robot" aria-hidden="true"></sl-icon>
-        <b>${agent}</b> recorded <b>${whose}</b> answer <b>${r.label}</b>
+        <b>${agent}</b> recorded <b>${whose}</b> answer <b>${r.label}</b>${otherText
+          ? html` — <span class="other-text">“${otherText}”</span>`
+          : nothing}
         ${r.key ? html`for <span class="key">${r.key}</span>` : nothing} from ${pronoun} reply
         ${this.renderTime()} ${this.renderNotDelivered()}
         ${r.sourceMessageId
@@ -301,7 +304,9 @@ export class ScionChatDecisionResponse extends LitElement {
     if (outcome === 'confirm') {
       return html`<div class="line" data-kind="single" data-outcome="confirm">
         <sl-icon class="ok" name="patch-check" aria-hidden="true"></sl-icon>
-        <b>${this.who}</b> confirmed <b>${r.label}</b>
+        <b>${this.who}</b> confirmed <b>${r.label}</b>${otherText
+          ? html` — <span class="other-text">“${otherText}”</span>`
+          : nothing}
         ${r.key ? html`for <span class="key">${r.key}</span>` : nothing} ${this.renderTime()}
         <span class="sep" aria-hidden="true">·</span>
         <span class="muted" data-state="not-sent">not sent to the agent</span>
@@ -313,9 +318,16 @@ export class ScionChatDecisionResponse extends LitElement {
       return html`<div class="line" data-kind="single" data-outcome="override">
         <sl-icon class="change" name="arrow-left-right" aria-hidden="true"></sl-icon>
         <b>${this.who}</b> changed ${r.key ? html`<span class="key">${r.key}</span>` : nothing} to
-        <b>${r.label}</b>
+        <b>${r.label}</b>${otherText
+          ? html` — <span class="other-text">“${otherText}”</span>`
+          : nothing}
         ${r.previousChoiceLabel
-          ? html`<span class="muted">(was interpreted as ${r.previousChoiceLabel})</span>`
+          ? html`<span class="muted"
+              >(was interpreted as
+              ${r.previousChoiceLabel}${r.previousOtherText
+                ? ` “${r.previousOtherText}”`
+                : ''})</span
+            >`
           : nothing}
         ${this.renderTime()} ${this.renderNotDelivered()}
         ${this.renderJumpButton(r.promptMessageId)}
@@ -323,7 +335,6 @@ export class ScionChatDecisionResponse extends LitElement {
     }
 
     const question = r.question?.trim();
-    const otherText = isOtherAnswer(r) ? r.otherText : undefined;
     return html`<div class="line" data-kind="single">
       <sl-icon class="ok" name="check-circle-fill" aria-hidden="true"></sl-icon>
       <b>${this.who}</b> chose <b>${r.label}</b>${otherText
@@ -342,7 +353,9 @@ export class ScionChatDecisionResponse extends LitElement {
       }
       if (a.outcome === 'override') {
         return html` <i
-          >(${a.previousChoiceLabel ? `changed from ${a.previousChoiceLabel}` : 'changed'})</i
+          >(${a.previousChoiceLabel
+            ? `changed from ${a.previousChoiceLabel}${a.previousOtherText ? ` “${a.previousOtherText}”` : ''}`
+            : 'changed'})</i
         >`;
       }
     }

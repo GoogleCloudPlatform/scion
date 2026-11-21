@@ -706,6 +706,75 @@ describe('single Other free-form response line (ptone/scion#8152)', () => {
     root(el).querySelector<HTMLButtonElement>('[data-action="jump"]')!.click();
     expect(got).toEqual(['prompt-9']);
   });
+
+  it('shows Other text and previousOtherText on interpreted, confirm, override, and set responses', async () => {
+    const interp = await mount({
+      agentName: 'release-bot',
+      answererName: 'Alice',
+      response: single({
+        key: 'region',
+        choiceId: '$other',
+        label: 'Another region',
+        otherText: 'europe-west4',
+        provenance: 'agent_interpreted',
+        sourceMessageId: 'src-1',
+      }),
+    });
+    expect(text(root(interp).querySelector('.line'))).toContain(
+      "release-bot recorded Alice's answer Another region — “europe-west4” for region from their reply"
+    );
+
+    const conf = await mount({
+      answererName: 'Alice',
+      response: single({
+        key: 'region',
+        choiceId: '$other',
+        label: 'Another region',
+        otherText: 'europe-west4',
+        outcome: 'confirm',
+      }),
+    });
+    expect(text(root(conf).querySelector('.line'))).toContain(
+      'Alice confirmed Another region — “europe-west4” for region'
+    );
+
+    const over = await mount({
+      answererName: 'Alice',
+      response: single({
+        key: 'region',
+        choiceId: '$other',
+        label: 'Another region',
+        otherText: 'asia-east1',
+        outcome: 'override',
+        previousChoiceLabel: 'Another region',
+        previousOtherText: 'europe-west4',
+      }),
+    });
+    expect(text(root(over).querySelector('.line'))).toContain(
+      'Alice changed region to Another region — “asia-east1” (was interpreted as Another region “europe-west4”)'
+    );
+
+    const setEl = await mount({
+      answererName: 'Alice',
+      responseSet: set({
+        answers: [
+          setAnswer({
+            rowId: 'r1',
+            key: 'region',
+            choiceId: '$other',
+            label: 'Another region',
+            otherText: 'asia-east1',
+            outcome: 'override',
+            previousChoiceLabel: 'Another region',
+            previousOtherText: 'europe-west4',
+          }),
+        ],
+      }),
+    });
+    expect(text(root(setEl).querySelector('li[data-row="r1"]'))).toBe(
+      'region Another region — “asia-east1” (changed from Another region “europe-west4”)'
+    );
+  });
 });
 
 describe('set Other free-form response lines (ptone/scion#8153)', () => {

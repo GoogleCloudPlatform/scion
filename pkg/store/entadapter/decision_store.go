@@ -1526,7 +1526,7 @@ func dismissalReasonContainsFold(q string) predicate.Decision {
 // effectiveAnswerLabelContainsFold matches decisions whose effective answer
 // (Decision.EffectiveAnswer: the direct answer when present, otherwise the
 // agent-interpreted answer, skipping dismissed decisions and outcome=dismiss
-// rows) has a choice_label containing q case-insensitively.
+// rows) has a choice_label or other_text containing q case-insensitively.
 func effectiveAnswerLabelContainsFold(q string) predicate.Decision {
 	return func(s *entsql.Selector) {
 		ta := entsql.Table(decisionanswer.Table).As("da_eff")
@@ -1547,7 +1547,10 @@ func effectiveAnswerLabelContainsFold(q string) predicate.Decision {
 					Where(entsql.And(
 						entsql.ColumnsEQ(ta.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
 						entsql.NEQ(ta.C(decisionanswer.FieldOutcome), decisionanswer.OutcomeDismiss),
-						entsql.ContainsFold(ta.C(decisionanswer.FieldChoiceLabel), q),
+						entsql.Or(
+							entsql.ContainsFold(ta.C(decisionanswer.FieldChoiceLabel), q),
+							entsql.ContainsFold(ta.C(decisionanswer.FieldOtherText), q),
+						),
 						entsql.Or(
 							entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
 							entsql.And(
@@ -1679,6 +1682,12 @@ func validateRecordInterpretedInput(in *store.RecordInterpretedInput) error {
 		if a.ChoiceID == "" || (a.Key == "" && a.DecisionRowID == "") {
 			return fmt.Errorf("%w: every pair needs a decision key or row id and a choice id", store.ErrInvalidInput)
 		}
+		if messages.IsReservedChoiceID(a.ChoiceID) && a.ChoiceID != messages.ChoiceIDOther {
+			return fmt.Errorf("%w: choice %q is reserved", store.ErrInvalidInput, a.ChoiceID)
+		}
+		if _, verr := messages.NormalizeOtherText(a.ChoiceID, a.OtherText); verr != nil {
+			return fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+		}
 		if a.DecisionRowID != "" {
 			if _, err := parseUUID(a.DecisionRowID); err != nil {
 				return err
@@ -1703,6 +1712,7 @@ type validatedInterpretedItem struct {
 	row         *ent.Decision
 	choiceID    string
 	choiceLabel string
+	otherText   string
 }
 
 func compareEntDecisionOrder(ri, rj *ent.Decision) bool {
@@ -1836,11 +1846,25 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			})
 			continue
 		}
+		otherText, verr := messages.NormalizeOtherText(a.ChoiceID, a.OtherText)
+		if verr != nil {
+			return nil, fmt.Errorf("%w: %s", store.ErrInvalidInput, verr.Error())
+		}
 		label := ""
-		for _, ch := range row.Choices {
-			if ch.ID == a.ChoiceID {
-				label = ch.Label
-				break
+		if a.ChoiceID == messages.ChoiceIDOther {
+			if row.AllowOther {
+				if row.OtherLabel != nil && *row.OtherLabel != "" {
+					label = *row.OtherLabel
+				} else {
+					label = messages.DefaultOtherLabel
+				}
+			}
+		} else {
+			for _, ch := range row.Choices {
+				if ch.ID == a.ChoiceID {
+					label = ch.Label
+					break
+				}
 			}
 		}
 		if label == "" {
@@ -1856,6 +1880,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			row:         row,
 			choiceID:    a.ChoiceID,
 			choiceLabel: label,
+			otherText:   otherText,
 		})
 	}
 	if len(failures) > 0 {
@@ -1883,6 +1908,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			Key:         v.row.Key,
 			ChoiceID:    v.choiceID,
 			ChoiceLabel: v.choiceLabel,
+			OtherText:   v.otherText,
 		}
 	}
 
@@ -1920,6 +1946,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			SetQuestionText(v.row.Question).
 			SetChoiceID(v.choiceID).
 			SetChoiceLabel(v.choiceLabel).
+			SetNillableOtherText(nullableString(v.otherText)).
 			SetNillableAnsweredByUserID(nullableString(in.AnsweredByUserID)).
 			SetAnsweredByName(in.AnsweredByName).
 			SetAnsweredByEmail(in.AnsweredByEmail).
@@ -1931,7 +1958,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			SetResponseMessageID(responseUUID).
 			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 			SetNillableBatchID(batchUUID).
-			SetMatchedDefault(v.row.DefaultChoiceID != nil && *v.row.DefaultChoiceID == v.choiceID).
+			SetMatchedDefault(v.choiceID != messages.ChoiceIDOther && v.row.DefaultChoiceID != nil && *v.row.DefaultChoiceID == v.choiceID).
 			SetCreatedAt(now).
 			Save(ctx)
 		if err != nil {
@@ -2024,6 +2051,17 @@ func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agent
 			f = byRowID[a.DecisionRowID]
 		}
 		if f == nil || matched[f.ID] || f.ChoiceID != a.ChoiceID {
+			return nil, false, mismatch
+		}
+		wantOther, verr := messages.NormalizeOtherText(a.ChoiceID, a.OtherText)
+		if verr != nil {
+			return nil, false, mismatch
+		}
+		gotOther := ""
+		if f.OtherText != nil {
+			gotOther = *f.OtherText
+		}
+		if gotOther != wantOther {
 			return nil, false, mismatch
 		}
 		if a.DecisionRowID != "" && f.DecisionRowID.String() != a.DecisionRowID && a.Key == "" {

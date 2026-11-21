@@ -94,6 +94,7 @@ type AnswerView struct {
 	BatchID             string    `json:"batchId,omitempty"`
 	MatchedDefault      bool      `json:"matchedDefault,omitempty"`
 	PreviousChoiceLabel string    `json:"previousChoiceLabel,omitempty"`
+	PreviousOtherText   string    `json:"previousOtherText,omitempty"`
 	At                  time.Time `json:"at"`
 }
 
@@ -153,6 +154,7 @@ type DecisionResponseSetAnswer struct {
 	SourceMessageID      string `json:"sourceMessageId,omitempty"`
 	PromptMessageID      string `json:"promptMessageId,omitempty"`
 	PreviousChoiceLabel  string `json:"previousChoiceLabel,omitempty"`
+	PreviousOtherText    string `json:"previousOtherText,omitempty"`
 }
 
 // DecisionResponseView is what a decision-response row gains in history and SSE.
@@ -174,6 +176,7 @@ type DecisionResponseView struct {
 	PromptMessageID      string `json:"promptMessageId"`
 	SourceMessageID      string `json:"sourceMessageId,omitempty"`
 	PreviousChoiceLabel  string `json:"previousChoiceLabel,omitempty"`
+	PreviousOtherText    string `json:"previousOtherText,omitempty"`
 }
 
 // answerView converts a stored answer.
@@ -225,6 +228,7 @@ func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
 	}
 	if v.Decision != nil {
 		v.Decision.PreviousChoiceLabel = previousChoiceLabel(eff, d)
+		v.Decision.PreviousOtherText = previousOtherText(eff, d)
 	}
 	if v.Choices == nil {
 		v.Choices = []messages.Choice{}
@@ -465,6 +469,20 @@ func previousChoiceLabel(a *store.DecisionAnswer, d *store.Decision) string {
 	return ""
 }
 
+// previousOtherText returns the Other text of d's interpreted answer when a
+// overrides it, or "".
+func previousOtherText(a *store.DecisionAnswer, d *store.Decision) string {
+	if a == nil || a.Outcome != store.DecisionOutcomeOverride || d == nil {
+		return ""
+	}
+	for _, prev := range d.Answers {
+		if prev.Provenance == store.DecisionProvenanceAgentInterpreted {
+			return prev.OtherText
+		}
+	}
+	return ""
+}
+
 // decisionResponseViewOf builds the DecisionResponseView of one answer and its
 // decision row (d may be nil if unreadable).
 func decisionResponseViewOf(a *store.DecisionAnswer, d *store.Decision) DecisionResponseView {
@@ -485,6 +503,7 @@ func decisionResponseViewOf(a *store.DecisionAnswer, d *store.Decision) Decision
 		InterpretedByAgentID: a.InterpretedByAgentID,
 		SourceMessageID:      a.SourceMessageID,
 		PreviousChoiceLabel:  previousChoiceLabel(a, d),
+		PreviousOtherText:    previousOtherText(a, d),
 	}
 	if d != nil {
 		v.RowID = d.ID
@@ -515,6 +534,7 @@ func decisionResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) Dec
 		InterpretedByAgentID: a.InterpretedByAgentID,
 		SourceMessageID:      a.SourceMessageID,
 		PreviousChoiceLabel:  previousChoiceLabel(a, d),
+		PreviousOtherText:    previousOtherText(a, d),
 	}
 	if d != nil {
 		item.RowID = d.ID

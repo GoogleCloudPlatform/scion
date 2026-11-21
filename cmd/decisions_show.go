@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/spf13/cobra"
 )
 
@@ -113,6 +114,9 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 			}
 			_, _ = fmt.Fprintf(out, "    - %s: %s%s\n", safeText(c.ID), collapseSingleLine(c.Label), suffix)
 		}
+		if v.Other != nil {
+			_, _ = fmt.Fprintf(out, "    - %s  %s (free-form)\n", messages.ChoiceIDOther, collapseSingleLine(v.Other.Label))
+		}
 		if len(v.Answers) == 0 {
 			_, _ = fmt.Fprintln(out, "  Answers:      none")
 			continue
@@ -122,8 +126,12 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 			aCopy := a
 			prov := decisionProvenanceDisplay(&aCopy)
 			who := decisionAnswererDisplay(&aCopy)
+			ansDisp := collapseSingleLine(a.Label)
+			if a.ChoiceID == messages.ChoiceIDOther && a.OtherText != "" {
+				ansDisp = fmt.Sprintf("%s \"%s\"", ansDisp, safeText(a.OtherText))
+			}
 			line := fmt.Sprintf("    - %s (%s) [%s] by %s via %s at %s",
-				collapseSingleLine(a.Label),
+				ansDisp,
 				safeText(a.ChoiceID),
 				prov,
 				who,
