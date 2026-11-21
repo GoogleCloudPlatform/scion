@@ -15,6 +15,7 @@
 package transfer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,5 +299,49 @@ func TestIsContentHash(t *testing.T) {
 		if got := IsContentHash(tt.in); got != tt.want {
 			t.Errorf("IsContentHash(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+func BenchmarkIsContentHash(b *testing.B) {
+	valid := "sha256:" + strings.Repeat("a", 64)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = IsContentHash(valid)
+	}
+}
+
+func BenchmarkIsGitBlobHash(b *testing.B) {
+	valid := strings.Repeat("a", 40)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = IsGitBlobHash(valid)
+	}
+}
+
+func BenchmarkHashBytes(b *testing.B) {
+	data := []byte("hello world")
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = HashBytes(data)
+	}
+}
+
+func BenchmarkComputeContentHashV2(b *testing.B) {
+	files := make([]FileInfo, 100)
+	for i := range files {
+		files[i] = FileInfo{
+			Path: fmt.Sprintf("dir/file_%d.txt", i),
+			Size: int64(100 + i),
+			Hash: "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+			Mode: "0644",
+		}
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ComputeContentHashV2(files)
 	}
 }
