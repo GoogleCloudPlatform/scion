@@ -39,6 +39,7 @@ import (
 	policytroubleshooteriam "cloud.google.com/go/policytroubleshooter/iam/apiv3"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/net/http/httpguts"
 	"google.golang.org/api/option"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -2942,9 +2943,18 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 		}
 	}
 
+	identityHeaders := make([]string, 0, len(jwtCfg.IdentityHeaders))
+	for i, raw := range jwtCfg.IdentityHeaders {
+		h := strings.TrimSpace(raw)
+		if h == "" || !httpguts.ValidHeaderFieldName(h) {
+			return nil, fmt.Errorf("auth.proxy.jwt.identity_headers[%d] %q is not a valid HTTP header name", i, raw)
+		}
+		identityHeaders = append(identityHeaders, h)
+	}
+
 	auth := &hub.JWTProxyAuthenticator{
 		Header:          jwtCfg.Header,
-		IdentityHeaders: append([]string(nil), jwtCfg.IdentityHeaders...),
+		IdentityHeaders: identityHeaders,
 		Algorithm:       jwtCfg.Algorithm,
 		Issuer:          jwtCfg.Issuer,
 		Audience:        jwtCfg.Audience,

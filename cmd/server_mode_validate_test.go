@@ -234,7 +234,7 @@ func TestValidateTestLogin(t *testing.T) {
 func TestNewJWTProxyAuthenticator_IdentityHeaders(t *testing.T) {
 	auth, err := newJWTProxyAuthenticator(&config.JWTAuthConfig{
 		Header:          "X-Custom-JWT",
-		IdentityHeaders: []string{"X-Proxy-Email", "X-Proxy-User-Id"},
+		IdentityHeaders: []string{"X-Proxy-Email", " x-proxy-user-id "},
 		Algorithm:       "RS256",
 		JWKSURL:         "https://auth.example.com/.well-known/jwks.json",
 	})
@@ -242,13 +242,32 @@ func TestNewJWTProxyAuthenticator_IdentityHeaders(t *testing.T) {
 		t.Fatalf("newJWTProxyAuthenticator unexpected err = %v", err)
 	}
 	got := auth.AssertionHeaders()
-	want := []string{"X-Custom-JWT", "X-Proxy-Email", "X-Proxy-User-Id"}
+	want := []string{"X-Custom-JWT", "X-Proxy-Email", "x-proxy-user-id"}
 	if len(got) != len(want) {
 		t.Fatalf("AssertionHeaders() = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("AssertionHeaders()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	for _, bad := range []string{
+		"",
+		"   ",
+		"X-Proxy-Email:",
+		"X-Proxy Email",
+		"X-Proxy\r\nInjected",
+		"X-Proxy/Email",
+	} {
+		_, err := newJWTProxyAuthenticator(&config.JWTAuthConfig{
+			Header:          "X-Custom-JWT",
+			IdentityHeaders: []string{"X-Valid-Header", bad},
+			Algorithm:       "RS256",
+			JWKSURL:         "https://auth.example.com/.well-known/jwks.json",
+		})
+		if err == nil || !strings.Contains(err.Error(), "identity_headers") {
+			t.Errorf("IdentityHeaders containing %q: err = %v, want error mentioning identity_headers", bad, err)
 		}
 	}
 }

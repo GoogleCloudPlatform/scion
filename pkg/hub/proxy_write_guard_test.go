@@ -618,7 +618,6 @@ func TestWebProxyWriteGuard_AuthEndpoints(t *testing.T) {
 
 	authPaths := []string{
 		"/auth/logout",
-		"/auth/test-identity/redeem",
 		"/auth/login/google",
 		"/api/v1/auth/test-login",
 	}
@@ -670,6 +669,18 @@ func TestWebProxyWriteGuard_AuthEndpoints(t *testing.T) {
 		if !reached || code != http.StatusOK {
 			t.Fatalf("%s oauth mode: got code=%d reached=%v, want 200 reached", p, code, reached)
 		}
+	}
+
+	// /auth/test-identity/redeem is exempted from the generic web write guard
+	// because handleTestIdentityRedeem runs its own origin check and writes an
+	// audited origin_refused record with the verified proxy assertion email.
+	code, reached := doWebGuard(proxyAuthMode, http.MethodPost, "/auth/test-identity/redeem", jsonBody, map[string]string{
+		"Sec-Fetch-Site": "cross-site",
+		"Origin":         "https://other-origin.example",
+		"Content-Type":   "application/json",
+	})
+	if !reached || code != http.StatusOK {
+		t.Fatalf("/auth/test-identity/redeem cross-site POST: got code=%d reached=%v, want pass-through to handler", code, reached)
 	}
 
 	// Verify buildHandler wires proxyModeWriteGuard on WebServer.

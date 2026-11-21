@@ -36,8 +36,8 @@ func (s *Server) proxyModeWriteGuard(next http.Handler) http.Handler {
 
 // proxyModeWriteGuard applies the same proxy-mode request checks to
 // state-changing sign-in and sign-out endpoints served directly by WebServer
-// (/auth/* and /api/v1/auth/test-login). It runs before authentication and is a
-// no-op outside proxy auth mode.
+// (/auth/* except /auth/test-identity/redeem, plus /api/v1/auth/test-login).
+// It runs before authentication and is a no-op outside proxy auth mode.
 func (ws *WebServer) proxyModeWriteGuard(next http.Handler) http.Handler {
 	return proxyModeWriteGuardMiddleware(ws.config.AuthMode, isStateChangingWebAuthRequest, next)
 }
@@ -146,8 +146,17 @@ func isStateChangingAPIRequest(r *http.Request) bool {
 // isStateChangingWebAuthRequest reports whether r targets a WebServer sign-in
 // or sign-out endpoint (/auth/* or /api/v1/auth/test-login) with a
 // state-changing method.
+//
+// /auth/test-identity/redeem is excluded: handleTestIdentityRedeem already
+// enforces POST, application/json, and origin checks itself, and in proxy mode
+// verifies the driver assertion before writing an audited origin_refused row
+// carrying the verified assertion email. Running the generic guard ahead of it
+// would pre-empt that audit record.
 func isStateChangingWebAuthRequest(r *http.Request) bool {
 	if !isStateChangingMethod(r.Method) {
+		return false
+	}
+	if r.URL.Path == "/auth/test-identity/redeem" {
 		return false
 	}
 	return strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/api/v1/auth/test-login"

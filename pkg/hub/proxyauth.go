@@ -45,9 +45,11 @@ type ProxyUserInfo struct {
 type ProxyAuthenticator interface {
 	Authenticate(r *http.Request) (*ProxyUserInfo, error)
 	Name() string // for logging/metrics, e.g. "iap"
-	// AssertionHeaders names the request headers this authenticator reads to
-	// establish identity. They are not forwarded to a proxied agent app (see
-	// Server.stripFrontProxyIdentityHeaders).
+	// AssertionHeaders names the request headers carrying front-proxy
+	// identity that must not be forwarded to a proxied agent app (see
+	// Server.stripFrontProxyIdentityHeaders). This includes the assertion
+	// header the authenticator verifies as well as any additional
+	// configured identity headers it does not read directly.
 	AssertionHeaders() []string
 }
 
