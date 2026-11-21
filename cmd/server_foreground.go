@@ -521,7 +521,12 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		brokerSettings.Hub = &config.HubClientConfig{}
 	}
 
-	// 9. Initialize dev auth
+	// 9. Initialize dev auth. On a hosted server dev auth is allowed only
+	// on a test hub whose test mode startup gate passes, decided here,
+	// before the dev token exists.
+	if err := validateHostedDevAuthTestHub(cfg, hostedMode, cfg.Auth.Enabled, s != nil, testInfraMarkerReader(ctx, entClient)); err != nil {
+		return err
+	}
 	var devAuthToken string
 	if cfg.Auth.Enabled {
 		devAuthToken, err = initDevAuth(cfg, globalDir)
@@ -1618,7 +1623,7 @@ func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	applyConduitFlagOverrides(cmd, cfg)
 
 	// cfg.Auth.Enabled is final here (settings, environment, --dev-auth).
-	if err := validateHostedDevAuth(hostedMode, cfg.Auth.Enabled); err != nil {
+	if err := validateHostedDevAuth(hostedMode, cfg.Auth.Enabled, testModeRequested()); err != nil {
 		return nil, err
 	}
 
@@ -1674,14 +1679,22 @@ func validateDebugEndpoints(hosted, enabled bool) error {
 
 // validateHostedDevAuth refuses dev auth in hosted mode. Dev auth is a
 // single-user workstation mechanism; a hosted server must authenticate users
-// with OAuth or an authenticating proxy, whatever host it listens on.
-func validateHostedDevAuth(hosted, devAuthEnabled bool) error {
-	if hosted && devAuthEnabled {
-		return fmt.Errorf("dev auth is not allowed in hosted mode; it is for single-user workstation servers only. " +
-			"Disable it (--dev-auth=false, or server.auth.dev_mode: false / SCION_SERVER_AUTH_DEVMODE=false) " +
-			"and configure OAuth or proxy authentication")
+// with OAuth or an authenticating proxy, whatever host it listens on. The
+// one exception is a designated test hub: when --test-mode requests a level
+// (testModeRequested), the decision is left to validateHostedDevAuthTestHub,
+// which allows dev auth only when the test mode startup gate passes.
+func validateHostedDevAuth(hosted, devAuthEnabled, testModeRequested bool) error {
+	if hosted && devAuthEnabled && !testModeRequested {
+		return hostedDevAuthRefusal()
 	}
 	return nil
+}
+
+// hostedDevAuthRefusal is the error that refuses dev auth in hosted mode.
+func hostedDevAuthRefusal() error {
+	return fmt.Errorf("dev auth is not allowed in hosted mode; it is for single-user workstation servers only. " +
+		"Disable it (--dev-auth=false, or server.auth.dev_mode: false / SCION_SERVER_AUTH_DEVMODE=false) " +
+		"and configure OAuth or proxy authentication")
 }
 
 // validateHostedBasic runs lightweight checks that apply to all --hosted
@@ -3408,6 +3421,12 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 	testMode, err := resolveTestMode(testModeInputsFor(ctx, cfg, hubCfg, s != nil, entClient))
 	if err != nil {
 		return nil, err
+	}
+	// Dev auth on a hosted server needs a test hub (validateHostedDevAuthTestHub
+	// decided it before the dev token was created); checked again here
+	// against the full gate of the requested level.
+	if hostedMode && cfg.Auth.Enabled && !testMode.EnableTestIdentities {
+		return nil, hostedDevAuthRefusal()
 	}
 	hubCfg.EnableTestIdentities = testMode.EnableTestIdentities
 	hubCfg.TestAdminGate = testMode.TestAdminGate

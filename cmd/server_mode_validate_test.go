@@ -239,7 +239,7 @@ func TestValidateHostedDevAuth(t *testing.T) {
 		{hosted: true, devAuth: false},
 		{hosted: true, devAuth: true, wantErr: true},
 	} {
-		err := validateHostedDevAuth(tc.hosted, tc.devAuth)
+		err := validateHostedDevAuth(tc.hosted, tc.devAuth, false)
 		if (err != nil) != tc.wantErr {
 			t.Errorf("validateHostedDevAuth(hosted=%v, devAuth=%v) err = %v, wantErr %v", tc.hosted, tc.devAuth, err, tc.wantErr)
 		}
