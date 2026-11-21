@@ -15,68 +15,16 @@
 package githubapp
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 )
 
-// Compile-time assertion that InstallationTokenMinter satisfies source.IdentityMinter
-// (app-shaped-source-seams.md §1–§2).
-var _ source.IdentityMinter = (*InstallationTokenMinter)(nil)
-
-// InstallationTokenMinter adapts *Client to the provider-free source.IdentityMinter
-// interface so callers outside pkg/hub/githubapp can mint repository-scoped
-// installation tokens through the source seam.
-type InstallationTokenMinter struct {
-	Client *Client
-}
-
-// Mint mints a repository-scoped GitHub App installation access token for t and scope.
-// t.InstallationID must be a positive decimal installation ID and t.Resource must
-// name the repository ("owner/repo" or bare "repo").
-func (m *InstallationTokenMinter) Mint(ctx context.Context, t source.Target, scope source.CredentialScope) (source.Credential, error) {
-	if m == nil || m.Client == nil {
-		return source.Credential{}, errors.New("githubapp: installation token minter client is nil")
-	}
-	instID, err := strconv.ParseInt(strings.TrimSpace(t.InstallationID), 10, 64)
-	if err != nil || instID <= 0 {
-		return source.Credential{}, fmt.Errorf("githubapp: invalid installation id %q", t.InstallationID)
-	}
-	repo := strings.TrimSpace(t.Resource)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		repo = strings.TrimSpace(repo[idx+1:])
-	}
-	if repo == "" {
-		return source.Credential{}, errors.New("githubapp: target resource repository is required")
-	}
-
-	perms, err := tokenPermissionsFromScope(scope)
-	if err != nil {
-		return source.Credential{}, err
-	}
-
-	tok, err := m.Client.MintInstallationToken(ctx, instID, []string{repo}, perms)
-	if err != nil {
-		return source.Credential{}, err
-	}
-	return source.Credential{
-		Token:     tok.Token,
-		ExpiresAt: tok.ExpiresAt,
-		Scope:     tok.Permissions,
-	}, nil
-}
-
 // TokenPermissionsFromScope converts a provider-neutral source.CredentialScope
 // into GitHub's TokenPermissions, rejecting unknown permission names or levels.
 func TokenPermissionsFromScope(scope source.CredentialScope) (TokenPermissions, error) {
-	return tokenPermissionsFromScope(scope)
-}
-
-func tokenPermissionsFromScope(scope source.CredentialScope) (TokenPermissions, error) {
 	var perms TokenPermissions
 	for k, rawVal := range scope.Permissions {
 		val := strings.ToLower(strings.TrimSpace(rawVal))
@@ -107,4 +55,29 @@ func tokenPermissionsFromScope(scope source.CredentialScope) (TokenPermissions, 
 		return TokenPermissions{}, errors.New("githubapp: at least one permission is required")
 	}
 	return perms, nil
+}
+
+// TokenPermissionsToMap converts non-empty fields of perms into a map suitable
+// for source.Credential.Scope.
+func TokenPermissionsToMap(perms TokenPermissions) map[string]string {
+	out := make(map[string]string)
+	if perms.Contents != "" {
+		out["contents"] = perms.Contents
+	}
+	if perms.PullRequests != "" {
+		out["pull_requests"] = perms.PullRequests
+	}
+	if perms.Issues != "" {
+		out["issues"] = perms.Issues
+	}
+	if perms.Metadata != "" {
+		out["metadata"] = perms.Metadata
+	}
+	if perms.Checks != "" {
+		out["checks"] = perms.Checks
+	}
+	if perms.Actions != "" {
+		out["actions"] = perms.Actions
+	}
+	return out
 }

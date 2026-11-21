@@ -1007,7 +1007,8 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 // intentionally uncached so agent tokens retain their full lifetime and
 // status checks always contact GitHub.
 func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project) (string, string, error) {
-	return s.mintGitHubAppTokenInternal(ctx, project, nil, false)
+	tok, exp, _, err := s.mintGitHubAppTokenInternal(ctx, project, nil, false)
+	return tok, exp, err
 }
 
 // MintGitHubAppTokenWithPermissions mints (or returns a cached) repository-scoped
@@ -1021,7 +1022,8 @@ func (s *Server) MintGitHubAppTokenWithPermissions(
 	project *store.Project,
 	requested githubapp.TokenPermissions,
 ) (string, string, error) {
-	return s.mintGitHubAppTokenInternal(ctx, project, &requested, true)
+	tok, exp, _, err := s.mintGitHubAppTokenInternal(ctx, project, &requested, true)
+	return tok, exp, err
 }
 
 func (s *Server) mintGitHubAppTokenInternal(
@@ -1029,9 +1031,9 @@ func (s *Server) mintGitHubAppTokenInternal(
 	project *store.Project,
 	requested *githubapp.TokenPermissions,
 	useCache bool,
-) (string, string, error) {
+) (string, string, map[string]string, error) {
 	if project == nil || project.GitHubInstallationID == nil {
-		return "", "", fmt.Errorf("project has no GitHub App installation")
+		return "", "", nil, fmt.Errorf("project has no GitHub App installation")
 	}
 
 	// Single choke for every token delivery leg (hub-host clone and pull,
@@ -1050,7 +1052,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 		errCode := githubAssociationErrorCode(authzErr)
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 			errCode, githubAppStatusMessage(errCode))
-		return "", "", authzErr
+		return "", "", nil, authzErr
 	}
 	s.githubAssociationRefusalLog.clear(project.ID)
 
@@ -1067,7 +1069,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 					"project_id", project.ID, "installation_id", *project.GitHubInstallationID)
 				s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 					githubapp.ErrCodeTokenMintFailed, msg)
-				return "", "", &githubapp.TokenMintError{
+				return "", "", nil, &githubapp.TokenMintError{
 					ErrorCode: githubapp.ErrCodeTokenMintFailed,
 					Message:   msg,
 				}
@@ -1077,7 +1079,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 		var permErr error
 		perms, permErr = scopeRequestedGitHubTokenPermissions(*requested, project.GitHubPermissions, grant, reqAppPerms)
 		if permErr != nil {
-			return "", "", permErr
+			return "", "", nil, permErr
 		}
 	} else if hasUsableStoredGitHubPermissions(project.GitHubPermissions) {
 		// Explicit stored project permissions are requested unchanged (still
@@ -1096,7 +1098,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 				"project_id", project.ID, "installation_id", *project.GitHubInstallationID)
 			s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 				githubapp.ErrCodeTokenMintFailed, msg)
-			return "", "", &githubapp.TokenMintError{
+			return "", "", nil, &githubapp.TokenMintError{
 				ErrorCode: githubapp.ErrCodeTokenMintFailed,
 				Message:   msg,
 			}
@@ -1109,7 +1111,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 				"project_id", project.ID, "installation_id", *project.GitHubInstallationID)
 			s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateDegraded,
 				githubapp.ErrCodePermissionDenied, msg)
-			return "", "", &githubapp.TokenMintError{
+			return "", "", nil, &githubapp.TokenMintError{
 				ErrorCode: githubapp.ErrCodePermissionDenied,
 				Message:   msg,
 			}
@@ -1124,8 +1126,11 @@ func (s *Server) mintGitHubAppTokenInternal(
 	permKey := canonicalGitHubTokenPermKey(perms)
 
 	if useCache {
-		if cachedToken, cachedExp, ok := s.githubTokenCache.get(project.ID, permKey, appID, apiBase, installationID, ownerRepo); ok {
-			return cachedToken, cachedExp.UTC().Format("2006-01-02T15:04:05Z"), nil
+		if cachedToken, cachedExp, cachedPerms, ok := s.githubTokenCache.get(project.ID, permKey, appID, apiBase, installationID, ownerRepo); ok {
+			if len(cachedPerms) == 0 {
+				cachedPerms = githubapp.TokenPermissionsToMap(perms)
+			}
+			return cachedToken, cachedExp.UTC().Format("2006-01-02T15:04:05Z"), cachedPerms, nil
 		}
 	}
 
@@ -1145,7 +1150,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 			"error_code", errorCode, "error", upstreamText(err.Error()))
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 			errorCode, githubAppStatusMessage(errorCode))
-		return "", "", err
+		return "", "", nil, err
 	}
 
 	// Always repository-scoped, never installation-wide: the API takes the
@@ -1177,11 +1182,19 @@ func (s *Server) mintGitHubAppTokenInternal(
 		}
 
 		s.updateProjectGitHubAppStatus(ctx, project, state, errorCode, errorMessage)
-		return "", "", err
+		return "", "", nil, err
+	}
+
+	grantedPerms := make(map[string]string, len(token.Permissions))
+	for k, v := range token.Permissions {
+		grantedPerms[k] = v
+	}
+	if len(grantedPerms) == 0 {
+		grantedPerms = githubapp.TokenPermissionsToMap(perms)
 	}
 
 	if useCache {
-		s.githubTokenCache.put(project.ID, permKey, appID, apiBase, installationID, ownerRepo, token.Token, token.ExpiresAt)
+		s.githubTokenCache.put(project.ID, permKey, appID, apiBase, installationID, ownerRepo, token.Token, token.ExpiresAt, grantedPerms)
 	}
 
 	// Cache rate limit info
@@ -1226,7 +1239,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 		s.events.PublishProjectUpdated(ctx, project)
 	}
 
-	return token.Token, token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"), nil
+	return token.Token, token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"), grantedPerms, nil
 }
 
 // updateProjectGitHubAppStatus is a helper to update a project's GitHub App status

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -113,11 +114,12 @@ func (s *Server) GitHubSourceInstallationResolver() source.InstallationResolver 
 }
 
 // GitHubSourceNormalizer returns GitHub's source.Normalizer wired to Server's
-// App mention identity cache.
+// in-memory App mention identity cache (pure, no DB or network I/O, matching
+// webhook ingress step 4).
 func (s *Server) GitHubSourceNormalizer() source.Normalizer {
 	return &triggithub.EventNormalizer{
-		OptionsFn: func(ctx context.Context, d source.Delivery) triggithub.Options {
-			slug, aliases, _ := s.GitHubAppMentionIdentities(ctx)
+		OptionsFn: func(_ context.Context, d source.Delivery) triggithub.Options {
+			slug, aliases, _ := s.peekGitHubAppMentionIdentities()
 			return triggithub.Options{
 				AppSlug:        slug,
 				MentionAliases: aliases,
@@ -154,14 +156,13 @@ func (s *Server) GitHubSourceIdentityMinter() source.IdentityMinter {
 			if err != nil {
 				return source.Credential{}, err
 			}
-			token, expStr, err := s.MintGitHubAppTokenWithPermissions(ctx, project, perms)
+			token, expStr, granted, err := s.mintGitHubAppTokenInternal(ctx, project, &perms, true)
 			if err != nil {
 				return source.Credential{}, err
 			}
-			exp, _ := time.Parse(time.RFC3339, expStr)
-			granted := make(map[string]string, len(scope.Permissions))
-			for k, v := range scope.Permissions {
-				granted[k] = v
+			exp, err := time.Parse(time.RFC3339, expStr)
+			if err != nil {
+				return source.Credential{}, fmt.Errorf("parse github installation token expiry: %w", err)
 			}
 			return source.Credential{
 				Token:     token,
@@ -173,105 +174,117 @@ func (s *Server) GitHubSourceIdentityMinter() source.IdentityMinter {
 }
 
 // GitHubSourceCommentAction returns GitHub's source.ProviderAction for
-// github.comment backed by githubCommentAction's validation, per-project rate
-// bucket (AllowGitHubComment), IdentityMinter credential minting, and
-// idempotent comment posting (PostGitHubCommentIdempotent).
+// github.comment delegating directly to the registered github.comment
+// FireAction (Validate, Preauthorize, Authorize, Fire, rate bucket, token
+// minting, marker-idempotent posting with Since, outcome classification, and
+// audit).
 func (s *Server) GitHubSourceCommentAction() source.ProviderAction {
 	commentAction := &githubCommentAction{srv: s}
-	minter := s.GitHubSourceIdentityMinter()
 	return &triggithub.CommentAction{
-		DefaultMinter: minter,
 		ValidateFunc: func(ctx context.Context, req source.ActionValidateRequest) (string, error) {
 			return commentAction.Validate(ctx, nil, req.ProjectID, req.Payload)
 		},
-		AllowRate: s.AllowGitHubComment,
 		FireFunc: func(ctx context.Context, req source.ActionFireRequest) (source.ActionFireResult, error) {
-			payload, tmpl, err := parseAndValidateGitHubCommentPayload(req.Payload)
-			if err != nil {
-				return source.ActionFireResult{Status: string(hubfire.FireStatusFailed), Error: "invalid github.comment payload"}, nil
+			if s.store == nil {
+				return source.ActionFireResult{
+					Status: string(hubfire.FireStatusFailed),
+					Error:  "github comment failed",
+				}, nil
 			}
-			target, err := extractGitHubCommentTarget(req.Event.Type, req.Event.Attributes, payload.ReplyInThread)
-			if err != nil {
-				return source.ActionFireResult{Status: string(hubfire.FireStatusFailed), Error: "github comment failed"}, nil
+			if strings.TrimSpace(req.TriggerID) == "" {
+				return source.ActionFireResult{
+					Status: string(hubfire.FireStatusRefused),
+					Error:  "github.comment refused",
+				}, nil
 			}
-			project, err := s.store.GetProject(ctx, req.ProjectID)
+			tr, err := s.store.GetTrigger(ctx, req.TriggerID)
 			if err != nil {
-				return source.ActionFireResult{}, err
+				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+					return source.ActionFireResult{
+						Status: string(hubfire.FireStatusRefused),
+						Error:  "github.comment refused",
+					}, nil
+				}
+				return source.ActionFireResult{
+					Status: string(hubfire.FireStatusFailed),
+					Error:  "github comment failed",
+				}, nil
 			}
-			vars := buildGitHubCommentTemplateVars(&hubfire.FireEvent{
-				ID:         req.Event.DeliveryID,
-				SourceKind: req.Event.SourceKind,
-				SourceID:   req.Event.SourceID,
-				Type:       req.Event.Type,
-				Subject:    req.Event.Subject,
-				OccurredAt: req.Event.OccurredAt,
-				Attributes: req.Event.Attributes,
-				Lists:      req.Event.Lists,
-			}, project)
-			renderedBody, _, err := tmpl.Render(vars, payload.UntrustedVars)
-			if err != nil {
-				return source.ActionFireResult{Status: string(hubfire.FireStatusFailed), Error: "github comment failed"}, nil
+			if tr.ProjectID != req.ProjectID {
+				return source.ActionFireResult{
+					Status: string(hubfire.FireStatusRefused),
+					Error:  "github.comment refused",
+				}, nil
 			}
 
-			mintTarget := req.Target
-			if mintTarget.ProjectID == "" {
-				mintTarget.ProjectID = req.ProjectID
-			}
-			cred, err := req.Minter.Mint(ctx, mintTarget, source.CredentialScope{
-				Permissions: map[string]string{"issues": "write", "metadata": "read"},
-			})
-			if err != nil {
-				return source.ActionFireResult{Status: string(hubfire.FireStatusRefused), Error: "github comment refused"}, err
+			var lists map[string][]string
+			if len(req.Event.Lists) > 0 {
+				lists = make(map[string][]string, len(req.Event.Lists))
+				for k, vals := range req.Event.Lists {
+					lists[k] = append([]string(nil), vals...)
+				}
 			}
 
-			attempts := req.Attempts
-			if attempts <= 0 {
-				attempts = 1
+			fireReq := hubfire.FireRequest{
+				ProjectID: tr.ProjectID,
+				Authority: hubfire.RecordedAuthority{
+					Attribution:    tr.InitiatorAttribution,
+					Ceiling:        tr.AuthorityCeiling,
+					DefinitionKind: hubfire.DefinitionKindTrigger,
+					DefinitionID:   tr.ID,
+					FireID:         req.FireID,
+				},
+				ActionType: store.TriggerActionGitHubComment,
+				Payload:    req.Payload,
+				Event: &hubfire.FireEvent{
+					ID:         req.Event.ID,
+					ProjectID:  tr.ProjectID,
+					SourceKind: req.Event.SourceKind,
+					SourceID:   req.Event.SourceID,
+					Type:       req.Event.Type,
+					Subject:    req.Event.Subject,
+					OccurredAt: req.Event.OccurredAt,
+					ReceivedAt: req.Event.ReceivedAt,
+					Attributes: maps.Clone(req.Event.Attributes),
+					Lists:      lists,
+					Payload:    req.Event.Payload,
+					Trigger: &hubfire.FireTriggerRef{
+						ID:   tr.ID,
+						Name: tr.Name,
+					},
+				},
+				FireAt:   req.Event.ReceivedAt,
+				Attempts: req.Attempts,
 			}
-			comment, err := s.PostGitHubCommentIdempotent(ctx, cred.Token, githubapp.PostCommentOptions{
-				Owner:           target.owner,
-				Repo:            target.repo,
-				IssueNumber:     target.number,
-				ReviewCommentID: target.reviewCommentID,
-				Body:            renderedBody,
-				FireID:          req.FireID,
-				Attempts:        attempts,
-			})
-			if err != nil {
-				return source.ActionFireResult{Status: string(hubfire.FireStatusFailed), Error: "github comment failed"}, err
-			}
+
+			out := s.fireAction(ctx, fireReq)
 			return source.ActionFireResult{
-				Status:    string(hubfire.FireStatusFired),
-				ResultRef: strconv.FormatInt(comment.ID, 10),
+				Status:    out.Status.String(),
+				ResultRef: out.ResultRef,
+				Error:     out.Error,
 			}, nil
 		},
 	}
 }
 
-// GitHubSourceReadiness returns GitHub's source.Readiness backed by Server's
-// App identity cache and webhook configuration.
+// GitHubSourceReadiness returns GitHub's source.Readiness backed directly by
+// Server's canonical computeGitHubTriggersReadiness evaluator (single table,
+// single evaluator, 1:1 field projection into source.Report).
 func (s *Server) GitHubSourceReadiness() source.Readiness {
 	return &triggithub.ReadinessChecker{
-		Snapshot: func(ctx context.Context) (triggithub.ReadinessSnapshot, error) {
+		CheckFunc: func(ctx context.Context) (source.Report, error) {
 			cfg, _, hasWebhookSecret := s.githubAppCredentialPresence(ctx)
 			full := s.computeGitHubTriggersReadiness(ctx, cfg, hasWebhookSecret)
-			id, _, _ := s.ensureGitHubAppIdentity(ctx)
-			snap := triggithub.ReadinessSnapshot{
-				Configured:       cfg.AppID != 0 && id != nil,
-				WebhooksEnabled:  full.WebhooksEnabled,
-				HasWebhookSecret: full.HasWebhookSecret,
-				AppSlug:          full.AppSlug,
-				CheckedAt:        full.CheckedAt,
-				Error:            full.Error,
-			}
-			if id != nil {
-				snap.Events = append([]string(nil), id.Events...)
-				snap.Permissions = make(map[string]string, len(id.Permissions))
-				for k, v := range id.Permissions {
-					snap.Permissions[k] = v
-				}
-			}
-			return snap, nil
+			return source.Report{
+				Ready:              full.Ready,
+				WebhooksEnabled:    full.WebhooksEnabled,
+				HasWebhookSecret:   full.HasWebhookSecret,
+				MissingEvents:      append([]string{}, full.MissingEvents...),
+				MissingPermissions: append([]string{}, full.MissingPermissions...),
+				AppSlug:            full.AppSlug,
+				CheckedAt:          full.CheckedAt,
+				Error:              full.Error,
+			}, nil
 		},
 	}
 }

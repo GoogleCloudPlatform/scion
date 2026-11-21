@@ -36,6 +36,30 @@ func signTestWebhook(body []byte, secret string) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+func TestVerifyWebhookSignature(t *testing.T) {
+	body := []byte(`{"action":"created"}`)
+	secret := "top-secret"
+	valid := signTestWebhook(body, secret)
+
+	if !triggithub.VerifyWebhookSignature(body, valid, secret) {
+		t.Fatal("expected valid lowercase signature to verify")
+	}
+	// Uppercase hex must be rejected identically to production.
+	upper := "sha256=" + strings.ToUpper(strings.TrimPrefix(valid, "sha256="))
+	if triggithub.VerifyWebhookSignature(body, upper, secret) {
+		t.Fatal("expected uppercase hex signature to be rejected")
+	}
+	if triggithub.VerifyWebhookSignature(body, strings.TrimPrefix(valid, "sha256="), secret) {
+		t.Fatal("expected signature without sha256= prefix to be rejected")
+	}
+	if triggithub.VerifyWebhookSignature(body, valid, "") {
+		t.Fatal("expected empty secret to be rejected")
+	}
+	if triggithub.VerifyWebhookSignature(body, "", secret) {
+		t.Fatal("expected empty signature to be rejected")
+	}
+}
+
 func TestWireVerifier_VerifyAndDedupKey(t *testing.T) {
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	v := &triggithub.WireVerifier{
@@ -71,13 +95,12 @@ func TestWireVerifier_VerifyAndDedupKey(t *testing.T) {
 		t.Errorf("Delivery.ReceivedAt = %v, want %v", d.ReceivedAt, now)
 	}
 
+	// Pin provider-level DedupKey format: "<lowercased-delivery-id>:<sha256-hex(body)>".
+	bodySum := sha256.Sum256(body)
+	wantKey := strings.ToLower(deliveryID) + ":" + hex.EncodeToString(bodySum[:])
 	k1 := v.DedupKey(d, body)
-	k2 := v.DedupKey(d, body)
-	if k1 == "" || k1 != k2 {
-		t.Fatalf("expected deterministic non-empty DedupKey, got %q / %q", k1, k2)
-	}
-	if !strings.HasPrefix(k1, strings.ToLower(deliveryID)+":") {
-		t.Errorf("DedupKey %q missing delivery ID prefix", k1)
+	if k1 != wantKey {
+		t.Fatalf("DedupKey = %q, want %q", k1, wantKey)
 	}
 	if k3 := v.DedupKey(d, []byte(`{"action":"edited"}`)); k3 == k1 {
 		t.Errorf("DedupKey must change when body changes")
@@ -90,11 +113,24 @@ func TestWireVerifier_VerifyAndDedupKey(t *testing.T) {
 		t.Errorf("expected ErrInvalidWebhookSignature, got %v", err)
 	}
 
+	// Uppercase hex signature rejected.
+	upperSigReq := req.Clone(context.Background())
+	upperSigReq.Header.Set("X-Hub-Signature-256", "sha256="+strings.ToUpper(strings.TrimPrefix(signTestWebhook(body, secret), "sha256=")))
+	if _, err := v.Verify(upperSigReq, body, secrets); !errors.Is(err, triggithub.ErrInvalidWebhookSignature) {
+		t.Errorf("expected ErrInvalidWebhookSignature for uppercase hex, got %v", err)
+	}
+
 	// Target mismatch rejected.
 	wrongTarget := req.Clone(context.Background())
 	wrongTarget.Header.Set("X-GitHub-Hook-Installation-Target-ID", "99999")
 	if _, err := v.Verify(wrongTarget, body, secrets); !errors.Is(err, triggithub.ErrWebhookTargetMismatch) {
 		t.Errorf("expected ErrWebhookTargetMismatch, got %v", err)
+	}
+
+	// ExpectedAppID == 0 must fail closed, never skip target check.
+	zeroAppVerifier := &triggithub.WireVerifier{ExpectedAppID: 0}
+	if _, err := zeroAppVerifier.Verify(req, body, secrets); !errors.Is(err, triggithub.ErrWebhookTargetMismatch) {
+		t.Errorf("expected ErrWebhookTargetMismatch when ExpectedAppID == 0, got %v", err)
 	}
 }
 
@@ -200,6 +236,9 @@ func TestEventNormalizer(t *testing.T) {
 	if ev.DedupKey != "deliv-1/proj-a" {
 		t.Errorf("DedupKey = %q, want %q", ev.DedupKey, "deliv-1/proj-a")
 	}
+	if !ev.ReceivedAt.Equal(now) {
+		t.Errorf("ReceivedAt = %v, want %v", ev.ReceivedAt, now)
+	}
 	if ev.Attributes["command"] != "review" {
 		t.Errorf("command = %q, want review", ev.Attributes["command"])
 	}
@@ -248,26 +287,11 @@ func TestTokenMinterAndCommentAction(t *testing.T) {
 		t.Fatalf("unexpected credential: %+v", cred)
 	}
 
-	rateLimited := false
 	action := &triggithub.CommentAction{
-		DefaultMinter: minter,
 		ValidateFunc: func(_ context.Context, req source.ActionValidateRequest) (string, error) {
 			return req.Payload, nil
 		},
-		AllowRate: func(string) error {
-			if rateLimited {
-				return errors.New("comment rate limited")
-			}
-			return nil
-		},
-		FireFunc: func(ctx context.Context, req source.ActionFireRequest) (source.ActionFireResult, error) {
-			if req.Minter == nil {
-				t.Fatal("expected DefaultMinter to be injected")
-			}
-			c, merr := req.Minter.Mint(ctx, req.Target, source.CredentialScope{Permissions: map[string]string{"issues": "write"}})
-			if merr != nil || c.Token != "ghs_test" {
-				t.Fatalf("mint failed: %v", merr)
-			}
+		FireFunc: func(_ context.Context, _ source.ActionFireRequest) (source.ActionFireResult, error) {
 			return source.ActionFireResult{Status: "fired", ResultRef: "555"}, nil
 		},
 	}
@@ -283,30 +307,28 @@ func TestTokenMinterAndCommentAction(t *testing.T) {
 		t.Fatalf("Fire = (%+v, %v)", res, err)
 	}
 
-	rateLimited = true
-	res, err = action.Fire(context.Background(), source.ActionFireRequest{ProjectID: "p1", FireID: "f2"})
-	if err != nil || res.Status != "failed" || res.Error != "comment rate limited" {
-		t.Fatalf("expected rate-limited failure, got (%+v, %v)", res, err)
+	// Nil callbacks return ErrNotConfigured.
+	empty := &triggithub.CommentAction{}
+	if _, err := empty.Validate(context.Background(), source.ActionValidateRequest{}); !errors.Is(err, triggithub.ErrNotConfigured) {
+		t.Errorf("expected ErrNotConfigured on Validate, got %v", err)
+	}
+	if _, err := empty.Fire(context.Background(), source.ActionFireRequest{}); !errors.Is(err, triggithub.ErrNotConfigured) {
+		t.Errorf("expected ErrNotConfigured on Fire, got %v", err)
 	}
 }
 
 func TestReadinessChecker(t *testing.T) {
 	checked := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 	checker := &triggithub.ReadinessChecker{
-		Snapshot: func(context.Context) (triggithub.ReadinessSnapshot, error) {
-			return triggithub.ReadinessSnapshot{
-				Configured:       true,
-				WebhooksEnabled:  true,
-				HasWebhookSecret: true,
-				AppSlug:          "scion-app",
-				Events:           triggithub.RequiredEvents,
-				Permissions: map[string]string{
-					"contents":      "write",
-					"issues":        "write",
-					"metadata":      "read",
-					"pull_requests": "write",
-				},
-				CheckedAt: &checked,
+		CheckFunc: func(context.Context) (source.Report, error) {
+			return source.Report{
+				Ready:              true,
+				WebhooksEnabled:    true,
+				HasWebhookSecret:   true,
+				AppSlug:            "scion-app",
+				MissingEvents:      []string{},
+				MissingPermissions: []string{},
+				CheckedAt:          &checked,
 			}, nil
 		},
 	}
@@ -319,22 +341,9 @@ func TestReadinessChecker(t *testing.T) {
 		t.Fatalf("expected ready report, got %+v", rep)
 	}
 
-	// Missing event + downgraded permission -> not ready.
-	partial := triggithub.EvaluateReadiness(triggithub.ReadinessSnapshot{
-		Configured:       true,
-		WebhooksEnabled:  true,
-		HasWebhookSecret: true,
-		Events:           []string{triggithub.EventPullRequest},
-		Permissions:      map[string]string{"issues": "read", "metadata": "read"},
-	})
-	if partial.Ready {
-		t.Fatalf("expected not ready, got %+v", partial)
-	}
-	if len(partial.MissingEvents) != 4 {
-		t.Errorf("MissingEvents = %v, want 4 missing", partial.MissingEvents)
-	}
-	if len(partial.MissingPermissions) != 3 {
-		t.Errorf("MissingPermissions = %v, want 3 missing", partial.MissingPermissions)
+	var nilChecker triggithub.ReadinessChecker
+	if _, err := nilChecker.Check(context.Background()); !errors.Is(err, triggithub.ErrNotConfigured) {
+		t.Fatalf("expected ErrNotConfigured, got %v", err)
 	}
 }
 

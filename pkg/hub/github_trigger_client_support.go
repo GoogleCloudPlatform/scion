@@ -191,6 +191,7 @@ type githubInstallationTokenCacheKey struct {
 type githubInstallationTokenCacheEntry struct {
 	token          string
 	expiresAt      time.Time
+	permissions    map[string]string
 	appID          int64
 	apiBase        string
 	installationID int64
@@ -228,9 +229,9 @@ func (c *githubInstallationTokenCache) get(
 	apiBase string,
 	installationID int64,
 	ownerRepo string,
-) (string, time.Time, bool) {
+) (string, time.Time, map[string]string, bool) {
 	if projectID == "" || permKey == "" {
-		return "", time.Time{}, false
+		return "", time.Time{}, nil, false
 	}
 
 	c.mu.Lock()
@@ -239,7 +240,7 @@ func (c *githubInstallationTokenCache) get(
 	key := githubInstallationTokenCacheKey{projectID: projectID, permKey: permKey}
 	entry, ok := c.entries[key]
 	if !ok {
-		return "", time.Time{}, false
+		return "", time.Time{}, nil, false
 	}
 
 	now := c.clock()
@@ -249,9 +250,16 @@ func (c *githubInstallationTokenCache) get(
 		entry.installationID != installationID ||
 		!strings.EqualFold(entry.ownerRepo, ownerRepo) {
 		delete(c.entries, key)
-		return "", time.Time{}, false
+		return "", time.Time{}, nil, false
 	}
-	return entry.token, entry.expiresAt, true
+	var permsCopy map[string]string
+	if len(entry.permissions) > 0 {
+		permsCopy = make(map[string]string, len(entry.permissions))
+		for k, v := range entry.permissions {
+			permsCopy[k] = v
+		}
+	}
+	return entry.token, entry.expiresAt, permsCopy, true
 }
 
 func (c *githubInstallationTokenCache) put(
@@ -262,6 +270,7 @@ func (c *githubInstallationTokenCache) put(
 	ownerRepo string,
 	token string,
 	expiresAt time.Time,
+	permissions map[string]string,
 ) {
 	if projectID == "" || permKey == "" || token == "" {
 		return
@@ -309,9 +318,17 @@ func (c *githubInstallationTokenCache) put(
 		}
 	}
 
+	var permsCopy map[string]string
+	if len(permissions) > 0 {
+		permsCopy = make(map[string]string, len(permissions))
+		for k, v := range permissions {
+			permsCopy[k] = v
+		}
+	}
 	c.entries[githubInstallationTokenCacheKey{projectID: projectID, permKey: permKey}] = githubInstallationTokenCacheEntry{
 		token:          token,
 		expiresAt:      expiresAt,
+		permissions:    permsCopy,
 		appID:          appID,
 		apiBase:        apiBase,
 		installationID: installationID,

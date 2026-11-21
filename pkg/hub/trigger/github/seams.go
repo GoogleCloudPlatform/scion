@@ -54,50 +54,48 @@ var (
 	ErrNotConfigured              = errors.New("github source: adapter callback not configured")
 )
 
-// GitHub lifecycle webhook event names handled by InstallationResolver.OnLifecycle.
+// GitHub lifecycle and ping webhook event names handled outside content-event routing.
 const (
+	EventPing                     = "ping"
 	EventInstallation             = "installation"
 	EventInstallationRepositories = "installation_repositories"
 )
 
-// RequiredEvents lists the GitHub App webhook events Stage 3 requires for
-// trigger readiness (§10.1), sorted for deterministic output.
-var RequiredEvents = []string{
-	EventIssueComment,
-	EventIssues,
-	EventPullRequest,
-	EventPullRequestReview,
-	EventPullRequestReviewComment,
-}
+// VerifyWebhookSignature validates a GitHub webhook payload signature using
+// X-Hub-Signature-256 ("sha256=<lowercase-hex>"). This is the single canonical
+// GitHub webhook HMAC-SHA256 verifier shared with pkg/hub/githubapp.
+func VerifyWebhookSignature(payload []byte, signature string, secret string) bool {
+	if secret == "" || signature == "" {
+		return false
+	}
 
-// RequiredPermission names a minimum GitHub App permission required for
-// trigger readiness (§10.1).
-type RequiredPermission struct {
-	Name  string
-	Level string
-}
+	const prefix = "sha256="
+	if !strings.HasPrefix(signature, prefix) {
+		return false
+	}
+	sigHex := signature[len(prefix):]
 
-// RequiredPermissions lists the GitHub App permissions Stage 3 requires for
-// trigger readiness (§10.1), sorted by name for deterministic output.
-var RequiredPermissions = []RequiredPermission{
-	{Name: "contents", Level: "write"},
-	{Name: "issues", Level: "write"},
-	{Name: "metadata", Level: "read"},
-	{Name: "pull_requests", Level: "write"},
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	expectedMAC := mac.Sum(nil)
+	expectedHex := fmt.Sprintf("%x", expectedMAC)
+
+	return hmac.Equal([]byte(sigHex), []byte(expectedHex))
 }
 
 // WireVerifier implements source.WireVerifier for GitHub App webhooks.
 type WireVerifier struct {
-	// ExpectedAppID, when > 0, enforces X-GitHub-Hook-Installation-Target-Type ==
-	// "integration" and X-GitHub-Hook-Installation-Target-ID == ExpectedAppID
-	// (Stage 3 §4.1 step 1).
+	// ExpectedAppID is the hub's configured GitHub App ID. For content events,
+	// ExpectedAppID <= 0 fails closed with ErrWebhookTargetMismatch, matching
+	// production handleGitHubContentWebhook step 1.
 	ExpectedAppID int64
 	// Now returns the delivery receipt timestamp (defaults to time.Now).
 	Now func() time.Time
 }
 
-// Verify authenticates a GitHub webhook request using X-Hub-Signature-256 and
-// extracts the provider-neutral Delivery metadata.
+// Verify authenticates a GitHub webhook request using the canonical
+// VerifyWebhookSignature and enforces production's target-id, event-header, and
+// delivery-id checks (Stage 3 §4.1 steps 1–2) for content events.
 func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.SecretSource) (source.Delivery, error) {
 	if r == nil {
 		return source.Delivery{}, ErrInvalidWebhookHeaders
@@ -114,39 +112,43 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 	}
 
 	sig := r.Header.Get("X-Hub-Signature-256")
-	if !verifyHMACSHA256(body, sig, secret) {
+	if !VerifyWebhookSignature(body, sig, secret) {
 		return source.Delivery{}, ErrInvalidWebhookSignature
 	}
 
-	eventValues := r.Header.Values("X-GitHub-Event")
-	if len(eventValues) != 1 || strings.TrimSpace(eventValues[0]) == "" {
-		return source.Delivery{}, ErrInvalidWebhookHeaders
-	}
-	eventName := eventValues[0]
-
-	deliveryValues := r.Header.Values("X-GitHub-Delivery")
-	deliveryID := ""
-	if len(deliveryValues) > 1 {
-		return source.Delivery{}, ErrInvalidDeliveryID
-	}
-	if len(deliveryValues) == 1 {
-		deliveryID = deliveryValues[0]
-	}
-	if IsSupportedEvent(eventName) {
-		if !isGUIDDeliveryID(deliveryID) {
-			return source.Delivery{}, ErrInvalidDeliveryID
-		}
-		deliveryID = strings.ToLower(deliveryID)
-	}
-
+	eventName := r.Header.Get("X-GitHub-Event")
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
 	targetType := r.Header.Get("X-GitHub-Hook-Installation-Target-Type")
 	targetID := r.Header.Get("X-GitHub-Hook-Installation-Target-ID")
-	if v != nil && v.ExpectedAppID > 0 && IsSupportedEvent(eventName) {
+
+	isNonContent := eventName == EventPing ||
+		eventName == EventInstallation ||
+		eventName == EventInstallationRepositories
+
+	if !isNonContent {
+		// Step 1: target-id check fails closed when ExpectedAppID <= 0.
+		var expectedAppID int64
+		if v != nil {
+			expectedAppID = v.ExpectedAppID
+		}
 		targetTypes := r.Header.Values("X-GitHub-Hook-Installation-Target-Type")
 		targetIDs := r.Header.Values("X-GitHub-Hook-Installation-Target-ID")
-		if len(targetTypes) != 1 || targetTypes[0] != "integration" ||
-			len(targetIDs) != 1 || targetIDs[0] != strconv.FormatInt(v.ExpectedAppID, 10) {
+		if expectedAppID <= 0 ||
+			len(targetTypes) != 1 || targetTypes[0] != "integration" ||
+			len(targetIDs) != 1 || targetIDs[0] != strconv.FormatInt(expectedAppID, 10) {
 			return source.Delivery{}, ErrWebhookTargetMismatch
+		}
+
+		// Step 2: single X-GitHub-Event header, and for supported families a
+		// single GUID-shaped X-GitHub-Delivery header.
+		if len(r.Header.Values("X-GitHub-Event")) != 1 || strings.TrimSpace(eventName) == "" {
+			return source.Delivery{}, ErrInvalidWebhookHeaders
+		}
+		if IsSupportedEvent(eventName) {
+			if len(r.Header.Values("X-GitHub-Delivery")) != 1 || !isGUIDDeliveryID(deliveryID) {
+				return source.Delivery{}, ErrInvalidDeliveryID
+			}
+			deliveryID = strings.ToLower(deliveryID)
 		}
 	}
 
@@ -165,8 +167,12 @@ func (v *WireVerifier) Verify(r *http.Request, body []byte, secrets source.Secre
 	}, nil
 }
 
-// DedupKey returns a deterministic provider-level deduplication key combining
-// the delivery ID and the signed raw-body SHA-256 digest (Stage 3 rev 1.8 §4.3).
+// DedupKey returns a deterministic provider-level deduplication key in the
+// format "<lowercased-delivery-id>:<sha256-hex(body)>" (or "<sha256-hex(body)>"
+// when d.ID is empty). This is a provider-level key combining both the delivery
+// ID and signed body hash; per-project persistence continues to store
+// Result.DedupKey(projectID) ("<delivery>/<project>") alongside the body SHA-256
+// column (Stage 3 rev 1.8 §4.3).
 func (v *WireVerifier) DedupKey(d source.Delivery, body []byte) string {
 	sum := sha256.Sum256(body)
 	bodyHash := hex.EncodeToString(sum[:])
@@ -175,23 +181,6 @@ func (v *WireVerifier) DedupKey(d source.Delivery, body []byte) string {
 		return bodyHash
 	}
 	return id + ":" + bodyHash
-}
-
-func verifyHMACSHA256(payload []byte, signature, secret string) bool {
-	if secret == "" || signature == "" {
-		return false
-	}
-	const prefix = "sha256="
-	if !strings.HasPrefix(signature, prefix) {
-		return false
-	}
-	sigBytes, err := hex.DecodeString(signature[len(prefix):])
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	return hmac.Equal(mac.Sum(nil), sigBytes)
 }
 
 func isGUIDDeliveryID(s string) bool {
@@ -341,10 +330,10 @@ func (n *EventNormalizer) Normalize(ctx context.Context, d source.Delivery, payl
 		return source.Event{}, ErrUnsupportedPayload
 	}
 
-	return resultToSourceEvent(res, t), nil
+	return resultToSourceEvent(res, d.ReceivedAt, t), nil
 }
 
-func resultToSourceEvent(res Result, t source.Target) source.Event {
+func resultToSourceEvent(res Result, receivedAt time.Time, t source.Target) source.Event {
 	var senderID string
 	if res.SenderID > 0 {
 		senderID = strconv.FormatInt(res.SenderID, 10)
@@ -362,6 +351,7 @@ func resultToSourceEvent(res Result, t source.Target) source.Event {
 		Type:         res.Type,
 		Subject:      res.Subject,
 		OccurredAt:   res.OccurredAt,
+		ReceivedAt:   receivedAt,
 		Attributes:   res.Attributes,
 		Lists:        res.Lists,
 		Payload:      res.Payload,
@@ -419,18 +409,14 @@ func (m *TokenMinter) Mint(ctx context.Context, t source.Target, scope source.Cr
 }
 
 // CommentAction implements source.ProviderAction for the github.comment action
-// (marker idempotency, per-project comment bucket, and short-lived credentials
-// via source.IdentityMinter).
+// by delegating Validate and Fire to the hub's registered github.comment
+// FireAction (which owns authorization, per-project rate limiting, token
+// minting, idempotent marker posting, outcome classification, and audit).
 type CommentAction struct {
 	// ValidateFunc validates and normalises a github.comment action payload.
 	ValidateFunc func(ctx context.Context, req source.ActionValidateRequest) (string, error)
-	// AllowRate enforces the per-project outbound comment bucket. Optional; when
-	// set, Fire calls it before minting or posting.
-	AllowRate func(projectID string) error
-	// FireFunc executes the idempotent comment post using the supplied minter.
+	// FireFunc executes the canonical github.comment fire sequence.
 	FireFunc func(ctx context.Context, req source.ActionFireRequest) (source.ActionFireResult, error)
-	// DefaultMinter is used when req.Minter is nil.
-	DefaultMinter source.IdentityMinter
 }
 
 // Kind returns the canonical action kind ("github.comment").
@@ -446,112 +432,26 @@ func (a *CommentAction) Validate(ctx context.Context, req source.ActionValidateR
 	return a.ValidateFunc(ctx, req)
 }
 
-// Fire enforces the optional per-project rate bucket, ensures a minter is
-// attached, and delegates to FireFunc.
+// Fire delegates to the canonical github.comment fire sequence.
 func (a *CommentAction) Fire(ctx context.Context, req source.ActionFireRequest) (source.ActionFireResult, error) {
 	if a == nil || a.FireFunc == nil {
 		return source.ActionFireResult{}, ErrNotConfigured
 	}
-	if a.AllowRate != nil {
-		if err := a.AllowRate(req.ProjectID); err != nil {
-			return source.ActionFireResult{
-				Status: "failed",
-				Error:  err.Error(),
-			}, nil
-		}
-	}
-	if req.Minter == nil {
-		req.Minter = a.DefaultMinter
-	}
 	return a.FireFunc(ctx, req)
 }
 
-// ReadinessSnapshot carries the raw GitHub App configuration and fetched GET /app
-// metadata evaluated by ReadinessChecker.
-type ReadinessSnapshot struct {
-	Configured       bool
-	WebhooksEnabled  bool
-	HasWebhookSecret bool
-	AppSlug          string
-	Events           []string
-	Permissions      map[string]string
-	CheckedAt        *time.Time
-	Error            string
-}
-
-// ReadinessChecker implements source.Readiness for the GitHub App trigger integration.
+// ReadinessChecker implements source.Readiness by delegating to the hub's
+// canonical GitHub App trigger readiness evaluator.
 type ReadinessChecker struct {
-	Snapshot func(ctx context.Context) (ReadinessSnapshot, error)
+	CheckFunc func(ctx context.Context) (source.Report, error)
 }
 
-// Check evaluates Stage 3 GitHub trigger readiness from the current App snapshot.
+// Check evaluates Stage 3 GitHub trigger readiness.
 func (c *ReadinessChecker) Check(ctx context.Context) (source.Report, error) {
-	if c == nil || c.Snapshot == nil {
+	if c == nil || c.CheckFunc == nil {
 		return source.Report{}, ErrNotConfigured
 	}
-	snap, err := c.Snapshot(ctx)
-	if err != nil {
-		return source.Report{}, err
-	}
-	return EvaluateReadiness(snap), nil
-}
-
-// EvaluateReadiness computes a provider-neutral source.Report from a GitHub App
-// ReadinessSnapshot using Stage 3's required events and permissions tables (§10.1).
-func EvaluateReadiness(snap ReadinessSnapshot) source.Report {
-	lastErr := snap.Error
-	if !snap.Configured && lastErr == "" {
-		lastErr = "GitHub App is not configured."
-	}
-
-	missingEvents := []string{}
-	missingPerms := []string{}
-	if snap.Configured && (len(snap.Events) > 0 || len(snap.Permissions) > 0) {
-		eventSet := make(map[string]bool, len(snap.Events))
-		for _, ev := range snap.Events {
-			eventSet[ev] = true
-		}
-		for _, reqEv := range RequiredEvents {
-			if !eventSet[reqEv] {
-				missingEvents = append(missingEvents, reqEv)
-			}
-		}
-		for _, reqPerm := range RequiredPermissions {
-			if !permissionSatisfies(snap.Permissions[reqPerm.Name], reqPerm.Level) {
-				missingPerms = append(missingPerms, reqPerm.Name+":"+reqPerm.Level)
-			}
-		}
-	}
-
-	hasMetadata := snap.Configured && (len(snap.Events) > 0 || len(snap.Permissions) > 0)
-	ready := snap.WebhooksEnabled &&
-		snap.HasWebhookSecret &&
-		hasMetadata &&
-		lastErr == "" &&
-		len(missingEvents) == 0 &&
-		len(missingPerms) == 0
-
-	return source.Report{
-		Ready:              ready,
-		WebhooksEnabled:    snap.WebhooksEnabled,
-		HasWebhookSecret:   snap.HasWebhookSecret,
-		MissingEvents:      missingEvents,
-		MissingPermissions: missingPerms,
-		AppSlug:            snap.AppSlug,
-		CheckedAt:          snap.CheckedAt,
-		Error:              lastErr,
-	}
-}
-
-func permissionSatisfies(appLevel, requiredLevel string) bool {
-	switch requiredLevel {
-	case "read":
-		return appLevel == "read" || appLevel == "write" || appLevel == "admin"
-	case "write":
-		return appLevel == "write" || appLevel == "admin"
-	default:
-		return appLevel == requiredLevel
-	}
+	return c.CheckFunc(ctx)
 }
 
 // PresetCatalog implements source.Presets over GitHub's trigger preset registry.

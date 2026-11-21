@@ -122,6 +122,8 @@ type Principal struct {
 
 // Event is the provider-neutral normalised trigger event produced by a Normalizer.
 type Event struct {
+	// ID is the persisted trigger event row identifier when known.
+	ID string
 	// Handled is false when the delivery's event family is outside the source's
 	// supported event table.
 	Handled bool
@@ -139,6 +141,8 @@ type Event struct {
 	Subject string
 	// OccurredAt is when the event occurred on the provider.
 	OccurredAt time.Time
+	// ReceivedAt is when the hub received the delivery.
+	ReceivedAt time.Time
 	// Attributes holds normalised string attributes.
 	Attributes map[string]string
 	// Lists holds normalised list-valued attributes.

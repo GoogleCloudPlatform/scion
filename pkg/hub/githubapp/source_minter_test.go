@@ -15,75 +15,43 @@
 package githubapp
 
 import (
-	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 )
 
-func TestInstallationTokenMinter_Mint(t *testing.T) {
-	keyPEM, _ := generateTestKey(t)
-	exp := time.Date(2026, 11, 21, 13, 0, 0, 0, time.UTC)
-
-	var gotPath string
-	var gotBody struct {
-		Repositories []string          `json:"repositories"`
-		Permissions  map[string]string `json:"permissions"`
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Errorf("decode request: %v", err)
-		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"token":       "ghs_from_seam",
-			"expires_at":  exp.Format(time.RFC3339),
-			"permissions": map[string]string{"issues": "write", "metadata": "read"},
-		})
-	}))
-	defer srv.Close()
-
-	client, err := NewClient(Config{AppID: 123, APIBaseURL: srv.URL}, keyPEM)
-	if err != nil {
-		t.Fatalf("NewClient: %v", err)
-	}
-
-	var minter source.IdentityMinter = &InstallationTokenMinter{Client: client}
-	cred, err := minter.Mint(context.Background(), source.Target{
-		ProjectID:      "proj-1",
-		InstallationID: "456",
-		Resource:       "acme/widgets",
-	}, source.CredentialScope{
-		Permissions: map[string]string{"issues": "write", "metadata": "read"},
+func TestTokenPermissionsFromScope(t *testing.T) {
+	perms, err := TokenPermissionsFromScope(source.CredentialScope{
+		Permissions: map[string]string{
+			"issues":   "write",
+			"metadata": "read",
+		},
 	})
 	if err != nil {
-		t.Fatalf("Mint failed: %v", err)
+		t.Fatalf("TokenPermissionsFromScope failed: %v", err)
 	}
-	if gotPath != "/app/installations/456/access_tokens" {
-		t.Errorf("path = %q, want /app/installations/456/access_tokens", gotPath)
-	}
-	if len(gotBody.Repositories) != 1 || gotBody.Repositories[0] != "widgets" {
-		t.Errorf("repositories = %v, want [widgets]", gotBody.Repositories)
-	}
-	if cred.Token != "ghs_from_seam" || !cred.ExpiresAt.Equal(exp) {
-		t.Errorf("unexpected credential: %+v", cred)
-	}
-	if cred.Scope["issues"] != "write" {
-		t.Errorf("unexpected scope: %+v", cred.Scope)
+	if perms.Issues != "write" || perms.Metadata != "read" {
+		t.Fatalf("unexpected permissions: %+v", perms)
 	}
 
-	// Reject unknown permission.
-	if _, err := minter.Mint(context.Background(), source.Target{
-		InstallationID: "456",
-		Resource:       "acme/widgets",
-	}, source.CredentialScope{
+	m := TokenPermissionsToMap(perms)
+	if m["issues"] != "write" || m["metadata"] != "read" || len(m) != 2 {
+		t.Fatalf("unexpected map: %+v", m)
+	}
+
+	if _, err := TokenPermissionsFromScope(source.CredentialScope{
 		Permissions: map[string]string{"bogus": "read"},
 	}); err == nil {
 		t.Error("expected error for unknown permission")
+	}
+
+	if _, err := TokenPermissionsFromScope(source.CredentialScope{
+		Permissions: map[string]string{"issues": "admin"},
+	}); err == nil {
+		t.Error("expected error for invalid permission level")
+	}
+
+	if _, err := TokenPermissionsFromScope(source.CredentialScope{}); err == nil {
+		t.Error("expected error for empty permission scope")
 	}
 }
