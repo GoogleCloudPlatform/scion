@@ -153,6 +153,10 @@ type resourceImportKind struct {
 	// refuses the whole import, so a refused import or reimport writes
 	// nothing. It reports every refused directory, not just the first.
 	checkContent func(dirs []resourceDir) error
+	// createOnly, when true, refuses to overwrite an existing resource (or any
+	// bundled harness-config whose slug already exists in the target scope).
+	// Used for agent-initiated template imports.
+	createOnly bool
 }
 
 // templateImportKind returns the import knobs for templates.
@@ -548,6 +552,9 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 			if err == nil {
 				if rd.nameFromConfig {
 					rstore.requireConfigName()
+				}
+				if kind.createOnly {
+					rstore.setCreateOnly(scope, scopeID)
 				}
 				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, rd.sourceURL, true)
 			}

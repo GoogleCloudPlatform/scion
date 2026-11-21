@@ -152,6 +152,12 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if GetAgentIdentityFromContext(ctx) != nil && strings.TrimSpace(req.SourceURL) != "" {
+		writeError(w, http.StatusForbidden, "agent_source_override_forbidden",
+			"agents can refresh a template only from its stored source URL", nil)
+		return
+	}
+
 	src, sourceURL, srcErr := resolveTemplateReimportSource(tmpl.SourceURL, req.SourceURL)
 	if srcErr != nil {
 		writeError(w, http.StatusBadRequest, srcErr.code, srcErr.message, nil)

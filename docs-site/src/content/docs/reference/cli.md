@@ -1228,7 +1228,7 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
 
 - `list`: List available templates from the Hub and the filesystem, grouped by scope. A failed global-scope Hub list is an error; a failed project or user list is a warning and the rest is still shown.
     - Flags: `--local` (list filesystem templates only; makes no Hub request, so it works offline).
-- `show <name>`: Show a template's resolved configuration.
+- `show <name>`: Show a template's resolved configuration (including its redacted `Source URL` for Hub templates when set, in both text and `--format json`).
     - Flags: `--local` (search local only), `--hub` (search Hub only). Without `--local`, a Hub error is shown rather than falling back to the filesystem; the same holds for `clone` and `delete`.
 - `create <name>`: Create a new template (seeded from the `default` template).
 - `clone <src> <dest>`: Clone an existing template (local or Hub source) to a new local one.
@@ -1246,8 +1246,10 @@ Hub-only commands (require an enabled Hub):
 - `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, `--name <name>` to sync under a different Hub name, or `--scope <project|global|user>` to select the target Hub scope (defaults to `project`, or `global` with `--global`; with `global` or `user`, it links and looks up no project, so it works outside a project; `--global` with a different `--scope` is rejected, and `--all` cannot be used with `--scope user`).
     - The template may also be a directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name` or `../name`). That directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Such an argument is read relative to the current directory, not looked up in the templates directories. If the base name cannot be a template name (for example a content-hash cache directory), sync stops and asks for `--name`.
 - `pull <name>`: Download a template from the Hub to the local filesystem. Use `--to <path>` for a custom destination.
+- `import-url <github-url>`: Import one or more templates from a GitHub folder URL directly through the Hub (credentials resolved from the target scope's Hub secrets; overwrites same-named templates for humans; create-only and own-project-only for agents).
+    - Flags: `--scope <project|global|user>` (defaults to `project` in agent mode or inside a project context; root `--global` selects `global`), `--name <name>` (repeatable; limit to named templates), `--dry-run` (discover and list without importing), `--format json`.
 - `update [name]`: Refresh a Hub template from its stored GitHub source URL.
-    - Flags: `--all` (every template with a GitHub source URL), `--scope <global|project|user>` (only templates in this scope; with `global`, `user`, or the root `--global` flag, it links and looks up no project, so it works with `--hub <url>` and a token outside a project; `--global` with a different `--scope` is rejected), `--url <url>` (override and store the source URL).
+    - Flags: `--all` (every template with a GitHub source URL), `--scope <global|project|user>` (only templates in this scope; defaults to `project` in agent mode; with `global`, `user`, or the root `--global` flag, it links and looks up no project, so it works with `--hub <url>` and a token outside a project; `--global` with a different `--scope` is rejected), `--url <url>` (override and store the source URL; refused in agent mode).
 - `status`: Show the sync status of templates relative to the Hub.
 
 See [Templates & Roles](/scion/local/templates/) for the full guide.

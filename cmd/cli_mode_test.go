@@ -238,14 +238,14 @@ func buildTestTree() *cobra.Command {
 
 	// templates with subcommands
 	templates := &cobra.Command{Use: "templates"}
-	for _, name := range []string{"list", "show", "create", "delete", "clone", "update-default", "import", "sync", "push", "pull", "status"} {
+	for _, name := range []string{"list", "show", "create", "delete", "clone", "update-default", "import", "import-url", "update", "sync", "push", "pull", "status"} {
 		templates.AddCommand(&cobra.Command{Use: name})
 	}
 	root.AddCommand(templates)
 
 	// template (singular alias)
 	template := &cobra.Command{Use: "template"}
-	for _, name := range []string{"list", "show", "delete", "clone", "import", "sync", "push", "pull", "status"} {
+	for _, name := range []string{"list", "show", "delete", "clone", "import", "import-url", "update", "sync", "push", "pull", "status"} {
 		template.AddCommand(&cobra.Command{Use: name})
 	}
 	root.AddCommand(template)
@@ -326,14 +326,14 @@ func TestApplyModeRestrictions_Agent(t *testing.T) {
 		"shared-dir", "shared-dir.info", "shared-dir.list",
 		"start", "stop",
 		"template",
-		"template.clone", "template.delete", "template.import",
+		"template.clone", "template.delete", "template.import", "template.import-url",
 		"template.list", "template.pull", "template.push",
-		"template.show", "template.status", "template.sync",
+		"template.show", "template.status", "template.sync", "template.update",
 		"templates",
-		"templates.clone", "templates.create", "templates.delete", "templates.import",
+		"templates.clone", "templates.create", "templates.delete", "templates.import", "templates.import-url",
 		"templates.list", "templates.pull", "templates.push",
 		"templates.show", "templates.status", "templates.sync",
-		"templates.update-default",
+		"templates.update", "templates.update-default",
 		"version",
 	}
 	assert.Equal(t, expected, remaining)
@@ -449,10 +449,11 @@ func TestAgentAllowedList(t *testing.T) {
 		"shared-dir", "shared-dir.list", "shared-dir.info",
 		"templates", "templates.list", "templates.show", "templates.create",
 		"templates.clone", "templates.delete", "templates.update-default",
-		"templates.import", "templates.sync", "templates.push", "templates.pull", "templates.status",
+		"templates.import", "templates.import-url", "templates.update",
+		"templates.sync", "templates.push", "templates.pull", "templates.status",
 		"template", "template.list", "template.show", "template.clone",
-		"template.delete", "template.import", "template.sync",
-		"template.push", "template.pull", "template.status",
+		"template.delete", "template.import", "template.import-url", "template.update",
+		"template.sync", "template.push", "template.pull", "template.status",
 		"harness-config", "harness-config.list", "harness-config.show", "harness-config.install",
 		"harness-config.sync", "harness-config.push", "harness-config.pull",
 		"harness-config.delete", "harness-config.reset", "harness-config.upgrade",

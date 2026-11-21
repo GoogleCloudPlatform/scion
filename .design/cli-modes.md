@@ -31,7 +31,7 @@ Used inside agent containers. Agents can orchestrate sibling agents within their
 | `hub` (all subcommands except the target-hub profile commands below) | Hub interaction — agents communicate via the messaging and notification systems, not direct Hub commands. Exception (ptone/scion#4240): `hub status`, `hub profile` and `hub test-identity` issue/token/list/delete/teardown/web-code are agent-allowed, and refuse at run time unless a target-hub profile names a hub other than the agent's own |
 | `init` | Grove initialization — infrastructure concern |
 | `grove` (all subcommands) | Grove administration — infrastructure concern |
-| `templates` (all subcommands) | Template management — managed by the operator |
+| `templates` (all subcommands) | *(Historical — superseded)* Template subcommands are now selectively allowed in agent mode (`list`, `show`, `create`, `clone`, `delete`, `update-default`, `import`, `import-url`, `update`, `sync`, `push`, `pull`, `status` and singular `template.*` equivalents; Hub authorization enforces project-scope and role/delegation limits). |
 | `harness-config` (all subcommands) | Harness configuration — managed by the operator |
 | `config` (all subcommands) | Configuration inspection/mutation — managed by the operator |
 | `doctor` | Host and platform diagnostics for people checking health or troubleshooting agents; an agent checks itself with `sciontool doctor`. An authorized assistant agent runs `scion doctor` from a person-owned environment with a hub-boundary token (`hub_health:read`), since the Hub serves the health summary to user credentials only (ptone/scion#4727) |
@@ -220,7 +220,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `start` | Y | Y (also with a target-hub profile, as for `create`) |
 | `stop` | Y | Y (also with a target-hub profile, as for `create`) |
 | `sync` | Y | - |
-| `templates` (all) | Y | - |
+| `templates` (`list`, `show`, `create`, `clone`, `delete`, `update-default`, `import`, `import-url`, `update`, `sync`, `push`, `pull`, `status`) | Y | Y (`import-url` and `update` are project-scoped for `full`-role agents; Hub enforces create-only on `import-url` and forbids `--url` override on `update`, ptone/scion#7836) |
+| `template` (`list`, `show`, `clone`, `delete`, `import`, `import-url`, `update`, `sync`, `push`, `pull`, `status`) | Y | Y (singular alias parity with `templates`) |
 | `tunnel` | Y | - |
 | `tunnel status` | Y | - |
 | `version` | Y | Y |
