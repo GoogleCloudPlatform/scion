@@ -164,6 +164,7 @@ func TestCeilingOptionalRoleScopesAreReviewed(t *testing.T) {
 	reviewed := map[AgentTokenScope]bool{
 		ScopeProjectArtifactRead:  true,
 		ScopeProjectArtifactWrite: true,
+		ScopeProjectSkillWrite:    true,
 	}
 	require.NoError(t, checkCeilingOptionalRoleScopesReviewed(ceilingOptionalRoleScopes, reviewed, ScopesForRole))
 
@@ -171,6 +172,7 @@ func TestCeilingOptionalRoleScopesAreReviewed(t *testing.T) {
 		candidate := map[AgentTokenScope]bool{
 			ScopeProjectArtifactRead:  true,
 			ScopeProjectArtifactWrite: true,
+			ScopeProjectSkillWrite:    true,
 			ScopeProjectTemplateWrite: true,
 		}
 		err := checkCeilingOptionalRoleScopesReviewed(candidate, reviewed, ScopesForRole)
@@ -183,6 +185,7 @@ func TestCeilingOptionalRoleScopesAreReviewed(t *testing.T) {
 		bad := map[AgentTokenScope]bool{
 			ScopeProjectArtifactRead:  true,
 			ScopeProjectArtifactWrite: false,
+			ScopeProjectSkillWrite:    true,
 		}
 		err := checkCeilingOptionalRoleScopesReviewed(bad, reviewed, ScopesForRole)
 		require.Error(t, err)

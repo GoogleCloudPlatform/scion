@@ -366,6 +366,29 @@ func (f *agentSkillFixture) newAgent(t *testing.T, name, projectID, delegatorID 
 	return f.srv.generateRecordedAgentToken(t, agent.ID, projectID, scopes, []string{delegatorID})
 }
 
+// newAgentWithRole creates agent name in projectID with the given role and a
+// principal-ceiling delegation edge from delegatorID (matching a human-session
+// agent creation), returning a recorded agent token carrying ScopesForRole(role).
+func (f *agentSkillFixture) newAgentWithRole(t *testing.T, name, projectID, delegatorID string, role AgentRole) string {
+	t.Helper()
+	ctx := context.Background()
+	agent := &store.Agent{
+		ID: tid(name), Slug: tid(name), Name: name,
+		ProjectID: projectID, Phase: string(state.PhaseRunning),
+		CreatedBy: delegatorID, OwnerID: delegatorID, Ancestry: []string{delegatorID},
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)},
+	}
+	require.NoError(t, f.s.CreateAgent(ctx, agent))
+	require.NoError(t, f.s.CreateDelegationEdge(ctx, &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser, DelegatorID: delegatorID,
+		DelegateType: store.DelegationPrincipalAgent, DelegateID: agent.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: projectID,
+		Role: string(role), Active: true,
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}))
+	return f.srv.generateRecordedAgentToken(t, agent.ID, projectID, ScopesForRole(role), []string{delegatorID})
+}
+
 func (f *agentSkillFixture) agentGet(t *testing.T, token, path string) (int, string) {
 	t.Helper()
 	rec := doAgentTokenRequestSkills(t, f.srv, path, token)

@@ -189,12 +189,20 @@ func agentCreateSkillStatus(t *testing.T, srv *Server, token, name, scope, scope
 func TestListSkills_Capabilities_Agent(t *testing.T) {
 	f := setupAgentSkillFixture(t)
 
-	creator := f.newAgent(t, "skillcap-agent-full", f.p.ID, f.u.ID, ScopesForRole(AgentRoleFull))
-	require.Contains(t, ScopesForRole(AgentRoleFull), ScopeAgentCreate)
-	plain := f.newAgent(t, "skillcap-agent-baseline", f.p.ID, f.u.ID, ScopesForRole(AgentRoleBaseline))
-	require.NotContains(t, ScopesForRole(AgentRoleBaseline), ScopeAgentCreate)
+	// skill.create is a project-owner/admin permission, so the delegating user
+	// must hold it for the agent's delegation ceiling to allow project skill
+	// creation.
+	owner := createNamedTestUser(t, f.s, "skillcap-owner", store.UserRoleMember)
+	createTestUserWithProjectRole(t, f.s, owner.ID, owner.Email, f.p.ID, store.ProjectRoleOwner)
 
-	// An agent holding the create scope can create in its own project only.
+	creator := f.newAgentWithRole(t, "skillcap-agent-full", f.p.ID, owner.ID, AgentRoleFull)
+	require.Contains(t, ScopesForRole(AgentRoleFull), ScopeProjectSkillWrite)
+	plain := f.newAgentWithRole(t, "skillcap-agent-baseline", f.p.ID, owner.ID, AgentRoleBaseline)
+	require.NotContains(t, ScopesForRole(AgentRoleBaseline), ScopeProjectSkillWrite)
+	memberDelegated := f.newAgentWithRole(t, "skillcap-agent-member-ceiling", f.p.ID, f.u.ID, AgentRoleFull)
+
+	// An agent holding the skill-write scope (and a creator ceiling with
+	// skill.create) can create in its own project only.
 	assert.Equal(t, []string{"create"}, agentSkillCapabilities(t, f.srv, creator, ""))
 	assert.Equal(t, []string{"create"}, agentSkillCapabilities(t, f.srv, creator, "scope=project"))
 	assert.Equal(t, []string{"create"}, agentSkillCapabilities(t, f.srv, creator, "scope=project&scopeId="+f.p.ID))
@@ -206,14 +214,19 @@ func TestListSkills_Capabilities_Agent(t *testing.T) {
 		assert.Empty(t, agentSkillCapabilities(t, f.srv, creator, query), "query %q", query)
 	}
 
-	// Without the create scope an agent can create nowhere.
+	// Without the skill-write scope (or when the delegator lacks skill.create)
+	// an agent can create nowhere.
 	assert.Empty(t, agentSkillCapabilities(t, f.srv, plain, ""))
 	assert.Empty(t, agentSkillCapabilities(t, f.srv, plain, "scope=project&scopeId="+f.p.ID))
+	assert.Empty(t, agentSkillCapabilities(t, f.srv, memberDelegated, "scope=project&scopeId="+f.p.ID))
 
 	// The capability matches what createSkill decides.
 	assert.Equal(t, http.StatusCreated, agentCreateSkillStatus(t, f.srv, creator, "agent-own", store.SkillScopeProject, f.p.ID))
 	assert.Equal(t, http.StatusForbidden, agentCreateSkillStatus(t, f.srv, creator, "agent-other", store.SkillScopeProject, f.q.ID))
+	assert.Equal(t, http.StatusForbidden, agentCreateSkillStatus(t, f.srv, creator, "agent-global", store.SkillScopeGlobal, ""))
+	assert.Equal(t, http.StatusForbidden, agentCreateSkillStatus(t, f.srv, creator, "agent-user", store.SkillScopeUser, ""))
 	assert.Equal(t, http.StatusForbidden, agentCreateSkillStatus(t, f.srv, plain, "agent-plain", store.SkillScopeProject, f.p.ID))
+	assert.Equal(t, http.StatusForbidden, agentCreateSkillStatus(t, f.srv, memberDelegated, "agent-member", store.SkillScopeProject, f.p.ID))
 }
 
 func TestListSkills_Capabilities_ProjectScopeWithoutProjects(t *testing.T) {

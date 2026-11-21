@@ -649,6 +649,9 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// Write access to templates within the agent's own project.
 		// Deliberately excludes template.delete - see the scope declaration.
 		ScopeProjectTemplateWrite: {"template.create", "template.update"},
+		// Write access to skills within the agent's own project (ptone/scion#8734).
+		// Deliberately excludes skill.delete and global/user scopes.
+		ScopeProjectSkillWrite: {"skill.create", "skill.update"},
 		// Publishing artifacts (and new versions) homed in the agent's own
 		// project. Deliberately excludes artifact.delete and artifact.manage,
 		// and the Reserved artifact.update (ptone/scion#3652).

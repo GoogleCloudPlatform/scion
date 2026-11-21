@@ -63,11 +63,12 @@ func TestScopesForRole_Baseline(t *testing.T) {
 	assert.NotContains(t, scopes, ScopeAgentLifecycle)
 	assert.NotContains(t, scopes, ScopeProjectSecretRead)
 	assert.NotContains(t, scopes, ScopeProjectTemplateWrite)
+	assert.NotContains(t, scopes, ScopeProjectSkillWrite)
 }
 
 func TestScopesForRole_Full(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleFull)
-	require.Len(t, scopes, 13)
+	require.Len(t, scopes, 14)
 	assert.Contains(t, scopes, ScopeProjectArtifactWrite)
 
 	// Must include everything in baseline
@@ -86,6 +87,7 @@ func TestScopesForRole_Full(t *testing.T) {
 	assert.Contains(t, scopes, ScopeAgentLifecycle)
 	assert.Contains(t, scopes, ScopeProjectSecretRead)
 	assert.Contains(t, scopes, ScopeProjectTemplateWrite)
+	assert.Contains(t, scopes, ScopeProjectSkillWrite)
 	assert.Contains(t, scopes, ScopeAgentSetMessageMode)
 	assert.Contains(t, scopes, ScopeProjectArtifactRead)
 }
@@ -167,7 +169,7 @@ func TestScopesForRole_RoleReadOnlyHasOnlyReadAndSelfStatus(t *testing.T) {
 	for _, s := range []AgentTokenScope{
 		ScopeAgentCreate, ScopeAgentLifecycle, ScopeAgentNotify, ScopeAgentPortForward,
 		ScopeAgentTokenRefresh, ScopeAgentSAAssign, ScopeProjectSecretRead,
-		ScopeProjectTemplateWrite, ScopeAgentSetMessageMode, ScopeProjectArtifactWrite,
+		ScopeProjectTemplateWrite, ScopeProjectSkillWrite, ScopeAgentSetMessageMode, ScopeProjectArtifactWrite,
 	} {
 		assert.NotContains(t, scopes, s)
 	}

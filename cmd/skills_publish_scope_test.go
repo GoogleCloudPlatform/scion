@@ -158,6 +158,15 @@ func TestSkillsPublish_ProjectLookupFiltersByScopeAndProject(t *testing.T) {
 	})
 }
 
+func TestDefaultPublishScope(t *testing.T) {
+	assert.Equal(t, "project", defaultPublishScope("", ModeAgent))
+	assert.Equal(t, "project", defaultPublishScope("project", ModeAgent))
+	assert.Equal(t, "global", defaultPublishScope("global", ModeAgent))
+	assert.Equal(t, "user", defaultPublishScope("user", ModeAgent))
+	assert.Equal(t, "", defaultPublishScope("", ModeHuman))
+	assert.Equal(t, "project", defaultPublishScope("project", ModeHuman))
+}
+
 // TestSkillsPublish_UserLookupFiltersByCaller: a --scope user lookup is
 // narrowed to the caller's user ID and never returns another user's
 // same-named skill, even from a hub that ignores the filter.

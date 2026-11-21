@@ -226,7 +226,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.AgentRoleDefFull,
 			Description: "Full agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    3, // R3: drop artifact.update (Reserved, ptone/scion#3652); R2: artifact.create, artifact.update via project:artifact:write
+			Revision:    4, // R4: skill.create, skill.update via project:skill:write (ptone/scion#8734); R3: drop artifact.update (Reserved, ptone/scion#3652); R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleFull),
 		},
 	}
