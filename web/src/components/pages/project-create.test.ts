@@ -584,6 +584,29 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(heard).toEqual([]);
   });
 
+  it('Blank + Git Repository orders workspace modes as Clone per agent, Shared, Worktree and defaults to Clone per agent', async () => {
+    const { el } = await createForm();
+    element = el;
+
+    await setValue(el, '#mode', 'git', 'sl-change');
+
+    const group = q(el, 'sl-radio-group') as (HTMLElement & { value: string }) | null;
+    expect(group).not.toBeNull();
+    expect(group!.value).toBe('per-agent');
+
+    const buttons = Array.from(group!.querySelectorAll('sl-radio-button'));
+    expect(buttons.map((b) => b.getAttribute('value'))).toEqual([
+      'per-agent',
+      'shared',
+      'worktree-per-agent',
+    ]);
+    expect(buttons.map((b) => text(b))).toEqual([
+      'Clone per agent',
+      'Shared workspace',
+      'Worktree per agent',
+    ]);
+  });
+
   it('Blank + Git Repository posts the git body to /projects', async () => {
     const { el, requests } = await createForm();
     element = el;
