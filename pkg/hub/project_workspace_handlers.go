@@ -809,23 +809,14 @@ func (s *Server) handleProjectWorkspaceDownload(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Open once and serve every mode from this handle: it must be the entry
-	// Lstat saw, so an entry swapped for a symlink in between is refused.
-	f, err := parent.Dir().Open(base)
+	// Open once non-blocking and serve every mode from this handle: it must
+	// still be a regular file and the same entry Lstat saw.
+	f, info, err := openWorkspaceRegularForRead(parent.Dir(), base, linfo)
 	if err != nil {
 		writeWorkspaceWalkError(w, "download", filePath, err)
 		return
 	}
 	defer func() { _ = f.Close() }()
-	info, err := f.Stat()
-	if err != nil {
-		InternalError(w)
-		return
-	}
-	if !os.SameFile(info, linfo) {
-		writeWorkspaceWalkError(w, "download", filePath, fmt.Errorf("%w: target changed while opening it", errWorkspaceWriteRefused))
-		return
-	}
 
 	// JSON format: return content wrapped with metadata for the editor
 	if r.URL.Query().Get("format") == "json" {
@@ -928,25 +919,25 @@ func writeDirectoryToZip(zw *zip.Writer, root *os.Root) error {
 		}
 
 		info, err := d.Info()
-		if err != nil {
+		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
 
-		header, err := zip.FileInfoHeader(info)
+		// Open before writing the header, so that a file we turn out not to
+		// be able to read does not leave a stray empty entry in the archive.
+		f, openedInfo, err := openWorkspaceRegularForRead(root, path, info)
+		if err != nil {
+			return nil
+		}
+		defer func() { _ = f.Close() }()
+
+		header, err := zip.FileInfoHeader(openedInfo)
 		if err != nil {
 			return nil
 		}
 		// Use the relative path so directory structure is preserved
 		header.Name = path
 		header.Method = zip.Deflate
-
-		// Open before writing the header, so that a file we turn out not to
-		// be able to read does not leave a stray empty entry in the archive.
-		f, err := root.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer func() { _ = f.Close() }()
 
 		writer, err := zw.CreateHeader(header)
 		if err != nil {
