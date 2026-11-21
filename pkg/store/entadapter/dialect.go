@@ -100,14 +100,14 @@ func projectLabelNotContains(key, value string) predicate.Project {
 		switch s.Dialect() {
 		case dialect.Postgres:
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				b.WriteString("NOT (").
+				b.WriteString("(NOT (").
 					WriteString(col).
 					WriteString(" @> ").
 					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
 					WriteString("::jsonb)").
 					WriteString(" OR ").
 					WriteString(col).
-					WriteString(" IS NULL")
+					WriteString(" IS NULL)")
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
@@ -165,21 +165,23 @@ func ancestryContains(principalID string) predicate.Agent {
 		switch s.Dialect() {
 		case dialect.Postgres:
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				b.WriteString(col).
+				b.WriteString("(").
+					WriteString(col).
 					WriteString(" IS NOT NULL AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(").
 					WriteString(col).
 					WriteString(") AS elem WHERE elem = ").
 					Arg(principalID).
-					WriteString(")")
+					WriteString("))")
 			}))
 		default: // SQLite and any other backend providing json_each().
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				b.WriteString(col).
+				b.WriteString("(").
+					WriteString(col).
 					WriteString(" IS NOT NULL AND EXISTS (SELECT 1 FROM json_each(").
 					WriteString(col).
 					WriteString(") WHERE json_each.value = ").
 					Arg(principalID).
-					WriteString(")")
+					WriteString("))")
 			}))
 		}
 	}
