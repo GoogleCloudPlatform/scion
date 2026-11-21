@@ -676,6 +676,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// max_agents_per_project one (ptone/scion#6033).
 	s.releaseBrokerQuota(ctx, agent)
 	s.releaseProjectQuota(ctx, agent)
+	s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
 }
@@ -849,6 +850,13 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, &respAgent)
 			return
+		}
+	}
+
+	if action == api.AgentActionStop || action == api.AgentActionSuspend {
+		if reason := parseLifecycleStopReason(r); reason != "" {
+			ctx = withLifecycleStopReason(ctx, reason)
+			r = r.WithContext(ctx)
 		}
 	}
 
@@ -1517,6 +1525,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		s.reassertBrokerReservation(ctx, agent)
 		s.reassertProjectReservation(ctx, agent, backstopSiteRestart)
 	}
+	if action == api.AgentActionStop && agent.DeletedAt.IsZero() {
+		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, lifecycleStopReasonFromContext(ctx))
+	}
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
@@ -1583,6 +1594,7 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	agent.Activity = ""
 	agent.Message = offlineStopMessage
 	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
+	s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, lifecycleStopReasonFromContext(ctx))
 	s.events.PublishAgentStatus(ctx, agent)
 
 	// The broker may have reconnected after the reachability check, in which
@@ -1878,6 +1890,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		return
 	}
 
+	stopReason := parseLifecycleStopReason(r)
 	dispatcher := s.GetDispatcher()
 
 	// From here the stops no longer follow the client (ptone/scion#2661):
@@ -2082,6 +2095,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					// settleLifecycleWrite reloaded DeletedAt: a delete that
 					// soft-finished meanwhile gets no stale stopped status.
 					if agent.DeletedAt.IsZero() {
+						s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionStop, stopReason)
 						s.events.PublishAgentStatus(ctx, agent)
 					}
 				}

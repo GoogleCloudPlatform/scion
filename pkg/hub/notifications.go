@@ -436,6 +436,16 @@ func notificationEventStatus(evt AgentStatusEvent) string {
 // storeAndDispatchMessage is storeAndDispatchForAgent with the notification
 // text given by the caller.
 func (nd *NotificationDispatcher) storeAndDispatchMessage(ctx context.Context, sub *store.NotificationSubscription, evt AgentStatusEvent, agent *store.Agent, message string) {
+	notif := nd.storeNotification(ctx, sub, evt, message)
+	if notif == nil {
+		return
+	}
+	nd.dispatchStoredNotification(ctx, sub, notif, agent)
+}
+
+// storeNotification persists a notification row for evt with message and
+// returns it, or nil if the store write failed.
+func (nd *NotificationDispatcher) storeNotification(ctx context.Context, sub *store.NotificationSubscription, evt AgentStatusEvent, message string) *store.Notification {
 	effectiveStatus := notificationEventStatus(evt)
 
 	notif := &store.Notification{
@@ -453,12 +463,17 @@ func (nd *NotificationDispatcher) storeAndDispatchMessage(ctx context.Context, s
 	if err := nd.store.CreateNotification(ctx, notif); err != nil {
 		nd.log.Error("Failed to create notification",
 			"subscriptionID", sub.ID, "agent_id", evt.AgentID, "error", err)
-		return
+		return nil
 	}
 
 	nd.log.Info("Notification created",
 		"notificationID", notif.ID, "agent_id", evt.AgentID, "subscriber", sub.SubscriberType+":"+sub.SubscriberID, "status", notif.Status)
+	return notif
+}
 
+// dispatchStoredNotification delivers an already-persisted notification to its
+// subscriber.
+func (nd *NotificationDispatcher) dispatchStoredNotification(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, agent *store.Agent) {
 	switch sub.SubscriberType {
 	case store.SubscriberTypeAgent:
 		nd.dispatchToAgent(ctx, sub, notif, agent.ID, agent.Slug)
