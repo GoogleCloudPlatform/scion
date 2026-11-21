@@ -283,7 +283,7 @@ on `ask_user` status notifications to deliver the request.
 - `--wake` resumes a suspended target before delivery. It needs lifecycle permission on the
   target, which its creator has and a sibling agent does not. Without `--wake`, a message to
   an agent its creator or a user suspended is recorded as failed and not delivered; an agent
-  Scion suspended as idle or completed wakes for new messages on its own.
+  Scion suspended on its own (as idle or stalled) wakes for new messages without it.
 - `--interrupt` interrupts an active target turn before delivery (ordinary messages
   queue until the current turn ends); use for mid-turn stop or scope-change corrections,
   and omit on routine messages.
