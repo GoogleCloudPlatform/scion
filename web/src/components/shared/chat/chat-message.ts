@@ -218,6 +218,11 @@ export function selectionCoversNode(target?: EventTarget | null): boolean {
   const sel: ComposedSelection | null =
     typeof window.getSelection === 'function' ? window.getSelection() : null;
   if (sel && typeof sel.getComposedRanges === 'function') {
+    // A collapsed Caret inside an unrelated shadow tree (for example after
+    // clicking in a sibling header component) is re-targeted by
+    // getComposedRanges to a non-collapsed StaticRange wrapping the shadow
+    // host. Only a non-collapsed Range selection can cover `target`.
+    if (!hasRangeSelection(sel)) return false;
     const roots = ancestorShadowRoots(target);
     return sel
       .getComposedRanges({ shadowRoots: roots })

@@ -309,6 +309,30 @@ describe('scion-chat-message @mentions', () => {
     }
   });
 
+  it('does not treat a collapsed Caret selection as covering the message when getComposedRanges re-targets to a host', async () => {
+    const el = await mount('hello @coder');
+    // Chromium re-targets a collapsed Caret inside an unrelated shadow tree to
+    // a non-collapsed StaticRange spanning the shadow host in light DOM.
+    const retargeted = {
+      collapsed: false,
+      startContainer: document.body,
+      startOffset: 0,
+      endContainer: document.body,
+      endOffset: document.body.childNodes.length,
+    } as StaticRange;
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue({
+      type: 'Caret',
+      isCollapsed: true,
+      rangeCount: 1,
+      getComposedRanges: () => [retargeted],
+    } as unknown as Selection);
+    try {
+      expect(el.hasSelectionForContextMenu(el)).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('emits a composed mention-click with the slug when a mention is clicked', async () => {
     const el = await mount('hello @coder');
     const seen: string[] = [];
