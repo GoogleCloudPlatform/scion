@@ -138,3 +138,18 @@ func (p *Pipeline) recordCloudExportOutcome(signal string, err error, isProbe bo
 	}
 	return false
 }
+
+// attachGCPAsyncLogErrorHook wires the GCP Cloud Logging client's async error
+// callback into pipeline diagnostics and per-signal auth stand-down.
+func (p *Pipeline) attachGCPAsyncLogErrorHook(g *GCPExporter) {
+	if g == nil {
+		return
+	}
+	g.onAsyncLogError = func(err error) {
+		p.logDiagnostics.sdkErrors.Add(1)
+		p.markDeliveryDegraded()
+		if isPermanentAuthError(err) {
+			p.recordCloudExportOutcome("logs", err, false)
+		}
+	}
+}

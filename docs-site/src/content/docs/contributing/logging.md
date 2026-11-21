@@ -198,6 +198,7 @@ For more advanced setups, you can export logs via OpenTelemetry to an OTLP colle
 # Enable OTel log bridging to an OTLP collector
 export SCION_OTEL_LOG_ENABLED=true
 export SCION_OTEL_ENDPOINT="localhost:4317"
+export SCION_OTEL_INSECURE=true
 
 scion server start --enable-hub
 ```

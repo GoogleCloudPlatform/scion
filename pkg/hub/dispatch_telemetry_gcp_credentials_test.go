@@ -326,7 +326,7 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 		if got.TelemetryHint == "" {
 			t.Fatal("expected non-empty telemetryHint, got empty")
 		}
-		for _, want := range []string{"block", telemetryGCPCredentialsSecretName, "--service-account"} {
+		for _, want := range []string{"block", telemetryGCPCredentialsSecretName, "--service-account", "remove provider: gcp"} {
 			if !strings.Contains(got.TelemetryHint, want) {
 				t.Errorf("telemetryHint %q missing %q", got.TelemetryHint, want)
 			}

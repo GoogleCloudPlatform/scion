@@ -57,6 +57,7 @@ The Scion Hub and Runtime Broker use structured logging (`slog`) with an OpenTel
     # below — monitoring.googleapis.com does not accept OTLP.
     export SCION_OTEL_LOG_ENABLED=true
     export SCION_OTEL_ENDPOINT="localhost:4317"
+    export SCION_OTEL_INSECURE=true
 
     # Specify your GCP Project ID
     export SCION_GCP_PROJECT_ID="your-project-id"
@@ -133,7 +134,7 @@ SCION_GCP_PROJECT_ID="your-project-id"
 SCION_TELEMETRY_ENABLED="true"
 ```
 
-For a generic OTLP collector instead of GCP-native export, set `SCION_OTEL_ENDPOINT="host.docker.internal:4317"` (and omit `SCION_TELEMETRY_CLOUD_PROVIDER`).
+For a generic OTLP collector instead of GCP-native export, set `SCION_OTEL_ENDPOINT="host.docker.internal:4317"` and `SCION_OTEL_INSECURE="true"` (and omit `SCION_TELEMETRY_CLOUD_PROVIDER`; omit `SCION_OTEL_INSECURE` if the collector terminates TLS).
 
 #### Harness-Specific Configuration
 

@@ -18,10 +18,12 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestBuildCreateRequest_WarnsWhenGCPTelemetryBlockedWithoutCredentials pins
@@ -61,4 +63,90 @@ func TestBuildCreateRequest_WarnsWhenGCPTelemetryBlockedWithoutCredentials(t *te
 	if !found {
 		t.Fatalf("expected dispatch warning mentioning %q, got %v", telemetryGCPCredentialsSecretName, got)
 	}
+}
+
+// TestDispatchStartAndRestart_WarnsWhenGCPTelemetryBlockedWithoutCredentials
+// pins the warning call sites in DispatchAgentStart and DispatchAgentRestart.
+func TestDispatchStartAndRestart_WarnsWhenGCPTelemetryBlockedWithoutCredentials(t *testing.T) {
+	boolPtr := func(v bool) *bool { return &v }
+	memStore := createTestStore(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-warn"),
+		Name: "warn-project",
+		Slug: "warn-project",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-warn"),
+		Name:     "warn-broker",
+		Slug:     "warn-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("CreateRuntimeBroker: %v", err)
+	}
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("AddProjectProvider: %v", err)
+	}
+
+	srv := &Server{
+		store:       memStore,
+		maintenance: NewMaintenanceState(false, ""),
+		config: ServerConfig{
+			HubEndpoint: "https://hub.example.com",
+			TelemetryConfig: &api.TelemetryConfig{
+				Enabled: boolPtr(true),
+				Cloud: &api.TelemetryCloudConfig{
+					Enabled:  boolPtr(true),
+					Provider: "gcp",
+				},
+			},
+		},
+	}
+	d := NewHTTPAgentDispatcherWithClient(memStore, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.hubTelemetryProvider = srv.hubTelemetryDefault
+
+	agent := &store.Agent{
+		ID:              tid("agent-warn"),
+		Name:            "warn-agent",
+		Slug:            "warn-agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+	}
+
+	assertWarning := func(t *testing.T, warns *dispatchWarnings) {
+		t.Helper()
+		for _, w := range warns.Warnings() {
+			if strings.Contains(w, telemetryGCPCredentialsSecretName) {
+				return
+			}
+		}
+		t.Fatalf("expected dispatch warning mentioning %q, got %v", telemetryGCPCredentialsSecretName, warns.Warnings())
+	}
+
+	t.Run("start", func(t *testing.T) {
+		wCtx, warns := withDispatchWarnings(ctx)
+		if err := d.DispatchAgentStart(wCtx, agent, "task", false); err != nil {
+			t.Fatalf("DispatchAgentStart: %v", err)
+		}
+		assertWarning(t, warns)
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		wCtx, warns := withDispatchWarnings(ctx)
+		if err := d.DispatchAgentRestart(wCtx, agent); err != nil {
+			t.Fatalf("DispatchAgentRestart: %v", err)
+		}
+		assertWarning(t, warns)
+	})
 }

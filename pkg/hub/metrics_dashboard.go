@@ -241,7 +241,7 @@ type DashboardSummary struct {
 	TelemetryHint string `json:"telemetryHint,omitempty"`
 }
 
-const missingGCPTelemetryCredentialsHint = "Cloud telemetry is enabled for GCP, but the default metadata mode is block and the scion-telemetry-gcp-credentials secret is not configured. Agents without an assigned service account cannot export metrics to Cloud Monitoring, so this dashboard will stay empty. Configure the scion-telemetry-gcp-credentials Hub secret, assign a service account (--service-account), or point telemetry.cloud.endpoint at a local OpenTelemetry Collector."
+const missingGCPTelemetryCredentialsHint = "Cloud telemetry is enabled for GCP, but the default metadata mode is block and the scion-telemetry-gcp-credentials secret is not configured. Agents without an assigned service account cannot export metrics to Cloud Monitoring, so this dashboard will stay empty. Configure the scion-telemetry-gcp-credentials Hub secret, assign a service account (--service-account), or remove provider: gcp and point telemetry.cloud.endpoint at a local OpenTelemetry Collector."
 
 // TimeSeriesPoint represents a single data point in a time series.
 type TimeSeriesPoint struct {

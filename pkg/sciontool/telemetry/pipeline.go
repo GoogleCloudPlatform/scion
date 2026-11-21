@@ -303,15 +303,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 			return fmt.Errorf("failed to create cloud exporter: %w", err)
 		} else {
 			p.exporter = exporter
-			if exporter.gcpExporter != nil {
-				exporter.gcpExporter.onAsyncLogError = func(err error) {
-					p.logDiagnostics.sdkErrors.Add(1)
-					p.markDeliveryDegraded()
-					if isPermanentAuthError(err) {
-						p.recordCloudExportOutcome("logs", err, false)
-					}
-				}
-			}
+			p.attachGCPAsyncLogErrorHook(exporter.gcpExporter)
 			p.analytics.start(ctx, exporter.gcpExporter)
 			mode := "OTLP"
 			if p.config.IsGCP() {
@@ -1410,7 +1402,7 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 			reason, rejected := terminalExportReason(err)
 			p.logDiagnostics.terminal(logCount, reason, rejected)
 			p.recordExportError(ctx, "logs", err)
-			if !p.recordCloudExportOutcome("logs", err, isProbe) {
+			if !p.recordCloudExportOutcome("logs", err, isProbe) && !p.isAuthStandingDown("logs") {
 				log.Error("Failed to export logs to cloud: %v", err)
 			}
 			return err
@@ -1520,6 +1512,14 @@ func (p *Pipeline) recordExportError(ctx context.Context, signal string, err err
 func classifyError(err error) string {
 	if err == nil {
 		return "none"
+	}
+
+	var partial *partialSuccessError
+	if errors.As(err, &partial) && partial.causeClass != "" {
+		switch partial.causeClass {
+		case "auth", "quota", "timeout":
+			return partial.causeClass
+		}
 	}
 
 	if errors.Is(err, context.DeadlineExceeded) {

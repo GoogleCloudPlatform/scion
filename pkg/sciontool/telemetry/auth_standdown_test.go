@@ -6,6 +6,7 @@ package telemetry
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"cloud.google.com/go/logging"
+	lp "cloud.google.com/go/logging/apiv2/loggingpb"
 	scionlog "github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	colmetricpb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -20,8 +23,11 @@ import (
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	metricpb "go.opentelemetry.io/proto/otlp/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/api/option"
+	mr "google.golang.org/genproto/googleapis/api/monitoredres"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -378,5 +384,223 @@ func TestNonAuthPermanentFailureDoesNotStandDown(t *testing.T) {
 	_ = p.handleLogs(ctx, logs)
 	if calls.Load() != 2 {
 		t.Fatalf("calls = %d, want 2 (non-auth errors must not trigger auth stand-down)", calls.Load())
+	}
+}
+
+func TestFlushMetricsOnStop_DropsWhenStandingDown(t *testing.T) {
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	var metricCalls atomic.Int32
+
+	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+	p.retryConfig.MaxRetries = 0
+	p.metricNow = func() time.Time { return now }
+	p.authStandDown.interval = 5 * time.Minute
+	p.exporter = &CloudExporter{
+		metricClient: &mockMetricClient{
+			exportFunc: func(context.Context, *colmetricpb.ExportMetricsServiceRequest, ...grpc.CallOption) (*colmetricpb.ExportMetricsServiceResponse, error) {
+				metricCalls.Add(1)
+				return nil, status.Error(codes.PermissionDenied, "denied")
+			},
+		},
+	}
+
+	ctx := context.Background()
+	rm1 := []*metricpb.ResourceMetrics{
+		testMetricResource("native", "scope", "", "", testNumber("safe", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 10, 1)),
+	}
+	if err := p.handleMetrics(ctx, rm1); err != nil {
+		t.Fatalf("handleMetrics(1): %v", err)
+	}
+	if p.flushMetricBuffer(ctx, true) {
+		t.Fatal("first flush succeeded despite auth failure")
+	}
+
+	// Simulate a recent flush so metricLastFlush + metricFlushInterval is well in the future.
+	// Enqueue a new metric while standing down, then call flushMetricsOnStop with a short timeout:
+	// it must drop immediately instead of waiting out metricFlushInterval.
+	p.metricStateMu.Lock()
+	p.metricLastFlush = time.Now()
+	p.metricStateMu.Unlock()
+
+	rm2 := []*metricpb.ResourceMetrics{
+		testMetricResource("native", "scope", "", "", testNumber("safe", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 20, 2)),
+	}
+	if err := p.handleMetrics(ctx, rm2); err != nil {
+		t.Fatalf("handleMetrics(2): %v", err)
+	}
+	if p.QueueDepth().Records == 0 {
+		t.Fatal("expected queued metric before flushMetricsOnStop")
+	}
+
+	stopCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	p.flushMetricsOnStop(stopCtx)
+	if stopCtx.Err() != nil {
+		t.Fatalf("flushMetricsOnStop waited until context expired instead of dropping during stand-down: %v", stopCtx.Err())
+	}
+	if depth := p.QueueDepth(); depth != (QueueDepth{}) {
+		t.Fatalf("queue depth after flushMetricsOnStop = %+v, want empty", depth)
+	}
+	if diag := p.Diagnostics()["metrics"]; diag.Dropped != 1 {
+		t.Fatalf("metrics dropped on stop = %d, want 1", diag.Dropped)
+	}
+	if metricCalls.Load() != 1 {
+		t.Fatalf("metricCalls = %d, want 1 (no export attempt on stop during stand-down)", metricCalls.Load())
+	}
+}
+
+func TestGCPAsyncLogAuthError_StandsDownAndSuppressesDuplicateError(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "gcp-async-standdown.log")
+	scionlog.SetLogPath(logPath)
+	t.Cleanup(func() { scionlog.SetLogPath("/tmp/agent.log") })
+
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	var sinkCalls atomic.Int32
+
+	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+	p.retryConfig.MaxRetries = 0
+	p.metricNow = func() time.Time { return now }
+	p.authStandDown.interval = 5 * time.Minute
+
+	g := &GCPExporter{
+		logSink: func(logging.Entry) {
+			sinkCalls.Add(1)
+		},
+	}
+	p.attachGCPAsyncLogErrorHook(g)
+	p.exporter = &CloudExporter{gcpExporter: g}
+
+	// Simulate an asynchronous Cloud Logging PermissionDenied callback.
+	g.reportAsyncLogError(status.Error(codes.PermissionDenied, "caller does not have logging.logEntries.create"))
+
+	if !p.isAuthStandingDown("logs") {
+		t.Fatal("expected logs signal to enter auth stand-down after async PermissionDenied")
+	}
+
+	// Subsequent handleLogs during stand-down must be suppressed without calling the sink.
+	logs := []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{EventName: "e1"}}}}}}
+	if err := p.handleLogs(context.Background(), logs); err != nil {
+		t.Fatalf("handleLogs during stand-down = %v, want nil", err)
+	}
+	if sinkCalls.Load() != 0 {
+		t.Fatalf("sinkCalls during stand-down = %d, want 0", sinkCalls.Load())
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	logText := string(raw)
+	if got := strings.Count(logText, "standing down after permanent authentication failure (logs)"); got != 1 {
+		t.Fatalf("stand-down error log count = %d, want 1:\n%s", got, logText)
+	}
+	if strings.Contains(logText, "Cloud Logging asynchronous delivery failed") {
+		t.Fatalf("unexpected duplicate async error log for permanent auth failure:\n%s", logText)
+	}
+}
+
+type authDeniedLoggingServer struct {
+	lp.UnimplementedLoggingServiceV2Server
+	calls atomic.Int32
+}
+
+func (s *authDeniedLoggingServer) WriteLogEntries(context.Context, *lp.WriteLogEntriesRequest) (*lp.WriteLogEntriesResponse, error) {
+	s.calls.Add(1)
+	return nil, status.Error(codes.PermissionDenied, "caller does not have logging.logEntries.create")
+}
+
+func TestGCPLogsFlushAuthFailure_ClassifiesAuthAndSuppressesPerBatchError(t *testing.T) {
+	// Unit check: partialSuccessError with causeClass="auth" classifies as auth.
+	partialErr := &partialSuccessError{
+		message:    "Cloud Logging flush failed with unknown per-record outcome: rpc error: code = PermissionDenied desc = denied",
+		causeClass: classifyError(status.Error(codes.PermissionDenied, "denied")),
+	}
+	if got := classifyError(partialErr); got != "auth" {
+		t.Fatalf("classifyError(partialSuccessError{auth}) = %q, want %q", got, "auth")
+	}
+
+	// End-to-end check against the real Cloud Logging SDK with a loopback gRPC server.
+	logPath := filepath.Join(t.TempDir(), "gcp-flush-standdown.log")
+	scionlog.SetLogPath(logPath)
+	t.Cleanup(func() { scionlog.SetLogPath("/tmp/agent.log") })
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer()
+	fake := &authDeniedLoggingServer{}
+	lp.RegisterLoggingServiceV2Server(srv, fake)
+	go func() { _ = srv.Serve(listener) }()
+	defer srv.Stop()
+
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := logging.NewClient(ctx, "auth-standdown-local", option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := client.Logger(
+		"auth-standdown-test",
+		logging.CommonResource(&mr.MonitoredResource{Type: "global", Labels: map[string]string{"project_id": "auth-standdown-local"}}),
+		logging.ContextFunc(func() (context.Context, func()) { return context.WithTimeout(ctx, 3*time.Second) }),
+	)
+
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	p := NewWithConfig(&Config{Enabled: true, CloudEnabled: true})
+	p.retryConfig.MaxRetries = 0
+	p.metricNow = func() time.Time { return now }
+	p.authStandDown.interval = 5 * time.Minute
+
+	g := &GCPExporter{logClient: client, logger: logger, projectID: "auth-standdown-local"}
+	p.attachGCPAsyncLogErrorHook(g)
+	client.OnError = func(e error) { g.reportAsyncLogError(e) }
+	p.exporter = &CloudExporter{gcpExporter: g}
+	defer func() { _ = g.Shutdown(ctx) }()
+
+	logs := []*logspb.ResourceLogs{{ScopeLogs: []*logspb.ScopeLogs{{LogRecords: []*logspb.LogRecord{{EventName: "e1"}}}}}}
+
+	// 1. First batch hits PermissionDenied and enters stand-down.
+	if err := p.handleLogs(ctx, logs); err == nil {
+		t.Fatal("first handleLogs succeeded despite PermissionDenied")
+	}
+	if !p.isAuthStandingDown("logs") {
+		t.Fatal("expected logs signal to be in auth stand-down")
+	}
+
+	// 2. Second batch during stand-down is suppressed without hitting the server.
+	callsAfterFirst := fake.calls.Load()
+	if err := p.handleLogs(ctx, logs); err != nil {
+		t.Fatalf("suppressed handleLogs = %v, want nil", err)
+	}
+	if fake.calls.Load() != callsAfterFirst {
+		t.Fatalf("RPC calls during stand-down = %d, want %d", fake.calls.Load(), callsAfterFirst)
+	}
+
+	// 3. Re-check probe after 5m hits PermissionDenied again -> still no per-batch Error log.
+	now = now.Add(5 * time.Minute)
+	if err := p.handleLogs(ctx, logs); err == nil {
+		t.Fatal("re-check probe succeeded despite PermissionDenied")
+	}
+
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading log file: %v", err)
+	}
+	logText := string(raw)
+	if got := strings.Count(logText, "standing down after permanent authentication failure (logs)"); got != 1 {
+		t.Fatalf("stand-down error log count = %d, want 1:\n%s", got, logText)
+	}
+	if got := strings.Count(logText, "Failed to export logs to cloud"); got != 0 {
+		t.Fatalf("unexpected per-batch log export errors = %d, want 0:\n%s", got, logText)
+	}
+	if strings.Contains(logText, "Cloud Logging asynchronous delivery failed") {
+		t.Fatalf("unexpected async delivery error log:\n%s", logText)
 	}
 }
