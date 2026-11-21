@@ -308,3 +308,167 @@ func TestCanDelegate_HubBoundaryAttachOnlyCeilingCannotDelegateLifecycle(t *test
 	access := f.authz.CheckAccess(ctx, hubToken, agentResource(agent), ActionLifecycle)
 	assert.False(t, access.Allowed, "the same token is denied the lifecycle operation")
 }
+
+// TestCanDelegate_ProjectScopeRuleEveryGrantType pins that the project-scope
+// consistency rule applies to every GrantType, not only agent delegation: a
+// project-scoped grant requires ScopeType == "project" and ProjectID == ScopeID.
+// A mismatched ProjectID or a non-project ScopeType is refused; a matching
+// grant is allowed.
+func TestCanDelegate_ProjectScopeRuleEveryGrantType(t *testing.T) {
+	f := newDelegationFixture(t, "proj-scope-all")
+	ctx := context.Background()
+
+	// Grant f.owner ownership of f.projectQ as well so mismatched-project
+	// assertions test the scope-consistency rule rather than failing
+	// downstream due to missing authority in f.projectQ.
+	ownerRD, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: ownerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      f.owner,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectQ,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	groupID := tid("deleg-proj-scope-group")
+	require.NoError(t, f.store.CreateGroup(ctx, &store.Group{
+		ID: groupID, Slug: "deleg-proj-scope-group", Name: "Deleg Project Scope Group",
+	}))
+	readRD, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        tid("deleg-proj-scope-read"),
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"agent.read"},
+	})
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: readRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      groupID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectP,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	projectToken := delegationProjectToken(t, f.owner, f.projectP, "agent:create", "agent:read", "project:manage")
+	hubToken := delegationHubToken(t, f.owner, "agent:create", "agent:read", "project:manage")
+	session := bearerUser(f.owner)
+
+	// Base valid matching project-scoped descriptor for every GrantType.
+	baseGrants := map[GrantType]GrantDescriptor{
+		GrantTypeRoleBinding: {
+			Type:            GrantTypeRoleBinding,
+			RolePermissions: []string{"agent.read"},
+			ProjectID:       f.projectP,
+			ScopeType:       store.RoleScopeProject,
+			ScopeID:         f.projectP,
+		},
+		GrantTypeGroupMembership: {
+			Type:      GrantTypeGroupMembership,
+			GroupID:   groupID,
+			ProjectID: f.projectP,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   f.projectP,
+		},
+		GrantTypeAgentDelegation: {
+			Type:      GrantTypeAgentDelegation,
+			AgentRole: string(AgentRoleBaseline),
+			ProjectID: f.projectP,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   f.projectP,
+		},
+		GrantTypeCustomRole: {
+			Type:                  GrantTypeCustomRole,
+			CustomRolePermissions: []string{"agent.read"},
+			ProjectID:             f.projectP,
+			ScopeType:             store.RoleScopeProject,
+			ScopeID:               f.projectP,
+		},
+		GrantTypeProjectMembership: {
+			Type:      GrantTypeProjectMembership,
+			ProjectID: f.projectP,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   f.projectP,
+		},
+	}
+	require.Len(t, baseGrants, len(allGrantTypes), "table must cover every GrantType")
+
+	for _, gt := range allGrantTypes {
+		base, ok := baseGrants[gt]
+		require.True(t, ok, "missing base grant for %s", gt)
+
+		t.Run(string(gt), func(t *testing.T) {
+			// Matching project-scoped grant is allowed for project-boundary UAT
+			// and for the user's session.
+			d := f.authz.CanDelegate(ctx, projectToken, base)
+			assert.True(t, d.Allowed, "project-boundary UAT matching grant should be allowed: %s", d.Reason)
+
+			d = f.authz.CanDelegate(ctx, session, base)
+			assert.True(t, d.Allowed, "session matching grant should be allowed: %s", d.Reason)
+
+			// Mismatched ProjectID (ProjectID != ScopeID) is refused for every
+			// actor kind.
+			mismatched := base
+			mismatched.ProjectID = f.projectQ
+			for name, actor := range map[string]Identity{
+				"project boundary": projectToken,
+				"hub boundary":     hubToken,
+				"session":          session,
+			} {
+				d := f.authz.CanDelegate(ctx, actor, mismatched)
+				assert.False(t, d.Allowed, "%s: mismatched ProjectID must be refused", name)
+			}
+
+			// Empty ScopeID with non-empty ProjectID is refused for every actor kind.
+			emptyScopeID := base
+			emptyScopeID.ScopeID = ""
+			for name, actor := range map[string]Identity{
+				"project boundary": projectToken,
+				"hub boundary":     hubToken,
+				"session":          session,
+			} {
+				d := f.authz.CanDelegate(ctx, actor, emptyScopeID)
+				assert.False(t, d.Allowed, "%s: empty ScopeID with ProjectID must be refused", name)
+			}
+
+			// Non-project scope types ("", "system", "org") are refused for UATs;
+			// explicit non-project scope types ("system", "org") are also refused
+			// for sessions when ProjectID is set.
+			for _, scopeType := range []string{"", store.RoleScopeSystem, "org"} {
+				nonProject := base
+				nonProject.ScopeType = scopeType
+				if scopeType == "" {
+					nonProject.ScopeID = ""
+				}
+				for name, actor := range map[string]*ScopedUserIdentity{
+					"project boundary": projectToken,
+					"hub boundary":     hubToken,
+				} {
+					d := f.authz.CanDelegate(ctx, actor, nonProject)
+					assert.False(t, d.Allowed, "%s: non-project scope type %q must be refused", name, scopeType)
+				}
+				if scopeType != "" {
+					d := f.authz.CanDelegate(ctx, session, nonProject)
+					assert.False(t, d.Allowed, "session: non-project scope type %q with ProjectID must be refused", scopeType)
+				}
+			}
+
+			// Grant types whose handlers inspect ProjectID must also refuse an
+			// empty ProjectID when ScopeType is project.
+			if gt == GrantTypeAgentDelegation || gt == GrantTypeProjectMembership {
+				emptyProjectID := base
+				emptyProjectID.ProjectID = ""
+				for name, actor := range map[string]*ScopedUserIdentity{
+					"project boundary": projectToken,
+					"hub boundary":     hubToken,
+				} {
+					d := f.authz.CanDelegate(ctx, actor, emptyProjectID)
+					assert.False(t, d.Allowed, "%s: empty ProjectID on %s must be refused", name, gt)
+				}
+			}
+		})
+	}
+}

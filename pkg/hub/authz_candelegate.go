@@ -146,6 +146,12 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 		}
 	}
 
+	// Any grant descriptor that names a ProjectID must not contradict its
+	// ScopeType or ScopeID.
+	if reason := validateGrantProjectConsistency(grant); reason != "" {
+		return Decision{Allowed: false, Reason: reason}
+	}
+
 	// Super-admin can delegate anything.
 	if user, ok := actor.(UserIdentity); ok && IsUnscopedLocalPlatformAdmin(user) {
 		return Decision{
@@ -417,25 +423,29 @@ func (a *AuthzService) kindCache() *testFixtureClampCache {
 // UAT; the permission half is the ceiling intersection in
 // actorHoldsAllPermissions, which every type-specific check applies.
 //
-//   - A grant with no scope type (group membership) is not confined here.
-//     canDelegateGroupMembership refuses system-scoped group authority to
-//     every scoped credential, and checks project-scoped group authority
-//     against the token's own authority in each project.
+//   - A group membership grant with no scope type and no ProjectID is not
+//     confined here. canDelegateGroupMembership refuses system-scoped group
+//     authority to every scoped credential, and checks project-scoped group
+//     authority against the token's own authority in each project.
+//   - A grant with no scope type that names a ProjectID, or is not a group
+//     membership grant, is denied.
 //   - A system-scoped grant is denied for every UAT, of either boundary
 //     kind.
 //   - A grant with any other non-project scope type is denied.
-//   - A project-scoped custom role definition names no project: the
-//     definition can be bound in every project. Under a hub boundary it
-//     passes here, and canDelegateCustomRole judges its permissions on the
-//     holder's system-scope authority within the token ceiling
-//     (actorHoldsAllPermissions with no scope ID). Under a project boundary
-//     it is denied.
+//   - A project-scoped custom role definition with no ScopeID and no
+//     ProjectID names no project: the definition can be bound in every
+//     project. Under a hub boundary it passes here, and canDelegateCustomRole
+//     judges its permissions on the holder's system-scope authority within
+//     the token ceiling (actorHoldsAllPermissions with no scope ID). Under a
+//     project boundary it is denied.
 //   - Any other project-scoped grant must name its project, and the token
 //     boundary must allow that project (BoundaryAllows): a project boundary
 //     allows only its own project, a hub boundary allows any project.
-//   - An agent delegation must name the same project in ProjectID and
-//     ScopeID, for every boundary kind, because the authority check runs
-//     on ProjectID and the boundary check runs on ScopeID.
+//   - Every project-scoped grant must agree between ProjectID and ScopeID
+//     (validateProjectGrantScope): agent delegation and project membership
+//     require ProjectID == ScopeID because their authority checks run on
+//     ProjectID while the boundary check runs on ScopeID; other grant types
+//     reject any non-empty ProjectID that differs from ScopeID.
 //   - Under a hub boundary the holder must also currently have access to
 //     that project (ProjectTargetAdmission), for the permission of the
 //     operation that creates the grant, on that project. The boundary
@@ -450,6 +460,12 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 
 	switch grant.ScopeType {
 	case "":
+		if grant.ProjectID != "" {
+			return deny("scoped credential cannot delegate a project grant without project scope")
+		}
+		if grant.Type != GrantTypeGroupMembership {
+			return deny("scoped credential cannot delegate a grant without a scope type")
+		}
 		return nil
 	case store.RoleScopeSystem:
 		return deny("scoped credential cannot create system-scoped grants")
@@ -459,13 +475,13 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 	}
 
 	if grant.ScopeID == "" {
-		if grant.Type == GrantTypeCustomRole && scoped.Boundary().Kind == BoundaryKindHub {
+		if grant.Type == GrantTypeCustomRole && scoped.Boundary().Kind == BoundaryKindHub && grant.ProjectID == "" {
 			return nil
 		}
 		return deny("scoped credential cannot delegate a project grant that names no project")
 	}
-	if grant.Type == GrantTypeAgentDelegation && grant.ProjectID != grant.ScopeID {
-		return deny("scoped credential cannot delegate an agent grant that names two projects")
+	if reason := validateProjectGrantScope(grant); reason != "" {
+		return deny(reason)
 	}
 	boundary := scoped.Boundary()
 	if !BoundaryAllows(boundary, TargetScope{Kind: TargetScopeProject, ProjectID: grant.ScopeID}) {
@@ -486,6 +502,45 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 	return nil
 }
 
+// validateProjectGrantScope checks that a project-scoped grant with a
+// non-empty ScopeID does not name a different ProjectID. Grant types whose
+// type-specific checks evaluate authority on ProjectID (agent delegation and
+// project membership) always require ProjectID == ScopeID; other grant types
+// reject any non-empty ProjectID that differs from ScopeID.
+func validateProjectGrantScope(grant GrantDescriptor) string {
+	switch grant.Type {
+	case GrantTypeAgentDelegation, GrantTypeProjectMembership:
+		if grant.ProjectID != grant.ScopeID {
+			return "scoped credential cannot delegate a project grant that names two projects"
+		}
+	default:
+		if grant.ProjectID != "" && grant.ProjectID != grant.ScopeID {
+			return "scoped credential cannot delegate a project grant that names two projects"
+		}
+	}
+	return ""
+}
+
+// validateGrantProjectConsistency rejects a grant descriptor that carries a
+// ProjectID alongside a non-project ScopeType or a disagreeing ScopeID. It
+// leaves descriptors with empty ScopeType and ScopeID to the UAT gate and
+// type-specific checks.
+func validateGrantProjectConsistency(grant GrantDescriptor) string {
+	if grant.ProjectID == "" {
+		return ""
+	}
+	if grant.ScopeType != "" && grant.ScopeType != store.RoleScopeProject {
+		return "project-scoped grant requires scope type project"
+	}
+	if grant.ScopeID != "" && grant.ProjectID != grant.ScopeID {
+		return "project-scoped grant names two projects"
+	}
+	if grant.ScopeType == store.RoleScopeProject && grant.ScopeID == "" {
+		return "project-scoped grant requires a scope ID matching project ID"
+	}
+	return ""
+}
+
 // uatDelegationAdmissionTarget names the permission and the project target
 // on which a hub-boundary UAT's project access is checked before it may
 // create grant. The permission is the one the operation creating the grant
@@ -501,15 +556,18 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 //     route additionally enforces role_binding.create at hub level.
 //
 // Any other grant type has no project admission target, and ok is false.
-// An agent delegation whose ProjectID differs from its ScopeID names two
-// projects, and ok is false; enforceUATDelegation denies that case before
-// it gets here.
+// A grant whose ScopeType is not project, whose ScopeID is empty, or that
+// fails validateProjectGrantScope returns ok == false; enforceUATDelegation
+// denies those cases before it gets here.
 func uatDelegationAdmissionTarget(grant GrantDescriptor) (permissionID string, target Resource, ok bool) {
+	if grant.ScopeType != store.RoleScopeProject || grant.ScopeID == "" {
+		return "", Resource{}, false
+	}
+	if validateProjectGrantScope(grant) != "" {
+		return "", Resource{}, false
+	}
 	switch grant.Type {
 	case GrantTypeAgentDelegation:
-		if grant.ProjectID != grant.ScopeID {
-			return "", Resource{}, false
-		}
 		return "agent.create", Resource{Type: "agent", ParentType: "project", ParentID: grant.ScopeID}, true
 	case GrantTypeRoleBinding, GrantTypeProjectMembership:
 		return "project.manage", Resource{Type: "project", ID: grant.ScopeID}, true
