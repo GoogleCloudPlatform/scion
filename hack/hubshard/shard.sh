@@ -47,7 +47,13 @@
 #   shard.sh postgres K|all TAGS TEST...
 #       Run the named tests (the shard binary with -test.v and -test.run)
 #       in the shard that holds each (in every shard holding one for
-#       "all"), with build tags TAGS ("" or for example integration).
+#       "all"), with build tags TAGS ("" for default/SQLite tags, or for
+#       example no_sqlite or integration). Despite the subcommand name
+#       (from its Makefile Postgres callers), it compiles only with TAGS
+#       and does not enable Postgres on its own: Postgres-backed tests
+#       still require SCION_TEST_POSTGRES_DSN or SCION_TEST_POSTGRES_URL
+#       (and skip/fail without them). Run labels report the actual tags
+#       and whether a Postgres env var is set.
 #       Fails if a name is in no test file, if any selected test skips,
 #       or if a named test prints no PASS line.
 #
@@ -214,6 +220,12 @@ postgres)
 	[ $# -ge 2 ] || usage
 	tags=$1
 	shift
+	if [ -n "${SCION_TEST_POSTGRES_DSN:-}" ] || [ -n "${SCION_TEST_POSTGRES_URL:-}" ]; then
+		pg_env_desc="Postgres env set"
+	else
+		pg_env_desc="no Postgres env"
+		echo "NOTE: neither SCION_TEST_POSTGRES_DSN nor SCION_TEST_POSTGRES_URL is set; running targeted tests without a Postgres database (tests requiring Postgres will skip and fail)." >&2
+	fi
 	# Fails (set -e) if a name is in no test file compiled with $tags.
 	hubshard -tags "$tags" -locate "$@" >"$tmp/located"
 	if [ "$shard" = all ]; then
@@ -228,22 +240,28 @@ postgres)
 		ran=1
 		regex="^($(echo "$names" | paste -sd '|' -))\$"
 		log="$tmp/postgres-$k.log"
-		echo "== Postgres tests in pkg/hub shard $k (tags: $(with_tags "$k" "$tags")): $(echo "$names" | tr '\n' ' ')"
+		if [ -n "$tags" ]; then
+			tag_desc="tags: $(with_tags "$k" "$tags")"
+		else
+			tag_desc="default/SQLite tags: $(with_tags "$k" "$tags")"
+		fi
+		run_label="pkg/hub shard $k ($tag_desc; $pg_env_desc)"
+		echo "== targeted tests in $run_label: $(echo "$names" | tr '\n' ' ')"
 		compile "$k" "$tags" "$tmp/bin-$k"
 		# The selected tests are short; they run with the compile GOGC,
 		# as they did when go test built and ran them in one command
 		# (or with HUB_SHARD_RUN_GOGC when that is set).
-		GOGC=$build_gogc run_binary "$tmp/bin-$k/hub.test" "pkg/hub shard $k Postgres tests" \
+		GOGC=$build_gogc run_binary "$tmp/bin-$k/hub.test" "$run_label" \
 			-test.count=1 -test.timeout=20m -test.v -test.run="$regex" 2>&1 | tee "$log"
 		if grep -qE '^[[:space:]]*--- SKIP' "$log"; then
-			die "one or more pkg/hub Postgres tests were skipped -- see '--- SKIP' lines above."
+			die "one or more targeted pkg/hub tests were skipped -- see '--- SKIP' lines above."
 		fi
 		for t in $names; do
 			grep -qE "^[[:space:]]*--- PASS: $t( |\$)" "$log" || die "$t did not pass."
 		done
 	done
 	if [ "$ran" = 0 ]; then
-		echo "no listed Postgres test is in pkg/hub shard $shard"
+		echo "no listed test is in pkg/hub shard $shard"
 	fi
 	;;
 
