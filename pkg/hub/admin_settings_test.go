@@ -568,16 +568,16 @@ func TestHandlePutServerConfig_BrokerPolicyExperimentDisabled(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\nbroker_policy:\n  admin_managed_only: true\n"), 0644); err != nil {
 		t.Fatalf("seed settings.yaml: %v", err)
 	}
-	echoReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config",
-		strings.NewReader(`{"broker_policy":{"admin_managed_only":true}}`))
+	echoReq := adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"broker_policy":{"admin_managed_only":true}}`)
 	echoRR := httptest.NewRecorder()
 	srv.handlePutServerConfig(echoRR, echoReq)
 	if echoRR.Code != http.StatusOK {
 		t.Fatalf("echo of stored true expected 200, got %d: %s", echoRR.Code, echoRR.Body.String())
 	}
 
-	clearReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/server-config",
-		strings.NewReader(`{"broker_policy":{"admin_managed_only":null}}`))
+	clearReq := adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"broker_policy":{"admin_managed_only":null}}`)
 	clearRR := httptest.NewRecorder()
 	srv.handlePutServerConfig(clearRR, clearReq)
 	if clearRR.Code != http.StatusOK {
