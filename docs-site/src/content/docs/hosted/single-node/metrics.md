@@ -35,25 +35,20 @@ For a Hub-dispatched agent, whether telemetry is on resolves, lowest to highest:
 The `telemetry` block can appear in any `settings.yaml` (global or project):
 
 ```yaml
-# In settings.yaml
+# In settings.yaml (GCP-native export)
 telemetry:
   enabled: true
 
   cloud:
     enabled: true
+    # Use GCP-native SDKs for Cloud Monitoring, Cloud Trace, and Cloud Logging.
+    provider: gcp
     # Required when exporting to Google Cloud. The metrics dashboard queries
     # Cloud Monitoring for this project, so without it the export has no
     # destination and the dashboard stays empty with no error shown.
     # Read at startup. See "Which GCP project the Hub uses" in the server
     # configuration reference for the dashboard's fallbacks.
     gcp_project_id: "my-gcp-project"
-    endpoint: "monitoring.googleapis.com:443"
-    protocol: grpc
-    headers:
-      Authorization: "Bearer ${OTEL_API_KEY}"
-    tls:
-      enabled: true
-      insecure_skip_verify: false
     batch:
       max_size: 512
       timeout: "5s"
@@ -81,6 +76,19 @@ telemetry:
 
   resource:
     service.name: "scion-agent"
+```
+
+For a generic OTLP gRPC collector (such as a local host OpenTelemetry Collector), omit `provider: gcp` and set `endpoint`, `protocol: grpc`, and optional `tls` or `headers`:
+
+```yaml
+telemetry:
+  enabled: true
+  cloud:
+    enabled: true
+    endpoint: "host.docker.internal:4317"
+    protocol: grpc
+    tls:
+      enabled: false
 ```
 
 See the [Orchestrator Settings Reference](/scion/reference/orchestrator-settings/#telemetry-configuration-telemetry) for the full field reference.
@@ -125,16 +133,15 @@ These settings control the ports where `sciontool` listens for data from the age
 
 ## Google Cloud Setup (Recommended)
 
-When deploying on Google Cloud, `sciontool` can forward directly to Cloud Trace and Cloud Logging using the standard OTLP endpoint.
+When deploying on Google Cloud, set `provider: gcp` so `sciontool` exports directly to Cloud Monitoring, Cloud Trace, and Cloud Logging using the GCP-native SDKs. Do not point `endpoint` at `monitoring.googleapis.com:443` — that endpoint does not accept OTLP and rejects exports with `Unimplemented`.
 
 ### 1. Configure the Forwarder
 
-Set these environment variables in your Hub settings (Project or Broker level):
+Set `telemetry.cloud.provider: gcp` and `telemetry.cloud.gcp_project_id` in `settings.yaml` (recommended), or set these environment variables in your Hub settings (Project or Broker level):
 
 ```bash
-# Direct OTLP ingestion for Google Cloud
-export SCION_OTEL_ENDPOINT="monitoring.googleapis.com:443"
-export SCION_OTEL_PROTOCOL="grpc"
+# GCP-native export for Google Cloud
+export SCION_TELEMETRY_CLOUD_PROVIDER="gcp"
 export SCION_GCP_PROJECT_ID="your-project-id"
 ```
 
@@ -200,6 +207,72 @@ When an agent starts, the broker:
 :::note[Fallback probe]
 `sciontool` also probes `~/.scion/telemetry-gcp-credentials.json` at startup even when `SCION_OTEL_GCP_CREDENTIALS` is not set — for example, when the file is placed via a volume mount or template provisioning. If the file exists, all of the above auto-detection applies.
 :::
+
+### 5. Alternative: Local Host OpenTelemetry Collector
+
+If you do not want to distribute a GCP service account key file (`scion-telemetry-gcp-credentials`) or assign a service account to every agent container, you can run an OpenTelemetry Collector (`otelcol-contrib`) on the broker host and have agents forward OTLP to it over the host bridge.
+
+In this pattern:
+- Agent containers stay in metadata mode `block` with no GCP credentials at all.
+- `sciontool` forwards OTLP gRPC to the host collector (generic OTLP mode — `provider` is unset).
+- The host collector authenticates to Google Cloud using the host's own Application Default Credentials (for example, a GCE VM's attached service account with `roles/monitoring.metricWriter`, `roles/cloudtrace.agent`, and `roles/logging.logWriter`).
+
+#### 1. Run `otelcol-contrib` on the host
+
+Configure the collector to listen for OTLP gRPC on the host (or Docker bridge interface) and export to Google Cloud:
+
+```yaml
+# /etc/otelcol-contrib/config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        # Bind to the Docker bridge IP (or 0.0.0.0 with host firewall rules
+        # restricting port 4317 to the container bridge subnet).
+        endpoint: "0.0.0.0:4317"
+
+processors:
+  batch: {}
+
+exporters:
+  googlecloud:
+    project: "my-gcp-project"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [googlecloud]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [googlecloud]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [googlecloud]
+```
+
+#### 2. Point Scion at the host collector
+
+In `~/.scion/settings.yaml`, omit `provider: gcp` and set `endpoint` to the host address reachable from agent containers (for example `host.docker.internal:4317`, or the Docker bridge gateway IP such as `172.17.0.1:4317` on Linux):
+
+```yaml
+telemetry:
+  enabled: true
+  cloud:
+    enabled: true
+    # Keep gcp_project_id set so the Hub's metrics dashboard knows which
+    # Google Cloud project to query in Cloud Monitoring.
+    gcp_project_id: "my-gcp-project"
+    endpoint: "host.docker.internal:4317"
+    protocol: grpc
+    tls:
+      enabled: false
+```
+
+Because `provider` is unset, `sciontool` exports generic OTLP gRPC to the local collector instead of calling Google Cloud APIs directly, while the Hub still uses `gcp_project_id` to read those metrics back for the dashboard.
 
 ## Native Metrics Pipeline
 
