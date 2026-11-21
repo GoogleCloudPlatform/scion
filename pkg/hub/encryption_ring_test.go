@@ -669,11 +669,13 @@ func TestAuditRecordIDs_Capped(t *testing.T) {
 }
 
 // TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup: every signing key
-// that production code in this package resolves through ensureSigningKey is
-// a backup New creates, so it must be classed and validated by the startup
+// that production code in this package resolves through ensureSigningKey (or
+// directly through ensureSigningKeyWithSource / ensureSigningKeyWith*) is a
+// backup New creates, so it must be classed and validated by the startup
 // encryption audit (infraPayloadValidators) and listed in encSigningKeys,
 // which the backup round-trip and no-overwrite tests iterate. A new
-// ensureSigningKey call site that is missing from either fails here.
+// ensureSigningKey or ensureSigningKeyWithSource call site that is missing
+// from either fails here.
 func TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup(t *testing.T) {
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers guardScanSubdirs
@@ -688,23 +690,9 @@ func TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup(t *testing.T) {
 		}
 		af, err := parser.ParseFile(fset, f, nil, 0)
 		require.NoError(t, err, f)
-		ast.Inspect(af, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "ensureSigningKey" || len(call.Args) < 2 {
-				return true
-			}
-			arg, ok := call.Args[1].(*ast.Ident)
-			if assert.True(t, ok, "%s: ensureSigningKey key name must be a constant", fset.Position(call.Pos())) {
-				if _, seen := used[arg.Name]; !seen {
-					used[arg.Name] = fset.Position(call.Pos()).String()
-				}
-			}
-			return true
-		})
+		for _, msg := range collectEnsureSigningKeyUses(fset, af, used) {
+			t.Error(msg)
+		}
 	}
 	require.GreaterOrEqual(t, len(used), 7, "input assertion: the ensureSigningKey call sites were found")
 
@@ -751,6 +739,116 @@ func TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup(t *testing.T) {
 		_, ok := used[key]
 		assert.True(t, ok, "encSigningKeys lists %s, which no ensureSigningKey call site uses", key)
 	}
+}
+
+// isEnsureSigningKeyCall reports whether name is ensureSigningKey or an
+// ensureSigningKeyWith* variant (such as ensureSigningKeyWithSource).
+func isEnsureSigningKeyCall(name string) bool {
+	return name == "ensureSigningKey" || strings.HasPrefix(name, "ensureSigningKeyWith")
+}
+
+// isEnsureSigningKeyWrapper reports whether fn is hub's (*Server).ensureSigningKey,
+// which forwards its keyName parameter to ensureSigningKeyWithSource.
+func isEnsureSigningKeyWrapper(af *ast.File, fn *ast.FuncDecl) bool {
+	if af.Name.Name != "hub" || fn == nil || fn.Name.Name != "ensureSigningKey" || fn.Recv == nil || len(fn.Recv.List) != 1 {
+		return false
+	}
+	star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	recv, ok := star.X.(*ast.Ident)
+	return ok && recv.Name == "Server"
+}
+
+// collectEnsureSigningKeyUses scans af for calls to ensureSigningKey and
+// ensureSigningKeyWith* (skipping only (*Server).ensureSigningKey's own
+// keyName forwarding call to ensureSigningKeyWithSource), recording each key
+// identifier's first call site in used and returning errors for non-identifier
+// keyName arguments.
+func collectEnsureSigningKeyUses(fset *token.FileSet, af *ast.File, used map[string]string) []string {
+	var errs []string
+	for _, decl := range af.Decls {
+		fn, _ := decl.(*ast.FuncDecl)
+		inWrapper := isEnsureSigningKeyWrapper(af, fn)
+		ast.Inspect(decl, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !isEnsureSigningKeyCall(sel.Sel.Name) || len(call.Args) < 2 {
+				return true
+			}
+			arg, ok := call.Args[1].(*ast.Ident)
+			if inWrapper && sel.Sel.Name == "ensureSigningKeyWithSource" && ok && arg.Name == "keyName" {
+				return true
+			}
+			if !ok {
+				errs = append(errs, fmt.Sprintf("%s: %s key name must be a constant", fset.Position(call.Pos()), sel.Sel.Name))
+				return true
+			}
+			if _, seen := used[arg.Name]; !seen {
+				used[arg.Name] = fset.Position(call.Pos()).String()
+			}
+			return true
+		})
+	}
+	return errs
+}
+
+func TestCollectEnsureSigningKeyUses_MatchesDirectWithSource(t *testing.T) {
+	const src = `package hub
+
+func (s *Server) ensureSigningKey(ctx context.Context, keyName string, existingKey []byte) ([]byte, error) {
+	key, source, err := s.ensureSigningKeyWithSource(ctx, keyName, existingKey)
+	return key, err
+}
+
+func (s *Server) callerViaWrapper(ctx context.Context) {
+	_, _ = s.ensureSigningKey(ctx, SecretKeyViaWrapper, nil)
+}
+
+func (s *Server) callerDirectWithSource(ctx context.Context) {
+	_, _, _ = s.ensureSigningKeyWithSource(ctx, SecretKeyDirectWithSource, nil)
+}
+
+func (s *Server) callerDirectWithVariant(ctx context.Context) {
+	_, _ = s.ensureSigningKeyWithCustom(ctx, SecretKeyDirectWithVariant, nil)
+}
+
+func (s *Server) otherHelperForwardingParam(ctx context.Context, keyName string) {
+	_, _, _ = s.ensureSigningKeyWithSource(ctx, keyName, nil)
+}
+`
+	fset := token.NewFileSet()
+	af, err := parser.ParseFile(fset, "planted.go", src, 0)
+	require.NoError(t, err)
+
+	used := map[string]string{}
+	errs := collectEnsureSigningKeyUses(fset, af, used)
+	assert.Empty(t, errs)
+	assert.Equal(t, map[string]string{
+		"SecretKeyViaWrapper":        "planted.go:9:9",
+		"SecretKeyDirectWithSource":  "planted.go:13:12",
+		"SecretKeyDirectWithVariant": "planted.go:17:9",
+		"keyName":                    "planted.go:21:12",
+	}, used)
+
+	const badSrc = `package hub
+
+func (s *Server) badDirectWithSource(ctx context.Context) {
+	_, _, _ = s.ensureSigningKeyWithSource(ctx, "literal_key", nil)
+}
+`
+	fsetBad := token.NewFileSet()
+	afBad, err := parser.ParseFile(fsetBad, "bad.go", badSrc, 0)
+	require.NoError(t, err)
+	badUsed := map[string]string{}
+	badErrs := collectEnsureSigningKeyUses(fsetBad, afBad, badUsed)
+	require.Len(t, badErrs, 1)
+	assert.Contains(t, badErrs[0], "bad.go:4:12: ensureSigningKeyWithSource key name must be a constant")
+	assert.Empty(t, badUsed)
 }
 
 // versions returns each backup row's Version.
