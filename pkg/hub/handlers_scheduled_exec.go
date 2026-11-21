@@ -197,6 +197,9 @@ func (s *Server) createExecSchedule(w http.ResponseWriter, r *http.Request, proj
 		writeCronParseError(w, err)
 		return
 	}
+	if !s.checkScheduleFrequency(w, req.CronExpr) {
+		return
+	}
 	timeZone, err := normalizeScheduleTimeZone(req.TimeZone)
 	if err != nil {
 		writeScheduleTimingError(w, err)
@@ -247,11 +250,14 @@ func (s *Server) createExecSchedule(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	targetID := p.AgentID
+	maxActive := s.config.ScheduleMaxActivePerProject
 	if err := s.store.CreateScheduleChecked(r.Context(), &schedule, scheduledExecMaxPerProject+1, func(snap store.ScheduledExecQuotaSnapshot) error {
-		return scheduledExecQuotaCheck(snap, targetID, "")
+		if err := scheduledExecQuotaCheck(snap, targetID, ""); err != nil {
+			return err
+		}
+		return scheduleQuotaCheck(snap, maxActive)
 	}); err != nil {
-		if errors.Is(err, errScheduledExecQuota) {
-			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(), nil)
+		if writeScheduleQuotaError(w, err) {
 			return
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {

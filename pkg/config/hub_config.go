@@ -268,6 +268,10 @@ type HubServerConfig struct {
 	// Branding holds Hub-wide UI branding settings (server.hub.branding).
 	// Reloadable at runtime via OperationalSettings.
 	Branding BrandingConfig `json:"branding,omitempty" yaml:"branding,omitempty" koanf:"branding"`
+
+	// Schedules holds the limits on recurring schedules
+	// (server.hub.schedules). Read at startup.
+	Schedules HubSchedulesConfig `json:"schedules" yaml:"schedules" koanf:"schedules"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.

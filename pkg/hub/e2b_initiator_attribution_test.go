@@ -490,6 +490,27 @@ func (f *e2bFailingScheduleStore) UpdateSchedule(
 	return f.Store.UpdateSchedule(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution)
 }
 
+// The schedule create, enable and resume handlers write through the
+// quota-checked variants (the per-project active schedule cap), so the
+// injected failures apply to them too.
+func (f *e2bFailingScheduleStore) CreateScheduleChecked(ctx context.Context, sc *store.Schedule, limit int, check func(store.ScheduledExecQuotaSnapshot) error) error {
+	if f.createScheduleErr != nil && f.fault.Active() {
+		return f.createScheduleErr
+	}
+	return f.Store.CreateScheduleChecked(ctx, sc, limit, check)
+}
+
+func (f *e2bFailingScheduleStore) UpdateScheduleChecked(
+	ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
+	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,
+	limit int, check func(store.ScheduledExecQuotaSnapshot) error,
+) error {
+	if f.updateScheduleErr != nil && f.fault.Active() {
+		return f.updateScheduleErr
+	}
+	return f.Store.UpdateScheduleChecked(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution, limit, check)
+}
+
 // TestCreateScheduledEvent_StoreFailureLeavesNoPartialAttribution covers the
 // transaction-guarantee test the plan requires: an injected store failure
 // during authoring leaves neither the event row nor a partial attribution.

@@ -646,9 +646,23 @@ func loadScheduledExecQuotaSnapshot(
 	for _, sc := range schedRows {
 		active = append(active, *entScheduleToStore(sc))
 	}
+
+	// Every kind, for the hub's per-project recurring schedule cap.
+	allPreds := []predicate.Schedule{
+		schedule.ProjectIDEQ(pid),
+		schedule.StatusEQ(store.ScheduleStatusActive),
+	}
+	if excludeScheduleID != nil {
+		allPreds = append(allPreds, schedule.IDNEQ(*excludeScheduleID))
+	}
+	allKinds, err := c.Schedule.Query().Where(allPreds...).Count(ctx)
+	if err != nil {
+		return store.ScheduledExecQuotaSnapshot{}, mapError(err)
+	}
 	return store.ScheduledExecQuotaSnapshot{
-		PendingEvents:   pending,
-		ActiveSchedules: active,
+		PendingEvents:           pending,
+		ActiveSchedules:         active,
+		ActiveSchedulesAllKinds: allKinds,
 	}, nil
 }
 

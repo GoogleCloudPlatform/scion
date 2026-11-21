@@ -77,6 +77,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "hub", "chat"},
 	// System One rule evaluation ceiling (ptone/scion#8044): Layer 0, read at startup.
 	{"server", "hub", "system_one"},
+	// Recurring schedule limits: Layer 0, read at startup.
+	{"server", "hub", "schedules"},
 	{"server", "hub", "disable_legacy_storage_fallback"},
 	{"server", "relay"},
 	// server.keyring_file is never API-writable: rejectGateProtectedSettingsKeys

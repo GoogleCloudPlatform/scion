@@ -121,6 +121,8 @@ var layer0Prefixes = []string{
 	// System One rule evaluation ceiling (max_eval_time) — read into
 	// ServerConfig at startup (ptone/scion#8044).
 	"server.hub.system_one",
+	// Recurring schedule limits — read into ServerConfig at startup.
+	"server.hub.schedules",
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",

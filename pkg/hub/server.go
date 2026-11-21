@@ -658,6 +658,16 @@ type ServerConfig struct {
 	// when positive. When zero, New resolves it from StartupServerSettings
 	// (falling back to config.SystemOneDefaultMaxEvalTime = 3s).
 	SystemOneMaxEvalTime time.Duration
+
+	// ScheduleMinInterval (server.hub.schedules.min_interval) is the
+	// shortest interval a recurring schedule may fire at. Zero means no
+	// minimum; the server command resolves the setting's default (5m).
+	ScheduleMinInterval time.Duration
+	// ScheduleMaxActivePerProject
+	// (server.hub.schedules.max_active_per_project) caps the active
+	// recurring schedules of one project, of every kind. Zero means no cap;
+	// the server command resolves the setting's default (50).
+	ScheduleMaxActivePerProject int
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
