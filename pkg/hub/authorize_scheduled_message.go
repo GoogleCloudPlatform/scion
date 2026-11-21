@@ -28,10 +28,9 @@ import (
 )
 
 // messageAuthoringCaller identifies which hub authoring surface is invoking
-// the shared HTTP-free message target rule (Stage 1 §5.3, rev 8.24 / rev 8.32
-// option a). It is unexported and derived strictly from the caller kind inside
-// the hub—never from request input—so a trigger caller can never opt into
-// schedule-style unresolved-target acceptance.
+// the shared HTTP-free message target rule (Stage 1 §5.3, rev 8.35 / L24,
+// ptone/scion#8588). It is unexported and derived strictly from the caller kind
+// inside the hub—never from request input.
 //
 // The zero value is the strictest mode (messageAuthoringCallerTrigger) so an
 // unset caller kind fails closed.
@@ -43,14 +42,11 @@ const (
 	// return 404, unreadable targets are masked as 404 (byte-identical to
 	// nonexistent), and cross-project targets are audited.
 	messageAuthoringCallerTrigger messageAuthoringCaller = iota
-	// messageAuthoringCallerScheduleNew is a schedule or scheduled-event create
-	// naming a new target: unresolved targets and unreadable new targets are
-	// accepted at authoring and refused at fire time.
-	messageAuthoringCallerScheduleNew
-	// messageAuthoringCallerScheduleExisting is a schedule resume or update
-	// keeping its stored target: unresolved targets are accepted, while an
-	// unauthorized existing target is refused with 403.
-	messageAuthoringCallerScheduleExisting
+	// messageAuthoringCallerSchedule is the strict schedule and scheduled-event
+	// authoring mode (ptone/scion#8588): it enforces the same target resolution
+	// and masking rule as triggers while preserving schedule payload validation,
+	// schedule error texts, and scheduled_author audit records.
+	messageAuthoringCallerSchedule
 )
 
 // messageAuthoringError is the HTTP-free denial returned by
@@ -111,76 +107,21 @@ func writeMessageAuthoringError(w http.ResponseWriter, r *http.Request, identity
 	}
 }
 
-// scheduledTargetMode says whether an authoring request names a new target
-// or re-authors a schedule whose target is already set.
-type scheduledTargetMode int
-
-const (
-	// scheduledTargetNew: the caller names the target (event or schedule
-	// create).
-	scheduledTargetNew scheduledTargetMode = iota
-	// scheduledTargetExisting: the caller resumes a schedule, or updates it
-	// without changing its target, which it can already see in the stored
-	// payload.
-	scheduledTargetExisting
-)
-
 // authorizeScheduledMessageAuthoring validates a scheduled-message event at
-// authoring time for a caller naming a new target (event and schedule
-// create). See authorizeScheduledMessageTarget.
-func (s *Server) authorizeScheduledMessageAuthoring(
-	w http.ResponseWriter,
-	r *http.Request,
-	projectID string,
-	rawPayload string,
-	agentID string,
-	agentName string,
-) bool {
-	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetNew, projectID, rawPayload, agentID, agentName)
-}
-
-// authorizeScheduledMessageReauthoring validates a schedule resume, or an
-// update that keeps the schedule's target: the same checks as authoring, but
-// the target is the existing schedule's, so a target the caller may not
-// message is refused (403) rather than treated like an unknown agent.
-func (s *Server) authorizeScheduledMessageReauthoring(
-	w http.ResponseWriter,
-	r *http.Request,
-	projectID string,
-	rawPayload string,
-) bool {
-	return s.authorizeScheduledMessageTarget(w, r, scheduledTargetExisting, projectID, rawPayload, "", "")
-}
-
-// scheduledPayloadTargetChanged reports whether a replacement message
-// payload names another target (agentId or agentName) than the stored one.
-// A payload that does not decode names no target.
-func scheduledPayloadTargetChanged(stored, replacement string) bool {
-	target := func(raw string) MessageEventPayload {
-		var p MessageEventPayload
-		if raw != "" {
-			_ = json.Unmarshal([]byte(raw), &p)
-		}
-		return MessageEventPayload{AgentID: p.AgentID, AgentName: p.AgentName}
-	}
-	return target(stored) != target(replacement)
-}
-
-// authorizeScheduledMessageTarget validates a scheduled-message event at
-// authoring time (create / update / resume). It resolves the target agent from
-// convenience fields or raw payload and rejects when:
+// authoring time (create, dispatch-changing update, or resume). It resolves
+// the target agent from convenience fields or raw payload and rejects when:
 //   - the request's credential may not author scheduled work
 //     (authorizeScheduleAuthoringCredential), checked before the target is
 //     resolved,
-//   - the target agent is in a different project from projectID and
-//     cross-project messaging is disabled, or
-//   - the caller is not currently authorized to message the target
-//     (fail-fast preview — the definitive check runs again at fire time).
-//
-// When the caller names a new target (scheduledTargetNew), a target the
-// caller cannot read and may not message is treated like an unknown agent
-// ID: authoring is accepted, and the fire-time check refuses. An update or
-// resume (scheduledTargetExisting) keeps the refusal below.
+//   - the target agent cannot be resolved (not found, deleted, or conflicting
+//     agentId/agentName) -> 404,
+//   - the target agent is unreadable and not messageable -> masked 404
+//     byte-identical to not-found,
+//   - the target agent is readable, in a different project from projectID, and
+//     cross-project messaging is disabled -> 403, or
+//   - the target agent is readable and the caller is not currently authorized
+//     to message it -> 403 (fail-fast preview; the definitive check runs again
+//     at fire time).
 //
 // An admitted revision records its author's ceiling, and each fire
 // re-checks the recorded authority under resolveRecordedAuthority
@@ -188,10 +129,9 @@ func scheduledPayloadTargetChanged(stored, replacement string) bool {
 //
 // Returns true when authoring is allowed; writes the HTTP error response and
 // returns false when denied.
-func (s *Server) authorizeScheduledMessageTarget(
+func (s *Server) authorizeScheduledMessageAuthoring(
 	w http.ResponseWriter,
 	r *http.Request,
-	mode scheduledTargetMode,
 	projectID string,
 	rawPayload string,
 	agentID string,
@@ -209,17 +149,7 @@ func (s *Server) authorizeScheduledMessageTarget(
 		return false
 	}
 
-	var callerKind messageAuthoringCaller
-	switch mode {
-	case scheduledTargetNew:
-		callerKind = messageAuthoringCallerScheduleNew
-	case scheduledTargetExisting:
-		callerKind = messageAuthoringCallerScheduleExisting
-	default:
-		// Fail closed to the strictest mode if an unknown mode is ever passed.
-		callerKind = messageAuthoringCallerTrigger
-	}
-	if _, err := s.validateMessageAuthoringTarget(ctx, identity, projectID, callerKind, rawPayload, agentID, agentName); err != nil {
+	if _, err := s.validateMessageAuthoringTarget(ctx, identity, projectID, messageAuthoringCallerSchedule, rawPayload, agentID, agentName); err != nil {
 		writeMessageAuthoringError(w, r, identity, err)
 		return false
 	}
@@ -248,7 +178,7 @@ func (s *Server) validateMessageAuthoringTarget(
 
 	var isTrigger bool
 	switch callerKind {
-	case messageAuthoringCallerScheduleNew, messageAuthoringCallerScheduleExisting:
+	case messageAuthoringCallerSchedule:
 		isTrigger = false
 	default:
 		// Fail closed to the strictest trigger mode for messageAuthoringCallerTrigger
@@ -349,32 +279,9 @@ func (s *Server) validateMessageAuthoringTarget(
 		}
 	}
 
-	if isTrigger {
-		if err != nil || agent == nil || !agent.DeletedAt.IsZero() ||
-			(targetAgentID != "" && targetAgentName != "" && targetAgentName != agent.Slug) {
-			return "", &messageAuthoringError{httpStatus: http.StatusNotFound, notFoundResource: "Agent"}
-		}
-	} else {
-		// If the target cannot be resolved at schedule authoring time (not
-		// found, no identifier, or slug-based lookup), allow authoring. The
-		// agent may be created between authoring and fire, and fire-time
-		// authorization is the definitive check.
-		if errors.Is(err, store.ErrNotFound) || agent == nil {
-			return rawPayload, nil
-		}
-	}
-
-	// Schedule new-target masking: a target the caller cannot read, and may
-	// not message, is treated exactly like an unknown agent ID: authoring is
-	// accepted and the fire-time check refuses it. This runs before any answer
-	// that would describe the target.
-	if callerKind == messageAuthoringCallerScheduleNew && !s.scheduledTargetReadable(ctx, identity, agent) {
-		if allowed, _, _ := s.authorizeAgentMessage(ctx, identity, agent, false); !allowed {
-			slog.InfoContext(ctx, "scheduled target not readable; treated as unknown",
-				"identity", identity.ID(), "identity_type", identity.Type(),
-				"agent_id", agent.ID, "project_id", projectID)
-			return rawPayload, nil
-		}
+	if err != nil || agent == nil || !agent.DeletedAt.IsZero() ||
+		(targetAgentID != "" && targetAgentName != "" && targetAgentName != agent.Slug) {
+		return "", &messageAuthoringError{httpStatus: http.StatusNotFound, notFoundResource: "Agent"}
 	}
 
 	// Cross-project messaging check and audit.
@@ -382,7 +289,7 @@ func (s *Server) validateMessageAuthoringTarget(
 	if isCrossProject {
 		ops := s.GetOperationalSettings()
 		if ops == nil || !ops.CrossProjectMessagingEnabled() {
-			if isTrigger && !s.scheduledTargetReadable(ctx, identity, agent) {
+			if !s.scheduledTargetReadable(ctx, identity, agent) {
 				return "", &messageAuthoringError{httpStatus: http.StatusNotFound, notFoundResource: "Agent"}
 			}
 			msg := "cross-project scheduled messages require cross-project messaging to be enabled"
@@ -420,11 +327,15 @@ func (s *Server) validateMessageAuthoringTarget(
 	// agent right now. The definitive check runs at fire time.
 	allowed, reason, _ := s.authorizeAgentMessage(ctx, identity, agent, false)
 	if !allowed {
-		if isTrigger && !s.scheduledTargetReadable(ctx, identity, agent) {
+		if !s.scheduledTargetReadable(ctx, identity, agent) {
+			denialPrefix := "scheduled message authoring: "
+			if isTrigger {
+				denialPrefix = "trigger message authoring: "
+			}
 			return "", &messageAuthoringError{
 				httpStatus:        http.StatusNotFound,
 				notFoundResource:  "Agent",
-				authzDenialReason: "trigger message authoring: " + reason,
+				authzDenialReason: denialPrefix + reason,
 				authzDenialTarget: agent,
 			}
 		}

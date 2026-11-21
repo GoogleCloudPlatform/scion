@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -157,18 +158,37 @@ func TestMessageAuthoringTargetRule_TriggerParity(t *testing.T) {
 	})
 }
 
-// TestMessageAuthoringTargetRule_ScheduleParity pins Stage 1 §16 criterion 17
-// and rev 8.32 option (a) for the schedule caller:
-//   - an unresolved target is accepted at authoring (201) and refused at fire;
-//   - an unreadable cross-project new target is accepted at authoring (201,
-//     identical to nonexistent) and refused at fire;
-//   - conflicting payload vs convenience targets return 400;
-//   - an existing target on resume/update refuses unauthorized targets with 403.
+// TestMessageAuthoringTargetRule_ScheduleParity pins Stage 1 rev 8.35 / L24
+// (ptone/scion#8588) for message schedules and one-shot scheduled events:
+//   - contract 1: create and target-changing update refuse unresolved targets
+//     (not found, deleted, conflicting agentId/agentName) with 404, mask
+//     unreadable targets as byte-identical 404 (whether cross-project messaging
+//     is off or on), refuse readable cross-project targets with 403 when off
+//     and admit them when on, and preserve 400 for conflicting payload vs
+//     convenience fields;
+//   - contract 2: resume of a schedule whose stored target is unresolved
+//     (deleted / target_deleted, or never existed) or unreadable is refused
+//     with the same generic 404 until PATCHed to a live target;
+//   - contract 3: keeping an unresolved target on PATCH is refused with the
+//     same generic 404 ONLY for dispatch-changing updates (payload, cronExpr,
+//     timeZone, eventType, enable), while name-only PATCH stays accepted;
+//   - contract 4: pause and delete stay allowed regardless of target state,
+//     and a readable-but-unauthorized existing target stays 403;
+//   - contract 5 & 6: stored schedules are not migrated, GET/list keep showing
+//     statusReason (target_deleted), fire-time refusal is unchanged, and every
+//     404 body is byte-identical to not-found.
 func TestMessageAuthoringTargetRule_ScheduleParity(t *testing.T) {
 	f := setupTriggersTestFixture(t)
+	f.srv.scheduler = NewScheduler(f.store, slog.Default())
+	f.srv.scheduler.srv = f.srv
 	ctx := context.Background()
 
-	// Create an agent in f.otherProjID that f.member cannot read and may not message.
+	// Zero value of messageAuthoringCaller must remain the strictest mode.
+	var zeroCaller messageAuthoringCaller
+	assert.Equal(t, messageAuthoringCallerTrigger, zeroCaller)
+
+	// Create an agent in f.otherProjID that f.member cannot read and may not
+	// message, while f.owner (who owns f.otherProjID) can read it.
 	unreadableTarget := &store.Agent{
 		ID:        api.NewUUID(),
 		Slug:      "sched-secret-cross-agent",
@@ -177,83 +197,355 @@ func TestMessageAuthoringTargetRule_ScheduleParity(t *testing.T) {
 		Phase:     "running",
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, unreadableTarget))
+
+	// Create a soft-deleted agent in f.projectID.
+	deletedAt := time.Now().UTC().Add(-time.Hour)
+	deletedTarget := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "sched-deleted-agent",
+		Name:      "sched-deleted-agent",
+		ProjectID: f.projectID,
+		Phase:     "stopped",
+		DeletedAt: deletedAt,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, deletedTarget))
+
 	nonexistentID := api.NewUUID()
 
-	f.srv.SetOperationalSettings(nil)
-
-	createSched := func(name, targetID string) (int, string, store.Schedule) {
+	createSched := func(caller *store.User, req CreateScheduleRequest) (int, string, store.Schedule) {
 		t.Helper()
-		rec := doRequestAsUser(t, f.srv, f.member, http.MethodPost,
-			"/api/v1/projects/"+f.projectID+"/schedules",
-			CreateScheduleRequest{
-				Name:      name,
-				CronExpr:  "0 * * * *",
-				EventType: "message",
-				Payload:   `{"agentId":"` + targetID + `","message":"hello"}`,
-			})
+		rec := doRequestAsUser(t, f.srv, caller, http.MethodPost,
+			"/api/v1/projects/"+f.projectID+"/schedules", req)
 		var sc store.Schedule
 		if rec.Code == http.StatusCreated {
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sc))
 		}
 		return rec.Code, rec.Body.String(), sc
 	}
-
-	codeMissing, bodyMissing, schedMissing := createSched("sched-missing", nonexistentID)
-	codeUnreadable, bodyUnreadable, schedUnreadable := createSched("sched-unreadable", unreadableTarget.ID)
-	require.Equal(t, http.StatusCreated, codeMissing, bodyMissing)
-	require.Equal(t, http.StatusCreated, codeUnreadable, bodyUnreadable)
-
-	// Reload from store to get the recorded InitiatorAttribution & AuthorityCeiling.
-	storedMissing, err := f.store.GetSchedule(ctx, schedMissing.ID)
-	require.NoError(t, err)
-	storedUnreadable, err := f.store.GetSchedule(ctx, schedUnreadable.ID)
-	require.NoError(t, err)
-
-	// Both must refuse at fire time with the same generic refusal.
-	for name, sc := range map[string]*store.Schedule{
-		"nonexistent": storedMissing,
-		"unreadable":  storedUnreadable,
-	} {
-		out := f.srv.fireAction(ctx, hubfire.FireRequest{
-			ProjectID: f.projectID,
-			Authority: hubfire.RecordedAuthority{
-				Attribution:    sc.InitiatorAttribution,
-				Ceiling:        sc.AuthorityCeiling,
-				DefinitionKind: hubfire.DefinitionKindSchedule,
-				DefinitionID:   sc.ID,
-				FireID:         api.NewUUID(),
-			},
-			ActionType: "message",
-			Payload:    sc.Payload,
-			FireAt:     time.Now().UTC(),
-		})
-		assert.Equal(t, hubfire.FireStatusRefused, out.Status, "schedule %s must refuse at fire time", name)
-		assert.Equal(t, errScheduledMessageRefused.Error(), out.Error, "schedule %s refusal text", name)
+	createEvent := func(caller *store.User, req CreateScheduledEventRequest) (int, string) {
+		t.Helper()
+		rec := doRequestAsUser(t, f.srv, caller, http.MethodPost,
+			"/api/v1/projects/"+f.projectID+"/scheduled-events", req)
+		return rec.Code, rec.Body.String()
 	}
 
-	// Conflicting payload vs convenience fields returns 400.
-	recConflict := doRequestAsUser(t, f.srv, f.member, http.MethodPost,
-		"/api/v1/projects/"+f.projectID+"/schedules",
-		CreateScheduleRequest{
+	// Capture canonical trigger 404 body to assert cross-surface parity (contract 6).
+	f.srv.SetOperationalSettings(nil)
+	codeMissingRef, bodyMissingRef, _ := createSched(f.member, CreateScheduleRequest{
+		Name:      "sched-missing-ref",
+		CronExpr:  "0 * * * *",
+		EventType: "message",
+		Payload:   `{"agentId":"` + nonexistentID + `","message":"hello"}`,
+	})
+	require.Equal(t, http.StatusNotFound, codeMissingRef, bodyMissingRef)
+	assert.Contains(t, bodyMissingRef, "Agent not found")
+
+	// Contract 1: create unresolved (not found, deleted, conflicting id/slug)
+	// and create unreadable (cross-project off and on) for both recurring
+	// schedules and one-shot scheduled events.
+	for _, crossProjectEnabled := range []bool{false, true} {
+		label := "cross_project_disabled"
+		if crossProjectEnabled {
+			label = "cross_project_enabled"
+			enableCPM(t, f.srv, f.store)
+		} else {
+			f.srv.SetOperationalSettings(nil)
+		}
+		t.Run("create/"+label, func(t *testing.T) {
+			cases := []struct {
+				name    string
+				payload string
+			}{
+				{"missing", `{"agentId":"` + nonexistentID + `","message":"hello"}`},
+				{"deleted", `{"agentId":"` + deletedTarget.ID + `","message":"hello"}`},
+				{"conflicting_id_slug", `{"agentId":"` + f.targetAgent.ID + `","agentName":"wrong-slug","message":"hello"}`},
+				{"unreadable_cross_project", `{"agentId":"` + unreadableTarget.ID + `","message":"hello"}`},
+			}
+			for _, tc := range cases {
+				code, body, _ := createSched(f.member, CreateScheduleRequest{
+					Name:      "sched-" + tc.name + "-" + label,
+					CronExpr:  "0 * * * *",
+					EventType: "message",
+					Payload:   tc.payload,
+				})
+				assert.Equal(t, http.StatusNotFound, code, "schedule %s: %s", tc.name, body)
+				assert.Equal(t, bodyMissingRef, body, "schedule %s must be byte-identical to not-found", tc.name)
+
+				evCode, evBody := createEvent(f.member, CreateScheduledEventRequest{
+					EventType: "message",
+					FireIn:    "30m",
+					Payload:   tc.payload,
+				})
+				assert.Equal(t, http.StatusNotFound, evCode, "event %s: %s", tc.name, evBody)
+				assert.Equal(t, bodyMissingRef, evBody, "event %s must be byte-identical to not-found", tc.name)
+			}
+		})
+	}
+
+	// Contract 1: readable cross-project target -> 403 when disabled, 201 when enabled.
+	t.Run("create/readable_cross_project", func(t *testing.T) {
+		f.srv.SetOperationalSettings(nil)
+		codeOff, bodyOff, _ := createSched(f.owner, CreateScheduleRequest{
+			Name:      "sched-xproj-off",
+			CronExpr:  "0 * * * *",
+			EventType: "message",
+			Payload:   `{"agentId":"` + unreadableTarget.ID + `","message":"hello"}`,
+		})
+		assert.Equal(t, http.StatusForbidden, codeOff, bodyOff)
+		assert.Contains(t, bodyOff, "cross-project scheduled messages require cross-project messaging to be enabled")
+
+		evCodeOff, evBodyOff := createEvent(f.owner, CreateScheduledEventRequest{
+			EventType: "message",
+			FireIn:    "30m",
+			AgentID:   unreadableTarget.ID,
+			Message:   "hello",
+		})
+		assert.Equal(t, http.StatusForbidden, evCodeOff, evBodyOff)
+		assert.Contains(t, evBodyOff, "cross-project scheduled messages require cross-project messaging to be enabled")
+
+		enableCPM(t, f.srv, f.store)
+		codeOn, bodyOn, _ := createSched(f.owner, CreateScheduleRequest{
+			Name:      "sched-xproj-on",
+			CronExpr:  "0 * * * *",
+			EventType: "message",
+			Payload:   `{"agentId":"` + unreadableTarget.ID + `","message":"hello"}`,
+		})
+		assert.Equal(t, http.StatusCreated, codeOn, bodyOn)
+
+		evCodeOn, evBodyOn := createEvent(f.owner, CreateScheduledEventRequest{
+			EventType: "message",
+			FireIn:    "30m",
+			AgentID:   unreadableTarget.ID,
+			Message:   "hello",
+		})
+		assert.Equal(t, http.StatusCreated, evCodeOn, evBodyOn)
+	})
+
+	// Schedule payload validation: conflicting payload vs convenience fields stays 400.
+	t.Run("create/conflicting_payload_vs_convenience_stays_400", func(t *testing.T) {
+		code, body, _ := createSched(f.member, CreateScheduleRequest{
 			Name:      "sched-conflict",
 			CronExpr:  "0 * * * *",
 			EventType: "message",
 			AgentName: f.targetAgent.Slug,
 			Payload:   `{"agentName":"other-slug","message":"hello"}`,
 		})
-	assert.Equal(t, http.StatusBadRequest, recConflict.Code, recConflict.Body.String())
-	assert.Contains(t, recConflict.Body.String(), "conflicting target")
+		assert.Equal(t, http.StatusBadRequest, code, body)
+		assert.Contains(t, body, "conflicting target")
+	})
 
-	// Existing target (re-authoring on resume): cross-project target when
-	// cross-project messaging is disabled refuses with 403 rather than masking.
-	pauseRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
-		"/api/v1/projects/"+f.projectID+"/schedules/"+schedUnreadable.ID+"/pause", nil)
-	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+	// Contract 1: update changing target.
+	t.Run("update/changing_target", func(t *testing.T) {
+		f.srv.SetOperationalSettings(nil)
+		code, body, sc := createSched(f.owner, CreateScheduleRequest{
+			Name:      "sched-retarget",
+			CronExpr:  "0 * * * *",
+			EventType: "message",
+			AgentName: f.targetAgent.Slug,
+			Message:   "hello",
+		})
+		require.Equal(t, http.StatusCreated, code, body)
 
-	resumeRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
-		"/api/v1/projects/"+f.projectID+"/schedules/"+schedUnreadable.ID+"/resume", nil)
-	assert.Equal(t, http.StatusForbidden, resumeRec.Code, resumeRec.Body.String())
-	assert.Contains(t, resumeRec.Body.String(), "cross-project scheduled messages require cross-project messaging to be enabled")
+		// Unresolved target -> 404 byte-identical.
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+sc.ID,
+			UpdateScheduleRequest{Payload: `{"agentId":"` + nonexistentID + `","message":"hello"}`})
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.Equal(t, bodyMissingRef, rec.Body.String())
+
+		// Unreadable cross-project target -> masked 404 byte-identical (for a
+		// caller who has scheduled_event.update in f.projectID but cannot read
+		// f.otherProjID).
+		projAdmin := &store.User{
+			ID: api.NewUUID(), Email: "proj-admin-parity@test.com",
+			DisplayName: "Proj Admin", Role: "member", Status: store.UserStatusActive,
+		}
+		require.NoError(t, f.store.CreateUser(ctx, projAdmin))
+		ensureHubMembership(ctx, f.store, projAdmin.ID)
+		grantProjectRole(t, f.store, projAdmin.ID, f.projectID, store.ProjectRoleAdmin)
+
+		rec = doRequestAsUser(t, f.srv, projAdmin, http.MethodPatch,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+sc.ID,
+			UpdateScheduleRequest{Payload: `{"agentId":"` + unreadableTarget.ID + `","message":"hello"}`})
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.Equal(t, bodyMissingRef, rec.Body.String())
+
+		// Readable cross-project target with CPM off -> 403.
+		rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+sc.ID,
+			UpdateScheduleRequest{Payload: `{"agentId":"` + unreadableTarget.ID + `","message":"hello"}`})
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "cross-project scheduled messages require cross-project messaging to be enabled")
+	})
+
+	// Seed stored schedules with unresolved/deleted/unreadable targets directly
+	// in the store (simulating pre-existing rows; contract 5: no migration).
+	seedStoredSchedule := func(name, payload, status, statusReason string) *store.Schedule {
+		t.Helper()
+		rev := withSessionRevision(store.ScheduledEvent{}, f.owner.ID)
+		nextRun := time.Now().UTC().Add(time.Hour)
+		sc := &store.Schedule{
+			ID:                   api.NewUUID(),
+			ProjectID:            f.projectID,
+			Name:                 name,
+			CronExpr:             "0 * * * *",
+			EventType:            "message",
+			Payload:              payload,
+			Status:               status,
+			StatusReason:         statusReason,
+			NextRunAt:            &nextRun,
+			CreatedBy:            f.owner.ID,
+			InitiatorAttribution: rev.InitiatorAttribution,
+			AuthorityCeiling:     rev.AuthorityCeiling,
+		}
+		require.NoError(t, f.store.CreateSchedule(ctx, sc))
+		return sc
+	}
+
+	// Contract 2, 3, 4, 5, 6: resume, dispatch-changing PATCH, metadata-only
+	// PATCH, pause, delete, GET/list statusReason, and fire-time refusal.
+	t.Run("existing_unresolved_target_lifecycle", func(t *testing.T) {
+		f.srv.SetOperationalSettings(nil)
+		deletedPaused := seedStoredSchedule(
+			"sched-stored-target-deleted",
+			`{"agentId":"`+deletedTarget.ID+`","message":"hello"}`,
+			store.ScheduleStatusPaused,
+			store.ScheduleStatusReasonTargetDeleted,
+		)
+		neverExistedActive := seedStoredSchedule(
+			"sched-stored-never-existed",
+			`{"agentId":"`+nonexistentID+`","message":"hello"}`,
+			store.ScheduleStatusActive,
+			store.ScheduleStatusReasonNone,
+		)
+
+		// Contract 5: GET and list keep showing statusReason (target_deleted) unchanged.
+		getRec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+deletedPaused.ID, nil)
+		require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+		var getResp ScheduleResponse
+		require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getResp))
+		assert.Equal(t, store.ScheduleStatusReasonTargetDeleted, getResp.StatusReason)
+
+		listRec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet,
+			"/api/v1/projects/"+f.projectID+"/schedules?name=sched-stored-target-deleted", nil)
+		require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
+		var listResp ListSchedulesResponse
+		require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+		require.Len(t, listResp.Schedules, 1)
+		assert.Equal(t, store.ScheduleStatusReasonTargetDeleted, listResp.Schedules[0].StatusReason)
+
+		// Contract 2 & 6: resume with deleted (target_deleted) or never-existed
+		// target is refused with the same generic 404 (never revealing whether
+		// the agent once existed).
+		resumeDel := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+deletedPaused.ID+"/resume", nil)
+		assert.Equal(t, http.StatusNotFound, resumeDel.Code, resumeDel.Body.String())
+		assert.Equal(t, bodyMissingRef, resumeDel.Body.String())
+
+		// Contract 3: dispatch-changing updates keeping an unresolved target are
+		// refused with the same masked 404 (payload, cronExpr, timeZone, eventType, enable).
+		dispatchAgentSched := seedStoredSchedule(
+			"sched-stored-dispatch-to-msg",
+			`{"agentId":"`+nonexistentID+`","message":"hello"}`,
+			store.ScheduleStatusActive,
+			store.ScheduleStatusReasonNone,
+		)
+		dispatchAgentSched.EventType = "dispatch_agent"
+		require.NoError(t, f.store.UpdateSchedule(ctx, dispatchAgentSched, store.ScheduleFieldMask{EventType: true},
+			dispatchAgentSched.AuthorizationRevision, dispatchAgentSched.AuthorizationRevision != 0, nil))
+
+		tz := "America/Los_Angeles"
+		dispatchUpdates := []struct {
+			name string
+			id   string
+			req  UpdateScheduleRequest
+		}{
+			{"payload", neverExistedActive.ID, UpdateScheduleRequest{Payload: `{"agentId":"` + nonexistentID + `","message":"updated text"}`}},
+			{"cronExpr", neverExistedActive.ID, UpdateScheduleRequest{CronExpr: "*/15 * * * *"}},
+			{"timeZone", neverExistedActive.ID, UpdateScheduleRequest{TimeZone: &tz}},
+			{"eventType", dispatchAgentSched.ID, UpdateScheduleRequest{EventType: "message"}},
+			{"enable", deletedPaused.ID, UpdateScheduleRequest{Status: store.ScheduleStatusActive}},
+		}
+		for _, tc := range dispatchUpdates {
+			rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+				"/api/v1/projects/"+f.projectID+"/schedules/"+tc.id, tc.req)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "dispatch update %s: %s", tc.name, rec.Body.String())
+			assert.Equal(t, bodyMissingRef, rec.Body.String(), "dispatch update %s body", tc.name)
+		}
+
+		// Contract 3: name-only PATCH (no revision bump) stays accepted.
+		renameRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+neverExistedActive.ID,
+			UpdateScheduleRequest{Name: "sched-stored-never-existed-renamed"})
+		assert.Equal(t, http.StatusOK, renameRec.Code, renameRec.Body.String())
+
+		// Contract 4: pause and delete stay allowed regardless of target state.
+		pauseRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+neverExistedActive.ID+"/pause", nil)
+		assert.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+
+		// Resume of never-existed paused schedule is also refused with the same 404.
+		resumeNever := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+neverExistedActive.ID+"/resume", nil)
+		assert.Equal(t, http.StatusNotFound, resumeNever.Code, resumeNever.Body.String())
+		assert.Equal(t, bodyMissingRef, resumeNever.Body.String())
+
+		// Contract 5: fire-time refusal for stored unresolved schedule is unchanged.
+		out := f.srv.fireAction(ctx, hubfire.FireRequest{
+			ProjectID: f.projectID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    neverExistedActive.InitiatorAttribution,
+				Ceiling:        neverExistedActive.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindSchedule,
+				DefinitionID:   neverExistedActive.ID,
+				FireID:         api.NewUUID(),
+			},
+			ActionType: "message",
+			Payload:    neverExistedActive.Payload,
+			FireAt:     time.Now().UTC(),
+		})
+		assert.Equal(t, hubfire.FireStatusRefused, out.Status)
+		assert.Equal(t, errScheduledMessageRefused.Error(), out.Error)
+
+		// Delete stays allowed regardless of target state.
+		delRec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+neverExistedActive.ID, nil)
+		assert.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
+
+		// Contract 2: PATCHing a live target allows subsequent resume to succeed.
+		retargetRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+deletedPaused.ID,
+			UpdateScheduleRequest{Payload: `{"agentId":"` + f.targetAgent.ID + `","message":"retargeted"}`})
+		require.Equal(t, http.StatusOK, retargetRec.Code, retargetRec.Body.String())
+
+		resumeLive := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+deletedPaused.ID+"/resume", nil)
+		assert.Equal(t, http.StatusOK, resumeLive.Code, resumeLive.Body.String())
+	})
+
+	// Contract 4: readable-but-unauthorized existing target stays 403 on resume
+	// and dispatch-changing PATCH.
+	t.Run("readable_unauthorized_existing_stays_403", func(t *testing.T) {
+		f.srv.SetOperationalSettings(nil)
+		storedCross := seedStoredSchedule(
+			"sched-stored-readable-cross",
+			`{"agentId":"`+unreadableTarget.ID+`","message":"hello"}`,
+			store.ScheduleStatusPaused,
+			store.ScheduleStatusReasonNone,
+		)
+		// f.owner can read unreadableTarget (in f.otherProjID), but CPM is off -> 403.
+		resumeRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+storedCross.ID+"/resume", nil)
+		assert.Equal(t, http.StatusForbidden, resumeRec.Code, resumeRec.Body.String())
+		assert.Contains(t, resumeRec.Body.String(), "cross-project scheduled messages require cross-project messaging to be enabled")
+
+		patchRec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
+			"/api/v1/projects/"+f.projectID+"/schedules/"+storedCross.ID,
+			UpdateScheduleRequest{CronExpr: "*/10 * * * *"})
+		assert.Equal(t, http.StatusForbidden, patchRec.Code, patchRec.Body.String())
+		assert.Contains(t, patchRec.Body.String(), "cross-project scheduled messages require cross-project messaging to be enabled")
+	})
 }
 
 // TestMessageAuthoringTargetRule_OutOfRangeCallerKindFailsClosed pins S2C-I1:
@@ -277,6 +569,7 @@ func TestMessageAuthoringTargetRule_OutOfRangeCallerKindFailsClosed(t *testing.T
 	outOfRangeKinds := []messageAuthoringCaller{
 		messageAuthoringCaller(0),
 		messageAuthoringCaller(-1),
+		messageAuthoringCaller(2),
 		messageAuthoringCaller(99),
 	}
 
@@ -294,5 +587,13 @@ func TestMessageAuthoringTargetRule_OutOfRangeCallerKindFailsClosed(t *testing.T
 			assert.Equal(t, http.StatusNotFound, authErr.httpStatus, "callerKind=%d case=%s", kind, tc.name)
 			assert.Equal(t, "Agent", authErr.notFoundResource, "callerKind=%d case=%s", kind, tc.name)
 		}
+
+		// Also prove out-of-range kinds take the strict trigger payload branch
+		// (400 action.message required) rather than schedule mode.
+		_, err := f.srv.validateMessageAuthoringTarget(ctx, f.ownerAuth, f.projectID, kind, `{"agentId":"`+f.targetAgent.ID+`"}`, "", "")
+		var authErr *messageAuthoringError
+		require.ErrorAs(t, err, &authErr, "callerKind=%d must take strict trigger payload validation", kind)
+		assert.Equal(t, http.StatusBadRequest, authErr.httpStatus, "callerKind=%d", kind)
+		assert.Equal(t, "action.message is required for message actions", authErr.message, "callerKind=%d", kind)
 	}
 }

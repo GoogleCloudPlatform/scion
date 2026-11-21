@@ -404,8 +404,8 @@ func TestAgentScheduleScope_ResumeKeepsAgentCreateGate(t *testing.T) {
 }
 
 // Resuming a held message schedule still runs the scheduled-message
-// reauthorization: a target in another project is refused by that gate
-// while cross-project messaging is off, and the revision is unchanged.
+// reauthorization: an unreadable target in another project is refused with
+// masked 404 (ptone/scion#8588), and the revision is unchanged.
 func TestAgentScheduleScope_ResumeKeepsMessageGate(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ctx := context.Background()
@@ -421,9 +421,9 @@ func TestAgentScheduleScope_ResumeKeepsMessageGate(t *testing.T) {
 	before := loadScheduleRevision(t, s, sc.ID)
 
 	rec := doAuthoredScheduleRequest(t, srv, agentScopeCaller(projectID), projectID, sc.ID+"/resume", http.MethodPost, nil)
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "cross-project scheduled messages require cross-project messaging to be enabled",
-		"the denial is the resume's scheduled-message reauthorization")
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Agent not found",
+		"the denial is the resume's masked scheduled-message reauthorization")
 	assert.Equal(t, before, loadScheduleRevision(t, s, sc.ID))
 }
 

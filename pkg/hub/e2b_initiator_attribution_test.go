@@ -176,7 +176,7 @@ func TestCreateScheduledEvent_CapturesInitiatorAttribution(t *testing.T) {
 	req := CreateScheduledEventRequest{
 		EventType: "message",
 		FireIn:    "1h",
-		AgentName: "nonexistent",
+		AgentName: "all",
 		Message:   "hello",
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
@@ -501,7 +501,7 @@ func TestCreateScheduledEvent_StoreFailureLeavesNoPartialAttribution(t *testing.
 	req := CreateScheduledEventRequest{
 		EventType: "message",
 		FireIn:    "1h",
-		AgentName: "nonexistent",
+		AgentName: "all",
 		Message:   "hello",
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", req)
@@ -1022,7 +1022,7 @@ func TestScheduleAndScheduledEventResponses_OmitInitiatorAttribution(t *testing.
 	scheduleRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", scheduleReq)
 	require.Equal(t, http.StatusCreated, scheduleRec.Code)
 
-	eventReq := CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentName: "nonexistent", Message: "hi"}
+	eventReq := CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentName: "all", Message: "hi"}
 	eventRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", eventReq)
 	require.Equal(t, http.StatusCreated, eventRec.Code)
 
@@ -1097,7 +1097,7 @@ func TestDeleteSchedule_EmitsMutationAudit(t *testing.T) {
 func TestCancelScheduledEvent_EmitsMutationAudit(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 
-	eventReq := CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentName: "nonexistent", Message: "hi"}
+	eventReq := CreateScheduledEventRequest{EventType: "message", FireIn: "1h", AgentName: "all", Message: "hi"}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", eventReq)
 	require.Equal(t, http.StatusCreated, rec.Code)
 	var created store.ScheduledEvent

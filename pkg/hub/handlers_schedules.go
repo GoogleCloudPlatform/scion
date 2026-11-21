@@ -281,13 +281,6 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 	}
-	// C1 containment: validate target agent project scope for message schedules.
-	if req.EventType == "message" {
-		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, "", req.AgentName) {
-			return
-		}
-	}
-
 	// Validate the cron expression (standard 5-field, no zone prefix) and
 	// the time zone it is evaluated in (empty means UTC).
 	if _, err := parseScheduleCron(req.CronExpr); err != nil {
@@ -346,6 +339,13 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 		payload = string(payloadBytes)
+	}
+	// C1 containment: validate target agent resolution and authorization for
+	// message schedules.
+	if req.EventType == "message" {
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, "", req.AgentName) {
+			return
+		}
 	}
 
 	// The revision's frozen ceiling is computed before any write.
@@ -588,25 +588,6 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 	}
-	// C1 containment: validate target agent project scope when the schedule
-	// is or becomes a message schedule. Check both the effective event type
-	// and the effective payload after the update is applied.
-	if effectiveEventType == "message" {
-		effectivePayload := schedule.Payload
-		if req.Payload != "" {
-			effectivePayload = req.Payload
-		}
-		// A replacement payload that names another target is authored like
-		// a new schedule; an update that keeps the stored target is
-		// re-checked against it.
-		if scheduledPayloadTargetChanged(schedule.Payload, effectivePayload) {
-			if !s.authorizeScheduledMessageAuthoring(w, r, projectID, effectivePayload, "", "") {
-				return
-			}
-		} else if !s.authorizeScheduledMessageReauthoring(w, r, projectID, effectivePayload) {
-			return
-		}
-	}
 
 	// fields tracks exactly which columns this request changes. UpdateSchedule
 	// writes only these — never the rest of the struct — so a column this
@@ -708,6 +689,17 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// two in sync: a dispatch field only re-attributes when the field mask
 	// also writes it.
 	changesFutureDispatch := fields.CronExpr || fields.TimeZone || fields.EventType || fields.Payload || enabling
+
+	// C1 containment / ptone/scion#8588: validate message target resolution and
+	// authorization only for dispatch-changing updates (the revision-bump list:
+	// cron, time zone, event type, payload, or re-enabling). Metadata-only
+	// edits (such as name-only PATCH or pausing) stay accepted regardless of
+	// target state.
+	if effectiveEventType == "message" && changesFutureDispatch {
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, schedule.Payload, "", "") {
+			return
+		}
+	}
 
 	// Any exec PATCH that supplies payload/exec fields or changes future
 	// dispatch runs full exec authoring (live agent.attach, managed runtime,
@@ -884,7 +876,7 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 			return
 		}
 	case "message":
-		if !s.authorizeScheduledMessageReauthoring(w, r, projectID, schedule.Payload) {
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, schedule.Payload, "", "") {
 			return
 		}
 	case scheduledEventTypeExec:

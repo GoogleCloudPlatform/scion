@@ -147,7 +147,7 @@ func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-typechange-owner"))
 	rec := doAuthoredScheduleRequest(t, srv, owner, projectID, "", http.MethodPost,
-		CreateScheduleRequest{Name: "type-change", CronExpr: "0 * * * *", EventType: "message", AgentName: "ghost-target", Message: "hi"})
+		CreateScheduleRequest{Name: "type-change", CronExpr: "0 * * * *", EventType: "message", AgentName: "worker", Message: "hi"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var created store.Schedule
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
@@ -178,7 +178,7 @@ func TestScheduleTypeChangeToDispatchAgentUsesDispatchRule(t *testing.T) {
 
 	// The same credential re-targeting the message schedule is refused too.
 	rec = doAuthoredScheduleRequest(t, srv, unrecordable, projectID, created.ID, http.MethodPatch,
-		UpdateScheduleRequest{Payload: `{"agentName":"ghost-target-2","message":"hi"}`})
+		UpdateScheduleRequest{Payload: `{"agentName":"all","message":"hi"}`})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
 	assert.Contains(t, rec.Body.String(), "cannot authorize scheduled work")

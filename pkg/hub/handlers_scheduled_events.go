@@ -373,16 +373,6 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 			return
 		}
 	}
-	// C1 containment: for message events, validate the target agent belongs to
-	// this project and the caller is authorized to message it. Scheduled messages
-	// are request-derived (not system-plane) and must pass the same authorization
-	// as direct sends — both at authoring and again at fire time.
-	if req.EventType == "message" {
-		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, req.AgentID, req.AgentName) {
-			return
-		}
-	}
-
 	fireAt, ok := parseScheduledFireTime(w, &req)
 	if !ok {
 		return
@@ -437,6 +427,16 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 			return
 		}
 		payload = string(payloadBytes)
+	}
+	// C1 containment: for message events, validate that the target agent
+	// resolves, belongs to this project (or cross-project messaging is enabled),
+	// and the caller is authorized to message it. Scheduled messages are
+	// request-derived (not system-plane) and must pass the same authorization
+	// as direct sends — both at authoring and again at fire time.
+	if req.EventType == "message" {
+		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, req.AgentID, req.AgentName) {
+			return
+		}
 	}
 
 	// The revision's frozen ceiling is computed before any write.

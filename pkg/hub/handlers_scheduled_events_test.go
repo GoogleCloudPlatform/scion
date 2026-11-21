@@ -601,7 +601,12 @@ func TestScheduledEvent_HubAdminCrossProjectAllowed(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 
-	t.Run("create allowed", func(t *testing.T) {
+	t.Run("create route gate allowed", func(t *testing.T) {
+		// hub-admin holds scheduled_event.create at system scope, so it passes
+		// the scheduled-event route gate (never 403 for scheduled_event.create).
+		// Because hub-admin is not a member of projectID and cannot read or
+		// message test-agent, strict target authoring masks the target as 404
+		// (ptone/scion#8588).
 		req := CreateScheduledEventRequest{
 			EventType: "message",
 			FireIn:    "30m",
@@ -609,7 +614,8 @@ func TestScheduledEvent_HubAdminCrossProjectAllowed(t *testing.T) {
 			Message:   "Hello from hub admin",
 		}
 		rec := doScheduledEventUserRequest(t, srv, hubAdminUser, http.MethodPost, projectID, "", req)
-		assert.Equal(t, http.StatusCreated, rec.Code)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "Agent not found")
 	})
 }
 

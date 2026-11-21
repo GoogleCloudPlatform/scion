@@ -280,9 +280,29 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
 		assert.Contains(t, rec.Body.String(), c.cause)
 	}
-	// The target is not stored, so scheduled-message authoring admits each
-	// credential and the refusal comes from the revision ceiling alone.
+	assertWriteDenial := func(t *testing.T, c messageWriteCredential, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if c.name == "agent whose row is not stored" {
+			// With strict target resolution (ptone/scion#8588), an unstored
+			// agent is already refused by live message authorization before
+			// reaching revisionAuthorityCeiling.
+			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "not authorized to message this agent")
+			return
+		}
+		assertCeilingDenial(t, c, rec)
+	}
+	// Seed a live target in projectID so scheduled-message authoring admits
+	// each credential and the refusal comes from the revision ceiling alone.
 	const unrecTarget = "unrec-ghost-target"
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID:          tid("unrec-ghost-target"),
+		Slug:        unrecTarget,
+		Name:        unrecTarget,
+		ProjectID:   projectID,
+		Phase:       "running",
+		MessageMode: store.MessageModeProject,
+	}))
 	createUnrecTargetSchedule := func(t *testing.T, name string) string {
 		t.Helper()
 		rec := doAuthoredScheduleRequest(t, srv, owner, projectID, "", http.MethodPost,
@@ -312,7 +332,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 				before := countEvents(t)
 				rec := doAuthoredEventRequest(t, srv, c.identity, projectID,
 					CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentName: unrecTarget, Message: "hi"})
-				assertCeilingDenial(t, c, rec)
+				assertWriteDenial(t, c, rec)
 				assert.Equal(t, before, countEvents(t), "no event is stored")
 			})
 
@@ -320,7 +340,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 				before := countSchedules(t)
 				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, "", http.MethodPost,
 					CreateScheduleRequest{Name: "unrec-msg" + suffix, CronExpr: "0 * * * *", EventType: "message", AgentName: unrecTarget, Message: "hi"})
-				assertCeilingDenial(t, c, rec)
+				assertWriteDenial(t, c, rec)
 				assert.Equal(t, before, countSchedules(t), "no schedule is stored")
 			})
 
@@ -351,7 +371,7 @@ func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
 				holdScheduleFor(t, s, id, c.identity)
 				before := loadScheduleRevision(t, s, id)
 				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, id+"/resume", http.MethodPost, nil)
-				assertCeilingDenial(t, c, rec)
+				assertWriteDenial(t, c, rec)
 				assert.Equal(t, before, loadScheduleRevision(t, s, id))
 				sc, err := s.GetSchedule(ctx, id)
 				require.NoError(t, err)
@@ -391,11 +411,21 @@ func TestResumeScopedUATRecordsTokenCeiling_Message(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
+	// Without agent:read or agent:message, the target is unreadable and masked as 404 (ptone/scion#8588).
 	updateOnly := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update"})
 	rec := doAuthoredScheduleRequest(t, srv, updateOnly, projectID, id+"/resume", http.MethodPost, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 	sc, err := s.GetSchedule(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduleStatusPaused, sc.Status)
+
+	// With agent:read but without agent:message, the target is readable-but-unauthorized -> 403.
+	readOnly := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update", "agent:read"})
+	rec = doAuthoredScheduleRequest(t, srv, readOnly, projectID, id+"/resume", http.MethodPost, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+	sc, err = s.GetSchedule(context.Background(), id)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduleStatusPaused, sc.Status)
 
@@ -474,15 +504,16 @@ func TestResumeNonAdmittedDenied_Message(t *testing.T) {
 
 	outsider := scheduleOnlyUser(t, s, projectID, tid("resume-na-msg-outsider"))
 	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id+"/resume", http.MethodPost, nil)
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the resume's scheduled-message re-authorization")
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Agent not found", "unreadable target is masked as 404 (ptone/scion#8588)")
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
-// Updating a message schedule re-checks the caller against the existing
-// schedule's target, as resume does: a caller who may manage schedules but
-// may not message the target is refused and the stored revision is
-// unchanged.
+// A dispatch-changing update of a message schedule re-checks the caller against
+// the existing schedule's target (ptone/scion#8588): a caller who may manage
+// schedules but cannot read or message the target is refused with masked 404
+// and the stored revision is unchanged, while a metadata-only rename stays
+// accepted without bumping the revision.
 func TestUpdateNonAdmittedDenied_Message(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("update-na-msg-owner"))
@@ -490,16 +521,23 @@ func TestUpdateNonAdmittedDenied_Message(t *testing.T) {
 	before := loadScheduleRevision(t, s, id)
 
 	outsider := scheduleOnlyUser(t, s, projectID, tid("update-na-msg-outsider"))
+	// Name-only PATCH does not bump the revision and stays accepted.
 	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Name: "update-na-msg-renamed"})
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the update's scheduled-message re-authorization")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+
+	// A dispatch-changing PATCH (cron change) re-checks the target and refuses
+	// an unreadable target with masked 404.
+	rec = doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{CronExpr: "30 * * * *"})
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Agent not found", "unreadable target is masked as 404 (ptone/scion#8588)")
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
 // An update whose replacement payload keeps the stored target (only the
-// message text changes) is re-checked against that target, like a name-only
-// update: a caller who may not message it is refused and the stored revision
-// is unchanged.
+// message text changes) is dispatch-changing and re-checked against that
+// target: a caller who cannot read or message it is refused with masked 404
+// and the stored revision is unchanged.
 func TestUpdateNonAdmittedDenied_MessageReplacementKeepsTarget(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("update-keep-msg-owner"))
@@ -513,34 +551,12 @@ func TestUpdateNonAdmittedDenied_MessageReplacementKeepsTarget(t *testing.T) {
 	payload["message"] = "new text, same target"
 	replacement, err := json.Marshal(payload)
 	require.NoError(t, err)
-	require.False(t, scheduledPayloadTargetChanged(stored.Payload, string(replacement)), "precondition: the target is kept")
 
 	outsider := scheduleOnlyUser(t, s, projectID, tid("update-keep-msg-outsider"))
 	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Payload: string(replacement)})
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the update's scheduled-message re-authorization")
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Agent not found", "unreadable target is masked as 404 (ptone/scion#8588)")
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
-}
-
-// scheduledPayloadTargetChanged compares only the target of two message
-// payloads.
-func TestScheduledPayloadTargetChanged(t *testing.T) {
-	cases := []struct {
-		name                string
-		stored, replacement string
-		want                bool
-	}{
-		{"same target, new text", `{"agentName":"worker","message":"a"}`, `{"agentName":"worker","message":"b"}`, false},
-		{"agentName to agentId", `{"agentName":"worker","message":"a"}`, `{"agentId":"` + tid("payload-target") + `","message":"a"}`, true},
-		{"other agentId", `{"agentId":"` + tid("payload-a") + `"}`, `{"agentId":"` + tid("payload-b") + `"}`, true},
-		{"both undecodable", `not json`, `{also not json`, false},
-		{"both empty", "", "", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, scheduledPayloadTargetChanged(tc.stored, tc.replacement))
-		})
-	}
 }
 
 // Resuming a dispatch_agent schedule requires agent creation in the project:

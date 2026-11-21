@@ -631,9 +631,9 @@ func responseKeys(t *testing.T, body string) []string {
 
 // TestScheduledMessageAuthoring_UnreadableTargetMatchesUnknownTarget:
 // scheduling a message to an agent the author cannot read and may not
-// message behaves exactly like scheduling to an unknown agent ID, whether or
-// not messaging between projects is enabled, and the answer does not name the
-// agent.
+// message behaves byte-identically to scheduling to an unknown agent ID (404),
+// whether or not messaging between projects is enabled, and the answer does
+// not name the agent (ptone/scion#8588).
 func TestScheduledMessageAuthoring_UnreadableTargetMatchesUnknownTarget(t *testing.T) {
 	for _, cpm := range []bool{true, false} {
 		name := "messaging between projects on"
@@ -653,28 +653,31 @@ func TestScheduledMessageAuthoring_UnreadableTargetMatchesUnknownTarget(t *testi
 				CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentID: agentB.ID, Message: "later"})
 			unknown := doAuthoredEventRequest(t, srv, author, projectA,
 				CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentID: tid("sched-unknown-agent"), Message: "later"})
-			require.Equal(t, http.StatusCreated, unknown.Code, unknown.Body.String())
+			require.Equal(t, http.StatusNotFound, unknown.Code, unknown.Body.String())
 			require.Equal(t, unknown.Code, got.Code, got.Body.String())
-			assert.Equal(t, responseKeys(t, unknown.Body.String()), responseKeys(t, got.Body.String()))
+			assert.Equal(t, unknown.Body.String(), got.Body.String())
 			assert.NotContains(t, got.Body.String(), agentB.Slug, "the answer does not name the agent")
 		})
 	}
 }
 
-// TestScheduledMessageFire_UnreadableTargetRefused: a schedule accepted for
-// an agent the author cannot read is refused when it fires.
+// TestScheduledMessageFire_UnreadableTargetRefused: a previously stored event
+// targeting an agent the author cannot read is still refused when it fires.
 func TestScheduledMessageFire_UnreadableTargetRefused(t *testing.T) {
 	srv, s, projectA, _, ownerA, _, _, agentB := cpmSetup(t)
 	srv.scheduler = NewScheduler(s, slog.Default())
 	ctx := context.Background()
-	rec := doAuthoredEventRequest(t, srv, authUser(ownerA), projectA,
-		CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentID: agentB.ID, Message: "later"})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-
-	events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectA}, store.ListOptions{})
-	require.NoError(t, err)
-	require.Len(t, events.Items, 1)
-	assert.Error(t, authorizeScheduledMessageFireFor(srv, events.Items[0], agentB), "refused at fire time")
+	evt := withSessionRevision(store.ScheduledEvent{
+		ID:        tid("evt-unreadable-fire"),
+		ProjectID: projectA,
+		EventType: "message",
+		FireAt:    time.Now().Add(30 * time.Minute),
+		Payload:   `{"agentId":"` + agentB.ID + `","message":"later"}`,
+		Status:    store.ScheduledEventPending,
+		CreatedBy: ownerA.ID,
+	}, ownerA.ID)
+	require.NoError(t, s.CreateScheduledEvent(ctx, &evt))
+	assert.Error(t, authorizeScheduledMessageFireFor(srv, evt, agentB), "refused at fire time")
 }
 
 // TestAgentMessage_ChatIntegrationRefOfOtherProjectNotReused: on
@@ -746,9 +749,8 @@ func (grantLookupFaultStore) ListRoleBindingsForPrincipals(context.Context, []st
 
 // TestScheduledTargetReadable_LookupErrorTreatedAsUnreadable: when the read
 // decision for a scheduled-message target cannot be made, the target counts
-// as not readable, and the authoring check answers exactly as for an unknown
-// agent ID (accepted, nothing written to the response) without naming the
-// agent.
+// as not readable, and the authoring check answers byte-identically to an
+// unknown agent ID (404) without naming the agent (ptone/scion#8588).
 func TestScheduledTargetReadable_LookupErrorTreatedAsUnreadable(t *testing.T) {
 	srv, s, projectA, _, ownerA, _, agentA, _ := cpmSetup(t)
 	author := authUser(ownerA)
@@ -762,7 +764,8 @@ func TestScheduledTargetReadable_LookupErrorTreatedAsUnreadable(t *testing.T) {
 		return ok, rec
 	}
 	unknownOK, unknown := authoring(tid("sched-fault-unknown-agent"))
-	require.True(t, unknownOK, unknown.Body.String())
+	require.False(t, unknownOK, unknown.Body.String())
+	require.Equal(t, http.StatusNotFound, unknown.Code, unknown.Body.String())
 
 	srv.authzService = NewAuthzService(grantLookupFaultStore{Store: s}, srv.authzService.logger)
 	assert.False(t, srv.scheduledTargetReadable(ctx, author, agentA), "a failed decision is not readable")
@@ -840,10 +843,10 @@ func TestScheduleUpdate_NewUnreadableTargetMatchesUnknownTarget(t *testing.T) {
 					UpdateScheduleRequest{Payload: `{"agentId":"` + agentID + `","message":"later"}`})
 			}
 			unknown := update(create("sched-update-unknown"), tid("sched-update-unknown-agent"))
-			require.Equal(t, http.StatusOK, unknown.Code, unknown.Body.String())
+			require.Equal(t, http.StatusNotFound, unknown.Code, unknown.Body.String())
 			got := update(create("sched-update-unreadable"), agentB.ID)
 			require.Equal(t, unknown.Code, got.Code, got.Body.String())
-			assert.Equal(t, responseKeys(t, unknown.Body.String()), responseKeys(t, got.Body.String()))
+			assert.Equal(t, unknown.Body.String(), got.Body.String())
 			assert.NotContains(t, got.Body.String(), agentB.Slug, "the answer does not name the agent")
 		})
 	}

@@ -13,6 +13,14 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Message schedules now require a live target agent at authoring, resume, and dispatch-changing updates
+
+Creating a one-shot message scheduled event or a recurring message schedule for an agent that does not exist yet (or is deleted, has a payload `agentId` whose `agentName` disagrees with the agent's slug, or is unreadable and not permitted to message — including an unreadable cross-project target while cross-project messaging is disabled) now fails with `404` (`Agent not found`), matching the trigger authoring rule. An unreadable target that the caller *may* message is accepted, and a conflict between the raw `payload` target and the convenience target fields returns `400`. Previously, unresolved or unreadable targets were accepted at authoring and refused only at fire time.
+
+- **Resume and dispatch-changing updates:** Resuming a paused message schedule (`POST .../resume` or `PATCH` with `status: "active"`), or making any dispatch-changing `PATCH` update (changing `payload`, `cronExpr`, `timeZone`, or `eventType`), now fails with `404` when the target no longer resolves or is unreadable and not permitted to message. Re-target the schedule to a live agent via `PATCH` before resuming.
+- **Metadata-only updates, pause, and delete:** Name-only `PATCH` edits (which do not bump the authorization revision), pausing, and deleting remain accepted regardless of target state. A readable-but-unauthorized existing target (or a readable cross-project target with cross-project messaging disabled) still returns `403`.
+- **Existing schedules:** Stored schedules and scheduled events are not migrated or re-validated on upgrade, and fire-time checks are unchanged. See [Scheduling — Security & Authorization](/scion/hosted/user/scheduling/#security--authorization).
+
 ## Scheduled agent dispatch creates owned agents with credentials and environment gathering
 
 At their next fire, `dispatch_agent` recurring schedules and one-shot scheduled events create agents with the revision's recorded principal as owner and ancestry, an agent role from the project and Hub default role ladder (`scion.io/default-agent-role` → `agent_defaults.default_agent_role` → `full` for user principals; the parent agent's role for agent principals, capped by `scion.io/max-agent-role` and the revision's recorded permission ceiling), the project's default agent settings, and `NoAuth: false`.

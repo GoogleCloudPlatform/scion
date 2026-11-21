@@ -152,11 +152,9 @@ func (f scheduleTokenFixture) createOwnerEvent(t *testing.T) string {
 
 // TestScheduledMessageAuthoringToken_UnknownTargetLikeSession requires the
 // scheduled-message authoring rule to treat a token naming a target that
-// does not exist as it treats a session: authoring is admitted, and the
-// target is checked again when the event fires. Over the routes, a token
-// with the authoring selectors creates a message schedule and a message
-// event naming an unknown target, and a malformed body is refused with 400
-// and writes nothing.
+// does not exist the same way it treats a session (ptone/scion#8588): both
+// refuse with 404 and write nothing, while a malformed body is refused with
+// 400 and writes nothing.
 func TestScheduledMessageAuthoringToken_UnknownTargetLikeSession(t *testing.T) {
 	f := newScheduleTokenFixture(t, "sched-msg-lookup")
 	missingTarget := `{"agentId":"` + tid("no-such-agent") + `","message":"x"}`
@@ -166,11 +164,12 @@ func TestScheduledMessageAuthoringToken_UnknownTargetLikeSession(t *testing.T) {
 		{"", "", ""},
 	}
 
-	// A session naming the same missing targets is admitted by the rule.
+	// A session naming the same missing targets is refused with 404 by the rule.
 	for _, a := range args {
 		session := authoredRequest(t, f.owner, http.MethodPost, f.path("/schedules"), nil)
 		rec := httptest.NewRecorder()
-		assert.True(t, f.srv.authorizeScheduledMessageAuthoring(rec, session, f.project, a.payload, a.agentID, a.agentName), "session: %+v: %s", a, rec.Body.String())
+		assert.False(t, f.srv.authorizeScheduledMessageAuthoring(rec, session, f.project, a.payload, a.agentID, a.agentName), "session: %+v: %s", a, rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code, "session: %+v: %s", a, rec.Body.String())
 	}
 
 	for label, key := range f.tokens(t, scheduleTokenAllSelectors...) {
@@ -179,7 +178,8 @@ func TestScheduledMessageAuthoringToken_UnknownTargetLikeSession(t *testing.T) {
 			rec := httptest.NewRecorder()
 			ok := f.srv.authorizeScheduledMessageAuthoring(rec, requestWithContext(ctx, http.MethodPost, f.path("/schedules"), nil),
 				f.project, a.payload, a.agentID, a.agentName)
-			assert.True(t, ok, "%s: %+v: %s", label, a, rec.Body.String())
+			assert.False(t, ok, "%s: %+v: %s", label, a, rec.Body.String())
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %+v: %s", label, a, rec.Body.String())
 		}
 
 		before, beforeEvents := f.scheduleCount(t), f.eventCount(t)
@@ -198,10 +198,10 @@ func TestScheduledMessageAuthoringToken_UnknownTargetLikeSession(t *testing.T) {
 			{"message event, unknown target", "/scheduled-events", `{"eventType":"message","fireIn":"1h","payload":` + jsonQuote(missingTarget) + `}`},
 		} {
 			rec := scheduleTokenRaw(t, f.srv, key, http.MethodPost, f.path(tc.path), tc.body)
-			assert.Equal(t, http.StatusCreated, rec.Code, "%s, %s: %s", label, tc.name, rec.Body.String())
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s, %s: %s", label, tc.name, rec.Body.String())
 		}
-		assert.Equal(t, before+1, f.scheduleCount(t), "%s: one schedule written", label)
-		assert.Equal(t, beforeEvents+1, f.eventCount(t), "%s: one event written", label)
+		assert.Equal(t, before, f.scheduleCount(t), "%s: no schedule written for unknown target", label)
+		assert.Equal(t, beforeEvents, f.eventCount(t), "%s: no event written for unknown target", label)
 	}
 }
 
