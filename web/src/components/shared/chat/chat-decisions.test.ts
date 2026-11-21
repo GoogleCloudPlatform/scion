@@ -23,7 +23,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
 import type { DecisionAnsweredDetail } from '../../../client/decision-prompts.js';
+import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { elementStyleRules } from '../../pages/__fixtures__/css-rules.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -117,6 +119,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = '';
+  vi.unstubAllGlobals();
 });
 
 describe('pending', () => {
@@ -155,6 +158,28 @@ describe('pending', () => {
     const el = await mount([noDefault()]);
     expect(card(el).hasAttribute('aria-describedby')).toBe(false);
     expect(root(el).querySelector('.hint')).toBeNull();
+  });
+
+  it('omits the Enter hint and aria-describedby on touch-primary devices', async () => {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => ({
+        matches: query === TOUCH_PRIMARY_QUERY,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }))
+    );
+    const el = await mount([view()]);
+    expect(card(el).hasAttribute('aria-describedby')).toBe(false);
+    expect(root(el).querySelector('.hint')).toBeNull();
+  });
+
+  it('hides the Enter hint via CSS on small viewports and touch-primary devices', () => {
+    const rules = elementStyleRules('scion-chat-decisions');
+    expect(
+      rules.get('@media (max-width: 768px), (hover: none) and (pointer: coarse) .hint')
+    ).toContain('display: none');
   });
 
   it('stacks choices as rows with descriptions when any choice has one', async () => {
