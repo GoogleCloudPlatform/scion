@@ -130,16 +130,16 @@ func TestAgentSecretList_ExperimentOffFallsBackToProjectList(t *testing.T) {
 	var agentEndpointHit, projectEndpointHit bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-		case r.URL.Path == "/api/v1/agents/"+secretGetTestAgentID+"/secrets":
+		case "/api/v1/agents/" + secretGetTestAgentID + "/secrets":
 			agentEndpointHit = true
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"error": map[string]string{"code": "validation_error", "message": "scope must be \"project\" or \"user\""},
 			})
-		case r.URL.Path == "/api/v1/secrets":
+		case "/api/v1/secrets":
 			projectEndpointHit = true
 			assert.Equal(t, "project", r.URL.Query().Get("scope"))
 			_ = json.NewEncoder(w).Encode(map[string]any{
