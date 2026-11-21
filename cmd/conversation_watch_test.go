@@ -202,3 +202,38 @@ func TestConversationWatch_Gating(t *testing.T) {
 	assert.True(t, windowsAllowed["conversation.watch"], "conversation.watch must be in windowsAllowed")
 	assert.False(t, agentAllowed["conversation.watch"], "conversation.watch must be absent from agentAllowed (D2 host-only)")
 }
+
+// Regression test (O3): when the --timeout budget has already elapsed before
+// the next poll iteration, executeConversationWatchOnce exits 124 without
+// issuing another Watch call with Wait == 0 (which would omit wait and block
+// for the server's 30s default).
+func TestConversationWatchOnce_ExpiredBudgetDoesNotPollWithZeroWait(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	calls := 0
+	svc := &fakeWatchConvService{
+		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			calls++
+			assert.Greater(t, opts.Wait, time.Duration(0), "Watch must never be called with Wait==0 under --timeout")
+			time.Sleep(15 * time.Millisecond)
+			return &hubclient.WatchResult{
+				Events:     []hubclient.WatchEvent{},
+				NextCursor: "cur-1",
+				TimedOut:   true,
+			}, nil
+		},
+	}
+
+	err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+		ConversationID: "conv-1",
+		Cursor:         "cur-0",
+		Filter:         "others",
+		Limit:          50,
+		Timeout:        10 * time.Millisecond,
+		JSON:           true,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+	})
+	require.Error(t, err)
+	assert.Equal(t, 124, exitCodeFor(err))
+	assert.Equal(t, 1, calls)
+}

@@ -203,8 +203,9 @@ func executeConversationWatchOnce(ctx context.Context, svc hubclient.Conversatio
 		if hasDeadline {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				wait = 0
-			} else if remaining < wait {
+				return writeWatchOnceTimeout(params, opts.Cursor, false)
+			}
+			if remaining < wait {
 				wait = remaining
 			}
 		}
@@ -242,25 +243,34 @@ func executeConversationWatchOnce(ctx context.Context, svc hubclient.Conversatio
 
 		// Empty result: check whether the total --timeout budget has expired.
 		if hasDeadline && time.Until(deadline) <= 0 {
-			res.TimedOut = true
-			if params.JSON {
-				if wErr := writeCompactJSON(params.Stdout, res); wErr != nil {
-					return wErr
-				}
-				return &watchExitError{
-					code:     watchExitTimeout,
-					err:      errors.New("watch timed out"),
-					reported: true,
-				}
-			}
-			if res.NextCursor != "" && params.Stderr != nil {
-				_, _ = fmt.Fprintf(params.Stderr, "next-cursor: %s\n", res.NextCursor)
-			}
-			return &watchExitError{
-				code: watchExitTimeout,
-				err:  errors.New("watch timed out"),
-			}
+			return writeWatchOnceTimeout(params, res.NextCursor, res.Truncated)
 		}
+	}
+}
+
+func writeWatchOnceTimeout(params watchOnceParams, nextCursor string, truncated bool) error {
+	if params.JSON {
+		out := &hubclient.WatchResult{
+			Events:     []hubclient.WatchEvent{},
+			NextCursor: nextCursor,
+			Truncated:  truncated,
+			TimedOut:   true,
+		}
+		if wErr := writeCompactJSON(params.Stdout, out); wErr != nil {
+			return wErr
+		}
+		return &watchExitError{
+			code:     watchExitTimeout,
+			err:      errors.New("watch timed out"),
+			reported: true,
+		}
+	}
+	if nextCursor != "" && params.Stderr != nil {
+		_, _ = fmt.Fprintf(params.Stderr, "next-cursor: %s\n", nextCursor)
+	}
+	return &watchExitError{
+		code: watchExitTimeout,
+		err:  errors.New("watch timed out"),
 	}
 }
 
