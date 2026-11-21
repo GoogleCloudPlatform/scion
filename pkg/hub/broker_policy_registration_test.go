@@ -35,12 +35,21 @@ import (
 
 func setBrokerPolicyState(t *testing.T, srv *Server, s store.Store, expOn, policyOn bool) {
 	t.Helper()
+	setBrokerPolicyStateWithOverrides(t, srv, s, expOn, policyOn, nil)
+}
+
+func setBrokerPolicyStateWithOverrides(t *testing.T, srv *Server, s store.Store, expOn, policyOn bool, extraOverrides map[string]bool) {
+	t.Helper()
 	ctx := context.Background()
-	expDoc := json.RawMessage(`{"overrides":{"` + experiments.AdminManagedBrokers + `":false}}`)
-	if expOn {
-		expDoc = json.RawMessage(`{"overrides":{"` + experiments.AdminManagedBrokers + `":true}}`)
+	overrides := map[string]bool{
+		experiments.AdminManagedBrokers: expOn,
 	}
-	_, err := s.UpsertHubSetting(ctx, "experiments", expDoc, "test", -1, "managed")
+	for k, v := range extraOverrides {
+		overrides[k] = v
+	}
+	expDoc, err := json.Marshal(map[string]any{"overrides": overrides})
+	require.NoError(t, err)
+	_, err = s.UpsertHubSetting(ctx, "experiments", json.RawMessage(expDoc), "test", -1, "managed")
 	require.NoError(t, err)
 
 	policyDoc := json.RawMessage(`{"admin_managed_only":false}`)
@@ -55,6 +64,15 @@ func setBrokerPolicyState(t *testing.T, srv *Server, s store.Store, expOn, polic
 	require.NoError(t, err)
 	ApplySnapshot(srv, ops.Snapshot())
 	srv.SetOperationalSettings(ops)
+}
+
+type captureBrokerPolicyAuditLogger struct {
+	AuditLogger
+	events []*BrokerAuthEvent
+}
+
+func (c *captureBrokerPolicyAuditLogger) LogBrokerAuth(_ context.Context, event *BrokerAuthEvent) {
+	c.events = append(c.events, event)
 }
 
 func newHubAdminUser(t *testing.T, s store.Store, slug string) *store.User {
@@ -184,7 +202,7 @@ func TestBrokerPolicy_RegistrationMatrix(t *testing.T) {
 	memberUATAuth := func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+memberUAT)
 	}
-	adminUAT := mintHubBrokerCreateUAT(t, srv, superAdmin.ID)
+	adminUAT := mintHubBrokerUAT(t, srv, superAdmin.ID, "broker:create", "project:create")
 	adminUATAuth := func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+adminUAT)
 	}
@@ -304,16 +322,25 @@ func TestBrokerPolicy_RegistrationMatrix(t *testing.T) {
 func TestBrokerPolicy_FlatRegistrationAndPreserveSettings(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
+	auditCap := &captureBrokerPolicyAuditLogger{}
+	srv.auditLogger = auditCap
+
 	member := newHubMemberUser(t, s, "bp-flat-member")
 	hubAdmin := newHubAdminUser(t, s, "bp-flat-admin")
+	superAdmin := newSuperAdminUser(t, s, "bp-flat-super")
 
-	setBrokerPolicyState(t, srv, s, true, true)
+	setBrokerPolicyStateWithOverrides(t, srv, s, true, true, map[string]bool{
+		experiments.FlatRuntimeBrokers: true,
+	})
 
 	memberAuth := func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, member))
 	}
 	adminAuth := func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, hubAdmin))
+	}
+	superAdminAuth := func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, superAdmin))
 	}
 
 	// Member flat registration refused with policy 403.
@@ -326,7 +353,7 @@ func TestBrokerPolicy_FlatRegistrationAndPreserveSettings(t *testing.T) {
 	code, _ := decodeBrokerPolicyErrorCode(t, rec)
 	assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
 
-	// Hub-admin flat registration with adminManaged: true + PreserveSettings: true (join-token style) succeeds and stamps AdminManaged=true.
+	// Hub-admin flat registration with adminManaged: true + PreserveSettings: true (join-token style) succeeds, stamps AdminManaged=true, and audits admin_managed=true.
 	brokerID := api.NewUUID()
 	rec = doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
 		BrokerID:         brokerID,
@@ -339,6 +366,71 @@ func TestBrokerPolicy_FlatRegistrationAndPreserveSettings(t *testing.T) {
 	got, err := s.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
 	assert.True(t, got.AdminManaged)
+	require.NotEmpty(t, auditCap.events)
+	lastEvent := auditCap.events[len(auditCap.events)-1]
+	assert.Equal(t, "true", lastEvent.Details["admin_managed"])
+	assert.Empty(t, lastEvent.Details["prior_admin_managed"])
+
+	// O1: Pre-approval via join-token (PreserveSettings: true + AdminManaged: true)
+	// against existing unmanaged legacy and flat brokers while policy is off
+	// upgrades AdminManaged=true while leaving preserved settings untouched, and
+	// audits prior_admin_managed=false -> admin_managed=true.
+	setBrokerPolicyStateWithOverrides(t, srv, s, true, false, map[string]bool{
+		experiments.FlatRuntimeBrokers: true,
+	})
+
+	legacyExisting := &store.RuntimeBroker{
+		ID:        api.NewUUID(),
+		Name:      "legacy-preserve-upgrade",
+		Slug:      "legacy-preserve-upgrade",
+		Status:    store.BrokerStatusOffline,
+		CreatedBy: member.ID,
+		Labels:    map[string]string{"env": "staging"},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, legacyExisting))
+	rec = doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:             legacyExisting.Name,
+		AdminManaged:     true,
+		PreserveSettings: true,
+		Labels:           map[string]string{"env": "should-not-overwrite", "extra": "ignored"},
+	}, superAdminAuth)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	gotLegacy, err := s.GetRuntimeBroker(ctx, legacyExisting.ID)
+	require.NoError(t, err)
+	assert.True(t, gotLegacy.AdminManaged, "legacy PreserveSettings re-registration must honor authorized AdminManaged=true")
+	assert.Equal(t, "staging", gotLegacy.Labels["env"], "preserved labels must remain untouched")
+	assert.NotContains(t, gotLegacy.Labels, "extra", "preserved re-registration must not merge new labels")
+	lastEvent = auditCap.events[len(auditCap.events)-1]
+	assert.Equal(t, "true", lastEvent.Details["admin_managed"])
+	assert.Equal(t, "false", lastEvent.Details["prior_admin_managed"])
+
+	flatExisting := &store.RuntimeBroker{
+		ID:            api.NewUUID(),
+		Name:          "flat-preserve-upgrade",
+		Slug:          "flat-preserve-upgrade",
+		Status:        store.BrokerStatusOffline,
+		CreatedBy:     member.ID,
+		Labels:        map[string]string{"env": "prod"},
+		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "rt-preserve", Type: "docker"},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, flatExisting))
+	rec = doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		BrokerID:         flatExisting.ID,
+		Name:             flatExisting.Name,
+		AdminManaged:     true,
+		PreserveSettings: true,
+		Labels:           map[string]string{"env": "should-not-overwrite", "extra": "ignored"},
+		RuntimeTarget:    &api.RuntimeTargetDescriptor{ID: "rt-preserve", Type: "docker"},
+	}, superAdminAuth)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	gotFlat, err := s.GetRuntimeBroker(ctx, flatExisting.ID)
+	require.NoError(t, err)
+	assert.True(t, gotFlat.AdminManaged, "flat PreserveSettings re-registration must honor authorized AdminManaged=true")
+	assert.Equal(t, "prod", gotFlat.Labels["env"], "preserved flat labels must remain untouched")
+	assert.NotContains(t, gotFlat.Labels, "extra", "preserved flat re-registration must not merge new labels")
+	lastEvent = auditCap.events[len(auditCap.events)-1]
+	assert.Equal(t, "true", lastEvent.Details["admin_managed"])
+	assert.Equal(t, "false", lastEvent.Details["prior_admin_managed"])
 }
 
 func TestBrokerPolicy_DeprecatedProjectsRegisterBrokerPath(t *testing.T) {
@@ -354,7 +446,7 @@ func TestBrokerPolicy_DeprecatedProjectsRegisterBrokerPath(t *testing.T) {
 	adminAuth := func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, superAdmin))
 	}
-	adminUAT := mintHubBrokerCreateUAT(t, srv, superAdmin.ID)
+	adminUAT := mintHubBrokerUAT(t, srv, superAdmin.ID, "broker:create", "project:create")
 	adminUATAuth := func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+adminUAT)
 	}
@@ -412,8 +504,10 @@ func TestBrokerPolicy_DeprecatedProjectsRegisterBrokerPath(t *testing.T) {
 		},
 	}, adminUATAuth)
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	code, _ = decodeBrokerPolicyErrorCode(t, rec)
+	code, details = decodeBrokerPolicyErrorCode(t, rec)
 	assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
+	assert.Equal(t, "reregister", details["operation"])
+	assert.Equal(t, managed.ID, details["brokerId"])
 
 	// Existing managed broker: allowed for interactive super-admin.
 	rec = doBrokerRequest(t, srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
@@ -473,10 +567,21 @@ func TestBrokerPolicy_AdminServerConfigDB_ExperimentGateAndLiveApply(t *testing.
 	_, err := ops.Refresh(ctx)
 	require.NoError(t, err)
 	srv.SetOperationalSettings(ops)
+	propCtx, cancelProp := context.WithCancel(ctx)
+	t.Cleanup(cancelProp)
+	ops.StartPropagation(propCtx, srv)
 
 	superAdmin := newSuperAdminUser(t, s, "bp-cfg-admin")
+	hubAdmin := newHubAdminUser(t, s, "bp-cfg-hub-admin")
+	member := newHubMemberUser(t, s, "bp-cfg-member")
 	adminAuth := func(r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, superAdmin))
+	}
+	hubAdminAuth := func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, hubAdmin))
+	}
+	memberAuth := func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, member))
 	}
 
 	// Experiment off: saving admin_managed_only=true returns 412 experiment_disabled.
@@ -498,6 +603,29 @@ func TestBrokerPolicy_AdminServerConfigDB_ExperimentGateAndLiveApply(t *testing.
 		map[string]interface{}{"broker_policy": map[string]interface{}{"admin_managed_only": true}}, adminAuth)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.True(t, srv.adminManagedBrokersOnly())
+
+	// End-to-end chain (design §8): with the policy saved via Admin Server Config,
+	// a member's registration gets 403 broker_policy_admin_managed_only naming the
+	// setting, and a hub-admin's --admin-managed sign-in registration returns 201
+	// with the row stamped adminManaged=true.
+	memberDenied := doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name: "e2e-member-denied",
+	}, memberAuth)
+	require.Equal(t, http.StatusForbidden, memberDenied.Code, memberDenied.Body.String())
+	code, details := decodeBrokerPolicyErrorCode(t, memberDenied)
+	assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
+	assert.Equal(t, "broker_policy.admin_managed_only", details["setting"])
+
+	adminCreated := doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:         "e2e-admin-managed",
+		AdminManaged: true,
+	}, hubAdminAuth)
+	require.Equal(t, http.StatusCreated, adminCreated.Code, adminCreated.Body.String())
+	var adminResp CreateBrokerRegistrationResponse
+	require.NoError(t, json.Unmarshal(adminCreated.Body.Bytes(), &adminResp))
+	storedBroker, err := s.GetRuntimeBroker(ctx, adminResp.BrokerID)
+	require.NoError(t, err)
+	assert.True(t, storedBroker.AdminManaged)
 
 	// GET returns broker_policy.admin_managed_only == true.
 	getRec := doBrokerRequest(t, srv, http.MethodGet, "/api/v1/admin/server-config", nil, adminAuth)
@@ -522,9 +650,22 @@ func TestBrokerPolicy_AdminServerConfigDB_ExperimentGateAndLiveApply(t *testing.
 		map[string]interface{}{"broker_policy": map[string]interface{}{"admin_managed_only": true}}, adminAuth)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	// Clear with null -> live-applies nil/false.
+	// Re-enable experiment, then clear the setting with null -> live-applies off,
+	// and a member registration succeeds again (201).
+	_, err = s.UpsertHubSetting(ctx, "experiments",
+		json.RawMessage(`{"overrides":{"`+experiments.AdminManagedBrokers+`":true}}`), "test", -1, "managed")
+	require.NoError(t, err)
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+
 	rec = doBrokerRequest(t, srv, http.MethodPut, "/api/v1/admin/server-config",
 		map[string]interface{}{"broker_policy": map[string]interface{}{"admin_managed_only": nil}}, adminAuth)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.False(t, srv.brokerPolicyAdminManagedOnlyConfigured())
+	assert.False(t, srv.adminManagedBrokersOnly())
+
+	memberAllowed := doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name: "e2e-member-allowed-after-clear",
+	}, memberAuth)
+	require.Equal(t, http.StatusCreated, memberAllowed.Code, memberAllowed.Body.String())
 }

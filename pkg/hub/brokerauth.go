@@ -656,10 +656,18 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	var kept []KeptSetting
 	var gcp registrationGCPHostResult
 	if existingBroker != nil && req.PreserveSettings {
-		// Reuse existing broker and leave its record as it is: only a new
-		// join token is issued below.
+		// Reuse existing broker and leave its metadata as it is, except when
+		// an authorized adminManaged stamp upgrades an existing row (e.g.
+		// 'scion hub brokers join-token create --admin-managed').
 		brokerID = existingBroker.ID
 		reregistered = true
+		if req.AdminManaged && !existingBroker.AdminManaged {
+			existingBroker.AdminManaged = true
+			existingBroker.Updated = time.Now()
+			if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
+				return nil, fmt.Errorf("failed to update existing broker: %w", err)
+			}
+		}
 	} else if existingBroker != nil {
 		// Reuse existing broker - update its metadata. Labels are added
 		// when the key is absent; the GCP host pair is filled below only

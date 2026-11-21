@@ -170,6 +170,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// Enforce broker_policy.admin_managed_only and explicit adminManaged
 	// registration (ptone/scion#7829). Runs after authorizeBrokerCreate and
 	// existing-broker lookup/remint check, covering both legacy and flat paths.
+	priorAdminManaged := existingBroker != nil && existingBroker.AdminManaged
 	stampAdminManaged, ok := s.authorizeBrokerRegistrationPolicy(w, r, existingBroker, req.AdminManaged)
 	if !ok {
 		return
@@ -271,6 +272,11 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	if resp.GCPHostSet {
 		kv = append(kv, "gcp_host_set", "true")
 	}
+	newAdminManaged := priorAdminManaged || req.AdminManaged
+	kv = append(kv, "admin_managed", strconv.FormatBool(newAdminManaged))
+	if existingBroker != nil {
+		kv = append(kv, "prior_admin_managed", strconv.FormatBool(priorAdminManaged))
+	}
 	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
 		operation, mergeBrokerAuditDetails(details, kv...))
 
@@ -315,19 +321,16 @@ func (s *Server) createFlatBrokerRegistration(ctx context.Context, req CreateBro
 		AutoProvideAuthorized: autoProvideAuthorized,
 		HostSAClaim:           hostSA,
 		Apply: func(b *store.RuntimeBroker, created bool) {
+			if req.AdminManaged {
+				b.AdminManaged = true
+			}
 			if preserve && !created {
 				return
 			}
 			if !preserve {
 				b.AutoProvide = req.AutoProvide
-				if req.AdminManaged {
-					b.AdminManaged = true
-				}
 			}
 			if created {
-				if req.AdminManaged {
-					b.AdminManaged = true
-				}
 				// A new row takes the GCP host pair and labels from the
 				// request; the Hub sets the broker role.
 				if !preserve && (saEmail != "" || req.GCPHostProjectID != "") {
