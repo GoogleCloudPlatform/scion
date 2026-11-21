@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -57,4 +58,33 @@ func TestNew_StoresServerConfigExperimentsRegistry(t *testing.T) {
 	if srv2.experimentRegistry() != experiments.Default() {
 		t.Error("New() without cfg.Experiments should fall back to experiments.Default()")
 	}
+}
+
+func TestServer_ExperimentRegistry_ConcurrentReadWrite(t *testing.T) {
+	srv := &Server{}
+	reg := testRegistry(t)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if i%2 == 0 {
+				srv.setExperimentRegistry(reg)
+			} else {
+				srv.setExperimentRegistry(nil)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			got := srv.experimentRegistry()
+			if got != reg && got != experiments.Default() {
+				t.Errorf("unexpected registry %p", got)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }

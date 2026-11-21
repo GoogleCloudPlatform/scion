@@ -3030,8 +3030,10 @@ type Server struct {
 
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
-	// nil-safe experimentRegistry() accessor, never directly.
-	experiments *experiments.Registry
+	// nil-safe experimentRegistry() accessor and write mid-test through
+	// setExperimentRegistry(), never directly while handlers may be reading.
+	experimentsMu sync.RWMutex
+	experiments   *experiments.Registry
 
 	// reincarnationRequesterResolveTimeout bounds
 	// buildReincarnationRequesterContext's store calls (design Amendment
@@ -4149,7 +4151,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 			"allowed_client_ids", len(cfg.GEGoogleExchange.AllowedClientIDs))
 	}
 
-	srv.experiments = cfg.Experiments
+	srv.setExperimentRegistry(cfg.Experiments)
 	srv.initSystemOneRuntime()
 
 	rulesEngine, celDialect, err := newRuleEngine()

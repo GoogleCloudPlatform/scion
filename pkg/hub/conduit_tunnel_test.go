@@ -1163,7 +1163,7 @@ type tunnelUserFaultStore struct {
 }
 
 func (s *tunnelUserFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	if id == s.userID && s.fault.Active() {
+	if s.fault.Active() && id == s.userID {
 		return nil, errors.New("injected user read fault")
 	}
 	return s.Store.GetUser(ctx, id)
@@ -1173,12 +1173,18 @@ func (s *tunnelUserFaultStore) GetUser(ctx context.Context, id string) (*store.U
 // is 500 internal_error and goes no further: no tunnel is opened or
 // tracked, although the owner would otherwise be allowed (200).
 func TestConduitTunnel_UserLookupFaultIs500(t *testing.T) {
-	tf := newTunnelFixture(t)
+	var (
+		faultStore *tunnelUserFaultStore
+		fault      *storeFaultSwitch
+	)
+	tf := newTunnelFixtureServer(t, func(srv *Server) {
+		faultStore, fault = installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *tunnelUserFaultStore {
+			return &tunnelUserFaultStore{Store: inner, fault: f}
+		})
+	})
 	tf.startAgent(t, tf.public.URL, tf.launched)
 	c := tf.ownerClient(t)
-	_, fault := installStoreFault(t, tf.srv, func(inner store.Store, f *storeFaultSwitch) *tunnelUserFaultStore {
-		return &tunnelUserFaultStore{Store: inner, fault: f, userID: tf.launched.OwnerID}
-	})
+	faultStore.userID = tf.launched.OwnerID
 	fault.Arm()
 	a := tf.srv.conduitAuthz.Load()
 
@@ -1271,7 +1277,7 @@ type tunnelBrokerFaultStore struct {
 }
 
 func (s *tunnelBrokerFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
-	if id == s.brokerID && s.fault.Active() {
+	if s.fault.Active() && id == s.brokerID {
 		return nil, errors.New("injected broker read fault")
 	}
 	return s.Store.GetRuntimeBroker(ctx, id)
@@ -1281,12 +1287,18 @@ func (s *tunnelBrokerFaultStore) GetRuntimeBroker(ctx context.Context, id string
 // is an internal error (generic 500), not "broker online": nothing is
 // opened.
 func TestConduitTunnel_BrokerLookupFaultIs500(t *testing.T) {
-	tf := newTunnelFixture(t)
+	var (
+		faultStore *tunnelBrokerFaultStore
+		fault      *storeFaultSwitch
+	)
+	tf := newTunnelFixtureServer(t, func(srv *Server) {
+		faultStore, fault = installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *tunnelBrokerFaultStore {
+			return &tunnelBrokerFaultStore{Store: inner, fault: f}
+		})
+	})
 	tf.startAgent(t, tf.public.URL, tf.launched)
 	c := tf.ownerClient(t)
-	_, fault := installStoreFault(t, tf.srv, func(inner store.Store, f *storeFaultSwitch) *tunnelBrokerFaultStore {
-		return &tunnelBrokerFaultStore{Store: inner, fault: f, brokerID: tf.launched.RuntimeBrokerID}
-	})
+	faultStore.brokerID = tf.launched.RuntimeBrokerID
 	fault.Arm()
 
 	r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))

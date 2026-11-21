@@ -184,11 +184,9 @@ func newCapReplica(t *testing.T, st store.Store, k *keyring.Keyring, clk *krCloc
 // store, object storage, the attachment store and the web chat store.
 func mirrorHubResources(dst, src *Server) {
 	src.mu.RLock()
-	exp, art, stor, att, wcs := src.experiments, src.artifactStore, src.storage, src.attachmentStore, src.webChatStore
+	art, stor, att, wcs := src.artifactStore, src.storage, src.attachmentStore, src.webChatStore
 	src.mu.RUnlock()
-	dst.mu.Lock()
-	dst.experiments = exp
-	dst.mu.Unlock()
+	dst.setExperimentRegistry(src.experimentRegistry())
 	dst.SetArtifactStore(art)
 	dst.SetStorage(stor)
 	if att != nil {

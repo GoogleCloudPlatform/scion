@@ -309,7 +309,9 @@ type compactDeletionSeed struct {
 // neither do the rest, so null views are compared too.
 func compactDeletionSeeds(f *compactFixture) []compactDeletionSeed {
 	return []compactDeletionSeed{
-		{agentID: f.agentIDAt(1), seed: seedLiveDeleting},
+		// Use a local long lease rather than the shared 60s seedLiveDeleting so
+		// the row stays live-deleting throughout slow -race runs (~70s on 2 CPUs).
+		{agentID: f.agentIDAt(1), seed: deleteSeed{name: "live deleting", state: store.DeletionStateDeleting, leaseIn: time.Hour}},
 		{agentID: f.agentIDAt(3), seed: deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError}, errText: "broker said: container c-3 exited 137", detail: true},
 		{agentID: f.agentIDAt(4), seed: deleteSeed{state: store.DeletionStateFinalizing, leaseIn: time.Hour}},
 		{agentID: f.agentIDAt(5), seed: deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeInDoubt}, errText: "teardown on broker unconfirmed", detail: true},
