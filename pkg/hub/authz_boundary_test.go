@@ -2413,3 +2413,17 @@ func TestResolveTargetScope_CollectionEmptyTypeWithBogusScopeKind_Denied(t *test
 		t.Errorf("collection evidence with empty Resource.Type + bogus ScopeKind must resolve Unknown: got %+v", got)
 	}
 }
+
+func TestResolveTargetScope_BrokerRegistryTypeOnly(t *testing.T) {
+	gotBroker := ResolveTargetScope(Resource{Type: permissions.ResourceBroker, ID: "b1"}, TargetScopeEvidence{})
+	if gotBroker.Kind != TargetScopeHub {
+		t.Errorf("broker resource must resolve Hub: got %+v", gotBroker)
+	}
+
+	for _, staleOrUnknown := range []string{"runtime_broker", "unknown_resource_type"} {
+		got := ResolveTargetScope(Resource{Type: staleOrUnknown, ID: "b1"}, TargetScopeEvidence{})
+		if got.Kind != TargetScopeUnknown {
+			t.Errorf("resource type %q must fail closed to TargetScopeUnknown, not Hub: got %+v", staleOrUnknown, got)
+		}
+	}
+}
