@@ -153,10 +153,8 @@ var DangerousExtensions = map[string]bool{
 	".application": true, ".appref-ms": true,
 }
 
-// attachmentExt returns the lower-cased extension that the blocklist above and
-// the classifier's text-like list both judge. It is deliberately the only such
-// parse: two copies of "lower-case filepath.Ext" is how two answers to the same
-// question begin to disagree.
+// attachmentExt returns the lower-cased extension after stripping any NTFS
+// alternate data stream suffix (":" and everything after it).
 //
 // The name is normalised first, because the blocklist is a claim about the file
 // a recipient ends up with rather than about the exact bytes of the upload's
@@ -167,6 +165,10 @@ var DangerousExtensions = map[string]bool{
 // Stream suffixes and trailing noise are stripped and invisible runes are
 // dropped so that every spelling of an extension is judged as the extension it
 // will behave as.
+//
+// Blocklist refusal goes through refusedAttachmentExt (the single refusal gate
+// shared by SanitizeFilename and ClassifyAttachment), while text-like MIME
+// classification uses normalizeAttachmentExt on the full name.
 func attachmentExt(name string) string {
 	if before, _, ok := strings.Cut(name, ":"); ok {
 		name = before
@@ -174,6 +176,8 @@ func attachmentExt(name string) string {
 	return normalizeAttachmentExt(name)
 }
 
+// normalizeAttachmentExt extracts and lower-cases the extension after trimming
+// trailing dots and ignorable runes, without stripping ":" stream suffixes.
 func normalizeAttachmentExt(name string) string {
 	name = strings.TrimRightFunc(name, func(r rune) bool {
 		return r == '.' || isIgnorableFilenameRune(r)

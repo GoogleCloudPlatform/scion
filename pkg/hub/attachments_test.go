@@ -218,6 +218,21 @@ func TestSanitizeFilename_StreamSuffixesDoNotDefeatTheBlocklist(t *testing.T) {
 		_, err = ClassifyAttachment(name, []byte("plain text content\n"))
 		require.NoError(t, err, "ClassifyAttachment(%q)", name)
 	}
+
+	// POSIX filenames with a colon in the stem retain their text-like
+	// classification rather than losing their extension to stream stripping.
+	gotMime, err := ClassifyAttachment("notes:v2.md", []byte("# Heading\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "text/markdown", gotMime)
+
+	gotMime, err = ClassifyAttachment("data:1.json", []byte(`{"ok":true}`))
+	require.NoError(t, err)
+	assert.Equal(t, "text/plain", gotMime)
+
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
+	_, err = ClassifyAttachment("data:1.json", png)
+	require.Error(t, err, "binary payload under data:1.json should still be refused as non-text")
+	assert.Contains(t, err.Error(), ".json content does not look like text")
 }
 
 // The blocklist should have no hole immediately beside an entry it already

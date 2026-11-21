@@ -96,7 +96,10 @@ func ClassifyAttachment(filename string, head []byte) (string, error) {
 	if ext, refused := refusedAttachmentExt(filename); refused {
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
-	ext := attachmentExt(filename)
+	// Use the full-name extension (without stripping ":" stream suffixes) for
+	// text-like MIME classification so POSIX filenames with a colon in the stem
+	// (such as "notes:v2.md") keep their expected type.
+	ext := normalizeAttachmentExt(filename)
 
 	if len(head) > contentSniffLen {
 		head = head[:contentSniffLen]
