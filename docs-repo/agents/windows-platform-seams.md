@@ -41,11 +41,15 @@ The `windows-latest` job runs only `.github/windows-test-packages.txt`: one pack
 
 ## Local check
 
-Only `./cmd/scion` and packages in its `GOOS=windows` import graph must build and vet on Windows: `./cmd/sciontool`, `./cmd/scion-broker-repl`, and container-only `pkg/sciontool` subpackages (`supervisor`, `services`, `homeprep`, `conduit/...`, `hooks/handlers`, `netcap`, `suppgroups`) are Unix-only (vet individual `./cmd/scion`-imported subpackages rather than `./pkg/sciontool/...`), and `GOOS=windows go test -c` applies only to packages in `.github/windows-test-packages.txt` or with `*_windows_test.go` (unlisted test binaries may import Unix-only container packages).
+Only `./cmd/scion` and packages in its `GOOS=windows` import graph (`GOOS=windows go list -deps ./cmd/scion`) must build on Windows, and vet where their test files allow:
+
+- **Outside `./cmd/scion`'s Windows import graph (out of Windows vet scope):** `./cmd/sciontool`, `./cmd/scion-broker-repl`, container-only `pkg/sciontool` subpackages omitted by `go list -deps` (e.g. `supervisor`, `services`, `conduit/...`, `hooks/handlers`, `netcap`, `suppgroups`), and Unix-only migration packages such as `./pkg/projectfs/migrate/...` (`GOOS=windows go vet ./pkg/projectfs/migrate/...` exits 1 with `matched no packages`). Vet individual `./cmd/scion`-imported subpackages rather than `./pkg/sciontool/...` or `./cmd/...`.
+- **In `./cmd/scion`'s Windows import graph, with `GOOS=windows go vet` skipped due to pre-existing Unix-only test files/imports:** `./pkg/runtimebroker` (`project_relink_test.go` references `syscall.Mkfifo`) and `./pkg/harness` (test-graph import pulls in `pkg/sciontool/supervisor`). The seams above and `hack/winsec-guard.sh` **do** apply to their non-test code; rely on the `./cmd/scion` Windows cross-build and `hack/winsec-guard.sh` for them instead of `GOOS=windows go vet`.
+- **`GOOS=windows go test -c`:** applies to any package listed in `.github/windows-test-packages.txt` (run it for **any** new or edited test in a listed package, not only `*_windows_test.go`, because CI compiles every test file in the package even when `-run` filters it) or with `*_windows_test.go`; unlisted test binaries may import Unix-only container packages.
 
 ```bash
 GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
 GOOS=windows GOARCH=amd64 go vet -buildvcs=false ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/<yours>/...   # for cmd/, pass ./cmd ./cmd/scion (not ./cmd/...; ./cmd/sciontool is unix-only)
 bash hack/winsec-guard.sh
-GOOS=windows go test -buildvcs=false -c -o /dev/null ./pkg/<yours>   # compiles Windows-only tests
+GOOS=windows go test -buildvcs=false -c -o /dev/null ./pkg/<yours>   # required for any test edit in .github/windows-test-packages.txt or *_windows_test.go
 ```
