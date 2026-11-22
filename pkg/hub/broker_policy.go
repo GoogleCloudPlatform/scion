@@ -127,6 +127,66 @@ func brokerPolicyDetails(op string, b *store.RuntimeBroker) map[string]interface
 	return details
 }
 
+// brokerPolicyEligible reports whether b is eligible under the current
+// admin-managed-only broker policy: true when the policy is off, or
+// isAdminManagedBroker(b) when the policy is on (design ptone/scion#7829 §4.2).
+func (s *Server) brokerPolicyEligible(b *store.RuntimeBroker) bool {
+	return !s.brokerPolicyRefuses(b)
+}
+
+// authorizeBrokerManage enforces the gate for approving or revoking a broker's
+// admin-managed flag on PATCH /api/v1/runtime-brokers/{id} (design
+// ptone/scion#7829 §3.1, §3.2, §4.1, §4.7.2):
+//   - interactive session or dev credential only (no UAT);
+//   - test-admin identities refused via testAdminPolicyRefusesUser;
+//   - broker.manage permission (not broker.update; owners cannot self-approve);
+//   - experiment hub.admin_managed_brokers must be on (412 experiment_disabled).
+func (s *Server) authorizeBrokerManage(w http.ResponseWriter, r *http.Request, actor UserIdentity, broker *store.RuntimeBroker) bool {
+	ctx := r.Context()
+	if !brokerUserCredentialKindAdmitted(ctx, actor, false) {
+		logAuthzDenial(r, actor, brokerResource(broker), ActionManage, "credential kind not admitted for broker.manage")
+		Forbidden(w)
+		return false
+	}
+	if s.testAdminPolicyRefusesUser(ctx, actor.ID(), "broker_policy.go:authorizeBrokerManage") {
+		logAuthzDenial(r, actor, brokerResource(broker), ActionManage, testAdminPolicyDenyReason)
+		Forbidden(w)
+		return false
+	}
+	decision := s.authzService.CheckAccess(ctx, actor, Resource{Type: "broker"}, ActionManage)
+	if !decision.Allowed {
+		logAuthzDenial(r, actor, brokerResource(broker), ActionManage, decision.Reason)
+		Forbidden(w)
+		return false
+	}
+	if !s.experimentEnabled(experiments.AdminManagedBrokers) {
+		writeBrokerPolicyExperimentDisabled(w)
+		return false
+	}
+	return true
+}
+
+// callerCanManageBrokers reports whether the caller in ctx holds broker.manage
+// on an admitted credential (interactive or dev) for UI capability reporting.
+func (s *Server) callerCanManageBrokers(ctx context.Context) bool {
+	if s.authzService == nil {
+		return false
+	}
+	user := GetUserIdentityFromContext(ctx)
+	if user == nil || !brokerUserCredentialKindAdmitted(ctx, user, false) {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, user, Resource{Type: "broker"}, ActionManage).Allowed
+}
+
+// reportBrokerManageCapability appends ActionManage to caps when allowed.
+func reportBrokerManageCapability(caps *Capabilities, allowed bool) {
+	if caps == nil || !allowed || capabilityAllows(caps, ActionManage) {
+		return
+	}
+	caps.Actions = append(caps.Actions, string(ActionManage))
+}
+
 // writeBrokerPolicyDenial logs and writes the structured 403 refusal for a
 // broker policy denial (design ptone/scion#7829 §4.4).
 func writeBrokerPolicyDenial(w http.ResponseWriter, r *http.Request, op string, b *store.RuntimeBroker) {

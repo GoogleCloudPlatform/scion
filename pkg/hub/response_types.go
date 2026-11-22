@@ -345,6 +345,10 @@ type RuntimeBrokerWithCapabilities struct {
 	// version: match, mismatch or unknown (see brokerVersionStatus).
 	// Omitted for a plugin record.
 	VersionStatus string `json:"versionStatus,omitempty"`
+	// PolicyEligible reports whether this broker is eligible under
+	// broker_policy.admin_managed_only (isAdminManagedBroker when the policy
+	// is on, or true when the policy is off; ptone/scion#7829 §4.2).
+	PolicyEligible bool `json:"policyEligible"`
 }
 
 // MarshalJSON implements custom marshaling to avoid shadowing of fields by the embedded store.RuntimeBroker.
@@ -358,6 +362,7 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
 		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
 		VersionStatus      string        `json:"versionStatus,omitempty"`
+		PolicyEligible     bool          `json:"policyEligible"`
 	}{
 		BrokerAlias:        BrokerAlias(b.RuntimeBroker),
 		Cap:                b.Cap,
@@ -366,6 +371,7 @@ func (b RuntimeBrokerWithCapabilities) MarshalJSON() ([]byte, error) {
 		AgentLimitSource:   b.AgentLimitSource,
 		HostedByThisServer: b.HostedByThisServer,
 		VersionStatus:      b.VersionStatus,
+		PolicyEligible:     b.PolicyEligible,
 	})
 }
 

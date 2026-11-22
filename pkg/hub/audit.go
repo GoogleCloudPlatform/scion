@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1169,6 +1170,12 @@ func brokerSettingsChangeDetails(before, after *store.RuntimeBroker) []string {
 	}
 	if before.GCPHostSource != after.GCPHostSource {
 		kv = append(kv, "gcp_host_source.old", before.GCPHostSource, "gcp_host_source.new", after.GCPHostSource)
+	}
+	if before.AdminManaged != after.AdminManaged {
+		kv = append(kv,
+			"admin_managed.old", strconv.FormatBool(before.AdminManaged),
+			"admin_managed.new", strconv.FormatBool(after.AdminManaged),
+		)
 	}
 	return kv
 }

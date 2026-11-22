@@ -3152,6 +3152,13 @@ type projectProviderView struct {
 	// against it). Omitted whenever resolution didn't run or failed — the
 	// same conditions that leave AgentLimit and AgentCount unset.
 	AgentLimitSource string `json:"agentLimitSource,omitempty"`
+	// AdminManaged is the broker's stored admin_managed approval flag
+	// (ptone/scion#7829 §4.2).
+	AdminManaged bool `json:"adminManaged,omitempty"`
+	// PolicyEligible reports whether this provider broker is eligible under
+	// broker_policy.admin_managed_only (isAdminManagedBroker when the policy
+	// is on, or true when the policy is off; ptone/scion#7829 §4.2).
+	PolicyEligible bool `json:"policyEligible"`
 }
 
 // listProjectProviders returns all providers for a project.
@@ -3174,6 +3181,12 @@ func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, pr
 	for i, p := range providers {
 		views[i] = projectProviderView{ProjectProvider: p}
 		views[i].AgentLimit, views[i].AgentCount, views[i].AgentLimitSource = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
+		if b, err := s.store.GetRuntimeBroker(ctx, p.BrokerID); err == nil && b != nil {
+			views[i].AdminManaged = b.AdminManaged
+			views[i].PolicyEligible = s.brokerPolicyEligible(b)
+		} else {
+			views[i].PolicyEligible = !s.adminManagedBrokersOnly()
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

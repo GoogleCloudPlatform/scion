@@ -50,6 +50,8 @@ type RuntimeBrokerWithProvider struct {
 	Cap       *Capabilities `json:"_capabilities,omitempty"`
 	// VersionStatus is as in RuntimeBrokerWithCapabilities.
 	VersionStatus string `json:"versionStatus,omitempty"`
+	// PolicyEligible is as in RuntimeBrokerWithCapabilities.
+	PolicyEligible bool `json:"policyEligible"`
 }
 
 // ListRuntimeBrokersWithProviderResponse is returned when filtering by projectId.
@@ -156,20 +158,23 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		// Storage layout values are shown to readers with hub.config.read
 		// only: decided once for the whole listing.
 		showStorage := s.storageValuesAllowed(ctx)
+		canManage := s.callerCanManageBrokers(ctx)
 		for i, broker := range result.Items {
 			if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
 			broker = redactBrokerStorage(broker, showStorage)
 			eb := RuntimeBrokerWithProvider{
-				RuntimeBroker: brokerForDisplayWithDetail(broker, false),
-				LocalPath:     brokerLocalPaths[broker.ID],
-				VersionStatus: runtimeBrokerVersionStatus(&result.Items[i], hubVersion),
+				RuntimeBroker:  brokerForDisplayWithDetail(broker, false),
+				LocalPath:      brokerLocalPaths[broker.ID],
+				VersionStatus:  runtimeBrokerVersionStatus(&result.Items[i], hubVersion),
+				PolicyEligible: s.brokerPolicyEligible(&result.Items[i]),
 			}
 			if caps != nil && i < len(caps) {
 				eb.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 				eb.Cap = caps[i]
 				s.reportBrokerDispatchCapability(ctx, eb.Cap, &result.Items[i], project)
+				reportBrokerManageCapability(eb.Cap, canManage)
 			}
 			extendedBrokers = append(extendedBrokers, eb)
 		}
@@ -202,6 +207,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	// Storage layout values are shown to readers with hub.config.read only:
 	// decided once for the whole listing.
 	showStorage := s.storageValuesAllowed(ctx)
+	canManage := s.callerCanManageBrokers(ctx)
 	for i, broker := range result.Items {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
@@ -210,11 +216,13 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplayWithDetail(broker, false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
 		resp.VersionStatus = runtimeBrokerVersionStatus(&result.Items[i], hubVersion)
+		resp.PolicyEligible = s.brokerPolicyEligible(&result.Items[i])
 		if caps != nil && i < len(caps) {
 			resp.RuntimeBroker = brokerForDisplayWithCap(broker, caps[i])
 			resp.Cap = caps[i]
 			// Without a project, the project-independent dispatch rule.
 			s.reportBrokerDispatchCapability(ctx, resp.Cap, &result.Items[i], nil)
+			reportBrokerManageCapability(resp.Cap, canManage)
 		}
 		// Capacity fields carry no visibility check beyond the ActionRead
 		// filter above: whoever can already see this broker row sees its
@@ -472,10 +480,12 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: brokerForDisplayWithDetail(shown, pureSelf)}
 	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
 	resp.VersionStatus = runtimeBrokerVersionStatus(broker, s.hubFleetVersion(ctx))
+	resp.PolicyEligible = s.brokerPolicyEligible(broker)
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
 		resp.RuntimeBroker = brokerForDisplayWithDetail(shown, pureSelf || (resp.Cap != nil && capabilityAllows(resp.Cap, ActionUpdate)))
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
+		reportBrokerManageCapability(resp.Cap, s.callerCanManageBrokers(ctx))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -498,18 +508,6 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// A test identity with an admin role updates only a broker it
-	// registered (test-admin policy).
-	if broker.CreatedBy != actor.ID() && s.testAdminPolicyRefuses(ctx, "handlers_runtime_brokers.go:updateRuntimeBroker") {
-		Forbidden(w)
-		return
-	}
-
-	// Enforce authorization: only the broker owner or admins can update
-	if !s.authorize(w, r, brokerResource(broker), ActionUpdate) {
-		return
-	}
-
 	var updates struct {
 		Name                       string            `json:"name,omitempty"`
 		Labels                     map[string]string `json:"labels,omitempty"`
@@ -520,12 +518,48 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		// values until the next update. Setting either GCP host field
 		// implies true unless false is sent with it.
 		GCPHostPinned *bool `json:"gcpHostPinned,omitempty"`
+		// AdminManaged approves or revokes this broker as admin-managed
+		// (ptone/scion#7829 §3.1, §4.7.2). Gated solely by broker.manage
+		// (not broker.update) on an interactive or dev credential while
+		// experiment hub.admin_managed_brokers is enabled.
+		AdminManaged *bool `json:"adminManaged,omitempty"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+
+	hasAdminManaged := updates.AdminManaged != nil
+	hasOtherUpdates := updates.Name != "" ||
+		updates.Labels != nil ||
+		updates.GCPHostServiceAccountEmail != nil ||
+		updates.GCPHostProjectID != nil ||
+		updates.GCPHostPinned != nil
+
+	// Non-adminManaged updates (and empty PATCH bodies) require broker.update.
+	needBrokerUpdate := !hasAdminManaged || hasOtherUpdates
+	if needBrokerUpdate {
+		// A test identity with an admin role updates only a broker it
+		// registered (test-admin policy).
+		if broker.CreatedBy != actor.ID() && s.testAdminPolicyRefuses(ctx, "handlers_runtime_brokers.go:updateRuntimeBroker") {
+			Forbidden(w)
+			return
+		}
+		// Enforce authorization: only the broker owner or admins can update
+		if !s.authorize(w, r, brokerResource(broker), ActionUpdate) {
+			return
+		}
+	}
+
+	// Updating adminManaged requires broker.manage only (never broker.update),
+	// interactive/dev credential, non-test-admin, and experiment enabled.
+	if hasAdminManaged {
+		if !s.authorizeBrokerManage(w, r, actor, broker) {
+			return
+		}
+	}
+
 	// Test admin tier: the plugin broker label is hub-reserved.
 	if s.refuseTestAdminPluginLabel(w, updates.Labels) {
 		return
@@ -567,6 +601,10 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			}
 		}
 		broker.Labels = labels
+		recordChanged = true
+	}
+	if updates.AdminManaged != nil && broker.AdminManaged != *updates.AdminManaged {
+		broker.AdminManaged = *updates.AdminManaged
 		recordChanged = true
 	}
 	priorHostSA := hostSAClaimOf(broker)
@@ -666,8 +704,22 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	// The caller holds broker.update (checked above).
-	writeJSON(w, http.StatusOK, brokerForDisplayWithDetail(s.brokerStorageForViewer(ctx, *after, false), true))
+	// Return the updated broker with policyEligible and _capabilities so
+	// callers (including the UI) see the new approval and eligibility state
+	// immediately without a second GET.
+	resp := RuntimeBrokerWithCapabilities{
+		RuntimeBroker:      brokerForDisplayWithDetail(s.brokerStorageForViewer(ctx, *after, false), needBrokerUpdate),
+		HostedByThisServer: s.embeddedBrokerSnapshot().has(after.ID),
+		VersionStatus:      runtimeBrokerVersionStatus(after, s.hubFleetVersion(ctx)),
+		PolicyEligible:     s.brokerPolicyEligible(after),
+	}
+	if ident := GetIdentityFromContext(ctx); ident != nil {
+		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(after))
+		resp.RuntimeBroker = brokerForDisplayWithDetail(s.brokerStorageForViewer(ctx, *after, false), resp.Cap != nil && capabilityAllows(resp.Cap, ActionUpdate))
+		s.reportBrokerDispatchCapability(ctx, resp.Cap, after, nil)
+		reportBrokerManageCapability(resp.Cap, s.callerCanManageBrokers(ctx))
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {

@@ -436,6 +436,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"handlers_agent_create_helpers.go:brokerProviderHasOwnerConsent": {Policy: testAdminPolicyAllow, Reason: "reads whether the broker provider's linker (not the caller) is a system admin"},
 	"handlers_brokers.go:brokerRemintTargetAuthorized":               {Policy: testAdminPolicyDeny, Reason: "runtime broker credential remint (key material)"},
 	"handlers_brokers.go:authorizedForBrokerRotate":                  {Policy: testAdminPolicyDeny, Reason: "runtime broker secret rotation (key material)"},
+	"broker_policy.go:authorizeBrokerManage":                         {Policy: testAdminPolicyDeny, Reason: "approving or revoking admin-managed runtime broker status (ptone/scion#7829)"},
 	"authz_delegation_ceiling.go:evaluateUserDelegatorAuthority":     {Policy: testAdminPolicyAllow, Reason: "delegation ceiling of a system-admin delegator; an agent rooted at a test admin is issued no scope covering a deny-classified permission (clampTestAdminRootedScopes, A3)"},
 	"project_deletion_service.go:Delete":                             {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
 	"project_deletion_service.go:checkDeletionGovernance":            {Policy: testAdminPolicyAllow, Reason: "super-admin project deletion governance"},
