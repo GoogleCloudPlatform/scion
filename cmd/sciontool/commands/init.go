@@ -1435,6 +1435,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		readyCfg := readyWatchConfig{
 			Nonce:         readyNonce,
 			Mode:          readyMode,
+			Strategy:      readySpec.Strategy,
 			Start:         harnessLaunchedAt,
 			Settle:        readySpec.Settle,
 			Deadline:      readySpec.Timeout,
@@ -1501,6 +1502,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 				LiveWork: liveWork.record(livenessProvider(liveness.NewSampler(liveness.Config{
 					AgentUID:         livenessAgentUID(targetUID),
 					HarnessRootDepth: livenessHarnessRootDepth(os.Getenv),
+					CheckAttached:    livenessAttachedChecker(os.Getenv),
 				}), statusHandler.CurrentActivitySince)),
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
@@ -2104,6 +2106,16 @@ func livenessAgentUID(targetUID int) int {
 		return targetUID
 	}
 	return os.Getuid()
+}
+
+// livenessAttachedChecker returns the attached-terminal liveness checker for
+// the built-in "shell" execution container harness only, or nil for every
+// other harness (ptone/scion#8812 §3.3).
+func livenessAttachedChecker(getenv func(string) string) func() bool {
+	if strings.TrimSpace(getenv("SCION_HARNESS")) != "shell" {
+		return nil
+	}
+	return liveness.TmuxAttachedChecker("scion")
 }
 
 // livenessHarnessRootDepth reads the liveness harness root depth from

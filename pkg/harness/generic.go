@@ -59,7 +59,7 @@ func ValidateCommand(h api.Harness, task string, resume bool, baseArgs []string)
 // build from, without constructing a container-script harness (for preflight
 // admission checks that hold only an EffectiveConfig entry and its source).
 func ValidateEntryCommand(source config.HarnessConfigSource, entry config.HarnessConfigEntry, task string, resume bool, baseArgs []string) error {
-	if source != config.HarnessConfigSourceBuiltin || entry.Provisioner != nil {
+	if source != config.HarnessConfigSourceBuiltin || entry.Provisioner != nil || entry.Harness == config.ShellHarnessConfigName {
 		return nil
 	}
 	d := NewDeclarativeGenericHarness(entry)

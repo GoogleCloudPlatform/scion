@@ -83,6 +83,9 @@ const (
 	// ReadySettleHook is how long the runtime waits after a fresh hook-mode
 	// ready marker before pasting, so the harness's input has mounted.
 	ReadySettleHook = 1500 * time.Millisecond
+	// ReadySettleIdle is how long an idle-strategy harness (e.g. the built-in
+	// shell execution container) settles before transitioning initializing -> idle.
+	ReadySettleIdle = 1 * time.Second
 )
 
 // Ready strategies, the values of a harness-config ready block's strategy
@@ -92,8 +95,12 @@ const (
 	// current run is written (by a session-start hook) plus the settle.
 	ReadyStrategyHook = "hook"
 	// ReadyStrategyDelay: the harness is ready once its tmux session has
-	// existed for the settle period.
+	// existed for the settle period (transitions initializing -> working).
 	ReadyStrategyDelay = "delay"
+	// ReadyStrategyIdle: the harness is ready once its tmux session has
+	// existed for the settle period, and transitions initializing -> idle
+	// rather than working (used by the built-in shell execution container).
+	ReadyStrategyIdle = "idle"
 )
 
 // Limits on ready spec values, shared by harness-config validation and by
@@ -128,10 +135,14 @@ const LivenessHarnessRootDepthHintEnv = "HARNESS_HINT_LIVENESS_ROOT_DEPTH"
 // configured: the readiness constants above. An unknown strategy gets the
 // delay defaults.
 func DefaultReadySpec(strategy string) api.ReadySpec {
-	if strategy == ReadyStrategyHook {
+	switch strategy {
+	case ReadyStrategyHook:
 		return api.ReadySpec{Strategy: ReadyStrategyHook, Settle: ReadySettleHook, Timeout: ReadyDeadline}
+	case ReadyStrategyIdle:
+		return api.ReadySpec{Strategy: ReadyStrategyIdle, Settle: ReadySettleIdle}
+	default:
+		return api.ReadySpec{Strategy: ReadyStrategyDelay, Settle: ReadySettleSession}
 	}
-	return api.ReadySpec{Strategy: ReadyStrategyDelay, Settle: ReadySettleSession}
 }
 
 // ReadyModeForStrategy returns the init-run line 1 mode for a ready
@@ -152,9 +163,9 @@ func CheckReadySpec(spec api.ReadySpec) error {
 		if spec.Timeout < MinReadyTimeout || spec.Timeout > MaxReadyTimeout {
 			return fmt.Errorf("ready timeout %s out of range [%s, %s]", spec.Timeout, MinReadyTimeout, MaxReadyTimeout)
 		}
-	case ReadyStrategyDelay:
+	case ReadyStrategyDelay, ReadyStrategyIdle:
 		if spec.Timeout != 0 {
-			return fmt.Errorf("ready timeout %s not allowed with strategy %q", spec.Timeout, ReadyStrategyDelay)
+			return fmt.Errorf("ready timeout %s not allowed with strategy %q", spec.Timeout, spec.Strategy)
 		}
 	default:
 		return fmt.Errorf("unknown ready strategy %q", spec.Strategy)
@@ -290,7 +301,7 @@ func ParseInitRunSpec(content string) (InitRunSpec, bool) {
 		}
 	}
 	res.HasSpec = strings.TrimSpace(line2) != ""
-	if s := fields["strategy"]; s == ReadyStrategyHook || s == ReadyStrategyDelay {
+	if s := fields["strategy"]; s == ReadyStrategyHook || s == ReadyStrategyDelay || s == ReadyStrategyIdle {
 		if ReadyModeForStrategy(s) == mode {
 			strategy = s
 		}

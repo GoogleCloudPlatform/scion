@@ -121,10 +121,13 @@ const (
 	ErrCodeMessageDenied = "message_denied"
 
 	// Delivery error codes
-	ErrCodeAgentNotFound   = "agent_not_found"
-	ErrCodeDeliveryFailed  = "delivery_failed"
-	ErrCodeAgentNotRunning = "agent_not_running"
-	ErrCodeBrokerTimeout   = "broker_timeout"
+	ErrCodeAgentNotFound       = "agent_not_found"
+	ErrCodeAgentNotMessageable = "agent_not_messageable"
+	ErrCodeDeliveryFailed      = "delivery_failed"
+	ErrCodeAgentNotRunning     = "agent_not_running"
+	ErrCodeBrokerTimeout       = "broker_timeout"
+	ErrCodeReservedName        = "reserved_name"
+	ErrCodeTaskNotSupported    = "task_not_supported"
 	// ErrCodeAgentSessionUnavailable is returned (503) when the agent is
 	// running but the conduit session a stream needs is not connected.
 	ErrCodeAgentSessionUnavailable = "agent_session_unavailable"

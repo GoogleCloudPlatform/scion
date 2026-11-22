@@ -41,6 +41,11 @@ type readyWatchConfig struct {
 	Nonce string
 	// Mode is state.ReadyModeHook or state.ReadyModeSettle.
 	Mode string
+	// Strategy is the resolved ready strategy (state.ReadyStrategyHook,
+	// state.ReadyStrategyDelay, or state.ReadyStrategyIdle). When set to
+	// state.ReadyStrategyIdle, settle transitions initializing -> idle with
+	// message "Execution container ready".
+	Strategy string
 	// Start is when the harness (tmux) was launched.
 	Start time.Time
 
@@ -166,6 +171,11 @@ func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutc
 			log.Debug("Harness readiness: hook marker seen and settled")
 			return readyOutcomeHookMarker
 		case !hookMode && !now.Before(cfg.Start.Add(sessionSettle)):
+			if cfg.Strategy == state.ReadyStrategyIdle {
+				markReadyActivity(ctx, cfg, state.ActivityIdle, "Execution container ready")
+				log.Debug("Harness readiness: idle strategy settled")
+				return readyOutcomeSettled
+			}
 			markReady(ctx, cfg, "Harness started")
 			log.Debug("Harness readiness: settle period elapsed")
 			return readyOutcomeSettled
@@ -187,10 +197,16 @@ func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutc
 // markReady swaps the local activity from initializing to working and, if
 // that happened, reports working to the hub. It reports whether it swapped.
 func markReady(ctx context.Context, cfg readyWatchConfig, message string) bool {
+	return markReadyActivity(ctx, cfg, state.ActivityWorking, message)
+}
+
+// markReadyActivity swaps the local activity from initializing to target and,
+// if that happened, reports target to the hub. It reports whether it swapped.
+func markReadyActivity(ctx context.Context, cfg readyWatchConfig, target state.Activity, message string) bool {
 	if cfg.ReplaceLocal == nil {
 		return false
 	}
-	swapped, err := cfg.ReplaceLocal(state.ActivityInitializing, state.ActivityWorking)
+	swapped, err := cfg.ReplaceLocal(state.ActivityInitializing, target)
 	if err != nil {
 		log.Error("Harness readiness: updating local status: %v", err)
 		// Without a local record, still tell the hub: leaving the agent
@@ -200,7 +216,7 @@ func markReady(ctx context.Context, cfg readyWatchConfig, message string) bool {
 	if !swapped {
 		return false
 	}
-	report(ctx, cfg, state.ActivityWorking, message)
+	report(ctx, cfg, target, message)
 	return true
 }
 

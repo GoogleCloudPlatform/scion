@@ -218,6 +218,11 @@ func (s *Server) importTemplateHarnessConfigsWithOptions(ctx context.Context, cd
 		}
 		dirPath := filepath.Join(cd.dir, filepath.FromSlash(rel))
 		slug := api.Slugify(name)
+		if slug == config.ShellHarnessConfigName {
+			s.templateLog.Warn("template harness-config import: skipping reserved shell harness-config directory",
+				"config", name, "dir", dirPath)
+			continue
+		}
 
 		hcDirCfg, err := config.LoadHarnessConfigFromFiles(name, dirPath, func(file string) ([]byte, error) {
 			return cd.read(rel + "/" + file)

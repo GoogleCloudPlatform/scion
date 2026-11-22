@@ -74,6 +74,11 @@ func (s *Server) BootstrapHarnessConfigsFromDir(ctx context.Context, harnessConf
 		name := entry.Name()
 		dirPath := filepath.Join(harnessConfigsDir, name)
 		slug := api.Slugify(name)
+		if slug == config.ShellHarnessConfigName {
+			s.resourceLog.Warn("harness config bootstrap: skipping reserved shell harness-config directory",
+				"config", name, "dir", dirPath)
+			continue
+		}
 
 		// Load config.yaml to get harness type, confined to the directory
 		// (a linked config.yaml fails the load).

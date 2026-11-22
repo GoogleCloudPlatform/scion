@@ -3539,6 +3539,9 @@ const (
 	// ReadyStrategyDelay means the harness is ready once its tmux session has
 	// existed for the settle period.
 	ReadyStrategyDelay = state.ReadyStrategyDelay
+	// ReadyStrategyIdle means the harness settles into idle rather than working
+	// (used by the built-in shell execution container).
+	ReadyStrategyIdle = state.ReadyStrategyIdle
 )
 
 // Ready and delivery limits and delivery defaults. The ready defaults are

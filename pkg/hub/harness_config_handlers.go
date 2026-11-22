@@ -349,6 +349,9 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "slug is empty after normalization", nil)
 		return
 	}
+	if refuseReservedHarnessConfigSlug(w, slug) {
+		return
+	}
 	if s.refuseGlobalHarnessConfigSlug(ctx, w, createScope, slug) {
 		return
 	}
@@ -730,6 +733,9 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
 	}
+	if refuseReservedHarnessConfigSlug(w, hc.Slug) {
+		return
+	}
 	if hc.Slug != existing.Slug && s.refuseGlobalHarnessConfigSlug(ctx, w, hc.Scope, hc.Slug) {
 		return
 	}
@@ -752,6 +758,9 @@ func (s *Server) patchHarnessConfig(w http.ResponseWriter, r *http.Request, exis
 		DisplayName: &existing.DisplayName,
 		Description: &existing.Description,
 	}) {
+		return
+	}
+	if refuseReservedHarnessConfigSlug(w, existing.Slug) {
 		return
 	}
 	if existing.Slug != prevSlug && s.refuseGlobalHarnessConfigSlug(ctx, w, existing.Scope, existing.Slug) {
@@ -1376,6 +1385,9 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 	// for why this must run ahead of the copy below rather than only being
 	// caught by CreateHarnessConfig's own uniqueness check, and why it is
 	// only a fast path rather than a full fix for concurrent requests.
+	if refuseReservedHarnessConfigSlug(w, clone.Slug) {
+		return
+	}
 	if existing, err := s.store.GetHarnessConfigBySlug(ctx, clone.Slug, clone.Scope, clone.ScopeID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeErrorFromErr(w, err, "")
 		return

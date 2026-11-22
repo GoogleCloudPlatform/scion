@@ -112,6 +112,9 @@ type MCPSettingsApplier interface {
 // Resolve it with config.HarnessConfigEntry.ResolvedDelivery, which applies
 // the defaults.
 type DeliverySpec struct {
+	// Disabled, when true, refuses all message delivery to this harness
+	// (e.g. the built-in "shell" execution container harness).
+	Disabled bool
 	// SubmitKeys are tmux key names sent after the paste, one send-keys call
 	// per entry. They are also sent once, alone, for an empty message.
 	SubmitKeys []string
@@ -128,8 +131,9 @@ type DeliverySpec struct {
 // only to strategies that wait for a signal. Resolve it with
 // config.HarnessConfigEntry.ResolvedReady, which applies the defaults.
 type ReadySpec struct {
-	// Strategy is "hook" (signal is the ready marker for the run) or "delay"
-	// (signal is tmux session creation).
+	// Strategy is "hook" (signal is the ready marker for the run), "delay"
+	// (signal is tmux session creation, transitions to working), or "idle"
+	// (signal is tmux session creation, transitions to idle).
 	Strategy string
 	// Settle is the wait after the signal before the harness counts as ready.
 	Settle time.Duration

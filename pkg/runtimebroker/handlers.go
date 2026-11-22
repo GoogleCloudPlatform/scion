@@ -950,6 +950,12 @@ func startSharerKey(agentID string) string {
 	return ""
 }
 
+// isShellCreateRequest reports whether req targets the reserved built-in
+// "shell" harness config, which uses NoAuth semantics (no LLM env gathering).
+func isShellCreateRequest(req CreateAgentRequest) bool {
+	return req.Config != nil && req.Config.HarnessConfig == config.ShellHarnessConfigName
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -1413,7 +1419,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// hash-only, or no resolver) and must not trigger another attempt.
 	var hydratedTemplatePath, hydratedHCPath string
 	var tplHydrated, hcHydrated bool
-	if req.GatherEnv && !req.NoAuth {
+	if req.GatherEnv && !req.NoAuth && !isShellCreateRequest(req) {
 		// A profile the Hub's stored profiles cannot resolve fails the
 		// create at buildStartContext anyway; report it here, before the
 		// auth and env checks below, so a create whose default runtime

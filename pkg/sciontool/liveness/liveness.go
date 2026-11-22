@@ -25,8 +25,10 @@ package liveness
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -48,6 +50,9 @@ const (
 	// KindProcess (Tier 2) is a process outside the baseline set whose CPU
 	// time advanced by at least MinCPUTicks since the previous sample.
 	KindProcess Kind = "process"
+	// KindAttached reports an interactive terminal client attached to the
+	// tmux session (shell execution containers only; guards idle-suspend).
+	KindAttached Kind = "attached"
 )
 
 // ToolCallStallCap is how long after a tool call began its live process
@@ -109,6 +114,10 @@ type Config struct {
 	// is the TUI, 2 when it is a launcher that spawns the TUI as a child
 	// (Codex). Capped at MaxHarnessRootDepth.
 	HarnessRootDepth int
+	// CheckAttached, when non-nil, reports whether an interactive terminal
+	// client is attached to the container's tmux session. Scoped to shell
+	// execution containers (ptone/scion#8812 §3.3).
+	CheckAttached func() bool
 }
 
 // MaxHarnessRootDepth caps Config.HarnessRootDepth: a deeper launcher
@@ -119,10 +128,11 @@ const MaxHarnessRootDepth = 4
 // of /proc. It is not safe for concurrent use; the heartbeat loop calls it
 // from one goroutine.
 type Sampler struct {
-	agentUID  int
-	isManaged func(pid int) bool
-	rootDepth int
-	procRoot  string
+	agentUID      int
+	isManaged     func(pid int) bool
+	checkAttached func() bool
+	rootDepth     int
+	procRoot      string
 	// prev holds each process's CPU time at the previous sample; nil until
 	// the first sample, which only records the baseline.
 	prev map[int]procSample
@@ -174,7 +184,13 @@ func NewSampler(cfg Config) *Sampler {
 		isManaged = procreap.IsManagedPID
 	}
 	depth := min(max(cfg.HarnessRootDepth, 1), MaxHarnessRootDepth)
-	return &Sampler{agentUID: cfg.AgentUID, isManaged: isManaged, rootDepth: depth, procRoot: "/proc"}
+	return &Sampler{
+		agentUID:      cfg.AgentUID,
+		isManaged:     isManaged,
+		checkAttached: cfg.CheckAttached,
+		rootDepth:     depth,
+		procRoot:      "/proc",
+	}
 }
 
 // sample walks the /proc tree at s.procRoot once and returns the live work
@@ -201,7 +217,57 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 	if work := s.cpuWork(procs, excluded); work != nil {
 		return work
 	}
-	return tool
+	if tool != nil {
+		return tool
+	}
+	if s.checkAttached != nil && s.checkAttached() {
+		return &LiveWork{
+			Kind:          KindAttached,
+			SuppressStall: false,
+			Detail:        "terminal attached",
+		}
+	}
+	return nil
+}
+
+const tmuxAttachedTimeout = 2 * time.Second
+
+// TmuxAttachedChecker returns a CheckAttached function that queries
+// `tmux list-clients -t <session>` and reports true when at least one
+// terminal client is attached.
+func TmuxAttachedChecker(session string) func() bool {
+	return tmuxAttachedCheckerOnSocket(session, "")
+}
+
+func tmuxAttachedCheckerOnSocket(session, socket string) func() bool {
+	if session == "" {
+		session = "scion"
+	}
+	return func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), tmuxAttachedTimeout)
+		defer cancel()
+		args := make([]string, 0, 5)
+		if socket != "" {
+			args = append(args, "-L", socket)
+		}
+		args = append(args, "list-clients", "-t", session)
+		cmd := exec.CommandContext(ctx, "tmux", args...)
+		if socket != "" {
+			// Isolate from any outer TMUX session when targeting a private socket.
+			env := make([]string, 0, len(os.Environ()))
+			for _, kv := range os.Environ() {
+				if !strings.HasPrefix(kv, "TMUX=") {
+					env = append(env, kv)
+				}
+			}
+			cmd.Env = env
+		}
+		out, err := cmd.Output()
+		if err != nil {
+			return false
+		}
+		return strings.TrimSpace(string(out)) != ""
+	}
 }
 
 // recordCPU records every process's CPU time for the next sample's Tier 2

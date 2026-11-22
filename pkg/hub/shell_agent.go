@@ -15,6 +15,9 @@
 package hub
 
 import (
+	"fmt"
+	"net/http"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -34,4 +37,18 @@ func isShellAgent(agent *store.Agent) bool {
 		return agent.AppliedConfig.HarnessConfig == config.ShellHarnessConfigName
 	}
 	return agent.HarnessConfig == config.ShellHarnessConfigName
+}
+
+// refuseReservedHarnessConfigSlug writes 400 reserved_name and returns true
+// when slug is the reserved built-in "shell" harness config name. This guard
+// is ungated and applies at every scope (global, project, user) so nothing
+// can shadow the built-in shell harness config (ptone/scion#8812 §3.2).
+func refuseReservedHarnessConfigSlug(w http.ResponseWriter, slug string) bool {
+	if slug != config.ShellHarnessConfigName {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeReservedName,
+		fmt.Sprintf("harness config slug %q is reserved by the built-in shell harness", slug),
+		map[string]interface{}{"field": "slug"})
+	return true
 }

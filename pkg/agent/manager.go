@@ -1485,6 +1485,9 @@ func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
 	}
 	h := newHarness(harnessName)
 	ds := h.DeliverySpec()
+	if ds.Disabled {
+		return fmt.Errorf("agent %q uses harness %q which does not support message delivery", agent.Name, h.Name())
+	}
 	if len(ds.SubmitKeys) == 0 {
 		// Resolved specs always carry at least one key; guard against an
 		// implementation that returns a zero value, which would paste the

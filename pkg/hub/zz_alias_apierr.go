@@ -36,7 +36,10 @@ const (
 	ErrCodeAddrUnknown                      = apierr.ErrCodeAddrUnknown
 	ErrCodeAgentExistsResumable             = apierr.ErrCodeAgentExistsResumable
 	ErrCodeAgentNotFound                    = apierr.ErrCodeAgentNotFound
+	ErrCodeAgentNotMessageable              = apierr.ErrCodeAgentNotMessageable
 	ErrCodeAgentNotRunning                  = apierr.ErrCodeAgentNotRunning
+	ErrCodeReservedName                     = apierr.ErrCodeReservedName
+	ErrCodeTaskNotSupported                 = apierr.ErrCodeTaskNotSupported
 	ErrCodeAgentSessionUnavailable          = apierr.ErrCodeAgentSessionUnavailable
 	ErrCodeAgentUpgradeRequired             = apierr.ErrCodeAgentUpgradeRequired
 	ErrCodeBrokerAuthFailed                 = apierr.ErrCodeBrokerAuthFailed

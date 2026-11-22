@@ -147,9 +147,22 @@ const (
 // other name is refused with ErrInvalidResourceName. The empty name loads the
 // hydrated copy on that branch (it is loaded whatever name resolves) and
 // finds nothing on the other.
+// builtinShellHarnessConfigDir returns the synthetic built-in harness-config
+// entry for the reserved "shell" execution container harness (ptone/scion#8812).
+func builtinShellHarnessConfigDir() *HarnessConfigDir {
+	return &HarnessConfigDir{
+		Name:   ShellHarnessConfigName,
+		Config: HarnessConfigEntry{Harness: ShellHarnessConfigName, Image: "scion-base:latest", User: "scion"},
+		Source: HarnessConfigSourceBuiltin,
+	}
+}
+
 func ResolveHarnessConfigDir(hydratedPath, name, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
 	if err := checkLookupName(name); err != nil {
 		return nil, err
+	}
+	if name == ShellHarnessConfigName {
+		return builtinShellHarnessConfigDir(), nil
 	}
 	if hydratedPath != "" {
 		hcDir, err := LoadHarnessConfigDir(hydratedPath)
@@ -374,6 +387,11 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	if err := checkLookupName(name); err != nil {
 		return nil, err
 	}
+	// The "shell" harness config is reserved and cannot be shadowed by any
+	// template, project, or global directory (ptone/scion#8812).
+	if name == ShellHarnessConfigName {
+		return builtinShellHarnessConfigDir(), nil
+	}
 
 	// Track which directories were searched so the error message is actionable.
 	var searched []string
@@ -472,8 +490,18 @@ func loadHarnessConfigsFromDir(parentDir string, into map[string]*HarnessConfigD
 		if !entry.IsDir() {
 			continue
 		}
+		if entry.Name() == ShellHarnessConfigName {
+			slog.Warn("skipping reserved on-disk harness-config directory",
+				"name", entry.Name(), "path", filepath.Join(parentDir, entry.Name()))
+			continue
+		}
 		hc, err := LoadHarnessConfigDir(filepath.Join(parentDir, entry.Name()))
 		if err != nil {
+			continue
+		}
+		if hc.Name == ShellHarnessConfigName {
+			slog.Warn("skipping reserved on-disk harness-config",
+				"name", hc.Name, "path", hc.Path)
 			continue
 		}
 		into[hc.Name] = hc
