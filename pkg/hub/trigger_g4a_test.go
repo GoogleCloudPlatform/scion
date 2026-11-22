@@ -831,20 +831,11 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 
 	var createCalls atomic.Int32
 	tracker := &reuseTrackingBrokerClient{
-		st: f.sched.store,
-		createFn: func(ctx context.Context, req *CreateAgentRequest) (*RemoteAgentResponse, error) {
+		headlessGatherBrokerClient: f.client,
+		storeForUpd:                f.sched.store,
+		onBeforeCreate: func(_ *RemoteCreateAgentRequest) error {
 			createCalls.Add(1)
-			return &RemoteAgentResponse{
-				Agent: &store.Agent{
-					ID:              req.ID,
-					Slug:            req.Slug,
-					Name:            req.Name,
-					ProjectID:       req.ProjectID,
-					RuntimeBrokerID: f.sched.broker.ID,
-					Phase:           string(state.PhaseRunning),
-					Activity:        string(state.ActivityWaitingForInput),
-				},
-			}, nil
+			return nil
 		},
 	}
 	f.sched.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.sched.store, tracker, false, slog.Default()))
