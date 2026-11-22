@@ -355,3 +355,138 @@ func TestServerPostGitHubCommentIdempotent_UsesIdentityBotLoginAndFallback(t *te
 		assert.Equal(t, int64(950), got.ID)
 	})
 }
+
+func TestHandleProjectGitHubPermissions_InvalidatesInstallationTokenCache(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	srv.githubTokenCache.now = func() time.Time { return now }
+
+	var mintCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          1,
+			"slug":        "perms-cache-app",
+			"permissions": map[string]string{"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read"},
+		})
+	})
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			http.NotFound(w, r)
+			return
+		}
+		var req fakeMintRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		n := mintCount.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":       fmt.Sprintf("ghs_PERMS_CACHE_TOK_%d", n),
+			"expires_at":  now.Add(time.Hour).UTC().Format(time.RFC3339),
+			"permissions": req.Permissions,
+		})
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.AppID = 1
+	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+	srv.mu.Unlock()
+
+	admin := createAssocAdmin(t, st, "perms-cache-admin")
+	createAssocInstallation(t, st, 7201, "acme", "acme/alpha", "acme/beta")
+
+	remoteA := gh.URL + "/acme/alpha"
+	projA := createAssocProject(t, st, "perms-cache-a", remoteA, "nobody", ptrInt64(7201))
+	setAdminBinding(t, st, projA, 7201, normalizedRemoteForTest(remoteA), admin.ID)
+
+	remoteB := gh.URL + "/acme/beta"
+	projB := createAssocProject(t, st, "perms-cache-b", remoteB, "nobody", ptrInt64(7201))
+	setAdminBinding(t, st, projB, 7201, normalizedRemoteForTest(remoteB), admin.ID)
+
+	commentPerms := githubapp.TokenPermissions{Issues: "write", Metadata: "read"}
+	readPerms := githubapp.TokenPermissions{Contents: "read", Metadata: "read"}
+
+	// Warm installation-token cache for both projA and projB.
+	tokA1, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_PERMS_CACHE_TOK_1", tokA1)
+
+	tokB1, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projB.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_PERMS_CACHE_TOK_2", tokB1)
+	assert.Equal(t, int64(2), mintCount.Load())
+
+	// Confirm both hit cache before PUT.
+	tokAHit, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, tokA1, tokAHit)
+	tokBHit, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projB.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, tokB1, tokBHit)
+	assert.Equal(t, int64(2), mintCount.Load())
+
+	// PUT /api/v1/projects/{id}/github-permissions invalidates projA's cache
+	// while leaving projB's cached token intact.
+	putRR := doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+projA.ID+"/github-permissions", map[string]string{
+		"issues":   "write",
+		"contents": "read",
+		"metadata": "read",
+	})
+	require.Equal(t, http.StatusOK, putRR.Code, putRR.Body.String())
+
+	// projB still hits cache; projA misses and mints a fresh token.
+	tokBAfterPut, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projB.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, tokB1, tokBAfterPut)
+	assert.Equal(t, int64(2), mintCount.Load(), "PUT on projA must not invalidate projB's cache")
+
+	tokAAfterPut, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_PERMS_CACHE_TOK_3", tokAAfterPut)
+	assert.Equal(t, int64(3), mintCount.Load(), "PUT /github-permissions must invalidate projA's installation-token cache")
+
+	// Narrowing via PUT also invalidates and prevents returning a stale write token.
+	putNarrowRR := doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+projA.ID+"/github-permissions", map[string]string{
+		"contents": "read",
+		"metadata": "read",
+	})
+	require.Equal(t, http.StatusOK, putNarrowRR.Code, putNarrowRR.Body.String())
+
+	_, _, err = srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrGitHubPermissionNotPermitted), "got %v, want ErrGitHubPermissionNotPermitted", err)
+
+	// Warm projA with readPerms, then DELETE /github-permissions -> invalidates projA only.
+	tokARead, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), readPerms)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_PERMS_CACHE_TOK_4", tokARead)
+	assert.Equal(t, int64(4), mintCount.Load())
+
+	delRR := doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/projects/"+projA.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusNoContent, delRR.Code, delRR.Body.String())
+
+	// projB still hits cache; projA misses and mints fresh for both readPerms and commentPerms.
+	tokBAfterDel, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projB.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, tokB1, tokBAfterDel)
+	assert.Equal(t, int64(4), mintCount.Load(), "DELETE on projA must not invalidate projB's cache")
+
+	tokAReadAfterDel, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), readPerms)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_PERMS_CACHE_TOK_5", tokAReadAfterDel)
+	assert.Equal(t, int64(5), mintCount.Load(), "DELETE /github-permissions must invalidate projA's installation-token cache")
+
+	tokACommentAfterDel, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms)
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_PERMS_CACHE_TOK_6", tokACommentAfterDel)
+	assert.Equal(t, int64(6), mintCount.Load())
+}
