@@ -930,7 +930,7 @@ var tiaKeyMaterialSites = map[string]string{
 	"githubapp/githubapp.go:GenerateJWT:github.com/go-jose/go-jose/v4.NewSigner":                    "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS1PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
 	"githubapp/githubapp.go:ParsePrivateKey:crypto/x509.ParsePKCS8PrivateKey":                       "exempt: GitHub App key; signs requests to GitHub, never a hub credential",
-	"githubapp/githubapp.go:VerifyWebhookSignature:crypto/hmac.New":                                 "exempt: verifies GitHub webhook signatures with the configured webhook secret; signs nothing",
+	"trigger/github/seams.go:VerifyWebhookSignature:crypto/hmac.New":                                "exempt: canonical GitHub webhook HMAC-SHA256 verifier (shared with githubapp.VerifyWebhookSignature); signs no hub credential",
 	"trigger/signature.go:computeScionV1MAC:crypto/hmac.New":                                        "exempt: computes/verifies inbound webhook scion_v1 HMAC-SHA256 with per-endpoint secret; signs no hub credential",
 }
 

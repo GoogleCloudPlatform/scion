@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/source"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
@@ -186,16 +187,9 @@ type PostEvaluationHook interface {
 
 // SourceEnricher is an optional interface Core implementations may satisfy to
 // enrich a trigger event with source-fetched facts once per event before rule
-// evaluation (Stage 3 §5.5).
-type SourceEnricher interface {
-	// NeedsEnrichment reports whether ev lacks facts the source can fetch.
-	NeedsEnrichment(ev *hubfire.FireEvent) bool
-	// Enrich fetches and returns the attribute/list updates; the dispatcher
-	// persists them on the event row (UpdateTriggerEventAttributes) before
-	// evaluating any rule, so rules, history, the envelope and the agent file
-	// all see the same facts. Bounded: one call, 5 s, errors content-free.
-	Enrich(ctx context.Context, ev *hubfire.FireEvent) (attrs map[string]string, lists map[string][]string, err error)
-}
+// evaluation (Stage 3 §5.5). It aliases source.Enricher so the drainer and
+// provider-free source seam share the exact same interface type.
+type SourceEnricher = source.Enricher
 
 // DispatcherConfig configures a trigger event Dispatcher.
 type DispatcherConfig struct {

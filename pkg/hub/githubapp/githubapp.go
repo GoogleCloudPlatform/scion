@@ -18,7 +18,6 @@ package githubapp
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -38,6 +37,8 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	triggithub "github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/github"
 )
 
 // Config holds the GitHub App configuration.
@@ -762,22 +763,7 @@ func (c *Client) ListInstallationRepos(ctx context.Context, installationID int64
 // VerifyWebhookSignature validates a GitHub webhook payload signature.
 // GitHub sends the signature in the X-Hub-Signature-256 header as "sha256=<hex>".
 func VerifyWebhookSignature(payload []byte, signature string, secret string) bool {
-	if secret == "" || signature == "" {
-		return false
-	}
-
-	const prefix = "sha256="
-	if !strings.HasPrefix(signature, prefix) {
-		return false
-	}
-	sigHex := signature[len(prefix):]
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	expectedMAC := mac.Sum(nil)
-	expectedHex := fmt.Sprintf("%x", expectedMAC)
-
-	return hmac.Equal([]byte(sigHex), []byte(expectedHex))
+	return triggithub.VerifyWebhookSignature(payload, signature, secret)
 }
 
 // GetApp retrieves the authenticated GitHub App's information.
