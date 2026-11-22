@@ -500,10 +500,10 @@ an edited branch cannot read the secret:
   `build-release.yml` and `build-release.yml` calls `publish-homebrew.yml`, both passing
   `HOMEBREW_SCION_TOKEN` by name (declared under `on.workflow_call.secrets`; the environment's
   value takes precedence; `publish-homebrew.yml` marks it required). A new caller on the preview
-  path needs it too; without it the run fails at once, or the secret is empty and the gate job
-  fails. Pass it by name rather than with
-  `secrets: inherit`, which the GitHub Actions scan flags. A manual run of `publish-homebrew.yml`
-  from `main` is not nested, so it always sees the secret.
+  path must pass it too. A direct caller of `publish-homebrew.yml` that omits it fails before any
+  job starts. A caller higher up the chain that omits it passes an empty value, and the gate job
+  fails. Pass it by name rather than with `secrets: inherit`, which the GitHub Actions scan flags.
+  A manual run of `publish-homebrew.yml` from `main` is not nested, so it always sees the secret.
 - **Required reviewers (optional):** GitHub applies them to every run that uses the environment,
   not only to manual dispatches, so each of the three jobs then waits for approval, including on
   the scheduled weekly run.
