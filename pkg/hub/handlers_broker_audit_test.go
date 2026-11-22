@@ -82,6 +82,7 @@ func TestBrokerAudit_HubTokenRegistrationRecordsCredential(t *testing.T) {
 		"join_token_expires_at":    resp.ExpiresAt.UTC().Format(time.RFC3339),
 		"join_token_ttl":           "1h0m0s",
 		"reissued":                 "false",
+		"admin_managed":            "false",
 	}, e.Details)
 	assertNoSecretInDetails(t, e.Details, key, token.KeyHash, resp.JoinToken)
 }
