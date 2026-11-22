@@ -513,6 +513,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
 			return
 		}
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+				return
+			}
+		}
 	}
 
 	// Generate slug from request or name — always sanitize caller-supplied
@@ -910,6 +915,11 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	// SECURITY-GATE: authorize update access to this template (upload mutates content).
 	if !s.authorize(w, r, templateResource(template), catalogWriteAction(permissions.ResourceTemplate, template.Scope, ActionUpdate)) {
 		return
+	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
 	}
 
 	stor := s.GetStorage()

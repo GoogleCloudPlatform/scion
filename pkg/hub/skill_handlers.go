@@ -1075,6 +1075,11 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to publish versions for this skill", nil)
 		return
 	}
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
+	}
 
 	// Dispatch based on content type: multipart uploads are handled inline,
 	// while JSON requests go through the existing two-phase upload flow.
@@ -1405,6 +1410,11 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to upload files for this skill", nil)
 		return
+	}
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
 	}
 
 	stor := s.GetStorage()

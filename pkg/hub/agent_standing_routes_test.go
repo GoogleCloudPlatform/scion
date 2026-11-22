@@ -500,7 +500,25 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/templates" },
 			body: func(f *standingCoverageFixture) any {
-				return map[string]any{"name": "standing-test-tpl", "scope": "project", "scopeId": f.projectID}
+				return map[string]any{
+					"name":    "standing-test-tpl",
+					"scope":   "project",
+					"scopeId": f.projectID,
+					"files":   []map[string]any{{"path": "scion-agent.yaml", "size": 10}},
+				}
+			},
+			wantDen: assertForbidden,
+		},
+		{
+			key:    "POST /api/v1/templates/{id}/upload",
+			method: http.MethodPost,
+			path: func(f *standingCoverageFixture, _ *store.Agent) string {
+				return "/api/v1/templates/" + f.templateID + "/upload"
+			},
+			body: func(*standingCoverageFixture) any {
+				return map[string]any{
+					"files": []map[string]any{{"path": "scion-agent.yaml", "size": 10}},
+				}
 			},
 			wantDen: assertForbidden,
 		},
@@ -511,6 +529,34 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			path:    func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills" },
 			body: func(f *standingCoverageFixture) any {
 				return map[string]any{"name": "standing-test-skill", "scope": "project", "scopeId": f.projectID}
+			},
+			wantDen: assertForbidden,
+		},
+		{
+			key:    "POST /api/v1/skills/{id}/versions",
+			method: http.MethodPost,
+			path: func(f *standingCoverageFixture, _ *store.Agent) string {
+				return "/api/v1/skills/" + f.skillID + "/versions"
+			},
+			body: func(*standingCoverageFixture) any {
+				return map[string]any{
+					"version": "2.0.0",
+					"files":   []map[string]any{{"path": "SKILL.md", "size": 10}},
+				}
+			},
+			wantDen: assertForbidden,
+		},
+		{
+			key:    "POST /api/v1/skills/{id}/upload",
+			method: http.MethodPost,
+			path: func(f *standingCoverageFixture, _ *store.Agent) string {
+				return "/api/v1/skills/" + f.skillID + "/upload"
+			},
+			body: func(*standingCoverageFixture) any {
+				return map[string]any{
+					"version": "1.0.0",
+					"files":   []map[string]any{{"path": "SKILL.md", "size": 10}},
+				}
 			},
 			wantDen: assertForbidden,
 		},
@@ -719,23 +765,11 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			path:   func(*standingCoverageFixture) string { return "/api/v1/skills" },
 			body:   func(*standingCoverageFixture) any { return map[string]any{"name": "u-skill", "scope": "user"} },
 		},
-		"POST /api/v1/skills/{id}/versions": {
-			reason: "agents lack skill.update scope; refuses agent tokens",
-			method: http.MethodPost,
-			path:   func(f *standingCoverageFixture) string { return "/api/v1/skills/" + f.skillID + "/versions" },
-			body:   func(*standingCoverageFixture) any { return map[string]any{"version": "1.0.1"} },
-		},
 		"POST /api/v1/skills/{id}/versions [scope=global]": {
 			reason: "agents lack global skill.update scope; refuses agent tokens",
 			method: http.MethodPost,
 			path:   func(f *standingCoverageFixture) string { return "/api/v1/skills/" + f.globalSkillID + "/versions" },
 			body:   func(*standingCoverageFixture) any { return map[string]any{"version": "1.0.1"} },
-		},
-		"POST /api/v1/skills/{id}/upload": {
-			reason: "agents lack skill.update scope; refuses agent tokens",
-			method: http.MethodPost,
-			path:   func(f *standingCoverageFixture) string { return "/api/v1/skills/" + f.skillID + "/upload" },
-			body:   func(*standingCoverageFixture) any { return map[string]any{} },
 		},
 		"POST /api/v1/skills/{id}/upload [scope=global]": {
 			reason: "agents lack global skill.update scope; refuses agent tokens",
@@ -748,12 +782,6 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture) string { return "/api/v1/templates" },
 			body:   func(*standingCoverageFixture) any { return map[string]any{"name": "g-tpl", "scope": "global"} },
-		},
-		"POST /api/v1/templates/{id}/upload": {
-			reason: "agents lack template.update scope; refuses agent tokens",
-			method: http.MethodPost,
-			path:   func(f *standingCoverageFixture) string { return "/api/v1/templates/" + f.templateID + "/upload" },
-			body:   func(*standingCoverageFixture) any { return map[string]any{} },
 		},
 		"POST /api/v1/templates/{id}/upload [scope=global]": {
 			reason: "agents lack global template.update scope; refuses agent tokens",
@@ -961,11 +989,21 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		})
 
 		f := newMSFixtureOn(t, name, srv, srv.store)
+		ctx := context.Background()
+		// Root the fixture at a project admin with full-role agents so
+		// admin-gated project write routes (skill create/versions/upload,
+		// template create/upload) reach authorization/standing rather than
+		// failing earlier on a member role denial.
+		f.dropBindings(f.userID)
+		f.addMember(f.userID, store.ProjectRoleAdmin)
+		for _, ag := range []*store.Agent{f.agentA, f.childC} {
+			ag.AppliedConfig = &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)}
+			require.NoError(t, f.s.UpdateAgent(ctx, ag))
+		}
 		scopes := append(append([]AgentTokenScope{}, ScopesForRole(AgentRoleFull)...), ScopeIdentityToken)
 		tokA := f.agentToken(f.agentA, scopes...)
 		tokC := f.agentToken(f.childC, scopes...)
 
-		ctx := context.Background()
 		grants := make(map[string]string, 2)
 		for _, ag := range []*store.Agent{f.agentA, f.childC} {
 			grantID := tid(name + "-grant-" + ag.Slug)
@@ -1166,6 +1204,61 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		conduitRec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/conduit", nil, f.tokA)
 		require.Equal(t, http.StatusBadRequest, conduitRec.Code, "control: active agent must pass standing check and reach WebSocket upgrade check on GET /api/v1/conduit: %s", conduitRec.Body.String())
 		assert.Contains(t, conduitRec.Body.String(), "WebSocket upgrade required")
+
+		// Positive controls for admin-rooted project skill and template write
+		// routes (direct and child agents) so refusal cases below prove loss of
+		// standing rather than an earlier role or scope denial.
+		for _, caller := range []struct {
+			label   string
+			tok     string
+			suffix  string
+			version string
+		}{
+			{"direct", f.tokA, "direct", "1.1.0"},
+			{"child", f.tokC, "child", "1.2.0"},
+		} {
+			skCreateRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/skills", map[string]any{
+				"name": "ctrl-skill-" + caller.suffix, "scope": "project", "scopeId": f.projectID,
+			}, caller.tok)
+			require.Equal(t, http.StatusCreated, skCreateRec.Code, "control (%s): active admin-rooted agent must create project skill: %s", caller.label, skCreateRec.Body.String())
+
+			skVerRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/skills/"+f.skillID+"/versions", map[string]any{
+				"version": caller.version,
+				"files":   []map[string]any{{"path": "SKILL.md", "size": 10}},
+			}, caller.tok)
+			require.Equal(t, http.StatusCreated, skVerRec.Code, "control (%s): active admin-rooted agent must publish project skill version: %s", caller.label, skVerRec.Body.String())
+			var skVerResp PublishVersionResponse
+			require.NoError(t, json.NewDecoder(skVerRec.Body).Decode(&skVerResp))
+			require.NotEmpty(t, skVerResp.UploadURLs, "control (%s): skill version publish must return upload URLs", caller.label)
+
+			skUpRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/skills/"+f.skillID+"/upload", map[string]any{
+				"version": "1.0.0",
+				"files":   []map[string]any{{"path": "SKILL.md", "size": 10}},
+			}, caller.tok)
+			require.Equal(t, http.StatusOK, skUpRec.Code, "control (%s): active admin-rooted agent must request project skill upload URLs: %s", caller.label, skUpRec.Body.String())
+			var skUpResp UploadResponse
+			require.NoError(t, json.NewDecoder(skUpRec.Body).Decode(&skUpResp))
+			require.NotEmpty(t, skUpResp.UploadURLs, "control (%s): skill upload must return upload URLs", caller.label)
+
+			tplCreateRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/templates", map[string]any{
+				"name":    "ctrl-tpl-" + caller.suffix,
+				"scope":   "project",
+				"scopeId": f.projectID,
+				"files":   []map[string]any{{"path": "scion-agent.yaml", "size": 10}},
+			}, caller.tok)
+			require.Equal(t, http.StatusCreated, tplCreateRec.Code, "control (%s): active admin-rooted agent must create project template: %s", caller.label, tplCreateRec.Body.String())
+			var tplCreateResp CreateTemplateResponse
+			require.NoError(t, json.NewDecoder(tplCreateRec.Body).Decode(&tplCreateResp))
+			require.NotEmpty(t, tplCreateResp.UploadURLs, "control (%s): template create must return upload URLs", caller.label)
+
+			tplUpRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/templates/"+f.templateID+"/upload", map[string]any{
+				"files": []map[string]any{{"path": "scion-agent.yaml", "size": 10}},
+			}, caller.tok)
+			require.Equal(t, http.StatusOK, tplUpRec.Code, "control (%s): active admin-rooted agent must request project template upload URLs: %s", caller.label, tplUpRec.Body.String())
+			var tplUpResp UploadResponse
+			require.NoError(t, json.NewDecoder(tplUpRec.Body).Decode(&tplUpResp))
+			require.NotEmpty(t, tplUpResp.UploadURLs, "control (%s): template upload must return upload URLs", caller.label)
+		}
 	}
 
 	// --- Behavioral Check 1: suspended root user (no AgentHold) refused on every route ---
@@ -1207,12 +1300,18 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 
 		f.dropBindings(f.userID)
 		require.False(t, f.held(f.agentA.ID))
+		require.False(t, f.held(f.childC.ID))
 		requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonRootNotAdmitted)
+		requireStandingReason(t, f.srv.agentStanding(ctx, f.childC.ID), standingReasonRootNotAdmitted)
 
 		for _, p := range probes {
-			t.Run(p.name(), func(t *testing.T) {
+			t.Run(p.name()+" (direct)", func(t *testing.T) {
 				rec := doRequestWithAgentToken(t, f.srv, p.method, p.path(f, f.agentA), p.body(f), f.tokA)
-				p.wantDen(t, rec, p.name())
+				p.wantDen(t, rec, p.name()+" (direct)")
+			})
+			t.Run(p.name()+" (child)", func(t *testing.T) {
+				rec := doRequestWithAgentToken(t, f.srv, p.method, p.path(f, f.childC), p.body(f), f.tokC)
+				p.wantDen(t, rec, p.name()+" (child)")
 			})
 		}
 	})
@@ -1268,5 +1367,75 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		}
 		require.True(t, got429, "expected 429 from handler rate limiter before standing check on POST /api/v1/agent/identity-token")
+	})
+
+	// --- Behavioral Check 5: soft-deleted agent refused by standing check on admin-rooted skill/template write routes ---
+	t.Run("soft-deleted agent refused on admin-rooted skill and template write routes", func(t *testing.T) {
+		f := newFullFixture(t, "cov-softdel")
+		ctx := context.Background()
+
+		// Positive controls before soft-deletion confirm CheckAccess allows both agents.
+		assertHealthyControls(t, f)
+
+		// Soft-delete agentA without revoking its token or placing an AgentHold.
+		// UnifiedAuthMiddleware and CheckAccess (delegation ceiling) still pass
+		// for agentA because its admin root is active and its delegation edge is
+		// active; only the handler's agentStandingForbidden check refuses it.
+		a, err := f.s.GetAgent(ctx, f.agentA.ID)
+		require.NoError(t, err)
+		a.DeletedAt = time.Now().UTC()
+		require.NoError(t, f.s.UpdateAgent(ctx, a))
+		require.False(t, f.held(f.agentA.ID))
+		requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonAgentDeleted)
+
+		writeProbes := []struct {
+			name   string
+			method string
+			path   string
+			body   any
+		}{
+			{
+				name:   "POST /api/v1/skills [scope=project]",
+				method: http.MethodPost,
+				path:   "/api/v1/skills",
+				body:   map[string]any{"name": "softdel-skill", "scope": "project", "scopeId": f.projectID},
+			},
+			{
+				name:   "POST /api/v1/skills/{id}/versions",
+				method: http.MethodPost,
+				path:   "/api/v1/skills/" + f.skillID + "/versions",
+				body:   map[string]any{"version": "2.0.0", "files": []map[string]any{{"path": "SKILL.md", "size": 10}}},
+			},
+			{
+				name:   "POST /api/v1/skills/{id}/upload",
+				method: http.MethodPost,
+				path:   "/api/v1/skills/" + f.skillID + "/upload",
+				body:   map[string]any{"version": "1.0.0", "files": []map[string]any{{"path": "SKILL.md", "size": 10}}},
+			},
+			{
+				name:   "POST /api/v1/templates [scope=project]",
+				method: http.MethodPost,
+				path:   "/api/v1/templates",
+				body:   map[string]any{"name": "softdel-tpl", "scope": "project", "scopeId": f.projectID, "files": []map[string]any{{"path": "scion-agent.yaml", "size": 10}}},
+			},
+			{
+				name:   "POST /api/v1/templates/{id}/upload",
+				method: http.MethodPost,
+				path:   "/api/v1/templates/" + f.templateID + "/upload",
+				body:   map[string]any{"files": []map[string]any{{"path": "scion-agent.yaml", "size": 10}}},
+			},
+		}
+
+		for _, wp := range writeProbes {
+			t.Run(wp.name+" (direct)", func(t *testing.T) {
+				rec := doRequestWithAgentToken(t, f.srv, wp.method, wp.path, wp.body, f.tokA)
+				require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", wp.name, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "Insufficient permissions", wp.name)
+			})
+			t.Run(wp.name+" (child)", func(t *testing.T) {
+				rec := doRequestWithAgentToken(t, f.srv, wp.method, wp.path, wp.body, f.tokC)
+				require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", wp.name, rec.Body.String())
+			})
+		}
 	})
 }
