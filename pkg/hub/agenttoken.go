@@ -85,6 +85,15 @@ const (
 	// do; being able to publish the template it spawns them from is the same
 	// authority expressed once instead of per-agent.
 	ScopeProjectTemplateWrite AgentTokenScope = "project:template:write"
+	// ScopeProjectSkillWrite allows the agent to create and update (publish
+	// versions of) skills within its own project (skill.create, skill.update).
+	// On the Hub, skill.update also authorizes project-skill metadata edits and
+	// version deprecation, even though the CLI agent-mode allowlist only exposes
+	// `skills publish`. Deliberately excludes deletion and global/user scopes.
+	// Ceiling-optional (ceilingOptionalRoleScopes) so existing UAT ceilings
+	// and project-member creators still fit agent-role-full; tokens minted
+	// under ceilings that allow skill.create and skill.update carry it.
+	ScopeProjectSkillWrite AgentTokenScope = "project:skill:write"
 	// ScopeProjectArtifactRead allows the agent to use the artifact service
 	// to read artifacts (artifact.read). It is a ceiling-optional role scope
 	// (ceilingOptionalRoleScopes): readonly, baseline and full carry it, but

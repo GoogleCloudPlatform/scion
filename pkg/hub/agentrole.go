@@ -118,6 +118,7 @@ func scopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentLifecycle,
 			ScopeProjectSecretRead,
 			ScopeProjectTemplateWrite,
+			ScopeProjectSkillWrite,
 			ScopeAgentSetMessageMode,
 			ScopeProjectArtifactRead,
 			ScopeProjectArtifactWrite,

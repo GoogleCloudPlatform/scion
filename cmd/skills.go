@@ -283,6 +283,17 @@ var skillsPublishCmd = &cobra.Command{
 	RunE:  runSkillsPublish,
 }
 
+// defaultPublishScope resolves an omitted --scope flag for `scion skills publish`.
+// In agent mode an omitted scope targets the agent's own project rather than
+// global (ptone/scion#8734); explicit scopes pass through unchanged so the Hub
+// remains the enforcement boundary.
+func defaultPublishScope(scope string, mode CLIMode) string {
+	if scope == "" && mode == ModeAgent {
+		return "project"
+	}
+	return scope
+}
+
 func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	skillDir := args[0]
 	version, _ := cmd.Flags().GetString("version")
@@ -295,6 +306,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	if err := validateSkillScopeFlag(scope); err != nil {
 		return err
 	}
+	scope = defaultPublishScope(scope, resolveMode())
 
 	// Collect files
 	rootDir, files, err := collectPublishFiles(skillDir, os.Stderr)
@@ -821,7 +833,7 @@ func init() {
 
 	// Flags for publish command
 	skillsPublishCmd.Flags().String("version", "", "Semver version to publish (required)")
-	skillsPublishCmd.Flags().String("scope", "", "Scope to publish into (global, project, user). When set, only a same-named skill in that scope (this project for project, your own for user) gets the version; when unset, any same-named skill does. A new skill is created in this scope, default global")
+	skillsPublishCmd.Flags().String("scope", "", "Scope to publish into (global, project, user). When set, only a same-named skill in that scope (this project for project, your own for user) gets the version; when unset, any same-named skill does. A new skill is created in this scope, default global (project in agent mode)")
 	skillsPublishCmd.Flags().String("skill-id", "", "Existing skill ID to publish a version for")
 
 	// Also add a 'skill' alias (singular) for convenience

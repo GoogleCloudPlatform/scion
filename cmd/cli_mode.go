@@ -125,6 +125,7 @@ var agentAllowed = map[string]bool{
 	"skills":                      true,
 	"skills.list":                 true,
 	"skills.show":                 true, // text output also lists versions (skills.versions itself is not allowed)
+	"skills.publish":              true, // own-project skill publish only; hub enforces project:skill:write (ptone/scion#8734)
 	"skill":                       true,
 	"skill.list":                  true,
 	"project":                     true,
