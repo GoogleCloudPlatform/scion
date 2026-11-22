@@ -459,8 +459,7 @@ func runPendingDispatchOnOwner(ctx context.Context, srv *Server, s store.Store, 
 
 func TestHomeFilesDispatch_CrossNodeDeferredCarriesHomeFiles(t *testing.T) {
 	want := []api.HomeFile{
-		{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte(`{"id":"evt-xnode"}`)},
-		{Path: ".scion/triggers/meta.json", Mode: 0o644, Content: []byte(`{"source":"webhook"}`)},
+		{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte(`{"id":"evt-xnode"}`)},
 	}
 
 	setupCrossNode := func(t *testing.T, ownerClient *mockRuntimeBrokerClient, reqClient *mockRuntimeBrokerClient, asNeeded ...store.EnvVar) (*Server, *HTTPAgentDispatcher, *prefixedMintingTokenGenerator, *prefixedMintingTokenGenerator, *store.Agent, store.Store, *ChannelEventPublisher) {
