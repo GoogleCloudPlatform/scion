@@ -57,6 +57,14 @@ import {
   renderBrokerVersion,
   renderHubVersionNote,
 } from '../shared/broker-version.js';
+import {
+  brokerPolicyStyles,
+  canManageBrokerApproval,
+  renderAdminManagedBadge,
+  renderPolicyBlockedTag,
+  updateBrokerAdminManaged,
+} from '../shared/broker-policy-badges.js';
+import { showToast } from '../../utils/toast.js';
 
 /** One runtime broker row of the health summary, as far as this page reads it. */
 interface HealthSummaryBrokerRow {
@@ -83,6 +91,9 @@ export class ScionPageBrokersArea extends LitElement {
 
   @state()
   private loading = true;
+
+  @state()
+  private approvalBusyIds: Set<string> = new Set();
 
   @state()
   private brokers: RuntimeBroker[] = [];
@@ -118,6 +129,7 @@ export class ScionPageBrokersArea extends LitElement {
     brokerTypeBadgeStyles,
     brokerAreaStyles,
     brokerVersionStyles,
+    brokerPolicyStyles,
     css`
       .filter-row {
         display: flex;
@@ -266,6 +278,44 @@ export class ScionPageBrokersArea extends LitElement {
     this.viewMode = e.detail.view;
   }
 
+  private async handleToggleApproval(e: Event, broker: RuntimeBroker): Promise<void> {
+    e.preventDefault();
+    e.stopPropagation();
+    if (this.approvalBusyIds.has(broker.id)) return;
+    const next = !broker.adminManaged;
+    this.approvalBusyIds = new Set([...this.approvalBusyIds, broker.id]);
+    try {
+      const updated = await updateBrokerAdminManaged(broker.id, next);
+      this.brokers = this.brokers.map((b) => (b.id === broker.id ? { ...b, ...updated } : b));
+      stateManager.seedBrokers([updated]);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update broker approval', 'danger');
+    } finally {
+      const nextSet = new Set(this.approvalBusyIds);
+      nextSet.delete(broker.id);
+      this.approvalBusyIds = nextSet;
+    }
+  }
+
+  private renderApprovalButton(broker: RuntimeBroker): TemplateResult | typeof nothing {
+    if (!canManageBrokerApproval(broker)) return nothing;
+    const busy = this.approvalBusyIds.has(broker.id);
+    return html`
+      <sl-button
+        size="small"
+        variant=${broker.adminManaged ? 'default' : 'primary'}
+        outline
+        data-testid="broker-approval-action"
+        ?loading=${busy}
+        ?disabled=${busy}
+        @click=${(e: Event) => this.handleToggleApproval(e, broker)}
+      >
+        <sl-icon slot="prefix" name=${broker.adminManaged ? 'shield-x' : 'shield-check'}></sl-icon>
+        ${broker.adminManaged ? 'Revoke' : 'Approve'}
+      </sl-button>
+    `;
+  }
+
   private renderName(broker: RuntimeBroker): TemplateResult {
     return html`
       <span class="name-cell">
@@ -279,7 +329,8 @@ export class ScionPageBrokersArea extends LitElement {
               title="Runs in this server's process"
             ></sl-icon>`
           : nothing}
-        ${this.renderBrokerTypeBadge(broker)}
+        ${this.renderBrokerTypeBadge(broker)} ${renderAdminManagedBadge(broker)}
+        ${renderPolicyBlockedTag(broker)} ${this.renderApprovalButton(broker)}
       </span>
     `;
   }

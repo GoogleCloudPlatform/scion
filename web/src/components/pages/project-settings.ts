@@ -38,6 +38,10 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import {
+  brokerPolicyStyles,
+  renderPolicyBlockedTag,
+} from '../shared/broker-policy-badges.js';
 import { cachedProjectLabel, projectDisplayName } from '../../client/project-label.js';
 import { projectVisitorsVisible } from '../../shared/project-visitors.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
@@ -497,7 +501,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   private stopBrokerRelativeTimeTick: (() => void) | null = null;
 
-  static override styles = css`
+  static override styles = [
+    brokerPolicyStyles,
+    css`
     :host {
       display: block;
     }
@@ -1090,7 +1096,8 @@ export class ScionPageProjectSettings extends LitElement {
       margin-bottom: 0.5rem;
       display: block;
     }
-  `;
+  `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -4176,6 +4183,7 @@ export class ScionPageProjectSettings extends LitElement {
           <div class="broker-name-row">
             <span class="broker-name">${broker.name}</span>
             ${isDefault ? html`<span class="broker-default-badge">Default</span>` : ''}
+            ${renderPolicyBlockedTag(broker)}
           </div>
           <div class="broker-meta-row">
             <span>${broker.status}</span>

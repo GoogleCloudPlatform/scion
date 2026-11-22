@@ -38,6 +38,14 @@ import {
   renderBrokerVersion,
   renderHubVersionNote,
 } from '../shared/broker-version.js';
+import {
+  brokerPolicyStyles,
+  canManageBrokerApproval,
+  renderAdminManagedBadge,
+  renderPolicyBlockedTag,
+  updateBrokerAdminManaged,
+} from '../shared/broker-policy-badges.js';
+import { showToast } from '../../utils/toast.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -58,6 +66,9 @@ export class ScionPageBrokers extends LitElement {
    */
   @state()
   private brokers: RuntimeBroker[] = [];
+
+  @state()
+  private approvalBusyIds: Set<string> = new Set();
 
   /**
    * Error message if loading failed
@@ -85,6 +96,7 @@ export class ScionPageBrokers extends LitElement {
     listPageStyles,
     brokerTypeBadgeStyles,
     brokerVersionStyles,
+    brokerPolicyStyles,
     css`
       .broker-header {
         display: flex;
@@ -371,6 +383,45 @@ export class ScionPageBrokers extends LitElement {
     return html`<span class=${cssClass}>${label}</span>`;
   }
 
+  private async handleToggleApproval(e: Event, broker: RuntimeBroker): Promise<void> {
+    e.preventDefault();
+    e.stopPropagation();
+    if (this.approvalBusyIds.has(broker.id)) return;
+    const next = !broker.adminManaged;
+    this.approvalBusyIds = new Set([...this.approvalBusyIds, broker.id]);
+    try {
+      const updated = await updateBrokerAdminManaged(broker.id, next);
+      this.brokers = this.brokers.map((b) => (b.id === broker.id ? { ...b, ...updated } : b));
+      stateManager.seedBrokers([updated]);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update broker approval', 'danger');
+    } finally {
+      const nextSet = new Set(this.approvalBusyIds);
+      nextSet.delete(broker.id);
+      this.approvalBusyIds = nextSet;
+    }
+  }
+
+  private renderApprovalButton(broker: RuntimeBroker): TemplateResult | typeof nothing {
+    if (!canManageBrokerApproval(broker)) return nothing;
+    const busy = this.approvalBusyIds.has(broker.id);
+    const label = broker.adminManaged ? 'Revoke' : 'Approve';
+    return html`
+      <sl-button
+        size="small"
+        variant=${broker.adminManaged ? 'default' : 'primary'}
+        outline
+        data-testid="broker-approval-action"
+        ?loading=${busy}
+        ?disabled=${busy}
+        @click=${(e: Event) => this.handleToggleApproval(e, broker)}
+      >
+        <sl-icon slot="prefix" name=${broker.adminManaged ? 'shield-x' : 'shield-check'}></sl-icon>
+        ${label}
+      </sl-button>
+    `;
+  }
+
   private renderBrokerCard(broker: RuntimeBroker) {
     return html`
       <a href="/brokers/${broker.id}" class="resource-card">
@@ -378,18 +429,24 @@ export class ScionPageBrokers extends LitElement {
           <div>
             <h3 class="resource-name">
               <sl-icon name="hdd-rack"></sl-icon>
-              <span>${broker.name} ${this.renderBrokerTypeBadge(broker)}</span>
+              <span>
+                ${broker.name} ${this.renderBrokerTypeBadge(broker)}
+                ${renderAdminManagedBadge(broker)} ${renderPolicyBlockedTag(broker)}
+              </span>
             </h3>
             <div class="broker-version">
               ${renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion)}
             </div>
           </div>
-          <scion-status-badge
-            status=${this.getStatusVariant(broker.status)}
-            label=${broker.status}
-            size="small"
-          >
-          </scion-status-badge>
+          <div class="broker-approval-actions">
+            ${this.renderApprovalButton(broker)}
+            <scion-status-badge
+              status=${this.getStatusVariant(broker.status)}
+              label=${broker.status}
+              size="small"
+            >
+            </scion-status-badge>
+          </div>
         </div>
         ${broker.capabilities ? this.renderCapabilities(broker.capabilities) : ''}
         <div class="broker-meta">
@@ -470,7 +527,8 @@ export class ScionPageBrokers extends LitElement {
         <td>
           <span class="name-cell">
             <sl-icon name="hdd-rack"></sl-icon>
-            ${broker.name} ${this.renderBrokerTypeBadge(broker)}
+            ${broker.name} ${this.renderBrokerTypeBadge(broker)} ${renderAdminManagedBadge(broker)}
+            ${renderPolicyBlockedTag(broker)} ${this.renderApprovalButton(broker)}
           </span>
         </td>
         <td class="hide-mobile">

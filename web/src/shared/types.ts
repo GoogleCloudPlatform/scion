@@ -1545,6 +1545,10 @@ export interface RuntimeBroker {
    */
   versionStatus?: 'match' | 'mismatch' | 'unknown';
   autoProvide: boolean;
+  /** Whether a hub administrator explicitly registered or approved this broker as admin-managed (ptone/scion#7829). */
+  adminManaged?: boolean;
+  /** Whether this broker is eligible for placement and attachment under broker_policy.admin_managed_only (true when the policy is off). */
+  policyEligible?: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
   createdBy?: string;
