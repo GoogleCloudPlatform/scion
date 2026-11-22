@@ -34,6 +34,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 )
 
 const (
@@ -45,10 +47,6 @@ const (
 	// Docker/Podman runtime sets when runtime-managed interception is active.
 	interceptionRequired      = "SCION_METADATA_INTERCEPTION=required"
 	interceptionSourceRuntime = "SCION_METADATA_INTERCEPTION_SOURCE=runtime"
-
-	// refusalText is the fixed Hub-visible refusal, pinned verbatim by
-	// cmd/sciontool/commands' TestMetadataProtectionRefusalText_Golden.
-	refusalText = "agent start refused: the configured metadata protection could not be set up in this container. Provide the required host capabilities, or set the metadata mode to passthrough explicitly to opt out."
 
 	// dummyTransportToken stands in for the bootstrap transport credential:
 	// it is not a credential, only something init would stage to a file.
@@ -373,8 +371,8 @@ func TestContainer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read agent-info.json: %v", err)
 		}
-		if !strings.Contains(string(info), refusalText) {
-			t.Errorf("agent-info.json does not carry the fixed refusal text:\n%s", info)
+		if !strings.Contains(string(info), metadata.InterceptionMarkerMissingRefusal) {
+			t.Errorf("agent-info.json does not carry the expected refusal text (%q):\n%s", metadata.InterceptionMarkerMissingRefusal, info)
 		}
 	})
 
@@ -403,8 +401,8 @@ func TestContainer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read agent-info.json: %v", err)
 		}
-		if !strings.Contains(string(info), refusalText) {
-			t.Errorf("agent-info.json does not carry the fixed refusal text:\n%s", info)
+		if !strings.Contains(string(info), metadata.ProtectionUnavailableRefusal) {
+			t.Errorf("agent-info.json does not carry the expected refusal text (%q):\n%s", metadata.ProtectionUnavailableRefusal, info)
 		}
 	})
 }

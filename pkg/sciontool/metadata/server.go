@@ -105,6 +105,21 @@ const (
 // set and the metadata interception could not be installed.
 var ErrInterceptionUnavailable = errors.New("metadata interception unavailable")
 
+// Hub-visible refusal messages when required metadata protection cannot be
+// established. Pinned verbatim by cmd/sciontool/commands'
+// TestMetadataProtectionRefusalText_Golden and asserted by
+// pkg/sciontool/netcap's container_test.go.
+const (
+	// ProtectionUnavailableRefusal is reported when required metadata
+	// protection cannot be set up or verified in the container.
+	ProtectionUnavailableRefusal = "agent start refused: the configured metadata protection could not be set up in this container (metadata_protection_unavailable). Verify the broker and agent image versions match (use a broker build that supports runtime-managed interception) and host capabilities are available, or set the metadata mode to passthrough explicitly to opt out."
+
+	// InterceptionMarkerMissingRefusal is reported when interception is
+	// required, the runtime-managed source marker is missing or unrecognized,
+	// and the legacy in-container fallback cannot run.
+	InterceptionMarkerMissingRefusal = "agent start refused: metadata interception version skew (metadata_interception_marker_missing): the broker and agent image disagree on who installs metadata interception. Upgrade the broker to a build that supports runtime-managed interception or use a matching agent image, or set the metadata mode to passthrough explicitly to opt out."
+)
+
 const (
 	modeBlock       = "block"
 	modeAssign      = "assign"
