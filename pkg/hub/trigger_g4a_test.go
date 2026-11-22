@@ -823,7 +823,6 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 				Type:         store.TriggerActionDispatchAgent,
 				Task:         "Review ${event.subject} sha=${event.payload.after}",
 				ReuseMessage: "Updated ${event.subject} sha=${event.payload.after}",
-				GitHubToken:  store.TriggerGitHubTokenUserPreferred,
 			},
 		})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
