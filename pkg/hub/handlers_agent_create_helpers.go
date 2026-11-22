@@ -860,9 +860,11 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	if isShellAgent(agent) {
 		// Shell execution containers never run project or hub pre-start hooks
 		// (security audit H3 / ptone/scion#8812 I1).
-		agent.AppliedConfig.ProjectPreStartHookID = ""
-		agent.AppliedConfig.ProjectPreStartHookScript = ""
-	} else if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
+		if agent.AppliedConfig != nil {
+			agent.AppliedConfig.ProjectPreStartHookID = ""
+			agent.AppliedConfig.ProjectPreStartHookScript = ""
+		}
+	} else if project != nil && agent.AppliedConfig != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
 		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
 		switch {
 		case hookErr == nil:

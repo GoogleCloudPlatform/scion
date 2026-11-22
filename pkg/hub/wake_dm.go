@@ -569,8 +569,15 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 // Used by validateAgentDeliverable and by exec-action preflight (which is
 // allowed to target shell execution containers when authored by a human).
 func validateAgentRunning(agent *store.Agent) *AgentDMError {
+	if agent == nil {
+		return &AgentDMError{
+			Code:       ErrCodeAgentNotRunning,
+			Message:    "agent is not running",
+			HTTPStatus: http.StatusConflict,
+		}
+	}
 	label := agentTargetLabel(agent)
-	if agent != nil && agent.IdleSuspendClaimActive {
+	if agent.IdleSuspendClaimActive {
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
 			Message:    fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", label),
