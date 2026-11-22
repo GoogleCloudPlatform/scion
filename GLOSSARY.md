@@ -18,6 +18,11 @@ _Avoid_: worker, bot, instance, process
 An agent spawned by another agent; "sub" only from the orchestrating user's view, since it is a full agent in capability.
 _Avoid_: helper, thread, worker thread
 
+**Execution container**:
+An agent that runs the reserved built-in `shell` harness-config (no LLM harness) and is registered in a user's profile settings as their default execution target for approved commands. Users log into CLI tools inside it manually so credentials stay in the container's `$HOME` (never in `/workspace`) and are never exposed to LLM agents.
+_Avoid_: execution environment, exec profile
+_See also_: Agent, Harness-config, Agent home
+
 **Reincarnation**:
 Migrating an existing agent to a new *generation*: the Hub re-resolves its template, image, and harness-config, then starts it again with the same agent ID and slug and a handoff as its first task. Done with `scion reincarnate`. Distinct from *restart* (same config) and *resume* (same harness session).
 
