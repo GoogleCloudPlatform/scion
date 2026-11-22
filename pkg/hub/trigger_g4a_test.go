@@ -334,8 +334,8 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	assert.Equal(t, int32(1), createCalls.Load(), "suspended agent must be woken, not replaced")
 	assert.Equal(t, []string{ag.Slug}, tracker.starts(), "suspended agent must be woken via StartAgent")
 	msgs = tracker.messages()
-	require.Len(t, msgs, 2)
-	assert.Equal(t, ag.Slug, msgs[1].AgentID)
+	require.Len(t, msgs, 3)
+	assert.Equal(t, ag.Slug, msgs[2].AgentID)
 }
 
 func TestTriggerG4a_Reuse_TerminalSoftDeletedAndCreateFailure(t *testing.T) {
