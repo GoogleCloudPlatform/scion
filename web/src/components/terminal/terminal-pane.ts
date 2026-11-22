@@ -71,6 +71,7 @@ import {
 import {
   TERMINAL_DRAG_MIME,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
+  TERMINAL_PANE_MENU_EVENT,
 } from '../../client/terminal-workspace-events.js';
 import { navigateTo } from '../../client/navigation.js';
 import { TouchPrimaryController } from '../../utils/input-modality.js';
@@ -185,6 +186,17 @@ export class ScionTerminalPane extends LitElement {
    * show as icon-only links (ptone/scion#4324).
    */
   @state() compactHeader = false;
+
+  /**
+   * Set by the workspace root on a phone-width viewport, where the terminal
+   * takes the screen: the header leads with a menu button (the terminal
+   * list, in a drawer), keeps the agent name, the agent/shell switch and the
+   * connection state, and moves every other action into a "More" menu.
+   */
+  @state() phoneChrome = false;
+
+  /** Set by the workspace root while its phone drawer is open (the menu button's aria-expanded). */
+  @state() drawerOpen = false;
 
   private registry: TerminalSessionRegistry | null = null;
   private disposed = false;
@@ -538,6 +550,21 @@ export class ScionTerminalPane extends LitElement {
 
     .spacer {
       flex: 1;
+    }
+
+    /* Phone header (phoneChrome): one tight row. */
+    .toolbar.phone {
+      gap: 0.5rem;
+      padding: 0.25rem 0.5rem;
+      min-height: 40px;
+    }
+
+    .toolbar.phone .status-indicator {
+      flex-shrink: 0;
+    }
+
+    .more-menu {
+      flex-shrink: 0;
     }
 
     .status-indicator {
@@ -1378,6 +1405,13 @@ export class ScionTerminalPane extends LitElement {
    * pane itself, so the terminal takes focus once it connects (see
    * `shouldAutoFocusTerminal`).
    */
+  /** Focuses the phone header's menu button (where a closed drawer returns focus). */
+  focusMenuButton(): void {
+    const button = this.renderRoot.querySelector<HTMLElement>('.menu-btn');
+    if (button) button.focus();
+    else this.focusTerminal();
+  }
+
   focusTerminal(): void {
     if (this.terminal) {
       this.terminal.focus();
@@ -2962,6 +2996,146 @@ export class ScionTerminalPane extends LitElement {
     </svg>`;
   }
 
+  /** The menu button that opens the terminal list on a phone. */
+  private renderMenuButton() {
+    if (!this.phoneChrome) return nothing;
+    return html`<button
+      class="pane-action-btn menu-btn"
+      aria-expanded=${this.drawerOpen ? 'true' : 'false'}
+      title="Terminals"
+      aria-label="Open terminals and navigation"
+      @click=${() =>
+        this.dispatchEvent(
+          new CustomEvent(TERMINAL_PANE_MENU_EVENT, { bubbles: true, composed: true })
+        )}
+    >
+      <sl-icon name="list" aria-hidden="true"></sl-icon>
+    </button>`;
+  }
+
+  /**
+   * The phone header's "More" menu: the back links, the graph and chat
+   * links, the exposed ports and Capture Auth, which the wide header shows
+   * inline.
+   */
+  private renderMoreMenu() {
+    const name = this.agentName || this.agentId;
+    const projectName = projectDisplayName({
+      name: this.agent?.project,
+      slug: this.agent?.projectSlug,
+    });
+    const onSelect = (e: CustomEvent<{ item: { value: string } }>): void => {
+      const value = e.detail.item.value;
+      if (value === 'project') navigateTo(`/projects/${this.projectId}`);
+      else if (value === 'agent') navigateTo(`/agents/${this.agentId}`);
+      else if (value === 'graph') this.openInGraph();
+      else if (value === 'chat') this.openInChat();
+      else if (value === 'capture-auth') void this.openCaptureAuthScopeDialog();
+      else if (value.startsWith('port:')) {
+        window.open(
+          `/api/v1/agents/${this.agentId}/ports/${value.slice(5)}/proxy/`,
+          '_blank',
+          'noopener'
+        );
+      }
+    };
+    return html`<sl-dropdown class="more-menu" placement="bottom-end" hoist>
+      <button
+        slot="trigger"
+        class="pane-action-btn"
+        title="More"
+        aria-label="More actions for ${name}"
+      >
+        <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
+      </button>
+      <sl-menu @sl-select=${onSelect}>
+        ${this.projectId
+          ? html`<sl-menu-item value="project">
+              <sl-icon slot="prefix" name="folder"></sl-icon>
+              ${projectName ? `Back to ${projectName}` : 'Back to Project'}
+            </sl-menu-item>`
+          : nothing}
+        <sl-menu-item value="agent">
+          <span slot="prefix" aria-hidden="true">${ROBOT_EMOJI}</span>
+          Back to Agent
+        </sl-menu-item>
+        ${this.projectId
+          ? html`<sl-menu-item value="graph">
+              <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              Open in graph
+            </sl-menu-item>`
+          : nothing}
+        ${this.userId && isFeatureEnabled('web.native_chat')
+          ? html`<sl-menu-item value="chat">
+              <sl-icon slot="prefix" name="chat-dots"></sl-icon>
+              Open in chat
+            </sl-menu-item>`
+          : nothing}
+        ${this.exposedPorts.map(
+          (p) =>
+            html`<sl-menu-item value=${`port:${p.port}`}>
+              <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+              ${p.label ? `${p.label} (:${p.port})` : `Open :${p.port}`}
+            </sl-menu-item>`
+        )}
+        ${this.showCaptureAuth
+          ? html`<sl-menu-item value="capture-auth" ?disabled=${this.captureAuthLoading}>
+              <sl-icon slot="prefix" name="key"></sl-icon>
+              ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
+            </sl-menu-item>`
+          : nothing}
+      </sl-menu>
+    </sl-dropdown>`;
+  }
+
+  /** The phone header row (phoneChrome). */
+  private renderPhoneToolbar() {
+    return html`
+      <div class="toolbar phone">
+        ${this.renderMenuButton()} ${this.renderAgentName(this.agentName || this.agentId)}
+        <div class="toggle-group" title="Switch between agent and shell tmux windows">
+          <button
+            class=${this.activeWindow === 'agent' ? 'active' : ''}
+            title="Agent window"
+            aria-label="Agent window"
+            @click=${() => this.switchToAgent()}
+            ?disabled=${!this.connected}
+          >
+            ${this.renderRobotIcon()}
+          </button>
+          <button
+            class=${this.activeWindow === 'shell' ? 'active' : ''}
+            title="Shell window"
+            aria-label="Shell window"
+            @click=${() => this.switchToShell()}
+            ?disabled=${!this.connected}
+          >
+            ${this.renderTerminalIcon()}
+          </button>
+        </div>
+        <div class="spacer"></div>
+        <div
+          class="status-indicator"
+          role="img"
+          title=${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}
+          aria-label=${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}
+        >
+          <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
+        </div>
+        ${!this.connected && !this.idle
+          ? html`<button
+              class="reconnect-btn"
+              ?disabled=${this.reconnectDisabled}
+              @click=${() => this.handleReconnect()}
+            >
+              ${this.attempting ? 'Reconnecting...' : 'Reconnect'}
+            </button>`
+          : nothing}
+        ${this.renderMoreMenu()}
+      </div>
+    `;
+  }
+
   /**
    * Breadcrumb navigation to the agent's project (when present) and agent
    * detail page. Full mode renders `<scion-breadcrumb>` with linked crumbs
@@ -3106,7 +3280,7 @@ export class ScionTerminalPane extends LitElement {
   override render() {
     if (this.loading) {
       return html`
-        <div class="toolbar">${this.renderBackLinks()}</div>
+        <div class="toolbar">${this.renderMenuButton()} ${this.renderBackLinks()}</div>
         <div class="loading-state">
           <div class="spinner"></div>
           <p>Connecting to agent...</p>
@@ -3120,7 +3294,7 @@ export class ScionTerminalPane extends LitElement {
         this.isSuspended && this.agent ? suspendReasonHint(this.agent) : undefined;
       return html`
         <div class="toolbar">
-          ${this.renderBackLinks()}
+          ${this.renderMenuButton()} ${this.renderBackLinks()}
           ${this.agentName
             ? html`
                 <div class="separator"></div>
@@ -3212,6 +3386,7 @@ export class ScionTerminalPane extends LitElement {
     return html`
       <div class="toolbar-container">
       <div class="toolbar">
+        ${this.renderMenuButton()}
         ${this.renderBackLinks()}
         <div class="separator"></div>
         ${this.renderAgentName(this.agentName || this.agentId)}

@@ -23,6 +23,7 @@ import {
   TERMINAL_DROPDOWN_SELECT_EVENT,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   TERMINAL_PANE_DIALOG_OPEN_EVENT,
+  TERMINAL_PANE_MENU_EVENT,
   publishTerminalWorkspaceSnapshot,
   type TerminalDropdownSelectDetail,
   type TerminalPaletteNewAgentDetail,
@@ -228,6 +229,16 @@ export class TerminalWorkspaceRoot {
   private readonly viewAsMemberBannerHost = document.createElement('div');
   private readonly shell = document.createElement('div');
   private readonly rail = document.createElement('aside');
+  /**
+   * Phone drawer (see applyPhoneChrome): on a narrow viewport with a
+   * terminal shown, the rail and the app header slide in over the terminal
+   * from the pane's menu button; the scrim behind them closes them.
+   */
+  private readonly drawerScrim = document.createElement('div');
+  private drawerOpen = false;
+  private drawerMode = false;
+  /** The right-side area (layout bar and panes); inert behind an open drawer. */
+  private paneArea: HTMLElement | null = null;
   private readonly railList = document.createElement('div');
   private readonly railFooter = document.createElement('div');
   private readonly count = document.createElement('span');
@@ -457,7 +468,28 @@ export class TerminalWorkspaceRoot {
     document.addEventListener('focusin', this.handleGlobalFocusIn);
     this.element.addEventListener(TERMINAL_PANE_DIALOG_OPEN_EVENT, this.handlePaneDialogOpen);
 
-    this.shell.append(this.rail, this.createPaneArea());
+    this.drawerScrim.className = 'terminal-drawer-scrim';
+    this.drawerScrim.addEventListener('click', () => this.setDrawerOpen(false));
+    this.element.addEventListener(TERMINAL_PANE_MENU_EVENT, () =>
+      this.setDrawerOpen(!this.drawerOpen)
+    );
+    this.element.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !this.drawerOpen || this.paletteHost.isOpen) return;
+      // An Escape that closes a menu or dialog inside the drawer (the
+      // header's dropdowns) closes only that.
+      const inOpenPopup = e
+        .composedPath()
+        .some(
+          (node) =>
+            node instanceof HTMLElement &&
+            (node.localName === 'sl-dropdown' || node.localName === 'sl-dialog') &&
+            node.hasAttribute('open')
+        );
+      if (inOpenPopup) return;
+      e.preventDefault();
+      this.setDrawerOpen(false);
+    });
+    this.shell.append(this.rail, this.createPaneArea(), this.drawerScrim);
     this.testHubBannerHost.className = 'terminal-test-hub-banner';
     this.viewAsMemberBannerHost.className = 'terminal-view-as-member-banner';
     this.element.append(
@@ -493,6 +525,7 @@ export class TerminalWorkspaceRoot {
     const area = document.createElement('div');
     area.className = 'terminal-pane-area';
     area.append(this.layoutBar, this.paneHost);
+    this.paneArea = area;
     return area;
   }
 
@@ -953,6 +986,9 @@ export class TerminalWorkspaceRoot {
    */
   private openPalette(): void {
     if (this.paletteHost.isOpen) return;
+    // From the drawer, the palette's invoker becomes the pane's menu button,
+    // where its close returns focus (the drawer's own button is inert).
+    this.setDrawerOpen(false);
     this.paletteFocusAgentId = null;
     this.railFocusAgentId = null;
     this.paletteHost.open();
@@ -1612,6 +1648,94 @@ export class TerminalWorkspaceRoot {
     // The rail renders before pane visibility in refresh(), so re-render it
     // once a pane is first shown: its row leaves "Not opened yet".
     if (newlyShown) this.queueRefresh();
+    this.applyPhoneChrome(isNarrow, visibleKeys.size > 0);
+  }
+
+  /**
+   * On a narrow viewport the terminal takes the screen while one is shown:
+   * the rail (the terminal list and Jump to agent) and the app header move
+   * into a drawer that the pane's menu button opens, and each pane shows its
+   * phone header (ScionTerminalPane.phoneChrome). The layout bar is hidden,
+   * since a narrow viewport always shows one pane. With no terminal shown,
+   * the rail stays on screen, as before.
+   */
+  private applyPhoneChrome(isNarrow: boolean, paneShown: boolean): void {
+    for (const pane of this.panes.values()) pane.phoneChrome = isNarrow;
+    const drawerMode = isNarrow && paneShown && !this.element.hidden;
+    if (drawerMode !== this.drawerMode) {
+      this.drawerMode = drawerMode;
+      // The slide animates only a toggle, never the switch into drawer mode
+      // (a load, a rotation), which would slide the rail across the terminal.
+      delete this.element.dataset.drawerAnim;
+      // Moving the header disconnects and reconnects it: its notification
+      // tray refetches and restarts its stream, as on any reconnect. That
+      // happens once per switch (a load, a rotation), not per toggle.
+      if (drawerMode) {
+        this.rail.prepend(this.header);
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            if (this.drawerMode) this.element.dataset.drawerAnim = 'on';
+          })
+        );
+      } else {
+        this.element.insertBefore(this.header, this.shell);
+        this.drawerOpen = false;
+      }
+    }
+    this.syncDrawer();
+    this.element.dataset.narrow = String(isNarrow);
+  }
+
+  /**
+   * Applies the drawer state: an open drawer is a modal dialog over the
+   * terminal (the pane area is inert behind it); a closed one is off screen,
+   * so nothing in it is focusable or read. Out of drawer mode the rail is an
+   * ordinary landmark again.
+   */
+  private syncDrawer(): void {
+    const open = this.drawerMode && this.drawerOpen;
+    this.element.dataset.phoneDrawer = this.drawerMode ? (open ? 'open' : 'closed') : 'off';
+    this.rail.inert = this.drawerMode && !open;
+    if (this.paneArea) this.paneArea.inert = open;
+    if (open) {
+      this.rail.setAttribute('role', 'dialog');
+      this.rail.setAttribute('aria-modal', 'true');
+      this.rail.setAttribute('aria-label', 'Terminals');
+    } else {
+      this.rail.removeAttribute('role');
+      this.rail.removeAttribute('aria-modal');
+      this.rail.setAttribute('aria-label', 'Open terminal sessions');
+    }
+    for (const pane of this.panes.values()) pane.drawerOpen = open;
+  }
+
+  /**
+   * Opens or closes the phone drawer. A close returns focus to the shown
+   * pane's menu button unless the caller moves it itself (a rail pick
+   * focuses the picked terminal).
+   */
+  private setDrawerOpen(open: boolean, returnFocus = true): void {
+    if (!this.drawerMode || open === this.drawerOpen) return;
+    this.drawerOpen = open;
+    if (open) {
+      // Off the terminal first: on a phone that also lowers the keyboard.
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && this.paneArea?.contains(active)) active.blur();
+    }
+    this.syncDrawer();
+    if (open) {
+      const current =
+        this.railList.querySelector<HTMLElement>('[aria-current="page"]') ??
+        this.railList.querySelector<HTMLElement>('.terminal-rail-select');
+      (current ?? this.railFooter.querySelector<HTMLElement>('button'))?.focus();
+    } else if (returnFocus) {
+      this.shownPane()?.focusMenuButton();
+    }
+  }
+
+  private shownPane(): ScionTerminalPane | undefined {
+    for (const pane of this.panes.values()) if (!pane.hidden) return pane;
+    return undefined;
   }
 
   private restoreRailFocus(focusedId: string): void {
@@ -1973,6 +2097,7 @@ export class TerminalWorkspaceRoot {
    * terminal — see {@link focusRailTarget}.
    */
   private openSessionRoute(entry: RailEntry): void {
+    this.setDrawerOpen(false, false);
     this.placeInNextFreeSlot(entry.state.key);
     this.railFocusAgentId = entry.state.agentId;
     this.dispatchNavigation(`/terminals/${entry.state.agentId}`);
@@ -2314,6 +2439,11 @@ export class TerminalWorkspaceRoot {
          root like app-shell / chat-shell). */
       #terminal-workspace > scion-header {
         padding-inline: 1.5rem;
+      }
+      /* The header in the phone drawer (applyPhoneChrome). */
+      #terminal-workspace .terminal-rail > scion-header {
+        padding-inline: 1rem;
+        flex-shrink: 0;
       }
       .terminal-test-hub-banner,
       .terminal-view-as-member-banner {
@@ -2845,6 +2975,63 @@ export class TerminalWorkspaceRoot {
           border-right: 0;
           border-bottom: 1px solid var(--scion-border, #e2e8f0);
         }
+        /* A narrow viewport always shows one pane, so the presets do nothing. */
+        #terminal-workspace .terminal-layout-bar {
+          display: none;
+        }
+      }
+      .terminal-drawer-scrim {
+        display: none;
+      }
+      /* Phone drawer (applyPhoneChrome): the terminal fills the shell; the
+         rail, with the app header on top, slides in over it. */
+      #terminal-workspace[data-phone-drawer='closed'] .terminal-workspace-shell,
+      #terminal-workspace[data-phone-drawer='open'] .terminal-workspace-shell {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+      }
+      #terminal-workspace[data-phone-drawer='closed'] .terminal-rail,
+      #terminal-workspace[data-phone-drawer='open'] .terminal-rail {
+        position: fixed;
+        z-index: 40;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        width: min(88vw, 24rem);
+        height: var(--scion-app-height, 100dvh);
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        box-sizing: border-box;
+        background: var(--scion-surface, var(--scion-bg, #ffffff));
+        border-right: 1px solid var(--scion-border, #e2e8f0);
+        border-bottom: 0;
+        box-shadow: 0 0 24px rgba(15, 23, 42, 0.25);
+        transform: translateX(-100%);
+        visibility: hidden;
+      }
+      #terminal-workspace[data-drawer-anim='on'][data-phone-drawer='closed'] .terminal-rail {
+        transition:
+          transform 0.2s ease,
+          visibility 0s linear 0.2s;
+      }
+      #terminal-workspace[data-phone-drawer='open'] .terminal-rail {
+        transform: none;
+        visibility: visible;
+      }
+      #terminal-workspace[data-drawer-anim='on'][data-phone-drawer='open'] .terminal-rail {
+        transition: transform 0.2s ease;
+      }
+      #terminal-workspace[data-phone-drawer='open'] .terminal-drawer-scrim {
+        display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 39;
+        background: rgba(15, 23, 42, 0.45);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #terminal-workspace .terminal-rail {
+          transition: none !important;
+        }
       }
       /* While an on-screen keyboard is up (ptone/scion#5059) the screen is
          the terminal and the keyboard. client/viewport.ts detects the
@@ -2856,7 +3043,7 @@ export class TerminalWorkspaceRoot {
       html[data-keyboard='open'] #terminal-workspace > .terminal-test-hub-banner,
       html[data-keyboard='open'] #terminal-workspace > .terminal-view-as-member-banner,
       html[data-keyboard='open'] #terminal-workspace > scion-header,
-      html[data-keyboard='open'] #terminal-workspace .terminal-rail,
+      html[data-keyboard='open'] #terminal-workspace:not([data-phone-drawer='open']) .terminal-rail,
       html[data-keyboard='open'] #terminal-workspace .terminal-layout-bar {
         display: none;
       }

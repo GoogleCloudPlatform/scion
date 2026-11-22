@@ -28,6 +28,17 @@ export default defineConfig({
       ],
     },
     {
+      // A phone: the terminal takes the screen (mobile.pw.ts).
+      name: 'mobile',
+      testMatch: 'mobile.pw.ts',
+      use: {
+        viewport: { width: 390, height: 844 },
+        isMobile: true,
+        hasTouch: true,
+        deviceScaleFactor: 3,
+      },
+    },
+    {
       name: 'base-path',
       testMatch: 'base.pw.ts',
       use: {

@@ -80,6 +80,13 @@ export const TERMINAL_PALETTE_NEW_AGENT_EVENT = 'scion:terminal-palette-new-agen
 export const TERMINAL_PANE_DIALOG_OPEN_EVENT = 'scion:terminal-pane-dialog-open';
 export const TERMINAL_DROPDOWN_SELECT_EVENT = 'scion:terminal-dropdown-select';
 
+/**
+ * Dispatched (bubbling, composed) by a pane's menu button, shown on a phone
+ * where the terminal list sits in a drawer; `TerminalWorkspaceRoot` toggles
+ * the drawer.
+ */
+export const TERMINAL_PANE_MENU_EVENT = 'scion:terminal-pane-menu';
+
 export interface TerminalDropdownSelectDetail {
   readonly agentId: string;
 }
