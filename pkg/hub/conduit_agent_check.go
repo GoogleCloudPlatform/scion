@@ -60,15 +60,23 @@ func (s *Server) conduitAgentRowCheck(ctx context.Context, ident AgentIdentity) 
 }
 
 // conduitAgentAdmissionCheck applies the conduit agent checks that follow
-// token authentication, in admission order: the scope, then the agent
-// row. It returns the agent row, a refusal (errConduitAgentMissingScope,
-// errConduitAgentGone or errConduitAgentMismatch), or a wrapped store
-// read error when the row could not be read.
+// token authentication, in admission order: the scope, the agent row, and
+// delegation standing. It returns the agent row, a refusal
+// (errConduitAgentMissingScope, errConduitAgentGone,
+// errConduitAgentMismatch or errAgentNotInStanding), or a wrapped store
+// read error when a check could not be evaluated.
 func (s *Server) conduitAgentAdmissionCheck(ctx context.Context, ident AgentIdentity) (*store.Agent, error) {
 	if err := conduitAgentScopeCheck(ident); err != nil {
 		return nil, err
 	}
-	return s.conduitAgentRowCheck(ctx, ident)
+	agent, err := s.conduitAgentRowCheck(ctx, ident)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.agentStanding(ctx, agent.ID); err != nil {
+		return nil, err
+	}
+	return agent, nil
 }
 
 // conduitAgentCheckRefused reports whether err from the conduit agent
@@ -76,5 +84,6 @@ func (s *Server) conduitAgentAdmissionCheck(ctx context.Context, ident AgentIden
 func conduitAgentCheckRefused(err error) bool {
 	return errors.Is(err, errConduitAgentMissingScope) ||
 		errors.Is(err, errConduitAgentGone) ||
-		errors.Is(err, errConduitAgentMismatch)
+		errors.Is(err, errConduitAgentMismatch) ||
+		errors.Is(err, errAgentNotInStanding)
 }
