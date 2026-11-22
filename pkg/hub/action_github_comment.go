@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
+	githubtrigger "github.com/GoogleCloudPlatform/scion/pkg/hub/trigger/github"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -145,6 +145,7 @@ func (a *githubCommentAction) SanitizedReasons() ([]string, string) {
 		"github permission not permitted",
 		"github association not authorized",
 		"github app identity unknown",
+		"github own app event",
 		"stale event",
 		"comment rate limited",
 	}, "github comment failed"
@@ -253,19 +254,29 @@ func (a *githubCommentAction) Preauthorize(ctx context.Context, req hubfire.Fire
 }
 
 // githubBotIdentityUnknownRefusal enforces the G4 own-App guard revisit
-// (G1a security S3, Option A): while the App's bot login is unknown (GET /app
-// failed and server.github_app.app_slug is unset), non-object-creating GitHub
-// events from Bot senders cannot be checked against <slug>[bot] at ingress, so
-// dispatch_agent and github.comment fires fail closed.
+// (G1a security S3, Option A):
+//   - while the App's bot login is unknown (GET /app failed and
+//     server.github_app.app_slug is unset), non-object-creating GitHub events
+//     from Bot senders cannot be checked against <slug>[bot] at ingress, so
+//     dispatch_agent and github.comment fires fail closed;
+//   - once the App's bot login is known (via GET /app recovery or app_slug),
+//     re-check queued events against <slug>[bot] so an App-authored event
+//     enqueued during the unknown window is still refused on drain.
 func (s *Server) githubBotIdentityUnknownRefusal(ctx context.Context, ev *hubfire.FireEvent) *FireRefusal {
 	if s == nil || ev == nil || ev.SourceKind != store.TriggerSourceKindGitHub {
 		return nil
 	}
-	if !strings.EqualFold(strings.TrimSpace(ev.Attributes["sender_type"]), "Bot") {
+	senderType := strings.TrimSpace(ev.Attributes["sender_type"])
+	if !strings.EqualFold(senderType, "Bot") {
 		return nil
 	}
-	if s.GitHubAppBotLogin(ctx) == "" {
+	botLogin := s.GitHubAppBotLogin(ctx)
+	if botLogin == "" {
 		return &FireRefusal{Reason: "github app identity unknown"}
+	}
+	slug := strings.TrimSuffix(botLogin, "[bot]")
+	if githubtrigger.IsOwnAppSender(senderType, ev.Attributes["sender"], slug) {
+		return &FireRefusal{Reason: "github own app event"}
 	}
 	return nil
 }
@@ -932,16 +943,6 @@ func validateGitHubAckCommentPayload(ack *DispatchAgentAckComment, untrustedVars
 	return nil
 }
 
-// buildAgentWebURL builds the user-facing web agent link for result.agent_url (§7.1).
-func (s *Server) buildAgentWebURL(agentID string) string {
-	path := "/agents/" + url.PathEscape(agentID)
-	base := strings.TrimRight(strings.TrimSpace(s.HubEndpointFor(HubEndpointForAgentLinks)), "/")
-	if base == "" {
-		return path
-	}
-	return base + path
-}
-
 // postDispatchAgentAckComment renders and posts the post-fire GitHub
 // acknowledgement comment for a fired dispatch_agent trigger through the shared
 // github.comment code path (§7.1, §7.2, app-shaped-source-seams §2.1).
@@ -1014,7 +1015,7 @@ func (s *Server) postDispatchAgentAckComment(
 	postVars := triggertemplate.MapVars{
 		"result.agent_id":   agentID,
 		"result.agent_name": agentName,
-		"result.agent_url":  s.buildAgentWebURL(agentID),
+		"result.agent_url":  s.AgentWebURL(agentID),
 		"result.fire_id":    req.Authority.FireID,
 	}
 	vars := triggertemplate.ChainVars(postVars, buildGitHubCommentTemplateVars(req.Event, da.project))

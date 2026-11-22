@@ -171,6 +171,64 @@ func TestDispatchAgentAckComment_AuthoringValidation(t *testing.T) {
 	assert.Equal(t, "ackComment", unsupportedScheduledDispatchField(DispatchAgentEventPayload{
 		AckComment: &DispatchAgentAckComment{Body: "hi"},
 	}))
+
+	// 7. O2: UAT scoped to trigger:create + agent:create (without github_trigger:comment)
+	// is 403 Forbidden with ackComment, and 201 Created for the identical payload without it.
+	ctx := context.Background()
+	uatExp := time.Now().UTC().Add(time.Hour)
+	uat := &store.UserAccessToken{
+		ID:                   uuid.NewString(),
+		UserID:               f.sched.creator.ID,
+		ProjectID:            proj.ID,
+		Name:                 "ack-perm-isolation-uat",
+		Prefix:               "scion_pat_iso",
+		KeyHash:              "hash-" + uuid.NewString(),
+		Scopes:               []string{"trigger:create", "agent:create", "project:read"},
+		BoundaryKind:         "project",
+		CeilingVersion:       permissions.CeilingVersionV1,
+		CeilingPermissionIDs: []string{"trigger.create", "agent.create", "project.read"},
+		ExpiresAt:            &uatExp,
+	}
+	require.NoError(t, f.sched.store.CreateUserAccessToken(ctx, uat))
+	baseUser := NewAuthenticatedUser(f.sched.creator.ID, f.sched.creator.Email, f.sched.creator.DisplayName, f.sched.creator.Role, "api")
+	scopedIdent := NewScopedUserIdentityWithBoundary(
+		baseUser,
+		TokenBoundary{Kind: BoundaryKindProject, ProjectID: proj.ID},
+		uat.Scopes,
+		uat.ID,
+		uat.NormalizedCeiling(),
+	)
+	uatCtx := contextWithIdentity(context.Background(), scopedIdent)
+	uatCtx = contextWithCredentialContext(uatCtx, credentialContextForIdentity(scopedIdent))
+
+	recUATWithAck := f.doJSON(t, uatCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-uat-with-ack",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:       store.TriggerActionDispatchAgent,
+				Task:       "review PR",
+				NoAuth:     true,
+				AckComment: &DispatchAgentAckComment{Body: "Started ${result.agent_name}"},
+			},
+		})
+	assert.Equal(t, http.StatusForbidden, recUATWithAck.Code, recUATWithAck.Body.String())
+
+	recUATNoAck := f.doJSON(t, uatCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-uat-no-ack",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:   store.TriggerActionDispatchAgent,
+				Task:   "review PR",
+				NoAuth: true,
+			},
+		})
+	assert.Equal(t, http.StatusCreated, recUATNoAck.Code, recUATNoAck.Body.String())
 }
 
 func TestDispatchAgentAckComment_FireLeaseLossOutcomeIsolationAndNoBodyLog(t *testing.T) {
@@ -387,6 +445,35 @@ func TestDispatchAgentAckComment_FireLeaseLossOutcomeIsolationAndNoBodyLog(t *te
 	assert.Contains(t, logBuf.String(), githubAckCommentFailedAuditEventType)
 	assert.Contains(t, logBuf.String(), "github.comment refused")
 	assert.NotContains(t, logBuf.String(), secretBodyMarker)
+
+	// 7. O1: when no public hub endpoint is configured, Server.AgentWebURL
+	// returns "" so result.agent_url renders empty rather than a broken relative
+	// /agents/<id> link.
+	f.sched.srv.mu.Lock()
+	f.sched.srv.config.HubEndpoint = ""
+	f.sched.srv.config.HubEndpoints = nil
+	f.sched.srv.mu.Unlock()
+
+	noURLFireID := uuid.NewString()
+	noURLPayload, mErr := json.Marshal(DispatchAgentEventPayload{
+		AgentName:     "pr-${event.attributes.number}-nourl",
+		Task:          "review PR ${event.attributes.number}",
+		GithubToken:   DispatchAgentGitHubTokenInstallation,
+		AckComment:    &DispatchAgentAckComment{Body: "Started **${result.agent_name}** url=[${result.agent_url}]"},
+		UntrustedVars: []string{"event.attributes.number"},
+	})
+	require.NoError(t, mErr)
+	reqNoURL := makeReq(noURLFireID, 1, DispatchAgentNameConflictSuffix, baseAttrs)
+	reqNoURL.Payload = string(noURLPayload)
+	outNoURL := f.sched.srv.fireAction(ctx, reqNoURL)
+	require.Equal(t, hubfire.FireStatusFired, outNoURL.Status, outNoURL.Error)
+
+	gh.mu.Lock()
+	require.Len(t, gh.comments, 2)
+	noURLBody := gh.comments[1].Body
+	gh.mu.Unlock()
+	assert.Contains(t, noURLBody, "url=[]", "result.agent_url must render empty when no public endpoint is configured")
+	assert.NotContains(t, noURLBody, "/agents/", "must not emit broken relative /agents/ link")
 }
 
 func TestDispatchAgentAckComment_AgentCallerForbidden(t *testing.T) {
@@ -423,6 +510,7 @@ func TestDispatchAgentAckComment_AgentCallerForbidden(t *testing.T) {
 			},
 		})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "ackComment")
 }
 
 func TestGitHubOwnAppUnknownIdentity_BotRefusal(t *testing.T) {
@@ -504,12 +592,14 @@ func TestGitHubOwnAppUnknownIdentity_BotRefusal(t *testing.T) {
 
 	// Running target agent for message action test.
 	targetAgent := &store.Agent{
-		ID:        uuid.NewString(),
-		Slug:      "msg-target-agent",
-		Name:      "msg-target-agent",
-		ProjectID: proj.ID,
-		OwnerID:   f.sched.creator.ID,
-		Phase:     string(state.PhaseRunning),
+		ID:              uuid.NewString(),
+		Slug:            "msg-target-agent",
+		Name:            "msg-target-agent",
+		ProjectID:       proj.ID,
+		OwnerID:         f.sched.creator.ID,
+		RuntimeBrokerID: f.sched.broker.ID,
+		Phase:           string(state.PhaseRunning),
+		ContainerStatus: "running",
 	}
 	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAgent))
 
@@ -572,15 +662,26 @@ func TestGitHubOwnAppUnknownIdentity_BotRefusal(t *testing.T) {
 	assert.Equal(t, hubfire.FireStatusFired, outCommentUser.Status, outCommentUser.Error)
 	assert.Equal(t, int64(1), commentPostCount.Load())
 
-	// 3. Unknown identity + Bot sender on message action -> unaffected (not refused for unknown identity).
+	// 3. Unknown identity + Bot sender on message action -> unaffected (fires normally).
 	msgPayload := fmt.Sprintf(`{"agentId":%q,"message":"bot event"}`, targetAgent.ID)
 	outMsgBot := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionMessage, msgPayload, "Bot", "dependabot[bot]"))
-	assert.NotEqual(t, "github app identity unknown", outMsgBot.Error, "message rules must be unaffected by unknown app identity")
+	assert.Equal(t, hubfire.FireStatusFired, outMsgBot.Status, outMsgBot.Error)
 
-	// 4. Known identity via AppSlug override + Bot sender -> fires normally.
+	// 4. Known identity via AppSlug override:
+	//    - own App login (configured-app[bot]) is refused as "github own app event";
+	//    - different bot (dependabot[bot]) fires normally.
 	f.sched.srv.mu.Lock()
 	f.sched.srv.config.GitHubAppConfig.AppSlug = "configured-app"
 	f.sched.srv.mu.Unlock()
+
+	outDispatchOwnSlug := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "Bot", "configured-app[bot]"))
+	assert.Equal(t, hubfire.FireStatusRefused, outDispatchOwnSlug.Status)
+	assert.Equal(t, "github own app event", outDispatchOwnSlug.Error)
+
+	outCommentOwnSlug := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionGitHubComment, commentPayload, "Bot", "configured-app[bot]"))
+	assert.Equal(t, hubfire.FireStatusRefused, outCommentOwnSlug.Status)
+	assert.Equal(t, "github own app event", outCommentOwnSlug.Error)
+	assert.Equal(t, int64(1), commentPostCount.Load())
 
 	outDispatchKnown := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "Bot", "dependabot[bot]"))
 	assert.Equal(t, hubfire.FireStatusFired, outDispatchKnown.Status, outDispatchKnown.Error)
@@ -589,12 +690,27 @@ func TestGitHubOwnAppUnknownIdentity_BotRefusal(t *testing.T) {
 	assert.Equal(t, hubfire.FireStatusFired, outCommentKnown.Status, outCommentKnown.Error)
 	assert.Equal(t, int64(2), commentPostCount.Load())
 
-	// 5. Identity recovered via GET /app (AppSlug unset, GET /app now succeeds) + Bot sender -> fires normally.
+	// 5. Identity recovered via GET /app (AppSlug unset, GET /app now succeeds):
+	//    - own App login (recovered-app[bot]) enqueued during unknown window is refused as "github own app event";
+	//    - different bot (dependabot[bot]) fires normally;
+	//    - message action stays unaffected.
 	f.sched.srv.mu.Lock()
 	f.sched.srv.config.GitHubAppConfig.AppSlug = ""
 	f.sched.srv.mu.Unlock()
 	appFail.Store(false)
 	f.sched.srv.githubAppIdentity.reset()
+
+	outDispatchOwnRecovered := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "Bot", "recovered-app[bot]"))
+	assert.Equal(t, hubfire.FireStatusRefused, outDispatchOwnRecovered.Status)
+	assert.Equal(t, "github own app event", outDispatchOwnRecovered.Error)
+
+	outCommentOwnRecovered := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionGitHubComment, commentPayload, "Bot", "recovered-app[bot]"))
+	assert.Equal(t, hubfire.FireStatusRefused, outCommentOwnRecovered.Status)
+	assert.Equal(t, "github own app event", outCommentOwnRecovered.Error)
+	assert.Equal(t, int64(2), commentPostCount.Load())
+
+	outMsgOwnRecovered := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionMessage, msgPayload, "Bot", "recovered-app[bot]"))
+	assert.Equal(t, hubfire.FireStatusFired, outMsgOwnRecovered.Status, outMsgOwnRecovered.Error)
 
 	outDispatchRecovered := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "Bot", "dependabot[bot]"))
 	assert.Equal(t, hubfire.FireStatusFired, outDispatchRecovered.Status, outDispatchRecovered.Error)

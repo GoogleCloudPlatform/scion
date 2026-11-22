@@ -577,8 +577,8 @@ func (s *Server) authorizeGitHubCommentAuthoringPermission(
 	case "agent":
 		// Design rev 1.12 §8.1: in Stage 3, github_trigger.comment has no agent
 		// scope, so agents cannot author github.comment triggers or ackComment.
-		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent callers cannot author github.comment triggers")
-		writeForbidden(w, "Agent callers cannot author github.comment triggers")
+		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent callers cannot author github.comment triggers or ackComment")
+		writeForbidden(w, "Agent callers cannot author github.comment triggers or ackComment")
 		return false
 
 	default:
