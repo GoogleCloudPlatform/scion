@@ -125,3 +125,72 @@ func TestStart_ShellClearsPreStartHook(t *testing.T) {
 	_, err = os.Stat(hookPath)
 	assert.True(t, os.IsNotExist(err), "Start must remove any stale pre-start hook for shell agents")
 }
+
+// Security audit H1-R: when a project-local "default" template defines an env
+// layer (e.g. PROMPT_COMMAND), ProvisionAgent with harness_config="shell" and
+// empty templateName must record NO template in agent-info.json or
+// image-provenance.json, and Start must pass an empty FallbackEnv (and empty
+// Template) to the runtime — even if TemplateEnvSource or a legacy recorded
+// template is present.
+func TestShellAgent_NoTemplateRecordedAndNoFallbackEnv(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+
+	// Auditor PoC: plant PROMPT_COMMAND in <project>/.scion/templates/default/scion-agent.yaml.
+	defaultTplDir := filepath.Join(scionDir, "templates", "default")
+	require.NoError(t, os.MkdirAll(defaultTplDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(defaultTplDir, "scion-agent.yaml"),
+		[]byte("env:\n  PROMPT_COMMAND: \"evil-command\"\n  BASH_ENV: \"/tmp/evil.sh\"\n"),
+		0644,
+	))
+
+	agentName := "shell-no-fallback-env"
+	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	ctx := api.ContextWithGitClone(context.Background(), gc)
+
+	// Provision with empty templateName (what Hub sends after dropping defaulted templates).
+	_, _, cfg, err := ProvisionAgent(ctx, agentName, "", "", config.ShellHarnessConfigName, scionDir, "", "created", "", "")
+	require.NoError(t, err)
+
+	agentDir := filepath.Join(scionDir, "agents", agentName)
+	require.NotNil(t, cfg)
+	if cfg.Info != nil {
+		assert.Empty(t, cfg.Info.Template, "agent-info.json must record no template for shell agents")
+		assert.Empty(t, cfg.Info.TemplateHash, "agent-info.json must record no template hash for shell agents")
+	}
+
+	prov, err := readImageProvenance(agentDir)
+	require.NoError(t, err)
+	require.NotNil(t, prov)
+	assert.Empty(t, prov.Template, "image-provenance.json must record no template for shell agents")
+	assert.Empty(t, prov.TemplateHash, "image-provenance.json must record no template hash for shell agents")
+
+	// Start the shell agent — even if TemplateEnvSource is supplied, FallbackEnv
+	// and Template in RunConfig must be empty.
+	var capturedRunCfg runtime.RunConfig
+	ran := false
+	mockRT := &runtime.MockRuntime{
+		RunFunc: func(_ context.Context, rc runtime.RunConfig) (string, error) {
+			ran = true
+			capturedRunCfg = rc
+			return "container-shell-1", nil
+		},
+	}
+	mgr := NewManager(mockRT)
+	_, err = mgr.Start(context.Background(), api.StartOptions{
+		Name:              agentName,
+		ProjectPath:       scionDir,
+		BrokerMode:        true,
+		HarnessConfig:     config.ShellHarnessConfigName,
+		TemplateEnvSource: "default",
+		GitClone:          gc,
+	})
+	require.NoError(t, err)
+	require.True(t, ran, "expected MockRuntime.RunFunc to be called")
+	assert.Empty(t, capturedRunCfg.FallbackEnv, "shell agent Start must not pass template FallbackEnv (PROMPT_COMMAND etc.)")
+	assert.Empty(t, capturedRunCfg.Template, "shell agent RunConfig.Template must be empty")
+	for _, kv := range capturedRunCfg.Env {
+		assert.NotContains(t, kv, "PROMPT_COMMAND=", "PROMPT_COMMAND must not leak into shell container Env")
+		assert.NotContains(t, kv, "BASH_ENV=", "BASH_ENV must not leak into shell container Env")
+	}
+}

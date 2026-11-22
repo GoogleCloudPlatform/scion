@@ -1558,9 +1558,20 @@ type resolvedTemplate struct {
 // dir for provisioning, launch (Start's harness.Resolve) and the runtime
 // broker's policy gate.
 func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
-	chain, err := templateChainFor(ctx, templateName, projectPath, settings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load template: %w", err)
+	// Shell execution containers take no template (security audit H1 / H1-R):
+	// do not resolve or merge a local "default" or named template chain when
+	// the request or inline config already selects the reserved "shell"
+	// harness config.
+	isShellRequested := harnessConfig == config.ShellHarnessConfigName ||
+		(inlineCfg != nil && (inlineCfg.HarnessConfig == config.ShellHarnessConfigName || inlineCfg.Harness == config.ShellHarnessConfigName))
+
+	var chain []*config.Template
+	if !isShellRequested {
+		var err error
+		chain, err = templateChainFor(ctx, templateName, projectPath, settings)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load template: %w", err)
+		}
 	}
 
 	// Each template contributes its job keys only (ptone/scion#4524):
@@ -1600,6 +1611,19 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, err
 	}
 	harnessConfigName := hcResolution.Name
+
+	// If settings/profile resolved harnessConfigName to "shell" after a
+	// template chain was loaded, discard the template chain and rebuild
+	// finalScionCfg from inlineCfg only so no template job keys or paths reach
+	// a shell container.
+	if harnessConfigName == config.ShellHarnessConfigName && len(chain) > 0 {
+		chain = nil
+		templateWarnings = nil
+		finalScionCfg = &api.ScionConfig{}
+		if inlineCfg != nil {
+			finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
+		}
+	}
 
 	// Load harness-config from disk (check template dirs first)
 	var templatePaths []string
@@ -2901,7 +2925,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// than the raw templateName which may be a cache path or remote URI. A
 	// content-hash cache directory is never recorded as the name; the slug
 	// carried in ctx is used instead when known.
-	displayTemplateName, templateHash := infoTemplateFields(ctx, templateName, chain)
+	// Shell execution containers record no template (security audit H1-R) so
+	// subsequent Starts never resolve a local "default" template chain.
+	var displayTemplateName, templateHash string
+	if harnessConfigName != config.ShellHarnessConfigName {
+		displayTemplateName, templateHash = infoTemplateFields(ctx, templateName, chain)
+	}
 	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
 		Project:               projectName,
