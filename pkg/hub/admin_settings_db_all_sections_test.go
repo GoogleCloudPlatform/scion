@@ -99,10 +99,11 @@ var layer1RoundTripSamples = map[string]string{
 	"telemetry.filter.sampling.default":        `0.5`,
 	"telemetry.filter.sampling.rates":          `{"agent.start":0.25}`,
 	"telemetry.resource":                       `{"service.name":"scion-hub"}`,
-	// auto_expose_ports, quotas, agent_secrets
-	"auto_expose_ports.enabled":     `true`,
-	"quotas.enforce_broker_quotas":  `false`,
-	"agent_secrets.user_scope_only": `true`,
+	// auto_expose_ports, quotas, agent_secrets, broker_policy
+	"auto_expose_ports.enabled":        `true`,
+	"quotas.enforce_broker_quotas":     `false`,
+	"agent_secrets.user_scope_only":    `true`,
+	"broker_policy.admin_managed_only": `true`,
 	// hub_observability
 	"server.hub.observability.metrics_enabled": `true`,
 	"server.hub.observability.tracing_enabled": `false`,
