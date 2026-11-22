@@ -167,6 +167,7 @@ const USED_ICONS = [
   'lock',
   'microsoft-teams',
   'moon',
+  'palette',
   'paperclip',
   'patch-check',
   'pencil',

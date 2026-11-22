@@ -639,6 +639,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/admin-server-config.js'),
   },
   {
+    pattern: /^\/admin\/branding$/,
+    tag: 'scion-page-admin-branding',
+    load: () => import('../components/pages/admin-branding.js'),
+  },
+  {
     pattern: /^\/admin\/federation$/,
     tag: 'scion-page-admin-federation',
     load: () => import('../components/pages/admin-federation.js'),
@@ -903,6 +908,7 @@ const ADMIN_ROUTES = new Set([
   'scion-page-admin-group-detail',
   'scion-page-admin-quotas',
   'scion-page-admin-server-config',
+  'scion-page-admin-branding',
   'scion-page-admin-federation',
   'scion-page-admin-integrations',
   'scion-page-admin-skill-registries',
