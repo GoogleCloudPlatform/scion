@@ -70,14 +70,14 @@ var (
 	// the metadata interception is required but cannot be set up. The
 	// text is fixed and pinned by a golden test.
 	//nolint:staticcheck // ST1005: fixed user-facing refusal text, pinned verbatim by the golden test.
-	errMetadataProtectionUnavailable = errors.New("agent start refused: the configured metadata protection could not be set up in this container (metadata_protection_unavailable). Verify the broker and agent image versions match (use a broker build that supports runtime-managed interception) and host capabilities are available, or set the metadata mode to passthrough explicitly to opt out.")
+	errMetadataProtectionUnavailable = errors.New(metadata.ProtectionUnavailableRefusal)
 
 	// errMetadataInterceptionMarkerMissing is the Hub-visible refusal when
 	// interception is required, the runtime-managed source marker is missing
 	// or unrecognized, and the legacy in-container fallback cannot run. The
 	// text is fixed and pinned by a golden test.
 	//nolint:staticcheck // ST1005: fixed user-facing refusal text, pinned verbatim by the golden test.
-	errMetadataInterceptionMarkerMissing = errors.New("agent start refused: metadata interception version skew (metadata_interception_marker_missing): the broker and agent image disagree on who installs metadata interception. Upgrade the broker to a build that supports runtime-managed interception or use a matching agent image, or set the metadata mode to passthrough explicitly to opt out.")
+	errMetadataInterceptionMarkerMissing = errors.New(metadata.InterceptionMarkerMissingRefusal)
 )
 
 // Seams for metadataProtectionPreflight and legacy in-container rule install.
