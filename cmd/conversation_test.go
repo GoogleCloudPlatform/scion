@@ -341,6 +341,66 @@ func TestConversationJoinRequiresArgs(t *testing.T) {
 	assert.Error(t, err, "join should require three arguments")
 }
 
+func TestConversationJoinHelpDocumentsResolution(t *testing.T) {
+	long := conversationJoinCmd.Long
+	assert.Contains(t, long, "email", "help should document email resolution")
+	assert.Contains(t, long, "handle", "help should document handle resolution")
+	assert.Contains(t, long, "name", "help should document agent name resolution")
+}
+
+func TestRunConversationJoin_DisplaysResolvedID(t *testing.T) {
+	orig := saveConversationCreateTestState()
+	defer orig.restore()
+
+	const (
+		convID     = "11111111-2222-3333-4444-555555555555"
+		resolvedID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	)
+
+	var gotKind, gotPrincipal string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/conversations/"+convID+"/participants" && r.Method == http.MethodPost {
+			var req hubclient.AddParticipantRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			gotKind = req.PrincipalKind
+			gotPrincipal = req.PrincipalID
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(store.ConversationParticipant{
+				ID:             "part-1",
+				ConversationID: convID,
+				PrincipalKind:  req.PrincipalKind,
+				PrincipalID:    resolvedID,
+				Role:           "member",
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	isolateHubEnvForTest(t, server.URL, "proj-1")
+	projectDir := setupConversationCreateProject(t, home, server.URL, "proj-1")
+	projectPath = projectDir
+
+	c := &cobra.Command{}
+	c.SetContext(context.Background())
+
+	var runErr error
+	stdout, _ := captureStdoutStderr(t, func() {
+		runErr = runConversationJoin(c, []string{"conv:" + convID, "user", "alice@example.com"})
+	})
+	require.NoError(t, runErr)
+	assert.Equal(t, "user", gotKind)
+	assert.Equal(t, "alice@example.com", gotPrincipal)
+	assert.Contains(t, stdout, "alice@example.com")
+	assert.Contains(t, stdout, resolvedID)
+	assert.Contains(t, stdout, convID)
+}
+
 func TestConversationLeaveRequiresArgs(t *testing.T) {
 	err := conversationLeaveCmd.Args(conversationLeaveCmd, []string{})
 	assert.Error(t, err, "leave should require a conversation ref argument")
