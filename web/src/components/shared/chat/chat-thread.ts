@@ -64,6 +64,7 @@ import {
   type DecisionHistoryMaps,
 } from '../../../client/decision-prompts.js';
 import type { ChatScheduleDetail, ChatSendDetail, ScionChatComposer } from './chat-composer.js';
+import { formatDeletedAgentLabel, isDeletedUnreachableReason } from './chat-message.js';
 import {
   conversationSupportsScheduledSend,
   conversationSupportsScheduledWake,
@@ -994,7 +995,12 @@ export class ScionChatThread extends LitElement {
     messageId: string;
     senderName: string;
     content: string;
+    sender?: string;
+    senderId?: string;
   } | null = null;
+
+  /** Message IDs for which an unreachable-agent send-time toast was already shown. */
+  private _toastedFailedIds = new Set<string>();
 
   /** Edit mode context for the composer. */
   @state() private composerEditMessage: {
@@ -3618,15 +3624,26 @@ export class ScionChatThread extends LitElement {
 
     // Optimistic insertion: show the message in the history immediately with
     // a "Sending" indicator, before the API call returns.
+    const replyMsg = replyToId ? this.messageMap.get(replyToId) : undefined;
+    const replySender = savedReplyTo?.sender || replyMsg?.sender || '';
+    const replySenderId = savedReplyTo?.senderId || replyMsg?.senderId || '';
+    const isReplyToAgent = !!replyToId && replySender.startsWith('agent:');
     const optimisticMsg: Message = {
       id: idempotencyKey,
       projectId: '',
       sender: '',
       senderId: this.selfUserId(),
-      // Name the agent by slug, as the server copy does, even when the
-      // default is stored by ID (a promoted DM stores the UUID).
-      recipient: this.defaultAgent ? 'agent:' + this.defaultAgentSlug() : '',
-      recipientId: this.defaultAgentMember()?.id || this.defaultAgent || '',
+      // On a reply to an agent message, match the hub's reply-target routing
+      // rather than flashing the topic default agent; otherwise name the
+      // default agent by slug (a promoted DM stores the UUID).
+      recipient: isReplyToAgent
+        ? replySender
+        : this.defaultAgent
+          ? 'agent:' + this.defaultAgentSlug()
+          : '',
+      recipientId: isReplyToAgent
+        ? replySenderId
+        : this.defaultAgentMember()?.id || this.defaultAgent || '',
       msg: text,
       type: replyToId ? 'reply' : 'chat',
       agentId: '',
@@ -3866,6 +3883,30 @@ export class ScionChatThread extends LitElement {
           this.messages = Array.from(this.messageMap.values())
             .filter((m) => m.type !== 'mention')
             .sort(compareMessageOrder);
+        }
+
+        // Notify the sender immediately when a 2xx send persisted as failed
+        // because the target agent is unreachable (deleted, stopped, etc.).
+        if (
+          dispatchState === 'failed' &&
+          resData?.dispatchFailureCode === 'agent_unreachable' &&
+          (!resData.id || !this._toastedFailedIds.has(resData.id))
+        ) {
+          if (resData.id) {
+            this._toastedFailedIds.add(resData.id);
+          }
+          const resolvedRecipient =
+            (resData.id ? this.messageMap.get(resData.id)?.recipient : undefined) ||
+            optimisticMsg.recipient ||
+            '';
+          const targetSlug = resolvedRecipient.startsWith('agent:')
+            ? resolvedRecipient.slice(6)
+            : '';
+          const reason = resData.dispatchFailureReason || '';
+          const toastMessage = isDeletedUnreachableReason(reason, resData.dispatchFailureCode)
+            ? formatDeletedAgentLabel(targetSlug)
+            : reason || 'Agent unreachable';
+          showToast(toastMessage, 'warning');
         }
 
         // The send response never carries the server's authoritative
@@ -6469,6 +6510,8 @@ export class ScionChatThread extends LitElement {
       messageId: msg.id,
       senderName: this.getSenderDisplayName(msg) || msg.sender,
       content: replyToContent(msg.msg),
+      sender: msg.sender,
+      senderId: msg.senderId,
     };
   }
 
@@ -7368,6 +7411,27 @@ export class ScionChatThread extends LitElement {
     </div>`;
   }
 
+  /**
+   * Non-blocking reply-bar warning when replying to an agent that is no longer
+   * present in the loaded project agent list. Returns empty while the agent
+   * list is unloaded/empty to avoid false positives during initial load.
+   */
+  private replyTargetWarning(): string {
+    if (!this.composerReplyTo) return '';
+    if (!this.agents || this.agents.length === 0) return '';
+    const replyMsg = this.messageMap.get(this.composerReplyTo.messageId);
+    const sender = this.composerReplyTo.sender || replyMsg?.sender || '';
+    if (!sender.startsWith('agent:')) return '';
+    const slug = sender.slice(6);
+    if (!slug) return '';
+    const senderId = this.composerReplyTo.senderId || replyMsg?.senderId || '';
+    const isLive = this.agents.some(
+      (a) => a.slug === slug || (senderId !== '' && a.id === senderId)
+    );
+    if (isLive) return '';
+    return `@${slug} was deleted — mention a live agent with @ or this reply won't be delivered.`;
+  }
+
   private renderComposerV2() {
     return html`
       <scion-chat-composer
@@ -7380,6 +7444,7 @@ export class ScionChatThread extends LitElement {
         .currentUserId=${this.currentUserId}
         .conversationKey=${this.conversationKey}
         .replyTo=${this.composerReplyTo}
+        .replyTargetWarning=${this.replyTargetWarning()}
         .editMessage=${this.composerEditMessage}
         ?scheduleSendEnabled=${this.scheduleSendAvailable}
         ?wakeAvailable=${conversationSupportsScheduledWake(this.conversationKey)}

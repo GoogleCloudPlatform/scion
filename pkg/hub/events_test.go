@@ -1071,6 +1071,7 @@ func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
 // every other test green.
 func TestPublishUserMessage_DispatchFailureFields(t *testing.T) {
 	unreachableReason := "Agent unreachable"
+	deletedReason := agentDeletedReason
 	// Round 4, item 5: a stale reason left over from a prior failed attempt
 	// (e.g. a retried row that later dispatched). If PublishUserMessage
 	// dropped its `DispatchState == failed` gate and instead populated the
@@ -1091,6 +1092,13 @@ func TestPublishUserMessage_DispatchFailureFields(t *testing.T) {
 			dispatchState: store.MessageDispatchFailed,
 			failureReason: &unreachableReason,
 			wantReason:    unreachableReason,
+			wantCode:      dispatchFailureCodeAgentUnreachable,
+		},
+		{
+			name:          "failed row with deleted agent reason",
+			dispatchState: store.MessageDispatchFailed,
+			failureReason: &deletedReason,
+			wantReason:    deletedReason,
 			wantCode:      dispatchFailureCodeAgentUnreachable,
 		},
 		{

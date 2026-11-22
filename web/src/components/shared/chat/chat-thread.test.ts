@@ -1810,6 +1810,268 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.dispatchFailureReason).toBe('Agent unreachable (suspended)');
     expect(msg?.dispatchFailureCode).toBe('agent_unreachable');
   });
+
+  it('renders deleted-agent failed delivery label for both sender and a second human viewer', async () => {
+    const el = await mount();
+    el.currentUserId = 'user-viewer';
+
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'sse-deleted-reply-1',
+      msg: 'approved!',
+      sender: 'user:alice@example.com',
+      senderId: 'user-sender',
+      recipient: 'agent:gone-worker',
+      recipientId: 'gone-worker-id',
+      type: 'reply',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'failed',
+      dispatchFailureReason: 'Agent unreachable (deleted)',
+      dispatchFailureCode: 'agent_unreachable',
+    });
+
+    await vi.waitFor(() => {
+      const bubble = el.shadowRoot?.querySelector('#msg-sse-deleted-reply-1') as
+        | (HTMLElement & { updateComplete: Promise<boolean> })
+        | null;
+      expect(bubble).not.toBeNull();
+      const state = bubble?.shadowRoot?.querySelector('.delivery-state.failed');
+      expect(state?.textContent).toContain('Not delivered — @gone-worker was deleted');
+    });
+
+    // Switch viewer to the sender: same label renders for the sender too.
+    el.currentUserId = 'user-sender';
+    await el.updateComplete;
+    const bubble = el.shadowRoot?.querySelector('#msg-sse-deleted-reply-1') as
+      | (HTMLElement & { updateComplete: Promise<boolean> })
+      | null;
+    await bubble?.updateComplete;
+    const state = bubble?.shadowRoot?.querySelector('.delivery-state.failed');
+    expect(state?.textContent).toContain('Not delivered — @gone-worker was deleted');
+  });
+
+  it('shows a warning toast on send when the reply target agent was deleted, without duplicating on replay', async () => {
+    showToastMock.mockReset();
+    const el = await mount();
+    el.defaultAgent = 'live-default';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      composerReplyTo: {
+        messageId: string;
+        senderName: string;
+        content: string;
+        sender?: string;
+        senderId?: string;
+      } | null;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+    internals.composerReplyTo = {
+      messageId: 'orig-agent-msg',
+      senderName: 'gone-worker',
+      content: 'please approve',
+      sender: 'agent:gone-worker',
+      senderId: 'gone-worker-id',
+    };
+
+    const failResponse = {
+      ok: true,
+      status: 201,
+      json: () =>
+        Promise.resolve({
+          id: 'failed-deleted-1',
+          dispatchState: 'failed',
+          dispatchFailureReason: 'Agent unreachable (deleted)',
+          dispatchFailureCode: 'agent_unreachable',
+        }),
+    } as unknown as Response;
+
+    apiFetch.mockResolvedValueOnce(failResponse);
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'approved',
+          plain: false,
+          interrupt: false,
+          replyToId: 'orig-agent-msg',
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'Not delivered — @gone-worker was deleted',
+      'warning'
+    );
+
+    // Replaying the same message ID must not emit a duplicate toast.
+    apiFetch.mockResolvedValueOnce(failResponse);
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'approved',
+          plain: false,
+          interrupt: false,
+          replyToId: 'orig-agent-msg',
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a warning toast with the reason text for non-deleted agent_unreachable failures', async () => {
+    showToastMock.mockReset();
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: () =>
+        Promise.resolve({
+          id: 'failed-stopped-1',
+          dispatchState: 'failed',
+          dispatchFailureReason: 'Agent unreachable (stopped)',
+          dispatchFailureCode: 'agent_unreachable',
+        }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hello',
+          plain: false,
+          interrupt: false,
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+
+    expect(showToastMock).toHaveBeenCalledWith('Agent unreachable (stopped)', 'warning');
+  });
+
+  it('sets optimistic bubble recipient to the replied-to agent rather than the topic default', async () => {
+    const el = await mount();
+    el.defaultAgent = 'topic-default';
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      composerReplyTo: {
+        messageId: string;
+        senderName: string;
+        content: string;
+        sender?: string;
+        senderId?: string;
+      } | null;
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+    internals.composerReplyTo = {
+      messageId: 'reply-target-msg',
+      senderName: 'specialist',
+      content: 'question',
+      sender: 'agent:specialist',
+      senderId: 'specialist-id',
+    };
+
+    let resolvePost!: (v: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvePost = resolve;
+        })
+    );
+
+    const sendPromise = internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'answer',
+          plain: false,
+          interrupt: false,
+          replyToId: 'reply-target-msg',
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+
+    const optimistic = [...internals.messageMap.values()].find((m) => m.msg === 'answer');
+    expect(optimistic?.recipient).toBe('agent:specialist');
+    expect(optimistic?.recipientId).toBe('specialist-id');
+
+    resolvePost({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'srv-reply-1', dispatchState: 'dispatched' }),
+    } as unknown as Response);
+    await sendPromise;
+  });
+
+  it('passes a composer reply-bar warning only when replying to an agent missing from a loaded agent list', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      composerReplyTo: {
+        messageId: string;
+        senderName: string;
+        content: string;
+        sender?: string;
+        senderId?: string;
+      } | null;
+    };
+    const composerWarning = () =>
+      (
+        el.shadowRoot?.querySelector('scion-chat-composer') as
+          | (HTMLElement & { replyTargetWarning?: string })
+          | null
+      )?.replyTargetWarning ?? '';
+
+    // 1. Agent list unloaded (empty): no false-positive warning.
+    el.agents = [];
+    internals.composerReplyTo = {
+      messageId: 'm-del',
+      senderName: 'gone-agent',
+      content: 'hi',
+      sender: 'agent:gone-agent',
+      senderId: 'gone-id',
+    };
+    await el.updateComplete;
+    expect(composerWarning()).toBe('');
+
+    // 2. Agent list loaded without the target agent: warning shown.
+    el.agents = [
+      { id: 'live-id', name: 'Live Agent', slug: 'live-agent', status: 'running' } as Agent,
+    ];
+    await el.updateComplete;
+    expect(composerWarning()).toBe(
+      "@gone-agent was deleted — mention a live agent with @ or this reply won't be delivered."
+    );
+
+    // 3. Replying to a live agent in the list: no warning.
+    internals.composerReplyTo = {
+      messageId: 'm-live',
+      senderName: 'live-agent',
+      content: 'hi',
+      sender: 'agent:live-agent',
+      senderId: 'live-id',
+    };
+    await el.updateComplete;
+    expect(composerWarning()).toBe('');
+
+    // 4. Replying to a human message: no warning.
+    internals.composerReplyTo = {
+      messageId: 'm-human',
+      senderName: 'Alice',
+      content: 'hi',
+      sender: 'user:alice@example.com',
+      senderId: 'user-alice',
+    };
+    await el.updateComplete;
+    expect(composerWarning()).toBe('');
+  });
 });
 
 describe('scion-chat-thread stale send and the sending state', () => {

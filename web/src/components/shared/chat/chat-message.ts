@@ -77,6 +77,30 @@ import type {
 } from '../../../shared/types.js';
 import { copyToClipboard, showCopyFailedToast } from '../../../utils/clipboard.js';
 
+/** Tooltip shown on a failed message whose target agent was deleted. */
+export const DELETED_AGENT_TOOLTIP = 'Mention a live agent with @ to resend.';
+
+/**
+ * Whether a failed message's reason/code indicates an unreachable deleted agent.
+ * Matches both explicit `agent_unreachable` codes and history rows without a code.
+ */
+export function isDeletedUnreachableReason(
+  reason: string | null | undefined,
+  code?: string
+): boolean {
+  if (!reason) return false;
+  const isUnreachable =
+    code === 'agent_unreachable' || (!code && reason.startsWith('Agent unreachable'));
+  return isUnreachable && reason.endsWith('(deleted)');
+}
+
+/** Label and toast text for a message that failed because the target agent was deleted. */
+export function formatDeletedAgentLabel(agentSlug: string): string {
+  return agentSlug
+    ? `Not delivered — @${agentSlug} was deleted`
+    : 'Not delivered — agent was deleted';
+}
+
 /** Structured attachment reference from the W7 API. */
 export interface AttachmentRefInfo {
   id: string;
@@ -3108,8 +3132,15 @@ export class ScionChatMessage extends LitElement {
 
   /** Render delivery state indicator for outbound (user-sent) messages. */
   private renderDeliveryState() {
-    // Only show on user-sent messages with a dispatch state.
-    if (this.fromAgent || !this.dispatchState) return nothing;
+    if (!this.dispatchState) return nothing;
+    // Failed delivery states are shown to every human participant in the
+    // conversation, not only the sender (where `fromAgent` means "not my
+    // message" in v2). Agent-sent messages never render delivery states.
+    if (this.dispatchState === 'failed') {
+      if (this.senderIsAgent || this.sender?.startsWith('agent:')) return nothing;
+    } else if (this.fromAgent) {
+      return nothing;
+    }
 
     switch (this.dispatchState) {
       case 'pending':
@@ -3201,6 +3232,16 @@ export class ScionChatMessage extends LitElement {
               <div class="delivery-state failed">
                 <sl-icon name="exclamation-triangle"></sl-icon>
                 Delivery unconfirmed
+              </div>
+            </sl-tooltip>
+          `;
+        }
+        if (isDeletedUnreachableReason(this.dispatchFailureReason, this.dispatchFailureCode)) {
+          return html`
+            <sl-tooltip content=${DELETED_AGENT_TOOLTIP} hoist>
+              <div class="delivery-state failed">
+                <sl-icon name="exclamation-triangle"></sl-icon>
+                ${formatDeletedAgentLabel(this.routedTo)}
               </div>
             </sl-tooltip>
           `;

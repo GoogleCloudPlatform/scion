@@ -147,6 +147,12 @@ func TestUnreachableNC_DeletedDefault(t *testing.T) {
 	if resp["dispatchFailureCode"] != "agent_unreachable" {
 		t.Fatalf("expected dispatchFailureCode=agent_unreachable, got %v", resp)
 	}
+	if resp["dispatchFailureReason"] != agentDeletedReason {
+		t.Fatalf("expected dispatchFailureReason=%q, got %v", agentDeletedReason, resp)
+	}
+	if m.DispatchFailureReason == nil || *m.DispatchFailureReason != agentDeletedReason {
+		t.Fatalf("expected row reason %q, got %v", agentDeletedReason, m.DispatchFailureReason)
+	}
 }
 
 // Running default agent: dispatches normally, and the dispatch context
@@ -438,8 +444,8 @@ func TestUnreachableNC_RoutingPlanError_DeletedDefault_NotMislabelledUnreachable
 	if resp["dispatchFailureCode"] == "agent_unreachable" {
 		t.Fatalf("expected no agent_unreachable code on a routing-plan error, got %v", resp)
 	}
-	if want := agentGoneReason; m.DispatchFailureReason != nil && *m.DispatchFailureReason == want {
-		t.Fatalf("expected the routing-plan error to NOT persist %q, got %+v", want, m)
+	if m.DispatchFailureReason != nil && (*m.DispatchFailureReason == agentGoneReason || *m.DispatchFailureReason == agentDeletedReason) {
+		t.Fatalf("expected the routing-plan error to NOT persist an unreachable reason, got %+v", m)
 	}
 }
 
@@ -550,9 +556,9 @@ func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
 	require.NoError(t, s.DeleteAgent(ctx, hard.ID))
 
 	softOut := sendDMOutcome(t, srv, s, d, soft.ID)
-	want := dmOutcome{Code: http.StatusCreated, State: store.MessageDispatchFailed, Reason: agentGoneReason,
+	want := dmOutcome{Code: http.StatusCreated, State: store.MessageDispatchFailed, Reason: agentDeletedReason,
 		FailCode: dispatchFailureCodeAgentUnreachable, Type: messages.TypeInstruction,
-		RowState: store.MessageDispatchFailed, RowReason: agentGoneReason}
+		RowState: store.MessageDispatchFailed, RowReason: agentDeletedReason}
 	require.Equal(t, want, softOut, "soft-deleted agent")
 
 	missingCode, missingBody := dmRefusal(t, srv, s, d, tid("dm-never-existed"))
@@ -583,5 +589,5 @@ func TestUnreachableNC_TopicDeletedAndMissingDefaultSameReason(t *testing.T) {
 	require.Equal(t, missingResp["dispatchFailureCode"], deletedResp["dispatchFailureCode"])
 	require.Equal(t, missingRow.DispatchState, deletedRow.DispatchState)
 	require.Equal(t, *missingRow.DispatchFailureReason, *deletedRow.DispatchFailureReason)
-	require.Equal(t, agentGoneReason, *deletedRow.DispatchFailureReason)
+	require.Equal(t, agentDeletedReason, *deletedRow.DispatchFailureReason)
 }
