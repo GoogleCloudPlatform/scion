@@ -44,7 +44,7 @@ func (ws *WebServer) proxyModeWriteGuard(next http.Handler) http.Handler {
 }
 
 func proxyModeWriteGuardMiddleware(authMode string, match func(*http.Request) bool, next http.Handler) http.Handler {
-	if !strings.EqualFold(strings.TrimSpace(authMode), proxyAuthMode) {
+	if authMode != proxyAuthMode {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,32 +139,39 @@ func isStateChangingMethod(method string) bool {
 }
 
 // isStateChangingAPIRequest reports whether r targets an /api/v1 route with a
-// state-changing method.
+// state-changing method. Both the raw and cleaned paths are checked so
+// percent-encoded dot segments that ServeMux still routes under /api/v1/ cannot
+// climb out of the prefix via path.Clean.
 func isStateChangingAPIRequest(r *http.Request) bool {
 	if !isStateChangingMethod(r.Method) {
 		return false
 	}
-	return strings.HasPrefix(path.Clean(r.URL.Path), "/api/v1/")
+	p := r.URL.Path
+	return strings.HasPrefix(p, "/api/v1/") || strings.HasPrefix(path.Clean(p), "/api/v1/")
 }
 
 // isStateChangingWebAuthRequest reports whether r targets a WebServer sign-in
 // or sign-out endpoint (/auth/* or /api/v1/auth/test-login) with a
-// state-changing method.
+// state-changing method. Both the raw and cleaned paths are checked so
+// percent-encoded dot segments cannot climb out of the /auth/ prefix via
+// path.Clean.
 //
-// /auth/test-identity/redeem is excluded: handleTestIdentityRedeem already
-// enforces POST, application/json, and origin checks itself, and in proxy mode
-// verifies the driver assertion before writing an audited origin_refused row
-// carrying the verified assertion email. Running the generic guard ahead of it
-// would pre-empt that audit record.
+// /auth/test-identity/redeem is excluded (exact raw path match only):
+// handleTestIdentityRedeem already enforces POST, application/json, and origin
+// checks itself, and in proxy mode verifies the driver assertion before writing
+// an audited origin_refused row carrying the verified assertion email. Running
+// the generic guard ahead of it would pre-empt that audit record.
 func isStateChangingWebAuthRequest(r *http.Request) bool {
 	if !isStateChangingMethod(r.Method) {
 		return false
 	}
-	if r.URL.Path == "/auth/test-identity/redeem" {
+	p := r.URL.Path
+	if p == "/auth/test-identity/redeem" {
 		return false
 	}
-	p := path.Clean(r.URL.Path)
-	return strings.HasPrefix(p, "/auth/") || p == "/api/v1/auth/test-login"
+	c := path.Clean(p)
+	return strings.HasPrefix(p, "/auth/") || p == "/api/v1/auth/test-login" ||
+		strings.HasPrefix(c, "/auth/") || c == "/api/v1/auth/test-login"
 }
 
 // requestHasOriginSignal reports whether r carries the Sec-Fetch-Site or Origin

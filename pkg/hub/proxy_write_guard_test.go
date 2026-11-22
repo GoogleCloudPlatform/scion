@@ -695,18 +695,24 @@ func TestWebProxyWriteGuard_AuthEndpoints(t *testing.T) {
 	}
 }
 
-func TestProxyWriteGuard_UncleanedPathsAndAuthModeCase(t *testing.T) {
+func TestProxyWriteGuard_UncleanedPathsAndExactAuthMode(t *testing.T) {
 	crossHeaders := map[string]string{
 		"Sec-Fetch-Site": "cross-site",
 		"Content-Type":   "application/json",
 	}
 
-	// Uncleaned paths that resolve to /api/v1/* are rejected before reaching auth/mux.
+	// Uncleaned paths that resolve to /api/v1/* and percent-encoded dot/slash
+	// paths whose raw prefix is /api/v1/ (which ServeMux still dispatches to
+	// subtree handlers without redirecting) are all rejected before reaching auth/mux.
 	for _, p := range []string{
 		"/x/../api/v1/projects",
 		"/auth/../api/v1/projects",
 		"//api/v1/projects",
 		"/api/v1/./projects",
+		"/api/v1/",
+		"/api/v1/agents/%2E%2E/%2E%2E/%2E%2E/x",
+		"/api/v1/agents/a%2F..%2F..%2F..%2F..",
+		"/api/v1/projects/%2E%2E/%2E%2E/%2E%2E/%2E%2E",
 	} {
 		code, reached := doGuardBody(proxyAuthMode, http.MethodPost, p, jsonBody, crossHeaders)
 		if reached || code != http.StatusForbidden {
@@ -715,7 +721,8 @@ func TestProxyWriteGuard_UncleanedPathsAndAuthModeCase(t *testing.T) {
 	}
 
 	// Uncleaned paths that resolve to web auth routes (including traversal to
-	// /auth/test-identity/redeem) are rejected by the web write guard.
+	// /auth/test-identity/redeem) and percent-encoded dot/slash paths under
+	// /auth/ are rejected by the web write guard.
 	doWebGuard := func(mode, p string) (int, bool) {
 		var reached bool
 		ws := &WebServer{config: WebServerConfig{AuthMode: mode}}
@@ -737,7 +744,13 @@ func TestProxyWriteGuard_UncleanedPathsAndAuthModeCase(t *testing.T) {
 		"/auth/test-identity/redeem/../logout",
 		"/x/../api/v1/auth/test-login",
 		"/x/../auth/test-identity/redeem",
+		"/auth/test-identity/redeem/",
+		"/auth/test-identity/%2E%2E/test-identity/redeem",
 		"//auth/logout",
+		"/auth/",
+		"/auth/login/%2E%2E/%2E%2E/x",
+		"/auth/callback/%2E%2E/%2E%2E",
+		"/auth/login/a%2F..%2F..%2F..",
 	} {
 		code, reached := doWebGuard(proxyAuthMode, p)
 		if reached || code != http.StatusForbidden {
@@ -745,15 +758,16 @@ func TestProxyWriteGuard_UncleanedPathsAndAuthModeCase(t *testing.T) {
 		}
 	}
 
-	// Case-insensitive and whitespace-padded AuthMode activates both guards.
+	// Non-canonical AuthMode values do not activate proxy authentication elsewhere
+	// in the server, so the write guard matches exact "proxy" only.
 	for _, mode := range []string{"PROXY", "Proxy", " proxy "} {
 		code, reached := doGuardBody(mode, http.MethodPost, "/api/v1/projects", jsonBody, crossHeaders)
-		if reached || code != http.StatusForbidden {
-			t.Fatalf("API guard mode %q: got code=%d reached=%v, want 403 not reached", mode, code, reached)
+		if !reached || code != http.StatusOK {
+			t.Fatalf("API guard mode %q: got code=%d reached=%v, want 200 pass-through", mode, code, reached)
 		}
 		code, reached = doWebGuard(mode, "/auth/logout")
-		if reached || code != http.StatusForbidden {
-			t.Fatalf("Web guard mode %q: got code=%d reached=%v, want 403 not reached", mode, code, reached)
+		if !reached || code != http.StatusOK {
+			t.Fatalf("Web guard mode %q: got code=%d reached=%v, want 200 pass-through", mode, code, reached)
 		}
 	}
 }
