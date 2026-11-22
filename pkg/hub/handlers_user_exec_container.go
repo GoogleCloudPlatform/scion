@@ -155,18 +155,29 @@ func (s *Server) putUserExecContainer(w http.ResponseWriter, r *http.Request, ac
 		return
 	}
 
+	prev, prevErr := s.store.GetUserExecContainer(ctx, actor.ID())
+	if prevErr != nil && !errors.Is(prevErr, store.ErrNotFound) {
+		slog.Error("failed to read previous execution container", "user_id", actor.ID(), "error", prevErr)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save execution container", nil)
+		return
+	}
+
 	if _, err := s.store.PutUserExecContainer(ctx, actor.ID(), agentID); err != nil {
 		slog.Error("failed to save execution container", "user_id", actor.ID(), "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to save execution container", nil)
 		return
 	}
 
-	s.emitMutationAuditSync(ctx, &store.MutationAuditRecord{
+	auditRec := &store.MutationAuditRecord{
 		MutationType: mutationTypeUserExecContainerSet,
 		TargetType:   "user",
 		TargetID:     actor.ID(),
 		AfterSummary: fmt.Sprintf("agent_id=%s", agentID),
-	})
+	}
+	if prev != nil && prev.AgentID != agentID {
+		auditRec.BeforeSummary = fmt.Sprintf("agent_id=%s", prev.AgentID)
+	}
+	s.emitMutationAuditSync(ctx, auditRec)
 
 	res := ExecContainerResolution{
 		State: mapExecContainerState(agent),

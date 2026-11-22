@@ -279,7 +279,8 @@ func TestExecContainer_AC4_Uniform422AndAttachEligibility(t *testing.T) {
 	assert.Equal(t, createdByOther.ID, resp.Agent.ID)
 	assert.Equal(t, "Member Project", resp.Agent.ProjectName)
 
-	// Verify audit event user.exec_container.set was recorded.
+	// Verify audit event user.exec_container.set was recorded (initial set has
+	// empty BeforeSummary).
 	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
 		MutationType: mutationTypeUserExecContainerSet,
 		TargetID:     caller.ID,
@@ -288,6 +289,28 @@ func TestExecContainer_AC4_Uniform422AndAttachEligibility(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, audits, "expected user.exec_container.set mutation audit record")
 	assert.Contains(t, audits[0].AfterSummary, createdByOther.ID)
+	assert.Empty(t, audits[0].BeforeSummary)
+
+	// Replacing with a different shell agent records BeforeSummary with the
+	// previous agent_id (O6).
+	secondShell := ecAgent(t, s, projMember.ID, caller.ID, caller.ID, config.ShellHarnessConfigName, string(state.PhaseRunning), string(state.ActivityIdle))
+	okRec2 := doECRequest(t, srv, http.MethodPut, map[string]string{"agentId": secondShell.ID}, ident, cred)
+	require.Equal(t, http.StatusOK, okRec2.Code, okRec2.Body.String())
+
+	audits2, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: mutationTypeUserExecContainerSet,
+		TargetID:     caller.ID,
+		Limit:        10,
+	})
+	require.NoError(t, err)
+	var foundReplace bool
+	for _, rec := range audits2 {
+		if rec.AfterSummary == "agent_id="+secondShell.ID && rec.BeforeSummary == "agent_id="+createdByOther.ID {
+			foundReplace = true
+			break
+		}
+	}
+	assert.True(t, foundReplace, "expected user.exec_container.set audit with BeforeSummary=%q and AfterSummary=%q", "agent_id="+createdByOther.ID, "agent_id="+secondShell.ID)
 }
 
 // TestExecContainer_AC5_StateResolution verifies AC 5:

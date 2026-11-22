@@ -241,3 +241,55 @@ func TestExecContainerCLI_RefusedInAgentModeAndWindows(t *testing.T) {
 	assert.True(t, winEC.Hidden)
 	assert.ErrorIs(t, winShow.RunE(winShow, nil), errUnsupportedOnWindows)
 }
+
+// TestResolveLocalProjectAgentID_PrecedenceAndAmbiguity verifies O5:
+// resolution prefers exact ID, then slug, then name, and errors on ambiguous names.
+func TestResolveLocalProjectAgentID_PrecedenceAndAmbiguity(t *testing.T) {
+	const (
+		projID  = "proj-prec-1"
+		idSlug  = "11111111-1111-1111-1111-111111111111"
+		idName1 = "22222222-2222-2222-2222-222222222222"
+		idName2 = "33333333-3333-3333-3333-333333333333"
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		case r.URL.Path == "/api/v1/projects/"+projID:
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": projID, "name": "Prec", "slug": "prec"})
+		case r.URL.Path == "/api/v1/projects/"+projID+"/agents":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agents": []map[string]any{
+					{"id": idName1, "slug": "ops-1", "name": "ops"},
+					{"id": idSlug, "slug": "ops", "name": "different-name"},
+					{"id": idName2, "slug": "dup-2", "name": "dup"},
+					{"id": "44444444-4444-4444-4444-444444444444", "slug": "dup-1", "name": "dup"},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	setupExecContainerTestProject(t, srv.URL, projID)
+	client, _, err := requireHubProjectClient()
+	require.NoError(t, err)
+
+	// Exact ID match wins.
+	got, err := resolveLocalProjectAgentID(t.Context(), client, projID, idName1)
+	require.NoError(t, err)
+	assert.Equal(t, idName1, got)
+
+	// Slug match beats Name match ("ops" matches slug of idSlug even though idName1 appears first with name "ops").
+	got, err = resolveLocalProjectAgentID(t.Context(), client, projID, "ops")
+	require.NoError(t, err)
+	assert.Equal(t, idSlug, got)
+
+	// Ambiguous name returns an error instead of picking arbitrarily.
+	_, err = resolveLocalProjectAgentID(t.Context(), client, projID, "dup")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ambiguous")
+}
