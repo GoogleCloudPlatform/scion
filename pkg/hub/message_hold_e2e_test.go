@@ -1374,6 +1374,11 @@ func TestHoldA2_5_FailurePathsRevalidationAndTransientFaultRehold(t *testing.T) 
 		ctx := context.Background()
 		origUntil := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Millisecond)
 
+		// Connect session first when no rows are held so conduit admission's
+		// delegation-standing GetUser check succeeds, then seed held rows and
+		// arm failGetUser for the re-drive pass.
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+
 		// Row 1 is from user f.owner; rows 2 & 3 are from agent f.agent.
 		// Injecting failGetUser faults row 1's re-validation with a transient
 		// store error (R3). Rows 2 & 3 MUST also be re-held so they never overtake row 1!
@@ -1382,10 +1387,7 @@ func TestHoldA2_5_FailurePathsRevalidationAndTransientFaultRehold(t *testing.T) 
 		m3 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "order-3-agent", origUntil)
 
 		f.fault.failGetUser.Store(true)
-		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
-
-		// Wait briefly for the admission re-drive pass to run and re-hold all 3.
-		time.Sleep(150 * time.Millisecond)
+		f.srv.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
 		assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug), "nothing dispatched on transient lookup fault")
 		for _, id := range []string{m1.ID, m2.ID, m3.ID} {
 			got, err := f.store.GetMessage(ctx, id)
@@ -2159,13 +2161,17 @@ func (s *cancelAfterClaimHoldStore) ClaimHeldMessages(ctx context.Context, agent
 func TestHoldA2_Round1_REQ3_OPT6_RefusedReholdAndTimeoutNeverOrphan(t *testing.T) {
 	t.Run("refused_rehold_on_stopped_agent_fails_all_claimed_rows_with_notices", func(t *testing.T) {
 		f := newHoldE2EFixture(t)
+		// Connect session first when no rows are held so conduit admission's
+		// delegation-standing GetUser check succeeds before arming the fault.
+		f.connectDeliverSession(t, f.public.URL, true, nil)
+
 		m1 := f.seedHeldMessage(t, "user:"+f.launched.OwnerID, f.launched.OwnerID, "orphan-1-user", time.Now().Add(10*time.Minute))
 		m2 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "orphan-2-agent", time.Now().Add(10*time.Minute))
 
 		installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *stopOnGetUserHoldStore {
 			return &stopOnGetUserHoldStore{Store: inner, inner: f.store, agentID: f.launched.ID, userID: f.launched.OwnerID}
 		})
-		f.connectDeliverSession(t, f.public.URL, true, nil)
+		f.srv.redriveAgentHeldMessagesOnce(context.Background(), f.launched.ID)
 
 		got1 := f.waitMessageState(t, m1.ID, store.MessageDispatchFailed)
 		got2 := f.waitMessageState(t, m2.ID, store.MessageDispatchFailed)
