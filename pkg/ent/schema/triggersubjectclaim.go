@@ -58,6 +58,8 @@ func (TriggerSubjectClaim) Fields() []ent.Field {
 		field.Time("released_at").
 			Optional().
 			Nillable(),
+		field.String("release_reason").
+			Optional(),
 	}
 }
 

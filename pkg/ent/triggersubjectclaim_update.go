@@ -145,6 +145,26 @@ func (_u *TriggerSubjectClaimUpdate) ClearReleasedAt() *TriggerSubjectClaimUpdat
 	return _u
 }
 
+// SetReleaseReason sets the "release_reason" field.
+func (_u *TriggerSubjectClaimUpdate) SetReleaseReason(v string) *TriggerSubjectClaimUpdate {
+	_u.mutation.SetReleaseReason(v)
+	return _u
+}
+
+// SetNillableReleaseReason sets the "release_reason" field if the given value is not nil.
+func (_u *TriggerSubjectClaimUpdate) SetNillableReleaseReason(v *string) *TriggerSubjectClaimUpdate {
+	if v != nil {
+		_u.SetReleaseReason(*v)
+	}
+	return _u
+}
+
+// ClearReleaseReason clears the value of the "release_reason" field.
+func (_u *TriggerSubjectClaimUpdate) ClearReleaseReason() *TriggerSubjectClaimUpdate {
+	_u.mutation.ClearReleaseReason()
+	return _u
+}
+
 // Mutation returns the TriggerSubjectClaimMutation object of the builder.
 func (_u *TriggerSubjectClaimUpdate) Mutation() *TriggerSubjectClaimMutation {
 	return _u.mutation
@@ -215,6 +235,12 @@ func (_u *TriggerSubjectClaimUpdate) sqlSave(ctx context.Context) (_node int, er
 	}
 	if _u.mutation.ReleasedAtCleared() {
 		_spec.ClearField(triggersubjectclaim.FieldReleasedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ReleaseReason(); ok {
+		_spec.SetField(triggersubjectclaim.FieldReleaseReason, field.TypeString, value)
+	}
+	if _u.mutation.ReleaseReasonCleared() {
+		_spec.ClearField(triggersubjectclaim.FieldReleaseReason, field.TypeString)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -352,6 +378,26 @@ func (_u *TriggerSubjectClaimUpdateOne) ClearReleasedAt() *TriggerSubjectClaimUp
 	return _u
 }
 
+// SetReleaseReason sets the "release_reason" field.
+func (_u *TriggerSubjectClaimUpdateOne) SetReleaseReason(v string) *TriggerSubjectClaimUpdateOne {
+	_u.mutation.SetReleaseReason(v)
+	return _u
+}
+
+// SetNillableReleaseReason sets the "release_reason" field if the given value is not nil.
+func (_u *TriggerSubjectClaimUpdateOne) SetNillableReleaseReason(v *string) *TriggerSubjectClaimUpdateOne {
+	if v != nil {
+		_u.SetReleaseReason(*v)
+	}
+	return _u
+}
+
+// ClearReleaseReason clears the value of the "release_reason" field.
+func (_u *TriggerSubjectClaimUpdateOne) ClearReleaseReason() *TriggerSubjectClaimUpdateOne {
+	_u.mutation.ClearReleaseReason()
+	return _u
+}
+
 // Mutation returns the TriggerSubjectClaimMutation object of the builder.
 func (_u *TriggerSubjectClaimUpdateOne) Mutation() *TriggerSubjectClaimMutation {
 	return _u.mutation
@@ -452,6 +498,12 @@ func (_u *TriggerSubjectClaimUpdateOne) sqlSave(ctx context.Context) (_node *Tri
 	}
 	if _u.mutation.ReleasedAtCleared() {
 		_spec.ClearField(triggersubjectclaim.FieldReleasedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ReleaseReason(); ok {
+		_spec.SetField(triggersubjectclaim.FieldReleaseReason, field.TypeString, value)
+	}
+	if _u.mutation.ReleaseReasonCleared() {
+		_spec.ClearField(triggersubjectclaim.FieldReleaseReason, field.TypeString)
 	}
 	_node = &TriggerSubjectClaim{config: _u.config}
 	_spec.Assign = _node.assignValues

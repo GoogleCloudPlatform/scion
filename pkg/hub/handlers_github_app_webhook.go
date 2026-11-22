@@ -841,9 +841,26 @@ func (s *Server) pauseGitHubTriggersForRemovedRepo(ctx context.Context, project 
 		return
 	}
 
-	// TODO(ptone/scion#8058): release this project's GitHub trigger subject
-	// claims with release_reason = "association_lost" (§10.3) once Stage 2's
-	// trigger_subject_claims table is merged on main.
+	// Release this project's active GitHub trigger subject claims with
+	// release_reason = "association_lost" (§10.3).
+	if releasedClaims, err := s.store.ReleaseTriggerSubjectClaimsForProjectBySourceKind(
+		ctx,
+		project.ID,
+		store.TriggerSourceKindGitHub,
+		store.TriggerSubjectClaimReleaseReasonAssociationLost,
+		timeNow().UTC(),
+	); err != nil {
+		slog.Warn("Failed to release GitHub trigger subject claims after repo removal",
+			"project_id", project.ID, "installation_id", installationID, "error", err)
+	} else if releasedClaims > 0 {
+		slog.Info("Released GitHub trigger subject claims after repository removal from installation",
+			"project_id", project.ID,
+			"installation_id", installationID,
+			"repo", strings.ToLower(strings.TrimSpace(ownerRepo)),
+			"released", releasedClaims,
+			"release_reason", store.TriggerSubjectClaimReleaseReasonAssociationLost,
+		)
+	}
 
 	var matches []store.Trigger
 	opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}

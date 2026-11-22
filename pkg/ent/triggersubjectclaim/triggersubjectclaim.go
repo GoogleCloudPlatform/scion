@@ -32,6 +32,8 @@ const (
 	FieldBoundAt = "bound_at"
 	// FieldReleasedAt holds the string denoting the released_at field in the database.
 	FieldReleasedAt = "released_at"
+	// FieldReleaseReason holds the string denoting the release_reason field in the database.
+	FieldReleaseReason = "release_reason"
 	// Table holds the table name of the triggersubjectclaim in the database.
 	Table = "trigger_subject_claims"
 )
@@ -48,6 +50,7 @@ var Columns = []string{
 	FieldClaimedAt,
 	FieldBoundAt,
 	FieldReleasedAt,
+	FieldReleaseReason,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -122,4 +125,9 @@ func ByBoundAt(opts ...sql.OrderTermOption) OrderOption {
 // ByReleasedAt orders the results by the released_at field.
 func ByReleasedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldReleasedAt, opts...).ToFunc()
+}
+
+// ByReleaseReason orders the results by the release_reason field.
+func ByReleaseReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReleaseReason, opts...).ToFunc()
 }

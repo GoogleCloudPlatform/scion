@@ -32,6 +32,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -1969,5 +1971,181 @@ func TestResumeGitHubTrigger_UserPausedResumesWithEmptyRepoCache(t *testing.T) {
 	}
 	if resumed.Status != store.TriggerStatusActive || resumed.StatusReason != store.TriggerStatusReasonNone {
 		t.Fatalf("expected trigger active with empty reason, got (%q, %q)", resumed.Status, resumed.StatusReason)
+	}
+}
+
+func TestInstallationRepositoriesRemoved_ReleasesSubjectClaimsWithAssociationLost(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	gh := newFakeGitHubForAssoc(t)
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.srv.config.GitHubAppConfig.AppID = 778899
+	f.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	f.srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
+	f.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.srv.mu.Unlock()
+
+	setTriggerExperimentsForG1bTest(t, f.srv, true, true)
+
+	sysAdmin := createAssocAdmin(t, f.store, "claim-release-sys-admin")
+	const instID int64 = 6204
+	createAssocInstallation(t, f.store, instID, "acme", "acme/widgets", "acme/other")
+
+	// Associate fixture project with instID + acme/widgets.
+	remoteA := gh.remote("Acme", "Widgets")
+	projA, err := f.store.GetProject(ctx, f.projectID)
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	projA.GitRemote = remoteA
+	idCopy := instID
+	projA.GitHubInstallationID = &idCopy
+	projA.GitHubAppStatus = &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now().UTC()}
+	if err := f.store.UpdateProject(ctx, projA); err != nil {
+		t.Fatalf("UpdateProject: %v", err)
+	}
+	setAdminBinding(t, f.store, projA, instID, util.NormalizeGitRemote(remoteA), sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(projA.ID)
+
+	// Create a second project on acme/other under the same installation; its claims must not be released.
+	remoteB := gh.remote("acme", "other")
+	projB := createAssocProject(t, f.store, "claim-release-other", remoteB, sysAdmin.ID, ptrInt64(instID))
+	setAdminBinding(t, f.store, projB, instID, util.NormalizeGitRemote(remoteB), sysAdmin.ID)
+	f.srv.invalidateGitHubAssociation(projB.ID)
+
+	// Seed a GitHub trigger and a non-GitHub (webhook) trigger in projA, plus a GitHub trigger in projB.
+	ghTrigA := uuid.NewString()
+	if err := f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:            ghTrigA,
+		ProjectID:     projA.ID,
+		Name:          "gh-claim-a",
+		SourceKind:    store.TriggerSourceKindGitHub,
+		MatchTypes:    []string{"github.pull_request.opened"},
+		MatchDialect:  "cel",
+		ActionType:    store.TriggerActionDispatchAgent,
+		ActionPayload: `{"template":"default"}`,
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		Status:        store.TriggerStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTrigger ghTrigA: %v", err)
+	}
+
+	whTrigA := uuid.NewString()
+	if err := f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:            whTrigA,
+		ProjectID:     projA.ID,
+		Name:          "wh-claim-a",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      uuid.NewString(),
+		MatchTypes:    []string{"*"},
+		MatchDialect:  "cel",
+		ActionType:    store.TriggerActionDispatchAgent,
+		ActionPayload: `{"template":"default"}`,
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		Status:        store.TriggerStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTrigger whTrigA: %v", err)
+	}
+
+	ghTrigB := uuid.NewString()
+	if err := f.store.CreateTrigger(ctx, &store.Trigger{
+		ID:            ghTrigB,
+		ProjectID:     projB.ID,
+		Name:          "gh-claim-b",
+		SourceKind:    store.TriggerSourceKindGitHub,
+		MatchTypes:    []string{"github.pull_request.opened"},
+		MatchDialect:  "cel",
+		ActionType:    store.TriggerActionDispatchAgent,
+		ActionPayload: `{"template":"default"}`,
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		Status:        store.TriggerStatusActive,
+	}); err != nil {
+		t.Fatalf("CreateTrigger ghTrigB: %v", err)
+	}
+
+	now := time.Now().UTC()
+	seedClaim := func(trigID, subject string) *store.TriggerSubjectClaim {
+		t.Helper()
+		c, existing, err := f.store.ClaimTriggerSubject(ctx, trigID, subject, uuid.NewString(), uuid.NewString(), now, now.Add(-5*time.Minute))
+		if err != nil || existing != nil || c == nil {
+			t.Fatalf("ClaimTriggerSubject(%s, %s): c=%v existing=%v err=%v", trigID, subject, c, existing, err)
+		}
+		if ok, err := f.store.BindTriggerSubjectClaim(ctx, c.ID, c.FireID, f.agentA.ID, now); err != nil || !ok {
+			t.Fatalf("BindTriggerSubjectClaim: ok=%v err=%v", ok, err)
+		}
+		return c
+	}
+
+	seedClaim(ghTrigA, "github:acme/widgets#42")
+	seedClaim(whTrigA, "wh-subject-42")
+	seedClaim(ghTrigB, "github:acme/other#7")
+
+	// Deliver installation_repositories.removed for acme/widgets.
+	removePayload := mustJSON(t, map[string]any{
+		"action":       "removed",
+		"installation": map[string]any{"id": instID},
+		"repositories_removed": []map[string]any{
+			{"id": 1, "full_name": "acme/widgets", "name": "widgets"},
+		},
+		"repositories_added": []map[string]any{},
+	})
+	removeReq := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(removePayload))
+	removeReq.Header.Set("X-GitHub-Event", "installation_repositories")
+	removeReq.Header.Set("X-Hub-Signature-256", signWebhookPayload(removePayload, "test-webhook-secret"))
+	removeRec := httptest.NewRecorder()
+	f.srv.handleGitHubWebhook(removeRec, removeReq)
+	if removeRec.Code != http.StatusOK {
+		t.Fatalf("removed webhook: expected 200, got %d: %s", removeRec.Code, removeRec.Body.String())
+	}
+
+	// projA's GitHub trigger claim must be released; webhook trigger claim and projB's claim stay active.
+	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, ghTrigA, "github:acme/widgets#42"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected projA GitHub subject claim to be released, got err=%v", err)
+	}
+	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, whTrigA, "wh-subject-42"); err != nil {
+		t.Fatalf("expected projA webhook subject claim to remain active, got err=%v", err)
+	}
+	if _, err := f.store.GetActiveTriggerSubjectClaim(ctx, ghTrigB, "github:acme/other#7"); err != nil {
+		t.Fatalf("expected projB GitHub subject claim to remain active, got err=%v", err)
+	}
+
+	// projA's GitHub trigger must be paused with source_deleted.
+	pausedTrig, err := f.store.GetTrigger(ctx, ghTrigA)
+	if err != nil {
+		t.Fatalf("GetTrigger ghTrigA: %v", err)
+	}
+	if pausedTrig.Status != store.TriggerStatusPaused || pausedTrig.StatusReason != store.TriggerStatusReasonSourceDeleted {
+		t.Fatalf("expected ghTrigA paused (source_deleted), got (%q, %q)", pausedTrig.Status, pausedTrig.StatusReason)
+	}
+
+	// Re-associate via installation_repositories.added and admin-resume the trigger.
+	addPayload := mustJSON(t, map[string]any{
+		"action":       "added",
+		"installation": map[string]any{"id": instID},
+		"repositories_added": []map[string]any{
+			{"id": 1, "full_name": "acme/widgets", "name": "widgets"},
+		},
+		"repositories_removed": []map[string]any{},
+	})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(addPayload))
+	addReq.Header.Set("X-GitHub-Event", "installation_repositories")
+	addReq.Header.Set("X-Hub-Signature-256", signWebhookPayload(addPayload, "test-webhook-secret"))
+	addRec := httptest.NewRecorder()
+	f.srv.handleGitHubWebhook(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("added webhook: expected 200, got %d: %s", addRec.Code, addRec.Body.String())
+	}
+
+	resumedRec := f.doTrigger(t, f.ownerAuth, ghTrigA+"/resume", http.MethodPost, nil)
+	if resumedRec.Code != http.StatusOK {
+		t.Fatalf("resume after re-association: expected 200, got %d: %s", resumedRec.Code, resumedRec.Body.String())
+	}
+
+	// Because the old claim was released, a new claim on the same subject succeeds cleanly.
+	reclaimed, existing, err := f.store.ClaimTriggerSubject(ctx, ghTrigA, "github:acme/widgets#42", uuid.NewString(), uuid.NewString(), now.Add(time.Minute), now)
+	if err != nil || existing != nil || reclaimed == nil {
+		t.Fatalf("expected fresh claim after re-association, got reclaimed=%v existing=%v err=%v", reclaimed, existing, err)
 	}
 }
