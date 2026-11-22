@@ -25,6 +25,7 @@ package liveness
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -262,11 +263,12 @@ func tmuxAttachedCheckerOnSocket(session, socket string) func() bool {
 			}
 			cmd.Env = env
 		}
-		out, err := cmd.Output()
-		if err != nil {
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		if err := procreap.RunManaged(cmd); err != nil {
 			return false
 		}
-		return strings.TrimSpace(string(out)) != ""
+		return strings.TrimSpace(out.String()) != ""
 	}
 }
 

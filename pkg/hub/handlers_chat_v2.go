@@ -1761,6 +1761,10 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	}
 
 	primaryAgent := agents[0]
+	if isShellAgent(primaryAgent) {
+		dmErr := shellAgentNotMessageableError(primaryAgent)
+		return nil, newChatSendError(dmErr.HTTPStatus, dmErr.Code, dmErr.Message, nil)
+	}
 
 	// The primary agent (agents[0]) always gets TypeInstruction. Secondaries
 	// (agents[1:]) get TypeMention via the fan-out path. The primary is the
@@ -2357,6 +2361,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// Handle additional mentioned agents (fan-out).
 	if len(agents) > 1 {
 		for _, mentionAgent := range agents[1:] {
+			if isShellAgent(mentionAgent) {
+				continue
+			}
 			// Phase 3 msg-authz: Check message authorization on each mentioned agent.
 			// Replaces the ActionAttach check — chat v2 mention fan-out is messaging.
 			mentionAllowed, _, _ := s.authorizeAgentMessage(ctx, user, mentionAgent, false)

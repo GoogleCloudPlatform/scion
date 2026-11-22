@@ -182,6 +182,7 @@ export function buildFixture() {
           'hub.code_span_mentions': false,
           'hub.custom_default_user_role': false,
           'hub.effective_permissions': false,
+          'hub.exec_containers': false,
           'hub.exec_schedules': false,
           'hub.flat_runtime_brokers': false,
           'hub.github_triggers': false,

@@ -2618,6 +2618,27 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Shell execution container admission (ptone/scion#8812 §3.2, §3.4 S6, §7):
+	//  - S6 (ungated): only human principals may create shell agents.
+	//  - Experiment gate: hub.exec_containers must be enabled.
+	//  - Initial task: rejected (400 task_not_supported).
+	if isShellAgent(agent) {
+		if GetAgentIdentityFromContext(ctx) != nil {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "shell agent: human principals only", nil)
+			return
+		}
+		if !s.experimentEnabled(experiments.ExecContainers) {
+			writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
+				"experiment_disabled: "+experiments.ExecContainers+" is off; execution containers are not enabled on this hub", nil)
+			return
+		}
+		if agent.AppliedConfig != nil && strings.TrimSpace(agent.AppliedConfig.Task) != "" {
+			writeError(w, http.StatusBadRequest, ErrCodeTaskNotSupported,
+				"shell execution containers do not support an initial task", nil)
+			return
+		}
+	}
+
 	// Quota enforcement, in order:
 	//  1. Per-broker agent ceiling (ptone/scion#1303). Exceeding the ceiling
 	//     must reject the create outright — before any per-project

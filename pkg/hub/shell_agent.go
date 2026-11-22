@@ -52,3 +52,13 @@ func refuseReservedHarnessConfigSlug(w http.ResponseWriter, slug string) bool {
 		map[string]interface{}{"field": "slug"})
 	return true
 }
+
+// shellAgentNotMessageableError returns the typed DM refusal for a shell
+// execution container (ptone/scion#8812 §3.4 S5).
+func shellAgentNotMessageableError(agent *store.Agent) *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeAgentNotMessageable,
+		Message:    fmt.Sprintf("agent %q is an execution container and cannot receive messages", agentTargetLabel(agent)),
+		HTTPStatus: http.StatusUnprocessableEntity,
+	}
+}

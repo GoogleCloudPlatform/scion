@@ -261,7 +261,7 @@ func (a *execAction) Authorize(
 	if isManagedAgentRuntime(target.Runtime) {
 		return nil, nil, a.skipExecFire(ctx, req, p, execReasonTargetNotRunning, "managed_runtime")
 	}
-	if phaseErr := a.srv.validateAgentDeliverable(target); phaseErr != nil {
+	if phaseErr := validateAgentRunning(target); phaseErr != nil {
 		return nil, nil, a.skipExecFire(ctx, req, p, execReasonTargetNotRunning, "phase_"+store.EffectiveRestingPhase(target))
 	}
 	if reincarnationInFlight(target) {

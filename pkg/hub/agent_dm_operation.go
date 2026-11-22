@@ -453,6 +453,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// buffered dispatch, which a starting agent receives once up.
 	autoWake := false
 	wakeQueued := false
+	if isShellAgent(input.TargetAgent) {
+		return nil, shellAgentNotMessageableError(input.TargetAgent)
+	}
 	if !deferred {
 		held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID)
 		mode := autoWakeNone

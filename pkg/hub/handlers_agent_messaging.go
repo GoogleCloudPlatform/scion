@@ -2596,6 +2596,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// migrating recipient, or when a wake finds another start in progress.
 	deferDelivery := reincarnationInFlight(agent)
 
+	// Shell execution containers refuse all message delivery, including from
+	// the owner and with --wake (ptone/scion#8812 §3.4 S5).
+	if isShellAgent(agent) {
+		WriteAgentDMError(w, shellAgentNotMessageableError(agent))
+		return
+	}
+
 	// A delegated send is an agent send: before anything is written, it
 	// gets the delivery checks ExecuteAgentDM applies to the actor agent's
 	// own send (dispatch availability, the target's hold and its phase),
@@ -4341,6 +4348,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		if authKind == "agent" && agent.ID == authID {
 			continue
 		}
+		// Broadcast silently skips shell execution containers (ptone/scion#8812 §3.4 S5).
+		if isShellAgent(&agent) {
+			continue
+		}
 		if agent.Phase == string(state.PhaseRunning) {
 			targeted++
 		} else {
@@ -4357,6 +4368,9 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	for _, agent := range allResult.Items {
 		// Skip the sending agent to avoid self-delivery.
 		if authKind == "agent" && agent.ID == authID {
+			continue
+		}
+		if isShellAgent(&agent) {
 			continue
 		}
 		if agent.Phase == string(state.PhaseRunning) {
@@ -4481,6 +4495,9 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 	msg.Metadata = s.stampSenderTimezone(ctx, msg.Metadata, msg.Sender, msg.SenderID)
 
 	for _, agent := range runningAgents {
+		if isShellAgent(&agent) {
+			continue
+		}
 		agentMsg := *msg
 		agentMsg.Recipient = "agent:" + agent.Slug
 		agentMsg.RecipientID = agent.ID
@@ -4746,6 +4763,11 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		if !ok {
 			results[i].Status = "error"
 			results[i].Error = "agent resolved but not found for dispatch"
+			continue
+		}
+		if isShellAgent(mentionAgent) {
+			results[i].Status = "skipped"
+			results[i].Error = shellAgentNotMessageableError(mentionAgent).Message
 			continue
 		}
 
