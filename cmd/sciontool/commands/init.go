@@ -1502,7 +1502,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 				LiveWork: liveWork.record(livenessProvider(liveness.NewSampler(liveness.Config{
 					AgentUID:         livenessAgentUID(targetUID),
 					HarnessRootDepth: livenessHarnessRootDepth(os.Getenv),
-					CheckAttached:    livenessAttachedChecker(os.Getenv),
+					CheckAttached:    livenessAttachedChecker(os.Getenv, livenessAgentUID(targetUID), livenessAgentGID(targetGID)),
 				}), statusHandler.CurrentActivitySince)),
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
@@ -2108,14 +2108,23 @@ func livenessAgentUID(targetUID int) int {
 	return os.Getuid()
 }
 
+// livenessAgentGID is the GID the agent's processes run as, paired with
+// livenessAgentUID for running tmux list-clients under the agent credential.
+func livenessAgentGID(targetGID int) int {
+	if targetGID > 0 {
+		return targetGID
+	}
+	return os.Getgid()
+}
+
 // livenessAttachedChecker returns the attached-terminal liveness checker for
 // the built-in "shell" execution container harness only, or nil for every
 // other harness (ptone/scion#8812 §3.3).
-func livenessAttachedChecker(getenv func(string) string) func() bool {
+func livenessAttachedChecker(getenv func(string) string, uid, gid int) func() bool {
 	if strings.TrimSpace(getenv("SCION_HARNESS")) != "shell" {
 		return nil
 	}
-	return liveness.TmuxAttachedChecker("scion")
+	return liveness.TmuxAttachedChecker("scion", uid, gid)
 }
 
 // livenessHarnessRootDepth reads the liveness harness root depth from

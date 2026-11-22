@@ -25,11 +25,8 @@ package liveness
 
 import (
 	"bufio"
-	"bytes"
-	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -229,47 +226,6 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 		}
 	}
 	return nil
-}
-
-const tmuxAttachedTimeout = 2 * time.Second
-
-// TmuxAttachedChecker returns a CheckAttached function that queries
-// `tmux list-clients -t <session>` and reports true when at least one
-// terminal client is attached.
-func TmuxAttachedChecker(session string) func() bool {
-	return tmuxAttachedCheckerOnSocket(session, "")
-}
-
-func tmuxAttachedCheckerOnSocket(session, socket string) func() bool {
-	if session == "" {
-		session = "scion"
-	}
-	return func() bool {
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxAttachedTimeout)
-		defer cancel()
-		args := make([]string, 0, 5)
-		if socket != "" {
-			args = append(args, "-L", socket)
-		}
-		args = append(args, "list-clients", "-t", session)
-		cmd := exec.CommandContext(ctx, "tmux", args...)
-		if socket != "" {
-			// Isolate from any outer TMUX session when targeting a private socket.
-			env := make([]string, 0, len(os.Environ()))
-			for _, kv := range os.Environ() {
-				if !strings.HasPrefix(kv, "TMUX=") {
-					env = append(env, kv)
-				}
-			}
-			cmd.Env = env
-		}
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		if err := procreap.RunManaged(cmd); err != nil {
-			return false
-		}
-		return strings.TrimSpace(out.String()) != ""
-	}
 }
 
 // recordCPU records every process's CPU time for the next sample's Tier 2

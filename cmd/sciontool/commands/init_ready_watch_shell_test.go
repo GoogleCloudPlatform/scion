@@ -80,11 +80,11 @@ func TestWatchHarnessReady_IdleStrategy(t *testing.T) {
 }
 
 func TestLivenessAttachedChecker_ShellOnly(t *testing.T) {
-	if fn := livenessAttachedChecker(func(string) string { return "shell" }); fn == nil {
+	if fn := livenessAttachedChecker(func(string) string { return "shell" }, 1000, 1000); fn == nil {
 		t.Fatal("expected non-nil checker for SCION_HARNESS=shell")
 	}
 	for _, h := range []string{"", "claude", "gemini", "generic"} {
-		if fn := livenessAttachedChecker(func(string) string { return h }); fn != nil {
+		if fn := livenessAttachedChecker(func(string) string { return h }, 1000, 1000); fn != nil {
 			t.Errorf("expected nil checker for SCION_HARNESS=%q", h)
 		}
 	}

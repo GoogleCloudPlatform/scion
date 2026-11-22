@@ -98,3 +98,24 @@ func TestShellHarness(t *testing.T) {
 		t.Errorf("ValidateEntryCommand(shell) = %v, want nil", err)
 	}
 }
+
+// TestResolve_NonReservedShellHarnessRefused verifies O1: a non-reserved
+// harness config declaring harness: shell must not resolve to *Shell.
+func TestResolve_NonReservedShellHarnessRefused(t *testing.T) {
+	settings := &config.VersionedSettings{
+		HarnessConfigs: map[string]config.HarnessConfigEntry{
+			"myshell": {
+				Harness: config.ShellHarnessConfigName,
+				Image:   "scion-base:latest",
+				User:    "scion",
+			},
+		},
+	}
+	res, err := Resolve(context.Background(), ResolveOptions{
+		Name:     "myshell",
+		Settings: settings,
+	})
+	if err == nil {
+		t.Fatalf("expected error resolving non-reserved config with harness: shell, got %+v (%T)", res, res.Harness)
+	}
+}

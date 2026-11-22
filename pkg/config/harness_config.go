@@ -128,6 +128,16 @@ const (
 	HarnessConfigSourceUnresolved HarnessConfigSource = "unresolved"
 )
 
+// BuiltinShellHarnessConfigDir returns the synthetic built-in harness-config
+// entry for the reserved "shell" execution container harness (ptone/scion#8812).
+func BuiltinShellHarnessConfigDir() *HarnessConfigDir {
+	return &HarnessConfigDir{
+		Name:   ShellHarnessConfigName,
+		Config: HarnessConfigEntry{Harness: ShellHarnessConfigName, Image: "scion-base:latest", User: "scion"},
+		Source: HarnessConfigSourceBuiltin,
+	}
+}
+
 // ResolveHarnessConfigDir is the single resolution order for an agent's
 // harness-config directory, shared by provisioning (pkg/agent), harness
 // construction (pkg/harness.Resolve) and the runtime broker's preflights
@@ -147,22 +157,12 @@ const (
 // other name is refused with ErrInvalidResourceName. The empty name loads the
 // hydrated copy on that branch (it is loaded whatever name resolves) and
 // finds nothing on the other.
-// builtinShellHarnessConfigDir returns the synthetic built-in harness-config
-// entry for the reserved "shell" execution container harness (ptone/scion#8812).
-func builtinShellHarnessConfigDir() *HarnessConfigDir {
-	return &HarnessConfigDir{
-		Name:   ShellHarnessConfigName,
-		Config: HarnessConfigEntry{Harness: ShellHarnessConfigName, Image: "scion-base:latest", User: "scion"},
-		Source: HarnessConfigSourceBuiltin,
-	}
-}
-
 func ResolveHarnessConfigDir(hydratedPath, name, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
 	if err := checkLookupName(name); err != nil {
 		return nil, err
 	}
 	if name == ShellHarnessConfigName {
-		return builtinShellHarnessConfigDir(), nil
+		return BuiltinShellHarnessConfigDir(), nil
 	}
 	if hydratedPath != "" {
 		hcDir, err := LoadHarnessConfigDir(hydratedPath)
@@ -390,7 +390,7 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// The "shell" harness config is reserved and cannot be shadowed by any
 	// template, project, or global directory (ptone/scion#8812).
 	if name == ShellHarnessConfigName {
-		return builtinShellHarnessConfigDir(), nil
+		return BuiltinShellHarnessConfigDir(), nil
 	}
 
 	// Track which directories were searched so the error message is actionable.

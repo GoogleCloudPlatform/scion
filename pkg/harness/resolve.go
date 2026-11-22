@@ -68,11 +68,8 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	// The reserved built-in "shell" harness config always resolves to Shell,
 	// regardless of settings overlays or on-disk directories (ptone/scion#8812).
 	if opts.Name == config.ShellHarnessConfigName {
-		entry := config.HarnessConfigEntry{
-			Harness: config.ShellHarnessConfigName,
-			Image:   "scion-base:latest",
-			User:    "scion",
-		}
+		builtin := config.BuiltinShellHarnessConfigDir()
+		entry := builtin.Config
 		if hcDir != nil {
 			entry = hcDir.Config
 		}
@@ -93,14 +90,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	if err := config.ValidateHarnessHomePaths(entry); err != nil {
 		return nil, fmt.Errorf("harness-config %q: %w", opts.Name, err)
 	}
+	// Only the reserved built-in "shell" config may resolve to the Shell
+	// harness (ptone/scion#8812 §3.2): a non-reserved config declaring
+	// harness: shell would bypass Hub-side shell-agent protections.
 	if entry.Harness == config.ShellHarnessConfigName {
-		return &ResolvedHarness{
-			Harness:        &Shell{},
-			ConfigName:     opts.Name,
-			ConfigDir:      hcDir,
-			Config:         entry,
-			Implementation: config.ShellHarnessConfigName,
-		}, nil
+		return nil, fmt.Errorf("harness-config %q: harness %q is reserved for the built-in %q harness config",
+			opts.Name, config.ShellHarnessConfigName, config.ShellHarnessConfigName)
 	}
 
 	// 1. Container-script harness (provisioner block present)
