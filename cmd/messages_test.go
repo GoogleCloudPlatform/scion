@@ -21,6 +21,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -76,9 +77,9 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 	}()
 	clearHubContextEnv(t)
 
-	var sawRequest bool
+	var sawRequest atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawRequest = true
+		sawRequest.Store(true)
 		switch {
 		case r.URL.Path == "/api/v1/messages" && r.Method == http.MethodGet:
 			w.Header().Set("Content-Type", "application/json")
@@ -138,10 +139,10 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 
 	for _, bare := range [][]string{{"messages"}, {"msgs"}, {"inbox"}} {
 		t.Run("bare_"+bare[0], func(t *testing.T) {
-			sawRequest = false
+			sawRequest.Store(false)
 			out, err := execArgs(t, bare)
 			require.NoError(t, err)
-			assert.True(t, sawRequest, "bare %v must call the hub list endpoint", bare)
+			assert.True(t, sawRequest.Load(), "bare %v must call the hub list endpoint", bare)
 			assert.Contains(t, out, "No messages")
 		})
 	}
@@ -163,10 +164,10 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sawRequest = false
+			sawRequest.Store(false)
 			out, err := execArgs(t, tc.args)
 			require.NoError(t, err)
-			assert.True(t, sawRequest, "%v must call the hub read endpoint", tc.args)
+			assert.True(t, sawRequest.Load(), "%v must call the hub read endpoint", tc.args)
 			assert.Contains(t, out, tc.wantOut)
 		})
 	}
@@ -203,11 +204,11 @@ func TestMessagesBareAndUnknownSubcommand(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sawRequest = false
+			sawRequest.Store(false)
 			_, err := execArgs(t, tc.args)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
-			assert.False(t, sawRequest, "unknown subcommand/arg must fail fast before calling the hub")
+			assert.False(t, sawRequest.Load(), "unknown subcommand/arg must fail fast before calling the hub")
 		})
 	}
 }
