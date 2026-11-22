@@ -1,0 +1,1230 @@
+{
+  "answer_409_already_answered": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "already_answered",
+        "details": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "decision": {
+              "answeredByEmail": "bob@test.com",
+              "answeredByName": "Bob",
+              "answeredByUserId": "<USER_BOB_ID>",
+              "at": "<TIMESTAMP>",
+              "choiceId": "1",
+              "label": "yes",
+              "matchedDefault": true,
+              "outcome": "answer",
+              "provenance": "direct",
+              "responseMessageId": "<UUID_1>",
+              "surface": "native"
+            },
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_2>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_3>",
+            "status": "decided",
+            "version": 1
+          }
+        },
+        "message": "decision D234 v1 is already answered"
+      }
+    }
+  },
+  "answer_409_batch_required": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "batch_required",
+        "details": {
+          "actionable": [
+            {
+              "askerAgentId": "<AGENT_ID>",
+              "askerAgentName": "sched-agent",
+              "choices": [
+                {
+                  "id": "1",
+                  "label": "yes"
+                },
+                {
+                  "id": "2",
+                  "label": "no"
+                }
+              ],
+              "defaultChoiceId": "1",
+              "dismissAvailableAt": "<TIMESTAMP>",
+              "key": "D234",
+              "messageId": "<UUID_1>",
+              "question": "Ship the **feature** now?",
+              "ref": "<AGENT_ID>/D234",
+              "rowId": "<UUID_2>",
+              "status": "pending",
+              "version": 1
+            },
+            {
+              "askerAgentId": "<AGENT_ID>",
+              "askerAgentName": "sched-agent",
+              "choices": [
+                {
+                  "id": "a",
+                  "label": "Extend"
+                },
+                {
+                  "id": "b",
+                  "label": "New type"
+                }
+              ],
+              "dismissAvailableAt": "<TIMESTAMP>",
+              "key": "1",
+              "messageId": "<UUID_1>",
+              "question": "Which approach?",
+              "ref": "<AGENT_ID>/1",
+              "rowId": "<UUID_3>",
+              "status": "pending",
+              "version": 1
+            }
+          ],
+          "promptMessageId": "<UUID_1>"
+        },
+        "message": "this prompt has 2 decisions; answer them together with POST /api/v1/decision-prompts/<UUID_1>/answers"
+      }
+    }
+  },
+  "answer_409_dismissed": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "dismissed",
+        "details": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "dismissed": {
+              "at": "<TIMESTAMP>",
+              "byName": "Alice",
+              "byUserId": "<USER_ALICE_ID>",
+              "reason": "out of scope",
+              "responseMessageId": "<UUID_1>",
+              "surface": "native"
+            },
+            "key": "D234",
+            "messageId": "<UUID_2>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_3>",
+            "status": "dismissed",
+            "version": 1
+          }
+        },
+        "message": "decision D234 v1 was dismissed"
+      }
+    }
+  },
+  "answer_409_replaced": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "replaced",
+        "details": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_1>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "replacedBy": {
+              "at": "<TIMESTAMP>",
+              "messageId": "<UUID_2>",
+              "rowId": "<UUID_3>",
+              "version": 2
+            },
+            "rowId": "<UUID_4>",
+            "status": "replaced",
+            "version": 1
+          },
+          "replacedBy": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_2>",
+            "question": "Ship v2 now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_3>",
+            "status": "pending",
+            "version": 2
+          }
+        },
+        "message": "decision D234 v1 was replaced by a newer version"
+      }
+    }
+  },
+  "answer_409_withdrawn": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "withdrawn",
+        "details": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_1>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_2>",
+            "status": "withdrawn",
+            "version": 1,
+            "withdrawn": {
+              "at": "<TIMESTAMP>",
+              "byName": "sched-agent",
+              "reason": "no longer needed"
+            }
+          }
+        },
+        "message": "decision D234 v1 was withdrawn"
+      }
+    }
+  },
+  "answer_set_409_changed": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "answer_set_changed",
+        "details": {
+          "decisions": [
+            {
+              "askerAgentId": "<AGENT_ID>",
+              "askerAgentName": "sched-agent",
+              "choices": [
+                {
+                  "id": "1",
+                  "label": "yes"
+                },
+                {
+                  "id": "2",
+                  "label": "no"
+                }
+              ],
+              "defaultChoiceId": "1",
+              "dismissAvailableAt": "<TIMESTAMP>",
+              "key": "D234",
+              "messageId": "<UUID_1>",
+              "question": "Ship the **feature** now?",
+              "ref": "<AGENT_ID>/D234",
+              "rowId": "<UUID_2>",
+              "status": "pending",
+              "version": 1
+            },
+            {
+              "askerAgentId": "<AGENT_ID>",
+              "askerAgentName": "sched-agent",
+              "choices": [
+                {
+                  "id": "a",
+                  "label": "Extend"
+                },
+                {
+                  "id": "b",
+                  "label": "New type"
+                }
+              ],
+              "dismissAvailableAt": "<TIMESTAMP>",
+              "key": "1",
+              "messageId": "<UUID_1>",
+              "question": "Which approach?",
+              "ref": "<AGENT_ID>/1",
+              "rowId": "<UUID_3>",
+              "status": "pending",
+              "version": 1
+            }
+          ],
+          "reasons": {
+            "<UUID_3>": "missing"
+          }
+        },
+        "message": "the decisions to answer changed; refresh and submit again"
+      }
+    }
+  },
+  "answer_set_ok": {
+    "status": 200,
+    "body": {
+      "batchId": "<UUID_1>",
+      "decisions": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "decision": {
+            "answeredByEmail": "bob@test.com",
+            "answeredByName": "Bob",
+            "answeredByUserId": "<USER_BOB_ID>",
+            "at": "<TIMESTAMP>",
+            "batchId": "<UUID_1>",
+            "choiceId": "1",
+            "label": "yes",
+            "matchedDefault": true,
+            "outcome": "answer",
+            "provenance": "direct",
+            "responseMessageId": "<UUID_2>",
+            "surface": "native"
+          },
+          "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
+          "key": "D234",
+          "messageId": "<UUID_3>",
+          "question": "Ship the **feature** now?",
+          "ref": "<AGENT_ID>/D234",
+          "rowId": "<UUID_4>",
+          "status": "decided",
+          "version": 1
+        },
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "a",
+              "label": "Extend"
+            },
+            {
+              "id": "b",
+              "label": "New type"
+            }
+          ],
+          "decision": {
+            "answeredByEmail": "bob@test.com",
+            "answeredByName": "Bob",
+            "answeredByUserId": "<USER_BOB_ID>",
+            "at": "<TIMESTAMP>",
+            "batchId": "<UUID_1>",
+            "choiceId": "a",
+            "label": "Extend",
+            "outcome": "answer",
+            "provenance": "direct",
+            "responseMessageId": "<UUID_2>",
+            "surface": "native"
+          },
+          "dismissAvailableAt": "<TIMESTAMP>",
+          "key": "1",
+          "messageId": "<UUID_3>",
+          "question": "Which approach?",
+          "ref": "<AGENT_ID>/1",
+          "rowId": "<UUID_5>",
+          "status": "decided",
+          "version": 1
+        }
+      ],
+      "responseMessageId": "<UUID_2>"
+    },
+    "events": [
+      {
+        "subject": "user.<USER_BOB_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "decision": {
+              "answeredByEmail": "bob@test.com",
+              "answeredByName": "Bob",
+              "answeredByUserId": "<USER_BOB_ID>",
+              "at": "<TIMESTAMP>",
+              "batchId": "<UUID_1>",
+              "choiceId": "1",
+              "label": "yes",
+              "matchedDefault": true,
+              "outcome": "answer",
+              "provenance": "direct",
+              "responseMessageId": "<UUID_2>",
+              "surface": "native"
+            },
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_3>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_4>",
+            "status": "decided",
+            "version": 1
+          },
+          "messageId": "<UUID_3>",
+          "threadId": "<DM_KEY>"
+        }
+      },
+      {
+        "subject": "user.<USER_BOB_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "a",
+                "label": "Extend"
+              },
+              {
+                "id": "b",
+                "label": "New type"
+              }
+            ],
+            "decision": {
+              "answeredByEmail": "bob@test.com",
+              "answeredByName": "Bob",
+              "answeredByUserId": "<USER_BOB_ID>",
+              "at": "<TIMESTAMP>",
+              "batchId": "<UUID_1>",
+              "choiceId": "a",
+              "label": "Extend",
+              "outcome": "answer",
+              "provenance": "direct",
+              "responseMessageId": "<UUID_2>",
+              "surface": "native"
+            },
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "1",
+            "messageId": "<UUID_3>",
+            "question": "Which approach?",
+            "ref": "<AGENT_ID>/1",
+            "rowId": "<UUID_5>",
+            "status": "decided",
+            "version": 1
+          },
+          "messageId": "<UUID_3>",
+          "threadId": "<DM_KEY>"
+        }
+      }
+    ]
+  },
+  "answer_single_dm_ok": {
+    "status": 200,
+    "body": {
+      "decision": {
+        "askerAgentId": "<AGENT_ID>",
+        "askerAgentName": "sched-agent",
+        "choices": [
+          {
+            "id": "1",
+            "label": "yes"
+          },
+          {
+            "id": "2",
+            "label": "no"
+          }
+        ],
+        "decision": {
+          "answeredByEmail": "bob@test.com",
+          "answeredByName": "Bob",
+          "answeredByUserId": "<USER_BOB_ID>",
+          "at": "<TIMESTAMP>",
+          "choiceId": "1",
+          "label": "yes",
+          "matchedDefault": true,
+          "outcome": "answer",
+          "provenance": "direct",
+          "responseMessageId": "<UUID_1>",
+          "surface": "native"
+        },
+        "defaultChoiceId": "1",
+        "dismissAvailableAt": "<TIMESTAMP>",
+        "key": "D234",
+        "messageId": "<UUID_2>",
+        "question": "Ship the **feature** now?",
+        "ref": "<AGENT_ID>/D234",
+        "rowId": "<UUID_3>",
+        "status": "decided",
+        "version": 1
+      },
+      "responseMessageId": "<UUID_1>"
+    },
+    "events": [
+      {
+        "subject": "user.<USER_BOB_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "decision": {
+              "answeredByEmail": "bob@test.com",
+              "answeredByName": "Bob",
+              "answeredByUserId": "<USER_BOB_ID>",
+              "at": "<TIMESTAMP>",
+              "choiceId": "1",
+              "label": "yes",
+              "matchedDefault": true,
+              "outcome": "answer",
+              "provenance": "direct",
+              "responseMessageId": "<UUID_1>",
+              "surface": "native"
+            },
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_2>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_3>",
+            "status": "decided",
+            "version": 1
+          },
+          "messageId": "<UUID_2>",
+          "threadId": "<DM_KEY>"
+        }
+      }
+    ]
+  },
+  "answer_single_topic_ok": {
+    "status": 200,
+    "body": {
+      "decision": {
+        "askerAgentId": "<AGENT_ID>",
+        "askerAgentName": "sched-agent",
+        "choices": [
+          {
+            "id": "1",
+            "label": "yes"
+          },
+          {
+            "id": "2",
+            "label": "no"
+          }
+        ],
+        "decision": {
+          "answeredByEmail": "alice@test.com",
+          "answeredByName": "Alice",
+          "answeredByUserId": "<USER_ALICE_ID>",
+          "at": "<TIMESTAMP>",
+          "choiceId": "1",
+          "label": "yes",
+          "matchedDefault": true,
+          "outcome": "answer",
+          "provenance": "direct",
+          "responseMessageId": "<UUID_1>",
+          "surface": "native"
+        },
+        "defaultChoiceId": "1",
+        "dismissAvailableAt": "<TIMESTAMP>",
+        "key": "D234",
+        "messageId": "<UUID_2>",
+        "question": "Ship the **feature** now?",
+        "ref": "<AGENT_ID>/D234",
+        "rowId": "<UUID_3>",
+        "status": "decided",
+        "version": 1
+      },
+      "responseMessageId": "<UUID_1>"
+    },
+    "events": [
+      {
+        "subject": "project.<PROJECT_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "decision": {
+              "answeredByEmail": "alice@test.com",
+              "answeredByName": "Alice",
+              "answeredByUserId": "<USER_ALICE_ID>",
+              "at": "<TIMESTAMP>",
+              "choiceId": "1",
+              "label": "yes",
+              "matchedDefault": true,
+              "outcome": "answer",
+              "provenance": "direct",
+              "responseMessageId": "<UUID_1>",
+              "surface": "native"
+            },
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_2>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_3>",
+            "status": "decided",
+            "version": 1
+          },
+          "messageId": "<UUID_2>",
+          "threadId": "<TOPIC_ID>"
+        }
+      }
+    ]
+  },
+  "dismiss_409_dismiss_changed": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "dismiss_changed",
+        "details": {
+          "decisions": [
+            {
+              "askerAgentId": "<AGENT_ID>",
+              "askerAgentName": "sched-agent",
+              "choices": [
+                {
+                  "id": "1",
+                  "label": "yes"
+                },
+                {
+                  "id": "2",
+                  "label": "no"
+                }
+              ],
+              "decision": {
+                "answeredByEmail": "alice@test.com",
+                "answeredByName": "Alice",
+                "answeredByUserId": "<USER_ALICE_ID>",
+                "at": "<TIMESTAMP>",
+                "choiceId": "1",
+                "label": "yes",
+                "outcome": "answer",
+                "provenance": "direct",
+                "responseMessageId": "<UUID_1>",
+                "surface": "native"
+              },
+              "dismissAvailableAt": "<TIMESTAMP>",
+              "key": "D-ANS",
+              "messageId": "<UUID_2>",
+              "question": "Already answered?",
+              "ref": "<AGENT_ID>/D-ANS",
+              "rowId": "<UUID_3>",
+              "status": "decided",
+              "version": 1
+            }
+          ],
+          "reasons": {
+            "<UUID_3>": "decided"
+          }
+        },
+        "message": "the decisions to dismiss changed; refresh and try again"
+      }
+    }
+  },
+  "dismiss_409_too_recent": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "too_recent",
+        "details": {
+          "availableAt": "<TIMESTAMP>"
+        },
+        "message": "decisions must be at least 5 minutes old before they can be dismissed"
+      }
+    }
+  },
+  "dismiss_topic_ok": {
+    "status": 200,
+    "body": {
+      "alreadyDismissed": [],
+      "delivered": true,
+      "deliveryStatus": "delivered",
+      "dismissed": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
+          "dismissed": {
+            "at": "<TIMESTAMP>",
+            "byName": "Alice",
+            "byUserId": "<USER_ALICE_ID>",
+            "reason": "out of scope",
+            "responseMessageId": "<UUID_1>",
+            "surface": "native"
+          },
+          "key": "D234",
+          "messageId": "<UUID_2>",
+          "question": "Ship the **feature** now?",
+          "ref": "<AGENT_ID>/D234",
+          "rowId": "<UUID_3>",
+          "status": "dismissed",
+          "version": 1
+        }
+      ],
+      "responseMessageId": "<UUID_1>"
+    },
+    "events": [
+      {
+        "subject": "project.<PROJECT_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "dismissed": {
+              "at": "<TIMESTAMP>",
+              "byName": "Alice",
+              "byUserId": "<USER_ALICE_ID>",
+              "reason": "out of scope",
+              "responseMessageId": "<UUID_1>",
+              "surface": "native"
+            },
+            "key": "D234",
+            "messageId": "<UUID_2>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_3>",
+            "status": "dismissed",
+            "version": 1
+          },
+          "messageId": "<UUID_2>",
+          "threadId": "<TOPIC_ID>"
+        }
+      }
+    ]
+  },
+  "interpreted_409_already_answered": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "already_answered",
+        "details": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "decision": {
+              "answeredByEmail": "bob@test.com",
+              "answeredByName": "Bob",
+              "answeredByUserId": "<USER_BOB_ID>",
+              "at": "<TIMESTAMP>",
+              "choiceId": "1",
+              "label": "yes",
+              "matchedDefault": true,
+              "outcome": "answer",
+              "provenance": "direct",
+              "responseMessageId": "<UUID_1>",
+              "surface": "native"
+            },
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_2>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_3>",
+            "status": "decided",
+            "version": 1
+          },
+          "errors": [
+            {
+              "code": "already_answered",
+              "decision": {
+                "askerAgentId": "<AGENT_ID>",
+                "askerAgentName": "sched-agent",
+                "choices": [
+                  {
+                    "id": "1",
+                    "label": "yes"
+                  },
+                  {
+                    "id": "2",
+                    "label": "no"
+                  }
+                ],
+                "decision": {
+                  "answeredByEmail": "bob@test.com",
+                  "answeredByName": "Bob",
+                  "answeredByUserId": "<USER_BOB_ID>",
+                  "at": "<TIMESTAMP>",
+                  "choiceId": "1",
+                  "label": "yes",
+                  "matchedDefault": true,
+                  "outcome": "answer",
+                  "provenance": "direct",
+                  "responseMessageId": "<UUID_1>",
+                  "surface": "native"
+                },
+                "defaultChoiceId": "1",
+                "dismissAvailableAt": "<TIMESTAMP>",
+                "key": "D234",
+                "messageId": "<UUID_2>",
+                "question": "Ship the **feature** now?",
+                "ref": "<AGENT_ID>/D234",
+                "rowId": "<UUID_3>",
+                "status": "decided",
+                "version": 1
+              },
+              "key": "D234",
+              "message": "D234: already answered (by Bob, yes)"
+            }
+          ]
+        },
+        "message": "D234: already answered (by Bob, yes)"
+      }
+    }
+  },
+  "replace_update_ok": {
+    "status": 200,
+    "body": {
+      "conversation_id": "<UUID_1>",
+      "decisions": [
+        {
+          "key": "D234",
+          "ref": "<AGENT_ID>/D234",
+          "replaced": {
+            "status": "pending",
+            "version": 1
+          },
+          "row_id": "<UUID_2>",
+          "version": 2
+        }
+      ],
+      "message_id": "<UUID_3>",
+      "recipient": "user:bob@test.com",
+      "recipient_id": "<USER_BOB_ID>",
+      "status": "sent"
+    },
+    "events": [
+      {
+        "subject": "user.<USER_BOB_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_4>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "replacedBy": {
+              "at": "<TIMESTAMP>",
+              "messageId": "<UUID_3>",
+              "rowId": "<UUID_2>",
+              "version": 2
+            },
+            "rowId": "<UUID_5>",
+            "status": "replaced",
+            "version": 1
+          },
+          "messageId": "<UUID_4>",
+          "threadId": "<DM_KEY>"
+        }
+      }
+    ]
+  },
+  "send_409_decision_key_exists_decided": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "decision_key_exists",
+        "details": {
+          "existing": [
+            {
+              "answer": "yes",
+              "key": "D234",
+              "status": "decided",
+              "version": 1
+            }
+          ]
+        },
+        "message": "D234 already exists (v1, decided by Bob: yes); pass --update to replace it, or use a new id"
+      }
+    }
+  },
+  "send_409_decision_key_exists_pending": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "decision_key_exists",
+        "details": {
+          "existing": [
+            {
+              "key": "D234",
+              "status": "pending",
+              "version": 1
+            }
+          ]
+        },
+        "message": "D234 already exists (v1, pending); pass --update to replace it, or use a new id"
+      }
+    }
+  },
+  "send_409_too_many_pending": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "too_many_pending_decisions",
+        "message": "at most 50 pending decisions per agent; wait for answers or replace existing ones with --update"
+      }
+    }
+  },
+  "withdraw_409_failed_answered": {
+    "status": 409,
+    "body": {
+      "error": {
+        "code": "withdraw_failed",
+        "details": {
+          "failures": [
+            {
+              "decision": {
+                "askerAgentId": "<AGENT_ID>",
+                "askerAgentName": "sched-agent",
+                "choices": [
+                  {
+                    "id": "1",
+                    "label": "yes"
+                  },
+                  {
+                    "id": "2",
+                    "label": "no"
+                  }
+                ],
+                "decision": {
+                  "answeredByEmail": "bob@test.com",
+                  "answeredByName": "Bob",
+                  "answeredByUserId": "<USER_BOB_ID>",
+                  "at": "<TIMESTAMP>",
+                  "choiceId": "1",
+                  "label": "yes",
+                  "matchedDefault": true,
+                  "outcome": "answer",
+                  "provenance": "direct",
+                  "responseMessageId": "<UUID_1>",
+                  "surface": "native"
+                },
+                "defaultChoiceId": "1",
+                "dismissAvailableAt": "<TIMESTAMP>",
+                "key": "D234",
+                "messageId": "<UUID_2>",
+                "question": "Ship the **feature** now?",
+                "ref": "<AGENT_ID>/D234",
+                "rowId": "<UUID_3>",
+                "status": "decided",
+                "version": 1
+              },
+              "key": "D234",
+              "message": "D234: already answered by Bob (yes)",
+              "reason": "already_answered"
+            }
+          ]
+        },
+        "message": "D234: already answered by Bob (yes)"
+      }
+    }
+  },
+  "withdraw_dm_ok": {
+    "status": 200,
+    "body": {
+      "alreadyWithdrawn": [],
+      "withdrawn": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
+          "key": "D234",
+          "messageId": "<UUID_1>",
+          "question": "Ship the **feature** now?",
+          "ref": "<AGENT_ID>/D234",
+          "rowId": "<UUID_2>",
+          "status": "withdrawn",
+          "version": 1,
+          "withdrawn": {
+            "at": "<TIMESTAMP>",
+            "byName": "sched-agent",
+            "reason": "no longer needed"
+          }
+        }
+      ]
+    },
+    "events": [
+      {
+        "subject": "user.<USER_BOB_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "D234",
+            "messageId": "<UUID_1>",
+            "question": "Ship the **feature** now?",
+            "ref": "<AGENT_ID>/D234",
+            "rowId": "<UUID_2>",
+            "status": "withdrawn",
+            "version": 1,
+            "withdrawn": {
+              "at": "<TIMESTAMP>",
+              "byName": "sched-agent",
+              "reason": "no longer needed"
+            }
+          },
+          "messageId": "<UUID_1>",
+          "threadId": "<DM_KEY>"
+        }
+      }
+    ]
+  },
+  "withdraw_idempotent_ok": {
+    "status": 200,
+    "body": {
+      "alreadyWithdrawn": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
+          "key": "D234",
+          "messageId": "<UUID_1>",
+          "question": "Ship the **feature** now?",
+          "ref": "<AGENT_ID>/D234",
+          "rowId": "<UUID_2>",
+          "status": "withdrawn",
+          "version": 1,
+          "withdrawn": {
+            "at": "<TIMESTAMP>",
+            "byName": "sched-agent",
+            "reason": "no longer needed"
+          }
+        }
+      ],
+      "withdrawn": []
+    }
+  },
+  "withdraw_topic_ok": {
+    "status": 200,
+    "body": {
+      "alreadyWithdrawn": [],
+      "withdrawn": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "dismissAvailableAt": "<TIMESTAMP>",
+          "key": "T1",
+          "messageId": "<UUID_1>",
+          "question": "Topic Q?",
+          "ref": "<AGENT_ID>/T1",
+          "rowId": "<UUID_2>",
+          "status": "withdrawn",
+          "version": 1,
+          "withdrawn": {
+            "at": "<TIMESTAMP>",
+            "byName": "sched-agent",
+            "reason": "superseded"
+          }
+        }
+      ]
+    },
+    "events": [
+      {
+        "subject": "project.<PROJECT_ID>.chat.decision.updated",
+        "payload": {
+          "decision": {
+            "askerAgentId": "<AGENT_ID>",
+            "askerAgentName": "sched-agent",
+            "choices": [
+              {
+                "id": "1",
+                "label": "yes"
+              },
+              {
+                "id": "2",
+                "label": "no"
+              }
+            ],
+            "dismissAvailableAt": "<TIMESTAMP>",
+            "key": "T1",
+            "messageId": "<UUID_1>",
+            "question": "Topic Q?",
+            "ref": "<AGENT_ID>/T1",
+            "rowId": "<UUID_2>",
+            "status": "withdrawn",
+            "version": 1,
+            "withdrawn": {
+              "at": "<TIMESTAMP>",
+              "byName": "sched-agent",
+              "reason": "superseded"
+            }
+          },
+          "messageId": "<UUID_1>",
+          "threadId": "<TOPIC_ID>"
+        }
+      }
+    ]
+  }
+}

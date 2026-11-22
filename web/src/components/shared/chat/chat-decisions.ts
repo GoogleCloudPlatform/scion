@@ -47,20 +47,20 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
-import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { formatInstant } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { showToast } from '../../../utils/toast.js';
 import { copyWithToast } from '../../../utils/clipboard.js';
 import {
   MAX_DISMISS_REASON_RUNES,
-  clampDismissReason,
   dismissResultToast,
   isOnlyTooRecentDismissError,
 } from '../decisions-format.js';
 import { focusElement } from '../focus-moved.js';
 import {
   ANSWERABLE,
+  DISMISS_MIN_AGE_MS,
   OTHER_CHOICE_ID,
   actionableReason,
   answerDecision,
@@ -74,6 +74,15 @@ import {
   isOtherAnswer,
   newerDecisionView,
 } from '../../../client/decision-prompts.js';
+import {
+  MessageActionStateController,
+  dismissDialogStyles,
+  isWholeSetDismissed as isWholeSetDismissedShared,
+  isWholeSetWithdrawn as isWholeSetWithdrawnShared,
+  messageActionBannerStyles,
+  messageActionRowStatusClass,
+} from './message-action-state.js';
+export { dismissDialogStyles };
 import {
   DecisionPreferencesController,
   preselectRecommendedChoices,
@@ -94,68 +103,22 @@ import type {
 
 let hintSeq = 0;
 
-export const dismissDialogStyles = css`
-  sl-dialog.dismiss-dialog {
-    --sl-panel-background-color: var(--scion-surface, #fff);
-    --sl-panel-border-color: var(--scion-border, #e2e8f0);
-    --sl-color-neutral-700: var(--scion-text, #1e293b);
-  }
-
-  sl-dialog.dismiss-dialog::part(panel) {
-    width: min(32.5rem, calc(100vw - 1.5rem));
-  }
-
-  .dismiss-dialog-body {
-    display: flex;
-    flex-direction: column;
-    gap: 0.65rem;
-    font-size: var(--chat-fs-base, 0.9375rem);
-    color: var(--scion-text, #1e293b);
-  }
-
-  .dismiss-dialog-note {
-    font-size: var(--chat-fs-sm, 0.875rem);
-    color: var(--scion-text-muted, #64748b);
-  }
-
-  .dismiss-reason-help {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 0.5rem;
-  }
-
-  .dismiss-reason-count {
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    color: var(--scion-text-muted, #64748b);
-  }
-
-  .dismiss-tell {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: var(--chat-fs-sm, 0.875rem);
-    color: var(--scion-text-secondary, #475569);
-  }
-
-  .dismiss-tell sl-icon {
-    flex-shrink: 0;
-  }
-
-  .dismiss-dialog-footer {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    width: 100%;
-  }
-`;
-
 @customElement('scion-chat-decisions')
 export class ScionChatDecisions extends LitElement {
   readonly _zone = new DisplayZoneController(this);
   readonly _decisionPrefs = new DecisionPreferencesController(this);
   private readonly touchPrimary = new TouchPrimaryController(this);
+  private readonly actionState = new MessageActionStateController(this, {
+    kind: 'decision',
+    dismissMinAgeMs: DISMISS_MIN_AGE_MS,
+    getCreatedAt: () => this.createdAt,
+    getDismissAvailableAtMs: () => dismissAvailableAtMsForDecisions(this.views, this.createdAt),
+    clockNow: () => this.clockNow(),
+    hasDismissableRows: () => this.views.some((d) => this.rowWaitsOnViewer(d)),
+    getDismissableRowIds: () =>
+      this.views.filter((d) => this.rowWaitsOnViewer(d)).map((d) => d.rowId),
+    jumpEventName: 'decision-jump',
+  });
 
   /** The decision-prompt message id. */
   @property()
@@ -265,39 +228,13 @@ export class ScionChatDecisions extends LitElement {
   @state()
   private answeredElsewhere = new Map<string, string>();
 
-  /** Whether the per-card Dismiss confirmation dialog is open (Mocks X4, X4b). */
-  @state()
-  private dismissDialogOpen = false;
-
-  /** Row ids checked for dismissal inside the set dialog. */
-  @state()
-  private dismissCheckedIds = new Set<string>();
-
-  /** Optional plain-text dismissal reason (<= 500 runes). */
-  @state()
-  private dismissReasonDraft = '';
-
-  /** Whether the `/dismiss` POST is in flight. */
-  @state()
-  private dismissSubmitting = false;
-
-  /** Whether an on-open `/agents/{id}` probe reported 404 (gone asker). */
-  @state()
-  private dismissProbedGone = false;
-
-  /** Epoch ms override returned by a 409 `too_recent` / `dismiss_changed` (`availableAt`). */
-  @state()
-  private dismissAvailableAtOverrideMs = 0;
-
-  private dismissUnlockTimer: ReturnType<typeof setTimeout> | null = null;
-  private dismissProbeGen = 0;
-
   private readonly hintId = `decision-hint-${++hintSeq}`;
   private readonly submitHintId = `decision-submit-hint-${hintSeq}`;
   private readonly reasonId = `decision-reason-${hintSeq}`;
 
   static override styles = css`
     ${dismissDialogStyles}
+    ${messageActionBannerStyles}
 
     :host {
       display: block;
@@ -735,68 +672,6 @@ export class ScionChatDecisions extends LitElement {
     .row.closed .choices,
     .row.closed .row-top .key {
       opacity: 0.55;
-    }
-
-    .wd {
-      margin-top: 0.45rem;
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-muted, #64748b);
-      display: flex;
-      gap: 0.35rem;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    .wd.card-wd {
-      margin-top: 0;
-    }
-
-    .wd-lead {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-    }
-
-    .wd sl-icon {
-      font-size: 0.95rem;
-    }
-
-    .wd sl-icon.dc {
-      color: var(--scion-status-danger, #dc2626);
-    }
-
-    .wd b {
-      color: var(--scion-text-secondary, #475569);
-    }
-
-    .wd b.state {
-      color: var(--scion-text-secondary, #475569);
-      font-weight: 600;
-    }
-
-    .wd a.jump {
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-      font-weight: 500;
-    }
-
-    .wd a.jump:hover {
-      text-decoration: underline;
-    }
-
-    .wd a.jump:focus-visible {
-      outline: 2px solid var(--scion-primary, #3b82f6);
-      outline-offset: 1px;
-      border-radius: calc(var(--scion-radius-sm) * 0.8);
-    }
-
-    .wd-reason {
-      margin-top: 0.35rem;
-      font-size: var(--chat-fs-sm, 0.875rem);
-      color: var(--scion-text-secondary, #475569);
-      border-left: 3px solid var(--scion-border, #e2e8f0);
-      padding: 0.1rem 0.55rem;
-      overflow-wrap: anywhere;
     }
 
     .card.withdrawn-all .card-head .title,
@@ -1296,20 +1171,6 @@ export class ScionChatDecisions extends LitElement {
     return this.decisions.map((d) => this.viewOf(d));
   }
 
-  override connectedCallback(): void {
-    super.connectedCallback();
-    this.scheduleDismissUnlockTimer();
-  }
-
-  override disconnectedCallback(): void {
-    if (this.dismissUnlockTimer !== null) {
-      clearTimeout(this.dismissUnlockTimer);
-      this.dismissUnlockTimer = null;
-    }
-    ++this.dismissProbeGen;
-    super.disconnectedCallback();
-  }
-
   override willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('decisions') || changed.has('currentUserId')) {
       if (changed.has('decisions')) {
@@ -1367,7 +1228,7 @@ export class ScionChatDecisions extends LitElement {
       changed.has('answerability') ||
       changed.has('waitingReasons')
     ) {
-      this.reconcileOpenDismissDialog();
+      this.actionState.reconcileOpenDismissDialog();
     }
     if (
       this.isConnected &&
@@ -1377,7 +1238,7 @@ export class ScionChatDecisions extends LitElement {
         changed.has('answerability') ||
         changed.has('waitingReasons'))
     ) {
-      this.scheduleDismissUnlockTimer();
+      this.actionState.scheduleDismissUnlockTimer();
     }
     if (
       !this.isSet &&
@@ -1504,51 +1365,15 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private rowStatusClass(d: DecisionView): string {
-    if (d.status === 'replaced') return ' replaced';
-    if (d.status === 'withdrawn') return ' withdrawn';
-    if (d.status === 'dismissed') return ' dismissed';
-    if (isClosedUnanswered(d)) return ' closed';
-    return '';
+    return messageActionRowStatusClass(d.status, isClosedUnanswered(d));
   }
 
   private isWholeSetWithdrawn(views: readonly DecisionView[]): boolean {
-    const first = views[0];
-    if (!first || !views.every((d) => d.status === 'withdrawn')) return false;
-    const at = first.withdrawn?.at ?? '';
-    const reason = first.withdrawn?.reason ?? '';
-    const by = this.withdrawnBy(first);
-    const jumpMsg = first.replacedBy?.messageId ?? '';
-    const jumpVer = first.replacedBy?.version ?? 0;
-    return views.every(
-      (d) =>
-        (d.withdrawn?.at ?? '') === at &&
-        (d.withdrawn?.reason ?? '') === reason &&
-        this.withdrawnBy(d) === by &&
-        (d.replacedBy?.messageId ?? '') === jumpMsg &&
-        (d.replacedBy?.version ?? 0) === jumpVer
-    );
+    return isWholeSetWithdrawnShared(views, (d) => this.withdrawnBy(d));
   }
 
   private isWholeSetDismissed(views: readonly DecisionView[]): boolean {
-    const first = views[0];
-    if (!first || !views.every((d) => d.status === 'dismissed' && Boolean(d.dismissed))) {
-      return false;
-    }
-    const respId = first.dismissed?.responseMessageId ?? '';
-    const at = first.dismissed?.at ?? '';
-    const reason = first.dismissed?.reason ?? '';
-    const by = this.dismissedBy(first);
-    const jumpMsg = first.replacedBy?.messageId ?? '';
-    const jumpVer = first.replacedBy?.version ?? 0;
-    return views.every(
-      (d) =>
-        (d.dismissed?.responseMessageId ?? '') === respId &&
-        (d.dismissed?.at ?? '') === at &&
-        (d.dismissed?.reason ?? '') === reason &&
-        this.dismissedBy(d) === by &&
-        (d.replacedBy?.messageId ?? '') === jumpMsg &&
-        (d.replacedBy?.version ?? 0) === jumpVer
-    );
+    return isWholeSetDismissedShared(views, (d) => this.dismissedBy(d));
   }
 
   /** Whether `d` is open and waiting on the signed-in viewer to answer or dismiss. */
@@ -1556,74 +1381,16 @@ export class ScionChatDecisions extends LitElement {
     return !this.answerBlocked && !this.waitingReasons?.[d.rowId] && this.rowActionable(d);
   }
 
-  private get dismissAvailableAtMsEffective(): number {
-    return Math.max(
-      dismissAvailableAtMsForDecisions(this.views, this.createdAt),
-      this.dismissAvailableAtOverrideMs
+  private get isDismissAskerGone(): boolean {
+    return (
+      this.effectiveAnswerability.state === 'gone' ||
+      this.askerGone ||
+      this.actionState.dismissProbedGone
     );
   }
 
-  private get dismissRemainingMin(): number {
-    const nowMs = this.clockNow();
-    const availMs = this.dismissAvailableAtMsEffective;
-    if (availMs <= 0 || nowMs >= availMs) return 0;
-    return Math.max(1, Math.ceil((availMs - nowMs) / 60000));
-  }
-
-  private scheduleDismissUnlockTimer(): void {
-    if (this.dismissUnlockTimer !== null) {
-      clearTimeout(this.dismissUnlockTimer);
-      this.dismissUnlockTimer = null;
-    }
-    if (!this.isConnected) return;
-    if (!this.views.some((d) => this.rowWaitsOnViewer(d))) return;
-    const availMs = this.dismissAvailableAtMsEffective;
-    const nowMs = this.clockNow();
-    const remainingMs = availMs - nowMs;
-    if (availMs <= 0 || remainingMs <= 0) return;
-    const remMin = Math.max(1, Math.ceil(remainingMs / 60000));
-    const nextBoundaryMs = remainingMs - (remMin - 1) * 60000;
-    const delayMs = Math.min(2_147_483_647, Math.max(1, nextBoundaryMs + 25));
-    this.dismissUnlockTimer = setTimeout(() => {
-      this.dismissUnlockTimer = null;
-      if (!this.isConnected) return;
-      this.requestUpdate();
-      this.scheduleDismissUnlockTimer();
-    }, delayMs);
-  }
-
-  private reconcileOpenDismissDialog(): void {
-    if (!this.dismissDialogOpen || this.dismissSubmitting) return;
-    const waitRows = this.views.filter((d) => this.rowWaitsOnViewer(d));
-    if (waitRows.length === 0) {
-      this.closeDismissDialogState();
-      return;
-    }
-    const validIds = new Set(waitRows.map((d) => d.rowId));
-    let changed = false;
-    const nextChecked = new Set<string>();
-    for (const id of this.dismissCheckedIds) {
-      if (validIds.has(id)) nextChecked.add(id);
-      else changed = true;
-    }
-    if (changed) {
-      this.dismissCheckedIds = nextChecked;
-    }
-  }
-
-  private get isDismissAskerGone(): boolean {
-    return this.effectiveAnswerability.state === 'gone' || this.askerGone || this.dismissProbedGone;
-  }
-
   private openDismissDialog(): void {
-    if (this.dismissRemainingMin > 0) return;
-    const waitRows = this.views.filter((d) => this.rowWaitsOnViewer(d));
-    if (waitRows.length === 0) return;
-    this.dismissCheckedIds = new Set(waitRows.map((d) => d.rowId));
-    this.dismissReasonDraft = '';
-    this.dismissSubmitting = false;
-    this.dismissProbedGone = false;
-    this.dismissDialogOpen = true;
+    if (!this.actionState.openDismissDialog()) return;
 
     const first = this.views[0];
     if (
@@ -1631,48 +1398,20 @@ export class ScionChatDecisions extends LitElement {
       first?.askerAgentId &&
       (this.surface === 'decisions_page' || this.effectiveAnswerability.state === 'unknown')
     ) {
-      const gen = ++this.dismissProbeGen;
-      void fetchAskerAnswerability(first.askerAgentId, first.askerAgentName).then((ans) => {
-        if (gen !== this.dismissProbeGen || !this.isConnected || !this.dismissDialogOpen) return;
-        if (ans.state === 'gone') {
-          this.dismissProbedGone = true;
-        }
+      this.actionState.probeAskerGone(async () => {
+        const ans = await fetchAskerAnswerability(first.askerAgentId, first.askerAgentName);
+        return ans.state === 'gone';
       });
     }
   }
 
-  private closeDismissDialogState(): void {
-    ++this.dismissProbeGen;
-    this.dismissDialogOpen = false;
-    this.dismissCheckedIds = new Set();
-    this.dismissReasonDraft = '';
-    this.dismissProbedGone = false;
-  }
-
-  private closeDismissDialog = (): void => {
-    if (this.dismissSubmitting) return;
-    this.closeDismissDialogState();
-  };
-
-  private onDismissRowToggle(rowId: string, e: Event): void {
-    const checked = Boolean((e.currentTarget as HTMLElement & { checked?: boolean })?.checked);
-    const next = new Set(this.dismissCheckedIds);
-    if (checked) next.add(rowId);
-    else next.delete(rowId);
-    this.dismissCheckedIds = next;
-  }
-
-  private readonly onDismissReasonInput = (e: Event): void => {
-    const raw = (e.target as HTMLElement & { value?: string })?.value ?? '';
-    const clamped = clampDismissReason(raw);
-    if (clamped !== raw && e.target && 'value' in e.target) {
-      (e.target as { value: string }).value = clamped;
-    }
-    this.dismissReasonDraft = clamped;
-  };
-
   private async confirmDismiss(): Promise<void> {
-    if (!this.dismissDialogOpen || this.dismissSubmitting || !this.messageId) return;
+    if (
+      !this.actionState.dismissDialogOpen ||
+      this.actionState.dismissSubmitting ||
+      !this.messageId
+    )
+      return;
     const views = this.views;
     const targetIds = this.isSet
       ? views
@@ -1680,28 +1419,28 @@ export class ScionChatDecisions extends LitElement {
             (d) =>
               isOpenDecision(d) &&
               this.rowWaitsOnViewer(d) &&
-              this.dismissRemainingMin === 0 &&
-              this.dismissCheckedIds.has(d.rowId)
+              this.actionState.dismissRemainingMin === 0 &&
+              this.actionState.dismissCheckedIds.has(d.rowId)
           )
           .map((d) => d.rowId)
-      : views[0] && this.rowWaitsOnViewer(views[0]) && this.dismissRemainingMin === 0
+      : views[0] && this.rowWaitsOnViewer(views[0]) && this.actionState.dismissRemainingMin === 0
         ? [views[0].rowId]
         : [];
     if (targetIds.length === 0) return;
 
     const askerName = views[0]?.askerAgentName || '';
-    this.dismissSubmitting = true;
+    this.actionState.setDismissSubmitting(true);
     try {
       const res = await dismissDecisionPrompt(this.messageId, {
         decisionIds: targetIds,
-        reason: this.dismissReasonDraft,
+        reason: this.actionState.dismissReasonDraft,
         surface: this.surface,
         idempotencyKey: crypto.randomUUID(),
       });
       if (!this.isConnected) return;
       if (res.ok) {
         const updated = [...res.dismissed, ...res.alreadyDismissed];
-        this.closeDismissDialogState();
+        this.actionState.closeDismissDialogState();
         this.applyOwnViews(updated, res.responseMessageId);
         const toast = dismissResultToast(
           res.deliveryStatus,
@@ -1714,10 +1453,7 @@ export class ScionChatDecisions extends LitElement {
       }
       if (isOnlyTooRecentDismissError(res)) {
         if (res.availableAt) {
-          const parsed = Date.parse(res.availableAt);
-          if (Number.isFinite(parsed)) {
-            this.dismissAvailableAtOverrideMs = parsed;
-          }
+          this.actionState.setDismissAvailableAtOverride(res.availableAt);
           this.dispatchEvent(
             new CustomEvent<{ messageId: string; availableAt: string }>(
               'decision-dismiss-too-recent',
@@ -1729,11 +1465,11 @@ export class ScionChatDecisions extends LitElement {
             )
           );
         }
-        this.closeDismissDialogState();
+        this.actionState.closeDismissDialogState();
         if (res.decisions) {
           this.applyOwnViews(res.decisions);
         }
-        this.scheduleDismissUnlockTimer();
+        this.actionState.scheduleDismissUnlockTimer();
         showToast(
           res.code === 'dismiss_changed'
             ? 'Decisions must be at least 5 minutes old before they can be dismissed.'
@@ -1743,7 +1479,7 @@ export class ScionChatDecisions extends LitElement {
         return;
       }
       if (res.code === 'dismiss_changed') {
-        this.closeDismissDialogState();
+        this.actionState.closeDismissDialogState();
         if (res.decisions) {
           this.applyOwnViews(res.decisions);
         }
@@ -1751,13 +1487,13 @@ export class ScionChatDecisions extends LitElement {
         return;
       }
       if (res.status === 403 && views[0]) {
-        this.closeDismissDialogState();
+        this.actionState.closeDismissDialogState();
         this.applyDenied(views[0], res.code, res.reason);
         return;
       }
       showToast(res.message, 'danger');
     } finally {
-      this.dismissSubmitting = false;
+      this.actionState.setDismissSubmitting(false);
     }
   }
 
@@ -1771,7 +1507,7 @@ export class ScionChatDecisions extends LitElement {
 
   private renderCardMenu(views: readonly DecisionView[]): TemplateResult | typeof nothing {
     if (!views.some((d) => this.rowWaitsOnViewer(d))) return nothing;
-    const remMin = this.dismissRemainingMin;
+    const remMin = this.actionState.dismissRemainingMin;
     const linkUrl = this.copyLinkUrl;
     return html`<span class="menu">
       <sl-dropdown class="card-menu" placement="bottom-end" hoist data-card-menu>
@@ -1820,8 +1556,8 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private whyRowDisabledInDismissDialog(d: DecisionView): string {
-    if (this.dismissRemainingMin > 0 && this.rowWaitsOnViewer(d)) {
-      const availMs = this.dismissAvailableAtMsEffective;
+    if (this.actionState.dismissRemainingMin > 0 && this.rowWaitsOnViewer(d)) {
+      const availMs = this.actionState.dismissAvailableAtMsEffective;
       return availMs > 0
         ? `Available at ${formatInstant(new Date(availMs).toISOString(), 'time')}`
         : 'Too recent to dismiss';
@@ -1837,17 +1573,17 @@ export class ScionChatDecisions extends LitElement {
   }
 
   private renderDismissDialog(views: readonly DecisionView[]): TemplateResult | typeof nothing {
-    if (!this.dismissDialogOpen || views.length === 0) return nothing;
+    if (!this.actionState.dismissDialogOpen || views.length === 0) return nothing;
     const isSet = this.isSet;
     const openRows = views.filter((d) => isOpenDecision(d));
     const checkedCount = isSet
       ? openRows.filter(
           (d) =>
             this.rowWaitsOnViewer(d) &&
-            this.dismissRemainingMin === 0 &&
-            this.dismissCheckedIds.has(d.rowId)
+            this.actionState.dismissRemainingMin === 0 &&
+            this.actionState.dismissCheckedIds.has(d.rowId)
         ).length
-      : views[0] && this.rowWaitsOnViewer(views[0]) && this.dismissRemainingMin === 0
+      : views[0] && this.rowWaitsOnViewer(views[0]) && this.actionState.dismissRemainingMin === 0
         ? 1
         : 0;
     const dialogLabel = isSet ? 'Dismiss decisions' : 'Dismiss decision';
@@ -1864,7 +1600,7 @@ export class ScionChatDecisions extends LitElement {
     const helpText = gone
       ? 'Plain text, up to 500 characters. Shown on the card.'
       : `Plain text, up to 500 characters. Sent to ${askerName} and shown on the card.`;
-    const reasonLen = [...this.dismissReasonDraft].length;
+    const reasonLen = [...this.actionState.dismissReasonDraft].length;
     const singleRow = views[0];
 
     return html`
@@ -1874,11 +1610,11 @@ export class ScionChatDecisions extends LitElement {
         label=${dialogLabel}
         open
         @sl-request-close=${(e: Event): void => {
-          if (this.dismissSubmitting) {
+          if (this.actionState.dismissSubmitting) {
             e.preventDefault();
             return;
           }
-          this.closeDismissDialog();
+          this.actionState.closeDismissDialog();
         }}
       >
         <span slot="label" class="dismiss-dialog-title">
@@ -1894,16 +1630,18 @@ export class ScionChatDecisions extends LitElement {
                 </div>
                 <div class="dismiss-row-list">
                   ${openRows.map((d) => {
-                    const pickable = this.rowWaitsOnViewer(d) && this.dismissRemainingMin === 0;
+                    const pickable =
+                      this.rowWaitsOnViewer(d) && this.actionState.dismissRemainingMin === 0;
                     if (pickable) {
-                      const checked = this.dismissCheckedIds.has(d.rowId);
+                      const checked = this.actionState.dismissCheckedIds.has(d.rowId);
                       return html`
                         <div class="dismiss-pick" data-dismiss-row=${d.rowId}>
                           <sl-checkbox
                             data-dismiss-check=${d.rowId}
                             ?checked=${checked}
-                            ?disabled=${this.dismissSubmitting}
-                            @sl-change=${(e: Event): void => this.onDismissRowToggle(d.rowId, e)}
+                            ?disabled=${this.actionState.dismissSubmitting}
+                            @sl-change=${(e: Event): void =>
+                              this.actionState.onDismissRowToggle(d.rowId, e)}
                           >
                             <span class="dismiss-pick-text">
                               ${d.key
@@ -1956,10 +1694,10 @@ export class ScionChatDecisions extends LitElement {
             help-text=${helpText}
             placeholder="Why it no longer applies"
             data-dismiss-reason
-            ?disabled=${this.dismissSubmitting}
-            .value=${this.dismissReasonDraft}
-            @sl-input=${this.onDismissReasonInput}
-            @input=${this.onDismissReasonInput}
+            ?disabled=${this.actionState.dismissSubmitting}
+            .value=${this.actionState.dismissReasonDraft}
+            @sl-input=${this.actionState.onDismissReasonInput}
+            @input=${this.actionState.onDismissReasonInput}
           >
             <span slot="help-text" class="dismiss-reason-help">
               <span>${helpText}</span>
@@ -1986,8 +1724,8 @@ export class ScionChatDecisions extends LitElement {
           <sl-button
             size="small"
             data-dismiss-cancel
-            ?disabled=${this.dismissSubmitting}
-            @click=${this.closeDismissDialog}
+            ?disabled=${this.actionState.dismissSubmitting}
+            @click=${this.actionState.closeDismissDialog}
           >
             Cancel
           </sl-button>
@@ -1996,8 +1734,8 @@ export class ScionChatDecisions extends LitElement {
             variant="danger"
             outline
             data-dismiss-confirm
-            ?loading=${this.dismissSubmitting}
-            ?disabled=${this.dismissSubmitting || checkedCount === 0}
+            ?loading=${this.actionState.dismissSubmitting}
+            ?disabled=${this.actionState.dismissSubmitting || checkedCount === 0}
             @click=${(): void => void this.confirmDismiss()}
           >
             ${confirmLabel}
@@ -2838,7 +2576,7 @@ export class ScionChatDecisions extends LitElement {
 
   private renderSingleActionsAndFoot(d: DecisionView): TemplateResult | typeof nothing {
     if (this.submitting?.rowId === d.rowId) {
-      return html`<div class="row-foot" role="status">Sending…</div>`;
+      return this.actionState.renderSubmittingBanner('Sending…');
     }
     if (
       d.status === 'decided' &&
@@ -3058,22 +2796,7 @@ export class ScionChatDecisions extends LitElement {
       </div>`;
     }
     if (d.status === 'replaced') {
-      const r = d.replacedBy;
-      const label = r?.version ? `v${r.version}` : 'the new version';
-      return html`<div class="row-foot">
-        <sl-icon name="arrow-repeat"></sl-icon>
-        <span>${r?.version ? `Replaced by v${r.version}` : 'Replaced'}</span>
-        ${this.renderAt(r?.at)}
-        ${r?.messageId
-          ? html`<span aria-hidden="true">·</span>
-              <a
-                class="jump"
-                href="#msg-${r.messageId}"
-                @click=${(e: Event): void => this.jump(e, r.messageId)}
-                >Jump to ${label}</a
-              >`
-          : nothing}
-      </div>`;
+      return this.actionState.renderReplacedBanner(d.replacedBy);
     }
     if (d.status === 'dismissed') {
       return this.renderDismissedFoot(d);
@@ -3082,61 +2805,33 @@ export class ScionChatDecisions extends LitElement {
       return this.renderWithdrawnFoot(d);
     }
     if (isClosedUnanswered(d)) {
-      return html`<div class="row-foot" role="status">
-        <sl-icon name="slash-circle" aria-hidden="true"></sl-icon>
-        <span>Closed</span>
-      </div>`;
+      return this.actionState.renderClosedBanner();
     }
     return null;
   }
 
   private renderWithdrawnFoot(d: DecisionView, inCardFoot = false): TemplateResult {
-    const w = d.withdrawn;
-    const who = this.withdrawnBy(d);
-    const r = d.replacedBy;
-    const label = r?.version ? `v${r.version}` : 'the new version';
-    return html`<div class="wd${inCardFoot ? ' card-wd' : ''}" role="status">
-        <span class="wd-lead"
-          ><sl-icon name="slash-circle" aria-hidden="true"></sl-icon>
-          <b class="state">No longer needed</b></span
-        >
-        <span aria-hidden="true">·</span>
-        <span>withdrawn by</span>
-        <b>${who}</b>
-        ${this.renderAt(w?.at)}
-        ${r?.messageId
-          ? html`<span aria-hidden="true">·</span>
-              <a
-                class="jump"
-                href="#msg-${r.messageId}"
-                @click=${(e: Event): void => this.jump(e, r.messageId)}
-                >Jump to ${label}</a
-              >`
-          : nothing}
-      </div>
-      ${w?.reason ? html`<div class="wd-reason">${w.reason}</div>` : nothing}`;
+    return this.actionState.renderWithdrawnBanner(
+      {
+        by: this.withdrawnBy(d),
+        at: d.withdrawn?.at,
+        reason: d.withdrawn?.reason,
+        replacedBy: d.replacedBy,
+      },
+      { inCardFoot }
+    );
   }
 
   private renderDismissedFoot(d: DecisionView, inCardFoot = false): TemplateResult {
-    const dm = d.dismissed;
-    const who = this.dismissedBy(d);
-    const r = d.replacedBy;
-    const label = r?.version ? `v${r.version}` : 'the new version';
-    return html`<div class="wd${inCardFoot ? ' card-wd' : ''}" role="status">
-        <sl-icon class="dc" name="x-circle" aria-hidden="true"></sl-icon>
-        <span><b class="state">Dismissed</b> by <b>${who}</b></span>
-        ${this.renderAt(dm?.at)}
-        ${r?.messageId
-          ? html`<span aria-hidden="true">·</span>
-              <a
-                class="jump"
-                href="#msg-${r.messageId}"
-                @click=${(e: Event): void => this.jump(e, r.messageId)}
-                >Jump to ${label}</a
-              >`
-          : nothing}
-      </div>
-      ${dm?.reason ? html`<div class="wd-reason">${dm.reason}</div>` : nothing}`;
+    return this.actionState.renderDismissedBanner(
+      {
+        by: this.dismissedBy(d),
+        at: d.dismissed?.at,
+        reason: d.dismissed?.reason,
+        replacedBy: d.replacedBy,
+      },
+      { inCardFoot }
+    );
   }
 
   private renderViewReply(sourceMessageId: string | undefined): TemplateResult | typeof nothing {
@@ -3164,9 +2859,7 @@ export class ScionChatDecisions extends LitElement {
 
   /** " · time" for an instant, or nothing. */
   private renderAt(at: string | undefined): TemplateResult | typeof nothing {
-    if (!at) return nothing;
-    return html`<span aria-hidden="true">·</span>
-      <time datetime=${at} title=${formatInstantWithZone(at)}>${formatInstant(at, 'time')}</time>`;
+    return this.actionState.renderAt(at);
   }
 
   /** The agent that interpreted an answer: the asker unless the view names another. */
@@ -3174,18 +2867,6 @@ export class ScionChatDecisions extends LitElement {
     const id = d.decision?.interpretedByAgentId;
     if (!id || id === d.askerAgentId) return d.askerAgentName || 'the agent';
     return id;
-  }
-
-  /** Asks the thread to scroll to a replacement version (design §4.1 `decision-jump`). */
-  private jump(e: Event, messageId: string): void {
-    e.preventDefault();
-    this.dispatchEvent(
-      new CustomEvent<{ messageId: string }>('decision-jump', {
-        detail: { messageId },
-        bubbles: true,
-        composed: true,
-      })
-    );
   }
 
   // ---- Set mode (design §4.3) ----

@@ -1392,7 +1392,7 @@ describe('web/src bare border-radius literal guard (ptone/scion#8601)', () => {
       ['components/shared/chat/chat-decisions.ts', '.key', 'border-radius', [4]],
       ['components/shared/chat/chat-decisions.ts', '.desc code', 'border-radius', [3.2]],
       [
-        'components/shared/chat/chat-decisions.ts',
+        'components/shared/chat/message-action-state.ts',
         '.wd a.jump:focus-visible',
         'border-radius',
         [3.2],

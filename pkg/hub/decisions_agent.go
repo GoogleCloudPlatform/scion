@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -992,46 +993,32 @@ func (s *Server) handleAgentDecisionWithdraw(w http.ResponseWriter, r *http.Requ
 	ctx := r.Context()
 	agentID := agentIdent.ID()
 
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, msgaction.MaxRequestBodyBytes)
 	var req WithdrawDecisionsRequest
 	if err := readJSON(r, &req); err != nil {
 		ValidationError(w, "invalid JSON body: "+err.Error(), nil)
 		return
 	}
 
-	if len(req.Keys) < 1 || len(req.Keys) > messages.MaxDecisionsPerMessage {
-		ValidationError(w, fmt.Sprintf("keys must contain 1 to %d items", messages.MaxDecisionsPerMessage),
-			map[string]interface{}{"field": "keys"})
-		return
+	parsed := &msgaction.WithdrawRequest{
+		Keys:     req.Keys,
+		WholeSet: req.WholeSet,
+		Reason:   req.Reason,
 	}
-	seenNorms := make(map[string]bool, len(req.Keys))
-	for i := range req.Keys {
-		req.Keys[i] = strings.TrimSpace(req.Keys[i])
-		if req.Keys[i] == "" {
-			ValidationError(w, "each key must be non-empty", map[string]interface{}{"field": "keys"})
-			return
-		}
-		norm := messages.DecisionKeyNorm(req.Keys[i])
-		if seenNorms[norm] {
-			ValidationError(w, fmt.Sprintf("duplicate decision key %q in request", req.Keys[i]),
-				map[string]interface{}{"field": "keys"})
-			return
-		}
-		seenNorms[norm] = true
-	}
-
-	reason := strings.TrimSpace(req.Reason)
-	if utf8.RuneCountInString(reason) > store.MaxDecisionWithdrawReasonRunes {
-		ValidationError(w, fmt.Sprintf("reason is at most %d characters", store.MaxDecisionWithdrawReasonRunes),
-			map[string]interface{}{"field": "reason"})
+	if ferr := msgaction.ValidateWithdrawRequest(parsed, msgaction.WithdrawParseOptions{
+		MaxKeys:      messages.MaxDecisionsPerMessage,
+		NormalizeKey: messages.DecisionKeyNorm,
+		KeyLabel:     "decision key",
+	}); ferr != nil {
+		ValidationError(w, ferr.Message, map[string]interface{}{"field": ferr.Field})
 		return
 	}
 
 	res, err := s.store.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
 		AskerAgentID: agentID,
-		Keys:         req.Keys,
-		WholeSet:     req.WholeSet,
-		Reason:       reason,
+		Keys:         parsed.Keys,
+		WholeSet:     parsed.WholeSet,
+		Reason:       parsed.Reason,
 	})
 	if err != nil {
 		s.writeWithdrawDecisionsError(w, ctx, err)

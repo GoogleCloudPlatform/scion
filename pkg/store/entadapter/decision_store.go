@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -41,59 +42,14 @@ import (
 // methods live on CompositeStore because each one writes a message and
 // decision rows in one transaction.
 
-// errDecisionRace marks a write that lost a race with a concurrent prompt
-// or answer: a unique-index violation on decisions, decision_answers or
-// decision_key_counters, or an active version replaced under us. The
-// non-transactional entry points retry (CreateDecisionPrompt, up to
-// maxDecisionRaceRetries times) or re-read (RecordAnswer) once on it.
-var errDecisionRace = errors.New("concurrent decision write")
-
-// maxDecisionRaceRetries bounds CreateDecisionPrompt's retries of a lost
-// race: each retry reads the winner's rows, so n concurrent reposts of one
-// key need up to n-1 retries for the last one.
-const maxDecisionRaceRetries = 5
-
-// markDecisionRace wraps a constraint violation as errDecisionRace, maps Ent
-// field validation failures to store.ErrInvalidInput, and maps any other error
-// as usual.
-func markDecisionRace(err error) error {
-	if ent.IsConstraintError(err) {
-		return fmt.Errorf("%w: %v", errDecisionRace, err)
-	}
-	if ent.IsValidationError(err) {
-		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
-	}
-	return mapError(err)
-}
-
 // CreateDecisionPrompt implements store.DecisionStore.
 func (c *CompositeStore) CreateDecisionPrompt(ctx context.Context, in *store.DecisionPromptInput) (*store.DecisionPromptResult, error) {
 	if err := validateDecisionPromptInput(in); err != nil {
 		return nil, err
 	}
-	if c.inTx {
-		return c.createDecisionPromptTx(ctx, in)
-	}
-	var res *store.DecisionPromptResult
-	for attempt := 0; ; attempt++ {
-		err := c.WithTx(ctx, func(tx store.Store) error {
-			var err error
-			res, err = tx.(*CompositeStore).createDecisionPromptTx(ctx, in)
-			return err
-		})
-		if err == nil {
-			return res, nil
-		}
-		// The loser of a concurrent repost (or of the first use of the
-		// agent's counter) retries on the winner's rows.
-		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
-			continue
-		}
-		if errors.Is(err, errDecisionRace) {
-			return nil, store.ErrTransient
-		}
-		return nil, err
-	}
+	return insertNextActionVersion(ctx, c, func(tx *CompositeStore) (*store.DecisionPromptResult, error) {
+		return tx.createDecisionPromptTx(ctx, in)
+	})
 }
 
 func validateDecisionPromptInput(in *store.DecisionPromptInput) error {
@@ -192,6 +148,25 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 	if err != nil {
 		return nil, err
 	}
+	headFor := func(key string, st *keyState) *msgaction.Head {
+		if st == nil {
+			return nil
+		}
+		h := &msgaction.Head{
+			Key:     key,
+			Version: st.maxVersion,
+			Status:  store.DecisionStatusReplaced,
+		}
+		if st.active != nil {
+			h.RowID = st.active.ID.String()
+			h.Key = st.active.Key
+			h.Status = string(st.active.Status)
+			if st.active.ReplacedByID != nil {
+				h.ReplacedBy = st.active.ReplacedByID.String()
+			}
+		}
+		return h
+	}
 	if !in.Update {
 		var existing []store.ExistingDecisionKey
 		var activeIDs []uuid.UUID
@@ -209,18 +184,20 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 			if d.Key == "" || !ok {
 				continue
 			}
-			ek := store.ExistingDecisionKey{Key: d.Key, Version: st.maxVersion, Status: store.DecisionStatusReplaced}
-			if st.active != nil {
-				ek.Key = st.active.Key
-				ek.Status = string(st.active.Status)
-				switch st.active.Status {
-				case decision.StatusDecided:
-					ek.Answer = effectiveAnswer(answers[st.active.ID])
-				case decision.StatusDismissed:
-					ek.Dismissal = dismissalAnswer(answers[st.active.ID])
+			if _, planErr := msgaction.PlanRepost(msgaction.DecisionKindSpec, headFor(d.Key, st), false); planErr != nil {
+				ek := store.ExistingDecisionKey{Key: d.Key, Version: st.maxVersion, Status: store.DecisionStatusReplaced}
+				if st.active != nil {
+					ek.Key = st.active.Key
+					ek.Status = string(st.active.Status)
+					switch st.active.Status {
+					case decision.StatusDecided:
+						ek.Answer = effectiveAnswer(answers[st.active.ID])
+					case decision.StatusDismissed:
+						ek.Dismissal = dismissalAnswer(answers[st.active.ID])
+					}
 				}
+				existing = append(existing, ek)
 			}
-			existing = append(existing, ek)
 		}
 		if len(existing) > 0 {
 			return nil, &store.DecisionKeyExistsError{Existing: existing}
@@ -257,37 +234,43 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 			r.KeySource = store.DecisionKeySourceHub
 		}
 		if st, ok := states[messages.DecisionKeyNorm(keyed[i].Key)]; ok && d.Key != "" {
-			r.Version = st.maxVersion + 1
-			if st.active != nil {
+			plan, planErr := msgaction.PlanRepost(msgaction.DecisionKindSpec, headFor(keyed[i].Key, st), in.Update)
+			if planErr != nil {
+				return nil, fmt.Errorf("%w: %v", store.ErrInvalidInput, planErr)
+			}
+			r.Version = plan.NextVersion
+			if plan.DisplayKey != "" {
 				// Display the key as first given.
-				keyed[i].Key = st.active.Key
+				keyed[i].Key = plan.DisplayKey
+			}
+			if plan.ReplacesRowID != "" && st.active != nil {
 				prev := &store.ReplacedDecision{RowID: st.active.ID.String(), Version: st.active.Version, Status: string(st.active.Status)}
 				if st.active.Status == decision.StatusDecided {
 					prev.Answer = effectiveAnswer(decided[st.active.ID])
 				}
-				var n int
-				if store.DecisionStatusTerminal(string(st.active.Status)) {
-					// A withdrawn or dismissed version keeps its terminal status when
-					// --update re-asks the key as the next version, while replaced_by_id
-					// links v1 -> v2 (design-8145 D7, design-8194 section 4.8).
-					n, err = client.Decision.Update().
-						Where(decision.ID(st.active.ID), decision.StatusIn(decision.StatusWithdrawn, decision.StatusDismissed), decision.ReplacedByIDIsNil()).
-						SetReplacedAt(now).
-						SetReplacedByID(rowIDs[i]).
-						Save(ctx)
-				} else {
-					n, err = client.Decision.Update().
+				casOK, _, casErr := casActionRows[*ent.Decision](ctx, 1, func(ctx context.Context) (int, error) {
+					if !plan.MarkReplaced {
+						// A withdrawn or dismissed version keeps its terminal status when
+						// --update re-asks the key as the next version, while replaced_by_id
+						// links v1 -> v2 (design-8145 D7, design-8194 section 4.8).
+						return client.Decision.Update().
+							Where(decision.ID(st.active.ID), decision.StatusIn(decision.StatusWithdrawn, decision.StatusDismissed), decision.ReplacedByIDIsNil()).
+							SetReplacedAt(now).
+							SetReplacedByID(rowIDs[i]).
+							Save(ctx)
+					}
+					return client.Decision.Update().
 						Where(decision.ID(st.active.ID), decision.StatusNotIn(decision.StatusReplaced, decision.StatusWithdrawn, decision.StatusDismissed), decision.ReplacedByIDIsNil()).
 						SetStatus(decision.StatusReplaced).
 						SetReplacedAt(now).
 						SetReplacedByID(rowIDs[i]).
 						Save(ctx)
+				}, nil)
+				if casErr != nil {
+					return nil, casErr
 				}
-				if err != nil {
-					return nil, mapError(err)
-				}
-				if n != 1 {
-					return nil, fmt.Errorf("%w: version %d of %s was replaced concurrently", errDecisionRace, st.active.Version, st.active.Key)
+				if !casOK {
+					return nil, fmt.Errorf("%w: version %d of %s was replaced concurrently", errMessageActionRace, st.active.Version, st.active.Key)
 				}
 				r.Replaced = prev
 			}
@@ -357,7 +340,7 @@ func (c *CompositeStore) createDecisionPromptTx(ctx context.Context, in *store.D
 		creates[i] = cr
 	}
 	if _, err := client.Decision.CreateBulk(creates...).Save(ctx); err != nil {
-		return nil, markDecisionRace(err)
+		return nil, markMessageActionRace(err)
 	}
 	return &store.DecisionPromptResult{Decisions: results, IntroLength: introLen}, nil
 }
@@ -386,7 +369,7 @@ func reserveDecisionNumbers(ctx context.Context, client *ent.Client, agentID uui
 	}
 	row, err = client.DecisionKeyCounter.Create().SetID(agentID).SetNext(int64(need) + 1).Save(ctx)
 	if err != nil {
-		return 0, markDecisionRace(err)
+		return 0, markMessageActionRace(err)
 	}
 	return row.Next, nil
 }
@@ -628,7 +611,7 @@ func (c *CompositeStore) RecordAnswer(ctx context.Context, in *store.RecordAnswe
 	if err == nil {
 		return answer, replayed, nil
 	}
-	if !errors.Is(err, errDecisionRace) {
+	if !errors.Is(err, errMessageActionRace) {
 		return nil, false, err
 	}
 	// A concurrent answer won. It is ours to replay only if it carries
@@ -848,7 +831,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 	}
 	saved, err := cr.Save(ctx)
 	if err != nil {
-		return nil, false, markDecisionRace(err)
+		return nil, false, markMessageActionRace(err)
 	}
 	// Only the pending-to-decided transition sets decided_at; a later
 	// answer (a direct one after an interpreted one) leaves it.
@@ -876,30 +859,9 @@ func (c *CompositeStore) RecordAnswerSet(ctx context.Context, in *store.RecordAn
 	if err := validateRecordAnswerSetInput(in); err != nil {
 		return nil, err
 	}
-	if c.inTx {
-		return c.recordAnswerSetTx(ctx, in)
-	}
-	var res *store.AnswerSetResult
-	for attempt := 0; ; attempt++ {
-		err := c.WithTx(ctx, func(tx store.Store) error {
-			var err error
-			res, err = tx.(*CompositeStore).recordAnswerSetTx(ctx, in)
-			return err
-		})
-		if err == nil {
-			return res, nil
-		}
-		// The loser of a concurrent answer or repost retries: the next
-		// attempt sees the winner's rows and reports the changed set (or
-		// replays its own key).
-		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
-			continue
-		}
-		if errors.Is(err, errDecisionRace) {
-			return nil, store.ErrTransient
-		}
-		return nil, err
-	}
+	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.AnswerSetResult, error) {
+		return tx.recordAnswerSetTx(ctx, in)
+	})
 }
 
 func validateRecordAnswerSetInput(in *store.RecordAnswerSetInput) error {
@@ -1133,22 +1095,24 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			SetCreatedAt(now).
 			Save(ctx)
 		if err != nil {
-			return nil, markDecisionRace(err)
+			return nil, markMessageActionRace(err)
 		}
 		// Only the pending-to-decided transition sets decided_at. It must
 		// change exactly the row read above; none changed means a
 		// concurrent write won, and the whole set rolls back and retries.
 		if r.Status == decision.StatusPending {
-			n, err := client.Decision.Update().
-				Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
-				SetStatus(decision.StatusDecided).
-				SetDecidedAt(now).
-				Save(ctx)
-			if err != nil {
-				return nil, mapError(err)
+			casOK, _, casErr := casActionRows[*ent.Decision](ctx, 1, func(ctx context.Context) (int, error) {
+				return client.Decision.Update().
+					Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
+					SetStatus(decision.StatusDecided).
+					SetDecidedAt(now).
+					Save(ctx)
+			}, nil)
+			if casErr != nil {
+				return nil, casErr
 			}
-			if n != 1 {
-				return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, r.Version, r.Key)
+			if !casOK {
+				return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, r.Version, r.Key)
 			}
 		}
 		res.Answers = append(res.Answers, answerToStore(saved))
@@ -1628,29 +1592,11 @@ func (c *CompositeStore) RecordInterpretedAnswers(ctx context.Context, in *store
 	if err := validateRecordInterpretedInput(in); err != nil {
 		return nil, err
 	}
-	if c.inTx {
-		return c.recordInterpretedAnswersTx(ctx, in)
-	}
 	origMsg := in.ResponseMessage.Msg
-	var res *store.AnswerSetResult
-	for attempt := 0; ; attempt++ {
+	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.AnswerSetResult, error) {
 		in.ResponseMessage.Msg = origMsg
-		err := c.WithTx(ctx, func(tx store.Store) error {
-			var err error
-			res, err = tx.(*CompositeStore).recordInterpretedAnswersTx(ctx, in)
-			return err
-		})
-		if err == nil {
-			return res, nil
-		}
-		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
-			continue
-		}
-		if errors.Is(err, errDecisionRace) {
-			return nil, store.ErrTransient
-		}
-		return nil, err
-	}
+		return tx.recordInterpretedAnswersTx(ctx, in)
+	})
 }
 
 func validateRecordInterpretedInput(in *store.RecordInterpretedInput) error {
@@ -1960,18 +1906,20 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			SetCreatedAt(now).
 			Save(ctx)
 		if err != nil {
-			return nil, markDecisionRace(err)
+			return nil, markMessageActionRace(err)
 		}
-		n, err := client.Decision.Update().
-			Where(decision.ID(v.row.ID), decision.StatusEQ(decision.StatusPending)).
-			SetStatus(decision.StatusDecided).
-			SetDecidedAt(now).
-			Save(ctx)
-		if err != nil {
-			return nil, mapError(err)
+		casOK, _, casErr := casActionRows[*ent.Decision](ctx, 1, func(ctx context.Context) (int, error) {
+			return client.Decision.Update().
+				Where(decision.ID(v.row.ID), decision.StatusEQ(decision.StatusPending)).
+				SetStatus(decision.StatusDecided).
+				SetDecidedAt(now).
+				Save(ctx)
+		}, nil)
+		if casErr != nil {
+			return nil, casErr
 		}
-		if n != 1 {
-			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, v.row.Version, v.row.Key)
+		if !casOK {
+			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, v.row.Version, v.row.Key)
 		}
 		res.Answers = append(res.Answers, answerToStore(saved))
 	}
@@ -2099,27 +2047,9 @@ func (c *CompositeStore) WithdrawDecisions(ctx context.Context, in *store.Withdr
 	if err := validateWithdrawDecisionsInput(in); err != nil {
 		return nil, err
 	}
-	if c.inTx {
-		return c.withdrawDecisionsTx(ctx, in)
-	}
-	var res *store.WithdrawDecisionsResult
-	for attempt := 0; ; attempt++ {
-		err := c.WithTx(ctx, func(tx store.Store) error {
-			var err error
-			res, err = tx.(*CompositeStore).withdrawDecisionsTx(ctx, in)
-			return err
-		})
-		if err == nil {
-			return res, nil
-		}
-		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
-			continue
-		}
-		if errors.Is(err, errDecisionRace) {
-			return nil, store.ErrTransient
-		}
-		return nil, err
-	}
+	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.WithdrawDecisionsResult, error) {
+		return tx.withdrawDecisionsTx(ctx, in)
+	})
 }
 
 func validateWithdrawDecisionsInput(in *store.WithdrawDecisionsInput) error {
@@ -2144,8 +2074,7 @@ func validateWithdrawDecisionsInput(in *store.WithdrawDecisionsInput) error {
 		}
 		seenNorms[norm] = true
 	}
-	reason := strings.TrimSpace(in.Reason)
-	if utf8.RuneCountInString(reason) > store.MaxDecisionWithdrawReasonRunes {
+	if _, err := msgaction.NormalizeReason(in.Reason); err != nil {
 		return fmt.Errorf("%w: reason is at most %d characters", store.ErrInvalidInput, store.MaxDecisionWithdrawReasonRunes)
 	}
 	return nil
@@ -2235,11 +2164,11 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 	for _, norm := range norms {
 		latest := latestByNorm[norm]
 		if latest != nil && activeByNorm[norm] == nil && (latest.Status == decision.StatusReplaced || latest.ReplacedByID != nil) {
-			return nil, fmt.Errorf("%w: %s was replaced concurrently", errDecisionRace, latest.Key)
+			return nil, fmt.Errorf("%w: %s was replaced concurrently", errMessageActionRace, latest.Key)
 		}
 		if in.WholeSet {
 			if active := activeByNorm[norm]; active != nil && !peekedMsgSet[active.MessageID] {
-				return nil, fmt.Errorf("%w: %s moved to a newer prompt concurrently", errDecisionRace, active.Key)
+				return nil, fmt.Errorf("%w: %s moved to a newer prompt concurrently", errMessageActionRace, active.Key)
 			}
 		}
 	}
@@ -2354,19 +2283,21 @@ func (c *CompositeStore) withdrawDecisionsTx(ctx context.Context, in *store.With
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	withdrawnOut := make([]*store.Decision, len(pendingRows))
 	for i, r := range pendingRows {
-		upd := client.Decision.Update().
-			Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
-			SetStatus(decision.StatusWithdrawn).
-			SetWithdrawnAt(now)
-		if reason != "" {
-			upd.SetWithdrawnReason(reason)
+		casOK, _, casErr := casActionRows[*ent.Decision](ctx, 1, func(ctx context.Context) (int, error) {
+			upd := client.Decision.Update().
+				Where(decision.ID(r.ID), decision.StatusEQ(decision.StatusPending)).
+				SetStatus(decision.StatusWithdrawn).
+				SetWithdrawnAt(now)
+			if reason != "" {
+				upd.SetWithdrawnReason(reason)
+			}
+			return upd.Save(ctx)
+		}, nil)
+		if casErr != nil {
+			return nil, casErr
 		}
-		n, err := upd.Save(ctx)
-		if err != nil {
-			return nil, mapError(err)
-		}
-		if n != 1 {
-			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, r.Version, r.Key)
+		if !casOK {
+			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, r.Version, r.Key)
 		}
 		d := decisionToStore(r)
 		d.Status = store.DecisionStatusWithdrawn
@@ -2388,29 +2319,11 @@ func (c *CompositeStore) DismissDecisions(ctx context.Context, in *store.Dismiss
 	if err := validateDismissDecisionsInput(in); err != nil {
 		return nil, err
 	}
-	if c.inTx {
-		return c.dismissDecisionsTx(ctx, in)
-	}
 	origMsg := in.ResponseMessage.Msg
-	var res *store.DismissDecisionsResult
-	for attempt := 0; ; attempt++ {
+	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.DismissDecisionsResult, error) {
 		in.ResponseMessage.Msg = origMsg
-		err := c.WithTx(ctx, func(tx store.Store) error {
-			var err error
-			res, err = tx.(*CompositeStore).dismissDecisionsTx(ctx, in)
-			return err
-		})
-		if err == nil {
-			return res, nil
-		}
-		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
-			continue
-		}
-		if errors.Is(err, errDecisionRace) {
-			return nil, store.ErrTransient
-		}
-		return nil, err
-	}
+		return tx.dismissDecisionsTx(ctx, in)
+	})
 }
 
 func validateDismissDecisionsInput(in *store.DismissDecisionsInput) error {
@@ -2452,8 +2365,7 @@ func validateDismissDecisionsInput(in *store.DismissDecisionsInput) error {
 	if surface != store.DecisionSurfaceNative && surface != store.DecisionSurfaceDecisionsPage {
 		return fmt.Errorf("%w: invalid dismiss surface %q", store.ErrInvalidInput, in.Surface)
 	}
-	reason := strings.TrimSpace(in.Reason)
-	if utf8.RuneCountInString(reason) > store.MaxDecisionDismissReasonRunes {
+	if _, err := msgaction.NormalizeReason(in.Reason); err != nil {
 		return fmt.Errorf("%w: reason is at most %d characters", store.ErrInvalidInput, store.MaxDecisionDismissReasonRunes)
 	}
 	return nil
@@ -2666,22 +2578,24 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 			SetCreatedAt(writeNow).
 			Save(ctx)
 		if err != nil {
-			return nil, markDecisionRace(err)
+			return nil, markMessageActionRace(err)
 		}
 
 		// Transition pending or decided (interpreted awaiting confirm, D6) to
 		// dismissed while keeping any prior agent_interpreted answer row in
 		// decision_answers.
-		n, err := client.Decision.Update().
-			Where(decision.ID(r.ID), decision.StatusEQ(r.Status)).
-			SetStatus(decision.StatusDismissed).
-			SetDismissedAt(writeNow).
-			Save(ctx)
-		if err != nil {
-			return nil, mapError(err)
+		casOK, _, casErr := casActionRows[*ent.Decision](ctx, 1, func(ctx context.Context) (int, error) {
+			return client.Decision.Update().
+				Where(decision.ID(r.ID), decision.StatusEQ(r.Status)).
+				SetStatus(decision.StatusDismissed).
+				SetDismissedAt(writeNow).
+				Save(ctx)
+		}, nil)
+		if casErr != nil {
+			return nil, casErr
 		}
-		if n != 1 {
-			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, r.Version, r.Key)
+		if !casOK {
+			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errMessageActionRace, r.Version, r.Key)
 		}
 
 		d := decisionToStore(r)

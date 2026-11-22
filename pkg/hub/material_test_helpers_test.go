@@ -428,3 +428,7 @@ func (f *materialFixture) recordAgentEdge(t *testing.T) {
 func (plainAuditLogger) LogPendingSecretEvent(context.Context, *PendingSecretEvent) error {
 	return nil
 }
+
+func (plainAuditLogger) LogMessageActionEvent(context.Context, *MessageActionEvent) error {
+	return nil
+}

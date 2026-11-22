@@ -294,6 +294,8 @@ type AuditLogger interface {
 	LogAgentSecretReadEvent(ctx context.Context, event *AgentSecretReadEvent) error
 	// LogPendingSecretEvent logs a pending secret event.
 	LogPendingSecretEvent(ctx context.Context, event *PendingSecretEvent) error
+	// LogMessageActionEvent logs a message-action lifecycle or refusal audit event.
+	LogMessageActionEvent(ctx context.Context, event *MessageActionEvent) error
 	// RecordSAAssignment logs a service-account assignment decision or binding
 	// (svc-accnt design §7). Named to match store.SAAssignmentAuditSink, which
 	// this method exists to satisfy: pkg/lifecyclehooks emits these too and

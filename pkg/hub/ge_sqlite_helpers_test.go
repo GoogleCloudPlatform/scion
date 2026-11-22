@@ -173,3 +173,7 @@ func (l *recordingAuditLogger) deniedCount() int {
 func (l *recordingAuditLogger) LogPendingSecretEvent(context.Context, *PendingSecretEvent) error {
 	return nil
 }
+
+func (l *recordingAuditLogger) LogMessageActionEvent(context.Context, *MessageActionEvent) error {
+	return nil
+}

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 )
 
 // Decisions (ptone/scion#7514): an agent's decision prompt carries decisions,
@@ -45,10 +46,10 @@ const (
 )
 
 // MaxDecisionWithdrawReasonRunes bounds WithdrawDecisionsInput.Reason.
-const MaxDecisionWithdrawReasonRunes = 500
+const MaxDecisionWithdrawReasonRunes = msgaction.MaxReasonRunes
 
 // MaxDecisionDismissReasonRunes bounds DismissDecisionsInput.Reason.
-const MaxDecisionDismissReasonRunes = 500
+const MaxDecisionDismissReasonRunes = msgaction.MaxReasonRunes
 
 // DecisionDismissMinAge is the minimum age a decision version must reach
 // before a user may dismiss it (design-8194 section 4.4a, D10).
@@ -57,12 +58,8 @@ const DecisionDismissMinAge = 5 * time.Minute
 // DecisionStatusTerminal reports whether status is a terminal decision status
 // (replaced, withdrawn, or dismissed) that cannot accept new answers.
 func DecisionStatusTerminal(status string) bool {
-	switch status {
-	case DecisionStatusReplaced, DecisionStatusWithdrawn, DecisionStatusDismissed:
-		return true
-	default:
-		return false
-	}
+	cls, ok := msgaction.DecisionKindSpec.Classify(status)
+	return ok && cls.Terminal() && cls != msgaction.ClassResolved
 }
 
 // Decision key sources.
@@ -98,7 +95,7 @@ const (
 )
 
 // MaxDecisionIdempotencyKeyLen bounds RecordAnswerInput.IdempotencyKey.
-const MaxDecisionIdempotencyKeyLen = 128
+const MaxDecisionIdempotencyKeyLen = msgaction.MaxIdempotencyKeyLen
 
 var (
 	// ErrDecisionKeyExists: a decision prompt without Update reuses a key that
