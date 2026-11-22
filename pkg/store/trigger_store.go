@@ -74,9 +74,10 @@ const (
 	TriggerEventStatusFailed    = "failed"
 )
 
-// TriggerFire statuses (§4.4, §5.5, Stage 3 §6.3).
+// TriggerFire statuses (§4.4, §5.5, Stage 3 §6.2, §6.3).
 const (
 	TriggerFireStatusCoalescing = "coalescing"
+	TriggerFireStatusDeferred   = "deferred"
 	TriggerFireStatusFiring     = "firing"
 	TriggerFireStatusFired      = "fired"
 	TriggerFireStatusFailed     = "failed"
@@ -368,7 +369,8 @@ type TriggerStore interface {
 	ClaimTriggerFire(ctx context.Context, fire *TriggerFire) (claimed bool, existing *TriggerFire, err error)
 	ClaimTriggerFireSubjectSkip(ctx context.Context, fire *TriggerFire, skipError string, now time.Time) (claimed bool, skippedBusy bool, existing *TriggerFire, err error)
 	ClaimTriggerFireCoalescing(ctx context.Context, fire *TriggerFire, coalesceError string, now, notBefore time.Time) (claimed bool, promoted bool, superseded []TriggerFire, existing *TriggerFire, err error)
-	CancelCoalescingTriggerFire(ctx context.Context, id, errMsg string, finishedAt time.Time) (bool, error)
+	DeferTriggerFire(ctx context.Context, id string, notBefore, leaseUntil time.Time) (bool, error)
+	FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error)
 	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)

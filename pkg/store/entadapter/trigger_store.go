@@ -2067,7 +2067,25 @@ func (s *TriggerStore) ClaimTriggerFireSubjectSkip(ctx context.Context, fire *st
 	return claimed, skippedBusy, existingOut, nil
 }
 
-const errReapedDuringCoalesce = "hub restarted during coalesce"
+const (
+	errReapedDuringCoalesce = "hub restarted during coalesce"
+	errReapedDuringDefer    = "hub restarted during defer"
+)
+
+func pendingOrReapedFirePredicate() predicate.TriggerFire {
+	return triggerfire.Or(
+		triggerfire.StatusIn(store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred),
+		triggerfire.And(
+			triggerfire.StatusEQ(store.TriggerFireStatusFailed),
+			triggerfire.ErrorIn(errReapedDuringCoalesce, errReapedDuringDefer),
+		),
+	)
+}
+
+func isReapedPendingFire(ex *ent.TriggerFire) bool {
+	return ex.Status == store.TriggerFireStatusFailed &&
+		(ex.Error == errReapedDuringCoalesce || ex.Error == errReapedDuringDefer)
+}
 
 func (s *TriggerStore) ClaimTriggerFireCoalescing(
 	ctx context.Context,
@@ -2111,7 +2129,7 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 			Only(ctx)
 		if qErr == nil {
 			// Existing row for (event_id, trigger_id).
-			if ex.Status == store.TriggerFireStatusCoalescing {
+			if ex.Status == store.TriggerFireStatusCoalescing || ex.Status == store.TriggerFireStatusDeferred {
 				if ex.NotBefore != nil && ex.NotBefore.UTC().After(now) {
 					claimed = false
 					promoted = false
@@ -2121,9 +2139,9 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 				if s.beforeCoalescePromoteHook != nil {
 					s.beforeCoalescePromoteHook(ctx, client, ex.ID)
 				}
-				// Coalesce window elapsed: CAS promote coalescing -> firing.
+				// Coalesce/defer window elapsed: CAS promote coalescing|deferred -> firing.
 				affected, uErr := client.TriggerFire.Update().
-					Where(triggerfire.IDEQ(ex.ID), triggerfire.StatusEQ(store.TriggerFireStatusCoalescing)).
+					Where(triggerfire.IDEQ(ex.ID), triggerfire.StatusEQ(ex.Status)).
 					SetStatus(store.TriggerFireStatusFiring).
 					SetLeaseUntil(now.Add(leaseHorizon)).
 					Save(ctx)
@@ -2141,19 +2159,19 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 					return nil
 				}
 				// Concurrent state transition (e.g. reaper marked the row
-				// failed "hub restarted during coalesce" between read and CAS):
-				// fall through so reaped-coalesce is revived in place.
+				// failed "hub restarted during coalesce/defer" between read and CAS):
+				// fall through so reaped-pending is revived in place.
 				ex = fresh
 			}
 
-			if ex.Status == store.TriggerFireStatusFailed && ex.Error == errReapedDuringCoalesce {
-				// Stage 3 §6.3/§6.4: reaped coalescing row is re-fired in place by
-				// the queue item's retry, never re-created/duplicated.
+			if isReapedPendingFire(ex) {
+				// Stage 3 §6.3/§6.4: reaped coalescing/deferred row is re-fired in place
+				// by the queue item's retry, never re-created/duplicated.
 				affected, uErr := client.TriggerFire.Update().
 					Where(
 						triggerfire.IDEQ(ex.ID),
 						triggerfire.StatusEQ(store.TriggerFireStatusFailed),
-						triggerfire.ErrorEQ(errReapedDuringCoalesce),
+						triggerfire.ErrorEQ(ex.Error),
 					).
 					SetStatus(store.TriggerFireStatusFiring).
 					ClearError().
@@ -2192,16 +2210,10 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 			return mapError(qErr)
 		}
 
-		// Supersede any unreleased coalescing or reaped-coalesce rows for
-		// (trigger_id, subject) via CAS so an older event's retry after a
-		// restart cannot revive and double-dispatch alongside the newer event.
-		coalesceOrReaped := triggerfire.Or(
-			triggerfire.StatusEQ(store.TriggerFireStatusCoalescing),
-			triggerfire.And(
-				triggerfire.StatusEQ(store.TriggerFireStatusFailed),
-				triggerfire.ErrorEQ(errReapedDuringCoalesce),
-			),
-		)
+		// Supersede any unreleased coalescing, deferred, or reaped-pending rows for
+		// (trigger_id, subject) via CAS so an older event's retry cannot revive
+		// and double-dispatch alongside the newer event.
+		coalesceOrReaped := pendingOrReapedFirePredicate()
 		prevRows, pErr := client.TriggerFire.Query().
 			Where(
 				triggerfire.TriggerIDEQ(tid),
@@ -2265,28 +2277,45 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 	return claimed, promoted, superseded, existing, nil
 }
 
-func (s *TriggerStore) CancelCoalescingTriggerFire(ctx context.Context, id, errMsg string, finishedAt time.Time) (bool, error) {
+func (s *TriggerStore) DeferTriggerFire(ctx context.Context, id string, notBefore, leaseUntil time.Time) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := s.client.TriggerFire.Update().
+		Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusFiring)).
+		SetStatus(store.TriggerFireStatusDeferred).
+		SetNotBefore(notBefore.UTC()).
+		SetLeaseUntil(leaseUntil.UTC()).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}
+
+func (s *TriggerStore) FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
 	}
 	u := s.client.TriggerFire.Update().
-		Where(
-			triggerfire.IDEQ(uid),
-			triggerfire.Or(
-				triggerfire.StatusEQ(store.TriggerFireStatusCoalescing),
-				triggerfire.And(
-					triggerfire.StatusEQ(store.TriggerFireStatusFailed),
-					triggerfire.ErrorEQ(errReapedDuringCoalesce),
-				),
-			),
-		).
-		SetStatus(store.TriggerFireStatusSkipped).
+		Where(triggerfire.IDEQ(uid), pendingOrReapedFirePredicate()).
+		SetStatus(status).
 		SetFinishedAt(finishedAt.UTC())
 	if errMsg != "" {
 		u.SetError(errMsg)
 	} else {
 		u.ClearError()
+	}
+	if matchedThrough != "" {
+		u.SetMatchedThrough(matchedThrough)
+	}
+	if decidedDialect != "" {
+		u.SetDecidedDialect(decidedDialect)
+	}
+	if ruleTrace != "" {
+		u.SetRuleTrace(ruleTrace)
 	}
 	affected, err := u.Save(ctx)
 	if err != nil {
@@ -2426,7 +2455,7 @@ func (s *TriggerStore) ListTriggerFires(ctx context.Context, filter store.Trigge
 }
 
 func hasLiveTriggerFireForSubjectClient(ctx context.Context, client *ent.Client, tid uuid.UUID, subject string, excludeFireID uuid.UUID, includeFiring bool, now time.Time) (bool, error) {
-	statuses := []string{store.TriggerFireStatusCoalescing}
+	statuses := []string{store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred}
 	if includeFiring {
 		statuses = append(statuses, store.TriggerFireStatusFiring)
 	}
@@ -2511,7 +2540,7 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 	now = now.UTC()
 	q := s.client.TriggerFire.Query().
 		Where(
-			triggerfire.StatusIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing),
+			triggerfire.StatusIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred),
 			triggerfire.LeaseUntilLTE(now),
 		).
 		Order(triggerfire.ByLeaseUntil())
@@ -2525,8 +2554,11 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 	reaped := 0
 	for _, f := range expired {
 		errMsg := "hub restarted during fire"
-		if f.Status == store.TriggerFireStatusCoalescing {
+		switch f.Status {
+		case store.TriggerFireStatusCoalescing:
 			errMsg = errReapedDuringCoalesce
+		case store.TriggerFireStatusDeferred:
+			errMsg = errReapedDuringDefer
 		}
 		affected, uErr := s.client.TriggerFire.Update().
 			Where(triggerfire.IDEQ(f.ID), triggerfire.StatusEQ(f.Status)).
@@ -2549,7 +2581,7 @@ func (s *TriggerStore) PurgeOldTriggerHistory(ctx context.Context, olderThan tim
 	cutoff := olderThan.UTC()
 	firesDeleted, err := s.client.TriggerFire.Delete().
 		Where(
-			triggerfire.StatusNotIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing),
+			triggerfire.StatusNotIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred),
 			triggerfire.CreatedLT(cutoff),
 		).
 		Exec(ctx)
