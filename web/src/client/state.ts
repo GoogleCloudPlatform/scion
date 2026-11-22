@@ -484,6 +484,7 @@ export type StateEventType =
   | 'chat-scheduled-updated'
   | 'chat-stars-updated'
   | 'decision-updated'
+  | 'message-action-updated'
   | 'agent-created';
 
 /**
@@ -889,6 +890,12 @@ export class StateManager extends EventTarget {
         } else if (subType === 'deleted') {
           this.notifyWithData('chat-message-deleted', data);
         }
+      } else if (parts.length >= 5 && parts[4] === 'updated') {
+        // user.{userId}.chat.<kind>.updated: a kind-agnostic message-action card updated.
+        this.notifyWithData('message-action-updated', {
+          ...(data as Record<string, unknown>),
+          kind: parts[3],
+        });
       } else {
         // Marked as addressed to this user: only conversations the user
         // takes part in are published on their own subject.
@@ -968,6 +975,12 @@ export class StateManager extends EventTarget {
           this.notifyWithData('chat-presence-updated', chatDetail);
         } else if (chatEventType === 'typing') {
           this.notifyWithData('chat-typing-received', chatDetail);
+        } else if (parts.length >= 5 && parts[4] === 'updated') {
+          // project.{projectId}.chat.<kind>.updated: a kind-agnostic message-action card updated.
+          this.notifyWithData('message-action-updated', {
+            ...chatDetail,
+            kind: chatEventType,
+          });
         }
         return;
       }

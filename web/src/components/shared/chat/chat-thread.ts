@@ -73,6 +73,7 @@ import {
 } from '../../../client/chat-scheduled.js';
 import type { ScheduledRestoreDetail, ScionChatScheduledList } from './chat-scheduled-list.js';
 import './chat-scheduled-list.js';
+import { subscribeMessageActionUpdated } from './message-action-state.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
@@ -1113,8 +1114,8 @@ export class ScionChatThread extends LitElement {
   /** Bound listener for v2 SSE message-deleted events. */
   private _v2DeleteHandler = this.handleV2MessageDeleted.bind(this);
 
-  /** Bound listener for `chat.decision.updated` (the `decision-updated` state event). */
-  private _decisionUpdatedHandler = this.handleDecisionUpdated.bind(this);
+  /** Unsubscribe callback for `chat.decision.updated` (via `subscribeMessageActionUpdated`). */
+  private _unsubscribeDecisionUpdated: (() => void) | null = null;
 
   private eventSource: EventSource | null = null;
   private nextCursor: string | null = null;
@@ -2048,7 +2049,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.removeEventListener('decision-updated', this._decisionUpdatedHandler);
+    this.unsubscribeDecisionUpdated();
 
     // Clear read-receipt state — it belongs to the conversation we just left.
     this.clearSeenState();
@@ -2146,7 +2147,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.removeEventListener('decision-updated', this._decisionUpdatedHandler);
+    this.unsubscribeDecisionUpdated();
     this.clearSeenState();
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
@@ -2337,7 +2338,7 @@ export class ScionChatThread extends LitElement {
       stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
       stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
       stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-      stateManager.removeEventListener('decision-updated', this._decisionUpdatedHandler);
+      this.unsubscribeDecisionUpdated();
     }
   }
 
@@ -2772,7 +2773,15 @@ export class ScionChatThread extends LitElement {
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.addEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.addEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.addEventListener('decision-updated', this._decisionUpdatedHandler);
+    this.unsubscribeDecisionUpdated();
+    this._unsubscribeDecisionUpdated = subscribeMessageActionUpdated<Partial<DecisionUpdatedEvent>>(
+      'decision',
+      (data) => this.handleDecisionUpdated(data),
+      {
+        eventSource: stateManager,
+        threadId: () => this.conversationKey,
+      }
+    );
     // Seed the typing self-filter. The scope may not exist yet — see selfUserId.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
@@ -4221,18 +4230,19 @@ export class ScionChatThread extends LitElement {
     );
   }
 
+  private unsubscribeDecisionUpdated(): void {
+    if (this._unsubscribeDecisionUpdated) {
+      this._unsubscribeDecisionUpdated();
+      this._unsubscribeDecisionUpdated = null;
+    }
+  }
+
   /**
    * SSE handler for chat.decision.updated: patches the row of a loaded
    * prompt (design §4.4).
    */
-  private handleDecisionUpdated(e: Event): void {
-    const detail = (e as CustomEvent).detail as
-      | ({ data?: Partial<DecisionUpdatedEvent> } & Partial<DecisionUpdatedEvent>)
-      | undefined;
-    // stateManager wraps SSE payloads as { state, data }; tolerate a flat detail too.
-    const data = detail?.data ?? detail;
+  private handleDecisionUpdated(data: Partial<DecisionUpdatedEvent>): void {
     if (!data?.messageId || !data.decision) return;
-    if (data.threadId && data.threadId !== this.conversationKey) return;
     this.patchMessageDecisions(data.messageId, [data.decision]);
   }
 
