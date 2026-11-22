@@ -196,10 +196,23 @@ func TestAgentSecrets_ExperimentOffRejectedEverywhere(t *testing.T) {
 	rr = doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/secrets/FOO?scope=agent&scopeId="+agentX.ID, nil)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 
-	// Agent runtime routes reject scope=agent with 400 when experiment is off.
+	// Agent runtime routes reject scope=agent and scope=all with 400 when
+	// experiment is off. Pin the exact error code and message so the CLI
+	// client's ErrAgentScopeUnavailable matcher cannot drift from the hub.
 	scopes := []AgentTokenScope{ScopeAgentStatusUpdate, ScopeProjectSecretRead}
 	rr = doAsAgentWithScopes(t, srv, agentX, scopes, http.MethodGet, "/api/v1/agents/"+agentX.ID+"/secrets?scope=agent", nil)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeInvalidRequest, errResp.Error.Code)
+	assert.Equal(t, "invalid scope: agent", errResp.Error.Message)
+
+	rr = doAsAgentWithScopes(t, srv, agentX, scopes, http.MethodGet, "/api/v1/agents/"+agentX.ID+"/secrets?scope=all", nil)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	errResp = ErrorResponse{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+	assert.Equal(t, `scope must be "project" or "user"`, errResp.Error.Message)
 
 	rr = doAsAgentWithScopes(t, srv, agentX, scopes, http.MethodGet, "/api/v1/agents/"+agentX.ID+"/secrets/FOO?scope=agent", nil)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)

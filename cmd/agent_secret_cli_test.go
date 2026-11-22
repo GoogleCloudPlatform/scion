@@ -239,11 +239,13 @@ func TestAgentSecretGetMetadata_InsideAgentScopes(t *testing.T) {
 					{"key": "BOTH_KEY", "type": "file", "target": "/agent/path", "scope": "agent"},
 				},
 			})
-		case "project":
+		case "all":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"secrets": []map[string]string{
 					{"key": "BOTH_KEY", "type": "file", "target": "/project/path", "scope": "project"},
 					{"key": "PROJ_ONLY", "type": "environment", "target": "PROJ_ONLY", "scope": "project"},
+					{"key": "AGENT_ONLY", "type": "environment", "target": "AGENT_ONLY", "scope": "agent"},
+					{"key": "BOTH_KEY", "type": "file", "target": "/agent/path", "scope": "agent"},
 				},
 			})
 		default:
@@ -255,7 +257,21 @@ func TestAgentSecretGetMetadata_InsideAgentScopes(t *testing.T) {
 	useSecretGetHub(t, srv)
 	t.Setenv("SCION_AGENT_ID", secretGetTestAgentID)
 	origScope := agentSecretGetScope
-	t.Cleanup(func() { agentSecretGetScope = origScope })
+	origFetch := fetchProjectSecretMeta
+	t.Cleanup(func() {
+		agentSecretGetScope = origScope
+		fetchProjectSecretMeta = origFetch
+	})
+	fetchProjectSecretMeta = func(_ *cobra.Command, key string) (*hubclient.Secret, error) {
+		return &hubclient.Secret{
+			Key:         key,
+			Scope:       "project",
+			SecretType:  "file",
+			Target:      "/project/path",
+			Version:     3,
+			Description: "project secret metadata",
+		}, nil
+	}
 
 	// 1. --scope agent resolves agent-only key.
 	agentSecretGetScope = "agent"
@@ -264,7 +280,7 @@ func TestAgentSecretGetMetadata_InsideAgentScopes(t *testing.T) {
 	assert.Contains(t, out, "Secret: AGENT_ONLY")
 	assert.Contains(t, out, "Scope:   agent")
 
-	// 2. Unset --scope resolves agent-only key via agent scope.
+	// 2. Unset --scope probes scope=all and resolves agent-only key.
 	agentSecretGetScope = ""
 	out, err = runSecretGetTest(t, "AGENT_ONLY")
 	require.NoError(t, err)
@@ -279,13 +295,85 @@ func TestAgentSecretGetMetadata_InsideAgentScopes(t *testing.T) {
 	assert.Contains(t, out, "Scope:   agent")
 	assert.Contains(t, out, "Target:  /agent/path")
 
-	// 4. --scope project pins to project scope even when key exists at agent scope.
+	// 4. Unset --scope for a project-only key fetches full project metadata (Version/Description).
+	agentSecretGetScope = ""
+	out, err = runSecretGetTest(t, "PROJ_ONLY")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Secret: PROJ_ONLY")
+	assert.Contains(t, out, "Scope:   project")
+	assert.Contains(t, out, "Version: 3")
+	assert.Contains(t, out, "Description: project secret metadata")
+
+	// 5. --scope project pins to project scope and preserves full project metadata.
 	agentSecretGetScope = "project"
 	out, err = runSecretGetTest(t, "BOTH_KEY")
 	require.NoError(t, err)
 	assert.Contains(t, out, "Secret: BOTH_KEY")
 	assert.Contains(t, out, "Scope:   project")
 	assert.Contains(t, out, "Target:  /project/path")
+	assert.Contains(t, out, "Version: 3")
+	assert.Contains(t, out, "Description: project secret metadata")
+}
+
+func TestAgentSecretGetMetadata_ExperimentOff(t *testing.T) {
+	// Mock returns the Hub's exact experiment-off 400 responses for scope=all
+	// and scope=agent (pinned by TestAgentSecrets_ExperimentOffRejectedEverywhere).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/agents/"+secretGetTestAgentID+"/secrets", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		switch r.URL.Query().Get("scope") {
+		case "all":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{
+					"code":    "validation_error",
+					"message": `scope must be "project" or "user"`,
+				},
+			})
+		case "agent":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{
+					"code":    "invalid_request",
+					"message": "invalid scope: agent",
+				},
+			})
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	useSecretGetHub(t, srv)
+	t.Setenv("SCION_AGENT_ID", secretGetTestAgentID)
+	origScope := agentSecretGetScope
+	origFetch := fetchProjectSecretMeta
+	t.Cleanup(func() {
+		agentSecretGetScope = origScope
+		fetchProjectSecretMeta = origFetch
+	})
+	fetchProjectSecretMeta = func(_ *cobra.Command, key string) (*hubclient.Secret, error) {
+		return &hubclient.Secret{
+			Key:         key,
+			Scope:       "project",
+			SecretType:  "environment",
+			Version:     2,
+			Description: "fallback project secret",
+		}, nil
+	}
+
+	// With --scope unset and experiment off, scope=all returns 400 and we fall
+	// back cleanly to fetchProjectSecretMeta.
+	agentSecretGetScope = ""
+	out, err := runSecretGetTest(t, "MY_KEY")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Secret: MY_KEY")
+	assert.Contains(t, out, "Scope:   project")
+	assert.Contains(t, out, "Version: 2")
+	assert.Contains(t, out, "Description: fallback project secret")
+
+	// With --scope agent and experiment off, return a clear ErrAgentScopeUnavailable error.
+	agentSecretGetScope = "agent"
+	_, err = runSecretGetTest(t, "MY_KEY")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, sciontoolhub.ErrAgentScopeUnavailable)
 }
 
 var _ = sciontoolhub.NewClient // keep import explicit

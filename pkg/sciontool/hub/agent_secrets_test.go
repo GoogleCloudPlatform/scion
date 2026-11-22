@@ -24,7 +24,7 @@ import (
 )
 
 func TestListSecretsWithScope_Narrow400Matching(t *testing.T) {
-	t.Run("experiment-off invalid scope maps to ErrAgentScopeUnavailable", func(t *testing.T) {
+	t.Run("experiment-off scope=all maps to ErrAgentScopeUnavailable", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -39,6 +39,26 @@ func TestListSecretsWithScope_Narrow400Matching(t *testing.T) {
 
 		c := &Client{hubURL: srv.URL, agentID: "agent-1", token: "tok", client: srv.Client()}
 		_, err := c.ListSecretsWithScope(context.Background(), "all")
+		if !errors.Is(err, ErrAgentScopeUnavailable) {
+			t.Fatalf("expected ErrAgentScopeUnavailable, got %v", err)
+		}
+	})
+
+	t.Run("experiment-off scope=agent maps to ErrAgentScopeUnavailable", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{
+					"code":    "invalid_request",
+					"message": "invalid scope: agent",
+				},
+			})
+		}))
+		defer srv.Close()
+
+		c := &Client{hubURL: srv.URL, agentID: "agent-1", token: "tok", client: srv.Client()}
+		_, err := c.ListSecretsWithScope(context.Background(), "agent")
 		if !errors.Is(err, ErrAgentScopeUnavailable) {
 			t.Fatalf("expected ErrAgentScopeUnavailable, got %v", err)
 		}

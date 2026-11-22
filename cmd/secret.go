@@ -286,47 +286,41 @@ func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
 }
 
 // fetchAgentSecretMeta resolves secret metadata through the agent-scoped list
-// route (/api/v1/agents/{id}/secrets). When scope is empty, it checks agent
-// scope first and falls back to project scope so metadata lookups match --value.
+// route (/api/v1/agents/{id}/secrets). When scope is empty, it probes with
+// scope=all (matching `scion secret list`) and picks agent scope before
+// project scope on the client so metadata lookups match --value. Whenever the
+// resolved scope is project (explicit --scope project, default lookup matching
+// a project secret, or experiment-off fallback), metadata is fetched via
+// fetchProjectSecretMeta so Version/Created/Updated/Description are preserved.
 func fetchAgentSecretMeta(cmd *cobra.Command, agentClient *sciontoolhub.Client, key, scope string) (*hubclient.Secret, error) {
+	if scope == "project" {
+		return fetchProjectSecretMeta(cmd, key)
+	}
+
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	findInScope := func(s string) (*hubclient.Secret, bool, error) {
-		resp, err := agentClient.ListSecretsWithScope(ctx, s)
-		if err != nil {
-			return nil, false, err
-		}
-		for _, item := range resp.Secrets {
-			if item.Key == key {
-				sc := item.Scope
-				if sc == "" {
-					sc = s
-				}
-				return &hubclient.Secret{
-					Key:        item.Key,
-					Scope:      sc,
-					SecretType: item.Type,
-					Target:     item.Target,
-				}, true, nil
-			}
-		}
-		return nil, false, nil
-	}
-
-	if scope != "" {
-		sec, found, err := findInScope(scope)
+	if scope == "agent" {
+		resp, err := agentClient.ListSecretsWithScope(ctx, "agent")
 		if err != nil {
 			return nil, fmt.Errorf("failed to get secret: %w", err)
 		}
-		if !found {
-			return nil, fmt.Errorf("secret %q not found in scope %s", key, scope)
+		for _, item := range resp.Secrets {
+			if item.Key == key {
+				return &hubclient.Secret{
+					Key:        item.Key,
+					Scope:      "agent",
+					SecretType: item.Type,
+					Target:     item.Target,
+				}, nil
+			}
 		}
-		return sec, nil
+		return nil, fmt.Errorf("secret %q not found in scope agent", key)
 	}
 
-	// Default (--scope unset): check agent scope first, then project scope.
-	sec, found, err := findInScope("agent")
+	// Default (--scope unset): probe with scope=all (same as `scion secret list`),
+	// then pick agent-then-project on the client.
+	resp, err := agentClient.ListSecretsWithScope(ctx, "all")
 	if err != nil {
 		if !errors.Is(err, sciontoolhub.ErrAgentScopeUnavailable) {
 			return nil, fmt.Errorf("failed to get secret: %w", err)
@@ -334,17 +328,28 @@ func fetchAgentSecretMeta(cmd *cobra.Command, agentClient *sciontoolhub.Client, 
 		// Experiment off: preserve pre-existing project-scoped metadata view.
 		return fetchProjectSecretMeta(cmd, key)
 	}
-	if found {
-		return sec, nil
+
+	var foundProject bool
+	for _, item := range resp.Secrets {
+		if item.Key != key {
+			continue
+		}
+		if item.Scope == "agent" {
+			return &hubclient.Secret{
+				Key:        item.Key,
+				Scope:      "agent",
+				SecretType: item.Type,
+				Target:     item.Target,
+			}, nil
+		}
+		if item.Scope == "project" || item.Scope == "" {
+			foundProject = true
+		}
 	}
-	sec, found, err = findInScope("project")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get secret: %w", err)
+	if foundProject {
+		return fetchProjectSecretMeta(cmd, key)
 	}
-	if !found {
-		return nil, fmt.Errorf("secret %q not found", key)
-	}
-	return sec, nil
+	return nil, fmt.Errorf("secret %q not found", key)
 }
 
 // printSecretMetadata writes the text metadata view of a secret, the
