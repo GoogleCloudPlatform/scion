@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -195,6 +196,19 @@ func wrapScheduleHubError(hubCtx *HubContext, err error) error {
 	return wrapHubError(err)
 }
 
+var (
+	errSchedulePrefixNotFound  = errors.New("schedule prefix not found")
+	errSchedulePrefixAmbiguous = errors.New("ambiguous ID prefix")
+)
+
+type schedulePrefixError struct {
+	sentinel error
+	msg      string
+}
+
+func (e *schedulePrefixError) Error() string { return e.msg }
+func (e *schedulePrefixError) Unwrap() error { return e.sentinel }
+
 // resolveScheduleID resolves a potentially truncated schedule/event ID to its full UUID.
 // If the input is already a valid full UUID, it is returned as-is with an empty resourceType.
 // Otherwise, it lists schedules and/or events and finds a unique prefix match.
@@ -261,11 +275,17 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 			case "event":
 				resourceLabel = "scheduled event"
 			}
-			return "", "", fmt.Errorf(
-				"no %s held by this agent found with ID prefix %q (agent callers only see schedules and events they hold; schedules held by another principal are not visible, and commands take an ID or ID prefix rather than a schedule name)",
-				resourceLabel, prefix)
+			return "", "", &schedulePrefixError{
+				sentinel: errSchedulePrefixNotFound,
+				msg: fmt.Sprintf(
+					"no %s held by this agent found with ID prefix %q (agent callers only see schedules and events they hold; schedules held by another principal are not visible, and commands take an ID or ID prefix rather than a schedule name)",
+					resourceLabel, prefix),
+			}
 		}
-		return "", "", fmt.Errorf("no schedule or event found with ID prefix %q", prefix)
+		return "", "", &schedulePrefixError{
+			sentinel: errSchedulePrefixNotFound,
+			msg:      fmt.Sprintf("no schedule or event found with ID prefix %q", prefix),
+		}
 	case 1:
 		return matches[0].id, matches[0].resourceType, nil
 	default:
@@ -273,7 +293,10 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 		for i, m := range matches {
 			ids[i] = m.id
 		}
-		return "", "", fmt.Errorf("ambiguous ID prefix %q matches %d resources: %s", prefix, len(matches), strings.Join(ids, ", "))
+		return "", "", &schedulePrefixError{
+			sentinel: errSchedulePrefixAmbiguous,
+			msg:      fmt.Sprintf("ambiguous ID prefix %q matches %d resources: %s", prefix, len(matches), strings.Join(ids, ", ")),
+		}
 	}
 }
 
@@ -1081,10 +1104,10 @@ func scheduleDeleteViaHub(ctx context.Context, hubCtx *HubContext, projectID, sc
 		// prefix matches a one-shot scheduled event so we can point the caller
 		// to 'scion schedule cancel' instead of a misleading schedule-not-found
 		// or agent caller-scope error.
-		if strings.HasPrefix(err.Error(), "no ") {
+		if errors.Is(err, errSchedulePrefixNotFound) {
 			if evtID, _, evtErr := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "event"); evtErr == nil {
 				return oneShotDeleteHintError(evtID)
-			} else if strings.Contains(evtErr.Error(), "ambiguous ID prefix") {
+			} else if errors.Is(evtErr, errSchedulePrefixAmbiguous) {
 				return fmt.Errorf("%w (one-shot scheduled events cannot be deleted; use 'scion schedule cancel <id>' to cancel them)", evtErr)
 			}
 		}
