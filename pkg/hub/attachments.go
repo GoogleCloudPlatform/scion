@@ -28,6 +28,8 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/rootopen"
 )
 
 // ---------------------------------------------------------------------------
@@ -380,7 +382,7 @@ func (s *LocalDiskAttachmentStore) Get(_ context.Context, projectID, id string) 
 	}
 	defer func() { _ = root.Close() }()
 
-	dir, err := root.Open(rel)
+	dir, err := rootopen.OpenDir(root, filepath.ToSlash(rel))
 	if err != nil {
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment not found: %s", id)
 	}
@@ -391,27 +393,14 @@ func (s *LocalDiskAttachmentStore) Get(_ context.Context, projectID, id string) 
 	}
 
 	filename := entries[0].Name()
-	filePath := filepath.Join(rel, filename)
+	filePath := filepath.ToSlash(filepath.Join(rel, filename))
 
-	// Use Lstat (not Stat) to detect symlinks — refuse to open anything
-	// that is not a regular file.
-	info, err := root.Lstat(filePath)
+	f, info, err := rootopen.OpenRegularForRead(root, filePath, nil)
 	if err != nil {
-		return nil, AttachmentMeta{}, fmt.Errorf("attachment stat: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, AttachmentMeta{}, fmt.Errorf("attachment not a regular file: %s", id)
-	}
-
-	f, err := root.Open(filePath)
-	if err != nil {
+		if errors.Is(err, rootopen.ErrRefused) {
+			return nil, AttachmentMeta{}, fmt.Errorf("attachment not a regular file: %s", id)
+		}
 		return nil, AttachmentMeta{}, fmt.Errorf("attachment open: %w", err)
-	}
-	// The open itself is checked again: the name could have been replaced
-	// between the Lstat and the open.
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || !os.SameFile(fi, info) {
-		_ = f.Close()
-		return nil, AttachmentMeta{}, fmt.Errorf("attachment not a regular file: %s", id)
 	}
 
 	meta := AttachmentMeta{
