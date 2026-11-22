@@ -416,8 +416,9 @@ func (m *memTriggerStore) CancelCoalescingTriggerFire(_ context.Context, id, err
 	if !ok {
 		return false, nil
 	}
-	if f.Status != store.TriggerFireStatusCoalescing &&
-		!(f.Status == store.TriggerFireStatusFailed && f.Error == trigger.ErrFireReapedDuringCoalesce) {
+	isCoalescingOrReaped := f.Status == store.TriggerFireStatusCoalescing ||
+		(f.Status == store.TriggerFireStatusFailed && f.Error == trigger.ErrFireReapedDuringCoalesce)
+	if !isCoalescingOrReaped {
 		return false, nil
 	}
 	f.Status = store.TriggerFireStatusSkipped
