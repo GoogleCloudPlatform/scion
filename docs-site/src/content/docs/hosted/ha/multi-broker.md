@@ -56,6 +56,8 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
 
 A scheduled agent ([`dispatch_agent`](/scion/hosted/user/scheduling/)) has no `--broker` flag and goes through priorities 2 to 5 under the schedule's recorded authority, so it runs on the same broker as a manual create in that project. Where a manual create would ask for `--broker`, the fire fails instead; set the project's default broker so scheduled agents have one.
 
+**Under `broker_policy.admin_managed_only`:** when the `hub.admin_managed_brokers` [experiment](/scion/reference/experiments/) and [`broker_policy.admin_managed_only`](/scion/reference/security/#7-admin-managed-runtime-brokers) are both enabled, non-managed Runtime Brokers are excluded from every rung of the selection cascade — including explicit `--broker`, project default, Hub default, single-provider auto-select, scheduled creates, agent-created agents, and harness-config image operations — even if the Runtime Broker is already linked as a project provider, and with no super-admin exemption. An explicit `--broker` that is not admin-managed, or a project whose online providers are all rejected solely by the policy, fails with `403 broker_policy_admin_managed_only` (`operation: "dispatch"`, with `details.eligibleBrokers: 0` when selection finds no eligible Runtime Broker). Existing stopped or suspended agents on a non-managed Runtime Broker also cannot be started, resumed, restarted, or woken (`operation: "start"`) until an administrator approves the Runtime Broker or moves the agent to an admin-managed Runtime Broker.
+
 - **Target a specific broker** with the `--broker` flag:
   ```bash
   scion start --broker my-cloud-vm
@@ -213,6 +215,8 @@ What each kind of caller can reach:
 | Another agent (for example, a coordinator moving its child) | Only a Runtime Broker that already serves the project and has AutoProvide on, or, if the calling agent has the `project:agent:create` scope, any Runtime Broker that serves the project. An agent never links a new broker, because agents cannot update the project. The calling agent needs the agent lifecycle permission on the agent it moves. |
 
 When a user or another agent moves an agent that runs with a GCP passthrough identity, the passthrough rules are checked again against the target, and the move gets `403` if passthrough is not allowed there.
+
+When [`broker_policy.admin_managed_only`](/scion/reference/security/#7-admin-managed-runtime-brokers) is active, the target Runtime Broker must also be admin-managed (embedded, auto-provide, or explicitly approved); moving to a non-managed Runtime Broker is refused with `403 broker_policy_admin_managed_only` (`operation: "move"`), including for super-admins. Moving an agent off a non-managed Runtime Broker onto an admin-managed Runtime Broker is allowed and is the supported way to migrate existing agents.
 
 ### What happens during a move
 
