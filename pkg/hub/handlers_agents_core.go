@@ -2619,7 +2619,7 @@ func (s *Server) createAgentInProject(
 	}
 
 	// Shell execution container admission (ptone/scion#8812 §3.2, §3.4 S6, §7).
-	if denial := s.checkShellAgentCreateAdmission(agent, GetAgentIdentityFromContext(ctx) != nil); denial != nil {
+	if denial := s.checkShellAgentCreateAdmission(agent, isHumanShellPrincipal(GetIdentityFromContext(ctx))); denial != nil {
 		denial.write(w)
 		return
 	}

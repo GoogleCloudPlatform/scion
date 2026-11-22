@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -537,4 +538,119 @@ func TestShellAgentBrokerInboundRefused(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), ErrCodeAgentNotMessageable)
 	assert.Contains(t, rec.Body.String(), "not_messageable")
 	assert.Empty(t, recDisp.deliveredSlugs, "DispatchAgentMessage must never be called for a shell agent")
+}
+
+// O2: S6 allowlists only interactive/dev human principals ("user" / "dev")
+// and fails closed on nil, agent, delegated, or unknown principal kinds.
+func TestIsHumanShellPrincipal_Allowlist(t *testing.T) {
+	assert.True(t, isHumanShellPrincipal(NewAuthenticatedUser("u1", "u@test.com", "User", "member", "session")))
+	assert.True(t, isHumanShellPrincipal(NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev"})))
+	assert.False(t, isHumanShellPrincipal(nil))
+	assert.False(t, isHumanShellPrincipal(&agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "a1"}}}))
+	assert.False(t, isHumanShellPrincipal(NewFederatedServiceIdentity("https://issuer.example", "svc", "svc@test.com", nil)))
+}
+
+// R2 (AC2 / §8 exit gate): an attached-terminal heartbeat on a shell agent in
+// running/idle refreshes activity_since so idle-suspend waits IdleSuspendAfter
+// after detach (not ~90s). Non-shell agents are unaffected.
+func TestShellAgentIdleSuspend_AttachedRefreshesActivitySince(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	disp := &recordingBroadcastDispatcher{}
+	srv.SetDispatcher(disp)
+
+	idleAfter := 15 * time.Minute
+	setExperimentOverrides(t, srv, map[string]bool{experiments.IdleSuspend: true})
+	srv.mu.Lock()
+	srv.config.AutoSuspendIdle = true
+	srv.config.IdleSuspendAfter = idleAfter
+	srv.mu.Unlock()
+
+	project, broker := seedShellTestProjectAndBroker(t, s)
+	owner := seedShellTestUser(t, s, "owner-idle@test.com", "Owner Idle")
+
+	now := time.Now().UTC()
+	longAgo := now.Add(-30 * time.Minute)
+	freshSeen := now.Add(-30 * time.Second)
+
+	seedIdleAgent := func(slug, hc string) *store.Agent {
+		a := &store.Agent{
+			ID:              api.NewUUID(),
+			Slug:            slug,
+			Name:            slug,
+			ProjectID:       project.ID,
+			RuntimeBrokerID: broker.ID,
+			OwnerID:         owner.ID,
+			CreatedBy:       owner.ID,
+			Phase:           string(state.PhaseRunning),
+			Activity:        string(state.ActivityIdle),
+			ActivitySince:   &longAgo,
+			LastSeen:        freshSeen,
+			RunID:           "run-" + slug,
+			RunIntent:       store.RunIntentRunning,
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: hc,
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		// Pin activity_since to 30m ago directly (CreateAgent stamps now).
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err := db.ExecContext(ctx, "UPDATE agents SET activity_since = ?, last_seen = ? WHERE id = ?", longAgo, freshSeen, a.ID)
+		require.NoError(t, err)
+		return a
+	}
+
+	shellAgent := seedIdleAgent("shell-idle-guard", config.ShellHarnessConfigName)
+	llmAgent := seedIdleAgent("llm-idle-guard", "claude")
+
+	// 1. Attached heartbeat at T=now refreshes activity_since on shell agent only.
+	attachedUpdate := store.AgentStatusUpdate{
+		Heartbeat: true,
+		LiveWork:  &store.LiveWork{Kind: "attached", SuppressStall: false, Detail: "terminal attached"},
+	}
+	require.NoError(t, s.UpdateAgentStatus(ctx, shellAgent.ID, attachedUpdate))
+	require.NoError(t, s.UpdateAgentStatus(ctx, llmAgent.ID, attachedUpdate))
+
+	gotShell, err := s.GetAgent(ctx, shellAgent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, gotShell.ActivitySince)
+	assert.True(t, gotShell.ActivitySince.After(now.Add(-5*time.Second)),
+		"attached heartbeat on shell agent must refresh activity_since to ~now; got %v", gotShell.ActivitySince)
+
+	gotLLM, err := s.GetAgent(ctx, llmAgent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, gotLLM.ActivitySince)
+	assert.True(t, gotLLM.ActivitySince.Before(now.Add(-20*time.Minute)),
+		"attached heartbeat on non-shell agent must not refresh activity_since; got %v", gotLLM.ActivitySince)
+
+	// 2. Simulate T + 2 min after detach (last_live_process_at stale > 90s,
+	//    activity_since = now - 2m < IdleSuspendAfter 15m): sweep must NOT suspend.
+	db := s.(*entadapter.CompositeStore).DB()
+	twoMinAgo := now.Add(-2 * time.Minute)
+	_, err = db.ExecContext(ctx,
+		"UPDATE agents SET activity_since = ?, last_live_process_at = ?, last_seen = ? WHERE id = ?",
+		twoMinAgo, twoMinAgo, freshSeen, shellAgent.ID)
+	require.NoError(t, err)
+
+	srv.agentIdleSuspendHandler()(ctx)
+	srv.waitAutoSuspendIdle()
+
+	gotShell, err = s.GetAgent(ctx, shellAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), gotShell.Phase, "shell agent must not be suspended 2m after detach (< IdleSuspendAfter)")
+
+	// 3. Simulate T + IdleSuspendAfter + 1m after detach: sweep MUST suspend.
+	pastCutoff := now.Add(-(idleAfter + time.Minute))
+	_, err = db.ExecContext(ctx,
+		"UPDATE agents SET activity_since = ?, last_live_process_at = ?, last_seen = ? WHERE id = ?",
+		pastCutoff, pastCutoff, freshSeen, shellAgent.ID)
+	require.NoError(t, err)
+
+	srv.agentIdleSuspendHandler()(ctx)
+	srv.waitAutoSuspendIdle()
+
+	gotShell, err = s.GetAgent(ctx, shellAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), gotShell.Phase, "shell agent must be suspended after detach + IdleSuspendAfter")
+	assert.Equal(t, string(state.SuspendReasonIdle), gotShell.SuspendReason)
 }

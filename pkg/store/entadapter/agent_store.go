@@ -2227,6 +2227,24 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	stampActivitySince(upd.Mutation(), current.Phase, current.Activity, now)
 
+	// Shell execution container attached-terminal guard (ptone/scion#8812 §3.3, AC2):
+	// while a terminal client is attached, refresh activity_since so idle-suspend
+	// measures IdleSuspendAfter from detach rather than from container ready time.
+	// Scoped strictly to shell agents in running/idle so LLM-agent behavior is unchanged.
+	if su.LiveWork != nil && su.LiveWork.Kind == "attached" && isShellEntAgent(current) {
+		effPhase, ok := upd.Mutation().Phase()
+		if !ok && !upd.Mutation().PhaseCleared() {
+			effPhase = current.Phase
+		}
+		effActivity, ok := upd.Mutation().Activity()
+		if !ok && !upd.Mutation().ActivityCleared() {
+			effActivity = current.Activity
+		}
+		if effPhase == string(state.PhaseRunning) && strings.EqualFold(effActivity, string(state.ActivityIdle)) {
+			upd.SetActivitySince(now)
+		}
+	}
+
 	if err := upd.Exec(ctx); err != nil {
 		return mapError(err)
 	}
@@ -3417,6 +3435,24 @@ func harnessConfigOf(cfg *store.AgentAppliedConfig) string {
 		return ""
 	}
 	return cfg.HarnessConfig
+}
+
+// isShellEntAgent reports whether the stored ent.Agent uses the reserved
+// built-in "shell" harness config.
+func isShellEntAgent(a *ent.Agent) bool {
+	if a == nil {
+		return false
+	}
+	if a.HarnessConfig != "" {
+		return a.HarnessConfig == "shell"
+	}
+	if a.AppliedConfig != "" {
+		var ac store.AgentAppliedConfig
+		if err := json.Unmarshal([]byte(a.AppliedConfig), &ac); err == nil {
+			return ac.HarnessConfig == "shell"
+		}
+	}
+	return false
 }
 
 // parseTimeString parses a status update's started_at string, accepting the

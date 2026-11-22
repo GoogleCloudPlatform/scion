@@ -1762,6 +1762,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	// Skip shell execution containers silently when other routed agents exist;
 	// only refuse when every routed agent is a shell container (ptone/scion#8812 §3.4 S5).
+	originalPrimaryIsShell := isShellAgent(agents[0])
 	nonShell := make([]*store.Agent, 0, len(agents))
 	for _, a := range agents {
 		if !isShellAgent(a) {
@@ -1775,12 +1776,15 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	agents = nonShell
 	primaryAgent := agents[0]
 
-	// The primary agent (agents[0]) always gets TypeInstruction. Secondaries
-	// (agents[1:]) get TypeMention via the fan-out path. The primary is the
-	// thread's implicit agent or the first-mentioned agent — it is never a
-	// "mention" recipient regardless of how the list was assembled.
+	// The primary agent (agents[0]) normally gets TypeInstruction (or TypeReply).
+	// Secondaries (agents[1:]) get TypeMention via the fan-out path. If the
+	// original primary was a dropped shell execution container, keep
+	// TypeMention so dropping the shell recipient does not change the remaining
+	// agents' message type.
 	msgType := messages.TypeInstruction
-	if replyToID != "" {
+	if originalPrimaryIsShell {
+		msgType = messages.TypeMention
+	} else if replyToID != "" {
 		msgType = messages.TypeReply
 	}
 

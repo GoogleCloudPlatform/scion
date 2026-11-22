@@ -606,10 +606,10 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 
 	// Shell execution container admission (ptone/scion#8812 §3.2, §3.4 S6, §7):
-	// enforce human-only creation, hub.exec_containers flag, and no initial task
-	// on the headless dispatch_agent path as well as HTTP create.
-	isAgentPrincipal := (hc.Identity != nil && hc.Identity.Type() == "agent") || hc.Authority.PrincipalKind == "agent"
-	if denial := s.checkShellAgentCreateAdmission(agent, isAgentPrincipal); denial != nil {
+	// enforce human-only creation (user/dev allowlist), hub.exec_containers flag,
+	// and no initial task on the headless dispatch_agent path as well as HTTP create.
+	isHumanPrincipal := isHumanShellPrincipal(hc.Identity) && hc.Authority.PrincipalKind == store.DelegationPrincipalUser
+	if denial := s.checkShellAgentCreateAdmission(agent, isHumanPrincipal); denial != nil {
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, denial)
 	}
 

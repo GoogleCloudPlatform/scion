@@ -85,17 +85,33 @@ func (d *shellCreateDenial) write(w http.ResponseWriter) {
 	writeError(w, d.status, d.code, d.message, nil)
 }
 
+// isHumanShellPrincipal reports whether identity is an interactive/dev human
+// principal permitted to create a shell execution container (ptone/scion#8812
+// §3.4 S6). Allowlists "user" and "dev" only and fails closed on nil,
+// delegated agent credentials, agent identities, or any other principal kind.
+func isHumanShellPrincipal(identity Identity) bool {
+	if identity == nil || isDelegatedAgentIdentity(identity) {
+		return false
+	}
+	switch identity.Type() {
+	case "user", "dev":
+		return true
+	default:
+		return false
+	}
+}
+
 // checkShellAgentCreateAdmission enforces shell execution container creation
 // admission (ptone/scion#8812 §3.2, §3.4 S6, §7) for both HTTP
 // (createAgentInProject) and headless (createAgentHeadless) agent creation:
-//   - S6 (ungated): only human principals may create shell agents (403).
+//   - S6 (ungated): only human principals (user/dev allowlist) may create shell agents (403).
 //   - Experiment gate: hub.exec_containers must be enabled (400).
 //   - Initial task: rejected (400 task_not_supported).
-func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, isAgentPrincipal bool) *shellCreateDenial {
+func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, isHumanPrincipal bool) *shellCreateDenial {
 	if !isShellAgent(agent) {
 		return nil
 	}
-	if isAgentPrincipal {
+	if !isHumanPrincipal {
 		return &shellCreateDenial{
 			status:  http.StatusForbidden,
 			code:    ErrCodeForbidden,
