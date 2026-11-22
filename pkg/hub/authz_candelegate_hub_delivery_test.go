@@ -122,6 +122,8 @@ func (f canDelegateParityFixture) grants() map[GrantType]GrantDescriptor {
 			Type:      GrantTypeAgentDelegation,
 			AgentRole: string(AgentRoleNone),
 			ProjectID: f.projectID,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   f.projectID,
 		},
 		GrantTypeCustomRole: {
 			Type:                  GrantTypeCustomRole,
@@ -132,6 +134,8 @@ func (f canDelegateParityFixture) grants() map[GrantType]GrantDescriptor {
 		GrantTypeProjectMembership: {
 			Type:      GrantTypeProjectMembership,
 			ProjectID: f.projectID,
+			ScopeType: store.RoleScopeProject,
+			ScopeID:   f.projectID,
 		},
 	}
 }
