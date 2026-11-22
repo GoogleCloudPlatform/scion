@@ -293,8 +293,9 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 		},
 	}
 
-	newServer := func(tel *api.TelemetryConfig, defaultMode string, metas map[string]*secret.SecretMeta) *Server {
+	newServer := func(tel *api.TelemetryConfig, defaultMode string, metas map[string]*secret.SecretMeta, st store.Store) *Server {
 		srv := &Server{
+			store: st,
 			hubID: "hub-test",
 			config: ServerConfig{
 				TelemetryConfig: tel,
@@ -313,7 +314,7 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 	}
 
 	t.Run("shows hint when GCP cloud on, default block mode, secret missing", func(t *testing.T) {
-		srv := newServer(gcpTel, "", nil)
+		srv := newServer(gcpTel, "", nil, nil)
 		rec := httptest.NewRecorder()
 		srv.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil))
 		if rec.Code != http.StatusOK {
@@ -343,7 +344,7 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 				Target:     "~/.scion/telemetry-gcp-credentials.json",
 			},
 		}
-		srv := newServer(gcpTel, store.GCPMetadataModeBlock, metas)
+		srv := newServer(gcpTel, store.GCPMetadataModeBlock, metas, nil)
 		rec := httptest.NewRecorder()
 		srv.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil))
 		if rec.Code != http.StatusOK {
@@ -359,7 +360,7 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 	})
 
 	t.Run("hides hint when default metadata mode is assign", func(t *testing.T) {
-		srv := newServer(gcpTel, store.GCPMetadataModeAssign, nil)
+		srv := newServer(gcpTel, store.GCPMetadataModeAssign, nil, nil)
 		rec := httptest.NewRecorder()
 		srv.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil))
 		var got DashboardSummary
@@ -372,7 +373,7 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 	})
 
 	t.Run("hides hint when using generic OTLP collector", func(t *testing.T) {
-		srv := newServer(otlpTel, store.GCPMetadataModeBlock, nil)
+		srv := newServer(otlpTel, store.GCPMetadataModeBlock, nil, nil)
 		rec := httptest.NewRecorder()
 		srv.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil))
 		var got DashboardSummary
@@ -385,14 +386,11 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 	})
 
 	t.Run("hides hint on Kubernetes-only hub when default metadata mode is empty", func(t *testing.T) {
-		srv := newServer(gcpTel, "", nil)
-		installStoreFault(t, srv, func(_ store.Store, _ *storeFaultSwitch) *fakeTelemetryBrokerStore {
-			return &fakeTelemetryBrokerStore{
-				list: []store.RuntimeBroker{{
-					ID:       "broker-k8s",
-					Profiles: []store.BrokerProfile{{Name: "gke", Type: "kubernetes"}},
-				}},
-			}
+		srv := newServer(gcpTel, "", nil, &fakeTelemetryBrokerStore{
+			list: []store.RuntimeBroker{{
+				ID:       "broker-k8s",
+				Profiles: []store.BrokerProfile{{Name: "gke", Type: "kubernetes"}},
+			}},
 		})
 		rec := httptest.NewRecorder()
 		srv.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil))
@@ -415,7 +413,7 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 				Target:     "~/.scion/telemetry-gcp-credentials.json",
 			},
 		}
-		srv := newServer(gcpTel, store.GCPMetadataModeBlock, metas)
+		srv := newServer(gcpTel, store.GCPMetadataModeBlock, metas, nil)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil)
 		req = req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser("user-1", "u@example.com", "User", "member", "web")))
 		rec := httptest.NewRecorder()
