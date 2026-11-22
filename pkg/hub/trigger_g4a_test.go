@@ -253,14 +253,19 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	require.Len(t, firesA.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusFired, firesA.Items[0].Status)
 
+	// Because dispatch_agent binds the claim inside the agent-create DB tx before
+	// invoking the broker, replica B (started after enterCreate) sees the live
+	// bound claim in provisioning phase and attempts reuse wake delivery rather
+	// than creating a second agent. (The pre-Bind unbound-claim window is tested
+	// deterministically in TestDispatcher_SubjectModeReuse_FreshUnboundClaimSkipsInProgress.)
 	firesB, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
 		TriggerID: trigResp.ID,
 		EventID:   itemsB[0].DedupKey,
 	}, store.ListOptions{Limit: 5})
 	require.NoError(t, err)
 	require.Len(t, firesB.Items, 1)
-	assert.Equal(t, store.TriggerFireStatusSkipped, firesB.Items[0].Status)
-	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, firesB.Items[0].Error)
+	assert.Equal(t, store.TriggerFireStatusFailed, firesB.Items[0].Status)
+	assert.Equal(t, "target wake failed", firesB.Items[0].Error)
 
 	subjectKey := "webhook:" + ep.ID + "/pr-42"
 	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
@@ -821,7 +826,7 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 			},
 			Action: TriggerActionSpec{
 				Type:         store.TriggerActionDispatchAgent,
-				Task:         "Review ${event.subject} sha=${event.payload.after}",
+				Task:         "Review ${event.id}",
 				ReuseMessage: "Updated ${event.subject} sha=${event.payload.after}",
 			},
 		})
