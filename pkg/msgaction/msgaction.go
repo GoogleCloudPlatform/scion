@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -148,6 +149,46 @@ type KindSpec struct {
 	// ConflictCodes lists kind-registered 4xx conflict/error codes in addition to
 	// the core set (C3), e.g. "secret_request_key_pending".
 	ConflictCodes []string
+	// DetailKeys lists the allow-listed audit MessageActionEvent.Details keys
+	// for this kind (C3, §4.11). Audit emission fails closed: any detail key not
+	// listed here (and all details when empty) is dropped before logging.
+	DetailKeys []string
+}
+
+var (
+	kindRegistryMu sync.RWMutex
+	kindRegistry   = map[string]KindSpec{
+		DecisionKindSpec.Name: DecisionKindSpec,
+	}
+)
+
+// RegisterKind registers spec under spec.Name in the package-level kind
+// registry used by audit emission to enforce per-kind event types and detail
+// key allow-lists.
+func RegisterKind(spec KindSpec) {
+	if spec.Name == "" {
+		return
+	}
+	kindRegistryMu.Lock()
+	kindRegistry[spec.Name] = spec
+	kindRegistryMu.Unlock()
+}
+
+// UnregisterKind removes name from the package-level kind registry (intended
+// for test cleanup).
+func UnregisterKind(name string) {
+	kindRegistryMu.Lock()
+	delete(kindRegistry, name)
+	kindRegistryMu.Unlock()
+}
+
+// LookupKind returns the registered KindSpec for name, or false when name is
+// not registered.
+func LookupKind(name string) (KindSpec, bool) {
+	kindRegistryMu.RLock()
+	spec, ok := kindRegistry[name]
+	kindRegistryMu.RUnlock()
+	return spec, ok
 }
 
 // DecisionKindSpec is the KindSpec for decision prompts.
@@ -247,6 +288,20 @@ func (s KindSpec) AcceptsEventType(evType string) bool {
 	}
 	for _, extra := range s.EventTypes {
 		if extra != "" && evType == extra {
+			return true
+		}
+	}
+	return false
+}
+
+// AcceptsDetailKey reports whether key is allow-listed in s.DetailKeys (C3).
+// Fails closed: returns false when key is empty or s.DetailKeys is empty.
+func (s KindSpec) AcceptsDetailKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, allowed := range s.DetailKeys {
+		if allowed != "" && key == allowed {
 			return true
 		}
 	}
@@ -460,6 +515,12 @@ func ValidateWithdrawRequest(req *WithdrawRequest, opts WithdrawParseOptions) *F
 // ParseWithdrawRequest decodes a WithdrawRequest using json.NewDecoder
 // (first-value struct decoding, case-insensitive field matching) and validates
 // it via ValidateWithdrawRequest.
+//
+// Note: ParseWithdrawRequest currently has no production callers. Its decode
+// rules differ from the hub's readJSON + http.MaxBytesReader path (it does not
+// wrap r with a body-size limit). Decision handlers decode into
+// WithdrawDecisionsRequest via readJSON and call ValidateWithdrawRequest so
+// existing wire decoding and oversize error texts remain unchanged.
 func ParseWithdrawRequest(r io.Reader, opts WithdrawParseOptions) (*WithdrawRequest, *FieldError) {
 	if r == nil {
 		return nil, &FieldError{Message: "invalid JSON body: EOF", InvalidJSON: true}
@@ -545,6 +606,14 @@ func ValidateDismissRequest(req *DismissRequest, opts DismissParseOptions) *Fiel
 // ParseDismissRequest decodes an optional-body DismissRequest using standard
 // Go struct decoding (case-insensitive field names) and validates it via
 // ValidateDismissRequest.
+//
+// Note: ParseDismissRequest currently has no production callers. Its decode
+// rules differ from the hub's readOptionalDismissJSON path (it has no
+// ContentLength == 0 short-circuit and enforces MaxRequestBodyBytes directly
+// via io.LimitReader + json.Unmarshal). Decision handlers decode into
+// DismissDecisionPromptRequest via readOptionalDismissJSON and call
+// ValidateDismissRequest so existing wire decoding and Go struct field type
+// error texts remain unchanged.
 func ParseDismissRequest(r io.Reader, opts DismissParseOptions) (*DismissRequest, *FieldError) {
 	var req DismissRequest
 	if r != nil {

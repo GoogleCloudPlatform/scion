@@ -202,6 +202,32 @@ func TestKindSpec_KindRegisteredEventTypesAndConflictCodes(t *testing.T) {
 	if !DecisionKindSpec.AcceptsConflictCode("already_answered") {
 		t.Errorf("DecisionKindSpec must accept already_answered")
 	}
+
+	// DetailKeys allow-list fails closed.
+	if execSpec.AcceptsDetailKey("exec_project_id") {
+		t.Errorf("empty DetailKeys must fail closed")
+	}
+	execSpec.DetailKeys = []string{"exec_project_id", "exit_code"}
+	if !execSpec.AcceptsDetailKey("exec_project_id") || !execSpec.AcceptsDetailKey("exit_code") {
+		t.Errorf("registered DetailKeys must be accepted")
+	}
+	if execSpec.AcceptsDetailKey("secret_value") || execSpec.AcceptsDetailKey("") {
+		t.Errorf("unlisted or empty detail key must be rejected")
+	}
+
+	// Registry lookup: DecisionKindSpec pre-registered; RegisterKind / UnregisterKind work.
+	if got, ok := LookupKind(DecisionKindSpec.Name); !ok || got.Name != DecisionKindSpec.Name {
+		t.Fatalf("DecisionKindSpec must be pre-registered, got %+v, %v", got, ok)
+	}
+	RegisterKind(execSpec)
+	t.Cleanup(func() { UnregisterKind(execSpec.Name) })
+	if got, ok := LookupKind("exec_action"); !ok || !got.AcceptsDetailKey("exec_project_id") {
+		t.Fatalf("LookupKind(exec_action) failed: %+v, %v", got, ok)
+	}
+	UnregisterKind("exec_action")
+	if _, ok := LookupKind("exec_action"); ok {
+		t.Fatalf("UnregisterKind(exec_action) did not remove kind")
+	}
 }
 
 // Seam test C4: a row needs no message anchor; identity is (asker, key, version).

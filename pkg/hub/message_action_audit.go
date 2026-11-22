@@ -16,9 +16,9 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
@@ -67,63 +67,71 @@ type MessageActionEvent struct {
 	Timestamp     time.Time         `json:"timestamp"`
 }
 
-// messageActionDetailAllowLists stores per-kind allowed Details keys registered
-// on a LogAuditLogger (C3). Keys outside a kind's registered allow-list are
-// never emitted into structured logs.
-type messageActionDetailAllowLists struct {
-	mu     sync.RWMutex
-	byKind map[string]map[string]bool
-}
-
-func (a *messageActionDetailAllowLists) register(kind string, keys ...string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.byKind == nil {
-		a.byKind = make(map[string]map[string]bool)
+// filterMessageActionDetails returns a copy of details containing only keys
+// allow-listed by spec.DetailKeys. Fails closed: returns nil when hasSpec is
+// false or spec.DetailKeys is empty.
+func filterMessageActionDetails(spec msgaction.KindSpec, hasSpec bool, details map[string]string) map[string]string {
+	if !hasSpec || len(spec.DetailKeys) == 0 || len(details) == 0 {
+		return nil
 	}
-	set := make(map[string]bool, len(keys))
-	for _, k := range keys {
-		if k != "" {
-			set[k] = true
+	var filtered map[string]string
+	for k, v := range details {
+		if !spec.AcceptsDetailKey(k) {
+			continue
 		}
+		if filtered == nil {
+			filtered = make(map[string]string)
+		}
+		filtered[k] = v
 	}
-	a.byKind[kind] = set
-}
-
-func (a *messageActionDetailAllowLists) allowListFor(kind string) (map[string]bool, bool) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	if a.byKind == nil {
-		return nil, false
-	}
-	set, ok := a.byKind[kind]
-	return set, ok
-}
-
-// RegisterMessageActionDetailKeys registers the per-kind allow-list of Details
-// keys that LogMessageActionEvent may emit for kind (C3). When registered for
-// a kind, any Details key not in keys is silently dropped before logging so
-// sensitive values cannot reach logs.
-func (l *LogAuditLogger) RegisterMessageActionDetailKeys(kind string, keys ...string) {
-	if l == nil || kind == "" {
-		return
-	}
-	l.messageActionDetails.register(kind, keys...)
+	return filtered
 }
 
 // LogMessageActionEvent logs a message-action lifecycle or refusal audit event
-// as structured slog attributes. Refused attempts are logged at warning level.
+// as structured slog attributes.
+//
+// Enforcement is fail-closed against the msgaction.KindSpec registry:
+//   - Details are filtered strictly through spec.DetailKeys; an unregistered
+//     kind or empty DetailKeys drops all Details so values can never reach logs.
+//   - EventType is validated against spec.AcceptsEventType (or the core event
+//     types when the kind is unregistered). An unregistered event type is
+//     rejected: a WARN refusal record is emitted without any Details and an
+//     error is returned.
 func (l *LogAuditLogger) LogMessageActionEvent(ctx context.Context, event *MessageActionEvent) error {
 	if l == nil || event == nil {
 		return nil
 	}
-	level := slog.LevelInfo
-	if event.EventType == MessageActionEventRefused {
-		level = slog.LevelWarn
-	}
 	ts := event.Timestamp
 	if ts.IsZero() {
 		ts = time.Now().UTC()
+	}
+
+	spec, hasSpec := msgaction.LookupKind(event.Kind)
+	if !spec.AcceptsEventType(event.EventType) {
+		attrs := []slog.Attr{
+			slog.String("kind", event.Kind),
+			slog.String("event_type", event.EventType),
+			slog.String("row_id", event.RowID),
+			slog.String("message_id", event.MessageID),
+			slog.String("project_id", event.ProjectID),
+			slog.String("agent_id", event.AgentID),
+			slog.String("key", event.Key),
+			slog.Int("version", event.Version),
+			slog.String("actor_kind", event.ActorKind),
+			slog.String("actor_id", event.ActorID),
+			slog.String("reason", "unregistered_event_type"),
+			slog.Time("timestamp", ts),
+		}
+		if credAttr, ok := credentialLogAttr(ctx); ok {
+			attrs = append(attrs, credAttr)
+		}
+		l.logger().LogAttrs(ctx, slog.LevelWarn, "message action event rejected", attrs...)
+		return fmt.Errorf("message action event rejected: unregistered event_type %q for kind %q", event.EventType, event.Kind)
+	}
+
+	level := slog.LevelInfo
+	if event.EventType == MessageActionEventRefused || !hasSpec {
+		level = slog.LevelWarn
 	}
 
 	attrs := []slog.Attr{
@@ -140,6 +148,9 @@ func (l *LogAuditLogger) LogMessageActionEvent(ctx context.Context, event *Messa
 		slog.String("actor_id", event.ActorID),
 		slog.Time("timestamp", ts),
 	}
+	if !hasSpec {
+		attrs = append(attrs, slog.Bool("unregistered_kind", true))
+	}
 	if event.ReplacesRowID != "" {
 		attrs = append(attrs, slog.String("replaces_row_id", event.ReplacesRowID))
 	}
@@ -149,18 +160,14 @@ func (l *LogAuditLogger) LogMessageActionEvent(ctx context.Context, event *Messa
 	if event.Reason != "" {
 		attrs = append(attrs, slog.String("reason", event.Reason))
 	}
-	if len(event.Details) > 0 {
-		allow, hasAllow := l.messageActionDetails.allowListFor(event.Kind)
-		keys := make([]string, 0, len(event.Details))
-		for k := range event.Details {
-			if hasAllow && !allow[k] {
-				continue
-			}
+	if allowedDetails := filterMessageActionDetails(spec, hasSpec, event.Details); len(allowedDetails) > 0 {
+		keys := make([]string, 0, len(allowedDetails))
+		for k := range allowedDetails {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			attrs = append(attrs, slog.String("detail_"+k, event.Details[k]))
+			attrs = append(attrs, slog.String("detail_"+k, allowedDetails[k]))
 		}
 	}
 	if credAttr, ok := credentialLogAttr(ctx); ok {
@@ -171,13 +178,17 @@ func (l *LogAuditLogger) LogMessageActionEvent(ctx context.Context, event *Messa
 	return nil
 }
 
-// emitMessageActionEvent emits ev through the server's audit logger when
-// configured. Safe to call with nil server, nil logger, or nil event.
+// emitMessageActionEvent filters ev.Details fail-closed through the kind's
+// registered msgaction.KindSpec before emitting through the server's audit
+// logger. Safe to call with nil server, nil logger, or nil event.
 //
 //nolint:unused // Consumed by P5 secret requests; decisions do not emit MessageActionEvent in P5a.
 func (s *Server) emitMessageActionEvent(ctx context.Context, ev *MessageActionEvent) {
 	if s == nil || s.auditLogger == nil || ev == nil {
 		return
 	}
-	_ = s.auditLogger.LogMessageActionEvent(ctx, ev)
+	spec, hasSpec := msgaction.LookupKind(ev.Kind)
+	sanitized := *ev
+	sanitized.Details = filterMessageActionDetails(spec, hasSpec, ev.Details)
+	_ = s.auditLogger.LogMessageActionEvent(ctx, &sanitized)
 }

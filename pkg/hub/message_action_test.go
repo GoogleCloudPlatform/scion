@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -163,19 +164,69 @@ func TestDispatchActionResponse_RepeatableAndOptional(t *testing.T) {
 	assert.Equal(t, "completed", disp.msgs[1].Metadata["exec_stage"])
 }
 
-func TestLogMessageActionEvent_StructuredAttrsAndAllowList(t *testing.T) {
+func TestLogMessageActionEvent_FailClosedAllowListAndEventTypes(t *testing.T) {
 	var buf bytes.Buffer
 	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	logger := &LogAuditLogger{
 		prefix: "[Audit]",
 		log:    slog.New(handler),
 	}
-	logger.RegisterMessageActionDetailKeys("secret_request", "secret_type", "secret_version")
+	srv := &Server{auditLogger: logger}
+
+	// 1. Unregistered kind with a canary value in Details MUST fail closed:
+	// canary never appears in log output.
+	const canaryUnreg = "CANARY_UNREGISTERED_KIND_SECRET_999"
+	require.NoError(t, logger.LogMessageActionEvent(context.Background(), &MessageActionEvent{
+		Kind:      "unregistered_test_kind",
+		EventType: MessageActionEventRequested,
+		RowID:     "row-u1",
+		ActorKind: MessageActionActorAgent,
+		ActorID:   "agent-1",
+		Details: map[string]string{
+			"secret_value": canaryUnreg,
+			"any_key":      canaryUnreg,
+		},
+	}))
+	assert.NotContains(t, buf.String(), canaryUnreg, "unregistered kind must drop all Details")
+	var unregRec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &unregRec))
+	assert.Equal(t, "WARN", unregRec["level"])
+	assert.Equal(t, true, unregRec["unregistered_kind"])
+	_, hasAnyDetail := unregRec["detail_any_key"]
+	assert.False(t, hasAnyDetail)
+
+	// 2. Registered kind with empty DetailKeys also fails closed.
+	buf.Reset()
+	const canaryEmpty = "CANARY_EMPTY_ALLOWLIST_SECRET_888"
+	msgaction.RegisterKind(msgaction.KindSpec{
+		Name:           "test_empty_details_kind",
+		ResolvedStatus: "done",
+	})
+	t.Cleanup(func() { msgaction.UnregisterKind("test_empty_details_kind") })
+	srv.emitMessageActionEvent(context.Background(), &MessageActionEvent{
+		Kind:      "test_empty_details_kind",
+		EventType: "done",
+		RowID:     "row-e1",
+		Details:   map[string]string{"secret": canaryEmpty},
+	})
+	assert.NotContains(t, buf.String(), canaryEmpty, "empty DetailKeys must fail closed")
+
+	// 3. Registered kind with DetailKeys passes ONLY allow-listed keys and
+	// accepts kind-registered EventTypes.
+	buf.Reset()
+	const canaryDisallowed = "CANARY_DISALLOWED_KEY_SECRET_777"
+	msgaction.RegisterKind(msgaction.KindSpec{
+		Name:           "test_secret_request",
+		ResolvedStatus: "fulfilled",
+		EventTypes:     []string{"claim_recovered"},
+		DetailKeys:     []string{"secret_type", "secret_version"},
+	})
+	t.Cleanup(func() { msgaction.UnregisterKind("test_secret_request") })
 
 	ts := time.Date(2026, 11, 22, 3, 0, 0, 0, time.UTC)
 	require.NoError(t, logger.LogMessageActionEvent(context.Background(), &MessageActionEvent{
-		Kind:          "secret_request",
-		EventType:     MessageActionEventResolved,
+		Kind:          "test_secret_request",
+		EventType:     "claim_recovered",
 		RowID:         "row-1",
 		MessageID:     "msg-1",
 		ProjectID:     "proj-1",
@@ -190,7 +241,7 @@ func TestLogMessageActionEvent_StructuredAttrsAndAllowList(t *testing.T) {
 		Details: map[string]string{
 			"secret_type":    "environment",
 			"secret_version": "3",
-			"secret_value":   "MUST_BE_DROPPED",
+			"secret_value":   canaryDisallowed,
 		},
 		Timestamp: ts,
 	}))
@@ -199,8 +250,8 @@ func TestLogMessageActionEvent_StructuredAttrsAndAllowList(t *testing.T) {
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rec))
 	assert.Equal(t, "INFO", rec["level"])
 	assert.Equal(t, "message action event", rec["msg"])
-	assert.Equal(t, "secret_request", rec["kind"])
-	assert.Equal(t, "resolved", rec["event_type"])
+	assert.Equal(t, "test_secret_request", rec["kind"])
+	assert.Equal(t, "claim_recovered", rec["event_type"])
 	assert.Equal(t, "row-1", rec["row_id"])
 	assert.Equal(t, "msg-1", rec["message_id"])
 	assert.Equal(t, "proj-1", rec["project_id"])
@@ -215,14 +266,39 @@ func TestLogMessageActionEvent_StructuredAttrsAndAllowList(t *testing.T) {
 	assert.Equal(t, "environment", rec["detail_secret_type"])
 	assert.Equal(t, "3", rec["detail_secret_version"])
 	_, leaked := rec["detail_secret_value"]
-	assert.False(t, leaked, "disallowed detail key must be dropped by per-kind allow-list")
-	assert.NotContains(t, buf.String(), "MUST_BE_DROPPED")
+	assert.False(t, leaked, "disallowed detail key must be dropped by KindSpec.DetailKeys")
+	assert.NotContains(t, buf.String(), canaryDisallowed)
 
-	// Refused event logs at WARN level.
+	// 4. Unknown / unregistered EventType is rejected with an error, logs a WARN
+	// refusal, and drops all Details (canary never appears).
 	buf.Reset()
-	srv := &Server{auditLogger: logger}
+	const canaryBadEv = "CANARY_BAD_EVENT_TYPE_SECRET_666"
+	err := logger.LogMessageActionEvent(context.Background(), &MessageActionEvent{
+		Kind:      "test_secret_request",
+		EventType: "bogus_event_type",
+		RowID:     "row-1",
+		ActorKind: MessageActionActorUser,
+		ActorID:   "user-2",
+		Details: map[string]string{
+			"secret_type":  "environment",
+			"secret_value": canaryBadEv,
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unregistered event_type")
+	assert.NotContains(t, buf.String(), canaryBadEv)
+	var rejRec map[string]any
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rejRec))
+	assert.Equal(t, "WARN", rejRec["level"])
+	assert.Equal(t, "message action event rejected", rejRec["msg"])
+	assert.Equal(t, "unregistered_event_type", rejRec["reason"])
+	_, hasAllowedOnReject := rejRec["detail_secret_type"]
+	assert.False(t, hasAllowedOnReject, "rejected event must not emit any Details")
+
+	// 5. Refused core event logs at WARN level.
+	buf.Reset()
 	srv.emitMessageActionEvent(context.Background(), &MessageActionEvent{
-		Kind:      "secret_request",
+		Kind:      "test_secret_request",
 		EventType: MessageActionEventRefused,
 		RowID:     "row-1",
 		ActorKind: MessageActionActorUser,
@@ -235,7 +311,7 @@ func TestLogMessageActionEvent_StructuredAttrsAndAllowList(t *testing.T) {
 	assert.Equal(t, "refused", refusedRec["event_type"])
 	assert.Equal(t, "forbidden", refusedRec["reason"])
 
-	// Nil safety.
+	// 6. Nil safety.
 	require.NoError(t, logger.LogMessageActionEvent(context.Background(), nil))
 	var nilLogger *LogAuditLogger
 	require.NoError(t, nilLogger.LogMessageActionEvent(context.Background(), &MessageActionEvent{}))
