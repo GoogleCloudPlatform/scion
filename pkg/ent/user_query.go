@@ -20,6 +20,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userexeccontainer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
@@ -36,6 +37,7 @@ type UserQuery struct {
 	withPolicyBindings        *PolicyBindingQuery
 	withExternalIdentities    *ExternalIdentityQuery
 	withTerminalWorkspace     *UserTerminalWorkspaceQuery
+	withExecContainer         *UserExecContainerQuery
 	withTestIdentityLoginCode *TestIdentityLoginCodeQuery
 	modifiers                 []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
@@ -177,6 +179,28 @@ func (_q *UserQuery) QueryTerminalWorkspace() *UserTerminalWorkspaceQuery {
 			sqlgraph.From(user.Table, user.FieldID, selector),
 			sqlgraph.To(userterminalworkspace.Table, userterminalworkspace.FieldID),
 			sqlgraph.Edge(sqlgraph.O2O, false, user.TerminalWorkspaceTable, user.TerminalWorkspaceColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryExecContainer chains the current query on the "exec_container" edge.
+func (_q *UserQuery) QueryExecContainer() *UserExecContainerQuery {
+	query := (&UserExecContainerClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, selector),
+			sqlgraph.To(userexeccontainer.Table, userexeccontainer.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, user.ExecContainerTable, user.ExecContainerColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -403,6 +427,7 @@ func (_q *UserQuery) Clone() *UserQuery {
 		withPolicyBindings:        _q.withPolicyBindings.Clone(),
 		withExternalIdentities:    _q.withExternalIdentities.Clone(),
 		withTerminalWorkspace:     _q.withTerminalWorkspace.Clone(),
+		withExecContainer:         _q.withExecContainer.Clone(),
 		withTestIdentityLoginCode: _q.withTestIdentityLoginCode.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
@@ -462,6 +487,17 @@ func (_q *UserQuery) WithTerminalWorkspace(opts ...func(*UserTerminalWorkspaceQu
 		opt(query)
 	}
 	_q.withTerminalWorkspace = query
+	return _q
+}
+
+// WithExecContainer tells the query-builder to eager-load the nodes that are connected to
+// the "exec_container" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *UserQuery) WithExecContainer(opts ...func(*UserExecContainerQuery)) *UserQuery {
+	query := (&UserExecContainerClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withExecContainer = query
 	return _q
 }
 
@@ -554,12 +590,13 @@ func (_q *UserQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*User, e
 	var (
 		nodes       = []*User{}
 		_spec       = _q.querySpec()
-		loadedTypes = [6]bool{
+		loadedTypes = [7]bool{
 			_q.withOwnedGroups != nil,
 			_q.withMemberships != nil,
 			_q.withPolicyBindings != nil,
 			_q.withExternalIdentities != nil,
 			_q.withTerminalWorkspace != nil,
+			_q.withExecContainer != nil,
 			_q.withTestIdentityLoginCode != nil,
 		}
 	)
@@ -615,6 +652,12 @@ func (_q *UserQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*User, e
 	if query := _q.withTerminalWorkspace; query != nil {
 		if err := _q.loadTerminalWorkspace(ctx, query, nodes, nil,
 			func(n *User, e *UserTerminalWorkspace) { n.Edges.TerminalWorkspace = e }); err != nil {
+			return nil, err
+		}
+	}
+	if query := _q.withExecContainer; query != nil {
+		if err := _q.loadExecContainer(ctx, query, nodes, nil,
+			func(n *User, e *UserExecContainer) { n.Edges.ExecContainer = e }); err != nil {
 			return nil, err
 		}
 	}
@@ -768,6 +811,33 @@ func (_q *UserQuery) loadTerminalWorkspace(ctx context.Context, query *UserTermi
 	}
 	query.Where(predicate.UserTerminalWorkspace(func(s *sql.Selector) {
 		s.Where(sql.InValues(s.C(user.TerminalWorkspaceColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.UserID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "user_id" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
+}
+func (_q *UserQuery) loadExecContainer(ctx context.Context, query *UserExecContainerQuery, nodes []*User, init func(*User), assign func(*User, *UserExecContainer)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[uuid.UUID]*User)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(userexeccontainer.FieldUserID)
+	}
+	query.Where(predicate.UserExecContainer(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(user.ExecContainerColumn), fks...))
 	}))
 	neighbors, err := query.All(ctx)
 	if err != nil {

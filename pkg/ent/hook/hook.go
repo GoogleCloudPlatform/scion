@@ -1293,6 +1293,18 @@ func (f UserDeletionAgentFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UserDeletionAgentMutation", m)
 }
 
+// The UserExecContainerFunc type is an adapter to allow the use of ordinary
+// function as UserExecContainer mutator.
+type UserExecContainerFunc func(context.Context, *ent.UserExecContainerMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UserExecContainerFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UserExecContainerMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UserExecContainerMutation", m)
+}
+
 // The UserTerminalWorkspaceFunc type is an adapter to allow the use of ordinary
 // function as UserTerminalWorkspace mutator.
 type UserTerminalWorkspaceFunc func(context.Context, *ent.UserTerminalWorkspaceMutation) (ent.Value, error)

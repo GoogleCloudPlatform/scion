@@ -119,6 +119,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userexeccontainer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 )
@@ -288,6 +289,7 @@ func checkColumn(t, c string) error {
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,
 			userdeletion.Table:                  userdeletion.ValidColumn,
 			userdeletionagent.Table:             userdeletionagent.ValidColumn,
+			userexeccontainer.Table:             userexeccontainer.ValidColumn,
 			userterminalworkspace.Table:         userterminalworkspace.ValidColumn,
 			webhookendpoint.Table:               webhookendpoint.ValidColumn,
 		})

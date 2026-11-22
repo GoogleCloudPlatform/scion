@@ -13,6 +13,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userexeccontainer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
@@ -82,11 +83,13 @@ type UserEdges struct {
 	ExternalIdentities []*ExternalIdentity `json:"external_identities,omitempty"`
 	// TerminalWorkspace holds the value of the terminal_workspace edge.
 	TerminalWorkspace *UserTerminalWorkspace `json:"terminal_workspace,omitempty"`
+	// ExecContainer holds the value of the exec_container edge.
+	ExecContainer *UserExecContainer `json:"exec_container,omitempty"`
 	// TestIdentityLoginCode holds the value of the test_identity_login_code edge.
 	TestIdentityLoginCode *TestIdentityLoginCode `json:"test_identity_login_code,omitempty"`
 	// loadedTypes holds the information for reporting if a
 	// type was loaded (or requested) in eager-loading or not.
-	loadedTypes [6]bool
+	loadedTypes [7]bool
 }
 
 // OwnedGroupsOrErr returns the OwnedGroups value or an error if the edge
@@ -136,12 +139,23 @@ func (e UserEdges) TerminalWorkspaceOrErr() (*UserTerminalWorkspace, error) {
 	return nil, &NotLoadedError{edge: "terminal_workspace"}
 }
 
+// ExecContainerOrErr returns the ExecContainer value or an error if the edge
+// was not loaded in eager-loading, or loaded but was not found.
+func (e UserEdges) ExecContainerOrErr() (*UserExecContainer, error) {
+	if e.ExecContainer != nil {
+		return e.ExecContainer, nil
+	} else if e.loadedTypes[5] {
+		return nil, &NotFoundError{label: userexeccontainer.Label}
+	}
+	return nil, &NotLoadedError{edge: "exec_container"}
+}
+
 // TestIdentityLoginCodeOrErr returns the TestIdentityLoginCode value or an error if the edge
 // was not loaded in eager-loading, or loaded but was not found.
 func (e UserEdges) TestIdentityLoginCodeOrErr() (*TestIdentityLoginCode, error) {
 	if e.TestIdentityLoginCode != nil {
 		return e.TestIdentityLoginCode, nil
-	} else if e.loadedTypes[5] {
+	} else if e.loadedTypes[6] {
 		return nil, &NotFoundError{label: testidentitylogincode.Label}
 	}
 	return nil, &NotLoadedError{edge: "test_identity_login_code"}
@@ -359,6 +373,11 @@ func (_m *User) QueryExternalIdentities() *ExternalIdentityQuery {
 // QueryTerminalWorkspace queries the "terminal_workspace" edge of the User entity.
 func (_m *User) QueryTerminalWorkspace() *UserTerminalWorkspaceQuery {
 	return NewUserClient(_m.config).QueryTerminalWorkspace(_m)
+}
+
+// QueryExecContainer queries the "exec_container" edge of the User entity.
+func (_m *User) QueryExecContainer() *UserExecContainerQuery {
+	return NewUserClient(_m.config).QueryExecContainer(_m)
 }
 
 // QueryTestIdentityLoginCode queries the "test_identity_login_code" edge of the User entity.

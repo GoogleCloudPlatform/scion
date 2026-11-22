@@ -458,6 +458,9 @@ type Store interface {
 	// UserTerminalWorkspace operations
 	UserTerminalWorkspaceStore
 
+	// UserExecContainer operations (ptone/scion#8817)
+	UserExecContainerStore
+
 	// ProjectProvider operations
 	ProjectProviderStore
 
@@ -5577,4 +5580,31 @@ type UserTerminalWorkspaceStore interface {
 	// (last-writer-wins: there is no expected-revision / compare-and-swap
 	// parameter). Returns the stored row.
 	PutUserTerminalWorkspace(ctx context.Context, userID string, agentIDs []string, frontmostAgentID string) (*UserTerminalWorkspace, error)
+}
+
+// UserExecContainer is a user's registered default execution container
+// (ptone/scion#8817). There is at most one row per user.
+type UserExecContainer struct {
+	UserID    string    `json:"userId"`
+	AgentID   string    `json:"agentId"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// UserExecContainerStore provides durable, per-user persistence for a user's
+// default execution container registration. Writers are restricted to the
+// session-only user API (PUT/DELETE /api/v1/users/me/exec-container) and user
+// cascade delete.
+type UserExecContainerStore interface {
+	// GetUserExecContainer returns the registered execution container for
+	// userID, or ErrNotFound when none is registered.
+	GetUserExecContainer(ctx context.Context, userID string) (*UserExecContainer, error)
+
+	// PutUserExecContainer atomically upserts the registered execution
+	// container for userID (last-writer-wins) and returns the stored row.
+	PutUserExecContainer(ctx context.Context, userID, agentID string) (*UserExecContainer, error)
+
+	// DeleteUserExecContainer removes any registered execution container for
+	// userID. It is idempotent and returns nil when no row exists.
+	DeleteUserExecContainer(ctx context.Context, userID string) error
 }

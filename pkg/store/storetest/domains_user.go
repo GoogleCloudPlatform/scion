@@ -212,6 +212,93 @@ func UserTerminalWorkspaceConformance(t *testing.T, factory Factory) {
 	})
 }
 
+// UserExecContainerConformance exercises store.UserExecContainerStore across
+// backends.
+func UserExecContainerConformance(t *testing.T, factory Factory) {
+	t.Helper()
+	ctx := context.Background()
+
+	seedUser := func(t *testing.T, s store.Store) string {
+		t.Helper()
+		id := uuid.NewString()
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID:          id,
+			Email:       fmt.Sprintf("exec-container-%s@example.com", id[:8]),
+			DisplayName: "Exec Container User",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+		}))
+		return id
+	}
+
+	t.Run("exec_container", func(t *testing.T) {
+		t.Run("get on missing row returns ErrNotFound", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			_, err := s.GetUserExecContainer(ctx, userID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+		})
+
+		t.Run("put creates then replaces atomically", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			agentA := uuid.NewString()
+			got, err := s.PutUserExecContainer(ctx, userID, agentA)
+			require.NoError(t, err)
+			assert.Equal(t, userID, got.UserID)
+			assert.Equal(t, agentA, got.AgentID)
+			assert.False(t, got.CreatedAt.IsZero())
+			assert.False(t, got.UpdatedAt.IsZero())
+
+			agentB := uuid.NewString()
+			got2, err := s.PutUserExecContainer(ctx, userID, agentB)
+			require.NoError(t, err)
+			assert.Equal(t, userID, got2.UserID)
+			assert.Equal(t, agentB, got2.AgentID)
+			assert.Equal(t, got.CreatedAt.UTC(), got2.CreatedAt.UTC())
+
+			fetched, err := s.GetUserExecContainer(ctx, userID)
+			require.NoError(t, err)
+			assert.Equal(t, agentB, fetched.AgentID)
+		})
+
+		t.Run("delete removes row and is idempotent", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			// Deleting when no row exists is a no-op.
+			require.NoError(t, s.DeleteUserExecContainer(ctx, userID))
+
+			agentA := uuid.NewString()
+			_, err := s.PutUserExecContainer(ctx, userID, agentA)
+			require.NoError(t, err)
+
+			require.NoError(t, s.DeleteUserExecContainer(ctx, userID))
+
+			_, err = s.GetUserExecContainer(ctx, userID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+
+			// Deleting again is still nil.
+			require.NoError(t, s.DeleteUserExecContainer(ctx, userID))
+		})
+
+		t.Run("deleting the user cascades the row away", func(t *testing.T) {
+			s := factory(t)
+			userID := seedUser(t, s)
+
+			_, err := s.PutUserExecContainer(ctx, userID, uuid.NewString())
+			require.NoError(t, err)
+
+			require.NoError(t, s.DeleteUser(ctx, userID))
+
+			_, err = s.GetUserExecContainer(ctx, userID)
+			require.ErrorIs(t, err, store.ErrNotFound)
+		})
+	})
+}
+
 // AllowListDomain describes the email allow-list entry for the CRUD-parity
 // oracle. The allow list is keyed by email rather than ID: Get and Delete
 // operate on the (normalized) email address, so GetID returns the email.

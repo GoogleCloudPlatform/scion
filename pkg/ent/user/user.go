@@ -68,6 +68,8 @@ const (
 	EdgeExternalIdentities = "external_identities"
 	// EdgeTerminalWorkspace holds the string denoting the terminal_workspace edge name in mutations.
 	EdgeTerminalWorkspace = "terminal_workspace"
+	// EdgeExecContainer holds the string denoting the exec_container edge name in mutations.
+	EdgeExecContainer = "exec_container"
 	// EdgeTestIdentityLoginCode holds the string denoting the test_identity_login_code edge name in mutations.
 	EdgeTestIdentityLoginCode = "test_identity_login_code"
 	// Table holds the table name of the user in the database.
@@ -107,6 +109,13 @@ const (
 	TerminalWorkspaceInverseTable = "user_terminal_workspaces"
 	// TerminalWorkspaceColumn is the table column denoting the terminal_workspace relation/edge.
 	TerminalWorkspaceColumn = "user_id"
+	// ExecContainerTable is the table that holds the exec_container relation/edge.
+	ExecContainerTable = "user_exec_containers"
+	// ExecContainerInverseTable is the table name for the UserExecContainer entity.
+	// It exists in this package in order to avoid circular dependency with the "userexeccontainer" package.
+	ExecContainerInverseTable = "user_exec_containers"
+	// ExecContainerColumn is the table column denoting the exec_container relation/edge.
+	ExecContainerColumn = "user_id"
 	// TestIdentityLoginCodeTable is the table that holds the test_identity_login_code relation/edge.
 	TestIdentityLoginCodeTable = "test_identity_login_codes"
 	// TestIdentityLoginCodeInverseTable is the table name for the TestIdentityLoginCode entity.
@@ -419,6 +428,13 @@ func ByTerminalWorkspaceField(field string, opts ...sql.OrderTermOption) OrderOp
 	}
 }
 
+// ByExecContainerField orders the results by exec_container field.
+func ByExecContainerField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newExecContainerStep(), sql.OrderByField(field, opts...))
+	}
+}
+
 // ByTestIdentityLoginCodeField orders the results by test_identity_login_code field.
 func ByTestIdentityLoginCodeField(field string, opts ...sql.OrderTermOption) OrderOption {
 	return func(s *sql.Selector) {
@@ -458,6 +474,13 @@ func newTerminalWorkspaceStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(TerminalWorkspaceInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2O, false, TerminalWorkspaceTable, TerminalWorkspaceColumn),
+	)
+}
+func newExecContainerStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(ExecContainerInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, ExecContainerTable, ExecContainerColumn),
 	)
 }
 func newTestIdentityLoginCodeStep() *sqlgraph.Step {

@@ -126,6 +126,7 @@ type CompositeStore struct {
 	*ExternalIdentityStore
 	*AgentReincarnationStore
 	*UserTerminalWorkspaceStore
+	*UserExecContainerStore
 	*HubInstanceStore
 	*TestIdentityDelegationStore
 	*UserDeletionStore
@@ -348,6 +349,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ExternalIdentityStore:       NewExternalIdentityStore(client),
 		AgentReincarnationStore:     NewAgentReincarnationStore(client),
 		UserTerminalWorkspaceStore:  NewUserTerminalWorkspaceStore(client),
+		UserExecContainerStore:      NewUserExecContainerStore(client),
 		HubInstanceStore:            NewHubInstanceStore(client),
 		TestIdentityDelegationStore: NewTestIdentityDelegationStore(client),
 		UserDeletionStore:           NewUserDeletionStore(client),

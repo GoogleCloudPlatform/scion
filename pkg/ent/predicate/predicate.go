@@ -327,6 +327,9 @@ type UserDeletion func(*sql.Selector)
 // UserDeletionAgent is the predicate function for userdeletionagent builders.
 type UserDeletionAgent func(*sql.Selector)
 
+// UserExecContainer is the predicate function for userexeccontainer builders.
+type UserExecContainer func(*sql.Selector)
+
 // UserTerminalWorkspace is the predicate function for userterminalworkspace builders.
 type UserTerminalWorkspace func(*sql.Selector)
 

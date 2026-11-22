@@ -4288,6 +4288,35 @@ var (
 			},
 		},
 	}
+	// UserExecContainersColumns holds the columns for the "user_exec_containers" table.
+	UserExecContainersColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeUUID},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "user_id", Type: field.TypeUUID, Unique: true},
+	}
+	// UserExecContainersTable holds the schema information for the "user_exec_containers" table.
+	UserExecContainersTable = &schema.Table{
+		Name:       "user_exec_containers",
+		Columns:    UserExecContainersColumns,
+		PrimaryKey: []*schema.Column{UserExecContainersColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "user_exec_containers_users_exec_container",
+				Columns:    []*schema.Column{UserExecContainersColumns[4]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "userexeccontainer_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{UserExecContainersColumns[1]},
+			},
+		},
+	}
 	// UserTerminalWorkspacesColumns holds the columns for the "user_terminal_workspaces" table.
 	UserTerminalWorkspacesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -4490,6 +4519,7 @@ var (
 		UserAccessTokensTable,
 		UserDeletionsTable,
 		UserDeletionAgentsTable,
+		UserExecContainersTable,
 		UserTerminalWorkspacesTable,
 		WebhookEndpointsTable,
 		GroupChildGroupsTable,
@@ -4782,6 +4812,10 @@ func init() {
 	UserDeletionAgentsTable.ForeignKeys[0].RefTable = UserDeletionsTable
 	UserDeletionAgentsTable.Annotation = &entsql.Annotation{
 		Table: "user_deletion_agents",
+	}
+	UserExecContainersTable.ForeignKeys[0].RefTable = UsersTable
+	UserExecContainersTable.Annotation = &entsql.Annotation{
+		Table: "user_exec_containers",
 	}
 	UserTerminalWorkspacesTable.ForeignKeys[0].RefTable = UsersTable
 	UserTerminalWorkspacesTable.Annotation = &entsql.Annotation{
