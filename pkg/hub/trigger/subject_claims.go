@@ -55,6 +55,13 @@ type AgentLookup interface {
 	GetAgent(ctx context.Context, id string) (*store.Agent, error)
 }
 
+// AgentPhaseLookup is an optional capability on SubjectClaims (implemented by
+// StoreSubjectClaims) allowing the dispatcher to inspect a claimed agent's
+// phase before attempting reuse wake delivery (Stage 3 §6.2 rev 1.16).
+type AgentPhaseLookup interface {
+	AgentPhase(ctx context.Context, agentID string) (phase string, exists bool, err error)
+}
+
 // StoreSubjectClaims implements SubjectClaims over store.TriggerStore and AgentLookup.
 type StoreSubjectClaims struct {
 	triggers store.TriggerStore
@@ -158,6 +165,25 @@ func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID, subject string
 		return nil, nil
 	}
 	return claim, nil
+}
+
+// AgentPhase returns the current lifecycle phase of agentID, or exists=false
+// when the agent is missing or soft-deleted.
+func (s *StoreSubjectClaims) AgentPhase(ctx context.Context, agentID string) (string, bool, error) {
+	if s == nil || s.agents == nil || agentID == "" {
+		return "", false, nil
+	}
+	ag, err := s.agents.GetAgent(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if ag == nil || !ag.DeletedAt.IsZero() {
+		return "", false, nil
+	}
+	return ag.Phase, true, nil
 }
 
 func isTerminalClaimAgentPhase(phase string) bool {
