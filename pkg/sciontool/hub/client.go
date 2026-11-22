@@ -2771,6 +2771,8 @@ func (c *Client) RequestIdentityToken(ctx context.Context, audience string) (*Id
 type AgentSelf struct {
 	Phase       string            `json:"phase,omitempty"`
 	Activity    string            `json:"activity,omitempty"`
+	Image       string            `json:"image,omitempty"`
+	Generation  int               `json:"generation,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
@@ -2781,6 +2783,14 @@ type AgentSelf struct {
 	// CreatedBy is the ID of the principal (user or agent) that created
 	// this agent.
 	CreatedBy string `json:"createdBy,omitempty"`
+	// AppliedConfig carries the subset of appliedConfig fields used as
+	// fallbacks when top-level fields are absent.
+	AppliedConfig *AgentSelfAppliedConfig `json:"appliedConfig,omitempty"`
+}
+
+// AgentSelfAppliedConfig is the subset of appliedConfig fields decoded by GetSelf.
+type AgentSelfAppliedConfig struct {
+	Image string `json:"image,omitempty"`
 }
 
 // GetSelf fetches the current agent's metadata from the Hub API.

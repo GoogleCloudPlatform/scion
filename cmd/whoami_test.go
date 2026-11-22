@@ -121,6 +121,8 @@ func TestWhoamiOmitEmpty(t *testing.T) {
 	t.Setenv("SCION_TEMPLATE_NAME", "")
 	t.Setenv("SCION_HARNESS", "")
 	t.Setenv("SCION_MODEL", "")
+	t.Setenv("SCION_IMAGE", "")
+	t.Setenv("SCION_GENERATION", "")
 	t.Setenv("SCION_CREATOR", "")
 	t.Setenv("SCION_BROKER_NAME", "")
 	t.Setenv("SCION_BROKER_ID", "")
@@ -150,6 +152,8 @@ func TestWhoamiOmitEmpty(t *testing.T) {
 	assert.NotContains(t, raw, "template")
 	assert.NotContains(t, raw, "harness")
 	assert.NotContains(t, raw, "model")
+	assert.NotContains(t, raw, "image")
+	assert.NotContains(t, raw, "generation")
 	assert.NotContains(t, raw, "creator")
 	assert.NotContains(t, raw, "brokerName")
 	assert.NotContains(t, raw, "brokerId")
@@ -616,4 +620,139 @@ func TestWhoamiFullExperiments(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &raw))
 	assert.NotContains(t, raw, "experiments")
 	assert.Equal(t, "running", raw["phase"], "the other hub fields are kept")
+}
+
+// TestWhoamiProvenance verifies that image (including resolved digest) and
+// generation appear in whoami --full JSON and plain-text output, as well as
+// Tier 1 env fallback when SCION_IMAGE/SCION_GENERATION are set (ptone/scion#8835).
+func TestWhoamiProvenance(t *testing.T) {
+	const digestImage = "us-docker.pkg.dev/my-proj/scion/claude:v2@sha256:0123456789abcdef0123456789abcdef"
+
+	t.Run("full from Hub top-level image and generation", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/v1/experiments" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"experiments": map[string]bool{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":         "agent-prov-id",
+				"slug":       "prov-agent",
+				"name":       "Prov Agent",
+				"phase":      "running",
+				"image":      digestImage,
+				"generation": 3,
+			})
+		}))
+		defer srv.Close()
+
+		t.Setenv("SCION_AGENT_SLUG", "prov-agent")
+		t.Setenv("SCION_AGENT_NAME", "Prov Agent")
+		t.Setenv("SCION_AGENT_ID", "agent-prov-id")
+		t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+		t.Setenv("SCION_IMAGE", "")
+		t.Setenv("SCION_GENERATION", "")
+		withWhoamiToken(t, "")
+
+		cleanup := sciontoolhub.SetHubTestSandboxed()
+		defer cleanup()
+		origFactory := newHubClient
+		newHubClient = func() *sciontoolhub.Client {
+			return sciontoolhub.NewClientWithConfig(srv.URL, "test-token", "agent-prov-id")
+		}
+		defer func() { newHubClient = origFactory }()
+
+		oldFull := whoamiFull
+		whoamiFull = true
+		defer func() { whoamiFull = oldFull }()
+
+		// JSON output
+		withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
+		jsonOut := captureStdout(t, func() {
+			require.NoError(t, whoamiCmd.RunE(whoamiCmd, nil))
+		})
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal([]byte(jsonOut), &raw))
+		assert.Equal(t, digestImage, raw["image"])
+		assert.Equal(t, float64(3), raw["generation"])
+
+		// Plain-text output
+		withRootOptions(t, whoamiCmd, cliutil.RootOptions{})
+		textOut := captureStdout(t, func() {
+			require.NoError(t, whoamiCmd.RunE(whoamiCmd, nil))
+		})
+		assert.Contains(t, textOut, "Image:")
+		assert.Contains(t, textOut, digestImage)
+		assert.Contains(t, textOut, "Generation:")
+		assert.Regexp(t, `Generation:\s+3\n`, textOut)
+	})
+
+	t.Run("full falls back to appliedConfig.image when top-level image empty", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/v1/experiments" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"experiments": map[string]bool{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":         "agent-prov-2",
+				"phase":      "running",
+				"generation": 2,
+				"appliedConfig": map[string]any{
+					"image": digestImage,
+				},
+			})
+		}))
+		defer srv.Close()
+
+		t.Setenv("SCION_AGENT_SLUG", "prov-agent-2")
+		t.Setenv("SCION_AGENT_NAME", "Prov Agent 2")
+		t.Setenv("SCION_AGENT_ID", "agent-prov-2")
+		t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+		t.Setenv("SCION_IMAGE", "")
+		t.Setenv("SCION_GENERATION", "")
+		withWhoamiToken(t, "")
+
+		cleanup := sciontoolhub.SetHubTestSandboxed()
+		defer cleanup()
+		origFactory := newHubClient
+		newHubClient = func() *sciontoolhub.Client {
+			return sciontoolhub.NewClientWithConfig(srv.URL, "test-token", "agent-prov-2")
+		}
+		defer func() { newHubClient = origFactory }()
+
+		oldFull := whoamiFull
+		whoamiFull = true
+		defer func() { whoamiFull = oldFull }()
+
+		withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
+		jsonOut := captureStdout(t, func() {
+			require.NoError(t, whoamiCmd.RunE(whoamiCmd, nil))
+		})
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal([]byte(jsonOut), &raw))
+		assert.Equal(t, digestImage, raw["image"])
+		assert.Equal(t, float64(2), raw["generation"])
+	})
+
+	t.Run("tier 1 env vars without --full", func(t *testing.T) {
+		t.Setenv("SCION_AGENT_SLUG", "env-prov-agent")
+		t.Setenv("SCION_AGENT_NAME", "Env Prov Agent")
+		t.Setenv("SCION_AGENT_ID", "agent-env-prov")
+		t.Setenv("SCION_IMAGE", digestImage)
+		t.Setenv("SCION_GENERATION", "4")
+
+		oldFull := whoamiFull
+		whoamiFull = false
+		defer func() { whoamiFull = oldFull }()
+
+		withRootOptions(t, whoamiCmd, cliutil.RootOptions{OutputFormat: "json"})
+		jsonOut := captureStdout(t, func() {
+			require.NoError(t, whoamiCmd.RunE(whoamiCmd, nil))
+		})
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal([]byte(jsonOut), &raw))
+		assert.Equal(t, digestImage, raw["image"])
+		assert.Equal(t, float64(4), raw["generation"])
+	})
 }

@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -43,6 +44,8 @@ type WhoamiResult struct {
 	Template    string `json:"template,omitempty"`
 	Harness     string `json:"harness,omitempty"`
 	Model       string `json:"model,omitempty"`
+	Image       string `json:"image,omitempty"`
+	Generation  int    `json:"generation,omitempty"`
 	Creator     string `json:"creator,omitempty"`
 	BrokerName  string `json:"brokerName,omitempty"`
 	BrokerID    string `json:"brokerId,omitempty"`
@@ -168,11 +171,16 @@ func buildWhoamiResult(slug, name string) WhoamiResult {
 		Template:    os.Getenv("SCION_TEMPLATE_NAME"),
 		Harness:     os.Getenv("SCION_HARNESS"),
 		Model:       os.Getenv("SCION_MODEL"),
+		Image:       os.Getenv("SCION_IMAGE"),
 		Creator:     os.Getenv("SCION_CREATOR"),
 		BrokerName:  os.Getenv("SCION_BROKER_NAME"),
 		BrokerID:    os.Getenv("SCION_BROKER_ID"),
 		CLIMode:     os.Getenv("SCION_CLI_MODE"),
 		HubEndpoint: hubEndpoint,
+	}
+
+	if gen, err := strconv.Atoi(os.Getenv("SCION_GENERATION")); err == nil && gen > 0 {
+		result.Generation = gen
 	}
 
 	// Construct hubUrl from hubEndpoint + id (no API call needed).
@@ -207,6 +215,14 @@ func enrichFromHub(cmd *cobra.Command, result *WhoamiResult) {
 
 	result.Phase = self.Phase
 	result.Activity = self.Activity
+	if self.Image != "" {
+		result.Image = self.Image
+	} else if self.AppliedConfig != nil && self.AppliedConfig.Image != "" {
+		result.Image = self.AppliedConfig.Image
+	}
+	if self.Generation > 0 {
+		result.Generation = self.Generation
+	}
 	result.Labels = self.Labels
 	result.Annotations = self.Annotations
 	result.Ancestry = self.Ancestry
@@ -244,6 +260,12 @@ func printFullPlainText(w io.Writer, r WhoamiResult) error {
 	}
 	if r.Model != "" {
 		_, _ = fmt.Fprintf(tw, "Model:\t%s\n", r.Model)
+	}
+	if r.Image != "" {
+		_, _ = fmt.Fprintf(tw, "Image:\t%s\n", r.Image)
+	}
+	if r.Generation > 0 {
+		_, _ = fmt.Fprintf(tw, "Generation:\t%d\n", r.Generation)
 	}
 	if r.Creator != "" {
 		_, _ = fmt.Fprintf(tw, "Creator:\t%s\n", r.Creator)
@@ -290,5 +312,5 @@ func runSystemWhoami() error {
 func init() {
 	rootCmd.AddCommand(whoamiCmd)
 	whoamiCmd.Flags().BoolVar(&whoamiFull, "full", false,
-		"Include the token's scopes and enriched fields from the Hub (phase, activity, message mode, labels, ancestry, enabled experiments)")
+		"Include the token's scopes and enriched fields from the Hub (image, generation, phase, activity, message mode, labels, ancestry, enabled experiments)")
 }

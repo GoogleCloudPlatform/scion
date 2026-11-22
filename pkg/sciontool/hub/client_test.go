@@ -2390,3 +2390,33 @@ func TestClient_SetSecret_PendingCap(t *testing.T) {
 	assert.Contains(t, err.Error(), "await your approval")
 	assert.NotContains(t, err.Error(), "already exists")
 }
+
+func TestClient_GetSelf_Provenance(t *testing.T) {
+	cleanup := SetHubTestSandboxed()
+	defer cleanup()
+
+	const digestImage = "us-docker.pkg.dev/proj/scion/claude:v2@sha256:abcdef0123456789"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/agents/agent-123", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"phase":      "running",
+			"image":      digestImage,
+			"generation": 2,
+			"appliedConfig": map[string]any{
+				"image": "ghcr.io/example/fallback:latest",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client := NewClientWithConfig(server.URL, "test-token", "agent-123")
+	self, err := client.GetSelf(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "running", self.Phase)
+	assert.Equal(t, digestImage, self.Image)
+	assert.Equal(t, 2, self.Generation)
+	require.NotNil(t, self.AppliedConfig)
+	assert.Equal(t, "ghcr.io/example/fallback:latest", self.AppliedConfig.Image)
+}
