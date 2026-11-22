@@ -699,9 +699,9 @@ type AgentInfo struct {
 	// Start always sets it, so empty means an older broker (ptone/scion#620).
 	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
 	HarnessAuth         string `json:"harnessAuth,omitempty"` // Resolved harness auth method (api-key, oauth-token, auth-file, vertex-ai)
-	// Harness and Model are what Start resolved: the harness name and the
-	// effective model (resolveEffectiveModel), set only by Start. The hub
-	// records them as the run's effective configuration (WP1 slice 3).
+	// Harness and Model are the resolved harness name and effective model
+	// (set by Start and populated in Hub list responses from the stored
+	// agent config).
 	Harness string `json:"harness,omitempty"`
 	Model   string `json:"model,omitempty"`
 	// ConfigResolved marks an AgentInfo returned by one of Start's return
@@ -747,6 +747,7 @@ type AgentInfo struct {
 
 	// Runtime configuration
 	Image      string            `json:"image,omitempty"`
+	Generation int               `json:"generation,omitempty"` // Reincarnation generation (starts at 1; 0 when unknown)
 	Detached   bool              `json:"detached,omitempty"`
 	Runtime    string            `json:"runtime,omitempty"`
 	Profile    string            `json:"profile,omitempty"`

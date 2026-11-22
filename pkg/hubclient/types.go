@@ -41,6 +41,7 @@ type Agent struct {
 	ContainerStatus   string            `json:"containerStatus,omitempty"`
 	RuntimeState      string            `json:"runtimeState,omitempty"`
 	Image             string            `json:"image,omitempty"`
+	Generation        int               `json:"generation,omitempty"`
 	Detached          bool              `json:"detached,omitempty"`
 	Runtime           string            `json:"runtime,omitempty"`
 	RuntimeBrokerID   string            `json:"runtimeBrokerId,omitempty"`
@@ -118,6 +119,7 @@ type AgentLaunch = api.AgentLaunch
 // AgentConfig represents agent configuration.
 type AgentConfig struct {
 	Image         string            `json:"image,omitempty"`
+	Harness       string            `json:"harness,omitempty"`
 	HarnessConfig string            `json:"harnessConfig,omitempty"`
 	HarnessAuth   string            `json:"harnessAuth,omitempty"`
 	Env           map[string]string `json:"env,omitempty"`

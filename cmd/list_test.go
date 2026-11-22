@@ -2956,3 +2956,123 @@ func TestListAgentsViaHub_JSONIncludesHarnessCapabilities(t *testing.T) {
 	})
 	assert.Equal(t, []string{"authority"}, gotIncludes, "text table output does not request include=capabilities")
 }
+
+// TestListAgentsViaHub_ProvenanceJSONAndTable verifies that scion list JSON
+// exposes generation, harness, model, and image (with appliedConfig fallbacks
+// and full digest preserved), while table output stays well-formed
+// (ptone/scion#8835).
+func TestListAgentsViaHub_ProvenanceJSONAndTable(t *testing.T) {
+	const digestImage = "us-docker.pkg.dev/my-proj/scion/claude:v3@sha256:fedcba9876543210fedcba9876543210"
+	const fallbackImage = "ghcr.io/example/scion-gemini:latest"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"agents": [
+				{
+					"id": "a1",
+					"slug": "reincarnated-dev",
+					"name": "reincarnated-dev",
+					"template": "developer",
+					"harnessConfig": "claude-prod",
+					"runtime": "docker",
+					"project": "demo",
+					"phase": "running",
+					"image": %q,
+					"generation": 3,
+					"appliedConfig": {
+						"harness": "claude",
+						"model": "claude-sonnet-4-6",
+						"harnessConfig": "claude-prod"
+					}
+				},
+				{
+					"id": "a2",
+					"slug": "legacy-agent",
+					"name": "legacy-agent",
+					"template": "default",
+					"runtime": "docker",
+					"project": "demo",
+					"phase": "running",
+					"generation": 1,
+					"resolvedHarness": "gemini",
+					"appliedConfig": {
+						"image": %q,
+						"model": "gemini-2.5-pro"
+					}
+				},
+				{
+					"id": "a3",
+					"slug": "older-hub-agent",
+					"name": "older-hub-agent",
+					"template": "default",
+					"runtime": "docker",
+					"project": "demo",
+					"phase": "stopped"
+				}
+			],
+			"totalCount": 3
+		}`, digestImage, fallbackImage)
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL}
+
+	savedAll := listAll
+	savedFormat := outputFormat
+	listAll = true
+	outputFormat = "json"
+	t.Cleanup(func() {
+		listAll = savedAll
+		outputFormat = savedFormat
+	})
+
+	stdout, _ := captureStdoutStderr(t, func() {
+		require.NoError(t, listAgentsViaHub(hubCtx))
+	})
+
+	var rawItems []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(stdout), &rawItems), stdout)
+	require.Len(t, rawItems, 3)
+
+	rawByName := map[string]map[string]any{}
+	for _, item := range rawItems {
+		name, _ := item["name"].(string)
+		rawByName[name] = item
+	}
+
+	// Running agent with top-level image, generation, and appliedConfig harness/model.
+	a1 := rawByName["reincarnated-dev"]
+	assert.Equal(t, digestImage, a1["image"])
+	assert.Equal(t, float64(3), a1["generation"])
+	assert.Equal(t, "claude", a1["harness"])
+	assert.Equal(t, "claude-sonnet-4-6", a1["model"])
+
+	// Agent falling back to resolvedHarness and appliedConfig.image.
+	a2 := rawByName["legacy-agent"]
+	assert.Equal(t, fallbackImage, a2["image"])
+	assert.Equal(t, float64(1), a2["generation"])
+	assert.Equal(t, "gemini", a2["harness"])
+	assert.Equal(t, "gemini-2.5-pro", a2["model"])
+
+	// Older Hub agent without provenance fields omits them cleanly.
+	a3 := rawByName["older-hub-agent"]
+	assert.NotContains(t, a3, "generation")
+	assert.NotContains(t, a3, "harness")
+	assert.NotContains(t, a3, "model")
+	assert.NotContains(t, a3, "image")
+
+	// Table output remains well-formed and unaffected by long image digests.
+	outputFormat = ""
+	tableOut, _ := captureStdoutStderr(t, func() {
+		require.NoError(t, listAgentsViaHub(hubCtx))
+	})
+	lines := strings.Split(strings.TrimSpace(tableOut), "\n")
+	require.Len(t, lines, 4, tableOut)
+	assert.Contains(t, lines[0], "NAME")
+	assert.Contains(t, lines[0], "HARNESS-CFG")
+	assert.Contains(t, lines[1], "reincarnated-dev")
+	assert.NotContains(t, tableOut, "@sha256:", "table should not be broken by full digest strings")
+}

@@ -675,6 +675,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		Activity:            activity,
 		ContainerStatus:     a.ContainerStatus,
 		Image:               a.Image,
+		Generation:          a.Generation,
 		Detached:            a.Detached,
 		Runtime:             a.Runtime,
 		RuntimeBrokerID:     a.RuntimeBrokerID,
@@ -706,13 +707,27 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		info.Detail = &api.AgentDetail{Message: a.Message}
 	}
 
-	// Fall back to AppliedConfig fields if top-level fields are empty
-	// (for backward compatibility with older Hubs that don't enrich these)
-	if info.HarnessConfig == "" && a.AppliedConfig != nil && a.AppliedConfig.HarnessConfig != "" {
-		info.HarnessConfig = a.AppliedConfig.HarnessConfig
+	// Populate provenance and config fields from AppliedConfig when present
+	// (including fallbacks for older Hubs that don't enrich top-level fields).
+	if a.AppliedConfig != nil {
+		if info.Harness == "" && a.AppliedConfig.Harness != "" {
+			info.Harness = a.AppliedConfig.Harness
+		}
+		if info.Model == "" && a.AppliedConfig.Model != "" {
+			info.Model = a.AppliedConfig.Model
+		}
+		if info.Image == "" && a.AppliedConfig.Image != "" {
+			info.Image = a.AppliedConfig.Image
+		}
+		if info.HarnessConfig == "" && a.AppliedConfig.HarnessConfig != "" {
+			info.HarnessConfig = a.AppliedConfig.HarnessConfig
+		}
+		if info.HarnessAuth == "" && a.AppliedConfig.HarnessAuth != "" {
+			info.HarnessAuth = a.AppliedConfig.HarnessAuth
+		}
 	}
-	if info.HarnessAuth == "" && a.AppliedConfig != nil && a.AppliedConfig.HarnessAuth != "" {
-		info.HarnessAuth = a.AppliedConfig.HarnessAuth
+	if info.Harness == "" && a.ResolvedHarness != "" {
+		info.Harness = a.ResolvedHarness
 	}
 
 	info.GCPIdentity = agentGCPIdentity(a)
