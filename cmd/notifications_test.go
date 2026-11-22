@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestResolveAgentIDForSubscription_Found(t *testing.T) {
@@ -472,5 +475,168 @@ func TestDefaultTriggers(t *testing.T) {
 		if defaultTriggers[i] != v {
 			t.Errorf("defaultTriggers[%d] = %q, want %q", i, defaultTriggers[i], v)
 		}
+	}
+}
+
+func TestNotificationsArgsValidators(t *testing.T) {
+	noArgCmds := []*cobra.Command{
+		notificationsCmd,
+		notificationsSubscribeCmd,
+		notificationsSubscriptionsCmd,
+	}
+	for _, cmd := range noArgCmds {
+		t.Run(cmd.Name()+"_no_args", func(t *testing.T) {
+			require.NotNil(t, cmd.Args, "%s must set Args to reject stray positional arguments", cmd.Name())
+			assert.NoError(t, cmd.Args(cmd, []string{}))
+			assert.Error(t, cmd.Args(cmd, []string{"bogus"}))
+		})
+	}
+
+	maxOneArgCmds := []*cobra.Command{
+		notificationsAckCmd,
+		notificationsUnsubscribeCmd,
+	}
+	for _, cmd := range maxOneArgCmds {
+		t.Run(cmd.Name()+"_max_one_arg", func(t *testing.T) {
+			require.NotNil(t, cmd.Args, "%s must set Args to reject extra positional arguments", cmd.Name())
+			assert.NoError(t, cmd.Args(cmd, []string{}))
+			assert.NoError(t, cmd.Args(cmd, []string{"id-1"}))
+			assert.Error(t, cmd.Args(cmd, []string{"id-1", "extra"}))
+		})
+	}
+}
+
+// TestNotificationsBareAndUnknownSubcommand covers ptone/scion#8831 through
+// rootCmd.Execute(): bare "scion notifications" (and its aliases) still lists
+// notifications, while unknown subcommands (e.g. "scion notifications bogus")
+// and stray positional arguments on subcommands fail fast without hitting the hub.
+func TestNotificationsBareAndUnknownSubcommand(t *testing.T) {
+	restoreAllSilenceUsage(t)
+	origProjectPath := projectPath
+	origJSON := notificationsJSON
+	origShowAll := notificationsShowAll
+	origOutputFormat := outputFormat
+	defer func() {
+		projectPath = origProjectPath
+		notificationsJSON = origJSON
+		notificationsShowAll = origShowAll
+		outputFormat = origOutputFormat
+	}()
+	clearHubContextEnv(t)
+
+	var sawRequest bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawRequest = true
+		if r.URL.Path == "/api/v1/notifications" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode([]hubclient.Notification{})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_PROJECT_ID", "agent-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	projectDir := filepath.Join(tmpHome, "agent-project", ".scion")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+	projectPath = projectDir
+	notificationsJSON = false
+	notificationsShowAll = false
+	outputFormat = ""
+
+	execArgs := func(t *testing.T, args []string) (string, error) {
+		t.Helper()
+		t.Cleanup(func() {
+			resetCommandFlags(t, notificationsCmd)
+			resetCommandFlags(t, notificationsAckCmd)
+			resetCommandFlags(t, notificationsSubscribeCmd)
+			resetCommandFlags(t, notificationsUnsubscribeCmd)
+			resetCommandFlags(t, notificationsSubscriptionsCmd)
+		})
+		var buf bytes.Buffer
+		rootCmd.SetArgs(args)
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		defer func() {
+			rootCmd.SetArgs(nil)
+			rootCmd.SetOut(nil)
+			rootCmd.SetErr(nil)
+		}()
+		var execErr error
+		stdout := captureStdout(t, func() {
+			execErr = rootCmd.Execute()
+		})
+		return stdout + buf.String(), execErr
+	}
+
+	for _, bare := range [][]string{{"notifications"}, {"notification"}, {"notif"}} {
+		t.Run("bare_"+bare[0], func(t *testing.T) {
+			sawRequest = false
+			out, err := execArgs(t, bare)
+			require.NoError(t, err)
+			assert.True(t, sawRequest, "bare %v must call the hub list endpoint", bare)
+			assert.Contains(t, out, "No notifications")
+		})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "unknown_subcommand",
+			args:    []string{"notifications", "bogus"},
+			wantErr: `unknown command "bogus" for "scion notifications"`,
+		},
+		{
+			name:    "notification_alias_unknown_subcommand",
+			args:    []string{"notification", "bogus"},
+			wantErr: `unknown command "bogus" for "scion notifications"`,
+		},
+		{
+			name:    "notif_alias_unknown_subcommand",
+			args:    []string{"notif", "bogus"},
+			wantErr: `unknown command "bogus" for "scion notifications"`,
+		},
+		{
+			name:    "subscribe_stray_arg",
+			args:    []string{"notifications", "subscribe", "extra"},
+			wantErr: `unknown command "extra" for "scion notifications subscribe"`,
+		},
+		{
+			name:    "subscriptions_stray_arg",
+			args:    []string{"notifications", "subscriptions", "extra"},
+			wantErr: `unknown command "extra" for "scion notifications subscriptions"`,
+		},
+		{
+			name:    "subs_alias_stray_arg",
+			args:    []string{"notifications", "subs", "extra"},
+			wantErr: `unknown command "extra" for "scion notifications subscriptions"`,
+		},
+		{
+			name:    "ack_extra_arg",
+			args:    []string{"notifications", "ack", "notif-1", "extra"},
+			wantErr: `accepts at most 1 arg(s), received 2`,
+		},
+		{
+			name:    "unsubscribe_extra_arg",
+			args:    []string{"notifications", "unsubscribe", "sub-1", "extra"},
+			wantErr: `accepts at most 1 arg(s), received 2`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sawRequest = false
+			_, err := execArgs(t, tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.False(t, sawRequest, "unknown subcommand/arg must fail fast before calling the hub")
+		})
 	}
 }

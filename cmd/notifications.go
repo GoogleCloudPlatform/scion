@@ -69,6 +69,7 @@ Commands:
   scion notifications unsubscribe [id]        Remove a subscription
   scion notifications update [id]             Update a subscription's triggers
   scion notifications subscriptions           List your subscriptions`,
+	Args: cobra.NoArgs,
 	RunE: runNotificationsList,
 }
 
@@ -84,6 +85,7 @@ With --all flag, acknowledges all unacknowledged notifications.
 Examples:
   scion notifications ack a1b2c3d4
   scion notifications ack --all`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runNotificationsAck,
 }
 
@@ -108,6 +110,7 @@ Examples:
 
   # Subscribe with specific triggers
   scion notifications subscribe --agent my-agent --triggers COMPLETED,WAITING_FOR_INPUT`,
+	Args: cobra.NoArgs,
 	RunE: runNotificationsSubscribe,
 }
 
@@ -120,6 +123,7 @@ var notificationsUnsubscribeCmd = &cobra.Command{
 Examples:
   scion notifications unsubscribe a1b2c3d4
   scion notifications unsubscribe --project my-project --all`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runNotificationsUnsubscribe,
 }
 
@@ -151,6 +155,7 @@ Examples:
   scion notifications subscriptions --all
   scion notifications subscriptions --project my-project
   scion notifications subscriptions --json`,
+	Args: cobra.NoArgs,
 	RunE: runNotificationsSubscriptions,
 }
 
