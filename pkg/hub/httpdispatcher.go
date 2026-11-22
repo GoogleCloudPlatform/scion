@@ -3545,7 +3545,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	// 2. Check secrets (all scopes via backend.Resolve; shell agents are
 	// restricted to the owning user's user-scope secrets only).
 	// Only environment-type secrets can be mapped to env key=value pairs.
-	if d.secretBackend != nil && (!isShellAgent(agent) || agent.OwnerID != "") {
+	if d.secretBackend != nil && agent != nil && (!isShellAgent(agent) || agent.OwnerID != "") {
 		projectID, brokerID := agent.ProjectID, agent.RuntimeBrokerID
 		if isShellAgent(agent) {
 			projectID, brokerID = "", ""

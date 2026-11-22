@@ -88,8 +88,16 @@ func resolveExecContainerHubClient() (hubclient.Client, error) {
 	return hubCtx.Client, nil
 }
 
+func execContainerContext(cmd *cobra.Command) (context.Context, context.CancelFunc) {
+	parent := context.Background()
+	if cmd != nil && cmd.Context() != nil {
+		parent = cmd.Context()
+	}
+	return context.WithTimeout(parent, 30*time.Second)
+}
+
 func runExecContainerShow(cmd *cobra.Command, _ []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := execContainerContext(cmd)
 	defer cancel()
 
 	client, err := resolveExecContainerHubClient()
@@ -110,7 +118,7 @@ func runExecContainerShow(cmd *cobra.Command, _ []string) error {
 }
 
 func runExecContainerSet(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := execContainerContext(cmd)
 	defer cancel()
 
 	agentRef := strings.TrimSpace(args[0])
@@ -141,7 +149,7 @@ func runExecContainerSet(cmd *cobra.Command, args []string) error {
 }
 
 func runExecContainerClear(cmd *cobra.Command, _ []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := execContainerContext(cmd)
 	defer cancel()
 
 	client, err := resolveExecContainerHubClient()
