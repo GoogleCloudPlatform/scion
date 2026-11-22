@@ -205,19 +205,19 @@ func checkBrokerHomeFilesCapability(broker *store.RuntimeBroker) error {
 // Container-launching dispatch entries swept for HomeFilesPending protection:
 //   - Create family (all reach gateCreateHomeFiles via createHomeFilesPrecheck
 //     and again at sendCreate / sendCreateWithGather):
-//       * HTTPAgentDispatcher.DispatchAgentCreate
-//       * HTTPAgentDispatcher.DispatchAgentCreateWithGather
-//       * HTTPAgentDispatcher.DispatchFinalizeEnv / finalizeEnv
-//         (also checked before claim acquisition in Server.submitAgentEnv)
-//       * HTTPAgentDispatcher.DispatchAgentProvision / DispatchAgentReprovision / dispatchProvision
-//       * Cross-node Server.execDispatchCreate -> DispatchAgentCreateWithGather
-//       * Cross-node Server.execDispatchFinalizeEnv -> DispatchFinalizeEnv
+//   - HTTPAgentDispatcher.DispatchAgentCreate
+//   - HTTPAgentDispatcher.DispatchAgentCreateWithGather
+//   - HTTPAgentDispatcher.DispatchFinalizeEnv / finalizeEnv
+//     (also checked before claim acquisition in Server.submitAgentEnv)
+//   - HTTPAgentDispatcher.DispatchAgentProvision / DispatchAgentReprovision / dispatchProvision
+//   - Cross-node Server.execDispatchCreate -> DispatchAgentCreateWithGather
+//   - Cross-node Server.execDispatchFinalizeEnv -> DispatchFinalizeEnv
 //   - Start family (all check agentHomeFilesPending directly):
-//       * Server.startAgentCore (before claim/capacity hold)
-//       * HTTPAgentDispatcher.DispatchAgentStart / DispatchAgentStartWithOptions / dispatchAgentStart
-//       * HTTPAgentDispatcher.DispatchAgentRestart
-//       * Cross-node Server.execDispatchStart -> DispatchAgentStart / DispatchAgentStartWithOptions
-//       * Cross-node Server.execDispatchRestart -> DispatchAgentRestart
+//   - Server.startAgentCore (before claim/capacity hold)
+//   - HTTPAgentDispatcher.DispatchAgentStart / DispatchAgentStartWithOptions / dispatchAgentStart
+//   - HTTPAgentDispatcher.DispatchAgentRestart
+//   - Cross-node Server.execDispatchStart -> DispatchAgentStart / DispatchAgentStartWithOptions
+//   - Cross-node Server.execDispatchRestart -> DispatchAgentRestart
 func (d *HTTPAgentDispatcher) gateCreateHomeFiles(ctx context.Context, agent *store.Agent, files []api.HomeFile, reprovision bool) error {
 	if len(files) == 0 {
 		if agentHomeFilesPending(agent) {
