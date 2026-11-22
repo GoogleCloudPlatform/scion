@@ -362,7 +362,17 @@ func TestTriggerG4a_Reuse_AuthoringRequiresWakeAuthority(t *testing.T) {
 	ctx := context.Background()
 	f := newTriggerDispatchAgentFixture(t, "s3-g4a-wake-auth")
 	f.sched.srv.authzService.mintDevAuthOverride = false
-	userCtx := f.userAuth(t, f.sched.creator)
+	owner := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "wake-auth-owner@example.com",
+		DisplayName: "Wake Auth Owner",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+		Created:     time.Now().UTC(),
+	}
+	require.NoError(t, f.sched.store.CreateUser(ctx, owner))
+	require.NoError(t, f.sched.srv.createProjectOwnerRoleBinding(ctx, f.sched.proj.ID, owner.ID))
+	userCtx := f.userAuth(t, owner)
 	ep := f.createEndpoint(t, userCtx, "wake-auth-ep")
 
 	// Create an agent caller with AgentRoleBaseline (so its stored ceiling lacks
@@ -406,8 +416,8 @@ func TestTriggerG4a_Reuse_AuthoringRequiresWakeAuthority(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "reuse requires wake authority")
 
-	// 2. UAT without agent:lifecycle scope -> 400 "reuse requires wake authority" on create and PATCH.
-	baseUser := NewAuthenticatedUser(f.sched.creator.ID, f.sched.creator.Email, f.sched.creator.DisplayName, f.sched.creator.Role, "web")
+	// 2. UAT without agent:lifecycle scope -> 400 "reuse requires wake authority" on create, PATCH, and resume.
+	baseUser := NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, "web")
 	projBoundary := TokenBoundary{Kind: BoundaryKindProject, ProjectID: f.sched.proj.ID}
 	uatNoLifecycle := scheduleTestUAT(t, baseUser, projBoundary,
 		"trigger:create", "trigger:update", "trigger:read", "webhook_endpoint:read", "agent:message")
@@ -455,7 +465,8 @@ func TestTriggerG4a_Reuse_AuthoringRequiresWakeAuthority(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recPatch.Code, recPatch.Body.String())
 	assert.Contains(t, recPatch.Body.String(), "reuse requires wake authority")
 
-	// 3. Session user (EffectCeilingPrincipal) succeeds creating reuse trigger.
+	// 3. Session user (EffectCeilingPrincipal) succeeds creating reuse trigger;
+	// pausing it and attempting to resume via UAT without agent:lifecycle fails with 400.
 	recOK := f.doJSON(t, userCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
 		CreateTriggerRequest{
@@ -470,6 +481,17 @@ func TestTriggerG4a_Reuse_AuthoringRequiresWakeAuthority(t *testing.T) {
 			},
 		})
 	require.Equal(t, http.StatusCreated, recOK.Code, recOK.Body.String())
+	var reuseTrig TriggerResponse
+	require.NoError(t, json.Unmarshal(recOK.Body.Bytes(), &reuseTrig))
+
+	recPause := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s/pause", f.sched.proj.ID, reuseTrig.ID), nil)
+	require.Equal(t, http.StatusOK, recPause.Code, recPause.Body.String())
+
+	recResume := f.doJSON(t, uatCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s/resume", f.sched.proj.ID, reuseTrig.ID), nil)
+	require.Equal(t, http.StatusBadRequest, recResume.Code, recResume.Body.String())
+	assert.Contains(t, recResume.Body.String(), "reuse requires wake authority")
 }
 
 func TestTriggerG4a_CoalesceWindow_APIRoundTripAndValidation(t *testing.T) {

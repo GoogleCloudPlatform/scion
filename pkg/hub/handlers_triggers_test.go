@@ -549,8 +549,8 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 			wantMsg: "match_types",
 		},
 		{
-			name:    "unsupported subject.mode reuse refused",
-			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Mode: "reuse"} },
+			name:    "unsupported subject.mode refused",
+			mutate:  func(r *CreateTriggerRequest) { r.Subject = &TriggerSubjectSpec{Mode: "bogus"} },
 			wantMsg: "unsupported subject mode",
 		},
 		{
