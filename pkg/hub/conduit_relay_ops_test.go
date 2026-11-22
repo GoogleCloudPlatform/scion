@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
 	"log/slog"
 	"net/http"
@@ -477,6 +478,118 @@ func TestRelaySessionRecheck_AgentDeleted(t *testing.T) {
 	res = sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: adm.AdmissionToken})
 	assert.True(t, res[0].Close)
 	assert.Equal(t, uint32(4404), res[0].CloseCode)
+}
+
+// TestRelaySessionRecheck_AgentDelegationStanding: a relay-held agent session
+// whose delegating root user is suspended or removed closes with 4401 at the
+// next periodic re-check without leaking the internal standing reason, while
+// a healthy agent in the same batch stays open.
+func TestRelaySessionRecheck_AgentDelegationStanding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		orphan func(t *testing.T, ctx context.Context, cf *conduitFixture)
+	}{
+		{
+			name: "root_user_suspended",
+			orphan: func(t *testing.T, ctx context.Context, cf *conduitFixture) {
+				owner, err := cf.store.GetUser(ctx, cf.owner.ID())
+				require.NoError(t, err)
+				owner.Status = store.UserStatusSuspended
+				require.NoError(t, cf.store.UpdateUser(ctx, owner))
+			},
+		},
+		{
+			name: "root_user_removed",
+			orphan: func(t *testing.T, ctx context.Context, cf *conduitFixture) {
+				require.NoError(t, cf.store.DeleteUser(ctx, cf.owner.ID()))
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, cf := newUserRelayOps(t)
+			ctx := context.Background()
+
+			healthyAgent := &store.Agent{
+				ID: tid("conduit-healthy-agent"), Slug: "conduit-healthy-agent", Name: "Healthy Agent",
+				ProjectID: cf.agent.ProjectID, OwnerID: cf.stranger.ID(), Ancestry: []string{cf.stranger.ID()},
+				RuntimeBrokerID: "broker-1", Phase: "running",
+			}
+			require.NoError(t, cf.store.CreateAgent(ctx, healthyAgent))
+
+			agentTok, err := cf.srv.GenerateAgentToken(cf.agent.ID, cf.agent.ProjectID, nil, AgentRoleFull, nil)
+			require.NoError(t, err)
+			healthyTok, err := cf.srv.GenerateAgentToken(healthyAgent.ID, healthyAgent.ProjectID, nil, AgentRoleFull, nil)
+			require.NoError(t, err)
+
+			adm := f.mustAdmit(t, http.Header{"X-Scion-Agent-Token": {agentTok}}, "s-agent")
+			healthyAdm := f.mustAdmit(t, http.Header{"X-Scion-Agent-Token": {healthyTok}}, "s-healthy")
+
+			res := sessionRecheck(t, f.hub,
+				relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: adm.AdmissionToken},
+				relay.HubSessionRecheckItem{SessionID: "s-healthy", AdmissionToken: healthyAdm.AdmissionToken},
+			)
+			require.True(t, res[0].OK && !res[0].Close, "healthy agent passes before orphaning: %+v", res[0])
+			require.True(t, res[1].OK && !res[1].Close, "second healthy agent passes: %+v", res[1])
+
+			tc.orphan(t, ctx, cf)
+
+			res = sessionRecheck(t, f.hub,
+				relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: adm.AdmissionToken},
+				relay.HubSessionRecheckItem{SessionID: "s-healthy", AdmissionToken: healthyAdm.AdmissionToken},
+			)
+			assert.False(t, res[0].OK, "orphaned agent must not pass recheck: %+v", res[0])
+			assert.True(t, res[0].Close, "orphaned agent must close at recheck: %+v", res[0])
+			assert.Equal(t, uint32(conduit.CloseUnauthenticated), res[0].CloseCode)
+			assert.Equal(t, "agent not in good standing", res[0].Reason)
+
+			assert.True(t, res[1].OK && !res[1].Close, "healthy agent unaffected by another agent's orphaning: %+v", res[1])
+		})
+	}
+}
+
+type relayStandingFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	err   error
+}
+
+func (s *relayStandingFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if !s.fault.Active() {
+		return s.Store.GetUser(ctx, id)
+	}
+	return nil, s.err
+}
+
+// TestRelaySessionRecheck_AgentStandingLookupFault: a store fault while
+// evaluating delegation standing during periodic re-check is treated as
+// unavailable (session stays open and its admission token is not re-issued),
+// consistent with other lookup faults in recheckRelayAdmission.
+func TestRelaySessionRecheck_AgentStandingLookupFault(t *testing.T) {
+	srv, st, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *relayStandingFaultStore {
+		return &relayStandingFaultStore{Store: inner, fault: f, err: errors.New("user store unavailable")}
+	})
+	cf := newConduitFixtureOn(t, srv, st)
+	f := startRelayOpsHub(t, cf.srv, cf.store)
+
+	start := time.Now()
+	now := relayClock(t, start)
+	agentTok, err := cf.srv.GenerateAgentToken(cf.agent.ID, cf.agent.ProjectID, nil, AgentRoleFull, nil)
+	require.NoError(t, err)
+	adm := f.mustAdmit(t, http.Header{"X-Scion-Agent-Token": {agentTok}}, "s-agent")
+
+	res := sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: adm.AdmissionToken})
+	require.True(t, res[0].OK && !res[0].Close, "healthy before fault: %+v", res[0])
+
+	// Advance past half-life so a healthy re-check would re-issue the token.
+	*now = start.Add(35 * time.Minute)
+	fault.Arm()
+
+	res = sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s-agent", AdmissionToken: adm.AdmissionToken})
+	assert.False(t, res[0].OK, "lookup fault must not report OK: %+v", res[0])
+	assert.False(t, res[0].Close, "lookup fault must not close the session: %+v", res[0])
+	assert.Equal(t, uint32(0), res[0].CloseCode)
+	assert.Equal(t, "unavailable", res[0].Reason)
+	assert.Empty(t, res[0].AdmissionToken, "lookup fault must not re-issue admission token")
 }
 
 // TestRelayRefresh_AgentCredential: an agent's in-band credential refresh on
