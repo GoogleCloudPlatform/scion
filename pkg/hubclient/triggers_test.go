@@ -260,6 +260,26 @@ func TestTriggerService(t *testing.T) {
 			ServerTime: now,
 		})
 	})
+	mux.HandleFunc("/api/v1/projects/proj-1/triggers/tr-456/render", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "evt-1", r.URL.Query().Get("eventId"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(TriggerRenderResponse{
+			Slots: TriggerRenderSlots{
+				Task: &TriggerRenderSlotResult{
+					Rendered: "Fix PR #42",
+					Used: []TriggerRenderUsedVar{
+						{Path: "event.attributes.number", Class: "untrusted"},
+					},
+				},
+				Name: &TriggerRenderSlotResult{
+					Rendered: "pr-42",
+					Used:     []TriggerRenderUsedVar{{Path: "event.attributes.number", Class: "untrusted"}},
+				},
+			},
+			Errors: []TriggerRenderError{},
+		})
+	})
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -315,6 +335,17 @@ func TestTriggerService(t *testing.T) {
 	assert.Equal(t, "cur-2", hist.NextCursor)
 	require.Len(t, hist.Fires, 1)
 	assert.Equal(t, "fired", hist.Fires[0].Status)
+
+	rendered, err := svc.Render(ctx, "tr-456", "evt-1")
+	require.NoError(t, err)
+	require.NotNil(t, rendered.Slots.Task)
+	assert.Equal(t, "Fix PR #42", rendered.Slots.Task.Rendered)
+	require.Len(t, rendered.Slots.Task.Used, 1)
+	assert.Equal(t, "event.attributes.number", rendered.Slots.Task.Used[0].Path)
+	assert.Equal(t, "untrusted", rendered.Slots.Task.Used[0].Class)
+	require.NotNil(t, rendered.Slots.Name)
+	assert.Equal(t, "pr-42", rendered.Slots.Name.Rendered)
+	assert.Empty(t, rendered.Errors)
 
 	require.NoError(t, svc.Delete(ctx, "tr-456"))
 }

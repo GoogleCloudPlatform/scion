@@ -48,11 +48,13 @@ var (
 	triggerMatchTypes   []string
 	triggerWhereRules   []string
 	triggerWhereFile    string
+	triggerAction       string
 	triggerAgent        string
 	triggerMessage      string
 	triggerInterrupt    bool
 	triggerWake         bool
 	triggerPlain        bool
+	triggerDispatch     dispatchAgentFlagValues
 	triggerSubjectExpr  string
 	triggerOnSubject    string
 
@@ -488,39 +490,61 @@ func resolveTriggerIDOrName(ctx context.Context, hubCtx *HubContext, projectID, 
 }
 
 func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
+	req, _, err := buildCreateTriggerRequestWithAllow(false)
+	return req, err
+}
+
+func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTriggerRequest, []string, error) {
 	name := strings.TrimSpace(triggerName)
 	if name == "" {
-		return nil, newUsageError("--name is required")
+		return nil, nil, newUsageError("--name is required")
 	}
 	webhookRef := strings.TrimSpace(triggerWebhookRef)
 	if triggerGitHubSource && webhookRef != "" {
-		return nil, newUsageError("--github and --webhook are mutually exclusive")
+		return nil, nil, newUsageError("--github and --webhook are mutually exclusive")
 	}
 	if !triggerGitHubSource && webhookRef == "" {
-		return nil, newUsageError("either --webhook or --github is required")
+		return nil, nil, newUsageError("either --webhook or --github is required")
 	}
 	if triggerGitHubSource && len(triggerMatchTypes) == 0 {
-		return nil, newUsageError("--type is required when --github is set")
-	}
-	agentRef := strings.TrimSpace(triggerAgent)
-	if agentRef == "" {
-		return nil, newUsageError("--agent is required")
-	}
-	if strings.TrimSpace(triggerMessage) == "" {
-		return nil, newUsageError("--message is required")
+		return nil, nil, newUsageError("--type is required when --github is set")
 	}
 
-	action := hubclient.TriggerActionSpec{
-		Type:      "message",
-		Message:   triggerMessage,
-		Interrupt: triggerInterrupt,
-		Wake:      triggerWake,
-		Plain:     triggerPlain,
+	actionKind, err := normalizeTriggerActionKind(triggerAction)
+	if err != nil {
+		return nil, nil, err
 	}
-	if uuid.Validate(agentRef) == nil {
-		action.AgentID = agentRef
-	} else {
-		action.AgentName = agentRef
+
+	var (
+		action           hubclient.TriggerActionSpec
+		derivedUntrusted []string
+	)
+	switch actionKind {
+	case "message":
+		agentRef := strings.TrimSpace(triggerAgent)
+		if agentRef == "" {
+			return nil, nil, newUsageError("--agent is required")
+		}
+		if strings.TrimSpace(triggerMessage) == "" {
+			return nil, nil, newUsageError("--message is required")
+		}
+		action = hubclient.TriggerActionSpec{
+			Type:      "message",
+			Message:   triggerMessage,
+			Interrupt: triggerInterrupt,
+			Wake:      triggerWake,
+			Plain:     triggerPlain,
+		}
+		if uuid.Validate(agentRef) == nil {
+			action.AgentID = agentRef
+		} else {
+			action.AgentName = agentRef
+		}
+	case "dispatch_agent":
+		action, derivedUntrusted, err = buildDispatchAgentActionSpec(&triggerDispatch, allowExplicit)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	source := hubclient.TriggerSourceSpec{
@@ -543,14 +567,14 @@ func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
 
 	whereFile := strings.TrimSpace(triggerWhereFile)
 	if len(triggerWhereRules) > 0 && whereFile != "" {
-		return nil, newUsageError("--where and --where-file cannot be used together")
+		return nil, nil, newUsageError("--where and --where-file cannot be used together")
 	}
 	var matchRules []hubclient.TriggerMatchRuleSpec
 	hasMatchRules := false
 	if whereFile != "" {
 		parsed, err := readTriggerWhereFile(whereFile)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		matchRules = parsed
 		hasMatchRules = true
@@ -575,11 +599,12 @@ func buildCreateTriggerRequest() (*hubclient.CreateTriggerRequest, error) {
 		}
 	}
 
-	return req, nil
+	return req, derivedUntrusted, nil
 }
 
 func runTriggerCreate(cmd *cobra.Command, args []string) error {
-	req, err := buildCreateTriggerRequest()
+	allowExplicit := cmd != nil && cmd.Flags().Changed("allow")
+	req, derivedUntrusted, err := buildCreateTriggerRequestWithAllow(allowExplicit)
 	if err != nil {
 		return err
 	}
@@ -590,19 +615,17 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
+	printDerivedUntrustedVars(derivedUntrusted)
+
 	created, err := hubCtx.Client.Triggers(projectID).Create(ctx, req)
 	if err != nil {
-		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger: %w", formatTriggerRuleError(err)))
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger: %w", formatTriggerAPIError(err)))
 	}
 
 	if isTriggerJSONOutput() {
 		return outputTriggerJSON(created)
 	}
 
-	agentLabel := created.Action.AgentName
-	if agentLabel == "" {
-		agentLabel = created.Action.AgentID
-	}
 	fmt.Printf("Trigger created: %s\n", created.ID)
 	fmt.Printf("  Name:    %s\n", created.Name)
 	fmt.Printf("  Source:  %s\n", formatTriggerSource(created.Source, 0))
@@ -619,7 +642,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	if created.Subject.Expr != "" {
 		fmt.Printf("  Subject: %q\n", created.Subject.Expr)
 	}
-	fmt.Printf("  Agent:   %s\n", agentLabel)
+	printTriggerActionSummary(created.Action)
 	fmt.Printf("  Status:  %s\n", triggerStatusLabel(created.Status, created.StatusReason))
 	return nil
 }
@@ -678,7 +701,9 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 			shortID = shortID[:8]
 		}
 		agentLabel := tr.Action.AgentName
-		if agentLabel == "" {
+		if tr.Action.Type == "dispatch_agent" {
+			agentLabel = "dispatch:" + tr.Action.Template
+		} else if agentLabel == "" {
 			agentLabel = tr.Action.AgentID
 			if len(agentLabel) > 8 {
 				agentLabel = agentLabel[:8]
@@ -765,7 +790,7 @@ func runTriggerResume(cmd *cobra.Command, args []string) error {
 	}
 
 	if _, err := hubCtx.Client.Triggers(projectID).Resume(ctx, fullID); err != nil {
-		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to resume trigger: %w", formatTriggerRuleError(err)))
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to resume trigger: %w", formatTriggerAPIError(err)))
 	}
 
 	return outputTriggerActionResult(ActionResult{
@@ -1032,11 +1057,13 @@ func init() {
 	triggerCreateCmd.Flags().StringSliceVar(&triggerMatchTypes, "type", nil, "Event type pattern to match (repeatable; default webhook.received for --webhook; required for --github)")
 	triggerCreateCmd.Flags().StringArrayVar(&triggerWhereRules, "where", nil, "Ordered match rule [<dialect>:]<expr> (repeatable, 1-8 rules, <= 4096B each; put cheap CEL guards first; run matches() on event.attributes.<k> or one event.payload.<field>, not whole payload)")
 	triggerCreateCmd.Flags().StringVar(&triggerWhereFile, "where-file", "", "Path to JSON file containing an ordered array of {dialect, expr} match rules")
-	triggerCreateCmd.Flags().StringVar(&triggerAgent, "agent", "", "Target agent name or ID (required)")
-	triggerCreateCmd.Flags().StringVar(&triggerMessage, "message", "", "Message delivered to the target agent (required)")
+	triggerCreateCmd.Flags().StringVar(&triggerAction, "action", "message", "Action kind (message or dispatch-agent)")
+	triggerCreateCmd.Flags().StringVar(&triggerAgent, "agent", "", "Target agent name or ID (required for --action message)")
+	triggerCreateCmd.Flags().StringVar(&triggerMessage, "message", "", "Message delivered to the target agent (required for --action message)")
 	triggerCreateCmd.Flags().BoolVar(&triggerInterrupt, "interrupt", false, "Interrupt the target agent")
 	triggerCreateCmd.Flags().BoolVar(&triggerWake, "wake", false, "Resume the target agent if suspended when the trigger fires")
 	triggerCreateCmd.Flags().BoolVar(&triggerPlain, "plain", false, "Deliver message text without sender prefix")
+	bindDispatchAgentFlags(triggerCreateCmd.Flags(), &triggerDispatch)
 	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
 	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new or skip; default new)")
 

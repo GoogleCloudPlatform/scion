@@ -220,14 +220,17 @@ var agentAllowed = map[string]bool{
 
 	// Event triggers and webhook endpoints (ptone/scion#8028, Stage 1 §12):
 	// Hub routes enforce hub.triggers and caller-scoped ownership for agents.
-	"trigger":                true,
-	"trigger.create":         true,
-	"trigger.get":            true,
-	"trigger.list":           true,
-	"trigger.delete":         true,
-	"trigger.pause":          true,
-	"trigger.resume":         true,
-	"trigger.history":        true,
+	"trigger":         true,
+	"trigger.create":  true,
+	"trigger.get":     true,
+	"trigger.list":    true,
+	"trigger.delete":  true,
+	"trigger.pause":   true,
+	"trigger.resume":  true,
+	"trigger.render":  true,
+	"trigger.history": true,
+	// trigger.update is deliberately absent: agent callers cannot PATCH
+	// trigger definitions (agentTriggerEditAllowed = false).
 	"trigger.event":          true,
 	"trigger.event.list":     true,
 	"trigger.event.get":      true,
