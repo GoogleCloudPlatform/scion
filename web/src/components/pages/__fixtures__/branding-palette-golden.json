@@ -264,6 +264,24 @@
       "errors": []
     },
     {
+      "name": "dark-accent-promo-passes-surface-fails-bg",
+      "input": {
+        "accentColor": "#e7f070",
+        "palette": {
+          "dark": {
+            "bg": "#03aa6d"
+          }
+        }
+      },
+      "hasCustomPalette": false,
+      "errors": [
+        "server.hub.branding.palette.dark.primary|contrast (#9ea42a) against dark.bg (#03aa6d) is 1.12:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text_muted|contrast (#94a3b8) against dark.bg (#03aa6d) is 1.17:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text_secondary|contrast (#cbd5e1) against dark.bg (#03aa6d) is 2.03:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text|contrast (#f1f5f9) against dark.bg (#03aa6d) is 2.75:1, minimum WCAG AA is 4.50:1"
+      ]
+    },
+    {
       "name": "accent-deep-no-promo",
       "input": {
         "accentColor": "#14532d"

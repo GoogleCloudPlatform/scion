@@ -305,6 +305,8 @@ describe('admin-branding-contrast', () => {
         expect(actualErrors).toEqual(scenario.errors);
 
         if (scenario.errors.length === 0) {
+          // On rejected scenarios, Go's ResolveBranding falls back to DefaultResolvedBranding()
+          // (hasCustomPalette: false), so only assert resolved tokens/flag when validation passes.
           expect(res.summary.allPass).toBe(true);
           expect(res.hasCustomPalette).toBe(scenario.hasCustomPalette);
           expect(res.light).toEqual(scenario.light);
