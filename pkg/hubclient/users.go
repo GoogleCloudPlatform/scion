@@ -69,6 +69,18 @@ type UserService interface {
 	// GET /api/v1/users/{id}/deletion. It answers after the user is
 	// deleted; a user with no deletion is a 404 API error.
 	GetDeletion(ctx context.Context, userID string) (*UserDeletion, error)
+
+	// GetExecContainer returns the caller's registered execution container
+	// status through GET /api/v1/users/me/exec-container.
+	GetExecContainer(ctx context.Context) (*ExecContainerStatus, error)
+
+	// SetExecContainer registers agentID as the caller's default execution
+	// container through PUT /api/v1/users/me/exec-container.
+	SetExecContainer(ctx context.Context, agentID string) (*ExecContainerStatus, error)
+
+	// ClearExecContainer clears the caller's execution container registration
+	// through DELETE /api/v1/users/me/exec-container.
+	ClearExecContainer(ctx context.Context) error
 }
 
 // userService is the implementation of UserService.

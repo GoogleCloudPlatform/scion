@@ -48,6 +48,10 @@ func warnRemovedMode(source string) {
 // Deliberately absent: "admin" and "admin.system-one.instance.*" (create,
 // list, delete, probe). Decision system-one-admin-cli v1 keeps Hub System One
 // provider instance and credential administration human-mode only.
+//
+// Deliberately absent: "exec-container" (show, set, clear). Human-mode only
+// per ptone/scion#8812 decision D4 (the Hub endpoint is session-only too);
+// cmd/platform_gate.go keeps it off Windows in v1.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
