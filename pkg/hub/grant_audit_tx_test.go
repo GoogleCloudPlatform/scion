@@ -150,13 +150,14 @@ func TestGroupMemberAuditFailureRollsBack(t *testing.T) {
 // the test arms fault for the failing request and heal for the request
 // that must succeed, so srv.store is installed once, before any request,
 // and never reassigned (ptone/scion#3435). auditErrFor fails
-// CreateMutationAudit for records of that mutation type; ownerAddFails
-// fails every owner-role AddGroupMember. Both apply inside and outside
-// transactions.
+// CreateMutationAudit for records of that mutation type (further narrowed
+// by auditMatch when non-nil); ownerAddFails fails every owner-role
+// AddGroupMember. Both apply inside and outside transactions.
 type grantAuditFaultStore struct {
 	store.Store
 	fault, heal   *storeFaultSwitch
 	auditErrFor   string
+	auditMatch    func(*store.MutationAuditRecord) bool
 	ownerAddFails bool
 }
 
@@ -187,7 +188,7 @@ func (s *grantAuditFaultStore) WithTx(ctx context.Context, fn func(tx store.Stor
 }
 
 func (s *grantAuditFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
-	if s.injecting() && s.auditErrFor != "" && r.MutationType == s.auditErrFor {
+	if s.injecting() && s.auditErrFor != "" && r.MutationType == s.auditErrFor && (s.auditMatch == nil || s.auditMatch(r)) {
 		return errors.New("injected mutation audit write fault")
 	}
 	return s.Store.CreateMutationAudit(ctx, r)
@@ -200,35 +201,83 @@ func (s *grantAuditFaultStore) AddGroupMember(ctx context.Context, m *store.Grou
 	return s.Store.AddGroupMember(ctx, m)
 }
 
-// Group create with a parent writes the parent membership's audit record
-// in the same transaction; an injected audit failure leaves no group and
-// no child edge under the parent.
+// Group create with a parent writes both the parent-edge and creator-owner
+// group_member_add audit records in the same transaction; faulting either
+// audit write independently leaves no group, no child edge under the parent,
+// and no creator-owner membership.
 func TestCreateGroupWithParentAuditFailureRollsBack(t *testing.T) {
-	srv, real, fault, heal := newGrantAuditFaultServer(t, grantAuditFaultStore{auditErrFor: "group_member_add"})
-	ctx := context.Background()
-	parent := &store.Group{ID: tid("cg-audit-parent"), Name: "cg audit parent", Slug: "cg-audit-parent", GroupType: store.GroupTypeExplicit}
-	require.NoError(t, real.CreateGroup(ctx, parent))
-	req := CreateGroupRequest{Name: "cg audit child", Slug: "cg-audit-child", ParentID: parent.ID}
+	cases := []struct {
+		name  string
+		match func(r *store.MutationAuditRecord, parentID string) bool
+	}{
+		{
+			name: "parent-edge audit fails",
+			match: func(r *store.MutationAuditRecord, parentID string) bool {
+				return r.TargetID == parentID
+			},
+		},
+		{
+			name: "creator-owner audit fails",
+			match: func(r *store.MutationAuditRecord, parentID string) bool {
+				return r.TargetID != parentID
+			},
+		},
+	}
 
-	fault.Arm()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
-	_, err := real.GetGroupBySlug(ctx, req.Slug)
-	assert.ErrorIs(t, err, store.ErrNotFound, "no group after the audit failure")
-	children, err := real.ListGroups(ctx, store.GroupFilter{ParentID: parent.ID}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Empty(t, children.Items, "no child edge after the audit failure")
-	assert.Empty(t, grantAudits(t, real, "group_member_add", parent.ID))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			parentID := tid("cg-audit-parent")
+			srv, real, fault, heal := newGrantAuditFaultServer(t, grantAuditFaultStore{
+				auditErrFor: "group_member_add",
+				auditMatch: func(r *store.MutationAuditRecord) bool {
+					return tc.match(r, parentID)
+				},
+			})
+			ctx := context.Background()
+			parent := &store.Group{ID: parentID, Name: "cg audit parent", Slug: "cg-audit-parent", GroupType: store.GroupTypeExplicit}
+			require.NoError(t, real.CreateGroup(ctx, parent))
+			beforeUserGroups, err := real.GetUserGroups(ctx, DevUserID)
+			require.NoError(t, err)
+			beforeAudits, _, err := real.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: "group_member_add"})
+			require.NoError(t, err)
+			req := CreateGroupRequest{Name: "cg audit child", Slug: "cg-audit-child", ParentID: parent.ID}
 
-	heal.Arm()
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var child store.Group
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&child))
-	audits := grantAudits(t, real, "group_member_add", parent.ID)
-	require.Len(t, audits, 1, "exactly one audit record, written synchronously")
-	assert.Contains(t, audits[0].AfterSummary, child.ID)
-	assert.NotEmpty(t, audits[0].ActorPrincipalID)
+			fault.Arm()
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			_, err = real.GetGroupBySlug(ctx, req.Slug)
+			assert.ErrorIs(t, err, store.ErrNotFound, "no group after the audit failure")
+			children, err := real.ListGroups(ctx, store.GroupFilter{ParentID: parent.ID}, store.ListOptions{})
+			require.NoError(t, err)
+			assert.Empty(t, children.Items, "no child edge after the audit failure")
+			afterUserGroups, err := real.GetUserGroups(ctx, DevUserID)
+			require.NoError(t, err)
+			assert.Equal(t, beforeUserGroups, afterUserGroups, "no creator-owner membership after the audit failure")
+			assert.Empty(t, grantAudits(t, real, "group_member_add", parent.ID))
+			afterAudits, _, err := real.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: "group_member_add"})
+			require.NoError(t, err)
+			assert.Len(t, afterAudits, len(beforeAudits), "no group_member_add audit records after rollback")
+
+			heal.Arm()
+			rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups", req)
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			var child store.Group
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&child))
+			audits := grantAudits(t, real, "group_member_add", parent.ID)
+			require.Len(t, audits, 1, "exactly one parent-edge audit record, written synchronously")
+			assert.Contains(t, audits[0].AfterSummary, child.ID)
+			assert.NotEmpty(t, audits[0].ActorPrincipalID)
+
+			owner, err := real.GetGroupMembership(ctx, child.ID, store.GroupMemberTypeUser, DevUserID)
+			require.NoError(t, err, "the creator is an owner of the new group")
+			assert.Equal(t, store.GroupMemberRoleOwner, owner.Role)
+			ownerAudits := grantAudits(t, real, "group_member_add", child.ID)
+			require.Len(t, ownerAudits, 1, "exactly one creator-owner audit record, written synchronously")
+			assert.Contains(t, ownerAudits[0].AfterSummary, DevUserID)
+			assert.Contains(t, ownerAudits[0].AfterSummary, `"role":"owner"`)
+			assert.Equal(t, DevUserID, ownerAudits[0].ActorPrincipalID)
+		})
+	}
 }
 
 // Group-member removal writes exactly one audit record in the same
