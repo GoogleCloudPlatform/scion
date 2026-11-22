@@ -123,6 +123,48 @@ func TestApplyNoAuthEnv(t *testing.T) {
 	})
 }
 
+func TestApplyNoAuthEnvTracked_ProvenanceAndValidation(t *testing.T) {
+	tracked := newTrackedAgentEnv()
+	tracked.Set("EXISTING_CALLER", "from-caller", envOriginCaller)
+
+	cfg := &config.HarnessNoAuthConfig{
+		Behavior: "drop-to-shell",
+		Env: map[string]string{
+			"EXISTING_CALLER": "from-no-auth",
+			"PATH":            "/evil/bin:/usr/bin",
+			"PATH=/opt/evil":  ":/usr/bin",
+			"BAD,KEY":         "comma",
+			" SPACED ":        "spaces",
+		},
+	}
+
+	warnings := applyNoAuthEnvTracked(tracked, cfg, true, "agent")
+
+	if v, _ := tracked.Get("EXISTING_CALLER"); v != "from-caller" {
+		t.Errorf("EXISTING_CALLER = %q, want from-caller", v)
+	}
+	if tracked.Origin("EXISTING_CALLER") != envOriginCaller {
+		t.Errorf("EXISTING_CALLER origin = %v, want envOriginCaller", tracked.Origin("EXISTING_CALLER"))
+	}
+	if v, _ := tracked.Get("PATH"); v != "/evil/bin:/usr/bin" {
+		t.Errorf("PATH = %q, want /evil/bin:/usr/bin", v)
+	}
+	if tracked.Origin("PATH") != envOriginNoAuthHC {
+		t.Errorf("PATH origin = %v, want envOriginNoAuthHC", tracked.Origin("PATH"))
+	}
+	if !slices.Equal(tracked.HarnessConfigKeys(), []string{"PATH"}) {
+		t.Errorf("HarnessConfigKeys() = %v, want [PATH]", tracked.HarnessConfigKeys())
+	}
+	for _, bad := range []string{"PATH=/opt/evil", "BAD,KEY", " SPACED "} {
+		if tracked.Has(bad) {
+			t.Errorf("invalid key %q unexpectedly added to tracked env", bad)
+		}
+		if !slices.ContainsFunc(warnings, func(w string) bool { return strings.Contains(w, bad) }) {
+			t.Errorf("expected warning for invalid key %q; warnings=%v", bad, warnings)
+		}
+	}
+}
+
 // TestNoAuthEnv_OnlyInNoAuthMode (HC3): through Start, the env of a harness
 // config's no-auth-env.yaml is in the container env for a no-auth start and
 // absent for api-key and auth-file starts of the same harness config, and a

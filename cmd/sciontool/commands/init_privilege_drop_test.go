@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/initenv"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
@@ -1231,7 +1232,9 @@ func TestSeamDefaultsAreRealFunctions(t *testing.T) {
 func withRunGitCloneWorkspace(t *testing.T, f func(uid, gid int, agentHome string, requirePrivilegeDrop bool) error) {
 	t.Helper()
 	orig := runGitCloneWorkspace
-	runGitCloneWorkspace = f
+	runGitCloneWorkspace = func(uid, gid int, agentHome string, requirePrivilegeDrop bool, _ initenv.Policy) error {
+		return f(uid, gid, agentHome, requirePrivilegeDrop)
+	}
 	t.Cleanup(func() { runGitCloneWorkspace = orig })
 }
 

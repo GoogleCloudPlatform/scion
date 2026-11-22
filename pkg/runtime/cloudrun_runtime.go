@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
@@ -462,7 +463,19 @@ func cloudRunHarnessEnvDenied(name string, nativeIdentity bool) bool {
 // deterministic and side-effect free, as every in-tree harness is.
 // Otherwise the name sets could differ.
 func cloudRunHarnessEnv(cfg RunConfig) (entries, denied []string) {
-	all := harnessEnvEntries(cfg, cfg.HomeDir)
+	sourced, denied := cloudRunHarnessEnvWithSource(cfg)
+	if len(sourced) == 0 {
+		return nil, denied
+	}
+	entries = make([]string, 0, len(sourced))
+	for _, e := range sourced {
+		entries = append(entries, e.Key+"="+e.Value)
+	}
+	return entries, denied
+}
+
+func cloudRunHarnessEnvWithSource(cfg RunConfig) (entries []harnessEnvEntry, denied []string) {
+	all := harnessEnvEntriesWithSource(cfg, cfg.HomeDir)
 	if len(all) == 0 {
 		return nil, nil
 	}
@@ -475,17 +488,31 @@ func cloudRunHarnessEnv(cfg RunConfig) (entries, denied []string) {
 		set[k] = true
 	}
 	for _, e := range all {
-		k, _, _ := strings.Cut(e, "=")
-		if cloudRunHarnessEnvDenied(k, cfg.CloudRunIdentity != nil) {
-			denied = append(denied, k)
+		if cloudRunHarnessEnvDenied(e.Key, cfg.CloudRunIdentity != nil) {
+			denied = append(denied, e.Key)
 			continue
 		}
-		if set[k] {
+		if set[e.Key] {
 			continue
 		}
 		entries = append(entries, e)
 	}
 	return entries, denied
+}
+
+// foldCloudRunSecretsAndAuth splits resolved auth between plain and staged
+// entries and folds non-colliding env-type secrets (plus staged extras) into
+// cfg.Env before buildCloudRunInstance runs. Shared by Run and env-emission
+// parity tests so both exercise the exact same pre-fold sequence.
+func foldCloudRunSecretsAndAuth(cfg *RunConfig, hubToken string, harnessSecrets []stagedsecrets.HarnessSecret) (secretEnvTargets []string, resolvedAuthStaged map[string]string, sizes stagedSizes, err error) {
+	_, resolvedAuthStaged = splitResolvedAuthEnv(cfg.ResolvedAuth, cloudRunResolvedAuthTaken(*cfg))
+	secretEnvTargets, sizes, err = applyStagedSecretsToEnvExtras(cfg, cloudRunEnvLimit, stagedExtras{
+		HubToken:         hubToken,
+		HarnessSecrets:   harnessSecrets,
+		ResolvedAuthEnv:  resolvedAuthStaged,
+		FieldClassErrors: true,
+	}, cloudRunRuntimeEnvKeys...)
+	return secretEnvTargets, resolvedAuthStaged, sizes, err
 }
 
 // cloudRunOwnerIDs returns the uid and gid the Cloud Run instance runs
@@ -560,7 +587,6 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// staged blob (splitResolvedAuthEnv), with the Docker rules: cfg.Env, an
 	// env-type secret and the runtime keys win over resolved auth. The
 	// discovery settings are emitted as plain env by buildCloudRunInstance.
-	_, resolvedAuthStaged := splitResolvedAuthEnv(cfg.ResolvedAuth, cloudRunResolvedAuthTaken(cfg))
 	// Deliver resolved secrets through the instance env: env-type secrets as
 	// plain variables, file/variable secrets, the hub credential, the
 	// harness secrets and the staged resolved-auth entries as the staged
@@ -568,12 +594,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// Done before any provisioning so an oversized blob fails fast; its
 	// error names only the largest field class. The blob's sizes (never
 	// names or values) are logged at every start.
-	secretEnvTargets, sizes, err := applyStagedSecretsToEnvExtras(&cfg, cloudRunEnvLimit, stagedExtras{
-		HubToken:         hubToken,
-		HarnessSecrets:   harnessSecrets,
-		ResolvedAuthEnv:  resolvedAuthStaged,
-		FieldClassErrors: true,
-	}, cloudRunRuntimeEnvKeys...)
+	secretEnvTargets, _, sizes, err := foldCloudRunSecretsAndAuth(&cfg, hubToken, harnessSecrets)
 	runtimeLog().Info("Cloud Run start: staged secrets size",
 		"agent_id", cfg.Labels["agent_id"], "total_bytes", sizes.Total, "limit_bytes", cloudRunMaxEnvValueBytes,
 		"hub_credential_bytes", sizes.HubToken, "file_secrets_bytes", sizes.FileSecrets, "harness_secrets_bytes", sizes.HarnessSecrets,
@@ -1056,6 +1077,14 @@ func (r *CloudRunRuntime) deleteOwnAfterFailedWait(ctx context.Context, c cloudr
 // so the SCION_METADATA_* settings in cfg.Env are always the hub's.
 func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) (*runpb.Instance, error) {
 	var envVars []*runpb.EnvVar
+	withheld := newHookWithheldTracker(cfg)
+	appendEnv := func(name, value string, isWithheld bool) {
+		envVars = append(envVars, &runpb.EnvVar{
+			Name:   name,
+			Values: &runpb.EnvVar_Value{Value: value},
+		})
+		withheld.Record(name, isWithheld)
+	}
 	for _, e := range cfg.Env {
 		parts := strings.SplitN(e, "=", 2)
 		if nfsPaths != nil && (parts[0] == harnessSecretsDirEnvVar || parts[0] == harnessOutputsDirEnvVar) {
@@ -1063,35 +1092,21 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			continue
 		}
 		if len(parts) == 2 {
-			envVars = append(envVars, &runpb.EnvVar{
-				Name:   parts[0],
-				Values: &runpb.EnvVar_Value{Value: parts[1]},
-			})
+			appendEnv(parts[0], parts[1], withheld.IsConfigHC(parts[0]))
 		}
 	}
 
-	envVars = append(envVars, &runpb.EnvVar{
-		Name:   "SCION_HOST_UID",
-		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", uid)},
-	})
-	envVars = append(envVars, &runpb.EnvVar{
-		Name:   "SCION_HOST_GID",
-		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", gid)},
-	})
+	appendEnv("SCION_HOST_UID", fmt.Sprintf("%d", uid), false)
+	appendEnv("SCION_HOST_GID", fmt.Sprintf("%d", gid), false)
 	// The harness secrets and outputs directories on the in-memory volume
 	// (cloudRunMemVolume), mounted with the NFS volumes below.
 	if nfsPaths != nil {
-		envVars = append(envVars,
-			&runpb.EnvVar{Name: harnessSecretsDirEnvVar, Values: &runpb.EnvVar_Value{Value: k8sHarnessSecretsDir}},
-			&runpb.EnvVar{Name: harnessOutputsDirEnvVar, Values: &runpb.EnvVar_Value{Value: k8sHarnessOutputsDir}},
-		)
+		appendEnv(harnessSecretsDirEnvVar, k8sHarnessSecretsDir, false)
+		appendEnv(harnessOutputsDirEnvVar, k8sHarnessOutputsDir, false)
 	}
 	// sciontool init opens the startup listener on this port, which the
 	// container's startup probe below checks.
-	envVars = append(envVars, &runpb.EnvVar{
-		Name:   startuplistener.EnvPort,
-		Values: &runpb.EnvVar_Value{Value: strconv.Itoa(startuplistener.Port)},
-	})
+	appendEnv(startuplistener.EnvPort, strconv.Itoa(startuplistener.Port), false)
 
 	// The harness env (GetEnv, then GetTelemetryEnv when telemetry is
 	// enabled), with the Docker rules: cfg.Env (with the env-type secrets
@@ -1100,10 +1115,9 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// below, which treat its names as set; Run's staged split
 	// (cloudRunResolvedAuthTaken) leaves the same names out. A denied name
 	// (cloudRunHarnessEnvDenied) is dropped and logged by name only.
-	harnessEnv, deniedHarnessEnv := cloudRunHarnessEnv(cfg)
+	harnessEnv, deniedHarnessEnv := cloudRunHarnessEnvWithSource(cfg)
 	for _, e := range harnessEnv {
-		k, v, _ := strings.Cut(e, "=")
-		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+		appendEnv(e.Key, e.Value, e.FromTemplate)
 	}
 	if len(deniedHarnessEnv) > 0 {
 		runtimeLog().Warn("Cloud Run start: harness env names not applied; the runtime owns them",
@@ -1126,7 +1140,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	plainAuth, stagedAuth := splitResolvedAuthEnv(cfg.ResolvedAuth, func(name string) bool { return emitted[name] })
 	for _, e := range plainAuth {
 		k, v, _ := strings.Cut(e, "=")
-		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+		appendEnv(k, v, false)
 		emitted[k] = true
 	}
 	for k := range stagedAuth {
@@ -1138,7 +1152,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// into cfg.Env), never a suppressed key.
 	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
 		k, v, _ := strings.Cut(e, "=")
-		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+		appendEnv(k, v, false)
 	}
 
 	workspaceMount := cfg.ContainerWorkspace
@@ -1233,6 +1247,12 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	// then ran without a PTY and crashed: "bubbletea: could not open TTY".
 	// A reserved name never reaches the instance, whatever its source.
 	envVars = slices.DeleteFunc(envVars, func(ev *runpb.EnvVar) bool { return reservedAgentEnvName(ev.GetName()) })
+	withheld.DeleteReserved()
+	// Emit the runtime-owned hook-withheld marker last, derived directly from
+	// the winning provenance of the entries emitted above.
+	if marker := withheld.Marker(); marker != "" {
+		envVars = append(envVars, &runpb.EnvVar{Name: envpolicy.HookWithheldEnvVar, Values: &runpb.EnvVar_Value{Value: marker}})
+	}
 	container := &runpb.Container{
 		Name:         "scion-agent",
 		Image:        cfg.Image,

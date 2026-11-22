@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/envpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/require"
 )
@@ -126,8 +127,9 @@ func TestBuildAgentEnv_HubAutoExposeDefaultIsLowestTier(t *testing.T) {
 
 // TestHubAutoExposeDefault_LosesToHarnessConfigEnvInOptsEnv is AC4 through the
 // start sequence's own helper: resolveAuthEnvOverlay injects harness-config env
-// into opts.Env (the path Hermes's SCION_AUTO_EXPOSE_PORTS=true takes), and the
-// hub default false must not override it.
+// into opts.Env (rewriting legacy SCION_AUTO_EXPOSE_PORTS to
+// HARNESS_HINT_AUTO_EXPOSE_PORTS), and the hub default false must not shadow
+// the harness hint.
 func TestHubAutoExposeDefault_LosesToHarnessConfigEnvInOptsEnv(t *testing.T) {
 	settings := g3TestSettings(map[string]string{api.EnvAutoExposePorts: "true"})
 	opts := api.StartOptions{Name: "hermes-agent", BrokerMode: true, Env: map[string]string{}}
@@ -135,8 +137,11 @@ func TestHubAutoExposeDefault_LosesToHarnessConfigEnvInOptsEnv(t *testing.T) {
 
 	hd := &api.HubAgentDefaults{AutoExposePorts: boolPtr(false)}
 	env, _, _, _ := buildAgentEnv(nil, opts.Env, hd.DefaultEnv(), true)
-	if got, _ := envValue(env, api.EnvAutoExposePorts); got != "true" {
-		t.Errorf("%s = %q, want harness-config value %q over hub default false", api.EnvAutoExposePorts, got, "true")
+	if got, _ := envValue(env, envpolicy.HintAutoExposePorts); got != "true" {
+		t.Errorf("%s = %q, want harness-config hint value %q", envpolicy.HintAutoExposePorts, got, "true")
+	}
+	if got, found := envValue(env, api.EnvAutoExposePorts); found {
+		t.Errorf("%s = %q (found=true), want omitted so hub default false does not shadow harness hint", api.EnvAutoExposePorts, got)
 	}
 }
 

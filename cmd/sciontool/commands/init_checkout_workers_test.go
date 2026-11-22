@@ -93,6 +93,9 @@ func (f *checkoutCloneFixture) runGit(dir string, args ...string) {
 
 func (f *checkoutCloneFixture) setCommonEnv(t *testing.T, workspace string) {
 	t.Helper()
+	origResolve := resolveGitForInit
+	resolveGitForInit = func(string) (string, error) { return filepath.Join(f.binDir, "git"), nil }
+	t.Cleanup(func() { resolveGitForInit = origResolve })
 	t.Setenv("PATH", f.binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", f.root)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(f.root, "gc"))
