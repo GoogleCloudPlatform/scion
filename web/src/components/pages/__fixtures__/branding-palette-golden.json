@@ -1,0 +1,587 @@
+{
+  "ramps": {
+    "#0d9488": {
+      "100": "#daf1ed",
+      "200": "#b3e2db",
+      "300": "#7dc9bf",
+      "400": "#48ada1",
+      "50": "#eefaf8",
+      "500": "#008e82",
+      "600": "#007268",
+      "700": "#005d55",
+      "800": "#004b45",
+      "900": "#003c36",
+      "950": "#002a26"
+    },
+    "#1e3a8a": {
+      "100": "#e4edff",
+      "200": "#c7d9ff",
+      "300": "#9dbbff",
+      "400": "#799cee",
+      "50": "#f3f7ff",
+      "500": "#587cd2",
+      "600": "#4262b1",
+      "700": "#344f94",
+      "800": "#2a4078",
+      "900": "#21335e",
+      "950": "#162343"
+    },
+    "#3b82f6": {
+      "100": "#e2edff",
+      "200": "#c3daff",
+      "300": "#94bdff",
+      "400": "#629dff",
+      "50": "#f3f7ff",
+      "500": "#347bee",
+      "600": "#1d60cb",
+      "700": "#134eaa",
+      "800": "#0f3f8a",
+      "900": "#0e326c",
+      "950": "#09234d"
+    },
+    "#555555": {
+      "100": "#ececec",
+      "200": "#d8d8d8",
+      "300": "#bcbcbc",
+      "400": "#9e9e9e",
+      "50": "#f7f7f7",
+      "500": "#7e7e7e",
+      "600": "#656565",
+      "700": "#525252",
+      "800": "#424242",
+      "900": "#353535",
+      "950": "#242424"
+    },
+    "#64748b": {
+      "100": "#e8edf3",
+      "200": "#d1d9e6",
+      "300": "#b0bdd0",
+      "400": "#8f9fb5",
+      "50": "#f5f7fa",
+      "500": "#6f8097",
+      "600": "#57667b",
+      "700": "#465366",
+      "800": "#394352",
+      "900": "#2d3541",
+      "950": "#1f252d"
+    },
+    "#7c3aed": {
+      "100": "#edeaff",
+      "200": "#dbd3ff",
+      "300": "#c1b1ff",
+      "400": "#a88bff",
+      "50": "#f7f6ff",
+      "500": "#905dff",
+      "600": "#793de4",
+      "700": "#642ec0",
+      "800": "#50269c",
+      "900": "#3f207a",
+      "950": "#2c1657"
+    },
+    "#d97706": {
+      "100": "#ffe8d8",
+      "200": "#ffcfac",
+      "300": "#f7ab6f",
+      "400": "#e38736",
+      "50": "#fff5ee",
+      "500": "#c06800",
+      "600": "#9a5200",
+      "700": "#7f4300",
+      "800": "#683500",
+      "900": "#532a00",
+      "950": "#3c1c00"
+    },
+    "#dc2626": {
+      "100": "#ffe7e4",
+      "200": "#ffcdc6",
+      "300": "#ffa499",
+      "400": "#ff7165",
+      "50": "#fff5f3",
+      "500": "#ec3934",
+      "600": "#c71a1d",
+      "700": "#a70b12",
+      "800": "#880c0f",
+      "900": "#6b0f0f",
+      "950": "#4c0a09"
+    },
+    "#eab308": {
+      "100": "#f8ebd0",
+      "200": "#f0d69e",
+      "300": "#dfb659",
+      "400": "#c69700",
+      "50": "#fdf7e9",
+      "500": "#9f7900",
+      "600": "#806000",
+      "700": "#694e00",
+      "800": "#553f00",
+      "900": "#443200",
+      "950": "#302200"
+    }
+  },
+  "scenarios": [
+    {
+      "name": "accent-teal",
+      "input": {
+        "accentColor": "#0d9488"
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#007268",
+        "primary_hover": "#005d55",
+        "primary_active": "#004b45",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#48ada1",
+        "primary_hover": "#7dc9bf",
+        "primary_active": "#b3e2db",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "accent-amber",
+      "input": {
+        "accentColor": "#d97706"
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#9a5200",
+        "primary_hover": "#7f4300",
+        "primary_active": "#683500",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#d97706",
+        "primary_hover": "#f7ab6f",
+        "primary_active": "#ffcfac",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "accent-navy-dark-hover",
+      "input": {
+        "accentColor": "#1e3a8a"
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#1e3a8a",
+        "primary_hover": "#21335e",
+        "primary_active": "#162343",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#799cee",
+        "primary_hover": "#9dbbff",
+        "primary_active": "#c7d9ff",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "accent-promo-passes-surface-fails-bg",
+      "input": {
+        "accentColor": "#747474"
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#656565",
+        "primary_hover": "#525252",
+        "primary_active": "#424242",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#9e9e9e",
+        "primary_hover": "#bcbcbc",
+        "primary_active": "#d8d8d8",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "accent-deep-no-promo",
+      "input": {
+        "accentColor": "#14532d"
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#14532d",
+        "primary_hover": "#1d3b26",
+        "primary_active": "#13291a",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#73aa82",
+        "primary_hover": "#99c6a5",
+        "primary_active": "#c3e0ca",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "boundary-text-pass-4.5002",
+      "input": {
+        "palette": {
+          "light": {
+            "text_muted": "#7a7673"
+          }
+        }
+      },
+      "hasCustomPalette": false,
+      "errors": [
+        "server.hub.branding.palette.light.text_muted|contrast (#7a7673) against light.bg (#f8fafc) is 4.30:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_muted|contrast (#7a7673) against light.bg_subtle (#f1f5f9) is 4.11:1, minimum WCAG AA is 4.50:1"
+      ]
+    },
+    {
+      "name": "boundary-text-fail-4.4990",
+      "input": {
+        "palette": {
+          "light": {
+            "text_muted": "#737874"
+          }
+        }
+      },
+      "hasCustomPalette": false,
+      "errors": [
+        "server.hub.branding.palette.light.text_muted|contrast (#737874) against light.bg (#f8fafc) is 4.30:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_muted|contrast (#737874) against light.bg_subtle (#f1f5f9) is 4.11:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_muted|contrast (#737874) against light.surface (#ffffff) is 4.50:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_muted|contrast (#737874) against light.surface_raised (#ffffff) is 4.50:1, minimum WCAG AA is 4.50:1"
+      ]
+    },
+    {
+      "name": "boundary-ui-pass-3.0001",
+      "input": {
+        "palette": {
+          "neutral": {
+            "600": "#929692"
+          }
+        }
+      },
+      "hasCustomPalette": false,
+      "errors": [
+        "server.hub.branding.palette.light.text_secondary|contrast (#929692) against light.bg (#f8fafc) is 2.87:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_secondary|contrast (#929692) against light.bg_subtle (#f1f5f9) is 2.74:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_secondary|contrast (#929692) against light.surface (#ffffff) is 3.00:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_secondary|contrast (#929692) against light.surface_raised (#ffffff) is 3.00:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.neutral.600|contrast (#ffffff) against light --sl-color-neutral-600 (#929692) is 3.00:1, minimum WCAG AA is 4.50:1"
+      ]
+    },
+    {
+      "name": "boundary-ui-fail-2.9981",
+      "input": {
+        "palette": {
+          "neutral": {
+            "600": "#959594"
+          }
+        }
+      },
+      "hasCustomPalette": false,
+      "errors": [
+        "server.hub.branding.palette.light.text_secondary|contrast (#959594) against light.bg (#f8fafc) is 2.87:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_secondary|contrast (#959594) against light.bg_subtle (#f1f5f9) is 2.74:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_secondary|contrast (#959594) against light.surface (#ffffff) is 3.00:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_secondary|contrast (#959594) against light.surface_raised (#ffffff) is 3.00:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.neutral.600|contrast (#959594) against light.surface (UI border contrast) (#ffffff) is 3.00:1, minimum WCAG AA is 3.00:1",
+        "server.hub.branding.palette.neutral.600|contrast (#ffffff) against light --sl-color-neutral-600 (#959594) is 3.00:1, minimum WCAG AA is 4.50:1"
+      ]
+    },
+    {
+      "name": "single-mode-dark-text-only",
+      "input": {
+        "palette": {
+          "dark": {
+            "text": "#ffffff"
+          }
+        }
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#3b82f6",
+        "primary_hover": "#2563eb",
+        "primary_active": "#1d4ed8",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#ffffff",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#60a5fa",
+        "primary_hover": "#93c5fd",
+        "primary_active": "#3b82f6",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "neutral-800-passing-override",
+      "input": {
+        "palette": {
+          "neutral": {
+            "800": "#202020"
+          }
+        }
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#202020",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#3b82f6",
+        "primary_hover": "#2563eb",
+        "primary_active": "#1d4ed8",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#202020",
+        "surface": "#202020",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#60a5fa",
+        "primary_hover": "#93c5fd",
+        "primary_active": "#bfdbfe",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "neutral-800-failing-dark-hover-trigger",
+      "input": {
+        "palette": {
+          "neutral": {
+            "800": "#64748b"
+          }
+        }
+      },
+      "hasCustomPalette": false,
+      "errors": [
+        "server.hub.branding.palette.danger.300|contrast (#64748b) against dark --sl-color-danger-600 (step 300) (#fca5a5) is 2.51:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.danger.300|dark badge contrast (#fca5a5 on 20% #ef4444 over dark.surface #64748b) is 2.58:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.danger.400|contrast (#64748b) against dark --sl-color-danger-500 hover (step 400) (#f87171) is 1.72:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.primary|contrast (#60a5fa) against dark.surface (#64748b) is 1.87:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text_muted|contrast (#94a3b8) against dark.bg_subtle (#64748b) is 1.86:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text_muted|contrast (#94a3b8) against dark.surface (#64748b) is 1.86:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text_secondary|contrast (#cbd5e1) against dark.bg_subtle (#64748b) is 3.21:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text_secondary|contrast (#cbd5e1) against dark.surface (#64748b) is 3.21:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text|contrast (#f1f5f9) against dark.bg_subtle (#64748b) is 4.34:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.dark.text|contrast (#f1f5f9) against dark.surface (#64748b) is 4.34:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text|contrast (#64748b) against light.bg_subtle (#f1f5f9) is 4.34:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.neutral.300|contrast (#64748b) against dark --sl-color-neutral-600 (step 300) (#cbd5e1) is 3.21:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.neutral.300|dark badge contrast (#cbd5e1 on 20% #64748b over dark.surface #64748b) is 3.21:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.neutral.400|contrast (#64748b) against dark --sl-color-neutral-500 hover (step 400) (#94a3b8) is 1.86:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.neutral.400|contrast (#94a3b8) against dark.surface (UI border contrast) (#64748b) is 1.86:1, minimum WCAG AA is 3.00:1",
+        "server.hub.branding.palette.neutral.800|contrast (#64748b) against light badge neutral-200 (#e2e8f0) is 3.86:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.primary.300|contrast (#64748b) against dark --sl-color-primary-600 (step 300) (#93c5fd) is 2.64:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.primary.300|dark badge contrast (#93c5fd on 20% #3b82f6 over dark.surface #64748b) is 2.54:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.primary.400|contrast (#64748b) against dark --sl-color-primary-500 hover (step 400) (#60a5fa) is 1.87:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.success.300|contrast (#64748b) against dark --sl-color-success-600 (step 300) (#86efac) is 3.39:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.success.300|dark badge contrast (#86efac on 20% #22c55e over dark.surface #64748b) is 2.97:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.success.400|contrast (#64748b) against dark --sl-color-success-500 hover (step 400) (#4ade80) is 2.73:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.warning.300|contrast (#64748b) against dark --sl-color-warning-600 (step 300) (#fcd34d) is 3.30:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.warning.300|dark badge contrast (#fcd34d on 20% #f59e0b over dark.surface #64748b) is 2.87:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.warning.400|contrast (#64748b) against dark --sl-color-warning-500 hover (step 400) (#fbbf24) is 2.85:1, minimum WCAG AA is 4.50:1"
+      ]
+    },
+    {
+      "name": "light-primary-explicit-dark-hover-delta",
+      "input": {
+        "palette": {
+          "light": {
+            "primary": "#1d4ed8"
+          }
+        }
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#1d4ed8",
+        "primary_hover": "#1e48ba",
+        "primary_active": "#183b97",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#6e9bff",
+        "primary_hover": "#9bbcff",
+        "primary_active": "#c6d9ff",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "light-primary-very-dark-fallback-700",
+      "input": {
+        "palette": {
+          "light": {
+            "primary": "#052e16"
+          }
+        }
+      },
+      "hasCustomPalette": true,
+      "light": {
+        "bg": "#f8fafc",
+        "bg_subtle": "#f1f5f9",
+        "surface": "#ffffff",
+        "surface_raised": "#ffffff",
+        "text": "#1e293b",
+        "text_secondary": "#475569",
+        "text_muted": "#64748b",
+        "border": "#e2e8f0",
+        "primary": "#052e16",
+        "primary_hover": "#395943",
+        "primary_active": "#2e4836",
+        "primary_text": "#ffffff"
+      },
+      "dark": {
+        "bg": "#0f172a",
+        "bg_subtle": "#1e293b",
+        "surface": "#1e293b",
+        "surface_raised": "#334155",
+        "text": "#f1f5f9",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#334155",
+        "primary": "#81a78b",
+        "primary_hover": "#a4c3ac",
+        "primary_active": "#c9dece",
+        "primary_text": "#0f172a"
+      },
+      "errors": []
+    },
+    {
+      "name": "neutral-50-backing-light-bg",
+      "input": {
+        "palette": {
+          "neutral": {
+            "50": "#334155"
+          }
+        }
+      },
+      "hasCustomPalette": false,
+      "errors": [
+        "server.hub.branding.palette.light.primary|contrast (#2563eb) against light.bg (#334155) is 2.00:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_muted|contrast (#64748b) against light.bg (#334155) is 2.18:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text_secondary|contrast (#475569) against light.bg (#334155) is 1.37:1, minimum WCAG AA is 4.50:1",
+        "server.hub.branding.palette.light.text|contrast (#1e293b) against light.bg (#334155) is 1.41:1, minimum WCAG AA is 4.50:1"
+      ]
+    }
+  ]
+}

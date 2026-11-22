@@ -535,7 +535,7 @@ describe('scion-page-admin-branding', () => {
     expect(query(element, '[data-contrast-advisory]')).toBeNull();
   });
 
-  it('shows advisory WCAG contrast warning when loaded CLI palette overrides fail AA', async () => {
+  it('shows advisory WCAG contrast warning without live-region noise when loaded CLI palette overrides fail AA', async () => {
     const handler = createHandler({
       config: {
         settings_tier: 'db',
@@ -556,8 +556,47 @@ describe('scion-page-admin-branding', () => {
     expect(query(element, '[data-contrast-pair="light.primary:surface"]')?.textContent).toContain(
       'AA Fail'
     );
-    expect(query(element, '[data-contrast-advisory]')?.textContent).toContain(
-      'server.hub.branding.palette.light.primary'
+    const advisory = query<HTMLElement>(element, '[data-contrast-advisory]')!;
+    expect(advisory.textContent).toContain('server.hub.branding.palette.light.primary');
+    // Must not use <sl-alert> / role="alert" / aria-live so color drags do not announce noisily
+    expect(advisory.tagName.toLowerCase()).toBe('div');
+    expect(advisory.getAttribute('role')).toBeNull();
+    expect(advisory.getAttribute('aria-live')).toBeNull();
+    expect(advisory.querySelector('[aria-live]')).toBeNull();
+
+    // Ramp swatches expose hex values to screen readers via .sr-only
+    const step600 = query<HTMLElement>(element, '[data-ramp-step="600"]')!;
+    expect(step600.querySelector('.sr-only')?.textContent?.trim()).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it('shows neutral Stock badges (not AA Fail) for unenforced stock mode pairs when only the other mode is customized', async () => {
+    const handler = createHandler({
+      config: {
+        settings_tier: 'db',
+        server: {
+          hub: {
+            branding: {
+              palette: {
+                dark: { text: '#ffffff' },
+              },
+            },
+          },
+        },
+        section_metadata: { branding: { source: 'db', origin: 'managed', revision: 2 } },
+      },
+    });
+    element = await mountPage(handler);
+
+    const preview = query<HTMLElement>(element, 'scion-branding-preview')!;
+    expect(
+      preview.shadowRoot?.querySelector('[data-preview-contrast-summary="pass"]')?.textContent
+    ).toContain('WCAG AA Pass');
+    expect(query(element, '[data-contrast-pair="light.primary:surface"]')?.textContent).toContain(
+      'Stock'
     );
+    expect(
+      query(element, '[data-contrast-pair="light.primary:surface"]')?.textContent
+    ).not.toContain('AA Fail');
+    expect(query(element, '[data-contrast-advisory]')).toBeNull();
   });
 });

@@ -723,6 +723,18 @@ export class ScionPageAdminBranding extends LitElement {
 
     .contrast-advisory {
       margin-top: 1rem;
+      padding: 0.75rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--scion-warning-border, #fcd34d);
+      background: var(--scion-warning-bg, #fffbeb);
+      color: var(--scion-warning-text, #92400e);
+      font-size: 0.8125rem;
+    }
+
+    .contrast-advisory-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
     }
 
     .contrast-advisory ul {
@@ -1333,13 +1345,10 @@ export class ScionPageAdminBranding extends LitElement {
     `;
   }
 
-  private renderContrastPairRow(
-    pair: ContrastPairBadge,
-    hasCustomPalette: boolean
-  ): TemplateResult {
-    const badgeVariant = !hasCustomPalette ? 'neutral' : pair.pass ? 'success' : 'danger';
-    const statusText = !hasCustomPalette ? 'Stock' : pair.pass ? 'AA Pass' : 'AA Fail';
-    const iconName = !hasCustomPalette
+  private renderContrastPairRow(pair: ContrastPairBadge): TemplateResult {
+    const badgeVariant = !pair.enforced ? 'neutral' : pair.pass ? 'success' : 'danger';
+    const statusText = !pair.enforced ? 'Stock' : pair.pass ? 'AA Pass' : 'AA Fail';
+    const iconName = !pair.enforced
       ? 'info-circle'
       : pair.pass
         ? 'check-circle'
@@ -1389,6 +1398,7 @@ export class ScionPageAdminBranding extends LitElement {
               <div class="ramp-swatch" data-ramp-step=${step} title="primary-${step}: ${hexVal}">
                 <span class="ramp-swatch-chip" style="--swatch-color: ${hexVal}"></span>
                 <span class="ramp-swatch-step">${step}</span>
+                <span class="sr-only">${hexVal}</span>
               </div>
             `;
           })}
@@ -1402,9 +1412,7 @@ export class ScionPageAdminBranding extends LitElement {
             Light Mode Contrast (min 4.50:1)
           </span>
           <div class="contrast-badge-list">
-            ${resolved.keyPairs.light.map((pair) =>
-              this.renderContrastPairRow(pair, resolved.hasCustomPalette)
-            )}
+            ${resolved.keyPairs.light.map((pair) => this.renderContrastPairRow(pair))}
           </div>
         </div>
         <div class="contrast-group" data-contrast-group="dark">
@@ -1413,26 +1421,29 @@ export class ScionPageAdminBranding extends LitElement {
             Dark Mode Contrast (min 4.50:1)
           </span>
           <div class="contrast-badge-list">
-            ${resolved.keyPairs.dark.map((pair) =>
-              this.renderContrastPairRow(pair, resolved.hasCustomPalette)
-            )}
+            ${resolved.keyPairs.dark.map((pair) => this.renderContrastPairRow(pair))}
           </div>
         </div>
       </div>
 
       ${resolved.hasCustomPalette && failedChecks.length > 0
         ? html`
-            <sl-alert class="contrast-advisory" variant="warning" open data-contrast-advisory>
-              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-              <strong>WCAG 2.1 AA contrast warning (advisory):</strong>
-              ${failedChecks.length} ${failedChecks.length === 1 ? 'pair is' : 'pairs are'} below
-              the minimum contrast threshold. Server validation enforces WCAG 2.1 AA on save.
+            <div class="contrast-advisory" data-contrast-advisory>
+              <div class="contrast-advisory-header">
+                <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                <span>
+                  <strong>WCAG 2.1 AA contrast warning (advisory):</strong>
+                  ${failedChecks.length} ${failedChecks.length === 1 ? 'pair is' : 'pairs are'}
+                  below the minimum contrast threshold. Server validation enforces WCAG 2.1 AA on
+                  save.
+                </span>
+              </div>
               <ul>
                 ${failedChecks
                   .slice(0, 5)
                   .map((c) => html`<li><code>${c.path}</code>: ${c.message}</li>`)}
               </ul>
-            </sl-alert>
+            </div>
           `
         : nothing}
     `;

@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   OKLCH_SHADE_ANCHORS,
@@ -26,7 +28,26 @@ import {
   isValidHexColor,
   relativeLuminance,
   resolveBrandingPalette,
+  type BrandingPaletteInput,
+  type BrandingScaleMap,
+  type BrandingSemanticTokens,
 } from './admin-branding-contrast.js';
+
+interface GoldenFixture {
+  ramps: Record<string, BrandingScaleMap>;
+  scenarios: Array<{
+    name: string;
+    input: BrandingPaletteInput;
+    hasCustomPalette: boolean;
+    light?: BrandingSemanticTokens;
+    dark?: BrandingSemanticTokens;
+    errors: string[];
+  }>;
+}
+
+const golden = JSON.parse(
+  readFileSync(resolve(__dirname, '__fixtures__/branding-palette-golden.json'), 'utf8')
+) as GoldenFixture;
 
 describe('admin-branding-contrast', () => {
   describe('WCAG 2.1 luminance and contrast vectors', () => {
@@ -246,6 +267,52 @@ describe('admin-branding-contrast', () => {
       expect(res.syntaxErrors[0].path).toBe('server.hub.branding.accent_color');
       expect(res.keyPairs.light).toHaveLength(3);
       expect(res.keyPairs.dark).toHaveLength(3);
+      expect(res.keyPairs.light.every((p) => !p.enforced)).toBe(true);
+      expect(res.keyPairs.dark.every((p) => !p.enforced)).toBe(true);
     });
+
+    it('marks unenforced stock mode primary pairs as enforced=false when only the sibling mode is customized', () => {
+      // Only dark.text customized -> neither light nor dark primary is recalculated or enforced
+      const darkTextOnly = resolveBrandingPalette({ palette: { dark: { text: '#ffffff' } } });
+      expect(darkTextOnly.summary.allPass).toBe(true);
+      expect(darkTextOnly.keyPairs.light.every((p) => !p.enforced)).toBe(true);
+      expect(darkTextOnly.keyPairs.dark.every((p) => !p.enforced)).toBe(true);
+
+      // neutral.800 backs dark.surface (enforcing dark primary) but not light.bg/surface
+      const neutral800 = resolveBrandingPalette({ palette: { neutral: { '800': '#202020' } } });
+      expect(neutral800.summary.allPass).toBe(true);
+      expect(neutral800.keyPairs.light.every((p) => !p.enforced)).toBe(true);
+      expect(neutral800.keyPairs.dark.every((p) => p.enforced && p.pass)).toBe(true);
+    });
+  });
+
+  describe('Go golden parity vectors (exact hex, semantic tokens, and error messages)', () => {
+    it.each(Object.entries(golden.ramps))(
+      'generateOKLCHScale(%s) matches Go GenerateOKLCHScale byte-for-byte',
+      (accent, expectedScale) => {
+        expect(generateOKLCHScale(accent)).toEqual(expectedScale);
+      }
+    );
+
+    it.each(golden.scenarios)(
+      'scenario "$name" matches Go ResolveBranding/ValidateBranding exactly',
+      (scenario) => {
+        const res = resolveBrandingPalette(scenario.input);
+        const actualErrors = res.checks
+          .filter((c) => !c.pass)
+          .map((c) => `${c.path}|${c.message}`)
+          .sort();
+        expect(actualErrors).toEqual(scenario.errors);
+
+        if (scenario.errors.length === 0) {
+          expect(res.summary.allPass).toBe(true);
+          expect(res.hasCustomPalette).toBe(scenario.hasCustomPalette);
+          expect(res.light).toEqual(scenario.light);
+          expect(res.dark).toEqual(scenario.dark);
+        } else {
+          expect(res.summary.allPass).toBe(false);
+        }
+      }
+    );
   });
 });

@@ -111,6 +111,8 @@ export interface ContrastPairBadge {
   ratio: number;
   minRatio: number;
   pass: boolean;
+  /** True when the server enforces this mode's primary contrast rules for the current input. */
+  enforced: boolean;
 }
 
 export interface ResolvedBrandingPalette {
@@ -595,7 +597,9 @@ const SEMANTIC_KEYS: readonly (keyof BrandingSemanticTokens)[] = [
 
 function buildKeyPairs(
   light: BrandingSemanticTokens,
-  dark: BrandingSemanticTokens
+  dark: BrandingSemanticTokens,
+  enforcedLight: boolean,
+  enforcedDark: boolean
 ): ResolvedBrandingPalette['keyPairs'] {
   const makePair = (
     id: string,
@@ -603,6 +607,7 @@ function buildKeyPairs(
     label: string,
     fgHex: string,
     bgHex: string,
+    enforced: boolean,
     minRatio = WCAG_AA_TEXT_MIN
   ): ContrastPairBadge => {
     const ratio = contrastRatio(fgHex, bgHex) ?? 1.0;
@@ -615,6 +620,7 @@ function buildKeyPairs(
       ratio,
       minRatio,
       pass: ratio + CONTRAST_EPSILON >= minRatio,
+      enforced,
     };
   };
 
@@ -625,26 +631,50 @@ function buildKeyPairs(
         'light',
         'Primary on Surface',
         light.primary,
-        light.surface
+        light.surface,
+        enforcedLight
       ),
-      makePair('light.primary:bg', 'light', 'Primary on Background', light.primary, light.bg),
+      makePair(
+        'light.primary:bg',
+        'light',
+        'Primary on Background',
+        light.primary,
+        light.bg,
+        enforcedLight
+      ),
       makePair(
         'light.primary_text:primary',
         'light',
         'Text on Primary',
         light.primary_text,
-        light.primary
+        light.primary,
+        enforcedLight
       ),
     ],
     dark: [
-      makePair('dark.primary:surface', 'dark', 'Primary on Surface', dark.primary, dark.surface),
-      makePair('dark.primary:bg', 'dark', 'Primary on Background', dark.primary, dark.bg),
+      makePair(
+        'dark.primary:surface',
+        'dark',
+        'Primary on Surface',
+        dark.primary,
+        dark.surface,
+        enforcedDark
+      ),
+      makePair(
+        'dark.primary:bg',
+        'dark',
+        'Primary on Background',
+        dark.primary,
+        dark.bg,
+        enforcedDark
+      ),
       makePair(
         'dark.primary_text:primary',
         'dark',
         'Text on Primary',
         dark.primary_text,
-        dark.primary
+        dark.primary,
+        enforcedDark
       ),
     ],
   };
@@ -682,7 +712,7 @@ export function resolveBrandingPalette(input: BrandingPaletteInput): ResolvedBra
       syntaxErrors,
       checks,
       summary: { total: 0, passed: 0, failed: 0, allPass: true },
-      keyPairs: buildKeyPairs(light, dark),
+      keyPairs: buildKeyPairs(light, dark, false, false),
     };
   }
 
@@ -777,7 +807,7 @@ export function resolveBrandingPalette(input: BrandingPaletteInput): ResolvedBra
       syntaxErrors,
       checks,
       summary: { total: 0, passed: 0, failed: 0, allPass: true },
-      keyPairs: buildKeyPairs(light, dark),
+      keyPairs: buildKeyPairs(light, dark, false, false),
     };
   }
 
@@ -1328,6 +1358,6 @@ export function resolveBrandingPalette(input: BrandingPaletteInput): ResolvedBra
       failed,
       allPass: failed === 0,
     },
-    keyPairs: buildKeyPairs(light, dark),
+    keyPairs: buildKeyPairs(light, dark, recalcLightPrimary, recalcDarkPrimary),
   };
 }
