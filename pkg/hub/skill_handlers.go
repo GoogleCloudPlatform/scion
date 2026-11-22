@@ -1710,6 +1710,12 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
+	}
+
 	var req ResolveSkillsRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())

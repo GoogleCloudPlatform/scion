@@ -17,19 +17,26 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,16 +136,24 @@ type standingCoverageFixture struct {
 	tokC            string
 	grants          map[string]string
 	skillID         string
+	skillSlug       string
+	globalSkillID   string
 	templateID      string
+	globalTplID     string
 	harnessConfigID string
+	brokerID        string
+	artifactID      string
 }
 
 // agentStandingProbe describes one agent-callable credential, token, or
-// secret-issuing HTTP route that must refuse an orphaned agent.
+// secret-issuing HTTP route (and optional authzop Variant) that must refuse an
+// orphaned agent.
 type agentStandingProbe struct {
 	// key is the canonical "METHOD /path" pattern matching authzop / routeMetadataTable.
 	key string
-	// label distinguishes multiple probes sharing one key (e.g. scope=project vs scope=hub).
+	// variant is the authzop EntryPoint.Variant (empty when the entry point has no Variant).
+	variant string
+	// label distinguishes multiple probes sharing one key when variant is empty.
 	label   string
 	method  string
 	path    func(f *standingCoverageFixture, agent *store.Agent) string
@@ -146,15 +161,22 @@ type agentStandingProbe struct {
 	wantDen func(t *testing.T, rec *httptest.ResponseRecorder, label string)
 }
 
+func (p agentStandingProbe) variantKey() string {
+	return normalizeStandingRouteVariantKey(p.key, p.method, p.variant)
+}
+
 func (p agentStandingProbe) name() string {
+	if p.variant != "" {
+		return p.key + " [" + p.variant + "]"
+	}
 	if p.label != "" {
 		return p.key + " [" + p.label + "]"
 	}
 	return p.key
 }
 
-// nonAgentCredentialRoute describes a ResponseCredential route that must
-// refuse even an active agent token.
+// nonAgentCredentialRoute describes a ResponseCredential route (or variant)
+// that must refuse even an active agent token with 401 or 403.
 type nonAgentCredentialRoute struct {
 	reason string
 	method string
@@ -172,6 +194,17 @@ func normalizeStandingRouteKey(pattern, method string) string {
 		method = http.MethodPost
 	}
 	return method + " " + pattern
+}
+
+// normalizeStandingRouteVariantKey canonicalizes an authzop entry point into
+// "METHOD /path" (when variant is empty) or "METHOD /path [variant]" so
+// distinct variants of the same route are tracked independently by the census.
+func normalizeStandingRouteVariantKey(pattern, method, variant string) string {
+	base := normalizeStandingRouteKey(pattern, method)
+	if variant != "" {
+		return base + " [" + variant + "]"
+	}
+	return base
 }
 
 // TestAgentStanding_CredentialRoutesCoverage structurally guards against a new
@@ -312,9 +345,9 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			wantDen: assertForbidden,
 		},
 		{
-			key:    "GET /api/v1/env",
-			label:  "scope=hub",
-			method: http.MethodGet,
+			key:     "GET /api/v1/env",
+			variant: "scope=hub",
+			method:  http.MethodGet,
 			path: func(*standingCoverageFixture, *store.Agent) string {
 				return "/api/v1/env?scope=hub"
 			},
@@ -332,9 +365,9 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			wantDen: assertForbidden,
 		},
 		{
-			key:    "GET /api/v1/env/{key}",
-			label:  "scope=hub",
-			method: http.MethodGet,
+			key:     "GET /api/v1/env/{key}",
+			variant: "scope=hub",
+			method:  http.MethodGet,
 			path: func(*standingCoverageFixture, *store.Agent) string {
 				return "/api/v1/env/API_KEY?scope=hub"
 			},
@@ -387,23 +420,55 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			wantDen: assertNotFound,
 		},
 		{
-			key:    "POST /api/v1/skills/resolve",
-			method: http.MethodPost,
-			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills/resolve" },
+			key:     "POST /api/v1/skills/resolve",
+			variant: "ref=skill",
+			method:  http.MethodPost,
+			path:    func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills/resolve" },
+			body: func(f *standingCoverageFixture) any {
+				return ResolveSkillsRequest{
+					Skills:    []ResolveSkillRef{{URI: "skill://" + f.skillSlug}},
+					ProjectID: f.projectID,
+				}
+			},
+			wantDen: assertForbidden,
+		},
+		{
+			key:     "POST /api/v1/skills/resolve",
+			variant: "ref=registry",
+			method:  http.MethodPost,
+			path:    func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills/resolve" },
+			body: func(f *standingCoverageFixture) any {
+				return ResolveSkillsRequest{
+					Skills:    []ResolveSkillRef{{URI: "skill://other-registry/my-skill"}},
+					ProjectID: f.projectID,
+				}
+			},
+			wantDen: assertForbidden,
+		},
+		{
+			key:     "POST /api/v1/skills/resolve",
+			variant: "ref=gh,project=named",
+			method:  http.MethodPost,
+			path:    func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills/resolve" },
 			body: func(f *standingCoverageFixture) any {
 				return ResolveSkillsRequest{
 					Skills:    []ResolveSkillRef{{URI: "gh://acme/private-repo/SKILL.md@main"}},
 					ProjectID: f.projectID,
 				}
 			},
-			wantDen: func(t *testing.T, rec *httptest.ResponseRecorder, label string) {
-				require.Equal(t, http.StatusOK, rec.Code, "%s: %s", label, rec.Body.String())
-				var resp ResolveSkillsResponse
-				require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp), label)
-				assert.Empty(t, resp.Resolved, label)
-				require.NotEmpty(t, resp.Errors, label)
-				assert.Equal(t, "forbidden", resp.Errors[0].Code, "%s: %+v", label, resp.Errors)
+			wantDen: assertForbidden,
+		},
+		{
+			key:     "POST /api/v1/skills/resolve",
+			variant: "ref=gh,project=none",
+			method:  http.MethodPost,
+			path:    func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills/resolve" },
+			body: func(*standingCoverageFixture) any {
+				return ResolveSkillsRequest{
+					Skills: []ResolveSkillRef{{URI: "gh://acme/public-repo/SKILL.md@main"}},
+				}
 			},
+			wantDen: assertForbidden,
 		},
 		{
 			key:    "POST /api/v1/projects/{projectId}/webhook-endpoints",
@@ -426,19 +491,31 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			wantDen: assertForbidden,
 		},
 		{
-			key:    "POST /api/v1/skills",
-			method: http.MethodPost,
-			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills" },
+			key:     "POST /api/v1/skills",
+			variant: "scope=project",
+			method:  http.MethodPost,
+			path:    func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/skills" },
 			body: func(f *standingCoverageFixture) any {
 				return map[string]any{"name": "standing-test-skill", "scope": "project", "scopeId": f.projectID}
 			},
 			wantDen: assertForbidden,
 		},
+		{
+			key:    "POST /api/v1/artifacts/{id}/versions/{seq}/view",
+			method: http.MethodPost,
+			path: func(f *standingCoverageFixture, _ *store.Agent) string {
+				return "/api/v1/artifacts/" + f.artifactID + "/versions/1/view"
+			},
+			body:    func(*standingCoverageFixture) any { return nil },
+			wantDen: assertNotFound,
+		},
 	}
 
-	probeKeys := make(map[string]bool, len(probes))
+	probeBaseKeys := make(map[string]bool, len(probes))
+	probeVariantKeys := make(map[string]bool, len(probes))
 	for _, p := range probes {
-		probeKeys[p.key] = true
+		probeBaseKeys[p.key] = true
+		probeVariantKeys[p.variantKey()] = true
 	}
 
 	// Explicit exempt RouteAgentToken routes (non-credential routes).
@@ -502,38 +579,52 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		"POST /api/v1/brokers/": {
 			reason: "broker-HMAC auth only; refuses agent tokens",
 			method: http.MethodPost,
-			path:   func(*standingCoverageFixture) string { return "/api/v1/brokers/broker-1" },
+			path:   func(f *standingCoverageFixture) string { return "/api/v1/brokers/" + f.brokerID + "/rotate-secret" },
 		},
 		"POST /api/v1/brokers/join": {
 			reason: "broker-HMAC join flow (one-time join token); ignores/refuses agent tokens",
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture) string { return "/api/v1/brokers/join" },
-			body: func(*standingCoverageFixture) any {
-				return map[string]any{"brokerId": "broker-1", "joinToken": "invalid-token"}
+			body: func(f *standingCoverageFixture) any {
+				return map[string]any{"brokerId": f.brokerID, "joinToken": "invalid-token"}
 			},
 		},
 		"GET /api/v1/runtime-brokers/{id}/env": {
 			reason: "broker/user material read; refuses agent tokens",
 			method: http.MethodGet,
-			path:   func(*standingCoverageFixture) string { return "/api/v1/runtime-brokers/broker-1/env" },
+			path:   func(f *standingCoverageFixture) string { return "/api/v1/runtime-brokers/" + f.brokerID + "/env" },
 		},
 		"GET /api/v1/runtime-brokers/{id}/env/{key}": {
 			reason: "broker/user material read; refuses agent tokens",
 			method: http.MethodGet,
-			path:   func(*standingCoverageFixture) string { return "/api/v1/runtime-brokers/broker-1/env/API_KEY" },
+			path: func(f *standingCoverageFixture) string {
+				return "/api/v1/runtime-brokers/" + f.brokerID + "/env/API_KEY"
+			},
 		},
 		"PUT /api/v1/runtime-brokers/{id}/env/{key}": {
 			reason: "broker/user material write; refuses agent tokens",
 			method: http.MethodPut,
-			path:   func(*standingCoverageFixture) string { return "/api/v1/runtime-brokers/broker-1/env/API_KEY" },
-			body:   func(*standingCoverageFixture) any { return map[string]any{"value": "v"} },
+			path: func(f *standingCoverageFixture) string {
+				return "/api/v1/runtime-brokers/" + f.brokerID + "/env/API_KEY"
+			},
+			body: func(*standingCoverageFixture) any { return map[string]any{"value": "v"} },
 		},
 		"POST /api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download": {
 			reason: "broker-only workspace download; refuses agent tokens",
 			method: http.MethodPost,
 			path: func(f *standingCoverageFixture) string {
-				return "/api/v1/runtime-brokers/broker-1/agents/" + f.agentA.ID + "/workspace-download"
+				return "/api/v1/runtime-brokers/" + f.brokerID + "/agents/" + f.agentA.ID + "/workspace-download"
 			},
+		},
+		"GET /api/v1/env [scope=user]": {
+			reason: "user-scoped env read; refuses agent tokens",
+			method: http.MethodGet,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/env?scope=user" },
+		},
+		"GET /api/v1/env/{key} [scope=user]": {
+			reason: "user-scoped env read; refuses agent tokens",
+			method: http.MethodGet,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/env/API_KEY?scope=user" },
 		},
 		"PUT /api/v1/env/{key}": {
 			reason: "agents have read-only env access; PUT refused",
@@ -541,6 +632,22 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			path:   func(*standingCoverageFixture) string { return "/api/v1/env/API_KEY" },
 			body: func(f *standingCoverageFixture) any {
 				return map[string]any{"value": "v", "scope": "project", "scopeId": f.projectID}
+			},
+		},
+		"PUT /api/v1/env/{key} [scope=hub]": {
+			reason: "agents have read-only hub env access; PUT refused",
+			method: http.MethodPut,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/env/API_KEY" },
+			body: func(*standingCoverageFixture) any {
+				return map[string]any{"value": "v", "scope": "hub"}
+			},
+		},
+		"PUT /api/v1/env/{key} [scope=user]": {
+			reason: "user-scoped env write; refuses agent tokens",
+			method: http.MethodPut,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/env/API_KEY" },
+			body: func(*standingCoverageFixture) any {
+				return map[string]any{"value": "v", "scope": "user"}
 			},
 		},
 		"PUT /api/v1/projects/{id}/env/{key}": {
@@ -561,15 +668,10 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			body:   func(*standingCoverageFixture) any { return map[string]any{"name": "p"} },
 		},
 		"POST /api/v1/artifacts/{id}/links": {
-			reason: "users only (agentAdminForbiddenMessage); refuses agent tokens",
+			reason: "users only (agentAdminForbiddenMessage); refuses agent tokens even on agent-owned artifact",
 			method: http.MethodPost,
-			path:   func(*standingCoverageFixture) string { return "/api/v1/artifacts/art-1/links" },
+			path:   func(f *standingCoverageFixture) string { return "/api/v1/artifacts/" + f.artifactID + "/links" },
 			body:   func(*standingCoverageFixture) any { return map[string]any{} },
-		},
-		"POST /api/v1/artifacts/{id}/versions/{seq}/view": {
-			reason: "artifact version view requires artifact service and CheckAccess; refuses agent without grant",
-			method: http.MethodPost,
-			path:   func(*standingCoverageFixture) string { return "/api/v1/artifacts/art-1/versions/1/view" },
 		},
 		"GET /api/v1/users/me/templates/{id}/download": {
 			reason: "user-scoped template download; refuses agent tokens",
@@ -592,10 +694,28 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			},
 			body: func(*standingCoverageFixture) any { return map[string]any{} },
 		},
+		"POST /api/v1/skills [scope=global]": {
+			reason: "agents cannot create global skills; refuses agent tokens",
+			method: http.MethodPost,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/skills" },
+			body:   func(*standingCoverageFixture) any { return map[string]any{"name": "g-skill", "scope": "global"} },
+		},
+		"POST /api/v1/skills [scope=user]": {
+			reason: "agents cannot create user-scoped skills; refuses agent tokens",
+			method: http.MethodPost,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/skills" },
+			body:   func(*standingCoverageFixture) any { return map[string]any{"name": "u-skill", "scope": "user"} },
+		},
 		"POST /api/v1/skills/{id}/versions": {
 			reason: "agents lack skill.update scope; refuses agent tokens",
 			method: http.MethodPost,
 			path:   func(f *standingCoverageFixture) string { return "/api/v1/skills/" + f.skillID + "/versions" },
+			body:   func(*standingCoverageFixture) any { return map[string]any{"version": "1.0.1"} },
+		},
+		"POST /api/v1/skills/{id}/versions [scope=global]": {
+			reason: "agents lack global skill.update scope; refuses agent tokens",
+			method: http.MethodPost,
+			path:   func(f *standingCoverageFixture) string { return "/api/v1/skills/" + f.globalSkillID + "/versions" },
 			body:   func(*standingCoverageFixture) any { return map[string]any{"version": "1.0.1"} },
 		},
 		"POST /api/v1/skills/{id}/upload": {
@@ -604,10 +724,28 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			path:   func(f *standingCoverageFixture) string { return "/api/v1/skills/" + f.skillID + "/upload" },
 			body:   func(*standingCoverageFixture) any { return map[string]any{} },
 		},
+		"POST /api/v1/skills/{id}/upload [scope=global]": {
+			reason: "agents lack global skill.update scope; refuses agent tokens",
+			method: http.MethodPost,
+			path:   func(f *standingCoverageFixture) string { return "/api/v1/skills/" + f.globalSkillID + "/upload" },
+			body:   func(*standingCoverageFixture) any { return map[string]any{} },
+		},
+		"POST /api/v1/templates [scope=global]": {
+			reason: "agents cannot create global templates; refuses agent tokens",
+			method: http.MethodPost,
+			path:   func(*standingCoverageFixture) string { return "/api/v1/templates" },
+			body:   func(*standingCoverageFixture) any { return map[string]any{"name": "g-tpl", "scope": "global"} },
+		},
 		"POST /api/v1/templates/{id}/upload": {
 			reason: "agents lack template.update scope; refuses agent tokens",
 			method: http.MethodPost,
 			path:   func(f *standingCoverageFixture) string { return "/api/v1/templates/" + f.templateID + "/upload" },
+			body:   func(*standingCoverageFixture) any { return map[string]any{} },
+		},
+		"POST /api/v1/templates/{id}/upload [scope=global]": {
+			reason: "agents lack global template.update scope; refuses agent tokens",
+			method: http.MethodPost,
+			path:   func(f *standingCoverageFixture) string { return "/api/v1/templates/" + f.globalTplID + "/upload" },
 			body:   func(*standingCoverageFixture) any { return map[string]any{} },
 		},
 		"POST /api/v1/harness-configs": {
@@ -668,7 +806,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 				seenExempt[pattern] = true
 			case AgentStandingGuard, AgentStandingHandler:
 				key := normalizeStandingRouteKey(pattern, http.MethodPost)
-				if !probeKeys[key] {
+				if !probeBaseKeys[key] {
 					missing = append(missing, pattern+" (key "+key+" missing from behavioral standing probes)")
 				}
 			default:
@@ -685,7 +823,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		}
 	})
 
-	// --- Structural Check 2: every authzop ResponseCredential HTTP route is accounted for ---
+	// --- Structural Check 2: every authzop ResponseCredential HTTP route+variant is accounted for ---
 	t.Run("every authzop ResponseCredential route is covered", func(t *testing.T) {
 		discovered := make(map[string]bool)
 		publicExemptions := make(map[string]string)
@@ -695,14 +833,14 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 				if ep.Kind != authzop.EntryPointHTTPRoute || ep.Response != authzop.ResponseCredential {
 					continue
 				}
-				discovered[normalizeStandingRouteKey(ep.Pattern, ep.Method)] = true
+				discovered[normalizeStandingRouteVariantKey(ep.Pattern, ep.Method, ep.Variant)] = true
 			}
 		}
 		for _, ex := range authzop.EntryPointExemptions {
 			if ex.Response != authzop.ResponseCredential {
 				continue
 			}
-			key := normalizeStandingRouteKey(ex.Pattern, http.MethodPost)
+			key := normalizeStandingRouteVariantKey(ex.Pattern, http.MethodPost, "")
 			discovered[key] = true
 			if ex.Kind == authzop.ExemptionPublicEndpoint {
 				publicExemptions[key] = ex.Pattern
@@ -712,12 +850,12 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			if ep.Kind != authzop.EntryPointHTTPRoute || ep.Response != authzop.ResponseCredential {
 				continue
 			}
-			discovered[normalizeStandingRouteKey(ep.Pattern, ep.Method)] = true
+			discovered[normalizeStandingRouteVariantKey(ep.Pattern, ep.Method, ep.Variant)] = true
 		}
 
 		var uncovered []string
 		for key := range discovered {
-			if probeKeys[key] {
+			if probeVariantKeys[key] {
 				continue
 			}
 			if _, ok := nonAgentCallableCredentialRoutes[key]; ok {
@@ -734,7 +872,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			uncovered = append(uncovered, key)
 		}
 		sort.Strings(uncovered)
-		require.Empty(t, uncovered, "authzop ResponseCredential routes missing from standing coverage census")
+		require.Empty(t, uncovered, "authzop ResponseCredential routes/variants missing from standing coverage census")
 
 		for key, spec := range nonAgentCallableCredentialRoutes {
 			if spec.reason == "" {
@@ -743,7 +881,7 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			if !discovered[key] {
 				t.Errorf("stale nonAgentCallableCredentialRoutes entry %q", key)
 			}
-			if probeKeys[key] {
+			if probeVariantKeys[key] {
 				t.Errorf("route %q listed in both probes and nonAgentCallableCredentialRoutes", key)
 			}
 		}
@@ -762,10 +900,24 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		srv := testOIDCServerWithRoutes(t)
 		t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 		srv.SetSecretBackend(secret.NewLocalBackend(srv.store, "test-hub-id", "test-secret"))
+		stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: t.TempDir()})
+		require.NoError(t, err)
+		srv.SetStorage(stor)
+		artDB, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "artifacts.db")+"?_pragma=busy_timeout(5000)")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = artDB.Close() })
+		artStore := artifacts.NewStore(artDB, "sqlite")
+		require.NoError(t, artStore.Init(context.Background()))
+		srv.SetArtifactStore(artStore)
+		srv.testIdentities.enabled = true
+		srv.testAdminGate.hubAdmin = true
 		cur := srv.experimentRegistry()
 		var active []experiments.Experiment
 		for _, e := range cur.All() {
-			if e.Name == experiments.AgentDelegation || e.Name == experiments.Triggers {
+			if e.Name == experiments.AgentDelegation ||
+				e.Name == experiments.Triggers ||
+				e.Name == experiments.Artifacts ||
+				e.Name == experiments.FederationProjectVisitors {
 				e.Default = true
 			}
 			active = append(active, e)
@@ -802,37 +954,130 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			grants[ag.ID] = grantID
 		}
 
-		// Seed project-scoped skill, template, and harness config so download
-		// and upload routes reach authorization rather than failing with 404
-		// on missing rows.
+		// Seed project-scoped skill (with published version and storage file),
+		// template, and harness config so download and resolve routes succeed
+		// with 200 for a healthy agent and refuse after standing loss.
 		skillID := tid(name + "-skill")
+		skillSlug := "standing-skill-" + name
+		skillStoragePath := "skills/project/" + f.projectID + "/" + skillSlug
+		skillContent := []byte("---\nname: " + skillSlug + "\n---\n# Standing Test\n")
+		_, err = stor.Upload(ctx, skillStoragePath+"/1.0.0/SKILL.md", bytes.NewReader(skillContent), storage.UploadOptions{})
+		require.NoError(t, err)
 		require.NoError(t, f.s.CreateSkill(ctx, &store.Skill{
-			ID:      skillID,
-			Name:    "standing-skill-" + name,
-			Slug:    "standing-skill-" + name,
-			Scope:   store.SkillScopeProject,
-			ScopeID: f.projectID,
-			Status:  "active",
+			ID:            skillID,
+			Name:          skillSlug,
+			Slug:          skillSlug,
+			Scope:         store.SkillScopeProject,
+			ScopeID:       f.projectID,
+			Status:        "active",
+			StoragePath:   skillStoragePath,
+			StorageBucket: "b",
 		}))
+		require.NoError(t, f.s.CreateSkillVersion(ctx, &store.SkillVersion{
+			ID:      tid(name + "-skill-v1"),
+			SkillID: skillID,
+			Version: "1.0.0",
+			Status:  store.SkillVersionStatusPublished,
+			Files: []store.TemplateFile{{
+				Path: "SKILL.md",
+				Size: int64(len(skillContent)),
+				Hash: "sha256:placeholder",
+			}},
+			Created: time.Now().UTC(),
+		}))
+		globalSkillID := tid(name + "-global-skill")
+		require.NoError(t, f.s.CreateSkill(ctx, &store.Skill{
+			ID:     globalSkillID,
+			Name:   "standing-global-skill-" + name,
+			Slug:   "standing-global-skill-" + name,
+			Scope:  store.SkillScopeGlobal,
+			Status: "active",
+		}))
+
 		tplID := tid(name + "-tpl")
+		tplSlug := "standing-tpl-" + name
+		tplStoragePath := "templates/project/" + f.projectID + "/" + tplSlug
+		tplContent := []byte("harness: claude\n")
+		_, err = stor.Upload(ctx, tplStoragePath+"/scion-agent.yaml", bytes.NewReader(tplContent), storage.UploadOptions{})
+		require.NoError(t, err)
 		require.NoError(t, f.s.CreateTemplate(ctx, &store.Template{
-			ID:      tplID,
-			Name:    "standing-tpl-" + name,
-			Slug:    "standing-tpl-" + name,
-			Scope:   store.TemplateScopeProject,
-			ScopeID: f.projectID,
-			Status:  store.TemplateStatusActive,
+			ID:            tplID,
+			Name:          tplSlug,
+			Slug:          tplSlug,
+			Scope:         store.TemplateScopeProject,
+			ScopeID:       f.projectID,
+			Status:        store.TemplateStatusActive,
+			StoragePath:   tplStoragePath,
+			StorageBucket: "b",
+			Files: []store.TemplateFile{{
+				Path: "scion-agent.yaml",
+				Size: int64(len(tplContent)),
+				Hash: "sha256:placeholder",
+			}},
 		}))
+		globalTplID := tid(name + "-global-tpl")
+		require.NoError(t, f.s.CreateTemplate(ctx, &store.Template{
+			ID:     globalTplID,
+			Name:   "standing-global-tpl-" + name,
+			Slug:   "standing-global-tpl-" + name,
+			Scope:  store.TemplateScopeGlobal,
+			Status: store.TemplateStatusActive,
+		}))
+
 		hcID := tid(name + "-hc")
+		hcSlug := "standing-hc-" + name
+		hcStoragePath := "harness-configs/project/" + f.projectID + "/" + hcSlug
+		hcContent := []byte("harness: claude\n")
+		_, err = stor.Upload(ctx, hcStoragePath+"/config.yaml", bytes.NewReader(hcContent), storage.UploadOptions{})
+		require.NoError(t, err)
 		require.NoError(t, f.s.CreateHarnessConfig(ctx, &store.HarnessConfig{
-			ID:      hcID,
-			Name:    "standing-hc-" + name,
-			Slug:    "standing-hc-" + name,
-			Harness: "claude",
-			Scope:   store.HarnessConfigScopeProject,
-			ScopeID: f.projectID,
-			Status:  store.HarnessConfigStatusActive,
+			ID:            hcID,
+			Name:          hcSlug,
+			Slug:          hcSlug,
+			Harness:       "claude",
+			Scope:         store.HarnessConfigScopeProject,
+			ScopeID:       f.projectID,
+			Status:        store.HarnessConfigStatusActive,
+			StoragePath:   hcStoragePath,
+			StorageBucket: "b",
+			Files: []store.TemplateFile{{
+				Path: "config.yaml",
+				Size: int64(len(hcContent)),
+				Hash: "sha256:placeholder",
+			}},
 		}))
+
+		brokerID := tid(name + "-broker")
+		require.NoError(t, f.s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:     brokerID,
+			Name:   "standing-broker-" + name,
+			Slug:   "standing-broker-" + name,
+			Status: store.BrokerStatusOnline,
+		}))
+
+		// Seed an HTML artifact owned by agentA so /versions/1/view succeeds
+		// with 200 for a healthy agent (and refuses after standing loss) while
+		// /links hits the explicit agent-refusal 403.
+		agentArtID := tid(name + "-agent-art")
+		artContent := []byte("<!doctype html><html><body>ok</body></html>")
+		artSum := sha256.Sum256(artContent)
+		artDigest := hex.EncodeToString(artSum[:])
+		_, err = stor.Upload(ctx, artifacts.BlobPath("test-hub-id", artDigest), bytes.NewReader(artContent), storage.UploadOptions{ContentType: "text/html"})
+		require.NoError(t, err)
+		now := time.Now().UTC()
+		require.NoError(t, artStore.CreatePublished(ctx,
+			&artifacts.Artifact{
+				ID: agentArtID, ScopeKind: artifacts.ScopeKindProject, ScopeRef: f.projectID,
+				OwnerKind: artifacts.PrincipalKindAgent, OwnerRef: f.agentA.ID, Title: "agent-art",
+				CreatedAt: now, UpdatedAt: now,
+			},
+			&artifacts.Version{
+				ID: tid(name + "-agent-art-v1"), ArtifactID: agentArtID, Seq: 1, Kind: artifacts.VersionKindPublish,
+				EntryPath: "index.html", TotalBytes: int64(len(artContent)), FileCount: 1, CreatedAt: now, State: artifacts.VersionStateReady,
+			},
+			[]artifacts.File{{VersionID: tid(name + "-agent-art-v1"), Path: "index.html", Size: int64(len(artContent)), SHA256: artDigest, MediaType: "text/html"}},
+			nil,
+		))
 
 		return &standingCoverageFixture{
 			msFixture:       f,
@@ -840,9 +1085,49 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			tokC:            tokC,
 			grants:          grants,
 			skillID:         skillID,
+			skillSlug:       skillSlug,
+			globalSkillID:   globalSkillID,
 			templateID:      tplID,
+			globalTplID:     globalTplID,
 			harnessConfigID: hcID,
+			brokerID:        brokerID,
+			artifactID:      agentArtID,
 		}
+	}
+
+	assertHealthyControls := func(t *testing.T, f *standingCoverageFixture) {
+		t.Helper()
+		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/env?scope=project&scopeId="+f.projectID, nil, f.tokA)
+		require.Equal(t, http.StatusOK, rec.Code, "control: active agent must reach GET /api/v1/env: %s", rec.Body.String())
+
+		for _, dl := range []struct {
+			name string
+			path string
+		}{
+			{"skill download", "/api/v1/skills/" + f.skillID + "/download"},
+			{"template download", "/api/v1/templates/" + f.templateID + "/download"},
+			{"harness-config download", "/api/v1/harness-configs/" + f.harnessConfigID + "/download"},
+		} {
+			dlRec := doRequestWithAgentToken(t, f.srv, http.MethodGet, dl.path, nil, f.tokA)
+			require.Equal(t, http.StatusOK, dlRec.Code, "control: active agent must reach %s: %s", dl.name, dlRec.Body.String())
+			var dlResp DownloadResponse
+			require.NoError(t, json.NewDecoder(dlRec.Body).Decode(&dlResp), dl.name)
+			require.NotEmpty(t, dlResp.Files, "control: %s must return download URLs", dl.name)
+		}
+
+		resRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
+			Skills:    []ResolveSkillRef{{URI: "skill://" + f.skillSlug}},
+			ProjectID: f.projectID,
+		}, f.tokA)
+		require.Equal(t, http.StatusOK, resRec.Code, "control: active agent must reach POST /api/v1/skills/resolve: %s", resRec.Body.String())
+		var resResp ResolveSkillsResponse
+		require.NoError(t, json.NewDecoder(resRec.Body).Decode(&resResp))
+		require.Len(t, resResp.Resolved, 1, "control: skill:// resolve must return 1 resolved skill")
+		require.NotEmpty(t, resResp.Resolved[0].Files, "control: skill:// resolve must return signed file URLs")
+		assert.Empty(t, resResp.Errors)
+
+		viewRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/artifacts/"+f.artifactID+"/versions/1/view", nil, f.tokA)
+		require.Equal(t, http.StatusOK, viewRec.Code, "control: active agent must reach POST /api/v1/artifacts/{id}/versions/{seq}/view: %s", viewRec.Body.String())
 	}
 
 	// --- Behavioral Check 1: suspended root user (no AgentHold) refused on every route ---
@@ -850,9 +1135,8 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		f := newFullFixture(t, "cov-susp")
 		ctx := context.Background()
 
-		// Positive control: active agent can read project env before suspension.
-		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/env?scope=project&scopeId="+f.projectID, nil, f.tokA)
-		require.Equal(t, http.StatusOK, rec.Code, "control: active agent must reach GET /api/v1/env: %s", rec.Body.String())
+		// Positive controls: active agent succeeds on env, downloads, and skill:// resolve before suspension.
+		assertHealthyControls(t, f)
 
 		u, err := f.s.GetUser(ctx, f.userID)
 		require.NoError(t, err)
@@ -879,6 +1163,9 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 	t.Run("removed root user refused across every agent credential route", func(t *testing.T) {
 		f := newFullFixture(t, "cov-rem")
 		ctx := context.Background()
+
+		// Positive controls before root-user removal (covers the review-2 skill:// resolve + download cases).
+		assertHealthyControls(t, f)
 
 		f.dropBindings(f.userID)
 		require.False(t, f.held(f.agentA.ID))
@@ -912,8 +1199,9 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 				}
 				rec := doRequestWithAgentToken(t, f.srv, spec.method, spec.path(f), body, allScopesTok)
 				require.True(t,
-					rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden || rec.Code == http.StatusNotFound,
-					"%s: expected 401/403/404 for active agent token, got %d: %s", key, rec.Code, rec.Body.String())
+					rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden,
+					"%s: expected 401/403 for active agent token, got %d: %s",
+					key, rec.Code, rec.Body.String())
 			})
 		}
 	})
