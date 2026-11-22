@@ -257,7 +257,7 @@ func (e *brokerPolicyError) Details() map[string]interface{} {
 // writeBrokerPolicyError writes the §4.4 403 response if err wraps a
 // *brokerPolicyError and reports whether it handled the error.
 func writeBrokerPolicyError(w http.ResponseWriter, r *http.Request, err error) bool {
-	var ctx context.Context
+	ctx := context.Background()
 	if r != nil {
 		ctx = r.Context()
 	}
