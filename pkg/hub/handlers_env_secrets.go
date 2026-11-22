@@ -225,19 +225,17 @@ func (s *Server) resolveEnvSecretAccess(w http.ResponseWriter, r *http.Request, 
 		}
 		return s.hubID, true
 
-	case store.ScopeAgent:
-		scopeID, _, ok := s.resolveAgentSecretAccess(w, r, scope, clientScopeID, isWrite)
-		return scopeID, ok
-
 	default:
 		BadRequest(w, "invalid scope: "+scope)
 		return "", false
 	}
 }
 
-// resolveEnvSecretAccessWithAgent is resolveEnvSecretAccess that also returns
-// the loaded *store.Agent when scope == store.ScopeAgent, so setSecret can
-// attach ProjectID without re-fetching the agent.
+// resolveEnvSecretAccessWithAgent resolves scope access for secret endpoints
+// (which support store.ScopeAgent when hub.agent_secrets is enabled) and
+// returns the loaded *store.Agent when scope == store.ScopeAgent so setSecret
+// can attach ProjectID without re-fetching. Plain env-var endpoints call
+// resolveEnvSecretAccess directly and never admit ScopeAgent.
 func (s *Server) resolveEnvSecretAccessWithAgent(w http.ResponseWriter, r *http.Request, scope, clientScopeID string, isWrite bool) (string, *store.Agent, bool) {
 	if scope == store.ScopeAgent {
 		return s.resolveAgentSecretAccess(w, r, scope, clientScopeID, isWrite)
@@ -248,8 +246,9 @@ func (s *Server) resolveEnvSecretAccessWithAgent(w http.ResponseWriter, r *http.
 
 func (s *Server) resolveAgentSecretAccess(w http.ResponseWriter, r *http.Request, scope, clientScopeID string, isWrite bool) (string, *store.Agent, bool) {
 	ctx := r.Context()
-	// Agent scope is secrets-only (not plain env vars) and gated on hub.agent_secrets.
-	if !s.experimentEnabled(experiments.AgentSecrets) || !strings.HasPrefix(r.URL.Path, "/api/v1/secrets") {
+	// Agent scope is secrets-only (callers are secret handlers via
+	// resolveEnvSecretAccessWithAgent) and gated on hub.agent_secrets.
+	if !s.experimentEnabled(experiments.AgentSecrets) {
 		BadRequest(w, "invalid scope: "+scope)
 		return "", nil, false
 	}
@@ -1067,7 +1066,7 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
+	scopeID, _, ok := s.resolveEnvSecretAccessWithAgent(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
 	}
@@ -1134,7 +1133,7 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
+	scopeID, _, ok := s.resolveEnvSecretAccessWithAgent(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
 		return
 	}
@@ -1468,7 +1467,7 @@ func (s *Server) patchSecret(w http.ResponseWriter, r *http.Request, key string)
 		scope = store.ScopeUser
 	}
 
-	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, r.URL.Query().Get("scopeId"), true)
+	scopeID, _, ok := s.resolveEnvSecretAccessWithAgent(w, r, scope, r.URL.Query().Get("scopeId"), true)
 	if !ok {
 		return
 	}
@@ -1485,7 +1484,7 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 		scope = store.ScopeUser
 	}
 
-	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), true)
+	scopeID, _, ok := s.resolveEnvSecretAccessWithAgent(w, r, scope, query.Get("scopeId"), true)
 	if !ok {
 		return
 	}
