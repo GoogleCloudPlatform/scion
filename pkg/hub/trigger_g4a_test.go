@@ -179,26 +179,41 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-reuse-1", "pr_comment", "pr-42", []byte(`{"n":1}`)).Code)
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-reuse-2", "pr_comment", "pr-42", []byte(`{"n":2}`)).Code)
 
-	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, nil)
+	now := time.Now().UTC().Truncate(time.Second)
+	var clockMu sync.Mutex
+	clock := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	advanceClock := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+
+	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, clock)
 	dispA, err := trigger.NewDispatcher(trigger.DispatcherConfig{
 		Store:         f.sched.store,
 		Core:          serverTriggerCore{srv: f.sched.srv},
 		SubjectClaims: claims,
+		Now:           clock,
 	})
 	require.NoError(t, err)
 	dispB, err := trigger.NewDispatcher(trigger.DispatcherConfig{
 		Store:         f.sched.store,
 		Core:          serverTriggerCore{srv: f.sched.srv},
 		SubjectClaims: claims,
+		Now:           clock,
 	})
 	require.NoError(t, err)
 
 	dqStore := f.sched.store.(store.DurableQueueStore)
-	now := time.Now().UTC()
-	itemsA, err := dqStore.ClaimDurableItems(ctx, trigger.EventQueueKind, "replica-a", now, now.Add(time.Minute), 1)
+	claimNow := time.Now().UTC()
+	itemsA, err := dqStore.ClaimDurableItems(ctx, trigger.EventQueueKind, "replica-a", claimNow, claimNow.Add(time.Minute), 1)
 	require.NoError(t, err)
 	require.Len(t, itemsA, 1)
-	itemsB, err := dqStore.ClaimDurableItems(ctx, trigger.EventQueueKind, "replica-b", now, now.Add(time.Minute), 1)
+	itemsB, err := dqStore.ClaimDurableItems(ctx, trigger.EventQueueKind, "replica-b", claimNow, claimNow.Add(time.Minute), 1)
 	require.NoError(t, err)
 	require.Len(t, itemsB, 1)
 
@@ -213,21 +228,33 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	bDone := make(chan durablequeue.Result, 1)
 	go func() { aDone <- dispA.HandleItem(ctx, toItem(itemsA[0]), nil) }()
 
-	// Wait until replica A has acquired the unbound claim and entered broker create.
+	// Wait until replica A has bound the claim (in provisioning phase) and entered broker create.
 	select {
 	case <-enterCreate:
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for first replica to enter broker create")
 	}
 
-	// Now start replica B while A is deterministically parked mid-create, and wait for B to finish.
+	// Start replica B while A's agent is in flight (provisioning): per Stage 3 §6.2
+	// rev 1.16, B defers delivery non-terminally with RetryAt instead of failing wake.
 	go func() { bDone <- dispB.HandleItem(ctx, toItem(itemsB[0]), nil) }()
 	var resB durablequeue.Result
 	select {
 	case resB = <-bDone:
 	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for second replica to finish")
+		t.Fatal("timed out waiting for second replica to defer")
 	}
+	assert.False(t, resB.Done, "in-flight target agent must defer B via RetryAt")
+	assert.Equal(t, clock().Add(trigger.ReuseDeferBackoff), resB.RetryAt)
+
+	firesBDeferred, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		TriggerID: trigResp.ID,
+		EventID:   itemsB[0].DedupKey,
+	}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesBDeferred.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusDeferred, firesBDeferred.Items[0].Status)
+	deferredFireID := firesBDeferred.Items[0].ID
 
 	close(releaseCreate)
 	var resA durablequeue.Result
@@ -238,13 +265,11 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	}
 
 	assert.True(t, resA.Done)
-	assert.True(t, resB.Done)
 	_, _ = dqStore.CompleteDurableItem(ctx, itemsA[0].Seq, "replica-a")
 	_, _ = dqStore.CompleteDurableItem(ctx, itemsB[0].Seq, "replica-b")
 
 	assert.Equal(t, int32(1), createCalls.Load(), "exactly one agent must be created across two concurrent drainers")
 
-	// Assert B's fire row explicitly skipped as "subject dispatch in progress" and A's fired.
 	firesA, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
 		TriggerID: trigResp.ID,
 		EventID:   itemsA[0].DedupKey,
@@ -253,32 +278,39 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	require.Len(t, firesA.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusFired, firesA.Items[0].Status)
 
-	// Because dispatch_agent binds the claim inside the agent-create DB tx before
-	// invoking the broker, replica B (started after enterCreate) sees the live
-	// bound claim in provisioning phase and attempts reuse wake delivery rather
-	// than creating a second agent. (The pre-Bind unbound-claim window is tested
-	// deterministically in TestDispatcher_SubjectModeReuse_FreshUnboundClaimSkipsInProgress.)
-	firesB, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
-		TriggerID: trigResp.ID,
-		EventID:   itemsB[0].DedupKey,
-	}, store.ListOptions{Limit: 5})
-	require.NoError(t, err)
-	require.Len(t, firesB.Items, 1)
-	assert.Equal(t, store.TriggerFireStatusFailed, firesB.Items[0].Status)
-	assert.Equal(t, "target wake failed", firesB.Items[0].Error)
-
 	subjectKey := "webhook:" + ep.ID + "/pr-42"
 	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
 	require.NoError(t, err)
 	agentID := claim.AgentID
 	require.NotEmpty(t, agentID)
 
-	// Mark the created agent running so message delivery succeeds.
+	// Mark A's agent running (launch complete), then advance clock past RetryAt and
+	// re-handle B: B's deferred fire promotes in place and delivers to A's agent.
 	ag, err := f.sched.store.GetAgent(ctx, agentID)
 	require.NoError(t, err)
 	ag.Phase = string(state.PhaseRunning)
 	ag.Activity = string(state.ActivityWaitingForInput)
 	require.NoError(t, f.sched.store.UpdateAgent(ctx, ag))
+
+	advanceClock(trigger.ReuseDeferBackoff)
+	resB2 := dispB.HandleItem(ctx, toItem(itemsB[0]), nil)
+	assert.True(t, resB2.Done)
+	assert.Zero(t, resB2.RetryAt)
+	assert.Equal(t, int32(1), createCalls.Load(), "re-handling deferred B must reuse A's agent")
+
+	firesBDelivered, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		TriggerID: trigResp.ID,
+		EventID:   itemsB[0].DedupKey,
+	}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesBDelivered.Items, 1)
+	assert.Equal(t, deferredFireID, firesBDelivered.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusFired, firesBDelivered.Items[0].Status)
+
+	msgsAfterB := tracker.messages()
+	require.Len(t, msgsAfterB, 1, "deferred B event must be delivered to A's agent once running")
+	assert.Equal(t, ag.Slug, msgsAfterB[0].AgentID)
+	assert.Contains(t, msgsAfterB[0].Message, "Follow-up on "+subjectKey)
 
 	// 2. Later event on the same subject -> delivered as wake message to the existing agent.
 	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-reuse-3", "pr_comment", "pr-42", []byte(`{"n":3}`)).Code)
@@ -286,10 +318,10 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 
 	assert.Equal(t, int32(1), createCalls.Load(), "reuse must not create a second agent")
 	msgs := tracker.messages()
-	require.Len(t, msgs, 1)
-	assert.Equal(t, ag.Slug, msgs[0].AgentID)
-	assert.Contains(t, msgs[0].Message, "Follow-up on "+subjectKey)
-	assert.NotEmpty(t, msgs[0].Event)
+	require.Len(t, msgs, 2)
+	assert.Equal(t, ag.Slug, msgs[1].AgentID)
+	assert.Contains(t, msgs[1].Message, "Follow-up on "+subjectKey)
+	assert.NotEmpty(t, msgs[1].Event)
 
 	// 3. Suspend the agent -> next event on the same subject wakes it and delivers the message.
 	ag.Phase = string(state.PhaseSuspended)
