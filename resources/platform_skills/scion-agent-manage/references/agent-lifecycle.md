@@ -146,7 +146,12 @@ can delete it directly or explicit human instruction is required.
    sub-task transitions, not only on full-task completion. Before treating an agent as
    done, verify with `scion look <agent>` and confirm the artifact it owed — commit
    pushed, file written, PR opened. Acting on the notification alone causes premature
-   follow-up dispatch against a state that does not yet exist.
+   follow-up dispatch against a state that does not yet exist. For long-lived children
+   whose routine `IDLE` transitions create noisy wakeups, narrow the auto-subscription
+   to drop `IDLE` while keeping `WAITING_FOR_INPUT` and terminal or exception states:
+   `scion notifications update <subscription-id> --triggers COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED,STALLED,SUSPENDED,ERROR,HARNESS_ERROR,HALTED`
+   (use the full `id` from `scion notifications subscriptions --json`, matching `agentId`
+   to the child's ID from `scion list --format json`).
 
 ## Anti-patterns
 

@@ -26,7 +26,7 @@ In-container per-agent clones (`SCION_GIT_DEPTH` set — `clone-per-agent`, or a
 - **Reach a merge base quickly:** `git fetch --deepen=50 origin main` (increase `<N>` until `git merge-base` succeeds). Use `--deepen=<N>` while shallow and plain `git fetch` once unshallowed — running `git fetch --depth=<N>` on an unshallowed checkout writes a new `.git/shallow` graft and re-shallows it.
 - **Inspect deeper commit/tree history without downloading all blobs:** `git fetch --filter=blob:none --deepen=200 <remote> <branch>` (trees are fetched, blobs are not: `--name-only`/`--name-status` and `git log -1 --no-patch <sha>` stay local, while `git show --stat`, `-p`, and other content diffs fetch missing blobs on demand).
 - **Fetch complete history (for full `git log -S`, `blame`, or `rebase`):** `git fetch --unshallow`.
-- **Diff against an explicit base commit:** when your brief names the base SHA and only a diff is needed, fetch that commit if missing and run `git diff <base-sha> HEAD`.
+- **Diff against an explicit base commit:** when your brief names the base SHA and only a diff is needed, fetch that commit by its full 40-character SHA (`git fetch origin <full-40-char-sha>` — short SHAs always fail with `couldn't find remote ref`, which matters most for commits no longer on any branch after a rebase or force-push) and run `git diff <base-sha> HEAD`.
 
 ## Working Tree Reset Safety
 
