@@ -551,6 +551,7 @@ func TestAuthorizeAgentCreate_DenialIsLogged(t *testing.T) {
 func TestAuthorizeAgentLifecycle_IdentityKinds(t *testing.T) {
 	srv, s := testServer(t)
 	authzHelperSeedAdmin(t, s)
+	authzHelperSeedCallerAgent(t, s)
 	target := authzHelperTargetAgent()
 
 	tests := []struct {

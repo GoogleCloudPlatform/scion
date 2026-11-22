@@ -80,6 +80,7 @@ func authzKeysHelperRequest(identity Identity) *http.Request {
 func TestAuthorizeAgentKeys_IdentityKinds(t *testing.T) {
 	srv, s := testServer(t)
 	authzHelperSeedAdmin(t, s)
+	authzHelperSeedCallerAgent(t, s)
 	target := authzHelperTargetAgent()
 
 	tests := []struct {
@@ -230,7 +231,8 @@ func TestAuthorizeAgentKeys_OwnerAndNonOwner(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAuthorizeAgentKeys_AgentCredential_ProjectBoundary(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+	authzHelperSeedCallerAgent(t, s)
 
 	selfID := authzHelperAgentID
 	target := &store.Agent{

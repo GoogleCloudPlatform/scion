@@ -476,7 +476,6 @@ func authzHelperSeedCallerAgent(t *testing.T, s store.Store) {
 func authzHelperSeedAdmin(t *testing.T, s store.Store) {
 	t.Helper()
 	createTestUserWithRole(t, s, authzHelperAdminID, "admin@test.com", "admin", store.SystemRoleSuperAdmin)
-	authzHelperSeedCallerAgent(t, s)
 }
 
 func authzHelperMember() UserIdentity {
