@@ -386,6 +386,7 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 		AgentLimitSource   string        `json:"agentLimitSource,omitempty"`
 		HostedByThisServer bool          `json:"hostedByThisServer,omitempty"`
 		VersionStatus      string        `json:"versionStatus,omitempty"`
+		PolicyEligible     bool          `json:"policyEligible"`
 	}{
 		BrokerAlias: (*BrokerAlias)(&b.RuntimeBroker),
 	}
@@ -398,5 +399,6 @@ func (b *RuntimeBrokerWithCapabilities) UnmarshalJSON(data []byte) error {
 	b.AgentLimitSource = aux.AgentLimitSource
 	b.HostedByThisServer = aux.HostedByThisServer
 	b.VersionStatus = aux.VersionStatus
+	b.PolicyEligible = aux.PolicyEligible
 	return nil
 }

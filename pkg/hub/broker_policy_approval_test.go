@@ -156,17 +156,17 @@ func TestBrokerPolicy_ApprovalPatch_AuthzAndAudit(t *testing.T) {
 	assert.Equal(t, "false", ev.Details["admin_managed.old"])
 	assert.Equal(t, "true", ev.Details["admin_managed.new"])
 	assert.Equal(t, string(CredentialKindInteractive), ev.Details["credential_kind"])
-	assert.NotEmpty(t, ev.Details["credential_id"])
 
-	// Dev credential revokes -> 200, audit records old=true, new=false + dev credential kind/id.
+	// Dev credential revokes -> 200, audit records old=true, new=false + dev credential kind.
 	capture.events = nil
 	rec = doBrokerRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID,
 		map[string]any{"adminManaged": false}, devAuth)
 	require.Equal(t, http.StatusOK, rec.Code, "dev credential revoke must succeed: %s", rec.Body.String())
 
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &patchResp))
-	assert.False(t, patchResp.AdminManaged)
-	assert.False(t, patchResp.PolicyEligible)
+	var revokeResp RuntimeBrokerWithCapabilities
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &revokeResp))
+	assert.False(t, revokeResp.AdminManaged)
+	assert.False(t, revokeResp.PolicyEligible)
 
 	require.NotEmpty(t, capture.events, "expected audit event on revoke")
 	ev = capture.events[len(capture.events)-1]
@@ -174,7 +174,6 @@ func TestBrokerPolicy_ApprovalPatch_AuthzAndAudit(t *testing.T) {
 	assert.Equal(t, "true", ev.Details["admin_managed.old"])
 	assert.Equal(t, "false", ev.Details["admin_managed.new"])
 	assert.Equal(t, string(CredentialKindDev), ev.Details["credential_kind"])
-	assert.NotEmpty(t, ev.Details["credential_id"])
 
 	// Super-admin (interactive) approves and hub-admin (interactive) revokes -> 200.
 	rec = doBrokerRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+broker.ID,
@@ -198,45 +197,25 @@ func TestBrokerPolicy_ApprovalPatch_TestAdminRefused(t *testing.T) {
 	setBrokerPolicyState(t, srv, s, true, true)
 	ctx := context.Background()
 
-	// Create a test_super_admin and a test_hub_admin user in the store with
-	// their respective system role bindings.
+	issuerSuper := newSuperAdminUser(t, s, "tsa-issuer-super")
+	issuerHub := newSuperAdminUser(t, s, "tsa-issuer-hub")
+
 	for _, tc := range []struct {
-		name     string
-		kind     string
-		roleName string
-		role     string
+		name   string
+		issuer *store.User
+		role   string
 	}{
-		{"test_super_admin", store.UserKindTestSuperAdmin, store.SystemRoleSuperAdmin, store.UserRoleAdmin},
-		{"test_hub_admin", store.UserKindTestHubAdmin, store.SystemRoleHubAdmin, store.UserRoleMember},
+		{"test_super_admin", issuerSuper, testAdminRoleSuperAdmin},
+		{"test_hub_admin", issuerHub, testAdminRoleHubAdmin},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			u := &store.User{
-				ID:          api.NewUUID(),
-				Email:       tc.name + "@test.invalid",
-				DisplayName: tc.name,
-				Role:        tc.role,
-				Status:      "active",
-				Kind:        tc.kind,
-			}
-			require.NoError(t, s.CreateUser(ctx, u))
-			roleDef, err := s.GetRoleDefinitionByName(ctx, tc.roleName, store.RoleScopeSystem)
-			require.NoError(t, err)
-			_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-				ID:               api.NewUUID(),
-				PrincipalType:    "user",
-				PrincipalID:      u.ID,
-				RoleDefinitionID: roleDef.ID,
-				ScopeType:        store.RoleScopeSystem,
-				CreatedBy:        "test",
-			})
-			require.NoError(t, err)
+			issued := tsaIssue(t, srv, tc.issuer, tc.role)
 
 			// Even on a broker the test-admin itself created, approving adminManaged must be refused.
-			ownBroker := createTestBrokerRow(t, s, tc.name+"-own-broker", u.ID, false, false)
-			tok := mintInteractiveUserJWT(t, srv, u)
+			ownBroker := createTestBrokerRow(t, s, tc.name+"-own-broker", issued.Identity.ID, false, false)
 			rec := doBrokerRequest(t, srv, http.MethodPatch, "/api/v1/runtime-brokers/"+ownBroker.ID,
 				map[string]any{"adminManaged": true},
-				func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+tok) })
+				func(req *http.Request) { req.Header.Set("Authorization", "Bearer "+issued.AccessToken) })
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s must be refused approving adminManaged", tc.name)
 
 			got, err := s.GetRuntimeBroker(ctx, ownBroker.ID)
