@@ -92,9 +92,10 @@ type conduitRelayVerdict struct {
 }
 
 // recheckRelayAdmission re-checks an admission's credential and principal
-// against current state: the user row and access token, the agent row and
-// its run, or the broker registration and secret. The close codes are the
-// in-process ones: 4404 for a deleted agent, 4401 otherwise.
+// against current state: the user row and access token, the agent row,
+// its run and delegation standing, or the broker registration and secret.
+// The close codes are the in-process ones: 4404 for a deleted agent, 4401
+// otherwise.
 func (s *Server) recheckRelayAdmission(ctx context.Context, c conduitAdmissionClaims) conduitRelayVerdict {
 	deny := func(code uint32, reason string) conduitRelayVerdict {
 		return conduitRelayVerdict{verdict: conduitAuthzDenied, reason: reason, closeCode: code}
@@ -157,6 +158,12 @@ func (s *Server) recheckRelayAdmission(ctx context.Context, c conduitAdmissionCl
 			case held:
 				return deny(conduit.CloseUnauthenticated, "agent held")
 			}
+		}
+		if err := s.agentStanding(ctx, c.ID); err != nil {
+			if errors.Is(err, errAgentNotInStanding) {
+				return deny(conduit.CloseUnauthenticated, "agent not in good standing")
+			}
+			return unavailable("agent standing lookup failed")
 		}
 		return conduitRelayVerdict{verdict: conduitAuthzAllowed}
 	case registry.PrincipalBroker:
