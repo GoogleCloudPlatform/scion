@@ -320,10 +320,7 @@ func reducePushRepository(repo map[string]any) (map[string]any, bool) {
 
 func reducePushCommit(commit map[string]any) (map[string]any, bool) {
 	out := make(map[string]any, 11)
-	truncated := false
-	if copyCappedString(out, commit, "id", MaxPushSHABytes) {
-		truncated = true
-	}
+	truncated := copyCappedString(out, commit, "id", MaxPushSHABytes)
 	if copyCappedString(out, commit, "tree_id", MaxPushSHABytes) {
 		truncated = true
 	}
