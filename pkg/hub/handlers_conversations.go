@@ -1086,7 +1086,9 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	if req.PrincipalKind == "" || req.PrincipalID == "" {
+	rawPrincipal := strings.TrimSpace(req.PrincipalID)
+	principalRef := strings.TrimPrefix(rawPrincipal, "@")
+	if req.PrincipalKind == "" || principalRef == "" {
 		BadRequest(w, "principalKind and principalId are required")
 		return
 	}
@@ -1096,41 +1098,21 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// For agent principals, verify the agent exists and belongs to the
-	// conversation's project. Without this check, a cross-project agent
-	// could be added as a participant and read messages via ListMessages
-	// (which uses participant-based auth only, no project check).
+	resolvedPrincipalID := rawPrincipal
+
+	// For agent principals, resolve by slug, ID, or name within the
+	// conversation's project (or by ID for legacy projectless groups).
+	// Without the project check, a cross-project agent could be added as a
+	// participant and read messages via ListMessages (which uses
+	// participant-based auth only, no project check).
 	if req.PrincipalKind == "agent" {
-		agent, agentErr := s.store.GetAgent(ctx, req.PrincipalID)
-		if agentErr != nil {
-			if errors.Is(agentErr, store.ErrNotFound) {
-				writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
-				return
-			}
-			writeErrorFromErr(w, agentErr, "")
+		agent, resErr, err := s.resolveAddParticipantAgent(ctx, r, identity, conv, principalRef)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
 			return
 		}
-
-		if agent == nil {
-			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
-			return
-		}
-
-		// An agent of another project gets the same answer as an
-		// unknown agent; the reason is logged. This runs before the
-		// soft-deleted check, so the reason is logged for a soft-deleted
-		// agent of another project too.
-		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {
-			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
-			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
-			return
-		}
-
-		// A soft-deleted agent is refused as an unknown agent, as group
-		// create and the default-agent path refuse it
-		// (validateDefaultAgent, handleSetDefaultAgent).
-		if !agent.DeletedAt.IsZero() {
-			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+		if resErr != nil {
+			writeError(w, resErr.status, resErr.code, resErr.message, nil)
 			return
 		}
 
@@ -1140,21 +1122,23 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 			writeGroupModeDenied(w, joinReason, agent.MessageMode)
 			return
 		}
+		resolvedPrincipalID = agent.ID
 	}
 
 	// A user added to a project group must currently be a member of the
-	// conversation's project.
+	// conversation's project. Resolve by ID, email, or handle against project
+	// members only so non-members and unknown inputs are indistinguishable.
 	if req.PrincipalKind == "user" && conv.ProjectID != nil && *conv.ProjectID != "" {
-		member, _, memberErr := s.authzService.ProjectMembershipEvidence(ctx,
-			PrincipalContext{Kind: PrincipalKindUser, ID: req.PrincipalID}, *conv.ProjectID)
-		if memberErr != nil && isProjectAccessLookupFault(memberErr) {
-			writeErrorFromErr(w, memberErr, "")
+		userID, resErr, err := s.resolveAddParticipantProjectUser(ctx, *conv.ProjectID, principalRef)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
 			return
 		}
-		if !member {
-			BadRequest(w, "user is not a member of the conversation's project")
+		if resErr != nil {
+			writeError(w, resErr.status, resErr.code, resErr.message, nil)
 			return
 		}
+		resolvedPrincipalID = userID
 	}
 
 	now := time.Now().UTC()
@@ -1162,7 +1146,7 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 		ID:             api.NewUUID(),
 		ConversationID: id,
 		PrincipalKind:  req.PrincipalKind,
-		PrincipalID:    req.PrincipalID,
+		PrincipalID:    resolvedPrincipalID,
 		Role:           "member",
 		JoinedAt:       now,
 	}
@@ -1177,6 +1161,254 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 	}
 
 	writeJSON(w, http.StatusCreated, participant)
+}
+
+type participantResolveError struct {
+	status  int
+	code    string
+	message string
+}
+
+// resolveAddParticipantAgent resolves ref to a live agent for handleAddParticipant.
+// For project-scoped conversations it accepts slug, ID, or case-insensitive
+// name/slug within the project; cross-project, soft-deleted, and unknown agents
+// all return the same 404 so existence outside the project is not leaked.
+func (s *Server) resolveAddParticipantAgent(
+	ctx context.Context, r *http.Request, identity Identity, conv *store.Conversation, ref string,
+) (*store.Agent, *participantResolveError, error) {
+	notFound := &participantResolveError{
+		status:  http.StatusNotFound,
+		code:    "not_found",
+		message: "agent not found",
+	}
+
+	if conv.ProjectID == nil || *conv.ProjectID == "" {
+		agent, err := s.store.GetAgent(ctx, ref)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, notFound, nil
+			}
+			return nil, nil, err
+		}
+		if agent == nil || !agent.DeletedAt.IsZero() {
+			return nil, notFound, nil
+		}
+		return agent, nil, nil
+	}
+
+	projectID := *conv.ProjectID
+
+	// 1. Exact slug lookup in the conversation's project (excludes soft-deleted).
+	agent, err := s.store.GetAgentBySlug(ctx, projectID, ref)
+	if err == nil && agent != nil {
+		return agent, nil, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, nil, err
+	}
+
+	// 2. Exact ID lookup.
+	agent, err = s.store.GetAgent(ctx, ref)
+	if err == nil && agent != nil {
+		// An agent of another project gets the same answer as an unknown
+		// agent; the reason is logged. This runs before the soft-deleted
+		// check, so the reason is logged for a soft-deleted agent of
+		// another project too.
+		if agent.ProjectID != projectID {
+			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
+			return nil, notFound, nil
+		}
+		if !agent.DeletedAt.IsZero() {
+			return nil, notFound, nil
+		}
+		return agent, nil, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, nil, err
+	}
+
+	// 3. Case-insensitive name/slug match among live agents in this project.
+	var matches []store.Agent
+	cursor := ""
+	for {
+		res, listErr := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{
+			Limit:          1000,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if listErr != nil {
+			return nil, nil, listErr
+		}
+		for i := range res.Items {
+			a := &res.Items[i]
+			if !a.DeletedAt.IsZero() || a.ProjectID != projectID {
+				continue
+			}
+			if strings.EqualFold(a.Name, ref) || strings.EqualFold(a.Slug, ref) {
+				matches = append(matches, *a)
+				if len(matches) > 1 {
+					break
+				}
+			}
+		}
+		if len(matches) > 1 || res.NextCursor == "" {
+			break
+		}
+		cursor = res.NextCursor
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, notFound, nil
+	case 1:
+		return &matches[0], nil, nil
+	default:
+		return nil, &participantResolveError{
+			status:  http.StatusConflict,
+			code:    "ambiguous_reference",
+			message: fmt.Sprintf("multiple agents match %q; specify an agent slug or ID", ref),
+		}, nil
+	}
+}
+
+// resolveAddParticipantProjectUser resolves ref to a user ID who is an active
+// member of projectID. Accepts a user ID, email, or handle (display name,
+// hyphenated display-name slug, or email local part). Unknown users and
+// non-member users produce the exact same error so user existence outside the
+// project is not leaked.
+func (s *Server) resolveAddParticipantProjectUser(
+	ctx context.Context, projectID, ref string,
+) (string, *participantResolveError, error) {
+	notFound := &participantResolveError{
+		status:  http.StatusBadRequest,
+		code:    ErrCodeInvalidRequest,
+		message: "user not found in the conversation's project",
+	}
+
+	isMember := func(userID string) (bool, error) {
+		member, _, memberErr := s.authzService.ProjectMembershipEvidence(ctx,
+			PrincipalContext{Kind: PrincipalKindUser, ID: userID}, projectID)
+		if memberErr != nil && isProjectAccessLookupFault(memberErr) {
+			return false, memberErr
+		}
+		return member, nil
+	}
+
+	// 1. Direct user ID lookup.
+	u, err := s.store.GetUser(ctx, ref)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", nil, err
+	}
+	if err == nil && u != nil {
+		member, memberErr := isMember(u.ID)
+		if memberErr != nil {
+			return "", nil, memberErr
+		}
+		if !member {
+			return "", notFound, nil
+		}
+		return u.ID, nil, nil
+	}
+
+	// 2. Email lookup (handles both direct and group-derived project members).
+	if strings.Contains(ref, "@") {
+		u, err = s.store.GetUserByEmail(ctx, ref)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return "", nil, err
+		}
+		if err == nil && u != nil {
+			member, memberErr := isMember(u.ID)
+			if memberErr != nil {
+				return "", nil, memberErr
+			}
+			if !member {
+				return "", notFound, nil
+			}
+			return u.ID, nil, nil
+		}
+	}
+
+	// 3. Handle lookup among the project's human members.
+	projectMembers, err := s.store.ListProjectMembers(ctx, projectID)
+	if err != nil {
+		return "", nil, err
+	}
+	userIDs := make([]string, 0, len(projectMembers))
+	seen := make(map[string]bool, len(projectMembers))
+	for _, m := range projectMembers {
+		if m == nil || seen[m.UserID] {
+			continue
+		}
+		seen[m.UserID] = true
+		userIDs = append(userIDs, m.UserID)
+	}
+	if len(userIDs) == 0 {
+		return "", notFound, nil
+	}
+
+	users, err := s.store.GetUsersByIDs(ctx, userIDs)
+	if err != nil {
+		return "", nil, err
+	}
+
+	var matches []string
+	for _, uid := range userIDs {
+		candidate := users[uid]
+		if candidate == nil || !userMatchesParticipantHandle(candidate, ref) {
+			continue
+		}
+		member, memberErr := isMember(candidate.ID)
+		if memberErr != nil {
+			return "", nil, memberErr
+		}
+		if !member {
+			continue
+		}
+		matches = append(matches, candidate.ID)
+		if len(matches) > 1 {
+			break
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", notFound, nil
+	case 1:
+		return matches[0], nil, nil
+	default:
+		return "", &participantResolveError{
+			status:  http.StatusConflict,
+			code:    "ambiguous_reference",
+			message: fmt.Sprintf("multiple users match %q; specify an email address or user ID", ref),
+		}, nil
+	}
+}
+
+func userMatchesParticipantHandle(u *store.User, ref string) bool {
+	email := u.Email
+	if u.FederatedEmail != nil && *u.FederatedEmail != "" {
+		if strings.EqualFold(*u.FederatedEmail, ref) {
+			return true
+		}
+		email = *u.FederatedEmail
+	}
+	if email != "" {
+		if strings.EqualFold(email, ref) {
+			return true
+		}
+		if at := strings.IndexByte(email, '@'); at > 0 && strings.EqualFold(email[:at], ref) {
+			return true
+		}
+	}
+	if dn := strings.TrimSpace(u.DisplayName); dn != "" {
+		if strings.EqualFold(dn, ref) {
+			return true
+		}
+		if slug := strings.ReplaceAll(dn, " ", "-"); strings.EqualFold(slug, ref) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleLeaveConversation handles POST /api/v1/conversations/{id}/leave.

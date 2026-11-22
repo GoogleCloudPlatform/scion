@@ -222,13 +222,19 @@ Examples:
 
 // conversationJoinCmd adds a participant to a conversation.
 var conversationJoinCmd = &cobra.Command{
-	Use:   "join <conversation-ref> <principal-kind> <principal-id>",
+	Use:   "join <conversation-ref> <principal-kind> <principal>",
 	Short: "Add a participant to a conversation",
 	Long: `Add a participant to a conversation.
 
+The principal argument accepts a user ID, email, or handle (display name,
+hyphenated display-name slug, or email local part) for kind "user", and an
+agent ID, slug, or name for kind "agent".
+
 Examples:
+  scion conversation join conv:a1b2c3d4-... agent my-agent
   scion conversation join conv:a1b2c3d4-... agent 0b56e8d0-...
-  scion conversation join #design-thread user a1b2c3d4-...`,
+  scion conversation join #design-thread user alice@example.com
+  scion conversation join #design-thread user alice-smith`,
 	Args: cobra.ExactArgs(3),
 	RunE: runConversationJoin,
 }
@@ -801,11 +807,16 @@ func runConversationJoin(cmd *cobra.Command, args []string) error {
 		PrincipalID:   args[2],
 	}
 
-	if _, err := client.Conversations().AddParticipant(ctx, conversationID, req); err != nil {
+	participant, err := client.Conversations().AddParticipant(ctx, conversationID, req)
+	if err != nil {
 		return fmt.Errorf("failed to add participant: %w", err)
 	}
 
-	fmt.Printf("Added %s %s to conversation %s\n", req.PrincipalKind, req.PrincipalID, conversationID)
+	if participant != nil && participant.PrincipalID != "" && participant.PrincipalID != req.PrincipalID {
+		fmt.Printf("Added %s %s (%s) to conversation %s\n", req.PrincipalKind, req.PrincipalID, participant.PrincipalID, conversationID)
+	} else {
+		fmt.Printf("Added %s %s to conversation %s\n", req.PrincipalKind, req.PrincipalID, conversationID)
+	}
 	return nil
 }
 

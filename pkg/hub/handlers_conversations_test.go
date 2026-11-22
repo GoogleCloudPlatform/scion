@@ -1296,6 +1296,250 @@ func TestAddParticipant_SoftDeletedAgentRefused(t *testing.T) {
 	require.False(t, isParticipant, "a soft-deleted agent must not become a participant")
 }
 
+func TestAddParticipant_ResolveAgentBySlugAndName(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, callerAgent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", callerAgent.ID)
+	callerCtx := agentContextWithScopes(callerAgent.ID, project.ID, []AgentTokenScope{ScopeProjectRead})
+
+	postJoin := func(principal string) *httptest.ResponseRecorder {
+		bodyBytes, _ := json.Marshal(addParticipantRequest{
+			PrincipalKind: "agent",
+			PrincipalID:   principal,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(callerCtx)
+		rr := httptest.NewRecorder()
+		srv.handleAddParticipant(rr, req, conv.ID)
+		return rr
+	}
+
+	// Agent resolved by slug.
+	slugAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Slug Agent",
+		Slug:      "slug-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, slugAgent))
+
+	rr := postJoin("slug-agent")
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	var result store.ConversationParticipant
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, slugAgent.ID, result.PrincipalID)
+
+	// Agent resolved by @slug (leading @ stripped).
+	atAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "At Agent",
+		Slug:      "at-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, atAgent))
+
+	rr = postJoin("@at-agent")
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	result = store.ConversationParticipant{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, atAgent.ID, result.PrincipalID)
+
+	// Agent resolved by display name (case-insensitive, differs from slug).
+	namedAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Release Coordinator",
+		Slug:      "rel-coord",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, namedAgent))
+
+	rr = postJoin("release coordinator")
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	result = store.ConversationParticipant{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, namedAgent.ID, result.PrincipalID)
+
+	// Ambiguous agent display name (two live agents share Name with different slugs).
+	dup1 := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Shared Worker",
+		Slug:      "shared-worker-1",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	dup2 := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Shared Worker",
+		Slug:      "shared-worker-2",
+		ProjectID: project.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, dup1))
+	require.NoError(t, s.CreateAgent(ctx, dup2))
+
+	rr = postJoin("Shared Worker")
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "ambiguous")
+
+	// Cross-project agent by slug is indistinguishable from an unknown agent.
+	otherProject := &store.Project{
+		ID:   api.NewUUID(),
+		Name: "other-project-resolve",
+		Slug: "other-project-resolve",
+	}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+	otherAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Secret Agent",
+		Slug:      "secret-agent",
+		ProjectID: otherProject.ID,
+		Phase:     "running",
+	}
+	require.NoError(t, s.CreateAgent(ctx, otherAgent))
+
+	rrOther := postJoin("secret-agent")
+	rrUnknown := postJoin("does-not-exist")
+	require.Equal(t, http.StatusNotFound, rrOther.Code, "body: %s", rrOther.Body.String())
+	require.Equal(t, http.StatusNotFound, rrUnknown.Code, "body: %s", rrUnknown.Body.String())
+	require.Equal(t, rrUnknown.Body.String(), rrOther.Body.String(),
+		"cross-project agent name must be indistinguishable from unknown agent")
+
+	// Soft-deleted agent by slug is refused as unknown.
+	deletedAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "Gone Agent",
+		Slug:      "gone-agent",
+		ProjectID: project.ID,
+		Phase:     "terminated",
+		DeletedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, deletedAgent))
+
+	rrDeleted := postJoin("gone-agent")
+	require.Equal(t, http.StatusNotFound, rrDeleted.Code, "body: %s", rrDeleted.Body.String())
+	require.Equal(t, rrUnknown.Body.String(), rrDeleted.Body.String())
+}
+
+func TestAddParticipant_ResolveUserByEmailAndHandle(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, callerAgent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", callerAgent.ID)
+	callerCtx := agentContextWithScopes(callerAgent.ID, project.ID, []AgentTokenScope{ScopeProjectRead})
+
+	addProjectMember := func(email, displayName string) *store.User {
+		u := &store.User{
+			ID:          api.NewUUID(),
+			Email:       email,
+			DisplayName: displayName,
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now().UTC(),
+		}
+		createTestUserWithProjectRole(t, s, u.ID, u.Email, project.ID, store.ProjectRoleMember)
+		// Update display name so handle resolution can match it.
+		stored, err := s.GetUser(ctx, u.ID)
+		require.NoError(t, err)
+		stored.DisplayName = displayName
+		require.NoError(t, s.UpdateUser(ctx, stored))
+		return stored
+	}
+
+	postJoin := func(principal string) *httptest.ResponseRecorder {
+		bodyBytes, _ := json.Marshal(addParticipantRequest{
+			PrincipalKind: "user",
+			PrincipalID:   principal,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(callerCtx)
+		rr := httptest.NewRecorder()
+		srv.handleAddParticipant(rr, req, conv.ID)
+		return rr
+	}
+
+	// 1. User by email (case-insensitive).
+	uEmail := addProjectMember("alice@example.com", "Alice Example")
+	rr := postJoin("ALICE@EXAMPLE.COM")
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	var result store.ConversationParticipant
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, "user", result.PrincipalKind)
+	require.Equal(t, uEmail.ID, result.PrincipalID)
+
+	// 2. User by @email (leading @ stripped).
+	uAtEmail := addProjectMember("carol@example.com", "Carol Example")
+	rr = postJoin("@carol@example.com")
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	result = store.ConversationParticipant{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, uAtEmail.ID, result.PrincipalID)
+
+	// 3. User by hyphenated display-name slug.
+	uSlug := addProjectMember("bob.jones@example.com", "Bob Jones")
+	rr = postJoin("bob-jones")
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	result = store.ConversationParticipant{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, uSlug.ID, result.PrincipalID)
+
+	// 4. User by email local part.
+	uLocal := addProjectMember("diana@example.com", "Different Name")
+	rr = postJoin("diana")
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	result = store.ConversationParticipant{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, uLocal.ID, result.PrincipalID)
+
+	// 5. User by raw ID.
+	uID := addProjectMember("erin@example.com", "Erin Raw")
+	rr = postJoin(uID.ID)
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+	result = store.ConversationParticipant{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
+	require.Equal(t, uID.ID, result.PrincipalID)
+
+	// 6. Ambiguous handle (two project members with same email local part).
+	_ = addProjectMember("alex@corp.example", "Alex Corp")
+	_ = addProjectMember("alex@partner.example", "Alex Partner")
+	rr = postJoin("alex")
+	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "ambiguous")
+
+	// 7. Unknown user vs outsider (exists in hub, not in project):
+	// both must produce the exact same error so existence is not leaked.
+	outsider := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "outsider@example.com",
+		DisplayName: "Outsider Person",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateUser(ctx, outsider))
+
+	rrUnknownEmail := postJoin("nobody@example.com")
+	rrOutsiderEmail := postJoin(outsider.Email)
+	rrOutsiderHandle := postJoin("outsider-person")
+	rrOutsiderID := postJoin(outsider.ID)
+
+	require.Equal(t, http.StatusBadRequest, rrUnknownEmail.Code, "body: %s", rrUnknownEmail.Body.String())
+	require.Equal(t, rrUnknownEmail.Code, rrOutsiderEmail.Code)
+	require.Equal(t, rrUnknownEmail.Body.String(), rrOutsiderEmail.Body.String(),
+		"outsider email must be indistinguishable from unknown email")
+	require.Equal(t, rrUnknownEmail.Code, rrOutsiderHandle.Code)
+	require.Equal(t, rrUnknownEmail.Body.String(), rrOutsiderHandle.Body.String(),
+		"outsider handle must be indistinguishable from unknown user")
+	require.Equal(t, rrUnknownEmail.Code, rrOutsiderID.Code)
+	require.Equal(t, rrUnknownEmail.Body.String(), rrOutsiderID.Body.String(),
+		"outsider ID must be indistinguishable from unknown user")
+}
+
 func TestLeaveConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent, conv := setupConvTestData(t, s)
