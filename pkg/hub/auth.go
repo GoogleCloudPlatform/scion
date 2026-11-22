@@ -777,6 +777,11 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token: "+err.Error(), nil)
 					return
 				}
+				if !isBearerTokenType(claims.TokenType) {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token: unsupported token type", nil)
+					return
+				}
 				// PRIMARY choke: see isReservedPlatformIdentity's invariant
 				// comment. This check applies to every self-contained user
 				// JWT that reaches this point, independent of which mint

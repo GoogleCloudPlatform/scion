@@ -63,6 +63,13 @@ const (
 	TokenTypeCLI UserTokenType = "cli"
 )
 
+// isBearerTokenType reports whether t is permitted for bearer authentication.
+// Only access and CLI tokens may authenticate bearer requests; refresh tokens
+// and any other or empty type are refused.
+func isBearerTokenType(t UserTokenType) bool {
+	return t == TokenTypeAccess || t == TokenTypeCLI
+}
+
 // ClientType represents the type of client.
 type ClientType string
 
@@ -316,6 +323,13 @@ func (s *UserTokenService) ValidateUserToken(tokenString string) (*UserTokenClai
 			slog.Debug("Token verification failed", "error", err)
 		}
 		return nil, fmt.Errorf("failed to verify token: %w", err)
+	}
+
+	// go-jose only validates exp when it is present — a token without exp
+	// would pass and never expire. Require it explicitly so a user token
+	// cannot be accepted without an expiration time.
+	if claims.Expiry == nil {
+		return nil, fmt.Errorf("token validation failed: missing exp claim")
 	}
 
 	// Validate standard claims
