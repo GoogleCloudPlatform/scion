@@ -16,7 +16,6 @@ package messaging
 
 import (
 	"strings"
-	"unicode/utf8"
 )
 
 // MaxAttachmentNameRunes is the most runes a delivered attachment name has.
@@ -26,22 +25,20 @@ const MaxAttachmentNameRunes = 120
 // delivered under in an agent's inbox (ptone/scion#4596): [A-Za-z0-9._-]
 // only (every other rune becomes '_'), at most MaxAttachmentNameRunes runes,
 // and never starting with '.' or '-' (such a name gets an "attachment-"
-// prefix). The hub reduces names with it, and the CLI uses it to refuse two
-// files that would land under one name before it uploads them.
+// prefix). When shortening over-limit names, it truncates the stem and keeps
+// the final extension when it fits with at least one stem rune. The hub
+// reduces names with it, and the CLI uses it to refuse two files that would
+// land under one name before it uploads them.
 func ReduceAttachmentName(name string) string {
 	var b strings.Builder
-	n := 0
+	b.Grow(len(name))
 	for _, r := range name {
-		if n == MaxAttachmentNameRunes {
-			break
-		}
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
-			b.WriteRune(r)
+			b.WriteByte(byte(r))
 		default:
-			b.WriteRune('_')
+			b.WriteByte('_')
 		}
-		n++
 	}
 	out := b.String()
 	if out == "" {
@@ -49,9 +46,15 @@ func ReduceAttachmentName(name string) string {
 	}
 	if out[0] == '.' || out[0] == '-' {
 		out = "attachment-" + out
-		if utf8.RuneCountInString(out) > MaxAttachmentNameRunes {
-			out = out[:MaxAttachmentNameRunes]
+	}
+	if len(out) > MaxAttachmentNameRunes {
+		if dot := strings.LastIndexByte(out, '.'); dot > 0 {
+			ext := out[dot:]
+			if len(ext) > 1 && len(ext) < MaxAttachmentNameRunes {
+				return out[:MaxAttachmentNameRunes-len(ext)] + ext
+			}
 		}
+		out = out[:MaxAttachmentNameRunes]
 	}
 	return out
 }
