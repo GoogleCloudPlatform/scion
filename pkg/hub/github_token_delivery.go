@@ -487,7 +487,7 @@ func (d *HTTPAgentDispatcher) deliverGitHubToken(
 
 	token, expiry, mintErr := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
 	if mintErr != nil {
-		if d.debug {
+		if d.debug || installationOnly {
 			d.log.Warn(operation+": GitHub App token minting failed",
 				"error", mintErr, "project_id", agent.ProjectID, "installation_only", installationOnly)
 		}

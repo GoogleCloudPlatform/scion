@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -286,6 +287,45 @@ func TestGitHubTokenDelivery_CreateStartRestartAndAsNeeded(t *testing.T) {
 				assertNoPATOrAliases(t, res.env, res.secrets)
 			})
 		}
+	})
+
+	t.Run("create_installation_mint_error_logs_warning_when_not_debug", func(t *testing.T) {
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&logBuf, nil))
+		minter := &mockGitHubAppMinter{err: errors.New("github app rate limited")}
+		d := NewHTTPAgentDispatcherWithClient(st, &mockRuntimeBrokerClient{}, false, logger)
+		d.SetSecretBackend(secBackend)
+		d.SetGitHubAppMinter(minter)
+
+		ag := makeAgent("inst-mint-err-create", projWithApp.ID, DispatchAgentGitHubTokenInstallation)
+
+		req, err := d.buildCreateRequest(ctx, ag, "TestCreateInstMintErr")
+		require.NoError(t, err)
+		assert.True(t, minter.called)
+		_, hasGH := req.ResolvedEnv["GITHUB_TOKEN"]
+		assert.False(t, hasGH, "GITHUB_TOKEN must be absent when minting fails")
+		assertNoPATOrAliases(t, req.ResolvedEnv, req.ResolvedSecrets)
+
+		rawLogs := logBuf.String()
+		assert.NotContains(t, rawLogs, userPAT, "user PAT must never appear in logs")
+
+		var foundWarn bool
+		for _, line := range strings.Split(strings.TrimSpace(rawLogs), "\n") {
+			if line == "" {
+				continue
+			}
+			var rec map[string]any
+			require.NoError(t, json.Unmarshal([]byte(line), &rec))
+			msg, _ := rec["msg"].(string)
+			if strings.Contains(msg, "GitHub App token minting failed") {
+				foundWarn = true
+				assert.Equal(t, "WARN", rec["level"])
+				assert.Equal(t, "github app rate limited", rec["error"])
+				assert.Equal(t, projWithApp.ID, rec["project_id"])
+				assert.Equal(t, true, rec["installation_only"])
+			}
+		}
+		assert.True(t, foundWarn, "expected warning log when installation token minting fails with debug=false; got logs: %s", rawLogs)
 	})
 
 	t.Run("resolve_as_needed_drops_github_tokens_for_installation", func(t *testing.T) {
