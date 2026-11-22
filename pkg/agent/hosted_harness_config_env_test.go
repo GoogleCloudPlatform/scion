@@ -77,7 +77,9 @@ func hcEnvBody(key, value string) string {
 // A hosted broker refuses a project-tier harness config's env when it
 // references the broker's environment, passes a host variable through, or
 // sets a reserved name: at admission and at start, before any container
-// runs. A workstation broker still expands it.
+// runs. A workstation broker does not refuse it at admission, and treats
+// bundle env values literally (no ${VAR} expansion and no broker-host
+// passthrough for empty values).
 func TestHostedHarnessConfigEnv_ProjectTier(t *testing.T) {
 	t.Setenv(hostedEnvHostVar, hostedEnvHostValue)
 	for _, tc := range hostedEnvCases {
@@ -99,15 +101,26 @@ func TestHostedHarnessConfigEnv_ProjectTier(t *testing.T) {
 					}
 					return
 				}
-				if preErr != nil || startErr != nil {
-					t.Fatalf("workstation: preflight %v, start %v", preErr, startErr)
+				if preErr != nil {
+					t.Fatalf("workstation preflight: %v", preErr)
+				}
+				if tc.value == "" {
+					// Empty bundle value never copies the broker host value;
+					// in non-broker mode an unsatisfied required env var fails start.
+					if startErr == nil || !strings.Contains(startErr.Error(), tc.key) {
+						t.Fatalf("workstation empty passthrough: start err = %v, want missing-value error for %s", startErr, tc.key)
+					}
+					return
+				}
+				if startErr != nil {
+					t.Fatalf("workstation start: %v", startErr)
 				}
 				if len(runs) != 1 {
 					t.Fatalf("expected one container run, got %d", len(runs))
 				}
 				if tc.key != "SCION_HUB_ENDPOINT" {
-					if v, _ := runEnvValue(runs[0], tc.key); v != hostedEnvHostValue {
-						t.Errorf("workstation %s = %q, want the host value expanded", tc.key, v)
+					if v, _ := runEnvValue(runs[0], tc.key); v != tc.value {
+						t.Errorf("workstation %s = %q, want literal %q", tc.key, v, tc.value)
 					}
 				}
 			})
@@ -149,8 +162,9 @@ func TestHostedHarnessConfigEnv_TemplateBundledAndProvision(t *testing.T) {
 	})
 }
 
-// The global harness-configs directory is operator content: its env
-// references still expand on a hosted broker.
+// The global harness-configs directory is operator content: it is not refused
+// on a hosted broker, and its bundle env values are passed literally (never
+// expanded against the broker host environment).
 func TestHostedHarnessConfigEnv_GlobalDirStillExpands(t *testing.T) {
 	t.Setenv(hostedEnvHostVar, hostedEnvHostValue)
 	e := newPolicyTestEnv(t)
@@ -163,8 +177,9 @@ func TestHostedHarnessConfigEnv_GlobalDirStillExpands(t *testing.T) {
 	if _, err := hostedEnvManager(&runs).Start(context.Background(), api.StartOptions{Name: "g", ProjectPath: e.scion, HarnessConfig: "hc-global", NoAuth: true, HostedMode: true}); err != nil {
 		t.Fatalf("hosted start with a global harness config: %v", err)
 	}
-	if v, _ := runEnvValue(runs[0], "HC_REF"); v != hostedEnvHostValue {
-		t.Errorf("HC_REF = %q, want the operator reference expanded", v)
+	want := "${" + hostedEnvHostVar + "}"
+	if v, _ := runEnvValue(runs[0], "HC_REF"); v != want {
+		t.Errorf("HC_REF = %q, want literal %q", v, want)
 	}
 }
 

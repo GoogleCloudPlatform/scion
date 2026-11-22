@@ -63,6 +63,9 @@ profiles:
   default:
     runtime: mock
 `)
+		// Project-tier harness-config env variable syntax is refused by
+		// hostedguard on a hosted broker before reaching BundleEnvLayer.
+		srv.config.WorkstationMode = true
 		body := `{
 			"name": "parity-literal",
 			"id": "agent-parity-literal",
@@ -101,6 +104,9 @@ profiles:
   default:
     runtime: mock
 `)
+		// Project-tier empty bundle env values are refused by hostedguard on a
+		// hosted broker before reaching BundleEnvLayer.
+		srv.config.WorkstationMode = true
 		body := `{
 			"name": "parity-empty-host",
 			"id": "agent-parity-empty-host",
@@ -137,6 +143,9 @@ profiles:
   default:
     runtime: mock
 `)
+		// Project-tier empty bundle env values are refused by hostedguard on a
+		// hosted broker before reaching BundleEnvLayer.
+		srv.config.WorkstationMode = true
 		body := `{
 			"name": "parity-hub-filled",
 			"id": "agent-parity-hub-filled",
