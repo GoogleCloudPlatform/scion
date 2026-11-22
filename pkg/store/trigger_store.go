@@ -314,6 +314,11 @@ type TriggerSubjectClaim struct {
 	ClaimedAt  time.Time  `json:"claimedAt"`
 	BoundAt    *time.Time `json:"boundAt,omitempty"`
 	ReleasedAt *time.Time `json:"releasedAt,omitempty"`
+
+	// Agent is populated in-memory by SubjectClaims.Live from the GetAgent
+	// lookup it already performs, so callers can inspect phase/launch state
+	// without a second store lookup or type assertion. Never persisted.
+	Agent *Agent `json:"-"`
 }
 
 // TriggerStore manages webhook endpoints, triggers, trigger events, and
@@ -377,6 +382,7 @@ type TriggerStore interface {
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
 	HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error)
 	HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error)
+	HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error)
 	AgentHasFiredTriggerForEvent(ctx context.Context, eventID, agentID string) (bool, error)
 	EventHasTriggerFireForResultRef(ctx context.Context, eventID, resultRef string) (bool, error)
 	ReapExpiredTriggerFires(ctx context.Context, now time.Time, limit int) (int, error)

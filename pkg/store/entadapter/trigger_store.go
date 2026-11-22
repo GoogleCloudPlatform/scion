@@ -2522,6 +2522,19 @@ func (s *TriggerStore) HasLiveTriggerFireForSubjectExcluding(ctx context.Context
 	return hasLiveTriggerFireForSubjectClient(ctx, s.client, tid, subject, exID, includeFiring, now)
 }
 
+func (s *TriggerStore) HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error) {
+	eid, err := parseUUID(eventID)
+	if err != nil {
+		return false, err
+	}
+	return s.client.TriggerFire.Query().
+		Where(
+			triggerfire.EventIDEQ(eid),
+			pendingOrReapedFirePredicate(),
+		).
+		Exist(ctx)
+}
+
 func (s *TriggerStore) AgentHasFiredTriggerForEvent(ctx context.Context, eventID, agentID string) (bool, error) {
 	eid, err := parseGetID(eventID)
 	if err != nil {

@@ -55,14 +55,6 @@ type AgentLookup interface {
 	GetAgent(ctx context.Context, id string) (*store.Agent, error)
 }
 
-// ReuseAgentLookup is an optional capability on SubjectClaims (implemented by
-// StoreSubjectClaims) allowing the dispatcher to inspect a claimed agent's
-// full launch and lifecycle state before attempting reuse wake delivery
-// (Stage 3 §6.2 rev 1.16).
-type ReuseAgentLookup interface {
-	LookupClaimAgent(ctx context.Context, agentID string) (*store.Agent, error)
-}
-
 // StoreSubjectClaims implements SubjectClaims over store.TriggerStore and AgentLookup.
 type StoreSubjectClaims struct {
 	triggers store.TriggerStore
@@ -165,26 +157,8 @@ func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID, subject string
 		}
 		return nil, nil
 	}
+	claim.Agent = ag
 	return claim, nil
-}
-
-// LookupClaimAgent returns the agent record for agentID, or (nil, nil) when
-// the agent is missing or soft-deleted.
-func (s *StoreSubjectClaims) LookupClaimAgent(ctx context.Context, agentID string) (*store.Agent, error) {
-	if s == nil || s.agents == nil || agentID == "" {
-		return nil, nil
-	}
-	ag, err := s.agents.GetAgent(ctx, agentID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if ag == nil || !ag.DeletedAt.IsZero() {
-		return nil, nil
-	}
-	return ag, nil
 }
 
 func isTerminalClaimAgentPhase(phase string) bool {

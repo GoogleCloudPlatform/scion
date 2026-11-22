@@ -523,6 +523,21 @@ func (m *memTriggerStore) HasLiveTriggerFireForSubjectExcluding(_ context.Contex
 	}
 	return false, nil
 }
+func (m *memTriggerStore) HasPendingTriggerFiresForEvent(_ context.Context, eventID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, f := range m.byFireID {
+		if f.EventID != eventID {
+			continue
+		}
+		if f.Status == store.TriggerFireStatusCoalescing ||
+			f.Status == store.TriggerFireStatusDeferred ||
+			(f.Status == store.TriggerFireStatusFailed && (f.Error == trigger.ErrFireReapedDuringCoalesce || f.Error == trigger.ErrFireReapedDuringDefer)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func (m *memTriggerStore) AgentHasFiredTriggerForEvent(context.Context, string, string) (bool, error) {
 	return false, nil
 }
