@@ -605,6 +605,14 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 	}
 
+	// Shell execution container admission (ptone/scion#8812 §3.2, §3.4 S6, §7):
+	// enforce human-only creation, hub.exec_containers flag, and no initial task
+	// on the headless dispatch_agent path as well as HTTP create.
+	isAgentPrincipal := (hc.Identity != nil && hc.Identity.Type() == "agent") || hc.Authority.PrincipalKind == "agent"
+	if denial := s.checkShellAgentCreateAdmission(agent, isAgentPrincipal); denial != nil {
+		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, denial)
+	}
+
 	// Inject allow-listed event data environment variables after deriveAgentConfig
 	// so neither template nor project defaults overwrite hub-assigned trigger IDs.
 	if len(hc.EventEnv) > 0 {

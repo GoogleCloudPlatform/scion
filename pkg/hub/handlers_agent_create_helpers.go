@@ -1502,6 +1502,13 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
+	// Shell execution containers never accept an initial task (ptone/scion#8812 §3.2).
+	if isShellAgent(existingAgent) && strings.TrimSpace(req.Task) != "" {
+		writeError(w, http.StatusBadRequest, ErrCodeTaskNotSupported,
+			"shell execution containers do not support an initial task", nil)
+		return existingAgentErrored
+	}
+
 	// Flat Runtime Broker checks for the branch this request takes, before
 	// any of the branch's writes (section 9 step 4 of the flat contract).
 	if res, done := s.existingAgentFlatChecks(ctx, w, &existingAgent, runtimeBrokerID, req); done {

@@ -90,6 +90,22 @@ func TestExecContainerCLI_ShowSetClear(t *testing.T) {
 			})
 
 		case r.URL.Path == "/api/v1/projects/"+projID+"/agents" && r.Method == http.MethodGet:
+			if r.URL.Query().Get("cursor") == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agents": []map[string]any{
+						{
+							"id":        "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+							"slug":      "other-agent",
+							"name":      "other-agent",
+							"projectId": projID,
+							"phase":     "running",
+							"activity":  "working",
+						},
+					},
+					"nextCursor": "page-2",
+				})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
 					{

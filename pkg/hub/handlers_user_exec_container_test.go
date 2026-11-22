@@ -160,14 +160,33 @@ func TestExecContainer_AC3_ExperimentFlagOff(t *testing.T) {
 	require.NotNil(t, res.Agent)
 	assert.Equal(t, shellAgent.ID, res.Agent.ID)
 
-	// Turn flag off again: DELETE is ungated and returns 204 (and clears row).
+	// Turn flag off again: DELETE is ungated and returns 204 (and clears row),
+	// emitting user.exec_container.clear (F5).
 	setExperimentOverrides(t, srv, map[string]bool{experiments.ExecContainers: false})
 	delRec := doECRequest(t, srv, http.MethodDelete, nil, ident, cred)
 	assert.Equal(t, http.StatusNoContent, delRec.Code)
 
-	// Idempotent DELETE when already cleared still returns 204.
+	clearAudits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: mutationTypeUserExecContainerClear,
+		TargetID:     u.ID,
+		Limit:        10,
+	})
+	require.NoError(t, err)
+	require.Len(t, clearAudits, 1, "expected user.exec_container.clear audit when a row was cleared")
+	assert.Contains(t, clearAudits[0].BeforeSummary, shellAgent.ID)
+
+	// Idempotent DELETE when already cleared still returns 204 and emits no
+	// second clear audit record.
 	delRec2 := doECRequest(t, srv, http.MethodDelete, nil, ident, cred)
 	assert.Equal(t, http.StatusNoContent, delRec2.Code)
+
+	clearAudits2, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: mutationTypeUserExecContainerClear,
+		TargetID:     u.ID,
+		Limit:        10,
+	})
+	require.NoError(t, err)
+	assert.Len(t, clearAudits2, 1, "idempotent DELETE with no row must not emit a duplicate clear audit")
 
 	// Confirm row is gone once flag is re-enabled.
 	setExperimentOverrides(t, srv, map[string]bool{experiments.ExecContainers: true})
@@ -506,4 +525,218 @@ func TestExecContainer_AC13_IndeterminateAuthzFailsClosed(t *testing.T) {
 	assert.Equal(t, ExecContainerStateUnavailable, res.State)
 	assert.Nil(t, res.Agent)
 	assert.Empty(t, res.RunID)
+}
+
+// TestShellAgentCreateAdmission_Headless verifies R4: createAgentHeadless
+// enforces S6 (agent principal refused), hub.exec_containers (flag off refused),
+// and task refusal (task_not_supported) after deriveAgentConfig resolves a
+// template whose default harness config is "shell".
+func TestShellAgentCreateAdmission_Headless(t *testing.T) {
+	ctx := context.Background()
+	f := newSchedFire(t, "hc-shell-adm")
+	_ = installHeadlessGatherDispatcher(t, f)
+
+	// Create a global template whose default harness config is "shell" so both
+	// human and agent principals resolve it during createAgentHeadless.
+	tpl := &store.Template{
+		ID:                   api.NewUUID(),
+		Name:                 "shell-default-tpl",
+		Slug:                 "shell-default-tpl",
+		Scope:                store.TemplateScopeGlobal,
+		Status:               store.TemplateStatusActive,
+		Harness:              config.ShellHarnessConfigName,
+		DefaultHarnessConfig: config.ShellHarnessConfigName,
+		CreatedBy:            f.creator.ID,
+	}
+	require.NoError(t, f.srv.store.CreateTemplate(ctx, tpl))
+
+	// Resolve human authority for flag-off and task-refusal cases.
+	evt := withSessionRevision(f.event("shell-headless"), f.creator.ID)
+	humanAuth, humanIdent, err := f.srv.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), f.proj.ID, "agent.create")
+	require.NoError(t, err)
+	humanCeiling, humanProv, err := f.srv.fireEffectCeiling(ctx, humanAuth)
+	require.NoError(t, err)
+
+	rr := headlessResolvedRole{preCapRole: AgentRoleFull}
+
+	// 1. Agent principal with template defaulting to shell (flag ON) -> refused (S6).
+	t.Run("agent_principal_refused", func(t *testing.T) {
+		setExperimentOverrides(t, f.srv, map[string]bool{experiments.ExecContainers: true})
+		callerAgent := ecAgent(t, f.srv.store, f.proj.ID, f.creator.ID, f.creator.ID, "claude", string(state.PhaseRunning), string(state.ActivityIdle))
+		agentIdent := &agentIdentityWrapper{
+			AgentTokenClaims: &AgentTokenClaims{
+				ProjectID: f.proj.ID,
+				Scopes:    []AgentTokenScope{ScopeAgentCreate, ScopeAgentLifecycle},
+			},
+		}
+		agentIdent.Subject = callerAgent.ID
+		agentAuth := humanAuth
+		agentAuth.PrincipalKind = "agent"
+		agentAuth.PrincipalID = callerAgent.ID
+		agentProv := humanProv
+		agentProv.SourcePrincipalKind = "agent"
+		agentProv.SourcePrincipalID = callerAgent.ID
+
+		_, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      agentAuth,
+			Identity:       agentIdent,
+			EdgeCeiling:    humanCeiling,
+			EdgeProvenance: agentProv,
+			resolvedRole:   &rr,
+			Name:           "agent-spawned-shell",
+			Template:       tpl.Slug,
+			Detached:       true,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "shell agent: human principals only")
+	})
+
+	// 2. Human principal with hub.exec_containers OFF -> refused (experiment_disabled).
+	t.Run("flag_off_refused", func(t *testing.T) {
+		setExperimentOverrides(t, f.srv, map[string]bool{experiments.ExecContainers: false})
+		_, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      humanAuth,
+			Identity:       humanIdent,
+			EdgeCeiling:    humanCeiling,
+			EdgeProvenance: humanProv,
+			resolvedRole:   &rr,
+			Name:           "flag-off-shell",
+			Template:       tpl.Slug,
+			Detached:       true,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), ErrCodeExperimentDisabled)
+	})
+
+	// 3. Human principal with hub.exec_containers ON and a Task -> refused (task_not_supported).
+	t.Run("task_refused", func(t *testing.T) {
+		setExperimentOverrides(t, f.srv, map[string]bool{experiments.ExecContainers: true})
+		_, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      humanAuth,
+			Identity:       humanIdent,
+			EdgeCeiling:    humanCeiling,
+			EdgeProvenance: humanProv,
+			resolvedRole:   &rr,
+			Name:           "task-shell",
+			Template:       tpl.Slug,
+			Task:           "echo should-not-run",
+			Detached:       true,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), ErrCodeTaskNotSupported)
+	})
+}
+
+// TestShellHarnessTypeReservedOnHub verifies O1 on the Hub: non-reserved
+// harness configs declaring harness: shell are refused with 400 reserved_name
+// on create, update (PUT), patch, and clone.
+func TestShellHarnessTypeReservedOnHub(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devIdent := NewDevUser(DevUserConfig{})
+	devCred := CredentialContext{Kind: CredentialKindDev}
+	withAdmin := func(req *http.Request) *http.Request {
+		return req.WithContext(contextWithCredentialContext(contextWithIdentity(req.Context(), devIdent), devCred))
+	}
+
+	// Create with non-reserved slug "myshell" but harness: "shell" -> 400 reserved_name.
+	t.Run("create_refused", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"name":    "myshell",
+			"slug":    "myshell",
+			"harness": config.ShellHarnessConfigName,
+			"scope":   store.HarnessConfigScopeUser,
+		})
+		req := withAdmin(httptest.NewRequest(http.MethodPost, "/api/v1/harness-configs", bytes.NewReader(body)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.createHarnessConfig(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeReservedName)
+	})
+
+	// Seed a legacy row with harness: "shell" and non-reserved slug.
+	legacy := &store.HarnessConfig{
+		ID:        api.NewUUID(),
+		Name:      "legacy-shell",
+		Slug:      "legacy-shell",
+		Harness:   config.ShellHarnessConfigName,
+		Scope:     store.HarnessConfigScopeUser,
+		ScopeID:   devIdent.ID(),
+		OwnerID:   devIdent.ID(),
+		CreatedBy: devIdent.ID(),
+		Status:    store.HarnessConfigStatusActive,
+	}
+	require.NoError(t, s.CreateHarnessConfig(ctx, legacy))
+
+	t.Run("update_refused", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"name": "legacy-shell-renamed",
+			"slug": "legacy-shell-renamed",
+		})
+		req := withAdmin(httptest.NewRequest(http.MethodPut, "/api/v1/harness-configs/"+legacy.ID, bytes.NewReader(body)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.updateHarnessConfig(rec, req, legacy)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeReservedName)
+	})
+
+	t.Run("patch_refused", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"displayName": "Still Shell",
+		})
+		req := withAdmin(httptest.NewRequest(http.MethodPatch, "/api/v1/harness-configs/"+legacy.ID, bytes.NewReader(body)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.patchHarnessConfig(rec, req, legacy)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeReservedName)
+	})
+
+	t.Run("clone_refused", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"name":  "cloned-shell",
+			"scope": store.HarnessConfigScopeUser,
+		})
+		req := withAdmin(httptest.NewRequest(http.MethodPost, "/api/v1/harness-configs/"+legacy.ID+"/clone", bytes.NewReader(body)))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.handleHarnessConfigClone(rec, req, legacy)
+		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeReservedName)
+	})
+}
+
+// TestHandleExistingAgent_ShellTaskRefused verifies the Nit fix: starting or
+// resuming an existing shell agent via create with a non-empty task is refused
+// with 400 task_not_supported.
+func TestHandleExistingAgent_ShellTaskRefused(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	u := ecUser(t, s, store.UserRoleMember)
+	proj := ecProject(t, s, "Existing Shell Project")
+	grantProjectAccessOnly(t, s, u.ID, proj.ID)
+	shellAgent := ecAgent(t, s, proj.ID, u.ID, u.ID, config.ShellHarnessConfigName, string(state.PhaseStopped), "")
+
+	ident, cred := interactiveUser(u)
+	reqCtx := contextWithCredentialContext(contextWithIdentity(ctx, ident), cred)
+	rec := httptest.NewRecorder()
+	res := srv.handleExistingAgent(
+		reqCtx,
+		rec,
+		shellAgent,
+		proj,
+		"",
+		CreateAgentRequest{Name: shellAgent.Name, Task: "echo nope"},
+		"", "", u.ID,
+	)
+	assert.Equal(t, existingAgentErrored, res)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeTaskNotSupported)
 }

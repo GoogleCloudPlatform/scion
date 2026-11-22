@@ -22,6 +22,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -160,17 +161,34 @@ func runExecContainerClear(cmd *cobra.Command, _ []string) error {
 }
 
 // resolveLocalProjectAgentID resolves an agent name, slug, or UUID within
-// projectID to its canonical agent ID. The Hub never resolves names on
+// projectID to its canonical agent ID, paging through all results so large
+// projects are never truncated. The Hub never resolves names on
 // PUT /api/v1/users/me/exec-container (design §4.5).
 func resolveLocalProjectAgentID(ctx context.Context, client hubclient.Client, projectID, ref string) (string, error) {
-	resp, err := client.ProjectAgents(projectID).List(ctx, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to list agents in current project: %w", err)
-	}
-	for _, a := range resp.Agents {
-		if a.Name == ref || a.Slug == ref || strings.EqualFold(a.ID, ref) {
-			return a.ID, nil
+	var cursor string
+	seenCursors := make(map[string]bool)
+	for {
+		opts := &hubclient.ListAgentsOptions{
+			Page: apiclient.PageOptions{
+				Limit:  200,
+				Cursor: cursor,
+			},
 		}
+		resp, err := client.ProjectAgents(projectID).List(ctx, opts)
+		if err != nil {
+			return "", fmt.Errorf("failed to list agents in current project: %w", err)
+		}
+		for _, a := range resp.Agents {
+			if a.Name == ref || a.Slug == ref || strings.EqualFold(a.ID, ref) {
+				return a.ID, nil
+			}
+		}
+		next := resp.Page.NextCursor
+		if next == "" || seenCursors[next] {
+			break
+		}
+		seenCursors[next] = true
+		cursor = next
 	}
 	return "", fmt.Errorf("agent %q not found in current project", ref)
 }

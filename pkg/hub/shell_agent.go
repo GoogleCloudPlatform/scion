@@ -17,8 +17,10 @@ package hub
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -51,6 +53,70 @@ func refuseReservedHarnessConfigSlug(w http.ResponseWriter, slug string) bool {
 		fmt.Sprintf("harness config slug %q is reserved by the built-in shell harness", slug),
 		map[string]interface{}{"field": "slug"})
 	return true
+}
+
+// refuseReservedHarnessType writes 400 reserved_name and returns true when
+// harnessType is the reserved "shell" harness type. Only the built-in "shell"
+// harness config may use the shell harness so non-reserved configs cannot
+// bypass Hub-side shell-agent protections (ptone/scion#8812 §3.2).
+func refuseReservedHarnessType(w http.ResponseWriter, harnessType string) bool {
+	if !strings.EqualFold(strings.TrimSpace(harnessType), config.ShellHarnessConfigName) {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeReservedName,
+		fmt.Sprintf("harness %q is reserved for the built-in %q harness config", config.ShellHarnessConfigName, config.ShellHarnessConfigName),
+		map[string]interface{}{"field": "harness"})
+	return true
+}
+
+// shellCreateDenial describes why creating a shell execution container was
+// refused by checkShellAgentCreateAdmission.
+type shellCreateDenial struct {
+	status  int
+	code    string
+	message string
+}
+
+func (d *shellCreateDenial) Error() string {
+	return d.code + ": " + d.message
+}
+
+func (d *shellCreateDenial) write(w http.ResponseWriter) {
+	writeError(w, d.status, d.code, d.message, nil)
+}
+
+// checkShellAgentCreateAdmission enforces shell execution container creation
+// admission (ptone/scion#8812 §3.2, §3.4 S6, §7) for both HTTP
+// (createAgentInProject) and headless (createAgentHeadless) agent creation:
+//   - S6 (ungated): only human principals may create shell agents (403).
+//   - Experiment gate: hub.exec_containers must be enabled (400).
+//   - Initial task: rejected (400 task_not_supported).
+func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, isAgentPrincipal bool) *shellCreateDenial {
+	if !isShellAgent(agent) {
+		return nil
+	}
+	if isAgentPrincipal {
+		return &shellCreateDenial{
+			status:  http.StatusForbidden,
+			code:    ErrCodeForbidden,
+			message: "shell agent: human principals only",
+		}
+	}
+	if !s.experimentEnabled(experiments.ExecContainers) {
+		return &shellCreateDenial{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeExperimentDisabled,
+			message: "experiment_disabled: " + experiments.ExecContainers + " is off; execution containers are not enabled on this hub",
+		}
+	}
+	if agent.AppliedConfig != nil && strings.TrimSpace(agent.AppliedConfig.Task) != "" {
+		return &shellCreateDenial{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeTaskNotSupported,
+			message: "shell execution containers do not support an initial task",
+		}
+	}
+	return nil
 }
 
 // shellAgentNotMessageableError returns the typed DM refusal for a shell

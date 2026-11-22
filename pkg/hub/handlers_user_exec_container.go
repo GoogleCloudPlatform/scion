@@ -50,7 +50,8 @@ const (
 	execContainerIneligibleMessage = "That agent can't be used as your execution container. It must be a shell agent you can attach to, in a project you can access."
 	execContainerUnavailableReason = "Your registered execution container is no longer available. Register another."
 
-	mutationTypeUserExecContainerSet = "user.exec_container.set"
+	mutationTypeUserExecContainerSet   = "user.exec_container.set"
+	mutationTypeUserExecContainerClear = "user.exec_container.clear"
 )
 
 type execContainerAgentResponse struct {
@@ -178,10 +179,26 @@ func (s *Server) putUserExecContainer(w http.ResponseWriter, r *http.Request, ac
 func (s *Server) deleteUserExecContainer(w http.ResponseWriter, r *http.Request, actor UserIdentity) {
 	ctx := r.Context()
 
+	prev, err := s.store.GetUserExecContainer(ctx, actor.ID())
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.Error("failed to check execution container before clear", "user_id", actor.ID(), "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to clear execution container", nil)
+		return
+	}
+
 	if err := s.store.DeleteUserExecContainer(ctx, actor.ID()); err != nil {
 		slog.Error("failed to clear execution container", "user_id", actor.ID(), "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to clear execution container", nil)
 		return
+	}
+
+	if prev != nil {
+		s.emitMutationAuditSync(ctx, &store.MutationAuditRecord{
+			MutationType:  mutationTypeUserExecContainerClear,
+			TargetType:    "user",
+			TargetID:      actor.ID(),
+			BeforeSummary: fmt.Sprintf("agent_id=%s", prev.AgentID),
+		})
 	}
 
 	w.WriteHeader(http.StatusNoContent)
