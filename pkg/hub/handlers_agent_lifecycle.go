@@ -668,6 +668,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// status write keeps its own grants (ptone/scion#6403).
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
+	// syncAgentAfterStopRecord and the GetAgent refresh below only align the
+	// in-memory struct for the HTTP response/event (persists no state; safe on
+	// error). Quota releases below run detached with timeout and panic recovery.
 	s.syncAgentAfterStopRecord(ctx, agent, newPhase, string(state.SuspendReasonUser))
 	s.persistSuspendScreen(ctx, agent.ID, captured)
 	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
@@ -681,7 +684,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.releaseProjectQuota(ctx, agent)
 	// Defensive guard: handleAgentLifecycle currently admits only running
 	// agents or an idle-suspend claim, so this is always true in production,
-	// but keeps the dedup invariant local.
+	// but keeps the dedup invariant local. Delivery runs in a detached
+	// background goroutine; PublishAgentStatus is a non-blocking in-memory
+	// publish (safe as-is).
 	if isRealThirdPartyLifecycleTransition(preActionPhase, preActionSuspendReason, api.AgentActionSuspend) {
 		s.notifyThirdPartyLifecycleAction(ctx, agent, api.AgentActionSuspend, lifecycleStopReasonFromContext(ctx))
 	}

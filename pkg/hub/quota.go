@@ -731,14 +731,36 @@ func (qs *QuotaService) resolveEffectiveLimitWithSource(ctx context.Context, lim
 // reservations under several limits (an agent holds both
 // max_agents_per_broker and max_agents_per_project), and releasing one must
 // not release the others (ptone/scion#1978). It is a no-op when the limit is
-// not defined or the resource holds no active reservation for it. Errors
-// are logged but not returned: deletion must not be blocked by quota
-// bookkeeping.
+// not defined or the resource holds no active reservation for it.
+//
+// It detaches from ctx's cancellation with a dedicated timeout
+// (quotaReleaseTimeout) so an expiring lifecycle budget does not leak
+// reservations until sweep, and recovers from panics so subsequent cleanup
+// steps still run (ptone/scion#8862). Errors are logged but not returned:
+// deletion and suspend must not be blocked by quota bookkeeping.
 func (qs *QuotaService) Release(ctx context.Context, limitName string, resourceID string) {
-	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
+	if qs == nil || qs.store == nil {
+		return
+	}
+	logger := qs.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn("recovered panic releasing quota reservation",
+				"limit", limitName, "resource_id", resourceID, "panic", r)
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), quotaReleaseTimeout)
+	defer cancel()
+	limitDef, err := qs.store.GetLimitDefinitionByName(releaseCtx, limitName)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			qs.logger.Warn("failed to release quota reservation: limit lookup failed",
+			logger.Warn("failed to release quota reservation: limit lookup failed",
 				"limit", limitName, "resource_id", resourceID, "error", err)
 		}
 		return
@@ -747,8 +769,8 @@ func (qs *QuotaService) Release(ctx context.Context, limitName string, resourceI
 		// No limit defined — nothing to release.
 		return
 	}
-	if err := qs.store.ReleaseReservation(ctx, limitDef.ID, resourceID); err != nil && !errors.Is(err, store.ErrNotFound) {
-		qs.logger.Warn("failed to release quota reservation",
+	if err := qs.store.ReleaseReservation(releaseCtx, limitDef.ID, resourceID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		logger.Warn("failed to release quota reservation",
 			"limit", limitName, "resource_id", resourceID, "error", err)
 	}
 }

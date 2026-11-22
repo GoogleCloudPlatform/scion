@@ -71,14 +71,50 @@ const agentCredentialRevokeTimeout = 5 * time.Second
 // A nil credStore is logged and skipped rather than dereferenced, so the
 // helper keeps its no-error, no-panic contract on every caller's error path.
 func revokeAgentCredentialsBestEffort(ctx context.Context, credStore store.AgentCredentialStore, agentID, reason string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("Recovered panic revoking agent credentials", "agent_id", agentID, "reason", reason, "panic", r)
+		}
+	}()
 	if credStore == nil {
 		slog.Warn("Skipping agent credential revoke: no credential store configured", "agent_id", agentID, "reason", reason)
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCredentialRevokeTimeout)
 	defer cancel()
 	if err := revokeAgentCredentials(revokeCtx, credStore, agentID, reason); err != nil {
 		slog.Warn("Failed to revoke agent credentials", "agent_id", agentID, "reason", reason, "error", err)
+	}
+}
+
+// revokeAgentCredentialBestEffort revokes a single credential (e.g., the old
+// credential superseded by a token refresh) on a detached, bounded context
+// with panic recovery so client cancellation or a store panic cannot leave
+// the superseded credential unlogged or abort the refresh response
+// (ptone/scion#8862).
+func revokeAgentCredentialBestEffort(ctx context.Context, credStore store.AgentCredentialStore, agentID, credentialID, reason string) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("Recovered panic revoking old credential after refresh",
+				"agent_id", agentID, "credential_id", credentialID, "reason", reason, "panic", r)
+		}
+	}()
+	if credStore == nil {
+		slog.Warn("Skipping old credential revoke after refresh: no credential store configured",
+			"agent_id", agentID, "credential_id", credentialID, "reason", reason)
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCredentialRevokeTimeout)
+	defer cancel()
+	if err := credStore.RevokeAgentCredential(revokeCtx, credentialID, "system", reason); err != nil {
+		slog.Warn("Failed to revoke old credential after refresh",
+			"agent_id", agentID, "credential_id", credentialID, "error", err)
 	}
 }
 

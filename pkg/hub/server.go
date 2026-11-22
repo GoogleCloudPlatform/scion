@@ -1641,14 +1641,38 @@ func (s *Server) syncAgentAfterStopRecord(ctx context.Context, agent *store.Agen
 // stopRunStillCurrent reports whether the row still holds runID, for a
 // caller that has no status to write after a stop dispatched for runID but
 // must not release a newer run's reservation (ptone/scion#2550). It logs a
-// Warn naming both runs when the run changed. An empty runID, or a failed
-// read, counts as current, as before run IDs.
-func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action string) bool {
-	if runID == "" {
+// Warn naming both runs when the run changed.
+//
+// It runs on a detached, bounded context (finalizationContext) so an expired
+// stop/suspend budget does not force a spurious read failure (ptone/scion#8862).
+// An empty runID, a failed read, or a recovered panic returns true (counts as
+// current, matching the pre-existing failed-read contract): on the suspend
+// record-error path this fails closed for credential security (revoking the
+// stopped container's credentials rather than leaving them live; a concurrent
+// newer run losing its token fails safe), and on queued stop a falsely-released
+// reservation is restored by quota backfill.
+func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action string) (stillCurrent bool) {
+	if runID == "" || s == nil || s.store == nil {
 		return true
 	}
-	current, err := s.store.GetAgent(ctx, agentID)
-	if err != nil || current.RunID == runID {
+	defer func() {
+		if r := recover(); r != nil {
+			logger := s.agentLifecycleLog
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Warn("Recovered panic checking stop run currency",
+				"agent_id", agentID, "stopped_run_id", runID, "action", action, "panic", r)
+			stillCurrent = true
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	checkCtx, cancel := finalizationContext(ctx)
+	defer cancel()
+	current, err := s.store.GetAgent(checkCtx, agentID)
+	if err != nil || current == nil || current.RunID == runID {
 		return true
 	}
 	s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
@@ -6533,10 +6557,13 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	s.persistSuspendScreen(ctx, agent.ID, captured)
 	releaseClaim()
 	if claimedIdle {
+		// Already detached with a bounded timeout via finalizationContext;
+		// error ignored and covered by auto_suspend_worker's panic boundary.
 		cctx, ccancel := finalizationContext(ctx)
 		_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
 		ccancel()
 	}
+	// Non-blocking in-memory publish; final step of auto-suspend.
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }

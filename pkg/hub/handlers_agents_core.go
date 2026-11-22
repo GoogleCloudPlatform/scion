@@ -6167,10 +6167,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 
 	// Revoke the old credential now that a new token has been issued (best-effort)
 	if oldCredentialID != "" {
-		if err := s.store.RevokeAgentCredential(r.Context(), oldCredentialID, "system", "refreshed"); err != nil {
-			slog.Warn("Failed to revoke old credential after refresh",
-				"agent_id", id, "credential_id", oldCredentialID, "error", err)
-		}
+		revokeAgentCredentialBestEffort(r.Context(), s.store, id, oldCredentialID, "refreshed")
 	}
 
 	// Parse the new token to extract the expiry for the response.

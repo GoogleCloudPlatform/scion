@@ -1252,8 +1252,17 @@ func (s *Server) createUnderClaim(ctx context.Context, agent *store.Agent, dispa
 // a queued stop's own stop-kind claim is kept. A holder still renewing
 // finds the claim gone and abandons its start.
 func (s *Server) releaseSupersededClaim(ctx context.Context, agentID, claimID string, stopIntentAt time.Time) {
-	if claimID == "" || stopIntentAt.IsZero() {
+	if claimID == "" || stopIntentAt.IsZero() || s == nil || s.store == nil {
 		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("Recovered panic releasing superseded start claim",
+				"agent_id", agentID, "claim_id", claimID, "panic", r)
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
