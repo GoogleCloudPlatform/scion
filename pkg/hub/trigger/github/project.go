@@ -64,9 +64,14 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 
 // projectDecodedPayload builds the §5.8 bounded JSON projection from a decoded root object.
 //
-// For push events (eventName == EventPush), every projected string and array is
-// bounded by construction via an explicit allow-list so a valid push delivery
-// cannot fail projection under the 64 KiB (DefaultMaxPayloadBytes) ceiling.
+// For push events (eventName == EventPush), every projected scalar and array is
+// bounded by construction via an explicit typed allow-list (capped UTF-8
+// strings, int64 parsed from json.Number, or bools; zero sanitizeValue or
+// arbitrary JSON pass-through) so a valid push delivery cannot fail projection
+// under the 64 KiB (DefaultMaxPayloadBytes) ceiling. payload_truncated is set
+// whenever commits[:20] slicing, per-commit file-array reduction (count > 20 or
+// path > 1 KiB), any push scalar cap/type-mismatch omission, or a shrink tier
+// applies.
 //
 // Worst-case push projection arithmetic (normal UTF-8, after Tier 4b drops
 // commit added/removed/modified file arrays):
@@ -78,15 +83,19 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 //   - Top-level push fields:
 //     ref (1,024) + before (64) + after (64) + created/deleted/forced (~40) +
 //     pusher{name(256),username(256)} (~547) <= ~1,750 bytes.
-//   - Reduced repository (all strings <= 256, owner.type <= 64): <= ~1,540 bytes.
-//   - Reduced sender (login <= 256, type <= 64, id <= 20): <= ~385 bytes.
-//   - Reduced installation (id <= 20): <= ~45 bytes.
+//   - Reduced repository: id (int64 <= 20) + private (5) + full_name (256) +
+//     name (256) + default_branch (256) + html_url (256) +
+//     owner{id (int64 <= 20), login (256), type (64)} + keys/syntax (~150)
+//     <= ~1,540 bytes.
+//   - Reduced sender: id (int64 <= 20) + login (256) + type (64) + syntax (~45)
+//     <= ~385 bytes.
+//   - Reduced installation: id (int64 <= 20) + syntax (~25) <= ~45 bytes.
 //   - Total <= ~49,479 bytes (< 65,536 bytes; >16 KiB headroom).
 //
 // Even under pathological JSON-escape expansion (e.g. control characters
 // expanding 6x) or a caller-configured smaller maxBytes, Tier 5 shrinks
-// unprotected push strings and Tier 5b shrinks commit author/committer names
-// so Tier 5's protected-key set cannot cause a refusal for push.
+// unprotected push strings and Tier 5b shrinks commit/pusher names so Tier 5's
+// protected-key set cannot cause a refusal for push.
 func projectDecodedPayload(root map[string]any, eventName string, maxBytes int) ([]byte, bool, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxPayloadBytes
@@ -96,41 +105,39 @@ func projectDecodedPayload(root map[string]any, eventName string, maxBytes int) 
 	proj := make(map[string]any)
 	reducedTruncated := false
 
-	if v, ok := root["action"]; ok {
-		proj["action"] = sanitizeValue(v)
-	}
-	if v, ok := root["number"]; ok {
-		proj["number"] = sanitizeValue(v)
-	}
 	if isPush {
-		if v, ok := root["ref"].(string); ok {
-			s, cut := truncateCleanString(v, MaxPushRefBytes)
-			proj["ref"] = s
-			reducedTruncated = reducedTruncated || cut
+		if copyCappedString(proj, root, "ref", MaxPushRefBytes) {
+			reducedTruncated = true
 		}
 		for _, shaKey := range []string{"before", "after"} {
-			if v, ok := root[shaKey].(string); ok {
-				s, cut := truncateCleanString(v, MaxPushSHABytes)
-				proj[shaKey] = s
-				reducedTruncated = reducedTruncated || cut
+			if copyCappedString(proj, root, shaKey, MaxPushSHABytes) {
+				reducedTruncated = true
 			}
 		}
 		for _, boolKey := range []string{"created", "deleted", "forced"} {
-			if v, ok := root[boolKey].(bool); ok {
-				proj[boolKey] = v
+			if copyBool(proj, root, boolKey) {
+				reducedTruncated = true
 			}
 		}
-		if headMap, ok := root["head_commit"].(map[string]any); ok {
-			reduced, cut := reducePushCommit(headMap)
-			proj["head_commit"] = reduced
-			reducedTruncated = reducedTruncated || cut
+		if rawHead, exists := root["head_commit"]; exists && rawHead != nil {
+			if headMap, ok := rawHead.(map[string]any); ok {
+				reduced, cut := reducePushCommit(headMap)
+				proj["head_commit"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
 		}
-		if pusherMap, ok := root["pusher"].(map[string]any); ok {
-			reduced, cut := reducePushActor(pusherMap)
-			proj["pusher"] = reduced
-			reducedTruncated = reducedTruncated || cut
+		if rawPusher, exists := root["pusher"]; exists && rawPusher != nil {
+			if pusherMap, ok := rawPusher.(map[string]any); ok {
+				reduced, cut := reducePushActor(pusherMap)
+				proj["pusher"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
 		}
-		if rawCommits, ok := root["commits"]; ok && rawCommits != nil {
+		if rawCommits, exists := root["commits"]; exists && rawCommits != nil {
 			if arr, isArr := rawCommits.([]any); isArr {
 				if len(arr) > MaxPushCommits {
 					arr = arr[:MaxPushCommits]
@@ -142,12 +149,49 @@ func projectDecodedPayload(root map[string]any, eventName string, maxBytes int) 
 						rc, cut := reducePushCommit(cm)
 						reduced = append(reduced, rc)
 						reducedTruncated = reducedTruncated || cut
+					} else {
+						reducedTruncated = true
 					}
 				}
 				proj["commits"] = reduced
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawRepo, exists := root["repository"]; exists && rawRepo != nil {
+			if repoMap, ok := rawRepo.(map[string]any); ok {
+				reduced, cut := reducePushRepository(repoMap)
+				proj["repository"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawSender, exists := root["sender"]; exists && rawSender != nil {
+			if senderMap, ok := rawSender.(map[string]any); ok {
+				reduced, cut := reducePushSender(senderMap)
+				proj["sender"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawInst, exists := root["installation"]; exists && rawInst != nil {
+			if instMap, ok := rawInst.(map[string]any); ok {
+				reduced, cut := reducePushInstallation(instMap)
+				proj["installation"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
 			}
 		}
 	} else {
+		if v, ok := root["action"]; ok {
+			proj["action"] = sanitizeValue(v)
+		}
+		if v, ok := root["number"]; ok {
+			proj["number"] = sanitizeValue(v)
+		}
 		for _, key := range keptPrimaryKeys {
 			val, ok := root[key]
 			if !ok || val == nil {
@@ -160,27 +204,15 @@ func projectDecodedPayload(root map[string]any, eventName string, maxBytes int) 
 			}
 			proj[key] = sanitizeValue(val)
 		}
-	}
-	if repoMap, ok := root["repository"].(map[string]any); ok {
-		if isPush {
-			reduced, cut := reducePushRepository(repoMap)
-			proj["repository"] = reduced
-			reducedTruncated = reducedTruncated || cut
-		} else {
+		if repoMap, ok := root["repository"].(map[string]any); ok {
 			proj["repository"] = reduceRepository(repoMap)
 		}
-	}
-	if senderMap, ok := root["sender"].(map[string]any); ok {
-		if isPush {
-			reduced, cut := reducePushSender(senderMap)
-			proj["sender"] = reduced
-			reducedTruncated = reducedTruncated || cut
-		} else {
+		if senderMap, ok := root["sender"].(map[string]any); ok {
 			proj["sender"] = reduceActor(senderMap)
 		}
-	}
-	if instMap, ok := root["installation"].(map[string]any); ok {
-		proj["installation"] = reduceInstallation(instMap)
+		if instMap, ok := root["installation"].(map[string]any); ok {
+			proj["installation"] = reduceInstallation(instMap)
+		}
 	}
 
 	encoded, err := encodeCompactJSON(proj)
@@ -267,16 +299,56 @@ func truncateCleanString(s string, maxBytes int) (string, bool) {
 
 func copyCappedString(dst, src map[string]any, key string, maxBytes int) bool {
 	raw, ok := src[key]
-	if !ok {
+	if !ok || raw == nil {
 		return false
 	}
 	s, ok := raw.(string)
 	if !ok {
-		return false
+		return true
 	}
 	capped, cut := truncateCleanString(s, maxBytes)
 	dst[key] = capped
 	return cut
+}
+
+func copyInt64(dst, src map[string]any, key string) bool {
+	raw, ok := src[key]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return true
+		}
+		dst[key] = n
+		return false
+	case int64:
+		dst[key] = v
+		return false
+	default:
+		return true
+	}
+}
+
+func copyBool(dst, src map[string]any, key string) bool {
+	raw, ok := src[key]
+	if !ok || raw == nil {
+		return false
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return true
+	}
+	dst[key] = b
+	return false
+}
+
+func reducePushInstallation(inst map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, 1)
+	cutID := copyInt64(out, inst, "id")
+	return out, cutID
 }
 
 func reducePushActor(actor map[string]any) (map[string]any, bool) {
@@ -289,31 +361,30 @@ func reducePushActor(actor map[string]any) (map[string]any, bool) {
 func reducePushSender(actor map[string]any) (map[string]any, bool) {
 	out := make(map[string]any, 3)
 	cutLogin := copyCappedString(out, actor, "login", MaxPushRepoStringBytes)
-	if v, ok := actor["id"]; ok {
-		out["id"] = sanitizeValue(v)
-	}
+	cutID := copyInt64(out, actor, "id")
 	cutType := copyCappedString(out, actor, "type", MaxPushSHABytes)
-	return out, cutLogin || cutType
+	return out, cutLogin || cutID || cutType
 }
 
 func reducePushRepository(repo map[string]any) (map[string]any, bool) {
 	out := make(map[string]any, 7)
-	truncated := false
-	if v, ok := repo["id"]; ok {
-		out["id"] = sanitizeValue(v)
-	}
-	if v, ok := repo["private"]; ok {
-		out["private"] = sanitizeValue(v)
+	truncated := copyInt64(out, repo, "id")
+	if copyBool(out, repo, "private") {
+		truncated = true
 	}
 	for _, key := range []string{"full_name", "name", "default_branch", "html_url"} {
 		if copyCappedString(out, repo, key, MaxPushRepoStringBytes) {
 			truncated = true
 		}
 	}
-	if owner, ok := repo["owner"].(map[string]any); ok {
-		reducedOwner, cutOwner := reducePushSender(owner)
-		out["owner"] = reducedOwner
-		truncated = truncated || cutOwner
+	if rawOwner, exists := repo["owner"]; exists && rawOwner != nil {
+		if owner, ok := rawOwner.(map[string]any); ok {
+			reducedOwner, cutOwner := reducePushSender(owner)
+			out["owner"] = reducedOwner
+			truncated = truncated || cutOwner
+		} else {
+			truncated = true
+		}
 	}
 	return out, truncated
 }
@@ -333,35 +404,52 @@ func reducePushCommit(commit map[string]any) (map[string]any, bool) {
 	if copyCappedString(out, commit, "url", MaxPushCommitURLBytes) {
 		truncated = true
 	}
-	if v, ok := commit["distinct"].(bool); ok {
-		out["distinct"] = v
+	if copyBool(out, commit, "distinct") {
+		truncated = true
 	}
-	if author, ok := commit["author"].(map[string]any); ok {
-		reduced, cut := reducePushActor(author)
-		out["author"] = reduced
-		truncated = truncated || cut
+	if rawAuthor, exists := commit["author"]; exists && rawAuthor != nil {
+		if author, ok := rawAuthor.(map[string]any); ok {
+			reduced, cut := reducePushActor(author)
+			out["author"] = reduced
+			truncated = truncated || cut
+		} else {
+			truncated = true
+		}
 	}
-	if committer, ok := commit["committer"].(map[string]any); ok {
-		reduced, cut := reducePushActor(committer)
-		out["committer"] = reduced
-		truncated = truncated || cut
+	if rawCommitter, exists := commit["committer"]; exists && rawCommitter != nil {
+		if committer, ok := rawCommitter.(map[string]any); ok {
+			reduced, cut := reducePushActor(committer)
+			out["committer"] = reduced
+			truncated = truncated || cut
+		} else {
+			truncated = true
+		}
 	}
 	for _, listKey := range []string{"added", "removed", "modified"} {
-		if rawList, ok := commit[listKey].([]any); ok {
-			if len(rawList) > MaxPushCommitFiles {
-				rawList = rawList[:MaxPushCommitFiles]
+		rawVal, exists := commit[listKey]
+		if !exists || rawVal == nil {
+			continue
+		}
+		rawList, ok := rawVal.([]any)
+		if !ok {
+			truncated = true
+			continue
+		}
+		if len(rawList) > MaxPushCommitFiles {
+			rawList = rawList[:MaxPushCommitFiles]
+			truncated = true
+		}
+		paths := make([]any, 0, len(rawList))
+		for _, elem := range rawList {
+			if p, isStr := elem.(string); isStr {
+				capped, cut := truncateCleanString(p, MaxPushFilePathBytes)
+				paths = append(paths, capped)
+				truncated = truncated || cut
+			} else {
 				truncated = true
 			}
-			paths := make([]any, 0, len(rawList))
-			for _, elem := range rawList {
-				if p, isStr := elem.(string); isStr {
-					capped, cut := truncateCleanString(p, MaxPushFilePathBytes)
-					paths = append(paths, capped)
-					truncated = truncated || cut
-				}
-			}
-			out[listKey] = paths
 		}
+		out[listKey] = paths
 	}
 	return out, truncated
 }

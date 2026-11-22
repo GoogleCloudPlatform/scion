@@ -1443,4 +1443,51 @@ func TestNormalize_Push(t *testing.T) {
 		assert.Equal(t, "4", res.Attributes["commit_count"])
 		assert.Equal(t, []string{sha40, sha64}, res.Lists["commits"])
 	})
+
+	t.Run("non_printable_unicode_ref_uses_hashed_subject_and_cleaned_ref_attr", func(t *testing.T) {
+		zwjRef := "refs/heads/feat/👨\u200d👩"
+		raw, err := json.Marshal(map[string]any{
+			"ref":          zwjRef,
+			"before":       strings.Repeat("0", 40),
+			"after":        strings.Repeat("a", 40),
+			"commits":      []any{},
+			"head_commit":  nil,
+			"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-zwj-ref", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.True(t, res.Handled)
+		assert.Equal(t, formatPushSubject("octo-org/octo-repo", zwjRef), res.Subject)
+		assert.Contains(t, res.Subject, "~")
+		assert.True(t, allPrintable(res.Subject))
+		assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
+		assert.True(t, allPrintable(res.Attributes["ref"]))
+		assert.Equal(t, "refs/heads/feat/👨👩", res.Attributes["ref"])
+	})
+
+	t.Run("oversize_pusher_name_capped_at_256_bytes", func(t *testing.T) {
+		longPusher := strings.Repeat("p", MaxPushActorNameBytes-1) + "ééé"
+		raw, err := json.Marshal(map[string]any{
+			"ref":          "refs/heads/main",
+			"before":       strings.Repeat("0", 40),
+			"after":        strings.Repeat("a", 40),
+			"commits":      []any{},
+			"head_commit":  nil,
+			"pusher":       map[string]any{"name": longPusher, "email": "p@example.com"},
+			"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-long-pusher", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.LessOrEqual(t, len(res.Attributes["pusher"]), MaxPushActorNameBytes)
+		assert.True(t, utf8.ValidString(res.Attributes["pusher"]))
+		assert.Equal(t, strings.Repeat("p", MaxPushActorNameBytes-1), res.Attributes["pusher"])
+	})
 }

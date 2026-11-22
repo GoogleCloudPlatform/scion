@@ -847,3 +847,141 @@ func TestNormalize_PushWorstCaseBoundedByConstruction(t *testing.T) {
 	assert.Equal(t, "true", escRes.Attributes["payload_truncated"])
 	assert.LessOrEqual(t, escRes.PayloadBytes, DefaultMaxPayloadBytes)
 }
+
+func TestProjectPayload_PushStructuralPropertyBound(t *testing.T) {
+	// R1 structural property test: derive every key path emitted by the push
+	// projection from a complete baseline push payload (plus non-push decoys
+	// action/number), then replace each path one at a time with:
+	//   1) an 8,000-key nested object (> 80 KiB),
+	//   2) a 100 KB digit json.Number,
+	//   3) a 100 KB string.
+	// Every mutation must project cleanly with err == nil and len(out) <= 64 KiB.
+	baseRaw := []byte(`{
+		"ref": "refs/heads/main",
+		"before": "0000000000000000000000000000000000000000",
+		"after": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		"created": false,
+		"deleted": false,
+		"forced": false,
+		"pusher": {"name": "monalisa", "username": "monalisa"},
+		"head_commit": {
+			"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"tree_id": "1111111111111111111111111111111111111111",
+			"distinct": true,
+			"message": "feat: baseline",
+			"timestamp": "2026-05-01T10:00:00Z",
+			"url": "https://github.com/octo-org/octo-repo/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"author": {"name": "Monalisa", "username": "monalisa"},
+			"committer": {"name": "Monalisa", "username": "monalisa"},
+			"added": ["a.go"],
+			"removed": ["b.go"],
+			"modified": ["c.go"]
+		},
+		"commits": [{
+			"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"tree_id": "1111111111111111111111111111111111111111",
+			"distinct": true,
+			"message": "feat: baseline",
+			"timestamp": "2026-05-01T10:00:00Z",
+			"url": "https://github.com/octo-org/octo-repo/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"author": {"name": "Monalisa", "username": "monalisa"},
+			"committer": {"name": "Monalisa", "username": "monalisa"},
+			"added": ["a.go"],
+			"removed": ["b.go"],
+			"modified": ["c.go"]
+		}],
+		"repository": {
+			"id": 1296269,
+			"full_name": "octo-org/octo-repo",
+			"name": "octo-repo",
+			"private": false,
+			"default_branch": "main",
+			"html_url": "https://github.com/octo-org/octo-repo",
+			"owner": {"id": 100, "login": "octo-org", "type": "Organization"}
+		},
+		"sender": {"id": 201, "login": "monalisa", "type": "User"},
+		"installation": {"id": 987654}
+	}`)
+
+	baseRoot, err := decodeJSONObject(baseRaw)
+	require.NoError(t, err)
+	baseOut, baseTrunc, err := projectDecodedPayload(baseRoot, EventPush, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.False(t, baseTrunc)
+
+	projRoot, err := decodeJSONObject(baseOut)
+	require.NoError(t, err)
+
+	// Dynamically collect every emitted path in projRoot so newly added keys are covered automatically.
+	var paths [][]string
+	var collect func(node any, prefix []string)
+	collect = func(node any, prefix []string) {
+		switch m := node.(type) {
+		case map[string]any:
+			for k, v := range m {
+				p := append(append([]string(nil), prefix...), k)
+				paths = append(paths, p)
+				collect(v, p)
+			}
+		case []any:
+			if len(m) > 0 {
+				p := append(append([]string(nil), prefix...), "0")
+				paths = append(paths, p)
+				collect(m[0], p)
+			}
+		}
+	}
+	collect(projRoot, nil)
+	// Also test non-push top-level decoys that must never pass through on push.
+	paths = append(paths, []string{"action"}, []string{"number"})
+	require.Greater(t, len(paths), 40, "expected all emitted push projection paths to be discovered")
+
+	hugeObj := make(map[string]any, 8000)
+	for i := 0; i < 8000; i++ {
+		hugeObj[fmt.Sprintf("k%04d", i)] = "v"
+	}
+	hugeNum := json.Number(strings.Repeat("9", 100*1024))
+	hugeStr := strings.Repeat("x", 100*1024)
+
+	adversarial := []struct {
+		name string
+		val  any
+	}{
+		{name: "huge_object", val: hugeObj},
+		{name: "100kb_number", val: hugeNum},
+		{name: "100kb_string", val: hugeStr},
+	}
+
+	setAtPath := func(root map[string]any, path []string, val any) {
+		var cur any = root
+		for i := 0; i < len(path)-1; i++ {
+			seg := path[i]
+			switch node := cur.(type) {
+			case map[string]any:
+				cur = node[seg]
+			case []any:
+				cur = node[0]
+			}
+		}
+		last := path[len(path)-1]
+		switch node := cur.(type) {
+		case map[string]any:
+			node[last] = val
+		case []any:
+			node[0] = val
+		}
+	}
+
+	for _, path := range paths {
+		pathLabel := strings.Join(path, ".")
+		for _, adv := range adversarial {
+			mutated, err := decodeJSONObject(baseRaw)
+			require.NoError(t, err)
+			setAtPath(mutated, path, adv.val)
+
+			out, _, err := projectDecodedPayload(mutated, EventPush, DefaultMaxPayloadBytes)
+			require.NoErrorf(t, err, "path=%s variant=%s must not fail push projection", pathLabel, adv.name)
+			assert.LessOrEqualf(t, len(out), DefaultMaxPayloadBytes, "path=%s variant=%s exceeded 64 KiB", pathLabel, adv.name)
+		}
+	}
+}
