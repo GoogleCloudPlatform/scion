@@ -81,7 +81,7 @@ Configure the App either in the web UI, which is the usual path, or in deploymen
    - **Public Installation URL**: `https://github.com/apps/<app-slug>/installations/new`. Project settings show this link to admins whose project has no installation yet.
 3. Click **Save GitHub App Configuration**. The status next to the button changes to **Configured** once the App ID and a private key are present.
 
-The save is applied to the running Hub without a restart. The Hub stores the private key and webhook secret as Hub-scoped secrets named `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET`, and the other fields in the `github_app` section of the Hub database. The UI never shows the stored secrets again: leave a secret field empty to keep its current value.
+The save is applied to the running Hub without a restart, except for the first `app_id` (see [Restart once after the first configuration](#restart-once-after-the-first-configuration)). The Hub stores the private key and webhook secret as Hub-scoped secrets named `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET`, and the other fields in the `github_app` section of the Hub database. The UI never shows the stored secrets again: leave a secret field empty to keep its current value.
 
 The same save is available as `PUT /api/v1/github-app` with any of `app_id`, `private_key`, `webhook_secret`, `api_base_url`, `webhooks_enabled` and `installation_url`. Because it manages credentials, this route requires an interactive session and refuses user access tokens with `403`.
 
@@ -118,7 +118,9 @@ Because a startup value wins, a key set by `private_key_path` or `SCION_SERVER_G
 
 ### Restart once after the first configuration
 
-The periodic installation health check is scheduled at startup and only when an App ID is set then: every 24 hours when `webhooks_enabled` is on, every 6 hours when it is off. After configuring the App for the first time, or changing `webhooks_enabled`, restart the Hub so the check runs on the matching schedule. A save that changes `app_id` is reported as pending a restart for the same reason. Token minting, discovery and webhooks work without the restart.
+The agent dispatcher attaches the App's token minter at startup, and only when an App ID is set then. After setting `app_id` for the first time, restart the Hub so agents receive App tokens when they start. A save that changes `app_id` is reported as pending a restart for this reason. Discovery, webhooks and the project status check work without the restart.
+
+The periodic installation health check needs no restart. It runs every 24 hours when `webhooks_enabled` is on and every 6 hours when it is off. Saving `app_id` or `webhooks_enabled`, in the UI or the API, reschedules it at once, and clearing `app_id` stops it.
 
 ## Step 3: Install the App and sync installations
 
@@ -173,7 +175,7 @@ There is no web UI or CLI command for binding yet.
 
 ### Project token permissions
 
-Each project can narrow what its tokens request with `GET`, `PUT` and `DELETE` on `/api/v1/projects/<project-id>/github-permissions`. The body takes `contents`, `pull_requests`, `issues`, `metadata`, `checks` and `actions`, each `"read"`, `"write"` or empty. Without stored permissions the Hub requests the defaults from Step 1. A read-only proof turns any `write` into `read`.
+Each project can narrow what its tokens request with `GET`, `PUT` and `DELETE` on `/api/v1/projects/<project-id>/github-permissions`. The body takes `contents`, `pull_requests`, `issues`, `metadata`, `checks` and `actions`, each `"read"`, `"write"` or empty. A `PUT` must set at least one of them: a body with every field empty, or with any other field, is rejected with `400`. To go back to the defaults, send `DELETE`. Without stored permissions the Hub requests the defaults from Step 1, and `GET` returns them; a stored set with every field empty counts as no stored permissions. A read-only proof turns any `write` into `read`.
 
 Commit authorship for agent commits is configured per project at `/api/v1/projects/<project-id>/git-identity` (mode `bot`, `custom` with `name` and `email`, or `co-authored`; default `bot`).
 
