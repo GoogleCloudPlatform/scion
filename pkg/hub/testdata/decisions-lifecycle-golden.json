@@ -32,6 +32,7 @@
               "surface": "native"
             },
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_2>",
             "question": "Ship the **feature** now?",
@@ -66,6 +67,7 @@
                 }
               ],
               "defaultChoiceId": "1",
+              "dismissAvailableAt": "<TIMESTAMP>",
               "key": "D234",
               "messageId": "<UUID_1>",
               "question": "Ship the **feature** now?",
@@ -87,6 +89,7 @@
                   "label": "New type"
                 }
               ],
+              "dismissAvailableAt": "<TIMESTAMP>",
               "key": "1",
               "messageId": "<UUID_1>",
               "question": "Which approach?",
@@ -122,6 +125,7 @@
               }
             ],
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "dismissed": {
               "at": "<TIMESTAMP>",
               "byName": "Alice",
@@ -163,6 +167,7 @@
               }
             ],
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_1>",
             "question": "Ship the **feature** now?",
@@ -191,6 +196,7 @@
               }
             ],
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_2>",
             "question": "Ship v2 now?",
@@ -224,6 +230,7 @@
               }
             ],
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_1>",
             "question": "Ship the **feature** now?",
@@ -263,6 +270,7 @@
                 }
               ],
               "defaultChoiceId": "1",
+              "dismissAvailableAt": "<TIMESTAMP>",
               "key": "D234",
               "messageId": "<UUID_1>",
               "question": "Ship the **feature** now?",
@@ -284,6 +292,7 @@
                   "label": "New type"
                 }
               ],
+              "dismissAvailableAt": "<TIMESTAMP>",
               "key": "1",
               "messageId": "<UUID_1>",
               "question": "Which approach?",
@@ -334,6 +343,7 @@
             "surface": "native"
           },
           "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
           "key": "D234",
           "messageId": "<UUID_3>",
           "question": "Ship the **feature** now?",
@@ -368,6 +378,7 @@
             "responseMessageId": "<UUID_2>",
             "surface": "native"
           },
+          "dismissAvailableAt": "<TIMESTAMP>",
           "key": "1",
           "messageId": "<UUID_3>",
           "question": "Which approach?",
@@ -411,6 +422,7 @@
               "surface": "native"
             },
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_3>",
             "question": "Ship the **feature** now?",
@@ -452,6 +464,7 @@
               "responseMessageId": "<UUID_2>",
               "surface": "native"
             },
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "1",
             "messageId": "<UUID_3>",
             "question": "Which approach?",
@@ -496,6 +509,7 @@
           "surface": "native"
         },
         "defaultChoiceId": "1",
+        "dismissAvailableAt": "<TIMESTAMP>",
         "key": "D234",
         "messageId": "<UUID_2>",
         "question": "Ship the **feature** now?",
@@ -537,6 +551,7 @@
               "surface": "native"
             },
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_2>",
             "question": "Ship the **feature** now?",
@@ -581,6 +596,7 @@
           "surface": "native"
         },
         "defaultChoiceId": "1",
+        "dismissAvailableAt": "<TIMESTAMP>",
         "key": "D234",
         "messageId": "<UUID_2>",
         "question": "Ship the **feature** now?",
@@ -622,6 +638,7 @@
               "surface": "native"
             },
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_2>",
             "question": "Ship the **feature** now?",
@@ -668,6 +685,7 @@
                 "responseMessageId": "<UUID_1>",
                 "surface": "native"
               },
+              "dismissAvailableAt": "<TIMESTAMP>",
               "key": "D-ANS",
               "messageId": "<UUID_2>",
               "question": "Already answered?",
@@ -718,6 +736,7 @@
             }
           ],
           "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
           "dismissed": {
             "at": "<TIMESTAMP>",
             "byName": "Alice",
@@ -755,6 +774,7 @@
               }
             ],
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "dismissed": {
               "at": "<TIMESTAMP>",
               "byName": "Alice",
@@ -810,6 +830,7 @@
               "surface": "native"
             },
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_2>",
             "question": "Ship the **feature** now?",
@@ -848,6 +869,7 @@
                   "surface": "native"
                 },
                 "defaultChoiceId": "1",
+                "dismissAvailableAt": "<TIMESTAMP>",
                 "key": "D234",
                 "messageId": "<UUID_2>",
                 "question": "Ship the **feature** now?",
@@ -904,6 +926,7 @@
               }
             ],
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_4>",
             "question": "Ship the **feature** now?",
@@ -1005,6 +1028,7 @@
                   "surface": "native"
                 },
                 "defaultChoiceId": "1",
+                "dismissAvailableAt": "<TIMESTAMP>",
                 "key": "D234",
                 "messageId": "<UUID_2>",
                 "question": "Ship the **feature** now?",
@@ -1042,6 +1066,7 @@
             }
           ],
           "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
           "key": "D234",
           "messageId": "<UUID_1>",
           "question": "Ship the **feature** now?",
@@ -1075,6 +1100,7 @@
               }
             ],
             "defaultChoiceId": "1",
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "D234",
             "messageId": "<UUID_1>",
             "question": "Ship the **feature** now?",
@@ -1112,6 +1138,7 @@
             }
           ],
           "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
           "key": "D234",
           "messageId": "<UUID_1>",
           "question": "Ship the **feature** now?",
@@ -1147,6 +1174,7 @@
               "label": "no"
             }
           ],
+          "dismissAvailableAt": "<TIMESTAMP>",
           "key": "T1",
           "messageId": "<UUID_1>",
           "question": "Topic Q?",
@@ -1179,6 +1207,7 @@
                 "label": "no"
               }
             ],
+            "dismissAvailableAt": "<TIMESTAMP>",
             "key": "T1",
             "messageId": "<UUID_1>",
             "question": "Topic Q?",

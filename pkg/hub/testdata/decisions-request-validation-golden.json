@@ -20,6 +20,7 @@
             }
           ],
           "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
           "dismissed": {
             "at": "<TIMESTAMP>",
             "byName": "Alice",
@@ -60,6 +61,7 @@
             }
           ],
           "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
           "dismissed": {
             "at": "<TIMESTAMP>",
             "byName": "Alice",
@@ -161,6 +163,7 @@
             }
           ],
           "defaultChoiceId": "1",
+          "dismissAvailableAt": "<TIMESTAMP>",
           "key": "D234",
           "messageId": "<UUID_1>",
           "question": "Ship the **feature** now?",
