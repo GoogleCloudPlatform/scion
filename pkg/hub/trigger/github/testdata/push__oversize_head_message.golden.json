@@ -11,7 +11,7 @@
   "sender_login": "monalisa",
   "sender_id": 201,
   "sender_type": "User",
-  "payload_bytes": 1808,
+  "payload_bytes": 1965,
   "truncated": false,
   "attributes": {
     "after": "9999888877776666555544443333222211110000",
@@ -49,7 +49,8 @@
       {
         "id": "9999888877776666555544443333222211110000",
         "message": "feat: UTF-8 boundary test for head_message truncation — aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéééééééééééééééééééé",
-        "timestamp": "2026-05-01T10:50:00Z"
+        "timestamp": "2026-05-01T10:50:00Z",
+        "url": "https://github.com/octo-org/octo-repo/commit/9999888877776666555544443333222211110000"
       }
     ],
     "created": false,
@@ -58,13 +59,13 @@
     "head_commit": {
       "id": "9999888877776666555544443333222211110000",
       "message": "feat: UTF-8 boundary test for head_message truncation — aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéééééééééééééééééééé",
-      "timestamp": "2026-05-01T10:50:00Z"
+      "timestamp": "2026-05-01T10:50:00Z",
+      "url": "https://github.com/octo-org/octo-repo/commit/9999888877776666555544443333222211110000"
     },
     "installation": {
       "id": 987654
     },
     "pusher": {
-      "email": "monalisa@example.com",
       "name": "monalisa"
     },
     "ref": "refs/heads/main",

@@ -11,7 +11,7 @@
   "sender_login": "octocat",
   "sender_id": 202,
   "sender_type": "User",
-  "payload_bytes": 1462,
+  "payload_bytes": 1500,
   "truncated": false,
   "attributes": {
     "after": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
@@ -49,12 +49,10 @@
       {
         "added": [],
         "author": {
-          "email": "octocat@example.com",
           "name": "The Octocat",
           "username": "octocat"
         },
         "committer": {
-          "email": "octocat@example.com",
           "name": "The Octocat",
           "username": "octocat"
         },
@@ -66,7 +64,8 @@
         ],
         "removed": [],
         "timestamp": "2026-05-01T10:25:00Z",
-        "tree_id": "cccc333333333333333333333333333333333333"
+        "tree_id": "cccc333333333333333333333333333333333333",
+        "url": "https://github.com/octo-org/octo-repo/commit/c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
       }
     ],
     "created": false,
@@ -75,12 +74,10 @@
     "head_commit": {
       "added": [],
       "author": {
-        "email": "octocat@example.com",
         "name": "The Octocat",
         "username": "octocat"
       },
       "committer": {
-        "email": "octocat@example.com",
         "name": "The Octocat",
         "username": "octocat"
       },
@@ -92,13 +89,13 @@
       ],
       "removed": [],
       "timestamp": "2026-05-01T10:25:00Z",
-      "tree_id": "cccc333333333333333333333333333333333333"
+      "tree_id": "cccc333333333333333333333333333333333333",
+      "url": "https://github.com/octo-org/octo-repo/commit/c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
     },
     "installation": {
       "id": 987654
     },
     "pusher": {
-      "email": "octocat@example.com",
       "name": "octocat"
     },
     "ref": "refs/heads/feat/retry-backoff",

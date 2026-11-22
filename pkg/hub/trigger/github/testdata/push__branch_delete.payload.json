@@ -19,8 +19,12 @@
     "full_name": "octo-org/octo-repo",
     "private": false,
     "default_branch": "main",
+    "created_at": 1579046400,
+    "pushed_at": 1777632300,
     "html_url": "https://github.com/octo-org/octo-repo",
     "owner": {
+      "name": "octo-org",
+      "email": "octo-org@example.com",
       "login": "octo-org",
       "id": 100,
       "type": "Organization"

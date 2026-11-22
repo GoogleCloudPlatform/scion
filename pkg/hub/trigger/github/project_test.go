@@ -561,13 +561,25 @@ func TestProjectPayload_Tier5ProtectsHTMLURLAndPath(t *testing.T) {
 }
 
 func TestProjectPayload_PushKeepsHeadCommitAndCapsCommitsAt20(t *testing.T) {
+	manyFiles := make([]string, 30)
+	for i := range manyFiles {
+		manyFiles[i] = fmt.Sprintf("pkg/file_%02d.go", i)
+	}
 	commits := make([]map[string]any, 25)
 	for i := range commits {
 		commits[i] = map[string]any{
 			"id":        fmt.Sprintf("%040d", i+1),
+			"tree_id":   fmt.Sprintf("%040d", i+100),
+			"distinct":  true,
 			"message":   fmt.Sprintf("commit %d", i+1),
 			"timestamp": "2026-05-01T10:00:00Z",
 			"url":       "https://github.com/octo-org/octo-repo/commit/" + fmt.Sprintf("%040d", i+1),
+			"author":    map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"committer": map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"added":     manyFiles,
+			"removed":   []string{},
+			"modified":  manyFiles,
+			"extra_key": "should-be-dropped",
 		}
 	}
 	raw, err := json.Marshal(map[string]any{
@@ -591,7 +603,7 @@ func TestProjectPayload_PushKeepsHeadCommitAndCapsCommitsAt20(t *testing.T) {
 			"archive_url":    "https://api.github.com/repos/octo-org/octo-repo/{archive_format}",
 			"owner":          map[string]any{"login": "octo-org", "id": 99, "type": "Organization", "avatar_url": "https://avatars.example/99"},
 		},
-		"pusher":      map[string]any{"name": "monalisa", "email": "monalisa@example.com"},
+		"pusher":      map[string]any{"name": "monalisa", "username": "monalisa", "email": "monalisa@example.com"},
 		"head_commit": commits[24],
 		"commits":     commits,
 	})
@@ -608,13 +620,30 @@ func TestProjectPayload_PushKeepsHeadCommitAndCapsCommitsAt20(t *testing.T) {
 	assert.Equal(t, "refs/heads/main", proj["ref"])
 	assert.NotNil(t, proj["head_commit"])
 
+	// O3: pusher is reduced to {name, username} with no email.
+	pusherMap, ok := proj["pusher"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "monalisa", pusherMap["name"])
+	assert.Equal(t, "monalisa", pusherMap["username"])
+	assert.NotContains(t, pusherMap, "email")
+
+	// R1: commits capped at 20, reduced fields kept (including url), no email, file arrays capped at 20.
 	projCommits, ok := proj["commits"].([]any)
 	require.True(t, ok)
 	require.Len(t, projCommits, MaxPushCommits)
 	firstCommit, ok := projCommits[0].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, fmt.Sprintf("%040d", 1), firstCommit["id"])
-	assert.NotContains(t, firstCommit, "url")
+	assert.Equal(t, "https://github.com/octo-org/octo-repo/commit/"+fmt.Sprintf("%040d", 1), firstCommit["url"])
+	assert.NotContains(t, firstCommit, "extra_key")
+	authorMap, ok := firstCommit["author"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "Monalisa", authorMap["name"])
+	assert.Equal(t, "monalisa", authorMap["username"])
+	assert.NotContains(t, authorMap, "email")
+	addedArr, ok := firstCommit["added"].([]any)
+	require.True(t, ok)
+	assert.Len(t, addedArr, MaxPushCommitFiles)
 
 	repoMap, ok := proj["repository"].(map[string]any)
 	require.True(t, ok)
@@ -622,4 +651,66 @@ func TestProjectPayload_PushKeepsHeadCommitAndCapsCommitsAt20(t *testing.T) {
 	senderMap, ok := proj["sender"].(map[string]any)
 	require.True(t, ok)
 	assert.NotContains(t, senderMap, "avatar_url")
+}
+
+func TestNormalize_PushLargeFileListsBoundedByPushShrinkTier(t *testing.T) {
+	// R1 regression test: 25 commits each touching 50 long file paths across
+	// added/removed/modified must succeed (Handled, payload_truncated=true,
+	// PayloadBytes <= 64 KiB) rather than failing projection with an error.
+	longPaths := make([]string, 50)
+	for i := range longPaths {
+		longPaths[i] = fmt.Sprintf("services/payments/internal/handlers/v2/subpackage/refund_handler_%03d.go", i)
+	}
+	commits := make([]map[string]any, 25)
+	for i := range commits {
+		commits[i] = map[string]any{
+			"id":        fmt.Sprintf("%040d", i+1),
+			"tree_id":   fmt.Sprintf("%040d", i+1000),
+			"distinct":  true,
+			"message":   fmt.Sprintf("feat: update payment handler batch %d", i+1),
+			"timestamp": "2026-05-01T11:00:00Z",
+			"url":       "https://github.com/octo-org/octo-repo/commit/" + fmt.Sprintf("%040d", i+1),
+			"author":    map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"committer": map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"added":     longPaths,
+			"removed":   longPaths,
+			"modified":  longPaths,
+		}
+	}
+	raw, err := json.Marshal(map[string]any{
+		"ref":          "refs/heads/main",
+		"before":       fmt.Sprintf("%040d", 0),
+		"after":        fmt.Sprintf("%040d", 25),
+		"created":      false,
+		"deleted":      false,
+		"forced":       false,
+		"commits":      commits,
+		"head_commit":  commits[24],
+		"pusher":       map[string]any{"name": "monalisa", "email": "monalisa@example.com"},
+		"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+		"sender":       map[string]any{"login": "monalisa", "id": 201, "type": "User"},
+		"installation": map[string]any{"id": 987654},
+	})
+	require.NoError(t, err)
+
+	res, err := Normalize(EventPush, "d-large-push", raw, Options{AppSlug: "octo-app"})
+	require.NoError(t, err)
+	assert.True(t, res.Handled)
+	assert.True(t, res.Truncated)
+	assert.Equal(t, "true", res.Attributes["payload_truncated"])
+	assert.LessOrEqual(t, res.PayloadBytes, DefaultMaxPayloadBytes)
+	assert.Equal(t, "25", res.Attributes["commit_count"])
+	assert.Equal(t, "true", res.Attributes["lists_truncated"])
+	assert.Len(t, res.Lists["commits"], MaxPushCommits)
+
+	var proj map[string]any
+	require.NoError(t, json.Unmarshal(res.Payload, &proj))
+	projCommits, ok := proj["commits"].([]any)
+	require.True(t, ok)
+	require.Len(t, projCommits, MaxPushCommits)
+	first, ok := projCommits[0].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, first, "added")
+	assert.NotContains(t, first, "removed")
+	assert.NotContains(t, first, "modified")
 }

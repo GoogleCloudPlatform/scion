@@ -1279,4 +1279,96 @@ func TestNormalize_Push(t *testing.T) {
 		assert.True(t, res.IsOwnAppActor("scion-app", 778899))
 		assert.False(t, res.IsOwnAppActor("other-app", 778899))
 	})
+
+	t.Run("occurred_at_prefers_repository_pushed_at_over_old_commit_and_on_delete", func(t *testing.T) {
+		recentPushedAt := baseNow.Add(-10 * time.Minute).UTC()
+		// Branch created from a commit older than 24h, but pushed 10m ago: NOT stale.
+		oldCommitRecentPush, err := json.Marshal(map[string]any{
+			"ref":     "refs/heads/release/v2",
+			"before":  strings.Repeat("0", 40),
+			"after":   "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"created": true,
+			"deleted": false,
+			"forced":  false,
+			"commits": []any{},
+			"head_commit": map[string]any{
+				"id":        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+				"message":   "ancient commit",
+				"timestamp": "2026-04-01T00:00:00Z",
+			},
+			"repository": map[string]any{
+				"id":             1,
+				"name":           "r",
+				"full_name":      "o/r",
+				"default_branch": "main",
+				"pushed_at":      recentPushedAt.Unix(),
+			},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+		res, err := Normalize(EventPush, "d-o1-branch", oldCommitRecentPush, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, recentPushedAt, res.OccurredAt)
+		assert.NotContains(t, res.Attributes, "stale")
+
+		// Deleted-branch push (no head_commit) uses repository.pushed_at when present.
+		delWithPushedAt, err := json.Marshal(map[string]any{
+			"ref":         "refs/heads/old-branch",
+			"before":      "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"after":       strings.Repeat("0", 40),
+			"created":     false,
+			"deleted":     true,
+			"forced":      false,
+			"commits":     []any{},
+			"head_commit": nil,
+			"repository": map[string]any{
+				"id":             1,
+				"name":           "r",
+				"full_name":      "o/r",
+				"default_branch": "main",
+				"pushed_at":      recentPushedAt.Unix(),
+			},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+		resDel, err := Normalize(EventPush, "d-o1-del", delWithPushedAt, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, recentPushedAt, resDel.OccurredAt)
+		assert.NotContains(t, resDel.Attributes, "stale")
+	})
+
+	t.Run("long_ref_uses_deterministic_hashed_subject_bounded_to_256", func(t *testing.T) {
+		longRef := "refs/heads/" + strings.Repeat("feature-branch-", 16) // 251 bytes; full subject > 256
+		require.Greater(t, len(longRef), 240)
+		raw, err := json.Marshal(map[string]any{
+			"ref":          longRef,
+			"before":       strings.Repeat("0", 40),
+			"after":        strings.Repeat("a", 64), // also exercises 64-char SHA-256 hex (O4)
+			"commits":      []any{},
+			"head_commit":  nil,
+			"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-long-ref", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.True(t, res.Handled)
+		assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
+		assert.True(t, utf8.ValidString(res.Subject))
+		assert.Equal(t, formatPushSubject("octo-org/octo-repo", longRef), res.Subject)
+		assert.Contains(t, res.Subject, "~")
+		assert.Equal(t, longRef, res.Attributes["ref"])
+		assert.Equal(t, strings.Repeat("a", 64), res.Attributes["after"])
+
+		// Determinism on second call and UTF-8 rune-safe truncation for multi-byte refs.
+		utf8Ref := "refs/heads/" + strings.Repeat("é", 130) // 271 bytes
+		subj := formatPushSubject("octo-org/octo-repo", utf8Ref)
+		assert.LessOrEqual(t, len(subj), MaxSubjectBytes)
+		assert.True(t, utf8.ValidString(subj))
+		assert.Equal(t, subj, formatPushSubject("octo-org/octo-repo", utf8Ref))
+	})
 }

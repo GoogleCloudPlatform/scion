@@ -5,13 +5,13 @@
   "delivery_id": "00000000-0000-4000-8000-branch-delete",
   "type": "github.push",
   "subject": "github:octo-org/octo-repo@refs/heads/feat/obsolete",
-  "occurred_at": "2026-05-01T12:00:00Z",
+  "occurred_at": "2026-05-01T10:45:00Z",
   "installation_id": 987654,
   "repo_full_name": "octo-org/octo-repo",
   "sender_login": "monalisa",
   "sender_id": 201,
   "sender_type": "User",
-  "payload_bytes": 569,
+  "payload_bytes": 538,
   "truncated": false,
   "attributes": {
     "after": "0000000000000000000000000000000000000000",
@@ -50,7 +50,6 @@
       "id": 987654
     },
     "pusher": {
-      "email": "monalisa@example.com",
       "name": "monalisa"
     },
     "ref": "refs/heads/feat/obsolete",

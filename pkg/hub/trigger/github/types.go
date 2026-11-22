@@ -54,6 +54,7 @@ const (
 	MaxTitleBytes       = 512
 	MaxHeadMessageBytes = 512
 	MaxPushCommits      = 20
+	MaxPushCommitFiles  = 20
 	MaxBodyBytes        = 4 * 1024
 	MaxDiffHunkBytes    = 1024
 	MaxCommandNameRunes = 32

@@ -16,7 +16,6 @@ package github
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -356,16 +355,64 @@ func TestNormalize_MalformedInputs(t *testing.T) {
 			}`,
 		},
 		{
-			name:  "push subject exceeds 256 bytes",
+			name:  "push invalid before SHA too short",
 			event: EventPush,
-			payload: fmt.Sprintf(`{
-				"ref": "refs/heads/%s",
-				"before": "0000000000000000000000000000000000000000",
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "deadbeef",
 				"after": "1111111111111111111111111111111111111111",
 				"installation": {"id": 1},
 				"repository": {"full_name": "o/r"},
 				"sender": {"login": "u"}
-			}`, strings.Repeat("b", MaxSubjectBytes)),
+			}`,
+		},
+		{
+			name:  "push invalid before SHA uppercase hex",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+				"after": "1111111111111111111111111111111111111111",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push invalid after SHA non-hex",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push invalid after SHA 41 chars",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "11111111111111111111111111111111111111111",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push invalid repository pushed_at type",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r", "pushed_at": true},
+				"sender": {"login": "u"}
+			}`,
 		},
 	}
 

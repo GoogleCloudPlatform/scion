@@ -15,6 +15,8 @@
 package github
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -187,7 +189,7 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	case EventPullRequestReviewComment:
 		number, occurredAt, rawCommandBody, err = normalizePullRequestReviewComment(root, action, repoFullName, opts, attrs, lists)
 	case EventPush:
-		pushRef, occurredAt, pushCommitsTruncated, err = normalizePush(root, defaultBranch, opts, attrs, lists)
+		pushRef, occurredAt, pushCommitsTruncated, err = normalizePush(root, repoMap, defaultBranch, opts, attrs, lists)
 	}
 	if err != nil {
 		return base, err
@@ -195,7 +197,7 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 
 	var subject string
 	if eventName == EventPush {
-		subject = fmt.Sprintf("github:%s@%s", repoFullName, pushRef)
+		subject = formatPushSubject(repoFullName, pushRef)
 	} else {
 		subject = fmt.Sprintf("github:%s#%d", repoFullName, number)
 	}
@@ -755,6 +757,7 @@ func normalizePullRequestReviewComment(
 
 func normalizePush(
 	root map[string]any,
+	repoMap map[string]any,
 	defaultBranch string,
 	opts Options,
 	attrs map[string]string,
@@ -771,9 +774,15 @@ func normalizePush(
 	if err != nil {
 		return "", time.Time{}, false, err
 	}
+	if !isGitSHAHex(before) {
+		return "", time.Time{}, false, errors.New("github trigger: before must be a 40- or 64-character lowercase hex SHA")
+	}
 	after, err := reqString(root, "after", "after")
 	if err != nil {
 		return "", time.Time{}, false, err
+	}
+	if !isGitSHAHex(after) {
+		return "", time.Time{}, false, errors.New("github trigger: after must be a 40- or 64-character lowercase hex SHA")
 	}
 	forced, err := optBool(root, "forced", "forced")
 	if err != nil {
@@ -790,8 +799,8 @@ func normalizePush(
 
 	isDefaultBranch := defaultBranch != "" && ref == "refs/heads/"+defaultBranch
 	attrs["ref"] = cleanUTF8(ref)
-	attrs["before"] = cleanUTF8(before)
-	attrs["after"] = cleanUTF8(after)
+	attrs["before"] = before
+	attrs["after"] = after
 	attrs["is_default_branch"] = strconv.FormatBool(isDefaultBranch)
 	attrs["forced"] = strconv.FormatBool(forced)
 	attrs["created"] = strconv.FormatBool(created)
@@ -835,7 +844,12 @@ func normalizePush(
 	attrs["commit_count"] = strconv.Itoa(commitCount)
 	lists["commits"] = commitSHAs
 
-	var occurredAt time.Time
+	pushedAt, err := optUnixOrRFC3339Timestamp(repoMap, "pushed_at", "repository.pushed_at")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+
+	var headCommitTS time.Time
 	if rawHead, exists := root["head_commit"]; exists && rawHead != nil {
 		headCommitMap, ok := rawHead.(map[string]any)
 		if !ok {
@@ -848,10 +862,68 @@ func normalizePush(
 		if err != nil {
 			return "", time.Time{}, false, err
 		}
-		occurredAt = ts
+		headCommitTS = ts
 	}
 
+	occurredAt := firstNonZeroTime(pushedAt, headCommitTS)
 	return ref, occurredAt, commitsTruncated, nil
+}
+
+// formatPushSubject formats github:<owner>/<repo>@<ref> bounded to MaxSubjectBytes.
+// When the full subject exceeds 256 bytes, it deterministically truncates the ref
+// on a UTF-8 rune boundary and appends "~<first 12 hex of sha256(ref)>" (§4.3).
+func formatPushSubject(repoFullName, ref string) string {
+	full := "github:" + repoFullName + "@" + ref
+	if len(full) <= MaxSubjectBytes {
+		return full
+	}
+	sum := sha256.Sum256([]byte(ref))
+	suffix := "~" + hex.EncodeToString(sum[:])[:12]
+	prefixBase := "github:" + repoFullName + "@"
+	maxRefPrefix := MaxSubjectBytes - len(prefixBase) - len(suffix)
+	if maxRefPrefix < 0 {
+		maxRefPrefix = 0
+	}
+	return prefixBase + truncateUTF8(ref, maxRefPrefix) + suffix
+}
+
+func isGitSHAHex(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func optUnixOrRFC3339Timestamp(m map[string]any, key, label string) (time.Time, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return time.Time{}, nil
+	}
+	switch x := v.(type) {
+	case json.Number:
+		sec, err := x.Int64()
+		if err != nil || sec <= 0 {
+			return time.Time{}, fmt.Errorf("github trigger: %s must be a positive Unix epoch integer", label)
+		}
+		return time.Unix(sec, 0).UTC(), nil
+	case string:
+		if x == "" {
+			return time.Time{}, nil
+		}
+		t, err := time.Parse(time.RFC3339Nano, x)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("github trigger: invalid RFC3339 timestamp in %s: %w", label, err)
+		}
+		return t.UTC(), nil
+	default:
+		return time.Time{}, fmt.Errorf("github trigger: %s must be a Unix epoch integer or RFC3339 string", label)
+	}
 }
 
 func populatePRCommon(

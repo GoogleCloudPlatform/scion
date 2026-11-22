@@ -175,11 +175,7 @@ func TestNormalize_GoldenFixturesAndSection51Coverage(t *testing.T) {
 				assert.NotEmpty(t, res.Attributes["author_association"], "author_association must be present on every object-bearing event")
 			}
 			assert.False(t, res.OccurredAt.IsZero())
-			if eventName != EventPush || res.Attributes["deleted"] != "true" {
-				assert.NotEqual(t, fixedReceivedAt, res.OccurredAt, "OccurredAt must come from the object timestamp, not fallback ReceivedAt")
-			} else {
-				assert.Equal(t, fixedReceivedAt, res.OccurredAt, "deleted-branch push with no head_commit must fall back to ReceivedAt")
-			}
+			assert.NotEqual(t, fixedReceivedAt, res.OccurredAt, "OccurredAt must come from the object timestamp, not fallback ReceivedAt")
 			assert.LessOrEqual(t, res.PayloadBytes, DefaultMaxPayloadBytes)
 			_, hasBranch := res.Attributes["branch"]
 			assert.False(t, hasBranch, "branch attribute must never be emitted")

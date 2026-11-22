@@ -34,8 +34,6 @@ var keptPrimaryKeys = []string{
 	"requested_reviewer",
 	"requested_team",
 	"changes",
-	"head_commit",
-	"pusher",
 }
 
 var keptPushScalarKeys = []string{
@@ -105,12 +103,24 @@ func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, err
 		}
 		proj[key] = sanitizeValue(val)
 	}
+	if headMap, ok := root["head_commit"].(map[string]any); ok {
+		proj["head_commit"] = reducePushCommit(headMap)
+	}
+	if pusherMap, ok := root["pusher"].(map[string]any); ok {
+		proj["pusher"] = reducePushActor(pusherMap)
+	}
 	if rawCommits, ok := root["commits"]; ok && rawCommits != nil {
 		if arr, isArr := rawCommits.([]any); isArr {
 			if len(arr) > MaxPushCommits {
 				arr = arr[:MaxPushCommits]
 			}
-			proj["commits"] = sanitizeValue(arr)
+			reduced := make([]any, 0, len(arr))
+			for _, elem := range arr {
+				if cm, isMap := elem.(map[string]any); isMap {
+					reduced = append(reduced, reducePushCommit(cm))
+				}
+			}
+			proj["commits"] = reduced
 		}
 	}
 	if repoMap, ok := root["repository"].(map[string]any); ok {
@@ -192,6 +202,32 @@ func reduceActor(actor map[string]any) map[string]any {
 func reduceInstallation(inst map[string]any) map[string]any {
 	out := make(map[string]any, 1)
 	copySanitizedKeys(out, inst, "id")
+	return out
+}
+
+func reducePushActor(actor map[string]any) map[string]any {
+	out := make(map[string]any, 2)
+	copySanitizedKeys(out, actor, "name", "username")
+	return out
+}
+
+func reducePushCommit(commit map[string]any) map[string]any {
+	out := make(map[string]any, 11)
+	copySanitizedKeys(out, commit, "id", "tree_id", "message", "timestamp", "url", "distinct")
+	if author, ok := commit["author"].(map[string]any); ok {
+		out["author"] = reducePushActor(author)
+	}
+	if committer, ok := commit["committer"].(map[string]any); ok {
+		out["committer"] = reducePushActor(committer)
+	}
+	for _, listKey := range []string{"added", "removed", "modified"} {
+		if rawList, ok := commit[listKey].([]any); ok {
+			if len(rawList) > MaxPushCommitFiles {
+				rawList = rawList[:MaxPushCommitFiles]
+			}
+			out[listKey] = sanitizeValue(rawList)
+		}
+	}
 	return out
 }
 
@@ -310,6 +346,32 @@ func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]
 		return encoded, nil
 	}
 
+	// Tier 4b (push): drop commit file-path arrays from commits[], then from
+	// head_commit, so large pushes with many long file paths stay bounded without
+	// failing projection.
+	if commitsArr, ok := proj["commits"].([]any); ok {
+		if dropCommitFileArrays(commitsArr) {
+			encoded, err = encodeCompactJSON(proj)
+			if err != nil {
+				return nil, err
+			}
+			if len(encoded) <= maxBytes {
+				return encoded, nil
+			}
+		}
+	}
+	if headMap, ok := proj["head_commit"].(map[string]any); ok {
+		if dropCommitFileArraysFromMap(headMap) {
+			encoded, err = encodeCompactJSON(proj)
+			if err != nil {
+				return nil, err
+			}
+			if len(encoded) <= maxBytes {
+				return encoded, nil
+			}
+		}
+	}
+
 	// Tier 5: truncate any remaining large non-identity strings inside primary objects.
 	protected := map[string]bool{
 		"action": true, "full_name": true, "name": true, "login": true,
@@ -403,6 +465,29 @@ func collectStringFieldRefs(v any, matchKey func(string) bool) []stringFieldRef 
 	}
 	walk(v)
 	return out
+}
+
+func dropCommitFileArrays(commits []any) bool {
+	changed := false
+	for _, elem := range commits {
+		if m, ok := elem.(map[string]any); ok {
+			if dropCommitFileArraysFromMap(m) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func dropCommitFileArraysFromMap(m map[string]any) bool {
+	changed := false
+	for _, key := range []string{"added", "removed", "modified"} {
+		if _, exists := m[key]; exists {
+			delete(m, key)
+			changed = true
+		}
+	}
+	return changed
 }
 
 func capNestedArrays(v any, limit int) {
