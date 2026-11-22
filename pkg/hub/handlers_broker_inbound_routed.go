@@ -61,12 +61,15 @@ type routedInboundResponse struct {
 // routedStatusHoldLookupFailed is the result status of a recipient whose
 // hold could not be read (ptone/scion#6859): the send is refused, and a
 // primary recipient answers 500 like the other send paths.
-const routedStatusHoldLookupFailed = "hold_lookup_failed"
+const (
+	routedStatusHoldLookupFailed = "hold_lookup_failed"
+	routedStatusNotMessageable   = "not_messageable"
+)
 
 type routedDeliveryResult struct {
 	AgentSlug          string `json:"agent_slug"`
 	Type               string `json:"type"`   // "message" or "mention"
-	Status             string `json:"status"` // delivered, unauthorized, not_running, hold_lookup_failed, conversation_not_resolved, error, not_attempted
+	Status             string `json:"status"` // delivered, unauthorized, not_running, not_messageable, hold_lookup_failed, conversation_not_resolved, error, not_attempted
 	MessageID          string `json:"message_id,omitempty"`
 	Error              string `json:"error,omitempty"`
 	PersistenceWarning string `json:"persistence_warning,omitempty"`
@@ -298,7 +301,7 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 				fmt.Sprintf("primary agent %q is not running", primaryAgent.Slug),
 				map[string]interface{}{"results": results})
 			return
-		case "not_messageable":
+		case routedStatusNotMessageable:
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeAgentNotMessageable,
 				primaryResult.Error,
 				map[string]interface{}{"results": results})
@@ -405,7 +408,7 @@ func (s *Server) dispatchRoutedRecipient(
 
 	// --- Shell execution container check (S5) ---
 	if isShellAgent(agent) {
-		result.Status = "not_messageable"
+		result.Status = routedStatusNotMessageable
 		result.Error = shellAgentNotMessageableError(agent).Message
 		return result
 	}

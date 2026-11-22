@@ -206,6 +206,18 @@ func NewSampler(cfg Config) *Sampler {
 // counted.
 func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) *LiveWork {
 	procs := readProcs(s.procRoot)
+	// For shell execution containers (where CheckAttached is configured),
+	// attachment takes precedence over CPU/tool work so an attached-but-busy
+	// shell still reports KindAttached and refreshes the hub's idle-suspend
+	// window. LLM agents leave CheckAttached nil and are unaffected.
+	if s.checkAttached != nil && s.checkAttached() {
+		s.recordCPU(procs)
+		return &LiveWork{
+			Kind:          KindAttached,
+			SuppressStall: false,
+			Detail:        "terminal attached",
+		}
+	}
 	excluded, harness := s.baseline(procs)
 	tool := s.toolCall(procs, excluded, harness, now, act, actSince)
 	if tool != nil && tool.SuppressStall {
@@ -217,13 +229,6 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 	}
 	if tool != nil {
 		return tool
-	}
-	if s.checkAttached != nil && s.checkAttached() {
-		return &LiveWork{
-			Kind:          KindAttached,
-			SuppressStall: false,
-			Detail:        "terminal attached",
-		}
 	}
 	return nil
 }

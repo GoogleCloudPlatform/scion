@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
@@ -3439,20 +3440,13 @@ func harnessConfigOf(cfg *store.AgentAppliedConfig) string {
 
 // isShellEntAgent reports whether the stored ent.Agent uses the reserved
 // built-in "shell" harness config.
+//
+// The indexed harness_config shadow column (populated unconditionally from
+// AppliedConfig.HarnessConfig via harnessConfigOf on CreateAgent and
+// UpdateAgent) is the authoritative store-level source, matching
+// pkg/hub.isShellAgent without raw-decoding applied_config JSON.
 func isShellEntAgent(a *ent.Agent) bool {
-	if a == nil {
-		return false
-	}
-	if a.HarnessConfig != "" {
-		return a.HarnessConfig == "shell"
-	}
-	if a.AppliedConfig != "" {
-		var ac store.AgentAppliedConfig
-		if err := json.Unmarshal([]byte(a.AppliedConfig), &ac); err == nil {
-			return ac.HarnessConfig == "shell"
-		}
-	}
-	return false
+	return a != nil && a.HarnessConfig == config.ShellHarnessConfigName
 }
 
 // parseTimeString parses a status update's started_at string, accepting the

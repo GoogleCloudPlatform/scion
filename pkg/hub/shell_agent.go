@@ -27,10 +27,12 @@ import (
 // isShellAgent reports whether agent uses the reserved built-in "shell"
 // harness config (config.ShellHarnessConfigName).
 //
-// AppliedConfig.HarnessConfig is the authoritative persisted field on
-// store.Agent (written on create/update and mirrored into the indexed
-// harness_config column). When AppliedConfig is nil or its HarnessConfig is
-// empty, isShellAgent falls back to the enriched Agent.HarnessConfig field.
+// AppliedConfig.HarnessConfig is the single authoritative persisted source:
+// entadapter.harnessConfigOf mirrors it unconditionally into the indexed
+// harness_config column on CreateAgent/UpdateAgent, and
+// entadapter.isShellEntAgent reads that shadow column directly. When
+// AppliedConfig is nil or empty (e.g. a partial or enriched store.Agent
+// projection), isShellAgent falls back to Agent.HarnessConfig.
 func isShellAgent(agent *store.Agent) bool {
 	if agent == nil {
 		return false
