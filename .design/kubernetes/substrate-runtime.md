@@ -210,10 +210,12 @@ same image/resources/sandbox share one template.
    (sanitised to a valid Kubernetes short name) and `actor = cfg.Name`
    (already DNS-safe). `CreateAtespace` if missing, treating `AlreadyExists`
    as success.
-2. Verify `cfg.Image` is digest-pinned (§3) and assemble the bootstrap `files`
-   payload (`buildBootstrapFiles`: composed home + `ResolvedAuth.Files` +
-   file-type secrets, §5.4) pre-flight; fail closed before building a template
-   or creating an actor.
+2. Verify `cfg.Image` is digest-pinned (§3), build `start_cmd`
+   (`buildSubstrateStartCmd`, using the same shared helper the docker/k8s
+   runtimes use), and assemble the bootstrap `files` payload
+   (`buildBootstrapFiles`: composed home + `ResolvedAuth.Files` + file-type
+   secrets, §5.4) pre-flight; fail closed before building a template or
+   creating an actor.
 3. Ensure the content-addressed ActorTemplate exists and its golden snapshot
    is ready (§3).
 4. `CreateActor(atespace/name, template)`. An existing actor with the same
@@ -222,10 +224,9 @@ same image/resources/sandbox share one template.
 6. `ResumeActor`, then poll `GetActor` until `RUNNING` (bounded).
 7. Poll `GET /scion/v1/healthz` via the router until `awaiting-bootstrap`
    (bounded backoff).
-8. `POST /scion/v1/bootstrap`: env — see §5.3; `files` assembled pre-flight in
-   step 2 (§5.4); `start_cmd` built by the same shared helper the docker/k8s
-   runtimes use. Generate a random 32-byte hex `control_token` and keep it in
-   memory, keyed by `<atespace>/<actor>`.
+8. `POST /scion/v1/bootstrap`: env — see §5.3; `files` (§5.4) and `start_cmd`
+   assembled pre-flight in step 2. Generate a random 32-byte hex
+   `control_token` and keep it in memory, keyed by `<atespace>/<actor>`.
 9. Return `<atespace>/<actor>` as the runtime ID (the same string
    `splitSubstrateID` parses back into atespace/actor for every later call).
 

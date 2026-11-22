@@ -766,8 +766,10 @@ func TestSubstrateRun_BuildBootstrapFilesFailsBeforeCreateActor(t *testing.T) {
 		{
 			name: "HomeDir is not a directory",
 			cfg: func(t *testing.T, cfg RunConfig) RunConfig {
-				notADir := filepath.Join(t.TempDir(), "regular-file")
-				if err := os.WriteFile(notADir, []byte(secretSentinel), 0o600); err != nil {
+				// Embed secretSentinel in the path itself so Lstat's error
+				// message carries it and genuinely exercises r.redact.
+				notADir := filepath.Join(t.TempDir(), secretSentinel)
+				if err := os.WriteFile(notADir, []byte("not a directory"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 				cfg.HomeDir = notADir
@@ -835,6 +837,39 @@ func TestSubstrateRun_BuildBootstrapFilesFailsBeforeCreateActor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSubstrateRun_BuildStartCmdFailsBeforeCreateActor proves
+// buildSubstrateStartCmd runs pre-flight before template lookup/creation or
+// CreateActor (substrate-runtime.md §4): a missing harness (with NoAuth
+// false) fails fast without building a golden template or spinning up and
+// tearing down an actor.
+func TestSubstrateRun_BuildStartCmdFailsBeforeCreateActor(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, _, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	cfg := testSubstrateRunConfig()
+	cfg.Harness = nil
+	cfg.NoAuth = false
+
+	_, err := rt.Run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Run() expected an error when Harness is nil and NoAuth is false, got nil")
+	}
+	if !strings.Contains(err.Error(), "no harness provided") {
+		t.Errorf("error = %v, want it to contain %q", err, "no harness provided")
+	}
+
+	calls := rec.list()
+	if containsCall(calls, "CreateActor") {
+		t.Errorf("Run() called CreateActor before failing buildSubstrateStartCmd; calls = %v", calls)
+	}
+	for _, c := range calls {
+		if c != "CreateAtespace" {
+			t.Errorf("Run() made unexpected post-preflight call %q before failing buildSubstrateStartCmd; calls = %v", c, calls)
+		}
 	}
 }
 

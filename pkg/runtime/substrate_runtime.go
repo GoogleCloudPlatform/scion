@@ -436,10 +436,15 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		return "", fmt.Errorf("substrate: image %q is not pinned by digest (@sha256:...); set a digest image in the agent's template or pass --image (tag resolution is not currently supported)", cfg.Image)
 	}
 
-	// Assemble the bootstrap file payload pre-flight (substrate-runtime.md §4,
-	// §5.4) so deterministic local configuration errors (missing HomeDir,
-	// unreadable auth file, or payload over maxBootstrapFilesTotalBytes) fail
-	// before building a golden template or creating an actor.
+	// Build the start command and assemble the bootstrap file payload
+	// pre-flight (substrate-runtime.md §4, §5.4) so deterministic local
+	// configuration errors (missing harness, missing HomeDir, unreadable auth
+	// file, or payload over maxBootstrapFilesTotalBytes) fail before building
+	// a golden template or creating an actor.
+	startCmd, err := buildSubstrateStartCmd(cfg)
+	if err != nil {
+		return "", r.redact(cfg, err)
+	}
 	files, err := buildBootstrapFiles(cfg)
 	if err != nil {
 		return "", r.redact(cfg, err)
@@ -518,12 +523,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 		return "", r.redact(cfg, err)
 	}
 
-	// Step 8: bootstrap (files were assembled pre-flight above).
-	startCmd, err := buildSubstrateStartCmd(cfg)
-	if err != nil {
-		cleanup()
-		return "", r.redact(cfg, err)
-	}
+	// Step 8: bootstrap (startCmd and files were assembled pre-flight above).
 	controlToken, err := generateControlToken()
 	if err != nil {
 		cleanup()
