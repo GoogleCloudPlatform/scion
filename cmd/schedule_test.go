@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1175,4 +1176,277 @@ func TestScheduleGetAndHistory_ExecSummary(t *testing.T) {
 	assert.Contains(t, msgHistOut, "ID")
 	assert.Contains(t, msgHistOut, "STATUS")
 	assert.NotContains(t, msgHistOut, "OUTCOME")
+}
+
+func TestScheduleDelete_OneShotEventCancelHint(t *testing.T) {
+	saveScheduleFlags(t)
+	outputFormat = ""
+
+	const (
+		evtUUID    = "e1111111-2222-4333-8444-555555555555"
+		evtUUID2   = "e1111111-9999-4333-8444-555555555555"
+		evtPrefix  = "e1111111"
+		schedUUID  = "a1111111-2222-4333-8444-555555555555"
+		schedUUID2 = "e1111111-aaaa-4333-8444-555555555555"
+		missUUID   = "00000000-0000-4000-8000-000000000000"
+	)
+	wantHint := fmt.Sprintf("%s is a one-shot scheduled event, not a recurring schedule; use 'scion schedule cancel %s' to cancel it", evtUUID, evtUUID)
+
+	t.Run("full UUID one-shot event with user token hints cancel", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/schedules/"+evtUUID:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Schedule not found"}}`))
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/scheduled-events/"+evtUUID:
+				_ = json.NewEncoder(w).Encode(hubclient.ScheduledEvent{ID: evtUUID, EventType: "message", Status: "pending"})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindOAuth)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtUUID)
+		require.Error(t, err)
+		assert.Equal(t, wantHint, err.Error())
+	})
+
+	t.Run("full UUID one-shot event with agent token on older hub omits agent hint", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/schedules/"+evtUUID:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Schedule not found"}}`))
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/scheduled-events/"+evtUUID:
+				_ = json.NewEncoder(w).Encode(hubclient.ScheduledEvent{ID: evtUUID, EventType: "message", Status: "pending"})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtUUID)
+		require.Error(t, err)
+		assert.Equal(t, wantHint, err.Error())
+		assert.NotContains(t, err.Error(), "another principal")
+		assert.NotContains(t, err.Error(), "hidden from agent lists")
+	})
+
+	t.Run("full UUID one-shot event with agent token on newer hub omits agent hint", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/schedules/"+evtUUID:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Schedule not found (per-ID schedule endpoints take a schedule ID, not a name; schedules held by another agent or user are hidden from agent lists and return 403 by ID)"}}`))
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/scheduled-events/"+evtUUID:
+				_ = json.NewEncoder(w).Encode(hubclient.ScheduledEvent{ID: evtUUID, EventType: "message", Status: "pending"})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtUUID)
+		require.Error(t, err)
+		assert.Equal(t, wantHint, err.Error())
+		assert.NotContains(t, err.Error(), "another agent or user")
+		assert.NotContains(t, err.Error(), "hidden from agent lists")
+	})
+
+	t.Run("prefix matching one-shot event with user token hints cancel", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Schedules:  []hubclient.Schedule{},
+					ServerTime: time.Now().UTC(),
+				})
+			case "/api/v1/projects/proj-1/scheduled-events":
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Events:     []hubclient.ScheduledEvent{{ID: evtUUID, EventType: "message", Status: "pending"}},
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindOAuth)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtPrefix)
+		require.Error(t, err)
+		assert.Equal(t, wantHint, err.Error())
+	})
+
+	t.Run("prefix matching one-shot event with agent token omits agent hint", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Scope:      hubclient.ScheduleListScopeCaller,
+					Schedules:  []hubclient.Schedule{},
+					ServerTime: time.Now().UTC(),
+				})
+			case "/api/v1/projects/proj-1/scheduled-events":
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Scope:      hubclient.ScheduleListScopeCaller,
+					Events:     []hubclient.ScheduledEvent{{ID: evtUUID, EventType: "message", Status: "pending"}},
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtPrefix)
+		require.Error(t, err)
+		assert.Equal(t, wantHint, err.Error())
+		assert.NotContains(t, err.Error(), "held by this agent")
+		assert.NotContains(t, err.Error(), "another principal")
+	})
+
+	t.Run("ambiguous prefix matching multiple one-shot events with agent token hints cancel", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Scope:      hubclient.ScheduleListScopeCaller,
+					Schedules:  []hubclient.Schedule{},
+					ServerTime: time.Now().UTC(),
+				})
+			case "/api/v1/projects/proj-1/scheduled-events":
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Scope: hubclient.ScheduleListScopeCaller,
+					Events: []hubclient.ScheduledEvent{
+						{ID: evtUUID, EventType: "message", Status: "pending"},
+						{ID: evtUUID2, EventType: "message", Status: "pending"},
+					},
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtPrefix)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ambiguous ID prefix")
+		assert.Contains(t, err.Error(), "scion schedule cancel <id>")
+		assert.NotContains(t, err.Error(), "held by this agent")
+		assert.NotContains(t, err.Error(), "another principal")
+	})
+
+	t.Run("missing full UUID with agent token keeps agent caller-scope hint", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Resource not found"}}`))
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", missUUID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "hidden from agent lists")
+		assert.NotContains(t, err.Error(), "scion schedule cancel")
+	})
+
+	t.Run("full UUID one-shot event held by another principal surfaces 403", func(t *testing.T) {
+		const forbiddenMsg = "Schedule or scheduled event is not visible to this agent (agent callers can only access schedules and events they hold)"
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/schedules/"+evtUUID:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Schedule not found"}}`))
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/scheduled-events/"+evtUUID:
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"` + forbiddenMsg + `"}}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtUUID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not visible to this agent")
+		assert.NotContains(t, err.Error(), "not found")
+	})
+
+	t.Run("missing prefix with agent token keeps agent caller-scope hint", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Scope:      hubclient.ScheduleListScopeCaller,
+					Schedules:  []hubclient.Schedule{},
+					ServerTime: time.Now().UTC(),
+				})
+			case "/api/v1/projects/proj-1/scheduled-events":
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Scope:      hubclient.ScheduleListScopeCaller,
+					Events:     []hubclient.ScheduledEvent{},
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", "deadbeef")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "held by this agent")
+		assert.NotContains(t, err.Error(), "scion schedule cancel")
+	})
+
+	t.Run("full UUID recurring schedule deletes without querying scheduled-events", func(t *testing.T) {
+		var eventHits int
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/schedules/"+schedUUID:
+				w.WriteHeader(http.StatusNoContent)
+			case strings.Contains(r.URL.Path, "scheduled-events"):
+				eventHits++
+				http.NotFound(w, r)
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindOAuth)
+
+		out := captureStdout(t, func() {
+			require.NoError(t, scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", schedUUID))
+		})
+		assert.Contains(t, out, fmt.Sprintf("Schedule %s deleted.", schedUUID))
+		assert.Equal(t, 0, eventHits)
+	})
+
+	t.Run("prefix matching recurring schedule deletes even when an event shares prefix", func(t *testing.T) {
+		var eventHits int
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Schedules:  []hubclient.Schedule{{ID: schedUUID2, Name: "nightly"}},
+					ServerTime: time.Now().UTC(),
+				})
+			case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/schedules/"+schedUUID2:
+				w.WriteHeader(http.StatusNoContent)
+			case strings.Contains(r.URL.Path, "scheduled-events"):
+				eventHits++
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Events:     []hubclient.ScheduledEvent{{ID: evtUUID, EventType: "message", Status: "pending"}},
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindOAuth)
+
+		out := captureStdout(t, func() {
+			require.NoError(t, scheduleDeleteViaHub(context.Background(), hubCtx, "proj-1", evtPrefix))
+		})
+		assert.Contains(t, out, fmt.Sprintf("Schedule %s deleted.", schedUUID2))
+		assert.Equal(t, 0, eventHits)
+	})
 }

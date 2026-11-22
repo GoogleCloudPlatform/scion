@@ -1066,13 +1066,39 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
+	return scheduleDeleteViaHub(ctx, hubCtx, projectID, scheduleID)
+}
+
+func oneShotDeleteHintError(id string) error {
+	return fmt.Errorf("%s is a one-shot scheduled event, not a recurring schedule; use 'scion schedule cancel %s' to cancel it", id, id)
+}
+
+func scheduleDeleteViaHub(ctx context.Context, hubCtx *HubContext, projectID, scheduleID string) error {
 	// Resolve potentially truncated ID to full UUID (delete only targets schedules)
 	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
 	if err != nil {
+		// If prefix resolution found no recurring schedule, check whether the
+		// prefix matches a one-shot scheduled event so we can point the caller
+		// to 'scion schedule cancel' instead of a misleading schedule-not-found
+		// or agent caller-scope error.
+		if strings.HasPrefix(err.Error(), "no ") {
+			if evtID, _, evtErr := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "event"); evtErr == nil {
+				return oneShotDeleteHintError(evtID)
+			} else if strings.Contains(evtErr.Error(), "ambiguous ID prefix") {
+				return fmt.Errorf("%w (one-shot scheduled events cannot be deleted; use 'scion schedule cancel <id>' to cancel them)", evtErr)
+			}
+		}
 		return err
 	}
 
 	if err := hubCtx.Client.Schedules(projectID).Delete(ctx, fullID); err != nil {
+		if apiclient.IsNotFoundError(err) {
+			if _, evtErr := hubCtx.Client.ScheduledEvents(projectID).Get(ctx, fullID); evtErr == nil {
+				return oneShotDeleteHintError(fullID)
+			} else if apiclient.IsForbiddenError(evtErr) {
+				return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to delete schedule: %w", evtErr))
+			}
+		}
 		return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to delete schedule: %w", err))
 	}
 
