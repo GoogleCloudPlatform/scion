@@ -3887,9 +3887,9 @@ func TestTriggersAuthoring_SubjectModeSkipCreatePatchAndResume(t *testing.T) {
 	assert.Equal(t, 1, created.AuthorizationRevision)
 
 	// PATCH unsupported mode or non-cel dialect -> 400.
-	reuseMode := "reuse"
+	bogusMode := "bogus"
 	badModeRec := f.doTrigger(t, f.adminAuth, created.ID, http.MethodPatch, UpdateTriggerRequest{
-		Subject: &TriggerSubjectPatchSpec{Mode: &reuseMode},
+		Subject: &TriggerSubjectPatchSpec{Mode: &bogusMode},
 	})
 	assert.Equal(t, http.StatusBadRequest, badModeRec.Code, badModeRec.Body.String())
 
