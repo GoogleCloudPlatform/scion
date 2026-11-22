@@ -208,22 +208,18 @@ func (s *grantAuditFaultStore) AddGroupMember(ctx context.Context, m *store.Grou
 func TestCreateGroupWithParentAuditFailureRollsBack(t *testing.T) {
 	cases := []struct {
 		name  string
-		match func(parentID string) func(*store.MutationAuditRecord) bool
+		match func(r *store.MutationAuditRecord, parentID string) bool
 	}{
 		{
 			name: "parent-edge audit fails",
-			match: func(parentID string) func(*store.MutationAuditRecord) bool {
-				return func(r *store.MutationAuditRecord) bool {
-					return r.TargetID == parentID
-				}
+			match: func(r *store.MutationAuditRecord, parentID string) bool {
+				return r.TargetID == parentID
 			},
 		},
 		{
 			name: "creator-owner audit fails",
-			match: func(parentID string) func(*store.MutationAuditRecord) bool {
-				return func(r *store.MutationAuditRecord) bool {
-					return r.TargetID != parentID
-				}
+			match: func(r *store.MutationAuditRecord, parentID string) bool {
+				return r.TargetID != parentID
 			},
 		},
 	}
@@ -233,7 +229,9 @@ func TestCreateGroupWithParentAuditFailureRollsBack(t *testing.T) {
 			parentID := tid("cg-audit-parent")
 			srv, real, fault, heal := newGrantAuditFaultServer(t, grantAuditFaultStore{
 				auditErrFor: "group_member_add",
-				auditMatch:  tc.match(parentID),
+				auditMatch: func(r *store.MutationAuditRecord) bool {
+					return tc.match(r, parentID)
+				},
 			})
 			ctx := context.Background()
 			parent := &store.Group{ID: parentID, Name: "cg audit parent", Slug: "cg-audit-parent", GroupType: store.GroupTypeExplicit}
