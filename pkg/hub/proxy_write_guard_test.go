@@ -694,3 +694,66 @@ func TestWebProxyWriteGuard_AuthEndpoints(t *testing.T) {
 		t.Fatalf("WebServer.Handler() cross-site POST /auth/logout: got %d, want 403", rec.Code)
 	}
 }
+
+func TestProxyWriteGuard_UncleanedPathsAndAuthModeCase(t *testing.T) {
+	crossHeaders := map[string]string{
+		"Sec-Fetch-Site": "cross-site",
+		"Content-Type":   "application/json",
+	}
+
+	// Uncleaned paths that resolve to /api/v1/* are rejected before reaching auth/mux.
+	for _, p := range []string{
+		"/x/../api/v1/projects",
+		"/auth/../api/v1/projects",
+		"//api/v1/projects",
+		"/api/v1/./projects",
+	} {
+		code, reached := doGuardBody(proxyAuthMode, http.MethodPost, p, jsonBody, crossHeaders)
+		if reached || code != http.StatusForbidden {
+			t.Fatalf("API guard %q: got code=%d reached=%v, want 403 not reached", p, code, reached)
+		}
+	}
+
+	// Uncleaned paths that resolve to web auth routes (including traversal to
+	// /auth/test-identity/redeem) are rejected by the web write guard.
+	doWebGuard := func(mode, p string) (int, bool) {
+		var reached bool
+		ws := &WebServer{config: WebServerConfig{AuthMode: mode}}
+		h := ws.proxyModeWriteGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+		}))
+		r := httptest.NewRequest(http.MethodPost, "https://hub.example"+p, strings.NewReader(jsonBody))
+		r.Host = "hub.example"
+		for k, v := range crossHeaders {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, reached
+	}
+	for _, p := range []string{
+		"/x/../auth/logout",
+		"/auth/test-identity/redeem/../logout",
+		"/x/../api/v1/auth/test-login",
+		"/x/../auth/test-identity/redeem",
+		"//auth/logout",
+	} {
+		code, reached := doWebGuard(proxyAuthMode, p)
+		if reached || code != http.StatusForbidden {
+			t.Fatalf("Web guard %q: got code=%d reached=%v, want 403 not reached", p, code, reached)
+		}
+	}
+
+	// Case-insensitive and whitespace-padded AuthMode activates both guards.
+	for _, mode := range []string{"PROXY", "Proxy", " proxy "} {
+		code, reached := doGuardBody(mode, http.MethodPost, "/api/v1/projects", jsonBody, crossHeaders)
+		if reached || code != http.StatusForbidden {
+			t.Fatalf("API guard mode %q: got code=%d reached=%v, want 403 not reached", mode, code, reached)
+		}
+		code, reached = doWebGuard(mode, "/auth/logout")
+		if reached || code != http.StatusForbidden {
+			t.Fatalf("Web guard mode %q: got code=%d reached=%v, want 403 not reached", mode, code, reached)
+		}
+	}
+}

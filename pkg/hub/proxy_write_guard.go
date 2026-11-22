@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -43,7 +44,7 @@ func (ws *WebServer) proxyModeWriteGuard(next http.Handler) http.Handler {
 }
 
 func proxyModeWriteGuardMiddleware(authMode string, match func(*http.Request) bool, next http.Handler) http.Handler {
-	if authMode != proxyAuthMode {
+	if !strings.EqualFold(strings.TrimSpace(authMode), proxyAuthMode) {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +141,10 @@ func isStateChangingMethod(method string) bool {
 // isStateChangingAPIRequest reports whether r targets an /api/v1 route with a
 // state-changing method.
 func isStateChangingAPIRequest(r *http.Request) bool {
-	return strings.HasPrefix(r.URL.Path, "/api/v1/") && isStateChangingMethod(r.Method)
+	if !isStateChangingMethod(r.Method) {
+		return false
+	}
+	return strings.HasPrefix(path.Clean(r.URL.Path), "/api/v1/")
 }
 
 // isStateChangingWebAuthRequest reports whether r targets a WebServer sign-in
@@ -159,7 +163,8 @@ func isStateChangingWebAuthRequest(r *http.Request) bool {
 	if r.URL.Path == "/auth/test-identity/redeem" {
 		return false
 	}
-	return strings.HasPrefix(r.URL.Path, "/auth/") || r.URL.Path == "/api/v1/auth/test-login"
+	p := path.Clean(r.URL.Path)
+	return strings.HasPrefix(p, "/auth/") || p == "/api/v1/auth/test-login"
 }
 
 // requestHasOriginSignal reports whether r carries the Sec-Fetch-Site or Origin
