@@ -1791,15 +1791,18 @@ func (s *Server) buildReincarnationPreambleWith(agent *store.Agent, toGeneration
 		// template) is authoritative on who to tell; the resolved creator
 		// (if any, and not the agent itself) is only a hint for when the
 		// handoff names no one, rendered as its own sentence (A26.3 N2).
-		fmt.Fprintf(&b, " 3. Message the owner named in your handoff's \"Authority and ownership\" section that generation %d is up, and state your next action.", toGeneration)
+		// Step 3 defers to the handoff's "Immediate active work" section so
+		// a handoff that instructs the new generation to stay idle or quiet
+		// is not contradicted (ptone/scion#8830).
+		fmt.Fprintf(&b, " 3. Unless your handoff's \"Immediate active work\" section says otherwise, message the owner named in your handoff's \"Authority and ownership\" section that generation %d is up, and state your next action.", toGeneration)
 		if requester.CreatorResolved {
 			fmt.Fprintf(&b, " If the handoff names none, message %s.", requester.CreatorHandle)
 		}
 		b.WriteString("\n")
 	case requester.Resolved:
-		fmt.Fprintf(&b, " 3. Message %s that generation %d is up, and state your next action.\n", requester.Handle, toGeneration)
+		fmt.Fprintf(&b, " 3. Unless your handoff's \"Immediate active work\" section says otherwise, message %s that generation %d is up, and state your next action.\n", requester.Handle, toGeneration)
 	default:
-		fmt.Fprintf(&b, " 3. Message %s that generation %d is up, and state your next action.\n", reincarnationRequesterFallback, toGeneration)
+		fmt.Fprintf(&b, " 3. Unless your handoff's \"Immediate active work\" section says otherwise, message %s that generation %d is up, and state your next action.\n", reincarnationRequesterFallback, toGeneration)
 	}
 	b.WriteString(" 4. Continue from the handoff's \"Immediate active work\" section below (its next action). Do not redo anything listed under \"Do not redo\".\n")
 	b.WriteString("The handoff from your previous generation follows.\n---\n")
