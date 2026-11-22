@@ -542,17 +542,19 @@ See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-author
 
 ### `scion messages` (aliases: `msgs`, `inbox`)
 
-Manages bidirectional communication and persistent messages sent by agents to humans.
+View and manage messages sent to you by agents. Running `scion messages` without a subcommand lists your unread messages.
 
-**Usage:** `scion messages [command] [flags]`
+**Usage:** `scion messages [flags]` or `scion messages [command] [flags]`
 
 - **Commands:**
-    - `list` (default): View unread messages.
-    - `read <message-id>`: Mark a specific message as read.
-    - `read-all`: Mark all messages as read.
-- **Flags:**
-    - `--agent <string>`: Filter messages by a specific agent.
-    - `--all`: Show all messages, including those already marked as read.
+    - `scion messages`: List your unread messages.
+        - Flags:
+            - `--agent <string>`: Filter by agent name or ID.
+            - `--all`: Include read messages.
+            - `--json`: Output in JSON format.
+    - `scion messages read [message-id]`: Mark one or all messages as read. Pass a message ID to mark that specific message as read, or `--all` to mark all unread messages as read (mutually exclusive).
+        - Flags:
+            - `--all`: Mark all messages as read.
 
 ### `scion message-policy`
 
@@ -1616,7 +1618,7 @@ Publishes files as artifacts and fetches them by reference (`scion://artifact/<i
 
 ### `scion notifications`
 
-Manages notifications and notification subscriptions.
+Manages notifications and notification subscriptions (aliases: `notification`, `notif`).
 
 - `scion notifications`: List your recent unacknowledged notifications.
     - Flags: `--all` (include acknowledged notifications), `--json` (format output as JSON).
@@ -1628,7 +1630,7 @@ Manages notifications and notification subscriptions.
         - `--agent <name-or-id>`: Subscribe to specific agent.
         - `--project <name>`: Specify project (inferred from context if omitted).
         - `--triggers <triggers>`: Trigger activities to subscribe to. This flag is **repeatable** and also accepts a **comma-separated list** of triggers (e.g., `--triggers COMPLETED,WAITING_FOR_INPUT --triggers LIMITS_EXCEEDED`). Default: `COMPLETED,IDLE,WAITING_FOR_INPUT,LIMITS_EXCEEDED`. Strict empty-value validation is enforced.
-- `scion notifications unsubscribe <id>`: Remove a subscription.
+- `scion notifications unsubscribe [id]`: Remove a subscription by ID, or pass `--all` (with `--project`) to remove all subscriptions in a project.
     - Flags: `--all` (remove all subscriptions in the project), `--project <name>`.
 - `scion notifications update <id>`: Update a subscription's trigger activities.
     - Flags:
