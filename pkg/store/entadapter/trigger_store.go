@@ -1832,6 +1832,7 @@ func entTriggerFireToStore(e *ent.TriggerFire) *store.TriggerFire {
 		ExecutorID:     e.ExecutorID,
 		LeaseUntil:     e.LeaseUntil,
 		NotBefore:      e.NotBefore,
+		DeferredAt:     e.DeferredAt,
 		StartedAt:      e.StartedAt,
 		FinishedAt:     e.FinishedAt,
 		CreatedAt:      e.Created,
@@ -1946,6 +1947,9 @@ func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fi
 	}
 	if fire.NotBefore != nil {
 		create.SetNotBefore(fire.NotBefore.UTC())
+	}
+	if fire.DeferredAt != nil {
+		create.SetDeferredAt(fire.DeferredAt.UTC())
 	}
 	if fire.FinishedAt != nil {
 		create.SetFinishedAt(fire.FinishedAt.UTC())
@@ -2277,21 +2281,44 @@ func (s *TriggerStore) ClaimTriggerFireCoalescing(
 	return claimed, promoted, superseded, existing, nil
 }
 
-func (s *TriggerStore) DeferTriggerFire(ctx context.Context, id string, notBefore, leaseUntil time.Time) (bool, error) {
+func (s *TriggerStore) DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
 	}
-	affected, err := s.client.TriggerFire.Update().
-		Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusFiring)).
-		SetStatus(store.TriggerFireStatusDeferred).
-		SetNotBefore(notBefore.UTC()).
-		SetLeaseUntil(leaseUntil.UTC()).
-		Save(ctx)
-	if err != nil {
-		return false, mapError(err)
+	var updated bool
+	txErr := s.withClientTx(ctx, func(client *ent.Client) error {
+		ex, qErr := client.TriggerFire.Get(ctx, uid)
+		if qErr != nil {
+			if ent.IsNotFound(qErr) {
+				return nil
+			}
+			return mapError(qErr)
+		}
+		if ex.Status != store.TriggerFireStatusFiring {
+			return nil
+		}
+		u := client.TriggerFire.Update().
+			Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusFiring)).
+			SetStatus(store.TriggerFireStatusDeferred).
+			SetNotBefore(notBefore.UTC()).
+			SetLeaseUntil(leaseUntil.UTC())
+		// Preserve the first deferral timestamp across subsequent deferrals
+		// and hub restarts (Stage 3 §6.2 rev 1.16).
+		if ex.DeferredAt == nil && !deferredAt.IsZero() {
+			u.SetDeferredAt(deferredAt.UTC())
+		}
+		affected, uErr := u.Save(ctx)
+		if uErr != nil {
+			return mapError(uErr)
+		}
+		updated = affected > 0
+		return nil
+	})
+	if txErr != nil {
+		return false, txErr
 	}
-	return affected > 0, nil
+	return updated, nil
 }
 
 func (s *TriggerStore) FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error) {

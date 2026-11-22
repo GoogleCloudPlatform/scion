@@ -285,6 +285,7 @@ type TriggerFire struct {
 	ExecutorID     string     `json:"executorId,omitempty"`
 	LeaseUntil     time.Time  `json:"leaseUntil"`
 	NotBefore      *time.Time `json:"notBefore,omitempty"`
+	DeferredAt     *time.Time `json:"deferredAt,omitempty"`
 	StartedAt      time.Time  `json:"startedAt"`
 	FinishedAt     *time.Time `json:"finishedAt,omitempty"`
 	CreatedAt      time.Time  `json:"createdAt"`
@@ -369,7 +370,7 @@ type TriggerStore interface {
 	ClaimTriggerFire(ctx context.Context, fire *TriggerFire) (claimed bool, existing *TriggerFire, err error)
 	ClaimTriggerFireSubjectSkip(ctx context.Context, fire *TriggerFire, skipError string, now time.Time) (claimed bool, skippedBusy bool, existing *TriggerFire, err error)
 	ClaimTriggerFireCoalescing(ctx context.Context, fire *TriggerFire, coalesceError string, now, notBefore time.Time) (claimed bool, promoted bool, superseded []TriggerFire, existing *TriggerFire, err error)
-	DeferTriggerFire(ctx context.Context, id string, notBefore, leaseUntil time.Time) (bool, error)
+	DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error)
 	FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error)
 	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)

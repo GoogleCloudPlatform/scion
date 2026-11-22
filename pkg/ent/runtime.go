@@ -3744,7 +3744,7 @@ func init() {
 	// triggerfire.DefaultExecutorID holds the default value on creation for the executor_id field.
 	triggerfire.DefaultExecutorID = triggerfireDescExecutorID.Default.(string)
 	// triggerfireDescCreated is the schema descriptor for created field.
-	triggerfireDescCreated := triggerfireFields[19].Descriptor()
+	triggerfireDescCreated := triggerfireFields[20].Descriptor()
 	// triggerfire.DefaultCreated holds the default value on creation for the created field.
 	triggerfire.DefaultCreated = triggerfireDescCreated.Default.(func() time.Time)
 	// triggerfireDescID is the schema descriptor for id field.

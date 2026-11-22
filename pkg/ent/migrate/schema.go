@@ -4046,6 +4046,7 @@ var (
 		{Name: "executor_id", Type: field.TypeString, Default: ""},
 		{Name: "lease_until", Type: field.TypeTime},
 		{Name: "not_before", Type: field.TypeTime, Nullable: true},
+		{Name: "deferred_at", Type: field.TypeTime, Nullable: true},
 		{Name: "started_at", Type: field.TypeTime},
 		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
@@ -4059,7 +4060,7 @@ var (
 			{
 				Name:    "triggerfire_trigger_id_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[26]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[27]},
 			},
 			{
 				Name:    "triggerfire_event_id_trigger_id",

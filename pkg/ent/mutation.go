@@ -119838,6 +119838,7 @@ type TriggerFireMutation struct {
 	executor_id                   *string
 	lease_until                   *time.Time
 	not_before                    *time.Time
+	deferred_at                   *time.Time
 	started_at                    *time.Time
 	finished_at                   *time.Time
 	created                       *time.Time
@@ -121003,6 +121004,55 @@ func (m *TriggerFireMutation) ResetNotBefore() {
 	delete(m.clearedFields, triggerfire.FieldNotBefore)
 }
 
+// SetDeferredAt sets the "deferred_at" field.
+func (m *TriggerFireMutation) SetDeferredAt(t time.Time) {
+	m.deferred_at = &t
+}
+
+// DeferredAt returns the value of the "deferred_at" field in the mutation.
+func (m *TriggerFireMutation) DeferredAt() (r time.Time, exists bool) {
+	v := m.deferred_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeferredAt returns the old "deferred_at" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldDeferredAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeferredAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeferredAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeferredAt: %w", err)
+	}
+	return oldValue.DeferredAt, nil
+}
+
+// ClearDeferredAt clears the value of the "deferred_at" field.
+func (m *TriggerFireMutation) ClearDeferredAt() {
+	m.deferred_at = nil
+	m.clearedFields[triggerfire.FieldDeferredAt] = struct{}{}
+}
+
+// DeferredAtCleared returns if the "deferred_at" field was cleared in this mutation.
+func (m *TriggerFireMutation) DeferredAtCleared() bool {
+	_, ok := m.clearedFields[triggerfire.FieldDeferredAt]
+	return ok
+}
+
+// ResetDeferredAt resets all changes to the "deferred_at" field.
+func (m *TriggerFireMutation) ResetDeferredAt() {
+	m.deferred_at = nil
+	delete(m.clearedFields, triggerfire.FieldDeferredAt)
+}
+
 // SetStartedAt sets the "started_at" field.
 func (m *TriggerFireMutation) SetStartedAt(t time.Time) {
 	m.started_at = &t
@@ -121158,7 +121208,7 @@ func (m *TriggerFireMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerFireMutation) Fields() []string {
-	fields := make([]string, 0, 26)
+	fields := make([]string, 0, 27)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, triggerfire.FieldInitiatorPrincipalKind)
 	}
@@ -121228,6 +121278,9 @@ func (m *TriggerFireMutation) Fields() []string {
 	if m.not_before != nil {
 		fields = append(fields, triggerfire.FieldNotBefore)
 	}
+	if m.deferred_at != nil {
+		fields = append(fields, triggerfire.FieldDeferredAt)
+	}
 	if m.started_at != nil {
 		fields = append(fields, triggerfire.FieldStartedAt)
 	}
@@ -121291,6 +121344,8 @@ func (m *TriggerFireMutation) Field(name string) (ent.Value, bool) {
 		return m.LeaseUntil()
 	case triggerfire.FieldNotBefore:
 		return m.NotBefore()
+	case triggerfire.FieldDeferredAt:
+		return m.DeferredAt()
 	case triggerfire.FieldStartedAt:
 		return m.StartedAt()
 	case triggerfire.FieldFinishedAt:
@@ -121352,6 +121407,8 @@ func (m *TriggerFireMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldLeaseUntil(ctx)
 	case triggerfire.FieldNotBefore:
 		return m.OldNotBefore(ctx)
+	case triggerfire.FieldDeferredAt:
+		return m.OldDeferredAt(ctx)
 	case triggerfire.FieldStartedAt:
 		return m.OldStartedAt(ctx)
 	case triggerfire.FieldFinishedAt:
@@ -121528,6 +121585,13 @@ func (m *TriggerFireMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetNotBefore(v)
 		return nil
+	case triggerfire.FieldDeferredAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeferredAt(v)
+		return nil
 	case triggerfire.FieldStartedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -121648,6 +121712,9 @@ func (m *TriggerFireMutation) ClearedFields() []string {
 	if m.FieldCleared(triggerfire.FieldNotBefore) {
 		fields = append(fields, triggerfire.FieldNotBefore)
 	}
+	if m.FieldCleared(triggerfire.FieldDeferredAt) {
+		fields = append(fields, triggerfire.FieldDeferredAt)
+	}
 	if m.FieldCleared(triggerfire.FieldFinishedAt) {
 		fields = append(fields, triggerfire.FieldFinishedAt)
 	}
@@ -121706,6 +121773,9 @@ func (m *TriggerFireMutation) ClearField(name string) error {
 		return nil
 	case triggerfire.FieldNotBefore:
 		m.ClearNotBefore()
+		return nil
+	case triggerfire.FieldDeferredAt:
+		m.ClearDeferredAt()
 		return nil
 	case triggerfire.FieldFinishedAt:
 		m.ClearFinishedAt()
@@ -121786,6 +121856,9 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 		return nil
 	case triggerfire.FieldNotBefore:
 		m.ResetNotBefore()
+		return nil
+	case triggerfire.FieldDeferredAt:
+		m.ResetDeferredAt()
 		return nil
 	case triggerfire.FieldStartedAt:
 		m.ResetStartedAt()

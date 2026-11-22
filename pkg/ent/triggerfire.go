@@ -64,6 +64,8 @@ type TriggerFire struct {
 	LeaseUntil time.Time `json:"lease_until,omitempty"`
 	// NotBefore holds the value of the "not_before" field.
 	NotBefore *time.Time `json:"not_before,omitempty"`
+	// DeferredAt holds the value of the "deferred_at" field.
+	DeferredAt *time.Time `json:"deferred_at,omitempty"`
 	// StartedAt holds the value of the "started_at" field.
 	StartedAt time.Time `json:"started_at,omitempty"`
 	// FinishedAt holds the value of the "finished_at" field.
@@ -84,7 +86,7 @@ func (*TriggerFire) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldMatchedThrough, triggerfire.FieldDecidedDialect, triggerfire.FieldRuleTrace, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
 			values[i] = new(sql.NullString)
-		case triggerfire.FieldLeaseUntil, triggerfire.FieldNotBefore, triggerfire.FieldStartedAt, triggerfire.FieldFinishedAt, triggerfire.FieldCreated:
+		case triggerfire.FieldLeaseUntil, triggerfire.FieldNotBefore, triggerfire.FieldDeferredAt, triggerfire.FieldStartedAt, triggerfire.FieldFinishedAt, triggerfire.FieldCreated:
 			values[i] = new(sql.NullTime)
 		case triggerfire.FieldID, triggerfire.FieldProjectID, triggerfire.FieldTriggerID, triggerfire.FieldEventID:
 			values[i] = new(uuid.UUID)
@@ -256,6 +258,13 @@ func (_m *TriggerFire) assignValues(columns []string, values []any) error {
 				_m.NotBefore = new(time.Time)
 				*_m.NotBefore = value.Time
 			}
+		case triggerfire.FieldDeferredAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deferred_at", values[i])
+			} else if value.Valid {
+				_m.DeferredAt = new(time.Time)
+				*_m.DeferredAt = value.Time
+			}
 		case triggerfire.FieldStartedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field started_at", values[i])
@@ -395,6 +404,11 @@ func (_m *TriggerFire) String() string {
 	builder.WriteString(", ")
 	if v := _m.NotBefore; v != nil {
 		builder.WriteString("not_before=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeferredAt; v != nil {
+		builder.WriteString("deferred_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")
