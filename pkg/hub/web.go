@@ -2849,11 +2849,11 @@ func validateSSESubjects(subjects []string) string {
 // resource-scoped subjects. For example, "project.>" (meaning "all my
 // projects") is expanded to "project.<uuid>.>" for each project the caller
 // has ActionRead access to. Subjects that don't contain wildcards in a
-// resource-ID position pass through unchanged. "notification" and "broker"
-// wildcards pass through unchanged too, since authorizeSSESubjects does not
-// apply a per-resource check to those two categories. Every other category —
-// including "admin" and "system", and any namespace this function does not
-// recognize — also passes through unchanged rather than being dropped here:
+// resource-ID position pass through unchanged. "broker" wildcards pass
+// through unchanged too, since authorizeSSESubjects does not apply a
+// per-resource check to that category. Every other category — including
+// "admin", "system", and any namespace this function does not recognize —
+// also passes through unchanged rather than being dropped here:
 // authorizeSSESubjects is the single place that decides whether a category is
 // allowed, and its default case denies anything not explicitly allow-listed.
 // Dropping unknown categories at this stage instead would make a mixed
@@ -2907,9 +2907,9 @@ func (ws *WebServer) expandSSEWildcards(r *http.Request, subjects []string) []st
 				expanded = append(expanded, "user."+sessionUser.UserID+"."+s)
 			}
 
-		case "notification", "broker":
-			// These categories pass through authorization without
-			// resource checks — wildcards are fine as-is.
+		case "broker":
+			// Broker subjects pass through authorization without
+			// per-resource checks — wildcards are fine as-is.
 			expanded = append(expanded, sub)
 
 		default:
@@ -3047,7 +3047,7 @@ func isNATSWildcard(token string) bool {
 // have ActionRead on the project. Agent subjects require a concrete canonical
 // UUID and ActionRead on the resolved agent, matching the metadata endpoint.
 // For user-scoped subjects (user.<id>.*) the caller's identity must match the
-// user ID. notification.* and broker.* are an explicit, deliberate pass-through
+// user ID. broker.* is an explicit, deliberate pass-through
 // (see the switch below). system.images.<jobId> requires a concrete job ID,
 // and admin.* requires the admin role. Every other first token — including
 // any unknown or future namespace — is denied by default.
@@ -3194,13 +3194,8 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			if len(tokens) < 2 || deniedUsers[tokens[1]] {
 				denied = append(denied, sub)
 			}
-		case "broker", "notification":
-			// Explicit, deliberate pass-through: neither category carries a
-			// per-resource authorization check today. notification.* is
-			// already known to over-share across projects — narrowing it
-			// to user.<subscriberId>.notification is left for a follow-up.
-			// TODO(ptone/scion#1934): scope notification.created per-user
-			// and drop this pass-through.
+		case "broker":
+			// Broker subjects do not carry a per-resource authorization check.
 		case "system":
 			// Only a concrete image-pull job ID is allowed; no wildcards
 			// and no trailing tokens past the job ID. Image-build output

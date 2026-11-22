@@ -90,11 +90,10 @@ func TestNotificationCreatedEvent_HasNoResourceFields(t *testing.T) {
 	}
 }
 
-// TestNotificationEvents_ResourceFieldsOnUserSubjectOnly pins that the kind
-// and resource fields are fields of UserNotificationEvent alone: the
-// broadcast notification.created and project.<id>.notification payloads,
-// which reach other sessions, never carry them, even for a notification
-// that sets them.
+// TestNotificationEvents_ResourceFieldsOnUserSubjectOnly pins that
+// notifications publish solely on user.<id>.notification (never on
+// notification.> or project.<id>.notification) and carry kind/resource fields
+// on UserNotificationEvent.
 func TestNotificationEvents_ResourceFieldsOnUserSubjectOnly(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
@@ -110,14 +109,6 @@ func TestNotificationEvents_ResourceFieldsOnUserSubjectOnly(t *testing.T) {
 	n := resourceNotification()
 
 	pub.PublishNotification(ctx, n)
-	for name, ch := range map[string]<-chan Event{"notification.created": broadcast, "project.g1.notification": project} {
-		keys := receiveRaw(t, ch)
-		for _, k := range resourceEventKeys {
-			assert.NotContains(t, keys, k, "%s must not carry %q", name, k)
-		}
-	}
-
-	pub.PublishUserNotification(ctx, n)
 	keys := receiveRaw(t, user)
 	var got UserNotificationEvent
 	raw, err := json.Marshal(keys)
@@ -127,17 +118,33 @@ func TestNotificationEvents_ResourceFieldsOnUserSubjectOnly(t *testing.T) {
 	assert.Equal(t, store.NotificationResourceArtifact, got.ResourceType)
 	assert.Equal(t, n.ResourceID, got.ResourceID)
 	assert.Equal(t, "u1", got.SubscriberID)
+
+	pub.PublishUserNotification(ctx, n)
+	keys = receiveRaw(t, user)
+	raw, err = json.Marshal(keys)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &got))
+	assert.Equal(t, store.NotificationKindArtifactGrant, got.Kind)
+	assert.Equal(t, store.NotificationResourceArtifact, got.ResourceType)
+	assert.Equal(t, n.ResourceID, got.ResourceID)
+	assert.Equal(t, "u1", got.SubscriberID)
+
+	select {
+	case evt := <-broadcast:
+		t.Fatalf("unexpected event on %q", evt.Subject)
+	case evt := <-project:
+		t.Fatalf("unexpected event on %q", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 // TestNotificationEvents_ExistingPayloadsUnchanged pins that a notification
-// without kind or resource fields produces the same user and broadcast
-// payloads as before those fields existed.
+// without kind or resource fields produces the expected UserNotificationEvent
+// payload on user.<id>.notification.
 func TestNotificationEvents_ExistingPayloadsUnchanged(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
-	broadcast, unsubB := pub.Subscribe("notification.created")
-	defer unsubB()
 	user, unsubU := pub.Subscribe("user.u1.notification")
 	defer unsubU()
 
@@ -155,25 +162,16 @@ func TestNotificationEvents_ExistingPayloadsUnchanged(t *testing.T) {
 	pub.PublishNotification(ctx, n)
 	pub.PublishUserNotification(ctx, n)
 
-	wantBroadcast := `{"id":"n1","agentId":"a1","projectId":"g1","status":"SCHEDULE_BLOCKED",` +
-		`"message":"Schedule \"nightly\" is blocked","createdAt":"2026-03-01T12:00:00.000Z"}`
 	wantUser := `{"id":"n1","agentId":"a1","projectId":"g1","status":"SCHEDULE_BLOCKED",` +
 		`"message":"Schedule \"nightly\" is blocked","createdAt":"2026-03-01T12:00:00.000Z","subscriberId":"u1"}`
 
-	for _, c := range []struct {
-		name string
-		ch   <-chan Event
-		want string
-	}{
-		{"broadcast", broadcast, wantBroadcast},
-		{"user", user, wantUser},
-	} {
+	for _, name := range []string{"PublishNotification", "PublishUserNotification"} {
 		select {
-		case evt := <-c.ch:
-			assert.JSONEq(t, c.want, string(evt.Data), c.name)
-			assert.Equal(t, c.want, string(evt.Data), "%s payload bytes", c.name)
+		case evt := <-user:
+			assert.JSONEq(t, wantUser, string(evt.Data), name)
+			assert.Equal(t, wantUser, string(evt.Data), "%s payload bytes", name)
 		case <-time.After(time.Second):
-			t.Fatalf("timeout waiting for %s event", c.name)
+			t.Fatalf("timeout waiting for %s event", name)
 		}
 	}
 }

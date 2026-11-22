@@ -30,10 +30,9 @@ import (
 //
 // authorizeSSESubjects denies any subject whose first token is not on an
 // explicit allowlist: project, user and agent each get a per-resource check;
-// broker and notification are a deliberate pass-through; system and admin
-// get the checks described at their cases in web.go. Every other first
-// token — including the legacy grove.<projectId>.* duplicate subjects
-// (never published; see events.go) and any future namespace — is denied.
+// broker is a deliberate pass-through; system and admin get the checks
+// described at their cases in web.go. Every other first token — including
+// notification.* and the legacy grove.<projectId>.* subjects — is denied.
 // These tests pin down that allowlist.
 
 func TestAuthorizeSSESubjects_UnknownNamespaceDeniedByDefault(t *testing.T) {
@@ -42,16 +41,17 @@ func TestAuthorizeSSESubjects_UnknownNamespaceDeniedByDefault(t *testing.T) {
 	user := &webSessionUser{UserID: "user-1", Email: "a@b.com", Role: "user"}
 	req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, user))
 
-	// Concrete (non-wildcard) subjects so expandSSEWildcards passes them
-	// through unchanged and authorizeSSESubjects is the thing under test.
+	// Concrete and wildcard subjects that must be denied by default.
 	subjects := []string{
 		"grove.proj-1.user.message", // legacy duplicate subject; never published
 		"grove.proj-1.created",
+		"notification.created",
+		"notification.>",
 		"foo.bar",
 	}
 	denied := ws.authorizeSSESubjects(req, subjects)
 	assert.ElementsMatch(t, subjects, denied,
-		"unknown namespaces, including the legacy grove.* duplicate subjects, must be denied by default")
+		"unknown and removed namespaces must be denied by default")
 }
 
 func TestAuthorizeSSESubjects_SystemImages(t *testing.T) {
@@ -110,6 +110,8 @@ func TestSSEHandler_LegacyAndUnknownSubjectsDenied(t *testing.T) {
 	subjects := []string{
 		"grove.>",
 		"grove." + victimProject + ".>",
+		"notification.>",
+		"notification.created",
 		"foo.>",
 		"project." + victimProject + ".>", // control: still denied for a non-member
 	}
@@ -200,8 +202,8 @@ func TestSSEHandler_AdminWildcardRequiresAdminRole(t *testing.T) {
 // TestSSEHandler_InventorySubjectsAllowed asserts that every subject the real
 // web client subscribes to (per the grep-based inventory of web/src) is
 // allowed by the default-deny allowlist: project feeds, per-user
-// notification/chat subjects, per-agent streams, the notification and broker
-// pass-throughs, and image-build progress.
+// notification/chat subjects, per-agent streams, the broker pass-through, and
+// image-build progress.
 func TestSSEHandler_InventorySubjectsAllowed(t *testing.T) {
 	const userID = "user-1"
 	ownProject := tid("inventory-own-project")
@@ -228,10 +230,8 @@ func TestSSEHandler_InventorySubjectsAllowed(t *testing.T) {
 		"user." + userID + ".notification",
 		"user." + userID + ".chat.>",
 		"agent." + agentID + ".>", // per-agent stream (scope=agent)
-		"notification.>",          // notification tray
-		"notification.created",
-		"broker.>",               // broker pages
-		"system.images." + jobID, // image pull progress
+		"broker.>",                // broker pages
+		"system.images." + jobID,  // image pull progress
 	}
 
 	for _, sub := range subjects {

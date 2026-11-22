@@ -393,8 +393,8 @@ func TestReviewerLabel(t *testing.T) {
 }
 
 // TestReviewSummaryEvents_ExcerptOnUserSubjectOnly: a review summary row
-// published on the broadcast subjects (which no writer does for this kind)
-// still carries no excerpt there; only the owner's subject has it.
+// publishes on the owner's per-user notification subject only, never on
+// notification.> or project.<id>.notification.
 func TestReviewSummaryEvents_ExcerptOnUserSubjectOnly(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
@@ -408,11 +408,18 @@ func TestReviewSummaryEvents_ExcerptOnUserSubjectOnly(t *testing.T) {
 	n := buildReviewSummaryNotification(summaryNotice("Looks good."), "owner-id", "Alice")
 	ctx := context.Background()
 	pub.PublishNotification(ctx, n)
-	for name, ch := range map[string]<-chan Event{"broadcast": broadcast, "project": project} {
-		keys := receiveRaw(t, ch)
-		assert.NotContains(t, keys, "excerpt", name)
-	}
-	pub.PublishUserNotification(ctx, n)
 	keys := receiveRaw(t, user)
 	assert.JSONEq(t, `"Looks good."`, string(keys["excerpt"]))
+
+	pub.PublishUserNotification(ctx, n)
+	keys = receiveRaw(t, user)
+	assert.JSONEq(t, `"Looks good."`, string(keys["excerpt"]))
+
+	select {
+	case evt := <-broadcast:
+		t.Fatalf("unexpected event on %q", evt.Subject)
+	case evt := <-project:
+		t.Fatalf("unexpected event on %q", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
+	}
 }

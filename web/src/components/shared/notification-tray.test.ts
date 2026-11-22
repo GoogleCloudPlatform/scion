@@ -76,7 +76,7 @@ function emitUserScoped(data: unknown): void {
   );
 }
 
-/** The bare notification.created path: notify() passes the state alone. */
+/** An event without a usable payload: notify() passes no data. */
 function emitBare(): void {
   stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
 }
@@ -269,7 +269,23 @@ describe('notification tray: event reactions', () => {
     expect(listFetches()).toBe(3);
   });
 
-  it('bare notification.created burst fetches once', async () => {
+  it('upserts agent-status user-scoped notifications without fetch', async () => {
+    const tray = await mountTray([]);
+    for (const status of ['COMPLETED', 'WAITING_FOR_INPUT', 'STALLED', 'ERROR']) {
+      emitUserScoped({
+        ...userEventPayload(`n-${status}`),
+        status,
+        message: `agent-2 ${status}`,
+      });
+    }
+    await tray.updateComplete;
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(listFetches()).toBe(0);
+    expect(ids(tray)).toEqual(['n-ERROR', 'n-STALLED', 'n-WAITING_FOR_INPUT', 'n-COMPLETED']);
+  });
+
+  it('events without payload burst fetch once', async () => {
     const tray = await mountTray([]);
     apiFetch.mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify([notif('n1')]), { status: 200 }))

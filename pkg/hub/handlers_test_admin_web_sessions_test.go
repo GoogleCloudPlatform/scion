@@ -120,7 +120,7 @@ func (e *ws4Env) adminLogin(iss *store.User, id string) []*http.Cookie {
 // sse opens the event stream with jar. Only refusals are asserted here: a
 // stream that is accepted would not return.
 func (e *ws4Env) sse(jar []*http.Cookie) *httptest.ResponseRecorder {
-	return e.do(tiReq{path: "/events?sub=notification.ti", cookies: jar})
+	return e.do(tiReq{path: "/events?sub=broker.ti", cookies: jar})
 }
 
 func (e *ws4Env) classify(jar []*http.Cookie) tiSessionResult {

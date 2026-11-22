@@ -505,7 +505,7 @@ func (nd *NotificationDispatcher) dispatchStoredNotification(ctx context.Context
 	case store.SubscriberTypeAgent:
 		nd.dispatchToAgent(ctx, sub, notif, agent.ID, agent.Slug)
 	case store.SubscriberTypeUser:
-		nd.events.PublishNotification(ctx, notif)
+		nd.events.PublishUserNotification(ctx, notif)
 		nd.log.Info("Notification dispatched to user via SSE",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
 

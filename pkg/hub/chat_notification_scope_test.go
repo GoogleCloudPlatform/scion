@@ -15,9 +15,13 @@
 package hub
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,12 +30,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests pin the SSE subject boundaries for notifications: agent-status
-// notifications keep their subjects, and per-user subjects are only granted
-// to their own user. Chat messages no longer create notifications.
+// These tests pin the SSE subject boundaries for notifications: all user
+// notifications (including agent-status notifications) publish strictly on
+// user.<subscriberID>.notification, and per-user subjects are only granted
+// to their own user.
 
-// bystanderSubjects is the unscoped notification subject every logged-in
-// session may subscribe to.
 const bystanderSubjects = "notification.>"
 
 // newUserNotificationForTest builds a notification addressed to
@@ -49,15 +52,18 @@ func newUserNotificationForTest(subscriberID, projectID, message string) *store.
 	}
 }
 
-// TestAgentStatusNotification_SubjectsUnchanged pins the subjects agent-status
-// notifications are published on.
-func TestAgentStatusNotification_SubjectsUnchanged(t *testing.T) {
+// TestAgentStatusNotification_ScopedToSubscriber pins that agent-status
+// notifications are published strictly on user.<subscriberID>.notification
+// and never on notification.> or project.<id>.notification.
+func TestAgentStatusNotification_ScopedToSubscriber(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	t.Cleanup(pub.Close)
 
 	const projectID = "proj-1"
-	ch, unsub := pub.Subscribe("notification.>", "project."+projectID+".notification")
-	defer unsub()
+	owner, unsubOwner := pub.Subscribe("user.user-alice.notification")
+	defer unsubOwner()
+	bystander, unsubBystander := pub.Subscribe(bystanderSubjects, "project."+projectID+".notification", "user.user-eve.notification")
+	defer unsubBystander()
 
 	pub.PublishNotification(context.Background(), &store.Notification{
 		ID:             "notif-agent",
@@ -71,18 +77,169 @@ func TestAgentStatusNotification_SubjectsUnchanged(t *testing.T) {
 		CreatedAt:      time.Now(),
 	})
 
-	subjects := map[string]bool{}
-	deadline := time.After(time.Second)
-	for len(subjects) < 2 {
+	// Unaddressed notifications must be dropped.
+	pub.PublishNotification(context.Background(), &store.Notification{
+		ID:        "notif-unaddressed",
+		AgentID:   "agent-1",
+		ProjectID: projectID,
+		Status:    "COMPLETED",
+		Message:   "dropped",
+		CreatedAt: time.Now(),
+	})
+
+	select {
+	case evt := <-owner:
+		assert.Equal(t, "user.user-alice.notification", evt.Subject)
+		var payload UserNotificationEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		assert.Equal(t, "notif-agent", payload.ID)
+		assert.Equal(t, "user-alice", payload.SubscriberID)
+		assert.Equal(t, "COMPLETED", payload.Status)
+	case <-time.After(time.Second):
+		t.Fatal("recipient did not receive agent-status notification on user.<id>.notification")
+	}
+
+	select {
+	case evt := <-bystander:
+		t.Fatalf("unexpected notification event on %q: %s", evt.Subject, evt.Data)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// TestSSE_AgentStatusNotificationScopedPerUser verifies end-to-end SSE
+// delivery: user A receives their own agent-status notifications on
+// user.<A>.notification and never receives user B's notifications, even when
+// both users share access to the same project.
+func TestSSE_AgentStatusNotificationScopedPerUser(t *testing.T) {
+	const (
+		userA     = "user-alice"
+		userB     = "user-bob"
+		projectID = "proj-shared"
+	)
+
+	mockStore := &mockAuthzStore{
+		projects: []store.Project{
+			{ID: projectID, OwnerID: userA},
+		},
+		projectMemberships: map[string]*store.ProjectMembership{
+			projectID + ":" + userA: {ProjectID: projectID, UserID: userA, Role: store.ProjectRoleOwner},
+			projectID + ":" + userB: {ProjectID: projectID, UserID: userB, Role: store.ProjectRoleMember},
+		},
+	}
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	ws := &WebServer{
+		store:        mockStore,
+		events:       pub,
+		authzService: NewAuthzService(mockStore, nil),
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uid := r.Header.Get("X-Test-User")
+		u := &webSessionUser{UserID: uid, Email: uid + "@example.com", Role: "user"}
+		ws.handleSSE(w, r.WithContext(context.WithValue(r.Context(), webUserContextKey{}, u)))
+	}))
+	t.Cleanup(ts.Close)
+
+	openStream := func(uid string, subs ...string) (*http.Response, chan string) {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		q := url.Values{"sub": subs}.Encode()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, ts.URL+"/events?"+q, nil)
+		require.NoError(t, err)
+		req.Header.Set("X-Test-User", uid)
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		lines := make(chan string, 32)
+		go func() {
+			sc := bufio.NewScanner(resp.Body)
+			for sc.Scan() {
+				line := sc.Text()
+				if strings.HasPrefix(line, "data: ") {
+					lines <- strings.TrimPrefix(line, "data: ")
+				}
+			}
+			close(lines)
+		}()
+		// handleSSE calls ws.events.Subscribe before flushing headers, so the
+		// subscription is already active once Do returns 200 OK.
+		return resp, lines
+	}
+
+	_, streamA := openStream(userA, "project."+projectID+".>", "user."+userA+".notification")
+	_, streamB := openStream(userB, "project."+projectID+".>", "user."+userB+".notification")
+
+	// Publish a notification for user B first, then one for user A.
+	pub.PublishUserNotification(context.Background(), &store.Notification{
+		ID:             "notif-for-b",
+		AgentID:        "agent-b",
+		ProjectID:      projectID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   userB,
+		Status:         "WAITING_FOR_INPUT",
+		Message:        "agent-b is WAITING_FOR_INPUT",
+		CreatedAt:      time.Now().UTC(),
+	})
+	pub.PublishUserNotification(context.Background(), &store.Notification{
+		ID:             "notif-for-a",
+		AgentID:        "agent-a",
+		ProjectID:      projectID,
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   userA,
+		Status:         "COMPLETED",
+		Message:        "agent-a has reached a state of COMPLETED",
+		CreatedAt:      time.Now().UTC(),
+	})
+
+	type sseEnvelope struct {
+		Subject string                `json:"subject"`
+		Data    UserNotificationEvent `json:"data"`
+	}
+
+	collect := func(ch <-chan string) []sseEnvelope {
+		var got []sseEnvelope
 		select {
-		case evt := <-ch:
-			subjects[evt.Subject] = true
-		case <-deadline:
-			t.Fatalf("agent-status notification subjects changed; saw only %v", subjects)
+		case raw, ok := <-ch:
+			if !ok {
+				return got
+			}
+			var env sseEnvelope
+			require.NoError(t, json.Unmarshal([]byte(raw), &env))
+			got = append(got, env)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timeout waiting for expected SSE notification event")
+		}
+		quiet := time.After(50 * time.Millisecond)
+		for {
+			select {
+			case raw, ok := <-ch:
+				if !ok {
+					return got
+				}
+				var env sseEnvelope
+				require.NoError(t, json.Unmarshal([]byte(raw), &env))
+				got = append(got, env)
+			case <-quiet:
+				return got
+			}
 		}
 	}
-	assert.True(t, subjects["notification.created"])
-	assert.True(t, subjects["project."+projectID+".notification"])
+
+	gotA := collect(streamA)
+	gotB := collect(streamB)
+
+	require.Len(t, gotA, 1, "user A should receive only their own notification")
+	assert.Equal(t, "user."+userA+".notification", gotA[0].Subject)
+	assert.Equal(t, "notif-for-a", gotA[0].Data.ID)
+	assert.Equal(t, userA, gotA[0].Data.SubscriberID)
+
+	require.Len(t, gotB, 1, "user B should receive only their own notification")
+	assert.Equal(t, "user."+userB+".notification", gotB[0].Subject)
+	assert.Equal(t, "notif-for-b", gotB[0].Data.ID)
+	assert.Equal(t, userB, gotB[0].Data.SubscriberID)
 }
 
 // TestAuthorizeSSESubjects_OtherUsersNotificationSubject is the authorization

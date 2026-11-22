@@ -728,26 +728,34 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 	pub := NewChannelEventPublisher()
 	defer pub.Close()
 
-	ch, unsub := pub.Subscribe("notification.>")
-	defer unsub()
+	userCh, unsubUser := pub.Subscribe("user.u1.notification")
+	defer unsubUser()
+	broadcastCh, unsubBroadcast := pub.Subscribe("notification.>", "project.g1.notification")
+	defer unsubBroadcast()
 
 	notif := &store.Notification{
-		ID:        "n1",
-		AgentID:   "a1",
-		ProjectID: "g1",
-		Status:    "COMPLETED",
-		Message:   "test-agent has reached a state of COMPLETED",
-		CreatedAt: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
+		ID:           "n1",
+		AgentID:      "a1",
+		ProjectID:    "g1",
+		SubscriberID: "u1",
+		Status:       "COMPLETED",
+		Message:      "test-agent has reached a state of COMPLETED",
+		CreatedAt:    time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
 	}
 
 	pub.PublishNotification(context.Background(), notif)
 
+	// Notifications without a SubscriberID are dropped.
+	unaddressed := *notif
+	unaddressed.SubscriberID = ""
+	pub.PublishNotification(context.Background(), &unaddressed)
+
 	select {
-	case evt := <-ch:
-		if evt.Subject != "notification.created" {
-			t.Errorf("got subject %q, want %q", evt.Subject, "notification.created")
+	case evt := <-userCh:
+		if evt.Subject != "user.u1.notification" {
+			t.Errorf("got subject %q, want %q", evt.Subject, "user.u1.notification")
 		}
-		var data NotificationCreatedEvent
+		var data UserNotificationEvent
 		if err := json.Unmarshal(evt.Data, &data); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
@@ -760,6 +768,9 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 		if data.ProjectID != "g1" {
 			t.Errorf("got ProjectID %q, want %q", data.ProjectID, "g1")
 		}
+		if data.SubscriberID != "u1" {
+			t.Errorf("got SubscriberID %q, want %q", data.SubscriberID, "u1")
+		}
 		if data.Status != "COMPLETED" {
 			t.Errorf("got Status %q, want %q", data.Status, "COMPLETED")
 		}
@@ -771,6 +782,12 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for notification event")
+	}
+
+	select {
+	case evt := <-broadcastCh:
+		t.Fatalf("unexpected event on %q", evt.Subject)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -835,7 +852,7 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 	pub.PublishProjectDeleted(ctx, "p1")
 	pub.PublishBrokerConnected(ctx, "b1", "broker-one", []string{"p1"})
 	pub.PublishBrokerDisconnected(ctx, "b1", []string{"p1"})
-	pub.PublishNotification(ctx, &store.Notification{ID: "n1", ProjectID: "p1", Status: "COMPLETED"})
+	pub.PublishNotification(ctx, &store.Notification{ID: "n1", ProjectID: "p1", SubscriberID: "u1", Status: "COMPLETED"})
 	pub.PublishUserMessage(ctx, &store.Message{
 		ID: "m1", ProjectID: "p1", Sender: "agent:a1", SenderID: "a1",
 		Recipient: "user:alice", RecipientID: "u1", Msg: "hi", Type: "assistant-reply",
@@ -868,7 +885,7 @@ func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
 		"project.p1.updated",
 		"project.p1.deleted",
 		"project.p1.broker.status", "project.p1.broker.status",
-		"notification.created", "project.p1.notification",
+		"user.u1.notification",
 		"user.u1.message", "project.p1.user.message",
 	}
 
