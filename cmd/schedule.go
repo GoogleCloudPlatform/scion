@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -195,6 +196,19 @@ func wrapScheduleHubError(hubCtx *HubContext, err error) error {
 	return wrapHubError(err)
 }
 
+var (
+	errSchedulePrefixNotFound  = errors.New("schedule prefix not found")
+	errSchedulePrefixAmbiguous = errors.New("ambiguous ID prefix")
+)
+
+type schedulePrefixError struct {
+	sentinel error
+	msg      string
+}
+
+func (e *schedulePrefixError) Error() string { return e.msg }
+func (e *schedulePrefixError) Unwrap() error { return e.sentinel }
+
 // resolveScheduleID resolves a potentially truncated schedule/event ID to its full UUID.
 // If the input is already a valid full UUID, it is returned as-is with an empty resourceType.
 // Otherwise, it lists schedules and/or events and finds a unique prefix match.
@@ -261,11 +275,17 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 			case "event":
 				resourceLabel = "scheduled event"
 			}
-			return "", "", fmt.Errorf(
-				"no %s held by this agent found with ID prefix %q (agent callers only see schedules and events they hold; schedules held by another principal are not visible, and commands take an ID or ID prefix rather than a schedule name)",
-				resourceLabel, prefix)
+			return "", "", &schedulePrefixError{
+				sentinel: errSchedulePrefixNotFound,
+				msg: fmt.Sprintf(
+					"no %s held by this agent found with ID prefix %q (agent callers only see schedules and events they hold; schedules held by another principal are not visible, and commands take an ID or ID prefix rather than a schedule name)",
+					resourceLabel, prefix),
+			}
 		}
-		return "", "", fmt.Errorf("no schedule or event found with ID prefix %q", prefix)
+		return "", "", &schedulePrefixError{
+			sentinel: errSchedulePrefixNotFound,
+			msg:      fmt.Sprintf("no schedule or event found with ID prefix %q", prefix),
+		}
 	case 1:
 		return matches[0].id, matches[0].resourceType, nil
 	default:
@@ -273,7 +293,10 @@ func resolveScheduleID(ctx context.Context, hubCtx *HubContext, projectID, prefi
 		for i, m := range matches {
 			ids[i] = m.id
 		}
-		return "", "", fmt.Errorf("ambiguous ID prefix %q matches %d resources: %s", prefix, len(matches), strings.Join(ids, ", "))
+		return "", "", &schedulePrefixError{
+			sentinel: errSchedulePrefixAmbiguous,
+			msg:      fmt.Sprintf("ambiguous ID prefix %q matches %d resources: %s", prefix, len(matches), strings.Join(ids, ", ")),
+		}
 	}
 }
 
@@ -1066,13 +1089,39 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
+	return scheduleDeleteViaHub(ctx, hubCtx, projectID, scheduleID)
+}
+
+func oneShotDeleteHintError(id string) error {
+	return fmt.Errorf("%s is a one-shot scheduled event, not a recurring schedule; use 'scion schedule cancel %s' to cancel it", id, id)
+}
+
+func scheduleDeleteViaHub(ctx context.Context, hubCtx *HubContext, projectID, scheduleID string) error {
 	// Resolve potentially truncated ID to full UUID (delete only targets schedules)
 	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
 	if err != nil {
+		// If prefix resolution found no recurring schedule, check whether the
+		// prefix matches a one-shot scheduled event so we can point the caller
+		// to 'scion schedule cancel' instead of a misleading schedule-not-found
+		// or agent caller-scope error.
+		if errors.Is(err, errSchedulePrefixNotFound) {
+			if evtID, _, evtErr := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "event"); evtErr == nil {
+				return oneShotDeleteHintError(evtID)
+			} else if errors.Is(evtErr, errSchedulePrefixAmbiguous) {
+				return fmt.Errorf("%w (one-shot scheduled events cannot be deleted; use 'scion schedule cancel <id>' to cancel them)", evtErr)
+			}
+		}
 		return err
 	}
 
 	if err := hubCtx.Client.Schedules(projectID).Delete(ctx, fullID); err != nil {
+		if apiclient.IsNotFoundError(err) {
+			if _, evtErr := hubCtx.Client.ScheduledEvents(projectID).Get(ctx, fullID); evtErr == nil {
+				return oneShotDeleteHintError(fullID)
+			} else if apiclient.IsForbiddenError(evtErr) {
+				return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to delete schedule: %w", evtErr))
+			}
+		}
 		return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to delete schedule: %w", err))
 	}
 
