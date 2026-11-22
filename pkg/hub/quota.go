@@ -746,33 +746,28 @@ func (qs *QuotaService) Release(ctx context.Context, limitName string, resourceI
 	if logger == nil {
 		logger = slog.Default()
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Warn("recovered panic releasing quota reservation",
-				"limit", limitName, "resource_id", resourceID, "panic", r)
-		}
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), quotaReleaseTimeout)
-	defer cancel()
-	limitDef, err := qs.store.GetLimitDefinitionByName(releaseCtx, limitName)
-	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
-			logger.Warn("failed to release quota reservation: limit lookup failed",
-				"limit", limitName, "resource_id", resourceID, "error", err)
-		}
-		return
-	}
-	if limitDef == nil {
-		// No limit defined — nothing to release.
-		return
-	}
-	if err := qs.store.ReleaseReservation(releaseCtx, limitDef.ID, resourceID); err != nil && !errors.Is(err, store.ErrNotFound) {
-		logger.Warn("failed to release quota reservation",
-			"limit", limitName, "resource_id", resourceID, "error", err)
-	}
+	_ = runBestEffortCleanupStep(ctx, quotaReleaseTimeout, logger,
+		"quota_release", "recovered panic releasing quota reservation",
+		[]any{"limit", limitName, "resource_id", resourceID},
+		func(releaseCtx context.Context) error {
+			limitDef, err := qs.store.GetLimitDefinitionByName(releaseCtx, limitName)
+			if err != nil {
+				if !errors.Is(err, store.ErrNotFound) {
+					logger.Warn("failed to release quota reservation: limit lookup failed",
+						"limit", limitName, "resource_id", resourceID, "error", err)
+				}
+				return nil
+			}
+			if limitDef == nil {
+				// No limit defined — nothing to release.
+				return nil
+			}
+			if err := qs.store.ReleaseReservation(releaseCtx, limitDef.ID, resourceID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				logger.Warn("failed to release quota reservation",
+					"limit", limitName, "resource_id", resourceID, "error", err)
+			}
+			return nil
+		})
 }
 
 // matchesScope checks whether a binding's scope matches the requested scope.

@@ -1583,15 +1583,15 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 	err := s.store.UpdateAgentStatus(ctx, agentID, upd)
 	if errors.Is(err, store.ErrRunChanged) {
 		current := ""
-		if a, gerr := s.store.GetAgent(ctx, agentID); gerr == nil {
+		if a := s.getAgentBestEffort(ctx, agentID, "recordStopStatus"); a != nil {
 			current = a.RunID
 		}
-		s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
+		s.lifecycleLogger().Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
 			"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current)
 		return false, nil
 	}
 	if errors.Is(err, store.ErrIdleSuspendPrecondition) || errors.Is(err, store.ErrClaimPredicate) {
-		s.agentLifecycleLog.Info("Agent "+action+": claim/commit guard rejected after stop dispatch; not recording the "+action,
+		s.lifecycleLogger().Info("Agent "+action+": claim/commit guard rejected after stop dispatch; not recording the "+action,
 			"agent_id", agentID, "stopped_run_id", runID)
 		return false, nil
 	}
@@ -1613,27 +1613,17 @@ func (s *Server) getAgentBestEffort(ctx context.Context, agentID, op string) (ag
 	if s == nil || s.store == nil || agentID == "" {
 		return nil
 	}
-	logger := s.agentLifecycleLog
-	if logger == nil {
-		logger = slog.Default()
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Warn("Recovered panic refreshing agent after stop",
-				"agent_id", agentID, "op", op, "panic", r)
-			agent = nil
-		}
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	readCtx, cancel := finalizationContext(ctx)
-	defer cancel()
-	fresh, err := s.store.GetAgent(readCtx, agentID)
-	if err != nil {
-		return nil
-	}
-	return fresh
+	_ = runBestEffortCleanupStep(ctx, finalizationTimeout, s.lifecycleLogger(),
+		"get_agent_best_effort", "Recovered panic refreshing agent after stop",
+		[]any{"agent_id", agentID, "op", op},
+		func(readCtx context.Context) error {
+			fresh, err := s.store.GetAgent(readCtx, agentID)
+			if err == nil {
+				agent = fresh
+			}
+			return nil
+		})
+	return agent
 }
 
 // syncAgentAfterStopRecord aligns the caller's in-memory agent struct with the
@@ -1690,29 +1680,22 @@ func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action
 	if runID == "" || s == nil || s.store == nil {
 		return true
 	}
-	logger := s.agentLifecycleLog
-	if logger == nil {
-		logger = slog.Default()
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Warn("Recovered panic checking stop run currency",
-				"agent_id", agentID, "stopped_run_id", runID, "action", action, "panic", r)
-			stillCurrent = true
-		}
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	checkCtx, cancel := finalizationContext(ctx)
-	defer cancel()
-	current, err := s.store.GetAgent(checkCtx, agentID)
-	if err != nil || current == nil || current.RunID == runID {
-		return true
-	}
-	logger.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
-		"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current.RunID)
-	return false
+	logger := s.lifecycleLogger()
+	stillCurrent = true
+	_ = runBestEffortCleanupStep(ctx, finalizationTimeout, logger,
+		"stop_run_still_current", "Recovered panic checking stop run currency",
+		[]any{"agent_id", agentID, "stopped_run_id", runID, "action", action},
+		func(checkCtx context.Context) error {
+			current, err := s.store.GetAgent(checkCtx, agentID)
+			if err != nil || current == nil || current.RunID == runID {
+				return nil
+			}
+			logger.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
+				"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current.RunID)
+			stillCurrent = false
+			return nil
+		})
+	return stillCurrent
 }
 
 // logStopRunMismatch logs a run-scoped stop the broker refused because a
@@ -6605,22 +6588,12 @@ func (s *Server) clearIdleSuspendClaimBestEffort(ctx context.Context, agentID st
 	if s == nil || s.store == nil || agentID == "" {
 		return
 	}
-	logger := s.agentLifecycleLog
-	if logger == nil {
-		logger = slog.Default()
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			logger.Warn("Recovered panic clearing idle-suspend claim",
-				"agent_id", agentID, "panic", r)
-		}
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	cctx, ccancel := finalizationContext(ctx)
-	defer ccancel()
-	_ = s.store.ClearIdleSuspendClaim(cctx, agentID)
+	_ = runBestEffortCleanupStep(ctx, finalizationTimeout, s.lifecycleLogger(),
+		"clear_idle_suspend_claim", "Recovered panic clearing idle-suspend claim",
+		[]any{"agent_id", agentID},
+		func(cctx context.Context) error {
+			return s.store.ClearIdleSuspendClaim(cctx, agentID)
+		})
 }
 
 // completeAutoSuspendRecord runs the steps that follow a recorded

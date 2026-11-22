@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -73,10 +75,16 @@ type suspendPathHardeningStore struct {
 	getUserCalled           atomic.Bool
 
 	panicClearIdleFor    atomic.Value // string agentID; if non-empty, panics on ClearIdleSuspendClaim for that agent
+	errClearIdleFor      atomic.Value // string agentID; if non-empty, returns error on ClearIdleSuspendClaim for that agent
 	clearIdleClaimCalled atomic.Bool
 
 	panicOnHasDeliveryHold atomic.Bool
 	hasDeliveryHoldCalled  atomic.Bool
+
+	armGetAgentPanicPostStatusUpdate atomic.Bool
+	returnErrRunChanged              atomic.Bool
+	armGetAgentPanicOnRunChanged     atomic.Bool
+	panicOnUpdateStatusFor           atomic.Value // string agentID; if non-empty, panics on UpdateAgentStatus for that agent
 }
 
 func (w *suspendPathHardeningStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
@@ -195,7 +203,30 @@ func (w *suspendPathHardeningStore) ClearIdleSuspendClaim(ctx context.Context, a
 	if target, ok := w.panicClearIdleFor.Load().(string); ok && target == agentID {
 		panic("injected clear idle suspend claim panic")
 	}
+	if target, ok := w.errClearIdleFor.Load().(string); ok && target == agentID {
+		return errors.New("injected clear idle suspend claim error")
+	}
 	return w.Store.ClearIdleSuspendClaim(ctx, agentID)
+}
+
+func (w *suspendPathHardeningStore) UpdateAgentStatus(ctx context.Context, id string, update store.AgentStatusUpdate) error {
+	if !w.fault.Active() {
+		return w.Store.UpdateAgentStatus(ctx, id, update)
+	}
+	if target, ok := w.panicOnUpdateStatusFor.Load().(string); ok && target == id {
+		panic("injected update agent status panic")
+	}
+	if w.returnErrRunChanged.Load() {
+		if w.armGetAgentPanicOnRunChanged.Load() {
+			w.panicOnGetAgent.Store(true)
+		}
+		return store.ErrRunChanged
+	}
+	err := w.Store.UpdateAgentStatus(ctx, id, update)
+	if err == nil && w.armGetAgentPanicPostStatusUpdate.Load() {
+		w.panicOnGetAgent.Store(true)
+	}
+	return err
 }
 
 func (w *suspendPathHardeningStore) HasAgentDeliveryHold(ctx context.Context, agentID string) (bool, error) {
@@ -932,6 +963,22 @@ func TestClearIdleSuspendClaim_Hardening(t *testing.T) {
 		assert.Contains(t, pub.publishedPhases(agent2.ID), string(state.PhaseSuspended), "PublishAgentStatus must run for agent2")
 		assertHasWarnLog(t, logs.String(), "Recovered panic clearing idle-suspend claim", agent1.ID, "injected clear idle suspend claim panic")
 	})
+
+	t.Run("non_panic_store_error_logged_at_warn", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = slog.Default()
+
+		agent := setupBrokerAgentInPhase(t, s, "idle-clear-err", state.PhaseRunning)
+		wrapped.errClearIdleFor.Store(agent.ID)
+		fault.Arm()
+
+		srv.clearIdleSuspendClaimBestEffort(context.Background(), agent.ID)
+		assert.True(t, wrapped.clearIdleClaimCalled.Load())
+		assertHasWarnLog(t, logs.String(), "Best-effort cleanup step failed", agent.ID, "injected clear idle suspend claim error")
+	})
 }
 
 func TestExpireHeldMessagesForAgent_Hardening(t *testing.T) {
@@ -975,5 +1022,234 @@ func TestExpireHeldMessagesForAgent_Hardening(t *testing.T) {
 
 		assert.Contains(t, pub.publishedPhases(agent.ID), string(state.PhaseSuspended))
 		assertHasWarnLog(t, logs.String(), "Recovered panic expiring held messages for agent", agent.ID, "injected has delivery hold panic")
+	})
+}
+
+func TestStopAllSettleLifecycleWrite_Hardening(t *testing.T) {
+	t.Run("settle_panic_still_releases_quotas_and_claim", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = slog.Default()
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		srv.SetDispatcher(&engineStubDispatcher{})
+		srv.quotaService = &QuotaService{store: s, logger: slog.Default()}
+
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "stopall-settle-panic", state.PhaseRunning)
+		_, err := s.ClaimAgentStart(ctx, agent.ID, "hub-stopall-settle", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+
+		projDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, agent.ProjectID, agent.ProjectID, agent.ID)
+		brokerDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.RuntimeBrokerID, agent.ID)
+
+		wrapped.armGetAgentPanicPostStatusUpdate.Store(true)
+		fault.Arm()
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+agent.ProjectID+"/agents/stop-all", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp StopAllAgentsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, 1, resp.Stopped, "stop-all must report agent stopped even when settleLifecycleWrite panics")
+		assert.Equal(t, 0, resp.Failed)
+
+		after := mustGetAgent(t, s, agent.ID)
+		assert.Equal(t, string(state.PhaseStopped), after.Phase)
+		assert.Empty(t, after.StartClaimID, "start claim must still be released after settleLifecycleWrite panic")
+
+		activeBroker, err := s.CountActiveReservations(ctx, brokerDef.ID, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeBroker, "broker quota must be released before/despite settleLifecycleWrite panic")
+
+		activeProj, err := s.CountActiveReservations(ctx, projDef.ID, agent.ProjectID, store.QuotaScopeProject, agent.ProjectID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeProj, "project quota must be released before/despite settleLifecycleWrite panic")
+
+		assert.Contains(t, pub.publishedPhases(agent.ID), string(state.PhaseStopped), "PublishAgentStatus must still run after settleLifecycleWrite panic")
+		assertHasWarnLog(t, logs.String(), "Recovered panic settling lifecycle write", agent.ID, "injected get agent panic")
+	})
+
+	t.Run("goroutine_panic_recovers_without_crashing_hub", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = slog.Default()
+		srv.SetDispatcher(&engineStubDispatcher{})
+
+		ctx := context.Background()
+		agent1 := setupBrokerAgentInPhase(t, s, "stopall-goroutine-panic-1", state.PhaseRunning)
+		agent2 := &store.Agent{
+			ID:              tid("stopall-goroutine-panic-2"),
+			Slug:            "stopall-goroutine-panic-2",
+			Name:            "stopall-goroutine-panic-2",
+			ProjectID:       agent1.ProjectID,
+			RuntimeBrokerID: agent1.RuntimeBrokerID,
+			Phase:           string(state.PhaseRunning),
+			ContainerStatus: "running",
+			RunID:           tid("run-2"),
+			Created:         time.Now(),
+			Updated:         time.Now(),
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent2))
+
+		wrapped.panicOnUpdateStatusFor.Store(agent1.ID)
+		fault.Arm()
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+agent1.ProjectID+"/agents/stop-all", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp StopAllAgentsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, 1, resp.Stopped, "second agent must still stop when first agent's goroutine panics")
+		assert.Equal(t, 1, resp.Failed, "panicking agent must be recorded as failed")
+
+		after2 := mustGetAgent(t, s, agent2.ID)
+		assert.Equal(t, string(state.PhaseStopped), after2.Phase)
+		assert.Contains(t, logs.String(), "stop-all: recovered panic stopping agent")
+		assert.NotContains(t, rec.Body.String(), "injected update agent status panic", "raw panic details must not leak in HTTP response")
+	})
+
+	t.Run("settle_cancelled_context_and_timeout_bounds_slow_reload", func(t *testing.T) {
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = slog.Default()
+		agent := setupBrokerAgentInPhase(t, s, "settle-ctx-test", state.PhaseStopped)
+
+		// Cancelled caller context still reloads via detached context.
+		cancelled, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := srv.settleLifecycleWrite(cancelled, agent, string(state.PhaseStopped))
+		assert.NoError(t, err, "settleLifecycleWrite must detach from cancelled caller context")
+
+		// Slow GetAgent is bounded by finalizationTimeout.
+		synctest.Test(t, func(t *testing.T) {
+			wrapped.blockOnGetAgent.Store(true)
+			wrapped.sawGetAgentDeadline.Store(false)
+			fault.Arm()
+
+			start := time.Now()
+			err := srv.settleLifecycleWrite(context.Background(), agent, string(state.PhaseStopped))
+			elapsed := time.Since(start)
+
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.True(t, wrapped.sawGetAgentDeadline.Load(), "settleLifecycleWrite must set a bounded deadline")
+			assert.GreaterOrEqual(t, elapsed, finalizationTimeout)
+		})
+	})
+}
+
+func TestRecordStopStatusErrRunChanged_Hardening(t *testing.T) {
+	t.Run("nil_logger_and_get_agent_panic_returns_false_nil", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = nil
+		agent := setupBrokerAgentInPhase(t, s, "run-changed-panic", state.PhaseRunning)
+
+		wrapped.returnErrRunChanged.Store(true)
+		wrapped.armGetAgentPanicOnRunChanged.Store(true)
+		fault.Arm()
+
+		var recorded bool
+		var err error
+		require.NotPanics(t, func() {
+			recorded, err = srv.recordStopStatus(context.Background(), agent.ID, agent.RunID, "stop", store.AgentStatusUpdate{
+				Phase: string(state.PhaseStopped),
+			})
+		})
+		assert.False(t, recorded)
+		assert.NoError(t, err)
+		assert.True(t, wrapped.getAgentCalled.Load())
+		assertHasWarnLog(t, logs.String(), "Recovered panic refreshing agent after stop", agent.ID, "injected get agent panic")
+	})
+
+	t.Run("queued_stop_err_run_changed_panic_still_releases_claim", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = nil
+		srv.SetDispatcher(&engineStubDispatcher{})
+
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "queued-stop-run-changed-panic", state.PhaseStopped)
+		require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			ContainerStatus: containerStatusStopQueued,
+			Message:         offlineStopMessage,
+		}))
+		claim, err := s.ClaimAgentStart(ctx, agent.ID, "hub-queued-stop", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+		intentAt, err := srv.recordRunIntent(ctx, agent, store.RunIntentStopped)
+		require.NoError(t, err)
+
+		args, err := MarshalDispatchArgs(StopDispatchArgs{
+			IntentAt:        &intentAt,
+			SupersedesClaim: claim.ID,
+			RunID:           agent.RunID,
+		})
+		require.NoError(t, err)
+
+		wrapped.returnErrRunChanged.Store(true)
+		wrapped.armGetAgentPanicOnRunChanged.Store(true)
+		fault.Arm()
+
+		require.NotPanics(t, func() {
+			_, err = srv.execDispatchStop(ctx, store.BrokerDispatch{
+				ID:        tid("dispatch-run-changed-panic"),
+				BrokerID:  agent.RuntimeBrokerID,
+				AgentID:   agent.ID,
+				AgentSlug: agent.Slug,
+				ProjectID: agent.ProjectID,
+				Op:        "stop",
+				Args:      args,
+			})
+		})
+		require.NoError(t, err)
+
+		after := mustGetAgent(t, s, agent.ID)
+		assert.Empty(t, after.StartClaimID, "releaseSupersededClaim must still run after ErrRunChanged GetAgent panic in execDispatchStop")
+		assertHasWarnLog(t, logs.String(), "Recovered panic refreshing agent after stop", agent.ID, "injected get agent panic")
+	})
+}
+
+func TestRunBestEffortCleanupStep(t *testing.T) {
+	t.Run("nil_ctx_and_logger_panic_recovers_with_step_attr", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		var sawDeadline bool
+		//nolint:staticcheck // intentionally testing nil context guard
+		err := runBestEffortCleanupStep(nil, 0, nil, "test_step", "", []any{"agent_id", "ag-1"}, func(stepCtx context.Context) error {
+			_, sawDeadline = stepCtx.Deadline()
+			panic("boom")
+		})
+		assert.ErrorIs(t, err, errCleanupStepPanicked)
+		assert.True(t, sawDeadline, "default timeout must set a deadline")
+		assertHasWarnLog(t, logs.String(), "Recovered panic in best-effort cleanup step", "ag-1", `"step":"test_step"`)
+	})
+
+	t.Run("cancelled_parent_detaches_and_bounds_timeout", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			logs := captureSuspendHardeningLogs(t)
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			start := time.Now()
+			err := runBestEffortCleanupStep(cancelled, 0, nil, "slow_step", "", []any{"agent_id", "ag-2"}, func(stepCtx context.Context) error {
+				require.NoError(t, stepCtx.Err(), "detached context must not inherit parent cancellation")
+				<-stepCtx.Done()
+				return stepCtx.Err()
+			})
+			elapsed := time.Since(start)
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.GreaterOrEqual(t, elapsed, finalizationTimeout)
+			assertHasWarnLog(t, logs.String(), "Best-effort cleanup step failed", "ag-2", `"step":"slow_step"`)
+		})
 	})
 }

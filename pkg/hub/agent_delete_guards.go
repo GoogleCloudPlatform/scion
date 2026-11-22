@@ -412,7 +412,7 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 	// view must keep explaining why (in_doubt never expires from view).
 	if outstanding, err := s.store.HasOutstandingBrokerDispatch(ctx, a.ID, brokerDispatchOpDelete); err != nil || outstanding {
 		if err != nil {
-			s.agentLifecycleLog.Warn("failed to check delete intents before clearing failed marker",
+			s.lifecycleLogger().Warn("failed to check delete intents before clearing failed marker",
 				"agent_id", a.ID, "error", err)
 		}
 		return
@@ -439,7 +439,7 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 	for _, pred := range preds {
 		n, err := s.store.UpdateAgentDeletion(ctx, a.ID, pred, set)
 		if err != nil {
-			s.agentLifecycleLog.Warn("failed to clear failed delete marker",
+			s.lifecycleLogger().Warn("failed to clear failed delete marker",
 				"agent_id", a.ID, "error", err)
 			return
 		}
@@ -471,14 +471,27 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 // fails, a falls back to the requested phase (the pre-guard behaviour) and
 // the re-read's error is returned (nil when the re-read succeeded).
 func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) (reloadErr error) {
+	if s == nil || s.store == nil || a == nil {
+		return nil
+	}
 	a.Phase = newPhase
-	s.clearFailedDeletion(ctx, a)
-	if err := s.reloadGuardedColumns(ctx, a); err != nil {
-		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
-			"agent_id", a.ID, "error", err)
+	logger := s.lifecycleLogger()
+	err := runBestEffortCleanupStep(ctx, finalizationTimeout, logger,
+		"settle_lifecycle_write", "Recovered panic settling lifecycle write",
+		[]any{"agent_id", a.ID, "phase", newPhase},
+		func(stepCtx context.Context) error {
+			s.clearFailedDeletion(stepCtx, a)
+			if rerr := s.reloadGuardedColumns(stepCtx, a); rerr != nil {
+				logger.Warn("failed to re-read agent after lifecycle write",
+					"agent_id", a.ID, "error", rerr)
+				reloadErr = rerr
+			}
+			return nil
+		})
+	if err != nil {
 		return err
 	}
-	return nil
+	return reloadErr
 }
 
 // reloadGuardedColumns re-reads a's row and copies the columns a concurrent
@@ -488,6 +501,9 @@ func (s *Server) reloadGuardedColumns(ctx context.Context, a *store.Agent) error
 	fresh, err := s.store.GetAgent(ctx, a.ID)
 	if err != nil {
 		return err
+	}
+	if fresh == nil {
+		return store.ErrNotFound
 	}
 	a.Phase = fresh.Phase
 	a.Activity = fresh.Activity

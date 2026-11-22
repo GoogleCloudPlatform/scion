@@ -1255,20 +1255,15 @@ func (s *Server) releaseSupersededClaim(ctx context.Context, agentID, claimID st
 	if claimID == "" || stopIntentAt.IsZero() || s == nil || s.store == nil {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			slog.Warn("Recovered panic releasing superseded start claim",
-				"agent_id", agentID, "claim_id", claimID, "panic", r)
-		}
-	}()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	if released, err := s.store.ReleaseSupersededStart(rctx, agentID, claimID, stopIntentAt); err != nil {
-		slog.Warn("Releasing a start claim superseded by a stop failed; the reaper will settle it", "agent_id", agentID, "error", err)
-	} else if released {
-		slog.Info("Released a start claim superseded by a stop", "agent_id", agentID, "claim_id", claimID)
-	}
+	_ = runBestEffortCleanupStep(ctx, 10*time.Second, nil,
+		"release_superseded_claim", "Recovered panic releasing superseded start claim",
+		[]any{"agent_id", agentID, "claim_id", claimID},
+		func(rctx context.Context) error {
+			if released, err := s.store.ReleaseSupersededStart(rctx, agentID, claimID, stopIntentAt); err != nil {
+				slog.Warn("Releasing a start claim superseded by a stop failed; the reaper will settle it", "agent_id", agentID, "error", err)
+			} else if released {
+				slog.Info("Released a start claim superseded by a stop", "agent_id", agentID, "claim_id", claimID)
+			}
+			return nil
+		})
 }
