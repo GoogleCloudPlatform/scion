@@ -752,8 +752,8 @@ var catalogResourceOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}/reimport", Method: "POST"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "template-from-url",
 		BasePermission:   "template.create",
 		Effects:          []SecurityEffect{EffectUpdateResource},

@@ -190,6 +190,10 @@ func inferHarnessFromName(name string) string {
 // collects it again and must open its root at that same subdirectory of cd's
 // root (ResourceStore.within).
 func (s *Server) importTemplateHarnessConfigs(ctx context.Context, cd *collectedDir, scope, scopeID string) {
+	s.importTemplateHarnessConfigsWithOptions(ctx, cd, scope, scopeID, false)
+}
+
+func (s *Server) importTemplateHarnessConfigsWithOptions(ctx context.Context, cd *collectedDir, scope, scopeID string, createOnly bool) {
 	const hcPrefix = "harness-configs"
 	names := cd.subdirs(hcPrefix)
 	if len(names) == 0 {
@@ -239,7 +243,7 @@ func (s *Server) importTemplateHarnessConfigs(ctx context.Context, cd *collected
 			}
 			s.templateLog.Info("template harness-config import: imported config",
 				"config", name, "harness", hcDirCfg.Config.Harness, "scope", hcScope)
-		} else {
+		} else if !createOnly {
 			if _, err := rs.Bootstrap(ctx, existing.Name, dirPath, existing.Scope, existing.ScopeID, "", false); err != nil {
 				s.templateLog.Warn("template harness-config import: failed to sync, skipping",
 					"config", name, "error", err)
