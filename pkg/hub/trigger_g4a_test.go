@@ -209,20 +209,33 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 		}
 	}
 
-	var wg sync.WaitGroup
-	var resA, resB durablequeue.Result
-	wg.Add(2)
-	go func() { defer wg.Done(); resA = dispA.HandleItem(ctx, toItem(itemsA[0]), nil) }()
-	go func() { defer wg.Done(); resB = dispB.HandleItem(ctx, toItem(itemsB[0]), nil) }()
+	aDone := make(chan durablequeue.Result, 1)
+	bDone := make(chan durablequeue.Result, 1)
+	go func() { aDone <- dispA.HandleItem(ctx, toItem(itemsA[0]), nil) }()
 
+	// Wait until replica A has acquired the unbound claim and entered broker create.
 	select {
 	case <-enterCreate:
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for first replica to enter broker create")
 	}
-	time.Sleep(100 * time.Millisecond)
+
+	// Now start replica B while A is deterministically parked mid-create, and wait for B to finish.
+	go func() { bDone <- dispB.HandleItem(ctx, toItem(itemsB[0]), nil) }()
+	var resB durablequeue.Result
+	select {
+	case resB = <-bDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for second replica to finish")
+	}
+
 	close(releaseCreate)
-	wg.Wait()
+	var resA durablequeue.Result
+	select {
+	case resA = <-aDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for first replica to finish")
+	}
 
 	assert.True(t, resA.Done)
 	assert.True(t, resB.Done)
@@ -230,6 +243,24 @@ func TestTriggerG4a_Reuse_TwoConcurrentDrainersAndWakeSuspended(t *testing.T) {
 	_, _ = dqStore.CompleteDurableItem(ctx, itemsB[0].Seq, "replica-b")
 
 	assert.Equal(t, int32(1), createCalls.Load(), "exactly one agent must be created across two concurrent drainers")
+
+	// Assert B's fire row explicitly skipped as "subject dispatch in progress" and A's fired.
+	firesA, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		TriggerID: trigResp.ID,
+		EventID:   itemsA[0].DedupKey,
+	}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesA.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, firesA.Items[0].Status)
+
+	firesB, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+		TriggerID: trigResp.ID,
+		EventID:   itemsB[0].DedupKey,
+	}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesB.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusSkipped, firesB.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireSubjectDispatchInProgress, firesB.Items[0].Error)
 
 	subjectKey := "webhook:" + ep.ID + "/pr-42"
 	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
@@ -769,4 +800,149 @@ func TestTriggerG4a_StaleReplayAfterDedupWindow(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgFires.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusFired, msgFires.Items[0].Status)
+}
+
+func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "s3-g4a-reuse-coalesce")
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "reuse-coalesce-ep")
+
+	// github.pr_updated shape: dispatch_agent + subject.mode=reuse + coalesce_window=30s.
+	rec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "pr-updated-shape",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"pr_sync"}},
+			Subject: &TriggerSubjectSpec{
+				Mode:           store.TriggerSubjectModeReuse,
+				CoalesceWindow: "30s",
+			},
+			Action: TriggerActionSpec{
+				Type:         store.TriggerActionDispatchAgent,
+				Task:         "Review ${event.subject} sha=${event.payload.after}",
+				ReuseMessage: "Updated ${event.subject} sha=${event.payload.after}",
+				GitHubToken:  store.TriggerGitHubTokenUserPreferred,
+			},
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var trigResp TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trigResp))
+
+	var createCalls atomic.Int32
+	tracker := &reuseTrackingBrokerClient{
+		st: f.sched.store,
+		createFn: func(ctx context.Context, req *CreateAgentRequest) (*RemoteAgentResponse, error) {
+			createCalls.Add(1)
+			return &RemoteAgentResponse{
+				Agent: &store.Agent{
+					ID:              req.ID,
+					Slug:            req.Slug,
+					Name:            req.Name,
+					ProjectID:       req.ProjectID,
+					RuntimeBrokerID: f.sched.broker.ID,
+					Phase:           string(state.PhaseRunning),
+					Activity:        string(state.ActivityWaitingForInput),
+				},
+			}, nil
+		},
+	}
+	f.sched.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.sched.store, tracker, false, slog.Default()))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(f.sched.store, f.sched.store, clock)
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	dqStore := f.sched.store.(store.DurableQueueStore)
+	claimNext := func(t *testing.T) durablequeue.Item {
+		t.Helper()
+		rows, cErr := dqStore.ClaimDurableItems(ctx, trigger.EventQueueKind, "worker-1", time.Now().UTC().Add(time.Hour), time.Now().UTC().Add(2*time.Hour), 1)
+		require.NoError(t, cErr)
+		require.Len(t, rows, 1)
+		_, _ = dqStore.CompleteDurableItem(ctx, rows[0].Seq, "worker-1")
+		return durablequeue.Item{
+			Seq: rows[0].Seq, Kind: rows[0].Kind, DedupKey: rows[0].DedupKey,
+			ProjectID: rows[0].ProjectID, Payload: []byte(rows[0].Payload), Attempts: 1,
+		}
+	}
+
+	// Burst 1: two synchronize events within 30s -> sha-1 coalesced, sha-2 dispatches 1 agent.
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-rc-1", "pr_sync", "pr-99", []byte(`{"after":"sha-1"}`)).Code)
+	it1 := claimNext(t)
+	res1 := disp.HandleItem(ctx, it1, nil)
+	assert.False(t, res1.Done)
+	assert.Equal(t, now.Add(30*time.Second), res1.RetryAt)
+
+	now = now.Add(5 * time.Second)
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-rc-2", "pr_sync", "pr-99", []byte(`{"after":"sha-2"}`)).Code)
+	it2 := claimNext(t)
+	res2 := disp.HandleItem(ctx, it2, nil)
+	assert.False(t, res2.Done)
+	assert.Equal(t, now.Add(30*time.Second), res2.RetryAt)
+	assert.Equal(t, int32(0), createCalls.Load())
+
+	// Window elapses -> it2 promotes and creates 1 agent with sha-2.
+	now = now.Add(30 * time.Second)
+	res2Due := disp.HandleItem(ctx, it2, nil)
+	assert.True(t, res2Due.Done)
+	assert.Equal(t, int32(1), createCalls.Load())
+
+	subjectKey := "webhook:" + ep.ID + "/pr-99"
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	require.NoError(t, err)
+	require.NotEmpty(t, claim.AgentID)
+
+	ag, err := f.sched.store.GetAgent(ctx, claim.AgentID)
+	require.NoError(t, err)
+	ag.Phase = string(state.PhaseRunning)
+	ag.Activity = string(state.ActivityWaitingForInput)
+	require.NoError(t, f.sched.store.UpdateAgent(ctx, ag))
+
+	// Burst 2: two more synchronize events on the same subject within 30s ->
+	// sha-3 coalesced, sha-4 promotes and delivers 1 reuse wake message (no second agent).
+	now = now.Add(5 * time.Second)
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-rc-3", "pr_sync", "pr-99", []byte(`{"after":"sha-3"}`)).Code)
+	it3 := claimNext(t)
+	res3 := disp.HandleItem(ctx, it3, nil)
+	assert.False(t, res3.Done)
+	assert.Equal(t, now.Add(30*time.Second), res3.RetryAt)
+
+	now = now.Add(5 * time.Second)
+	require.Equal(t, http.StatusAccepted, f.postSignedWebhook(t, ep, "del-rc-4", "pr_sync", "pr-99", []byte(`{"after":"sha-4"}`)).Code)
+	it4 := claimNext(t)
+	res4 := disp.HandleItem(ctx, it4, nil)
+	assert.False(t, res4.Done)
+	assert.Equal(t, now.Add(30*time.Second), res4.RetryAt)
+	assert.Empty(t, tracker.messages(), "reuse message must wait for coalesce window")
+
+	now = now.Add(30 * time.Second)
+	res4Due := disp.HandleItem(ctx, it4, nil)
+	assert.True(t, res4Due.Done)
+	assert.Equal(t, int32(1), createCalls.Load(), "reuse+coalesce must not create a second agent")
+
+	msgs := tracker.messages()
+	require.Len(t, msgs, 1, "only latest coalesced event delivers reuse message")
+	assert.Equal(t, ag.Slug, msgs[0].AgentID)
+	assert.Contains(t, msgs[0].Message, "sha=sha-4")
+	assert.NotContains(t, msgs[0].Message, "sha=sha-3")
+
+	// Confirm superseded rows (it1 and it3) are skipped "coalesced".
+	for _, evID := range []string{it1.DedupKey, it3.DedupKey} {
+		fRes, err := f.sched.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+			TriggerID: trigResp.ID,
+			EventID:   evID,
+		}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		require.Len(t, fRes.Items, 1)
+		assert.Equal(t, store.TriggerFireStatusSkipped, fRes.Items[0].Status)
+		assert.Equal(t, trigger.ErrFireCoalesced, fRes.Items[0].Error)
+	}
 }
