@@ -3804,6 +3804,15 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
+	// Refuse before taking a start claim if create-time HomeFiles have not yet
+	// been delivered (P1c-4a R1): an env-submit dispatch carries no HomeFiles
+	// and must not launch a trigger agent without its event file or hold the
+	// start claim against the trigger's own create dispatch.
+	if agentHomeFilesPending(agent) {
+		s.writeStartClaimError(ctx, w, errHomeFilesNotDelivered, agent.ID)
+		return
+	}
+
 	// Dispatch finalize-env to the broker
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil || agent.RuntimeBrokerID == "" {

@@ -78,8 +78,11 @@ func mergeDispatchedAppliedConfig(dst, src *store.Agent) {
 
 // clearAgentHomeFilesPending clears CreateInputs.HomeFilesPending on the
 // persisted agent row (and the in-memory copy, if non-nil) once its create
-// dispatch has delivered the HomeFiles. Best-effort: logs a warning on store
-// error so a delivered create is not falsely rolled back.
+// dispatch has delivered the HomeFiles. Retries on store.ErrVersionConflict
+// (re-reading the row and stopping immediately if already cleared) so a
+// concurrent status/heartbeat write cannot leave a delivered agent stuck
+// pending. Best-effort: logs a warning on store error or exhausted retries so
+// a delivered create is not falsely rolled back.
 func (s *Server) clearAgentHomeFilesPending(ctx context.Context, agent *store.Agent) {
 	if s == nil || s.store == nil || agent == nil || agent.ID == "" {
 		return
@@ -87,23 +90,31 @@ func (s *Server) clearAgentHomeFilesPending(ctx context.Context, agent *store.Ag
 	if !agentHomeFilesPending(agent) {
 		return
 	}
-	fresh, err := s.store.GetAgent(ctx, agent.ID)
-	if err != nil {
-		slog.Warn("HomeFiles: failed to reload agent to clear HomeFilesPending",
-			"agent_id", agent.ID, "error", err)
-		return
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		fresh, err := s.store.GetAgent(ctx, agent.ID)
+		if err != nil {
+			slog.Warn("HomeFiles: failed to reload agent to clear HomeFilesPending",
+				"agent_id", agent.ID, "error", err)
+			return
+		}
+		if !agentHomeFilesPending(fresh) {
+			agent.AppliedConfig.CreateInputs.HomeFilesPending = false
+			return
+		}
+		fresh.AppliedConfig.CreateInputs.HomeFilesPending = false
+		lastErr = s.store.UpdateAgent(ctx, fresh)
+		if lastErr == nil {
+			agent.AppliedConfig.CreateInputs.HomeFilesPending = false
+			return
+		}
+		if !errors.Is(lastErr, store.ErrVersionConflict) {
+			break
+		}
 	}
-	if !agentHomeFilesPending(fresh) {
-		agent.AppliedConfig.CreateInputs.HomeFilesPending = false
-		return
-	}
-	fresh.AppliedConfig.CreateInputs.HomeFilesPending = false
-	if err := s.store.UpdateAgent(ctx, fresh); err != nil {
-		slog.Warn("HomeFiles: failed to clear HomeFilesPending on agent",
-			"agent_id", agent.ID, "error", err)
-		return
-	}
-	agent.AppliedConfig.CreateInputs.HomeFilesPending = false
+	slog.Warn("HomeFiles: failed to clear HomeFilesPending on agent",
+		"agent_id", agent.ID, "error", lastErr)
 }
 
 type brokerLacksHomeFilesError struct {
@@ -186,11 +197,32 @@ func checkBrokerHomeFilesCapability(broker *store.RuntimeBroker) error {
 	return &brokerLacksHomeFilesError{broker: name}
 }
 
-// gateCreateHomeFiles is the single Hub validation and broker capability gate
-// for create-only HomeFiles, shared by the pre-token/run precheck and the
-// sendCreate / sendCreateWithGather boundary check.
+// gateCreateHomeFiles is the single Hub validation, pending-delivery guard,
+// and broker capability gate for create-only HomeFiles, shared by the
+// pre-token/run precheck and the sendCreate / sendCreateWithGather boundary
+// check.
+//
+// Container-launching dispatch entries swept for HomeFilesPending protection:
+//   - Create family (all reach gateCreateHomeFiles via createHomeFilesPrecheck
+//     and again at sendCreate / sendCreateWithGather):
+//       * HTTPAgentDispatcher.DispatchAgentCreate
+//       * HTTPAgentDispatcher.DispatchAgentCreateWithGather
+//       * HTTPAgentDispatcher.DispatchFinalizeEnv / finalizeEnv
+//         (also checked before claim acquisition in Server.submitAgentEnv)
+//       * HTTPAgentDispatcher.DispatchAgentProvision / DispatchAgentReprovision / dispatchProvision
+//       * Cross-node Server.execDispatchCreate -> DispatchAgentCreateWithGather
+//       * Cross-node Server.execDispatchFinalizeEnv -> DispatchFinalizeEnv
+//   - Start family (all check agentHomeFilesPending directly):
+//       * Server.startAgentCore (before claim/capacity hold)
+//       * HTTPAgentDispatcher.DispatchAgentStart / DispatchAgentStartWithOptions / dispatchAgentStart
+//       * HTTPAgentDispatcher.DispatchAgentRestart
+//       * Cross-node Server.execDispatchStart -> DispatchAgentStart / DispatchAgentStartWithOptions
+//       * Cross-node Server.execDispatchRestart -> DispatchAgentRestart
 func (d *HTTPAgentDispatcher) gateCreateHomeFiles(ctx context.Context, agent *store.Agent, files []api.HomeFile, reprovision bool) error {
 	if len(files) == 0 {
+		if agentHomeFilesPending(agent) {
+			return errHomeFilesNotDelivered
+		}
 		return nil
 	}
 	if reprovision {
