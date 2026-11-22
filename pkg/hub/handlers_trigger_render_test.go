@@ -156,13 +156,13 @@ func TestTriggerRender(t *testing.T) {
 		return trigID + "/render?eventId=" + url.QueryEscape(eventID)
 	}
 
-	t.Run("allowed for project reader (viewer) and DTO shape with framing trailer, no values in logs", func(t *testing.T) {
+	t.Run("allowed for project member (trigger.read) and DTO shape with framing trailer, no values in logs", func(t *testing.T) {
 		var logBuf bytes.Buffer
 		prevLogger := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 		t.Cleanup(func() { slog.SetDefault(prevLogger) })
 
-		rec := f.doTrigger(t, f.viewerAuth, renderPath(dispatchTrig.ID, ownerEvent.ID), http.MethodPost, nil)
+		rec := f.doTrigger(t, f.memberAuth, renderPath(dispatchTrig.ID, ownerEvent.ID), http.MethodPost, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 		var resp TriggerRenderResponse
@@ -214,7 +214,10 @@ func TestTriggerRender(t *testing.T) {
 		}, resp.Slots.Message.Used)
 	})
 
-	t.Run("refused for user without trigger.read", func(t *testing.T) {
+	t.Run("refused for user without trigger.read (viewer and outsider)", func(t *testing.T) {
+		recViewer := f.doTrigger(t, f.viewerAuth, renderPath(dispatchTrig.ID, ownerEvent.ID), http.MethodPost, nil)
+		assert.Equal(t, http.StatusForbidden, recViewer.Code, recViewer.Body.String())
+
 		rec := f.doTrigger(t, outsiderAuth, renderPath(dispatchTrig.ID, ownerEvent.ID), http.MethodPost, nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	})
@@ -230,10 +233,10 @@ func TestTriggerRender(t *testing.T) {
 	})
 
 	t.Run("missing eventId returns 400 and GET returns 405", func(t *testing.T) {
-		rec := f.doTrigger(t, f.viewerAuth, renderPath(dispatchTrig.ID, ""), http.MethodPost, nil)
+		rec := f.doTrigger(t, f.memberAuth, renderPath(dispatchTrig.ID, ""), http.MethodPost, nil)
 		assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 
-		recMethod := f.doTrigger(t, f.viewerAuth, renderPath(dispatchTrig.ID, ownerEvent.ID), http.MethodGet, nil)
+		recMethod := f.doTrigger(t, f.memberAuth, renderPath(dispatchTrig.ID, ownerEvent.ID), http.MethodGet, nil)
 		assert.Equal(t, http.StatusMethodNotAllowed, recMethod.Code, recMethod.Body.String())
 	})
 
@@ -256,7 +259,7 @@ func TestTriggerRender(t *testing.T) {
 		}
 		require.NoError(t, f.store.CreateTriggerEvent(ctx, missingEvent))
 
-		rec := f.doTrigger(t, f.viewerAuth, renderPath(dispatchTrig.ID, missingEvent.ID), http.MethodPost, nil)
+		rec := f.doTrigger(t, f.memberAuth, renderPath(dispatchTrig.ID, missingEvent.ID), http.MethodPost, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 		var resp TriggerRenderResponse
