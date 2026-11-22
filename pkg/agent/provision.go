@@ -979,7 +979,15 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 	// empty script removes any previously staged file, so a hook that no
 	// longer applies (e.g. deactivated between generations, or on a
 	// first-time resume) cannot survive on a reused agent home.
-	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+	// Defence in depth (security audit H3 / ptone/scion#8812 I1): shell
+	// execution containers never stage a project/hub pre-start hook; forcing
+	// an empty script also clears any stale staged file.
+	preStartHookScript := opts.ProjectPreStartHookScript
+	if opts.HarnessConfig == config.ShellHarnessConfigName ||
+		(cfg != nil && (cfg.HarnessConfig == config.ShellHarnessConfigName || cfg.Harness == config.ShellHarnessConfigName)) {
+		preStartHookScript = ""
+	}
+	if err := harness.WriteProjectPreStartHook(agentHome, preStartHookScript); err != nil {
 		return fmt.Errorf("stage project pre-start hook: %w", err)
 	}
 
@@ -2611,14 +2619,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		return "", "", nil, fmt.Errorf("failed to copy harness-config home %q: %w", harnessConfigName, err)
 	}
 
-	// Step 2: Copy template home → agentHome (overlay; template files win on conflict)
+	// Step 2: Copy template home → agentHome (overlay; template files win on conflict).
+	// Defence in depth (security audit H1 / ptone/scion#8812 I1): shell
+	// execution containers never inherit template home files (such as .bashrc
+	// or .scion/hooks/pre-start.d); skip the template chain so they fall
+	// through to the embedded default home floor only.
 	templateHomeCopied := false
-	for _, tpl := range chain {
-		copied, err := overlayHomeLayer(agentHomeDir, tpl.OpenDir)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
+	if harnessConfigName != config.ShellHarnessConfigName {
+		for _, tpl := range chain {
+			copied, err := overlayHomeLayer(agentHomeDir, tpl.OpenDir)
+			if err != nil {
+				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
+			}
+			templateHomeCopied = templateHomeCopied || copied
 		}
-		templateHomeCopied = templateHomeCopied || copied
 	}
 
 	// Safety net: an agent must never come up without its base home files.

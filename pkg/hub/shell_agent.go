@@ -103,17 +103,61 @@ func isHumanShellPrincipal(identity Identity) bool {
 	}
 }
 
+// isHumanShellCreatePrincipal reports whether the caller identity and
+// delegation principal kind represent a human principal permitted to create a
+// shell execution container (ptone/scion#8812 §3.4 S6).
+//
+// Both HTTP (createAgentInProject) and headless (createAgentHeadless) create
+// paths share this helper: identity must satisfy isHumanShellPrincipal
+// ("user"/"dev" allowlist, rejecting nil and delegated agent credentials) AND
+// principalKind must be store.DelegationPrincipalUser.
+func isHumanShellCreatePrincipal(identity Identity, principalKind string) bool {
+	return isHumanShellPrincipal(identity) && principalKind == store.DelegationPrincipalUser
+}
+
+// templateSuppliesShellHarnessConfig reports whether resolvedTemplate is what
+// supplies the reserved "shell" harness config (i.e. neither the request nor
+// the project default_harness_config annotation set a harness config, and the
+// template declares default_harness_config: shell).
+func templateSuppliesShellHarnessConfig(resolvedTemplate *store.Template, agent *store.Agent, project *store.Project) bool {
+	if resolvedTemplate == nil || agent == nil || agent.AppliedConfig == nil {
+		return false
+	}
+	if agent.AppliedConfig.HarnessConfig != "" {
+		return false
+	}
+	if project != nil && project.Annotations != nil && project.Annotations[projectSettingDefaultHarnessConfig] != "" {
+		return false
+	}
+	return templateHarnessConfigName(resolvedTemplate) == config.ShellHarnessConfigName
+}
+
+// shellAgentCreateOpts carries caller and template provenance into
+// checkShellAgentCreateAdmission.
+type shellAgentCreateOpts struct {
+	IsHumanPrincipal        bool
+	TemplateExplicit        bool
+	TemplateSuppliedShellHC bool
+}
+
 // checkShellAgentCreateAdmission enforces shell execution container creation
 // admission (ptone/scion#8812 §3.2, §3.4 S6, §7) for both HTTP
 // (createAgentInProject) and headless (createAgentHeadless) agent creation:
-//   - S6 (ungated): only human principals (user/dev allowlist) may create shell agents (403).
+//   - S6 (ungated): only human principals (user/dev allowlist + user principal kind) may create shell agents (403).
 //   - Experiment gate: hub.exec_containers must be enabled (400).
 //   - Initial task: rejected (400 task_not_supported).
-func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, isHumanPrincipal bool) *shellCreateDenial {
+//   - No templates (security audit H1): an explicitly requested template or a
+//     template that itself declares default_harness_config: shell is refused
+//     (400 validation_error, fail-closed); any defaulted template (project
+//     default annotation, hub default, implicit "default") is dropped from the
+//     agent record so no member-authored template home/ can reach the shell.
+//   - No pre-start hook (security audit H3): clears any ProjectPreStartHookID
+//     and ProjectPreStartHookScript on AppliedConfig as defence in depth.
+func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, opts shellAgentCreateOpts) *shellCreateDenial {
 	if !isShellAgent(agent) {
 		return nil
 	}
-	if !isHumanPrincipal {
+	if !opts.IsHumanPrincipal {
 		return &shellCreateDenial{
 			status:  http.StatusForbidden,
 			code:    ErrCodeForbidden,
@@ -133,6 +177,29 @@ func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, isHumanPrinc
 			code:    ErrCodeTaskNotSupported,
 			message: "shell execution containers do not support an initial task",
 		}
+	}
+	if opts.TemplateExplicit {
+		return &shellCreateDenial{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeValidationError,
+			message: "shell execution containers do not use templates",
+		}
+	}
+	if opts.TemplateSuppliedShellHC {
+		return &shellCreateDenial{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeValidationError,
+			message: "shell execution containers do not use templates; pass harness_config \"shell\" explicitly without a template",
+		}
+	}
+
+	// Drop any defaulted template (project annotation, hub default, implicit "default").
+	agent.Template = ""
+	if agent.AppliedConfig != nil {
+		agent.AppliedConfig.TemplateID = ""
+		agent.AppliedConfig.TemplateHash = ""
+		agent.AppliedConfig.ProjectPreStartHookID = ""
+		agent.AppliedConfig.ProjectPreStartHookScript = ""
 	}
 	return nil
 }

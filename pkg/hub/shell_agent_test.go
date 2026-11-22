@@ -654,3 +654,170 @@ func TestShellAgentIdleSuspend_AttachedRefreshesActivitySince(t *testing.T) {
 	assert.Equal(t, string(state.PhaseSuspended), gotShell.Phase, "shell agent must be suspended after detach + IdleSuspendAfter")
 	assert.Equal(t, string(state.SuspendReasonIdle), gotShell.SuspendReason)
 }
+
+// Security audit H1, H3 & L2:
+//   - H1: Shell agents refuse explicit templates (400), refuse templates that
+//     declare default_harness_config: shell (400), and drop defaulted templates
+//     (project "default" template and project default_template annotation).
+//   - H3: Shell agents never receive project (or hub) pre-start hooks in
+//     AppliedConfig.ProjectPreStartHookID / ProjectPreStartHookScript.
+//   - L2: isHumanShellCreatePrincipal requires both the user/dev allowlist and
+//     store.DelegationPrincipalUser.
+func TestShellAgentCreate_NoTemplateAndNoPreStartHook(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	setExperimentOverrides(t, srv, map[string]bool{experiments.ExecContainers: true})
+
+	project, _ := seedShellTestProjectAndBroker(t, s)
+	owner := seedShellTestUser(t, s, "owner-h1h3@test.com", "Owner H1H3")
+	bindProjectRole(t, s, project.ID, owner.ID, "project-owner")
+
+	// Seed a project-scoped "default" template, a project-scoped member template
+	// (set as the project's default_template annotation), and an active project
+	// pre-start hook.
+	defaultTpl := &store.Template{
+		ID:          api.NewUUID(),
+		Name:        "default",
+		Slug:        "default",
+		Scope:       store.TemplateScopeProject,
+		ScopeID:     project.ID,
+		Status:      store.TemplateStatusActive,
+		ContentHash: "hash-default-tpl",
+		Files:       []store.TemplateFile{{Path: "home/.bashrc", Size: 16, Hash: "abc"}},
+	}
+	require.NoError(t, s.CreateTemplate(ctx, defaultTpl))
+
+	memberTpl := &store.Template{
+		ID:          api.NewUUID(),
+		Name:        "member-tpl",
+		Slug:        "member-tpl",
+		Scope:       store.TemplateScopeProject,
+		ScopeID:     project.ID,
+		Status:      store.TemplateStatusActive,
+		ContentHash: "hash-member-tpl",
+		Files:       []store.TemplateFile{{Path: "home/.bashrc", Size: 16, Hash: "def"}},
+	}
+	require.NoError(t, s.CreateTemplate(ctx, memberTpl))
+
+	shellDeclaringTpl := &store.Template{
+		ID:                   api.NewUUID(),
+		Name:                 "shell-decl-tpl",
+		Slug:                 "shell-decl-tpl",
+		Scope:                store.TemplateScopeProject,
+		ScopeID:              project.ID,
+		Status:               store.TemplateStatusActive,
+		ContentHash:          "hash-shell-decl",
+		DefaultHarnessConfig: config.ShellHarnessConfigName,
+		Files:                []store.TemplateFile{{Path: "scion-agent.json", Size: 32, Hash: "ghi"}},
+	}
+	require.NoError(t, s.CreateTemplate(ctx, shellDeclaringTpl))
+
+	_, err := s.CreateProjectPreStartHook(ctx, &store.ProjectPreStartHook{
+		ID:        api.NewUUID(),
+		Scope:     store.PreStartHookScopeProject,
+		ProjectID: project.ID,
+		Name:      "project-hook",
+		Slug:      "project-hook",
+		Script:    "#!/bin/sh\necho project-hook-ran\n",
+		Status:    store.ProjectPreStartHookStatusActive,
+		CreatedBy: owner.ID,
+	})
+	require.NoError(t, err)
+
+	// 1. Explicit template with harness_config=shell -> 400 validation_error.
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:          "shell-explicit-tpl",
+		Template:      "member-tpl",
+		HarnessConfig: config.ShellHarnessConfigName,
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "explicit template on shell agent must be refused: %s", rec.Body.String())
+
+	// 2. Shell create with no explicit template while project has a "default"
+	//    template (implicit default) and an active project pre-start hook -> 201,
+	//    template dropped and pre-start hook NOT stamped.
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:          "shell-implicit-default",
+		HarnessConfig: config.ShellHarnessConfigName,
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "shell create with implicit default template should succeed: %s", rec.Body.String())
+	var created1 struct {
+		Agent store.Agent `json:"agent"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created1))
+	got1, err := s.GetAgent(ctx, created1.Agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got1.Template, "defaulted template must be dropped from shell agent")
+	require.NotNil(t, got1.AppliedConfig)
+	assert.Empty(t, got1.AppliedConfig.TemplateID, "TemplateID must be cleared on shell agent")
+	assert.Empty(t, got1.AppliedConfig.TemplateHash, "TemplateHash must be cleared on shell agent")
+	assert.Empty(t, got1.AppliedConfig.ProjectPreStartHookID, "ProjectPreStartHookID must be empty on shell agent")
+	assert.Empty(t, got1.AppliedConfig.ProjectPreStartHookScript, "ProjectPreStartHookScript must be empty on shell agent")
+
+	// 3. Set project default_template annotation to member-tpl: shell create
+	//    drops the project-defaulted template and skips the pre-start hook;
+	//    normal LLM create still inherits both.
+	project.Annotations = map[string]string{projectSettingDefaultTemplate: "member-tpl"}
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:          "shell-project-default",
+		HarnessConfig: config.ShellHarnessConfigName,
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "shell create with project default_template annotation should succeed: %s", rec.Body.String())
+	var created2 struct {
+		Agent store.Agent `json:"agent"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created2))
+	got2, err := s.GetAgent(ctx, created2.Agent.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got2.Template)
+	require.NotNil(t, got2.AppliedConfig)
+	assert.Empty(t, got2.AppliedConfig.TemplateID)
+	assert.Empty(t, got2.AppliedConfig.TemplateHash)
+	assert.Empty(t, got2.AppliedConfig.ProjectPreStartHookID)
+	assert.Empty(t, got2.AppliedConfig.ProjectPreStartHookScript)
+
+	// Control: a normal LLM agent in the same project still receives both.
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:          "llm-control",
+		HarnessConfig: "claude",
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "control LLM create should succeed: %s", rec.Body.String())
+	var createdLLM struct {
+		Agent store.Agent `json:"agent"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createdLLM))
+	gotLLM, err := s.GetAgent(ctx, createdLLM.Agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member-tpl", gotLLM.Template)
+	require.NotNil(t, gotLLM.AppliedConfig)
+	assert.Equal(t, memberTpl.ID, gotLLM.AppliedConfig.TemplateID)
+	assert.NotEmpty(t, gotLLM.AppliedConfig.ProjectPreStartHookScript)
+
+	// 4. Project default_template pointing at a template that itself declares
+	//    default_harness_config: shell -> 400 (fail-closed; templates cannot
+	//    turn a create into a shell container).
+	project.Annotations = map[string]string{projectSettingDefaultTemplate: "shell-decl-tpl"}
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+		Name:          "shell-from-tpl-default",
+		ProvisionOnly: true,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "template supplying default_harness_config=shell must be refused: %s", rec.Body.String())
+}
+
+func TestIsHumanShellCreatePrincipal(t *testing.T) {
+	user := NewAuthenticatedUser("u-1", "u@test.com", "U", "member", "user")
+	dev := NewAuthenticatedUser("dev-1", "dev@test.com", "Dev", "admin", "dev")
+
+	assert.True(t, isHumanShellCreatePrincipal(user, store.DelegationPrincipalUser))
+	assert.True(t, isHumanShellCreatePrincipal(dev, store.DelegationPrincipalUser))
+	assert.False(t, isHumanShellCreatePrincipal(user, store.DelegationPrincipalAgent))
+	assert.False(t, isHumanShellCreatePrincipal(user, ""))
+	assert.False(t, isHumanShellCreatePrincipal(nil, store.DelegationPrincipalUser))
+}

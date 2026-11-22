@@ -1348,7 +1348,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// will not fire, so the hook would silently not run — worse than aborting.
 	// Called unconditionally: with an empty script the helper clears any file
 	// staged by an earlier occupant of this agent home.
-	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript) }); err != nil {
+	// Defence in depth (security audit H3 / ptone/scion#8812 I1): shell
+	// execution containers never run a project/hub pre-start hook; forcing an
+	// empty script also removes any stale staged file.
+	preStartHookScript := opts.ProjectPreStartHookScript
+	if harnessConfigName == config.ShellHarnessConfigName || h.Name() == config.ShellHarnessConfigName {
+		preStartHookScript = ""
+	}
+	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, preStartHookScript) }); err != nil {
 		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 	}
 

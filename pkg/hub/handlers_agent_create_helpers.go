@@ -857,7 +857,12 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// is ambiguous: the project may well have an override we simply failed to
 	// read, and silently staging the hub script in that case would run the
 	// wrong code. On an ambiguous error we log and stage nothing.
-	if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
+	if isShellAgent(agent) {
+		// Shell execution containers never run project or hub pre-start hooks
+		// (security audit H3 / ptone/scion#8812 I1).
+		agent.AppliedConfig.ProjectPreStartHookID = ""
+		agent.AppliedConfig.ProjectPreStartHookScript = ""
+	} else if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
 		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
 		switch {
 		case hookErr == nil:
