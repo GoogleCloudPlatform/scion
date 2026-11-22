@@ -41,22 +41,23 @@ import (
 const maxTriggerWhereFileBytes = 64 * 1024
 
 var (
-	triggerName         string
-	triggerDescription  string
-	triggerWebhookRef   string
-	triggerGitHubSource bool
-	triggerMatchTypes   []string
-	triggerWhereRules   []string
-	triggerWhereFile    string
-	triggerAction       string
-	triggerAgent        string
-	triggerMessage      string
-	triggerInterrupt    bool
-	triggerWake         bool
-	triggerPlain        bool
-	triggerDispatch     dispatchAgentFlagValues
-	triggerSubjectExpr  string
-	triggerOnSubject    string
+	triggerName           string
+	triggerDescription    string
+	triggerWebhookRef     string
+	triggerGitHubSource   bool
+	triggerMatchTypes     []string
+	triggerWhereRules     []string
+	triggerWhereFile      string
+	triggerAction         string
+	triggerAgent          string
+	triggerMessage        string
+	triggerInterrupt      bool
+	triggerWake           bool
+	triggerPlain          bool
+	triggerDispatch       dispatchAgentFlagValues
+	triggerSubjectExpr    string
+	triggerOnSubject      string
+	triggerCoalesceWindow string
 
 	triggerListSource  string
 	triggerListWebhook string
@@ -592,10 +593,11 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 			Rules: matchRules,
 		}
 	}
-	if triggerSubjectExpr != "" || triggerOnSubject != "" {
+	if triggerSubjectExpr != "" || triggerOnSubject != "" || triggerCoalesceWindow != "" {
 		req.Subject = &hubclient.TriggerSubjectSpec{
-			Expr: triggerSubjectExpr,
-			Mode: triggerOnSubject,
+			Expr:           triggerSubjectExpr,
+			Mode:           triggerOnSubject,
+			CoalesceWindow: triggerCoalesceWindow,
 		}
 	}
 
@@ -641,6 +643,9 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	}
 	if created.Subject.Expr != "" {
 		fmt.Printf("  Subject: %q\n", created.Subject.Expr)
+	}
+	if created.Subject.CoalesceWindow != "" {
+		fmt.Printf("  Coalesce: %s\n", triggerTerminalText(created.Subject.CoalesceWindow, false))
 	}
 	printTriggerActionSummary(created.Action)
 	fmt.Printf("  Status:  %s\n", triggerStatusLabel(created.Status, created.StatusReason))
@@ -1065,7 +1070,8 @@ func init() {
 	triggerCreateCmd.Flags().BoolVar(&triggerPlain, "plain", false, "Deliver message text without sender prefix")
 	bindDispatchAgentFlags(triggerCreateCmd.Flags(), &triggerDispatch)
 	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
-	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new or skip; default new)")
+	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new, skip, or reuse; default new)")
+	triggerCreateCmd.Flags().StringVar(&triggerCoalesceWindow, "coalesce", "", "Coalescing window duration (0s disables, max 10m, e.g. 30s)")
 
 	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (webhook or github)")
 	triggerListCmd.Flags().StringVar(&triggerListWebhook, "webhook", "", "Filter by webhook endpoint ID or name")

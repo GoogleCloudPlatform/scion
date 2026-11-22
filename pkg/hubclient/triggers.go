@@ -264,16 +264,18 @@ type TriggerRenderResponse struct {
 
 // TriggerSubjectSpec configures per-subject handling for a trigger.
 type TriggerSubjectSpec struct {
-	Dialect string `json:"dialect,omitempty"`
-	Expr    string `json:"expr,omitempty"`
-	Mode    string `json:"mode,omitempty"`
+	Dialect        string `json:"dialect,omitempty"`
+	Expr           string `json:"expr,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	CoalesceWindow string `json:"coalesce_window,omitempty"`
 }
 
 // TriggerSubjectPatchSpec holds partial updates to a trigger's subject block.
 type TriggerSubjectPatchSpec struct {
-	Dialect *string `json:"dialect,omitempty"`
-	Expr    *string `json:"expr,omitempty"`
-	Mode    *string `json:"mode,omitempty"`
+	Dialect        *string `json:"dialect,omitempty"`
+	Expr           *string `json:"expr,omitempty"`
+	Mode           *string `json:"mode,omitempty"`
+	CoalesceWindow *string `json:"coalesce_window,omitempty"`
 }
 
 // Trigger represents a trigger definition returned by the Hub API.
@@ -371,6 +373,7 @@ type TriggerFire struct {
 	MatchedThrough string            `json:"matchedThrough,omitempty"`
 	DecidedDialect string            `json:"decidedDialect,omitempty"`
 	RuleTrace      *TriggerRuleTrace `json:"ruleTrace,omitempty"`
+	NotBefore      *time.Time        `json:"notBefore,omitempty"`
 	StartedAt      time.Time         `json:"startedAt"`
 	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
 }

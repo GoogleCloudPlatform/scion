@@ -289,10 +289,13 @@ func TestTriggerPresetCLI_ApplyDryRunFieldCoercionAndActionValidation(t *testing
 	assert.Contains(t, err.Error(), "invalid boolean value")
 }
 
-func TestTriggerPresetCLI_ApplyRefusesReuseAndCoalesceWindow(t *testing.T) {
+func TestTriggerPresetCLI_ApplyCarriesReuseAndCoalesceWindow(t *testing.T) {
 	resetTriggerPresetFlags(t)
 
-	var createCalled bool
+	var (
+		createCalled bool
+		seenCreate   hubclient.CreateTriggerRequest
+	)
 	schema := hubclient.TriggerPreset{
 		ID:      "github.pr_updated",
 		Source:  "github",
@@ -326,14 +329,23 @@ func TestTriggerPresetCLI_ApplyRefusesReuseAndCoalesceWindow(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(compiledResp)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers":
 			createCalled = true
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&seenCreate))
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(hubclient.Trigger{ID: "tr-1"})
+			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+				ID:      "tr-1",
+				Name:    seenCreate.Name,
+				Source:  seenCreate.Source,
+				Match:   *seenCreate.Match,
+				Action:  seenCreate.Action,
+				Subject: *seenCreate.Subject,
+				Status:  "active",
+			})
 		default:
 			http.NotFound(w, r)
 		}
 	}, hubsync.CredentialKindOAuth)
 
-	// --dry-run still works to preview the compiled rule.
+	// --dry-run previews the compiled rule with reuse and coalesce_window.
 	triggerPresetApplyDryRun = true
 	dryOut := captureStdout(t, func() {
 		require.NoError(t, runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.pr_updated"}))
@@ -341,15 +353,18 @@ func TestTriggerPresetCLI_ApplyRefusesReuseAndCoalesceWindow(t *testing.T) {
 	assert.Contains(t, dryOut, "mode=reuse, coalesce_window=30s")
 	assert.False(t, createCalled)
 
-	// Applying without --dry-run refuses client-side before calling Create.
+	// Applying without --dry-run carries mode=reuse and coalesce_window=30s into Create.
 	triggerPresetApplyDryRun = false
 	triggerPresetApplyName = "pr-updated-trigger"
 	triggerPresetApplyAgent = "lead"
 	triggerPresetApplyMessage = "Handle PR update"
-	err := runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.pr_updated"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not yet supported")
-	assert.Contains(t, err.Error(), "reuse")
-	assert.Contains(t, err.Error(), "30s")
-	assert.False(t, createCalled, "apply must refuse client-side before calling Create")
+	applyOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.pr_updated"}))
+	})
+	require.True(t, createCalled, "apply must call Create with compiled subject policy")
+	require.NotNil(t, seenCreate.Subject)
+	assert.Equal(t, "reuse", seenCreate.Subject.Mode)
+	assert.Equal(t, "30s", seenCreate.Subject.CoalesceWindow)
+	assert.Contains(t, applyOut, "Trigger created: tr-1")
+	assert.Contains(t, applyOut, "Coalesce: 30s")
 }

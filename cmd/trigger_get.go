@@ -123,9 +123,19 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 		if subjDialect == "" {
 			subjDialect = ruleengine.DialectCEL
 		}
-		fmt.Printf("  Subject:     [%s] %q (mode: %s)\n", triggerTerminalText(subjDialect, false), tr.Subject.Expr, triggerTerminalText(tr.Subject.Mode, false))
-	} else if tr.Subject.Mode != "" {
-		fmt.Printf("  Subject:     default (mode: %s)\n", triggerTerminalText(tr.Subject.Mode, false))
+		line := fmt.Sprintf("[%s] %q (mode: %s", triggerTerminalText(subjDialect, false), tr.Subject.Expr, triggerTerminalText(tr.Subject.Mode, false))
+		if tr.Subject.CoalesceWindow != "" {
+			line += ", coalesce: " + triggerTerminalText(tr.Subject.CoalesceWindow, false)
+		}
+		line += ")"
+		fmt.Printf("  Subject:     %s\n", line)
+	} else if tr.Subject.Mode != "" || tr.Subject.CoalesceWindow != "" {
+		line := fmt.Sprintf("default (mode: %s", triggerTerminalText(tr.Subject.Mode, false))
+		if tr.Subject.CoalesceWindow != "" {
+			line += ", coalesce: " + triggerTerminalText(tr.Subject.CoalesceWindow, false)
+		}
+		line += ")"
+		fmt.Printf("  Subject:     %s\n", line)
 	}
 
 	if tr.Action.Type == "dispatch_agent" {

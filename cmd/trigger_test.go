@@ -139,13 +139,13 @@ func TestBuildCreateTriggerRequest(t *testing.T) {
 	origTypes, origWhere, origWhereFile := triggerMatchTypes, triggerWhereRules, triggerWhereFile
 	origAgent, origMessage := triggerAgent, triggerMessage
 	origInt, origWake, origPlain := triggerInterrupt, triggerWake, triggerPlain
-	origSubj, origOnSubj := triggerSubjectExpr, triggerOnSubject
+	origSubj, origOnSubj, origCoalesce := triggerSubjectExpr, triggerOnSubject, triggerCoalesceWindow
 	t.Cleanup(func() {
 		triggerName, triggerDescription, triggerWebhookRef, triggerGitHubSource = origName, origDesc, origWebhook, origGitHub
 		triggerMatchTypes, triggerWhereRules, triggerWhereFile = origTypes, origWhere, origWhereFile
 		triggerAgent, triggerMessage = origAgent, origMessage
 		triggerInterrupt, triggerWake, triggerPlain = origInt, origWake, origPlain
-		triggerSubjectExpr, triggerOnSubject = origSubj, origOnSubj
+		triggerSubjectExpr, triggerOnSubject, triggerCoalesceWindow = origSubj, origOnSubj, origCoalesce
 	})
 
 	resetFlags := func() {
@@ -163,7 +163,19 @@ func TestBuildCreateTriggerRequest(t *testing.T) {
 		triggerPlain = false
 		triggerSubjectExpr = ""
 		triggerOnSubject = ""
+		triggerCoalesceWindow = ""
 	}
+
+	t.Run("reuse and coalesce flags", func(t *testing.T) {
+		resetFlags()
+		triggerOnSubject = "reuse"
+		triggerCoalesceWindow = "30s"
+		req, err := buildCreateTriggerRequest()
+		require.NoError(t, err)
+		require.NotNil(t, req.Subject)
+		assert.Equal(t, "reuse", req.Subject.Mode)
+		assert.Equal(t, "30s", req.Subject.CoalesceWindow)
+	})
 
 	t.Run("missing required flags", func(t *testing.T) {
 		resetFlags()
