@@ -69,8 +69,7 @@ interface ChatInternals extends HTMLElement {
 interface ThreadInternals extends ScionChatThread {
   handleDefaultAgentChange(e: CustomEvent<{ defaultAgent: string }>): Promise<void>;
   handleDefaultCommand(text: string): Promise<void>;
-  handleContextMenuSetDefault(): Promise<void>;
-  contextMenuMessage: { sender: string; senderId: string } | null;
+  handleSetDefaultAgent(agentSlug: string): Promise<void>;
 }
 
 beforeAll(async () => {
@@ -262,13 +261,12 @@ describe('scion-chat-thread does not mutate its parent-owned defaultAgent proper
     const el = document.createElement('scion-chat-thread') as ThreadInternals;
     el.conversationKey = 'topic-a';
     el.defaultAgent = 'agent-old';
-    el.contextMenuMessage = { sender: 'agent:agent-ctx', senderId: 'id-ctx' };
     const events: string[] = [];
     el.addEventListener('default-agent-changed', (e) => {
       events.push((e as CustomEvent<{ defaultAgent: string }>).detail.defaultAgent);
     });
 
-    await el.handleContextMenuSetDefault();
+    await el.handleSetDefaultAgent('agent-ctx');
 
     expect(events).toEqual(['agent-ctx']);
     expect(el.defaultAgent).toBe('agent-old');
