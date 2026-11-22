@@ -1504,6 +1504,45 @@ func TestAddParticipant_ResolveAgentBySlugAndName(t *testing.T) {
 	require.Equal(t, decoyDeleted.ID, result.PrincipalID)
 }
 
+type nilAgentListFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (n *nilAgentListFaultStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	if !n.fault.Active() {
+		return n.Store.ListAgents(ctx, filter, opts)
+	}
+	return nil, nil
+}
+
+// TestAddParticipant_ResolveAgentNilListResult verifies that a nil page from
+// ListAgents (with nil error) does not panic in resolveAddParticipantAgent and
+// returns the standard 404 agent-not-found response.
+func TestAddParticipant_ResolveAgentNilListResult(t *testing.T) {
+	srv, s, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *nilAgentListFaultStore {
+		return &nilAgentListFaultStore{Store: inner, fault: f}
+	})
+	project, callerAgent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", callerAgent.ID)
+	callerCtx := agentContextWithScopes(callerAgent.ID, project.ID, []AgentTokenScope{ScopeProjectRead})
+
+	fault.Arm()
+
+	bodyBytes, _ := json.Marshal(addParticipantRequest{
+		PrincipalKind: "agent",
+		PrincipalID:   "no-such-agent-name",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(callerCtx)
+	rr := httptest.NewRecorder()
+	srv.handleAddParticipant(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "agent not found")
+}
+
 func TestAddParticipant_ResolveUserByEmailAndHandle(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

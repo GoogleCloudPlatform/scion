@@ -1237,6 +1237,9 @@ func (s *Server) resolveAddParticipantAgent(
 		if listErr != nil {
 			return nil, nil, listErr
 		}
+		if res == nil {
+			break
+		}
 		for i := range res.Items {
 			a := &res.Items[i]
 			if !a.DeletedAt.IsZero() || a.ProjectID != projectID {
