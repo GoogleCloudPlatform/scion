@@ -53,6 +53,7 @@ func resetServerFlags() {
 	serverKeyringFile = ""
 	serverKeyringAllowWorldReadable = false
 	serverKeyring = nil
+	testDecisionDismissMinAge = 0
 }
 
 func TestWorkstationModeDefaults(t *testing.T) {

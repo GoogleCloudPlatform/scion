@@ -206,9 +206,12 @@ func TestBuildDaemonStartArgsForwardsEnableTestIdentities(t *testing.T) {
 	}
 
 	assert.Contains(t, buildDaemonStartArgs(newCmd("--test-mode=member:hub-1")), "--test-mode=member:hub-1")
+	assert.Contains(t, buildDaemonStartArgs(newCmd("--test-mode=member:hub-1", "--test-decision-dismiss-min-age=5s")), "--test-decision-dismiss-min-age=5s")
 	testModeValue = ""
+	testDecisionDismissMinAge = 0
 	for _, a := range buildDaemonStartArgs(newCmd()) {
 		assert.False(t, strings.HasPrefix(a, "--test-mode"), "unset flag must not be forwarded: %s", a)
+		assert.False(t, strings.HasPrefix(a, "--test-decision-dismiss-min-age"), "unset flag must not be forwarded: %s", a)
 		assert.False(t, strings.HasPrefix(a, "--enable-test-identities"), "removed flag must not be forwarded: %s", a)
 	}
 }

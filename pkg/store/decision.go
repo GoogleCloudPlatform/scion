@@ -840,6 +840,9 @@ type DismissDecisionsInput struct {
 	ResponseMessage *Message         // the decision-response to store (built by the hub)
 	FormatMessage   func(dismissed []*Decision) string
 	Now             func() time.Time // optional clock override for tests; defaults to time.Now
+	// MinAge overrides DecisionDismissMinAge when positive (test-mode hubs
+	// only; <= 0 enforces the production 5-minute DecisionDismissMinAge).
+	MinAge time.Duration
 }
 
 // DismissDecisionsResult reports the decisions dismissed (or already dismissed)

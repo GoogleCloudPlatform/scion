@@ -92,6 +92,9 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if cmd.Flags().Changed(testModeFlag) {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testModeFlag, testModeValue))
 	}
+	if cmd.Flags().Changed(testDecisionDismissMinAgeFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testDecisionDismissMinAgeFlag, testDecisionDismissMinAge))
+	}
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so

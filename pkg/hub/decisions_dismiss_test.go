@@ -760,3 +760,91 @@ func TestDecisionPromptDismiss_SubsetsIdempotencyInterpretedMadeAndAgentEndpoint
 	assert.Equal(t, store.DecisionOutcomeDismiss, agentShow.Versions[0].Answers[1].Outcome)
 	assert.Equal(t, "Misread + stale — quartz-token", agentShow.Versions[0].Answers[1].DismissReason)
 }
+
+func TestDecisionPromptDismiss_TestModeMinAge(t *testing.T) {
+	// 1. ValidateTestModeConfig refuses any non-zero override when TestMode is off
+	//    and refuses negative values in all modes.
+	assert.ErrorIs(t, ValidateTestModeConfig(ServerConfig{
+		TestDecisionDismissMinAge: 5 * time.Second,
+	}), ErrTestDecisionDismissMinAgeRequiresTestMode)
+	assert.ErrorIs(t, ValidateTestModeConfig(ServerConfig{
+		TestMode:                  TestModeConfig{Level: TestModeOff},
+		TestDecisionDismissMinAge: 5 * time.Second,
+	}), ErrTestDecisionDismissMinAgeRequiresTestMode)
+	assert.ErrorIs(t, ValidateTestModeConfig(ServerConfig{
+		TestDecisionDismissMinAge: -time.Second,
+	}), ErrTestDecisionDismissMinAgeInvalid)
+	assert.NoError(t, ValidateTestModeConfig(ServerConfig{
+		HubID:                     "hub-test",
+		HubIDPinned:               true,
+		EnableTestIdentities:      true,
+		TestDecisionDismissMinAge: 5 * time.Second,
+		TestMode: TestModeConfig{
+			Level:       TestModeMember,
+			HubID:       "hub-test",
+			HubClass:    "test",
+			MarkerHubID: "hub-test",
+			MarkerClass: "test",
+		},
+	}))
+
+	// 2. Runtime enforcement: outside test mode, even a directly-populated
+	//    TestDecisionDismissMinAge is ignored and the 5-minute floor holds.
+	f := newChatFixture(t)
+	ctx := context.Background()
+	setDecisionsExperiment(t, f.srv, true)
+	f.agentA.OwnerID = f.owner
+	f.agentA.Ancestry = []string{f.owner}
+	f.agentA.MessageMode = store.MessageModeProject
+	require.NoError(t, f.s.UpdateAgent(ctx, f.agentA))
+
+	seedPrompt := func(key string) (string, *store.Decision) {
+		decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, `[{"id":"`+key+`","question":"Choice?","choices":["yes","no"]}]`))
+		require.NoError(t, err)
+		msg := &store.Message{
+			ID: api.NewUUID(), ProjectID: f.projA, Sender: "agent:" + f.agentA.Slug, SenderID: f.agentA.ID,
+			Recipient: "chat", ThreadID: f.topicA, Channel: "web",
+		}
+		res, err := f.s.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+			Message: msg, Intro: "Pick", AskerAgentID: f.agentA.ID, AskerAgentName: f.agentA.Slug, Decisions: decs,
+		})
+		require.NoError(t, err)
+		d, err := f.s.GetDecision(ctx, res.Decisions[0].RowID)
+		require.NoError(t, err)
+		return msg.ID, d
+	}
+
+	msgDefault, dDefault := seedPrompt("D-DEF")
+	f.srv.config.TestDecisionDismissMinAge = 3 * time.Second // TestMode is still off
+	assert.Equal(t, store.DecisionDismissMinAge, f.srv.decisionDismissMinAge())
+
+	f.srv.decisionClock = func() time.Time { return dDefault.CreatedAt.Add(10 * time.Second) }
+	rr := f.session(t, f.owner, http.MethodPost, "/api/v1/decision-prompts/"+msgDefault+"/dismiss", map[string]any{})
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), ErrCodeDecisionTooRecent)
+	defaultView := f.srv.decisionViewFor(ctx, dDefault)
+	require.NotNil(t, defaultView.DismissAvailableAt)
+	assert.True(t, dDefault.CreatedAt.Add(store.DecisionDismissMinAge).Equal(*defaultView.DismissAvailableAt))
+
+	// 3. Inside test mode, TestDecisionDismissMinAge governs both dismiss
+	//    enforcement and DecisionView.DismissAvailableAt.
+	f.srv.testMode = newTestModeState(TestModeConfig{Level: TestModeMember})
+	assert.Equal(t, 3*time.Second, f.srv.decisionDismissMinAge())
+
+	msgTest, dTest := seedPrompt("D-TST")
+	testView := f.srv.decisionViewFor(ctx, dTest)
+	require.NotNil(t, testView.DismissAvailableAt)
+	assert.True(t, dTest.CreatedAt.Add(3*time.Second).Equal(*testView.DismissAvailableAt))
+
+	f.srv.decisionClock = func() time.Time { return dTest.CreatedAt.Add(2 * time.Second) }
+	rrEarly := f.session(t, f.owner, http.MethodPost, "/api/v1/decision-prompts/"+msgTest+"/dismiss", map[string]any{})
+	require.Equal(t, http.StatusConflict, rrEarly.Code, rrEarly.Body.String())
+	assert.Contains(t, rrEarly.Body.String(), ErrCodeDecisionTooRecent)
+	assert.Contains(t, rrEarly.Body.String(), dTest.CreatedAt.Add(3*time.Second).UTC().Format(time.RFC3339Nano))
+
+	f.srv.decisionClock = func() time.Time { return dTest.CreatedAt.Add(3 * time.Second) }
+	rrOk := f.session(t, f.owner, http.MethodPost, "/api/v1/decision-prompts/"+msgTest+"/dismiss", map[string]any{"reason": "short window"})
+	out := decodeDismissResponse(t, rrOk)
+	require.Len(t, out.Dismissed, 1)
+	assert.Equal(t, store.DecisionStatusDismissed, out.Dismissed[0].Status)
+}

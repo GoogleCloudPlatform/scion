@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -35,6 +36,11 @@ const (
 	// testModeFlag is --test-mode=<level>:<hub id>.
 	testModeFlag = "test-mode"
 
+	// testDecisionDismissMinAgeFlag overrides store.DecisionDismissMinAge on
+	// test-mode hubs only (ptone/scion#8582). Hidden and never wired to
+	// settings.yaml or environment variables.
+	testDecisionDismissMinAgeFlag = "test-decision-dismiss-min-age"
+
 	// The flags --test-mode replaced. They stay registered, hidden, only
 	// so that using one refuses startup with hub.ErrTestModeRemovedFlag
 	// naming --test-mode instead of a bare "unknown flag".
@@ -49,6 +55,8 @@ var removedTestFlags = []string{removedTestIdentitiesFlag, removedTestAdminIdent
 var (
 	// testModeValue is the raw --test-mode value.
 	testModeValue string
+	// testDecisionDismissMinAge is the raw --test-decision-dismiss-min-age value.
+	testDecisionDismissMinAge time.Duration
 	// removedTestFlagValue receives the value of any removed flag; it is
 	// never read.
 	removedTestFlagValue string
@@ -65,6 +73,9 @@ func registerTestModeFlags(c *cobra.Command) {
 		"Test identity level of a designated test hub: off, member, admin or super-admin, written <level>:<hub id> (the hub id must be this hub's resolved hub id). "+
 			"Every level but off requires an explicitly configured server.hub.hub_id (or SCION_SERVER_HUB_HUBID; set it to the hub's current resolved id, never a new one), server.hub.class: test, a test infrastructure marker for this hub id and no --production; admin also requires a non-workstation hub, no federation and hub-local signing keys. "+
 			"A level whose requirements are not all met, or an unrecognised value, refuses to start; empty means off (do not use in production)")
+	c.Flags().DurationVar(&testDecisionDismissMinAge, testDecisionDismissMinAgeFlag, 0,
+		"Override the decision dismiss minimum age for test-mode hubs only (requires --test-mode=member|admin|super-admin; do not use in production)")
+	_ = c.Flags().MarkHidden(testDecisionDismissMinAgeFlag)
 	for _, name := range removedTestFlags {
 		c.Flags().StringVar(&removedTestFlagValue, name, "", "Replaced by --"+testModeFlag)
 		// A bare --enable-test-identities still parses, so it reaches the
@@ -109,6 +120,14 @@ func validateTestModeFlagsEarly(cmd *cobra.Command) error {
 	}
 	if !recordTestModeFlags(cmd) && testModeValue != "" {
 		return hub.ErrTestModeUnrecognized
+	}
+	if f := cmd.Flags().Lookup(testDecisionDismissMinAgeFlag); f != nil && f.Changed {
+		if testDecisionDismissMinAge <= 0 {
+			return fmt.Errorf("--%s: %w", testDecisionDismissMinAgeFlag, hub.ErrTestDecisionDismissMinAgeInvalid)
+		}
+		if !testModeRequested() {
+			return fmt.Errorf("--%s: %w", testDecisionDismissMinAgeFlag, hub.ErrTestDecisionDismissMinAgeRequiresTestMode)
+		}
 	}
 	if !testModeRequested() {
 		return nil
@@ -200,6 +219,10 @@ type testModeInputs struct {
 	// server.hub.test_identities.offline_admin_delegations: the hub id the
 	// offline hub-admin delegation setting is bound to, or "" (off).
 	OfflineAdminDelegations string
+
+	// DecisionDismissMinAge is the test-only override from
+	// --test-decision-dismiss-min-age (0 = use production 5m default).
+	DecisionDismissMinAge time.Duration
 }
 
 // testAdminPolicyComplete is the G3 check. A variable only so tests can
@@ -214,6 +237,8 @@ type testModeResolution struct {
 	TestAdminWebSessions hub.TestAdminWebSessionsConfig
 	// OfflineAdminDelegations is the offline hub-admin delegation setting.
 	OfflineAdminDelegations hub.OfflineAdminDelegationsConfig
+	// DecisionDismissMinAge is the validated test-only dismiss min-age override.
+	DecisionDismissMinAge time.Duration
 }
 
 // resolveTestMode checks every precondition of the requested level and
@@ -255,7 +280,13 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 		}
 		return off, fmt.Errorf("%s with --test-mode=%s: %w", config.TestIdentityOfflineAdminDelegationsKey, shown, hub.ErrOfflineAdminDelegationsBelowAdmin)
 	}
+	if in.DecisionDismissMinAge < 0 {
+		return off, fmt.Errorf("--%s: %w", testDecisionDismissMinAgeFlag, hub.ErrTestDecisionDismissMinAgeInvalid)
+	}
 	if level == "" || level == hub.TestModeOff {
+		if in.DecisionDismissMinAge > 0 {
+			return off, fmt.Errorf("--%s: %w", testDecisionDismissMinAgeFlag, hub.ErrTestDecisionDismissMinAgeRequiresTestMode)
+		}
 		return off, nil
 	}
 	refuse := func(err error) (testModeResolution, error) {
@@ -355,6 +386,7 @@ func resolveTestMode(in testModeInputs) (testModeResolution, error) {
 			MarkerClass:    marker.Class,
 			ProductionFlag: in.ProductionFlagExplicit,
 		},
+		DecisionDismissMinAge: in.DecisionDismissMinAge,
 	}
 	if in.AdminWebSessions != "" {
 		// The level is admin or super-admin (checked first). The binding is
@@ -406,6 +438,7 @@ func testModeInputsFor(ctx context.Context, cfg *config.GlobalConfig, hubCfg hub
 		PreconfiguredSigningKey: len(hubCfg.UserTokenConfig.SigningKey) > 0 || len(hubCfg.AgentTokenConfig.SigningKey) > 0,
 		AdminWebSessions:        cfg.Hub.TestIdentityAdminWebSessions(),
 		OfflineAdminDelegations: cfg.Hub.TestIdentityOfflineAdminDelegations(),
+		DecisionDismissMinAge:   testDecisionDismissMinAge,
 		ReadMarker:              testInfraMarkerReader(ctx, entClient),
 	}
 	if !keyringSigning {

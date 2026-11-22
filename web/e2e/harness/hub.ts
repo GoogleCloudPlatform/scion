@@ -111,6 +111,12 @@ export interface StartHubOptions {
    * registers either way. Default false.
    */
   runtimeBroker?: boolean;
+  /**
+   * Override the hub's decision dismiss minimum age for test-mode hubs only
+   * (`--test-decision-dismiss-min-age=<duration>`, e.g. `'10s'`, ptone/scion#8582).
+   * Requires `testIdentities: true` (`--test-mode=member:<hub id>`).
+   */
+  decisionDismissMinAge?: string;
   /** Hub binary to run. Default: build/scion. For the harness's own tests. */
   binary?: string;
   /**
@@ -505,6 +511,9 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   if (options.runtimeBroker && !testIdentities) {
     throw new Error('startHub: runtimeBroker needs testIdentities (a private HOME)');
   }
+  if (options.decisionDismissMinAge && !testIdentities) {
+    throw new Error('startHub: decisionDismissMinAge needs testIdentities (--test-mode)');
+  }
 
   // Build assets and binary
   if (options.build ?? true) {
@@ -611,6 +620,9 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   }
   if (testLogin) args.push('--enable-test-login', '--session-secret', E2E_SESSION_SECRET);
   args.push(`--test-mode=member:${hubId}`);
+  if (options.decisionDismissMinAge) {
+    args.push(`--test-decision-dismiss-min-age=${options.decisionDismissMinAge}`);
+  }
   args.push('--db', dbPath, '--web-assets-dir', webAssetsDir);
   const cwd = homeDir ?? WORKSPACE_ROOT;
   let { hubProcess, devToken } = await launchHub(binary, args, env, cwd, baseURL);

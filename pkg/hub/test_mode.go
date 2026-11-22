@@ -217,6 +217,17 @@ var ErrTestModeUnrecognized = testAdminGateErr("test_mode", "unrecognized_value"
 var ErrTestModeRemovedFlag = testAdminGateErr("test_mode", "removed_flag",
 	"this flag was replaced by --test-mode=off|member|admin|super-admin (with :<hub id> for every level but off)")
 
+// ErrTestDecisionDismissMinAgeRequiresTestMode refuses startup when the
+// test-only decision dismiss minimum age override is configured while
+// --test-mode is off (ptone/scion#8582).
+var ErrTestDecisionDismissMinAgeRequiresTestMode = testAdminGateErr("test_mode", "decision_dismiss_min_age_requires_test_mode",
+	"--test-decision-dismiss-min-age requires --test-mode=member|admin|super-admin")
+
+// ErrTestDecisionDismissMinAgeInvalid refuses startup when the test-only
+// decision dismiss minimum age override is zero or negative (ptone/scion#8582).
+var ErrTestDecisionDismissMinAgeInvalid = testAdminGateErr("test_mode", "decision_dismiss_min_age_invalid",
+	"--test-decision-dismiss-min-age must be a positive duration")
+
 // ValidateTestModeConfig is the check New runs on the test mode: the level
 // is one of the four allowlisted strings, the switches the hub runs with
 // (EnableTestIdentities, TestAdminGate) are exactly what the level grants,
@@ -245,7 +256,13 @@ func ValidateTestModeConfig(cfg ServerConfig) error {
 	if got != want {
 		return fmt.Errorf("%w: level %q grants %+v, configured %+v", ErrTestModeInconsistent, level, want, got)
 	}
+	if cfg.TestDecisionDismissMinAge < 0 {
+		return ErrTestDecisionDismissMinAgeInvalid
+	}
 	if level == TestModeOff {
+		if cfg.TestDecisionDismissMinAge > 0 {
+			return ErrTestDecisionDismissMinAgeRequiresTestMode
+		}
 		return nil
 	}
 	t := cfg.TestMode

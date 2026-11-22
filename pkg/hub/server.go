@@ -556,6 +556,12 @@ type ServerConfig struct {
 	// EnableTestIdentities and TestAdminGate differ from what the level
 	// grants. The zero value is off.
 	TestMode TestModeConfig
+	// TestDecisionDismissMinAge overrides store.DecisionDismissMinAge (5m)
+	// for test-mode hubs only (--test-decision-dismiss-min-age,
+	// ptone/scion#8582). New refuses any non-zero value unless TestMode is
+	// active (member, admin, or super-admin). Never populated from
+	// settings.yaml or environment variables.
+	TestDecisionDismissMinAge time.Duration
 	// TestAdminWebSessions is the admin-kind web session setting
 	// (server.hub.test_identities.admin_web_sessions, ptone/scion#4240
 	// phase WS4) cmd validated at startup. New refuses it unless the level

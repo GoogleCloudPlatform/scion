@@ -30,21 +30,22 @@ import (
 // choices v4, 4.4): the web card, the answer endpoint's responses and the
 // decision.updated event.
 type DecisionView struct {
-	RowID           string                `json:"rowId"`
-	MessageID       string                `json:"messageId"`
-	Key             string                `json:"key"`
-	Ref             string                `json:"ref"`
-	Version         int                   `json:"version"`
-	Status          string                `json:"status"`
-	AskerAgentID    string                `json:"askerAgentId"`
-	AskerAgentName  string                `json:"askerAgentName"`
-	Question        string                `json:"question"`
-	DefaultChoiceID string                `json:"defaultChoiceId,omitempty"`
-	Choices         []messages.Choice     `json:"choices"`
-	Other           *messages.OtherOption `json:"other,omitempty"`
-	ReplacedBy      *DecisionReplacedBy   `json:"replacedBy,omitempty"`
-	Withdrawn       *DecisionWithdrawn    `json:"withdrawn,omitempty"`
-	Dismissed       *DecisionDismissed    `json:"dismissed,omitempty"`
+	RowID              string                `json:"rowId"`
+	MessageID          string                `json:"messageId"`
+	Key                string                `json:"key"`
+	Ref                string                `json:"ref"`
+	Version            int                   `json:"version"`
+	Status             string                `json:"status"`
+	AskerAgentID       string                `json:"askerAgentId"`
+	AskerAgentName     string                `json:"askerAgentName"`
+	Question           string                `json:"question"`
+	DefaultChoiceID    string                `json:"defaultChoiceId,omitempty"`
+	Choices            []messages.Choice     `json:"choices"`
+	Other              *messages.OtherOption `json:"other,omitempty"`
+	ReplacedBy         *DecisionReplacedBy   `json:"replacedBy,omitempty"`
+	Withdrawn          *DecisionWithdrawn    `json:"withdrawn,omitempty"`
+	Dismissed          *DecisionDismissed    `json:"dismissed,omitempty"`
+	DismissAvailableAt *time.Time            `json:"dismissAvailableAt,omitempty"`
 	// Decision is the effective answer; nil while pending or dismissed.
 	Decision *AnswerView `json:"decision,omitempty"`
 }
@@ -206,7 +207,12 @@ func answerView(a *store.DecisionAnswer) *AnswerView {
 
 // decisionView converts a stored decision. replacedBy, when the decision is
 // replaced, is the row that replaced it (nil when it could not be read).
-func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
+// minAge is the hub's effective dismiss minimum age (<= 0 defaults to
+// store.DecisionDismissMinAge).
+func decisionView(d *store.Decision, replacedBy *store.Decision, minAge time.Duration) DecisionView {
+	if minAge <= 0 {
+		minAge = store.DecisionDismissMinAge
+	}
 	eff := d.EffectiveAnswer()
 	v := DecisionView{
 		RowID:           d.ID,
@@ -225,6 +231,10 @@ func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
 	if d.Other != nil {
 		otherCopy := *d.Other
 		v.Other = &otherCopy
+	}
+	if !d.CreatedAt.IsZero() {
+		avail := d.CreatedAt.Add(minAge).UTC()
+		v.DismissAvailableAt = &avail
 	}
 	if v.Decision != nil {
 		v.Decision.PreviousChoiceLabel = previousChoiceLabel(eff, d)
@@ -294,7 +304,7 @@ func (s *Server) decisionViewFor(ctx context.Context, d *store.Decision) Decisio
 			replacedBy = r
 		}
 	}
-	return decisionView(d, replacedBy)
+	return decisionView(d, replacedBy, s.decisionDismissMinAge())
 }
 
 // decisionPromptViews returns the DecisionPromptView of every decision-prompt
@@ -338,7 +348,7 @@ func (s *Server) decisionPromptViews(ctx context.Context, msgs []*store.Message)
 			if d.Position == 0 {
 				view.Intro = messages.DecisionIntro(byID[id].Msg, d.IntroLength)
 			}
-			view.Decisions = append(view.Decisions, decisionView(d, replacedBy[d.ReplacedByID]))
+			view.Decisions = append(view.Decisions, decisionView(d, replacedBy[d.ReplacedByID], s.decisionDismissMinAge()))
 		}
 		out[id] = view
 	}

@@ -528,6 +528,33 @@ export function dismissAvailableAtMs(createdAt: string): number {
 }
 
 /**
+ * Epoch milliseconds at which a prompt's decisions reach the hub's dismissal
+ * threshold. Prefers hub-provided `DecisionView.dismissAvailableAt` (earliest
+ * among open rows, else earliest across all rows) so the client stays in sync
+ * with the hub, falling back to `dismissAvailableAtMs(fallbackCreatedAt)` when
+ * absent.
+ */
+export function dismissAvailableAtMsForDecisions(
+  decisions: readonly DecisionView[] | undefined,
+  fallbackCreatedAt: string
+): number {
+  if (decisions && decisions.length > 0) {
+    let earliestOpen = Infinity;
+    let earliestAny = Infinity;
+    for (const d of decisions) {
+      if (!d.dismissAvailableAt) continue;
+      const parsed = Date.parse(d.dismissAvailableAt);
+      if (!Number.isFinite(parsed)) continue;
+      if (parsed < earliestAny) earliestAny = parsed;
+      if (isOpenDecision(d) && parsed < earliestOpen) earliestOpen = parsed;
+    }
+    if (Number.isFinite(earliestOpen)) return earliestOpen;
+    if (Number.isFinite(earliestAny)) return earliestAny;
+  }
+  return dismissAvailableAtMs(fallbackCreatedAt);
+}
+
+/**
  * Remaining whole minutes (rounded up, minimum 1 while before threshold)
  * until `createdAt + 5 min`, or `0` once dismiss is available.
  */

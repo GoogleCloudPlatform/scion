@@ -2529,6 +2529,8 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 		}
 	}
 
+	minAge := dismissMinAge(in)
+
 	var toDismiss []*ent.Decision
 	var alreadyRows []*ent.Decision
 	var earliestAvailableAt time.Time
@@ -2538,7 +2540,7 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 	if len(requestedSet) > 0 {
 		// Explicit RowIDs: all-or-nothing. Every requested row must either be
 		// already dismissed (idempotent no-op) or pass DecisionActionableReason
-		// for the user and meet DecisionDismissMinAge.
+		// for the user and meet minAge (DecisionDismissMinAge in production).
 		for _, r := range rows {
 			id := r.ID.String()
 			if !requestedSet[id] {
@@ -2555,7 +2557,7 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 				reasons[id] = actReason
 				continue
 			}
-			avail := r.CreatedAt.Add(store.DecisionDismissMinAge)
+			avail := r.CreatedAt.Add(minAge)
 			if rawNow.Before(avail) {
 				reasons[id] = store.AnswerSetReasonTooRecent
 				if avail.After(latestTooRecentAt) {
@@ -2571,9 +2573,9 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 	} else {
 		// Empty RowIDs: dismiss every open row of the prompt waiting on the user
 		// (pending or agent_interpreted naming the user, D6) that has reached
-		// DecisionDismissMinAge; too-recent open rows are skipped, and if none
-		// remain eligible, return DecisionTooRecentError with the earliest time
-		// (design-8194 section 4.4a).
+		// minAge (DecisionDismissMinAge in production); too-recent open rows are
+		// skipped, and if none remain eligible, return DecisionTooRecentError
+		// with the earliest time (design-8194 section 4.4a).
 		for _, r := range rows {
 			dStore := decisionToStore(r)
 			dStore.Answers = answersToStore(existingAnswers[r.ID])
@@ -2583,7 +2585,7 @@ func (c *CompositeStore) dismissDecisionsTx(ctx context.Context, in *store.Dismi
 			}
 			actReason := store.DecisionActionableReason(dStore, in.User.UserID)
 			if actReason == "" {
-				avail := r.CreatedAt.Add(store.DecisionDismissMinAge)
+				avail := r.CreatedAt.Add(minAge)
 				if rawNow.Before(avail) {
 					if earliestAvailableAt.IsZero() || avail.Before(earliestAvailableAt) {
 						earliestAvailableAt = avail
@@ -2788,10 +2790,10 @@ func replayableDismissal(
 				continue
 			}
 			// If another row of the prompt is still waiting on the user and was
-			// already >= 5 minutes old at recordedAt, the original call under
+			// already >= minAge old at recordedAt, the original call under
 			// this key must have been an explicit subset rather than empty RowIDs.
 			if store.DecisionActionableReason(dStore, in.User.UserID) == "" &&
-				!recordedAt.Before(r.CreatedAt.Add(store.DecisionDismissMinAge).Truncate(time.Microsecond)) {
+				!recordedAt.Before(r.CreatedAt.Add(dismissMinAge(in)).Truncate(time.Microsecond)) {
 				return nil, false, mismatch
 			}
 		}
@@ -2809,4 +2811,11 @@ func replayableDismissal(
 		BatchID:          batch.String(),
 		Replayed:         true,
 	}, true, nil
+}
+
+func dismissMinAge(in *store.DismissDecisionsInput) time.Duration {
+	if in != nil && in.MinAge > 0 {
+		return in.MinAge
+	}
+	return store.DecisionDismissMinAge
 }

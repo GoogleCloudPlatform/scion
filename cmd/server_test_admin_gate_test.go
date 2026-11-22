@@ -166,6 +166,7 @@ func tiaStartCmd(t *testing.T, args ...string) *cobra.Command {
 
 func resetTestModeFlags() {
 	testModeValue, removedTestFlagValue = "", ""
+	testDecisionDismissMinAge = 0
 	testModeLevel, testModeHubID, productionFlagIsExplicit = "", "", false
 }
 

@@ -131,6 +131,16 @@ func (s *Server) nowDecision() time.Time {
 	return time.Now().UTC()
 }
 
+// decisionDismissMinAge returns the effective minimum age before a decision
+// version may be dismissed. Outside an active --test-mode hub it always
+// returns the production 5-minute store.DecisionDismissMinAge.
+func (s *Server) decisionDismissMinAge() time.Duration {
+	if s != nil && s.TestModeLevel() != TestModeOff && s.config.TestDecisionDismissMinAge > 0 {
+		return s.config.TestDecisionDismissMinAge
+	}
+	return store.DecisionDismissMinAge
+}
+
 // dismissCaller verifies the caller is a human user (web session, dev
 // credential, or UAT with inbox:write) and never an agent, visitor, or
 // federated user.
@@ -286,6 +296,7 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 	responseMsg := s.decisionDismissResponseStoreMessage(ctx, user, ds[0], chatKey, asker, askerGone, now)
 	who := userDisplay(user)
 
+	minAge := s.decisionDismissMinAge()
 	res, err := s.store.DismissDecisions(ctx, &store.DismissDecisionsInput{
 		MessageID: msgID,
 		RowIDs:    cleanIDs,
@@ -301,7 +312,8 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		FormatMessage: func(dismissed []*store.Decision) string {
 			return decisionDismissConversationLine(who, dismissed, trimmedReason)
 		},
-		Now: func() time.Time { return s.nowDecision() },
+		Now:    func() time.Time { return s.nowDecision() },
+		MinAge: minAge,
 	})
 	var tooRecent *store.DecisionTooRecentError
 	var changed *store.DismissChangedError
@@ -312,8 +324,12 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 			"the idempotency key was used for another dismissal or answer set", nil)
 		return
 	case errors.As(err, &tooRecent):
+		msg := "decisions must be at least 5 minutes old before they can be dismissed"
+		if minAge != store.DecisionDismissMinAge {
+			msg = fmt.Sprintf("decisions must be at least %s old before they can be dismissed", minAge)
+		}
 		writeError(w, http.StatusConflict, ErrCodeDecisionTooRecent,
-			"decisions must be at least 5 minutes old before they can be dismissed",
+			msg,
 			map[string]interface{}{"availableAt": tooRecent.AvailableAt.UTC()})
 		return
 	case errors.As(err, &changed):
