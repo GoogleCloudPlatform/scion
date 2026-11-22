@@ -688,11 +688,32 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 }
 
 // revokeSuspendedCredentials revokes every credential of a suspended agent
-// (best-effort, Phase 1H). The agent_credential_revoke mutation audit is
-// recorded only after the revoke succeeds: a failed revoke is logged and
-// leaves no record claiming the credentials were revoked (ptone/scion#2403).
+// (best-effort, Phase 1H). It detaches from ctx's cancellation (preserving
+// context values such as the suspending actor for audit attribution) with a
+// dedicated timeout so an expiring lifecycle budget cannot cut the revoke
+// short and a slow store cannot hang the suspend sequence (ptone/scion#7658).
+// A panic inside the store call is recovered and logged so the rest of the
+// suspend sequence (delegation grant revoke, quota and claim release) still
+// runs (ptone/scion#7659). The agent_credential_revoke mutation audit is
+// recorded only after the revoke succeeds: a failed or panicked revoke is
+// logged and leaves no record claiming the credentials were revoked
+// (ptone/scion#2403).
 func (s *Server) revokeSuspendedCredentials(ctx context.Context, agentID string) {
-	if _, err := s.store.RevokeAgentCredentialsByAgent(ctx, agentID, "system", "agent_suspended"); err != nil {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("Recovered panic revoking agent credentials on suspend", "agent_id", agentID, "panic", r)
+		}
+	}()
+	if s.store == nil {
+		slog.Warn("Skipping agent credential revoke on suspend: no store configured", "agent_id", agentID)
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCredentialRevokeTimeout)
+	defer cancel()
+	if _, err := s.store.RevokeAgentCredentialsByAgent(revokeCtx, agentID, "system", "agent_suspended"); err != nil {
 		slog.Warn("Failed to revoke agent credentials on suspend", "agent_id", agentID, "error", err)
 		return
 	}
@@ -701,14 +722,14 @@ func (s *Server) revokeSuspendedCredentials(ctx context.Context, agentID string)
 		TargetType:   "agent_credential",
 		TargetID:     agentID,
 	}
-	auditActorFromContext(ctx).ApplyActor(record)
+	auditActorFromContext(revokeCtx).ApplyActor(record)
 	if record.ActorPrincipalKind == "" {
 		// The scheduler's auto-suspend runs with no request principal; the
 		// record needs an actor, as for a hub-initiated mint.
 		record.ActorPrincipalKind = mintAuditSystemActorKind
 		record.ActorPrincipalID = mintAuditSystemActorID
 	}
-	s.emitMutationAudit(ctx, record)
+	s.emitMutationAudit(revokeCtx, record)
 }
 
 // recordRunIntent sets the agent's run intent in the store and mirrors the

@@ -246,38 +246,57 @@ func newerRunStarted(agent *store.Agent, stopRunID string) bool {
 	return true
 }
 
+// agentDelegationRevokeTimeout bounds a best-effort delegation grant
+// revocation so a slow store cannot hang a suspend or user-lifecycle path
+// indefinitely (ptone/scion#7658).
+const agentDelegationRevokeTimeout = 5 * time.Second
+
 // errNarrowRevocation wraps an error from the narrow step of
 // revokeAgentDelegationGrantsBestEffortWith.
 var errNarrowRevocation = errors.New("narrow agent delegation revocation")
 
 // revokeAgentDelegationGrantsBestEffortWith is the body of the best-effort
-// revocations. When narrow is non-nil it runs first in the revocation's
-// transaction and returns the filter to revoke with in place of filter. If
-// narrow fails, that transaction rolls back and filter is revoked in a new
-// one, so a failure to narrow never revokes less than filter.
+// revocations. It detaches from ctx's cancellation (preserving context values
+// for actor attribution) with a dedicated timeout (ptone/scion#7658), and
+// recovers from panics so subsequent cleanup still runs (ptone/scion#7659).
+// When narrow is non-nil it runs first in the revocation's transaction and
+// returns the filter to revoke with in place of filter. If narrow fails (and
+// the timeout has not expired), that transaction rolls back and filter is
+// revoked in a new one, so a failure to narrow never revokes less than filter.
 func (s *Server) revokeAgentDelegationGrantsBestEffortWith(ctx context.Context, filter store.AgentDelegationGrantFilter, reason string,
 	narrow func(ctx context.Context, tx store.Store) (store.AgentDelegationGrantFilter, error)) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("Recovered panic revoking agent delegation grants", "agent_id", filter.AgentID,
+				"issuer_user_id", filter.IssuerUserID, "reason", reason, "panic", r)
+		}
+	}()
 	if s.store == nil {
 		return
 	}
-	actor := auditActorFromContext(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentDelegationRevokeTimeout)
+	defer cancel()
+	actor := auditActorFromContext(revokeCtx)
 	var revoked []*store.AgentDelegationGrant
 	attempt := func(narrowed bool) error {
-		return s.store.WithTx(ctx, func(tx store.Store) error {
+		return s.store.WithTx(revokeCtx, func(tx store.Store) error {
 			f := filter
 			if narrowed && narrow != nil {
 				var err error
-				if f, err = narrow(ctx, tx); err != nil {
+				if f, err = narrow(revokeCtx, tx); err != nil {
 					return fmt.Errorf("%w: %w", errNarrowRevocation, err)
 				}
 			}
 			var err error
-			revoked, err = revokeAgentDelegationGrantsTx(ctx, tx, f, reason, actor, time.Now().UTC())
+			revoked, err = revokeAgentDelegationGrantsTx(revokeCtx, tx, f, reason, actor, time.Now().UTC())
 			return err
 		})
 	}
 	err := attempt(true)
-	if errors.Is(err, errNarrowRevocation) {
+	if errors.Is(err, errNarrowRevocation) && revokeCtx.Err() == nil {
 		slog.Warn("agent delegation revocation not narrowed; revoking every matching grant", "agent_id", filter.AgentID,
 			"issuer_user_id", filter.IssuerUserID, "reason", reason, "error", err)
 		err = attempt(false)
