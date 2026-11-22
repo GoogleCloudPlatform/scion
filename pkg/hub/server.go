@@ -1605,11 +1605,46 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 	return true, nil
 }
 
+// getAgentBestEffort reads an agent row on a detached, bounded context
+// (finalizationContext) with panic recovery and nil guards, for best-effort
+// post-commit in-memory refreshes that must never abort subsequent quota or
+// start-claim releases (ptone/scion#8862).
+func (s *Server) getAgentBestEffort(ctx context.Context, agentID, op string) (agent *store.Agent) {
+	if s == nil || s.store == nil || agentID == "" {
+		return nil
+	}
+	logger := s.agentLifecycleLog
+	if logger == nil {
+		logger = slog.Default()
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn("Recovered panic refreshing agent after stop",
+				"agent_id", agentID, "op", op, "panic", r)
+			agent = nil
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	readCtx, cancel := finalizationContext(ctx)
+	defer cancel()
+	fresh, err := s.store.GetAgent(readCtx, agentID)
+	if err != nil {
+		return nil
+	}
+	return fresh
+}
+
 // syncAgentAfterStopRecord aligns the caller's in-memory agent struct with the
 // phase, suspend reason, and retained/cleared activity persisted by
 // recordStopStatus so HTTP responses and published AgentStatusEvents match the
-// stored row.
+// stored row. The store refresh runs best-effort on a detached, bounded context
+// with panic recovery so it can never abort subsequent quota or claim releases.
 func (s *Server) syncAgentAfterStopRecord(ctx context.Context, agent *store.Agent, newPhase, suspendReason string) {
+	if agent == nil {
+		return
+	}
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"
 	if newPhase == string(state.PhaseSuspended) {
@@ -1629,7 +1664,7 @@ func (s *Server) syncAgentAfterStopRecord(ctx context.Context, agent *store.Agen
 	agent.StalledFromActivity = ""
 	agent.ToolName = ""
 	agent.ActivitySince = nil
-	if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil && fresh != nil && fresh.Phase == newPhase {
+	if fresh := s.getAgentBestEffort(ctx, agent.ID, "syncAgentAfterStopRecord"); fresh != nil && fresh.Phase == newPhase {
 		agent.Activity = fresh.Activity
 		agent.SuspendReason = fresh.SuspendReason
 		agent.StalledFromActivity = fresh.StalledFromActivity
@@ -1655,12 +1690,12 @@ func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action
 	if runID == "" || s == nil || s.store == nil {
 		return true
 	}
+	logger := s.agentLifecycleLog
+	if logger == nil {
+		logger = slog.Default()
+	}
 	defer func() {
 		if r := recover(); r != nil {
-			logger := s.agentLifecycleLog
-			if logger == nil {
-				logger = slog.Default()
-			}
 			logger.Warn("Recovered panic checking stop run currency",
 				"agent_id", agentID, "stopped_run_id", runID, "action", action, "panic", r)
 			stillCurrent = true
@@ -1675,7 +1710,7 @@ func (s *Server) stopRunStillCurrent(ctx context.Context, agentID, runID, action
 	if err != nil || current == nil || current.RunID == runID {
 		return true
 	}
-	s.agentLifecycleLog.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
+	logger.Warn("Agent "+action+": the agent moved to a newer run after the stop was dispatched; not recording the "+action,
 		"agent_id", agentID, "stopped_run_id", runID, "current_run_id", current.RunID)
 	return false
 }
@@ -6492,9 +6527,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 				}
 			}
 			if claimedIdle {
-				cctx, ccancel := finalizationContext(ctx)
-				_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
-				ccancel()
+				s.clearIdleSuspendClaimBestEffort(ctx, agent.ID)
 			}
 			return false
 		}
@@ -6557,15 +6590,37 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	s.persistSuspendScreen(ctx, agent.ID, captured)
 	releaseClaim()
 	if claimedIdle {
-		// Already detached with a bounded timeout via finalizationContext;
-		// error ignored and covered by auto_suspend_worker's panic boundary.
-		cctx, ccancel := finalizationContext(ctx)
-		_ = s.store.ClearIdleSuspendClaim(cctx, agent.ID)
-		ccancel()
+		s.clearIdleSuspendClaimBestEffort(ctx, agent.ID)
 	}
 	// Non-blocking in-memory publish; final step of auto-suspend.
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
+}
+
+// clearIdleSuspendClaimBestEffort clears the agent's idle-suspend claim on a
+// detached, bounded context (finalizationContext) with panic recovery so a
+// store panic on one agent cannot skip PublishAgentStatus, leak the timeout
+// timer, or abort remaining agents in an auto-suspend batch (ptone/scion#8862).
+func (s *Server) clearIdleSuspendClaimBestEffort(ctx context.Context, agentID string) {
+	if s == nil || s.store == nil || agentID == "" {
+		return
+	}
+	logger := s.agentLifecycleLog
+	if logger == nil {
+		logger = slog.Default()
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Warn("Recovered panic clearing idle-suspend claim",
+				"agent_id", agentID, "panic", r)
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cctx, ccancel := finalizationContext(ctx)
+	defer ccancel()
+	_ = s.store.ClearIdleSuspendClaim(cctx, agentID)
 }
 
 // completeAutoSuspendRecord runs the steps that follow a recorded
@@ -6590,7 +6645,7 @@ func (s *Server) completeAutoSuspendRecord(ctx context.Context, agent *store.Age
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(reason))
-	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
+	if fresh := s.getAgentBestEffort(ctx, agent.ID, "auto-suspend"); fresh != nil {
 		agent.Activity = fresh.Activity
 		agent.SuspendReason = fresh.SuspendReason
 	}

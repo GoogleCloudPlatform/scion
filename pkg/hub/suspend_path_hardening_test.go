@@ -21,13 +21,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -53,13 +57,26 @@ type suspendPathHardeningStore struct {
 	sawBulkDeadline   atomic.Bool
 	bulkRevokeCalled  atomic.Bool
 
-	panicOnGetAgent     atomic.Bool
-	blockOnGetAgent     atomic.Bool
-	sawGetAgentDeadline atomic.Bool
-	getAgentCalled      atomic.Bool
+	panicOnGetAgent          atomic.Bool
+	armGetAgentPanicPostCred atomic.Bool
+	blockOnGetAgent          atomic.Bool
+	sawGetAgentDeadline      atomic.Bool
+	getAgentCalled           atomic.Bool
 
 	panicOnReleaseClaim atomic.Bool
 	releaseClaimCalled  atomic.Bool
+
+	panicOnGetUser          atomic.Bool
+	armGetUserPanicPostCred atomic.Bool
+	blockOnGetUser          atomic.Bool
+	sawGetUserDeadline      atomic.Bool
+	getUserCalled           atomic.Bool
+
+	panicClearIdleFor    atomic.Value // string agentID; if non-empty, panics on ClearIdleSuspendClaim for that agent
+	clearIdleClaimCalled atomic.Bool
+
+	panicOnHasDeliveryHold atomic.Bool
+	hasDeliveryHoldCalled  atomic.Bool
 }
 
 func (w *suspendPathHardeningStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
@@ -113,7 +130,14 @@ func (w *suspendPathHardeningStore) RevokeAgentCredentialsByAgent(ctx context.Co
 		<-ctx.Done()
 		return 0, ctx.Err()
 	}
-	return w.Store.RevokeAgentCredentialsByAgent(ctx, agentID, revokedBy, reason)
+	n, err := w.Store.RevokeAgentCredentialsByAgent(ctx, agentID, revokedBy, reason)
+	if w.armGetAgentPanicPostCred.Load() {
+		w.panicOnGetAgent.Store(true)
+	}
+	if w.armGetUserPanicPostCred.Load() {
+		w.panicOnGetUser.Store(true)
+	}
+	return n, err
 }
 
 func (w *suspendPathHardeningStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
@@ -143,6 +167,76 @@ func (w *suspendPathHardeningStore) ReleaseSupersededStart(ctx context.Context, 
 		panic("injected release superseded start panic")
 	}
 	return w.Store.ReleaseSupersededStart(ctx, agentID, claimID, stopIntentAt)
+}
+
+func (w *suspendPathHardeningStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if !w.fault.Active() {
+		return w.Store.GetUser(ctx, id)
+	}
+	w.getUserCalled.Store(true)
+	if w.panicOnGetUser.Load() {
+		panic("injected get user panic")
+	}
+	if w.blockOnGetUser.Load() {
+		if _, ok := ctx.Deadline(); ok {
+			w.sawGetUserDeadline.Store(true)
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return w.Store.GetUser(ctx, id)
+}
+
+func (w *suspendPathHardeningStore) ClearIdleSuspendClaim(ctx context.Context, agentID string) error {
+	if !w.fault.Active() {
+		return w.Store.ClearIdleSuspendClaim(ctx, agentID)
+	}
+	w.clearIdleClaimCalled.Store(true)
+	if target, ok := w.panicClearIdleFor.Load().(string); ok && target == agentID {
+		panic("injected clear idle suspend claim panic")
+	}
+	return w.Store.ClearIdleSuspendClaim(ctx, agentID)
+}
+
+func (w *suspendPathHardeningStore) HasAgentDeliveryHold(ctx context.Context, agentID string) (bool, error) {
+	if !w.fault.Active() {
+		return w.Store.HasAgentDeliveryHold(ctx, agentID)
+	}
+	w.hasDeliveryHoldCalled.Store(true)
+	if w.panicOnHasDeliveryHold.Load() {
+		panic("injected has delivery hold panic")
+	}
+	return w.Store.HasAgentDeliveryHold(ctx, agentID)
+}
+
+type statusRecordingPublisher struct {
+	EventPublisher
+	mu       sync.Mutex
+	statuses map[string][]string // agentID -> phases
+}
+
+func newStatusRecordingPublisher(inner EventPublisher) *statusRecordingPublisher {
+	return &statusRecordingPublisher{
+		EventPublisher: inner,
+		statuses:       make(map[string][]string),
+	}
+}
+
+func (p *statusRecordingPublisher) PublishAgentStatus(ctx context.Context, agent *store.Agent) {
+	if agent != nil {
+		p.mu.Lock()
+		p.statuses[agent.ID] = append(p.statuses[agent.ID], agent.Phase)
+		p.mu.Unlock()
+	}
+	if p.EventPublisher != nil {
+		p.EventPublisher.PublishAgentStatus(ctx, agent)
+	}
+}
+
+func (p *statusRecordingPublisher) publishedPhases(agentID string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.statuses[agentID]...)
 }
 
 func seedActiveQuotaReservation(t *testing.T, s store.Store, limitName, scopeType, scopeID, subject, resourceID string) *store.LimitDefinition {
@@ -456,6 +550,25 @@ func TestStopRunStillCurrent_Hardening(t *testing.T) {
 		assert.True(t, wrapped.sawGetAgentDeadline.Load(), "stopRunStillCurrent must run with a bounded deadline")
 		assert.True(t, stillCurrent, "timed-out read must fail open")
 	})
+
+	t.Run("nil_logger_detects_newer_run", func(t *testing.T) {
+		srv, s := testServer(t)
+		agent := setupBrokerAgentInPhase(t, s, "stop-run-nillog", state.PhaseRunning)
+		oldRunID := tid("run-nillog-old")
+		agent.RunID = oldRunID
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		agent.RunID = tid("run-nillog-newer")
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		srv.agentLifecycleLog = nil
+
+		var stillCurrent bool
+		require.NotPanics(t, func() {
+			stillCurrent = srv.stopRunStillCurrent(context.Background(), agent.ID, oldRunID, "suspend (credential revoke)")
+		})
+		assert.False(t, stillCurrent, "nil agentLifecycleLog must not panic and flip stopRunStillCurrent to true")
+	})
 }
 
 func TestReleaseSupersededClaim_Hardening(t *testing.T) {
@@ -494,5 +607,373 @@ func TestReleaseSupersededClaim_Hardening(t *testing.T) {
 
 		after := mustGetAgent(t, s, agent.ID)
 		assert.Empty(t, after.StartClaimID, "start claim must be released even when ctx is nil")
+	})
+}
+
+func TestSyncAgentAfterStopRecord_Hardening(t *testing.T) {
+	t.Run("suspend_get_agent_panic_still_releases_quotas_and_claim", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		srv.SetDispatcher(&engineStubDispatcher{})
+		srv.quotaService = &QuotaService{store: s, logger: slog.Default()}
+
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "sync-panic-susp", state.PhaseRunning)
+		_, err := s.ClaimAgentStart(ctx, agent.ID, "hub-sync-panic", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+		agent = mustGetAgent(t, s, agent.ID)
+
+		projDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, agent.ProjectID, agent.ProjectID, agent.ID)
+		brokerDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.RuntimeBrokerID, agent.ID)
+
+		wrapped.armGetAgentPanicPostCred.Store(true)
+		fault.Arm()
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.True(t, wrapped.getAgentCalled.Load(), "GetAgent refresh must have been attempted")
+		after := mustGetAgent(t, s, agent.ID)
+		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+		assert.Empty(t, after.StartClaimID, "start claim must still be released after GetAgent panic")
+
+		activeBroker, err := s.CountActiveReservations(ctx, brokerDef.ID, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeBroker, "broker quota must still be released after GetAgent panic")
+
+		activeProj, err := s.CountActiveReservations(ctx, projDef.ID, agent.ProjectID, store.QuotaScopeProject, agent.ProjectID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeProj, "project quota must still be released after GetAgent panic")
+
+		assert.Contains(t, pub.publishedPhases(agent.ID), string(state.PhaseSuspended), "PublishAgentStatus must still run after GetAgent panic")
+		assertHasWarnLog(t, logs.String(), "Recovered panic refreshing agent after stop", agent.ID, "injected get agent panic")
+	})
+
+	t.Run("auto_suspend_get_agent_panic_still_releases_quotas_and_claim", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		disp := &engineStubDispatcher{}
+		srv.SetDispatcher(disp)
+		srv.quotaService = &QuotaService{store: s, logger: slog.Default()}
+
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "autosusp-sync-panic", state.PhaseRunning)
+		agent.Activity = string(state.ActivityStalled)
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+		_, err := s.ClaimAgentStart(ctx, agent.ID, "hub-autosusp-panic", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+		agent = mustGetAgent(t, s, agent.ID)
+
+		projDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, agent.ProjectID, agent.ProjectID, agent.ID)
+		brokerDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.RuntimeBrokerID, agent.ID)
+
+		wrapped.armGetAgentPanicPostCred.Store(true)
+		fault.Arm()
+
+		var ok bool
+		require.NotPanics(t, func() {
+			ok = srv.autoSuspendAgent(ctx, disp, agent, state.SuspendReasonStalled)
+		})
+		require.True(t, ok, "autoSuspendAgent must still complete after GetAgent panic")
+
+		assert.True(t, wrapped.getAgentCalled.Load())
+		after := mustGetAgent(t, s, agent.ID)
+		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+		assert.Empty(t, after.StartClaimID, "start claim must still be released after GetAgent panic in autoSuspendAgent")
+
+		activeBroker, err := s.CountActiveReservations(ctx, brokerDef.ID, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeBroker, "broker quota must still be released after GetAgent panic in autoSuspendAgent")
+
+		activeProj, err := s.CountActiveReservations(ctx, projDef.ID, agent.ProjectID, store.QuotaScopeProject, agent.ProjectID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeProj, "project quota must still be released after GetAgent panic in autoSuspendAgent")
+
+		assert.Contains(t, pub.publishedPhases(agent.ID), string(state.PhaseSuspended), "PublishAgentStatus must still run after GetAgent panic in autoSuspendAgent")
+		assertHasWarnLog(t, logs.String(), "Recovered panic refreshing agent after stop", agent.ID, "injected get agent panic")
+	})
+
+	t.Run("cancelled_context_and_timeout_bounds_slow_refresh", func(t *testing.T) {
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "sync-cancel-timeout", state.PhaseSuspended)
+		agent.Activity = string(state.ActivityWaitingForInput)
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		// Cancelled context must still refresh from the store.
+		localCopy := *agent
+		localCopy.Activity = ""
+		cancelledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		srv.syncAgentAfterStopRecord(cancelledCtx, &localCopy, string(state.PhaseSuspended), string(state.SuspendReasonUser))
+		assert.Equal(t, string(state.ActivityWaitingForInput), localCopy.Activity, "detached syncAgentAfterStopRecord must still refresh when caller context is cancelled")
+
+		// Slow store read must be bounded by finalizationContext deadline.
+		wrapped.blockOnGetAgent.Store(true)
+		fault.Arm()
+		slowCopy := *agent
+		synctest.Test(t, func(t *testing.T) {
+			srv.syncAgentAfterStopRecord(context.Background(), &slowCopy, string(state.PhaseSuspended), string(state.SuspendReasonUser))
+			synctest.Wait()
+		})
+		assert.True(t, wrapped.getAgentCalled.Load())
+		assert.True(t, wrapped.sawGetAgentDeadline.Load(), "syncAgentAfterStopRecord must run with a bounded deadline")
+	})
+}
+
+func TestNotifyThirdPartyLifecycleAction_Hardening(t *testing.T) {
+	t.Run("suspend_sync_panic_recovers_publishes_status_and_returns_200", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		srv.SetDispatcher(&engineStubDispatcher{})
+		srv.quotaService = &QuotaService{store: s, logger: slog.Default()}
+		srv.notificationDispatcher = NewNotificationDispatcher(wrapped, pub, srv.GetDispatcher, slog.Default())
+
+		ctx := context.Background()
+		creatorID := tid("tp-panic-creator")
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID:          creatorID,
+			Email:       creatorID + "@example.com",
+			DisplayName: "Creator User",
+			Role:        store.UserRoleMember,
+			Status:      store.UserStatusActive,
+		}))
+
+		seed := setupBrokerAgentInPhase(t, s, "tp-panic-seed", state.PhaseRunning)
+		agent := &store.Agent{
+			ID:              tid("tp-panic-susp"),
+			Slug:            "tp-panic-susp",
+			Name:            "tp-panic-susp",
+			ProjectID:       seed.ProjectID,
+			RuntimeBrokerID: seed.RuntimeBrokerID,
+			Phase:           string(state.PhaseRunning),
+			Template:        "claude",
+			CreatedBy:       creatorID,
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+		_, err := s.ClaimAgentStart(ctx, agent.ID, "hub-tp-panic", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+
+		projDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, agent.ProjectID, agent.ProjectID, agent.ID)
+		brokerDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.RuntimeBrokerID, agent.ID)
+
+		wrapped.armGetUserPanicPostCred.Store(true)
+		fault.Arm()
+
+		// Dev auth acts as a third-party admin (ID != creatorID).
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.True(t, wrapped.getUserCalled.Load(), "synchronous GetUser in notifyThirdPartyLifecycleAction must have been attempted")
+		after := mustGetAgent(t, s, agent.ID)
+		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+		assert.Empty(t, after.StartClaimID, "start claim must still be released")
+
+		activeBroker, err := s.CountActiveReservations(ctx, brokerDef.ID, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeBroker)
+		activeProj, err := s.CountActiveReservations(ctx, projDef.ID, agent.ProjectID, store.QuotaScopeProject, agent.ProjectID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeProj)
+
+		assert.Contains(t, pub.publishedPhases(agent.ID), string(state.PhaseSuspended), "PublishAgentStatus must still run after sync notify panic")
+		assertHasWarnLog(t, logs.String(), "Recovered panic preparing third-party lifecycle notification", agent.ID, "injected get user panic")
+	})
+
+	t.Run("cancelled_context_still_persists_notification", func(t *testing.T) {
+		srv, s := testServer(t)
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		srv.events = bus
+		srv.notificationDispatcher = NewNotificationDispatcher(s, bus, srv.GetDispatcher, slog.Default())
+
+		ctx := context.Background()
+		creatorID := tid("tp-cancel-creator")
+		actorID := tid("tp-cancel-actor")
+		require.NoError(t, s.CreateUser(ctx, &store.User{
+			ID:          creatorID,
+			Email:       creatorID + "@example.com",
+			DisplayName: "Creator",
+			Role:        store.UserRoleMember,
+			Status:      store.UserStatusActive,
+		}))
+		agent := setupBrokerAgentInPhase(t, s, "tp-cancel-susp", state.PhaseSuspended)
+		agent.CreatedBy = creatorID
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		cancelledCtx, cancel := context.WithCancel(
+			contextWithIdentity(ctx, NewAuthenticatedUser(actorID, "actor@example.com", "Actor", store.UserRoleAdmin, "web")),
+		)
+		cancel()
+
+		srv.notifyThirdPartyLifecycleAction(cancelledCtx, agent, api.AgentActionSuspend, "maintenance")
+		srv.thirdPartyStopDispatches.Wait()
+
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, creatorID, false)
+		require.NoError(t, err)
+		require.Len(t, notifs, 1, "synchronous third-party notification persistence must detach from cancelled caller context")
+	})
+
+	t.Run("timeout_bounds_slow_sync_lookup", func(t *testing.T) {
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		srv.events = bus
+		srv.notificationDispatcher = NewNotificationDispatcher(wrapped, bus, srv.GetDispatcher, slog.Default())
+
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "tp-timeout-susp", state.PhaseSuspended)
+		agent.CreatedBy = tid("tp-timeout-creator")
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		actorCtx := contextWithIdentity(ctx, NewAuthenticatedUser(tid("tp-timeout-actor"), "actor@example.com", "Actor", store.UserRoleAdmin, "web"))
+		wrapped.blockOnGetUser.Store(true)
+		fault.Arm()
+
+		synctest.Test(t, func(t *testing.T) {
+			srv.notifyThirdPartyLifecycleAction(actorCtx, agent, api.AgentActionSuspend, "slow")
+			synctest.Wait()
+		})
+
+		assert.True(t, wrapped.getUserCalled.Load())
+		assert.True(t, wrapped.sawGetUserDeadline.Load(), "synchronous third-party notification lookup must run with a bounded deadline")
+	})
+}
+
+func TestClearIdleSuspendClaim_Hardening(t *testing.T) {
+	t.Run("panic_isolated_per_agent_publishes_and_continues_batch", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		srv.SetDispatcher(&engineStubDispatcher{})
+
+		// Enable IdleSuspend experiment and settings so autoSuspendAgent accepts SuspendReasonIdle.
+		var activeExps []experiments.Experiment
+		for _, e := range experiments.Default().All() {
+			if e.Name == experiments.IdleSuspend {
+				e.Default = true
+			}
+			activeExps = append(activeExps, e)
+		}
+		reg, err := experiments.NewRegistry(activeExps, nil)
+		require.NoError(t, err)
+		srv.experiments = reg
+		srv.mu.Lock()
+		srv.config.AutoSuspendIdle = true
+		srv.config.IdleSuspendAfter = DefaultIdleSuspendAfter
+		srv.mu.Unlock()
+
+		ctx := context.Background()
+		idleSince := time.Now().UTC().Add(-(DefaultIdleSuspendAfter + 10*time.Minute))
+		freshSeen := time.Now().UTC().Add(-10 * time.Second)
+		db := s.(*entadapter.CompositeStore).DB()
+
+		agent1 := setupBrokerAgentInPhase(t, s, "idle-clear-panic-1", state.PhaseRunning)
+		_, err = db.ExecContext(ctx,
+			"UPDATE agents SET activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			string(state.ActivityIdle), idleSince, freshSeen, agent1.ID,
+		)
+		require.NoError(t, err)
+		agent1 = mustGetAgent(t, s, agent1.ID)
+
+		agent2 := setupBrokerAgentInPhase(t, s, "idle-clear-panic-2", state.PhaseRunning)
+		_, err = db.ExecContext(ctx,
+			"UPDATE agents SET activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			string(state.ActivityIdle), idleSince, freshSeen, agent2.ID,
+		)
+		require.NoError(t, err)
+		agent2 = mustGetAgent(t, s, agent2.ID)
+
+		wrapped.panicClearIdleFor.Store(agent1.ID)
+		fault.Arm()
+
+		require.NotPanics(t, func() {
+			srv.autoSuspendAgents(ctx, []autoSuspendItem{
+				{agent: *agent1, reason: state.SuspendReasonIdle},
+				{agent: *agent2, reason: state.SuspendReasonIdle},
+			})
+		})
+
+		assert.True(t, wrapped.clearIdleClaimCalled.Load())
+		after1 := mustGetAgent(t, s, agent1.ID)
+		after2 := mustGetAgent(t, s, agent2.ID)
+		assert.Equal(t, string(state.PhaseSuspended), after1.Phase)
+		assert.Equal(t, string(state.PhaseSuspended), after2.Phase, "second agent in batch must still be auto-suspended after ClearIdleSuspendClaim panic on first agent")
+		assert.Nil(t, after2.IdleSuspendClaimUntil, "second agent idle claim must be cleared")
+
+		assert.Contains(t, pub.publishedPhases(agent1.ID), string(state.PhaseSuspended), "PublishAgentStatus must still run for agent1 after ClearIdleSuspendClaim panic")
+		assert.Contains(t, pub.publishedPhases(agent2.ID), string(state.PhaseSuspended), "PublishAgentStatus must run for agent2")
+		assertHasWarnLog(t, logs.String(), "Recovered panic clearing idle-suspend claim", agent1.ID, "injected clear idle suspend claim panic")
+	})
+}
+
+func TestExpireHeldMessagesForAgent_Hardening(t *testing.T) {
+	t.Run("panic_recovers_and_continues_suspend", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		srv.SetDispatcher(&engineStubDispatcher{})
+		srv.quotaService = &QuotaService{store: s, logger: slog.Default()}
+
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "expire-hold-panic", state.PhaseRunning)
+		_, err := s.ClaimAgentStart(ctx, agent.ID, "hub-expire-hold", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+
+		projDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, agent.ProjectID, agent.ProjectID, agent.ID)
+		brokerDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.RuntimeBrokerID, agent.ID)
+
+		wrapped.panicOnHasDeliveryHold.Store(true)
+		fault.Arm()
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.True(t, wrapped.hasDeliveryHoldCalled.Load())
+		after := mustGetAgent(t, s, agent.ID)
+		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+		assert.Empty(t, after.StartClaimID, "start claim must still be released after expireHeldMessagesForAgent panic")
+
+		activeBroker, err := s.CountActiveReservations(ctx, brokerDef.ID, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeBroker)
+		activeProj, err := s.CountActiveReservations(ctx, projDef.ID, agent.ProjectID, store.QuotaScopeProject, agent.ProjectID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeProj)
+
+		assert.Contains(t, pub.publishedPhases(agent.ID), string(state.PhaseSuspended))
+		assertHasWarnLog(t, logs.String(), "Recovered panic expiring held messages for agent", agent.ID, "injected has delivery hold panic")
 	})
 }

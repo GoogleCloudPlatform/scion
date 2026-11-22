@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -109,12 +110,22 @@ func isRealThirdPartyLifecycleTransition(prevPhase, prevSuspendReason, action st
 // for user creators) runs in a detached background goroutine so a slow or
 // unreachable subscriber never holds up the HTTP response.
 func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *store.Agent, action, reason string) {
-	if agent == nil || agent.ID == "" || agent.CreatedBy == "" {
+	if s == nil || ctx == nil || agent == nil || agent.ID == "" || agent.CreatedBy == "" {
 		return
 	}
 	if action != api.AgentActionStop && action != api.AgentActionSuspend {
 		return
 	}
+	logger := s.agentLifecycleLog
+	if logger == nil {
+		logger = slog.Default()
+	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			logger.Warn("Recovered panic preparing third-party lifecycle notification",
+				"agent_id", agent.ID, "action", action, "panic", fmt.Sprint(rec))
+		}
+	}()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil || identity.ID() == "" {
 		return
@@ -152,12 +163,15 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 	postWriteStatus := notificationEventStatus(agentStatusEvent(agent, now))
 	matchExistingSub := strings.EqualFold(postWriteStatus, status)
 
-	sub := nd.resolveThirdPartyCreatorSubscription(ctx, agent, status, matchExistingSub)
+	persistCtx, persistCancel := finalizationContext(ctx)
+	defer persistCancel()
+
+	sub := nd.resolveThirdPartyCreatorSubscription(persistCtx, agent, status, matchExistingSub)
 	if sub == nil {
 		return
 	}
 
-	actorLabel := s.thirdPartyActorLabel(ctx, identity)
+	actorLabel := s.thirdPartyActorLabel(persistCtx, identity)
 	message := thirdPartyLifecycleMessage(agent.Slug, action, actorLabel, now, reason)
 	evt := AgentStatusEvent{
 		AgentID:   agent.ID,
@@ -165,7 +179,7 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 		Phase:     phase,
 	}
 
-	notif := nd.storeNotification(ctx, sub, evt, message)
+	notif := nd.storeNotification(persistCtx, sub, evt, message)
 	if notif == nil {
 		return
 	}
@@ -177,7 +191,7 @@ func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *sto
 		defer s.thirdPartyStopDispatches.Done()
 		defer func() {
 			if rec := recover(); rec != nil {
-				s.agentLifecycleLog.Error("third-party lifecycle notification panicked",
+				logger.Error("third-party lifecycle notification panicked",
 					"agent_id", agentSnapshot.ID, "action", action, "panic", fmt.Sprint(rec))
 			}
 		}()

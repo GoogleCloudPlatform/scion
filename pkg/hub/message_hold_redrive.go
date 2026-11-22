@@ -524,6 +524,15 @@ func (s *Server) expireHeldMessagesForAgent(ctx context.Context, agentID, fixedR
 	if s == nil || s.store == nil || agentID == "" {
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Warn("Recovered panic expiring held messages for agent",
+				"agent_id", agentID, "reason", fixedReason, "panic", r)
+		}
+	}()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	finCtx, finCancel := finalizationContext(ctx)
 	defer finCancel()
 
