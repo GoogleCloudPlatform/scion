@@ -35,7 +35,7 @@ const (
 	brokerPolicyOpMove         = "move"
 	brokerPolicyOpStart        = "start"
 	brokerPolicyRegisterRemedy = "Ask a hub administrator to register the broker with --admin-managed."
-	brokerPolicyUATRemedy      = "Sign in as a hub administrator and run 'scion runtime-broker register --admin-managed', or mint a join token with 'scion hub brokers join-token create --admin-managed' from a signed-in machine and run '/brokers/join' on the host."
+	brokerPolicyUATRemedy      = "Sign in as a hub administrator and run 'scion runtime-broker register --admin-managed', or mint a join token with 'scion hub brokers join-token create <broker-name> --admin-managed' from a signed-in machine and run 'scion runtime-broker join' on the host."
 	brokerPolicyEmbeddedRemedy = "Use 'scion runtime-broker register --admin-managed' from a signed-in hub administrator account."
 )
 
