@@ -848,3 +848,45 @@ func TestDialect_ConsumerAttributionUsesCompiledHandleConsumer(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "consumer_b", evalFail.Rule.Consumer)
 }
+
+func TestDialect_EngineDeadlineMarginCappedAt10ms(t *testing.T) {
+	const rawRule = `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+
+	synctest.Test(t, func(t *testing.T) {
+		var observedRemaining time.Duration
+		rt := newFakeAdapterRuntime(t, 3*time.Second, func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			dl, ok := attemptCtx.Deadline()
+			require.True(t, ok)
+			observedRemaining = time.Until(dl)
+			<-attemptCtx.Done()
+			return provider.ModelResult{}, attemptCtx.Err()
+		})
+		eng := ruleengine.NewEngine()
+		require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
+			Runtime:     rt,
+			MaxEvalTime: 3 * time.Second,
+		})))
+		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: testSystemOneConsumer,
+			Name:     spec.ProbeEnvironmentName,
+		})
+		require.NoError(t, err)
+
+		_, err = eng.Evaluate(context.Background(), c, ruleengine.Input{
+			Payload: systemone.ProbeInput("cap-check"),
+		}, ruleengine.Budget{MaxEvalTime: 400 * time.Millisecond})
+		require.Error(t, err)
+		assert.Equal(t, 390*time.Millisecond, observedRemaining,
+			"dialect must inject ruleengine.EngineDeadlineMargin (400ms - 10ms cap = 390ms)")
+
+		eval, ok := systemone.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, systemone.ClassFailed, eval.Class)
+		assert.Equal(t, string(provider.FailTimeout), eval.Reason)
+	})
+}

@@ -160,7 +160,7 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 
 // Evaluate executes a compiled System One rule against a typed systemone.Input
 // read from ruleengine.Input.Payload. Budget.CostLimit is ignored;
-// Budget.MaxEvalTime is forwarded to Runtime with the engine deadline margin.
+// Budget.MaxEvalTime is forwarded to Runtime alongside ruleengine.EngineDeadlineMargin.
 func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input ruleengine.Input, budget ruleengine.Budget) (ruleengine.Decision, error) {
 	if !d.isEnabled() {
 		return ruleengine.Decision{}, &ruleengine.FailedError{
@@ -191,8 +191,9 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	}
 
 	dec, err := rt.Evaluate(ctx, prog.compiled, soInput, runtime.EvalOptions{
-		Consumer:          consumer,
-		EngineMaxEvalTime: budget.MaxEvalTime,
+		Consumer:             consumer,
+		EngineMaxEvalTime:    budget.MaxEvalTime,
+		EngineDeadlineMargin: ruleengine.EngineDeadlineMargin(budget.MaxEvalTime),
 	})
 	if err == nil {
 		return ruleengine.Decision{

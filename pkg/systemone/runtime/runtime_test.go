@@ -1775,20 +1775,23 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 	}`
 	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
 
-	t.Run("margin_subtracts_min_10ms_5pct_from_engine_max_eval_time", func(t *testing.T) {
+	t.Run("margin_subtracts_injected_margin_from_engine_max_eval_time", func(t *testing.T) {
 		cases := []struct {
 			name         string
 			engineBudget time.Duration
-			wantMaxDur   time.Duration // engineBudget - min(10ms, 5%)
+			margin       time.Duration
+			wantMaxDur   time.Duration // engineBudget - max(0, margin)
 		}{
 			{
 				name:         "short_budget_uses_5pct_margin",
 				engineBudget: 160 * time.Millisecond, // 5% = 8ms < 10ms -> 152ms
+				margin:       8 * time.Millisecond,
 				wantMaxDur:   152 * time.Millisecond,
 			},
 			{
 				name:         "longer_budget_caps_margin_at_10ms",
 				engineBudget: 400 * time.Millisecond, // 5% = 20ms > 10ms -> 390ms
+				margin:       10 * time.Millisecond,
 				wantMaxDur:   390 * time.Millisecond,
 			},
 		}
@@ -1818,13 +1821,14 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 					defer cancel()
 
 					_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("margin"), runtime.EvalOptions{
-						EngineMaxEvalTime: tc.engineBudget,
+						EngineMaxEvalTime:    tc.engineBudget,
+						EngineDeadlineMargin: tc.margin,
 					})
 					elapsed := time.Since(before)
 
 					require.Error(t, err)
 					assert.LessOrEqual(t, observedRemaining, tc.wantMaxDur,
-						"attemptCtx deadline must incorporate the min(10ms, 5%%) margin")
+						"attemptCtx deadline must incorporate the injected EngineDeadlineMargin")
 					assert.NoError(t, engineCtx.Err(),
 						"runtime timeout (elapsed=%v) must fire before engine context deadline (%v)", elapsed, tc.engineBudget)
 
@@ -1832,6 +1836,135 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 					require.True(t, ok)
 					assert.Equal(t, runtime.ClassFailed, eval.Class)
 					assert.Equal(t, string(provider.FailTimeout), eval.Reason)
+				})
+			})
+		}
+	})
+
+	t.Run("margin_ge_engine_max_eval_time_immediate_fail_timeout", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			engineBudget time.Duration
+			margin       time.Duration
+		}{
+			{name: "margin_equals_budget", engineBudget: 5 * time.Millisecond, margin: 5 * time.Millisecond},
+			{name: "margin_exceeds_budget", engineBudget: 5 * time.Millisecond, margin: 10 * time.Millisecond},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var called bool
+					adapter := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+						called = true
+						return provider.ModelResult{}, fmt.Errorf("adapter must not be invoked")
+					})
+
+					reg := provider.NewRegistry()
+					reg.MustRegister(adapter)
+					rt := runtime.New(runtime.Config{
+						Registry:    reg,
+						Instances:   runtime.StaticInstances(defaultTestInstance()),
+						Credentials: runtime.StaticCredential("sk-test"),
+					})
+
+					_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("immediate-timeout"), runtime.EvalOptions{
+						EngineMaxEvalTime:    tc.engineBudget,
+						EngineDeadlineMargin: tc.margin,
+					})
+					require.Error(t, err)
+					assert.False(t, called, "provider must not be invoked when margin >= EngineMaxEvalTime")
+
+					eval, ok := runtime.EvaluationFrom(err)
+					require.True(t, ok)
+					assert.Equal(t, runtime.ClassFailed, eval.Class)
+					assert.Equal(t, string(provider.FailTimeout), eval.Reason)
+					assert.Empty(t, eval.Attempts)
+				})
+			})
+		}
+	})
+
+	t.Run("negative_margin_treated_as_zero", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var observedRemaining time.Duration
+			adapter := newFakeAdapter(func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				dl, ok := attemptCtx.Deadline()
+				require.True(t, ok)
+				observedRemaining = time.Until(dl)
+				<-attemptCtx.Done()
+				return provider.ModelResult{}, attemptCtx.Err()
+			})
+
+			reg := provider.NewRegistry()
+			reg.MustRegister(adapter)
+			rt := runtime.New(runtime.Config{
+				Registry:    reg,
+				Instances:   runtime.StaticInstances(defaultTestInstance()),
+				Credentials: runtime.StaticCredential("sk-test"),
+			})
+
+			_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("neg-margin"), runtime.EvalOptions{
+				EngineMaxEvalTime:    100 * time.Millisecond,
+				EngineDeadlineMargin: -10 * time.Millisecond,
+			})
+			require.Error(t, err)
+			assert.Equal(t, 100*time.Millisecond, observedRemaining,
+				"negative EngineDeadlineMargin must be treated as 0 and not extend EngineMaxEvalTime")
+
+			eval, ok := runtime.EvaluationFrom(err)
+			require.True(t, ok)
+			assert.Equal(t, runtime.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailTimeout), eval.Reason)
+		})
+	})
+
+	t.Run("engine_max_eval_time_non_positive_ignores_margin", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			engineBudget time.Duration
+		}{
+			{name: "zero_engine_max_eval_time", engineBudget: 0},
+			{name: "negative_engine_max_eval_time", engineBudget: -10 * time.Millisecond},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var observedRemaining time.Duration
+					adapter := newFakeAdapter(func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+						dl, ok := attemptCtx.Deadline()
+						require.True(t, ok)
+						observedRemaining = time.Until(dl)
+						dist, val, _, _ := provider.BinaryDistribution(0.9)
+						return provider.ModelResult{
+							ResolvedModel: "jev-1.14.0",
+							HTTPStatus:    200,
+							Answers: map[string]provider.Answer{
+								"q1": {
+									QuestionID:   "q1",
+									Primitive:    spec.PrimitiveBinary,
+									Status:       provider.AnswerStatusAnswered,
+									Bool:         val,
+									Distribution: dist,
+								},
+							},
+						}, nil
+					})
+
+					reg := provider.NewRegistry()
+					reg.MustRegister(adapter)
+					rt := runtime.New(runtime.Config{
+						Registry:    reg,
+						Instances:   runtime.StaticInstances(defaultTestInstance()),
+						Credentials: runtime.StaticCredential("sk-test"),
+						MaxEvalTime: 500 * time.Millisecond,
+					})
+
+					dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("no-engine-bound"), runtime.EvalOptions{
+						EngineMaxEvalTime:    tc.engineBudget,
+						EngineDeadlineMargin: 10 * time.Second,
+					})
+					require.NoError(t, err)
+					assert.True(t, dec.Bool)
+					assert.Equal(t, 500*time.Millisecond, observedRemaining,
+						"EngineDeadlineMargin must be ignored when EngineMaxEvalTime <= 0")
 				})
 			})
 		}
@@ -1880,7 +2013,8 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 					})
 
 					_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("latch"), runtime.EvalOptions{
-						EngineMaxEvalTime: 60 * time.Millisecond,
+						EngineMaxEvalTime:    60 * time.Millisecond,
+						EngineDeadlineMargin: 3 * time.Millisecond,
 					})
 					require.Error(t, err)
 					eval, ok := runtime.EvaluationFrom(err)
@@ -1920,7 +2054,8 @@ func TestRuntime_EngineMaxEvalTimeMarginAndLatch(t *testing.T) {
 			})
 
 			_, err := rt.Evaluate(engineCtx, compiled, runtime.ProbeInput("stage-latch"), runtime.EvalOptions{
-				EngineMaxEvalTime: 60 * time.Millisecond,
+				EngineMaxEvalTime:    60 * time.Millisecond,
+				EngineDeadlineMargin: 3 * time.Millisecond,
 			})
 			require.Error(t, err)
 			eval, ok := runtime.EvaluationFrom(err)

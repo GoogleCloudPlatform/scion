@@ -156,10 +156,15 @@ type EvalOptions struct {
 	Budget time.Duration
 	// EngineMaxEvalTime optionally carries ruleengine.Budget.MaxEvalTime when
 	// Evaluate is invoked through the ruleengine Dialect (P1 brief §5). When
-	// positive, Runtime folds EngineMaxEvalTime - min(10ms, 5%) into its own
-	// deadline so errRuntimeDeadline fires before ruleengine's context deadline
-	// and passes through unchanged as FailTimeout.
+	// positive, Runtime folds max(0, EngineMaxEvalTime - EngineDeadlineMargin)
+	// into its own deadline so errRuntimeDeadline fires before ruleengine's
+	// context deadline and passes through unchanged as FailTimeout.
 	EngineMaxEvalTime time.Duration
+	// EngineDeadlineMargin is the safety margin computed by
+	// ruleengine.EngineDeadlineMargin(EngineMaxEvalTime), set by the systemone
+	// Dialect alongside EngineMaxEvalTime. Only meaningful when
+	// EngineMaxEvalTime > 0; negative values are treated as 0.
+	EngineDeadlineMargin time.Duration
 }
 
 type transportKey struct {
@@ -303,7 +308,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	}
 
 	// Compose initial runtime-owned deadline (rule timeout, MaxEvalTime, Budget,
-	// and EngineMaxEvalTime minus min(10ms, 5%)) before instance resolution;
+	// and EngineMaxEvalTime minus EngineDeadlineMargin) before instance resolution;
 	// CallTimeout tightens it once inst is resolved. Latch errRuntimeDeadline
 	// across stages so once the runtime's own deadline fires, the outcome stays
 	// FailTimeout even if the parent/engine context also expires afterwards.
@@ -613,25 +618,13 @@ func (r *Runtime) effectiveOwnDuration(ruleTimeout time.Duration, opts EvalOptio
 		d = opts.Budget
 	}
 	if opts.EngineMaxEvalTime > 0 {
-		engDur := engineDeadlineWithMargin(opts.EngineMaxEvalTime)
+		margin := max(opts.EngineDeadlineMargin, 0)
+		engDur := max(opts.EngineMaxEvalTime-margin, 0)
 		if engDur < d {
 			d = engDur
 		}
 	}
 	return d
-}
-
-const maxEngineDeadlineMargin = 10 * time.Millisecond
-
-func engineDeadlineWithMargin(engineMax time.Duration) time.Duration {
-	margin := min(maxEngineDeadlineMargin, engineMax/20)
-	if margin <= 0 && engineMax > 0 {
-		margin = 1
-	}
-	if engineMax <= margin {
-		return 0
-	}
-	return engineMax - margin
 }
 
 func (r *Runtime) resolveBinding(
