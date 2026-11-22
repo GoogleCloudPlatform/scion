@@ -120,7 +120,7 @@ func TestWebEventStream_RefusesUserAccessToken(t *testing.T) {
 
 	for _, auth := range []string{"Bearer " + key, ""} {
 		reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		req := httptest.NewRequest(http.MethodGet, "/events?sub=notification."+userID, nil).WithContext(reqCtx)
+		req := httptest.NewRequest(http.MethodGet, "/events?sub=user."+userID+".notification", nil).WithContext(reqCtx)
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}

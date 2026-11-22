@@ -3047,7 +3047,7 @@ func isNATSWildcard(token string) bool {
 // have ActionRead on the project. Agent subjects require a concrete canonical
 // UUID and ActionRead on the resolved agent, matching the metadata endpoint.
 // For user-scoped subjects (user.<id>.*) the caller's identity must match the
-// user ID. notification.* and broker.* are an explicit, deliberate pass-through
+// user ID. broker.* is an explicit, deliberate pass-through
 // (see the switch below). system.images.<jobId> requires a concrete job ID,
 // and admin.* requires the admin role. Every other first token — including
 // any unknown or future namespace — is denied by default.

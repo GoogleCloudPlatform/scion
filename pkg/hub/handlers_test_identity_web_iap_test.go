@@ -999,7 +999,7 @@ func tiOpenStream(t *testing.T, e *tiIAPEnv, jar []*http.Cookie, assertion strin
 	t.Helper()
 	server := httptest.NewServer(e.ws.Handler())
 	t.Cleanup(server.Close)
-	req, err := http.NewRequest(http.MethodGet, server.URL+"/events?sub=notification.ti", nil)
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/events?sub=broker.ti", nil)
 	require.NoError(t, err)
 	req.Header.Set("Accept", "text/event-stream")
 	if assertion != "" {

@@ -734,7 +734,7 @@ func TestTestIdentityWeb_GenerationBumpRefuses(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "Test identity session ended")
 	assert.Empty(t, rec.Header().Get("Location"), "no login redirect")
 	assert.Equal(t, http.StatusUnauthorized, e.apiMe(jar).Code)
-	assert.Equal(t, http.StatusUnauthorized, e.do(tiReq{path: "/events?sub=notification.ti", cookies: jar}).Code)
+	assert.Equal(t, http.StatusUnauthorized, e.do(tiReq{path: "/events?sub=broker.ti", cookies: jar}).Code)
 }
 
 // --- AC5c (C5): the session's own expiry is enforced explicitly -------------
@@ -755,7 +755,7 @@ func TestTestIdentityWeb_ExplicitSessionExpiry(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, e.page(jar).Code, "sessionAuth")
 	assert.Equal(t, http.StatusUnauthorized, e.webMe(jar).Code, "/auth/me")
 	assert.Equal(t, http.StatusUnauthorized, e.apiMe(jar).Code, "sessionToBearer")
-	assert.Equal(t, http.StatusUnauthorized, e.do(tiReq{path: "/events?sub=notification.ti", cookies: jar}).Code, "SSE")
+	assert.Equal(t, http.StatusUnauthorized, e.do(tiReq{path: "/events?sub=broker.ti", cookies: jar}).Code, "SSE")
 	res := e.ws.classifyTestIdentitySession(tiWebRequest(jar), tiWebSession(t, e.ws, jar), nil)
 	assert.Equal(t, "session_expired", res.reason)
 }
@@ -1089,7 +1089,7 @@ func TestTestIdentityWeb_DeathWithRow(t *testing.T) {
 		server := httptest.NewServer(e.ws.Handler())
 		t.Cleanup(server.Close)
 
-		req, err := http.NewRequest(http.MethodGet, server.URL+"/events?sub=notification.ti", nil)
+		req, err := http.NewRequest(http.MethodGet, server.URL+"/events?sub=broker.ti", nil)
 		require.NoError(t, err)
 		req.Header.Set("Accept", "text/event-stream")
 		for _, c := range jar {
@@ -1246,7 +1246,7 @@ func TestTestIdentityWeb_UnmarkedSessionDecidedFromRow(t *testing.T) {
 		e := newTIWebEnv(t)
 		e.ws.events = NewChannelEventPublisher()
 		fx := e.issue()
-		rec := e.do(tiReq{path: "/events?sub=notification.ti", cookies: unmarked(t, e, fx.Identity.ID)})
+		rec := e.do(tiReq{path: "/events?sub=broker.ti", cookies: unmarked(t, e, fx.Identity.ID)})
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 		assert.NotContains(t, rec.Header().Get("Content-Type"), "text/event-stream")
 	})
@@ -1283,13 +1283,13 @@ func TestTestIdentityWeb_UnmarkedSessionDecidedFromRow(t *testing.T) {
 		e.ws.events = NewChannelEventPublisher()
 		fx := e.issue()
 		jar := unmarked(t, e, fx.Identity.ID)
-		rec := e.do(tiReq{path: "/events?sub=notification.ti", cookies: jar})
+		rec := e.do(tiReq{path: "/events?sub=broker.ti", cookies: jar})
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 		// The stream decides at accept time on its own too: with a context
 		// user already set (as any admitting middleware would), the handler
 		// refuses before it subscribes or writes stream headers.
 		req := tiWebRequest(jar)
-		req.URL.RawQuery = "sub=notification.ti"
+		req.URL.RawQuery = "sub=broker.ti"
 		req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, &webSessionUser{UserID: fx.Identity.ID, Email: "someone@example.com"}))
 		rec = httptest.NewRecorder()
 		e.ws.handleSSE(rec, req)
@@ -1317,7 +1317,7 @@ func TestTestIdentityWeb_UnmarkedSessionDecidedFromRow(t *testing.T) {
 		// The event stream refuses at accept time on a store error.
 		e.ws.events = NewChannelEventPublisher()
 		req := tiWebRequest(jar)
-		req.URL.RawQuery = "sub=notification.ti"
+		req.URL.RawQuery = "sub=broker.ti"
 		req = req.WithContext(context.WithValue(req.Context(), webUserContextKey{}, &webSessionUser{UserID: fx.Identity.ID}))
 		sse := httptest.NewRecorder()
 		e.ws.handleSSE(sse, req)
@@ -1595,7 +1595,7 @@ func TestTestIdentityWeb_Indicator(t *testing.T) {
 // logout do not touch the missing store.
 func TestTestIdentityWeb_NilSessionStoreFailsClosed(t *testing.T) {
 	ws := &WebServer{}
-	req := httptest.NewRequest(http.MethodGet, "/events?sub=notification.ti", nil)
+	req := httptest.NewRequest(http.MethodGet, "/events?sub=broker.ti", nil)
 	req.AddCookie(&http.Cookie{Name: testIdentitySessionCookie, Value: "x"})
 	assert.False(t, ws.sseTestIdentitySessionStillValid(req))
 
