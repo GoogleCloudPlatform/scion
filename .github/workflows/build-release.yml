@@ -573,8 +573,7 @@ jobs:
   # nesting. So this call passes it by name (the environment's value takes
   # precedence over the passed one), and so does every caller of this
   # workflow on the preview path (build-preview-weekly.yml). Without it the
-  # secret resolves to an empty string and the jobs skip with a notice, as if
-  # it were not set. Passing it by name, not with `secrets: inherit`, keeps
+  # secret resolves to an empty string and the gate job fails. Passing it by name, not with `secrets: inherit`, keeps
   # every other secret out of the called workflow.
   publish-homebrew:
     name: Publish to Homebrew
