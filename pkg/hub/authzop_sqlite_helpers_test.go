@@ -1301,6 +1301,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/triggers":               {"projectId": f.project},
 		"/api/v1/projects/{projectId}/triggers/{id}":          {"projectId": f.project, "id": f.trigger},
 		"/api/v1/projects/{projectId}/triggers/{id}/history":  {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/render":   {"projectId": f.project, "id": f.trigger},
 		"/api/v1/projects/{projectId}/triggers/{id}/pause":    {"projectId": f.project, "id": f.trigger},
 		"/api/v1/projects/{projectId}/triggers/{id}/resume":   {"projectId": f.project, "id": f.triggerPaused},
 		"/api/v1/projects/{projectId}/trigger-events":         {"projectId": f.project},

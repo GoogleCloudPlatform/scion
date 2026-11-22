@@ -1189,6 +1189,27 @@ var projectOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "trigger.render",
+		Domain:      "trigger",
+		Description: "Dry-run compile and render a trigger's template slots against a stored trigger event without firing or exercising recorded authority. Requires trigger.read on the trigger and read visibility on the event (agents without visibility on the event receive 404)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers/{id}/render", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "trigger.read",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestTriggerRender"},
+			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
+		},
+		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
 		ID:          "trigger.create",
 		Domain:      "trigger",
 		Description: "Create an event trigger in a project. Webhook triggers resolve source.id through webhookEndpointAccessDecision(read); GitHub triggers (source.kind=github, source.id=\"\") require hub.github_triggers and an authorized GitHub App association on the project; a github.comment action requires github_trigger.comment (users only in Stage 3; agents cannot author github.comment triggers because github_trigger.comment has no agent scope); all actions pass their target checks",
