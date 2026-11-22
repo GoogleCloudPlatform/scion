@@ -34,6 +34,17 @@ var keptPrimaryKeys = []string{
 	"requested_reviewer",
 	"requested_team",
 	"changes",
+	"head_commit",
+	"pusher",
+}
+
+var keptPushScalarKeys = []string{
+	"ref",
+	"before",
+	"after",
+	"created",
+	"deleted",
+	"forced",
 }
 
 // decodeJSONObject parses raw as a single JSON object preserving number tokens.
@@ -75,6 +86,13 @@ func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, err
 	if v, ok := root["number"]; ok {
 		proj["number"] = sanitizeValue(v)
 	}
+	if _, hasRef := root["ref"]; hasRef {
+		for _, key := range keptPushScalarKeys {
+			if v, ok := root[key]; ok {
+				proj[key] = sanitizeValue(v)
+			}
+		}
+	}
 	for _, key := range keptPrimaryKeys {
 		val, ok := root[key]
 		if !ok || val == nil {
@@ -86,6 +104,14 @@ func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, err
 			}
 		}
 		proj[key] = sanitizeValue(val)
+	}
+	if rawCommits, ok := root["commits"]; ok && rawCommits != nil {
+		if arr, isArr := rawCommits.([]any); isArr {
+			if len(arr) > MaxPushCommits {
+				arr = arr[:MaxPushCommits]
+			}
+			proj["commits"] = sanitizeValue(arr)
+		}
 	}
 	if repoMap, ok := root["repository"].(map[string]any); ok {
 		proj["repository"] = reduceRepository(repoMap)
@@ -287,8 +313,8 @@ func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]
 	// Tier 5: truncate any remaining large non-identity strings inside primary objects.
 	protected := map[string]bool{
 		"action": true, "full_name": true, "name": true, "login": true,
-		"type": true, "ref": true, "sha": true, "state": true,
-		"html_url": true, "path": true,
+		"type": true, "ref": true, "sha": true, "before": true, "after": true,
+		"state": true, "html_url": true, "path": true,
 	}
 	encoded, err = shrinkSubtreeFieldsLongestFirst(proj, proj, encoded, maxBytes, func(key string) bool {
 		return !protected[key]

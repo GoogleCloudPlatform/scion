@@ -1,0 +1,84 @@
+{
+  "ref": "refs/heads/feat/retry-backoff",
+  "before": "00112233445566778899aabbccddeeff00112233",
+  "after": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "created": false,
+  "deleted": false,
+  "forced": false,
+  "base_ref": null,
+  "compare": "https://github.com/octo-org/octo-repo/compare/001122334455...c3d4e5f6a1b2",
+  "commits": [
+    {
+      "id": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+      "tree_id": "cccc333333333333333333333333333333333333",
+      "distinct": true,
+      "message": "fix: tune backoff ceiling on feature branch",
+      "timestamp": "2026-05-01T10:25:00Z",
+      "url": "https://github.com/octo-org/octo-repo/commit/c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+      "author": {
+        "name": "The Octocat",
+        "email": "octocat@example.com",
+        "username": "octocat"
+      },
+      "committer": {
+        "name": "The Octocat",
+        "email": "octocat@example.com",
+        "username": "octocat"
+      },
+      "added": [],
+      "removed": [],
+      "modified": [
+        "pkg/retry/backoff.go"
+      ]
+    }
+  ],
+  "head_commit": {
+    "id": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+    "tree_id": "cccc333333333333333333333333333333333333",
+    "distinct": true,
+    "message": "fix: tune backoff ceiling on feature branch",
+    "timestamp": "2026-05-01T10:25:00Z",
+    "url": "https://github.com/octo-org/octo-repo/commit/c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+    "author": {
+      "name": "The Octocat",
+      "email": "octocat@example.com",
+      "username": "octocat"
+    },
+    "committer": {
+      "name": "The Octocat",
+      "email": "octocat@example.com",
+      "username": "octocat"
+    },
+    "added": [],
+    "removed": [],
+    "modified": [
+      "pkg/retry/backoff.go"
+    ]
+  },
+  "pusher": {
+    "name": "octocat",
+    "email": "octocat@example.com"
+  },
+  "repository": {
+    "id": 1296269,
+    "name": "octo-repo",
+    "full_name": "octo-org/octo-repo",
+    "private": true,
+    "default_branch": "main",
+    "html_url": "https://github.com/octo-org/octo-repo",
+    "url": "https://api.github.com/repos/octo-org/octo-repo",
+    "owner": {
+      "login": "octo-org",
+      "id": 100,
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "octocat",
+    "id": 202,
+    "type": "User"
+  },
+  "installation": {
+    "id": 987654
+  }
+}

@@ -559,3 +559,67 @@ func TestProjectPayload_Tier5ProtectsHTMLURLAndPath(t *testing.T) {
 		assert.Nil(t, res.Payload)
 	})
 }
+
+func TestProjectPayload_PushKeepsHeadCommitAndCapsCommitsAt20(t *testing.T) {
+	commits := make([]map[string]any, 25)
+	for i := range commits {
+		commits[i] = map[string]any{
+			"id":        fmt.Sprintf("%040d", i+1),
+			"message":   fmt.Sprintf("commit %d", i+1),
+			"timestamp": "2026-05-01T10:00:00Z",
+			"url":       "https://github.com/octo-org/octo-repo/commit/" + fmt.Sprintf("%040d", i+1),
+		}
+	}
+	raw, err := json.Marshal(map[string]any{
+		"ref":          "refs/heads/main",
+		"before":       fmt.Sprintf("%040d", 0),
+		"after":        fmt.Sprintf("%040d", 25),
+		"created":      false,
+		"deleted":      false,
+		"forced":       false,
+		"organization": map[string]any{"login": "octo-org", "id": 99},
+		"enterprise":   map[string]any{"id": 7, "name": "Octo Corp"},
+		"installation": map[string]any{"id": 42, "repositories_url": "https://api.github.com/installation/repositories"},
+		"sender":       map[string]any{"login": "monalisa", "id": 201, "type": "User", "avatar_url": "https://avatars.example/201"},
+		"repository": map[string]any{
+			"id":             1001,
+			"full_name":      "octo-org/octo-repo",
+			"name":           "octo-repo",
+			"private":        false,
+			"default_branch": "main",
+			"html_url":       "https://github.com/octo-org/octo-repo",
+			"archive_url":    "https://api.github.com/repos/octo-org/octo-repo/{archive_format}",
+			"owner":          map[string]any{"login": "octo-org", "id": 99, "type": "Organization", "avatar_url": "https://avatars.example/99"},
+		},
+		"pusher":      map[string]any{"name": "monalisa", "email": "monalisa@example.com"},
+		"head_commit": commits[24],
+		"commits":     commits,
+	})
+	require.NoError(t, err)
+
+	out, truncated, err := projectPayload(raw, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.False(t, truncated)
+
+	var proj map[string]any
+	require.NoError(t, json.Unmarshal(out, &proj))
+	assert.NotContains(t, proj, "organization")
+	assert.NotContains(t, proj, "enterprise")
+	assert.Equal(t, "refs/heads/main", proj["ref"])
+	assert.NotNil(t, proj["head_commit"])
+
+	projCommits, ok := proj["commits"].([]any)
+	require.True(t, ok)
+	require.Len(t, projCommits, MaxPushCommits)
+	firstCommit, ok := projCommits[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, fmt.Sprintf("%040d", 1), firstCommit["id"])
+	assert.NotContains(t, firstCommit, "url")
+
+	repoMap, ok := proj["repository"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, repoMap, "archive_url")
+	senderMap, ok := proj["sender"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, senderMap, "avatar_url")
+}

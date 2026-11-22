@@ -1,0 +1,90 @@
+{
+  "handled": true,
+  "source_kind": "github",
+  "source_id": "987654",
+  "delivery_id": "00000000-0000-4000-8000-oversize-head-message",
+  "type": "github.push",
+  "subject": "github:octo-org/octo-repo@refs/heads/main",
+  "occurred_at": "2026-05-01T10:50:00Z",
+  "installation_id": 987654,
+  "repo_full_name": "octo-org/octo-repo",
+  "sender_login": "monalisa",
+  "sender_id": 201,
+  "sender_type": "User",
+  "payload_bytes": 1808,
+  "truncated": false,
+  "attributes": {
+    "after": "9999888877776666555544443333222211110000",
+    "before": "00112233445566778899aabbccddeeff00112233",
+    "commit_count": "1",
+    "created": "false",
+    "default_branch": "main",
+    "deleted": "false",
+    "delivery": "00000000-0000-4000-8000-oversize-head-message",
+    "event": "push",
+    "forced": "false",
+    "head_message": "feat: UTF-8 boundary test for head_message truncation — aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéééééééééééééééé",
+    "installation_id": "987654",
+    "is_default_branch": "true",
+    "provider": "github",
+    "pusher": "monalisa",
+    "ref": "refs/heads/main",
+    "repo": "octo-org/octo-repo",
+    "repo_name": "octo-repo",
+    "repo_owner": "octo-org",
+    "repo_private": "false",
+    "sender": "monalisa",
+    "sender_id": "201",
+    "sender_type": "User"
+  },
+  "lists": {
+    "commits": [
+      "9999888877776666555544443333222211110000"
+    ]
+  },
+  "projected_payload": {
+    "after": "9999888877776666555544443333222211110000",
+    "before": "00112233445566778899aabbccddeeff00112233",
+    "commits": [
+      {
+        "id": "9999888877776666555544443333222211110000",
+        "message": "feat: UTF-8 boundary test for head_message truncation — aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéééééééééééééééééééé",
+        "timestamp": "2026-05-01T10:50:00Z"
+      }
+    ],
+    "created": false,
+    "deleted": false,
+    "forced": false,
+    "head_commit": {
+      "id": "9999888877776666555544443333222211110000",
+      "message": "feat: UTF-8 boundary test for head_message truncation — aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéééééééééééééééééééé",
+      "timestamp": "2026-05-01T10:50:00Z"
+    },
+    "installation": {
+      "id": 987654
+    },
+    "pusher": {
+      "email": "monalisa@example.com",
+      "name": "monalisa"
+    },
+    "ref": "refs/heads/main",
+    "repository": {
+      "default_branch": "main",
+      "full_name": "octo-org/octo-repo",
+      "html_url": "https://github.com/octo-org/octo-repo",
+      "id": 1296269,
+      "name": "octo-repo",
+      "owner": {
+        "id": 100,
+        "login": "octo-org",
+        "type": "Organization"
+      },
+      "private": false
+    },
+    "sender": {
+      "id": 201,
+      "login": "monalisa",
+      "type": "User"
+    }
+  }
+}

@@ -16,6 +16,7 @@ package github
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -256,6 +257,115 @@ func TestNormalize_MalformedInputs(t *testing.T) {
 				"sender": {"login": "u"},
 				"issue": {"number": 1, "updated_at": "not-a-date"}
 			}`,
+		},
+		{
+			name:  "push missing ref",
+			event: EventPush,
+			payload: `{
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push ref with whitespace",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/bad branch",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push missing before",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"after": "1111111111111111111111111111111111111111",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push missing after",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push non-boolean forced",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"forced": "yes",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push non-array commits",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"commits": "not-an-array",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push non-object head_commit",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"head_commit": "not-an-object",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push malformed head_commit timestamp",
+			event: EventPush,
+			payload: `{
+				"ref": "refs/heads/main",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"head_commit": {"id": "1111", "timestamp": "bad-ts"},
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`,
+		},
+		{
+			name:  "push subject exceeds 256 bytes",
+			event: EventPush,
+			payload: fmt.Sprintf(`{
+				"ref": "refs/heads/%s",
+				"before": "0000000000000000000000000000000000000000",
+				"after": "1111111111111111111111111111111111111111",
+				"installation": {"id": 1},
+				"repository": {"full_name": "o/r"},
+				"sender": {"login": "u"}
+			}`, strings.Repeat("b", MaxSubjectBytes)),
 		},
 	}
 

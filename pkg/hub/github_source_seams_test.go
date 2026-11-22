@@ -304,15 +304,28 @@ func TestServerGitHubSourceSeams_WireVerifierParity(t *testing.T) {
 			name:  "unsupported event family ignored",
 			appID: 4242,
 			mutateHeaders: func(h http.Header) {
-				h.Set("X-GitHub-Event", "push")
+				h.Set("X-GitHub-Event", "check_run")
 				h.Del("X-GitHub-Delivery")
 			},
-			eventArg:       "push",
+			eventArg:       "check_run",
 			deliveryArg:    "",
 			wantSeamErr:    nil,
 			wantSupported:  false,
 			wantProdStatus: http.StatusOK,
 			wantProdBody:   `"status":"ignored"`,
+		},
+		{
+			name:  "push event missing delivery header",
+			appID: 4242,
+			mutateHeaders: func(h http.Header) {
+				h.Set("X-GitHub-Event", triggithub.EventPush)
+				h.Del("X-GitHub-Delivery")
+			},
+			eventArg:       triggithub.EventPush,
+			deliveryArg:    "",
+			wantSeamErr:    triggithub.ErrInvalidDeliveryID,
+			wantProdStatus: http.StatusBadRequest,
+			wantProdBody:   "invalid delivery id",
 		},
 		{
 			name:  "missing delivery header",

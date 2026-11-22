@@ -1,0 +1,83 @@
+{
+  "ref": "refs/heads/release/v1.2",
+  "before": "0000000000000000000000000000000000000000",
+  "after": "2222333344445555666677778888999900001111",
+  "created": true,
+  "deleted": false,
+  "forced": false,
+  "base_ref": "refs/heads/main",
+  "compare": "https://github.com/octo-org/octo-repo/commit/222233334444",
+  "commits": [
+    {
+      "id": "2222333344445555666677778888999900001111",
+      "tree_id": "eeee555555555555555555555555555555555555",
+      "distinct": true,
+      "message": "chore: cut release v1.2 branch",
+      "timestamp": "2026-05-01T10:40:00Z",
+      "url": "https://github.com/octo-org/octo-repo/commit/2222333344445555666677778888999900001111",
+      "author": {
+        "name": "Monalisa Octocat",
+        "email": "monalisa@example.com",
+        "username": "monalisa"
+      },
+      "committer": {
+        "name": "Monalisa Octocat",
+        "email": "monalisa@example.com",
+        "username": "monalisa"
+      },
+      "added": [],
+      "removed": [],
+      "modified": [
+        "VERSION"
+      ]
+    }
+  ],
+  "head_commit": {
+    "id": "2222333344445555666677778888999900001111",
+    "tree_id": "eeee555555555555555555555555555555555555",
+    "distinct": true,
+    "message": "chore: cut release v1.2 branch",
+    "timestamp": "2026-05-01T10:40:00Z",
+    "url": "https://github.com/octo-org/octo-repo/commit/2222333344445555666677778888999900001111",
+    "author": {
+      "name": "Monalisa Octocat",
+      "email": "monalisa@example.com",
+      "username": "monalisa"
+    },
+    "committer": {
+      "name": "Monalisa Octocat",
+      "email": "monalisa@example.com",
+      "username": "monalisa"
+    },
+    "added": [],
+    "removed": [],
+    "modified": [
+      "VERSION"
+    ]
+  },
+  "pusher": {
+    "name": "monalisa",
+    "email": "monalisa@example.com"
+  },
+  "repository": {
+    "id": 1296269,
+    "name": "octo-repo",
+    "full_name": "octo-org/octo-repo",
+    "private": false,
+    "default_branch": "main",
+    "html_url": "https://github.com/octo-org/octo-repo",
+    "owner": {
+      "login": "octo-org",
+      "id": 100,
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "monalisa",
+    "id": 201,
+    "type": "User"
+  },
+  "installation": {
+    "id": 987654
+  }
+}

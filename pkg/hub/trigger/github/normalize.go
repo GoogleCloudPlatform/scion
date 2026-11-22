@@ -55,14 +55,17 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		return Result{}, err
 	}
 
-	actionRaw, err := reqString(root, "action", "action")
-	if err != nil {
-		return Result{}, err
+	var action string
+	if eventName != EventPush {
+		actionRaw, err := reqString(root, "action", "action")
+		if err != nil {
+			return Result{}, err
+		}
+		if !isActionIdent(actionRaw) {
+			return Result{}, errors.New("github trigger: invalid action identifier")
+		}
+		action = strings.ToLower(actionRaw)
 	}
-	if !isActionIdent(actionRaw) {
-		return Result{}, errors.New("github trigger: invalid action identifier")
-	}
-	action := strings.ToLower(actionRaw)
 
 	instMap, err := reqMap(root, "installation", "installation")
 	if err != nil {
@@ -144,8 +147,10 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		"repo_private":    strconv.FormatBool(repoPrivate),
 		"installation_id": strconv.FormatInt(installationID, 10),
 		"event":           eventName,
-		"action":          action,
 		"sender":          senderLogin,
+	}
+	if action != "" {
+		attrs["action"] = action
 	}
 	if defaultBranch != "" {
 		attrs["default_branch"] = defaultBranch
@@ -163,9 +168,11 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	lists := make(map[string][]string)
 
 	var (
-		number         int64
-		occurredAt     time.Time
-		rawCommandBody string
+		number               int64
+		pushRef              string
+		pushCommitsTruncated bool
+		occurredAt           time.Time
+		rawCommandBody       string
 	)
 
 	switch eventName {
@@ -179,12 +186,19 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		number, occurredAt, rawCommandBody, err = normalizePullRequestReview(root, action, repoFullName, opts, attrs, lists)
 	case EventPullRequestReviewComment:
 		number, occurredAt, rawCommandBody, err = normalizePullRequestReviewComment(root, action, repoFullName, opts, attrs, lists)
+	case EventPush:
+		pushRef, occurredAt, pushCommitsTruncated, err = normalizePush(root, defaultBranch, opts, attrs, lists)
 	}
 	if err != nil {
 		return base, err
 	}
 
-	subject := fmt.Sprintf("github:%s#%d", repoFullName, number)
+	var subject string
+	if eventName == EventPush {
+		subject = fmt.Sprintf("github:%s@%s", repoFullName, pushRef)
+	} else {
+		subject = fmt.Sprintf("github:%s#%d", repoFullName, number)
+	}
 	if len(subject) > MaxSubjectBytes || !allPrintable(subject) {
 		return base, errors.New("github trigger: derived subject exceeds bounds or contains non-printable characters")
 	}
@@ -215,11 +229,16 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	if err != nil {
 		return base, err
 	}
-	if listsTruncated {
+	if pushCommitsTruncated || listsTruncated {
 		attrs["lists_truncated"] = "true"
 	}
 	if err := enforceAttributesCeiling(attrs, DefaultMaxAttributesBytes); err != nil {
 		return base, err
+	}
+
+	eventType := SourceKind + "." + eventName
+	if action != "" {
+		eventType += "." + action
 	}
 
 	return Result{
@@ -227,7 +246,7 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		SourceKind:        SourceKind,
 		SourceID:          strconv.FormatInt(installationID, 10),
 		DeliveryID:        deliveryID,
-		Type:              SourceKind + "." + eventName + "." + action,
+		Type:              eventType,
 		Subject:           subject,
 		OccurredAt:        occurredAt,
 		Attributes:        attrs,
@@ -734,6 +753,107 @@ func normalizePullRequestReviewComment(
 	return number, occurredAt, rawBody, nil
 }
 
+func normalizePush(
+	root map[string]any,
+	defaultBranch string,
+	opts Options,
+	attrs map[string]string,
+	lists map[string][]string,
+) (string, time.Time, bool, error) {
+	ref, err := reqString(root, "ref", "ref")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	if !allPrintableNonSpace(ref) {
+		return "", time.Time{}, false, errors.New("github trigger: invalid ref")
+	}
+	before, err := reqString(root, "before", "before")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	after, err := reqString(root, "after", "after")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	forced, err := optBool(root, "forced", "forced")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	created, err := optBool(root, "created", "created")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	deleted, err := optBool(root, "deleted", "deleted")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+
+	isDefaultBranch := defaultBranch != "" && ref == "refs/heads/"+defaultBranch
+	attrs["ref"] = cleanUTF8(ref)
+	attrs["before"] = cleanUTF8(before)
+	attrs["after"] = cleanUTF8(after)
+	attrs["is_default_branch"] = strconv.FormatBool(isDefaultBranch)
+	attrs["forced"] = strconv.FormatBool(forced)
+	attrs["created"] = strconv.FormatBool(created)
+	attrs["deleted"] = strconv.FormatBool(deleted)
+
+	if rawPusher, exists := root["pusher"]; exists && rawPusher != nil {
+		pusherMap, ok := rawPusher.(map[string]any)
+		if !ok {
+			return "", time.Time{}, false, errors.New("github trigger: pusher must be a JSON object")
+		}
+		if name := optCleanString(pusherMap, "name"); name != "" {
+			attrs["pusher"] = name
+		}
+	}
+
+	commitSHAs := []string{}
+	commitCount := 0
+	commitsTruncated := false
+	if rawCommits, exists := root["commits"]; exists && rawCommits != nil {
+		arr, ok := rawCommits.([]any)
+		if !ok {
+			return "", time.Time{}, false, errors.New("github trigger: commits must be a JSON array")
+		}
+		commitCount = len(arr)
+		if commitCount > MaxPushCommits {
+			commitsTruncated = true
+		}
+		limit := commitCount
+		if limit > MaxPushCommits {
+			limit = MaxPushCommits
+		}
+		commitSHAs = make([]string, 0, limit)
+		for i := 0; i < limit; i++ {
+			if m, ok := arr[i].(map[string]any); ok {
+				if sha := optCleanString(m, "id"); sha != "" {
+					commitSHAs = append(commitSHAs, sha)
+				}
+			}
+		}
+	}
+	attrs["commit_count"] = strconv.Itoa(commitCount)
+	lists["commits"] = commitSHAs
+
+	var occurredAt time.Time
+	if rawHead, exists := root["head_commit"]; exists && rawHead != nil {
+		headCommitMap, ok := rawHead.(map[string]any)
+		if !ok {
+			return "", time.Time{}, false, errors.New("github trigger: head_commit must be a JSON object")
+		}
+		if msg := optCleanString(headCommitMap, "message"); msg != "" {
+			attrs["head_message"] = truncateUTF8(msg, opts.maxHeadMessageBytes())
+		}
+		ts, _, err := optTimestamp(headCommitMap, "timestamp", "head_commit.timestamp")
+		if err != nil {
+			return "", time.Time{}, false, err
+		}
+		occurredAt = ts
+	}
+
+	return ref, occurredAt, commitsTruncated, nil
+}
+
 func populatePRCommon(
 	prMap map[string]any,
 	number int64,
@@ -906,6 +1026,7 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"command_args",
 		"issue_title",
 		"title",
+		"head_message",
 	}
 	for _, key := range priorityKeys {
 		for len(encoded) > maxBytes {
@@ -952,6 +1073,8 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"stale": true, "payload_truncated": true, "lists_truncated": true,
 		"mention_detection": true, "mention": true, "command": true,
 		"head_ref": true, "head_sha": true, "base_ref": true, "base_sha": true,
+		"ref": true, "before": true, "after": true, "is_default_branch": true,
+		"forced": true, "created": true, "deleted": true, "commit_count": true,
 		"comment_id": true, "review_id": true, "line": true, "path": true,
 		"html_url": true, "comment_url": true, "issue_url": true, "pull_request_url": true,
 	}

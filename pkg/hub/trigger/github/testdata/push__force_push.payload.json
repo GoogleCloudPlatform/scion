@@ -1,0 +1,83 @@
+{
+  "ref": "refs/heads/feat/retry-backoff",
+  "before": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "after": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+  "created": false,
+  "deleted": false,
+  "forced": true,
+  "base_ref": null,
+  "compare": "https://github.com/octo-org/octo-repo/compare/c3d4e5f6a1b2...f0f0f0f0f0f0",
+  "commits": [
+    {
+      "id": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "tree_id": "dddd444444444444444444444444444444444444",
+      "distinct": true,
+      "message": "refactor: rebase feature branch onto main",
+      "timestamp": "2026-05-01T10:35:00Z",
+      "url": "https://github.com/octo-org/octo-repo/commit/f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+      "author": {
+        "name": "Monalisa Octocat",
+        "email": "monalisa@example.com",
+        "username": "monalisa"
+      },
+      "committer": {
+        "name": "Monalisa Octocat",
+        "email": "monalisa@example.com",
+        "username": "monalisa"
+      },
+      "added": [],
+      "removed": [],
+      "modified": [
+        "pkg/retry/backoff.go"
+      ]
+    }
+  ],
+  "head_commit": {
+    "id": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+    "tree_id": "dddd444444444444444444444444444444444444",
+    "distinct": true,
+    "message": "refactor: rebase feature branch onto main",
+    "timestamp": "2026-05-01T10:35:00Z",
+    "url": "https://github.com/octo-org/octo-repo/commit/f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+    "author": {
+      "name": "Monalisa Octocat",
+      "email": "monalisa@example.com",
+      "username": "monalisa"
+    },
+    "committer": {
+      "name": "Monalisa Octocat",
+      "email": "monalisa@example.com",
+      "username": "monalisa"
+    },
+    "added": [],
+    "removed": [],
+    "modified": [
+      "pkg/retry/backoff.go"
+    ]
+  },
+  "pusher": {
+    "name": "monalisa",
+    "email": "monalisa@example.com"
+  },
+  "repository": {
+    "id": 1296269,
+    "name": "octo-repo",
+    "full_name": "octo-org/octo-repo",
+    "private": false,
+    "default_branch": "main",
+    "html_url": "https://github.com/octo-org/octo-repo",
+    "owner": {
+      "login": "octo-org",
+      "id": 100,
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "monalisa",
+    "id": 201,
+    "type": "User"
+  },
+  "installation": {
+    "id": 987654
+  }
+}
