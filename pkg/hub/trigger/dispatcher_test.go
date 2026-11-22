@@ -389,7 +389,9 @@ func (m *memTriggerStore) ClaimTriggerFireCoalescing(_ context.Context, fire *st
 	}
 	var superseded []store.TriggerFire
 	for _, f := range m.byFireID {
-		if f.TriggerID == fire.TriggerID && f.Subject == fire.Subject && f.Status == store.TriggerFireStatusCoalescing {
+		isCoalescingOrReaped := f.Status == store.TriggerFireStatusCoalescing ||
+			(f.Status == store.TriggerFireStatusFailed && f.Error == trigger.ErrFireReapedDuringCoalesce)
+		if f.TriggerID == fire.TriggerID && f.Subject == fire.Subject && isCoalescingOrReaped {
 			f.Status = store.TriggerFireStatusSkipped
 			f.Error = coalesceError
 			fin := now
@@ -406,6 +408,23 @@ func (m *memTriggerStore) ClaimTriggerFireCoalescing(_ context.Context, fire *st
 	m.byFireID[cp.ID] = &cp
 	*fire = cp
 	return true, false, superseded, nil, nil
+}
+func (m *memTriggerStore) CancelCoalescingTriggerFire(_ context.Context, id, errMsg string, finishedAt time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.byFireID[id]
+	if !ok {
+		return false, nil
+	}
+	if f.Status != store.TriggerFireStatusCoalescing &&
+		!(f.Status == store.TriggerFireStatusFailed && f.Error == trigger.ErrFireReapedDuringCoalesce) {
+		return false, nil
+	}
+	f.Status = store.TriggerFireStatusSkipped
+	f.Error = errMsg
+	t := finishedAt.UTC()
+	f.FinishedAt = &t
+	return true, nil
 }
 func (m *memTriggerStore) FinishTriggerFire(_ context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error) {
 	m.mu.Lock()
@@ -434,11 +453,20 @@ func (m *memTriggerStore) GetTriggerFire(_ context.Context, id string) (*store.T
 	cp := *f
 	return &cp, nil
 }
-func (m *memTriggerStore) ListTriggerFires(context.Context, store.TriggerFireFilter, store.ListOptions) (*store.ListResult[store.TriggerFire], error) {
+func (m *memTriggerStore) ListTriggerFires(_ context.Context, filter store.TriggerFireFilter, _ store.ListOptions) (*store.ListResult[store.TriggerFire], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var items []store.TriggerFire
 	for _, f := range m.byFireID {
+		if filter.EventID != "" && f.EventID != filter.EventID {
+			continue
+		}
+		if filter.TriggerID != "" && f.TriggerID != filter.TriggerID {
+			continue
+		}
+		if filter.Status != "" && f.Status != filter.Status {
+			continue
+		}
 		items = append(items, *f)
 	}
 	return &store.ListResult[store.TriggerFire]{Items: items, TotalCount: len(items)}, nil

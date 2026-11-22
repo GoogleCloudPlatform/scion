@@ -76,6 +76,7 @@ const (
 	ErrFireSubjectBusy                   = "subject busy"
 	ErrFireSubjectDispatchInProgress     = "subject dispatch in progress"
 	ErrFireCoalesced                     = "coalesced"
+	ErrFireCoalesceCancelled             = "coalesce cancelled"
 	ErrFireStaleEvent                    = "stale event"
 	ErrFireReapedDuringCoalesce          = "hub restarted during coalesce"
 
@@ -89,6 +90,7 @@ const (
 	FireSkipReasonSubjectBusy                = "subject_busy"
 	FireSkipReasonSubjectDispatchInProgress  = "subject_dispatch_in_progress"
 	FireSkipReasonCoalesced                  = "coalesced"
+	FireSkipReasonCoalesceCancelled          = "coalesce_cancelled"
 	FireSkipReasonAgentNameInUse             = "agent_name_in_use"
 	FireSkipReasonCommentRateLimited         = "comment_rate_limited"
 	FireSkipReasonOther                      = "other"
@@ -107,6 +109,7 @@ func FireSkipReasons() []string {
 		FireSkipReasonSubjectBusy,
 		FireSkipReasonSubjectDispatchInProgress,
 		FireSkipReasonCoalesced,
+		FireSkipReasonCoalesceCancelled,
 		FireSkipReasonAgentNameInUse,
 		FireSkipReasonCommentRateLimited,
 		FireSkipReasonOther,
@@ -133,6 +136,8 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonSubjectDispatchInProgress
 	case ErrFireCoalesced:
 		return FireSkipReasonCoalesced
+	case ErrFireCoalesceCancelled:
+		return FireSkipReasonCoalesceCancelled
 	case "agent name in use":
 		return FireSkipReasonAgentNameInUse
 	case "comment rate limited":
@@ -544,18 +549,19 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	}
 
 	var (
-		matchCount        int
-		fireCount         int
-		hadAnyFire        bool
-		sourceAuthChecked bool
-		sourceAuthorized  bool
-		enrichmentChecked bool
-		webhookEPChecked  bool
-		webhookEP         *store.WebhookEndpoint
-		earliestRetryAt   time.Time
-		baseActBuilt      bool
-		baseAct           triggerrule.Activation
-		actErr            error
+		matchCount              int
+		fireCount               int
+		hadAnyFire              bool
+		sourceAuthChecked       bool
+		sourceAuthorized        bool
+		enrichmentChecked       bool
+		webhookEPChecked        bool
+		webhookEP               *store.WebhookEndpoint
+		earliestRetryAt         time.Time
+		stillCoalescingTriggers = make(map[string]bool)
+		baseActBuilt            bool
+		baseAct                 triggerrule.Activation
+		actErr                  error
 	)
 
 	for i := range candidates {
@@ -949,6 +955,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 			if !claimed {
 				if existing != nil && existing.Status == store.TriggerFireStatusCoalescing {
+					stillCoalescingTriggers[tr.ID] = true
 					retryAt := notBefore
 					if existing.NotBefore != nil && !existing.NotBefore.IsZero() {
 						retryAt = existing.NotBefore.UTC()
@@ -962,6 +969,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				continue
 			}
 			if !promoted {
+				stillCoalescingTriggers[tr.ID] = true
 				if earliestRetryAt.IsZero() || notBefore.Before(earliestRetryAt) {
 					earliestRetryAt = notBefore
 				}
@@ -982,7 +990,39 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 					"eventID", ev.ID, "triggerID", tr.ID, "error", cErr)
 				return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
 			}
-			if !claimed {
+			if !claimed && isCoalescingOrReapedFire(existing) {
+				// Trigger's coalesce_window was edited to 0 mid-window while the
+				// rule still matches and remains enabled: route through the
+				// promote/revive path instead of stranding the coalescing row.
+				claimed, promoted, _, existing, cErr = d.store.ClaimTriggerFireCoalescing(ctx, &fire, ErrFireCoalesced, claimNow, claimNow)
+				if cErr != nil {
+					d.logger.Warn("trigger: failed to promote coalescing trigger fire after window edit",
+						"eventID", ev.ID, "triggerID", tr.ID, "error", cErr)
+					return durablequeue.Result{Err: errors.New("trigger: claim fire failed")}
+				}
+				if !claimed {
+					if existing != nil && existing.Status == store.TriggerFireStatusCoalescing {
+						stillCoalescingTriggers[tr.ID] = true
+						retryAt := claimNow
+						if existing.NotBefore != nil && !existing.NotBefore.IsZero() {
+							retryAt = existing.NotBefore.UTC()
+						}
+						if earliestRetryAt.IsZero() || retryAt.Before(earliestRetryAt) {
+							earliestRetryAt = retryAt
+						}
+					} else if existing != nil && existing.Status == store.TriggerFireStatusFired {
+						fireCount++
+					}
+					continue
+				}
+				if !promoted {
+					stillCoalescingTriggers[tr.ID] = true
+					if earliestRetryAt.IsZero() || claimNow.Before(earliestRetryAt) {
+						earliestRetryAt = claimNow
+					}
+					continue
+				}
+			} else if !claimed {
 				// Display-only counter: on a lost-lease re-handle, if an earlier
 				// attempt's claimed row is still in status "firing" (or transitions to
 				// "fired" after this check), fire_count on trigger_events can
@@ -1150,6 +1190,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	if ctx.Err() != nil {
 		return durablequeue.Result{Err: errors.New("trigger: event handler canceled")}
 	}
+	if err := d.cancelStrandedCoalescingFires(ctx, ev, stillCoalescingTriggers); err != nil {
+		d.logger.Warn("trigger: failed to cancel stranded coalescing fires",
+			"eventID", ev.ID, "error", err)
+		return durablequeue.Result{Err: errors.New("trigger: cancel stranded coalescing fires failed")}
+	}
 	if !earliestRetryAt.IsZero() {
 		return durablequeue.Result{RetryAt: earliestRetryAt}
 	}
@@ -1170,6 +1215,65 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 
 func actionRefusesStaleEvent(actionType string) bool {
 	return actionType == store.TriggerActionDispatchAgent || actionType == store.TriggerActionGitHubComment
+}
+
+func isCoalescingOrReapedFire(f *store.TriggerFire) bool {
+	if f == nil {
+		return false
+	}
+	return f.Status == store.TriggerFireStatusCoalescing ||
+		(f.Status == store.TriggerFireStatusFailed && f.Error == ErrFireReapedDuringCoalesce)
+}
+
+// cancelStrandedCoalescingFires explicitly skips any coalescing (or
+// reaped-coalesce) fire rows for ev whose trigger is no longer actively
+// coalescing in this pass (e.g., the trigger was paused/deleted or its match
+// rules/types were edited mid-window so it no longer matches). Without this,
+// those rows would stay live for skip/reuse until reaped as hub-restart failures.
+func (d *Dispatcher) cancelStrandedCoalescingFires(ctx context.Context, ev *store.TriggerEvent, stillCoalescing map[string]bool) error {
+	list, err := d.store.ListTriggerFires(ctx, store.TriggerFireFilter{EventID: ev.ID}, store.ListOptions{Limit: 100})
+	if err != nil {
+		return err
+	}
+	if list == nil || len(list.Items) == 0 {
+		return nil
+	}
+	now := d.now().UTC()
+	writeCtx, cancelWrite := storeWriteContext(ctx)
+	defer cancelWrite()
+	for i := range list.Items {
+		ef := &list.Items[i]
+		if !isCoalescingOrReapedFire(ef) || stillCoalescing[ef.TriggerID] {
+			continue
+		}
+		cancelled, cErr := d.store.CancelCoalescingTriggerFire(writeCtx, ef.ID, ErrFireCoalesceCancelled, now)
+		if cErr != nil {
+			return cErr
+		}
+		if !cancelled {
+			continue
+		}
+		d.recordFireMetric(ef.ActionType, store.TriggerFireStatusSkipped, ErrFireCoalesceCancelled)
+		if rErr := d.store.RecordTriggerFire(writeCtx, ef.TriggerID, now, store.TriggerFireStatusSkipped, ErrFireCoalesceCancelled); rErr != nil &&
+			!errors.Is(rErr, store.ErrNotFound) {
+			d.logger.Warn("trigger: failed to update cancelled coalescing fire counters",
+				"triggerID", ef.TriggerID, "fireID", ef.ID, "error", rErr)
+		}
+		if d.fireAudit != nil {
+			d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
+				ProjectID:      ef.ProjectID,
+				TriggerID:      ef.TriggerID,
+				EventID:        ef.EventID,
+				FireID:         ef.ID,
+				ActionType:     ef.ActionType,
+				Status:         store.TriggerFireStatusSkipped,
+				MatchedThrough: ef.MatchedThrough,
+				DecidedDialect: ef.DecidedDialect,
+				Reason:         FireSkipReasonCoalesceCancelled,
+			})
+		}
+	}
+	return nil
 }
 
 func (d *Dispatcher) isEventSourceReplayProtected(

@@ -400,3 +400,239 @@ func TestDispatcher_SubjectModeReuse_FreshUnboundClaimSkipsInProgress(t *testing
 	require.Len(t, core.firedRequests(), 1)
 	assert.Equal(t, store.TriggerActionDispatchAgent, core.firedRequests()[0].ActionType)
 }
+
+func TestDispatcher_CoalesceWindow_MidWindowEditToZeroPromotes(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 22, 17, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	tr := makeActiveTrigger(projID, "", "edit-to-zero", []string{"github.pull_request.synchronize"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.CoalesceWindowSeconds = 30
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	core := &g4aTestCore{}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: cs,
+		Now:   clock,
+	})
+	require.NoError(t, err)
+
+	evID := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.pull_request.synchronize",
+		Subject:    "github:octo/repo#81",
+		DedupKey:   "del-edit0-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	res1 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.False(t, res1.Done)
+	assert.Equal(t, now.Add(30*time.Second), res1.RetryAt)
+
+	fires1, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	origFireID := fires1.Items[0].ID
+	assert.Equal(t, store.TriggerFireStatusCoalescing, fires1.Items[0].Status)
+
+	// Mid-window PATCH: coalesce_window changed to 0 while trigger stays active and matching.
+	tr.CoalesceWindowSeconds = 0
+	require.NoError(t, cs.UpdateTrigger(ctx, tr, store.TriggerFieldMask{CoalesceWindowSeconds: true}, 1, true, nil))
+
+	// At retry time, the existing coalescing row is promoted in place and fired (never stranded).
+	now = now.Add(30 * time.Second)
+	res2 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.True(t, res2.Done)
+	assert.Zero(t, res2.RetryAt)
+	require.Len(t, core.firedRequests(), 1)
+
+	fires2, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, fires2.Items, 1)
+	assert.Equal(t, origFireID, fires2.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusFired, fires2.Items[0].Status)
+}
+
+func TestDispatcher_CoalesceWindow_MidWindowPauseOrRuleMismatchCancels(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	trPaused := makeActiveTrigger(projID, "", "mid-pause", []string{"github.pull_request.synchronize"})
+	trPaused.SourceKind = store.TriggerSourceKindGitHub
+	trPaused.CoalesceWindowSeconds = 30
+	require.NoError(t, cs.CreateTrigger(ctx, trPaused))
+
+	trMismatch := makeActiveTrigger(projID, "", "mid-mismatch", []string{"github.pull_request.synchronize"})
+	trMismatch.SourceKind = store.TriggerSourceKindGitHub
+	trMismatch.CoalesceWindowSeconds = 30
+	require.NoError(t, cs.CreateTrigger(ctx, trMismatch))
+
+	core := &g4aTestCore{}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: cs,
+		Now:   clock,
+	})
+	require.NoError(t, err)
+
+	evID := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.pull_request.synchronize",
+		Subject:    "github:octo/repo#82",
+		DedupKey:   "del-cancel-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	res1 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.False(t, res1.Done)
+	assert.Equal(t, now.Add(30*time.Second), res1.RetryAt)
+
+	// Pause trPaused and edit trMismatch so it no longer matches the event type.
+	trPaused.Status = store.TriggerStatusPaused
+	require.NoError(t, cs.UpdateTrigger(ctx, trPaused, store.TriggerFieldMask{Status: true}, 1, true, nil))
+
+	trMismatch.MatchTypes = []string{"github.issues.opened"}
+	require.NoError(t, cs.UpdateTrigger(ctx, trMismatch, store.TriggerFieldMask{MatchTypes: true}, 1, true, nil))
+
+	// On retry, both stranded coalescing rows must be finished as skipped "coalesce cancelled"
+	// and no longer count as live for the subject.
+	now = now.Add(30 * time.Second)
+	res2 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.True(t, res2.Done)
+	assert.Zero(t, res2.RetryAt)
+	assert.Empty(t, core.firedRequests())
+
+	for _, tid := range []string{trPaused.ID, trMismatch.ID} {
+		fires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tid, EventID: evID}, store.ListOptions{Limit: 5})
+		require.NoError(t, err)
+		require.Len(t, fires.Items, 1)
+		assert.Equal(t, store.TriggerFireStatusSkipped, fires.Items[0].Status)
+		assert.Equal(t, trigger.ErrFireCoalesceCancelled, fires.Items[0].Error)
+
+		live, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, tid, "github:octo/repo#82", "", true, now)
+		require.NoError(t, err)
+		assert.False(t, live, "cancelled coalescing row must not stay live for subject")
+	}
+}
+
+type blockingG4aCore struct {
+	g4aTestCore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingG4aCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return b.g4aTestCore.Fire(ctx, req)
+}
+
+func TestDispatcher_CoalesceWindow_LostLeaseRehandlePromotedFiringNoDuplicate(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 22, 19, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	tr := makeActiveTrigger(projID, "", "lost-lease-coalesce", []string{"github.pull_request.synchronize"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.CoalesceWindowSeconds = 30
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	core := &blockingG4aCore{
+		entered: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: cs,
+		Now:   clock,
+	})
+	require.NoError(t, err)
+
+	evID := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.pull_request.synchronize",
+		Subject:    "github:octo/repo#83",
+		DedupKey:   "del-lostlease-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	// 1. Initial handle creates coalescing row and returns RetryAt.
+	res1 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.False(t, res1.Done)
+	assert.Equal(t, now.Add(30*time.Second), res1.RetryAt)
+
+	// 2. Advance past window; worker A promotes row to firing and parks inside Fire.
+	now = now.Add(30 * time.Second)
+	aDone := make(chan durablequeue.Result, 1)
+	go func() {
+		aDone <- disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	}()
+
+	select {
+	case <-core.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for worker A to enter Fire after promote")
+	}
+
+	// Verify row is in status "firing" while worker A is mid-Fire.
+	firesMid, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesMid.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFiring, firesMid.Items[0].Status)
+	origFireID := firesMid.Items[0].ID
+
+	// 3. Simulate lost-lease redelivery to worker B while A is still firing:
+	// must NOT duplicate the fire or invoke core.Fire a second time.
+	resB := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.True(t, resB.Done)
+	assert.Zero(t, resB.RetryAt)
+
+	// Release worker A and wait for completion.
+	close(core.release)
+	resA := <-aDone
+	assert.True(t, resA.Done)
+
+	// Exactly one Fire call and one fire row in status "fired".
+	require.Len(t, core.firedRequests(), 1, "lost-lease re-handle must not duplicate Fire")
+	firesEnd, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesEnd.Items, 1)
+	assert.Equal(t, origFireID, firesEnd.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusFired, firesEnd.Items[0].Status)
+}
