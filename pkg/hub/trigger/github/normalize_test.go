@@ -1444,29 +1444,28 @@ func TestNormalize_Push(t *testing.T) {
 		assert.Equal(t, []string{sha40, sha64}, res.Lists["commits"])
 	})
 
-	t.Run("non_printable_unicode_ref_uses_hashed_subject_and_cleaned_ref_attr", func(t *testing.T) {
-		zwjRef := "refs/heads/feat/👨\u200d👩"
-		raw, err := json.Marshal(map[string]any{
-			"ref":          zwjRef,
-			"before":       strings.Repeat("0", 40),
-			"after":        strings.Repeat("a", 40),
-			"commits":      []any{},
-			"head_commit":  nil,
-			"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
-			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
-			"installation": map[string]any{"id": 10},
-		})
-		require.NoError(t, err)
+	t.Run("non_printable_unicode_ref_refused_as_invalid_ref", func(t *testing.T) {
+		for _, badRef := range []string{
+			"refs/heads/main\u200b",
+			"refs/heads/feat/👨\u200d👩",
+		} {
+			raw, err := json.Marshal(map[string]any{
+				"ref":          badRef,
+				"before":       strings.Repeat("0", 40),
+				"after":        strings.Repeat("a", 40),
+				"commits":      []any{},
+				"head_commit":  nil,
+				"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+				"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+				"installation": map[string]any{"id": 10},
+			})
+			require.NoError(t, err)
 
-		res, err := Normalize(EventPush, "d-zwj-ref", raw, Options{ReceivedAt: baseNow})
-		require.NoError(t, err)
-		assert.True(t, res.Handled)
-		assert.Equal(t, formatPushSubject("octo-org/octo-repo", zwjRef), res.Subject)
-		assert.Contains(t, res.Subject, "~")
-		assert.True(t, allPrintable(res.Subject))
-		assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
-		assert.True(t, allPrintable(res.Attributes["ref"]))
-		assert.Equal(t, "refs/heads/feat/👨👩", res.Attributes["ref"])
+			res, err := Normalize(EventPush, "d-nonprint-ref", raw, Options{ReceivedAt: baseNow})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid ref")
+			assert.False(t, res.Handled)
+		}
 	})
 
 	t.Run("oversize_pusher_name_capped_at_256_bytes", func(t *testing.T) {

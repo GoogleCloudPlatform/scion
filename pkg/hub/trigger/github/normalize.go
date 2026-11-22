@@ -767,7 +767,7 @@ func normalizePush(
 	if err != nil {
 		return "", time.Time{}, false, err
 	}
-	if hasSpaceOrASCIIControl(ref) {
+	if !allPrintableNonSpace(ref) {
 		return "", time.Time{}, false, errors.New("github trigger: invalid ref")
 	}
 	before, err := reqString(root, "before", "before")
@@ -798,7 +798,7 @@ func normalizePush(
 	}
 
 	isDefaultBranch := defaultBranch != "" && ref == "refs/heads/"+defaultBranch
-	cleanRef := stripNonPrintable(cleanUTF8(ref))
+	cleanRef := cleanUTF8(ref)
 	if len(cleanRef) > MaxPushRefBytes {
 		attrs["ref"] = truncateUTF8(cleanRef, MaxPushRefBytes)
 		attrs["ref_truncated"] = "true"
@@ -876,13 +876,11 @@ func normalizePush(
 }
 
 // formatPushSubject formats github:<owner>/<repo>@<ref> bounded to MaxSubjectBytes.
-// When the full subject exceeds 256 bytes or contains non-printable Unicode
-// runes (such as ZWJ in emoji branch names), it deterministically strips
-// non-printable runes from the prefix, truncates on a UTF-8 rune boundary, and
-// appends "~<first 12 hex of sha256(ref)>" (§4.3).
+// When the full subject exceeds 256 bytes, it deterministically truncates the ref
+// on a UTF-8 rune boundary and appends "~<first 12 hex of sha256(ref)>" (§4.3).
 func formatPushSubject(repoFullName, ref string) string {
 	full := "github:" + repoFullName + "@" + ref
-	if len(full) <= MaxSubjectBytes && allPrintable(full) {
+	if len(full) <= MaxSubjectBytes {
 		return full
 	}
 	sum := sha256.Sum256([]byte(ref))
@@ -892,31 +890,7 @@ func formatPushSubject(repoFullName, ref string) string {
 	if maxRefPrefix < 0 {
 		maxRefPrefix = 0
 	}
-	printableRef := stripNonPrintable(cleanUTF8(ref))
-	return prefixBase + truncateUTF8(printableRef, maxRefPrefix) + suffix
-}
-
-func hasSpaceOrASCIIControl(s string) bool {
-	for _, r := range s {
-		if unicode.IsSpace(r) || r < 0x20 || r == 0x7f {
-			return true
-		}
-	}
-	return false
-}
-
-func stripNonPrintable(s string) string {
-	if allPrintable(s) {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		if unicode.IsPrint(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return prefixBase + truncateUTF8(ref, maxRefPrefix) + suffix
 }
 
 func isGitSHAHex(s string) bool {
