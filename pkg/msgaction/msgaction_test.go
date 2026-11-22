@@ -75,6 +75,9 @@ func TestKindSpecClassifyAndConflictCode(t *testing.T) {
 	if got := ConflictCode(DecisionKindSpec, "claimed"); got != "" {
 		t.Fatalf("decision claimed (UsesClaim=false) conflict = %q, want empty", got)
 	}
+	if got := ConflictCode(DecisionKindSpec, "expired"); got != "" {
+		t.Fatalf("decision expired (Expires=0) conflict = %q, want empty", got)
+	}
 	if !DecisionKindSpec.Answerable("pending") || DecisionKindSpec.Answerable("decided") {
 		t.Fatalf("unexpected DecisionKindSpec.Answerable results")
 	}
@@ -153,6 +156,7 @@ func TestPlanRepost_TerminalOK(t *testing.T) {
 		Name:             "secret_request",
 		ResolvedStatus:   "fulfilled",
 		UsesClaim:        true,
+		Expires:          7 * 24 * time.Hour,
 		RepostTerminalOK: true,
 	}
 

@@ -143,7 +143,10 @@ func (s KindSpec) Classify(status string) (Class, bool) {
 	case string(ClassDismissed):
 		return ClassDismissed, true
 	case string(ClassExpired):
-		return ClassExpired, true
+		if s.Expires > 0 {
+			return ClassExpired, true
+		}
+		return "", false
 	default:
 		return "", false
 	}

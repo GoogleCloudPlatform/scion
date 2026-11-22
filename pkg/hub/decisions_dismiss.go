@@ -25,11 +25,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -177,25 +177,6 @@ func (s *Server) dismissCaller(w http.ResponseWriter, r *http.Request) (UserIden
 	return user, token, true
 }
 
-const maxDismissRequestBodyBytes = 64 * 1024
-
-func readOptionalDismissJSON(r *http.Request, v *DismissDecisionPromptRequest) error {
-	if r.Body == nil || r.ContentLength == 0 {
-		return nil
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxDismissRequestBodyBytes+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(body)) > maxDismissRequestBodyBytes {
-		return fmt.Errorf("request body exceeds %d bytes", maxDismissRequestBodyBytes)
-	}
-	if len(strings.TrimSpace(string(body))) == 0 {
-		return nil
-	}
-	return json.Unmarshal(body, v)
-}
-
 // handleDecisionPromptDismiss serves POST /api/v1/decision-prompts/{messageId}/dismiss.
 func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Request, msgID string) {
 	ctx := r.Context()
@@ -204,33 +185,28 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var req DismissDecisionPromptRequest
-	if err := readOptionalDismissJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid request body: "+err.Error())
+	var bodyReader io.Reader
+	if r.Body != nil && r.ContentLength != 0 {
+		bodyReader = r.Body
+	}
+	req, ferr := msgaction.ParseDismissRequest(bodyReader, msgaction.DismissParseOptions{
+		RowIDsField:      "decisionIds",
+		MaxRowIDs:        messages.MaxDecisionsPerMessage,
+		NormalizeSurface: normalizeAnswerSurface,
+		SurfaceError: func(raw string) string {
+			return fmt.Sprintf("surface %q is not supported; expected %q or %q", raw, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage)
+		},
+	})
+	if ferr != nil {
+		if ferr.InvalidJSON {
+			BadRequest(w, ferr.Message)
+			return
+		}
+		ValidationError(w, ferr.Message, map[string]interface{}{"field": ferr.Field})
 		return
 	}
-	if len(req.IdempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
-		ValidationError(w, fmt.Sprintf("idempotencyKey is at most %d bytes", store.MaxDecisionIdempotencyKeyLen),
-			map[string]interface{}{"field": "idempotencyKey"})
-		return
-	}
-	if len(req.DecisionIDs) > messages.MaxDecisionsPerMessage {
-		ValidationError(w, fmt.Sprintf("decisionIds accepts at most %d ids", messages.MaxDecisionsPerMessage),
-			map[string]interface{}{"field": "decisionIds"})
-		return
-	}
-	surface, ok := normalizeAnswerSurface(req.Surface)
-	if !ok {
-		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage),
-			map[string]interface{}{"field": "surface"})
-		return
-	}
-	trimmedReason := strings.TrimSpace(req.Reason)
-	if utf8.RuneCountInString(trimmedReason) > store.MaxDecisionDismissReasonRunes {
-		ValidationError(w, fmt.Sprintf("reason is at most %d characters", store.MaxDecisionDismissReasonRunes),
-			map[string]interface{}{"field": "reason"})
-		return
-	}
+	surface := req.Surface
+	trimmedReason := req.Reason
 
 	// Authorize on the prompt's conversation using the exact answer check (D5).
 	ds, chatKey, ok := s.loadAuthorizedDecisionPrompt(w, ctx, user, msgID)
@@ -255,10 +231,10 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		byID[d.ID] = d
 	}
 	var cleanIDs []string
-	if len(req.DecisionIDs) > 0 {
-		cleanIDs = make([]string, 0, len(req.DecisionIDs))
-		seenIDs := make(map[string]bool, len(req.DecisionIDs))
-		for i, rawID := range req.DecisionIDs {
+	if len(req.RowIDs) > 0 {
+		cleanIDs = make([]string, 0, len(req.RowIDs))
+		seenIDs := make(map[string]bool, len(req.RowIDs))
+		for i, rawID := range req.RowIDs {
 			field := fmt.Sprintf("decisionIds[%d]", i)
 			rowID := strings.TrimSpace(rawID)
 			d, exists := byID[rowID]
