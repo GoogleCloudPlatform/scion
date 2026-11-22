@@ -68,19 +68,19 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "handlers_agent_messaging.go", function: "broadcastDirect", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage per-recipient at handlers_agent_messaging.go:1644"},
 
-	// decisions_answer.go: dispatchDecisionResponse — shared delivery helper
-	// for single answer (handleDecisionAnswer), set/batch answer
-	// (handleDecisionSetAnswer), and dismiss (handleDecisionPromptDismiss).
-	// Every caller calls authorizeAgentMessage on the asker before recording
-	// and before delivery (and confirm-only answers are never delivered).
-	{file: "decisions_answer.go", function: "dispatchDecisionResponse", symbol: "dispatchWithBrokerRetry",
+	// message_action_dispatch.go: dispatchActionResponse — shared delivery
+	// helper for message-action responses (decisions single/set answer and
+	// dismiss, and future kinds). Every caller calls authorizeAgentMessage on
+	// the asker before recording and before delivery (and confirm-only answers
+	// are never delivered).
+	{file: "message_action_dispatch.go", function: "dispatchActionResponse", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage in handleDecisionAnswer / handleDecisionSetAnswer / handleDecisionPromptDismiss before recording and delivery"},
 
-	// decisions_answer.go: decisionResponseAutoWakeItem — background auto-wake
-	// delivery built only inside dispatchDecisionResponse after the caller's
-	// authorizeAgentMessage admitted delivery (ptone/scion#8517).
-	{file: "decisions_answer.go", function: "decisionResponseAutoWakeItem", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "built only inside dispatchDecisionResponse after authorizeAgentMessage admitted delivery (ptone/scion#8517)"},
+	// message_action_dispatch.go: actionResponseAutoWakeItem — background
+	// auto-wake delivery built only inside dispatchActionResponse after the
+	// caller's authorizeAgentMessage admitted delivery (ptone/scion#8517).
+	{file: "message_action_dispatch.go", function: "actionResponseAutoWakeItem", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "built only inside dispatchActionResponse after authorizeAgentMessage admitted delivery (ptone/scion#8517)"},
 
 	// handlers_agent_messaging.go: publishBroadcastDeliveryFailed — derivative
 	// notice back to the original sender agent.

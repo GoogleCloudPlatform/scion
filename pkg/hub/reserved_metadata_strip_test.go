@@ -48,7 +48,7 @@ var stripExemptions = map[stripSiteKey]string{
 	{"notification_sweep.go", "retryDispatch"}:                        "hub-built notification fan-out retry; no client metadata",
 	{"agent_dm_operation.go", "agentDMAutoWakeItem"}:                  "dispatches the message ExecuteAgentDM already stripped (step 7b) before queuing it behind the auto-wake",
 	{"auto_wake.go", "chatSecondaryAutoWakeItemWithLog"}:              "dispatches the secondary copy sendAgentRouted / processMentions already stripped (mentionMsg.Metadata) before queuing it behind the auto-wake",
-	{"decisions_answer.go", "decisionResponseAutoWakeItem"}:           "dispatches the decision-response deliverDecision* already stripped before queuing it behind the auto-wake",
+	{"message_action_dispatch.go", "actionResponseAutoWakeItem"}:      "dispatches the action response dispatchActionResponse already stripped before queuing it behind the auto-wake",
 }
 
 // TestReservedKeyStripCoverage requires every dispatchWithBrokerRetry /
