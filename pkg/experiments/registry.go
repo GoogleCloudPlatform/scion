@@ -567,10 +567,29 @@ const EffectivePermissions = "hub.effective_permissions"
 // Admin > Server Config.
 const CustomDefaultUserRole = "hub.custom_default_user_role"
 
+// AgentSecrets gates agent-scoped secrets (ptone/scion#8742): secrets bound to
+// a single agent, readable only by that agent's token, injected at start at
+// highest scope precedence, and deleted when the agent is hard-deleted or
+// purged. Server layer: while off, agent scope is rejected on every route (400
+// invalid scope) and skipped by launch delivery. Web layer: hides the agent
+// Secrets management and create-form tabs and secret-request UI while off.
+const AgentSecrets = "hub.agent_secrets"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        AgentSecrets,
+		Title:       "Agent-scoped secrets",
+		Description: "Allows storing secrets bound to a single agent in the secret backend, readable only by that agent's token and delivered at start with highest scope precedence. Server layer: while off, agent scope is rejected on every route and skipped by launch delivery. Web layer: hides agent-secret management and request UI while off.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8742",
+		Owner:       "auth",
+		ReviewBy:    "2027-05-21",
+	},
 	{
 		Name:        CustomDefaultUserRole,
 		Title:       "Custom default user role",

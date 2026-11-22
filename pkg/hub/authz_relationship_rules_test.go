@@ -230,6 +230,9 @@ func TestRelationshipRules_FederatedAgentMatchesNoAgentRow(t *testing.T) {
 		"broker_association": {RelationshipRuleBrokerAssociation, materialDeliveryResource(MaterialKindSecret, materialRecordSecret,
 			f.secretID, "golden-secret", store.ScopeRuntimeBroker, tid("relrule-fedrow-broker"), fed.ID(), GrantBrokerAssociation, PurposeRestart),
 			ActionDeliver, "secret.deliver", true},
+		"agent_association": {RelationshipRuleAgentAssociation, materialDeliveryResource(MaterialKindSecret, materialRecordSecret,
+			f.secretID, "golden-secret", store.ScopeAgent, fed.ID(), fed.ID(), GrantAgentAssociation, PurposeRestart),
+			ActionDeliver, "secret.deliver", true},
 	}
 
 	// Every relationship with an agent-kind row has a case here.
@@ -353,6 +356,7 @@ func TestRelationshipRules_RuleIDsMatchPolicyNames(t *testing.T) {
 		RelationshipRuleOwner, RelationshipRuleAncestor, RelationshipRuleProgeny,
 		RelationshipRuleHubMemberSAAssign, RelationshipRuleLauncher,
 		RelationshipRuleProjectAssociation, RelationshipRuleHubAssociation, RelationshipRuleBrokerAssociation,
+		RelationshipRuleAgentAssociation,
 	} {
 		ids[string(id)] = true
 	}

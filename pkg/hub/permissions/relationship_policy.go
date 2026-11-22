@@ -282,6 +282,12 @@ var RelationshipPolicies = []RelationshipPolicy{
 		ResourceType:   "env_var",
 		PermissionIDs:  []string{"env_var.deliver"},
 	},
+	{
+		Relationship:   "agent_association",
+		PrincipalKinds: []string{"agent"},
+		ResourceType:   "secret",
+		PermissionIDs:  []string{"secret.deliver"},
+	},
 }
 
 // RelationshipPolicyAllows reports whether relationship (for principalKind,

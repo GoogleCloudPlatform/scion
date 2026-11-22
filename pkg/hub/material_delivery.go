@@ -460,7 +460,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	}
 
 	type scopeEntry struct{ scope, scopeID string }
-	scopes := make([]scopeEntry, 0, 4)
+	scopes := make([]scopeEntry, 0, 5)
 	if agent.RuntimeBrokerID != "" {
 		scopes = append(scopes, scopeEntry{store.ScopeRuntimeBroker, agent.RuntimeBrokerID})
 	}
@@ -470,6 +470,9 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	}
 	if agent.OwnerID != "" {
 		scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
+	}
+	if d.agentSecretsEnabled() && agent.ID != "" {
+		scopes = append(scopes, scopeEntry{store.ScopeAgent, agent.ID})
 	}
 
 	// The test-admin scope restriction, evaluated once: the start-time

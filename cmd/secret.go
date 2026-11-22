@@ -39,6 +39,8 @@ var (
 	agentSecretTarget      string
 	agentSecretGetMetadata bool
 	agentSecretGetValue    bool
+	agentSecretGetScope    string
+	agentSecretListScope   string
 )
 
 // agentSecretCmd is the top-level `scion secret` command group.
@@ -150,7 +152,10 @@ func init() {
 
 	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetMetadata, "metadata", false, "Print the secret's metadata (the default)")
 	agentSecretGetCmd.Flags().BoolVar(&agentSecretGetValue, "value", false, "Print the secret's decoded value (requires an agent's hub identity)")
+	agentSecretGetCmd.Flags().StringVar(&agentSecretGetScope, "scope", "", "Pin lookup to a scope: agent or project (default: agent then project)")
 	agentSecretGetCmd.MarkFlagsMutuallyExclusive("metadata", "value")
+
+	agentSecretListCmd.Flags().StringVar(&agentSecretListScope, "scope", "", "Filter by scope: agent, project, or all (default: all)")
 
 	agentSecretSetCmd.Flags().StringVar(&agentSecretType, "type", "", "Secret type: environment (default), variable, file")
 	agentSecretSetCmd.Flags().StringVar(&agentSecretTarget, "target", "", "Injection target path (defaults to key for env, required for file)")
@@ -175,6 +180,11 @@ func secretGetWantsValue(metadata, value, jsonOutput bool) (bool, error) {
 }
 
 func runAgentSecretGet(cmd *cobra.Command, args []string) error {
+	switch agentSecretGetScope {
+	case "", "agent", "project":
+	default:
+		return newUsageError("invalid --scope %q: must be 'agent' or 'project'", agentSecretGetScope)
+	}
 	wantValue, err := secretGetWantsValue(agentSecretGetMetadata, agentSecretGetValue, isJSONOutput())
 	if err != nil {
 		return err
@@ -196,7 +206,7 @@ func runAgentSecretGetValue(cmd *cobra.Command, key string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
 
-	resp, err := client.GetSecret(ctx, key)
+	resp, err := client.GetSecretWithScope(ctx, key, agentSecretGetScope)
 	if err != nil {
 		return fmt.Errorf("failed to get secret: %w", err)
 	}
@@ -239,7 +249,28 @@ var fetchProjectSecretMeta = func(cmd *cobra.Command, key string) (*hubclient.Se
 }
 
 func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
-	secret, err := fetchProjectSecretMeta(cmd, key)
+	var sec *hubclient.Secret
+	var err error
+
+	// Inside an agent container (or when --scope agent is explicitly passed),
+	// resolve metadata through the agent secrets route so --scope is honored
+	// and default lookups check agent scope before project scope (matching
+	// --value). Outside an agent container (no SCION_AGENT_ID and no --scope
+	// agent), use the project-scoped route directly without constructing an
+	// agent value client.
+	if os.Getenv("SCION_AGENT_ID") != "" || agentSecretGetScope == "agent" {
+		agentClient := newSecretValueHubClient()
+		if agentClient == nil || !agentClient.IsConfigured() {
+			if agentSecretGetScope == "agent" {
+				return errSecretValueNeedsAgent
+			}
+			sec, err = fetchProjectSecretMeta(cmd, key)
+		} else {
+			sec, err = fetchAgentSecretMeta(cmd, agentClient, key, agentSecretGetScope)
+		}
+	} else {
+		sec, err = fetchProjectSecretMeta(cmd, key)
+	}
 	if err != nil {
 		return err
 	}
@@ -247,11 +278,78 @@ func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
 	if isJSONOutput() {
 		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
-		return enc.Encode(secret)
+		return enc.Encode(sec)
 	}
 
-	printSecretMetadata(cmd.OutOrStdout(), secret)
+	printSecretMetadata(cmd.OutOrStdout(), sec)
 	return nil
+}
+
+// fetchAgentSecretMeta resolves secret metadata through the agent-scoped list
+// route (/api/v1/agents/{id}/secrets). When scope is empty, it probes with
+// scope=all (matching `scion secret list`) and picks agent scope before
+// project scope on the client so metadata lookups match --value. Whenever the
+// resolved scope is project (explicit --scope project, default lookup matching
+// a project secret, or experiment-off fallback), metadata is fetched via
+// fetchProjectSecretMeta so Version/Created/Updated/Description are preserved.
+func fetchAgentSecretMeta(cmd *cobra.Command, agentClient *sciontoolhub.Client, key, scope string) (*hubclient.Secret, error) {
+	if scope == "project" {
+		return fetchProjectSecretMeta(cmd, key)
+	}
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+
+	if scope == "agent" {
+		resp, err := agentClient.ListSecretsWithScope(ctx, "agent")
+		if err != nil {
+			return nil, fmt.Errorf("failed to get secret: %w", err)
+		}
+		for _, item := range resp.Secrets {
+			if item.Key == key {
+				return &hubclient.Secret{
+					Key:        item.Key,
+					Scope:      "agent",
+					SecretType: item.Type,
+					Target:     item.Target,
+				}, nil
+			}
+		}
+		return nil, fmt.Errorf("secret %q not found in scope agent", key)
+	}
+
+	// Default (--scope unset): probe with scope=all (same as `scion secret list`),
+	// then pick agent-then-project on the client.
+	resp, err := agentClient.ListSecretsWithScope(ctx, "all")
+	if err != nil {
+		if !errors.Is(err, sciontoolhub.ErrAgentScopeUnavailable) {
+			return nil, fmt.Errorf("failed to get secret: %w", err)
+		}
+		// Experiment off: preserve pre-existing project-scoped metadata view.
+		return fetchProjectSecretMeta(cmd, key)
+	}
+
+	var foundProject bool
+	for _, item := range resp.Secrets {
+		if item.Key != key {
+			continue
+		}
+		if item.Scope == "agent" {
+			return &hubclient.Secret{
+				Key:        item.Key,
+				Scope:      "agent",
+				SecretType: item.Type,
+				Target:     item.Target,
+			}, nil
+		}
+		if item.Scope == "project" || item.Scope == "" {
+			foundProject = true
+		}
+	}
+	if foundProject {
+		return fetchProjectSecretMeta(cmd, key)
+	}
+	return nil, fmt.Errorf("secret %q not found", key)
 }
 
 // printSecretMetadata writes the text metadata view of a secret, the
@@ -270,9 +368,15 @@ func printSecretMetadata(w io.Writer, secret *hubclient.Secret) {
 	if secret.SecretRef != "" {
 		_, _ = fmt.Fprintf(w, "  Ref:     %s\n", secret.SecretRef)
 	}
-	_, _ = fmt.Fprintf(w, "  Version: %d\n", secret.Version)
-	_, _ = fmt.Fprintf(w, "  Created: %s\n", clitime.Format(secret.Created, clitime.Full))
-	_, _ = fmt.Fprintf(w, "  Updated: %s\n", clitime.Format(secret.Updated, clitime.Full))
+	if secret.Version > 0 {
+		_, _ = fmt.Fprintf(w, "  Version: %d\n", secret.Version)
+	}
+	if !secret.Created.IsZero() {
+		_, _ = fmt.Fprintf(w, "  Created: %s\n", clitime.Format(secret.Created, clitime.Full))
+	}
+	if !secret.Updated.IsZero() {
+		_, _ = fmt.Fprintf(w, "  Updated: %s\n", clitime.Format(secret.Updated, clitime.Full))
+	}
 	if secret.Description != "" {
 		_, _ = fmt.Fprintf(w, "  Description: %s\n", secret.Description)
 	}
@@ -424,6 +528,57 @@ func runAgentSecretSet(cmd *cobra.Command, args []string) error {
 }
 
 func runAgentSecretList(cmd *cobra.Command, _ []string) error {
+	switch agentSecretListScope {
+	case "", "agent", "project", "all":
+	default:
+		return newUsageError("invalid --scope %q: must be 'agent', 'project', or 'all'", agentSecretListScope)
+	}
+
+	// Inside an agent container, query the agent-scoped endpoint with scope=all
+	// (or the explicit --scope) so agent-scope secrets are shown alongside
+	// project-scope secrets with a SCOPE column. When hub.agent_secrets is off
+	// and no explicit scope was requested, the Hub answers 400 (ErrAgentScopeUnavailable)
+	// and we fall back to the pre-existing project-scoped list unchanged.
+	if agentClient := newSecretValueHubClient(); agentClient != nil && agentClient.IsConfigured() && agentSecretListScope != "project" {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+		defer cancel()
+
+		queryScope := agentSecretListScope
+		if queryScope == "" {
+			queryScope = "all"
+		}
+		resp, err := agentClient.ListSecretsWithScope(ctx, queryScope)
+		if err == nil {
+			if isJSONOutput() {
+				enc := json.NewEncoder(cmd.OutOrStdout())
+				enc.SetIndent("", "  ")
+				return enc.Encode(resp)
+			}
+			if len(resp.Secrets) == 0 {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No secrets found")
+				return nil
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-30s  %-10s  %-12s  %s\n", "KEY", "SCOPE", "TYPE", "TARGET")
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-30s  %-10s  %-12s  %s\n", "------------------------------", "----------", "------------", "------------------------------")
+			for _, s := range resp.Secrets {
+				scopeLabel := s.Scope
+				if scopeLabel == "" {
+					scopeLabel = "project"
+				}
+				typeLabel := s.Type
+				if typeLabel == "" {
+					typeLabel = "environment"
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-30s  %-10s  %-12s  %s\n", truncate(s.Key, 30), scopeLabel, typeLabel, s.Target)
+			}
+			return nil
+		}
+		if agentSecretListScope != "" || !errors.Is(err, sciontoolhub.ErrAgentScopeUnavailable) {
+			return fmt.Errorf("failed to list secrets: %w", err)
+		}
+		// Experiment off (default invocation): fall through to unchanged project-scoped list.
+	}
+
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err

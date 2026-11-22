@@ -1384,15 +1384,17 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agent *store.Agent, 
 			defer cancel()
 			now := time.Now()
 			var n int
-			n, err = s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
-				createRowHeldCheck(func(tx store.Store) error {
-					_, _, werr := s.agentHardDeleteWork(sctx, tx, agent, actor, store.Deactivation{
-						Cause: store.EdgeDeactivationCreateCompensation,
-						At:    &now,
-						OpID:  opID,
-					}, "compensation fallback")
-					return werr
-				}))
+			n, err = s.withAgentSecretCleanup(sctx, agentID, func() (int, error) {
+				return s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+					createRowHeldCheck(func(tx store.Store) error {
+						_, _, werr := s.agentHardDeleteWork(sctx, tx, agent, actor, store.Deactivation{
+							Cause: store.EdgeDeactivationCreateCompensation,
+							At:    &now,
+							OpID:  opID,
+						}, "compensation fallback")
+						return werr
+					}))
+			})
 			if err == nil && n == 0 {
 				err = errCreateRowDeleteHeld
 			}
@@ -1976,7 +1978,8 @@ func (s *Server) createAgentInProject(
 		}
 	}
 
-	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy) {
+	var carriedAgentSecrets []*secret.SecretWithValue
+	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy, &carriedAgentSecrets) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
 	case existingAgentConflict:
@@ -2750,6 +2753,19 @@ func (s *Server) createAgentInProject(
 			return
 		}
 		writeCreateFailure(w, corrID, writeOriginal)
+	}
+
+	// Carry over any agent-scoped secrets from an env-gather recreated agent
+	// onto the new agent ID before dispatch. On failure, restoreCarriedAgentSecrets
+	// cleans up any partially written secrets and failCreate rolls back the
+	// new agent row so no orphaned values remain.
+	if len(carriedAgentSecrets) > 0 {
+		if err := s.restoreCarriedAgentSecrets(ctx, agent, carriedAgentSecrets); err != nil {
+			failCreate(createRollback{Stage: createStageStorage, Cause: err}, func() {
+				writeErrorFromErr(w, err, "")
+			})
+			return
+		}
 	}
 
 	// Empty-per-agent agents start in an empty private directory (design

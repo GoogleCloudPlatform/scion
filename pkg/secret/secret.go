@@ -87,6 +87,7 @@ const (
 	ScopeUser          = "user"
 	ScopeProject       = "project"
 	ScopeRuntimeBroker = "runtime_broker"
+	ScopeAgent         = "agent"
 )
 
 // Filter specifies criteria for listing secrets.
@@ -142,7 +143,7 @@ type SetSecretInput struct {
 	Value         string // Plaintext secret value
 	SecretType    string // environment, variable, file
 	Target        string // Projection target
-	Scope         string // user, project, runtime_broker
+	Scope         string // user, project, runtime_broker, agent
 	ScopeID       string // ID of the scoped entity
 	Description   string // Optional description
 	InjectionMode string // "always" or "as_needed"
@@ -150,10 +151,16 @@ type SetSecretInput struct {
 	CreatedBy     string // User ID of creator (for new secrets)
 	UpdatedBy     string // User ID of updater
 	UserEmail     string // Email of the user (for labeling user-scoped secrets)
+	ProjectID     string // Project ID (for labeling agent-scoped secrets)
 }
 
 // ResolveOpts provides additional context for secret resolution.
 type ResolveOpts struct {
+	// AgentID, when non-empty, includes agent-scoped secrets for this agent
+	// at the highest scope precedence (above user). When empty, agent-scoped
+	// secrets are not queried and resolution behavior is unchanged.
+	AgentID string
+
 	// AgentAncestry is the ordered ancestor chain from the agent's token.
 	// When present, secrets marked allowProgeny whose creator appears
 	// in this chain are included in the result.
@@ -304,6 +311,8 @@ func scopePrecedence(scope string) int {
 		return 3
 	case ScopeUser:
 		return 4
+	case ScopeAgent:
+		return 5
 	default:
 		return 0
 	}

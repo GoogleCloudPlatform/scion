@@ -33,6 +33,7 @@ import (
 var (
 	secretProjectScope string
 	secretBrokerScope  string
+	secretAgentScope   string
 	secretScope        string
 	secretOutputJSON   bool
 	secretType         string
@@ -171,14 +172,16 @@ Examples:
 
 // hubSecretClearCmd clears a secret
 var hubSecretClearCmd = &cobra.Command{
-	Use:   "clear KEY",
-	Short: "Clear a secret",
+	Use:     "clear KEY",
+	Aliases: []string{"delete"},
+	Short:   "Clear a secret",
 	Long: `Remove a secret from the Hub.
 
 Examples:
   scion hub secret clear API_KEY
   scion hub secret clear --project API_KEY
-  scion hub secret clear --broker API_KEY`,
+  scion hub secret clear --broker API_KEY
+  scion hub secret delete --agent my-agent API_KEY`,
 	Args: cobra.ExactArgs(1),
 	RunE: runSecretClear,
 }
@@ -194,7 +197,8 @@ func init() {
 	// Add scope flags to all subcommands.
 	// --scope selects the scope level (hub, user). --project/--broker select their
 	// respective scopes and support both bare usage (infer from settings) and
-	// explicit name/ID via --project=<name|id>.
+	// explicit name/ID via --project=<name|id>. --agent selects agent scope and
+	// requires an agent name or ID.
 	for _, cmd := range []*cobra.Command{hubSecretSetCmd, hubSecretGetCmd, hubSecretListCmd, hubSecretClearCmd, hubSecretUpdateCmd} {
 		cmd.Flags().StringVar(&secretScope, "scope", "", "Scope level: hub, user (default: user)")
 		cmd.Flags().StringVar(&secretProjectScope, "project", "", "Project scope (bare flag infers current project, or use --project=<name|id>)")
@@ -202,6 +206,8 @@ func init() {
 
 		cmd.Flags().StringVar(&secretBrokerScope, "broker", "", "Broker scope (bare flag infers current broker, or use --broker=<name|id>)")
 		cmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
+
+		cmd.Flags().StringVar(&secretAgentScope, "agent", "", "Agent scope (--agent <name|id>)")
 	}
 
 	hubSecretGetCmd.Flags().BoolVar(&secretOutputJSON, "json", false, "Output in JSON format")
@@ -229,6 +235,7 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (hubScope
 	scopeSet := cmd.Flags().Changed("scope")
 	projectSet := cmd.Flags().Changed("project")
 	brokerSet := cmd.Flags().Changed("broker")
+	agentSet := cmd.Flags().Changed("agent")
 
 	// Enforce mutual exclusivity
 	setCount := 0
@@ -241,8 +248,18 @@ func resolveSecretScope(cmd *cobra.Command, settings *config.Settings) (hubScope
 	if brokerSet {
 		setCount++
 	}
+	if agentSet {
+		setCount++
+	}
 	if setCount > 1 {
-		return hubScopeTarget{}, newUsageError("cannot specify more than one of --scope, --project, and --broker")
+		return hubScopeTarget{}, newUsageError("cannot specify more than one of --scope, --project, --broker, and --agent")
+	}
+
+	if agentSet {
+		if strings.TrimSpace(secretAgentScope) == "" {
+			return hubScopeTarget{}, newUsageError("--agent requires an agent name or ID")
+		}
+		return hubScopeTarget{scope: "agent", id: secretAgentScope}, nil
 	}
 
 	if scopeSet {

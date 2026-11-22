@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -102,8 +104,9 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 	ctx := r.Context()
 	ident := GetAgentIdentityFromContext(ctx)
 	correlationID := newMaterialCorrelationID()
+	agentSecretsOn := s.experimentEnabled(experiments.AgentSecrets)
 
-	facts, reason, status := s.materialRuntimePrecheck(ctx, ident)
+	facts, reason, status := s.materialRuntimePrecheckOpts(ctx, ident, !agentSecretsOn)
 	if status != 0 {
 		event := s.buildMaterialSelectionEvent(ctx, "fetch", correlationID, nil, reason, nil)
 		s.logMaterialSelection(ctx, event)
@@ -130,23 +133,39 @@ func (s *Server) handleAgentSecretFetch(w http.ResponseWriter, r *http.Request) 
 	var decisionCache projectDecisionCache
 
 	for _, key := range req.Keys {
-		item, sv, permission, detail := s.selectRuntimeMaterial(ctx, ident, facts, store.ScopeProject, key, &decisionCache)
+		var (
+			item       ItemResult
+			sv         *secret.SecretWithValue
+			permission string
+			detail     string
+		)
+		if agentSecretsOn {
+			agentItem, agentSV, agentPerm, agentDetail := s.selectRuntimeMaterial(ctx, ident, facts, store.ScopeAgent, key, &decisionCache)
+			if agentItem.Selected || agentItem.Allowed || agentItem.Reason == ReasonBackendError {
+				item, sv, permission, detail = agentItem, agentSV, agentPerm, agentDetail
+			} else {
+				// Not found at agent scope: fall back to project scope.
+				item, sv, permission, detail = s.selectRuntimeMaterial(ctx, ident, facts, store.ScopeProject, key, &decisionCache)
+			}
+		} else {
+			item, sv, permission, detail = s.selectRuntimeMaterial(ctx, ident, facts, store.ScopeProject, key, &decisionCache)
+		}
 		items = append(items, materialSelectionItem(item, permission, detail))
 
 		switch {
 		case item.Selected:
 			results = append(results, secretFetchResult{Key: key, Value: sv.Value, Status: "ok"})
-			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, true, "", true, correlationID)
+			s.logAgentSecretReadCompatVersion(ctx, agent.Subject, facts.ProjectID, item.Scope, item.ScopeID, key, sv.Version, true, "", true, correlationID)
 		case item.Allowed || item.Reason == ReasonBackendError:
-			// The project-level decision allowed this item (or check 7 hit an
+			// The decision allowed this item (or check 7 hit an
 			// infrastructure error before deciding). Either way a backend
 			// fault or a check-9 record race confirms nothing about the key,
 			// so it is reported unavailable rather than not found.
 			results = append(results, secretFetchResult{Key: key, Status: "entitled_but_unavailable", Error: "secret unavailable"})
-			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, false, item.Reason, true, correlationID)
+			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, item.Scope, item.ScopeID, key, false, item.Reason, true, correlationID)
 		default:
 			results = append(results, secretFetchResult{Key: key, Status: "not_found", Error: "secret not found"})
-			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, store.ScopeProject, facts.ProjectID, key, false, item.Reason, true, correlationID)
+			s.logAgentSecretReadCompat(ctx, agent.Subject, facts.ProjectID, item.Scope, item.ScopeID, key, false, item.Reason, true, correlationID)
 		}
 	}
 

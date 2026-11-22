@@ -220,6 +220,7 @@ type AgentSecretReadEvent struct {
 	Scope     string `json:"scope,omitempty"`
 	ScopeID   string `json:"scopeId,omitempty"`
 	SecretKey string `json:"secretKey"`
+	Version   int    `json:"version,omitempty"`
 	Success   bool   `json:"success"`
 	// Derived is true when this event has a partner MaterialSelectionEvent
 	// with the same CorrelationID.
@@ -695,6 +696,9 @@ func (l *LogAuditLogger) LogAgentSecretReadEvent(ctx context.Context, event *Age
 	}
 	if event.ScopeID != "" {
 		attrs = append(attrs, slog.String("scope_id", event.ScopeID))
+	}
+	if event.Version > 0 {
+		attrs = append(attrs, slog.Int("version", event.Version))
 	}
 	if event.Derived {
 		attrs = append(attrs, slog.Bool("derived", event.Derived))

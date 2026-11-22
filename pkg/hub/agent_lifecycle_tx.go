@@ -283,6 +283,9 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate service-account assignments: %w", label, err)
 	}
+	if _, err := tx.DeleteSecretsByScope(ctx, store.ScopeAgent, a.ID); err != nil {
+		return 0, 0, fmt.Errorf("%s: delete agent-scope secrets: %w", label, err)
+	}
 	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
 		return 0, 0, err
 	}

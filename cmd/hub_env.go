@@ -285,8 +285,31 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 			return "", err
 		}
 		return broker.ID, nil
+	case "agent":
+		return resolveAgentScopeID(ctx, client, nil, uat, scopeID)
 	}
 	return scopeID, nil
+}
+
+// resolveAgentScopeID resolves an agent name, slug, or ID to its UUID.
+// When a project can be inferred from settings/context, resolution is scoped
+// to that project (paginating through all agents in the project); otherwise
+// it paginates across all accessible agents and detects same-name ambiguity.
+func resolveAgentScopeID(ctx context.Context, client hubclient.Client, settings *config.Settings, uat bool, agentRef string) (string, error) {
+	if _, err := uuid.Parse(agentRef); err == nil {
+		return agentRef, nil
+	}
+	agentSvc := client.Agents()
+	if projRef, _, err := inferScopeProject(settings); err == nil && projRef != "" {
+		if proj, perr := resolveProjectByNameOrID(ctx, client, projRef, uat); perr == nil && proj != nil && proj.ID != "" {
+			agentSvc = client.ProjectAgents(proj.ID)
+		}
+	}
+	agent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
+	if err != nil {
+		return "", err
+	}
+	return agent.ID, nil
 }
 
 func runEnvSet(cmd *cobra.Command, args []string) error {

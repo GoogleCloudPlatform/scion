@@ -579,18 +579,13 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 		scopeID string
 	}
 
-	// Scope precedence, lowest first: runtime_broker < hub < project < user.
+	// Scope precedence, lowest first: runtime_broker < hub < project < user < agent.
 	// Later entries in this slice overwrite earlier ones in the merge loop
 	// below, so this order must match envScopePrecedence in
-	// pkg/hub/httpdispatcher.go — broker is the most infrastructural and
-	// least specific of the four scopes, so it is intentionally the
-	// weakest, not an override nobody can escape. (Previously this listed
-	// hub, user, project, broker, which put broker last and therefore
-	// strongest — the opposite of every other precedence-ordered resolver
-	// in this codebase, and the reason a stale broker-scoped secret could
-	// silently shadow a project-scoped one regardless of which was meant
-	// to win.)
-	scopes := make([]scopeEntry, 0, 4)
+	// pkg/hub/httpdispatcher.go (with agent scope above user for secrets) —
+	// broker is the most infrastructural and least specific of the scopes, so
+	// it is intentionally the weakest, not an override nobody can escape.
+	scopes := make([]scopeEntry, 0, 5)
 	if brokerID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
 	}
@@ -600,6 +595,9 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 	}
 	if userID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeUser, scopeID: userID})
+	}
+	if opts != nil && opts.AgentID != "" {
+		scopes = append(scopes, scopeEntry{scope: store.ScopeAgent, scopeID: opts.AgentID})
 	}
 
 	for _, sc := range scopes {
@@ -1628,6 +1626,7 @@ func sanitizeLabel(s string) string {
 
 // buildLabels constructs the GCP SM labels map for a secret.
 // For user-scoped secrets with a known email, a scion-userid label is added.
+// For agent-scoped secrets with a known project ID, a scion-project-id label is added.
 // The scion-hub-name label allows filtering secrets by hub in the GCP console.
 func buildLabels(input *SetSecretInput, target, hubName string) map[string]string {
 	labels := map[string]string{
@@ -1640,6 +1639,9 @@ func buildLabels(input *SetSecretInput, target, hubName string) map[string]strin
 	}
 	if input.Scope == ScopeUser && input.UserEmail != "" {
 		labels["scion-userid"] = sanitizeLabel(input.UserEmail)
+	}
+	if input.Scope == ScopeAgent && input.ProjectID != "" {
+		labels["scion-project-id"] = sanitizeLabel(input.ProjectID)
 	}
 	return labels
 }

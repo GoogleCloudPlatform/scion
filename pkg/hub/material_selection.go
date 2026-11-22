@@ -75,13 +75,18 @@ const (
 	// GrantProgeny is the runtime user read grant (check 8).
 	GrantProgeny GrantKind = "progeny"
 
-	// Delivery association grants (material_delivery.go): a project-, hub-
-	// or broker-scope item delivered at launch to an agent associated with
-	// that scope. Each names the relationship rule of the same name
+	// GrantAgentSelfRead is the runtime agent-scope read of an agent's own
+	// secrets (ptone/scion#8742).
+	GrantAgentSelfRead GrantKind = "agent_self_read"
+
+	// Delivery association grants (material_delivery.go): a project-, hub-,
+	// broker- or agent-scope item delivered at launch to an agent associated
+	// with that scope. Each names the relationship rule of the same name
 	// (authz_material_association.go). None is ever a runtime-read grant.
 	GrantProjectAssociation GrantKind = "project_association"
 	GrantHubAssociation     GrantKind = "hub_association"
 	GrantBrokerAssociation  GrantKind = "broker_association"
+	GrantAgentAssociation   GrantKind = "agent_association"
 )
 
 // ProvenanceRoot identifies the human ancestor a runtime read is evaluated
@@ -175,8 +180,17 @@ const (
 // makes no such decision).
 func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity, facts *TargetFacts, scope, key string, decisionCache *projectDecisionCache) (item ItemResult, value *secret.SecretWithValue, permission, detail string) {
 	switch scope {
+	case store.ScopeAgent:
+		item = s.authorizeRuntimeAgentItem(ctx, key, facts)
 	case store.ScopeProject:
 		permission = "project.secret_read"
+		if !ident.HasScope(ScopeProjectSecretRead) {
+			item = ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonCapabilityRequired,
+			}
+			return item, nil, permission, detail
+		}
 		decision, decErr := s.projectReadDecision(ctx, ident, facts, decisionCache)
 		if decErr != nil {
 			item = ItemResult{
@@ -187,6 +201,13 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 		}
 		item, detail = s.authorizeRuntimeProjectItem(ctx, key, facts, decision)
 	case store.ScopeUser:
+		if !ident.HasScope(ScopeProjectSecretRead) {
+			item = ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny},
+				Reason:    ReasonCapabilityRequired,
+			}
+			return item, nil, permission, detail
+		}
 		item = s.authorizeRuntimeUserItem(ctx, ident, facts, key)
 	default:
 		return ItemResult{}, nil, "", ""

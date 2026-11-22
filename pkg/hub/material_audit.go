@@ -30,12 +30,13 @@ type MaterialSelectionEventItem struct {
 	Key           string
 	Scope         string
 	ScopeID       string
+	Version       int
 	Grant         GrantKind
 	SharingSource *SourceRef
 	Allowed       bool
 	Selected      bool
 	Reason        string // audit only, never sent to the caller
-	Permission    string // "project.secret_read" (project) or "" (user; no permission named)
+	Permission    string // "project.secret_read" (project) or "" (user/agent; no permission named)
 	Detail        string // check 7 only, Decision.Reason verbatim; audit-only, never parsed
 }
 
@@ -105,6 +106,9 @@ func materialSelectionAttrs(e *MaterialSelectionEvent) []slog.Attr {
 			slog.String("reason", item.Reason),
 			slog.String("permission", item.Permission),
 			slog.String("detail", item.Detail),
+		}
+		if item.Version > 0 {
+			itemAttrs = append(itemAttrs, slog.Int("version", item.Version))
 		}
 		if item.SharingSource != nil {
 			itemAttrs = append(itemAttrs,
@@ -186,6 +190,7 @@ func materialSelectionItem(item ItemResult, permission, detail string) MaterialS
 		Key:           item.Key,
 		Scope:         item.Scope,
 		ScopeID:       item.ScopeID,
+		Version:       item.Meta.Version,
 		Grant:         item.Grant,
 		SharingSource: item.SharingSource,
 		Allowed:       item.Allowed,
@@ -210,6 +215,10 @@ func newMaterialCorrelationID() string {
 // CorrelationID". Nil-safe like LogAgentSecretRead was
 // (TestMaterialAudit_NilAuditLoggerSafe).
 func (s *Server) logAgentSecretReadCompat(ctx context.Context, agentID, projectID, scope, scopeID, key string, success bool, failReason string, derived bool, correlationID string) {
+	s.logAgentSecretReadCompatVersion(ctx, agentID, projectID, scope, scopeID, key, 0, success, failReason, derived, correlationID)
+}
+
+func (s *Server) logAgentSecretReadCompatVersion(ctx context.Context, agentID, projectID, scope, scopeID, key string, version int, success bool, failReason string, derived bool, correlationID string) {
 	if s.auditLogger == nil {
 		return
 	}
@@ -220,6 +229,7 @@ func (s *Server) logAgentSecretReadCompat(ctx context.Context, agentID, projectI
 		Scope:         scope,
 		ScopeID:       scopeID,
 		SecretKey:     key,
+		Version:       version,
 		Success:       success,
 		FailReason:    failReason,
 		Derived:       derived,

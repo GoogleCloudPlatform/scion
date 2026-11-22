@@ -106,7 +106,12 @@ func (s *Server) purgeExpiredAgents(ctx context.Context, cutoff time.Time) (int,
 			// broker removing the files and the record going away (a
 			// restore in that gap would bring back an agent without its
 			// files). Purged rows drop out of later pages.
-			n, err := s.store.PurgeDeletedAgentsByID(ctx, []string{a.ID}, cutoff)
+			// withAgentSecretCleanup captures any agent-scope secret names
+			// before the purge transaction deletes the DB rows and runs
+			// best-effort post-commit external (GCP) cleanup when n > 0.
+			n, err := s.withAgentSecretCleanup(ctx, a.ID, func() (int, error) {
+				return s.store.PurgeDeletedAgentsByID(ctx, []string{a.ID}, cutoff)
+			})
 			total += n
 			if err != nil {
 				return total, err

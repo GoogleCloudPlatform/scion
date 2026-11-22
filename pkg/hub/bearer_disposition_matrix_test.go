@@ -79,6 +79,26 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the hub.effective_permissions experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET and HEAD with hub- and project-boundary tokens carrying and lacking role_binding:read",
 		Pin:    "TestAdminEffectivePermissions_ScopedTokens",
 	},
+	{OperationID: "agent.secret.read", Method: "GET", Pattern: "/api/v1/secrets"}: {
+		Reason: "the route defaults to scope=user (session-only) without scope=agent&scopeId=<agentID> and rejects scope=agent while hub.agent_secrets is off in this fixture. The dedicated test enables hub.agent_secrets and drives /api/v1/secrets?scope=agent&scopeId=... with agent:read, agent:update, unrelated-selector, and cross-project user access tokens",
+		Pin:    "TestAgentSecrets_ScopedTokens",
+	},
+	{OperationID: "agent.secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}: {
+		Reason: "the route defaults to scope=user (session-only) without scope=agent&scopeId=<agentID> and rejects scope=agent while hub.agent_secrets is off in this fixture. The dedicated test enables hub.agent_secrets and drives /api/v1/secrets/{key}?scope=agent&scopeId=... with agent:read, agent:update, unrelated-selector, and cross-project user access tokens",
+		Pin:    "TestAgentSecrets_ScopedTokens",
+	},
+	{OperationID: "agent.secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}: {
+		Reason: "the route defaults to scope=user (session-only) without scope=agent&scopeId=<agentID> and rejects scope=agent while hub.agent_secrets is off in this fixture. The dedicated test enables hub.agent_secrets and drives PUT /api/v1/secrets/{key} with scope=agent using agent:read, agent:update, unrelated-selector, and cross-project user access tokens",
+		Pin:    "TestAgentSecrets_ScopedTokens",
+	},
+	{OperationID: "agent.secret.write", Method: "PATCH", Pattern: "/api/v1/secrets/{key}"}: {
+		Reason: "the route defaults to scope=user (session-only) without scope=agent&scopeId=<agentID> and rejects scope=agent while hub.agent_secrets is off in this fixture. The dedicated test enables hub.agent_secrets and drives PATCH /api/v1/secrets/{key}?scope=agent&scopeId=... with agent:read, agent:update, unrelated-selector, and cross-project user access tokens",
+		Pin:    "TestAgentSecrets_ScopedTokens",
+	},
+	{OperationID: "agent.secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}: {
+		Reason: "the route defaults to scope=user (session-only) without scope=agent&scopeId=<agentID> and rejects scope=agent while hub.agent_secrets is off in this fixture. The dedicated test enables hub.agent_secrets and drives DELETE /api/v1/secrets/{key}?scope=agent&scopeId=... with agent:read, agent:update, unrelated-selector, and cross-project user access tokens",
+		Pin:    "TestAgentSecrets_ScopedTokens",
+	},
 	{OperationID: "project.membership.add", Method: "POST", Pattern: "/api/v1/projects/{id}/members"}: {
 		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
 		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",

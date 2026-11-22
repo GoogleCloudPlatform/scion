@@ -678,11 +678,17 @@ func TestTestAdminRootScopes_ViewerGetsNoProjectSecrets(t *testing.T) {
 
 	restricted, allowed, _ := d.testAdminRootScopes(ctx, agentIn(viewerProject))
 	require.True(t, restricted, "precondition: the root is an admin-kind test identity")
-	assert.Equal(t, map[string]bool{store.ScopeUser: true}, allowed, "a viewer-only root gets no project scope")
+	assert.Equal(t, map[string]bool{store.ScopeUser: true, store.ScopeAgent: true}, allowed, "a viewer-only root that owns the agent gets user and agent scope, no project scope")
+
+	nonOwnerViewerAgent := agentIn(viewerProject)
+	nonOwnerViewerAgent.OwnerID = issuer.ID
+	restricted, allowed, _ = d.testAdminRootScopes(ctx, nonOwnerViewerAgent)
+	require.True(t, restricted)
+	assert.Empty(t, allowed, "a viewer-only root that does not own the agent gets no user, project, or agent scope")
 
 	restricted, allowed, _ = d.testAdminRootScopes(ctx, agentIn(memberProject))
 	require.True(t, restricted)
-	assert.Equal(t, map[string]bool{store.ScopeUser: true, store.ScopeProject: true}, allowed, "a project-member root gets project scope")
+	assert.Equal(t, map[string]bool{store.ScopeUser: true, store.ScopeProject: true, store.ScopeAgent: true}, allowed, "a project-member root gets user, project, and agent scope")
 }
 
 // TestProjectViewer_RootAgentKeepsStanding pins Phase 1 behaviour (lead

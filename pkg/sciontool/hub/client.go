@@ -802,17 +802,28 @@ type GetSecretResponse struct {
 	Value  string `json:"value"` // base64-encoded
 	Type   string `json:"type"`
 	Target string `json:"target"`
+	Scope  string `json:"scope,omitempty"`
 }
 
-// GetSecret retrieves a project-scoped secret via the Hub API.
-// Returns the secret key, value (base64-encoded), type and target.
+// GetSecret retrieves a secret via the Hub API using the default scope
+// resolution (agent scope first when enabled, then project scope).
+// Returns the secret key, value (base64-encoded), type, target and scope.
 func (c *Client) GetSecret(ctx context.Context, key string) (*GetSecretResponse, error) {
+	return c.GetSecretWithScope(ctx, key, "")
+}
+
+// GetSecretWithScope retrieves a secret via the Hub API, optionally pinning
+// the lookup to a specific scope ("agent", "project", or "user").
+func (c *Client) GetSecretWithScope(ctx context.Context, key, scope string) (*GetSecretResponse, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets/%s",
-		strings.TrimSuffix(c.hubURL, "/"), c.agentID, key)
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID, url.PathEscape(key))
+	if scope != "" {
+		endpoint += "?scope=" + url.QueryEscape(scope)
+	}
 
 	c.tokenMu.RLock()
 	currentToken := c.token
@@ -849,6 +860,7 @@ type ListSecretsSecretMeta struct {
 	Key    string `json:"key"`
 	Type   string `json:"type"`
 	Target string `json:"target"`
+	Scope  string `json:"scope,omitempty"`
 }
 
 // ListSecretsResponse is the response from the agent secret LIST endpoint.
@@ -856,14 +868,28 @@ type ListSecretsResponse struct {
 	Secrets []ListSecretsSecretMeta `json:"secrets"`
 }
 
-// ListSecrets lists metadata for all project-scoped secrets via the Hub API.
+// ListSecrets lists metadata for all secrets accessible to the agent via the Hub API.
 func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) {
+	return c.ListSecretsWithScope(ctx, "")
+}
+
+// ErrAgentScopeUnavailable is returned by ListSecretsWithScope when the Hub
+// rejects the requested scope with HTTP 400 (for example, when hub.agent_secrets
+// is not enabled on the Hub).
+var ErrAgentScopeUnavailable = errors.New("agent secret scope is not enabled on this hub")
+
+// ListSecretsWithScope lists metadata for secrets accessible to the agent,
+// optionally filtered by scope ("agent", "project", "user", or "all").
+func (c *Client) ListSecretsWithScope(ctx context.Context, scope string) (*ListSecretsResponse, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets",
 		strings.TrimSuffix(c.hubURL, "/"), c.agentID)
+	if scope != "" {
+		endpoint += "?scope=" + url.QueryEscape(scope)
+	}
 
 	c.tokenMu.RLock()
 	currentToken := c.token
@@ -884,6 +910,9 @@ func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) 
 
 	respBody, _ := io.ReadAll(resp.Body)
 
+	if resp.StatusCode == http.StatusBadRequest && (scope == "agent" || scope == "all") && isAgentScopeUnavailableResponse(scope, respBody) {
+		return nil, fmt.Errorf("%w: %s", ErrAgentScopeUnavailable, string(respBody))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -893,6 +922,29 @@ func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) 
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	return &result, nil
+}
+
+// isAgentScopeUnavailableResponse reports whether a 400 response body from
+// /api/v1/agents/{id}/secrets is specifically the Hub's invalid-scope error
+// returned when hub.agent_secrets is disabled.
+func isAgentScopeUnavailableResponse(scope string, body []byte) bool {
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return false
+	}
+	switch scope {
+	case "all":
+		return env.Error.Code == "validation_error" && env.Error.Message == `scope must be "project" or "user"`
+	case "agent":
+		return env.Error.Code == "invalid_request" && env.Error.Message == "invalid scope: agent"
+	default:
+		return false
+	}
 }
 
 // RefreshTokenEntry represents a single token in the generalized refresh response.

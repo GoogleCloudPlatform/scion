@@ -1365,7 +1365,7 @@ func TestUserSecretWriters_Inventory(t *testing.T) {
 			return false
 		}
 		switch sel.Sel.Name {
-		case "ScopeHub", "ScopeProject", "ScopeRuntimeBroker":
+		case "ScopeHub", "ScopeProject", "ScopeRuntimeBroker", "ScopeAgent":
 			return true
 		}
 		return false

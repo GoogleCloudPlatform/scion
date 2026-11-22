@@ -851,6 +851,11 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 			if err := deactivatePurgedAgentAuthority(ctx, txStore, removed, deactivation); err != nil {
 				return 0, err
 			}
+			for _, id := range removed {
+				if _, err := txStore.DeleteSecretsByScope(ctx, store.ScopeAgent, id); err != nil {
+					return 0, err
+				}
+			}
 			for _, id := range removedIDs {
 				if row := lifecycleBefore[id]; row != nil {
 					if err := observeAgentWrite(ctx, obs, tx.Client(), tx, store.AgentWrite{

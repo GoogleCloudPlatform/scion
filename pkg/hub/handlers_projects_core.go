@@ -4033,6 +4033,11 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	s.invalidateGitHubAssociation(id)
 	// Release the held values of the project's deleted pending secrets.
 	s.dropPendingValues(ctx, result.PendingSecretValueRefs)
+	// Best-effort external backend cleanup of deleted agents' agent-scoped
+	// secrets (DB rows were deleted in the project deletion transaction).
+	for agentID, keys := range result.AgentSecretKeys {
+		s.removeAgentScopedSecrets(ctx, agentID, keys)
+	}
 	kept := s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
 	// The Hub is the only remover of the project's tree on shared project
