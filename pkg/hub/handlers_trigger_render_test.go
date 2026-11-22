@@ -20,9 +20,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -379,4 +381,94 @@ func TestTriggerRender(t *testing.T) {
 	afterFires, err := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{ProjectID: f.projectID}, store.ListOptions{Limit: 100})
 	require.NoError(t, err)
 	assert.Equal(t, len(initialFires.Items), len(afterFires.Items), "render must not create trigger fires")
+}
+
+type triggerRenderGetProjectFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	mu    sync.Mutex
+	err   error
+}
+
+func (w *triggerRenderGetProjectFaultStore) setErr(err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.err = err
+}
+
+func (w *triggerRenderGetProjectFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	if w.fault.Active() {
+		w.mu.Lock()
+		err := w.err
+		w.mu.Unlock()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return w.Store.GetProject(ctx, id)
+}
+
+func TestTriggerRender_GetProjectErrors(t *testing.T) {
+	srv, s, failing, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *triggerRenderGetProjectFaultStore {
+		return &triggerRenderGetProjectFaultStore{Store: inner, fault: f}
+	})
+	f := setupTriggersTestFixtureOnServer(t, srv, s)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "proj-err-hook"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "proj-err-trigger",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{
+			Type:     store.TriggerActionDispatchAgent,
+			Template: "default",
+			Task:     "Task for ${project.name}",
+		},
+	})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+	now := time.Now().UTC().Truncate(time.Second)
+	ev := &store.TriggerEvent{
+		ID:           api.NewUUID(),
+		ProjectID:    f.projectID,
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     ep.ID,
+		Type:         "webhook.received",
+		Subject:      "s1",
+		DedupKey:     "proj-err-dedup",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Attributes:   map[string]string{"endpoint_name": ep.Name},
+		Payload:      `{}`,
+		PayloadBytes: 2,
+		Status:       store.TriggerEventStatusProcessed,
+		CreatedAt:    now,
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+
+	renderSubPath := tr.ID + "/render?eventId=" + url.QueryEscape(ev.ID)
+
+	t.Run("GetProject ErrNotFound returns 404", func(t *testing.T) {
+		failing.setErr(store.ErrNotFound)
+		fault.Arm()
+		t.Cleanup(func() { failing.setErr(nil) })
+
+		rec := f.doTrigger(t, f.memberAuth, renderSubPath, http.MethodPost, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+
+	t.Run("GetProject unexpected store error returns 500", func(t *testing.T) {
+		failing.setErr(errors.New("db unavailable"))
+		fault.Arm()
+		t.Cleanup(func() { failing.setErr(nil) })
+
+		rec := f.doTrigger(t, f.memberAuth, renderSubPath, http.MethodPost, nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	})
 }

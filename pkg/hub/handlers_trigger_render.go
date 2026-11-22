@@ -110,12 +110,22 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	var project *store.Project
-	projectName := ""
-	if p, pErr := s.store.GetProject(ctx, projectID); pErr == nil && p != nil {
-		project = p
-		projectName = p.Name
+	project, pErr := s.store.GetProject(ctx, projectID)
+	if pErr != nil {
+		if errors.Is(pErr, store.ErrNotFound) || errors.Is(pErr, store.ErrInvalidInput) {
+			NotFound(w, "Project")
+			return
+		}
+		slog.ErrorContext(ctx, "trigger render: failed to load project",
+			"project_id", projectID, "trigger_id", triggerID, "event_id", eventID, "error", pErr)
+		writeErrorFromErr(w, pErr, "")
+		return
 	}
+	if project == nil {
+		NotFound(w, "Project")
+		return
+	}
+	projectName := project.Name
 
 	sourceName := ""
 	signatureMode := ""
