@@ -340,6 +340,8 @@ func unsupportedScheduledDispatchField(p DispatchAgentEventPayload) string {
 		return "agentRole"
 	case p.ReuseMessage != "":
 		return "reuseMessage"
+	case p.AckComment != nil:
+		return "ackComment"
 	case p.UntrustedVars != nil:
 		return "untrustedVars"
 	default:

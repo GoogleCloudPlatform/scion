@@ -6728,23 +6728,30 @@ type MessageEventPayload struct {
 // errScheduledAuthorityUnrecorded when no recorded authority exists.
 var errScheduledMessageRefused = errors.New("scheduled_message_denied: message delivery refused")
 
+// DispatchAgentAckComment configures the post-fire GitHub acknowledgement
+// comment posted as the App after a fired dispatch_agent trigger (Stage 3 §7.2).
+type DispatchAgentAckComment struct {
+	Body string `json:"body"`
+}
+
 // DispatchAgentEventPayload is the JSON payload for "dispatch_agent" actions
 // on both scheduled events/schedules and event triggers (Stage 2 design §5.1).
 // Schedules accept only agentName, template, task, branch, and noAuth; the
 // remaining fields are trigger-only and refused for schedules at authoring.
 type DispatchAgentEventPayload struct {
-	AgentName     string            `json:"agentName,omitempty"`
-	NameConflict  string            `json:"nameConflict,omitempty"`
-	Template      string            `json:"template,omitempty"`
-	Task          string            `json:"task,omitempty"`
-	Branch        string            `json:"branch,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	Ephemeral     bool              `json:"ephemeral,omitempty"`
-	GithubToken   string            `json:"githubToken,omitempty"`
-	AgentRole     string            `json:"agentRole,omitempty"`
-	ReuseMessage  string            `json:"reuseMessage,omitempty"`
-	UntrustedVars []string          `json:"untrustedVars,omitempty"`
-	NoAuth        bool              `json:"noAuth,omitempty"`
+	AgentName     string                   `json:"agentName,omitempty"`
+	NameConflict  string                   `json:"nameConflict,omitempty"`
+	Template      string                   `json:"template,omitempty"`
+	Task          string                   `json:"task,omitempty"`
+	Branch        string                   `json:"branch,omitempty"`
+	Labels        map[string]string        `json:"labels,omitempty"`
+	Ephemeral     bool                     `json:"ephemeral,omitempty"`
+	GithubToken   string                   `json:"githubToken,omitempty"`
+	AgentRole     string                   `json:"agentRole,omitempty"`
+	ReuseMessage  string                   `json:"reuseMessage,omitempty"`
+	AckComment    *DispatchAgentAckComment `json:"ackComment,omitempty"`
+	UntrustedVars []string                 `json:"untrustedVars,omitempty"`
+	NoAuth        bool                     `json:"noAuth,omitempty"`
 }
 
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the

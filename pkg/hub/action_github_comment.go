@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -45,8 +47,6 @@ const (
 
 	// TriggerTemplateSlotGitHubAckCommentBody is the PhasePost template slot for
 	// dispatch_agent ackComment bodies (§7.1, §7.2).
-	// TODO(triggers-s3-g4): wire ackComment on dispatch_agent using this slot
-	// once Stage 2 P1c (dispatch_agent from event) lands.
 	TriggerTemplateSlotGitHubAckCommentBody = "github.ackComment.body"
 
 	githubCommentTargetEvent = "event"
@@ -144,6 +144,7 @@ func (a *githubCommentAction) SanitizedReasons() ([]string, string) {
 		"github write not permitted",
 		"github permission not permitted",
 		"github association not authorized",
+		"github app identity unknown",
 		"stale event",
 		"comment rate limited",
 	}, "github comment failed"
@@ -234,7 +235,7 @@ func (a *githubCommentAction) ValidatePayload(req hubfire.FireRequest) error {
 	return nil
 }
 
-func (a *githubCommentAction) Preauthorize(_ context.Context, req hubfire.FireRequest) (*FireRefusal, error) {
+func (a *githubCommentAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) (*FireRefusal, error) {
 	if req.Authority.DefinitionKind != hubfire.DefinitionKindTrigger {
 		return &FireRefusal{Reason: "github.comment refused"}, nil
 	}
@@ -245,7 +246,28 @@ func (a *githubCommentAction) Preauthorize(_ context.Context, req hubfire.FireRe
 	if req.Event != nil && req.Event.Attributes["stale"] == "true" {
 		return &FireRefusal{Reason: "stale event"}, nil
 	}
+	if refusal := a.srv.githubBotIdentityUnknownRefusal(ctx, req.Event); refusal != nil {
+		return refusal, nil
+	}
 	return nil, nil
+}
+
+// githubBotIdentityUnknownRefusal enforces the G4 own-App guard revisit
+// (G1a security S3, Option A): while the App's bot login is unknown (GET /app
+// failed and server.github_app.app_slug is unset), non-object-creating GitHub
+// events from Bot senders cannot be checked against <slug>[bot] at ingress, so
+// dispatch_agent and github.comment fires fail closed.
+func (s *Server) githubBotIdentityUnknownRefusal(ctx context.Context, ev *hubfire.FireEvent) *FireRefusal {
+	if s == nil || ev == nil || ev.SourceKind != store.TriggerSourceKindGitHub {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(ev.Attributes["sender_type"]), "Bot") {
+		return nil
+	}
+	if s.GitHubAppBotLogin(ctx) == "" {
+		return &FireRefusal{Reason: "github app identity unknown"}
+	}
+	return nil
 }
 
 // authorizeGitHubCommentFire verifies the frozen effect ceiling and live
@@ -872,5 +894,169 @@ func (s *Server) handleUnmatchedGitHubCommand(ctx context.Context, ev *store.Tri
 		ActorID:          actorID,
 		ExecutorKind:     trigger.ExecutorKindTriggerDrainer,
 		ExecutorID:       trigger.ExecutorIDPrefixTriggerEvent + ev.ID,
+	})
+}
+
+const githubAckCommentFailedAuditEventType = "trigger.fire.github_ack_comment_failed"
+
+// validateGitHubAckCommentPayload validates the dispatch_agent ackComment
+// payload against the PhasePost github.ackComment.body slot (§7.1, §7.2).
+func validateGitHubAckCommentPayload(ack *DispatchAgentAckComment, untrustedVars []string) error {
+	if ack == nil {
+		return nil
+	}
+	if ack.Body == "" {
+		return &dispatchAgentValidationError{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeValidationError,
+			message: "action.ackComment.body is required when ackComment is set",
+		}
+	}
+	if len(ack.Body) > githubapp.MaxCommentBodyBytes {
+		return &dispatchAgentValidationError{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeValidationError,
+			message: fmt.Sprintf("action.ackComment.body exceeds %d-byte limit", githubapp.MaxCommentBodyBytes),
+		}
+	}
+	if err := acceptGitHubCommentUTF8NoNUL(ack.Body); err != nil {
+		return &dispatchAgentValidationError{
+			status:  http.StatusBadRequest,
+			code:    ErrCodeValidationError,
+			message: fmt.Sprintf("invalid action.ackComment.body: %v", err),
+		}
+	}
+	if _, err := validateTemplateSlot(ack.Body, TriggerTemplateSlotGitHubAckCommentBody, untrustedVars); err != nil {
+		return err
+	}
+	return nil
+}
+
+// buildAgentWebURL builds the user-facing web agent link for result.agent_url (§7.1).
+func (s *Server) buildAgentWebURL(agentID string) string {
+	path := "/agents/" + url.PathEscape(agentID)
+	base := strings.TrimRight(strings.TrimSpace(s.HubEndpointFor(HubEndpointForAgentLinks)), "/")
+	if base == "" {
+		return path
+	}
+	return base + path
+}
+
+// postDispatchAgentAckComment renders and posts the post-fire GitHub
+// acknowledgement comment for a fired dispatch_agent trigger through the shared
+// github.comment code path (§7.1, §7.2, app-shaped-source-seams §2.1).
+// Failures never alter the dispatch outcome and are recorded visibly via audit
+// and slog without ever logging the comment body.
+func (s *Server) postDispatchAgentAckComment(
+	ctx context.Context,
+	req hubfire.FireRequest,
+	da *dispatchAgentAuthorized,
+	agent *store.Agent,
+) {
+	if s == nil || req.Event == nil || da == nil || da.payload.AckComment == nil {
+		return
+	}
+	var agentID, agentName string
+	if agent != nil {
+		agentID = agent.ID
+		agentName = agent.Name
+		if agentName == "" {
+			agentName = agent.Slug
+		}
+	}
+
+	recordAckFailure := func(status hubfire.FireStatus, reason string) {
+		slog.WarnContext(ctx, "dispatch_agent ackComment did not post",
+			"project_id", req.ProjectID,
+			"trigger_id", req.Authority.DefinitionID,
+			"fire_id", req.Authority.FireID,
+			"event_id", req.Event.ID,
+			"agent_id", agentID,
+			"status", status,
+			"reason", reason)
+		logging.Subsystem("hub.audit").LogAttrs(ctx, slog.LevelWarn, githubAckCommentFailedAuditEventType,
+			slog.String("event_type", githubAckCommentFailedAuditEventType),
+			slog.String("project", req.ProjectID),
+			slog.String("project_id", req.ProjectID),
+			slog.String("trigger", req.Authority.DefinitionID),
+			slog.String("trigger_id", req.Authority.DefinitionID),
+			slog.String("fire", req.Authority.FireID),
+			slog.String("fire_id", req.Authority.FireID),
+			slog.String("event_id", req.Event.ID),
+			slog.String("agent_id", agentID),
+			slog.String("status", string(status)),
+			slog.String("reason", reason),
+		)
+	}
+
+	if da.project == nil {
+		recordAckFailure(hubfire.FireStatusFailed, "github comment failed")
+		return
+	}
+	if authErr := s.authorizeGitHubCommentFire(ctx, req.ProjectID, da.auth, da.identity); authErr != nil {
+		slog.WarnContext(ctx, "dispatch_agent ackComment refused at authorization",
+			"fire_id", req.Authority.FireID,
+			"trigger_id", req.Authority.DefinitionID,
+			"project_id", req.ProjectID,
+			"principal_kind", da.auth.PrincipalKind,
+			"principal_id", da.auth.PrincipalID,
+			"authorization_revision", da.auth.Revision,
+			"error", authErr)
+		recordAckFailure(hubfire.FireStatusRefused, "github.comment refused")
+		return
+	}
+	target, err := extractGitHubCommentTarget(req.Event.Type, req.Event.Attributes, false)
+	if err != nil {
+		recordAckFailure(hubfire.FireStatusFailed, "github comment failed")
+		return
+	}
+
+	postVars := triggertemplate.MapVars{
+		"result.agent_id":   agentID,
+		"result.agent_name": agentName,
+		"result.agent_url":  s.buildAgentWebURL(agentID),
+		"result.fire_id":    req.Authority.FireID,
+	}
+	vars := triggertemplate.ChainVars(postVars, buildGitHubCommentTemplateVars(req.Event, da.project))
+
+	tmpl, err := triggertemplate.ValidateSlot(da.payload.AckComment.Body, TriggerTemplateSlotGitHubAckCommentBody, da.payload.UntrustedVars)
+	if err != nil {
+		recordAckFailure(hubfire.FireStatusRefused, "invalid ackComment template")
+		return
+	}
+	renderedBody, _, renderErr := tmpl.Render(vars, da.payload.UntrustedVars)
+	if renderErr != nil {
+		recordAckFailure(hubfire.FireStatusRefused, "ackComment render failed")
+		return
+	}
+
+	attempts := req.Attempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+
+	comment, outcome := s.postGitHubTriggerComment(ctx, da.project, githubapp.PostCommentOptions{
+		Owner:       target.owner,
+		Repo:        target.repo,
+		IssueNumber: target.number,
+		Body:        renderedBody,
+		FireID:      req.Authority.FireID,
+		Attempts:    attempts,
+		Since:       req.Event.ReceivedAt,
+	})
+	if outcome != nil {
+		recordAckFailure(outcome.Status, outcome.Error)
+		return
+	}
+
+	emitGitHubCommentAudit(ctx, githubCommentAuditParams{
+		ProjectID: req.ProjectID,
+		TriggerID: req.Authority.DefinitionID,
+		FireID:    req.Authority.FireID,
+		EventID:   req.Event.ID,
+		Repo:      target.repoFullName,
+		Number:    target.number,
+		CommentID: comment.ID,
+		HTMLURL:   comment.HTMLURL,
 	})
 }

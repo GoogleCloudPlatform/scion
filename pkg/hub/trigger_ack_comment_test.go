@@ -1,0 +1,605 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
+)
+
+func setupAckCommentFixture(t *testing.T, tag string) (*triggerDispatchAgentFixture, *fakeGitHubCommentAPI, *store.User, *store.Project) {
+	t.Helper()
+	f := newTriggerDispatchAgentFixture(t, tag)
+	ctx := context.Background()
+
+	gh := newFakeGitHubCommentAPI(t)
+	f.sched.srv.mu.Lock()
+	f.sched.srv.config.GitHubAppConfig.APIBaseURL = gh.srv.URL
+	f.sched.srv.config.GitHubAppConfig.AppID = 778899
+	f.sched.srv.config.GitHubAppConfig.AppSlug = "scion-bot"
+	f.sched.srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+	f.sched.srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
+	f.sched.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.sched.srv.config.HubEndpoint = "https://hub.example.test"
+	f.sched.srv.config.HubEndpoints = &HubEndpoints{Public: "https://hub.example.test"}
+	f.sched.srv.mu.Unlock()
+
+	setTriggerExperimentsForG1bTest(t, f.sched.srv, true, true)
+
+	const instID int64 = 8301
+	createAssocInstallation(t, f.sched.store, instID, "acme", "acme/widgets")
+
+	admin := createAssocAdmin(t, f.sched.store, "ack-admin-"+tag)
+	proj, err := f.sched.store.GetProject(ctx, f.sched.proj.ID)
+	require.NoError(t, err)
+	// Use https:// with the fake GitHub server's host so both githubOwnerRepo
+	// (host-pinned against APIBaseURL) and clone-per-agent URL validation accept it.
+	remote := "https://" + strings.TrimPrefix(gh.srv.URL, "http://") + "/acme/widgets"
+	proj.GitRemote = remote
+	idCopy := instID
+	proj.GitHubInstallationID = &idCopy
+	proj.GitHubAppStatus = &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now().UTC()}
+	require.NoError(t, f.sched.store.UpdateProject(ctx, proj))
+	setAdminBinding(t, f.sched.store, proj, instID, util.NormalizeGitRemote(remote), admin.ID)
+	f.sched.srv.invalidateGitHubAssociation(proj.ID)
+
+	// Make f.sched.creator an owner so they can author github triggers and dispatch agents.
+	ownerCtx := f.userAuth(t, f.sched.creator)
+	_ = ownerCtx
+	return f, gh, admin, proj
+}
+
+func TestDispatchAgentAckComment_AuthoringValidation(t *testing.T) {
+	f, _, admin, proj := setupAckCommentFixture(t, "ack-authoring")
+	creatorCtx := f.userAuth(t, f.sched.creator)
+	adminCtx := f.userAuth(t, admin)
+	ep := f.createEndpoint(t, creatorCtx, "ack-wh-ep")
+
+	// 1. Non-github trigger with ackComment -> 400 ack_comment_requires_github_source.
+	recWH := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "wh-ack-rejected",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Action: TriggerActionSpec{
+				Type:       store.TriggerActionDispatchAgent,
+				Task:       "run",
+				AckComment: &DispatchAgentAckComment{Body: "Started ${result.agent_name}"},
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recWH.Code, recWH.Body.String())
+	assert.Equal(t, "ack_comment_requires_github_source", decodeAPIErrorCode(t, recWH))
+
+	// 2. Empty ackComment.body -> 400.
+	recEmpty := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-ack-empty",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:       store.TriggerActionDispatchAgent,
+				Task:       "run",
+				AckComment: &DispatchAgentAckComment{Body: ""},
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recEmpty.Code, recEmpty.Body.String())
+
+	// 3. Un-opted-in untrusted variable in ackComment.body -> 400 untrusted_var_not_allowed.
+	recUntrusted := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-ack-untrusted",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:       store.TriggerActionDispatchAgent,
+				Task:       "run",
+				AckComment: &DispatchAgentAckComment{Body: "Requested by @${event.attributes.sender}"},
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recUntrusted.Code, recUntrusted.Body.String())
+	assert.Equal(t, "untrusted_var_not_allowed", decodeAPIErrorCode(t, recUntrusted))
+
+	// 4. Valid github trigger with PhasePost result.* and opted-in untrusted var -> 201 Created, round-trips.
+	ackBody := "Started **${result.agent_name}** (${result.agent_id}) — [open](${result.agent_url}) [fire ${result.fire_id}] for @${event.attributes.sender}"
+	recOK := f.doJSON(t, creatorCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "gh-ack-ok",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:          store.TriggerActionDispatchAgent,
+				Task:          "review PR",
+				AckComment:    &DispatchAgentAckComment{Body: ackBody},
+				UntrustedVars: []string{"event.attributes.sender"},
+			},
+		})
+	require.Equal(t, http.StatusCreated, recOK.Code, recOK.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(recOK.Body.Bytes(), &created))
+	require.NotNil(t, created.Action.AckComment)
+	assert.Equal(t, ackBody, created.Action.AckComment.Body)
+
+	// 5. PATCH changing source from github to webhook while keeping ackComment -> 400 ack_comment_requires_github_source.
+	recPatch := f.doJSON(t, adminCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", proj.ID, created.ID),
+		map[string]any{
+			"source": TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			"match":  map[string]any{"types": []string{"webhook.received"}},
+		})
+	require.Equal(t, http.StatusBadRequest, recPatch.Code, recPatch.Body.String())
+	assert.Equal(t, "ack_comment_requires_github_source", decodeAPIErrorCode(t, recPatch))
+
+	// 6. Schedule payload with ackComment is rejected as trigger-only.
+	assert.Equal(t, "ackComment", unsupportedScheduledDispatchField(DispatchAgentEventPayload{
+		AckComment: &DispatchAgentAckComment{Body: "hi"},
+	}))
+}
+
+func TestDispatchAgentAckComment_FireLeaseLossOutcomeIsolationAndNoBodyLog(t *testing.T) {
+	var logBuf bytes.Buffer
+	origLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(origLogger) })
+
+	f, gh, _, proj := setupAckCommentFixture(t, "ack-fire")
+	ctx := context.Background()
+
+	const secretBodyMarker = "ACK_SECRET_BODY_DO_NOT_LOG_98765"
+	ackBody := secretBodyMarker + " Started **${result.agent_name}** (${result.agent_id}) — [open](${result.agent_url}) [fire ${result.fire_id}] for @${event.attributes.sender}"
+
+	triggerID := uuid.NewString()
+	fireID := uuid.NewString()
+	eventID := uuid.NewString()
+	receivedAt := time.Now().UTC().Add(-time.Minute)
+
+	makeReq := func(fid string, attempts int, nameConflict string, attrs map[string]string) hubfire.FireRequest {
+		p := DispatchAgentEventPayload{
+			AgentName:     "pr-${event.attributes.number}-review",
+			NameConflict:  nameConflict,
+			Task:          "review PR ${event.attributes.number}",
+			GithubToken:   DispatchAgentGitHubTokenInstallation,
+			AckComment:    &DispatchAgentAckComment{Body: ackBody},
+			UntrustedVars: []string{"event.attributes.number", "event.attributes.sender"},
+		}
+		raw, mErr := json.Marshal(p)
+		require.NoError(t, mErr)
+		return hubfire.FireRequest{
+			ProjectID: proj.ID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+					InitiatorPrincipalID:    f.sched.creator.ID,
+					InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+					AttributionVersion:      1,
+					AuthorizationRevision:   1,
+				},
+				Ceiling:        store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   triggerID,
+				FireID:         fid,
+			},
+			ActionType: store.TriggerActionDispatchAgent,
+			Payload:    string(raw),
+			FireAt:     time.Now().UTC(),
+			Attempts:   attempts,
+			Event: &hubfire.FireEvent{
+				ID:         eventID,
+				SourceKind: store.TriggerSourceKindGitHub,
+				SourceID:   "8301",
+				Type:       "github.issue_comment.created",
+				Subject:    "github:acme/widgets#42",
+				ReceivedAt: receivedAt,
+				Attributes: attrs,
+				Trigger: &hubfire.FireTriggerRef{
+					ID:          triggerID,
+					Name:        "gh-ack-trigger",
+					SubjectMode: store.TriggerSubjectModeNew,
+					FireSubject: "github:acme/widgets#42",
+				},
+			},
+		}
+	}
+
+	baseAttrs := map[string]string{
+		"repo":       "acme/widgets",
+		"repo_owner": "acme",
+		"repo_name":  "widgets",
+		"number":     "42",
+		"sender":     "alice",
+		"command":    "review",
+	}
+
+	// 1. Fired dispatch renders PhasePost result.* and posts exactly one ack comment with marker.
+	req1 := makeReq(fireID, 1, DispatchAgentNameConflictSuffix, baseAttrs)
+	out1 := f.sched.srv.fireAction(ctx, req1)
+	require.Equal(t, hubfire.FireStatusFired, out1.Status, out1.Error)
+	require.NotEmpty(t, out1.TargetAgentID)
+	assert.Equal(t, out1.TargetAgentID, out1.ResultRef)
+
+	gh.mu.Lock()
+	require.Len(t, gh.comments, 1)
+	posted := gh.comments[0]
+	assert.Equal(t, 1, gh.postCount)
+	gh.mu.Unlock()
+
+	expectedURL := "https://hub.example.test/agents/" + out1.TargetAgentID
+	assert.Contains(t, posted.Body, "Started **pr-42-review**")
+	assert.Contains(t, posted.Body, "("+out1.TargetAgentID+")")
+	assert.Contains(t, posted.Body, "[open]("+expectedURL+")")
+	assert.Contains(t, posted.Body, "[fire "+fireID+"]")
+	assert.Contains(t, posted.Body, "@alice")
+	assert.True(t, strings.HasSuffix(posted.Body, "<!-- scion fire:"+fireID+" -->"), "body: %s", posted.Body)
+
+	// 2. Lease-loss retry (Attempts > 1 with same fireID) scans comments for marker and does NOT double-post.
+	reqLeaseRetry := makeReq(fireID, 2, DispatchAgentNameConflictSuffix, baseAttrs)
+	outRetry := f.sched.srv.fireAction(ctx, reqLeaseRetry)
+	require.Equal(t, hubfire.FireStatusFired, outRetry.Status, outRetry.Error)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "lease-loss retry must not post a duplicate ack comment")
+	assert.GreaterOrEqual(t, gh.listCount, 1, "lease-loss retry must scan existing comments for marker")
+	gh.mu.Unlock()
+
+	// 3. Skipped outcome (nameConflict: skip on existing slug) must NOT post an ack comment.
+	reqSkipped := makeReq(uuid.NewString(), 1, DispatchAgentNameConflictSkip, baseAttrs)
+	outSkipped := f.sched.srv.fireAction(ctx, reqSkipped)
+	require.Equal(t, hubfire.FireStatusSkipped, outSkipped.Status)
+	assert.Equal(t, "agent name in use", outSkipped.Error)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "skipped dispatch must not post ack comment")
+	gh.mu.Unlock()
+
+	// 4. Refused outcome (missing required untrusted attr for template render) must NOT post an ack comment.
+	reqRefused := makeReq(uuid.NewString(), 1, DispatchAgentNameConflictSuffix, map[string]string{
+		"repo":       "acme/widgets",
+		"repo_owner": "acme",
+		"repo_name":  "widgets",
+		"sender":     "alice",
+		// number missing -> Name/Task template render refuses
+	})
+	outRefused := f.sched.srv.fireAction(ctx, reqRefused)
+	require.Equal(t, hubfire.FireStatusRefused, outRefused.Status)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "refused dispatch must not post ack comment")
+	gh.mu.Unlock()
+
+	// 5. Ack failure (project github-permissions excludes issues:write) must NOT change dispatch outcome,
+	// and must record the failure visibly without logging the comment body.
+	projUpdated, err := f.sched.store.GetProject(ctx, proj.ID)
+	require.NoError(t, err)
+	projUpdated.GitHubPermissions = &store.GitHubTokenPermissions{Contents: "read", Metadata: "read"}
+	require.NoError(t, f.sched.store.UpdateProject(ctx, projUpdated))
+	f.sched.srv.githubTokenCache.invalidateProject(proj.ID)
+
+	logBuf.Reset()
+
+	failFireID := uuid.NewString()
+	reqPermDenied := makeReq(failFireID, 1, DispatchAgentNameConflictSuffix, baseAttrs)
+	outPermDenied := f.sched.srv.fireAction(ctx, reqPermDenied)
+	require.Equal(t, hubfire.FireStatusFired, outPermDenied.Status, "ack failure must not change dispatch outcome")
+	require.NotEmpty(t, outPermDenied.TargetAgentID)
+	assert.Empty(t, outPermDenied.Error)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "ack without issues:write permission must be refused")
+	gh.mu.Unlock()
+
+	logged := logBuf.String()
+	assert.Contains(t, logged, githubAckCommentFailedAuditEventType)
+	assert.Contains(t, logged, "github permission not permitted")
+	assert.NotContains(t, logged, secretBodyMarker, "ackComment body must never appear in logs or audit")
+
+	// 6. Fire-time github_trigger.comment authorization revocation (frozen ceiling
+	// omits github_trigger.comment) refuses only the ack and keeps dispatch fired.
+	projRestore, err := f.sched.store.GetProject(ctx, proj.ID)
+	require.NoError(t, err)
+	projRestore.GitHubPermissions = nil
+	require.NoError(t, f.sched.store.UpdateProject(ctx, projRestore))
+	f.sched.srv.githubTokenCache.invalidateProject(proj.ID)
+
+	logBuf.Reset()
+	// Fire-time github_trigger.comment authorization revocation via a UAT whose
+	// frozen ceiling permits agent.create (with noAuth) but omits github_trigger.comment:
+	// dispatch_agent succeeds (fired), while only ackComment is refused.
+	uatExp := time.Now().UTC().Add(time.Hour)
+	uat := &store.UserAccessToken{
+		ID:                   uuid.NewString(),
+		UserID:               f.sched.creator.ID,
+		ProjectID:            proj.ID,
+		Name:                 "ack-ceiling-uat",
+		Prefix:               "scion_pat_ack",
+		KeyHash:              "hash-" + uuid.NewString(),
+		Scopes:               []string{"agent:create"},
+		BoundaryKind:         "project",
+		CeilingVersion:       permissions.CeilingVersionV1,
+		CeilingPermissionIDs: []string{"agent.create"},
+		ExpiresAt:            &uatExp,
+	}
+	require.NoError(t, f.sched.store.CreateUserAccessToken(ctx, uat))
+
+	ceilingPayload, mErr := json.Marshal(DispatchAgentEventPayload{
+		AgentName:     "pr-${event.attributes.number}-ceiling",
+		Task:          "review PR ${event.attributes.number}",
+		NoAuth:        true,
+		GithubToken:   DispatchAgentGitHubTokenInstallation,
+		AckComment:    &DispatchAgentAckComment{Body: ackBody},
+		UntrustedVars: []string{"event.attributes.number", "event.attributes.sender"},
+	})
+	require.NoError(t, mErr)
+	reqCeilingDenied := makeReq(uuid.NewString(), 1, DispatchAgentNameConflictSuffix, baseAttrs)
+	reqCeilingDenied.Payload = string(ceilingPayload)
+	reqCeilingDenied.Authority.Attribution.InitiatorCredentialKind = store.InitiatorCredentialKindUAT
+	reqCeilingDenied.Authority.Attribution.InitiatorCredentialID = uat.ID
+	reqCeilingDenied.Authority.Ceiling = store.EffectCeiling{
+		Kind:              store.EffectCeilingBounded,
+		Version:           permissions.CeilingVersionV1,
+		PermissionIDs:     []string{"agent.create"},
+		BoundaryKind:      "project",
+		BoundaryProjectID: proj.ID,
+	}
+	outCeilingDenied := f.sched.srv.fireAction(ctx, reqCeilingDenied)
+	require.Equal(t, hubfire.FireStatusFired, outCeilingDenied.Status, "revoked github_trigger.comment must not fail dispatch (err=%s, log=%s)", outCeilingDenied.Error, logBuf.String())
+	assert.Empty(t, outCeilingDenied.Error)
+
+	gh.mu.Lock()
+	assert.Equal(t, 1, gh.postCount, "ack without github_trigger.comment in ceiling must not post")
+	gh.mu.Unlock()
+	assert.Contains(t, logBuf.String(), githubAckCommentFailedAuditEventType)
+	assert.Contains(t, logBuf.String(), "github.comment refused")
+	assert.NotContains(t, logBuf.String(), secretBodyMarker)
+}
+
+func TestDispatchAgentAckComment_AgentCallerForbidden(t *testing.T) {
+	f, _, _, proj := setupAckCommentFixture(t, "ack-agent-forbid")
+	ctx := context.Background()
+
+	// Seed a full-role agent in the project and give it agent-JWT auth.
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "full-author-agent",
+		Name:      "full-author-agent",
+		ProjectID: proj.ID,
+		OwnerID:   f.sched.creator.ID,
+		Phase:     string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			AgentRole: string(AgentRoleFull),
+		},
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, ag))
+	agentCtx := f.agentAuth(t, ag, AgentRoleFull)
+
+	// Agent callers cannot author dispatch_agent with ackComment (design rev 1.12 §8.1:
+	// github_trigger.comment has no agent scope).
+	rec := f.doJSON(t, agentCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", proj.ID),
+		CreateTriggerRequest{
+			Name:   "agent-ack-denied",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindGitHub, ID: ""},
+			Match:  &TriggerMatchSpec{Types: []string{"github.issue_comment.created"}},
+			Action: TriggerActionSpec{
+				Type:       store.TriggerActionDispatchAgent,
+				Task:       "run",
+				AckComment: &DispatchAgentAckComment{Body: "Started ${result.agent_name}"},
+			},
+		})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+func TestGitHubOwnAppUnknownIdentity_BotRefusal(t *testing.T) {
+	f := newTriggerDispatchAgentFixture(t, "own-app-unknown-id")
+	ctx := context.Background()
+
+	var appFail atomic.Bool
+	appFail.Store(true)
+
+	var commentPostCount atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		if appFail.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "github down"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":          778899,
+			"slug":        "recovered-app",
+			"name":        "Recovered App",
+			"permissions": map[string]string{"contents": "write", "pull_requests": "write", "issues": "write", "metadata": "read"},
+		})
+	})
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"token":       "ghs_ownapp_test_tok",
+			"expires_at":  time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			"permissions": map[string]string{"issues": "write", "metadata": "read"},
+		})
+	})
+	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/comments") {
+			commentPostCount.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(githubapp.IssueComment{
+				ID:      501,
+				HTMLURL: "https://github.com/acme/widgets/issues/7#issuecomment-501",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	ghSrv := httptest.NewServer(mux)
+	t.Cleanup(ghSrv.Close)
+
+	f.sched.srv.mu.Lock()
+	f.sched.srv.config.GitHubAppConfig.APIBaseURL = ghSrv.URL
+	f.sched.srv.config.GitHubAppConfig.AppID = 778899
+	f.sched.srv.config.GitHubAppConfig.AppSlug = "" // unknown until GET /app succeeds
+	f.sched.srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+	f.sched.srv.config.GitHubAppConfig.WebhookSecret = "test-webhook-secret"
+	f.sched.srv.config.GitHubAppConfig.WebhooksEnabled = true
+	f.sched.srv.mu.Unlock()
+	f.sched.srv.githubAppIdentity.reset()
+
+	setTriggerExperimentsForG1bTest(t, f.sched.srv, true, true)
+
+	const instID int64 = 8401
+	createAssocInstallation(t, f.sched.store, instID, "acme", "acme/widgets")
+	admin := createAssocAdmin(t, f.sched.store, "ownapp-admin")
+	proj, err := f.sched.store.GetProject(ctx, f.sched.proj.ID)
+	require.NoError(t, err)
+	remote := "https://" + strings.TrimPrefix(ghSrv.URL, "http://") + "/acme/widgets"
+	proj.GitRemote = remote
+	idCopy := instID
+	proj.GitHubInstallationID = &idCopy
+	// Explicit project permissions so github.comment mint doesn't require GET /app for defaults.
+	proj.GitHubPermissions = &store.GitHubTokenPermissions{Issues: "write", Metadata: "read"}
+	proj.GitHubAppStatus = &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now().UTC()}
+	require.NoError(t, f.sched.store.UpdateProject(ctx, proj))
+	setAdminBinding(t, f.sched.store, proj, instID, util.NormalizeGitRemote(remote), admin.ID)
+	f.sched.srv.invalidateGitHubAssociation(proj.ID)
+
+	// Running target agent for message action test.
+	targetAgent := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "msg-target-agent",
+		Name:      "msg-target-agent",
+		ProjectID: proj.ID,
+		OwnerID:   f.sched.creator.ID,
+		Phase:     string(state.PhaseRunning),
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAgent))
+
+	makeFireReq := func(actionType, payload, senderType, sender string) hubfire.FireRequest {
+		return hubfire.FireRequest{
+			ProjectID: proj.ID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+					InitiatorPrincipalID:    f.sched.creator.ID,
+					InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+					AttributionVersion:      1,
+					AuthorizationRevision:   1,
+				},
+				Ceiling:        store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   uuid.NewString(),
+				FireID:         uuid.NewString(),
+			},
+			ActionType: actionType,
+			Payload:    payload,
+			FireAt:     time.Now().UTC(),
+			Event: &hubfire.FireEvent{
+				ID:         uuid.NewString(),
+				SourceKind: store.TriggerSourceKindGitHub,
+				SourceID:   "8401",
+				Type:       "github.pull_request.synchronize",
+				Subject:    "github:acme/widgets#7",
+				ReceivedAt: time.Now().UTC(),
+				Attributes: map[string]string{
+					"repo":        "acme/widgets",
+					"repo_owner":  "acme",
+					"repo_name":   "widgets",
+					"number":      "7",
+					"sender_type": senderType,
+					"sender":      sender,
+				},
+			},
+		}
+	}
+
+	dispatchPayload := `{"task":"check PR","githubToken":"installation"}`
+	commentPayload := `{"body":"hello from trigger"}`
+
+	// 1. Unknown identity + Bot sender -> dispatch_agent and github.comment refused.
+	outDispatchBot := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "Bot", "dependabot[bot]"))
+	assert.Equal(t, hubfire.FireStatusRefused, outDispatchBot.Status)
+	assert.Equal(t, "github app identity unknown", outDispatchBot.Error)
+
+	outCommentBot := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionGitHubComment, commentPayload, "Bot", "dependabot[bot]"))
+	assert.Equal(t, hubfire.FireStatusRefused, outCommentBot.Status)
+	assert.Equal(t, "github app identity unknown", outCommentBot.Error)
+	assert.Zero(t, commentPostCount.Load())
+
+	// 2. Unknown identity + User sender -> dispatch_agent and github.comment fire normally.
+	outDispatchUser := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "User", "alice"))
+	assert.Equal(t, hubfire.FireStatusFired, outDispatchUser.Status, outDispatchUser.Error)
+
+	outCommentUser := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionGitHubComment, commentPayload, "User", "alice"))
+	assert.Equal(t, hubfire.FireStatusFired, outCommentUser.Status, outCommentUser.Error)
+	assert.Equal(t, int64(1), commentPostCount.Load())
+
+	// 3. Unknown identity + Bot sender on message action -> unaffected (not refused for unknown identity).
+	msgPayload := fmt.Sprintf(`{"agentId":%q,"message":"bot event"}`, targetAgent.ID)
+	outMsgBot := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionMessage, msgPayload, "Bot", "dependabot[bot]"))
+	assert.NotEqual(t, "github app identity unknown", outMsgBot.Error, "message rules must be unaffected by unknown app identity")
+
+	// 4. Known identity via AppSlug override + Bot sender -> fires normally.
+	f.sched.srv.mu.Lock()
+	f.sched.srv.config.GitHubAppConfig.AppSlug = "configured-app"
+	f.sched.srv.mu.Unlock()
+
+	outDispatchKnown := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "Bot", "dependabot[bot]"))
+	assert.Equal(t, hubfire.FireStatusFired, outDispatchKnown.Status, outDispatchKnown.Error)
+
+	outCommentKnown := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionGitHubComment, commentPayload, "Bot", "dependabot[bot]"))
+	assert.Equal(t, hubfire.FireStatusFired, outCommentKnown.Status, outCommentKnown.Error)
+	assert.Equal(t, int64(2), commentPostCount.Load())
+
+	// 5. Identity recovered via GET /app (AppSlug unset, GET /app now succeeds) + Bot sender -> fires normally.
+	f.sched.srv.mu.Lock()
+	f.sched.srv.config.GitHubAppConfig.AppSlug = ""
+	f.sched.srv.mu.Unlock()
+	appFail.Store(false)
+	f.sched.srv.githubAppIdentity.reset()
+
+	outDispatchRecovered := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionDispatchAgent, dispatchPayload, "Bot", "dependabot[bot]"))
+	assert.Equal(t, hubfire.FireStatusFired, outDispatchRecovered.Status, outDispatchRecovered.Error)
+
+	outCommentRecovered := f.sched.srv.fireAction(ctx, makeFireReq(store.TriggerActionGitHubComment, commentPayload, "Bot", "dependabot[bot]"))
+	assert.Equal(t, hubfire.FireStatusFired, outCommentRecovered.Status, outCommentRecovered.Error)
+	assert.Equal(t, int64(3), commentPostCount.Load())
+}

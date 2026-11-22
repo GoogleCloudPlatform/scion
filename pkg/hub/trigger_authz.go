@@ -488,6 +488,7 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		GithubToken:   spec.GithubToken,
 		AgentRole:     spec.AgentRole,
 		ReuseMessage:  spec.ReuseMessage,
+		AckComment:    spec.AckComment,
 		UntrustedVars: spec.UntrustedVars,
 		NoAuth:        spec.NoAuth,
 	})
@@ -526,7 +527,65 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 		return "", false
 	}
 
+	if sourceKind == store.TriggerSourceKindGitHub && spec.AckComment != nil {
+		if !s.authorizeGitHubCommentAuthoringPermission(w, r, projectID) {
+			return "", false
+		}
+	}
+
 	return normalized, true
+}
+
+func (s *Server) authorizeGitHubCommentAuthoringPermission(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+) bool {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false
+	}
+	res := Resource{
+		Type:       permissions.ResourceGitHubTrigger,
+		ID:         projectID,
+		ParentType: permissions.ResourceProject,
+		ParentID:   projectID,
+	}
+	switch identity.Type() {
+	case "user", "dev", "federated_user":
+		userIdent, ok := identity.(UserIdentity)
+		if !ok || s.authzService == nil {
+			writeForbidden(w, "You don't have permission to post GitHub comments through triggers in this project")
+			return false
+		}
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   res,
+			Action:     Action(permissions.ActionComment),
+			Permission: githubTriggerCommentPermission,
+		})
+		if !decision.Allowed {
+			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), decision.Reason)
+			writeForbidden(w, "You don't have permission to post GitHub comments through triggers in this project")
+			return false
+		}
+		return true
+
+	case "agent":
+		// Design rev 1.12 §8.1: in Stage 3, github_trigger.comment has no agent
+		// scope, so agents cannot author github.comment triggers or ackComment.
+		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent callers cannot author github.comment triggers")
+		writeForbidden(w, "Agent callers cannot author github.comment triggers")
+		return false
+
+	default:
+		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "identity type may not author github.comment triggers")
+		writeForbidden(w, "")
+		return false
+	}
 }
 
 // authorizeTriggerGitHubCommentAuthoring enforces Stage 3 §7.1 / §8.1 authoring
@@ -553,43 +612,7 @@ func (s *Server) authorizeTriggerGitHubCommentAuthoring(
 		ValidationError(w, "github.comment action requires a github trigger source", nil)
 		return "", false
 	}
-
-	res := Resource{
-		Type:       permissions.ResourceGitHubTrigger,
-		ID:         projectID,
-		ParentType: permissions.ResourceProject,
-		ParentID:   projectID,
-	}
-	switch identity.Type() {
-	case "user", "dev", "federated_user":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok || s.authzService == nil {
-			writeForbidden(w, "You don't have permission to post GitHub comments through triggers in this project")
-			return "", false
-		}
-		decision := s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(userIdent),
-			Credential: credentialContextForIdentity(userIdent),
-			Resource:   res,
-			Action:     Action(permissions.ActionComment),
-			Permission: githubTriggerCommentPermission,
-		})
-		if !decision.Allowed {
-			logAuthzDenial(r, identity, res, Action(permissions.ActionComment), decision.Reason)
-			writeForbidden(w, "You don't have permission to post GitHub comments through triggers in this project")
-			return "", false
-		}
-
-	case "agent":
-		// Design rev 1.12 §8.1: in Stage 3, github_trigger.comment has no agent
-		// scope, so agents cannot author github.comment triggers.
-		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "agent callers cannot author github.comment triggers")
-		writeForbidden(w, "Agent callers cannot author github.comment triggers")
-		return "", false
-
-	default:
-		logAuthzDenial(r, identity, res, Action(permissions.ActionComment), "identity type may not author github.comment triggers")
-		writeForbidden(w, "")
+	if !s.authorizeGitHubCommentAuthoringPermission(w, r, projectID) {
 		return "", false
 	}
 
