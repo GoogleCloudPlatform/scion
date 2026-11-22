@@ -1194,11 +1194,11 @@ var identityOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{
-			EventType:              "user.exec_container.set",
+			EventType:              "user.exec_container.set, user.exec_container.clear",
 			ContextFields:          []string{"actor_id"},
 			BeforeFields:           []string{"agent_id"},
 			AfterFields:            []string{"agent_id"},
-			NonAtomicJustification: "Single-row per-user upsert; best-effort synchronous mutation audit follows PutUserExecContainer",
+			NonAtomicJustification: "Single-row per-user upsert/delete; best-effort synchronous mutation audit follows PutUserExecContainer and DeleteUserExecContainer",
 		},
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{

@@ -10243,12 +10243,12 @@
 
 ### Audit
 
-- **Event Type:** `user.exec_container.set`
+- **Event Type:** `user.exec_container.set, user.exec_container.clear`
 - **Context Fields:** actor_id
 - **Before Fields:** agent_id
 - **After Fields:** agent_id
 - **Atomic:** No
-- **Non-Atomic Justification:** Single-row per-user upsert; best-effort synchronous mutation audit follows PutUserExecContainer
+- **Non-Atomic Justification:** Single-row per-user upsert/delete; best-effort synchronous mutation audit follows PutUserExecContainer and DeleteUserExecContainer
 
 **Denial Codes:** `forbidden`
 
