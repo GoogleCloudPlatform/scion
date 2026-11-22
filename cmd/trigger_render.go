@@ -87,6 +87,9 @@ func printTriggerRenderResult(resp *hubclient.TriggerRenderResponse) {
 		}
 		printedAny = true
 		fmt.Printf("Slot: %s\n", triggerTerminalText(name, false))
+		if slot.Templating != "" {
+			fmt.Printf("  Templating: %s\n", triggerTerminalText(slot.Templating, false))
+		}
 		if len(slot.Used) > 0 {
 			parts := make([]string, len(slot.Used))
 			for i, u := range slot.Used {

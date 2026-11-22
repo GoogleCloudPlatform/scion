@@ -329,6 +329,10 @@ func formatTriggerAPIError(err error) error {
 			cp.Message = fmt.Sprintf("invalid value for %s: %s", field, triggerTerminalText(apiErr.Message, false))
 			return &cp
 		}
+
+	case "revision_conflict":
+		cp.Message = "trigger was modified concurrently (revision conflict); refresh and retry"
+		return &cp
 	}
 
 	return err
@@ -365,7 +369,9 @@ var triggerUpdateCmd = &cobra.Command{
 Only flags explicitly provided are updated. When updating action fields without
 passing --action, the trigger's existing action type and unchanged fields are
 preserved; when passing --action to switch action kinds, provide the required
-flags for the new action.
+flags for the new action. When updating a dispatch-agent action without --allow,
+the untrusted variable list is re-derived from the resulting templates
+(narrowing any previously stored wildcard).
 
 Note: agent callers cannot PATCH trigger definitions.`,
 	Args: cobra.ExactArgs(1),
@@ -469,6 +475,10 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 		existing, gErr := hubCtx.Client.Triggers(projectID).Get(ctx, fullID)
 		if gErr != nil {
 			return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to load trigger before update: %w", gErr))
+		}
+		if !flags.Changed("revision") && existing.AuthorizationRevision > 0 {
+			rev := existing.AuthorizationRevision
+			req.ExpectedRevision = &rev
 		}
 		targetType := existing.Action.Type
 		if flags.Changed("action") {

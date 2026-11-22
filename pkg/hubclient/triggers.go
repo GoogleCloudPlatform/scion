@@ -232,8 +232,9 @@ type TriggerRenderUsedVar struct {
 
 // TriggerRenderSlotResult holds the rendered text and used variables for one slot.
 type TriggerRenderSlotResult struct {
-	Rendered string                 `json:"rendered"`
-	Used     []TriggerRenderUsedVar `json:"used"`
+	Rendered   string                 `json:"rendered"`
+	Used       []TriggerRenderUsedVar `json:"used"`
+	Templating string                 `json:"templating,omitempty"`
 }
 
 // TriggerRenderSlots holds rendered slot outputs keyed by slot name.

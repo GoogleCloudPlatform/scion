@@ -610,3 +610,67 @@ func TestTriggerUpdate_DispatchAgentPartialUpdateAndDerivedAllow(t *testing.T) {
 	assert.Contains(t, out, "Event values that will be inserted as data: event.payload.title, event.attributes.number")
 	assert.Contains(t, out, "Trigger updated: "+trigID+" (revision 3)")
 }
+
+func TestTriggerUpdate_PinsRevisionWhenActionChangedAndMaps409(t *testing.T) {
+	resetTriggerDispatchTestFlags(t)
+
+	const trigID = "44444444-4444-4444-4444-444444444444"
+	var gotPatch hubclient.UpdateTriggerRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+				ID:                    trigID,
+				ProjectID:             "proj-1",
+				Name:                  "pr-fix",
+				AuthorizationRevision: 7,
+				Action: hubclient.TriggerActionSpec{
+					Type:     "dispatch_agent",
+					Template: "default",
+					Task:     "old task",
+				},
+				Status: "active",
+			})
+		case http.MethodPatch:
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotPatch))
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    "revision_conflict",
+					"message": "trigger revision mismatch; refresh and retry",
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	origFn := triggerHubContextFn
+	t.Cleanup(func() { triggerHubContextFn = origFn })
+	triggerHubContextFn = func() (*HubContext, string, context.Context, context.CancelFunc, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		return &HubContext{Client: client, Endpoint: srv.URL}, "proj-1", ctx, cancel, nil
+	}
+
+	origTask := triggerUpdateDispatch.task
+	t.Cleanup(func() { triggerUpdateDispatch.task = origTask })
+
+	// Set --task without setting --revision: ExpectedRevision must be pinned to existing.AuthorizationRevision (7).
+	require.NoError(t, triggerUpdateCmd.Flags().Set("task", "New task"))
+	t.Cleanup(func() {
+		_ = triggerUpdateCmd.Flags().Set("task", "")
+		triggerUpdateCmd.Flags().Lookup("task").Changed = false
+	})
+
+	err = runTriggerUpdate(triggerUpdateCmd, []string{trigID})
+	require.Error(t, err)
+	require.NotNil(t, gotPatch.ExpectedRevision, "ExpectedRevision must be pinned from fetched trigger when --revision is omitted")
+	assert.Equal(t, 7, *gotPatch.ExpectedRevision)
+	assert.Contains(t, err.Error(), "revision conflict")
+}

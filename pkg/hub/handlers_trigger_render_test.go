@@ -199,7 +199,7 @@ func TestTriggerRender(t *testing.T) {
 		assert.NotContains(t, logBuf.String(), secretSentinel)
 	})
 
-	t.Run("allowed for agent holding trigger with readable event (message action)", func(t *testing.T) {
+	t.Run("allowed for agent holding trigger with readable event (message action delivered literally until P2b)", func(t *testing.T) {
 		rec := f.doTrigger(t, f.agentAAuth, renderPath(msgTrig.ID, agentEvent.ID), http.MethodPost, nil)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
@@ -207,11 +207,101 @@ func TestTriggerRender(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.Empty(t, resp.Errors)
 		require.NotNil(t, resp.Slots.Message)
-		assert.Equal(t, "Event "+agentEvent.ID+" on render-msg-agent-a", resp.Slots.Message.Rendered)
-		assert.Equal(t, []TriggerRenderUsedVar{
-			{Path: "event.id", Class: string(triggertemplate.ClassTrusted)},
-			{Path: "trigger.name", Class: string(triggertemplate.ClassTrusted)},
-		}, resp.Slots.Message.Used)
+		assert.Equal(t, "Event ${event.id} on ${trigger.name}", resp.Slots.Message.Rendered)
+		assert.Empty(t, resp.Slots.Message.Used)
+		assert.Equal(t, "not_supported_until_P2b", resp.Slots.Message.Templating)
+	})
+
+	t.Run("refused for cross-project event (project-B event via project-A trigger -> 404)", func(t *testing.T) {
+		const crossProjSentinel = "CROSS_PROJECT_SENTINEL_NEVER_LEAK_445566"
+		otherProjEvent := &store.TriggerEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  f.otherProjID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   api.NewUUID(),
+			Type:       "webhook.received",
+			Subject:    "other:1",
+			DedupKey:   "render-cross-proj-1",
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: map[string]string{
+				"endpoint_name": "other-hook",
+				"number":        "99",
+			},
+			Payload:      `{"title":"` + crossProjSentinel + `","env":"prod"}`,
+			PayloadBytes: 64,
+			Status:       store.TriggerEventStatusProcessed,
+			CreatedAt:    now,
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, otherProjEvent))
+
+		for _, tc := range []struct {
+			name   string
+			auth   Identity
+			trigID string
+		}{
+			{"member", f.memberAuth, dispatchTrig.ID},
+			{"owner", f.ownerAuth, dispatchTrig.ID},
+			{"agent", f.agentAAuth, msgTrig.ID},
+		} {
+			rec := f.doTrigger(t, tc.auth, renderPath(tc.trigID, otherProjEvent.ID), http.MethodPost, nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s: %s", tc.name, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), crossProjSentinel, "%s response must not leak project-B payload", tc.name)
+		}
+	})
+
+	t.Run("github.comment render uses buildGitHubCommentTemplateVars (source.name falls back to github)", func(t *testing.T) {
+		commentPayload, err := json.Marshal(GitHubCommentActionPayload{
+			Body:          "Source=${event.source.name} Repo=${event.attributes.repo}",
+			UntrustedVars: []string{"event.attributes.repo"},
+		})
+		require.NoError(t, err)
+		ghTrig := &store.Trigger{
+			ID:            api.NewUUID(),
+			ProjectID:     f.projectID,
+			Name:          "render-gh-comment",
+			SourceKind:    store.TriggerSourceKindGitHub,
+			SourceID:      "",
+			MatchTypes:    []string{"github.issue_comment.created"},
+			ActionType:    store.TriggerActionGitHubComment,
+			ActionPayload: string(commentPayload),
+			SubjectMode:   store.TriggerSubjectModeNew,
+			Status:        store.TriggerStatusActive,
+			CreatedBy:     f.owner.ID,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind: "user",
+				InitiatorPrincipalID:   f.owner.ID,
+				AuthorizationRevision:  1,
+			},
+		}
+		require.NoError(t, f.store.CreateTrigger(ctx, ghTrig))
+
+		ghEvent := &store.TriggerEvent{
+			ID:           api.NewUUID(),
+			ProjectID:    f.projectID,
+			SourceKind:   store.TriggerSourceKindGitHub,
+			SourceID:     "777001",
+			Type:         "github.issue_comment.created",
+			Subject:      "github:acme/widgets#5",
+			DedupKey:     "render-gh-dedup-1",
+			OccurredAt:   now,
+			ReceivedAt:   now,
+			Attributes:   map[string]string{"repo": "acme/widgets"},
+			Payload:      `{not-valid-json`,
+			PayloadBytes: 15,
+			Status:       store.TriggerEventStatusProcessed,
+			CreatedAt:    now,
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, ghEvent))
+
+		rec := f.doTrigger(t, f.memberAuth, renderPath(ghTrig.ID, ghEvent.ID), http.MethodPost, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp TriggerRenderResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Empty(t, resp.Errors)
+		require.NotNil(t, resp.Slots.Body)
+		assert.Equal(t, "Source=github Repo=acme/widgets", resp.Slots.Body.Rendered)
 	})
 
 	t.Run("refused for user without trigger.read (viewer and outsider)", func(t *testing.T) {

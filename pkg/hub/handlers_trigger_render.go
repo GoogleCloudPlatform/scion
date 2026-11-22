@@ -38,8 +38,9 @@ type TriggerRenderUsedVar struct {
 
 // TriggerRenderSlotResult holds the rendered text and used variables for one slot.
 type TriggerRenderSlotResult struct {
-	Rendered string                 `json:"rendered"`
-	Used     []TriggerRenderUsedVar `json:"used"`
+	Rendered   string                 `json:"rendered"`
+	Used       []TriggerRenderUsedVar `json:"used"`
+	Templating string                 `json:"templating,omitempty"`
 }
 
 // TriggerRenderSlots holds rendered slot outputs keyed by slot name.
@@ -109,9 +110,11 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
+	var project *store.Project
 	projectName := ""
-	if project, pErr := s.store.GetProject(ctx, projectID); pErr == nil && project != nil {
-		projectName = project.Name
+	if p, pErr := s.store.GetProject(ctx, projectID); pErr == nil && p != nil {
+		project = p
+		projectName = p.Name
 	}
 
 	sourceName := ""
@@ -276,10 +279,12 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
-		if res, rErr := renderSlotPreview(p.Message, triggertemplate.SlotMessage, vars, nil); rErr != nil {
-			resp.Errors = append(resp.Errors, toTriggerRenderError(triggertemplate.SlotMessage, rErr))
-		} else {
-			resp.Slots.Message = &res
+		// Message action fires deliver Message literally until Stage 2 §5.7 (P2b)
+		// lands message templating; mirror fire-path delivery verbatim here.
+		resp.Slots.Message = &TriggerRenderSlotResult{
+			Rendered:   p.Message,
+			Used:       []TriggerRenderUsedVar{},
+			Templating: "not_supported_until_P2b",
 		}
 
 	case store.TriggerActionGitHubComment:
@@ -293,7 +298,8 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
-		if res, rErr := renderSlotPreview(p.Body, TriggerTemplateSlotGitHubCommentBody, vars, p.UntrustedVars); rErr != nil {
+		commentVars := buildGitHubCommentTemplateVars(fireReq.Event, project)
+		if res, rErr := renderSlotPreview(p.Body, TriggerTemplateSlotGitHubCommentBody, commentVars, p.UntrustedVars); rErr != nil {
 			resp.Errors = append(resp.Errors, toTriggerRenderError(TriggerTemplateSlotGitHubCommentBody, rErr))
 		} else {
 			resp.Slots.Body = &res
