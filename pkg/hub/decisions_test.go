@@ -238,7 +238,7 @@ func TestDecisionsSend_Refusals(t *testing.T) {
 		{"broadcast recipient", OutboundMessageRequest{Recipient: "broadcast", Decisions: decisionInputs(t, twoDecisions)}, ErrCodeValidationError},
 		{"update without decisions", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Msg: "x", DecisionsUpdate: true}, ErrCodeValidationError},
 		{"attachments", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, twoDecisions), Attachments: []string{"/workspace/a"}}, ErrCodeValidationError},
-		{"one choice", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"question":"q","choices":["only"]}]`)}, ErrCodeValidationError},
+		{"no choices", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"question":"q","choices":[]}]`)}, ErrCodeValidationError},
 		{"never issued number", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"id":"99","question":"q","choices":["a","b"]}]`)}, ErrCodeDecisionKeyNotIssue},
 	}
 	for _, tc := range cases {
@@ -258,6 +258,38 @@ func TestDecisionsSend_Refusals(t *testing.T) {
 	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, rows.Items, "no refused prompt is stored")
+}
+
+// Single-choice confirmation decision (ptone/scion#8786): 1 choice without
+// allow_other is accepted, stored, and answered with one click.
+func TestDecisionsSend_SingleChoice(t *testing.T) {
+	f := newDecisionsFixture(t)
+	resp := f.sendPromptToBob(t, `[{"id":"confirm-deploy","question":"Approve production deploy?","choices":[{"id":"approve","label":"Approved"}]}]`, false)
+	require.Len(t, resp.Decisions, 1)
+	rowID := resp.Decisions[0].RowID
+
+	getRR := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil)
+	require.Equal(t, http.StatusOK, getRR.Code, "body: %s", getRR.Body.String())
+	var got struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(getRR.Body.Bytes(), &got))
+	assert.Equal(t, "pending", got.Decision.Status)
+	require.Len(t, got.Decision.Choices, 1)
+	assert.Equal(t, "approve", got.Decision.Choices[0].ID)
+	assert.Equal(t, "Approved", got.Decision.Choices[0].Label)
+	assert.Nil(t, got.Decision.Other)
+
+	ansRR := f.answer(t, f.bob, rowID, map[string]interface{}{"choice_id": "approve"})
+	require.Equal(t, http.StatusOK, ansRR.Code, "body: %s", ansRR.Body.String())
+	var ansResp struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(ansRR.Body.Bytes(), &ansResp))
+	assert.Equal(t, "decided", ansResp.Decision.Status)
+	require.NotNil(t, ansResp.Decision.Decision)
+	assert.Equal(t, "approve", ansResp.Decision.Decision.ChoiceID)
+	assert.Equal(t, "Approved", ansResp.Decision.Decision.Label)
 }
 
 // Acceptance 7 (send side): reusing a key without --update is refused as a
@@ -1253,7 +1285,7 @@ func TestDecisionsSend_LegacyChoicesFallbackAndConflict(t *testing.T) {
 	assert.Contains(t, logged, f.agent.ID)
 
 	// 3. Validation errors on fallback still report the primary decisions[i] root.
-	rrBadFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"One choice?","choices":["only"]}]}`))
+	rrBadFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"No choices?","choices":[]}]}`))
 	require.Equal(t, http.StatusBadRequest, rrBadFallback.Code, rrBadFallback.Body.String())
 	assert.Equal(t, ErrCodeValidationError, errorCode(t, rrBadFallback))
 	assert.Contains(t, rrBadFallback.Body.String(), "decisions[0].choices")

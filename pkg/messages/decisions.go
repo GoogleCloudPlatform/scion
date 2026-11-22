@@ -14,9 +14,10 @@
 
 package messages
 
-// Decisions: an agent asks a user to decide between a few options. A decision
-// prompt (TypeDecisionPrompt) carries one or more decisions; each decision
-// has a per-agent key, a markdown question and 2 to 10 choices. This file
+// Decisions: an agent asks a user to decide between a few options (or confirm
+// a single option). A decision prompt (TypeDecisionPrompt) carries one or more
+// decisions; each decision has a per-agent key, a markdown question and 1 to 10
+// choices. This file
 // holds the agent-facing input schema (DecisionInput), the canonical stored
 // form (Decision), the normalizer and validator (NormalizeDecisions), and
 // the markdown fallback the hub renders into the prompt's msg
@@ -42,11 +43,9 @@ const (
 	// MaxDecisionsPerMessage is the most decisions one decision prompt carries.
 	MaxDecisionsPerMessage = 10
 	// MinChoicesPerDecision and MaxChoicesPerDecision bound a decision's
-	// fixed choices when allow_other is off; MinChoicesPerDecisionWithOther
-	// applies when allow_other is on (design-8146 §4.1, D3).
-	MinChoicesPerDecision          = 2
-	MinChoicesPerDecisionWithOther = 1
-	MaxChoicesPerDecision          = 10
+	// fixed choices.
+	MinChoicesPerDecision = 1
+	MaxChoicesPerDecision = 10
 	// MaxDecisionQuestionLen is the most characters (runes) in a question.
 	MaxDecisionQuestionLen = 2000
 	// MaxChoiceLabelLen is the most characters (runes) in a choice label.
@@ -531,12 +530,8 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 			add(p+".question", DecisionErrTooLong, "question is at most %d characters", MaxDecisionQuestionLen)
 		}
 
-		otherOpt, otherEnabled := normalizeAllowOther(p+".allow_other", d.AllowOther, add)
-		minChoices := MinChoicesPerDecision
-		if otherEnabled {
-			minChoices = MinChoicesPerDecisionWithOther
-		}
-		nd.Choices = normalizeChoices(p+".choices", d.Choices, minChoices, add)
+		otherOpt := normalizeAllowOther(p+".allow_other", d.AllowOther, add)
+		nd.Choices = normalizeChoices(p+".choices", d.Choices, add)
 		if otherOpt != nil && otherOpt.Label != "" && nd.Choices != nil {
 			for j, c := range nd.Choices {
 				if strings.EqualFold(c.Label, otherOpt.Label) {
@@ -573,19 +568,18 @@ func NormalizeDecisions(root string, in []DecisionInput) ([]Decision, error) {
 	return out, nil
 }
 
-// normalizeAllowOther validates a decision's allow_other input. It returns
-// the canonical OtherOption and whether Other is enabled (lowering the
-// minimum fixed choices from 2 to 1).
-func normalizeAllowOther(p string, ao *OtherInput, add func(field, code, format string, args ...any)) (*OtherOption, bool) {
+// normalizeAllowOther validates a decision's allow_other input and returns
+// the canonical OtherOption (nil when disabled or invalid).
+func normalizeAllowOther(p string, ao *OtherInput, add func(field, code, format string, args ...any)) *OtherOption {
 	if ao == nil {
-		return nil, false
+		return nil
 	}
 	if ao.invalidRoot {
 		add(p, DecisionErrInvalid, "allow_other must be a boolean, a string, or an object")
-		return nil, false
+		return nil
 	}
 	if !ao.Enabled {
-		return nil, false
+		return nil
 	}
 	for _, name := range ao.extraFields {
 		add(p+"."+name, DecisionErrUnknownField, "unknown field %q", name)
@@ -631,7 +625,7 @@ func normalizeAllowOther(p string, ao *OtherInput, add func(field, code, format 
 			}
 		}
 	}
-	return out, true
+	return out
 }
 
 // NormalizeOtherText validates and normalizes the free-form text of an
@@ -677,10 +671,10 @@ func NormalizeOtherText(choiceID, raw string) (string, *DecisionValidationError)
 
 // normalizeChoices validates one decision's choices. It returns nil when
 // the count is out of range (the per-choice checks are then skipped).
-func normalizeChoices(p string, in []ChoiceInput, minChoices int, add func(field, code, format string, args ...any)) []Choice {
+func normalizeChoices(p string, in []ChoiceInput, add func(field, code, format string, args ...any)) []Choice {
 	switch {
-	case len(in) < minChoices:
-		add(p, DecisionErrTooFew, "at least %d choices are required, got %d", minChoices, len(in))
+	case len(in) < MinChoicesPerDecision:
+		add(p, DecisionErrTooFew, "at least %d choice is required, got %d", MinChoicesPerDecision, len(in))
 		return nil
 	case len(in) > MaxChoicesPerDecision:
 		add(p, DecisionErrTooMany, "at most %d choices are allowed, got %d", MaxChoicesPerDecision, len(in))

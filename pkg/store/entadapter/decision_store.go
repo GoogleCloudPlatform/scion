@@ -122,9 +122,7 @@ func validateDecisionPromptInput(in *store.DecisionPromptInput) error {
 			}
 			seen[norm] = true
 		}
-		minChoices := messages.MinChoicesPerDecision
 		if d.Other != nil {
-			minChoices = messages.MinChoicesPerDecisionWithOther
 			if strings.TrimSpace(d.Other.Label) == "" {
 				return fmt.Errorf("%w: decision %d has an empty other label", store.ErrInvalidInput, i)
 			}
@@ -138,7 +136,7 @@ func validateDecisionPromptInput(in *store.DecisionPromptInput) error {
 				return fmt.Errorf("%w: decision %d other placeholder exceeds %d characters", store.ErrInvalidInput, i, messages.MaxOtherPlaceholderLen)
 			}
 		}
-		if d.Question == "" || len(d.Choices) < minChoices {
+		if d.Question == "" || len(d.Choices) < messages.MinChoicesPerDecision {
 			return fmt.Errorf("%w: decision %d is not normalized", store.ErrInvalidInput, i)
 		}
 	}

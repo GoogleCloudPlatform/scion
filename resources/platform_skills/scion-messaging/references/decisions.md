@@ -5,7 +5,7 @@ experiment: web.decisions
 # Asking users to decide: decision prompts
 
 A **decision prompt** (`decision-prompt`) is a message that carries one or more
-keyed decisions. Each decision has a question and 2 to 10 choices. In web chat
+keyed decisions. Each decision has a question and 1 to 10 choices. In web chat
 the user answers with a click, and the answer comes back to you as a
 `decision-response` message. Other surfaces show a Markdown copy of the same
 questions and options.
@@ -13,9 +13,22 @@ questions and options.
 ## When to use one
 
 Use a decision prompt when the user should pick between a few concrete options
-and you can act on the answer directly: approve or hold a step, pick one of two
-designs, choose a target. Keep prose for open questions, for options you cannot
-list in a short label, or when you need a discussion rather than a pick.
+— or confirm/approve a single action — and you can act on the answer directly:
+approve or hold a step, pick one of two designs, choose a target. Keep prose
+for open questions, for options you cannot list in a short label, or when you
+need a discussion rather than a pick.
+
+**Single-choice confirmation:** a decision with **1 choice** (such as
+`"Approved"` or `"Confirmed"`) lets the user confirm or approve with one click
+and records the sign-off in the decision log.
+Use it when you need a person's explicit confirmation or approval before
+proceeding (for example approving a plan, deploy, or destructive action) and
+there is no meaningful second button — the user can click to approve, dismiss
+it, or reply in words if they want changes. If the reply asks for changes, do
+not record it as the choice; withdraw the decision with
+`scion decisions withdraw <key>` (or re-ask with `--update`) after acting on
+their feedback. Use plain prose instead for FYI updates or open-ended feedback
+that does not need recorded sign-off.
 
 - Send it to a user or a conversation: `@<email>`, `user:<email>`, `conv:<id>` or
   `#<thread>`. Decision prompts cannot go to an agent or a `group[...]`.
@@ -128,7 +141,7 @@ The JSON is an array of decisions:
 |---|---|
 | `id` | Optional decision key. Use a short key you will recognize, such as `deploy-target`: `[A-Za-z0-9_-]`, at most 32 characters, with at least one non-digit. Leave it out and the Hub assigns your next number (`1`, `2`, ...). Keys compare case-insensitively. |
 | `question` | Required. Markdown, at most 2000 characters (the CLI warns above 200 characters; keep it to one short sentence and put context in the message body). |
-| `choices` | Required, 2 to 10 (1 to 10 when `allow_other` is enabled). Each is a string label, or an object with `label` (one line, at most 100 characters; the CLI warns above 40 characters — keep labels to a few words), optional `id` (`[A-Za-z0-9_-]`, at most 32 characters) and optional `description` (one line, at most 300 characters). A choice without an `id` gets its position (`1`, `2`, ...). Choice ids and labels must each be unique within the decision, compared case-insensitively. |
+| `choices` | Required, 1 to 10. Each is a string label, or an object with `label` (one line, at most 100 characters; the CLI warns above 40 characters — keep labels to a few words), optional `id` (`[A-Za-z0-9_-]`, at most 32 characters) and optional `description` (one line, at most 300 characters). A choice without an `id` gets its position (`1`, `2`, ...). Choice ids and labels must each be unique within the decision, compared case-insensitively. |
 | `default` | Optional. Marks your recommended choice, by its `id` or `label` (cannot name Other). |
 | `allow_other` | Optional. Lets the user type a short free-form answer; use sparingly (see [Let the user answer in their own words](#let-the-user-answer-in-their-own-words-allow_other)). |
 
@@ -182,7 +195,7 @@ individual choice objects):
   most 100 characters. The user's typed answer is one line of plain text (no
   newlines, tabs, control, or bidi/format characters), 1 to 200 characters
   after trimming.
-- With `allow_other` enabled, **1 to 10** fixed choices are allowed (0 is
+- Even with `allow_other` enabled, **1 to 10** fixed choices are required (0 is
   refused; use a plain message for free-form-only questions). `default` cannot
   name Other (`$other` or its label).
 - **What comes back:** the choice ID is `$other`, the label is the decision's
@@ -332,8 +345,7 @@ scion decisions record --from <message-id> <key>=<choice-id> <key>=<choice-id>
 
 ## Limits
 
-- At most 10 decisions per prompt and 2 to 10 choices per decision (1 to 10
-  when `allow_other` is enabled).
+- At most 10 decisions per prompt and 1 to 10 choices per decision.
 - At most 50 pending decisions per agent. A prompt that would exceed it is
   refused (`too_many_pending_decisions`): wait for answers, withdraw obsolete
   pending decisions with `scion decisions withdraw`, or replace pending

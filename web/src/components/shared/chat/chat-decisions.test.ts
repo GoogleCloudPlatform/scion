@@ -1910,3 +1910,148 @@ describe('set card Other free-form answers (ptone/scion#8153, O5–O7)', () => {
     expect(posted.idempotency_key).toEqual(expect.any(String));
   });
 });
+
+describe('single-choice confirmation decisions (ptone/scion#8786)', () => {
+  function singleChoiceView(over: Partial<DecisionView> = {}): DecisionView {
+    const { defaultChoiceId: _unused, ...base } = view({
+      key: 'confirm-deploy',
+      ref: 'confirm-deploy',
+      question: 'Approve production deploy?',
+      choices: [{ id: 'approve', label: 'Approved' }],
+    });
+    return { ...base, ...over };
+  }
+
+  it('renders a pending single-choice decision as one filled primary button and submits on click', async () => {
+    const d = singleChoiceView();
+    const el = await mount([d]);
+    await settle(el);
+
+    const buttons = root(el).querySelectorAll('[data-choice]');
+    expect(buttons.length).toBe(1);
+    const btn = button(el, 'approve');
+    expect(btn.getAttribute('variant')).toBe('primary');
+    expect(btn.hasAttribute('outline')).toBe(false);
+    expect(btn.hasAttribute('disabled')).toBe(false);
+    expect(btn.textContent?.trim()).toBe('Approved');
+    expect(foot(el)).toBe('Awaiting your answer');
+
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: singleChoiceView({
+          status: 'decided',
+          decision: {
+            choiceId: 'approve',
+            label: 'Approved',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Alice',
+            provenance: 'direct',
+            surface: 'web',
+            responseMessageId: 'resp-confirm-1',
+            at: '2026-11-21T19:00:00Z',
+          },
+        }),
+        responseMessageId: 'resp-confirm-1',
+      })
+    );
+
+    btn.click();
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(button(el, 'approve').getAttribute('variant')).toBe('primary');
+    expect(button(el, 'approve').hasAttribute('data-readonly')).toBe(true);
+    expect(foot(el)).toContain('Answered by you');
+  });
+
+  it('keeps the button filled primary with default set and shows the concise Enter hint', async () => {
+    const el = await mount([singleChoiceView({ defaultChoiceId: 'approve' })]);
+    await settle(el);
+
+    const btn = button(el, 'approve');
+    expect(btn.getAttribute('variant')).toBe('primary');
+    expect(btn.hasAttribute('outline')).toBe(false);
+    const hintId = card(el).getAttribute('aria-describedby');
+    expect(hintId).toBeTruthy();
+    expect(root(el).getElementById(hintId!)?.textContent?.trim()).toBe('Press Enter to confirm.');
+  });
+
+  it('renders a pending single-choice option with description as outlined row rather than chosen', async () => {
+    const el = await mount([
+      singleChoiceView({
+        choices: [{ id: 'approve', label: 'Approved', description: 'Deploy build abc1234' }],
+      }),
+    ]);
+    await settle(el);
+
+    const opt = button(el, 'approve');
+    expect(opt.classList.contains('opt')).toBe(true);
+    expect(opt.classList.contains('recd')).toBe(true);
+    expect(opt.classList.contains('chosen')).toBe(false);
+  });
+
+  it('does not treat 1 fixed choice + allow_other as a single-choice confirmation', async () => {
+    const el = await mount([singleChoiceView({ other: { label: 'Other' } })]);
+    await settle(el);
+
+    expect(button(el, 'approve').getAttribute('variant')).toBe('default');
+    expect(button(el, '$other')).toBeTruthy();
+  });
+
+  it('omits "or pick another answer" on an interpreted single-choice decision', async () => {
+    const el = await mount([
+      singleChoiceView({
+        status: 'decided',
+        decision: {
+          choiceId: 'approve',
+          label: 'Approved',
+          answeredByUserId: 'u-me',
+          answeredByName: 'Alice',
+          provenance: 'agent_interpreted',
+          outcome: 'answer',
+          sourceMessageId: 'src-1',
+          surface: 'slack',
+          responseMessageId: 'resp-interp-1',
+          at: '2026-11-21T19:00:00Z',
+        },
+      }),
+    ]);
+    await settle(el);
+
+    const confirmRow = root(el).querySelector('.confirm-row');
+    expect(confirmRow).toBeTruthy();
+    expect(confirmRow?.textContent).toContain('Confirm');
+    expect(confirmRow?.textContent).not.toContain('pick another answer');
+  });
+
+  it('renders a closed (dismissed/withdrawn) single-choice button as disabled default', async () => {
+    const el = await mount([
+      singleChoiceView({
+        status: 'withdrawn',
+        withdrawn: { at: '2026-11-21T19:05:00Z', byName: 'release-bot' },
+      }),
+    ]);
+    await settle(el);
+
+    const btn = button(el, 'approve');
+    expect(btn.getAttribute('variant')).toBe('default');
+    expect(btn.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('keeps a single-choice row unselected in a set card until clicked', async () => {
+    const d1 = singleChoiceView({ rowId: 'r1', key: 'confirm-1' });
+    const d2 = { ...noDefault(), rowId: 'r2', key: 'D2' };
+    const el = await mount([d1, d2]);
+    await settle(el);
+
+    const r1Btn = root(el).querySelector<HTMLElement>('[data-row="r1"] [data-choice="approve"]')!;
+    expect(r1Btn.getAttribute('data-look')).toBe('default');
+    expect(r1Btn.getAttribute('aria-pressed')).toBe('false');
+
+    r1Btn.click();
+    await settle(el);
+
+    expect(r1Btn.getAttribute('data-look')).toBe('filled');
+    expect(r1Btn.getAttribute('aria-pressed')).toBe('true');
+  });
+});
