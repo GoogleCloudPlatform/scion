@@ -219,10 +219,25 @@ func TestHomeFilesDispatch_RefusesInvalidHomeFilesBeforeDispatch(t *testing.T) {
 		},
 		"oversize total content": {
 			{
-				Path:    ".scion/big.json",
+				Path:    api.TriggerEventHomeFilePath,
 				Mode:    0o600,
 				Content: append([]byte(secretCanary), bytes.Repeat([]byte("a"), api.MaxHomeFilesTotalBytes)...),
 			},
+		},
+		"case variant of reserved secrets.json": {
+			{Path: ".scion/Secrets.json", Mode: 0o600, Content: []byte(secretCanary)},
+		},
+		"case variant of allowed path": {
+			{Path: ".scion/Trigger-Event.json", Mode: 0o600, Content: []byte(secretCanary)},
+		},
+		"hooks post-start path": {
+			{Path: ".scion/hooks/post-start", Mode: 0o600, Content: []byte(secretCanary)},
+		},
+		"hooks pre-start.sh path": {
+			{Path: ".scion/hooks/pre-start.sh", Mode: 0o600, Content: []byte(secretCanary)},
+		},
+		"unregistered path under .scion": {
+			{Path: ".scion/other.json", Mode: 0o600, Content: []byte(secretCanary)},
 		},
 	}
 
@@ -248,8 +263,7 @@ func TestHomeFilesDispatch_RefusesInvalidHomeFilesBeforeDispatch(t *testing.T) {
 
 func TestHomeFilesDispatch_ProceedsWhenBrokerAdvertisesCapability(t *testing.T) {
 	want := []api.HomeFile{
-		{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte(`{"id":"evt-42"}`)},
-		{Path: ".scion/meta/readme.txt", Mode: 0o644, Content: []byte("context")},
+		{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte(`{"id":"evt-42"}`)},
 	}
 
 	for _, op := range homeFilesCreateOps() {

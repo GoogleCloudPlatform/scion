@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
@@ -1768,4 +1769,126 @@ func TestHeadlessCreate_HubDefaultMessageMode(t *testing.T) {
 			assert.Equal(t, tc.wantMode, stored.MessageMode)
 		})
 	}
+}
+
+// TestHeadlessCreate_HomeFilesPendingBlocksConcurrentStart verifies the
+// structural fix for the held start claim race (P1c-1 O-C / sec L2):
+//   - While create-time HomeFiles have not yet been delivered, CreateInputs.HomeFilesPending
+//     is true on the committed agent row, and both startAgentCore and DispatchAgentStart
+//     refuse concurrent manual starts with a clear retryable 409 Conflict error.
+//   - Once createAgentHeadless delivers the HomeFiles, HomeFilesPending is cleared
+//     and subsequent starts proceed normally.
+//   - A normal headless create without EventFile never sets HomeFilesPending and is
+//     unaffected.
+func TestHeadlessCreate_HomeFilesPendingBlocksConcurrentStart(t *testing.T) {
+	ctx := context.Background()
+	f := newSchedFire(t, "hf-race")
+	client := installHeadlessGatherDispatcher(t, f)
+
+	broker, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+	require.NoError(t, err)
+	broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true}
+	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, broker))
+
+	evt := withSessionRevision(f.event("hf-race-agent"), f.creator.ID)
+	auth, identity, err := f.srv.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), f.proj.ID, "agent.create")
+	require.NoError(t, err)
+	edgeCeiling, edgeProv, err := f.srv.fireEffectCeiling(ctx, auth)
+	require.NoError(t, err)
+	rr := headlessResolvedRole{preCapRole: AgentRoleFull}
+
+	t.Run("concurrent_manual_start_refused_until_home_files_delivered", func(t *testing.T) {
+		var (
+			callbackRan     bool
+			startCoreErr    error
+			dispatcherErr   error
+			httpStatus      int
+			httpBody        string
+			pendingAtCommit bool
+		)
+		created, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      auth,
+			Identity:       identity,
+			EdgeCeiling:    edgeCeiling,
+			EdgeProvenance: edgeProv,
+			resolvedRole:   &rr,
+			Name:           "hf-race-agent",
+			Detached:       true,
+			EventFile:      []byte(`{"event_id":"ev-race-1"}`),
+			OnCommitted: func(agentID string) {
+				callbackRan = true
+				committed, gerr := f.store.GetAgent(ctx, agentID)
+				if gerr != nil {
+					t.Errorf("GetAgent in OnCommitted: %v", gerr)
+					return
+				}
+				pendingAtCommit = agentHomeFilesPending(committed)
+
+				// Simulate a concurrent manual start via startAgentCore during
+				// the window between commitAgentCreate and createUnderClaim.
+				startCoreErr = f.srv.startAgentCore(ctx, committed, StartOpts{
+					Kind: store.StartClaimUser,
+				})
+				rec := httptest.NewRecorder()
+				if f.srv.writeStartClaimError(ctx, rec, startCoreErr, agentID) {
+					httpStatus = rec.Code
+					httpBody = rec.Body.String()
+				}
+
+				// Direct DispatchAgentStart backstop must also refuse.
+				dispatcherErr = f.srv.GetDispatcher().DispatchAgentStart(ctx, committed, "", false)
+			},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, created)
+		require.True(t, callbackRan, "OnCommitted must run between commit and dispatch")
+		assert.True(t, pendingAtCommit, "HomeFilesPending must be true immediately after commit")
+		require.ErrorIs(t, startCoreErr, errHomeFilesNotDelivered)
+		assert.Equal(t, http.StatusConflict, httpStatus)
+		assert.Contains(t, httpBody, "home files")
+		require.ErrorIs(t, dispatcherErr, errHomeFilesNotDelivered)
+		assert.Equal(t, []api.HomeFile{{
+			Path:    HeadlessEventFilePath,
+			Mode:    0o600,
+			Content: []byte(`{"event_id":"ev-race-1"}`),
+		}}, client.lastCreateReq.HomeFiles)
+
+		// After create dispatch completes, HomeFilesPending is cleared in store.
+		afterCreate, err := f.store.GetAgent(ctx, created.ID)
+		require.NoError(t, err)
+		assert.False(t, agentHomeFilesPending(afterCreate), "HomeFilesPending must be cleared after create dispatch delivers HomeFiles")
+
+		// A subsequent manual start is no longer blocked by HomeFilesPending.
+		startAfterErr := f.srv.startAgentCore(ctx, afterCreate, StartOpts{
+			Kind: store.StartClaimUser,
+		})
+		assert.NotErrorIs(t, startAfterErr, errHomeFilesNotDelivered)
+	})
+
+	t.Run("normal_create_without_event_file_unaffected", func(t *testing.T) {
+		var pendingAtCommit bool
+		created, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      auth,
+			Identity:       identity,
+			EdgeCeiling:    edgeCeiling,
+			EdgeProvenance: edgeProv,
+			resolvedRole:   &rr,
+			Name:           "hf-normal-agent",
+			Detached:       true,
+			OnCommitted: func(agentID string) {
+				committed, gerr := f.store.GetAgent(ctx, agentID)
+				if gerr == nil {
+					pendingAtCommit = agentHomeFilesPending(committed)
+				}
+			},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, created)
+		assert.False(t, pendingAtCommit, "normal create without EventFile must not set HomeFilesPending")
+		stored, err := f.store.GetAgent(ctx, created.ID)
+		require.NoError(t, err)
+		assert.False(t, agentHomeFilesPending(stored))
+	})
 }

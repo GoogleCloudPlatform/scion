@@ -4120,6 +4120,13 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		return nil, err
 	}
 
+	// HomeFiles delivery backstop: no start path may launch an agent whose
+	// create-time HomeFiles have not yet been delivered.
+	if agentHomeFilesPending(agent) {
+		span.SetStatus(codes.Error, errHomeFilesNotDelivered.Error())
+		return nil, errHomeFilesNotDelivered
+	}
+
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -41,6 +42,51 @@ var ErrHomeFilesEnvGatherDeferred = errors.New("homeFiles create cannot defer to
 // follow-up request (such as workspace bootstrap upload finalize), where the
 // request-scoped HomeFiles are no longer present.
 var ErrHomeFilesCreateNotDeferrable = errors.New("homeFiles create cannot be deferred")
+
+// errHomeFilesNotDelivered is returned by start paths when an agent's
+// create-time HomeFiles have not yet been delivered by its create dispatch
+// (CreateInputs.HomeFilesPending == true). Wraps errStartRequestNotSent because
+// the refusal happens before any broker request is sent.
+var errHomeFilesNotDelivered = fmt.Errorf("create-time home files have not been delivered yet (%w)", errStartRequestNotSent)
+
+// agentHomeFilesPending reports whether agent requires create-time HomeFiles
+// that have not yet been delivered.
+func agentHomeFilesPending(agent *store.Agent) bool {
+	return agent != nil &&
+		agent.AppliedConfig != nil &&
+		agent.AppliedConfig.CreateInputs != nil &&
+		agent.AppliedConfig.CreateInputs.HomeFilesPending
+}
+
+// clearAgentHomeFilesPending clears CreateInputs.HomeFilesPending on the
+// persisted agent row (and the in-memory copy, if non-nil) once its create
+// dispatch has delivered the HomeFiles. Best-effort: logs a warning on store
+// error so a delivered create is not falsely rolled back.
+func (s *Server) clearAgentHomeFilesPending(ctx context.Context, agent *store.Agent) {
+	if s == nil || s.store == nil || agent == nil || agent.ID == "" {
+		return
+	}
+	if !agentHomeFilesPending(agent) {
+		return
+	}
+	fresh, err := s.store.GetAgent(ctx, agent.ID)
+	if err != nil {
+		slog.Warn("HomeFiles: failed to reload agent to clear HomeFilesPending",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+	if !agentHomeFilesPending(fresh) {
+		agent.AppliedConfig.CreateInputs.HomeFilesPending = false
+		return
+	}
+	fresh.AppliedConfig.CreateInputs.HomeFilesPending = false
+	if err := s.store.UpdateAgent(ctx, fresh); err != nil {
+		slog.Warn("HomeFiles: failed to clear HomeFilesPending on agent",
+			"agent_id", agent.ID, "error", err)
+		return
+	}
+	agent.AppliedConfig.CreateInputs.HomeFilesPending = false
+}
 
 type brokerLacksHomeFilesError struct {
 	broker string
@@ -103,6 +149,14 @@ func createHomeFilesFromContext(ctx context.Context) []api.HomeFile {
 
 // checkBrokerHomeFilesCapability fails closed when broker does not advertise
 // the homeFiles capability.
+//
+// Stale capability window (P1b security L4 / review-2 F2): Capabilities are
+// replaced (not OR-merged) on every broker registration and heartbeat. If a
+// broker is downgraded to a pre-P1b build between heartbeats, the Hub still
+// sees HomeFiles=true until the next heartbeat/re-registration and the older
+// broker's lenient JSON decoder ignores the unknown homeFiles field. This is
+// the standard capability-heartbeat window shared by all broker capabilities
+// and is accepted as documented behavior (no protocol echo added).
 func checkBrokerHomeFilesCapability(broker *store.RuntimeBroker) error {
 	if broker != nil && broker.Capabilities != nil && broker.Capabilities.HomeFiles {
 		return nil

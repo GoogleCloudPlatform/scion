@@ -36,14 +36,16 @@ import (
 const (
 	EventEnvKeyTriggerEventID   = "SCION_TRIGGER_EVENT_ID"
 	EventEnvKeyTriggerID        = "SCION_TRIGGER_ID"
-	EventEnvKeyTriggerEventFile = "SCION_TRIGGER_EVENT_FILE"
+	EventEnvKeyTriggerEventFile = api.EnvTriggerEventFile
 
 	// HeadlessEventFilePath is the relative home-directory path where
 	// HeadlessCreate.EventFile is written via WithCreateHomeFiles (Stage 1
 	// design §5.7, Stage 2 §5.4).
-	HeadlessEventFilePath = ".scion/trigger-event.json"
-	// HeadlessEventFileContainerPath is the resolved absolute path inside the
+	HeadlessEventFilePath = api.TriggerEventHomeFilePath
+	// HeadlessEventFileContainerPath is the default absolute path inside the
 	// agent container advertised via SCION_TRIGGER_EVENT_FILE (Stage 2 §5.4).
+	// The Runtime Broker overrides this with the container user's resolved
+	// home directory (e.g. /root or /home/<user>) at start time.
 	HeadlessEventFileContainerPath = "/home/scion/" + HeadlessEventFilePath
 	headlessEventFileMode          = 0o600
 
@@ -614,6 +616,16 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		}
 	}
 
+	// Mark create-time HomeFiles as pending before committing the agent row so
+	// no concurrent manual start can launch the agent without its event file
+	// before our create dispatch delivers it (P1c-1 O-C / sec L2).
+	if len(hc.EventFile) > 0 {
+		if agent.AppliedConfig.CreateInputs == nil {
+			agent.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+		}
+		agent.AppliedConfig.CreateInputs.HomeFilesPending = true
+	}
+
 	agent.LaunchAsyncOptIn = true
 
 	scheduledDispatchAudit := &store.MutationAuditRecord{
@@ -709,7 +721,12 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 				Content: hc.EventFile,
 			}})
 		}
-		return dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+		res, derr := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+		if derr == nil && len(hc.EventFile) > 0 && res.AcceptedLaunch() == nil &&
+			(res == nil || res.EnvRequirements() == nil || len(res.EnvRequirements().Needs) == 0) {
+			s.clearAgentHomeFilesPending(ctx, agent)
+		}
+		return res, derr
 	})
 	var missingNeeds []string
 	var homeFilesMissing *homeFilesEnvGatherDeferredError
@@ -719,6 +736,11 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 	var held *store.ClaimHeldError
 	if errors.As(err, &held) {
+		if len(hc.EventFile) > 0 {
+			slog.Warn("Scheduler: start claim held during homeFiles create; refusing to report fired",
+				"eventID", fireID, "agent_id", agent.ID, "holder", string(held.Kind))
+			return nil, fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		}
 		slog.Info("Scheduler: agent already starting; event skipped",
 			"eventID", fireID, "agent_id", agent.ID, "holder", string(held.Kind))
 		return agent, nil
