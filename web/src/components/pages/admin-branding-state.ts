@@ -477,10 +477,11 @@ export function parseDataUriInfo(value: string): DataUriInfo | null {
   if (mediaType === 'image/vnd.microsoft.icon') {
     mediaType = 'image/x-icon';
   }
-  const cleanLen = payload.replace(/\s+/g, '').length;
+  const clean = /\s/.test(payload) ? payload.replace(/\s+/g, '') : payload;
+  const cleanLen = clean.length;
   let padding = 0;
-  if (payload.endsWith('==')) padding = 2;
-  else if (payload.endsWith('=')) padding = 1;
+  if (clean.endsWith('==')) padding = 2;
+  else if (clean.endsWith('=')) padding = 1;
   const decodedBytes = Math.max(0, Math.floor((cleanLen * 3) / 4) - padding);
   return { mediaType, decodedBytes };
 }

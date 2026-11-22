@@ -501,4 +501,63 @@ describe('scion-page-admin-branding', () => {
     );
     expect(query(element, '[data-save-btn]')?.hasAttribute('disabled')).toBe(true);
   });
+
+  it('renders live scoped preview, 11-step OKLCH ramp, and WCAG AA contrast badges on color input', async () => {
+    const handler = createHandler({
+      config: {
+        settings_tier: 'db',
+        server: { hub: { branding: {} } },
+        section_metadata: { branding: { source: 'db', origin: 'seed', revision: 0 } },
+      },
+    });
+    element = await mountPage(handler);
+
+    // Initial stock state renders preview and 11 ramp swatches with Stock badges
+    const preview = query<HTMLElement>(element, 'scion-branding-preview')!;
+    expect(preview).not.toBeNull();
+    expect(element.shadowRoot?.querySelectorAll('[data-ramp-step]').length).toBe(11);
+    expect(query(element, '[data-contrast-pair="light.primary:surface"]')?.textContent).toContain(
+      'Stock'
+    );
+
+    // Drag native color picker (input event) -> updates preview & contrast badges live
+    const colorPicker = query<HTMLInputElement>(element, 'input[type="color"]')!;
+    colorPicker.value = '#0d9488';
+    colorPicker.dispatchEvent(new Event('input', { bubbles: true }));
+    await element.updateComplete;
+
+    expect(query(element, '[data-contrast-pair="light.primary:surface"]')?.textContent).toContain(
+      'AA Pass'
+    );
+    expect(query(element, '[data-contrast-pair="dark.primary:surface"]')?.textContent).toContain(
+      'AA Pass'
+    );
+    expect(query(element, '[data-contrast-advisory]')).toBeNull();
+  });
+
+  it('shows advisory WCAG contrast warning when loaded CLI palette overrides fail AA', async () => {
+    const handler = createHandler({
+      config: {
+        settings_tier: 'db',
+        server: {
+          hub: {
+            branding: {
+              palette: {
+                light: { primary: '#eab308' },
+              },
+            },
+          },
+        },
+        section_metadata: { branding: { source: 'db', origin: 'managed', revision: 2 } },
+      },
+    });
+    element = await mountPage(handler);
+
+    expect(query(element, '[data-contrast-pair="light.primary:surface"]')?.textContent).toContain(
+      'AA Fail'
+    );
+    expect(query(element, '[data-contrast-advisory]')?.textContent).toContain(
+      'server.hub.branding.palette.light.primary'
+    );
+  });
 });
