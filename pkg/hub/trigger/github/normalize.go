@@ -219,7 +219,7 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	maxCmdLine := opts.maxCommandLineBytes()
 	applyCommandAttributes(attrs, commandEligible, rawCommandBody, opts.AppSlug, opts.MentionAliases, maxCmdArgs, maxCmdLine)
 
-	projected, truncated, err := projectDecodedPayload(root, opts.maxPayloadBytes())
+	projected, truncated, err := projectDecodedPayload(root, eventName, opts.maxPayloadBytes())
 	if err != nil {
 		return base, err
 	}
@@ -798,7 +798,13 @@ func normalizePush(
 	}
 
 	isDefaultBranch := defaultBranch != "" && ref == "refs/heads/"+defaultBranch
-	attrs["ref"] = cleanUTF8(ref)
+	cleanRef := cleanUTF8(ref)
+	if len(cleanRef) > MaxPushRefBytes {
+		attrs["ref"] = truncateUTF8(cleanRef, MaxPushRefBytes)
+		attrs["ref_truncated"] = "true"
+	} else {
+		attrs["ref"] = cleanRef
+	}
 	attrs["before"] = before
 	attrs["after"] = after
 	attrs["is_default_branch"] = strconv.FormatBool(isDefaultBranch)
@@ -835,7 +841,7 @@ func normalizePush(
 		commitSHAs = make([]string, 0, limit)
 		for i := 0; i < limit; i++ {
 			if m, ok := arr[i].(map[string]any); ok {
-				if sha := optCleanString(m, "id"); sha != "" {
+				if sha := optCleanString(m, "id"); isGitSHAHex(sha) {
 					commitSHAs = append(commitSHAs, sha)
 				}
 			}
@@ -1145,7 +1151,7 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"stale": true, "payload_truncated": true, "lists_truncated": true,
 		"mention_detection": true, "mention": true, "command": true,
 		"head_ref": true, "head_sha": true, "base_ref": true, "base_sha": true,
-		"ref": true, "before": true, "after": true, "is_default_branch": true,
+		"ref": true, "ref_truncated": true, "before": true, "after": true, "is_default_branch": true,
 		"forced": true, "created": true, "deleted": true, "commit_count": true,
 		"comment_id": true, "review_id": true, "line": true, "path": true,
 		"html_url": true, "comment_url": true, "issue_url": true, "pull_request_url": true,

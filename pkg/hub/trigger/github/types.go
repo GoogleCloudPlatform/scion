@@ -51,15 +51,23 @@ const (
 	DefaultMaxListsBytes      = 8 * 1024
 	MaxSubjectBytes           = 256
 
-	MaxTitleBytes       = 512
-	MaxHeadMessageBytes = 512
-	MaxPushCommits      = 20
-	MaxPushCommitFiles  = 20
-	MaxBodyBytes        = 4 * 1024
-	MaxDiffHunkBytes    = 1024
-	MaxCommandNameRunes = 32
-	MaxCommandArgsBytes = 1024
-	MaxCommandLineBytes = 1024
+	MaxTitleBytes             = 512
+	MaxHeadMessageBytes       = 512
+	MaxPushCommits            = 20
+	MaxPushCommitFiles        = 20
+	MaxPushRefBytes           = 1024
+	MaxPushSHABytes           = 64
+	MaxPushTimestampBytes     = 64
+	MaxPushCommitURLBytes     = 256
+	MaxPushCommitMessageBytes = 512
+	MaxPushActorNameBytes     = 256
+	MaxPushFilePathBytes      = 1024
+	MaxPushRepoStringBytes    = 256
+	MaxBodyBytes              = 4 * 1024
+	MaxDiffHunkBytes          = 1024
+	MaxCommandNameRunes       = 32
+	MaxCommandArgsBytes       = 1024
+	MaxCommandLineBytes       = 1024
 
 	// StaleThreshold is the §4.4 replay-protection freshness window: when
 	// Options.ReceivedAt - Result.OccurredAt exceeds 24h, Normalize sets

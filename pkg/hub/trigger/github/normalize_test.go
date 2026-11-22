@@ -1371,4 +1371,76 @@ func TestNormalize_Push(t *testing.T) {
 		assert.True(t, utf8.ValidString(subj))
 		assert.Equal(t, subj, formatPushSubject("octo-org/octo-repo", utf8Ref))
 	})
+
+	t.Run("huge_9kb_ref_caps_ref_attribute_and_preserves_full_ref_subject", func(t *testing.T) {
+		hugeRef := "refs/heads/" + strings.Repeat("a", 9*1024)
+		raw, err := json.Marshal(map[string]any{
+			"ref":          hugeRef,
+			"before":       strings.Repeat("0", 40),
+			"after":        strings.Repeat("b", 40),
+			"commits":      []any{},
+			"head_commit":  nil,
+			"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-9kb-ref", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.True(t, res.Handled)
+		assert.Equal(t, "true", res.Attributes["ref_truncated"])
+		assert.Equal(t, MaxPushRefBytes, len(res.Attributes["ref"]))
+		assert.Equal(t, formatPushSubject("octo-org/octo-repo", hugeRef), res.Subject)
+		assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
+		assert.Equal(t, "false", res.Attributes["is_default_branch"])
+	})
+
+	t.Run("is_default_branch_rejects_nested_branch_and_tag_named_main", func(t *testing.T) {
+		for _, ref := range []string{"refs/heads/feat/main", "refs/tags/main"} {
+			t.Run(ref, func(t *testing.T) {
+				raw, err := json.Marshal(map[string]any{
+					"ref":          ref,
+					"before":       strings.Repeat("0", 40),
+					"after":        strings.Repeat("c", 40),
+					"commits":      []any{},
+					"head_commit":  nil,
+					"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+					"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+					"installation": map[string]any{"id": 10},
+				})
+				require.NoError(t, err)
+
+				res, err := Normalize(EventPush, "d-def-branch", raw, Options{ReceivedAt: baseNow})
+				require.NoError(t, err)
+				assert.Equal(t, "false", res.Attributes["is_default_branch"])
+			})
+		}
+	})
+
+	t.Run("lists_commits_filters_out_non_sha_ids", func(t *testing.T) {
+		sha40 := strings.Repeat("1", 40)
+		sha64 := strings.Repeat("2", 64)
+		raw, err := json.Marshal(map[string]any{
+			"ref":    "refs/heads/main",
+			"before": strings.Repeat("0", 40),
+			"after":  sha40,
+			"commits": []map[string]any{
+				{"id": sha40, "message": "valid 40"},
+				{"id": "not-a-sha", "message": "bad short"},
+				{"id": strings.Repeat("A", 40), "message": "bad uppercase"},
+				{"id": sha64, "message": "valid 64"},
+			},
+			"head_commit":  nil,
+			"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-sha-filter", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, "4", res.Attributes["commit_count"])
+		assert.Equal(t, []string{sha40, sha64}, res.Lists["commits"])
+	})
 }

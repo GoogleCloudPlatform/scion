@@ -27,11 +27,15 @@ import (
 )
 
 func projectPayload(raw []byte, maxBytes int) ([]byte, bool, error) {
+	return projectPayloadForEvent("", raw, maxBytes)
+}
+
+func projectPayloadForEvent(eventName string, raw []byte, maxBytes int) ([]byte, bool, error) {
 	root, err := decodeJSONObject(raw)
 	if err != nil {
 		return nil, false, err
 	}
-	return projectDecodedPayload(root, maxBytes)
+	return projectDecodedPayload(root, eventName, maxBytes)
 }
 
 func TestProjectPayload_StripsBloatAndReducesObjects(t *testing.T) {
@@ -405,11 +409,11 @@ func TestProjectDecodedPayload_ReducesPRBranchReposBeforeSanitizeWithoutMutating
 	bloatedRoot := buildRoot(1500)
 
 	minAllocs := testing.AllocsPerRun(10, func() {
-		_, _, err := projectDecodedPayload(minimalRoot, DefaultMaxPayloadBytes)
+		_, _, err := projectDecodedPayload(minimalRoot, EventPullRequest, DefaultMaxPayloadBytes)
 		require.NoError(t, err)
 	})
 	bloatedAllocs := testing.AllocsPerRun(10, func() {
-		_, _, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+		_, _, err := projectDecodedPayload(bloatedRoot, EventPullRequest, DefaultMaxPayloadBytes)
 		require.NoError(t, err)
 	})
 
@@ -431,13 +435,13 @@ func TestProjectDecodedPayload_ReducesPRBranchReposBeforeSanitizeWithoutMutating
 	assert.Contains(t, rawBaseRepo, "bloat_1499", "caller base.repo map must retain all raw fields")
 
 	// Output must be identical between minimal and bloated raw branch repos, and across repeated calls.
-	outMin, truncMin, err := projectDecodedPayload(minimalRoot, DefaultMaxPayloadBytes)
+	outMin, truncMin, err := projectDecodedPayload(minimalRoot, EventPullRequest, DefaultMaxPayloadBytes)
 	require.NoError(t, err)
 	assert.False(t, truncMin)
-	outBloat1, truncBloat1, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+	outBloat1, truncBloat1, err := projectDecodedPayload(bloatedRoot, EventPullRequest, DefaultMaxPayloadBytes)
 	require.NoError(t, err)
 	assert.False(t, truncBloat1)
-	outBloat2, _, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+	outBloat2, _, err := projectDecodedPayload(bloatedRoot, EventPullRequest, DefaultMaxPayloadBytes)
 	require.NoError(t, err)
 	assert.Equal(t, string(outMin), string(outBloat1))
 	assert.Equal(t, string(outBloat1), string(outBloat2))
@@ -609,9 +613,9 @@ func TestProjectPayload_PushKeepsHeadCommitAndCapsCommitsAt20(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	out, truncated, err := projectPayload(raw, DefaultMaxPayloadBytes)
+	out, truncated, err := projectPayloadForEvent(EventPush, raw, DefaultMaxPayloadBytes)
 	require.NoError(t, err)
-	assert.False(t, truncated)
+	assert.True(t, truncated, "cutting commits >20 and file arrays >20 must flag payload_truncated")
 
 	var proj map[string]any
 	require.NoError(t, json.Unmarshal(out, &proj))
@@ -713,4 +717,133 @@ func TestNormalize_PushLargeFileListsBoundedByPushShrinkTier(t *testing.T) {
 	assert.NotContains(t, first, "added")
 	assert.NotContains(t, first, "removed")
 	assert.NotContains(t, first, "modified")
+}
+
+func TestNormalize_PushWorstCaseBoundedByConstruction(t *testing.T) {
+	// R1 worst-case test: 2048 commits with every field far beyond its maximum
+	// (3000-byte author/committer names, 4000-byte message, 1000-byte url,
+	// 200-byte ids/timestamps, 50 x 2000-byte file paths, ~9 KB ref, large
+	// repository/sender fields) must succeed with PayloadBytes <= 64 KiB,
+	// payload_truncated=true, and Handled=true.
+	longName := strings.Repeat("é", 1500) // 3000 bytes, multi-byte UTF-8
+	longMsg := strings.Repeat("m", 4000)
+	longURL := "https://github.com/octo-org/octo-repo/commit/" + strings.Repeat("u", 1000)
+	longID := strings.Repeat("a", 200)
+	longPath := "services/deep/" + strings.Repeat("p", 2000) + ".go"
+	longPaths := make([]string, 50)
+	for i := range longPaths {
+		longPaths[i] = longPath
+	}
+
+	commits := make([]map[string]any, 2048)
+	for i := range commits {
+		commits[i] = map[string]any{
+			"id":        longID,
+			"tree_id":   longID,
+			"distinct":  true,
+			"message":   longMsg,
+			"timestamp": strings.Repeat("t", 200),
+			"url":       longURL,
+			"author":    map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+			"committer": map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+			"added":     longPaths,
+			"removed":   longPaths,
+			"modified":  longPaths,
+		}
+	}
+	headCommit := map[string]any{
+		"id":        strings.Repeat("b", 200),
+		"tree_id":   strings.Repeat("c", 200),
+		"distinct":  true,
+		"message":   longMsg,
+		"timestamp": "2026-05-01T11:00:00Z",
+		"url":       longURL,
+		"author":    map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+		"committer": map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+		"added":     longPaths,
+		"removed":   longPaths,
+		"modified":  longPaths,
+	}
+
+	longRef := "refs/heads/" + strings.Repeat("r", 9*1024)
+	raw, err := json.Marshal(map[string]any{
+		"ref":         longRef,
+		"before":      strings.Repeat("0", 40),
+		"after":       strings.Repeat("f", 40),
+		"created":     false,
+		"deleted":     false,
+		"forced":      true,
+		"commits":     commits,
+		"head_commit": headCommit,
+		"pusher":      map[string]any{"name": longName, "username": longName, "email": "p@example.com"},
+		"repository": map[string]any{
+			"id":             1296269,
+			"name":           "octo-repo",
+			"full_name":      "octo-org/octo-repo",
+			"private":        false,
+			"default_branch": strings.Repeat("d", 500),
+			"html_url":       "https://github.com/octo-org/octo-repo/" + strings.Repeat("h", 1000),
+			"pushed_at":      1777630500,
+			"owner": map[string]any{
+				"login": "octo-org",
+				"id":    100,
+				"type":  strings.Repeat("o", 200),
+			},
+		},
+		"sender": map[string]any{
+			"login": "monalisa",
+			"id":    201,
+			"type":  strings.Repeat("s", 200),
+		},
+		"installation": map[string]any{"id": 987654},
+	})
+	require.NoError(t, err)
+
+	res, err := Normalize(EventPush, "d-worst-case", raw, Options{AppSlug: "octo-app"})
+	require.NoError(t, err)
+	assert.True(t, res.Handled)
+	assert.True(t, res.Truncated)
+	assert.Equal(t, "true", res.Attributes["payload_truncated"])
+	assert.Equal(t, "true", res.Attributes["ref_truncated"])
+	assert.LessOrEqual(t, len(res.Attributes["ref"]), MaxPushRefBytes)
+	assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
+	assert.LessOrEqual(t, res.PayloadBytes, DefaultMaxPayloadBytes)
+	assert.True(t, utf8.Valid(res.Payload))
+	assert.Equal(t, "2048", res.Attributes["commit_count"])
+
+	// Also verify pathological JSON-escape expansion (control chars expanding 6x)
+	// in protected "name" fields does not cause Tier 5 to refuse a push delivery.
+	escName := strings.Repeat("\x01", 3000)
+	escCommits := make([]map[string]any, 30)
+	for i := range escCommits {
+		escCommits[i] = map[string]any{
+			"id":        fmt.Sprintf("%040d", i+1),
+			"tree_id":   fmt.Sprintf("%040d", i+100),
+			"distinct":  true,
+			"message":   strings.Repeat("\x01", 1000),
+			"timestamp": "2026-05-01T11:00:00Z",
+			"url":       longURL,
+			"author":    map[string]any{"name": escName, "username": escName},
+			"committer": map[string]any{"name": escName, "username": escName},
+		}
+	}
+	escRaw, err := json.Marshal(map[string]any{
+		"ref":          "refs/heads/main",
+		"before":       strings.Repeat("0", 40),
+		"after":        strings.Repeat("f", 40),
+		"commits":      escCommits,
+		"head_commit":  escCommits[29],
+		"pusher":       map[string]any{"name": escName, "username": escName},
+		"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+		"sender":       map[string]any{"login": "monalisa", "id": 201, "type": "User"},
+		"installation": map[string]any{"id": 987654},
+	})
+	require.NoError(t, err)
+
+	escRes, err := Normalize(EventPush, "d-worst-escape", escRaw, Options{AppSlug: "octo-app"})
+	require.NoError(t, err)
+	assert.True(t, escRes.Handled)
+	assert.True(t, escRes.Truncated)
+	assert.Equal(t, "true", escRes.Attributes["payload_truncated"])
+	assert.LessOrEqual(t, escRes.PayloadBytes, DefaultMaxPayloadBytes)
 }

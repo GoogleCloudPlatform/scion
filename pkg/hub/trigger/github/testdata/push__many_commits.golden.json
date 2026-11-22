@@ -12,7 +12,7 @@
   "sender_id": 201,
   "sender_type": "User",
   "payload_bytes": 4755,
-  "truncated": false,
+  "truncated": true,
   "attributes": {
     "after": "0000000000000000000000000000000000000025",
     "before": "0000000000000000000000000000000000000001",
@@ -27,6 +27,7 @@
     "installation_id": "987654",
     "is_default_branch": "true",
     "lists_truncated": "true",
+    "payload_truncated": "true",
     "provider": "github",
     "pusher": "monalisa",
     "ref": "refs/heads/main",
