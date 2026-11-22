@@ -684,11 +684,11 @@ func (s *Server) publishDecisionsWaitingUserEvent(ctx context.Context, id string
 	s.events.PublishUserNotification(ctx, notif)
 }
 
-// decisionBellProjectMemberIDs returns the distinct candidate user IDs that hold
-// active membership-conferring role bindings (direct or via group closure) on
-// projectID. Each candidate is still re-checked with CheckEffectiveMembership
-// and chatUserAccess before topic fan-out and inside waitingOnYouTotal.
-func (s *Server) decisionBellProjectMemberIDs(ctx context.Context, projectID string) ([]string, error) {
+// projectMemberCandidateUserIDs returns the distinct candidate user IDs that
+// hold active membership-conferring role bindings (direct or via group
+// closure) on projectID. Callers still re-check authoritative membership per
+// candidate (CheckEffectiveMembership / ProjectMembershipEvidence).
+func (s *Server) projectMemberCandidateUserIDs(ctx context.Context, projectID string) ([]string, error) {
 	bindings, err := s.store.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {
 		return nil, err
@@ -772,7 +772,7 @@ func (s *Server) expandDecisionBellTopic(ctx context.Context, projectID, chatKey
 		return nil
 	}
 
-	candidateIDs, err := s.decisionBellProjectMemberIDs(ctx, projectID)
+	candidateIDs, err := s.projectMemberCandidateUserIDs(ctx, projectID)
 	if err != nil || len(candidateIDs) == 0 {
 		return nil
 	}

@@ -1200,28 +1200,26 @@ func (s *Server) resolveAddParticipantAgent(
 
 	// 1. Exact slug lookup in the conversation's project (excludes soft-deleted).
 	agent, err := s.store.GetAgentBySlug(ctx, projectID, ref)
-	if err == nil && agent != nil {
+	if err == nil && agent != nil && agent.ProjectID == projectID && agent.DeletedAt.IsZero() {
 		return agent, nil, nil
 	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, nil, err
 	}
 
-	// 2. Exact ID lookup.
+	// 2. Exact ID lookup. Out-of-scope (other project) and soft-deleted hits
+	// fall through to Step 3 rather than short-circuiting, so a caller cannot
+	// distinguish a cross-project or deleted agent UUID from an unknown UUID
+	// by naming a local agent after it. If Step 3 also finds no local match,
+	// we still log the cross-project refusal.
+	refusedOtherProject := false
 	agent, err = s.store.GetAgent(ctx, ref)
 	if err == nil && agent != nil {
-		// An agent of another project gets the same answer as an unknown
-		// agent; the reason is logged. This runs before the soft-deleted
-		// check, so the reason is logged for a soft-deleted agent of
-		// another project too.
 		if agent.ProjectID != projectID {
-			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
-			return nil, notFound, nil
+			refusedOtherProject = true
+		} else if agent.DeletedAt.IsZero() {
+			return agent, nil, nil
 		}
-		if !agent.DeletedAt.IsZero() {
-			return nil, notFound, nil
-		}
-		return agent, nil, nil
 	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, nil, err
@@ -1259,6 +1257,9 @@ func (s *Server) resolveAddParticipantAgent(
 
 	switch len(matches) {
 	case 0:
+		if refusedOtherProject {
+			logReferenceRefused(ctx, logging.RequestPath(r), "agent belongs to another project than the conversation", identity)
+		}
 		return nil, notFound, nil
 	case 1:
 		return &matches[0], nil, nil
@@ -1294,7 +1295,9 @@ func (s *Server) resolveAddParticipantProjectUser(
 		return member, nil
 	}
 
-	// 1. Direct user ID lookup.
+	// 1. Direct user ID lookup. Non-members and inactive users fall through
+	// rather than short-circuiting so an outsider's UUID cannot be probed by
+	// setting a project member's displayName to it.
 	u, err := s.store.GetUser(ctx, ref)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return "", nil, err
@@ -1304,13 +1307,15 @@ func (s *Server) resolveAddParticipantProjectUser(
 		if memberErr != nil {
 			return "", nil, memberErr
 		}
-		if !member {
-			return "", notFound, nil
+		if member {
+			return u.ID, nil, nil
 		}
-		return u.ID, nil, nil
 	}
 
 	// 2. Email lookup (handles both direct and group-derived project members).
+	// Non-members and inactive users fall through to Step 3 so an outsider's
+	// email cannot be probed via a project member's displayName, and so a
+	// federated project member's FederatedEmail can still match in Step 3.
 	if strings.Contains(ref, "@") {
 		u, err = s.store.GetUserByEmail(ctx, ref)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1321,26 +1326,19 @@ func (s *Server) resolveAddParticipantProjectUser(
 			if memberErr != nil {
 				return "", nil, memberErr
 			}
-			if !member {
-				return "", notFound, nil
+			if member {
+				return u.ID, nil, nil
 			}
-			return u.ID, nil, nil
 		}
 	}
 
-	// 3. Handle lookup among the project's human members.
-	projectMembers, err := s.store.ListProjectMembers(ctx, projectID)
+	// 3. Handle lookup among the project's human members (direct and
+	// group-derived). Each matching candidate is still verified through
+	// ProjectMembershipEvidence (which enforces active user status, active
+	// bindings, and test-identity clamps).
+	userIDs, err := s.projectMemberCandidateUserIDs(ctx, projectID)
 	if err != nil {
 		return "", nil, err
-	}
-	userIDs := make([]string, 0, len(projectMembers))
-	seen := make(map[string]bool, len(projectMembers))
-	for _, m := range projectMembers {
-		if m == nil || seen[m.UserID] {
-			continue
-		}
-		seen[m.UserID] = true
-		userIDs = append(userIDs, m.UserID)
 	}
 	if len(userIDs) == 0 {
 		return "", notFound, nil
