@@ -252,6 +252,15 @@ const (
 	// existing create+rename atomicity guarantee. Use this only for a leaf
 	// that is known to sometimes be a bind-mount target.
 	TruncateInPlaceOrCreate
+
+	// CreateExclusive creates the leaf directly with O_CREAT|O_EXCL|O_NOFOLLOW
+	// relative to the open parent dirFd and refuses with os.ErrExist (EEXIST)
+	// if any entry — regular file, symlink, directory, or FIFO — already
+	// exists at that name. Used for create-time HomeFiles so an allowed path
+	// can never overwrite a pre-existing file (for example in a leftover agent
+	// directory). On any post-create write/chmod/chown/fsync error the newly
+	// created leaf is unlinked.
+	CreateExclusive
 )
 
 // WriteFileNoFollow atomically replaces path's content the way
@@ -303,8 +312,12 @@ func WriteFileNoFollowWithChown(path string, data []byte, mode os.FileMode, uid,
 // destination again. pathForErrors is used only in error messages, never to
 // resolve anything.
 func WriteAtNoFollowWithChown(dirFd int, leaf, pathForErrors string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) error {
-	if policy != ReplaceLeaf && policy != RefuseSymlink && policy != TruncateInPlaceOrCreate {
-		return fmt.Errorf("dirfd: WriteFileNoFollow %s: invalid LeafPolicy %d (every caller must choose ReplaceLeaf, RefuseSymlink, or TruncateInPlaceOrCreate)", pathForErrors, policy)
+	if policy != ReplaceLeaf && policy != RefuseSymlink && policy != TruncateInPlaceOrCreate && policy != CreateExclusive {
+		return fmt.Errorf("dirfd: WriteFileNoFollow %s: invalid LeafPolicy %d (every caller must choose ReplaceLeaf, RefuseSymlink, TruncateInPlaceOrCreate, or CreateExclusive)", pathForErrors, policy)
+	}
+
+	if policy == CreateExclusive {
+		return writeExclusiveAt(dirFd, leaf, pathForErrors, data, mode, uid, gid, chown)
 	}
 
 	if policy == RefuseSymlink {
@@ -473,6 +486,45 @@ func writeTempAndRename(dirFd int, tmpFile *os.File, tmpName, leaf, path string,
 
 	if rerr := RenameAt(dirFd, tmpName, leaf); rerr != nil {
 		return fmt.Errorf("dirfd: rename into %s: %w", path, rerr)
+	}
+	return nil
+}
+
+// writeExclusiveAt implements CreateExclusive: creates leaf directly via
+// CreateExclAt (O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW|O_CLOEXEC) so any existing
+// entry (regular file, symlink, directory, FIFO) fails atomically with EEXIST.
+// If any subsequent step fails, the newly created leaf is unlinked.
+func writeExclusiveAt(dirFd int, leaf, path string, data []byte, mode os.FileMode, uid, gid int, chown func(fd, uid, gid int) error) (err error) {
+	f, cerr := CreateExclAt(dirFd, leaf, 0o600)
+	if cerr != nil {
+		return fmt.Errorf("dirfd: create exclusive %s: %w", path, cerr)
+	}
+	defer func() {
+		if err != nil {
+			_ = UnlinkAt(dirFd, leaf)
+		}
+	}()
+
+	if _, werr := f.Write(data); werr != nil {
+		_ = f.Close()
+		return fmt.Errorf("dirfd: write %s: %w", path, werr)
+	}
+	if cerr := f.Chmod(mode); cerr != nil {
+		_ = f.Close()
+		return fmt.Errorf("dirfd: chmod %s: %w", path, cerr)
+	}
+	if uid > 0 {
+		if cerr := chown(int(f.Fd()), uid, gid); cerr != nil {
+			_ = f.Close()
+			return fmt.Errorf("dirfd: chown %s: %w", path, cerr)
+		}
+	}
+	if serr := f.Sync(); serr != nil {
+		_ = f.Close()
+		return fmt.Errorf("dirfd: fsync %s: %w", path, serr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Errorf("dirfd: close %s: %w", path, cerr)
 	}
 	return nil
 }

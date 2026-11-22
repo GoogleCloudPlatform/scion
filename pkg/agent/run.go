@@ -2724,6 +2724,15 @@ authDone:
 		agentEnv.Delete(envInitialTask)
 	}
 
+	// When create-time HomeFiles wrote the trigger event file (or the Hub
+	// advertised SCION_TRIGGER_EVENT_FILE for a trigger-dispatched agent),
+	// set or override it with the resolved container home path for unixUsername
+	// (Hub decides that the file exists; Broker decides where home is).
+	if (opts.FreshProvision && !opts.Resume && hasHomeFile(opts.HomeFiles, api.TriggerEventHomeFilePath)) ||
+		agentEnv.Has(api.EnvTriggerEventFile) {
+		agentEnv.Set(api.EnvTriggerEventFile, resolvedTriggerEventFilePath(unixUsername), envOriginBrokerSystem)
+	}
+
 	// The container-script provisioner reads the manifest inside the
 	// container, where the workspace is mounted at containerWorkspace, not at
 	// the host path Provision staged it with above. Claude's provisioner, for

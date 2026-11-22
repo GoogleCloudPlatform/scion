@@ -85,6 +85,23 @@ func writeHomeFile(agentHome, rel string, data []byte, mode os.FileMode) error {
 	return dirfd.WriteAtNoFollowWithChown(fd, leaf, rel, data, mode, 0, 0, dirfd.ReplaceLeaf, noChown)
 }
 
+// writeHomeFileExclusive creates rel inside agentHome with O_CREAT|O_EXCL|O_NOFOLLOW
+// semantics through dirfd, confined to agentHome. Any pre-existing entry at rel
+// (regular file, symlink, directory, or FIFO) is refused with os.ErrExist rather
+// than overwritten.
+func writeHomeFileExclusive(agentHome, rel string, data []byte, mode os.FileMode) error {
+	parent, leaf, err := splitHomeRel(rel)
+	if err != nil {
+		return err
+	}
+	fd, err := homeParentFd(agentHome, parent)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	return dirfd.WriteAtNoFollowWithChown(fd, leaf, rel, data, mode, 0, 0, dirfd.CreateExclusive, noChown)
+}
+
 // removeHomeFile removes rel inside the agent home when it is there,
 // confined to the home: an entry at rel that is a symbolic link is
 // removed itself, never its target, and a missing parent means there is

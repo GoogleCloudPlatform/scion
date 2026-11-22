@@ -34,8 +34,26 @@ const (
 	// MaxHomeFilePathBytes is the maximum byte length of a single HomeFile.Path.
 	MaxHomeFilePathBytes = 256
 
+	// TriggerEventHomeFilePath is the registered create-time HomeFile path for
+	// trigger-dispatched event bodies (Stage 2 §5.4).
+	TriggerEventHomeFilePath = ".scion/trigger-event.json"
+
+	// EnvTriggerEventFile is the container environment variable pointing at the
+	// resolved absolute path of TriggerEventHomeFilePath inside the agent home.
+	EnvTriggerEventFile = "SCION_TRIGGER_EVENT_FILE"
+
 	homeFilesRequiredPrefix = ".scion/"
 )
+
+// allowedHomeFilePaths is the exact allow-list of registered create-time
+// HomeFile paths enforced by both the Hub (before dispatch) and the Runtime
+// Broker (before provisioning). Matching is exact (case-sensitive ASCII) so
+// unregistered subtrees (such as .scion/hooks/*) and case or Unicode
+// normalization variants of reserved files (such as .scion/Secrets.json on a
+// case-insensitive broker filesystem) are refused structurally.
+var allowedHomeFilePaths = map[string]struct{}{
+	TriggerEventHomeFilePath: {},
+}
 
 // HomeFile describes a small control-plane file the Hub asks the Runtime
 // Broker to write into a newly provisioned agent's home directory at create
@@ -120,6 +138,9 @@ func validateHomeFilePath(p string) error {
 	}
 	if !strings.HasPrefix(p, homeFilesRequiredPrefix) {
 		return fmt.Errorf("path %q must start with %q", p, homeFilesRequiredPrefix)
+	}
+	if _, ok := allowedHomeFilePaths[p]; !ok {
+		return fmt.Errorf("path %q is not an allowed home file path", p)
 	}
 	return nil
 }

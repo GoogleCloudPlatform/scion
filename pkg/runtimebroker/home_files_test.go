@@ -182,6 +182,42 @@ func TestCreateAgent_HomeFilesValidationAndThreading(t *testing.T) {
 					{Path: ".scion/vscode/state.json", Mode: 0o600, Content: []byte(canary)},
 				},
 			},
+			{
+				name: "case variant of reserved secrets.json refused",
+				files: []api.HomeFile{
+					{Path: ".scion/Secrets.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "case variant of allowed trigger-event.json refused",
+				files: []api.HomeFile{
+					{Path: ".scion/Trigger-Event.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "hooks post-start path refused",
+				files: []api.HomeFile{
+					{Path: ".scion/hooks/post-start", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "hooks pre-start.sh path refused",
+				files: []api.HomeFile{
+					{Path: ".scion/hooks/pre-start.sh", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "hooks session-end.d path refused",
+				files: []api.HomeFile{
+					{Path: ".scion/hooks/session-end.d/x", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "unregistered path under .scion/ refused",
+				files: []api.HomeFile{
+					{Path: ".scion/other.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
 		}
 
 		for _, tc := range cases {

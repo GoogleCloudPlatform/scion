@@ -32,6 +32,10 @@ func writeHomeFile(agentHome, rel string, data []byte, mode os.FileMode) error {
 	return errConfinedWriteUnsupported
 }
 
+func writeHomeFileExclusive(agentHome, rel string, data []byte, mode os.FileMode) error {
+	return errConfinedWriteUnsupported
+}
+
 func removeHomeFile(agentHome, rel string) error {
 	return errConfinedWriteUnsupported
 }
