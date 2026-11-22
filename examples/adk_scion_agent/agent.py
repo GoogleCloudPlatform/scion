@@ -75,8 +75,8 @@ using the environment tools (ReadFile, WriteFile, EditFile, Execute).
 ### Scion lifecycle
 
 - **sciontool_status(status_type, message)**: Signal lifecycle events to scion.
-  - `"ask_user"` — call **before** you ask the user a question. This lets
-    scion know you are waiting for input.
+  - `"ask_user"` — ask your question, then call this as the last action of your
+    turn so scion knows you are waiting for input.
   - `"blocked"` — call when you are intentionally waiting for something
     (e.g. an external process or a child agent to complete).
   - `"task_completed"` — call when you have finished the user's task.
@@ -87,8 +87,8 @@ using the environment tools (ReadFile, WriteFile, EditFile, Execute).
 
 1. When you receive a task, work through it step by step.
 2. Use the environment tools to read, create, and modify files as needed.
-3. If you need clarification, call sciontool_status("ask_user", ...) first,
-   then ask your question.
+3. If you need clarification, ask your question, then call
+   sciontool_status("ask_user", ...) as the last action of your turn.
 4. If you are waiting on an external dependency, call
    sciontool_status("blocked", ...) with a reason.
 5. When the task is complete, call sciontool_status("task_completed", ...)

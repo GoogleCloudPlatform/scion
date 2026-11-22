@@ -381,7 +381,7 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 // message, which a later waiting_for_input must not replace.
 func (h *HubHandler) isLocalWaitAgentSet() bool {
 	info := readLocalAgentInfo()
-	return isAgentSetWaiting(info) || (isNotificationWaiting(info) && parentWaitOf(info) == parentWaitAgent)
+	return isAgentSetWaiting(info) || (isNotificationWaiting(info) && isParentAgentWait(parentWaitOf(info)))
 }
 
 // isLocalSubagentEndRelease reports whether the local agent-info.json holds

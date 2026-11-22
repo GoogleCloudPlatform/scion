@@ -33,6 +33,7 @@ type Definition struct {
 	eventPrefix    string
 	outputPrefix   string
 	useTaskSummary bool
+	isAskUser      bool
 }
 
 var definitions = map[string]Definition{
@@ -41,6 +42,7 @@ var definitions = map[string]Definition{
 		DefaultMessage: "Input requested",
 		eventPrefix:    "Agent requested input",
 		outputPrefix:   "Agent asked",
+		isAskUser:      true,
 	},
 	Blocked: {
 		Activity:       state.ActivityBlocked,

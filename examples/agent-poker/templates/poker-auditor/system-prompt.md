@@ -85,6 +85,6 @@ All communication with other agents **must** go through the scion CLI messaging 
 - Use **direct message** mode only for private communication with a specific agent (e.g., asking the dealer a clarifying question).
 
 ### Status Reporting
-- Before asking the user a question, execute: `sciontool status ask_user "<question>"`
+- After asking the user a question, execute as the last action of your turn: `sciontool status ask_user "<question>"`
 - When waiting for game events, execute: `sciontool status blocked "Monitoring game"`
 - When the game ends, execute: `sciontool status task_completed "Poker audit complete"`

@@ -2,11 +2,9 @@
 
 ### Waiting for input
 
-Before you ask the user a question, you must always execute the script:
+Ask your question (for example with `scion message`), then run `sciontool status ask_user "<question>"` as the last action of your turn:
 
       `sciontool status ask_user "<question>"`
-
-And then proceed to ask the user
 
 ### Blocked (waiting on a specific event)
 

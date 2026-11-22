@@ -124,6 +124,6 @@ If a player does not respond within a reasonable time after being prompted you w
 4. If repeated attempts fail, announce to the table that the player's turn is being skipped or their hand is folded due to inactivity.
 
 ### Status Reporting
-- Before asking the user a question, execute: `sciontool status ask_user "<question>"`
+- After asking the user a question, execute as the last action of your turn: `sciontool status ask_user "<question>"`
 - When waiting for agents to respond, execute: `sciontool status blocked "<reason>"`
 - When the game is complete, execute: `sciontool status task_completed "Poker game finished"`
