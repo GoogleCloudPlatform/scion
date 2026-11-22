@@ -1037,3 +1037,316 @@ func TestDispatcher_CoalesceWindow_TransientSkipPreservesRealReason(t *testing.T
 	assert.Equal(t, store.TriggerFireStatusSkipped, fires.Items[0].Status)
 	assert.Equal(t, trigger.ErrFireRuleEvaluationFailed, fires.Items[0].Error)
 }
+
+func TestDispatcher_Reuse_DeferAfterMaxCoalesceWindowAndBoundFromFirstDeferral(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 22, 22, 10, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(cs, cs, clock)
+
+	// Maximum 10-minute coalesce window combined with reuse.
+	tr := makeActiveTrigger(projID, "", "max-coalesce-defer", []string{"github.pull_request.synchronize"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	tr.CoalesceWindowSeconds = store.MaxTriggerCoalesceWindowSeconds // 600s = 10m
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	ag := &store.Agent{
+		ID:          uuid.NewString(),
+		Slug:        "max-coalesce-ag",
+		Name:        "max-coalesce-ag",
+		ProjectID:   projID,
+		Phase:       "provisioning",
+		LaunchState: store.LaunchStateActive,
+		LaunchKind:  "create",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+
+	const subject = "github:octo/repo#96"
+	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.NoError(t, claims.Bind(ctx, c, ag.ID))
+
+	core := &g4aTestCore{
+		renderFn: func(_ context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+			return "after-max-coalesce-" + req.Event.ID, nil, nil
+		},
+	}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          core,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	// Subcase A: 10-minute coalesce window + in-flight agent -> must NOT fail on
+	// first in-flight check; defers and delivers once the launch settles.
+	ev1 := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         ev1,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.pull_request.synchronize",
+		Subject:    subject,
+		DedupKey:   "del-maxcoal-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	resCoal := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	assert.False(t, resCoal.Done)
+	assert.Equal(t, now.Add(10*time.Minute), resCoal.RetryAt)
+
+	// 10-minute coalesce window elapses -> first in-flight check defers (sets DeferredAt = t0+10m).
+	now = now.Add(10 * time.Minute)
+	firstDeferTime := now
+	resDefer := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	assert.False(t, resDefer.Done, "max coalesce window must not exhaust deferral bound")
+	assert.Equal(t, firstDeferTime.Add(trigger.ReuseDeferBackoff), resDefer.RetryAt)
+
+	fires1, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: ev1}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
+	require.NotNil(t, fires1.Items[0].DeferredAt)
+	assert.Equal(t, firstDeferTime, fires1.Items[0].DeferredAt.UTC())
+
+	// 9 minutes into deferral (19 minutes since StartedAt): still defers!
+	now = firstDeferTime.Add(9 * time.Minute)
+	resStillDefer := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	assert.False(t, resStillDefer.Done, "9 min after first deferral must still defer")
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), resStillDefer.RetryAt)
+
+	// Agent finishes launching -> delivers reuse message!
+	ag.Phase = "running"
+	ag.LaunchState = ""
+	require.NoError(t, cs.UpdateAgent(ctx, ag))
+	now = resStillDefer.RetryAt
+	resDelivered := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	assert.True(t, resDelivered.Done)
+	require.Len(t, core.firedRequests(), 1)
+	assert.Contains(t, core.firedRequests()[0].Payload, "after-max-coalesce-"+ev1)
+
+	// Subcase B: bound is counted strictly from first deferral (10 min after DeferredAt,
+	// i.e. 20 min after StartedAt when coalesce_window=10m).
+	ag.Phase = "provisioning"
+	ag.LaunchState = store.LaunchStateActive
+	require.NoError(t, cs.UpdateAgent(ctx, ag))
+
+	ev2 := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         ev2,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.pull_request.synchronize",
+		Subject:    subject,
+		DedupKey:   "del-maxcoal-2",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+	_ = disp.HandleItem(ctx, makeEventItem(ev2, projID), nil) // coalescing (10m)
+	now = now.Add(10 * time.Minute)
+	res2Defer := disp.HandleItem(ctx, makeEventItem(ev2, projID), nil) // first deferral
+	assert.False(t, res2Defer.Done)
+
+	now = now.Add(trigger.ReuseDeferTimeout) // 10m after first deferral (20m after StartedAt)
+	res2Timeout := disp.HandleItem(ctx, makeEventItem(ev2, projID), nil)
+	assert.True(t, res2Timeout.Done)
+	fires2, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: ev2}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires2.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusFailed, fires2.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireTargetAgentStillStarting, fires2.Items[0].Error)
+}
+
+func TestDispatcher_Reuse_DeferReapAndRetryNeverDuplicated(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 22, 22, 30, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(cs, cs, clock)
+
+	tr := makeActiveTrigger(projID, "", "defer-reap-retry", []string{"github.issue_comment.created"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	ag := &store.Agent{
+		ID:          uuid.NewString(),
+		Slug:        "reap-defer-ag",
+		Name:        "reap-defer-ag",
+		ProjectID:   projID,
+		Phase:       "starting",
+		LaunchState: store.LaunchStateActive,
+		LaunchKind:  "create",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+
+	const subject = "github:octo/repo#97"
+	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.NoError(t, claims.Bind(ctx, c, ag.ID))
+
+	core := &g4aTestCore{
+		renderFn: func(_ context.Context, req hubfire.FireRequest) (string, *hubfire.FireOutcome, error) {
+			return "revived-" + req.Event.ID, nil, nil
+		},
+	}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          core,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	evID := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.issue_comment.created",
+		Subject:    subject,
+		DedupKey:   "del-defer-reap-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	// 1. Defer the fire.
+	res1 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.False(t, res1.Done)
+	fires1, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires1.Items, 1)
+	origFireID := fires1.Items[0].ID
+	assert.Equal(t, store.TriggerFireStatusDeferred, fires1.Items[0].Status)
+
+	// 2. Hub restarts past lease -> reaper marks deferred row failed "hub restarted during defer".
+	reapAt := now.Add(trigger.ReuseDeferBackoff + trigger.FireLeaseHorizon + time.Minute)
+	reaped, err := cs.ReapExpiredTriggerFires(ctx, reapAt, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reaped)
+
+	reapedFire, err := cs.GetTriggerFire(ctx, origFireID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFailed, reapedFire.Status)
+	assert.Equal(t, trigger.ErrFireReapedDuringDefer, reapedFire.Error)
+
+	// 3. Agent is now running -> queue retry revives the SAME fire row in place and delivers.
+	ag.Phase = "running"
+	ag.LaunchState = ""
+	require.NoError(t, cs.UpdateAgent(ctx, ag))
+	now = reapAt.Add(time.Second)
+
+	res2 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.True(t, res2.Done)
+	require.Len(t, core.firedRequests(), 1)
+	assert.Contains(t, core.firedRequests()[0].Payload, "revived-"+evID)
+
+	firesAfter, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, firesAfter.Items, 1, "reaped deferred row must be revived in place, never duplicated")
+	assert.Equal(t, origFireID, firesAfter.Items[0].ID)
+	assert.Equal(t, store.TriggerFireStatusFired, firesAfter.Items[0].Status)
+}
+
+func TestDispatcher_Reuse_DeferPausedUsesTruthfulReasonAndIncompleteCreateDefers(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 22, 22, 45, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(cs, cs, clock)
+
+	tr := makeActiveTrigger(projID, "", "defer-pause-truthful", []string{"github.issue_comment.created"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	// N1: Agent in suspended phase with active create launch (IsIncompleteCreate() == true):
+	// launchStartRefusal refuses wake, so reuse must defer rather than failing wake.
+	ag := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "incomplete-create-ag",
+		Name:      "incomplete-create-ag",
+		ProjectID: projID,
+		Phase:     "suspended",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, ag))
+	_, err := entClient.Agent.UpdateOneID(uuid.MustParse(ag.ID)).
+		SetLaunchKind("create").
+		SetLaunchState(store.LaunchStateActive).
+		Save(ctx)
+	require.NoError(t, err)
+	gotAg, err := cs.GetAgent(ctx, ag.ID)
+	require.NoError(t, err)
+	require.True(t, gotAg.IsIncompleteCreate())
+
+	const subject = "github:octo/repo#98"
+	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.NoError(t, claims.Bind(ctx, c, ag.ID))
+
+	core := &g4aTestCore{}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          core,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	evID := uuid.NewString()
+	require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:         evID,
+		ProjectID:  projID,
+		SourceKind: store.TriggerSourceKindGitHub,
+		SourceID:   "1001",
+		Type:       "github.issue_comment.created",
+		Subject:    subject,
+		DedupKey:   "del-defer-pause-1",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}))
+
+	// 1. Defers because IsIncompleteCreate() matches launchStartRefusal.
+	res1 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.False(t, res1.Done)
+	assert.Equal(t, now.Add(trigger.ReuseDeferBackoff), res1.RetryAt)
+
+	// 2. N3: Pause the trigger while the fire is deferred -> retry finishes with
+	// truthful reason "defer cancelled", NOT "coalesce cancelled".
+	tr.Status = store.TriggerStatusPaused
+	require.NoError(t, cs.UpdateTrigger(ctx, tr, store.TriggerFieldMask{Status: true}, 1, true, nil))
+
+	now = now.Add(trigger.ReuseDeferBackoff)
+	res2 := disp.HandleItem(ctx, makeEventItem(evID, projID), nil)
+	assert.True(t, res2.Done)
+	assert.Empty(t, core.firedRequests())
+
+	fires, err := cs.ListTriggerFires(ctx, store.TriggerFireFilter{TriggerID: tr.ID, EventID: evID}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 1)
+	assert.Equal(t, store.TriggerFireStatusSkipped, fires.Items[0].Status)
+	assert.Equal(t, trigger.ErrFireDeferCancelled, fires.Items[0].Error)
+}

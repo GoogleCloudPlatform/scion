@@ -411,7 +411,7 @@ func (m *memTriggerStore) ClaimTriggerFireCoalescing(_ context.Context, fire *st
 	*fire = cp
 	return true, false, superseded, nil, nil
 }
-func (m *memTriggerStore) DeferTriggerFire(_ context.Context, id string, notBefore, leaseUntil time.Time) (bool, error) {
+func (m *memTriggerStore) DeferTriggerFire(_ context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	f, ok := m.byFireID[id]
@@ -419,6 +419,10 @@ func (m *memTriggerStore) DeferTriggerFire(_ context.Context, id string, notBefo
 		return false, nil
 	}
 	f.Status = store.TriggerFireStatusDeferred
+	if f.DeferredAt == nil && !deferredAt.IsZero() {
+		da := deferredAt.UTC()
+		f.DeferredAt = &da
+	}
 	nb := notBefore.UTC()
 	f.NotBefore = &nb
 	f.LeaseUntil = leaseUntil.UTC()

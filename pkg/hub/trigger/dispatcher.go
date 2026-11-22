@@ -77,6 +77,7 @@ const (
 	ErrFireSubjectDispatchInProgress     = "subject dispatch in progress"
 	ErrFireCoalesced                     = "coalesced"
 	ErrFireCoalesceCancelled             = "coalesce cancelled"
+	ErrFireDeferCancelled                = "defer cancelled"
 	ErrFireStaleEvent                    = "stale event"
 	ErrFireReapedDuringCoalesce          = "hub restarted during coalesce"
 	ErrFireReapedDuringDefer             = "hub restarted during defer"
@@ -100,6 +101,7 @@ const (
 	FireSkipReasonSubjectDispatchInProgress  = "subject_dispatch_in_progress"
 	FireSkipReasonCoalesced                  = "coalesced"
 	FireSkipReasonCoalesceCancelled          = "coalesce_cancelled"
+	FireSkipReasonDeferCancelled             = "defer_cancelled"
 	FireSkipReasonAgentNameInUse             = "agent_name_in_use"
 	FireSkipReasonCommentRateLimited         = "comment_rate_limited"
 	FireSkipReasonOther                      = "other"
@@ -119,6 +121,7 @@ func FireSkipReasons() []string {
 		FireSkipReasonSubjectDispatchInProgress,
 		FireSkipReasonCoalesced,
 		FireSkipReasonCoalesceCancelled,
+		FireSkipReasonDeferCancelled,
 		FireSkipReasonAgentNameInUse,
 		FireSkipReasonCommentRateLimited,
 		FireSkipReasonOther,
@@ -147,6 +150,8 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonCoalesced
 	case ErrFireCoalesceCancelled:
 		return FireSkipReasonCoalesceCancelled
+	case ErrFireDeferCancelled:
+		return FireSkipReasonDeferCancelled
 	case "agent name in use":
 		return FireSkipReasonAgentNameInUse
 	case "comment rate limited":
@@ -1134,35 +1139,36 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				out = hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "fire failed"}
 			case claim != nil && claim.AgentID != "":
 				// Stage 3 §6.2 rev 1.16: if the claimed agent's launch is still
-				// in flight (created..starting), wake delivery would be refused;
-				// defer the fire non-terminally via RetryAt, bounded at 10 min
-				// since the fire's first handling.
-				if pl, ok := d.claims.(AgentPhaseLookup); ok {
-					phase, exists, pErr := pl.AgentPhase(fireCtx, claim.AgentID)
-					if pErr != nil {
-						d.logger.Warn("trigger: agent phase lookup failed for reuse",
-							"triggerID", tr.ID, "fireID", fire.ID, "agentID", claim.AgentID, "error", pErr)
+				// in flight or incomplete (aligned with wake_dm.go / launchStartRefusal),
+				// wake delivery would be refused; defer the fire non-terminally via
+				// RetryAt, bounded at 10 min from the first deferral timestamp
+				// (fire.DeferredAt), not from StartedAt (which includes coalesce wait).
+				if al, ok := d.claims.(ReuseAgentLookup); ok {
+					ag, aErr := al.LookupClaimAgent(fireCtx, claim.AgentID)
+					if aErr != nil {
+						d.logger.Warn("trigger: agent lookup failed for reuse",
+							"triggerID", tr.ID, "fireID", fire.ID, "agentID", claim.AgentID, "error", aErr)
 						out = hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "fire failed"}
 						break
 					}
-					if exists && store.InFlightPhases[phase] {
-						firstHandled := fire.StartedAt.UTC()
-						if firstHandled.IsZero() {
-							firstHandled = claimNow
-						}
-						if claimNow.Sub(firstHandled) >= ReuseDeferTimeout {
-							out = hubfire.FireOutcome{
-								Status: hubfire.FireStatusFailed,
-								Error:  ErrFireTargetAgentStillStarting,
+					if reuseTargetLaunchInFlight(ag, claimNow) {
+						firstDeferred := claimNow
+						if fire.DeferredAt != nil && !fire.DeferredAt.IsZero() {
+							firstDeferred = fire.DeferredAt.UTC()
+							if claimNow.Sub(firstDeferred) >= ReuseDeferTimeout {
+								out = hubfire.FireOutcome{
+									Status: hubfire.FireStatusFailed,
+									Error:  ErrFireTargetAgentStillStarting,
+								}
+								break
 							}
-							break
 						}
 						retryAt := claimNow.Add(ReuseDeferBackoff)
-						if deadline := firstHandled.Add(ReuseDeferTimeout); retryAt.After(deadline) {
+						if deadline := firstDeferred.Add(ReuseDeferTimeout); retryAt.After(deadline) {
 							retryAt = deadline
 						}
 						writeCtx, cancelWrite := storeWriteContext(ctx)
-						deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, retryAt, retryAt.Add(FireLeaseHorizon))
+						deferred, dErr := d.store.DeferTriggerFire(writeCtx, fire.ID, firstDeferred, retryAt, retryAt.Add(FireLeaseHorizon))
 						cancelWrite()
 						if dErr != nil {
 							cancelFire()
@@ -1273,6 +1279,23 @@ func actionRefusesStaleEvent(actionType string) bool {
 	return actionType == store.TriggerActionDispatchAgent || actionType == store.TriggerActionGitHubComment
 }
 
+// reuseTargetLaunchInFlight reports whether agent a is in a launch state that
+// wakeAgentForDM refuses (aligned with launchStartRefusal and wake_dm.go's
+// pre-running phases): incomplete create, active in-flight launch before its
+// deadline, or any pre-running phase (created..starting).
+func reuseTargetLaunchInFlight(a *store.Agent, now time.Time) bool {
+	if a == nil || !a.DeletedAt.IsZero() {
+		return false
+	}
+	if a.IsIncompleteCreate() {
+		return true
+	}
+	if a.IsInFlight() && (a.LaunchDeadline.IsZero() || now.Before(a.LaunchDeadline)) {
+		return true
+	}
+	return store.InFlightPhases[a.Phase]
+}
+
 func isCoalescingOrReapedFire(f *store.TriggerFire) bool {
 	if f == nil {
 		return false
@@ -1305,17 +1328,24 @@ func (d *Dispatcher) cancelStrandedCoalescingFires(ctx context.Context, ev *stor
 		if !isCoalescingOrReapedFire(ef) || stillCoalescing[ef.TriggerID] {
 			continue
 		}
-		cancelled, cErr := d.store.FinishPendingTriggerFire(writeCtx, ef.ID, store.TriggerFireStatusSkipped, ErrFireCoalesceCancelled, "", "", "", now)
+		cancelErr := ErrFireCoalesceCancelled
+		cancelReason := FireSkipReasonCoalesceCancelled
+		if ef.Status == store.TriggerFireStatusDeferred ||
+			(ef.Status == store.TriggerFireStatusFailed && ef.Error == ErrFireReapedDuringDefer) {
+			cancelErr = ErrFireDeferCancelled
+			cancelReason = FireSkipReasonDeferCancelled
+		}
+		cancelled, cErr := d.store.FinishPendingTriggerFire(writeCtx, ef.ID, store.TriggerFireStatusSkipped, cancelErr, "", "", "", now)
 		if cErr != nil {
 			return cErr
 		}
 		if !cancelled {
 			continue
 		}
-		d.recordFireMetric(ef.ActionType, store.TriggerFireStatusSkipped, ErrFireCoalesceCancelled)
-		if rErr := d.store.RecordTriggerFire(writeCtx, ef.TriggerID, now, store.TriggerFireStatusSkipped, ErrFireCoalesceCancelled); rErr != nil &&
+		d.recordFireMetric(ef.ActionType, store.TriggerFireStatusSkipped, cancelErr)
+		if rErr := d.store.RecordTriggerFire(writeCtx, ef.TriggerID, now, store.TriggerFireStatusSkipped, cancelErr); rErr != nil &&
 			!errors.Is(rErr, store.ErrNotFound) {
-			d.logger.Warn("trigger: failed to update cancelled coalescing fire counters",
+			d.logger.Warn("trigger: failed to update cancelled pending fire counters",
 				"triggerID", ef.TriggerID, "fireID", ef.ID, "error", rErr)
 		}
 		if d.fireAudit != nil {
@@ -1328,7 +1358,7 @@ func (d *Dispatcher) cancelStrandedCoalescingFires(ctx context.Context, ev *stor
 				Status:         store.TriggerFireStatusSkipped,
 				MatchedThrough: ef.MatchedThrough,
 				DecidedDialect: ef.DecidedDialect,
-				Reason:         FireSkipReasonCoalesceCancelled,
+				Reason:         cancelReason,
 			})
 		}
 	}

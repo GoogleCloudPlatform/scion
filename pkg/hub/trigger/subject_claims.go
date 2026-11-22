@@ -55,11 +55,12 @@ type AgentLookup interface {
 	GetAgent(ctx context.Context, id string) (*store.Agent, error)
 }
 
-// AgentPhaseLookup is an optional capability on SubjectClaims (implemented by
+// ReuseAgentLookup is an optional capability on SubjectClaims (implemented by
 // StoreSubjectClaims) allowing the dispatcher to inspect a claimed agent's
-// phase before attempting reuse wake delivery (Stage 3 §6.2 rev 1.16).
-type AgentPhaseLookup interface {
-	AgentPhase(ctx context.Context, agentID string) (phase string, exists bool, err error)
+// full launch and lifecycle state before attempting reuse wake delivery
+// (Stage 3 §6.2 rev 1.16).
+type ReuseAgentLookup interface {
+	LookupClaimAgent(ctx context.Context, agentID string) (*store.Agent, error)
 }
 
 // StoreSubjectClaims implements SubjectClaims over store.TriggerStore and AgentLookup.
@@ -167,23 +168,23 @@ func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID, subject string
 	return claim, nil
 }
 
-// AgentPhase returns the current lifecycle phase of agentID, or exists=false
-// when the agent is missing or soft-deleted.
-func (s *StoreSubjectClaims) AgentPhase(ctx context.Context, agentID string) (string, bool, error) {
+// LookupClaimAgent returns the agent record for agentID, or (nil, nil) when
+// the agent is missing or soft-deleted.
+func (s *StoreSubjectClaims) LookupClaimAgent(ctx context.Context, agentID string) (*store.Agent, error) {
 	if s == nil || s.agents == nil || agentID == "" {
-		return "", false, nil
+		return nil, nil
 	}
 	ag, err := s.agents.GetAgent(ctx, agentID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return "", false, nil
+			return nil, nil
 		}
-		return "", false, err
+		return nil, err
 	}
 	if ag == nil || !ag.DeletedAt.IsZero() {
-		return "", false, nil
+		return nil, nil
 	}
-	return ag.Phase, true, nil
+	return ag, nil
 }
 
 func isTerminalClaimAgentPhase(phase string) bool {
