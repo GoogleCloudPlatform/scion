@@ -108,8 +108,10 @@ func (s *StoreSubjectClaims) Bind(ctx context.Context, c Claim, agentID string) 
 	return nil
 }
 
-// Release transitions an active claim held by c.FireID to released.
-// Releasing an already-released or superseded claim is a no-op.
+// Release transitions an active unbound claim (agent_id IS NULL) held by
+// c.FireID to released. Releasing an already-released, superseded, or bound
+// claim is a no-op (bound claims are released only via Live, maintenance, or
+// agent deletion).
 func (s *StoreSubjectClaims) Release(ctx context.Context, c Claim) error {
 	if s == nil || s.triggers == nil {
 		return fmt.Errorf("%w: subject claims store is nil", store.ErrInvalidInput)
@@ -142,7 +144,7 @@ func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID, subject string
 	ag, err := s.agents.GetAgent(ctx, claim.AgentID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			if _, rErr := s.triggers.ReleaseTriggerSubjectClaim(ctx, claim.ID, claim.FireID, s.now().UTC()); rErr != nil {
+			if _, rErr := s.triggers.ReleaseTriggerSubjectClaimsForAgent(ctx, claim.AgentID, s.now().UTC()); rErr != nil {
 				return nil, rErr
 			}
 			return nil, nil
@@ -150,7 +152,7 @@ func (s *StoreSubjectClaims) Live(ctx context.Context, triggerID, subject string
 		return nil, err
 	}
 	if ag == nil || !ag.DeletedAt.IsZero() || isTerminalClaimAgentPhase(ag.Phase) {
-		if _, rErr := s.triggers.ReleaseTriggerSubjectClaim(ctx, claim.ID, claim.FireID, s.now().UTC()); rErr != nil {
+		if _, rErr := s.triggers.ReleaseTriggerSubjectClaimsForAgent(ctx, claim.AgentID, s.now().UTC()); rErr != nil {
 			return nil, rErr
 		}
 		return nil, nil
