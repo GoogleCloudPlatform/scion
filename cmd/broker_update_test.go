@@ -51,11 +51,12 @@ func TestBrokerUpdate_ForwardsAdminManagedFlag(t *testing.T) {
 					gotPath = r.URL.Path
 					require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
 					w.Header().Set("Content-Type", "application/json")
+					eligible := want
 					_ = json.NewEncoder(w).Encode(hubclient.RuntimeBroker{
 						ID:             "broker-123",
 						Name:           "build-host",
 						AdminManaged:   want,
-						PolicyEligible: want,
+						PolicyEligible: &eligible,
 					})
 				default:
 					http.NotFound(w, r)

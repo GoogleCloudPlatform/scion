@@ -286,8 +286,9 @@ export class ScionPageBrokersArea extends LitElement {
     this.approvalBusyIds = new Set([...this.approvalBusyIds, broker.id]);
     try {
       const updated = await updateBrokerAdminManaged(broker.id, next);
-      this.brokers = this.brokers.map((b) => (b.id === broker.id ? { ...b, ...updated } : b));
-      stateManager.seedBrokers([updated]);
+      const merged = { ...broker, ...updated };
+      this.brokers = this.brokers.map((b) => (b.id === broker.id ? merged : b));
+      stateManager.seedBrokers([merged]);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to update broker approval', 'danger');
     } finally {
@@ -316,7 +317,7 @@ export class ScionPageBrokersArea extends LitElement {
     `;
   }
 
-  private renderName(broker: RuntimeBroker): TemplateResult {
+  private renderName(broker: RuntimeBroker, includeAction = true): TemplateResult {
     return html`
       <span class="name-cell">
         <sl-icon name="hdd-rack"></sl-icon>
@@ -330,7 +331,8 @@ export class ScionPageBrokersArea extends LitElement {
             ></sl-icon>`
           : nothing}
         ${this.renderBrokerTypeBadge(broker)} ${renderAdminManagedBadge(broker)}
-        ${renderPolicyBlockedTag(broker)} ${this.renderApprovalButton(broker)}
+        ${renderPolicyBlockedTag(broker)}
+        ${includeAction ? this.renderApprovalButton(broker) : nothing}
       </span>
     `;
   }
@@ -475,24 +477,30 @@ export class ScionPageBrokersArea extends LitElement {
   private renderGrid(rows: RuntimeBroker[]) {
     return html`
       <div class="resource-grid">
-        ${rows.map(
-          (broker) => html`
-            <a href="/brokers/${broker.id}" class="resource-card broker-row" data-id=${broker.id}>
-              <h3 class="resource-name">${this.renderName(broker)}</h3>
-              <div class="broker-meta">
-                ${this.renderKind(broker)}
-                <span class="target-cell">${this.targetText(broker)}</span>
-                <scion-status-badge
-                  status=${this.getStatusVariant(broker.status)}
-                  label=${broker.status}
-                  size="small"
-                ></scion-status-badge>
-                ${this.health ? this.renderHealth(broker) : nothing} ${this.renderVersion(broker)}
-                ${this.renderAgentCapacity(broker)}
-              </div>
-            </a>
-          `
-        )}
+        ${rows.map((broker) => {
+          const approvalBtn = this.renderApprovalButton(broker);
+          return html`
+            <div class="broker-card-wrap">
+              <a href="/brokers/${broker.id}" class="resource-card broker-row" data-id=${broker.id}>
+                <h3 class="resource-name">${this.renderName(broker, false)}</h3>
+                <div class="broker-meta">
+                  ${this.renderKind(broker)}
+                  <span class="target-cell">${this.targetText(broker)}</span>
+                  <scion-status-badge
+                    status=${this.getStatusVariant(broker.status)}
+                    label=${broker.status}
+                    size="small"
+                  ></scion-status-badge>
+                  ${this.health ? this.renderHealth(broker) : nothing} ${this.renderVersion(broker)}
+                  ${this.renderAgentCapacity(broker)}
+                </div>
+              </a>
+              ${approvalBtn !== nothing
+                ? html`<div class="broker-card-actions">${approvalBtn}</div>`
+                : nothing}
+            </div>
+          `;
+        })}
       </div>
     `;
   }

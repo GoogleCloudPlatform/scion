@@ -391,8 +391,9 @@ export class ScionPageBrokers extends LitElement {
     this.approvalBusyIds = new Set([...this.approvalBusyIds, broker.id]);
     try {
       const updated = await updateBrokerAdminManaged(broker.id, next);
-      this.brokers = this.brokers.map((b) => (b.id === broker.id ? { ...b, ...updated } : b));
-      stateManager.seedBrokers([updated]);
+      const merged = { ...broker, ...updated };
+      this.brokers = this.brokers.map((b) => (b.id === broker.id ? merged : b));
+      stateManager.seedBrokers([merged]);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to update broker approval', 'danger');
     } finally {
@@ -423,23 +424,23 @@ export class ScionPageBrokers extends LitElement {
   }
 
   private renderBrokerCard(broker: RuntimeBroker) {
+    const approvalBtn = this.renderApprovalButton(broker);
     return html`
-      <a href="/brokers/${broker.id}" class="resource-card">
-        <div class="broker-header">
-          <div>
-            <h3 class="resource-name">
-              <sl-icon name="hdd-rack"></sl-icon>
-              <span>
-                ${broker.name} ${this.renderBrokerTypeBadge(broker)}
-                ${renderAdminManagedBadge(broker)} ${renderPolicyBlockedTag(broker)}
-              </span>
-            </h3>
-            <div class="broker-version">
-              ${renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion)}
+      <div class="broker-card-wrap">
+        <a href="/brokers/${broker.id}" class="resource-card">
+          <div class="broker-header">
+            <div>
+              <h3 class="resource-name">
+                <sl-icon name="hdd-rack"></sl-icon>
+                <span>
+                  ${broker.name} ${this.renderBrokerTypeBadge(broker)}
+                  ${renderAdminManagedBadge(broker)} ${renderPolicyBlockedTag(broker)}
+                </span>
+              </h3>
+              <div class="broker-version">
+                ${renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion)}
+              </div>
             </div>
-          </div>
-          <div class="broker-approval-actions">
-            ${this.renderApprovalButton(broker)}
             <scion-status-badge
               status=${this.getStatusVariant(broker.status)}
               label=${broker.status}
@@ -447,39 +448,42 @@ export class ScionPageBrokers extends LitElement {
             >
             </scion-status-badge>
           </div>
-        </div>
-        ${broker.capabilities ? this.renderCapabilities(broker.capabilities) : ''}
-        <div class="broker-meta">
-          <div class="stat">
-            <span class="stat-label">Last Heartbeat</span>
-            <span class="stat-value">${formatRelative(broker.lastHeartbeat)}</span>
+          ${broker.capabilities ? this.renderCapabilities(broker.capabilities) : ''}
+          <div class="broker-meta">
+            <div class="stat">
+              <span class="stat-label">Last Heartbeat</span>
+              <span class="stat-value">${formatRelative(broker.lastHeartbeat)}</span>
+            </div>
+            ${broker.profiles
+              ? html`
+                  <div class="stat">
+                    <span class="stat-label">Profiles</span>
+                    <span class="stat-value">${broker.profiles.length}</span>
+                  </div>
+                `
+              : ''}
+            ${broker.agentCount != null
+              ? html`
+                  <div class="stat">
+                    <span class="stat-label">Agents / Cap</span>
+                    ${this.renderAgentCapacity(broker)}
+                  </div>
+                `
+              : ''}
+            ${broker.createdBy
+              ? html`
+                  <div class="stat">
+                    <span class="stat-label">Created By</span>
+                    <span class="stat-value">${broker.createdByName || broker.createdBy}</span>
+                  </div>
+                `
+              : ''}
           </div>
-          ${broker.profiles
-            ? html`
-                <div class="stat">
-                  <span class="stat-label">Profiles</span>
-                  <span class="stat-value">${broker.profiles.length}</span>
-                </div>
-              `
-            : ''}
-          ${broker.agentCount != null
-            ? html`
-                <div class="stat">
-                  <span class="stat-label">Agents / Cap</span>
-                  ${this.renderAgentCapacity(broker)}
-                </div>
-              `
-            : ''}
-          ${broker.createdBy
-            ? html`
-                <div class="stat">
-                  <span class="stat-label">Created By</span>
-                  <span class="stat-value">${broker.createdByName || broker.createdBy}</span>
-                </div>
-              `
-            : ''}
-        </div>
-      </a>
+        </a>
+        ${approvalBtn !== nothing
+          ? html`<div class="broker-card-actions">${approvalBtn}</div>`
+          : nothing}
+      </div>
     `;
   }
 

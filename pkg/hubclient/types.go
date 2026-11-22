@@ -236,8 +236,9 @@ type ProjectProvider struct {
 	// AdminManaged is the broker's stored admin_managed approval flag (ptone/scion#7829).
 	AdminManaged bool `json:"adminManaged,omitempty"`
 	// PolicyEligible reports whether this provider broker is eligible under
-	// broker_policy.admin_managed_only (true when the policy is off).
-	PolicyEligible bool `json:"policyEligible"`
+	// broker_policy.admin_managed_only (true when the policy is off). Nil when
+	// omitted by an older Hub that does not report this field.
+	PolicyEligible *bool `json:"policyEligible,omitempty"`
 	// AgentLimitSource reports which precedence step produced AgentLimit
 	// (ptone/scion#2061 P2, design.md §5.9): "broker", "entitlement",
 	// "hub_default", "unlimited", or "not_enforced" (Amendment A1: the P1b
@@ -403,7 +404,7 @@ type RuntimeBroker struct {
 	Projects        []BrokerProjectInfo `json:"projects,omitempty"`
 	AutoProvide     bool                `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
 	AdminManaged    bool                `json:"adminManaged,omitempty"`
-	PolicyEligible  bool                `json:"policyEligible"`
+	PolicyEligible  *bool               `json:"policyEligible,omitempty"`
 	Created         time.Time           `json:"created"`
 	Updated         time.Time           `json:"updated"`
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker

@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -192,8 +191,7 @@ func TestBrokerPolicy_ApprovalPatch_AuthzAndAudit(t *testing.T) {
 }
 
 func TestBrokerPolicy_ApprovalPatch_TestAdminRefused(t *testing.T) {
-	srv, s := testServer(t)
-	srv.testAdminGate = testAdminGate{hubAdmin: true, superAdmin: true, hubID: "test-hub", hubClass: config.HubClassTest}
+	srv, s, sink := tsaServer(t)
 	setBrokerPolicyState(t, srv, s, true, true)
 	ctx := context.Background()
 
@@ -221,6 +219,20 @@ func TestBrokerPolicy_ApprovalPatch_TestAdminRefused(t *testing.T) {
 			got, err := s.GetRuntimeBroker(ctx, ownBroker.ID)
 			require.NoError(t, err)
 			assert.False(t, got.AdminManaged)
+
+			// Pin the census gate: verify test_admin_policy_denial was recorded with
+			// subject == "broker_policy.go:authorizeBrokerManage" for this issuance.
+			denials := tsaSinkLines(sink, testAdminAuditEventPolicyDenial)
+			foundGate := false
+			for _, d := range denials {
+				if d["issuance_id"] == issued.Identity.IssuanceID &&
+					d["class"] == "role_gate" &&
+					d["subject"] == "broker_policy.go:authorizeBrokerManage" {
+					foundGate = true
+					break
+				}
+			}
+			assert.True(t, foundGate, "%s: expected test_admin_policy_denial sink line with subject=broker_policy.go:authorizeBrokerManage, got %v", tc.name, denials)
 		})
 	}
 }

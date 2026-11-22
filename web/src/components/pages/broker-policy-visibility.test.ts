@@ -25,6 +25,7 @@ import {
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
+import { stateManager } from '../../client/state.js';
 import type { RuntimeBroker } from '../../shared/types.js';
 
 class FakeEventSource extends EventTarget {
@@ -200,12 +201,14 @@ describe('Admin-managed Runtime Brokers UI (hub.admin_managed_brokers, ptone/sci
       expect(blockedTags?.length).toBe(1);
       expect(blockedTags?.[0]?.textContent).toContain('Not approved — new agents blocked');
 
-      // Only blocked-host (which has manage capability) has an approval button.
+      // Only blocked-host (which has manage capability) has an approval button,
+      // and it must not be nested inside the card's <a> anchor (O4).
       const buttons = element.shadowRoot?.querySelectorAll(
         '[data-testid="broker-approval-action"]'
       );
       expect(buttons?.length).toBe(1);
       expect(buttons?.[0]?.textContent?.trim()).toContain('Approve');
+      expect(buttons?.[0]?.closest('a')).toBeNull();
 
       // Click Approve -> sends PATCH {"adminManaged": true} and updates UI.
       (buttons![0] as HTMLElement).click();
@@ -234,6 +237,59 @@ describe('Admin-managed Runtime Brokers UI (hub.admin_managed_brokers, ptone/sci
       expect(
         element.shadowRoot?.querySelectorAll('[data-testid="policy-blocked-tag"]').length
       ).toBe(1);
+    });
+
+    it('preserves existing broker detail fields in stateManager when PATCH returns a sparse record (O3)', async () => {
+      setFeatureFlag(ADMIN_MANAGED_BROKERS_FLAG, true);
+      const richBroker = makeBroker({
+        id: 'b-rich',
+        name: 'rich-host',
+        endpoint: 'https://broker.example.internal',
+        agentLimit: 12,
+        agentCount: 3,
+        adminManaged: false,
+        policyEligible: false,
+        _capabilities: { actions: ['read', 'manage'] },
+      });
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = reqUrl(input);
+          if (init?.method === 'PATCH' && url.includes('/api/v1/runtime-brokers/b-rich')) {
+            // Bare PATCH response omitting detail/capacity fields.
+            return Promise.resolve(
+              jsonResponse({
+                id: 'b-rich',
+                name: 'rich-host',
+                adminManaged: true,
+                policyEligible: true,
+              })
+            );
+          }
+          return Promise.resolve(jsonResponse({ brokers: [richBroker] }));
+        })
+      );
+
+      element = document.createElement('scion-page-brokers') as HTMLElement & {
+        updateComplete: Promise<boolean>;
+      };
+      document.body.appendChild(element);
+      await flush(element);
+
+      const btn = element.shadowRoot?.querySelector(
+        '[data-testid="broker-approval-action"]'
+      ) as HTMLElement | null;
+      expect(btn).not.toBeNull();
+      btn!.click();
+      await flush(element);
+
+      const cached = stateManager.getBroker('b-rich');
+      expect(cached?.adminManaged).toBe(true);
+      expect(cached?.policyEligible).toBe(true);
+      expect(cached?.endpoint).toBe('https://broker.example.internal');
+      expect(cached?.agentLimit).toBe(12);
+      expect(cached?.agentCount).toBe(3);
     });
   });
 

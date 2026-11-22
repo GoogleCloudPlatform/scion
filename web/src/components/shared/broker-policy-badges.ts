@@ -69,6 +69,22 @@ export const brokerPolicyStyles = css`
     align-items: center;
     gap: 0.375rem;
   }
+
+  .broker-card-wrap {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+
+  .broker-card-wrap > .resource-card {
+    flex: 1;
+  }
+
+  .broker-card-actions {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 0.5rem;
+  }
 `;
 
 export function isAdminManagedBrokersExperimentOn(): boolean {
