@@ -93,11 +93,11 @@ func TestIngestAgentAttachments_SymlinkMatrix(t *testing.T) {
 			rel:  "in_link",
 		},
 		{
-			// A link that resolves back inside the shared dir is an ordinary
-			// path component and still works.
+			// Refused along with leaf links: attachment ingest opens files
+			// through the no-symlink open path, which rejects symlinks at
+			// every component, including in-root intermediate directories.
 			name: "inside intermediate directory link",
 			rel:  "in_dir/inside.txt",
-			want: "inside content",
 		},
 		{
 			name: "no link at all",
