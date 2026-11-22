@@ -312,7 +312,6 @@ func TestTemplateTiers_RestartDoesNotResendStoredHubCopy(t *testing.T) {
 // for one that reports it or for a heartbeat without capabilities.
 func TestBrokerHeartbeat_WarnsOnceWithoutTemplateTiers(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	logs := &syncBuffer{}
 	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
 	ctx := context.Background()

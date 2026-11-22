@@ -75,7 +75,6 @@ func TestCapabilitiesFromStrings_AgentMoveAliases(t *testing.T) {
 
 func TestBrokerHeartbeat_WorkspaceStorageRoundTrip(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -125,7 +124,6 @@ func TestBrokerHeartbeat_WorkspaceStorageRoundTrip(t *testing.T) {
 // the stored descriptor: an omitted field never clears it.
 func TestBrokerHeartbeat_CapabilitiesWithoutDescriptorKeepsDescriptor(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	stored := &api.BrokerWorkspaceStorage{

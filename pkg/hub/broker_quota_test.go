@@ -158,7 +158,6 @@ func TestBrokerQuota_ResumeReReserves(t *testing.T) {
 // agent's max_agents_per_broker reservation is released.
 func TestBrokerQuota_CrashViaHeartbeatReleases(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 
 	broker, project := newQuotaTestBrokerAndProject(t, s, "crash")
 	agent := newQuotaTestAgent(t, s, broker, project, "crash-agent", state.PhaseRunning)
@@ -186,7 +185,6 @@ func TestBrokerQuota_CrashViaHeartbeatReleases(t *testing.T) {
 // stop action — e.g. the container exited on its own.
 func TestBrokerQuota_CleanStopViaHeartbeatReleases(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 
 	broker, project := newQuotaTestBrokerAndProject(t, s, "cleanexit")
 	agent := newQuotaTestAgent(t, s, broker, project, "cleanexit-agent", state.PhaseRunning)

@@ -74,7 +74,6 @@ func requireFlatRowUnchanged(t *testing.T, s store.Store, want *store.RuntimeBro
 func TestFlatHeartbeat_AfterRestartKeepsIdentityTargetAndPlacement(t *testing.T) {
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	a := f.pinnedAgent(t, "hb-restart", string(state.PhaseRunning))
 	wantBroker, wantPin := placementOf(t, f.s, a.ID)
 	require.Equal(t, f.flat.ID, wantBroker)
@@ -122,7 +121,6 @@ func TestFlatHeartbeat_AfterRestartKeepsIdentityTargetAndPlacement(t *testing.T)
 // container-missing exactly as a legacy agent is, and its placement stays.
 func TestFlatHeartbeat_MissingAgentFollowsObservedStateRules(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	a := f.pinnedAgentWith(t, "hb-missing", string(state.PhaseRunning), func(a *store.Agent) {
 		a.Activity = "working"
 		a.LastSeen = time.Now().Add(-time.Hour)
@@ -159,7 +157,6 @@ func TestFlatHeartbeat_MissingAgentFollowsObservedStateRules(t *testing.T) {
 func TestFlatHeartbeat_NoAdoptionAcrossFlatAndLegacy(t *testing.T) {
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	old := time.Now().Add(-time.Hour)
 	flatAgent := f.pinnedAgentWith(t, "hb-flat", string(state.PhaseRunning), func(a *store.Agent) {
 		a.Activity = "idle"
@@ -203,7 +200,6 @@ func TestFlatHeartbeat_NoAdoptionAcrossFlatAndLegacy(t *testing.T) {
 func TestFlatHeartbeat_RunIDAndRecoverySemanticsPreserved(t *testing.T) {
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	lost := f.pinnedAgent(t, "hb-lost", string(state.PhaseError))
 	inflight := f.pinnedAgent(t, "hb-inflight", string(state.PhaseError))
 	for _, a := range []*store.Agent{lost, inflight} {
@@ -250,7 +246,6 @@ func TestFlatHeartbeat_RunIDAndRecoverySemanticsPreserved(t *testing.T) {
 // produces) gets no Runtime Broker-reported profile from a heartbeat either.
 func TestFlatHeartbeat_NoProfileBackfillOnFlatRuntimeBroker(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	a := f.unpinnedAgentOnWith(t, "hb-null-pin", f.flat.ID, string(state.PhaseRunning), nil)
 	agentHB := flatAgentHeartbeat(a.Slug)
 	agentHB.Profile = "batch"
@@ -275,7 +270,6 @@ func TestFlatHeartbeat_NoProfileBackfillOnFlatRuntimeBroker(t *testing.T) {
 func TestFlatHeartbeat_ProfileSAMappingsDroppedForFlatRow(t *testing.T) {
 	ctx := context.Background()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	logs := &lockedBuffer{}
 	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	const warning = "ignoring Runtime Broker Profile fields reported for a flat Runtime Broker"

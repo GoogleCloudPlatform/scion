@@ -334,7 +334,6 @@ func TestWorktreePerAgent_CloudRun_LifecycleAndDispatcherGates(t *testing.T) {
 
 	t.Run("start returns 412 and keeps stopped phase", func(t *testing.T) {
 		srv, s, project, broker := newCloudRunWorktreeHandlerSetup(t, "start", store.WorkspaceModeWorktreePerAgent, crProfiles, "cloudrun")
-		grantDevUserRuntimeBrokerAccess(t, s)
 		agent := newQuotaTestAgent(t, s, broker, project, "wtcr-start", state.PhaseStopped)
 		client := &mockRuntimeBrokerClient{}
 		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
@@ -351,7 +350,6 @@ func TestWorktreePerAgent_CloudRun_LifecycleAndDispatcherGates(t *testing.T) {
 
 	t.Run("restart returns 412 before stop leg and keeps running phase", func(t *testing.T) {
 		srv, s, project, broker := newCloudRunWorktreeHandlerSetup(t, "restart", store.WorkspaceModeWorktreePerAgent, crProfiles, "cloudrun")
-		grantDevUserRuntimeBrokerAccess(t, s)
 		agent := newQuotaTestAgent(t, s, broker, project, "wtcr-restart", state.PhaseRunning)
 		client := &mockRuntimeBrokerClient{}
 		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
@@ -386,7 +384,6 @@ func TestWorktreePerAgent_CloudRun_LifecycleAndDispatcherGates(t *testing.T) {
 
 	t.Run("unprofiled broker 412 unsupported_capability refusal is relayed cleanly", func(t *testing.T) {
 		srv, s, project, broker := newCloudRunWorktreeHandlerSetup(t, "relay", store.WorkspaceModeWorktreePerAgent, nil, "")
-		grantDevUserRuntimeBrokerAccess(t, s)
 
 		bodyBytes, err := json.Marshal(map[string]any{
 			"error": map[string]any{

@@ -424,7 +424,6 @@ func TestFlat_CloudRunHubRecordsOmitCloudFields(t *testing.T) {
 	ctx := context.Background()
 	f := newFlatRegFixture(t, true)
 	setFlatExperiments(t, f.srv, true, true)
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 
 	brokerID := tid("cr-present-broker")
 	target := cloudRunTargetFor("present-broker")

@@ -232,7 +232,6 @@ func TestMintGCPServiceAccount_WorkloadIdentityNoKubernetesTargets(t *testing.T)
 // replaces them, and a flat row keeps its targets without a profile.
 func TestBrokerHeartbeat_WorkloadIdentityTargetsPersisted(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	b := addProviderBroker(t, s, projectID, "b", k8sProfile("gke", false))
 	load := func(id string) *store.RuntimeBroker {
 		t.Helper()
@@ -283,7 +282,6 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsPersisted(t *testing.T) {
 // or namespace a mint binds.
 func TestBrokerHeartbeat_WorkloadIdentityTargetsIgnoredFromUser(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	b := addProviderBroker(t, s, projectID, "b", k8sProfile("gke", false))
 	targets := []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"}}
 	wiHeartbeatAsBroker(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &targets})
@@ -304,7 +302,6 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsIgnoredFromUser(t *testing.T) {
 
 func TestBrokerHeartbeat_WorkloadIdentityTargetsFlatRowDropsProfile(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	b := &store.RuntimeBroker{
 		ID: tid("wi-flat" + t.Name()), Name: "flat-wi", Slug: "flat-wi-" + tidSlugSafe(t.Name()),
@@ -359,7 +356,6 @@ func TestMintHubScopedGCPServiceAccount_WorkloadIdentityBindings(t *testing.T) {
 	audit := &mockAuditLogger{}
 	srv.auditLogger = audit
 	setWorkloadIdentitySetupExperiment(t, srv, true)
-	grantDevUserRuntimeBrokerAccess(t, s)
 
 	projectID := createTestProjectForSA(t, srv, nil)
 	a := addProviderBroker(t, s, projectID, "a", k8sProfile("gke", false), k8sProfile("gke-dev", false))

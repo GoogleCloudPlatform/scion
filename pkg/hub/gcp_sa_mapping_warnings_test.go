@@ -714,7 +714,6 @@ func postHeartbeatResponse(t *testing.T, srv *Server, brokerID string, hb broker
 // heartbeat without the field leaves it unchanged, and it drives warnings.
 func TestBrokerHeartbeat_ProfileSAMappingsPersisted(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	b := addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", false))
 	sa := mappingTestSA(t, s, projectID, unmappedGSA)
 	assert.Empty(t, srv.projectSAMappingWarnings(context.Background(), projectID, sa), "unknown before any report")
@@ -747,7 +746,6 @@ func TestBrokerHeartbeat_ProfileSAMappingsPersisted(t *testing.T) {
 // heartbeat response, and an older broker leaves everything untouched.
 func TestBrokerHeartbeat_ProfileSAReportHashes(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	b := addProviderBroker(t, s, projectID, "b", k8sProfile("k8s", false))
 	load := func() store.BrokerProfile {
 		t.Helper()
@@ -824,7 +822,6 @@ func TestBrokerHeartbeat_ProfileSAReportHashes(t *testing.T) {
 // A flat row stores no profiles, so profile-scoped heartbeat data is dropped.
 func TestBrokerHeartbeat_ProfileSAMappingsDroppedForFlatRow(t *testing.T) {
 	srv, s, projectID := newMappingProject(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	b := addProviderBroker(t, s, projectID, "flat")
 	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{
 		Status: "online",

@@ -1640,7 +1640,6 @@ func TestRuntimeBrokerDeleteCascadesProviders(t *testing.T) {
 
 func TestRuntimeBrokerGetByID(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -1674,7 +1673,6 @@ func TestRuntimeBrokerGetByID(t *testing.T) {
 
 func TestRuntimeBrokerGetByID_CreatedByName(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	// Create a user to be the broker creator
@@ -1734,7 +1732,6 @@ func TestRuntimeBrokerGetByID_CreatedByName(t *testing.T) {
 
 func TestRuntimeBrokerGetByID_CreatedByNameFallsBackToEmail(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	// Create a user with no display name

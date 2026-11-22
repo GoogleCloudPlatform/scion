@@ -622,7 +622,6 @@ func TestBrokerQuota_WakeReadinessTimeoutHoldsSlotThroughReconcile(t *testing.T)
 func TestBrokerQuota_WakeReadinessTimeoutThenConfirmedStopReleases(t *testing.T) {
 	srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
 	setBrokerAgentCeiling(t, s, 1)
-	grantDevUserRuntimeBrokerAccess(t, s)
 
 	disp := &wakeTrackingDispatcher{}
 	srv.SetDispatcher(disp)

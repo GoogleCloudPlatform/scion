@@ -889,7 +889,6 @@ type flatPendingFixture struct {
 func newFlatPendingFixture(t *testing.T, mutate func(a *store.Agent)) *flatPendingFixture {
 	t.Helper()
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	a := f.pinnedAgentWith(t, "pending", string(state.PhaseRunning), func(a *store.Agent) {
 		a.Activity = "working"
 		a.LastSeen = time.Now().Add(-time.Hour)

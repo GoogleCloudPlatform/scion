@@ -1255,7 +1255,6 @@ func TestSuspend_ShutdownReportsKeepSuspendedAndAutoWakeable(t *testing.T) {
 		}
 	})
 	setIdleSuspendExperiment(t, srv, true)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	t.Cleanup(srv.waitAutoWakeIdle)
 
 	ctx := context.Background()

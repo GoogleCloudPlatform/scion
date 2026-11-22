@@ -396,7 +396,6 @@ func postStoppedHeartbeat(t *testing.T, srv *Server, brokerID string, a *store.A
 // held; its exit code and reason are still recorded.
 func TestHeartbeatPhaseGuard_StoppedReportMidStart(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	disp := &hookedStartDispatcher{}
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
@@ -436,7 +435,6 @@ func TestHeartbeatPhaseGuard_StoppedReportMidStart(t *testing.T) {
 // does not release the slot.
 func TestHeartbeatPhaseGuard_StoppedReportDuringRestart(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	disp := &hookedStartDispatcher{}
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
@@ -467,7 +465,6 @@ func TestHeartbeatPhaseGuard_NoOpAppliesAsBefore(t *testing.T) {
 	for _, phase := range []state.Phase{state.PhaseRunning, state.PhaseStarting} {
 		t.Run(string(phase), func(t *testing.T) {
 			srv, s := testServer(t)
-			grantDevUserRuntimeBrokerAccess(t, s)
 			setBrokerAgentCeiling(t, s, 2)
 			ctx := context.Background()
 			broker, project := newQuotaTestBrokerAndProject(t, s, "hbg-noop-"+string(phase))
@@ -528,7 +525,6 @@ func TestStartDispatch_FinalWriteClearsTerminalRemnants(t *testing.T) {
 	forEachStartSite(t, func(t *testing.T, site startSiteCase, async bool) {
 		disp := &hookedStartDispatcher{}
 		srv, s, broker, agentID, run := site.setup(t, disp, async)
-		grantDevUserRuntimeBrokerAccess(t, s)
 		ctx := context.Background()
 		row, err := s.GetAgent(ctx, agentID)
 		require.NoError(t, err)
@@ -566,7 +562,6 @@ func TestStartDispatch_RestartGuardedHeartbeatLeavesNoStaleMessage(t *testing.T)
 	for _, phase := range []state.Phase{state.PhaseRunning, state.PhaseStopped} {
 		t.Run(string(phase), func(t *testing.T) {
 			srv, s := testServer(t)
-			grantDevUserRuntimeBrokerAccess(t, s)
 			disp := &hookedStartDispatcher{}
 			srv.SetDispatcher(disp)
 			setBrokerAgentCeiling(t, s, 2)
@@ -644,7 +639,6 @@ func TestStartDispatch_StaleSnapshotConflicts(t *testing.T) {
 // writes stopped itself and releases the slot.
 func TestHeartbeatPhaseGuard_DuringStop(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	disp := &hookedStartDispatcher{}
 	srv.SetDispatcher(disp)
 	setBrokerAgentCeiling(t, s, 2)
@@ -1045,7 +1039,6 @@ func TestHeartbeatPhaseGuard_UncountedStoredPhaseEndToEnd(t *testing.T) {
 	for _, op := range []bool{true, false} {
 		t.Run(fmt.Sprintf("op=%v", op), func(t *testing.T) {
 			srv, s := testServer(t)
-			grantDevUserRuntimeBrokerAccess(t, s)
 			rec := &recordingStatusStore{Store: srv.store}
 			srv.store = rec
 			setBrokerAgentCeiling(t, s, 2)

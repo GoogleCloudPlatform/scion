@@ -228,38 +228,6 @@ func doRequestRaw(t *testing.T, srv *Server, method, path string, body []byte, c
 	return rec
 }
 
-// grantDevUserRuntimeBrokerAccess binds a custom role carrying the
-// runtime_broker.* permission IDs to the dev user. No production check
-// evaluates those IDs: broker records, broker env/secret material and the
-// heartbeat user path are all checked on the registry's broker.*
-// permissions, which the dev user's super-admin role already holds. The
-// grant therefore changes no decision; callers keep it only until it is
-// removed in a separate cleanup.
-func grantDevUserRuntimeBrokerAccess(t *testing.T, s store.Store) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:      "runtime-broker-compat",
-		ScopeType: store.RoleScopeSystem,
-		Permissions: []string{
-			"runtime_broker.read",
-			"runtime_broker.update",
-			"runtime_broker.delete",
-			"runtime_broker.list",
-		},
-	})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      DevUserID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
 // grantSuperAdminRole binds the seeded super-admin role definition to the
 // given user. Under the CO1 authorization cutover the AK1 kernel only
 // evaluates role bindings, so User.Role = "admin" alone is insufficient.

@@ -4703,7 +4703,6 @@ func setupProjectSecretTest(t *testing.T) (*Server, string) {
 func setupBrokerSecretTest(t *testing.T) (*Server, string) {
 	t.Helper()
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
 	ctx := context.Background()
 

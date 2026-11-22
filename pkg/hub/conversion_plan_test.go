@@ -57,7 +57,6 @@ func newConversionPlanFixture(t *testing.T, experimentOn bool) *conversionPlanFi
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: experimentOn, linkFlat: true})
 	logs := &bytes.Buffer{}
 	f.srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	return &conversionPlanFixture{flatHubFixture: f, logs: logs}
 }
 
@@ -506,7 +505,6 @@ func TestConversionPlanGet_AgentPagingBounded(t *testing.T) {
 			cyc = &cyclingAgentsStore{Store: inner}
 			return cyc
 		}})
-	grantDevUserRuntimeBrokerAccess(t, f.s)
 	sendAsBroker(t, f.srv, f.legacy.ID, planBeat(samplePlan("a")))
 	cyc.armed.Store(true)
 

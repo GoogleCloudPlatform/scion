@@ -347,7 +347,6 @@ func TestBrokerHeartbeatTimeoutHandler_RefreshErrorDoesNotBlockSweep(t *testing.
 // "connected" or health.status "healthy".
 func TestBrokerHeartbeatTimeoutHandler_ReapedBrokerConsistentOnAPI(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	stale := &store.RuntimeBroker{

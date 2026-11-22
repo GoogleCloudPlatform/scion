@@ -75,7 +75,6 @@ func TestHealthSummaryBrokers_Health(t *testing.T) {
 // unavailable while it stays online.
 func TestHealthSummaryBrokers_HealthFromHeartbeat(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	createSummaryBroker(t, s, &store.RuntimeBroker{ID: tid("hs-health-hb"), Name: "hs-health-hb"})
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+tid("hs-health-hb")+"/heartbeat",

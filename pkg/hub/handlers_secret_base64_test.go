@@ -572,7 +572,6 @@ func TestBrokerSecretByKey_InvalidBase64_DefaultEncoding_Returns400(t *testing.T
 
 func TestBrokerSecretByKey_RawEncoding_StoresLiteralValue(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(localBackend)
 	ctx := context.Background()

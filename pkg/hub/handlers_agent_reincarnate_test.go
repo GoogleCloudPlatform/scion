@@ -162,7 +162,6 @@ func TestReincarnateAgent_RejectsUnsupportedOverrides(t *testing.T) {
 // re-registration.
 func TestBrokerHeartbeat_RefreshesCapabilities(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -196,7 +195,6 @@ func TestBrokerHeartbeat_RefreshesCapabilities(t *testing.T) {
 // the field is a "refresh if present" signal, not a full replace.
 func TestBrokerHeartbeat_NoCapabilities_LeavesStoredCapabilitiesUntouched(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -4296,7 +4294,6 @@ type notificationRace struct {
 func newNotificationRace(t *testing.T, disp AgentDispatcher) *notificationRace {
 	t.Helper()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	grantDevUserRuntimeBrokerAccess(t, s)
 
 	pub := NewChannelEventPublisher()
 	srv.SetEventPublisher(pub)

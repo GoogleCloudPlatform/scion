@@ -396,7 +396,6 @@ func runningHeartbeat(t *testing.T, srv *Server, brokerID string, a *store.Agent
 // through the real register, join and heartbeat endpoints.
 func TestReRegistered_BackfillRestoresRunningAgents(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s) // the heartbeat and DELETE endpoints check runtime_broker permissions
 	ctx := context.Background()
 	id := uuid.NewString()
 	registerBrokerWithID(t, srv, id, "rereg-instance")
@@ -582,7 +581,6 @@ func TestJoinBackfill_PendingLost_SweepRestores(t *testing.T) {
 // pending there) keeps them and writes nothing.
 func TestReRegistered_JoinOnOneReplica_HeartbeatOnAnother(t *testing.T) {
 	srvA, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 	id := uuid.NewString()
 	registerBrokerWithID(t, srvA, id, "rereg-xr")

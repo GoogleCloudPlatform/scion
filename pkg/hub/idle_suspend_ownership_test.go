@@ -2208,7 +2208,6 @@ func TestIdleSuspend_PostCommitLateAgentAndRuntimeReportsKeepSuspendedIdleAndAut
 		}
 	})
 	isoEnableIdleSweep(t, srvA, 15*time.Minute)
-	grantDevUserRuntimeBrokerAccess(t, s)
 
 	dispB := &isoCallbackDispatcher{st: s, autoReadyOnStart: true}
 	srvB := isoSecondReplica(t, s, dispB)

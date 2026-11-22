@@ -750,7 +750,6 @@ func TestBrokerAuthz_GetBrokerProjects_PropagatesOtherProjectErrors(t *testing.T
 // agent's own profile, not whichever profile is listed first.
 func TestBrokerHeartbeat_NoRuntimeGuessPersisted(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -819,7 +818,6 @@ func TestBrokerHeartbeat_NoRuntimeGuessPersisted(t *testing.T) {
 // rather than falling back to the broker's docker profile.
 func TestBrokerHeartbeat_UnresolvedProfileDoesNotBackfillRuntime(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -885,7 +883,6 @@ func TestBrokerHeartbeat_UnresolvedProfileDoesNotBackfillRuntime(t *testing.T) {
 // missing.
 func TestBrokerHeartbeat_NeverOverwritesExplicitRuntime(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -960,7 +957,6 @@ func TestBrokerHeartbeat_NeverOverwritesExplicitRuntime(t *testing.T) {
 // unknown" is exactly the authoritative case this backfill must not touch.
 func TestBrokerHeartbeat_RuntimeNotOverwrittenWhenProfileFirstBackfilledSamePass(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -1034,7 +1030,6 @@ func TestBrokerHeartbeat_RuntimeNotOverwrittenWhenProfileFirstBackfilledSamePass
 // memoisation (heartbeatBrokerLoaded), this would be three separate reads.
 func TestBrokerHeartbeat_BrokerLoadedOnceForCapabilitiesAndBackfill(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -1135,7 +1130,6 @@ func TestBrokerHeartbeat_BrokerLoadedOnceForCapabilitiesAndBackfill(t *testing.T
 // regressing back into an unconditional read on every heartbeat.
 func TestBrokerHeartbeat_NoBrokerLoadWhenNothingNeedsIt(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{
@@ -1205,7 +1199,6 @@ func TestBrokerHeartbeat_NoBrokerLoadWhenNothingNeedsIt(t *testing.T) {
 // broker row — is still applied.
 func TestBrokerHeartbeat_BrokerLoadErrorDoesNotCrashOrBlockStatusUpdate(t *testing.T) {
 	srv, s := testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	ctx := context.Background()
 
 	broker := &store.RuntimeBroker{

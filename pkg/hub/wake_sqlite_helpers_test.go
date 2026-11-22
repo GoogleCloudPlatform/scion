@@ -123,7 +123,6 @@ func newWakeQuotaFixture(t *testing.T, name string, limit int64) *wakeQuotaFixtu
 	srv, s := testServer(t)
 	srv.SetDispatcher(&quotaLifecycleDispatcher{})
 	setBrokerAgentCeiling(t, s, limit)
-	grantDevUserRuntimeBrokerAccess(t, s)
 	broker, project := newQuotaTestBrokerAndProject(t, s, name)
 	target := newQuotaTestAgent(t, s, broker, project, name+"-target", state.PhaseSuspended)
 	return &wakeQuotaFixture{srv, s, broker, project, target}
