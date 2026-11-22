@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -533,4 +534,165 @@ func TestDecisionsLifecycle_Golden(t *testing.T) {
 	wantBytes, err := os.ReadFile(decisionsLifecycleGoldenPath)
 	require.NoError(t, err, "missing golden file %s; run with UPDATE_DECISIONS_GOLDEN=1 to generate", decisionsLifecycleGoldenPath)
 	require.Equal(t, string(wantBytes), string(gotBytes), "decision lifecycle golden mismatch")
+}
+
+const decisionsRequestValidationGoldenPath = "testdata/decisions-request-validation-golden.json"
+
+// TestDecisionsRequestValidation_Golden pins the exact HTTP 400 validation /
+// decode error bodies and case-insensitive / trailing-data wire semantics for
+// withdraw and dismiss requests against base 0fb0e90 (R2).
+func TestDecisionsRequestValidation_Golden(t *testing.T) {
+	captures := map[string]goldenCapture{}
+
+	rawWithdraw := func(f *decisionsFixture, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/agent/decisions/withdraw", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r = r.WithContext(agentCtx(r.Context(), f.agent))
+		rr := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rr, r)
+		return rr
+	}
+
+	rawDismiss := func(f *decisionsFixture, msgID, body string) *httptest.ResponseRecorder {
+		token, _, _, err := f.srv.userTokenService.GenerateTokenPair(
+			f.alice.ID, f.alice.Email, f.alice.DisplayName, f.alice.Role, ClientTypeWeb,
+		)
+		require.NoError(t, err)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/decision-prompts/"+msgID+"/dismiss", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rr, r)
+		return rr
+	}
+
+	// Withdraw cases.
+	{
+		f := newDecisionsFixture(t)
+		f.sendPromptToBob(t, oneDecision, false)
+		norm := newGoldenNormalizer(f, "")
+
+		rrBad := rawWithdraw(f, `{bad`)
+		require.Equal(t, http.StatusBadRequest, rrBad.Code)
+		captures["withdraw_400_invalid_json"] = goldenCapture{
+			Status: rrBad.Code,
+			Body:   norm.decodeBody(t, rrBad.Body.Bytes()),
+		}
+
+		oversize := `{"keys":["D234"],"reason":"` + strings.Repeat("a", 70*1024) + `"}`
+		rrOver := rawWithdraw(f, oversize)
+		require.Equal(t, http.StatusBadRequest, rrOver.Code)
+		captures["withdraw_400_oversize_body"] = goldenCapture{
+			Status: rrOver.Code,
+			Body:   norm.decodeBody(t, rrOver.Body.Bytes()),
+		}
+
+		longReason := `{"keys":["D234"],"reason":"` + strings.Repeat("r", 501) + `"}`
+		rrLong := rawWithdraw(f, longReason)
+		require.Equal(t, http.StatusBadRequest, rrLong.Code)
+		captures["withdraw_400_reason_too_long"] = goldenCapture{
+			Status: rrLong.Code,
+			Body:   norm.decodeBody(t, rrLong.Body.Bytes()),
+		}
+
+		// Trailing data after first JSON value is accepted by Decoder.
+		normTrail := newGoldenNormalizer(f, "")
+		rrTrail := rawWithdraw(f, `{"keys":["D234"]} trailing`)
+		require.Equal(t, http.StatusOK, rrTrail.Code, rrTrail.Body.String())
+		captures["withdraw_200_trailing_data"] = goldenCapture{
+			Status: rrTrail.Code,
+			Body:   normTrail.decodeBody(t, rrTrail.Body.Bytes()),
+		}
+	}
+
+	// Dismiss cases.
+	{
+		f := newDecisionsFixture(t)
+		f.srv.decisionClock = func() time.Time { return time.Now().UTC().Add(10 * time.Minute) }
+		msg, res := f.topicPrompt(t, twoDecisions, false)
+		row0 := res.Decisions[0].RowID
+		norm := newGoldenNormalizer(f, "")
+
+		rrBad := rawDismiss(f, msg.ID, `{bad`)
+		require.Equal(t, http.StatusBadRequest, rrBad.Code)
+		captures["dismiss_400_invalid_json"] = goldenCapture{
+			Status: rrBad.Code,
+			Body:   norm.decodeBody(t, rrBad.Body.Bytes()),
+		}
+
+		oversize := `{"reason":"` + strings.Repeat("a", 70*1024) + `"}`
+		rrOver := rawDismiss(f, msg.ID, oversize)
+		require.Equal(t, http.StatusBadRequest, rrOver.Code)
+		captures["dismiss_400_oversize_body"] = goldenCapture{
+			Status: rrOver.Code,
+			Body:   norm.decodeBody(t, rrOver.Body.Bytes()),
+		}
+
+		rrType := rawDismiss(f, msg.ID, `{"reason":123}`)
+		require.Equal(t, http.StatusBadRequest, rrType.Code)
+		captures["dismiss_400_wrong_field_type"] = goldenCapture{
+			Status: rrType.Code,
+			Body:   norm.decodeBody(t, rrType.Body.Bytes()),
+		}
+
+		ids := make([]string, 11)
+		for i := range ids {
+			ids[i] = fmt.Sprintf(`"00000000-0000-0000-0000-%012d"`, i+1)
+		}
+		rrTooMany := rawDismiss(f, msg.ID, `{"decisionIds":[`+strings.Join(ids, ",")+`]}`)
+		require.Equal(t, http.StatusBadRequest, rrTooMany.Code)
+		captures["dismiss_400_too_many_ids"] = goldenCapture{
+			Status: rrTooMany.Code,
+			Body:   norm.decodeBody(t, rrTooMany.Body.Bytes()),
+		}
+
+		rrSurf := rawDismiss(f, msg.ID, `{"surface":"bogus"}`)
+		require.Equal(t, http.StatusBadRequest, rrSurf.Code)
+		captures["dismiss_400_bad_surface"] = goldenCapture{
+			Status: rrSurf.Code,
+			Body:   norm.decodeBody(t, rrSurf.Body.Bytes()),
+		}
+
+		rrLong := rawDismiss(f, msg.ID, `{"reason":"`+strings.Repeat("x", 501)+`"}`)
+		require.Equal(t, http.StatusBadRequest, rrLong.Code)
+		captures["dismiss_400_reason_too_long"] = goldenCapture{
+			Status: rrLong.Code,
+			Body:   norm.decodeBody(t, rrLong.Body.Bytes()),
+		}
+
+		// Mis-cased keys: must dismiss ONLY row0 (not the whole card) and replay under IdempotencyKey.
+		misCasedBody := `{"DecisionIds":["` + row0 + `"],"IdempotencyKey":"k-case-1"}`
+		normCase1 := newGoldenNormalizer(f, "")
+		rrCase1 := rawDismiss(f, msg.ID, misCasedBody)
+		require.Equal(t, http.StatusOK, rrCase1.Code, rrCase1.Body.String())
+		captures["dismiss_200_miscased_subset"] = goldenCapture{
+			Status: rrCase1.Code,
+			Body:   normCase1.decodeBody(t, rrCase1.Body.Bytes()),
+		}
+
+		normCase2 := newGoldenNormalizer(f, "")
+		rrCase2 := rawDismiss(f, msg.ID, misCasedBody)
+		require.Equal(t, http.StatusOK, rrCase2.Code, rrCase2.Body.String())
+		captures["dismiss_200_miscased_replay"] = goldenCapture{
+			Status: rrCase2.Code,
+			Body:   normCase2.decodeBody(t, rrCase2.Body.Bytes()),
+		}
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	require.NoError(t, enc.Encode(captures))
+	gotBytes := buf.Bytes()
+
+	if os.Getenv("UPDATE_DECISIONS_GOLDEN") == "1" {
+		require.NoError(t, os.MkdirAll(filepath.Dir(decisionsRequestValidationGoldenPath), 0o755))
+		require.NoError(t, os.WriteFile(decisionsRequestValidationGoldenPath, gotBytes, 0o644))
+		return
+	}
+
+	wantBytes, err := os.ReadFile(decisionsRequestValidationGoldenPath)
+	require.NoError(t, err, "missing golden file %s; run with UPDATE_DECISIONS_GOLDEN=1 to generate", decisionsRequestValidationGoldenPath)
+	require.Equal(t, string(wantBytes), string(gotBytes), "decision request validation golden mismatch")
 }

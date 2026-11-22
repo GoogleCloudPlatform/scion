@@ -993,25 +993,32 @@ func (s *Server) handleAgentDecisionWithdraw(w http.ResponseWriter, r *http.Requ
 	ctx := r.Context()
 	agentID := agentIdent.ID()
 
-	req, ferr := msgaction.ParseWithdrawRequest(r.Body, msgaction.WithdrawParseOptions{
+	r.Body = http.MaxBytesReader(w, r.Body, msgaction.MaxRequestBodyBytes)
+	var req WithdrawDecisionsRequest
+	if err := readJSON(r, &req); err != nil {
+		ValidationError(w, "invalid JSON body: "+err.Error(), nil)
+		return
+	}
+
+	parsed := &msgaction.WithdrawRequest{
+		Keys:     req.Keys,
+		WholeSet: req.WholeSet,
+		Reason:   req.Reason,
+	}
+	if ferr := msgaction.ValidateWithdrawRequest(parsed, msgaction.WithdrawParseOptions{
 		MaxKeys:      messages.MaxDecisionsPerMessage,
 		NormalizeKey: messages.DecisionKeyNorm,
 		KeyLabel:     "decision key",
-	})
-	if ferr != nil {
-		if ferr.InvalidJSON {
-			ValidationError(w, ferr.Message, nil)
-			return
-		}
+	}); ferr != nil {
 		ValidationError(w, ferr.Message, map[string]interface{}{"field": ferr.Field})
 		return
 	}
 
 	res, err := s.store.WithdrawDecisions(ctx, &store.WithdrawDecisionsInput{
 		AskerAgentID: agentID,
-		Keys:         req.Keys,
-		WholeSet:     req.WholeSet,
-		Reason:       req.Reason,
+		Keys:         parsed.Keys,
+		WholeSet:     parsed.WholeSet,
+		Reason:       parsed.Reason,
 	})
 	if err != nil {
 		s.writeWithdrawDecisionsError(w, ctx, err)

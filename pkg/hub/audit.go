@@ -376,6 +376,9 @@ type LogAuditLogger struct {
 	// brokerDropWarn rate-limits the operational warning for a converted
 	// event that could not be built; nil uses defaultBrokerAuditDropWarner.
 	brokerDropWarn *auditDropWarner
+	// messageActionDetails holds per-kind Details key allow-lists for
+	// LogMessageActionEvent (C3).
+	messageActionDetails messageActionDetailAllowLists
 }
 
 // NewLogAuditLogger creates a new log-based audit logger.

@@ -91,6 +91,11 @@ func (s *Server) actionResponseAutoWakeItem(messageID, agentSlug, text string, s
 // (queuedOrHeld, err), where queuedOrHeld is true when delivery is held for
 // the next session or queued behind a background auto-wake.
 func (s *Server) dispatchActionResponse(ctx context.Context, r actionResponse) (bool, error) {
+	// Delivery to the asker is optional (C2): with no asker, message, or
+	// structured payload, dispatch is a no-op and never panics.
+	if s == nil || r.Asker == nil || r.Message == nil || r.Structured == nil {
+		return false, nil
+	}
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return false, nil

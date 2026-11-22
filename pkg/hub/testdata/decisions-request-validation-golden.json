@@ -1,0 +1,209 @@
+{
+  "dismiss_200_miscased_replay": {
+    "status": 200,
+    "body": {
+      "alreadyDismissed": [],
+      "delivered": true,
+      "deliveryStatus": "delivered",
+      "dismissed": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "defaultChoiceId": "1",
+          "dismissed": {
+            "at": "<TIMESTAMP>",
+            "byName": "Alice",
+            "byUserId": "<USER_ALICE_ID>",
+            "responseMessageId": "<UUID_1>",
+            "surface": "native"
+          },
+          "key": "D234",
+          "messageId": "<UUID_2>",
+          "question": "Ship the **feature** now?",
+          "ref": "<AGENT_ID>/D234",
+          "rowId": "<UUID_3>",
+          "status": "dismissed",
+          "version": 1
+        }
+      ],
+      "responseMessageId": "<UUID_1>"
+    }
+  },
+  "dismiss_200_miscased_subset": {
+    "status": 200,
+    "body": {
+      "alreadyDismissed": [],
+      "delivered": true,
+      "deliveryStatus": "delivered",
+      "dismissed": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "defaultChoiceId": "1",
+          "dismissed": {
+            "at": "<TIMESTAMP>",
+            "byName": "Alice",
+            "byUserId": "<USER_ALICE_ID>",
+            "responseMessageId": "<UUID_1>",
+            "surface": "native"
+          },
+          "key": "D234",
+          "messageId": "<UUID_2>",
+          "question": "Ship the **feature** now?",
+          "ref": "<AGENT_ID>/D234",
+          "rowId": "<UUID_3>",
+          "status": "dismissed",
+          "version": 1
+        }
+      ],
+      "responseMessageId": "<UUID_1>"
+    }
+  },
+  "dismiss_400_bad_surface": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "surface"
+        },
+        "message": "surface \"bogus\" is not supported; expected \"native\" or \"decisions_page\""
+      }
+    }
+  },
+  "dismiss_400_invalid_json": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "invalid_request",
+        "message": "Invalid request body: invalid character 'b' looking for beginning of object key string"
+      }
+    }
+  },
+  "dismiss_400_oversize_body": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "invalid_request",
+        "message": "Invalid request body: request body exceeds 65536 bytes"
+      }
+    }
+  },
+  "dismiss_400_reason_too_long": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "reason"
+        },
+        "message": "reason is at most 500 characters"
+      }
+    }
+  },
+  "dismiss_400_too_many_ids": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "decisionIds"
+        },
+        "message": "decisionIds accepts at most 10 ids"
+      }
+    }
+  },
+  "dismiss_400_wrong_field_type": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "invalid_request",
+        "message": "Invalid request body: json: cannot unmarshal number into Go struct field DismissDecisionPromptRequest.reason of type string"
+      }
+    }
+  },
+  "withdraw_200_trailing_data": {
+    "status": 200,
+    "body": {
+      "alreadyWithdrawn": [],
+      "withdrawn": [
+        {
+          "askerAgentId": "<AGENT_ID>",
+          "askerAgentName": "sched-agent",
+          "choices": [
+            {
+              "id": "1",
+              "label": "yes"
+            },
+            {
+              "id": "2",
+              "label": "no"
+            }
+          ],
+          "defaultChoiceId": "1",
+          "key": "D234",
+          "messageId": "<UUID_1>",
+          "question": "Ship the **feature** now?",
+          "ref": "<AGENT_ID>/D234",
+          "rowId": "<UUID_2>",
+          "status": "withdrawn",
+          "version": 1,
+          "withdrawn": {
+            "at": "<TIMESTAMP>",
+            "byName": "sched-agent"
+          }
+        }
+      ]
+    }
+  },
+  "withdraw_400_invalid_json": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "message": "invalid JSON body: invalid character 'b' looking for beginning of object key string"
+      }
+    }
+  },
+  "withdraw_400_oversize_body": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "message": "invalid JSON body: http: request body too large"
+      }
+    }
+  },
+  "withdraw_400_reason_too_long": {
+    "status": 400,
+    "body": {
+      "error": {
+        "code": "validation_error",
+        "details": {
+          "field": "reason"
+        },
+        "message": "reason is at most 500 characters"
+      }
+    }
+  }
+}

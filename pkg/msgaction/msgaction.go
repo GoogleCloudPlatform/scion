@@ -57,6 +57,30 @@ func (c Class) Answerable() bool {
 	return c == ClassPending
 }
 
+// ClaimRecovery configures how stale claims are handled by a sweeper (C1).
+// Kinds whose resolve operation is idempotent (e.g. secret requests) use
+// ClaimRecoveryToPending; kinds whose resolve may have already triggered a
+// non-idempotent side effect (e.g. exec approval) use ClaimRecoveryNone so a
+// stale claim is never re-armed.
+type ClaimRecovery string
+
+const (
+	ClaimRecoveryNone      ClaimRecovery = "none"
+	ClaimRecoveryToPending ClaimRecovery = "to_pending"
+)
+
+// Core kind-neutral audit event types (C3). Kinds may register additional
+// event types (such as "fulfilled" or "claim_recovered") via KindSpec.EventTypes.
+const (
+	EventRequested = "requested"
+	EventReplaced  = "replaced"
+	EventWithdrawn = "withdrawn"
+	EventResolved  = "resolved"
+	EventDismissed = "dismissed"
+	EventExpired   = "expired"
+	EventRefused   = "refused"
+)
+
 // Conflict codes returned on HTTP 409 for non-answerable states.
 const (
 	ConflictReplaced        = "replaced"
@@ -89,16 +113,22 @@ var (
 
 // KindSpec configures the kind-specific parameters of a message-action kind.
 type KindSpec struct {
-	// Name is the event topic segment and audit kind (e.g. "decision", "secret_request").
+	// Name is the event topic segment and audit kind (e.g. "decision", "secret_request", "exec_action").
 	Name string
 	// ResolvedStatus is the kind's stored status name for ClassResolved
-	// (e.g. "decided", "fulfilled"). Defaults to "resolved" when empty.
+	// (e.g. "decided", "fulfilled", "approved"). Defaults to "resolved" when empty.
 	ResolvedStatus string
 	// ResolvedConflictCode overrides the 409 conflict code for ClassResolved
 	// (e.g. "already_answered" for decisions). Defaults to ConflictAlreadyResolved.
 	ResolvedConflictCode string
 	// UsesClaim reports whether the kind uses the transient ClassClaimed state.
 	UsesClaim bool
+	// ClaimRecovery controls whether stale claims may return to pending (C1).
+	// Only ClaimRecoveryToPending allows automatic recovery; ClaimRecoveryNone
+	// (or zero value) never re-arms a stale claim.
+	ClaimRecovery ClaimRecovery
+	// ClaimTTL is the staleness threshold used only when ClaimRecovery == ClaimRecoveryToPending.
+	ClaimTTL time.Duration
 	// Expires is the default TTL of a pending action (0 means never expires).
 	Expires time.Duration
 	// DismissMinAge is the minimum age before a user may dismiss an action (0 means none).
@@ -107,17 +137,43 @@ type KindSpec struct {
 	// terminal automatically allocates the next version without update=true.
 	// Decisions set this to false; secret requests set this to true.
 	RepostTerminalOK bool
+	// ReplaceResolvedOnUpdate reports whether replacing a resolved prior version
+	// transitions its status to "replaced" (true for decisions) rather than
+	// preserving its resolved status while linking replaced_by_id (false for
+	// secret requests and exec actions).
+	ReplaceResolvedOnUpdate bool
+	// EventTypes lists kind-registered audit event types in addition to the core
+	// set (C3), e.g. "fulfilled", "claim_recovered".
+	EventTypes []string
+	// ConflictCodes lists kind-registered 4xx conflict/error codes in addition to
+	// the core set (C3), e.g. "secret_request_key_pending".
+	ConflictCodes []string
 }
 
 // DecisionKindSpec is the KindSpec for decision prompts.
 var DecisionKindSpec = KindSpec{
-	Name:                 "decision",
-	ResolvedStatus:       "decided",
-	ResolvedConflictCode: "already_answered",
-	UsesClaim:            false,
-	Expires:              0,
-	DismissMinAge:        5 * time.Minute,
-	RepostTerminalOK:     false,
+	Name:                    "decision",
+	ResolvedStatus:          "decided",
+	ResolvedConflictCode:    "already_answered",
+	UsesClaim:               false,
+	ClaimRecovery:           ClaimRecoveryNone,
+	Expires:                 0,
+	DismissMinAge:           5 * time.Minute,
+	RepostTerminalOK:        false,
+	ReplaceResolvedOnUpdate: true,
+}
+
+// Anchor optionally links a message-action row to a chat message and block.
+// Identity is (asker_agent_id, key_norm, version), not the message, so a row
+// needs no anchor (C4).
+type Anchor struct {
+	MessageID  string
+	BlockIndex int
+}
+
+// IsZero reports whether a has no message anchor.
+func (a Anchor) IsZero() bool {
+	return a.MessageID == ""
 }
 
 // Classify maps a kind-specific stored status string to its lifecycle Class.
@@ -164,41 +220,104 @@ func (s KindSpec) Answerable(status string) bool {
 	return ok && cls.Answerable()
 }
 
-// ConflictCode maps a stored status string to its HTTP 409 conflict code,
-// or "" when status is pending or unrecognized.
+// ShouldRecoverClaim reports whether a row claimed at claimedAt should be
+// returned to pending at now (C1). It is false whenever UsesClaim is false,
+// ClaimRecovery != ClaimRecoveryToPending (including ClaimRecoveryNone),
+// ClaimTTL <= 0, or claimedAt is zero.
+func (s KindSpec) ShouldRecoverClaim(claimedAt, now time.Time) bool {
+	if !s.UsesClaim || s.ClaimRecovery != ClaimRecoveryToPending || s.ClaimTTL <= 0 || claimedAt.IsZero() {
+		return false
+	}
+	return !now.Before(claimedAt.Add(s.ClaimTTL))
+}
+
+// AcceptsEventType reports whether evType is valid for s: either one of the
+// core audit event types, s.ResolvedStatus, or a kind-registered entry in
+// s.EventTypes (C3).
+func (s KindSpec) AcceptsEventType(evType string) bool {
+	if evType == "" {
+		return false
+	}
+	switch evType {
+	case EventRequested, EventReplaced, EventWithdrawn, EventResolved, EventDismissed, EventExpired, EventRefused:
+		return true
+	}
+	if s.ResolvedStatus != "" && evType == s.ResolvedStatus {
+		return true
+	}
+	for _, extra := range s.EventTypes {
+		if extra != "" && evType == extra {
+			return true
+		}
+	}
+	return false
+}
+
+// AcceptsConflictCode reports whether code is valid for s: either one of the
+// core conflict codes, s.ResolvedConflictCode, or a kind-registered entry in
+// s.ConflictCodes (C3).
+func (s KindSpec) AcceptsConflictCode(code string) bool {
+	if code == "" {
+		return false
+	}
+	switch code {
+	case ConflictReplaced, ConflictWithdrawn, ConflictDismissed, ConflictExpired, ConflictAlreadyResolved, ConflictSubmitting:
+		return true
+	}
+	if s.ResolvedConflictCode != "" && code == s.ResolvedConflictCode {
+		return true
+	}
+	for _, extra := range s.ConflictCodes {
+		if extra != "" && code == extra {
+			return true
+		}
+	}
+	return false
+}
+
+// ConflictCode maps a stored status string (or a kind-registered conflict code)
+// to its HTTP 409 conflict code, or "" when status is pending or unrecognized.
 func ConflictCode(spec KindSpec, status string) string {
 	cls, ok := spec.Classify(status)
-	if !ok {
-		return ""
-	}
-	switch cls {
-	case ClassReplaced:
-		return ConflictReplaced
-	case ClassWithdrawn:
-		return ConflictWithdrawn
-	case ClassDismissed:
-		return ConflictDismissed
-	case ClassExpired:
-		return ConflictExpired
-	case ClassClaimed:
-		return ConflictSubmitting
-	case ClassResolved:
-		if spec.ResolvedConflictCode != "" {
-			return spec.ResolvedConflictCode
+	if ok {
+		switch cls {
+		case ClassReplaced:
+			return ConflictReplaced
+		case ClassWithdrawn:
+			return ConflictWithdrawn
+		case ClassDismissed:
+			return ConflictDismissed
+		case ClassExpired:
+			return ConflictExpired
+		case ClassClaimed:
+			return ConflictSubmitting
+		case ClassResolved:
+			if spec.ResolvedConflictCode != "" {
+				return spec.ResolvedConflictCode
+			}
+			return ConflictAlreadyResolved
+		default:
+			return ""
 		}
-		return ConflictAlreadyResolved
-	default:
-		return ""
 	}
+	for _, extra := range spec.ConflictCodes {
+		if extra != "" && status == extra {
+			return status
+		}
+	}
+	return ""
 }
 
 // Head describes the latest stored version of one (asker_agent_id, key).
+// ResolvedAt is populated when the latest version resolved, letting a kind
+// surface the prior outcome on repost.
 type Head struct {
 	RowID      string
 	Key        string
 	Version    int
 	Status     string
 	ReplacedBy string
+	ResolvedAt *time.Time
 }
 
 // RepostPlan describes how a new prompt version for a key should be inserted
@@ -210,8 +329,9 @@ type RepostPlan struct {
 	// MarkReplaced is true when the predecessor row should transition its status
 	// to "replaced" (alongside setting replaced_at and replaced_by_id). When
 	// false and ReplacesRowID is non-empty, the predecessor keeps its existing
-	// terminal status (e.g. withdrawn, dismissed, expired) while recording
-	// replaced_at and replaced_by_id.
+	// terminal status (e.g. withdrawn, dismissed, expired, or resolved when
+	// ReplaceResolvedOnUpdate is false) while recording replaced_at and
+	// replaced_by_id.
 	MarkReplaced bool
 }
 
@@ -243,10 +363,7 @@ func PlanRepost(spec KindSpec, head *Head, update bool) (RepostPlan, error) {
 		case ClassPending, ClassClaimed:
 			plan.MarkReplaced = true
 		case ClassResolved:
-			// Kinds that require --update to replace a resolved version (like
-			// decisions) transition the prior row's status to replaced; kinds
-			// with RepostTerminalOK keep the terminal status intact.
-			plan.MarkReplaced = !spec.RepostTerminalOK
+			plan.MarkReplaced = spec.ReplaceResolvedOnUpdate
 		default:
 			plan.MarkReplaced = false
 		}
@@ -279,28 +396,26 @@ type WithdrawRequest struct {
 	Reason   string   `json:"reason,omitempty"`
 }
 
-// WithdrawParseOptions configures ParseWithdrawRequest.
+// WithdrawParseOptions configures ParseWithdrawRequest and ValidateWithdrawRequest.
 type WithdrawParseOptions struct {
 	MaxKeys      int
 	NormalizeKey func(string) string
 	KeyLabel     string // used in duplicate error message; defaults to "key"
 }
 
-// ParseWithdrawRequest decodes and validates a withdraw JSON body.
-func ParseWithdrawRequest(r io.Reader, opts WithdrawParseOptions) (*WithdrawRequest, *FieldError) {
-	body, ferr := readBoundedBody(r, MaxRequestBodyBytes, false)
-	if ferr != nil {
-		return nil, ferr
-	}
-	var req WithdrawRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, &FieldError{Message: "invalid JSON body: " + err.Error(), InvalidJSON: true}
+// ValidateWithdrawRequest normalizes and validates an already-decoded
+// WithdrawRequest in place. Callers that decode into their own request struct
+// (e.g. via http.MaxBytesReader + json.NewDecoder) pass the decoded fields
+// here so wire decoding semantics remain intact.
+func ValidateWithdrawRequest(req *WithdrawRequest, opts WithdrawParseOptions) *FieldError {
+	if req == nil {
+		return &FieldError{Field: "keys", Message: "keys must contain at least 1 item"}
 	}
 	if opts.MaxKeys <= 0 {
 		opts.MaxKeys = 10
 	}
 	if len(req.Keys) < 1 || len(req.Keys) > opts.MaxKeys {
-		return nil, &FieldError{
+		return &FieldError{
 			Field:   "keys",
 			Message: fmt.Sprintf("keys must contain 1 to %d items", opts.MaxKeys),
 		}
@@ -317,14 +432,14 @@ func ParseWithdrawRequest(r io.Reader, opts WithdrawParseOptions) (*WithdrawRequ
 	for i := range req.Keys {
 		req.Keys[i] = strings.TrimSpace(req.Keys[i])
 		if req.Keys[i] == "" {
-			return nil, &FieldError{
+			return &FieldError{
 				Field:   "keys",
 				Message: "each key must be non-empty",
 			}
 		}
 		norm := normFn(req.Keys[i])
 		if seen[norm] {
-			return nil, &FieldError{
+			return &FieldError{
 				Field:   "keys",
 				Message: fmt.Sprintf("duplicate %s %q in request", keyLabel, req.Keys[i]),
 			}
@@ -333,12 +448,29 @@ func ParseWithdrawRequest(r io.Reader, opts WithdrawParseOptions) (*WithdrawRequ
 	}
 	reason, err := NormalizeReason(req.Reason)
 	if err != nil {
-		return nil, &FieldError{
+		return &FieldError{
 			Field:   "reason",
 			Message: fmt.Sprintf("reason is at most %d characters", MaxReasonRunes),
 		}
 	}
 	req.Reason = reason
+	return nil
+}
+
+// ParseWithdrawRequest decodes a WithdrawRequest using json.NewDecoder
+// (first-value struct decoding, case-insensitive field matching) and validates
+// it via ValidateWithdrawRequest.
+func ParseWithdrawRequest(r io.Reader, opts WithdrawParseOptions) (*WithdrawRequest, *FieldError) {
+	if r == nil {
+		return nil, &FieldError{Message: "invalid JSON body: EOF", InvalidJSON: true}
+	}
+	var req WithdrawRequest
+	if err := json.NewDecoder(r).Decode(&req); err != nil {
+		return nil, &FieldError{Message: "invalid JSON body: " + err.Error(), InvalidJSON: true}
+	}
+	if ferr := ValidateWithdrawRequest(&req, opts); ferr != nil {
+		return nil, ferr
+	}
 	return &req, nil
 }
 
@@ -350,10 +482,10 @@ type DismissRequest struct {
 	IdempotencyKey string   `json:"idempotencyKey,omitempty"`
 }
 
-// DismissParseOptions configures ParseDismissRequest.
+// DismissParseOptions configures ParseDismissRequest and ValidateDismissRequest.
 type DismissParseOptions struct {
-	// RowIDsField names the JSON field for row IDs (defaults to "rowIds";
-	// decisions use "decisionIds").
+	// RowIDsField names the JSON field for row IDs in error details (defaults
+	// to "rowIds"; decisions pass "decisionIds").
 	RowIDsField string
 	// MaxRowIDs caps len(RowIDs) when > 0.
 	MaxRowIDs int
@@ -363,57 +495,27 @@ type DismissParseOptions struct {
 	SurfaceError func(raw string) string
 }
 
-// ParseDismissRequest decodes and validates an optional-body dismiss JSON request.
-func ParseDismissRequest(r io.Reader, opts DismissParseOptions) (*DismissRequest, *FieldError) {
+// ValidateDismissRequest normalizes and validates an already-decoded
+// DismissRequest in place. Callers with kind-specific JSON field names (such
+// as decisions' "decisionIds") decode into their own struct and pass the
+// fields here so Go's case-insensitive struct decoding and type-error messages
+// are preserved verbatim.
+func ValidateDismissRequest(req *DismissRequest, opts DismissParseOptions) *FieldError {
+	if req == nil {
+		return nil
+	}
 	rowIDsField := opts.RowIDsField
 	if rowIDsField == "" {
 		rowIDsField = "rowIds"
 	}
-	body, ferr := readBoundedBody(r, MaxRequestBodyBytes, true)
-	if ferr != nil {
-		return nil, ferr
-	}
-	var req DismissRequest
-	if len(body) > 0 {
-		if rowIDsField == "rowIds" {
-			if err := json.Unmarshal(body, &req); err != nil {
-				return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-			}
-		} else {
-			var raw map[string]json.RawMessage
-			if err := json.Unmarshal(body, &raw); err != nil {
-				return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-			}
-			if v, ok := raw[rowIDsField]; ok {
-				if err := json.Unmarshal(v, &req.RowIDs); err != nil {
-					return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-				}
-			}
-			if v, ok := raw["reason"]; ok {
-				if err := json.Unmarshal(v, &req.Reason); err != nil {
-					return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-				}
-			}
-			if v, ok := raw["surface"]; ok {
-				if err := json.Unmarshal(v, &req.Surface); err != nil {
-					return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-				}
-			}
-			if v, ok := raw["idempotencyKey"]; ok {
-				if err := json.Unmarshal(v, &req.IdempotencyKey); err != nil {
-					return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-				}
-			}
-		}
-	}
 	if len(req.IdempotencyKey) > MaxIdempotencyKeyLen {
-		return nil, &FieldError{
+		return &FieldError{
 			Field:   "idempotencyKey",
 			Message: fmt.Sprintf("idempotencyKey is at most %d bytes", MaxIdempotencyKeyLen),
 		}
 	}
 	if opts.MaxRowIDs > 0 && len(req.RowIDs) > opts.MaxRowIDs {
-		return nil, &FieldError{
+		return &FieldError{
 			Field:   rowIDsField,
 			Message: fmt.Sprintf("%s accepts at most %d ids", rowIDsField, opts.MaxRowIDs),
 		}
@@ -425,44 +527,45 @@ func ParseDismissRequest(r io.Reader, opts DismissParseOptions) (*DismissRequest
 			if opts.SurfaceError != nil {
 				msg = opts.SurfaceError(req.Surface)
 			}
-			return nil, &FieldError{Field: "surface", Message: msg}
+			return &FieldError{Field: "surface", Message: msg}
 		}
 		req.Surface = surface
 	}
 	reason, err := NormalizeReason(req.Reason)
 	if err != nil {
-		return nil, &FieldError{
+		return &FieldError{
 			Field:   "reason",
 			Message: fmt.Sprintf("reason is at most %d characters", MaxReasonRunes),
 		}
 	}
 	req.Reason = reason
-	return &req, nil
+	return nil
 }
 
-func readBoundedBody(r io.Reader, limit int64, allowEmpty bool) ([]byte, *FieldError) {
-	if r == nil {
-		if allowEmpty {
-			return nil, nil
+// ParseDismissRequest decodes an optional-body DismissRequest using standard
+// Go struct decoding (case-insensitive field names) and validates it via
+// ValidateDismissRequest.
+func ParseDismissRequest(r io.Reader, opts DismissParseOptions) (*DismissRequest, *FieldError) {
+	var req DismissRequest
+	if r != nil {
+		body, err := io.ReadAll(io.LimitReader(r, MaxRequestBodyBytes+1))
+		if err != nil {
+			return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
 		}
-		return nil, &FieldError{Message: "invalid JSON body: empty body", InvalidJSON: true}
-	}
-	body, err := io.ReadAll(io.LimitReader(r, limit+1))
-	if err != nil {
-		return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
-	}
-	if int64(len(body)) > limit {
-		return nil, &FieldError{
-			Message:     fmt.Sprintf("Invalid request body: request body exceeds %d bytes", limit),
-			InvalidJSON: true,
+		if int64(len(body)) > MaxRequestBodyBytes {
+			return nil, &FieldError{
+				Message:     fmt.Sprintf("Invalid request body: request body exceeds %d bytes", MaxRequestBodyBytes),
+				InvalidJSON: true,
+			}
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				return nil, &FieldError{Message: "Invalid request body: " + err.Error(), InvalidJSON: true}
+			}
 		}
 	}
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 {
-		if allowEmpty {
-			return nil, nil
-		}
-		return nil, &FieldError{Message: "invalid JSON body: EOF", InvalidJSON: true}
+	if ferr := ValidateDismissRequest(&req, opts); ferr != nil {
+		return nil, ferr
 	}
-	return trimmed, nil
+	return &req, nil
 }

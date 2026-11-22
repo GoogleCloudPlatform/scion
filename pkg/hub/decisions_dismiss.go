@@ -177,6 +177,25 @@ func (s *Server) dismissCaller(w http.ResponseWriter, r *http.Request) (UserIden
 	return user, token, true
 }
 
+const maxDismissRequestBodyBytes = msgaction.MaxRequestBodyBytes
+
+func readOptionalDismissJSON(r *http.Request, v *DismissDecisionPromptRequest) error {
+	if r.Body == nil || r.ContentLength == 0 {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxDismissRequestBodyBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) > maxDismissRequestBodyBytes {
+		return fmt.Errorf("request body exceeds %d bytes", maxDismissRequestBodyBytes)
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return nil
+	}
+	return json.Unmarshal(body, v)
+}
+
 // handleDecisionPromptDismiss serves POST /api/v1/decision-prompts/{messageId}/dismiss.
 func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Request, msgID string) {
 	ctx := r.Context()
@@ -185,23 +204,25 @@ func (s *Server) handleDecisionPromptDismiss(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var bodyReader io.Reader
-	if r.Body != nil && r.ContentLength != 0 {
-		bodyReader = r.Body
+	var rawReq DismissDecisionPromptRequest
+	if err := readOptionalDismissJSON(r, &rawReq); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return
 	}
-	req, ferr := msgaction.ParseDismissRequest(bodyReader, msgaction.DismissParseOptions{
+	req := &msgaction.DismissRequest{
+		RowIDs:         rawReq.DecisionIDs,
+		Reason:         rawReq.Reason,
+		Surface:        rawReq.Surface,
+		IdempotencyKey: rawReq.IdempotencyKey,
+	}
+	if ferr := msgaction.ValidateDismissRequest(req, msgaction.DismissParseOptions{
 		RowIDsField:      "decisionIds",
 		MaxRowIDs:        messages.MaxDecisionsPerMessage,
 		NormalizeSurface: normalizeAnswerSurface,
 		SurfaceError: func(raw string) string {
 			return fmt.Sprintf("surface %q is not supported; expected %q or %q", raw, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage)
 		},
-	})
-	if ferr != nil {
-		if ferr.InvalidJSON {
-			BadRequest(w, ferr.Message)
-			return
-		}
+	}); ferr != nil {
 		ValidationError(w, ferr.Message, map[string]interface{}{"field": ferr.Field})
 		return
 	}

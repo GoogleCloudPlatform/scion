@@ -1,3 +1,5 @@
+//go:build !no_sqlite
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +20,14 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -98,13 +107,116 @@ func TestInsertNextActionVersion_InTxPassthrough(t *testing.T) {
 	}
 }
 
+// Verifies bounded retries on errMessageActionRace, mapping exhausted retries
+// to store.ErrTransient, and no retries on non-race errors.
 func TestInsertNextActionVersion_RetryBounds(t *testing.T) {
-	// Sanity check that maxMessageActionRaceRetries matches the decision retry budget
-	// and that store.ErrTransient is returned when retries are exhausted.
-	if maxMessageActionRaceRetries < 1 {
-		t.Fatalf("maxMessageActionRaceRetries must be >= 1, got %d", maxMessageActionRaceRetries)
-	}
-	if !errors.Is(store.ErrTransient, store.ErrTransient) {
-		t.Fatal("unreachable")
-	}
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+
+	// 1. Exhausted race retries: called maxMessageActionRaceRetries+1 times,
+	// returning store.ErrTransient.
+	calls := 0
+	_, err := insertNextActionVersion(ctx, cs, func(_ *CompositeStore) (int, error) {
+		calls++
+		return 0, errMessageActionRace
+	})
+	assert.Equal(t, maxMessageActionRaceRetries+1, calls, "must attempt 1 initial + maxMessageActionRaceRetries retries")
+	assert.True(t, errors.Is(err, store.ErrTransient), "exhausted race retries must return store.ErrTransient, got %v", err)
+
+	// 2. Transient race that resolves on the 3rd attempt succeeds.
+	calls = 0
+	got, err := insertNextActionVersion(ctx, cs, func(_ *CompositeStore) (int, error) {
+		calls++
+		if calls < 3 {
+			return 0, errMessageActionRace
+		}
+		return 99, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 3, calls)
+	assert.Equal(t, 99, got)
+
+	// 3. Non-race error is never retried.
+	calls = 0
+	_, err = insertNextActionVersion(ctx, cs, func(_ *CompositeStore) (int, error) {
+		calls++
+		return 0, store.ErrInvalidInput
+	})
+	assert.Equal(t, 1, calls, "non-race error must not be retried")
+	assert.True(t, errors.Is(err, store.ErrInvalidInput), "expected store.ErrInvalidInput, got %v", err)
+}
+
+// Seam test C4: insertNextActionVersion and casActionRows compose inside one
+// caller-supplied transaction so a create-and-resolve flow (e.g. an inline
+// approval that mints v1 and transitions it to resolved atomically) commits as
+// one unit.
+func TestMessageActionHelpers_CreateAndResolveInOneTx(t *testing.T) {
+	ctx := context.Background()
+	f := newDecisionFixture(t)
+
+	var createdRowID string
+	err := f.cs.WithTx(ctx, func(tx store.Store) error {
+		txStore := tx.(*CompositeStore)
+
+		// 1. Insert v1 via insertNextActionVersion (inside caller's tx).
+		res, err := insertNextActionVersion(ctx, txStore, func(inner *CompositeStore) (*store.DecisionPromptResult, error) {
+			return inner.CreateDecisionPrompt(ctx, f.prompt("inline", false, yesNo("EXEC1", "Run tests?")))
+		})
+		if err != nil {
+			return err
+		}
+		createdRowID = res.Decisions[0].RowID
+		rowUID, err := uuid.Parse(createdRowID)
+		if err != nil {
+			return err
+		}
+
+		// 2. Transition pending -> decided in the same tx via casActionRows.
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		ok, current, err := casActionRows[*ent.Decision](ctx, 1,
+			func(ctx context.Context) (int, error) {
+				return txStore.client.Decision.Update().
+					Where(decision.ID(rowUID), decision.StatusEQ(decision.StatusPending)).
+					SetStatus(decision.StatusDecided).
+					SetDecidedAt(now).
+					Save(ctx)
+			},
+			func(ctx context.Context) ([]*ent.Decision, error) {
+				return txStore.client.Decision.Query().Where(decision.ID(rowUID)).All(ctx)
+			},
+		)
+		if err != nil {
+			return err
+		}
+		require.True(t, ok, "CAS on freshly inserted row must succeed in same tx")
+		assert.Nil(t, current)
+
+		// 3. A second CAS expecting pending fails and reloads the current row
+		// showing StatusDecided inside the same tx.
+		ok2, current2, err := casActionRows[*ent.Decision](ctx, 1,
+			func(ctx context.Context) (int, error) {
+				return txStore.client.Decision.Update().
+					Where(decision.ID(rowUID), decision.StatusEQ(decision.StatusPending)).
+					SetStatus(decision.StatusWithdrawn).
+					Save(ctx)
+			},
+			func(ctx context.Context) ([]*ent.Decision, error) {
+				return txStore.client.Decision.Query().Where(decision.ID(rowUID)).All(ctx)
+			},
+		)
+		if err != nil {
+			return err
+		}
+		require.False(t, ok2)
+		require.Len(t, current2, 1)
+		assert.Equal(t, decision.StatusDecided, current2[0].Status)
+		return nil
+	})
+	require.NoError(t, err)
+
+	// Committed state reflects both the insert and the resolve atomically.
+	got, err := f.cs.GetDecision(ctx, createdRowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusDecided, got.Status)
+	assert.NotNil(t, got.DecidedAt)
 }

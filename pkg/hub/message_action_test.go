@@ -19,9 +19,12 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,18 +86,96 @@ func TestPublishActionUpdated_SubjectsAndPayloads(t *testing.T) {
 	assert.Empty(t, drainActionEvents(projSecCh))
 }
 
-func TestLogMessageActionEvent_StructuredAttrsAndLevel(t *testing.T) {
+// recordingActionDispatcher captures DispatchAgentMessage calls for C2 seam tests.
+type recordingActionDispatcher struct {
+	AgentDispatcher
+	mu   sync.Mutex
+	msgs []*messages.StructuredMessage
+}
+
+func (d *recordingActionDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, _ bool, sm *messages.StructuredMessage) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	cp := *sm
+	d.msgs = append(d.msgs, &cp)
+	return nil
+}
+
+// Seam test C2: dispatchActionResponse can be called more than once per row
+// (e.g. approved, then execution outcome), and delivery is optional (no asker
+// or nil Structured is a safe no-op without panicking).
+func TestDispatchActionResponse_RepeatableAndOptional(t *testing.T) {
+	ctx := context.Background()
+	disp := &recordingActionDispatcher{}
+	srv := &Server{
+		dispatcher: disp,
+		messageLog: slog.Default(),
+	}
+
+	// Optional delivery: nil Asker, nil Message, and nil Structured are safe no-ops.
+	held, err := srv.dispatchActionResponse(ctx, actionResponse{
+		Asker:      nil,
+		Message:    &store.Message{ID: "m-0"},
+		Text:       "approved",
+		Structured: &messages.StructuredMessage{Msg: "approved"},
+	})
+	require.NoError(t, err)
+	assert.False(t, held)
+	assert.Empty(t, disp.msgs)
+
+	held, err = srv.dispatchActionResponse(ctx, actionResponse{
+		Asker:      &store.Agent{ID: "a-1", Slug: "worker-1"},
+		Message:    &store.Message{ID: "m-0"},
+		Text:       "approved",
+		Structured: nil,
+	})
+	require.NoError(t, err)
+	assert.False(t, held)
+	assert.Empty(t, disp.msgs)
+
+	// Repeatable delivery: two responses for the same action row (e.g. approved,
+	// then completed) both dispatch cleanly.
+	asker := &store.Agent{ID: "a-1", Slug: "worker-1"}
+	for _, step := range []struct {
+		msgID string
+		text  string
+		stage string
+	}{
+		{"m-1", "[exec-response] approved", "approved"},
+		{"m-2", "[exec-response] completed exit=0", "completed"},
+	} {
+		held, err := srv.dispatchActionResponse(ctx, actionResponse{
+			Asker:      asker,
+			Message:    &store.Message{ID: step.msgID},
+			Text:       step.text,
+			Structured: &messages.StructuredMessage{Msg: step.text},
+			PopulateMeta: func(meta map[string]string) {
+				meta["exec_stage"] = step.stage
+			},
+			LogPrefix: "exec_action",
+			Label:     "exec-response",
+		})
+		require.NoError(t, err)
+		assert.False(t, held)
+	}
+	require.Len(t, disp.msgs, 2)
+	assert.Equal(t, "approved", disp.msgs[0].Metadata["exec_stage"])
+	assert.Equal(t, "completed", disp.msgs[1].Metadata["exec_stage"])
+}
+
+func TestLogMessageActionEvent_StructuredAttrsAndAllowList(t *testing.T) {
 	var buf bytes.Buffer
 	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	logger := &LogAuditLogger{
 		prefix: "[Audit]",
 		log:    slog.New(handler),
 	}
+	logger.RegisterMessageActionDetailKeys("secret_request", "secret_type", "secret_version")
 
 	ts := time.Date(2026, 11, 22, 3, 0, 0, 0, time.UTC)
 	require.NoError(t, logger.LogMessageActionEvent(context.Background(), &MessageActionEvent{
 		Kind:          "secret_request",
-		EventType:     MessageActionEventFulfilled,
+		EventType:     MessageActionEventResolved,
 		RowID:         "row-1",
 		MessageID:     "msg-1",
 		ProjectID:     "proj-1",
@@ -109,6 +190,7 @@ func TestLogMessageActionEvent_StructuredAttrsAndLevel(t *testing.T) {
 		Details: map[string]string{
 			"secret_type":    "environment",
 			"secret_version": "3",
+			"secret_value":   "MUST_BE_DROPPED",
 		},
 		Timestamp: ts,
 	}))
@@ -118,7 +200,7 @@ func TestLogMessageActionEvent_StructuredAttrsAndLevel(t *testing.T) {
 	assert.Equal(t, "INFO", rec["level"])
 	assert.Equal(t, "message action event", rec["msg"])
 	assert.Equal(t, "secret_request", rec["kind"])
-	assert.Equal(t, "fulfilled", rec["event_type"])
+	assert.Equal(t, "resolved", rec["event_type"])
 	assert.Equal(t, "row-1", rec["row_id"])
 	assert.Equal(t, "msg-1", rec["message_id"])
 	assert.Equal(t, "proj-1", rec["project_id"])
@@ -132,6 +214,9 @@ func TestLogMessageActionEvent_StructuredAttrsAndLevel(t *testing.T) {
 	assert.Equal(t, "native", rec["surface"])
 	assert.Equal(t, "environment", rec["detail_secret_type"])
 	assert.Equal(t, "3", rec["detail_secret_version"])
+	_, leaked := rec["detail_secret_value"]
+	assert.False(t, leaked, "disallowed detail key must be dropped by per-kind allow-list")
+	assert.NotContains(t, buf.String(), "MUST_BE_DROPPED")
 
 	// Refused event logs at WARN level.
 	buf.Reset()

@@ -18,22 +18,27 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 )
 
-// Message action audit event types (MessageActionEvent.EventType).
+// Core kind-neutral message-action audit event types (C3). Kind-specific event
+// types (such as "fulfilled" or "claim_recovered") are registered by each kind
+// in its msgaction.KindSpec.EventTypes.
 const (
-	MessageActionEventRequested      = "requested"
-	MessageActionEventReplaced       = "replaced"
-	MessageActionEventWithdrawn      = "withdrawn"
-	MessageActionEventFulfilled      = "fulfilled"
-	MessageActionEventDismissed      = "dismissed"
-	MessageActionEventExpired        = "expired"
-	MessageActionEventClaimRecovered = "claim_recovered"
-	MessageActionEventRefused        = "refused"
+	MessageActionEventRequested = msgaction.EventRequested
+	MessageActionEventReplaced  = msgaction.EventReplaced
+	MessageActionEventWithdrawn = msgaction.EventWithdrawn
+	MessageActionEventResolved  = msgaction.EventResolved
+	MessageActionEventDismissed = msgaction.EventDismissed
+	MessageActionEventExpired   = msgaction.EventExpired
+	MessageActionEventRefused   = msgaction.EventRefused
 )
 
-// Actor kinds of a MessageActionEvent.
+// Core actor kinds of a MessageActionEvent. ActorKind is open-ended (C3) so
+// future kinds may record additional actor kinds (e.g. an external executor).
 const (
 	MessageActionActorAgent = "agent"
 	MessageActionActorUser  = "user"
@@ -60,6 +65,50 @@ type MessageActionEvent struct {
 	Reason        string            `json:"reason,omitempty"`
 	Details       map[string]string `json:"details,omitempty"`
 	Timestamp     time.Time         `json:"timestamp"`
+}
+
+// messageActionDetailAllowLists stores per-kind allowed Details keys registered
+// on a LogAuditLogger (C3). Keys outside a kind's registered allow-list are
+// never emitted into structured logs.
+type messageActionDetailAllowLists struct {
+	mu     sync.RWMutex
+	byKind map[string]map[string]bool
+}
+
+func (a *messageActionDetailAllowLists) register(kind string, keys ...string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.byKind == nil {
+		a.byKind = make(map[string]map[string]bool)
+	}
+	set := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if k != "" {
+			set[k] = true
+		}
+	}
+	a.byKind[kind] = set
+}
+
+func (a *messageActionDetailAllowLists) allowListFor(kind string) (map[string]bool, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.byKind == nil {
+		return nil, false
+	}
+	set, ok := a.byKind[kind]
+	return set, ok
+}
+
+// RegisterMessageActionDetailKeys registers the per-kind allow-list of Details
+// keys that LogMessageActionEvent may emit for kind (C3). When registered for
+// a kind, any Details key not in keys is silently dropped before logging so
+// sensitive values cannot reach logs.
+func (l *LogAuditLogger) RegisterMessageActionDetailKeys(kind string, keys ...string) {
+	if l == nil || kind == "" {
+		return
+	}
+	l.messageActionDetails.register(kind, keys...)
 }
 
 // LogMessageActionEvent logs a message-action lifecycle or refusal audit event
@@ -101,8 +150,12 @@ func (l *LogAuditLogger) LogMessageActionEvent(ctx context.Context, event *Messa
 		attrs = append(attrs, slog.String("reason", event.Reason))
 	}
 	if len(event.Details) > 0 {
+		allow, hasAllow := l.messageActionDetails.allowListFor(event.Kind)
 		keys := make([]string, 0, len(event.Details))
 		for k := range event.Details {
+			if hasAllow && !allow[k] {
+				continue
+			}
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
