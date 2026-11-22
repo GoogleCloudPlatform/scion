@@ -120,6 +120,8 @@ func (l *LogAuditLogger) LogMessageActionEvent(ctx context.Context, event *Messa
 
 // emitMessageActionEvent emits ev through the server's audit logger when
 // configured. Safe to call with nil server, nil logger, or nil event.
+//
+//nolint:unused // Consumed by P5 secret requests; decisions do not emit MessageActionEvent in P5a.
 func (s *Server) emitMessageActionEvent(ctx context.Context, ev *MessageActionEvent) {
 	if s == nil || s.auditLogger == nil || ev == nil {
 		return
