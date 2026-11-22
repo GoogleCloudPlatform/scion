@@ -1200,7 +1200,7 @@ var compiled = []Experiment{
 	{
 		Name:        ExecContainers,
 		Title:       "Execution containers",
-		Description: "Lets users start shell-only execution containers (--harness shell) and register one in their profile as their default execution container. While off, creating shell agents is refused, GET/PUT /api/v1/users/me/exec-container answer 404, and existing shell agents keep all human-only protections.",
+		Description: "Lets users start execution containers (--harness shell) and register one in their profile as their default execution container. While off, creating execution containers is refused, GET/PUT /api/v1/users/me/exec-container answer 404, and existing execution containers keep all human-only protections.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,

@@ -612,7 +612,7 @@ func TestShellAgentCreateAdmission_Headless(t *testing.T) {
 			Detached:       true,
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "shell agent: human principals only")
+		assert.Contains(t, err.Error(), "execution container: human principals only")
 	})
 
 	// 2. Human principal with hub.exec_containers OFF -> refused (experiment_disabled).

@@ -36,7 +36,7 @@ var execContainerCmd = &cobra.Command{
 	Short: "Manage your default execution container",
 	Long: `Inspect, set, or clear your default execution container on the Hub.
 
-An execution container is a shell-harness agent (started with --harness shell)
+An execution container is an agent running the built-in shell harness (--harness shell)
 that holds credentials you log into manually so approved commands can run
 without exposing those credentials to LLM agents.
 
@@ -55,12 +55,12 @@ var execContainerShowCmd = &cobra.Command{
 
 var execContainerSetCmd = &cobra.Command{
 	Use:   "set <agent>",
-	Short: "Register a shell agent in the current project as your execution container",
+	Short: "Register an execution container in the current project as your default execution container",
 	Long: `Resolve <agent> (by name, slug, or UUID) within the current project and
 register it as your default execution container on the Hub.
 
 Name resolution happens locally against the current project; the Hub validates
-that the target is a shell agent you can attach to.`,
+that the target is an execution container you can attach to.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runExecContainerSet,
 }

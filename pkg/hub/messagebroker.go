@@ -1170,7 +1170,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// Shell execution containers cannot receive messages, even while
 	// reincarnating (so nothing is persisted for later redrive; §3.4 S5).
 	if isShellAgent(agent) {
-		p.log.Warn("Rejecting broker message to shell execution container",
+		p.log.Warn("Rejecting broker message to execution container",
 			"agentSlug", agentSlug, "projectID", projectID)
 		if !msg.Broadcasted {
 			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(shellAgentNotMessageableError(agent).Message))

@@ -458,8 +458,8 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 	if isShellAgent(target) && identity.Type() == "agent" {
 		return &agentTargetDenial{
 			status:  http.StatusForbidden,
-			message: "shell agent: human principals only",
-			reason:  "shell agent: human principals only",
+			message: "execution container: human principals only",
+			reason:  "execution container: human principals only",
 		}
 	}
 

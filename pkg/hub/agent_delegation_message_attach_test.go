@@ -847,7 +847,7 @@ func TestAgentDelegatedAttach_ShellAgentDenied(t *testing.T) {
 	// Preflight GET on real PTY route -> 403.
 	rec := f.do(t, http.MethodGet, adtPTYPath(e.ID), nil, adtBearer(cred.Token))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "shell agent: human principals only")
+	assert.Contains(t, rec.Body.String(), "execution container: human principals only")
 
 	// WebSocket upgrade on real PTY route -> 403.
 	hub := httptest.NewServer(f.srv.Handler())

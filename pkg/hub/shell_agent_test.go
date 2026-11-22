@@ -154,7 +154,7 @@ func TestShellAgentCreateAdmission(t *testing.T) {
 		ProvisionOnly: true,
 	})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "shell agent: human principals only")
+	assert.Contains(t, rec.Body.String(), "execution container: human principals only")
 
 	// Turn hub.exec_containers ON.
 	setExperimentOverrides(t, srv, map[string]bool{experiments.ExecContainers: true})
@@ -166,7 +166,7 @@ func TestShellAgentCreateAdmission(t *testing.T) {
 		ProvisionOnly: true,
 	})
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "shell agent: human principals only")
+	assert.Contains(t, rec.Body.String(), "execution container: human principals only")
 
 	// 4. Initial task rejected -> 400 task_not_supported.
 	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
@@ -232,17 +232,17 @@ func TestShellAgentAuthzChokePointAndExecSchedules(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, denial.status)
 	assert.Nil(t, srv.authorizeAgentTargetAction(ctx, adminIdent, shellAgent, ActionLifecycle))
 
-	// 3. Ancestor agent with ScopeAgentLifecycle -> ActionAttach (and ActionStop) denied with 403 "shell agent: human principals only".
+	// 3. Ancestor agent with ScopeAgentLifecycle -> ActionAttach (and ActionStop) denied with 403 "execution container: human principals only".
 	denial = srv.authorizeAgentTargetAction(ctx, ancestorIdent, shellAgent, ActionAttach)
 	require.NotNil(t, denial)
 	assert.Equal(t, http.StatusForbidden, denial.status)
-	assert.Equal(t, "shell agent: human principals only", denial.reason)
+	assert.Equal(t, "execution container: human principals only", denial.reason)
 
-	// 4. Same-project agent with ScopeAgentLifecycle -> ActionAttach denied with 403 "shell agent: human principals only".
+	// 4. Same-project agent with ScopeAgentLifecycle -> ActionAttach denied with 403 "execution container: human principals only".
 	denial = srv.authorizeAgentTargetAction(ctx, siblingIdent, shellAgent, ActionAttach)
 	require.NotNil(t, denial)
 	assert.Equal(t, http.StatusForbidden, denial.status)
-	assert.Equal(t, "shell agent: human principals only", denial.reason)
+	assert.Equal(t, "execution container: human principals only", denial.reason)
 
 	// 5. Exec schedule authoring (S3): agent principal -> 403; owner human -> allowed.
 	payload := &scheduledExecPayload{AgentID: shellAgent.ID, Command: []string{"echo", "hi"}}
@@ -265,7 +265,7 @@ func TestShellAgentAuthzChokePointAndExecSchedules(t *testing.T) {
 	fullCeiling := store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
 	_, err := srv.authorizeExecFire(ctx, project.ID, FireAuthority{Ceiling: fullCeiling, PrincipalKind: "agent", PrincipalID: ancestorAgent.ID}, ancestorIdent, payload)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "shell agent: human principals only")
+	assert.Contains(t, err.Error(), "execution container: human principals only")
 
 	fireTarget, err := srv.authorizeExecFire(ctx, project.ID, FireAuthority{Ceiling: fullCeiling, PrincipalKind: "user", PrincipalID: owner.ID}, ownerIdent, payload)
 	require.NoError(t, err)

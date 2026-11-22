@@ -3540,7 +3540,7 @@ const (
 	// existed for the settle period.
 	ReadyStrategyDelay = state.ReadyStrategyDelay
 	// ReadyStrategyIdle means the harness settles into idle rather than working
-	// (used by the built-in shell execution container).
+	// (used by the built-in execution container).
 	ReadyStrategyIdle = state.ReadyStrategyIdle
 )
 

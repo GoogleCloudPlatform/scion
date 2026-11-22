@@ -47,7 +47,7 @@ const (
 	// ineligible target agent, with one fixed message and no existence oracle.
 	ErrCodeExecContainerIneligible = "exec_container_ineligible"
 
-	execContainerIneligibleMessage = "That agent can't be used as your execution container. It must be a shell agent you can attach to, in a project you can access."
+	execContainerIneligibleMessage = "That agent can't be used as your default execution container. It must be an execution container you can attach to, in a project you can access."
 	execContainerUnavailableReason = "Your registered execution container is no longer available. Register another."
 
 	mutationTypeUserExecContainerSet   = "user.exec_container.set"

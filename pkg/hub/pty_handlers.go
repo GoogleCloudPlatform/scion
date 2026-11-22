@@ -114,7 +114,7 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 	// §3.4 S1, G3): no agent principal or delegated agent credential may attach.
 	// Keyed on the agent, not the experiment flag.
 	if isShellAgent(agent) && (isDelegatedAgentIdentity(identity) || identity.Type() == "agent") {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "shell agent: human principals only", nil)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "execution container: human principals only", nil)
 		return
 	}
 
@@ -206,7 +206,7 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 // carries the decision's reason (.design/agent-delegation.md §11.4).
 func (s *Server) authorizeDelegatedAttach(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent) bool {
 	if isShellAgent(agent) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "shell agent: human principals only", nil)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "execution container: human principals only", nil)
 		return false
 	}
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{

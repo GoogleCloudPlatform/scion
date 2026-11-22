@@ -1510,7 +1510,7 @@ func (s *Server) handleExistingAgent(
 	// Shell execution containers never accept an initial task (ptone/scion#8812 §3.2).
 	if isShellAgent(existingAgent) && strings.TrimSpace(req.Task) != "" {
 		writeError(w, http.StatusBadRequest, ErrCodeTaskNotSupported,
-			"shell execution containers do not support an initial task", nil)
+			"execution containers do not support an initial task", nil)
 		return existingAgentErrored
 	}
 

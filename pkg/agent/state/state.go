@@ -84,7 +84,7 @@ const (
 	// ready marker before pasting, so the harness's input has mounted.
 	ReadySettleHook = 1500 * time.Millisecond
 	// ReadySettleIdle is how long an idle-strategy harness (e.g. the built-in
-	// shell execution container) settles before transitioning initializing -> idle.
+	// execution container) settles before transitioning initializing -> idle.
 	ReadySettleIdle = 1 * time.Second
 )
 
@@ -99,7 +99,7 @@ const (
 	ReadyStrategyDelay = "delay"
 	// ReadyStrategyIdle: the harness is ready once its tmux session has
 	// existed for the settle period, and transitions initializing -> idle
-	// rather than working (used by the built-in shell execution container).
+	// rather than working (used by the built-in execution container).
 	ReadyStrategyIdle = "idle"
 )
 

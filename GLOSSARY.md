@@ -19,8 +19,8 @@ An agent spawned by another agent; "sub" only from the orchestrating user's view
 _Avoid_: helper, thread, worker thread
 
 **Execution container**:
-An agent that runs the reserved built-in `shell` harness-config (no LLM harness) and is registered in a user's profile settings as their default execution target for approved commands. Users log into CLI tools inside it manually so credentials stay in the container's `$HOME` (never in `/workspace`) and are never exposed to LLM agents.
-_Avoid_: execution environment, exec profile
+Any agent running the reserved built-in `shell` harness-config (no LLM harness). Users log into CLI tools inside it manually so credentials stay in the container's `$HOME` (never in `/workspace`) and are never exposed to LLM agents, and may register one in their user profile as their *default execution container* for approved commands.
+_Avoid_: shell agent, execution environment, exec profile
 _See also_: Agent, Harness-config, Agent home
 
 **Reincarnation**:

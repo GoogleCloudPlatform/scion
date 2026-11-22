@@ -161,7 +161,7 @@ func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, opts shellAg
 		return &shellCreateDenial{
 			status:  http.StatusForbidden,
 			code:    ErrCodeForbidden,
-			message: "shell agent: human principals only",
+			message: "execution container: human principals only",
 		}
 	}
 	if !s.experimentEnabled(experiments.ExecContainers) {
@@ -175,21 +175,21 @@ func (s *Server) checkShellAgentCreateAdmission(agent *store.Agent, opts shellAg
 		return &shellCreateDenial{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeTaskNotSupported,
-			message: "shell execution containers do not support an initial task",
+			message: "execution containers do not support an initial task",
 		}
 	}
 	if opts.TemplateExplicit {
 		return &shellCreateDenial{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
-			message: "shell execution containers do not use templates",
+			message: "execution containers do not use templates",
 		}
 	}
 	if opts.TemplateSuppliedShellHC {
 		return &shellCreateDenial{
 			status:  http.StatusBadRequest,
 			code:    ErrCodeValidationError,
-			message: "shell execution containers do not use templates; pass harness_config \"shell\" explicitly without a template",
+			message: "execution containers do not use templates; pass harness_config \"shell\" explicitly without a template",
 		}
 	}
 
