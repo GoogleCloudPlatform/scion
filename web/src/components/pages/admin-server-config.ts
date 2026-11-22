@@ -5354,8 +5354,9 @@ export class ScionPageAdminServerConfig extends LitElement {
             })}
             <span class="hint"
               >When on, only hub administrators may register new Runtime Brokers (using
-              <code>--admin-managed</code>), and non-approved brokers cannot be registered or used
-              for new workloads. Embedded and auto-provide brokers remain eligible.</span
+              <code>--admin-managed</code>), non-approved brokers cannot be registered or used for
+              new workloads, and existing agents on non-approved brokers cannot be started, resumed,
+              restarted, or woken. Embedded and auto-provide brokers remain eligible.</span
             >
           </div>
         </div>
