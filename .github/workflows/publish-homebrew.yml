@@ -23,8 +23,10 @@
 #
 # Both steps authenticate with the HOMEBREW_SCION_TOKEN secret of the
 # "homebrew" environment, which is limited to main and preview tags, so a
-# run from any other branch cannot read it. Without the secret the workflow
-# skips with a notice. Setup: docs/release-process.md, "Homebrew publishing".
+# run from any other branch cannot read it. Without the secret the gate job
+# fails, so a missing or unpassed token shows up as a red "Publish to
+# Homebrew" job instead of a silent skip (the release itself is already
+# published by then). Setup: docs/release-process.md, "Homebrew publishing".
 
 name: Publish to Homebrew
 
@@ -46,7 +48,9 @@ on:
     secrets:
       HOMEBREW_SCION_TOKEN:
         description: 'Homebrew tap and ghcr token; the called jobs read it from the homebrew environment, which takes precedence over the passed value'
-        required: false
+        # Required so that a caller that forgets to pass it fails at once
+        # (an empty value still reaches the gate, which fails on it too).
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -93,9 +97,12 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           if [ "$HAS_TOKEN" != "true" ]; then
-            echo "::notice::HOMEBREW_SCION_TOKEN is not set; skipping Homebrew publishing for ${TAG}."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            # Fail rather than skip: a silent skip hid weeks of unpublished
+            # previews (ptone/scion#8769). Empty here means the secret is
+            # missing from the homebrew environment or a caller on the
+            # preview path did not pass it on.
+            echo "::error::HOMEBREW_SCION_TOKEN is empty, so ${TAG} was not published to Homebrew. Check the homebrew environment secret, and that every calling workflow passes HOMEBREW_SCION_TOKEN by name (docs/release-process.md, \"Homebrew publishing\")."
+            exit 1
           fi
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
