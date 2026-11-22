@@ -74,6 +74,8 @@ const (
 	FieldSubjectRule = "subject_rule"
 	// FieldSubjectMode holds the string denoting the subject_mode field in the database.
 	FieldSubjectMode = "subject_mode"
+	// FieldCoalesceWindowSeconds holds the string denoting the coalesce_window_seconds field in the database.
+	FieldCoalesceWindowSeconds = "coalesce_window_seconds"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldStatusReason holds the string denoting the status_reason field in the database.
@@ -131,6 +133,7 @@ var Columns = []string{
 	FieldSubjectDialect,
 	FieldSubjectRule,
 	FieldSubjectMode,
+	FieldCoalesceWindowSeconds,
 	FieldStatus,
 	FieldStatusReason,
 	FieldLastFireAt,
@@ -186,6 +189,8 @@ var (
 	DefaultSubjectRule string
 	// DefaultSubjectMode holds the default value on creation for the "subject_mode" field.
 	DefaultSubjectMode string
+	// DefaultCoalesceWindowSeconds holds the default value on creation for the "coalesce_window_seconds" field.
+	DefaultCoalesceWindowSeconds int
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// DefaultFireCount holds the default value on creation for the "fire_count" field.
@@ -358,6 +363,11 @@ func BySubjectRule(opts ...sql.OrderTermOption) OrderOption {
 // BySubjectMode orders the results by the subject_mode field.
 func BySubjectMode(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSubjectMode, opts...).ToFunc()
+}
+
+// ByCoalesceWindowSeconds orders the results by the coalesce_window_seconds field.
+func ByCoalesceWindowSeconds(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCoalesceWindowSeconds, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

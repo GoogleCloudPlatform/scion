@@ -80,6 +80,9 @@ func (TriggerFire) Fields() []ent.Field {
 		field.String("executor_id").
 			Default(""),
 		field.Time("lease_until"),
+		field.Time("not_before").
+			Optional().
+			Nillable(),
 		field.Time("started_at").
 			Immutable(),
 		field.Time("finished_at").

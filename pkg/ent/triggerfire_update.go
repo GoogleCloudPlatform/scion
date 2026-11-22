@@ -359,6 +359,26 @@ func (_u *TriggerFireUpdate) SetNillableLeaseUntil(v *time.Time) *TriggerFireUpd
 	return _u
 }
 
+// SetNotBefore sets the "not_before" field.
+func (_u *TriggerFireUpdate) SetNotBefore(v time.Time) *TriggerFireUpdate {
+	_u.mutation.SetNotBefore(v)
+	return _u
+}
+
+// SetNillableNotBefore sets the "not_before" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableNotBefore(v *time.Time) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetNotBefore(*v)
+	}
+	return _u
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (_u *TriggerFireUpdate) ClearNotBefore() *TriggerFireUpdate {
+	_u.mutation.ClearNotBefore()
+	return _u
+}
+
 // SetFinishedAt sets the "finished_at" field.
 func (_u *TriggerFireUpdate) SetFinishedAt(v time.Time) *TriggerFireUpdate {
 	_u.mutation.SetFinishedAt(v)
@@ -538,6 +558,12 @@ func (_u *TriggerFireUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	}
 	if value, ok := _u.mutation.LeaseUntil(); ok {
 		_spec.SetField(triggerfire.FieldLeaseUntil, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.NotBefore(); ok {
+		_spec.SetField(triggerfire.FieldNotBefore, field.TypeTime, value)
+	}
+	if _u.mutation.NotBeforeCleared() {
+		_spec.ClearField(triggerfire.FieldNotBefore, field.TypeTime)
 	}
 	if value, ok := _u.mutation.FinishedAt(); ok {
 		_spec.SetField(triggerfire.FieldFinishedAt, field.TypeTime, value)
@@ -895,6 +921,26 @@ func (_u *TriggerFireUpdateOne) SetNillableLeaseUntil(v *time.Time) *TriggerFire
 	return _u
 }
 
+// SetNotBefore sets the "not_before" field.
+func (_u *TriggerFireUpdateOne) SetNotBefore(v time.Time) *TriggerFireUpdateOne {
+	_u.mutation.SetNotBefore(v)
+	return _u
+}
+
+// SetNillableNotBefore sets the "not_before" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableNotBefore(v *time.Time) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetNotBefore(*v)
+	}
+	return _u
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (_u *TriggerFireUpdateOne) ClearNotBefore() *TriggerFireUpdateOne {
+	_u.mutation.ClearNotBefore()
+	return _u
+}
+
 // SetFinishedAt sets the "finished_at" field.
 func (_u *TriggerFireUpdateOne) SetFinishedAt(v time.Time) *TriggerFireUpdateOne {
 	_u.mutation.SetFinishedAt(v)
@@ -1104,6 +1150,12 @@ func (_u *TriggerFireUpdateOne) sqlSave(ctx context.Context) (_node *TriggerFire
 	}
 	if value, ok := _u.mutation.LeaseUntil(); ok {
 		_spec.SetField(triggerfire.FieldLeaseUntil, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.NotBefore(); ok {
+		_spec.SetField(triggerfire.FieldNotBefore, field.TypeTime, value)
+	}
+	if _u.mutation.NotBeforeCleared() {
+		_spec.ClearField(triggerfire.FieldNotBefore, field.TypeTime)
 	}
 	if value, ok := _u.mutation.FinishedAt(); ok {
 		_spec.SetField(triggerfire.FieldFinishedAt, field.TypeTime, value)

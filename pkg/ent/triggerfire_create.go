@@ -284,6 +284,20 @@ func (_c *TriggerFireCreate) SetLeaseUntil(v time.Time) *TriggerFireCreate {
 	return _c
 }
 
+// SetNotBefore sets the "not_before" field.
+func (_c *TriggerFireCreate) SetNotBefore(v time.Time) *TriggerFireCreate {
+	_c.mutation.SetNotBefore(v)
+	return _c
+}
+
+// SetNillableNotBefore sets the "not_before" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableNotBefore(v *time.Time) *TriggerFireCreate {
+	if v != nil {
+		_c.SetNotBefore(*v)
+	}
+	return _c
+}
+
 // SetStartedAt sets the "started_at" field.
 func (_c *TriggerFireCreate) SetStartedAt(v time.Time) *TriggerFireCreate {
 	_c.mutation.SetStartedAt(v)
@@ -572,6 +586,10 @@ func (_c *TriggerFireCreate) createSpec() (*TriggerFire, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.LeaseUntil(); ok {
 		_spec.SetField(triggerfire.FieldLeaseUntil, field.TypeTime, value)
 		_node.LeaseUntil = value
+	}
+	if value, ok := _c.mutation.NotBefore(); ok {
+		_spec.SetField(triggerfire.FieldNotBefore, field.TypeTime, value)
+		_node.NotBefore = &value
 	}
 	if value, ok := _c.mutation.StartedAt(); ok {
 		_spec.SetField(triggerfire.FieldStartedAt, field.TypeTime, value)
@@ -928,6 +946,24 @@ func (u *TriggerFireUpsert) SetLeaseUntil(v time.Time) *TriggerFireUpsert {
 // UpdateLeaseUntil sets the "lease_until" field to the value that was provided on create.
 func (u *TriggerFireUpsert) UpdateLeaseUntil() *TriggerFireUpsert {
 	u.SetExcluded(triggerfire.FieldLeaseUntil)
+	return u
+}
+
+// SetNotBefore sets the "not_before" field.
+func (u *TriggerFireUpsert) SetNotBefore(v time.Time) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldNotBefore, v)
+	return u
+}
+
+// UpdateNotBefore sets the "not_before" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateNotBefore() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldNotBefore)
+	return u
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (u *TriggerFireUpsert) ClearNotBefore() *TriggerFireUpsert {
+	u.SetNull(triggerfire.FieldNotBefore)
 	return u
 }
 
@@ -1358,6 +1394,27 @@ func (u *TriggerFireUpsertOne) SetLeaseUntil(v time.Time) *TriggerFireUpsertOne 
 func (u *TriggerFireUpsertOne) UpdateLeaseUntil() *TriggerFireUpsertOne {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.UpdateLeaseUntil()
+	})
+}
+
+// SetNotBefore sets the "not_before" field.
+func (u *TriggerFireUpsertOne) SetNotBefore(v time.Time) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetNotBefore(v)
+	})
+}
+
+// UpdateNotBefore sets the "not_before" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateNotBefore() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateNotBefore()
+	})
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (u *TriggerFireUpsertOne) ClearNotBefore() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearNotBefore()
 	})
 }
 
@@ -1958,6 +2015,27 @@ func (u *TriggerFireUpsertBulk) SetLeaseUntil(v time.Time) *TriggerFireUpsertBul
 func (u *TriggerFireUpsertBulk) UpdateLeaseUntil() *TriggerFireUpsertBulk {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.UpdateLeaseUntil()
+	})
+}
+
+// SetNotBefore sets the "not_before" field.
+func (u *TriggerFireUpsertBulk) SetNotBefore(v time.Time) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetNotBefore(v)
+	})
+}
+
+// UpdateNotBefore sets the "not_before" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateNotBefore() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateNotBefore()
+	})
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (u *TriggerFireUpsertBulk) ClearNotBefore() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearNotBefore()
 	})
 }
 

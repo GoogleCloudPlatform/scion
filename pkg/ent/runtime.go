@@ -3613,24 +3613,28 @@ func init() {
 	triggerDescSubjectMode := triggerFields[15].Descriptor()
 	// trigger.DefaultSubjectMode holds the default value on creation for the subject_mode field.
 	trigger.DefaultSubjectMode = triggerDescSubjectMode.Default.(string)
+	// triggerDescCoalesceWindowSeconds is the schema descriptor for coalesce_window_seconds field.
+	triggerDescCoalesceWindowSeconds := triggerFields[16].Descriptor()
+	// trigger.DefaultCoalesceWindowSeconds holds the default value on creation for the coalesce_window_seconds field.
+	trigger.DefaultCoalesceWindowSeconds = triggerDescCoalesceWindowSeconds.Default.(int)
 	// triggerDescStatus is the schema descriptor for status field.
-	triggerDescStatus := triggerFields[16].Descriptor()
+	triggerDescStatus := triggerFields[17].Descriptor()
 	// trigger.DefaultStatus holds the default value on creation for the status field.
 	trigger.DefaultStatus = triggerDescStatus.Default.(string)
 	// triggerDescFireCount is the schema descriptor for fire_count field.
-	triggerDescFireCount := triggerFields[21].Descriptor()
+	triggerDescFireCount := triggerFields[22].Descriptor()
 	// trigger.DefaultFireCount holds the default value on creation for the fire_count field.
 	trigger.DefaultFireCount = triggerDescFireCount.Default.(int)
 	// triggerDescErrorCount is the schema descriptor for error_count field.
-	triggerDescErrorCount := triggerFields[22].Descriptor()
+	triggerDescErrorCount := triggerFields[23].Descriptor()
 	// trigger.DefaultErrorCount holds the default value on creation for the error_count field.
 	trigger.DefaultErrorCount = triggerDescErrorCount.Default.(int)
 	// triggerDescCreated is the schema descriptor for created field.
-	triggerDescCreated := triggerFields[24].Descriptor()
+	triggerDescCreated := triggerFields[25].Descriptor()
 	// trigger.DefaultCreated holds the default value on creation for the created field.
 	trigger.DefaultCreated = triggerDescCreated.Default.(func() time.Time)
 	// triggerDescUpdated is the schema descriptor for updated field.
-	triggerDescUpdated := triggerFields[25].Descriptor()
+	triggerDescUpdated := triggerFields[26].Descriptor()
 	// trigger.DefaultUpdated holds the default value on creation for the updated field.
 	trigger.DefaultUpdated = triggerDescUpdated.Default.(func() time.Time)
 	// trigger.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -3740,7 +3744,7 @@ func init() {
 	// triggerfire.DefaultExecutorID holds the default value on creation for the executor_id field.
 	triggerfire.DefaultExecutorID = triggerfireDescExecutorID.Default.(string)
 	// triggerfireDescCreated is the schema descriptor for created field.
-	triggerfireDescCreated := triggerfireFields[18].Descriptor()
+	triggerfireDescCreated := triggerfireFields[19].Descriptor()
 	// triggerfire.DefaultCreated holds the default value on creation for the created field.
 	triggerfire.DefaultCreated = triggerfireDescCreated.Default.(func() time.Time)
 	// triggerfireDescID is the schema descriptor for id field.

@@ -1726,3 +1726,166 @@ func TestTriggerStore_ListTriggers_SkipTotalCountAndTargetFilter(t *testing.T) {
 	assert.NotContains(t, gotIDs, trOtherAgent.ID)
 	assert.NotContains(t, gotIDs, trDispatch.ID)
 }
+
+func TestTriggerStore_CoalesceWindowAndCoalescingLifecycle(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+
+	projID := uuid.NewString()
+	trID := uuid.NewString()
+	base := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+
+	tr := &store.Trigger{
+		ID:                    trID,
+		ProjectID:             projID,
+		Name:                  "pr-sync-coalesce",
+		SourceKind:            store.TriggerSourceKindGitHub,
+		SourceID:              "",
+		MatchTypes:            []string{"github.pull_request.synchronize"},
+		ActionType:            store.TriggerActionDispatchAgent,
+		ActionPayload:         `{"template":"default","task":"sync"}`,
+		SubjectMode:           store.TriggerSubjectModeReuse,
+		CoalesceWindowSeconds: 30,
+		Status:                store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+			InitiatorPrincipalID:    uuid.NewString(),
+			InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal, Version: 1},
+	}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	got, err := cs.GetTrigger(ctx, trID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerSubjectModeReuse, got.SubjectMode)
+	assert.Equal(t, 30, got.CoalesceWindowSeconds)
+
+	// Update CoalesceWindowSeconds via UpdateTrigger.
+	got.CoalesceWindowSeconds = 45
+	require.NoError(t, cs.UpdateTrigger(ctx, got, store.TriggerFieldMask{CoalesceWindowSeconds: true}, 1, true, nil))
+	got2, err := cs.GetTrigger(ctx, trID)
+	require.NoError(t, err)
+	assert.Equal(t, 45, got2.CoalesceWindowSeconds)
+
+	const subject = "github:octo/repo#42"
+	newFire := func(evID string, at time.Time) *store.TriggerFire {
+		return &store.TriggerFire{
+			ID:         uuid.NewString(),
+			ProjectID:  projID,
+			TriggerID:  trID,
+			EventID:    evID,
+			Subject:    subject,
+			ActionType: store.TriggerActionDispatchAgent,
+			LeaseUntil: at.Add(10 * time.Minute),
+			StartedAt:  at,
+		}
+	}
+
+	// 1. E1 claims coalescing with not_before = base + 30s.
+	ev1 := uuid.NewString()
+	f1 := newFire(ev1, base)
+	nb1 := base.Add(30 * time.Second)
+	claimed, promoted, superseded, existing, err := cs.ClaimTriggerFireCoalescing(ctx, f1, "coalesced", base, nb1)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	assert.False(t, promoted)
+	assert.Empty(t, superseded)
+	assert.Nil(t, existing)
+	assert.Equal(t, store.TriggerFireStatusCoalescing, f1.Status)
+	require.NotNil(t, f1.NotBefore)
+	assert.Equal(t, nb1, f1.NotBefore.UTC())
+
+	// Coalescing row counts as live for subjectLive / HasLiveTriggerFireForSubjectExcluding.
+	liveAll, err := cs.HasLiveTriggerFireForSubject(ctx, trID, subject, base.Add(5*time.Second))
+	require.NoError(t, err)
+	assert.True(t, liveAll)
+	liveExclSelf, err := cs.HasLiveTriggerFireForSubjectExcluding(ctx, trID, subject, f1.ID, true, base.Add(5*time.Second))
+	require.NoError(t, err)
+	assert.False(t, liveExclSelf)
+
+	// 2. E2 arrives at base+10s -> supersedes E1 (skipped "coalesced"), inserts E2 as coalescing.
+	ev2 := uuid.NewString()
+	t2 := base.Add(10 * time.Second)
+	nb2 := t2.Add(30 * time.Second)
+	f2 := newFire(ev2, t2)
+	claimed2, promoted2, superseded2, existing2, err := cs.ClaimTriggerFireCoalescing(ctx, f2, "coalesced", t2, nb2)
+	require.NoError(t, err)
+	require.True(t, claimed2)
+	assert.False(t, promoted2)
+	require.Len(t, superseded2, 1)
+	assert.Equal(t, f1.ID, superseded2[0].ID)
+	assert.Equal(t, store.TriggerFireStatusSkipped, superseded2[0].Status)
+	assert.Equal(t, "coalesced", superseded2[0].Error)
+	assert.Nil(t, existing2)
+
+	gotF1, err := cs.GetTriggerFire(ctx, f1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusSkipped, gotF1.Status)
+	assert.Equal(t, "coalesced", gotF1.Error)
+
+	// 3. Re-handling E2 before not_before returns claimed=false with existing coalescing row.
+	f2Early := newFire(ev2, t2.Add(5*time.Second))
+	claimedEarly, promotedEarly, _, exEarly, err := cs.ClaimTriggerFireCoalescing(ctx, f2Early, "coalesced", t2.Add(5*time.Second), nb2)
+	require.NoError(t, err)
+	assert.False(t, claimedEarly)
+	assert.False(t, promotedEarly)
+	require.NotNil(t, exEarly)
+	assert.Equal(t, store.TriggerFireStatusCoalescing, exEarly.Status)
+
+	// 4. Re-handling E2 at/after not_before promotes coalescing -> firing in place (same fire ID).
+	f2Due := newFire(ev2, nb2)
+	claimedDue, promotedDue, _, exDue, err := cs.ClaimTriggerFireCoalescing(ctx, f2Due, "coalesced", nb2, nb2.Add(30*time.Second))
+	require.NoError(t, err)
+	require.True(t, claimedDue)
+	assert.True(t, promotedDue)
+	assert.Nil(t, exDue)
+	assert.Equal(t, f2.ID, f2Due.ID)
+	assert.Equal(t, store.TriggerFireStatusFiring, f2Due.Status)
+
+	finished, err := cs.FinishTriggerFire(ctx, f2Due.ID, store.TriggerFireStatusFired, "agent-1", "", "", nb2.Add(time.Second))
+	require.NoError(t, err)
+	assert.True(t, finished)
+
+	// 5. Reap expired coalescing row -> failed "hub restarted during coalesce", then retry promotes SAME row.
+	ev3 := uuid.NewString()
+	t3 := nb2.Add(5 * time.Second)
+	nb3 := t3.Add(30 * time.Second)
+	f3 := newFire(ev3, t3)
+	claimed3, promoted3, _, _, err := cs.ClaimTriggerFireCoalescing(ctx, f3, "coalesced", t3, nb3)
+	require.NoError(t, err)
+	require.True(t, claimed3)
+	assert.False(t, promoted3)
+
+	// PurgeOldTriggerHistory must NOT purge active coalescing rows even if Created < cutoff.
+	_, firesPurged, err := cs.PurgeOldTriggerHistory(ctx, t3.Add(24*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 2, firesPurged, "terminal f1 and f2 purged, active coalescing f3 preserved")
+	stillThere, err := cs.GetTriggerFire(ctx, f3.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusCoalescing, stillThere.Status)
+
+	// Reap after lease_until (one lease past not_before).
+	reapAt := nb3.Add(11 * time.Minute)
+	reaped, err := cs.ReapExpiredTriggerFires(ctx, reapAt, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reaped)
+
+	reapedF3, err := cs.GetTriggerFire(ctx, f3.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFailed, reapedF3.Status)
+	assert.Equal(t, "hub restarted during coalesce", reapedF3.Error)
+
+	// Queue retry re-promotes the SAME row (never duplicated).
+	retryAt := reapAt.Add(time.Minute)
+	f3Retry := newFire(ev3, retryAt)
+	claimedRetry, promotedRetry, _, _, err := cs.ClaimTriggerFireCoalescing(ctx, f3Retry, "coalesced", retryAt, retryAt.Add(30*time.Second))
+	require.NoError(t, err)
+	require.True(t, claimedRetry)
+	assert.True(t, promotedRetry)
+	assert.Equal(t, f3.ID, f3Retry.ID)
+	assert.Equal(t, store.TriggerFireStatusFiring, f3Retry.Status)
+	assert.Empty(t, f3Retry.Error)
+}

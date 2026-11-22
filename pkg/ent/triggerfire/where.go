@@ -165,6 +165,11 @@ func LeaseUntil(v time.Time) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldLeaseUntil, v))
 }
 
+// NotBefore applies equality check predicate on the "not_before" field. It's identical to NotBeforeEQ.
+func NotBefore(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldNotBefore, v))
+}
+
 // StartedAt applies equality check predicate on the "started_at" field. It's identical to StartedAtEQ.
 func StartedAt(v time.Time) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldStartedAt, v))
@@ -1563,6 +1568,56 @@ func LeaseUntilLT(v time.Time) predicate.TriggerFire {
 // LeaseUntilLTE applies the LTE predicate on the "lease_until" field.
 func LeaseUntilLTE(v time.Time) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldLTE(FieldLeaseUntil, v))
+}
+
+// NotBeforeEQ applies the EQ predicate on the "not_before" field.
+func NotBeforeEQ(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldNotBefore, v))
+}
+
+// NotBeforeNEQ applies the NEQ predicate on the "not_before" field.
+func NotBeforeNEQ(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldNotBefore, v))
+}
+
+// NotBeforeIn applies the In predicate on the "not_before" field.
+func NotBeforeIn(vs ...time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldNotBefore, vs...))
+}
+
+// NotBeforeNotIn applies the NotIn predicate on the "not_before" field.
+func NotBeforeNotIn(vs ...time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldNotBefore, vs...))
+}
+
+// NotBeforeGT applies the GT predicate on the "not_before" field.
+func NotBeforeGT(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldNotBefore, v))
+}
+
+// NotBeforeGTE applies the GTE predicate on the "not_before" field.
+func NotBeforeGTE(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldNotBefore, v))
+}
+
+// NotBeforeLT applies the LT predicate on the "not_before" field.
+func NotBeforeLT(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldNotBefore, v))
+}
+
+// NotBeforeLTE applies the LTE predicate on the "not_before" field.
+func NotBeforeLTE(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldNotBefore, v))
+}
+
+// NotBeforeIsNil applies the IsNil predicate on the "not_before" field.
+func NotBeforeIsNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIsNull(FieldNotBefore))
+}
+
+// NotBeforeNotNil applies the NotNil predicate on the "not_before" field.
+func NotBeforeNotNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotNull(FieldNotBefore))
 }
 
 // StartedAtEQ applies the EQ predicate on the "started_at" field.

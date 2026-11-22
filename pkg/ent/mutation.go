@@ -115305,6 +115305,8 @@ type TriggerMutation struct {
 	subject_dialect                       *string
 	subject_rule                          *string
 	subject_mode                          *string
+	coalesce_window_seconds               *int
+	addcoalesce_window_seconds            *int
 	status                                *string
 	status_reason                         *string
 	last_fire_at                          *time.Time
@@ -116738,6 +116740,62 @@ func (m *TriggerMutation) ResetSubjectMode() {
 	m.subject_mode = nil
 }
 
+// SetCoalesceWindowSeconds sets the "coalesce_window_seconds" field.
+func (m *TriggerMutation) SetCoalesceWindowSeconds(i int) {
+	m.coalesce_window_seconds = &i
+	m.addcoalesce_window_seconds = nil
+}
+
+// CoalesceWindowSeconds returns the value of the "coalesce_window_seconds" field in the mutation.
+func (m *TriggerMutation) CoalesceWindowSeconds() (r int, exists bool) {
+	v := m.coalesce_window_seconds
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCoalesceWindowSeconds returns the old "coalesce_window_seconds" field's value of the Trigger entity.
+// If the Trigger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerMutation) OldCoalesceWindowSeconds(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCoalesceWindowSeconds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCoalesceWindowSeconds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCoalesceWindowSeconds: %w", err)
+	}
+	return oldValue.CoalesceWindowSeconds, nil
+}
+
+// AddCoalesceWindowSeconds adds i to the "coalesce_window_seconds" field.
+func (m *TriggerMutation) AddCoalesceWindowSeconds(i int) {
+	if m.addcoalesce_window_seconds != nil {
+		*m.addcoalesce_window_seconds += i
+	} else {
+		m.addcoalesce_window_seconds = &i
+	}
+}
+
+// AddedCoalesceWindowSeconds returns the value that was added to the "coalesce_window_seconds" field in this mutation.
+func (m *TriggerMutation) AddedCoalesceWindowSeconds() (r int, exists bool) {
+	v := m.addcoalesce_window_seconds
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCoalesceWindowSeconds resets all changes to the "coalesce_window_seconds" field.
+func (m *TriggerMutation) ResetCoalesceWindowSeconds() {
+	m.coalesce_window_seconds = nil
+	m.addcoalesce_window_seconds = nil
+}
+
 // SetStatus sets the "status" field.
 func (m *TriggerMutation) SetStatus(s string) {
 	m.status = &s
@@ -117237,7 +117295,7 @@ func (m *TriggerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerMutation) Fields() []string {
-	fields := make([]string, 0, 40)
+	fields := make([]string, 0, 41)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, trigger.FieldInitiatorPrincipalKind)
 	}
@@ -117327,6 +117385,9 @@ func (m *TriggerMutation) Fields() []string {
 	}
 	if m.subject_mode != nil {
 		fields = append(fields, trigger.FieldSubjectMode)
+	}
+	if m.coalesce_window_seconds != nil {
+		fields = append(fields, trigger.FieldCoalesceWindowSeconds)
 	}
 	if m.status != nil {
 		fields = append(fields, trigger.FieldStatus)
@@ -117426,6 +117487,8 @@ func (m *TriggerMutation) Field(name string) (ent.Value, bool) {
 		return m.SubjectRule()
 	case trigger.FieldSubjectMode:
 		return m.SubjectMode()
+	case trigger.FieldCoalesceWindowSeconds:
+		return m.CoalesceWindowSeconds()
 	case trigger.FieldStatus:
 		return m.Status()
 	case trigger.FieldStatusReason:
@@ -117515,6 +117578,8 @@ func (m *TriggerMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldSubjectRule(ctx)
 	case trigger.FieldSubjectMode:
 		return m.OldSubjectMode(ctx)
+	case trigger.FieldCoalesceWindowSeconds:
+		return m.OldCoalesceWindowSeconds(ctx)
 	case trigger.FieldStatus:
 		return m.OldStatus(ctx)
 	case trigger.FieldStatusReason:
@@ -117754,6 +117819,13 @@ func (m *TriggerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetSubjectMode(v)
 		return nil
+	case trigger.FieldCoalesceWindowSeconds:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCoalesceWindowSeconds(v)
+		return nil
 	case trigger.FieldStatus:
 		v, ok := value.(string)
 		if !ok {
@@ -117841,6 +117913,9 @@ func (m *TriggerMutation) AddedFields() []string {
 	if m.addauthority_ceiling_version != nil {
 		fields = append(fields, trigger.FieldAuthorityCeilingVersion)
 	}
+	if m.addcoalesce_window_seconds != nil {
+		fields = append(fields, trigger.FieldCoalesceWindowSeconds)
+	}
 	if m.addfire_count != nil {
 		fields = append(fields, trigger.FieldFireCount)
 	}
@@ -117861,6 +117936,8 @@ func (m *TriggerMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedAuthorizationRevision()
 	case trigger.FieldAuthorityCeilingVersion:
 		return m.AddedAuthorityCeilingVersion()
+	case trigger.FieldCoalesceWindowSeconds:
+		return m.AddedCoalesceWindowSeconds()
 	case trigger.FieldFireCount:
 		return m.AddedFireCount()
 	case trigger.FieldErrorCount:
@@ -117894,6 +117971,13 @@ func (m *TriggerMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddAuthorityCeilingVersion(v)
+		return nil
+	case trigger.FieldCoalesceWindowSeconds:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCoalesceWindowSeconds(v)
 		return nil
 	case trigger.FieldFireCount:
 		v, ok := value.(int)
@@ -118136,6 +118220,9 @@ func (m *TriggerMutation) ResetField(name string) error {
 		return nil
 	case trigger.FieldSubjectMode:
 		m.ResetSubjectMode()
+		return nil
+	case trigger.FieldCoalesceWindowSeconds:
+		m.ResetCoalesceWindowSeconds()
 		return nil
 	case trigger.FieldStatus:
 		m.ResetStatus()
@@ -119750,6 +119837,7 @@ type TriggerFireMutation struct {
 	executor_kind                 *string
 	executor_id                   *string
 	lease_until                   *time.Time
+	not_before                    *time.Time
 	started_at                    *time.Time
 	finished_at                   *time.Time
 	created                       *time.Time
@@ -120866,6 +120954,55 @@ func (m *TriggerFireMutation) ResetLeaseUntil() {
 	m.lease_until = nil
 }
 
+// SetNotBefore sets the "not_before" field.
+func (m *TriggerFireMutation) SetNotBefore(t time.Time) {
+	m.not_before = &t
+}
+
+// NotBefore returns the value of the "not_before" field in the mutation.
+func (m *TriggerFireMutation) NotBefore() (r time.Time, exists bool) {
+	v := m.not_before
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotBefore returns the old "not_before" field's value of the TriggerFire entity.
+// If the TriggerFire object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerFireMutation) OldNotBefore(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotBefore is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotBefore requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotBefore: %w", err)
+	}
+	return oldValue.NotBefore, nil
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (m *TriggerFireMutation) ClearNotBefore() {
+	m.not_before = nil
+	m.clearedFields[triggerfire.FieldNotBefore] = struct{}{}
+}
+
+// NotBeforeCleared returns if the "not_before" field was cleared in this mutation.
+func (m *TriggerFireMutation) NotBeforeCleared() bool {
+	_, ok := m.clearedFields[triggerfire.FieldNotBefore]
+	return ok
+}
+
+// ResetNotBefore resets all changes to the "not_before" field.
+func (m *TriggerFireMutation) ResetNotBefore() {
+	m.not_before = nil
+	delete(m.clearedFields, triggerfire.FieldNotBefore)
+}
+
 // SetStartedAt sets the "started_at" field.
 func (m *TriggerFireMutation) SetStartedAt(t time.Time) {
 	m.started_at = &t
@@ -121021,7 +121158,7 @@ func (m *TriggerFireMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerFireMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 26)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, triggerfire.FieldInitiatorPrincipalKind)
 	}
@@ -121088,6 +121225,9 @@ func (m *TriggerFireMutation) Fields() []string {
 	if m.lease_until != nil {
 		fields = append(fields, triggerfire.FieldLeaseUntil)
 	}
+	if m.not_before != nil {
+		fields = append(fields, triggerfire.FieldNotBefore)
+	}
 	if m.started_at != nil {
 		fields = append(fields, triggerfire.FieldStartedAt)
 	}
@@ -121149,6 +121289,8 @@ func (m *TriggerFireMutation) Field(name string) (ent.Value, bool) {
 		return m.ExecutorID()
 	case triggerfire.FieldLeaseUntil:
 		return m.LeaseUntil()
+	case triggerfire.FieldNotBefore:
+		return m.NotBefore()
 	case triggerfire.FieldStartedAt:
 		return m.StartedAt()
 	case triggerfire.FieldFinishedAt:
@@ -121208,6 +121350,8 @@ func (m *TriggerFireMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldExecutorID(ctx)
 	case triggerfire.FieldLeaseUntil:
 		return m.OldLeaseUntil(ctx)
+	case triggerfire.FieldNotBefore:
+		return m.OldNotBefore(ctx)
 	case triggerfire.FieldStartedAt:
 		return m.OldStartedAt(ctx)
 	case triggerfire.FieldFinishedAt:
@@ -121377,6 +121521,13 @@ func (m *TriggerFireMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLeaseUntil(v)
 		return nil
+	case triggerfire.FieldNotBefore:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotBefore(v)
+		return nil
 	case triggerfire.FieldStartedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -121494,6 +121645,9 @@ func (m *TriggerFireMutation) ClearedFields() []string {
 	if m.FieldCleared(triggerfire.FieldTargetAgentID) {
 		fields = append(fields, triggerfire.FieldTargetAgentID)
 	}
+	if m.FieldCleared(triggerfire.FieldNotBefore) {
+		fields = append(fields, triggerfire.FieldNotBefore)
+	}
 	if m.FieldCleared(triggerfire.FieldFinishedAt) {
 		fields = append(fields, triggerfire.FieldFinishedAt)
 	}
@@ -121549,6 +121703,9 @@ func (m *TriggerFireMutation) ClearField(name string) error {
 		return nil
 	case triggerfire.FieldTargetAgentID:
 		m.ClearTargetAgentID()
+		return nil
+	case triggerfire.FieldNotBefore:
+		m.ClearNotBefore()
 		return nil
 	case triggerfire.FieldFinishedAt:
 		m.ClearFinishedAt()
@@ -121626,6 +121783,9 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 		return nil
 	case triggerfire.FieldLeaseUntil:
 		m.ResetLeaseUntil()
+		return nil
+	case triggerfire.FieldNotBefore:
+		m.ResetNotBefore()
 		return nil
 	case triggerfire.FieldStartedAt:
 		m.ResetStartedAt()
