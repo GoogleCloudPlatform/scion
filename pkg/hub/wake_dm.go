@@ -167,6 +167,18 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		if err := s.checkPinnedPlacement(agent); err != nil {
 			return nil, runtimeTargetDMError(err)
 		}
+		// Admin-managed broker policy pre-check (ptone/scion#7829 §4.3.D):
+		// refused wake leaves the agent suspended with a non-retryable 403.
+		if err := s.checkBrokerPolicyForStart(ctx, agent); err != nil {
+			if dmErr := brokerPolicyDMError(ctx, err); dmErr != nil {
+				return nil, dmErr
+			}
+			return nil, &AgentDMError{
+				Code:       ErrCodeInternalError,
+				Message:    "Failed to wake agent: " + err.Error(),
+				HTTPStatus: http.StatusInternalServerError,
+			}
+		}
 
 		// Resume the suspended agent (continue=true restores its prior
 		// session) under a start claim of kind wake, which records run
@@ -323,6 +335,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			return nil
 		}})
 		if err != nil {
+			if dmErr := brokerPolicyDMError(launchCtx, err); dmErr != nil {
+				return nil, dmErr
+			}
 			var quotaErr *startQuotaError
 			if errors.As(err, &quotaErr) {
 				var conflict *ReservationScopeConflictError

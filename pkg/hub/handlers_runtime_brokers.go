@@ -788,6 +788,10 @@ func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseW
 		writeErrorFromErr(w, err, "")
 		return false
 	}
+	if s.brokerPolicyRefuses(broker) {
+		writeBrokerPolicyDenialCtx(ctx, w, nil, brokerPolicyOpDispatch, broker, "", nil)
+		return false
+	}
 	if !s.canUseBrokerForProject(ctx, broker, project) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to create agents on this broker", nil)

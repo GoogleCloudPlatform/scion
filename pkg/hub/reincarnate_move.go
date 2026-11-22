@@ -150,6 +150,9 @@ type moveRefusal struct {
 	Status  int
 	Code    string
 	Message string
+	// Details holds additional error details merged into the response alongside
+	// the move verdict (e.g., broker policy setting/operation/brokerId).
+	Details map[string]interface{}
 	// ForceWouldApply is set on a refusal without --force that only the
 	// workspace placement caused (same_export, workspace_on_export, or the
 	// placementCaused target_profile refusal), for an agent whose
@@ -170,6 +173,9 @@ type moveRefusal struct {
 type moveProbes struct {
 	// Reachable reports whether a broker looks reachable now.
 	Reachable func(b *store.RuntimeBroker) bool
+	// PolicyRefused reports whether broker_policy.admin_managed_only refuses
+	// moving an agent onto dst. Nil means no policy refusal.
+	PolicyRefused func(dst *store.RuntimeBroker) bool
 	// CanDispatch reports whether the caller may dispatch agents to dst.
 	CanDispatch func(dst *store.RuntimeBroker) bool
 	// CanUseAsProvider reports whether dst already serves the agent's
@@ -490,11 +496,23 @@ func evaluateMoveChecks(in moveEligibilityInput, recreate bool) (MoveVerdict, *m
 			return fail(http.StatusForbidden, ErrCodeForbidden,
 				"this agent cannot move itself; ask a user to move you")
 		}
+		if in.Probes.PolicyRefused != nil && in.Probes.PolicyRefused(dst) {
+			msg := brokerPolicyMessage(brokerPolicyOpMove, dst, "")
+			v, ref := fail(http.StatusForbidden, ErrCodeBrokerPolicyAdminManagedOnly, msg)
+			ref.Details = brokerPolicyDetails(brokerPolicyOpMove, dst)
+			return v, ref
+		}
 		if !in.Probes.ServesProject(dst) {
 			return fail(http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
 				"target broker %s does not serve this project; an agent can only move itself to a broker that already serves its project", dstName))
 		}
 	} else {
+		if in.Probes.PolicyRefused != nil && in.Probes.PolicyRefused(dst) {
+			msg := brokerPolicyMessage(brokerPolicyOpMove, dst, "")
+			v, ref := fail(http.StatusForbidden, ErrCodeBrokerPolicyAdminManagedOnly, msg)
+			ref.Details = brokerPolicyDetails(brokerPolicyOpMove, dst)
+			return v, ref
+		}
 		if !in.Probes.CanDispatch(dst) {
 			return fail(http.StatusForbidden, ErrCodeForbidden,
 				fmt.Sprintf("you don't have permission to run agents on broker %s", dstName))
@@ -799,6 +817,9 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 		// The loaded record decides; unlike brokerReachable this never fails
 		// open, because a move refused here leaves the agent untouched.
 		Reachable: func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
+		PolicyRefused: func(dst *store.RuntimeBroker) bool {
+			return s.brokerPolicyRefuses(dst)
+		},
 		CanDispatch: func(dst *store.RuntimeBroker) bool {
 			return s.canDispatchToBroker(ctx, dst)
 		},
@@ -884,6 +905,9 @@ func (s *Server) hostSARecordMoveProbe(ctx context.Context, ac *store.AgentAppli
 // error.details.verdict.
 func writeMoveRefusal(w http.ResponseWriter, ref *moveRefusal, v MoveVerdict) {
 	details := map[string]interface{}{"verdict": v}
+	for k, val := range ref.Details {
+		details[k] = val
+	}
 	if ref.ForceWouldApply {
 		details["forceWouldApply"] = true
 	}

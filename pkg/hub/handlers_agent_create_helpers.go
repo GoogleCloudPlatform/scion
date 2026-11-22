@@ -1698,6 +1698,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
+				return existingAgentErrored
+			}
 			if writeAgentTokenRecordError(w, err) {
 				return existingAgentErrored
 			}
@@ -1864,6 +1867,9 @@ func (s *Server) handleExistingAgent(
 			if err := s.startAgentCore(ctx, existingAgent, StartOpts{Kind: store.StartClaimUser, Task: req.Task, Resume: forcedRecovery, AfterStart: afterStart, SyncDispatchBound: true,
 				AcceptAsyncLaunch: req.AcceptAsyncLaunch, OnLaunchAccepted: func(context.Context, *store.Agent) { launchAccepted = true }}); answered || err != nil {
 				if answered {
+					return existingAgentErrored
+				}
+				if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
 					return existingAgentErrored
 				}
 				if writeAgentTokenRecordError(w, err) {
@@ -2143,6 +2149,9 @@ func (s *Server) handleExistingAgent(
 			if answered {
 				return existingAgentErrored
 			}
+			if writeBrokerPolicyErrorCtx(ctx, w, nil, err) {
+				return existingAgentErrored
+			}
 			if writeAgentTokenRecordError(w, err) {
 				return existingAgentErrored
 			}
@@ -2378,6 +2387,10 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			// canDispatchToBroker. The difference admits no additional
 			// caller.
 			if broker.IsFlat() {
+				if s.brokerPolicyRefuses(broker) {
+					writeBrokerPolicyDenialCtx(ctx, w, nil, brokerPolicyOpDispatch, broker, "", nil)
+					return "", store.ErrNotFound
+				}
 				if !s.canDispatchToBroker(ctx, broker) {
 					writeBrokerDispatchForbidden(w)
 					return "", store.ErrNotFound
@@ -2468,7 +2481,11 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	// Cases 2-4: no explicit broker. selectProjectRuntimeBroker is shared
 	// with scheduled dispatch (ptone/scion#7868), so both paths pick the same
 	// broker.
-	brokerID, refusal := s.selectProjectRuntimeBroker(ctx, project, allProviders, availableBrokers)
+	brokerID, refusal, policyErr := s.selectProjectRuntimeBrokerInternal(ctx, project, allProviders, availableBrokers)
+	if policyErr != nil {
+		writeBrokerPolicyErrorCtx(ctx, w, nil, policyErr)
+		return "", store.ErrNotFound
+	}
 	if refusal != "" {
 		NoRuntimeBroker(w, refusal, usableBrokers())
 		return "", store.ErrNotFound
@@ -2493,6 +2510,21 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 // subset returned by getAvailableBrokersForProject. On refusal it returns ""
 // and a non-empty message for the caller to report.
 func (s *Server) selectProjectRuntimeBroker(ctx context.Context, project *store.Project, allProviders []store.ProjectProvider, availableBrokers []store.RuntimeBroker) (brokerID, refusal string) {
+	brokerID, refusal, _ = s.selectProjectRuntimeBrokerInternal(ctx, project, allProviders, availableBrokers)
+	return brokerID, refusal
+}
+
+func selectionBrokerPolicyError(b *store.RuntimeBroker) *brokerPolicyError {
+	remedy := "0 eligible brokers available. " + brokerPolicyRemedy(brokerPolicyOpDispatch, b)
+	return &brokerPolicyError{
+		Operation:    brokerPolicyOpDispatch,
+		Broker:       b,
+		Remedy:       remedy,
+		ExtraDetails: map[string]interface{}{"eligibleBrokers": 0},
+	}
+}
+
+func (s *Server) selectProjectRuntimeBrokerInternal(ctx context.Context, project *store.Project, allProviders []store.ProjectProvider, availableBrokers []store.RuntimeBroker) (brokerID, refusal string, policyErr *brokerPolicyError) {
 	// anyUsable reports whether an online provider passes
 	// canUseBrokerForProject. Computed only on refusal paths: it costs a
 	// dispatch check per online provider.
@@ -2508,20 +2540,27 @@ func (s *Server) selectProjectRuntimeBroker(ctx context.Context, project *store.
 	// Case 1: Use project's default runtime broker (must be online and dispatchable)
 	if project.DefaultRuntimeBrokerID != "" {
 		// Check if the default broker is still available
-		for _, h := range availableBrokers {
-			if h.ID == project.DefaultRuntimeBrokerID {
+		var defaultBroker *store.RuntimeBroker
+		for i := range availableBrokers {
+			if availableBrokers[i].ID == project.DefaultRuntimeBrokerID {
+				h := availableBrokers[i]
 				if s.canUseBrokerForProject(ctx, &h, project) {
-					return project.DefaultRuntimeBrokerID, ""
+					return project.DefaultRuntimeBrokerID, "", nil
 				}
+				defaultBroker = &h
 				// Default broker exists but user can't dispatch to it — fall through
 				break
 			}
 		}
 		// Default broker is not available or not dispatchable
 		if anyUsable() {
-			return "", "Default runtime broker is unavailable; specify an alternative"
+			return "", "Default runtime broker is unavailable; specify an alternative", nil
 		}
-		return "", "Default runtime broker is unavailable and no alternatives found"
+		if defaultBroker != nil && s.brokerRejectedOnlyByPolicy(ctx, defaultBroker, project) {
+			pe := selectionBrokerPolicyError(defaultBroker)
+			return "", pe.Error(), pe
+		}
+		return "", "Default runtime broker is unavailable and no alternatives found", nil
 	}
 
 	// Case 2: Hub-level default broker (from hub operational agent_defaults).
@@ -2533,7 +2572,7 @@ func (s *Server) selectProjectRuntimeBroker(ctx context.Context, project *store.
 				if s.canUseBrokerForProject(ctx, &h, project) {
 					slog.Info("Using hub-level default runtime broker",
 						"broker", h.Name, "brokerID", h.ID, "project_id", project.ID)
-					return h.ID, ""
+					return h.ID, "", nil
 				}
 				break
 			}
@@ -2550,12 +2589,16 @@ func (s *Server) selectProjectRuntimeBroker(ctx context.Context, project *store.
 		broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
 		present := brokerErr == nil && s.brokerPresence(ctx, broker).Connected
 		if present && s.canUseBrokerForProject(ctx, broker, project) {
-			return allProviders[0].BrokerID, ""
+			return allProviders[0].BrokerID, "", nil
 		}
 		if present {
-			return "", "No runtime brokers available for this project that you have permission to use"
+			if s.brokerRejectedOnlyByPolicy(ctx, broker, project) {
+				pe := selectionBrokerPolicyError(broker)
+				return "", pe.Error(), pe
+			}
+			return "", "No runtime brokers available for this project that you have permission to use", nil
 		}
-		return "", "This project's only runtime broker is offline"
+		return "", "This project's only runtime broker is offline", nil
 	}
 
 	// Case 4: Multiple providers - filter to dispatchable brokers, then require selection
@@ -2569,17 +2612,34 @@ func (s *Server) selectProjectRuntimeBroker(ctx context.Context, project *store.
 	switch len(dispatchable) {
 	case 0:
 		if len(availableBrokers) > 0 {
-			// Online brokers exist, but none the caller may use.
-			return "", "No runtime brokers available for this project that you have permission to use"
+			// Online brokers exist, but none the caller may use. When every
+			// online candidate was rejected only by broker_policy.admin_managed_only
+			// (design §4.3.C), surface the policy refusal with eligible count (0)
+			// and remedy. Mixed cases keep the generic permission message.
+			var policyRejected []store.RuntimeBroker
+			for i := range availableBrokers {
+				if s.brokerRejectedOnlyByPolicy(ctx, &availableBrokers[i], project) {
+					policyRejected = append(policyRejected, availableBrokers[i])
+				}
+			}
+			if len(policyRejected) == len(availableBrokers) {
+				var single *store.RuntimeBroker
+				if len(policyRejected) == 1 {
+					single = &policyRejected[0]
+				}
+				pe := selectionBrokerPolicyError(single)
+				return "", pe.Error(), pe
+			}
+			return "", "No runtime brokers available for this project that you have permission to use", nil
 		} else if len(allProviders) == 0 {
-			return "", "No runtime brokers available for this project; register a runtime broker first"
+			return "", "No runtime brokers available for this project; register a runtime broker first", nil
 		}
-		return "", "None of this project's runtime brokers are online"
+		return "", "None of this project's runtime brokers are online", nil
 	case 1:
-		return dispatchable[0].ID, ""
+		return dispatchable[0].ID, "", nil
 	default:
 		// Multiple dispatchable brokers - require explicit selection
-		return "", "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one"
+		return "", "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", nil
 	}
 }
 
@@ -2635,17 +2695,22 @@ func (s *Server) canDispatchToBroker(ctx context.Context, broker *store.RuntimeB
 // image on broker (the harness-config image operations with broker_id). It
 // writes no HTTP response.
 //
-// Dispatch authority is checked first: a user or dev caller holding
-// broker.dispatch on the broker passes. A user or dev caller whose
-// credential is not an interactive session or dev credential
-// (sessionCredentialAllowed) is then refused, so the broker's auto-provide
-// setting never admits a user access token or any other non-session
-// credential. Every other caller is decided by canDispatchToBroker, the
-// shared-broker rule agent creation uses. Agent creation itself keeps
-// canUseBrokerForProject.
+// When broker_policy.admin_managed_only is active, non-managed brokers are
+// refused first (before the broker.dispatch arm, with no super-admin
+// exemption; design ptone/scion#7829 §4.3.C). Dispatch authority is checked
+// next: a user or dev caller holding broker.dispatch on the broker passes. A
+// user or dev caller whose credential is not an interactive session or dev
+// credential (sessionCredentialAllowed) is then refused, so the broker's
+// auto-provide setting never admits a user access token or any other
+// non-session credential. Every other caller is decided by
+// canDispatchToBroker, the shared-broker rule agent creation uses. Agent
+// creation itself keeps canUseBrokerForProject.
 func (s *Server) canRunBrokerImageOps(ctx context.Context, broker *store.RuntimeBroker) bool {
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) || broker == nil {
+		return false
+	}
+	if s.brokerPolicyRefuses(broker) {
 		return false
 	}
 	if user, ok := identity.(UserIdentity); ok && (identity.Type() == "user" || identity.Type() == "dev") {
@@ -2684,13 +2749,41 @@ func (s *Server) canUseBrokerForProject(ctx context.Context, broker *store.Runti
 	})
 }
 
+// brokerRejectedOnlyByPolicy reports whether broker is refused by
+// broker_policy.admin_managed_only and would otherwise be usable by the caller
+// in ctx for project.
+func (s *Server) brokerRejectedOnlyByPolicy(ctx context.Context, broker *store.RuntimeBroker, project *store.Project) bool {
+	if broker == nil || !s.brokerPolicyRefuses(broker) {
+		return false
+	}
+	if hasRuntimeTargetDescriptor(broker) {
+		return s.brokerDispatchAllowedWithoutPolicy(ctx, broker, func(user UserIdentity) bool {
+			return s.userHoldsBrokerDispatch(ctx, user, broker)
+		})
+	}
+	return s.brokerDispatchAllowedWithoutPolicy(ctx, broker, func(user UserIdentity) bool {
+		if project != nil && s.brokerProviderHasOwnerConsent(ctx, broker, project.ID) {
+			return true
+		}
+		return s.userHoldsBrokerDispatch(ctx, user, broker)
+	})
+}
+
 // brokerDispatchAllowed is the single identity switch behind
 // canDispatchToBroker and canUseBrokerForProject. An unauthenticated caller
-// is denied; an auto-provide broker is allowed for every authenticated
-// caller; a user or dev caller is decided by userAllowed; an agent caller
-// needs ScopeAgentCreate and a broker that serves its own project; every
-// other identity type is denied.
+// is denied; when broker_policy.admin_managed_only is active, non-managed
+// brokers are refused before the AutoProvide arm (no super-admin exemption);
+// an auto-provide broker is allowed for every authenticated caller; a user or
+// dev caller is decided by userAllowed; an agent caller needs ScopeAgentCreate
+// and a broker that serves its own project; every other identity type is denied.
 func (s *Server) brokerDispatchAllowed(ctx context.Context, broker *store.RuntimeBroker, userAllowed func(UserIdentity) bool) bool {
+	if broker != nil && s.brokerPolicyRefuses(broker) {
+		return false
+	}
+	return s.brokerDispatchAllowedWithoutPolicy(ctx, broker, userAllowed)
+}
+
+func (s *Server) brokerDispatchAllowedWithoutPolicy(ctx context.Context, broker *store.RuntimeBroker, userAllowed func(UserIdentity) bool) bool {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil || broker == nil {
 		// Unauthenticated. Note this branch is inverted from allow to deny, not

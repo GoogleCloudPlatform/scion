@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -29,7 +31,9 @@ const (
 	brokerPolicyOpRegister     = "register"
 	brokerPolicyOpReregister   = "reregister"
 	brokerPolicyOpAttach       = "attach"
+	brokerPolicyOpDispatch     = "dispatch"
 	brokerPolicyOpMove         = "move"
+	brokerPolicyOpStart        = "start"
 	brokerPolicyRegisterRemedy = "Ask a hub administrator to register the broker with --admin-managed."
 	brokerPolicyUATRemedy      = "Sign in as a hub administrator and run 'scion runtime-broker register --admin-managed', or mint a join token with 'scion hub broker join-token --admin-managed' from a signed-in machine and run '/brokers/join' on the host."
 	brokerPolicyEmbeddedRemedy = "Use 'scion runtime-broker register --admin-managed' from a signed-in hub administrator account."
@@ -112,6 +116,17 @@ func brokerPolicyMessage(op string, b *store.RuntimeBroker, remedy string) strin
 		op, brokerPolicySettingKey, remedy)
 }
 
+func brokerPolicyDetails(op string, b *store.RuntimeBroker) map[string]interface{} {
+	details := map[string]interface{}{
+		"setting":   brokerPolicySettingKey,
+		"operation": op,
+	}
+	if b != nil && b.ID != "" {
+		details["brokerId"] = b.ID
+	}
+	return details
+}
+
 // writeBrokerPolicyDenial logs and writes the structured 403 refusal for a
 // broker policy denial (design ptone/scion#7829 §4.4).
 func writeBrokerPolicyDenial(w http.ResponseWriter, r *http.Request, op string, b *store.RuntimeBroker) {
@@ -127,21 +142,130 @@ func writeBrokerPolicyDenialWithRemedy(w http.ResponseWriter, r *http.Request, o
 // hand (such as agent-create auto-link), in which case identity is still logged
 // via logAuthzDenial with reason broker_policy.
 func writeBrokerPolicyDenialForIdentity(w http.ResponseWriter, r *http.Request, identity Identity, op string, b *store.RuntimeBroker, remedy string) {
-	details := map[string]interface{}{
-		"setting":   brokerPolicySettingKey,
-		"operation": op,
+	writeBrokerPolicyDenialFull(w, r, identity, op, b, remedy, nil)
+}
+
+func writeBrokerPolicyDenialCtx(ctx context.Context, w http.ResponseWriter, r *http.Request, op string, b *store.RuntimeBroker, remedy string, extraDetails map[string]interface{}) {
+	var identity Identity
+	if r != nil {
+		identity = GetIdentityFromContext(r.Context())
+	} else if ctx != nil {
+		identity = GetIdentityFromContext(ctx)
+	}
+	writeBrokerPolicyDenialFull(w, r, identity, op, b, remedy, extraDetails)
+}
+
+func writeBrokerPolicyDenialFull(w http.ResponseWriter, r *http.Request, identity Identity, op string, b *store.RuntimeBroker, remedy string, extraDetails map[string]interface{}) {
+	details := brokerPolicyDetails(op, b)
+	for k, v := range extraDetails {
+		details[k] = v
 	}
 	res := Resource{Type: "broker"}
 	if b != nil && b.ID != "" {
-		details["brokerId"] = b.ID
 		res = brokerResource(b)
 	}
 	if identity == nil && r != nil {
 		identity = GetIdentityFromContext(r.Context())
 	}
 	logAuthzDenial(r, identity, res, Action(op), brokerPolicyDenialReason)
-	msg := brokerPolicyMessage(op, b, remedy)
-	writeError(w, http.StatusForbidden, ErrCodeBrokerPolicyAdminManagedOnly, msg, details)
+	writeError(w, http.StatusForbidden, ErrCodeBrokerPolicyAdminManagedOnly,
+		brokerPolicyMessage(op, b, remedy), details)
+}
+
+// brokerPolicyError is a typed error returned by internal enforcement
+// chokepoints (such as startAgentCore and selectProjectRuntimeBroker) when
+// broker_policy.admin_managed_only refuses an operation (ptone/scion#7829).
+type brokerPolicyError struct {
+	Operation    string
+	Broker       *store.RuntimeBroker
+	Remedy       string
+	ExtraDetails map[string]interface{}
+}
+
+func (e *brokerPolicyError) Error() string {
+	return brokerPolicyMessage(e.Operation, e.Broker, e.Remedy)
+}
+
+func (e *brokerPolicyError) Details() map[string]interface{} {
+	d := brokerPolicyDetails(e.Operation, e.Broker)
+	for k, v := range e.ExtraDetails {
+		d[k] = v
+	}
+	return d
+}
+
+// writeBrokerPolicyError writes the §4.4 403 response if err wraps a
+// *brokerPolicyError and reports whether it handled the error.
+func writeBrokerPolicyError(w http.ResponseWriter, r *http.Request, err error) bool {
+	var ctx context.Context
+	if r != nil {
+		ctx = r.Context()
+	}
+	return writeBrokerPolicyErrorCtx(ctx, w, r, err)
+}
+
+func writeBrokerPolicyErrorCtx(ctx context.Context, w http.ResponseWriter, r *http.Request, err error) bool {
+	var bpe *brokerPolicyError
+	if !errors.As(err, &bpe) {
+		return false
+	}
+	writeBrokerPolicyDenialCtx(ctx, w, r, bpe.Operation, bpe.Broker, bpe.Remedy, bpe.ExtraDetails)
+	return true
+}
+
+// logBrokerPolicyDenial logs a non-HTTP broker policy refusal (such as message
+// wake or scheduled dispatch) with reason broker_policy (design ptone/scion#7829 §4.7.7).
+func logBrokerPolicyDenial(ctx context.Context, op string, b *store.RuntimeBroker) {
+	res := Resource{Type: "broker"}
+	if b != nil && b.ID != "" {
+		res = brokerResource(b)
+	}
+	var identity Identity
+	if ctx != nil {
+		identity = GetIdentityFromContext(ctx)
+	}
+	logAuthzDenial(nil, identity, res, Action(op), brokerPolicyDenialReason)
+}
+
+// brokerPolicyDMError maps a *brokerPolicyError to a non-retryable 403
+// AgentDMError for the message wake path (ptone/scion#7829 §4.3.D) and logs
+// the policy denial (§4.7.7).
+func brokerPolicyDMError(ctx context.Context, err error) *AgentDMError {
+	var bpe *brokerPolicyError
+	if !errors.As(err, &bpe) {
+		return nil
+	}
+	logBrokerPolicyDenial(ctx, bpe.Operation, bpe.Broker)
+	return &AgentDMError{
+		Code:       ErrCodeBrokerPolicyAdminManagedOnly,
+		Message:    bpe.Error(),
+		HTTPStatus: http.StatusForbidden,
+		Details:    bpe.Details(),
+	}
+}
+
+// checkBrokerPolicyForStart enforces broker_policy.admin_managed_only before
+// starting, resuming, restarting, or waking an existing agent
+// (ptone/scion#7829 §4.3.D). A missing broker row or empty RuntimeBrokerID
+// keeps today's behavior; any other store lookup error fails closed (§4.7.5).
+func (s *Server) checkBrokerPolicyForStart(ctx context.Context, agent *store.Agent) error {
+	if agent == nil || agent.RuntimeBrokerID == "" || !s.adminManagedBrokersOnly() {
+		return nil
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to load runtime broker %q for policy check: %w", agent.RuntimeBrokerID, err)
+	}
+	if s.brokerPolicyRefuses(broker) {
+		return &brokerPolicyError{
+			Operation: brokerPolicyOpStart,
+			Broker:    broker,
+		}
+	}
+	return nil
 }
 
 // authorizeBrokerRegistrationPolicy enforces the admin-managed broker policy

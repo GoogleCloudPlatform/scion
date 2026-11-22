@@ -1835,6 +1835,10 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 			return
 		}
 		if !s.canRunBrokerImageOps(ctx, broker) {
+			if s.brokerPolicyRefuses(broker) {
+				writeBrokerPolicyDenial(w, r, brokerPolicyOpDispatch, broker)
+				return
+			}
 			writeError(w, http.StatusForbidden, "forbidden", "You do not have permission to perform image operations on this broker", nil)
 			return
 		}
@@ -1905,6 +1909,10 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if !s.canRunBrokerImageOps(ctx, broker) {
+			if s.brokerPolicyRefuses(broker) {
+				writeBrokerPolicyDenial(w, r, brokerPolicyOpDispatch, broker)
+				return
+			}
 			writeError(w, http.StatusForbidden, "forbidden", "You do not have permission to perform image operations on this broker", nil)
 			return
 		}

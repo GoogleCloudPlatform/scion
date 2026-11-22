@@ -131,6 +131,7 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		GitRemote:          project.GitRemote,
 		Probes: moveProbes{
 			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
+			PolicyRefused:    func(b *store.RuntimeBroker) bool { return s.brokerPolicyRefuses(b) },
 			CanDispatch:      allowed,
 			CanUseAsProvider: allowed,
 			ServesProject: func(b *store.RuntimeBroker) bool {

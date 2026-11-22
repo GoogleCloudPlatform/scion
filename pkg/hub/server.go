@@ -6907,7 +6907,11 @@ func (s *Server) resolveScheduledRuntimeBroker(ctx context.Context, project *sto
 	if err != nil {
 		return "", fmt.Errorf("failed to list available runtime brokers for project %q: %w", project.ID, err)
 	}
-	brokerID, refusal := s.selectProjectRuntimeBroker(ctx, project, allProviders, availableBrokers)
+	brokerID, refusal, policyErr := s.selectProjectRuntimeBrokerInternal(ctx, project, allProviders, availableBrokers)
+	if policyErr != nil {
+		logBrokerPolicyDenial(ctx, policyErr.Operation, policyErr.Broker)
+		return "", errors.New(policyErr.Error())
+	}
 	if refusal != "" {
 		return "", fmt.Errorf("%s; %s", refusal, scheduledBrokerRemedy(project, len(allProviders)))
 	}
