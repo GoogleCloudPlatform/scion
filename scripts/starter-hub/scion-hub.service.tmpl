@@ -7,6 +7,7 @@
 ##    whitespace. Inline anything else as literal text.
 ##  - If you change Description=, append the old value to
 ##    knownStarterHubDescriptions in pkg/hub/unitdrift.
+##  - Invariant: the hub unit runs as User=scion and must never run as root.
 [Unit]
 Description=Scion Hub API Server
 After=network.target
