@@ -276,9 +276,10 @@ type ListBrokersResponse struct {
 
 // UpdateBrokerRequest is the request for updating a runtime broker.
 type UpdateBrokerRequest struct {
-	Name        string            `json:"name,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty"`
-	Annotations map[string]string `json:"annotations,omitempty"`
+	Name         string            `json:"name,omitempty"`
+	Labels       map[string]string `json:"labels,omitempty"`
+	Annotations  map[string]string `json:"annotations,omitempty"`
+	AdminManaged *bool             `json:"adminManaged,omitempty"`
 }
 
 // ListBrokerProjectsResponse is the response from listing broker projects.
