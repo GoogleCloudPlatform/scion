@@ -555,8 +555,8 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/conduit": {
 		Pattern: "/api/v1/conduit", RouteID: "conduit.session",
 		Classification:      RouteAgentToken,
-		AgentStanding:       AgentStandingExempt,
-		AgentStandingReason: "WebSocket session endpoint (agent, broker, user); issues no credentials or tokens",
+		AgentStanding:       AgentStandingHandler,
+		AgentStandingReason: "handler checks scope and agent row before calling agentStandingForbidden in decideConduitAgent, and re-checks standing on in-band AuthRefresh",
 	},
 
 	// -------------------------------------------------------------------------

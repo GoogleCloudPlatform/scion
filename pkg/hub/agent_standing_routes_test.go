@@ -19,6 +19,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -32,12 +33,15 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -260,6 +264,16 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/agent/identity-token" },
 			body:   func(*standingCoverageFixture) any { return map[string]string{"audience": "https://api.example.com"} },
+			wantDen: func(t *testing.T, rec *httptest.ResponseRecorder, label string) {
+				assertForbidden(t, rec, label)
+				assert.Contains(t, rec.Body.String(), "Insufficient permissions", label)
+			},
+		},
+		{
+			key:    "GET /api/v1/conduit",
+			method: http.MethodGet,
+			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/conduit" },
+			body:   func(*standingCoverageFixture) any { return nil },
 			wantDen: func(t *testing.T, rec *httptest.ResponseRecorder, label string) {
 				assertForbidden(t, rec, label)
 				assert.Contains(t, rec.Body.String(), "Insufficient permissions", label)
@@ -522,7 +536,6 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 	exemptAgentTokenRoutes := map[string]string{
 		"/api/v1/agent/decisions":  "reads and records agent decisions; issues no credentials, tokens, or secrets",
 		"/api/v1/agent/decisions/": "reads and records agent decisions; issues no credentials, tokens, or secrets",
-		"/api/v1/conduit":          "WebSocket session endpoint (agent, broker, user); issues no credentials or tokens",
 	}
 
 	// Explicit pre-authentication public credential routes (ExemptionPublicEndpoint).
@@ -806,7 +819,11 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 				seenExempt[pattern] = true
 			case AgentStandingGuard, AgentStandingHandler:
 				key := normalizeStandingRouteKey(pattern, http.MethodPost)
-				if !probeBaseKeys[key] {
+				matched := probeBaseKeys[key]
+				if !matched && !strings.Contains(pattern, " ") {
+					matched = probeBaseKeys[http.MethodGet+" "+pattern]
+				}
+				if !matched {
 					missing = append(missing, pattern+" (key "+key+" missing from behavioral standing probes)")
 				}
 			default:
@@ -917,7 +934,8 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			if e.Name == experiments.AgentDelegation ||
 				e.Name == experiments.Triggers ||
 				e.Name == experiments.Artifacts ||
-				e.Name == experiments.FederationProjectVisitors {
+				e.Name == experiments.FederationProjectVisitors ||
+				e.Name == conduitExperiment {
 				e.Default = true
 			}
 			active = append(active, e)
@@ -925,6 +943,22 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 		reg, err := experiments.NewRegistry(active, cur.Retired())
 		require.NoError(t, err)
 		srv.setExperimentRegistry(reg)
+
+		conduitSecret := make([]byte, 32)
+		_, err = rand.Read(conduitSecret)
+		require.NoError(t, err)
+		conduitPeerAuth, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: conduitSecret, SelfID: "standing-cov-" + name})
+		require.NoError(t, err)
+		require.NoError(t, srv.StartConduitRelay(context.Background(), ConduitRelayOptions{
+			InstanceID: "standing-cov-" + name,
+			PeerAuth:   conduitPeerAuth,
+			Store:      entadapter.NewConduitRegistryStore(enttest.NewClient(t)),
+		}))
+		t.Cleanup(func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			srv.shutdownConduitRelay(sctx)
+		})
 
 		f := newMSFixtureOn(t, name, srv, srv.store)
 		scopes := append(append([]AgentTokenScope{}, ScopesForRole(AgentRoleFull)...), ScopeIdentityToken)
@@ -1128,6 +1162,10 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 
 		viewRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/artifacts/"+f.artifactID+"/versions/1/view", nil, f.tokA)
 		require.Equal(t, http.StatusOK, viewRec.Code, "control: active agent must reach POST /api/v1/artifacts/{id}/versions/{seq}/view: %s", viewRec.Body.String())
+
+		conduitRec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/conduit", nil, f.tokA)
+		require.Equal(t, http.StatusBadRequest, conduitRec.Code, "control: active agent must pass standing check and reach WebSocket upgrade check on GET /api/v1/conduit: %s", conduitRec.Body.String())
+		assert.Contains(t, conduitRec.Body.String(), "WebSocket upgrade required")
 	}
 
 	// --- Behavioral Check 1: suspended root user (no AgentHold) refused on every route ---
