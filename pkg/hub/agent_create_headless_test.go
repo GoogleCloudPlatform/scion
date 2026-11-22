@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -2002,9 +2003,15 @@ func TestHeadlessCreate_HomeFilesPendingBlocksConcurrentStart(t *testing.T) {
 		_, gErr := f.store.GetAgent(ctx, createdID)
 		assert.ErrorIs(t, gErr, store.ErrNotFound, "pending orphan agent must be rolled back on ClaimHeldError")
 
-		// The bound subject claim must have been released so later events are not stuck busy.
+		// Because the orphan agent row was rolled back, Live() sees the missing
+		// agent and lazily releases the bound subject claim so later events are
+		// not stuck busy (preserving P1c-2's post-commit claim invariant).
+		claims := trigger.NewSubjectClaims(f.store, f.store, time.Now)
+		live, liveErr := claims.Live(ctx, trigID, "pr-held-1")
+		require.NoError(t, liveErr)
+		assert.Nil(t, live, "Live must see rolled-back agent is gone and release the claim")
 		_, claimErr := f.store.GetActiveTriggerSubjectClaim(ctx, trigID, "pr-held-1")
-		assert.ErrorIs(t, claimErr, store.ErrNotFound, "bound subject claim must be released on rollback")
+		assert.ErrorIs(t, claimErr, store.ErrNotFound, "bound subject claim must be lazily released after rollback")
 	})
 
 	t.Run("normal_create_without_event_file_unaffected", func(t *testing.T) {

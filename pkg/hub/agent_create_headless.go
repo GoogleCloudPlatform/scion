@@ -22,7 +22,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -681,12 +680,6 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		deleteWon := false
 		rb.DeleteWon = &deleteWon
 		corrID := s.cleanupFailedCreate(ctx, rb)
-		if !deleteWon && corrID == "" && s.store != nil {
-			if _, relErr := s.store.ReleaseTriggerSubjectClaimsForAgent(ctx, agent.ID, time.Now().UTC()); relErr != nil {
-				slog.Warn("Scheduler: failed to release trigger subject claims during create rollback",
-					"agent_id", agent.ID, "error", relErr)
-			}
-		}
 		if deleteWon && !errors.Is(rb.Cause, store.ErrDeleteInProgress) {
 			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
 		}
