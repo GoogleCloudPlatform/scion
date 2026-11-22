@@ -386,12 +386,14 @@ func TestMetricsDashboard_TelemetryHintWhenGCPBlockedWithoutCredentials(t *testi
 
 	t.Run("hides hint on Kubernetes-only hub when default metadata mode is empty", func(t *testing.T) {
 		srv := newServer(gcpTel, "", nil)
-		srv.store = &fakeTelemetryBrokerStore{
-			list: []store.RuntimeBroker{{
-				ID:       "broker-k8s",
-				Profiles: []store.BrokerProfile{{Name: "gke", Type: "kubernetes"}},
-			}},
-		}
+		installStoreFault(t, srv, func(_ store.Store, _ *storeFaultSwitch) *fakeTelemetryBrokerStore {
+			return &fakeTelemetryBrokerStore{
+				list: []store.RuntimeBroker{{
+					ID:       "broker-k8s",
+					Profiles: []store.BrokerProfile{{Name: "gke", Type: "kubernetes"}},
+				}},
+			}
+		})
 		rec := httptest.NewRecorder()
 		srv.serveMetricsDashboard(rec, httptest.NewRequest(http.MethodGet, "/api/v1/metrics/?view=summary&period=7", nil))
 		var got DashboardSummary
