@@ -112,9 +112,24 @@ type TriggerMatchPatchSpec struct {
 
 // TriggerSubjectPatchSpec holds partial updates to a trigger's subject block.
 type TriggerSubjectPatchSpec struct {
-	Dialect *string `json:"dialect,omitempty"`
-	Expr    *string `json:"expr,omitempty"`
-	Mode    *string `json:"mode,omitempty"`
+	Dialect        *string `json:"dialect,omitempty"`
+	Expr           *string `json:"expr,omitempty"`
+	Mode           *string `json:"mode,omitempty"`
+	CoalesceWindow *string `json:"coalesce_window,omitempty"`
+}
+
+// authorizeTriggerReuseSubject enforces Stage 3 §6.2: authoring a reuse trigger
+// requires wake authority (agent.lifecycle) in the author's ceiling, returning
+// HTTP 400 "reuse requires wake authority" when absent.
+func authorizeTriggerReuseSubject(w http.ResponseWriter, subjectMode string, ceiling store.EffectCeiling) bool {
+	if subjectMode != store.TriggerSubjectModeReuse {
+		return true
+	}
+	if !EffectCeilingAllows(ceiling, scheduledWakePermission, false) {
+		ValidationError(w, "reuse requires wake authority", nil)
+		return false
+	}
+	return true
 }
 
 // UpdateTriggerRequest is the request body for PATCH /triggers/{id}.
@@ -430,7 +445,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		}
 	}
 	explicitSubjectDialect := req.Subject != nil && strings.TrimSpace(req.Subject.Dialect) != ""
-	subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, req.Subject, explicitSubjectDialect)
+	subjectDialect, subjectRule, subjectMode, coalesceSeconds, ok := s.writeAndValidateTriggerSubject(w, ctx, req.Subject, explicitSubjectDialect)
 	if !ok {
 		return
 	}
@@ -456,6 +471,9 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
+	if !authorizeTriggerReuseSubject(w, subjectMode, ceiling) {
+		return
+	}
 
 	actionType := strings.TrimSpace(req.Action.Type)
 	var actionPayload string
@@ -476,24 +494,25 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	trigger := store.Trigger{
-		ID:                   api.NewUUID(),
-		ProjectID:            projectID,
-		Name:                 name,
-		Description:          req.Description,
-		SourceKind:           sourceKind,
-		SourceID:             resolvedSourceID,
-		MatchTypes:           matchTypes,
-		MatchRules:           matchRules,
-		MatchForm:            matchForm,
-		ActionType:           actionType,
-		ActionPayload:        actionPayload,
-		SubjectDialect:       subjectDialect,
-		SubjectRule:          subjectRule,
-		SubjectMode:          subjectMode,
-		Status:               store.TriggerStatusActive,
-		CreatedBy:            identity.ID(),
-		InitiatorAttribution: newInitiatorAttribution(ctx),
-		AuthorityCeiling:     ceiling,
+		ID:                    api.NewUUID(),
+		ProjectID:             projectID,
+		Name:                  name,
+		Description:           req.Description,
+		SourceKind:            sourceKind,
+		SourceID:              resolvedSourceID,
+		MatchTypes:            matchTypes,
+		MatchRules:            matchRules,
+		MatchForm:             matchForm,
+		ActionType:            actionType,
+		ActionPayload:         actionPayload,
+		SubjectDialect:        subjectDialect,
+		SubjectRule:           subjectRule,
+		SubjectMode:           subjectMode,
+		CoalesceWindowSeconds: coalesceSeconds,
+		Status:                store.TriggerStatusActive,
+		CreatedBy:             identity.ID(),
+		InitiatorAttribution:  newInitiatorAttribution(ctx),
+		AuthorityCeiling:      ceiling,
 	}
 
 	fp := fixturePrincipalFromContext(ctx)
@@ -855,9 +874,10 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 	if req.Subject != nil {
 		merged := TriggerSubjectSpec{
-			Dialect: tr.SubjectDialect,
-			Expr:    tr.SubjectRule,
-			Mode:    tr.SubjectMode,
+			Dialect:        tr.SubjectDialect,
+			Expr:           tr.SubjectRule,
+			Mode:           tr.SubjectMode,
+			CoalesceWindow: formatTriggerCoalesceWindow(tr.CoalesceWindowSeconds),
 		}
 		if req.Subject.Dialect != nil {
 			merged.Dialect = *req.Subject.Dialect
@@ -871,15 +891,20 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			merged.Mode = *req.Subject.Mode
 			fields.SubjectMode = true
 		}
+		if req.Subject.CoalesceWindow != nil {
+			merged.CoalesceWindow = *req.Subject.CoalesceWindow
+			fields.CoalesceWindowSeconds = true
+		}
 		explicitSubjectDialect := req.Subject.Dialect != nil && strings.TrimSpace(*req.Subject.Dialect) != ""
-		subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, &merged, explicitSubjectDialect)
+		subjectDialect, subjectRule, subjectMode, coalesceSeconds, ok := s.writeAndValidateTriggerSubject(w, ctx, &merged, explicitSubjectDialect)
 		if !ok {
 			return
 		}
 		tr.SubjectDialect = subjectDialect
 		tr.SubjectRule = subjectRule
 		tr.SubjectMode = subjectMode
-		if fields.SubjectDialect || fields.SubjectRule || fields.SubjectMode {
+		tr.CoalesceWindowSeconds = coalesceSeconds
+		if fields.SubjectDialect || fields.SubjectRule || fields.SubjectMode || fields.CoalesceWindowSeconds {
 			changesFutureDispatch = true
 		}
 	}
@@ -944,16 +969,20 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			}
 		}
 		if req.Subject == nil {
-			if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
-				Dialect: tr.SubjectDialect,
-				Expr:    tr.SubjectRule,
-				Mode:    tr.SubjectMode,
+			if _, _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
+				Dialect:        tr.SubjectDialect,
+				Expr:           tr.SubjectRule,
+				Mode:           tr.SubjectMode,
+				CoalesceWindow: formatTriggerCoalesceWindow(tr.CoalesceWindowSeconds),
 			}, false); !ok {
 				return
 			}
 		}
 		ceiling, prov, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 		if !ok {
+			return
+		}
+		if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling) {
 			return
 		}
 		if oldSourceKind != store.TriggerSourceKindGitHub &&
@@ -1141,15 +1170,19 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}, false, false); !ok {
 		return
 	}
-	if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
-		Dialect: tr.SubjectDialect,
-		Expr:    tr.SubjectRule,
-		Mode:    tr.SubjectMode,
+	if _, _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
+		Dialect:        tr.SubjectDialect,
+		Expr:           tr.SubjectRule,
+		Mode:           tr.SubjectMode,
+		CoalesceWindow: formatTriggerCoalesceWindow(tr.CoalesceWindowSeconds),
 	}, false); !ok {
 		return
 	}
 	ceiling, prov, ok := s.triggerRevisionAuthorityCeiling(w, r, projectID, ActionUpdate)
 	if !ok {
+		return
+	}
+	if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling) {
 		return
 	}
 	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)

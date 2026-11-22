@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -607,13 +608,34 @@ func (s *Server) writeAndValidateTriggerMatch(
 	return copiedTypes, normalized, true
 }
 
+func formatTriggerCoalesceWindow(seconds int) string {
+	if seconds <= 0 {
+		return ""
+	}
+	return (time.Duration(seconds) * time.Second).String()
+}
+
+func parseTriggerCoalesceWindow(raw string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "0" || s == "0s" {
+		return 0, nil
+	}
+	maxDur := time.Duration(store.MaxTriggerCoalesceWindowSeconds) * time.Second
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 || d > maxDur || d%time.Second != 0 {
+		return 0, errors.New("subject.coalesce_window must be a whole-second duration between 0s and 10m")
+	}
+	return int(d / time.Second), nil
+}
+
 // writeAndValidateTriggerSubject normalizes and compiles a trigger's subject
 // block at authoring time (create, PATCH, or resume). When explicitDialect is
 // true, an empty expr is refused as a malformed request.
-func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx context.Context, spec *TriggerSubjectSpec, explicitDialect bool) (string, string, string, bool) {
+func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx context.Context, spec *TriggerSubjectSpec, explicitDialect bool) (string, string, string, int, bool) {
 	dialect := ruleengine.DialectCEL
 	expr := ""
 	mode := store.TriggerSubjectModeNew
+	rawCoalesce := ""
 	if spec != nil {
 		if d := strings.TrimSpace(spec.Dialect); d != "" {
 			dialect = d
@@ -622,12 +644,19 @@ func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx conte
 		if m := strings.TrimSpace(spec.Mode); m != "" {
 			mode = m
 		}
+		rawCoalesce = spec.CoalesceWindow
 	}
 	switch mode {
-	case store.TriggerSubjectModeNew, store.TriggerSubjectModeSkip:
+	case store.TriggerSubjectModeNew, store.TriggerSubjectModeSkip, store.TriggerSubjectModeReuse:
 	default:
-		ValidationError(w, fmt.Sprintf("unsupported subject mode %q (supported: %s, %s)", mode, store.TriggerSubjectModeNew, store.TriggerSubjectModeSkip), nil)
-		return "", "", "", false
+		ValidationError(w, fmt.Sprintf("unsupported subject mode %q (supported: %s, %s, %s)",
+			mode, store.TriggerSubjectModeNew, store.TriggerSubjectModeSkip, store.TriggerSubjectModeReuse), nil)
+		return "", "", "", 0, false
+	}
+	coalesceSeconds, err := parseTriggerCoalesceWindow(rawCoalesce)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return "", "", "", 0, false
 	}
 	if err := validateTriggerDialectName(dialect); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, "invalid subject dialect: "+err.Error(), map[string]any{
@@ -637,21 +666,21 @@ func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx conte
 			"line":     1,
 			"column":   1,
 		})
-		return "", "", "", false
+		return "", "", "", 0, false
 	}
 	if err := validateTriggerRuleExpr("subject.expr", expr); err != nil {
 		ValidationError(w, err.Error(), nil)
-		return "", "", "", false
+		return "", "", "", 0, false
 	}
 	if err := s.compileTriggerSubjectRule(ctx, dialect, expr); err != nil {
 		writeTriggerRuleError(w, "subject", err)
-		return "", "", "", false
+		return "", "", "", 0, false
 	}
 	if explicitDialect && expr == "" {
 		ValidationError(w, "subject.dialect requires a non-empty subject.expr", nil)
-		return "", "", "", false
+		return "", "", "", 0, false
 	}
-	return dialect, expr, mode, true
+	return dialect, expr, mode, coalesceSeconds, true
 }
 
 // writeTriggerRuleError maps authoring-time rule compilation and dialect-admission

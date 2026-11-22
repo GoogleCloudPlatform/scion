@@ -142,9 +142,10 @@ func (f *triggerDispatchAgentFixture) drainOneTriggerEvent(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
-		Store: f.sched.store,
-		Core:  serverTriggerCore{srv: f.sched.srv},
-		Rules: f.sched.srv.TriggerRules(),
+		Store:         f.sched.store,
+		Core:          serverTriggerCore{srv: f.sched.srv},
+		SubjectClaims: trigger.NewSubjectClaims(f.sched.store, f.sched.store, nil),
+		Rules:         f.sched.srv.TriggerRules(),
 	})
 	require.NoError(t, err)
 
