@@ -218,6 +218,9 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
 		return "", err
 	}
+	if config.MetadataInterception {
+		checkImageNetnsSetupSupport(ctx, r.Command, config.Image)
+	}
 	// Rootless podman that starts its user namespace's pause process
 	// (catatonit -P) hands it its own environment, and the pause process
 	// outlives the run: the secret values would stay in its

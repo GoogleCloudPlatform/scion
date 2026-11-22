@@ -71,6 +71,7 @@ var launchCodeLabels = map[string]string{
 	api.BrokerErrCodeStorageMigrationRequired: "the agent's storage settings must be migrated first",
 	api.LaunchCodeImagePullFailed:             "the agent image could not be pulled",
 	api.LaunchCodeInvalidImage:                "the agent image reference is not valid",
+	api.LaunchCodeImageLacksNetnsSetup:        "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough",
 	api.LaunchCodeContainerConfig:             "the agent container could not be configured",
 	api.LaunchCodeCrashLoop:                   "the agent container keeps crashing on start",
 	api.LaunchCodeInitContainerFailed:         "an init container of the agent pod failed",

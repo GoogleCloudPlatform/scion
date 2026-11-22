@@ -108,6 +108,10 @@ const (
 	// LaunchCodeInvalidImage: the image reference is not valid
 	// (Kubernetes InvalidImageName, or a malformed Docker image reference).
 	LaunchCodeInvalidImage = "invalid_image"
+	// LaunchCodeImageLacksNetnsSetup: the agent image does not support the
+	// `sciontool netns-setup` sidecar required by the broker for
+	// runtime-managed metadata interception (broker/image version skew).
+	LaunchCodeImageLacksNetnsSetup = "image_lacks_netns_setup"
 	// LaunchCodeContainerConfig: the runtime refused the agent container's
 	// configuration, e.g. a missing secret or volume (Kubernetes
 	// CreateContainerConfigError), or CPU and memory limits outside what

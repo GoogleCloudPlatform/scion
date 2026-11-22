@@ -96,6 +96,10 @@ LABEL org.opencontainers.image.revision="${GIT_COMMIT}"
 # Inherited by the same images as the revision label.
 ARG VERSION
 LABEL org.opencontainers.image.version="${VERSION}"
+# Capabilities supported by the sciontool binary in this image. Brokers inspect
+# this label before running runtime-managed helpers such as `sciontool netns-setup`
+# so broker/image version skew fails with an actionable error before container start.
+LABEL scion.sciontool.capabilities="netns-setup"
 
 # Copy scion and sciontool from builder
 COPY --from=builder /usr/local/bin/scion /usr/local/bin/scion

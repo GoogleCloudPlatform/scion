@@ -883,12 +883,21 @@ func RunInit(args []string, opts InitRunOptions) int {
 	runtimeManagedInterception := metaCfg != nil &&
 		metaCfg.InterceptionRequired &&
 		metaCfg.InterceptionSource == metadata.InterceptionSourceRuntime
+	legacyInContainerInterception := metaCfg != nil &&
+		metaCfg.InterceptionRequired &&
+		metaCfg.InterceptionSource == ""
+	if legacyInContainerInterception {
+		log.Warn("Runtime-managed metadata interception marker (%s=%s) is absent; using legacy in-container setup (upgrade broker to a build that supports runtime-managed interception)",
+			metadata.InterceptionSourceEnvVar, metadata.InterceptionSourceRuntime)
+	}
 	var firewallInstalled bool
 	if !runtimeManagedInterception {
 		var fwErr error
 		firewallInstalled, fwErr = setupInitFirewall()
 		if fwErr != nil {
 			reportInitFailure(agentHome, fwErr)
+			removeTransportTokenOnRefusal()
+			stagedTokenCleanExit = true
 			return 1
 		}
 	}
@@ -969,6 +978,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 					stagedTokenCleanExit = true
 					return 1
 				}
+			} else if legacyInContainerInterception {
+				if err := runInstallInterceptionRules(metaCfg.Mode, metaCfg.Port); err != nil {
+					log.Error("Legacy in-container metadata interception setup failed (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
+					reportInitFailure(agentHome, errMetadataProtectionUnavailable)
+					removeTransportTokenOnRefusal()
+					stagedTokenCleanExit = true
+					return 1
+				}
 			}
 		}
 	}
@@ -976,11 +993,14 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Network setup is complete: drop CAP_NET_ADMIN if present before
 	// anything else starts (clone, pre-start hooks, services, the harness).
 	// The drop is required (fatal on failure) when init itself installed the
-	// opt-in firewall; otherwise it runs as best-effort hardening.
-	required := firewallInstalled
+	// opt-in firewall or legacy in-container metadata interception rules;
+	// otherwise it runs as best-effort hardening.
+	required := firewallInstalled || legacyInContainerInterception
 	if metadataServer != nil || firewallInstalled {
 		if err := dropNetAdmin(required); err != nil {
 			reportInitFailure(agentHome, err)
+			removeTransportTokenOnRefusal()
+			stagedTokenCleanExit = true
 			return 1
 		}
 	}

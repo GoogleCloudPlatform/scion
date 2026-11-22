@@ -36,19 +36,23 @@ const (
 
 // failure_stage values agentErrorStage derives from the agent's message.
 const (
-	failureStagePreStartHook     = "pre_start_hook"
-	failureStageHarnessProvision = "harness_provision"
-	failureStageGitClone         = "git_clone"
-	failureStageOther            = "other"
+	failureStagePreStartHook                      = "pre_start_hook"
+	failureStageHarnessProvision                  = "harness_provision"
+	failureStageGitClone                          = "git_clone"
+	failureStageMetadataInterceptionMarkerMissing = "metadata_interception_marker_missing"
+	failureStageImageLacksNetnsSetup              = "image_lacks_netns_setup"
+	failureStageMetadataProtectionUnavailable     = "metadata_protection_unavailable"
+	failureStageOther                             = "other"
 )
 
 // Message prefixes sciontool init writes with phase error
 // (cmd/sciontool/commands/init.go), and the harness provisioner's hook
 // file name (pkg/sciontool/hooks.HarnessProvisionHookFilename).
 const (
-	preStartHookFailedPrefix = "pre-start hook failed:"
-	gitCloneFailedPrefix     = "git clone failed:"
-	harnessProvisionHookName = "20-harness-provision"
+	preStartHookFailedPrefix              = "pre-start hook failed:"
+	gitCloneFailedPrefix                  = "git clone failed:"
+	harnessProvisionHookName              = "20-harness-provision"
+	legacyMetadataProtectionRefusedPrefix = "agent start refused: the configured metadata protection could not be set up"
 )
 
 var (
@@ -77,6 +81,16 @@ func agentErrorStage(message string) (stage, hook, exitStatus string) {
 		}
 	case strings.HasPrefix(message, gitCloneFailedPrefix):
 		stage = failureStageGitClone
+	case strings.Contains(message, failureStageMetadataInterceptionMarkerMissing):
+		stage = failureStageMetadataInterceptionMarkerMissing
+	case strings.Contains(message, failureStageImageLacksNetnsSetup):
+		// Primary channel for image_lacks_netns_setup is the broker's typed
+		// LaunchFailure code (api.LaunchCodeImageLacksNetnsSetup); classify it
+		// here too if it reaches an agent phase message.
+		stage = failureStageImageLacksNetnsSetup
+	case strings.Contains(message, failureStageMetadataProtectionUnavailable),
+		strings.HasPrefix(message, legacyMetadataProtectionRefusedPrefix):
+		stage = failureStageMetadataProtectionUnavailable
 	default:
 		stage = failureStageOther
 	}
