@@ -189,7 +189,7 @@ func TestHomeFiles_WrittenOnProvisionOnlyCreate(t *testing.T) {
 }
 
 func TestHomeFiles_SymlinkEscapeRefusedByConfinement(t *testing.T) {
-	t.Run("writeProvisionHomeFiles refuses symlinked .scion and refuses leaf symlink via create-exclusive", func(t *testing.T) {
+	t.Run("writeProvisionHomeFiles refuses symlinked .scion and unlinks leaf symlink without following", func(t *testing.T) {
 		outsideDir := t.TempDir()
 		victim := filepath.Join(outsideDir, "trigger-event.json")
 		if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
@@ -208,23 +208,31 @@ func TestHomeFiles_SymlinkEscapeRefusedByConfinement(t *testing.T) {
 			t.Fatal("expected refusal when .scion is a symlink, got nil")
 		}
 
-		// Case B: leaf .scion/trigger-event.json is a symlink to victim -> refused by O_EXCL, victim untouched.
+		// Case B: leaf .scion/trigger-event.json is a symlink to victim -> symlink
+		// is unlinked (not followed), regular file is created exclusively, and
+		// outside victim is untouched.
 		homeB := t.TempDir()
 		mkdirAll(t, filepath.Join(homeB, ".scion"))
 		leafPath := filepath.Join(homeB, ".scion", "trigger-event.json")
 		if err := os.Symlink(victim, leafPath); err != nil {
 			t.Fatal(err)
 		}
-		err = writeProvisionHomeFiles(homeB, []api.HomeFile{
+		if err := writeProvisionHomeFiles(homeB, []api.HomeFile{
 			{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte("safe-content")},
-		})
-		if err == nil {
-			t.Fatal("expected create-exclusive refusal when leaf is an existing symlink, got nil")
+		}); err != nil {
+			t.Fatalf("writeProvisionHomeFiles over leaf symlink failed: %v", err)
 		}
-		if !errors.Is(err, os.ErrExist) {
-			t.Errorf("expected os.ErrExist, got: %v", err)
+		info, err := os.Lstat(leafPath)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("expected regular file after unlinking leaf symlink, stat err=%v mode=%v", err, info.Mode())
 		}
-
+		gotLeaf, err := os.ReadFile(leafPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotLeaf) != "safe-content" {
+			t.Errorf("leaf content = %q, want %q", gotLeaf, "safe-content")
+		}
 		gotVictim, err := os.ReadFile(victim)
 		if err != nil {
 			t.Fatal(err)
@@ -232,12 +240,18 @@ func TestHomeFiles_SymlinkEscapeRefusedByConfinement(t *testing.T) {
 		if string(gotVictim) != "untouched" {
 			t.Errorf("outside victim file modified: got %q", gotVictim)
 		}
+
+		// Case C: writeHomeFileExclusive directly still refuses an existing file with os.ErrExist.
+		if err := writeHomeFileExclusive(homeB, api.TriggerEventHomeFilePath, []byte("overwrite"), 0o600); !errors.Is(err, os.ErrExist) {
+			t.Fatalf("writeHomeFileExclusive over existing file = %v, want os.ErrExist", err)
+		}
 	})
 
-	t.Run("Start refuses leftover existing HomeFile before container launch", func(t *testing.T) {
+	t.Run("Start replaces leftover existing HomeFile in reused agent dir with new event body", func(t *testing.T) {
 		fx := newHomeFilesTestFixture(t)
 
-		// Seed a leftover agent dir where .scion/trigger-event.json already exists.
+		// Seed a leftover agent dir where .scion/trigger-event.json already exists
+		// (e.g. reused name under soft_delete_retain_files).
 		agentDir := filepath.Join(fx.projectScionDir, "agents", "leftover-file-agent")
 		agentHome := filepath.Join(agentDir, "home")
 		mkdirAll(t, filepath.Join(agentDir, "workspace"))
@@ -258,22 +272,70 @@ func TestHomeFiles_SymlinkEscapeRefusedByConfinement(t *testing.T) {
 			},
 			GitClone: &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main"},
 		}
-		_, err := fx.mgr.Start(context.Background(), opts)
-		if err == nil {
-			t.Fatal("expected Start() to refuse overwriting existing trigger-event.json, got nil")
+		if _, err := fx.mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("expected Start() to succeed on reused agent dir with leftover trigger-event.json, got: %v", err)
 		}
-		if !errors.Is(err, os.ErrExist) {
-			t.Errorf("expected os.ErrExist, got: %v", err)
-		}
-		if fx.runCalls != 0 {
-			t.Errorf("expected container not to start, got %d Run calls", fx.runCalls)
+		if fx.runCalls != 1 {
+			t.Errorf("expected 1 container Run call, got %d", fx.runCalls)
 		}
 		got, err := os.ReadFile(existingPath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(got) != "leftover-content" {
-			t.Errorf("existing file overwritten: got %q, want %q", got, "leftover-content")
+		if string(got) != "new-content" {
+			t.Errorf("trigger-event.json = %q, want %q", got, "new-content")
+		}
+	})
+
+	t.Run("Start removes planted symlink at HomeFile path without following target", func(t *testing.T) {
+		fx := newHomeFilesTestFixture(t)
+
+		outsideDir := t.TempDir()
+		victim := filepath.Join(outsideDir, "victim.json")
+		if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		agentDir := filepath.Join(fx.projectScionDir, "agents", "leftover-symlink-agent")
+		agentHome := filepath.Join(agentDir, "home")
+		mkdirAll(t, filepath.Join(agentDir, "workspace"))
+		mkdirAll(t, filepath.Join(agentHome, ".scion"))
+		writeFile(t, filepath.Join(agentDir, "scion-agent.json"), `{"harness":"gemini","default_harness_config":"test-harness"}`)
+		leafPath := filepath.Join(agentHome, ".scion", "trigger-event.json")
+		if err := os.Symlink(victim, leafPath); err != nil {
+			t.Fatal(err)
+		}
+
+		opts := api.StartOptions{
+			Name:           "leftover-symlink-agent",
+			ProjectPath:    fx.projectScionDir,
+			NoAuth:         true,
+			FreshProvision: true,
+			HomeFiles: []api.HomeFile{
+				{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte("fresh-event")},
+			},
+			GitClone: &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main"},
+		}
+		if _, err := fx.mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start() failed over planted leaf symlink: %v", err)
+		}
+		info, err := os.Lstat(leafPath)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("expected regular file at %s, err=%v mode=%v", leafPath, err, info.Mode())
+		}
+		got, err := os.ReadFile(leafPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "fresh-event" {
+			t.Errorf("leaf content = %q, want %q", got, "fresh-event")
+		}
+		gotVictim, err := os.ReadFile(victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotVictim) != "untouched" {
+			t.Errorf("symlink target modified: got %q, want %q", gotVictim, "untouched")
 		}
 	})
 }

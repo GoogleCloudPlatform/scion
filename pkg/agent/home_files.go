@@ -90,13 +90,17 @@ func collidesWithReservedHomePath(p string) (string, bool) {
 }
 
 // writeProvisionHomeFiles writes create-time HomeFiles into agentHome under
-// .scion/, confined to agentHome via writeHomeFileExclusive (O_CREAT|O_EXCL|O_NOFOLLOW).
-// Re-validates files as defense in depth before touching disk.
+// .scion/, confined to agentHome. Re-validates files as defense in depth
+// before touching disk.
 //
-// Create-exclusive semantics mean that if a create reuses a leftover agent
-// directory where the target HomeFile already exists (regular file, symlink,
-// or other entry), the create fails with a clear error rather than overwriting
-// the existing file.
+// Each validated path is an exact hub-owned registered file (currently only
+// .scion/trigger-event.json). On a fresh create, any leftover entry at that
+// registered path (for example from a reused soft-deleted agent directory or
+// a planted leaf symlink) is first unlinked via removeHomeFile without
+// following symlinks, and the new file is then created with create-exclusive
+// semantics (writeHomeFileExclusive: O_CREAT|O_EXCL|O_NOFOLLOW). This prevents
+// a new agent from reading a previous agent's event body while refusing any
+// concurrent race or symlinked parent directory.
 func writeProvisionHomeFiles(agentHome string, files []api.HomeFile) error {
 	if len(files) == 0 {
 		return nil
@@ -105,9 +109,12 @@ func writeProvisionHomeFiles(agentHome string, files []api.HomeFile) error {
 		return fmt.Errorf("invalid home files: %w", err)
 	}
 	for _, f := range files {
+		if err := removeHomeFile(agentHome, f.Path); err != nil {
+			return fmt.Errorf("remove leftover home file %q: %w", f.Path, err)
+		}
 		if err := writeHomeFileExclusive(agentHome, f.Path, f.Content, os.FileMode(f.Mode)); err != nil {
 			if errors.Is(err, os.ErrExist) {
-				return fmt.Errorf("write home file %q: file already exists in agent home (refusing to overwrite leftover create-time file): %w", f.Path, err)
+				return fmt.Errorf("write home file %q: file already exists in agent home: %w", f.Path, err)
 			}
 			return fmt.Errorf("write home file %q: %w", f.Path, err)
 		}

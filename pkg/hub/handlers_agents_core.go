@@ -3381,7 +3381,7 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 		dst.Runtime = src.Runtime
 	}
 	if src.AppliedConfig != nil {
-		dst.AppliedConfig = src.AppliedConfig
+		mergeDispatchedAppliedConfig(dst, src)
 	}
 	if src.Message != "" {
 		dst.Message = src.Message

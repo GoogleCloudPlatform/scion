@@ -22,6 +22,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -680,6 +681,12 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		deleteWon := false
 		rb.DeleteWon = &deleteWon
 		corrID := s.cleanupFailedCreate(ctx, rb)
+		if !deleteWon && corrID == "" && s.store != nil {
+			if _, relErr := s.store.ReleaseTriggerSubjectClaimsForAgent(ctx, agent.ID, time.Now().UTC()); relErr != nil {
+				slog.Warn("Scheduler: failed to release trigger subject claims during create rollback",
+					"agent_id", agent.ID, "error", relErr)
+			}
+		}
 		if deleteWon && !errors.Is(rb.Cause, store.ErrDeleteInProgress) {
 			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
 		}
@@ -737,15 +744,18 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	var held *store.ClaimHeldError
 	if errors.As(err, &held) {
 		if len(hc.EventFile) > 0 {
-			slog.Warn("Scheduler: start claim held during homeFiles create; refusing to report fired",
+			slog.Warn("Scheduler: start claim held during homeFiles create; rolling back pending agent",
 				"eventID", fireID, "agent_id", agent.ID, "holder", string(held.Kind))
-			return nil, fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+			return nil, rollback(createRollback{Stage: createStageRunIntent, Cause: err})
 		}
 		slog.Info("Scheduler: agent already starting; event skipped",
 			"eventID", fireID, "agent_id", agent.ID, "holder", string(held.Kind))
 		return agent, nil
 	}
 	if errors.Is(err, ErrLaunchInvalidPhase) {
+		if len(hc.EventFile) > 0 {
+			return nil, rollback(createRollback{Stage: createStageDispatch, Cause: err})
+		}
 		return nil, fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
 	}
 	if errors.Is(err, errStartClaimWrite) {
@@ -753,6 +763,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 	if err != nil && !errors.Is(err, store.ErrDeleteInProgress) &&
 		(errors.Is(err, errStartingWrite) || errors.Is(err, store.ErrClaimPredicate) || errors.Is(err, errStartClaimLost)) {
+		if len(hc.EventFile) > 0 {
+			return nil, rollback(createRollback{Stage: createStageRunIntent, Cause: err})
+		}
 		return nil, fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
 	}
 	if err != nil {

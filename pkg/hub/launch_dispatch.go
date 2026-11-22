@@ -522,7 +522,7 @@ func mergeDispatchedConfig(dst, src *store.Agent) {
 		dst.Runtime = src.Runtime
 	}
 	if src.AppliedConfig != nil {
-		dst.AppliedConfig = src.AppliedConfig
+		mergeDispatchedAppliedConfig(dst, src)
 	}
 	if src.TaskSummary != "" {
 		dst.TaskSummary = src.TaskSummary

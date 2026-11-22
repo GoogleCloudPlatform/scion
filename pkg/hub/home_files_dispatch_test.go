@@ -551,6 +551,64 @@ func TestHomeFilesDispatch_CrossNodeDeferredCarriesHomeFiles(t *testing.T) {
 		assert.Equal(t, want, ownerReceived.HomeFiles, "owner execDispatchCreate must attach HomeFiles from BrokerDispatch.Args")
 	})
 
+	t.Run("cross-node deferredCreateWithGather preserves cleared HomeFilesPending when launch report precedes persistAcceptedLaunch", func(t *testing.T) {
+		var ownerReceived *RemoteCreateAgentRequest
+		ownerClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				cp := *req
+				cp.HomeFiles = api.CloneHomeFiles(req.HomeFiles)
+				ownerReceived = &cp
+				return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Phase: string(state.PhaseStarting)}}, nil, nil
+			},
+		}
+		reqClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				return nil, nil, ErrLifecycleDeferred
+			},
+		}
+		srv, reqDisp, _, _, agent, s, events := setupCrossNode(t, ownerClient, reqClient)
+		ctx := context.Background()
+
+		// Mark HomeFilesPending=true on both the stored row and the requester's in-memory copy.
+		agent.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HomeFilesPending: true}
+		require.NoError(t, s.UpdateAgent(ctx, agent))
+
+		launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
+		require.NoError(t, err)
+
+		ownerDone := make(chan error, 1)
+		go func() {
+			ownerDone <- runPendingDispatchOnOwner(ctx, srv, s, events, agent.RuntimeBrokerID)
+		}()
+
+		_, err = reqDisp.DispatchAgentCreateWithGather(WithCreateHomeFiles(ctx, want), agent)
+		require.NoError(t, err)
+		require.NoError(t, <-ownerDone)
+		require.NotNil(t, ownerReceived)
+
+		// Broker's succeeded launch report arrives on the hub before the requester's
+		// persistAcceptedLaunch runs, clearing HomeFilesPending in the store.
+		rec := postLaunchReport(t, srv, agent.RuntimeBrokerID, agent.ID, agent.RuntimeBrokerID, AgentLaunchReport{
+			LaunchID:   launchID,
+			InstanceID: "owner-broker-inst-1",
+			Seq:        1,
+			State:      store.LaunchReportStateSucceeded,
+			Phase:      string(state.PhaseRunning),
+		})
+		require.Equal(t, http.StatusOK, rec.Code, "launch report body: %s", rec.Body.String())
+
+		// Requester's in-memory agent still has stale HomeFilesPending=true;
+		// persistAcceptedLaunch must NOT resurrect it.
+		require.True(t, agentHomeFilesPending(agent))
+		persisted, err := srv.persistAcceptedLaunch(ctx, agent)
+		require.NoError(t, err)
+		assert.False(t, agentHomeFilesPending(persisted))
+
+		stored, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		assert.False(t, agentHomeFilesPending(stored), "cross-node persistAcceptedLaunch must preserve cleared HomeFilesPending")
+	})
+
 	t.Run("deferredFinalizeEnv -> execDispatchFinalizeEnv forwards HomeFiles and as_needed env to owner broker", func(t *testing.T) {
 		var ownerReceived *RemoteCreateAgentRequest
 		ownerClient := &mockRuntimeBrokerClient{

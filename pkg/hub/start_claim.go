@@ -1200,7 +1200,7 @@ func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter
 	case s.writeStartInProgress(w, err):
 		return true
 	case errors.Is(err, errHomeFilesNotDelivered):
-		Conflict(w, "the agent cannot be started yet: create-time home files have not been delivered yet; retry once creation completes")
+		Conflict(w, "the agent cannot be started yet: create-time home files have not been delivered yet; retry once creation completes; if creation failed, delete and re-create the agent")
 		return true
 	case errors.Is(err, store.ErrClaimPredicate):
 		Conflict(w, "the agent cannot be started now: it is being deleted or reincarnated")

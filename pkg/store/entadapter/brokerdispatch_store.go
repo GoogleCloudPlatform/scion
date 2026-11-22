@@ -840,7 +840,7 @@ func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore
 	}
 	for _, r := range hfRows {
 		upd := s.client.BrokerDispatch.Update().
-			Where(brokerdispatch.IDEQ(r.ID), brokerdispatch.StateEQ(store.DispatchStateInProgress), brokerdispatch.AttemptsGTE(maxAttempts)).
+			Where(brokerdispatch.IDEQ(r.ID), stuckPred, brokerdispatch.AttemptsGTE(maxAttempts)).
 			SetState(store.DispatchStateFailed).
 			SetError("reaper: max attempts exceeded").
 			AddAttempts(1).

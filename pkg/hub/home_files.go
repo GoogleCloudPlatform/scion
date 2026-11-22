@@ -58,6 +58,24 @@ func agentHomeFilesPending(agent *store.Agent) bool {
 		agent.AppliedConfig.CreateInputs.HomeFilesPending
 }
 
+// mergeDispatchedAppliedConfig copies src.AppliedConfig onto dst without
+// allowing a stale in-memory src (with HomeFilesPending=true) to resurrect
+// CreateInputs.HomeFilesPending after the stored row (dst) has already cleared
+// it (for example via an early async launch report).
+func mergeDispatchedAppliedConfig(dst, src *store.Agent) {
+	if src.AppliedConfig == nil {
+		return
+	}
+	storedPending := agentHomeFilesPending(dst)
+	copiedCfg := *src.AppliedConfig
+	if copiedCfg.CreateInputs != nil && copiedCfg.CreateInputs.HomeFilesPending && !storedPending {
+		ci := *copiedCfg.CreateInputs
+		ci.HomeFilesPending = false
+		copiedCfg.CreateInputs = &ci
+	}
+	dst.AppliedConfig = &copiedCfg
+}
+
 // clearAgentHomeFilesPending clears CreateInputs.HomeFilesPending on the
 // persisted agent row (and the in-memory copy, if non-nil) once its create
 // dispatch has delivered the HomeFiles. Best-effort: logs a warning on store

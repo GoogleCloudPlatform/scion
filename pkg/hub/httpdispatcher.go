@@ -4529,6 +4529,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if err := d.launchGuardError(ctx, agent, "DispatchAgentRestart"); err != nil {
 		return err
 	}
+	if agentHomeFilesPending(agent) {
+		return errHomeFilesNotDelivered
+	}
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
