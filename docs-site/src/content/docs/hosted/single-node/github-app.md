@@ -81,7 +81,7 @@ Configure the App either in the web UI, which is the usual path, or in deploymen
    - **Public Installation URL**: `https://github.com/apps/<app-slug>/installations/new`. Project settings show this link to admins whose project has no installation yet.
 3. Click **Save GitHub App Configuration**. The status next to the button changes to **Configured** once the App ID and a private key are present.
 
-The save is applied to the running Hub without a restart, except for the first `app_id` (see [Restart once after the first configuration](#restart-once-after-the-first-configuration)). The Hub stores the private key and webhook secret as Hub-scoped secrets named `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET`, and the other fields in the `github_app` section of the Hub database. The UI never shows the stored secrets again: leave a secret field empty to keep its current value.
+The save is applied to the running Hub without a restart, except for setting or changing `app_id` (see [Restart once after the first configuration](#restart-once-after-the-first-configuration)). The Hub stores the private key and webhook secret as Hub-scoped secrets named `GITHUB_APP_PRIVATE_KEY` and `GITHUB_APP_WEBHOOK_SECRET`, and the other fields in the `github_app` section of the Hub database. The UI never shows the stored secrets again: leave a secret field empty to keep its current value.
 
 The same save is available as `PUT /api/v1/github-app` with any of `app_id`, `private_key`, `webhook_secret`, `api_base_url`, `webhooks_enabled` and `installation_url`. Because it manages credentials, this route requires an interactive session and refuses user access tokens with `403`.
 
