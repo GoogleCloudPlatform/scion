@@ -819,15 +819,16 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 		CreateTriggerRequest{
 			Name:   "pr-updated-shape",
 			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
-			Match:  &TriggerMatchSpec{Types: []string{"pr_sync"}},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.pr_sync"}},
 			Subject: &TriggerSubjectSpec{
 				Mode:           store.TriggerSubjectModeReuse,
 				CoalesceWindow: "30s",
 			},
 			Action: TriggerActionSpec{
-				Type:         store.TriggerActionDispatchAgent,
-				Task:         "Review ${event.id}",
-				ReuseMessage: "Updated ${event.subject} sha=${event.payload.after}",
+				Type:          store.TriggerActionDispatchAgent,
+				Task:          "Review ${event.id}",
+				ReuseMessage:  "Updated ${event.subject} event=${event.id}",
+				UntrustedVars: []string{"event.subject"},
 			},
 		})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -926,8 +927,8 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 	msgs := tracker.messages()
 	require.Len(t, msgs, 1, "only latest coalesced event delivers reuse message")
 	assert.Equal(t, ag.Slug, msgs[0].AgentID)
-	assert.Contains(t, msgs[0].Message, "sha=sha-4")
-	assert.NotContains(t, msgs[0].Message, "sha=sha-3")
+	assert.Contains(t, msgs[0].Message, "event="+it4.DedupKey)
+	assert.NotContains(t, msgs[0].Message, "event="+it3.DedupKey)
 
 	// Confirm superseded rows (it1 and it3) are skipped "coalesced".
 	for _, evID := range []string{it1.DedupKey, it3.DedupKey} {
