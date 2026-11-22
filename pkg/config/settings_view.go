@@ -116,7 +116,8 @@ type viewOptions struct {
 // a file) are left empty.
 //
 // The two project IDs keep their legacy meaning:
-//   - ProjectID is the project's own ID: SCION_HUB_PROJECT_ID, then the
+//   - ProjectID is the project's own ID: SCION_HUB_PROJECT_ID, then (in
+//     agent/container mode, see ptone/scion#8302) SCION_PROJECT_ID, then the
 //     project-id file, then hub.project_id in the settings files (not when
 //     it comes from a legacy file's hub.projectId, which named the hub
 //     project only), then SCION_PROJECT_ID, then a top-level project_id in
@@ -138,9 +139,16 @@ func settingsViewOf(vs *VersionedSettings, res *versionedLoadResult, opts viewOp
 	}
 
 	s.ProjectID = vs.ProjectID
+	envProjectID := ""
+	if !ignoreEnvProjectID {
+		envProjectID = projectkeys.ProjectIDFromEnv(os.Getenv)
+	}
+	inAgentContainer := !ignoreEnvProjectID && (IsAgentContainerContext() || (vs.CLI != nil && vs.CLI.Mode == "agent"))
 	switch {
 	case res.hubEnvProjectID != "":
 		s.ProjectID = res.hubEnvProjectID
+	case inAgentContainer && envProjectID != "":
+		s.ProjectID = envProjectID
 	case res.idFileProjectID != "":
 		s.ProjectID = res.idFileProjectID
 	case res.fileHubProjectID != "" && !res.fileHubProjectIDFromCamel:

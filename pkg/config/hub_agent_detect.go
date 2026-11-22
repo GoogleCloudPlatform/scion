@@ -24,3 +24,17 @@ import "os"
 func IsHubManagedAgent() bool {
 	return os.Getenv("SCION_AGENT_ID") != ""
 }
+
+// IsAgentContainerContext reports whether the current process is running in
+// agent/container mode where SCION_PROJECT_ID names the container's
+// authoritative Hub project: a hub-managed agent (SCION_AGENT_ID), a
+// runtime-launched agent container (SCION_HOST_UID), agent CLI mode
+// (SCION_CLI_MODE=agent), or an injected hub endpoint
+// (SCION_HUB_ENDPOINT / SCION_HUB_URL).
+func IsAgentContainerContext() bool {
+	return IsHubManagedAgent() ||
+		os.Getenv("SCION_HOST_UID") != "" ||
+		os.Getenv("SCION_CLI_MODE") == "agent" ||
+		os.Getenv("SCION_HUB_ENDPOINT") != "" ||
+		os.Getenv("SCION_HUB_URL") != ""
+}

@@ -223,11 +223,7 @@ func resolveProjectID(settings *config.Settings, projectFlag string) (string, er
 		return projectFlag, nil
 	}
 
-	// Try hub project ID first, then local project ID
-	projectID := settings.GetHubProjectID()
-	if projectID == "" {
-		projectID = settings.ProjectID
-	}
+	projectID := targetProjectIDFromSettings(settings)
 	if projectID == "" {
 		return "", fmt.Errorf("cannot determine project ID. Use --project flag or link this project with 'scion hub link'")
 	}
