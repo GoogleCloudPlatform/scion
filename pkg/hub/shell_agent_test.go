@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -455,4 +456,85 @@ func TestShellHarnessConfigSlugReservedOnHub(t *testing.T) {
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, hcRoot))
 	_, err := s.GetHarnessConfigBySlug(ctx, "shell", store.HarnessConfigScopeGlobal, "")
 	assert.ErrorIs(t, err, store.ErrNotFound, "on-disk shell dir must not be imported")
+}
+
+// R2 (AC8, S5): dispatchMarkedAgentMessage / dispatchWithBrokerRetry refuses
+// shell agents before DispatchAgentMessage is ever reached, with a typed
+// pre-dispatch error classified by isPreDispatchDeliveryError.
+func TestShellAgentDispatchChokePointNeverReachesDispatcher(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project, broker := seedShellTestProjectAndBroker(t, s)
+	owner := seedShellTestUser(t, s, "owner-choke@test.com", "Owner Choke")
+
+	shellAgent := seedShellTestAgent(t, s, project.ID, broker.ID, "choke-shell", owner.ID, config.ShellHarnessConfigName, state.PhaseRunning, []string{owner.ID})
+
+	recDisp := &recordingBroadcastDispatcher{}
+	err := dispatchWithBrokerRetry(ctx, srv.deliveryMarker(), nil, recDisp, shellAgent, "must not paste", false, nil)
+	require.Error(t, err)
+	assert.True(t, isPreDispatchDeliveryError(err), "shell refusal must be classified as a pre-dispatch error")
+	var notMsgErr *errAgentNotMessageable
+	assert.ErrorAs(t, err, &notMsgErr)
+	assert.Empty(t, recDisp.deliveredSlugs, "DispatchAgentMessage must never be called for a shell agent")
+}
+
+// R2 (AC8, S5): external message-broker inbound routes (/api/v1/broker/inbound
+// and /api/v1/broker/inbound/routed) refuse delivery to shell agents without
+// ever invoking the dispatcher.
+func TestShellAgentBrokerInboundRefused(t *testing.T) {
+	srv, s := testServer(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+	owner := seedShellTestUser(t, s, "owner-inbound@test.com", "Owner Inbound")
+	bindProjectRole(t, s, project.ID, owner.ID, "project-owner")
+
+	shellAgent := seedShellTestAgent(t, s, project.ID, broker.ID, "inbound-shell", owner.ID, config.ShellHarnessConfigName, state.PhaseRunning, []string{owner.ID})
+	recDisp := &recordingBroadcastDispatcher{}
+	srv.SetDispatcher(recDisp)
+
+	postBroker := func(path string, payload interface{}) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, err := json.Marshal(payload)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Scion-Plugin-Name", "test-plugin")
+		req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Direct broker inbound -> 422 agent_not_messageable.
+	rec := postBroker("/api/v1/broker/inbound", inboundMessageRequest{
+		Topic: "scion.project." + project.ID + ".agent." + shellAgent.Slug + ".messages",
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			Sender:    "user:" + owner.Email,
+			Recipient: "agent:" + shellAgent.Slug,
+			Msg:       "hello from slack",
+			Type:      messages.TypeInstruction,
+		},
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeAgentNotMessageable)
+
+	// 2. Routed broker inbound -> recipient status "not_messageable".
+	rec = postBroker("/api/v1/broker/inbound/routed", routedInboundRequest{
+		ProjectID:    project.ID,
+		DefaultAgent: shellAgent.Slug,
+		Message: &messages.StructuredMessage{
+			Version:   messages.Version,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Channel:   "slack",
+			Sender:    "user:" + owner.Email,
+			Msg:       "routed hello from slack",
+			Type:      messages.TypeInstruction,
+		},
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeAgentNotMessageable)
+	assert.Contains(t, rec.Body.String(), "not_messageable")
+	assert.Empty(t, recDisp.deliveredSlugs, "DispatchAgentMessage must never be called for a shell agent")
 }

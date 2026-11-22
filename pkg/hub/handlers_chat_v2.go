@@ -1760,11 +1760,20 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		return nil, newChatSendError(http.StatusInternalServerError, "INTERNAL", "no agent to route to", nil)
 	}
 
-	primaryAgent := agents[0]
-	if isShellAgent(primaryAgent) {
-		dmErr := shellAgentNotMessageableError(primaryAgent)
+	// Skip shell execution containers silently when other routed agents exist;
+	// only refuse when every routed agent is a shell container (ptone/scion#8812 §3.4 S5).
+	nonShell := make([]*store.Agent, 0, len(agents))
+	for _, a := range agents {
+		if !isShellAgent(a) {
+			nonShell = append(nonShell, a)
+		}
+	}
+	if len(nonShell) == 0 {
+		dmErr := shellAgentNotMessageableError(agents[0])
 		return nil, newChatSendError(dmErr.HTTPStatus, dmErr.Code, dmErr.Message, nil)
 	}
+	agents = nonShell
+	primaryAgent := agents[0]
 
 	// The primary agent (agents[0]) always gets TypeInstruction. Secondaries
 	// (agents[1:]) get TypeMention via the fan-out path. The primary is the

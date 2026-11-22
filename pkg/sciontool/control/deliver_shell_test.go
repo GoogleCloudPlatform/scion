@@ -14,12 +14,7 @@
 
 package control
 
-import (
-	"bytes"
-	"net/http"
-	"net/http/httptest"
-	"testing"
-)
+import "testing"
 
 func TestDeliverEnabled_RefusesShellHarness(t *testing.T) {
 	getenv := func(k string) string {
@@ -34,18 +29,5 @@ func TestDeliverEnabled_RefusesShellHarness(t *testing.T) {
 	}
 	if DeliverEnabled(getenv, true) {
 		t.Fatal("DeliverEnabled must return false for SCION_HARNESS=shell")
-	}
-}
-
-func TestDeliverRoute_DisabledRefuses(t *testing.T) {
-	route := newDeliverRoute(DeliverOptions{Disabled: true})
-	req := httptest.NewRequest(http.MethodPost, "/"+RouteDeliverMessage, bytes.NewBufferString(`{}`))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-
-	route.serve(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
 	}
 }

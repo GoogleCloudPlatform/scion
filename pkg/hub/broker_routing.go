@@ -242,16 +242,31 @@ func (e *errAutoWakeRefused) Error() string {
 
 func (e *errAutoWakeRefused) Unwrap() error { return e.awaitErr }
 
+// errAgentNotMessageable is returned by dispatchMarkedAgentMessage when the
+// target agent is a shell execution container (ptone/scion#8812 §3.4 S5).
+// No broker dispatch runs, and dispatchWithBrokerRetry never retries it.
+type errAgentNotMessageable struct {
+	agent *store.Agent
+}
+
+func (e *errAgentNotMessageable) Error() string {
+	if e != nil && e.agent != nil {
+		return shellAgentNotMessageableError(e.agent).Message
+	}
+	return "agent is an execution container and cannot receive messages"
+}
+
 // isPreDispatchDeliveryError reports whether err failed in the pre-dispatch
-// delivery mark, claim gate, or auto-wake step before DispatchAgentMessage was
-// called (so no broker delivery could be in flight).
+// delivery mark, claim gate, shell-agent gate, or auto-wake step before
+// DispatchAgentMessage was called (so no broker delivery could be in flight).
 func isPreDispatchDeliveryError(err error) bool {
 	var (
-		markErr *errDeliveryMarkFailed
-		idleErr *errAgentIdleSuspending
-		wakeErr *errAutoWakeRefused
+		markErr   *errDeliveryMarkFailed
+		idleErr   *errAgentIdleSuspending
+		wakeErr   *errAutoWakeRefused
+		notMsgErr *errAgentNotMessageable
 	)
-	return errors.As(err, &markErr) || errors.As(err, &idleErr) || errors.As(err, &wakeErr)
+	return errors.As(err, &markErr) || errors.As(err, &idleErr) || errors.As(err, &wakeErr) || errors.As(err, &notMsgErr)
 }
 
 // markAgentForDispatch runs MarkAgentDelivery under the row lock whenever
@@ -307,6 +322,13 @@ func dispatchMarkedAgentMessage(
 	urgent bool,
 	structuredMsg *messages.StructuredMessage,
 ) error {
+	// Shell execution containers cannot receive messages from any path
+	// (ptone/scion#8812 §3.4 S5). Enforced here at the single dispatch choke
+	// point so notifications, inbound bridges, redrive, reconcile, and future
+	// callers all fail closed before DispatchAgentMessage is reached.
+	if isShellAgent(agent) {
+		return &errAgentNotMessageable{agent: agent}
+	}
 	if err := markAgentForDispatch(ctx, marker, agent); err != nil {
 		return err
 	}

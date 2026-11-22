@@ -298,6 +298,11 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 				fmt.Sprintf("primary agent %q is not running", primaryAgent.Slug),
 				map[string]interface{}{"results": results})
 			return
+		case "not_messageable":
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeAgentNotMessageable,
+				primaryResult.Error,
+				map[string]interface{}{"results": results})
+			return
 		case routedStatusHoldLookupFailed:
 			// A store fault, not a dispatch failure: the same 500 the other
 			// send paths give when the target's hold cannot be read.
@@ -395,6 +400,13 @@ func (s *Server) dispatchRoutedRecipient(
 		// The response carries one constant public refusal; the internal
 		// reason stays in the log above.
 		result.Error = routedRefusalError
+		return result
+	}
+
+	// --- Shell execution container check (S5) ---
+	if isShellAgent(agent) {
+		result.Status = "not_messageable"
+		result.Error = shellAgentNotMessageableError(agent).Message
 		return result
 	}
 

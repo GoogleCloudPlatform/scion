@@ -828,6 +828,35 @@ func TestAgentDelegatedAttach_IssuerAncestorAttaches(t *testing.T) {
 	assert.Equal(t, e.Slug, open.Slug)
 }
 
+// TestAgentDelegatedAttach_ShellAgentDenied (AC7, S1, G3): even when Alice
+// holds an ancestor relationship to a shell agent and issues an agent:attach
+// delegation grant on the project, a delegated agent credential is refused
+// with 403 on both PTY preflight and WebSocket upgrade.
+func TestAgentDelegatedAttach_ShellAgentDenied(t *testing.T) {
+	f := newADTFixture(t, "adt-att-shell")
+	e, _ := f.adtAttachTarget(t, "adt-att-shell")
+	e.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "shell"}
+	require.NoError(t, f.store.UpdateAgent(context.Background(), e))
+	got, err := f.store.GetAgent(context.Background(), e.ID)
+	require.NoError(t, err)
+	require.True(t, isShellAgent(got), "target must be persisted as a shell agent")
+
+	grant := f.adtIssueGrant(t, map[string]string{"kind": "project", "projectId": f.proj.ID}, "agent:attach")
+	cred := f.delegated(t, grant.ID)
+
+	// Preflight GET on real PTY route -> 403.
+	rec := f.do(t, http.MethodGet, adtPTYPath(e.ID), nil, adtBearer(cred.Token))
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "shell agent: human principals only")
+
+	// WebSocket upgrade on real PTY route -> 403.
+	hub := httptest.NewServer(f.srv.Handler())
+	t.Cleanup(hub.Close)
+	conn, status := dialDelegatedPTY(t, hub, cred.Token, e.ID)
+	assert.Nil(t, conn)
+	assert.Equal(t, http.StatusForbidden, status)
+}
+
 // TestAgentDelegatedAttach_SessionOutlivesRevocationAndExpiry documents
 // .design/agent-delegation.md §16.6: an attach is authorized at the
 // handshake only. An established session keeps carrying input after its

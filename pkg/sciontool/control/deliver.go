@@ -62,16 +62,12 @@ type DeliverOptions struct {
 	Sleep func(ctx context.Context, d time.Duration) bool
 	// ReadyPollInterval overrides the readiness poll interval (tests).
 	ReadyPollInterval time.Duration
-	// Disabled, when true, refuses every deliver-message request without
-	// touching tmux (defence in depth for harnesses with Delivery: none).
-	Disabled bool
 }
 
 // deliverRoute serves deliver-message. One flush runs at a time; a second
 // request gets 409 busy (another key) or in_progress (the same key).
 type deliverRoute struct {
 	runner   tmuxdeliver.Runner
-	disabled bool
 	now      func() time.Time
 	sleep    func(ctx context.Context, d time.Duration) bool
 	poll     time.Duration
@@ -83,10 +79,10 @@ type deliverRoute struct {
 }
 
 func newDeliverRoute(o DeliverOptions) *deliverRoute {
-	if o.Runner == nil && !o.Disabled {
+	if o.Runner == nil {
 		panic("control: DeliverOptions.Runner is required")
 	}
-	d := &deliverRoute{runner: o.Runner, disabled: o.Disabled, now: o.Now, sleep: o.Sleep, poll: o.ReadyPollInterval}
+	d := &deliverRoute{runner: o.Runner, now: o.Now, sleep: o.Sleep, poll: o.ReadyPollInterval}
 	if d.now == nil {
 		d.now = time.Now
 	}
@@ -102,11 +98,6 @@ type deliverResult struct {
 }
 
 func (d *deliverRoute) serve(w http.ResponseWriter, r *http.Request) {
-	if d.disabled {
-		log.Info("Control: deliver-message refused (delivery disabled for this harness)")
-		writeDeliver(w, deliverResult{status: http.StatusForbidden, resp: agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeInvalid, Field: agentcontrol.FieldBody}})
-		return
-	}
 	receipt := d.now()
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		writeDeliver(w, invalid(agentcontrol.FieldBody))

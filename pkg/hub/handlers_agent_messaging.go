@@ -4765,17 +4765,17 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			results[i].Error = "agent resolved but not found for dispatch"
 			continue
 		}
-		if isShellAgent(mentionAgent) {
-			results[i].Status = "skipped"
-			results[i].Error = shellAgentNotMessageableError(mentionAgent).Message
-			continue
-		}
 
 		// Phase 3 msg-authz: Check message authorization per mention recipient.
 		mentionAllowed, _, _ := s.authorizeAgentMessage(ctx, senderIdentity, mentionAgent, false)
 		if !mentionAllowed {
 			results[i].Status = "unauthorized"
 			results[i].Error = "message delivery denied"
+			continue
+		}
+		if isShellAgent(mentionAgent) {
+			results[i].Status = "skipped"
+			results[i].Error = shellAgentNotMessageableError(mentionAgent).Message
 			continue
 		}
 
