@@ -575,7 +575,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	} else if parentMessageMode != "" {
 		agent.MessageMode = parentMessageMode
 	} else {
-		agent.MessageMode = store.MessageModeProject
+		agent.MessageMode = s.defaultAgentMessageMode()
 	}
 	if agent.MessageMode == store.MessageModeHub {
 		if decision := s.AuthorizeMessageModeGrant(ctx, creatorIdentity, hc.ProjectID, agent.MessageMode); !decision.Allowed {

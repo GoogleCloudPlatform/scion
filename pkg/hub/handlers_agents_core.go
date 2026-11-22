@@ -2234,7 +2234,8 @@ func (s *Server) createAgentInProject(
 	//      template's job config (its stripped AgentConfig snapshot,
 	//      ptone/scion#4222), the template's own scion-agent.yaml.
 	//   3. Parent agent exists → inherit parent's message_mode.
-	//   4. Otherwise → default to "project" (handled by Ent schema default).
+	//   4. Otherwise → the hub default (server.hub.default_message_mode),
+	//      "project" when unset (defaultAgentMessageMode).
 	var templateMessageMode string
 	if jc := s.templateJobConfig(ctx, resolvedTemplate); jc != nil {
 		templateMessageMode = jc.MessageMode
@@ -2254,7 +2255,7 @@ func (s *Server) createAgentInProject(
 	} else if parentMessageMode != "" {
 		agent.MessageMode = parentMessageMode
 	} else {
-		agent.MessageMode = store.MessageModeProject
+		agent.MessageMode = s.defaultAgentMessageMode()
 	}
 
 	// Hub-mode grant guard: for creation, any effective "hub" is a new grant,

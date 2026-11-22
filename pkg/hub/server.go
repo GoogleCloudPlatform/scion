@@ -676,6 +676,11 @@ type ServerConfig struct {
 	// recurring schedules of one project, of every kind. Zero means no cap;
 	// the server command resolves the setting's default (50).
 	ScheduleMaxActivePerProject int
+
+	// DefaultMessageMode (server.hub.default_message_mode) is the message
+	// mode of a new agent when neither the create request, its template nor
+	// its parent agent sets one. Empty means store.MessageModeProject.
+	DefaultMessageMode string
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
