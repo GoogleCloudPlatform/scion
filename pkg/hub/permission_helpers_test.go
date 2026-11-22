@@ -183,7 +183,7 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 		{"authz_resource_parent_ceiling.go", "AuthzService.decideStoredAgentServiceAccountUse"},
 	},
 	"github_trigger.comment": {
-		{"trigger_authz.go", "Server.authorizeTriggerGitHubCommentAuthoring"},
+		{"trigger_authz.go", "Server.authorizeGitHubCommentAuthoringPermission"},
 		{"action_github_comment.go", "Server.authorizeGitHubCommentFire"},
 	},
 }
