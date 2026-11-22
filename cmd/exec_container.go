@@ -155,7 +155,7 @@ func runExecContainerClear(cmd *cobra.Command, _ []string) error {
 	if isJSONOutput() {
 		return outputJSON(map[string]any{"cleared": true})
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), "Execution container cleared.")
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "Execution container cleared.")
 	return nil
 }
 
@@ -177,32 +177,32 @@ func resolveLocalProjectAgentID(ctx context.Context, client hubclient.Client, pr
 
 func printExecContainerStatus(out io.Writer, status *hubclient.ExecContainerStatus) {
 	if status == nil || !status.Configured {
-		fmt.Fprintln(out, "Not configured")
+		_, _ = fmt.Fprintln(out, "Not configured")
 		return
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "STATE\t%s\n", status.State)
+	_, _ = fmt.Fprintf(tw, "STATE\t%s\n", status.State)
 	if status.Reason != "" {
-		fmt.Fprintf(tw, "REASON\t%s\n", status.Reason)
+		_, _ = fmt.Fprintf(tw, "REASON\t%s\n", status.Reason)
 	}
 	if status.Agent != nil {
 		name := status.Agent.Name
 		if name == "" {
 			name = status.Agent.Slug
 		}
-		fmt.Fprintf(tw, "AGENT\t%s\n", name)
-		fmt.Fprintf(tw, "AGENT ID\t%s\n", status.Agent.ID)
+		_, _ = fmt.Fprintf(tw, "AGENT\t%s\n", name)
+		_, _ = fmt.Fprintf(tw, "AGENT ID\t%s\n", status.Agent.ID)
 		proj := status.Agent.ProjectName
 		if proj == "" {
 			proj = status.Agent.ProjectID
 		} else if status.Agent.ProjectID != "" {
 			proj = fmt.Sprintf("%s (%s)", proj, status.Agent.ProjectID)
 		}
-		fmt.Fprintf(tw, "PROJECT\t%s\n", proj)
-		fmt.Fprintf(tw, "PHASE\t%s\n", status.Agent.Phase)
+		_, _ = fmt.Fprintf(tw, "PROJECT\t%s\n", proj)
+		_, _ = fmt.Fprintf(tw, "PHASE\t%s\n", status.Agent.Phase)
 		if status.Agent.Activity != "" {
-			fmt.Fprintf(tw, "ACTIVITY\t%s\n", status.Agent.Activity)
+			_, _ = fmt.Fprintf(tw, "ACTIVITY\t%s\n", status.Agent.Activity)
 		}
 	}
 	_ = tw.Flush()
