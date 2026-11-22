@@ -357,7 +357,8 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnvWith(ctx context.Context, sel *de
 	}
 
 	// Progeny env vars: unchanged from resolveEnvFromStorage.
-	if len(agent.Ancestry) > 1 {
+	// Shell execution containers receive no progeny env vars (ptone/scion#8817 H2).
+	if len(agent.Ancestry) > 1 && !isShellAgent(agent) {
 		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list progeny env vars: %w", err)
@@ -461,18 +462,26 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 
 	type scopeEntry struct{ scope, scopeID string }
 	scopes := make([]scopeEntry, 0, 5)
-	if agent.RuntimeBrokerID != "" {
-		scopes = append(scopes, scopeEntry{store.ScopeRuntimeBroker, agent.RuntimeBrokerID})
-	}
-	scopes = append(scopes, scopeEntry{store.ScopeHub, d.secretBackend.HubID()})
-	if agent.ProjectID != "" {
-		scopes = append(scopes, scopeEntry{store.ScopeProject, agent.ProjectID})
-	}
-	if agent.OwnerID != "" {
-		scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
-	}
-	if d.agentSecretsEnabled() && agent.ID != "" {
-		scopes = append(scopes, scopeEntry{store.ScopeAgent, agent.ID})
+	if isShellAgent(agent) {
+		// Shell execution containers receive only the owning user's user-scope
+		// secrets, never broker, hub, project, agent, or progeny secrets (ptone/scion#8817 H2).
+		if agent.OwnerID != "" {
+			scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
+		}
+	} else {
+		if agent.RuntimeBrokerID != "" {
+			scopes = append(scopes, scopeEntry{store.ScopeRuntimeBroker, agent.RuntimeBrokerID})
+		}
+		scopes = append(scopes, scopeEntry{store.ScopeHub, d.secretBackend.HubID()})
+		if agent.ProjectID != "" {
+			scopes = append(scopes, scopeEntry{store.ScopeProject, agent.ProjectID})
+		}
+		if agent.OwnerID != "" {
+			scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
+		}
+		if d.agentSecretsEnabled() && agent.ID != "" {
+			scopes = append(scopes, scopeEntry{store.ScopeAgent, agent.ID})
+		}
 	}
 
 	// The test-admin scope restriction, evaluated once: the start-time
@@ -536,7 +545,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel
 	// Progeny secrets: the agent's own progeny decision, as resolveSecrets.
 	// startSecretResolveOpts sets AuthzCheck only for an agent with more
 	// than one ancestry entry.
-	if !noAuth && startOpts != nil && startOpts.AuthzCheck != nil {
+	if !noAuth && !isShellAgent(agent) && startOpts != nil && startOpts.AuthzCheck != nil {
 		progeny, err := d.store.ListProgenySecrets(ctx, agent.Ancestry)
 		if err != nil {
 			return nil, nil, nil, err

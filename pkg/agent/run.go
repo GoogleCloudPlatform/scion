@@ -4501,7 +4501,7 @@ func resolveAuthEnvOverlayWithPolicy(opts *api.StartOptions, settings *config.Ve
 	// Profile env is fully retired — profiles.<p>.env was removed from both
 	// the struct and the JSON schema (G3-full). This reads the harness config
 	// only. See design §0.3.
-	if settings != nil && harnessConfigName != "" {
+	if settings != nil && harnessConfigName != "" && harnessConfigName != config.ShellHarnessConfigName {
 		if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && len(hcEntry.Env) > 0 {
 			// Check hub-only broker keys first so broker-mode accounting and
 			// warnings stay accurate even for SCION_* hub-only keys (e.g.

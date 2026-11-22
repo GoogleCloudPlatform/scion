@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -820,4 +822,146 @@ func TestIsHumanShellCreatePrincipal(t *testing.T) {
 	assert.False(t, isHumanShellCreatePrincipal(user, store.DelegationPrincipalAgent))
 	assert.False(t, isHumanShellCreatePrincipal(user, ""))
 	assert.False(t, isHumanShellCreatePrincipal(nil, store.DelegationPrincipalUser))
+}
+
+func TestShellAgentEnvAndSecretIsolation_H2(t *testing.T) {
+	ctx := context.Background()
+	s := createTestStore(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+
+	ownerID := api.NewUUID()
+	ancestorID := api.NewUUID()
+	hubID := api.NewUUID()
+
+	// Seed env vars across every scope + progeny.
+	envSeeds := []*store.EnvVar{
+		{ID: api.NewUUID(), Key: "PROMPT_COMMAND", Value: "evil-project-cmd", Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "PROJ_AS_NEEDED", Value: "evil-proj-an", Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded},
+		{ID: api.NewUUID(), Key: "HUB_ENV", Value: "evil-hub-val", Scope: store.ScopeHub, ScopeID: hubID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "BROKER_ENV", Value: "evil-broker-val", Scope: store.ScopeRuntimeBroker, ScopeID: broker.ID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "OWNER_ENV", Value: "good-owner-val", Scope: store.ScopeUser, ScopeID: ownerID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "OWNER_AS_NEEDED", Value: "good-owner-an", Scope: store.ScopeUser, ScopeID: ownerID, InjectionMode: store.InjectionModeAsNeeded},
+		{ID: api.NewUUID(), Key: "PROGENY_ENV", Value: "evil-progeny-val", Scope: store.ScopeUser, ScopeID: ancestorID, InjectionMode: store.InjectionModeAlways, AllowProgeny: true},
+	}
+	for _, ev := range envSeeds {
+		require.NoError(t, s.CreateEnvVar(ctx, ev))
+	}
+
+	// Seed secrets across every scope + progeny via LocalBackend.
+	backend := secret.NewLocalBackend(s, hubID, "")
+	secretSeeds := []*secret.SetSecretInput{
+		{Name: "PROJECT_SECRET", Value: "proj-sec-val", SecretType: store.SecretTypeEnvironment, Target: "PROJECT_SECRET", Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAlways},
+		{Name: "PROJECT_AS_NEEDED_SEC", Value: "proj-an-sec", SecretType: store.SecretTypeEnvironment, Target: "PROJECT_AS_NEEDED_SEC", Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAsNeeded},
+		{Name: "HUB_SECRET", Value: "hub-sec-val", SecretType: store.SecretTypeEnvironment, Target: "HUB_SECRET", Scope: store.ScopeHub, ScopeID: hubID, InjectionMode: store.InjectionModeAlways},
+		{Name: "BROKER_SECRET", Value: "broker-sec-val", SecretType: store.SecretTypeEnvironment, Target: "BROKER_SECRET", Scope: store.ScopeRuntimeBroker, ScopeID: broker.ID, InjectionMode: store.InjectionModeAlways},
+		{Name: "OWNER_SECRET", Value: "owner-sec-val", SecretType: store.SecretTypeEnvironment, Target: "OWNER_SECRET", Scope: store.ScopeUser, ScopeID: ownerID, InjectionMode: store.InjectionModeAlways},
+		{Name: "OWNER_AS_NEEDED_SEC", Value: "owner-an-sec", SecretType: store.SecretTypeEnvironment, Target: "OWNER_AS_NEEDED_SEC", Scope: store.ScopeUser, ScopeID: ownerID, InjectionMode: store.InjectionModeAsNeeded},
+		{Name: "PROGENY_SECRET", Value: "progeny-sec-val", SecretType: store.SecretTypeEnvironment, Target: "PROGENY_SECRET", Scope: store.ScopeUser, ScopeID: ancestorID, InjectionMode: store.InjectionModeAlways, AllowProgeny: true},
+	}
+	for _, inp := range secretSeeds {
+		_, _, err := backend.Set(ctx, inp)
+		require.NoError(t, err)
+	}
+
+	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetHubID(hubID)
+	d.SetSecretBackend(backend)
+
+	shellAgent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "shell-h2",
+		Name:            "shell-h2",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		OwnerID:         ownerID,
+		Ancestry:        []string{ancestorID, api.NewUUID()},
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName},
+	}
+	llmAgent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "llm-h2",
+		Name:            "llm-h2",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		OwnerID:         ownerID,
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+
+	// 1. envScopesForDispatch: shell agent gets ONLY owner's user scope (and nil if no owner).
+	scopes := d.envScopesForDispatch(ctx, shellAgent)
+	require.Equal(t, []store.EnvVarFilter{{Scope: store.ScopeUser, ScopeID: ownerID}}, scopes)
+
+	ownerlessShell := *shellAgent
+	ownerlessShell.OwnerID = ""
+	assert.Empty(t, d.envScopesForDispatch(ctx, &ownerlessShell))
+	ownerlessSecs, _, err := d.resolveSecrets(ctx, &ownerlessShell)
+	require.NoError(t, err)
+	assert.Empty(t, ownerlessSecs)
+
+	// 2. Create path: resolveEnvFromStorageWithSource + resolveSecrets + resolveAsNeededForKeys.
+	shellEnv, _, _, err := d.resolveEnvFromStorageWithSource(ctx, shellAgent)
+	require.NoError(t, err)
+	assert.Equal(t, "good-owner-val", shellEnv["OWNER_ENV"], "shell agent must receive owner user-scope env")
+	assert.NotContains(t, shellEnv, "PROMPT_COMMAND", "shell agent must not receive project env")
+	assert.NotContains(t, shellEnv, "HUB_ENV", "shell agent must not receive hub env")
+	assert.NotContains(t, shellEnv, "BROKER_ENV", "shell agent must not receive broker env")
+	assert.NotContains(t, shellEnv, "PROGENY_ENV", "shell agent must not receive progeny env")
+
+	shellSecs, _, err := d.resolveSecrets(ctx, shellAgent)
+	require.NoError(t, err)
+	shellSecMap := make(map[string]string, len(shellSecs))
+	for _, rs := range shellSecs {
+		shellSecMap[rs.Name] = rs.Value
+	}
+	assert.Equal(t, "owner-sec-val", shellSecMap["OWNER_SECRET"], "shell agent must receive owner user-scope secret")
+	assert.NotContains(t, shellSecMap, "PROJECT_SECRET", "shell agent must not receive project secret")
+	assert.NotContains(t, shellSecMap, "HUB_SECRET", "shell agent must not receive hub secret")
+	assert.NotContains(t, shellSecMap, "BROKER_SECRET", "shell agent must not receive broker secret")
+	assert.NotContains(t, shellSecMap, "PROGENY_SECRET", "shell agent must not receive progeny secret")
+
+	asNeeded, err := d.resolveAsNeededForKeys(ctx, shellAgent, []string{
+		"PROJ_AS_NEEDED", "OWNER_AS_NEEDED", "PROJECT_AS_NEEDED_SEC", "OWNER_AS_NEEDED_SEC",
+	}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "good-owner-an", asNeeded["OWNER_AS_NEEDED"])
+	assert.Equal(t, "owner-an-sec", asNeeded["OWNER_AS_NEEDED_SEC"])
+	assert.NotContains(t, asNeeded, "PROJ_AS_NEEDED")
+	assert.NotContains(t, asNeeded, "PROJECT_AS_NEEDED_SEC")
+
+	// 3. Start/resume/restart path: selectDeliveryEnv + selectDeliverySecretsWith.
+	sel := newDeliverySelector(nil, shellAgent, PurposeRestart)
+	startEnv, _, err := d.selectDeliveryEnv(ctx, sel, shellAgent, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "good-owner-val", startEnv["OWNER_ENV"])
+	assert.NotContains(t, startEnv, "PROMPT_COMMAND")
+	assert.NotContains(t, startEnv, "HUB_ENV")
+	assert.NotContains(t, startEnv, "BROKER_ENV")
+	assert.NotContains(t, startEnv, "PROGENY_ENV")
+
+	startSecs, _, _, err := d.selectDeliverySecretsWith(ctx, sel, shellAgent, nil)
+	require.NoError(t, err)
+	startSecMap := make(map[string]string, len(startSecs))
+	for _, rs := range startSecs {
+		startSecMap[rs.Name] = rs.Value
+	}
+	assert.Equal(t, "owner-sec-val", startSecMap["OWNER_SECRET"])
+	assert.NotContains(t, startSecMap, "PROJECT_SECRET")
+	assert.NotContains(t, startSecMap, "HUB_SECRET")
+	assert.NotContains(t, startSecMap, "BROKER_SECRET")
+	assert.NotContains(t, startSecMap, "PROGENY_SECRET")
+
+	// 4. Control: an LLM agent in the same project still receives project env and project secret.
+	llmEnv, _, _, err := d.resolveEnvFromStorageWithSource(ctx, llmAgent)
+	require.NoError(t, err)
+	assert.Equal(t, "evil-project-cmd", llmEnv["PROMPT_COMMAND"], "LLM control agent must still receive project env")
+	assert.Equal(t, "good-owner-val", llmEnv["OWNER_ENV"], "LLM control agent must still receive owner env")
+
+	llmSecs, _, err := d.resolveSecrets(ctx, llmAgent)
+	require.NoError(t, err)
+	llmSecMap := make(map[string]string, len(llmSecs))
+	for _, rs := range llmSecs {
+		llmSecMap[rs.Name] = rs.Value
+	}
+	assert.Equal(t, "proj-sec-val", llmSecMap["PROJECT_SECRET"], "LLM control agent must still receive project secret")
+	assert.Equal(t, "owner-sec-val", llmSecMap["OWNER_SECRET"], "LLM control agent must still receive owner secret")
 }

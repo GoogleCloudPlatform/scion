@@ -254,12 +254,12 @@ func TestResolveLocalProjectAgentID_PrecedenceAndAmbiguity(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/healthz":
+		switch r.URL.Path {
+		case "/healthz":
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
-		case r.URL.Path == "/api/v1/projects/"+projID:
+		case "/api/v1/projects/" + projID:
 			_ = json.NewEncoder(w).Encode(map[string]any{"id": projID, "name": "Prec", "slug": "prec"})
-		case r.URL.Path == "/api/v1/projects/"+projID+"/agents":
+		case "/api/v1/projects/" + projID + "/agents":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
 					{"id": idName1, "slug": "ops-1", "name": "ops"},

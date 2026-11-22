@@ -2825,7 +2825,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		hConfig, err := settings.ResolveHarnessConfig(profileName, harnessConfigName)
 		if err == nil {
 			settingsCfg := &api.ScionConfig{}
-			if hConfig.Env != nil {
+			if hConfig.Env != nil && harnessConfigName != config.ShellHarnessConfigName {
 				settingsCfg.Env, _ = sanitizeHarnessConfigEnv(hConfig.Env, "settings", false)
 			}
 			if hConfig.Volumes != nil {

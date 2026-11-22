@@ -194,3 +194,39 @@ func TestShellAgent_NoTemplateRecordedAndNoFallbackEnv(t *testing.T) {
 		assert.NotContains(t, kv, "BASH_ENV=", "BASH_ENV must not leak into shell container Env")
 	}
 }
+
+func TestShellAgent_ResolveAuthEnvOverlay_IgnoresSettingsHarnessConfigEnv(t *testing.T) {
+	settings := &config.VersionedSettings{
+		HarnessConfigs: map[string]config.HarnessConfigEntry{
+			config.ShellHarnessConfigName: {
+				Harness: config.ShellHarnessConfigName,
+				Env: map[string]string{
+					"PROMPT_COMMAND": "evil-broker-settings-cmd",
+					"BASH_ENV":       "/tmp/evil.sh",
+				},
+			},
+			"claude": {
+				Harness: "claude",
+				Env: map[string]string{
+					"CLAUDE_SETTINGS_ENV": "allowed-for-llm",
+				},
+			},
+		},
+	}
+
+	shellOpts := api.StartOptions{
+		BrokerMode: true,
+		Env:        map[string]string{"OWNER_ENV": "keep-me"},
+	}
+	overlay, _ := resolveAuthEnvOverlay(&shellOpts, settings, "", config.ShellHarnessConfigName)
+	assert.Equal(t, "keep-me", shellOpts.Env["OWNER_ENV"])
+	assert.NotContains(t, shellOpts.Env, "PROMPT_COMMAND", "shell agent must not receive settings harness_configs.shell.env")
+	assert.NotContains(t, shellOpts.Env, "BASH_ENV", "shell agent must not receive settings harness_configs.shell.env")
+	assert.NotContains(t, overlay, "PROMPT_COMMAND")
+
+	// Control: LLM harness config still receives its settings env.
+	llmOpts := api.StartOptions{BrokerMode: true}
+	llmOverlay, _ := resolveAuthEnvOverlay(&llmOpts, settings, "", "claude")
+	assert.Equal(t, "allowed-for-llm", llmOpts.Env["CLAUDE_SETTINGS_ENV"])
+	assert.Equal(t, "allowed-for-llm", llmOverlay["CLAUDE_SETTINGS_ENV"])
+}
