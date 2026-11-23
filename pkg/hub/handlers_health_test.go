@@ -18,11 +18,17 @@ package hub
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -187,4 +193,124 @@ func TestHealthz_StatusIsFirstField(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodGet, "/healthz", nil)
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, strings.HasPrefix(rec.Body.String(), `{"status":"unhealthy"`), "got %s", rec.Body.String())
+}
+
+func enableExperimentForReadyzTest(t *testing.T, srv *Server, name string) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == name {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+}
+
+// TestReadyz_ArtifactStoreStartupLifecycle verifies ptone/scion#5712:
+//   - /healthz remains 200 OK (liveness) while the artifact store is initializing.
+//   - /readyz returns 503 ("artifact store initializing") while ExpectArtifactStore
+//     is pending and artifacts are enabled, and turns 200 once SetArtifactStore
+//     completes.
+//   - During initialization, artifact routes answer 503 with a starting-up
+//     message and Retry-After instead of "artifact storage is not configured".
+//   - When artifacts are disabled, /readyz is not blocked on artifact store init.
+//   - When ArtifactStoreInitFailed is called while artifacts are enabled,
+//     /readyz stays 503 ("artifact store not available") and artifact routes
+//     answer 503 without Retry-After.
+func TestReadyz_ArtifactStoreStartupLifecycle(t *testing.T) {
+	t.Run("artifacts disabled does not block readyz", func(t *testing.T) {
+		srv, _ := testServer(t)
+		require.False(t, srv.experimentEnabled(experiments.Artifacts))
+		require.False(t, srv.experimentEnabled(experiments.AttachmentArtifacts))
+
+		srv.ExpectArtifactStore()
+		rec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Contains(t, rec.Body.String(), `"status":"ready"`)
+	})
+
+	t.Run("artifacts enabled gates readyz and sets Retry-After until initialized", func(t *testing.T) {
+		srv, _ := testServer(t)
+		enableExperimentForReadyzTest(t, srv, experiments.Artifacts)
+		blobs, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: t.TempDir()})
+		require.NoError(t, err)
+		srv.SetStorage(blobs)
+
+		// Before ExpectArtifactStore, /readyz is 200 (unconfigured test server).
+		rec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		// Startup marks artifact store as initializing before listener binds.
+		srv.ExpectArtifactStore()
+
+		// /healthz stays 200 OK (liveness).
+		healthRec := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+		require.Equal(t, http.StatusOK, healthRec.Code)
+		assert.True(t, strings.HasPrefix(healthRec.Body.String(), `{"status":"healthy"`))
+
+		// /readyz reports 503 not_ready while initializing.
+		readyRec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+		require.Equal(t, http.StatusServiceUnavailable, readyRec.Code)
+		var readyBody map[string]string
+		require.NoError(t, json.Unmarshal(readyRec.Body.Bytes(), &readyBody))
+		assert.Equal(t, "not_ready", readyBody["status"])
+		assert.Equal(t, "artifact store initializing", readyBody["reason"])
+
+		// Artifact route returns 503 with starting-up message and Retry-After.
+		artRec := doRequest(t, srv, http.MethodGet, "/api/v1/artifacts?mine=1", nil)
+		require.Equal(t, http.StatusServiceUnavailable, artRec.Code)
+		assert.NotEmpty(t, artRec.Header().Get("Retry-After"))
+		assert.Contains(t, artRec.Body.String(), "starting up")
+		assert.NotContains(t, artRec.Body.String(), "not configured")
+
+		// Once SetArtifactStore completes, /readyz turns 200 and artifact routes serve.
+		db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "artifacts.db")+"?_pragma=busy_timeout(5000)")
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		st := artifacts.NewStore(db, "sqlite")
+		require.NoError(t, st.Init(context.Background()))
+		srv.SetArtifactStore(st)
+
+		readyRec = doRequest(t, srv, http.MethodGet, "/readyz", nil)
+		require.Equal(t, http.StatusOK, readyRec.Code)
+		assert.Contains(t, readyRec.Body.String(), `"status":"ready"`)
+
+		artRec = doRequest(t, srv, http.MethodGet, "/api/v1/artifacts?mine=1", nil)
+		require.Equal(t, http.StatusOK, artRec.Code)
+	})
+
+	t.Run("init failure keeps readyz 503 and drops Retry-After", func(t *testing.T) {
+		srv, _ := testServer(t)
+		enableExperimentForReadyzTest(t, srv, experiments.Artifacts)
+		srv.ExpectArtifactStore()
+		srv.ArtifactStoreInitFailed()
+
+		readyRec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+		require.Equal(t, http.StatusServiceUnavailable, readyRec.Code)
+		var readyBody map[string]string
+		require.NoError(t, json.Unmarshal(readyRec.Body.Bytes(), &readyBody))
+		assert.Equal(t, "not_ready", readyBody["status"])
+		assert.Equal(t, "artifact store not available", readyBody["reason"])
+
+		artRec := doRequest(t, srv, http.MethodGet, "/api/v1/artifacts?mine=1", nil)
+		require.Equal(t, http.StatusServiceUnavailable, artRec.Code)
+		assert.Empty(t, artRec.Header().Get("Retry-After"))
+		assert.Contains(t, artRec.Body.String(), "not configured")
+	})
+
+	t.Run("attachment_artifacts experiment also gates readyz while initializing", func(t *testing.T) {
+		srv, _ := testServer(t)
+		enableExperimentForReadyzTest(t, srv, experiments.AttachmentArtifacts)
+		srv.ExpectArtifactStore()
+
+		readyRec := doRequest(t, srv, http.MethodGet, "/readyz", nil)
+		require.Equal(t, http.StatusServiceUnavailable, readyRec.Code)
+		var readyBody map[string]string
+		require.NoError(t, json.Unmarshal(readyRec.Body.Bytes(), &readyBody))
+		assert.Equal(t, "not_ready", readyBody["status"])
+		assert.Equal(t, "artifact store initializing", readyBody["reason"])
+	})
 }

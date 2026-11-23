@@ -30,13 +30,93 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 )
 
+// artifactStoreState tracks the startup lifecycle of the server's artifact
+// store so /readyz and artifact HTTP routes can distinguish "still
+// initializing at startup" from "not configured" or "initialization failed"
+// (ptone/scion#5712).
+type artifactStoreState int
+
+const (
+	// artifactStoreUnconfigured is the zero value: no store has been
+	// installed and startup has not committed to initializing one.
+	artifactStoreUnconfigured artifactStoreState = iota
+	// artifactStoreInitializing means startup has committed to initializing
+	// the artifact store (ExpectArtifactStore) and SetArtifactStore has not
+	// completed yet.
+	artifactStoreInitializing
+	// artifactStoreReady means SetArtifactStore installed a non-nil store.
+	artifactStoreReady
+	// artifactStoreFailed means startup attempted to initialize the artifact
+	// store and Init failed (ArtifactStoreInitFailed).
+	artifactStoreFailed
+)
+
+// ExpectArtifactStore records that this server will initialize an artifact
+// store during startup (after the HTTP listener binds). Until SetArtifactStore
+// or ArtifactStoreInitFailed runs, /readyz returns 503 when artifacts are
+// enabled and artifact HTTP routes answer 503 with a starting-up message and
+// Retry-After (ptone/scion#5712).
+func (s *Server) ExpectArtifactStore() {
+	s.mu.Lock()
+	if s.artifactStore == nil {
+		s.artifactStoreState = artifactStoreInitializing
+	}
+	s.mu.Unlock()
+}
+
+// ArtifactStoreInitFailed records that startup failed to initialize the
+// expected artifact store. Artifact HTTP routes stop reporting "starting up"
+// (no Retry-After), while /readyz remains 503 when artifacts are enabled.
+func (s *Server) ArtifactStoreInitFailed() {
+	s.mu.Lock()
+	if s.artifactStore == nil {
+		s.artifactStoreState = artifactStoreFailed
+	}
+	s.mu.Unlock()
+}
+
 // SetArtifactStore installs the artifact service's store. The store owns the
 // artifact_* tables, created by its Init outside the Ent migration graph
 // (design D3). Until a store is set the artifact routes answer 503.
 func (s *Server) SetArtifactStore(st artifacts.Store) {
 	s.mu.Lock()
 	s.artifactStore = st
+	if st != nil {
+		s.artifactStoreState = artifactStoreReady
+	} else {
+		s.artifactStoreState = artifactStoreUnconfigured
+	}
 	s.mu.Unlock()
+}
+
+// artifactsEnabled reports whether any artifact-store-backed feature is
+// enabled on this server (hub.artifacts or hub.attachment_artifacts, with the
+// artifacts operational settings section enabled).
+func (s *Server) artifactsEnabled() bool {
+	if !s.artifactsConfig().Enabled {
+		return false
+	}
+	return s.experimentEnabled(experiments.Artifacts) || s.experimentEnabled(experiments.AttachmentArtifacts)
+}
+
+// artifactStoreNotReadyReason returns the /readyz reason when this server
+// expects an artifact store, artifacts are enabled, and the store is not yet
+// ready. Returns "" when /readyz should not be blocked on the artifact store.
+func (s *Server) artifactStoreNotReadyReason() string {
+	if !s.artifactsEnabled() {
+		return ""
+	}
+	s.mu.RLock()
+	st := s.artifactStoreState
+	s.mu.RUnlock()
+	switch st {
+	case artifactStoreInitializing:
+		return "artifact store initializing"
+	case artifactStoreFailed:
+		return "artifact store not available"
+	default:
+		return ""
+	}
 }
 
 // ArtifactStore returns the artifact store, or nil when none is set.
@@ -136,7 +216,13 @@ func (s *Server) attachmentService() *artifacts.Service {
 func (s *Server) artifactBackend() artifacts.Backend {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID, ViewKeys: s.artifactViewKeys.viewKeys()}
+	return artifacts.Backend{
+		Store:        s.artifactStore,
+		Blobs:        s.storage,
+		HubID:        s.hubID,
+		ViewKeys:     s.artifactViewKeys.viewKeys(),
+		Initializing: s.artifactStoreState == artifactStoreInitializing,
+	}
 }
 
 // artifactReapInterval is how often the hub reaps abandoned pending

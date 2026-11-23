@@ -353,7 +353,7 @@ func (s *Service) handleView(w http.ResponseWriter, r *http.Request, segs []stri
 	}
 	b, ok := s.backend()
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact storage is not configured")
+		writeBackendUnavailable(w, b, "artifact storage is not configured")
 		return
 	}
 	now := time.Now()

@@ -237,7 +237,7 @@ func grantAllows(ctx context.Context, host Host, a *Artifact, grants []Grant, no
 func (s *Service) readableArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
 	b, ok := s.backend()
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact storage is not configured")
+		writeBackendUnavailable(w, b, "artifact storage is not configured")
 		return b, nil, false
 	}
 	a, err := b.store.GetArtifact(r.Context(), id)

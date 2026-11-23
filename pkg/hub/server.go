@@ -2480,7 +2480,11 @@ type Server struct {
 	chatRetention chatRetentionState
 
 	// Artifact store for the artifact_* tables (pkg/artifacts) — nil = artifacts unavailable.
-	artifactStore artifacts.Store
+	// artifactStoreState tracks whether startup is still initializing the store
+	// (ExpectArtifactStore) or failed to initialize it (ArtifactStoreInitFailed),
+	// guarded by mu.
+	artifactStore      artifacts.Store
+	artifactStoreState artifactStoreState
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper

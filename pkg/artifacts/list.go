@@ -186,7 +186,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	b, ok := s.backend()
 	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact storage is not configured")
+		writeBackendUnavailable(w, b, "artifact storage is not configured")
 		return
 	}
 	ctx := r.Context()

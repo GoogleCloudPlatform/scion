@@ -641,6 +641,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			hubSrv.ExpectEmbeddedBroker()
 		}
 
+		// The artifact store initializes in step 14, after the HTTP listener
+		// starts. Mark it as initializing now whenever the store exposes a
+		// raw SQL handle so /readyz stays 503 (when artifacts are enabled)
+		// and artifact routes return a retryable 503 until SetArtifactStore
+		// completes (ptone/scion#5712).
+		if rawSQLDB(s) != nil {
+			hubSrv.ExpectArtifactStore()
+		}
+
 		// Metrics and traces share one resolved identity. initHubServerFn
 		// has applied the operational settings, so the hub name is the
 		// applied one (ptone/scion#4903).
@@ -859,55 +868,54 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// DB handle, not the message broker, so they live outside the broker
 		// gate to work on single-node instances without broker plugins.
 		var webStore hub.WebChatStore
-		if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
-			if rawDB := dbProvider.DB(); rawDB != nil {
-				// Artifact store: creates the artifact_* tables (outside
-				// the Ent migration graph, design D3) on every start,
-				// whether or not the hub.artifacts experiment is on.
-				as := artifacts.NewStore(rawDB, cfg.Database.Driver)
-				if err := as.Init(ctx); err != nil {
-					log.Printf("Warning: failed to initialize artifact store: %v", err)
-				} else {
-					hubSrv.SetArtifactStore(as)
-					log.Printf("Artifact store initialized")
+		if rawDB := rawSQLDB(s); rawDB != nil {
+			// Artifact store: creates the artifact_* tables (outside
+			// the Ent migration graph, design D3) on every start,
+			// whether or not the hub.artifacts experiment is on.
+			as := artifacts.NewStore(rawDB, cfg.Database.Driver)
+			if err := as.Init(ctx); err != nil {
+				hubSrv.ArtifactStoreInitFailed()
+				log.Printf("Warning: failed to initialize artifact store: %v", err)
+			} else {
+				hubSrv.SetArtifactStore(as)
+				log.Printf("Artifact store initialized")
+			}
+
+			searchOpts, closeSearch := webChatSearchOptions(cfg)
+			ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver, searchOpts...)
+			if err := ws.Init(); err != nil {
+				closeSearch()
+				log.Printf("Warning: failed to initialize webchat store: %v", err)
+			} else {
+				defer closeSearch()
+				webStore = ws
+				hubSrv.SetWebChatStore(webStore)
+				log.Printf("Web chat store initialized")
+
+				// Chat message retention purges the web chat tables
+				// and messages in one transaction on this same DB, so
+				// it is wired only once the webchat tables exist.
+				if crp, ok := s.(interface {
+					ChatRetention() store.ChatRetentionStore
+				}); ok {
+					hubSrv.SetChatRetentionStore(crp.ChatRetention())
+					// Preview and manual runs a restart interrupted
+					// would otherwise stay "running" forever.
+					hubSrv.ReconcileInterruptedChatRetentionRuns(context.Background())
 				}
 
-				searchOpts, closeSearch := webChatSearchOptions(cfg)
-				ws := hub.NewWebChatStore(rawDB, cfg.Database.Driver, searchOpts...)
-				if err := ws.Init(); err != nil {
-					closeSearch()
-					log.Printf("Warning: failed to initialize webchat store: %v", err)
+				// W7: Initialize local-disk attachment store.
+				globalDir, err := config.GetGlobalDir()
+				if err != nil {
+					log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
 				} else {
-					defer closeSearch()
-					webStore = ws
-					hubSrv.SetWebChatStore(webStore)
-					log.Printf("Web chat store initialized")
-
-					// Chat message retention purges the web chat tables
-					// and messages in one transaction on this same DB, so
-					// it is wired only once the webchat tables exist.
-					if crp, ok := s.(interface {
-						ChatRetention() store.ChatRetentionStore
-					}); ok {
-						hubSrv.SetChatRetentionStore(crp.ChatRetention())
-						// Preview and manual runs a restart interrupted
-						// would otherwise stay "running" forever.
-						hubSrv.ReconcileInterruptedChatRetentionRuns(context.Background())
-					}
-
-					// W7: Initialize local-disk attachment store.
-					globalDir, err := config.GetGlobalDir()
+					attachDir := filepath.Join(globalDir, "attachments")
+					attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
 					if err != nil {
-						log.Printf("Warning: could not determine global dir, attachments disabled: %v", err)
+						log.Printf("Warning: failed to initialize attachment store: %v", err)
 					} else {
-						attachDir := filepath.Join(globalDir, "attachments")
-						attachStore, err := hub.NewLocalDiskAttachmentStore(attachDir)
-						if err != nil {
-							log.Printf("Warning: failed to initialize attachment store: %v", err)
-						} else {
-							hubSrv.SetAttachmentStore(attachStore)
-							log.Printf("Attachment store initialized: dir=%s", attachDir)
-						}
+						hubSrv.SetAttachmentStore(attachStore)
+						log.Printf("Attachment store initialized: dir=%s", attachDir)
 					}
 				}
 			}
@@ -4543,6 +4551,17 @@ func sharedDirStorageStartupLogWanted(brokerEnabled, hubEnabled bool) bool {
 // startup window.
 func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 	return enableHub && cfg.RuntimeBroker.Enabled && !simulateRemoteBroker && s != nil
+}
+
+// rawSQLDB returns the underlying *sql.DB exposed by s, or nil if the store
+// does not provide one. Shared by the early hubSrv.ExpectArtifactStore() mark
+// and step 14's artifact-store initialization so both use the exact same
+// condition (ptone/scion#5712).
+func rawSQLDB(s store.Store) *sql.DB {
+	if dbProvider, ok := s.(interface{ DB() *sql.DB }); ok {
+		return dbProvider.DB()
+	}
+	return nil
 }
 
 // refuseErrorRuntimeAtStartup returns a non-nil error when rt — the broker's
