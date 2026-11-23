@@ -589,7 +589,7 @@ func TestHandleBrokerMessageFailures_Deliveries(t *testing.T) {
 	})
 
 	t.Run("foreign_broker_delivery_report_ignored", func(t *testing.T) {
-		srv, s, _, sender, target, _, _ := deliverySetup(t)
+		srv, s, project, sender, target, _, _ := deliverySetup(t)
 		ctx := context.Background()
 
 		result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "owned-by-other"))
@@ -599,15 +599,61 @@ func TestHandleBrokerMessageFailures_Deliveries(t *testing.T) {
 		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
 			ID: otherBroker, Name: "foreign-broker", Slug: "foreign-broker", Status: store.BrokerStatusOnline,
 		}))
+		// Give the foreign broker its own agent and send that agent's ID in
+		// the request body to pin that ownership uses the stored
+		// msg.RecipientID rather than trusting the body's agentId/projectId.
+		foreignAgent := &store.Agent{
+			ID:              tid("foreign-owned-agent"),
+			Slug:            "foreign-owned-agent",
+			Name:            "foreign-owned-agent",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: otherBroker,
+			Phase:           "running",
+		}
+		require.NoError(t, s.CreateAgent(ctx, foreignAgent))
 
 		rr, resp := postMessageReport(t, srv, otherBroker, otherBroker, messageDeliveryFailuresRequest{
-			Deliveries: []messageDeliveryConfirmation{{MessageID: result.MessageID}},
+			Deliveries: []messageDeliveryConfirmation{{
+				MessageID: result.MessageID,
+				AgentID:   foreignAgent.ID,
+				ProjectID: foreignAgent.ProjectID,
+			}},
 		})
 		require.Equal(t, http.StatusOK, rr.Code)
 		assert.Equal(t, 0, resp.Delivered)
 		assert.Equal(t, 1, resp.Ignored)
 
 		row, err := s.GetMessage(ctx, result.MessageID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDispatched, row.DispatchState)
+	})
+
+	t.Run("non_agent_recipient_delivery_report_ignored", func(t *testing.T) {
+		srv, s, _, _, target, _, _ := deliverySetup(t)
+		ctx := context.Background()
+
+		msgID := api.NewUUID()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID:            msgID,
+			ProjectID:     target.ProjectID,
+			Sender:        "agent:" + target.Slug,
+			SenderID:      target.ID,
+			Recipient:     "user:bob@example.com",
+			RecipientID:   target.ID,
+			Msg:           "to human",
+			Type:          messages.TypeInstruction,
+			AgentID:       target.ID,
+			DispatchState: store.MessageDispatchDispatched,
+		}))
+
+		rr, resp := postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+			Deliveries: []messageDeliveryConfirmation{{MessageID: msgID, AgentID: target.ID, ProjectID: target.ProjectID}},
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, 0, resp.Delivered)
+		assert.Equal(t, 1, resp.Ignored)
+
+		row, err := s.GetMessage(ctx, msgID)
 		require.NoError(t, err)
 		assert.Equal(t, store.MessageDispatchDispatched, row.DispatchState)
 	})

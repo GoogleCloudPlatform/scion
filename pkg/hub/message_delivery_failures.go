@@ -299,6 +299,8 @@ func (s *Server) applyBrokerMessageFailureOutcome(ctx context.Context, brokerID 
 	}
 
 	// Ownership: the recipient agent must be assigned to the reporting broker.
+	// Always derive ownership from the stored msg.RecipientID; request body
+	// agentId and projectId are informational only and never trusted.
 	recipientAgentID := msg.RecipientID
 	if recipientAgentID == "" || !strings.HasPrefix(msg.Recipient, "agent:") {
 		return brokerFailureIgnored
@@ -410,6 +412,8 @@ func (s *Server) applyBrokerMessageDeliveryOutcome(ctx context.Context, brokerID
 	}
 
 	// Ownership: the recipient agent must be assigned to the reporting broker.
+	// Always derive ownership from the stored msg.RecipientID; request body
+	// agentId and projectId are informational only and never trusted.
 	recipientAgentID := msg.RecipientID
 	if recipientAgentID == "" || !strings.HasPrefix(msg.Recipient, "agent:") {
 		return false

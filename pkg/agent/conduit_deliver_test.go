@@ -1356,3 +1356,170 @@ func TestConduitVsExec_SuccessHandlerOnlyOnExec(t *testing.T) {
 		}
 	})
 }
+
+// TestAgentManager_Message_SuccessHandlerWiring (ptone/scion#9015, sec1 M1):
+// exercises the real NewManager + AgentManager.Message paths (buffered flush
+// through NewManager's deliverFlush, synchronous interrupt, and oversize split
+// flushes) so production wiring and per-sub-flush attribution are pinned.
+func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
+	newRealManager := func(t *testing.T, labelled bool, execs *[]string) *AgentManager {
+		t.Helper()
+		orig := conduitDeliverRuntimes
+		conduitDeliverRuntimes = map[string]bool{"mock": true}
+		origBackoff := conduitRetryBackoff
+		conduitRetryBackoff = time.Millisecond
+		t.Cleanup(func() { conduitDeliverRuntimes, conduitRetryBackoff = orig, origBackoff })
+
+		labels := map[string]string{"scion.name": "test-agent"}
+		if labelled {
+			labels[LabelConduitDeliver] = "true"
+		}
+		var mu sync.Mutex
+		rt := &runtime.MockRuntime{
+			ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{{ID: "hub-agent-1", ContainerID: "c-1", Name: "test-agent", Labels: labels}}, nil
+			},
+			ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				*execs = append(*execs, strings.Join(cmd, " "))
+				return "", nil
+			},
+			ExecWithStdinFunc: func(_ context.Context, _ string, cmd []string, _ io.Reader) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				*execs = append(*execs, strings.Join(cmd, " "))
+				return "", nil
+			},
+		}
+		m := NewManager(rt).(*AgentManager)
+		m.newHarness = func(string) api.Harness { return &deliveryTestHarness{spec: shippedSpec} }
+		m.msgBuffer.bufferDelay = time.Hour
+		m.msgBuffer.waitReady = nil
+		m.msgBuffer.maxFlushAttempts = 1
+		t.Cleanup(func() { m.Close() })
+		return m
+	}
+
+	t.Run("buffered_exec_invokes_onSuccess_through_NewManager_deliverFlush", func(t *testing.T) {
+		var execs []string
+		m := newRealManager(t, false, &execs)
+
+		var calls atomic.Int32
+		ctx := WithDeliveryMessageID(
+			WithDeliverySuccessHandler(context.Background(), func() { calls.Add(1) }),
+			"m-buf-1",
+		)
+		if err := m.Message(ctx, "test-agent", "", "hello buffered", false); err != nil {
+			t.Fatalf("Message: %v", err)
+		}
+		flushNow(m)
+
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("onSuccess called %d times, want 1", got)
+		}
+		if !execDelivered(execs) {
+			t.Fatalf("expected exec delivery, got %v", execs)
+		}
+	})
+
+	t.Run("buffered_conduit_delivered_does_not_invoke_onSuccess", func(t *testing.T) {
+		var execs []string
+		m := newRealManager(t, true, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{answer(http.StatusOK, agentcontrol.OutcomeDelivered)}}
+		m.SetConduitDeliverer(d)
+
+		var calls atomic.Int32
+		ctx := WithDeliveryMessageID(
+			WithDeliverySuccessHandler(context.Background(), func() { calls.Add(1) }),
+			"m-buf-conduit-1",
+		)
+		if err := m.Message(ctx, "test-agent", "", "hello conduit buffered", false); err != nil {
+			t.Fatalf("Message: %v", err)
+		}
+		flushNow(m)
+
+		if got := calls.Load(); got != 0 {
+			t.Fatalf("onSuccess called %d times on conduit delivery, want 0", got)
+		}
+		if d.calls() != 1 || len(execs) != 0 {
+			t.Fatalf("conduit calls=%d execs=%v; want 1 conduit call and 0 execs", d.calls(), execs)
+		}
+	})
+
+	t.Run("interrupt_exec_invokes_onSuccess", func(t *testing.T) {
+		var execs []string
+		m := newRealManager(t, false, &execs)
+
+		var calls atomic.Int32
+		ctx := WithDeliveryMessageID(
+			WithDeliverySuccessHandler(context.Background(), func() { calls.Add(1) }),
+			"m-int-1",
+		)
+		if err := m.Message(ctx, "test-agent", "", "stop now", true); err != nil {
+			t.Fatalf("Message(interrupt): %v", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("onSuccess called %d times on interrupt exec, want 1", got)
+		}
+		if !execDelivered(execs) {
+			t.Fatalf("expected exec delivery on interrupt, got %v", execs)
+		}
+	})
+
+	t.Run("split_flush_attributes_onSuccess_per_subflush_and_failure_wins_on_later_group", func(t *testing.T) {
+		var execs []string
+		m := newRealManager(t, true, &execs)
+		// Sub-flush 0 falls back to exec and succeeds; sub-flush 1 gets a final
+		// conduit error (409 bound) so the split stops and sub-flushes 1..2 fail.
+		d := &fakeDeliverer{answers: []fakeAnswer{
+			{err: ErrConduitUnavailable},
+			answer(http.StatusConflict, agentcontrol.OutcomeBound),
+		}}
+		m.SetConduitDeliverer(d)
+
+		var mu sync.Mutex
+		var succeeded []int
+		var failed []int
+		for i := range 3 {
+			idx := i
+			ctx := WithDeliveryMessageID(
+				WithDeliverySuccessHandler(
+					WithDeliveryFailureHandler(context.Background(), func(error) {
+						mu.Lock()
+						failed = append(failed, idx)
+						mu.Unlock()
+					}),
+					func() {
+						mu.Lock()
+						succeeded = append(succeeded, idx)
+						mu.Unlock()
+					},
+				),
+				fmt.Sprintf("m-split-%d", idx),
+			)
+			text := fmt.Sprintf("%d", idx) + strings.Repeat("z", 300*1024)
+			if err := m.Message(ctx, "test-agent", "", text, false); err != nil {
+				t.Fatalf("Message(%d): %v", idx, err)
+			}
+		}
+		flushNow(m)
+
+		mu.Lock()
+		defer mu.Unlock()
+		slices.Sort(succeeded)
+		slices.Sort(failed)
+		if !slices.Equal(succeeded, []int{0}) {
+			t.Fatalf("onSuccess fired for %v, want [0] only", succeeded)
+		}
+		if !slices.Equal(failed, []int{1, 2}) {
+			t.Fatalf("onFailure fired for %v, want [1 2]", failed)
+		}
+		if !execDelivered(execs) {
+			t.Fatalf("expected exec fallback for sub-flush 0, got %v", execs)
+		}
+		if d.calls() != 2 {
+			t.Fatalf("conduit calls = %d, want 2 (sub-flush 0 fallback + sub-flush 1 failure)", d.calls())
+		}
+	})
+}

@@ -2490,7 +2490,11 @@ export class ScionChatThread extends LitElement {
       // copy of its prompt arrives (design §4.4 out-of-order guard).
       carryDecisionFields(existing, msg);
       let toStore = msg;
-      if (existing?.dispatchState === 'failed' && msg.dispatchState !== 'failed') {
+      if (
+        existing?.dispatchState === 'failed' &&
+        msg.dispatchState !== 'failed' &&
+        msg.dispatchState !== 'delivered'
+      ) {
         // The pinned dispatchFailureReason/Code must come only from
         // `existing`, so strip any value `msg` carries for them before
         // conditionally re-adding `existing`'s.
@@ -2500,16 +2504,18 @@ export class ScionChatThread extends LitElement {
           existing.dispatchFailureReason,
           existing.dispatchFailureCode
         );
-      } else if (
-        existing?.dispatchState === 'delivered' &&
-        (!msg.dispatchState ||
-          msg.dispatchState === 'pending' ||
-          msg.dispatchState === 'waking' ||
-          msg.dispatchState === 'dispatched')
-      ) {
+      } else if (existing?.dispatchState === 'failed' && msg.dispatchState === 'delivered') {
+        // ptone/scion#9015: in the store, delivered and failed are mutually
+        // terminal (MarkMessageDelivered never overwrites failed). The server
+        // can only emit "delivered" (via SSE or history refetch) when the DB
+        // row is actually delivered — meaning the prior "failed" was a stale
+        // synchronous timeout response whose markFailed lost to delivered.
+        // Converge to delivered and clear stale failure metadata.
+        toStore = withDispatchFailure(msg, 'delivered', undefined, undefined);
+      } else if (existing?.dispatchState === 'delivered' && msg.dispatchState !== 'delivered') {
         // ptone/scion#9015: delivery state is monotonic — never downgrade a
-        // confirmed "delivered" message back to pending/dispatched on an
-        // out-of-order HTTP response or backfill row.
+        // confirmed "delivered" message back to pending/waking/dispatched,
+        // omitted, or a stale synchronous timeout "failed".
         toStore = withDispatchFailure(msg, 'delivered', undefined, undefined);
       } else if (
         existing?.dispatchState === 'dispatched' &&
@@ -3901,10 +3907,10 @@ export class ScionChatThread extends LitElement {
               // The same holds for terminal `no_recipient`: a replayed
               // response without dispatchState defaults to dispatched above.
               const wouldDowngrade =
-                (sseVersion.dispatchState === 'failed' ||
-                  sseVersion.dispatchState === 'no_recipient' ||
-                  sseVersion.dispatchState === 'delivered') &&
-                (dispatchState === 'dispatched' || dispatchState === 'pending');
+                (sseVersion.dispatchState === 'delivered' && dispatchState !== 'delivered') ||
+                ((sseVersion.dispatchState === 'failed' ||
+                  sseVersion.dispatchState === 'no_recipient') &&
+                  (dispatchState === 'dispatched' || dispatchState === 'pending'));
               let updatedSseVersion = sseVersion;
               if (!wouldDowngrade) {
                 // Strip any prior dispatchFailureReason/Code before
