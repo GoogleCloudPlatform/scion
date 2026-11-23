@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
@@ -178,5 +179,9 @@ func (l *recordingAuditLogger) LogPendingSecretEvent(context.Context, *PendingSe
 }
 
 func (l *recordingAuditLogger) LogMessageActionEvent(context.Context, *MessageActionEvent) error {
+	return nil
+}
+
+func (l *recordingAuditLogger) LogMaintenanceOverrideEvent(context.Context, *rebuildpreflight.MaintenanceOverrideEvent) error {
 	return nil
 }

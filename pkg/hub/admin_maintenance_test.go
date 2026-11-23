@@ -1039,7 +1039,7 @@ func TestExecuteOperation_InvalidBranchRejected(t *testing.T) {
 		{"invalid", `{"params":{"branch":"--upload-pack=x"}}`, []string{"invalid branch name", "start with a letter or digit"}},
 		{"padded key", `{"params":{" branch":"x+y"}}`, []string{"invalid branch name", "start with a letter or digit"}},
 		{"repeated key", `{"params":{"branch":"main","branch ":"x+y"}}`, []string{"branch is given more than once", "start with a letter or digit"}},
-		{"padded key, valid value", `{"params":{" branch ":"main"}}`, []string{"unknown_param", "unknown parameter(s):  branch  (allowed: branch)"}},
+		{"padded key, valid value", `{"params":{" branch ":"main"}}`, []string{"unknown_param", "unknown parameter(s):  branch  (allowed: branch"}},
 	}
 	for _, key := range []string{"rebuild-server", "rebuild-web"} {
 		for _, tc := range cases {

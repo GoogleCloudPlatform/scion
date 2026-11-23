@@ -39,8 +39,8 @@ type Reject struct {
 	Message string
 }
 
-// ForceRequest is what a run request asks for beyond an ordinary run. It is
-// empty for every request today: force re-runs are not accepted yet.
+// ForceRequest is what a forced run request asks for beyond an ordinary run.
+// When RerunOf is non-empty, the request is a forced re-run of that run ID.
 type ForceRequest struct {
 	// RerunOf is the failed run a forced request re-runs.
 	RerunOf string
@@ -50,32 +50,80 @@ type ForceRequest struct {
 // decoded JSON body as sent (before the hub's parameter parser trims or
 // drops anything). It returns a Reject for a request the hub must refuse.
 //
-// For rebuild-server and rebuild-web, a "branch" parameter must be a
-// string, and, unless it is blank (the configured branch is used), a valid
-// branch name (ValidBranch). The parameter parser trims keys as well as
-// values, so every key that trims to "branch" is the branch parameter: more
-// than one such key is a 400, and the value is checked as the executor will
-// use it, with surrounding space trimmed.
+// Force rules (3.1 step 1):
+//   - "force" and "rerunOf" are accepted only for rebuild-server;
+//   - "force" must be the exact string "true" (not boolean true or "yes");
+//   - "rerunOf" must be a non-empty string;
+//   - "force" and "rerunOf" must appear together;
+//   - no other parameter (including "branch") may accompany a forced request.
+//
+// Branch rules:
+//   - For rebuild-server and rebuild-web, a "branch" parameter must be a
+//     string, and, unless it is blank (the configured branch is used), a
+//     valid branch name (ValidBranch). Duplicate keys that trim to "branch"
+//     are rejected with 400.
 func CheckRunRequest(key string, rawBody map[string]any) (ForceRequest, *Reject) {
+	params, _ := rawBody["params"].(map[string]any)
+
+	var (
+		forceCount  int
+		rawForce    any
+		rerunCount  int
+		rawRerun    any
+		branchCount int
+		rawBranch   any
+		otherKeys   int
+	)
+	for k, v := range params {
+		switch strings.TrimSpace(k) {
+		case "force":
+			rawForce = v
+			forceCount++
+		case "rerunOf":
+			rawRerun = v
+			rerunCount++
+		case "branch":
+			rawBranch = v
+			branchCount++
+		default:
+			otherKeys++
+		}
+	}
+
+	if key == RebuildServerKey && (forceCount > 0 || rerunCount > 0) {
+		if forceCount > 1 || rerunCount > 1 {
+			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "force and rerunOf may each be given at most once"}
+		}
+		if forceCount == 0 {
+			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "rerunOf requires force=\"true\""}
+		}
+		if rerunCount == 0 {
+			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "force requires rerunOf"}
+		}
+		forceStr, ok := rawForce.(string)
+		if !ok || forceStr != "true" {
+			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "force must be the string \"true\""}
+		}
+		rerunStr, ok := rawRerun.(string)
+		if !ok || strings.TrimSpace(rerunStr) == "" {
+			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "rerunOf must be a non-empty string"}
+		}
+		if branchCount > 0 || otherKeys > 0 {
+			return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "a forced re-run accepts only force and rerunOf"}
+		}
+		return ForceRequest{RerunOf: strings.TrimSpace(rerunStr)}, nil
+	}
+
 	if !branchParamKeys[key] {
 		return ForceRequest{}, nil
 	}
-	params, _ := rawBody["params"].(map[string]any)
-	var raw any
-	found := 0
-	for k, v := range params {
-		if strings.TrimSpace(k) == "branch" {
-			raw = v
-			found++
-		}
-	}
-	if found > 1 {
+	if branchCount > 1 {
 		return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "branch is given more than once; " + BranchRule}
 	}
-	if found == 0 {
+	if branchCount == 0 {
 		return ForceRequest{}, nil
 	}
-	branch, isString := raw.(string)
+	branch, isString := rawBranch.(string)
 	if !isString {
 		return ForceRequest{}, &Reject{Status: http.StatusBadRequest, Message: "branch must be a string; " + BranchRule}
 	}

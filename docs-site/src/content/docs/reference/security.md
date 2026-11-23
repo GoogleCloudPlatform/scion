@@ -295,6 +295,10 @@ URL user-info redaction (`pkg/util/urlredact`) is shared across CLI output, API 
 
 Cloud Logging query and stream endpoints (`GET /api/v1/agents/:id/cloud-logs`, `GET /api/v1/agents/:id/cloud-logs/stream`, their project-scoped counterparts, `GET /api/v1/admin/diagnostics/logs`, and `GET /api/v1/admin/diagnostics/logs/stream`) accept only the nine Cloud Logging severity names in the `severity` query parameter (`DEFAULT`, `DEBUG`, `INFO`, `NOTICE`, `WARNING`, `ERROR`, `CRITICAL`, `ALERT`, `EMERGENCY`, matched ASCII case-insensitively with non-ASCII bytes refused) and interpolate only the canonical table constant into `severity >= <LEVEL>`; any other non-empty `severity` value is rejected with `400 validation_error` (`details.field: "severity"`) before a filter is constructed.
 
+### 4.9 Maintenance Preflight Override Audit Stream
+
+When an administrator forces a `rebuild-server` maintenance run past blocking preflight findings or a could-not-run outcome, the Hub records the override both on the forced run row (`override`) and verbatim on the failed run row (`forcedBy`, including `runId`), and emits a `maintenance_preflight_override` event to the `hub.audit` structured log stream. The audit event carries the actor's stable user ID and email, timestamp, both run IDs, operation key, pinned commit and branch, and blocking / could-not-run counts (with no finding text, subjects, or profile names). The `hub.audit` stream is an **index** and may be incomplete (emission is fail-open, logging an `ERROR` with all event fields if the sink fails); the **maintenance run rows** are authoritative. Every emitted event carries `record: "index"` and `authoritative: "maintenance run rows <RunID>, <RerunOf>"`.
+
 ## 5. Development Security
 
 To facilitate local development, Scion provides a **Development Authentication** mode.

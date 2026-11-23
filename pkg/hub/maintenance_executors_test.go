@@ -85,6 +85,11 @@ func TestRebuildServerExecutor_BuildsThenInstallsThroughSudoInstall(t *testing.T
 			return unitdrift.UnitInfo{}, fmt.Errorf("no systemd in tests")
 		},
 		UnitRevision: func(context.Context, string) (string, error) { return "", nil },
+		ColocatedBrokerID: func(context.Context) (string, bool, error) {
+			return "broker-test", true, nil
+		},
+		DatabaseDSN:    ":memory:",
+		DatabaseDriver: "sqlite",
 	})
 
 	var buf bytes.Buffer

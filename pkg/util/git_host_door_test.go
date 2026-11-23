@@ -101,7 +101,7 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	// executors' branch checks (check-ref-format, version; branch_param.go,
 	// ptone/scion#6987) also go through gitOutput and add no literal.
 	"pkg/hub/unitdrift/check.go:GitRevision":                              {1, hostGitDoorReasonHub},
-	"pkg/hub/maintenance/maintenance_executors.go:runRebuildSteps":        {5, hostGitDoorReasonHub},
+	"pkg/hub/maintenance/maintenance_executors.go:runRebuildSteps":        {6, hostGitDoorReasonHub},
 	"pkg/hub/maintenance/maintenance_executors.go:gitOutput":              {1, hostGitDoorReasonHub},
 	"pkg/hub/maintenance/maintenance_executors.go:RebuildWebExecutor.Run": {6, hostGitDoorReasonHub},
 	"pkg/hub/maintenance/maintenance_executors.go:CheckForUpdates":        {1, hostGitDoorReasonHub},
@@ -115,6 +115,7 @@ var hostGitDoorAllowlist = map[string]hostGitDoorEntry{
 	"pkg/hub/maintenance/maintenance_executors.go:PullImagesExecutor.Run":              {1, hostGitDoorReasonNotGit + " (the container runtime)"},
 	"pkg/hub/maintenance/maintenance_executors.go:VerifyScionBinary":                   {1, hostGitDoorReasonNotGit + " (the scion binary being verified)"},
 	"pkg/hub/maintenance/git_build.go:VerifyGitBuild":                                  {1, hostGitDoorReasonNotGit + " (the scion binary built from Git, being verified)"},
+	"pkg/hub/maintenance/rebuild_preflight.go:execPreflightCmd":                        {1, hostGitDoorReasonNotGit + " (the newly built scion binary running server preflight)"},
 	"pkg/hub/system_handlers.go:Server.runImageBuild":                                  {1, hostGitDoorReasonNotGit + " (the image build script)"},
 	"pkg/runtimebroker/nfs_mount_run_unix.go:execRunCommand":                           {1, hostGitDoorReasonNotGit + " (the mount helper)"},
 	"pkg/runtimebroker/pty_classifier.go:tmuxHasSession":                               {1, hostGitDoorReasonNotGit + " (the container runtime)"},

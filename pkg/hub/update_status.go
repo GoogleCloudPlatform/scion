@@ -446,12 +446,14 @@ func (s *Server) finishPendingRun(ctx context.Context, p PendingUpdate, status, 
 		line = fmt.Sprintf("\n==> Hub restarted on %s at %s: update verified.\n", running, now.UTC().Format(time.RFC3339))
 	} else if status == LastUpdateRolledBack {
 		run.Status = store.MaintenanceStatusFailed
+		result["aborted"] = true
 		result["error"] = fmt.Sprintf("%q failed to start; the boot-failure guard rolled back and the hub restarted on %q",
 			p.To, displayRunningVersion(running))
 		line = fmt.Sprintf("\n==> %s failed to start; the boot-failure guard rolled back. Hub restarted on %s at %s.\n",
 			p.To, displayRunningVersion(running), now.UTC().Format(time.RFC3339))
 	} else {
 		run.Status = store.MaintenanceStatusFailed
+		result["aborted"] = true
 		result["error"] = fmt.Sprintf("the hub restarted on %q, not the installed %q", displayRunningVersion(running), p.To)
 		line = fmt.Sprintf("\n==> Hub restarted on %s at %s, expected %s: update failed.\n",
 			displayRunningVersion(running), now.UTC().Format(time.RFC3339), p.To)
@@ -494,9 +496,13 @@ func (s *Server) failStaleRestartingRuns(ctx context.Context) error {
 		now := time.Now()
 		run.Status = store.MaintenanceStatusFailed
 		run.CompletedAt = &now
-		resultJSON, _ := json.Marshal(map[string]string{
-			"error": "the hub restarted without a pending update record for this run; the update could not be verified",
-		})
+		result := map[string]any{}
+		if run.Result != "" {
+			_ = json.Unmarshal([]byte(run.Result), &result)
+		}
+		result["aborted"] = true
+		result["error"] = "the hub restarted without a pending update record for this run; the update could not be verified"
+		resultJSON, _ := json.Marshal(result)
 		run.Result = string(resultJSON)
 		if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
 			return fmt.Errorf("fail stale restarting run %s: %w", run.ID, err)

@@ -135,3 +135,54 @@ func TestCheckRunRequest_Accepts(t *testing.T) {
 		t.Errorf("CheckRunRequest with no body = %+v, want nil", rej)
 	}
 }
+
+func TestCheckRunRequest_ForceRules(t *testing.T) {
+	// Valid forced request.
+	got, rej := CheckRunRequest(RebuildServerKey, decodeBody(t, `{"params":{"force":"true","rerunOf":"run-123"}}`))
+	if rej != nil {
+		t.Fatalf("valid force request rejected: %+v", rej)
+	}
+	if got.RerunOf != "run-123" {
+		t.Errorf("RerunOf = %q, want run-123", got.RerunOf)
+	}
+
+	// Rejected force requests (S01, S02, S45, S46).
+	badCases := []struct {
+		name string
+		key  string
+		body string
+	}{
+		{"boolean true (S01)", RebuildServerKey, `{"params":{"force":true,"rerunOf":"run-1"}}`},
+		{"force yes (S01)", RebuildServerKey, `{"params":{"force":"yes","rerunOf":"run-1"}}`},
+		{"force false", RebuildServerKey, `{"params":{"force":"false","rerunOf":"run-1"}}`},
+		{"force without rerunOf (S02)", RebuildServerKey, `{"params":{"force":"true"}}`},
+		{"rerunOf empty (S02)", RebuildServerKey, `{"params":{"force":"true","rerunOf":""}}`},
+		{"rerunOf whitespace (S02)", RebuildServerKey, `{"params":{"force":"true","rerunOf":"   "}}`},
+		{"rerunOf non-string (S02)", RebuildServerKey, `{"params":{"force":"true","rerunOf":123}}`},
+		{"rerunOf without force", RebuildServerKey, `{"params":{"rerunOf":"run-1"}}`},
+		{"extra branch param (S45)", RebuildServerKey, `{"params":{"force":"true","rerunOf":"run-1","branch":"main"}}`},
+		{"extra unknown param (S45)", RebuildServerKey, `{"params":{"force":"true","rerunOf":"run-1","extra":"x"}}`},
+		{"duplicate padded force", RebuildServerKey, `{"params":{"force":"true"," force ":"true","rerunOf":"run-1"}}`},
+		{"duplicate padded rerunOf", RebuildServerKey, `{"params":{"force":"true","rerunOf":"run-1"," rerunOf":"run-2"}}`},
+	}
+	for _, tc := range badCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, rej := CheckRunRequest(tc.key, decodeBody(t, tc.body))
+			if rej == nil {
+				t.Fatalf("CheckRunRequest(%s, %s) = nil, want 400", tc.key, tc.body)
+			}
+			if rej.Status != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", rej.Status)
+			}
+		})
+	}
+
+	// Non-rebuild-server operations fall through to the hub's operationParamAllowlist
+	// so they keep their documented unknown_param 400 contract (R0c).
+	for _, key := range []string{RebuildWebKey, "update-binary", "pull-images"} {
+		got, rej := CheckRunRequest(key, decodeBody(t, `{"params":{"force":"true","rerunOf":"run-1"}}`))
+		if rej != nil || got != (ForceRequest{}) {
+			t.Errorf("CheckRunRequest(%s, force) = (%+v, %+v), want empty/nil to delegate to allowlist", key, got, rej)
+		}
+	}
+}
