@@ -202,3 +202,72 @@ func TestListAgents_QueryTerms_AuthzIntersectionAndUnknownField(t *testing.T) {
 		t.Fatalf("unknown field err = %v, want store.ErrInvalidInput", err)
 	}
 }
+
+func TestListAgents_QueryTerms_BackslashLabelKeys(t *testing.T) {
+	as, projID := newTestAgentStore(t)
+	ctx := context.Background()
+
+	withBackslash := &store.Agent{
+		ID:        uuid.NewString(),
+		Name:      "with-bs",
+		Slug:      "with-bs",
+		ProjectID: projID,
+		Phase:     "running",
+		Labels:    map[string]string{`foo\`: "1", `k\`: "v"},
+	}
+	plain := &store.Agent{
+		ID:        uuid.NewString(),
+		Name:      "plain",
+		Slug:      "plain",
+		ProjectID: projID,
+		Phase:     "running",
+	}
+	if err := as.CreateAgent(ctx, withBackslash); err != nil {
+		t.Fatalf("CreateAgent withBackslash: %v", err)
+	}
+	if err := as.CreateAgent(ctx, plain); err != nil {
+		t.Fatalf("CreateAgent plain: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		term   store.QueryTerm
+		wantID string
+	}{
+		{
+			name:   "has-key trailing backslash",
+			term:   store.QueryTerm{Field: "label", Values: []string{`foo\`}, Op: store.QueryOpHasKey},
+			wantID: withBackslash.ID,
+		},
+		{
+			name:   "negated has-key trailing backslash",
+			term:   store.QueryTerm{Field: "label", Values: []string{`foo\`}, Negate: true, Op: store.QueryOpHasKey},
+			wantID: plain.ID,
+		},
+		{
+			name:   "label eq trailing backslash",
+			term:   store.QueryTerm{Field: "label", Values: []string{`k\=v`}, Op: store.QueryOpLabelEq},
+			wantID: withBackslash.ID,
+		},
+		{
+			name:   "negated label eq trailing backslash",
+			term:   store.QueryTerm{Field: "label", Values: []string{`k\=v`}, Negate: true, Op: store.QueryOpLabelEq},
+			wantID: plain.ID,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := as.ListAgents(ctx, store.AgentFilter{
+				ProjectID: projID,
+				Query:     &store.QueryTerms{Terms: []store.QueryTerm{tc.term}},
+			}, store.ListOptions{Limit: 10})
+			if err != nil {
+				t.Fatalf("ListAgents(%s): %v", tc.name, err)
+			}
+			if len(res.Items) != 1 || res.Items[0].ID != tc.wantID {
+				t.Fatalf("ListAgents(%s) got %d items, want [%s]", tc.name, len(res.Items), tc.wantID)
+			}
+		})
+	}
+}

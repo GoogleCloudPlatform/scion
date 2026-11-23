@@ -26,6 +26,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 )
 
+// sqliteJSONKeyPath formats a top-level JSON object key as a SQLite JSON path
+// (`$."key"`), escaping backslashes before double quotes so keys containing
+// dots, quotes, or trailing backslashes (e.g. `foo\`) remain valid JSON paths.
+func sqliteJSONKeyPath(key string) string {
+	escaped := strings.ReplaceAll(key, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	return fmt.Sprintf(`$."%s"`, escaped)
+}
+
 // labelContains returns an Ent predicate restricting results to agents whose
 // `labels` JSON object contains the given key-value pair.
 //
@@ -52,11 +61,10 @@ func labelContains(key, value string) predicate.Agent {
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
 				b.WriteString("json_extract(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(sqliteJSONKeyPath(key)).
 					WriteString(") = ").
 					Arg(value)
 			}))
@@ -83,15 +91,15 @@ func labelNotContains(key, value string) predicate.Agent {
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				path := sqliteJSONKeyPath(key)
 				b.WriteString("(json_extract(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(path).
 					WriteString(") IS NULL OR json_extract(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(path).
 					WriteString(") != ").
 					Arg(value).
 					WriteString(")")
@@ -121,11 +129,10 @@ func labelHasKey(key string) predicate.Agent {
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
 				b.WriteString("json_type(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(sqliteJSONKeyPath(key)).
 					WriteString(") IS NOT NULL")
 			}))
 		}
@@ -150,11 +157,10 @@ func labelNotHasKey(key string) predicate.Agent {
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
 				b.WriteString("json_type(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(sqliteJSONKeyPath(key)).
 					WriteString(") IS NULL")
 			}))
 		}
@@ -176,11 +182,10 @@ func projectLabelContains(key, value string) predicate.Project {
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
 				b.WriteString("json_extract(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(sqliteJSONKeyPath(key)).
 					WriteString(") = ").
 					Arg(value)
 			}))
@@ -208,15 +213,15 @@ func projectLabelNotContains(key, value string) predicate.Project {
 			}))
 		default: // SQLite
 			s.Where(entsql.P(func(b *entsql.Builder) {
-				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				path := sqliteJSONKeyPath(key)
 				b.WriteString("(json_extract(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(path).
 					WriteString(") IS NULL OR json_extract(").
 					WriteString(col).
 					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					Arg(path).
 					WriteString(") != ").
 					Arg(value).
 					WriteString(")")
