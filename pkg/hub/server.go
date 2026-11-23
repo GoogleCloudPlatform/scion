@@ -8435,6 +8435,9 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/decision-prompts/", s.guarded("/api/v1/decision-prompts/", s.handleDecisionPromptRoutes))
 	}
 
+	// Secret request responder endpoints (hub.agent_secrets; 404 while off).
+	s.mux.HandleFunc("/api/v1/secret-requests/", s.guarded("/api/v1/secret-requests/", s.handleSecretRequestRoutes))
+
 	// Attachment delivery capability redemption by brokers (ptone/scion#4596).
 	s.mux.HandleFunc("/api/v1/attachment-deliveries/", s.guarded("/api/v1/attachment-deliveries/", s.handleAttachmentDelivery))
 
@@ -8454,6 +8457,10 @@ func (s *Server) registerRoutes() {
 	// Agent self-service decision list, show, interpreted answers, and withdraw (agent token auth; 404 when web.decisions is off)
 	s.mux.HandleFunc("/api/v1/agent/decisions", s.guarded("/api/v1/agent/decisions", s.handleAgentDecisionRoutes))
 	s.mux.HandleFunc("/api/v1/agent/decisions/", s.guarded("/api/v1/agent/decisions/", s.handleAgentDecisionRoutes))
+
+	// Agent self-service secret-request list and withdraw (agent token auth; 404 when hub.agent_secrets is off)
+	s.mux.HandleFunc("/api/v1/agent/secret-requests", s.guarded("/api/v1/agent/secret-requests", s.handleAgentSecretRequestRoutes))
+	s.mux.HandleFunc("/api/v1/agent/secret-requests/", s.guarded("/api/v1/agent/secret-requests/", s.handleAgentSecretRequestRoutes))
 
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))

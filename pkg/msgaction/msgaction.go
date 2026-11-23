@@ -119,6 +119,9 @@ type KindSpec struct {
 	// ResolvedStatus is the kind's stored status name for ClassResolved
 	// (e.g. "decided", "fulfilled", "approved"). Defaults to "resolved" when empty.
 	ResolvedStatus string
+	// ClaimedStatus is the kind's stored status name for ClassClaimed
+	// (e.g. "fulfilling" for secret requests). Defaults to "claimed" when empty.
+	ClaimedStatus string
 	// ResolvedConflictCode overrides the 409 conflict code for ClassResolved
 	// (e.g. "already_answered" for decisions). Defaults to ConflictAlreadyResolved.
 	ResolvedConflictCode string
@@ -223,10 +226,14 @@ func (s KindSpec) Classify(status string) (Class, bool) {
 	if resolved == "" {
 		resolved = string(ClassResolved)
 	}
+	claimed := s.ClaimedStatus
+	if claimed == "" {
+		claimed = string(ClassClaimed)
+	}
 	switch status {
 	case string(ClassPending):
 		return ClassPending, true
-	case string(ClassClaimed):
+	case claimed:
 		if s.UsesClaim {
 			return ClassClaimed, true
 		}

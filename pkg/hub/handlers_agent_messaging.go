@@ -105,6 +105,15 @@ type OutboundMessageRequest struct {
 	// exist (a new version each). Valid only with Decisions.
 	DecisionsUpdate bool `json:"decisions_update,omitempty"`
 
+	// SecretRequests makes the message a secret request prompt asking a user to
+	// supply one or more agent-scoped secrets (ptone/scion#8747). Gated by the
+	// hub.agent_secrets experiment.
+	SecretRequests []messages.SecretRequestInput `json:"secret_requests,omitempty"`
+	// SecretRequestsUpdate allows SecretRequests to replace pending secret
+	// requests for the named keys (a new version each). Valid only with
+	// SecretRequests.
+	SecretRequestsUpdate bool `json:"secret_requests_update,omitempty"`
+
 	// legacy choices fallback: remove in ptone/scion#8249
 	Choices       []messages.DecisionInput `json:"choices,omitempty"`
 	ChoicesUpdate bool                     `json:"choices_update,omitempty"`

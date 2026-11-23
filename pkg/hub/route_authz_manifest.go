@@ -288,6 +288,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/search":                "authenticated", // Chat search
 	"/api/v1/decisions/":                 "authenticated", // Decision prompt decisions (read, answer)
 	"/api/v1/decision-prompts/":          "authenticated", // Decision prompt set answers and dismissal
+	"/api/v1/secret-requests/":           "authenticated", // Secret request card read, fulfill, and dismiss (session-only; agent.read / agent.attach)
 	"/api/v1/chat/stars":                 "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
 	"/api/v1/chat/stars/":                "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
 	"/api/v1/chat/starred-conversations": "authenticated", // Caller's conversations with starred messages (the Starred rail); 404 when the experiment is off
@@ -317,6 +318,8 @@ var routeAuthzManifest = map[string]string{
 	"GET /api/v1/agent/hub":            "agent-token", // Agent hub metadata (hub_id)
 	"/api/v1/agent/decisions":          "agent-token", // Agent decision list (self-scoped; 404 when web.decisions is off)
 	"/api/v1/agent/decisions/":         "agent-token", // Agent decision show, interpreted answers, and withdraw (self-scoped; 404 when web.decisions is off)
+	"/api/v1/agent/secret-requests":    "agent-token", // Agent secret-request list (self-scoped; 404 when hub.agent_secrets is off)
+	"/api/v1/agent/secret-requests/":   "agent-token", // Agent secret-request withdraw (self-scoped; 404 when hub.agent_secrets is off)
 
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public":       "authenticated", // Public settings — requires session despite name

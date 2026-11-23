@@ -102,13 +102,21 @@ const (
 	// of them. Both are hub-minted: see IsHubMintedType.
 	TypeDecisionPrompt   = "decision-prompt"
 	TypeDecisionResponse = "decision-response"
+
+	// TypeSecretRequest is an agent message asking a user to supply one or
+	// more agent-scoped secrets. TypeSecretResponse notifies the agent when
+	// a request is fulfilled or dismissed. Both are hub-minted: see
+	// IsHubMintedType.
+	TypeSecretRequest  = "secret-request"
+	TypeSecretResponse = "secret-response"
 )
 
 // IsHubMintedType reports whether t is a message type only the hub may set.
 // Every client send path must reject a caller-supplied type for which it
 // returns true.
 func IsHubMintedType(t string) bool {
-	return t == TypeDecisionPrompt || t == TypeDecisionResponse
+	return t == TypeDecisionPrompt || t == TypeDecisionResponse ||
+		t == TypeSecretRequest || t == TypeSecretResponse
 }
 
 // System message category constants identify the origin of a system message.
@@ -146,6 +154,8 @@ var validTypes = map[string]bool{
 	TypeReply:            true,
 	TypeDecisionPrompt:   true,
 	TypeDecisionResponse: true,
+	TypeSecretRequest:    true,
+	TypeSecretResponse:   true,
 }
 
 // StructuredMessage represents a formatted Scion message.
