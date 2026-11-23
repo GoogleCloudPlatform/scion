@@ -118,6 +118,9 @@ type Service struct {
 	archiveSlots   *archiveSlots
 	archiveNow     func() time.Time
 
+	// nowFn overrides time.Now in tests; nil means time.Now.
+	nowFn func() time.Time
+
 	// viewIssuanceClosedWarned makes the view issuance-closed warning
 	// appear once (warnViewIssuanceClosed).
 	viewIssuanceClosedWarned atomic.Bool
@@ -248,6 +251,13 @@ func (s *Service) notifyReview(ctx context.Context, a *Artifact, v *Version, acc
 
 // Host returns the host the service was built with.
 func (s *Service) Host() Host { return s.host }
+
+func (s *Service) now() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
+}
 
 // SetBackendProvider makes the service ask fn for its store, blob storage
 // and hub id on each request, instead of the values given to SetStore and
