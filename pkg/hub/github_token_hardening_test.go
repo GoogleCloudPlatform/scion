@@ -205,6 +205,7 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 		mockClient := &mockRuntimeBrokerClient{}
 		disp := NewHTTPAgentDispatcherWithClient(st, mockClient, false, slog.Default())
 		disp.SetSecretBackend(secBackend)
+		disp.SetAuthzService(NewAuthzService(st, slog.Default()))
 
 		instAg := &store.Agent{
 			ID: api.NewUUID(), Name: "inst-file-ag", Slug: "inst-file-ag",
