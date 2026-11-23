@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -99,8 +100,13 @@ Secret types control how the value is projected into agent containers:
 For file secrets, prefix the value with @ to read from a file:
   scion hub secret set --type file --target /etc/ssl/cert.pem TLS_CERT @cert.pem
 
+To read the value from stdin without exposing it in shell history or process
+listings, pass '-' as VALUE (trailing CR/LF is trimmed; type is unchanged):
+  printf %s "$V" | scion hub secret set --agent my-agent API_KEY -
+
 Examples:
   scion hub secret set API_KEY sk-abc123
+  printf %s "$V" | scion hub secret set API_KEY -
   scion hub secret set --scope hub API_KEY sk-abc123
   scion hub secret set --project DATABASE_PASSWORD mypassword
   scion hub secret set --type variable CONFIG_JSON '{"key":"val"}'
@@ -325,9 +331,26 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		return newUsageError("key cannot contain spaces, tabs, newlines, or '='")
 	}
 
-	// Handle @filename prefix for file secrets: read file content and base64-encode
-	isFileValue := strings.HasPrefix(value, "@")
-	if isFileValue {
+	// Handle '-' to read secret value from stdin without changing the secret type,
+	// or '@filename' to read file content and base64-encode. Using else-if ensures
+	// a stdin secret value that happens to begin with '@' is never misinterpreted
+	// as a file path.
+	isFileValue := false
+	if value == "-" {
+		const maxStdinSecretBytes = 64 * 1024
+		b, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), maxStdinSecretBytes+1))
+		if err != nil {
+			return fmt.Errorf("failed to read secret value from stdin: %w", err)
+		}
+		if len(b) > maxStdinSecretBytes {
+			return newUsageError("secret value from stdin exceeds 64KB limit")
+		}
+		value = strings.TrimRight(string(b), "\r\n")
+		if value == "" {
+			return newUsageError("secret value from stdin is empty")
+		}
+	} else if strings.HasPrefix(value, "@") {
+		isFileValue = true
 		filePath := value[1:]
 		// Expand ~ in source file path for reading
 		if strings.HasPrefix(filePath, "~/") {

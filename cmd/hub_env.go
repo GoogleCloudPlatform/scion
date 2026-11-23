@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -303,7 +304,11 @@ func resolveAgentScopeID(ctx context.Context, client hubclient.Client, settings 
 	if projRef, _, err := inferScopeProject(settings); err == nil && projRef != "" {
 		if proj, perr := resolveProjectByNameOrID(ctx, client, projRef, uat); perr == nil && proj != nil && proj.ID != "" {
 			agentSvc = client.ProjectAgents(proj.ID)
+		} else if perr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not resolve inferred project %q (%v); resolving agent %q across all accessible projects\n", projRef, perr, agentRef)
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: no project context found; resolving agent %q across all accessible projects\n", agentRef)
 	}
 	agent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 	if err != nil {

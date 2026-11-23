@@ -88,12 +88,18 @@ The agent is provisioned but not started, even when a task is given. Run
 			return err
 		}
 
+		// Load create-time secrets from --secrets-file before any hub work.
+		createSecrets, err := loadSecretsFile(secretsFilePath, os.Stderr)
+		if err != nil {
+			return asUsageError(err)
+		}
+
 		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}
 
-		return createAgentViaHub(hubCtx, agentName, task, inlineCfg)
+		return createAgentViaHubWithSecrets(hubCtx, agentName, task, inlineCfg, createSecrets)
 	},
 }
 
@@ -230,6 +236,18 @@ func loadCreateInlineConfig(cmd *cobra.Command) (*api.ScionConfig, error) {
 // --config file's config (nil without --config); it is sent as the request
 // config, as startAgentViaHub does, so the Hub stores it with the agent.
 func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inlineCfg *api.ScionConfig) error {
+	var createSecrets []hubclient.AgentSecretInput
+	if secretsFilePath != "" {
+		var err error
+		createSecrets, err = loadSecretsFile(secretsFilePath, os.Stderr)
+		if err != nil {
+			return asUsageError(err)
+		}
+	}
+	return createAgentViaHubWithSecrets(hubCtx, agentName, task, inlineCfg, createSecrets)
+}
+
+func createAgentViaHubWithSecrets(hubCtx *HubContext, agentName string, task string, inlineCfg *api.ScionConfig, createSecrets []hubclient.AgentSecretInput) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -288,6 +306,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string, inline
 		ProvisionOnly:   true,
 		AgentRole:       agentRoleFlag,
 		MessageMode:     messageModeFlag,
+		Secrets:         createSecrets,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -369,6 +388,7 @@ func init() {
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
 	createCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
+	createCmd.Flags().StringVar(&secretsFilePath, secretsFileFlagName, "", secretsFileFlagUsage)
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")

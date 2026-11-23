@@ -987,12 +987,18 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return err
 	}
 
+	// Load create-time secrets from --secrets-file before any hub work.
+	createSecrets, err := loadSecretsFile(secretsFilePath, os.Stderr)
+	if err != nil {
+		return asUsageError(err)
+	}
+
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
 
-	return startAgentViaHub(cmd, hubCtx, agentName, task, resume, inlineCfg)
+	return startAgentViaHubWithSecrets(cmd, hubCtx, agentName, task, resume, inlineCfg, createSecrets)
 }
 
 // applyModelFlags writes --model and --thinking-level into the request's
@@ -1175,6 +1181,18 @@ func warnFlagsIgnoredForExistingAgent(cmd *cobra.Command, agentName, phase strin
 // the Hub. cmd is used only to detect which flags the user explicitly set (for
 // the "not applied to an existing agent" warning); it may be nil.
 func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
+	var createSecrets []hubclient.AgentSecretInput
+	if secretsFilePath != "" {
+		var err error
+		createSecrets, err = loadSecretsFile(secretsFilePath, os.Stderr)
+		if err != nil {
+			return asUsageError(err)
+		}
+	}
+	return startAgentViaHubWithSecrets(cmd, hubCtx, agentName, task, resume, inlineCfg, createSecrets)
+}
+
+func startAgentViaHubWithSecrets(cmd *cobra.Command, hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig, createSecrets []hubclient.AgentSecretInput) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
 	// Get the project ID for this project
@@ -1255,6 +1273,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		// Opt in to a non-blocking launch; the CLI waits for it below. A
 		// Hub without async launch ignores this and answers synchronously.
 		AcceptAsyncLaunch: true,
+		Secrets:           createSecrets,
 	}
 
 	// With a target-hub profile, nothing is gathered from the local
