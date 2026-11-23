@@ -388,6 +388,32 @@ describe('space rail — scoped projectId lookup for mark read/unread', () => {
     expect(valuesSpy).not.toHaveBeenCalled();
   });
 
+  it('rebuilds the threadId -> projectId index when threadsBySpace is replaced', () => {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.spaces = [
+      { ...SPACE, unreadCount: 0 },
+      { ...SPACE_2, unreadCount: 1 },
+    ];
+    el.threadsBySpace = new Map([[SPACE.projectId, [thread({ id: 'topic-1', hasUnread: false })]]]);
+    el.collapsedSpaces = new Set<string>();
+    el.loading = false;
+
+    // Warm the index before SPACE_2's threads are loaded.
+    el.markThreadRead('topic-1');
+
+    // Replace threadsBySpace with an updated map that now holds an unread topic-2.
+    el.threadsBySpace = new Map([
+      [SPACE.projectId, [thread({ id: 'topic-1', hasUnread: false })]],
+      [SPACE_2.projectId, [thread({ id: 'topic-2', hasUnread: true })]],
+    ]);
+
+    el.markThreadRead('topic-2');
+    expect(
+      el.threadsBySpace.get(SPACE_2.projectId).find((t: any) => t.id === 'topic-2').hasUnread
+    ).toBe(false);
+    expect(el.spaces.find((s: any) => s.projectId === SPACE_2.projectId).unreadCount).toBe(0);
+  });
+
   it('with a known loaded projectId, an absent thread does not trigger a rail reload even when another space is unloaded', () => {
     const el = document.createElement('scion-chat-space-rail') as any;
     el.spaces = [
