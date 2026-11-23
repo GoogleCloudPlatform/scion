@@ -416,10 +416,10 @@ export class ScionScheduledEventList extends LitElement {
       this.outputFetched = true;
       if (data.output === undefined) {
         this.outputText = null;
-      } else if (data.captureMode === 'json') {
+      } else if (data.captureMode === 'json' || typeof data.output !== 'string') {
         this.outputText = JSON.stringify(data.output, null, 2);
       } else {
-        this.outputText = typeof data.output === 'string' ? data.output : String(data.output);
+        this.outputText = data.output;
       }
     } catch (err) {
       if (this.detailEvent?.id !== eventId) return;
