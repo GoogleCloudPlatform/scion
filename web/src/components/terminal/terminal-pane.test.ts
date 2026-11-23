@@ -4,6 +4,8 @@ import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import { TERMINAL_PANE_DIALOG_OPEN_EVENT } from '../../client/terminal-workspace-events.js';
+import { crumbTuples } from '../../test-utils/crumbs.js';
+import type { ScionBreadcrumb } from '../shared/breadcrumb.js';
 
 /**
  * The automatic reconnect after a 4503 close waits a full-jitter delay;
@@ -1678,8 +1680,10 @@ describe('compact pane header (ptone/scion#4324)', () => {
     return href;
   }
 
-  it('shows a folder icon and a robot emoji, labelled, with tooltips and the same destinations', async () => {
+  it('shows folder and cpu icons, labelled, with tooltips and the same destinations', async () => {
     await withProject(true);
+
+    expect(toolbar().querySelector('scion-breadcrumb')).toBeNull();
 
     const project = backLink('Back to Project')!;
     expect(project.classList.contains('compact')).toBe(true);
@@ -1692,8 +1696,9 @@ describe('compact pane header (ptone/scion#4324)', () => {
     const agent = backLink('Back to Agent')!;
     expect(agent.classList.contains('compact')).toBe(true);
     expect(agent.getAttribute('href')).toBe(`/agents/${agentId}`);
-    expect(agent.textContent!.trim()).toBe('\u{1F916}');
+    expect(agent.querySelector('sl-icon')!.getAttribute('name')).toBe('cpu');
     expect(agent.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    expect(agent.textContent!.trim()).toBe('');
     expect(agent.closest('sl-tooltip')!.getAttribute('content')).toBe('Back to Agent');
     expect(clickedHref(agent)).toBe(`/agents/${agentId}`);
 
@@ -1701,19 +1706,57 @@ describe('compact pane header (ptone/scion#4324)', () => {
     expect(toolbar().textContent).not.toContain('Back to Agent');
   });
 
-  it('keeps the full text labels when there is room', async () => {
+  it('renders a two-link breadcrumb with no current crumb in full mode (#9025)', async () => {
     await withProject(false);
 
-    const project = backLink('Back to Project')!;
-    expect(project.classList.contains('compact')).toBe(false);
-    expect(project.textContent!.trim()).toBe('← Back to Project');
-    expect(project.getAttribute('href')).toBe('/projects/proj-1');
-    const agent = backLink('Back to Agent')!;
-    expect(agent.textContent!.trim()).toBe('← Back to Agent');
-    expect(toolbar().querySelector('sl-tooltip > a.back-link')).toBeNull();
+    expect(toolbar().querySelector('a.back-link')).toBeNull();
+    const crumbEl = toolbar().querySelector<ScionBreadcrumb>('scion-breadcrumb.toolbar-crumbs')!;
+    expect(crumbEl).not.toBeNull();
+    await crumbEl.updateComplete;
+
+    expect(crumbTuples(toolbar())).toEqual([
+      ['proj-1', '/projects/proj-1'],
+      ['test', `/agents/${agentId}`],
+    ]);
+    expect(crumbEl.crumbs.every((c) => c.truncate)).toBe(true);
+    expect(crumbEl.shadowRoot!.querySelector('[aria-current]')).toBeNull();
+
+    const anchors = [...crumbEl.shadowRoot!.querySelectorAll<HTMLAnchorElement>('a')];
+    expect(anchors).toHaveLength(2);
+    expect(clickedHref(anchors[0])).toBe('/projects/proj-1');
+    expect(clickedHref(anchors[1])).toBe(`/agents/${agentId}`);
   });
 
-  it('shows project display name or slug with tooltip in full and compact back links (#8731)', async () => {
+  it('omits the project crumb in full mode when the agent has no project', async () => {
+    await mountConnected();
+    page.compactHeader = false;
+    page.requestUpdate();
+    await page.updateComplete;
+
+    expect(crumbTuples(toolbar())).toEqual([['test', `/agents/${agentId}`]]);
+  });
+
+  it('URL-encodes projectId in full-mode breadcrumb and compact icon links (#9025)', async () => {
+    await mountConnected();
+    (page as unknown as { projectId: string }).projectId = 'proj/a b?x';
+    page.compactHeader = false;
+    page.requestUpdate();
+    await page.updateComplete;
+
+    expect(crumbTuples(toolbar())).toEqual([
+      ['proj/a b?x', '/projects/proj%2Fa%20b%3Fx'],
+      ['test', `/agents/${agentId}`],
+    ]);
+
+    page.compactHeader = true;
+    page.requestUpdate();
+    await page.updateComplete;
+
+    const project = backLink('Back to Project')!;
+    expect(project.getAttribute('href')).toBe('/projects/proj%2Fa%20b%3Fx');
+  });
+
+  it('shows project display name or slug in full breadcrumb and compact tooltip (#8731, #9025)', async () => {
     await withProject(false);
     (page as unknown as { agent: { project?: string; projectSlug?: string } }).agent = {
       project: 'Billing Service',
@@ -1722,11 +1765,10 @@ describe('compact pane header (ptone/scion#4324)', () => {
     page.requestUpdate();
     await page.updateComplete;
 
-    const fullLink = toolbar().querySelector<HTMLAnchorElement>('a.back-link.project-back-link')!;
-    expect(fullLink).not.toBeNull();
-    expect(fullLink.textContent!.trim()).toBe('← Billing Service');
-    expect(fullLink.getAttribute('href')).toBe('/projects/proj-1');
-    expect(fullLink.closest('sl-tooltip')!.getAttribute('content')).toBe('Billing Service');
+    expect(crumbTuples(toolbar())).toEqual([
+      ['Billing Service', '/projects/proj-1'],
+      ['test', `/agents/${agentId}`],
+    ]);
 
     // Falls back to slug when display name is blank.
     (page as unknown as { agent: { project?: string; projectSlug?: string } }).agent = {
@@ -1735,11 +1777,10 @@ describe('compact pane header (ptone/scion#4324)', () => {
     };
     page.requestUpdate();
     await page.updateComplete;
-    expect(
-      toolbar()
-        .querySelector<HTMLAnchorElement>('a.back-link.project-back-link')!
-        .textContent!.trim()
-    ).toBe('← billing-service');
+    expect(crumbTuples(toolbar())).toEqual([
+      ['billing-service', '/projects/proj-1'],
+      ['test', `/agents/${agentId}`],
+    ]);
 
     // Compact mode uses project name in tooltip and aria-label.
     page.compactHeader = true;
@@ -1749,6 +1790,17 @@ describe('compact pane header (ptone/scion#4324)', () => {
     expect(compactLink.getAttribute('aria-label')).toBe('Back to billing-service');
     expect(compactLink.closest('sl-tooltip')!.getAttribute('content')).toBe(
       'Back to billing-service'
+    );
+  });
+
+  it('overrides breadcrumb host margins and sizing for toolbar layout', () => {
+    const styles = (
+      customElements.get('scion-terminal-pane') as unknown as {
+        styles: { cssText: string };
+      }
+    ).styles.cssText.replace(/\s+/g, ' ');
+    expect(styles).toMatch(
+      /scion-breadcrumb\.toolbar-crumbs \{[^}]*width: auto;[^}]*margin-bottom: 0;[^}]*flex-shrink: 1;[^}]*min-width: 0;[^}]*container-type: normal;/
     );
   });
 
