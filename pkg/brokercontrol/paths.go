@@ -69,6 +69,9 @@ const (
 	ClassHostState     Class = "host identity and state"
 	ClassHubState      Class = "Hub state"
 	ClassHostPlugins   Class = "host plugins"
+	// ClassContainerEngineSocket is reported when a source equals or contains
+	// a container-engine daemon socket (Docker or Podman).
+	ClassContainerEngineSocket Class = "container-engine socket"
 	// ClassGlobalDir is reported for the global-directory floor.
 	ClassGlobalDir Class = "global directory"
 )
@@ -209,6 +212,15 @@ func Resolve() (*Set, error) {
 			return nil, fmt.Errorf("%w: %v", errSetUnresolved, err)
 		}
 		s.Entries = append(s.Entries, Entry{Path: p, Kind: e.Kind, Class: e.Class})
+	}
+	seenSockets := map[string]bool{}
+	for _, raw := range containerEngineSocketPaths() {
+		p, ok := resolveSocketPath(raw)
+		if !ok || seenSockets[p] {
+			continue
+		}
+		seenSockets[p] = true
+		s.Entries = append(s.Entries, Entry{Path: p, Kind: File, Class: ClassContainerEngineSocket})
 	}
 	return s, nil
 }

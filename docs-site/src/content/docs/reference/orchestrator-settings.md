@@ -281,7 +281,7 @@ The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server
 
 ## Volume Source Restrictions
 
-A Runtime Broker refuses any agent mount whose host source reaches the Runtime Broker host's own control files. This applies to every `volumes:` entry, whatever sets it (settings, profiles, harness configs, templates, flat Runtime Broker instance `agent_defaults`, or a create or start request from the Hub). It applies equally to read-only and read-write mounts. It also applies to shared directories, workspaces, agent homes and harness auth files.
+A Runtime Broker refuses any agent mount whose host source reaches the Runtime Broker host's own control files or a host container-engine socket. This applies to every `volumes:` entry, whatever sets it (settings, profiles, harness configs, templates, flat Runtime Broker instance `agent_defaults`, or a create or start request from the Hub). It applies equally to read-only and read-write mounts. It also applies to shared directories, workspaces, agent homes and harness auth files.
 
 The protected paths are, in the Scion global directory (`~/.scion`):
 
@@ -294,6 +294,15 @@ The protected paths are, in the Scion global directory (`~/.scion`):
 | Hub state | `hub-id`, and `hub.db` with its `-wal`, `-shm` and `-journal` files |
 
 The Runtime Broker's configured state directory (`server.broker.state_dir`) and a co-located Hub's SQLite database file are protected wherever they are configured.
+
+Container-engine sockets on the host are also protected (class `container-engine socket`):
+
+- Standard rootful Docker and Podman sockets: `/var/run/docker.sock`, `/run/docker.sock`, `/run/podman/podman.sock`, `/var/run/podman/podman.sock`
+- Rootless Docker and Podman sockets under `$XDG_RUNTIME_DIR` and `/run/user/<uid>` (`docker.sock`, `podman/podman.sock`)
+- `~/.docker/run/docker.sock` (as a result, mounting `~/.docker` as a whole is refused, while mounting `~/.docker/config.json` directly as a file remains allowed)
+- Any local `unix://` socket path configured in `DOCKER_HOST` or `CONTAINER_HOST`
+
+Because parent directories of protected paths are refused, mounting `/run`, `/var/run`, `/run/podman`, `$XDG_RUNTIME_DIR`, or `~/.docker` is also refused. Non-existent socket paths and symlinks pointing to a socket are refused as well.
 
 A mount source is refused when:
 

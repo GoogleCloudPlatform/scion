@@ -62,6 +62,9 @@ func (e *RefusalError) Error() string {
 	if e.Rule == RuleShape || e.Rule == RuleUnresolved {
 		return fmt.Sprintf("mount source %q is refused: it could not be verified to stay clear of Runtime Broker control files on this host; use an existing absolute path with no dangling links", e.Source)
 	}
+	if e.Class == ClassContainerEngineSocket {
+		return fmt.Sprintf("mount source %q is refused: it equals or contains a %s on this host; container-engine sockets cannot be mounted into agents", e.Source, e.Class)
+	}
 	return fmt.Sprintf("mount source %q is refused: it equals or contains Runtime Broker %s on this host; mount a directory that does not contain the Scion global directory (~/.scion) or its control files", e.Source, e.Class)
 }
 
