@@ -211,13 +211,56 @@ func TestHTTPDispatcher_RepairTemplateNameOnlyFallback(t *testing.T) {
 			agent := &store.Agent{
 				Slug:          "a",
 				ProjectID:     "proj-1",
+				OwnerID:       "user-1",
 				Template:      "worker",
 				AppliedConfig: tc.applied,
 			}
 			require.NoError(t, d.repairTemplate(context.Background(), agent))
-			assert.Equal(t, TemplateRepairRef{Name: "worker", ProjectID: "proj-1"}, got)
+			assert.Equal(t, TemplateRepairRef{Name: "worker", ProjectID: "proj-1", UserID: "user-1"}, got)
 		})
 	}
+}
+
+func TestTemplateRepair_NameOnlyUserScopeRepairsUserTemplate(t *testing.T) {
+	f := newTemplateRepairFixture(t)
+	ctx := context.Background()
+	ownerID := tid("tmpl-repair-owner")
+	otherUserID := tid("tmpl-repair-other-user")
+
+	userTmpl := &store.Template{
+		ID:          tid("tmpl-user" + t.Name()),
+		Name:        "worker",
+		Slug:        "worker",
+		Harness:     "claude",
+		Scope:       store.TemplateScopeUser,
+		ScopeID:     ownerID,
+		OwnerID:     ownerID,
+		StoragePath: "tmpl/user/worker",
+		Files:       []store.TemplateFile{{Path: "scion-agent.yaml", Hash: repairStaleHash}},
+		ContentHash: "stale-content",
+		Status:      store.TemplateStatusActive,
+	}
+	require.NoError(t, f.store.CreateTemplate(ctx, userTmpl))
+	_, err := f.srv.GetStorage().Upload(ctx, userTmpl.StoragePath+"/scion-agent.yaml", strings.NewReader(templateRepairContent), storage.UploadOptions{
+		Metadata: map[string]string{"sha256": commitHash(templateRepairContent)},
+	})
+	require.NoError(t, err)
+
+	// Project B has no project-scoped "worker"; ownerID's user template beats global.
+	err = f.srv.syncTemplateFromStorage(ctx, TemplateRepairRef{
+		Name: "worker", ProjectID: f.projectB.ID, UserID: ownerID,
+	})
+	require.NoError(t, err)
+	assert.True(t, f.repaired(t, userTmpl), "owner's user-scoped template must be repaired ahead of global")
+	assert.False(t, f.repaired(t, f.global), "global template must not be repaired when owner has a user-scoped template")
+	assert.False(t, f.repaired(t, f.inA), "project A's template must not be touched")
+
+	// Another user without a user-scoped "worker" falls through to global.
+	err = f.srv.syncTemplateFromStorage(ctx, TemplateRepairRef{
+		Name: "worker", ProjectID: f.projectB.ID, UserID: otherUserID,
+	})
+	require.NoError(t, err)
+	assert.True(t, f.repaired(t, f.global), "other user must fall through to repairing global")
 }
 
 func TestHTTPDispatcher_RepairTemplateNoReference(t *testing.T) {

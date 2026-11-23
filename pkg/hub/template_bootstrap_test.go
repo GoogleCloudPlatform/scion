@@ -529,7 +529,7 @@ func TestSyncExistingTemplate_PopulatesNewHashForLaterAgents(t *testing.T) {
 	if err := srv.bootstrapSingleTemplate(ctx, "claude-template", templateDir, store.TemplateScopeGlobal, ""); err != nil {
 		t.Fatalf("bootstrap failed: %v", err)
 	}
-	v1, err := srv.resolveTemplate(ctx, "claude-template", "")
+	v1, err := srv.resolveTemplate(ctx, "claude-template", "", "")
 	if err != nil || v1 == nil {
 		t.Fatalf("resolveTemplate v1: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestSyncExistingTemplate_PopulatesNewHashForLaterAgents(t *testing.T) {
 		t.Fatalf("sync (force) failed: %v", err)
 	}
 
-	v2, err := srv.resolveTemplate(ctx, "claude-template", "")
+	v2, err := srv.resolveTemplate(ctx, "claude-template", "", "")
 	if err != nil || v2 == nil {
 		t.Fatalf("resolveTemplate v2: %v", err)
 	}

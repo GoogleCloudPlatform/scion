@@ -813,8 +813,8 @@ func (d *HTTPAgentDispatcher) repairTemplate(ctx context.Context, agent *store.A
 		return fmt.Errorf("no template repairer")
 	}
 	// Prefer the stamped record ID; the agent's template reference is only a
-	// fallback, resolved in the agent's project then global scope.
-	ref := TemplateRepairRef{Name: agent.Template, ProjectID: agent.ProjectID}
+	// fallback, resolved in the agent's project, then owner's user, then global scope.
+	ref := TemplateRepairRef{Name: agent.Template, ProjectID: agent.ProjectID, UserID: agent.OwnerID}
 	if agent.AppliedConfig != nil {
 		ref.ID = agent.AppliedConfig.TemplateID
 	}

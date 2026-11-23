@@ -105,7 +105,7 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	// env reconstruction below; ptone/scion#4224).
 	var resolvedTemplate *store.Template
 	if agent.Template != "" {
-		tmpl, err := s.resolveTemplate(ctx, agent.Template, agent.ProjectID)
+		tmpl, err := s.resolveTemplate(ctx, agent.Template, agent.ProjectID, agent.OwnerID)
 		if err != nil {
 			s.agentLifecycleLog.Warn("reincarnate: failed to re-resolve template; continuing without one",
 				"agent_id", agent.ID, "template", agent.Template, "error", err)

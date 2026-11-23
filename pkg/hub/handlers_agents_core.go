@@ -2134,7 +2134,7 @@ func (s *Server) createAgentInProject(
 
 	var resolvedTemplate *store.Template
 	if req.Template != "" {
-		resolvedTemplate, err = s.resolveTemplate(ctx, req.Template, projectID)
+		resolvedTemplate, err = s.resolveTemplateForIdentity(ctx, GetIdentityFromContext(ctx), req.Template, projectID)
 		// SECURITY-GATE (ptone/scion#1916): a resolved candidate is not yet
 		// known to be one the caller may read — resolveTemplate's by-ID arm
 		// looks across every scope. Fold a denial into the same "not found"
