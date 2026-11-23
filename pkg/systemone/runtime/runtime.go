@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/textproto"
@@ -364,6 +365,166 @@ func New(cfg Config, opts ...Option) *Runtime {
 // MaxEvalTime returns the Runtime's configured evaluation time ceiling.
 func (r *Runtime) MaxEvalTime() time.Duration {
 	return r.maxEvalTime
+}
+
+// ValidateCompiled validates compiled at authoring/compile time against the
+// bound or eligible instance's capabilities (primitive limits, conservative
+// bytes-to-tokens MaxInputTokens pre-check, and Adapter.Validate;
+// runtime-design §§4.4, 4.5).
+//
+// When r.instances is nil, ValidateCompiled is a no-op (for runtimes that
+// supply EvalOptions.Instance per call). When compiled binds a specific
+// instance, that instance must exist, be enabled, and pass validation. When
+// compiled is unbound and enabled instances exist, at least one eligible
+// instance must pass (or r.defaultInstance when configured).
+func (r *Runtime) ValidateCompiled(ctx context.Context, compiled *spec.Compiled) error {
+	if r == nil || compiled == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if compiled.Spec.Binding.Pool != "" {
+		return &spec.CompileError{
+			Path:     "spec.binding.pool",
+			Category: spec.CategoryBinding,
+			Message:  fmt.Sprintf("pool binding %q is not supported yet (deferred to P4)", compiled.Spec.Binding.Pool),
+		}
+	}
+	if r.instances == nil {
+		return nil
+	}
+
+	var candidates []Instance
+	switch {
+	case compiled.Spec.Binding.Instance != "":
+		inst, found, err := r.instances.GetInstance(ctx, compiled.Spec.Binding.Instance)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding.instance",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("failed to resolve instance %q", compiled.Spec.Binding.Instance),
+			}
+		}
+		if !found || !inst.Enabled {
+			return &spec.CompileError{
+				Path:     "spec.binding.instance",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("instance %q is not found or disabled", compiled.Spec.Binding.Instance),
+			}
+		}
+		candidates = []Instance{inst}
+
+	case r.defaultInstance != "":
+		inst, found, err := r.instances.GetInstance(ctx, r.defaultInstance)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("failed to resolve default instance %q", r.defaultInstance),
+			}
+		}
+		if !found || !inst.Enabled {
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("default instance %q is not found or disabled", r.defaultInstance),
+			}
+		}
+		candidates = []Instance{inst}
+
+	default:
+		all, err := r.instances.ListInstances(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  "failed to list instances for compile validation",
+			}
+		}
+		for _, inst := range all {
+			if inst.Enabled {
+				candidates = append(candidates, inst)
+			}
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
+	}
+
+	var firstErr error
+	for _, inst := range candidates {
+		if err := r.validateCompiledForInstance(compiled, inst); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		return nil
+	}
+	return firstErr
+}
+
+func (r *Runtime) validateCompiledForInstance(compiled *spec.Compiled, inst Instance) error {
+	adapter, ok := r.registry.Get(inst.Adapter)
+	if !ok {
+		return &spec.CompileError{
+			Path:     "spec.binding.instance",
+			Category: spec.CategoryBinding,
+			Message:  fmt.Sprintf("adapter %q for instance %q is not registered", inst.Adapter, inst.Name),
+		}
+	}
+	view := inst.View()
+	caps, err, panicked := capabilitiesSafely(adapter, view)
+	if panicked || err != nil {
+		return &spec.CompileError{
+			Path:     "spec.binding.instance",
+			Category: spec.CategoryBinding,
+			Message:  fmt.Sprintf("failed to inspect capabilities for instance %q", inst.Name),
+		}
+	}
+	if !caps.SideEffectFree {
+		return &spec.CompileError{
+			Path:     "spec.binding.instance",
+			Category: spec.CategoryCapability,
+			Message:  fmt.Sprintf("adapter %q for instance %q is not side-effect-free", inst.Adapter, inst.Name),
+		}
+	}
+
+	specLimits := caps.SpecLimits()
+	if inst.Limits.MaxInputTokens > 0 && (specLimits.MaxInputTokens <= 0 || inst.Limits.MaxInputTokens < specLimits.MaxInputTokens) {
+		specLimits.MaxInputTokens = inst.Limits.MaxInputTokens
+	}
+	if err := spec.ValidateInputTokenBudget(compiled.Inputs, compiled.Environment, specLimits); err != nil {
+		return err
+	}
+	spCopy := cloneSpec(compiled.Spec)
+	if err := spec.ValidatePortable(&spCopy, specLimits); err != nil {
+		return err
+	}
+	if err := adapter.Validate(view, spCopy); err != nil {
+		if _, ok := spec.AsCompileError(err); ok {
+			return err
+		}
+		return &spec.CompileError{
+			Path:     "spec",
+			Category: spec.CategoryCapability,
+			Message:  fmt.Sprintf("instance %q rejected rule: %v", inst.Name, err),
+		}
+	}
+	return nil
 }
 
 // CloseIdleConnections closes idle HTTP keep-alive connections across cached

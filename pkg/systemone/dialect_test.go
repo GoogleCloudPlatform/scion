@@ -890,3 +890,179 @@ func TestDialect_EngineDeadlineMarginCappedAt10ms(t *testing.T) {
 		assert.Equal(t, string(provider.FailTimeout), eval.Reason)
 	})
 }
+
+func TestDialect_ConsumerEnvironmentRegistrationAndCompileMatrix(t *testing.T) {
+	ctx := context.Background()
+
+	customEnv := spec.ContentEnvironment{
+		Name:    "test_consumer_env",
+		Version: 2,
+		Fields: []spec.FieldDecl{
+			{Name: "doc.title", Kind: spec.FieldKindText, MaxBytes: 256, Trust: spec.TrustTrusted},
+			{Name: "doc.body", Kind: spec.FieldKindText, MaxBytes: 16384, Trust: spec.TrustUntrusted},
+			{Name: "doc.meta", Kind: spec.FieldKindJSON, MaxBytes: 4096, Trust: spec.TrustUntrusted},
+		},
+		ChoiceSets: []spec.ChoiceSetDecl{
+			{Name: "reviewers", MaxItems: 16, MaxLabelBytes: 64},
+		},
+		MaxTotalBytes: 18 * 1024,
+	}
+
+	t.Run("consumer_grant_enforced_when_binding_environment", func(t *testing.T) {
+		eng := ruleengine.NewEngine()
+		d := systemone.NewDialect(systemone.DialectConfig{})
+		require.NoError(t, eng.Register(d))
+
+		// Unregistered consumer cannot bind an environment.
+		err := systemone.RegisterConsumerEnvironment(eng, "unregistered", customEnv)
+		var unsup *ruleengine.UnsupportedDialectError
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+
+		// Pure Grant without AllowIO cannot bind an environment.
+		require.NoError(t, eng.AllowConsumerDialects("pure_consumer", ruleengine.Grant(systemone.DialectName)))
+		err = systemone.RegisterConsumerEnvironment(eng, "pure_consumer", customEnv)
+		unsup = nil
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonIONotAllowed, unsup.Reason)
+
+		// Consumer with GrantIO can bind its environment.
+		require.NoError(t, eng.AllowConsumerDialects("granted_consumer", ruleengine.GrantIO(systemone.DialectName)))
+		require.NoError(t, systemone.RegisterConsumerEnvironment(eng, "granted_consumer", customEnv))
+
+		// Duplicate registration is rejected.
+		require.Error(t, systemone.RegisterConsumerEnvironment(eng, "granted_consumer", customEnv))
+
+		// Built-in probe stays registered alongside customEnv.
+		gotProbe, ok := d.Environment(spec.ProbeEnvironmentName)
+		require.True(t, ok)
+		assert.Equal(t, spec.ProbeEnvironment(), gotProbe)
+		gotCustom, ok := d.Environment(customEnv.Name)
+		require.True(t, ok)
+		assert.Equal(t, customEnv, gotCustom)
+	})
+
+	t.Run("compile_rejects_unknown_env_undeclared_field_and_max_input_tokens", func(t *testing.T) {
+		reg := provider.NewRegistry()
+		reg.MustRegister(&dialectFuncAdapter{
+			name: "tight-adapter",
+			invokeFn: func(context.Context, provider.Transport, provider.InstanceView, provider.ModelRequest) (provider.ModelResult, error) {
+				return provider.ModelResult{}, errors.New("unexpected invoke")
+			},
+		})
+		// Instance limits MaxInputTokens to 512 -> 512*16 = 8192 bytes ceiling.
+		// doc.title (256) fits; doc.body (16384) exceeds 8192.
+		smallInst := runtime.Instance{
+			ID:       "inst-small",
+			Name:     "small-inst",
+			Adapter:  "tight-adapter",
+			Model:    "fake-model-1",
+			Endpoint: "https://fake.example.test",
+			Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-small"},
+			Limits:   runtime.InstanceLimits{MaxInputTokens: 512},
+			Enabled:  true,
+			Revision: 1,
+		}
+		rt := runtime.New(runtime.Config{
+			Registry:    reg,
+			Instances:   runtime.StaticInstances(smallInst),
+			Credentials: runtime.StaticCredential("sk-fake"),
+		})
+		t.Cleanup(rt.CloseIdleConnections)
+
+		eng := ruleengine.NewEngine()
+		require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{Runtime: rt})))
+		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+		require.NoError(t, systemone.RegisterConsumerEnvironment(eng, testSystemOneConsumer, customEnv))
+
+		// Fits: doc.title (256 bytes <= 512*16) on small-inst.
+		okRule := `{
+		  "dialect": "system_one",
+		  "inputs": ["doc.title"],
+		  "on_oversize": "truncate",
+		  "spec": {
+		    "version": 1,
+		    "binding": {"instance": "small-inst"},
+		    "questions": [{"id": "q1", "type": "binary", "instructions": "Check title."}],
+		    "output": {"question": "q1"}
+		  }
+		}`
+		compiled, err := eng.Compile(ctx, systemone.DialectName, okRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: testSystemOneConsumer,
+			Name:     customEnv.Name,
+		})
+		require.NoError(t, err)
+		assert.False(t, compiled.IsZero())
+
+		// Too large for bound instance MaxInputTokens: doc.body (16384 > 512*16 = 8192).
+		tooLargeRule := `{
+		  "dialect": "system_one",
+		  "inputs": ["doc.body"],
+		  "spec": {
+		    "version": 1,
+		    "binding": {"instance": "small-inst"},
+		    "questions": [{"id": "q1", "type": "binary", "instructions": "Check body."}],
+		    "output": {"question": "q1"}
+		  }
+		}`
+		_, err = eng.Compile(ctx, systemone.DialectName, tooLargeRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: testSystemOneConsumer,
+			Name:     customEnv.Name,
+		})
+		require.Error(t, err)
+		ce, ok := spec.AsCompileError(err)
+		require.True(t, ok)
+		assert.Equal(t, spec.CategoryLimit, ce.Category)
+		assert.Equal(t, "inputs", ce.Path)
+
+		// Undeclared field rejected with CategoryInput.
+		undeclaredRule := `{
+		  "dialect": "system_one",
+		  "inputs": ["doc.secret"],
+		  "spec": {
+		    "version": 1,
+		    "binding": {"instance": "small-inst"},
+		    "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+		    "output": {"question": "q1"}
+		  }
+		}`
+		_, err = eng.Compile(ctx, systemone.DialectName, undeclaredRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: testSystemOneConsumer,
+			Name:     customEnv.Name,
+		})
+		require.Error(t, err)
+		ce, ok = spec.AsCompileError(err)
+		require.True(t, ok)
+		assert.Equal(t, spec.CategoryInput, ce.Category)
+
+		// Unknown environment rejected with CategoryInput.
+		_, err = eng.Compile(ctx, systemone.DialectName, okRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: testSystemOneConsumer,
+			Name:     "nonexistent_env",
+		})
+		require.Error(t, err)
+		ce, ok = spec.AsCompileError(err)
+		require.True(t, ok)
+		assert.Equal(t, spec.CategoryInput, ce.Category)
+
+		// Unknown bound instance rejected with CategoryBinding.
+		badBindRule := `{
+		  "dialect": "system_one",
+		  "inputs": ["doc.title"],
+		  "spec": {
+		    "version": 1,
+		    "binding": {"instance": "missing-inst"},
+		    "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+		    "output": {"question": "q1"}
+		  }
+		}`
+		_, err = eng.Compile(ctx, systemone.DialectName, badBindRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: testSystemOneConsumer,
+			Name:     customEnv.Name,
+		})
+		require.Error(t, err)
+		ce, ok = spec.AsCompileError(err)
+		require.True(t, ok)
+		assert.Equal(t, spec.CategoryBinding, ce.Category)
+	})
+}

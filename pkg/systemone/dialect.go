@@ -50,6 +50,10 @@ type DialectConfig struct {
 	// Enabled gates Compile and Evaluate on feature availability before any I/O
 	// (AC-13 option (b)). When nil, the dialect is treated as enabled.
 	Enabled func() bool
+	// Environments optionally supplies a shared ContentEnvironment registry.
+	// When nil, NewDialect creates a fresh spec.NewEnvironmentRegistry() with
+	// the built-in "probe" environment pre-registered.
+	Environments *spec.EnvironmentRegistry
 }
 
 // Dialect adapts System One spec compilation and bounded runtime evaluation to
@@ -67,10 +71,11 @@ type DialectConfig struct {
 //     *ruleengine.UnsupportedDialectError{Dialect: "system_one", Consumer: consumer,
 //     Reason: ruleengine.ReasonUnknownDialect}} without making any provider call.
 type Dialect struct {
-	runtime     *runtime.Runtime
-	runtimeFunc func() *runtime.Runtime
-	maxEvalTime time.Duration
-	enabled     func() bool
+	runtime      *runtime.Runtime
+	runtimeFunc  func() *runtime.Runtime
+	maxEvalTime  time.Duration
+	enabled      func() bool
+	environments *spec.EnvironmentRegistry
 }
 
 type compiledRule struct {
@@ -88,12 +93,67 @@ func NewDialect(cfg DialectConfig) *Dialect {
 	} else if cfg.Runtime != nil {
 		maxEval = cfg.Runtime.MaxEvalTime()
 	}
-	return &Dialect{
-		runtime:     cfg.Runtime,
-		runtimeFunc: cfg.RuntimeFunc,
-		maxEvalTime: maxEval,
-		enabled:     cfg.Enabled,
+	envs := cfg.Environments
+	if envs == nil {
+		envs = spec.NewEnvironmentRegistry()
 	}
+	return &Dialect{
+		runtime:      cfg.Runtime,
+		runtimeFunc:  cfg.RuntimeFunc,
+		maxEvalTime:  maxEval,
+		enabled:      cfg.Enabled,
+		environments: envs,
+	}
+}
+
+// RegisterEnvironment validates and registers a consumer ContentEnvironment on d.
+// Callers wired through a shared ruleengine.Engine should prefer
+// RegisterConsumerEnvironment so the consumer's system_one grant (with AllowIO)
+// is verified before binding.
+func (d *Dialect) RegisterEnvironment(env spec.ContentEnvironment) error {
+	if d == nil || d.environments == nil {
+		return &spec.CompileError{
+			Path:     "environment",
+			Category: spec.CategoryInput,
+			Message:  "system_one dialect environment registry is not initialized",
+		}
+	}
+	return d.environments.Register(env)
+}
+
+// Environment returns a defensive copy of the registered ContentEnvironment
+// named name.
+func (d *Dialect) Environment(name string) (spec.ContentEnvironment, bool) {
+	if d == nil || d.environments == nil {
+		return spec.ContentEnvironment{}, false
+	}
+	return d.environments.Get(name)
+}
+
+// Environments returns d's ContentEnvironment registry.
+func (d *Dialect) Environments() *spec.EnvironmentRegistry {
+	if d == nil {
+		return nil
+	}
+	return d.environments
+}
+
+// RegisterConsumerEnvironment binds env onto the "system_one" Dialect
+// registered in eng after verifying that consumer holds an active system_one
+// grant (including AllowIO) via eng.DialectFor (runtime-design §4.4).
+func RegisterConsumerEnvironment(eng *ruleengine.Engine, consumer string, env spec.ContentEnvironment) error {
+	if eng == nil {
+		return fmt.Errorf("system_one: cannot register environment on nil ruleengine.Engine")
+	}
+	d, err := eng.DialectFor(consumer, DialectName)
+	if err != nil {
+		return err
+	}
+	soDialect, ok := d.(*Dialect)
+	if !ok {
+		return fmt.Errorf("system_one: registered dialect %q has unexpected type %T", DialectName, d)
+	}
+	return soDialect.RegisterEnvironment(env)
 }
 
 // Name returns DialectName ("system_one").
@@ -138,19 +198,27 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 	}
 
 	envName := strings.TrimSpace(env.Name)
-	if envName != spec.ProbeEnvironmentName {
+	contentEnv, ok := d.Environment(envName)
+	if !ok {
 		return ruleengine.Compiled{}, &spec.CompileError{
 			Path:     "environment",
 			Category: spec.CategoryInput,
-			Message:  fmt.Sprintf("unsupported content environment %q (only %q is supported in P1)", envName, spec.ProbeEnvironmentName),
+			Message:  fmt.Sprintf("unknown content environment %q", envName),
 		}
 	}
 
 	compiled, err := spec.Compile([]byte(rule), spec.CompileOptions{
-		Kind: spec.Kind(kind),
+		Kind:        spec.Kind(kind),
+		Environment: &contentEnv,
 	})
 	if err != nil {
 		return ruleengine.Compiled{}, err
+	}
+
+	if rt := d.resolveRuntime(); rt != nil {
+		if err := rt.ValidateCompiled(ctx, compiled); err != nil {
+			return ruleengine.Compiled{}, err
+		}
 	}
 
 	return ruleengine.NewCompiled(strings.TrimSpace(env.Consumer), DialectName, kind, &compiledRule{

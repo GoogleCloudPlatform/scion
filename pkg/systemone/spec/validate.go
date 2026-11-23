@@ -39,15 +39,18 @@ type CompileOptions struct {
 	// Kind is the consumer projection kind (filter, route, judgment_bool,
 	// judgment_choice, judgments). Required.
 	Kind Kind
+	// Environment selects the ContentEnvironment to validate inputs against.
+	// When nil, Compile defaults to ProbeEnvironment().
+	Environment *ContentEnvironment
 	// Inputs overrides or supplies the referenced input fields when compiling an
-	// inline Spec that does not wrap an Envelope. When nil on an inline Spec, it
-	// defaults to ["probe.text"].
+	// inline Spec that does not wrap an Envelope. When nil on an inline Spec
+	// targeting the built-in probe environment, it defaults to ["probe.text"].
 	Inputs []string
 	// Params overrides or supplies trusted {param} values when compiling an
 	// inline Spec without an Envelope.
 	Params map[string]string
-	// Caps optionally validates the portable spec against a specific instance's
-	// capabilities at compile time.
+	// Caps optionally validates the portable spec and declared input sizes
+	// against a specific instance's capabilities at compile time.
 	Caps *CapabilityLimits
 }
 
@@ -119,6 +122,11 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 		timeout    time.Duration
 	)
 
+	contentEnv := ProbeEnvironment()
+	if opts.Environment != nil {
+		contentEnv = opts.Environment.Clone()
+	}
+
 	if isEnv {
 		env, err := ParseEnvelope(raw)
 		if err != nil {
@@ -160,7 +168,7 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 		sp = *parsed
 		if opts.Inputs != nil {
 			inputs = opts.Inputs
-		} else {
+		} else if contentEnv.Name == ProbeEnvironmentName {
 			inputs = []string{ProbeFieldText}
 		}
 		params = opts.Params
@@ -170,11 +178,7 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 	case "", OversizeReject:
 		onOversize = OversizeReject
 	case OversizeTruncate:
-		return nil, &CompileError{
-			Path:     "on_oversize",
-			Category: CategoryCapability,
-			Message:  "on_oversize \"truncate\" is not supported in P1 (deferred to P2)",
-		}
+		onOversize = OversizeTruncate
 	default:
 		return nil, &CompileError{
 			Path:     "on_oversize",
@@ -192,8 +196,10 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 		}
 	}
 
-	contentEnv := ProbeEnvironment()
 	if err := ValidateInputs(inputs, contentEnv); err != nil {
+		return nil, err
+	}
+	if err := ValidateInputTokenBudget(inputs, contentEnv, opts.Caps); err != nil {
 		return nil, err
 	}
 
