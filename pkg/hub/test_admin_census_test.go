@@ -351,6 +351,7 @@ var testAdminRoleAdminCensus = map[string]string{
 	"google_identity_resolver.go:provisionNewUser":                        "sign-in: test identities never sign in",
 	"web.go:handleOAuthCallback":                                          "sign-in: test identities never sign in",
 	"web.go:proxyAuthMiddleware":                                          "sign-in: test identities never sign in",
+	"handlers_test_login.go:handleTestLogin":                              "sign-in: test identities are refused before any write (testLoginRefusesUser / isReservedTestIdentityEmail)",
 	"handlers_users_core.go:checkUserPromotePermission":                   "mutation: requested new role; test identity targets are refused first",
 	"handlers_users_core.go:executeRoleTransition":                        "mutation: requested new role; test identity targets are refused",
 	"handlers_users_core.go:updateUser":                                   "mutation: requested new role; test identity targets are refused",
