@@ -227,28 +227,24 @@ export class ScionQuickPalette extends LitElement {
              window.visualViewport.height while open). Shoelace's own dialog
              part sets max-width and max-height clamps, so override both
              alongside width and height. */
-          width: calc(100vw - 1rem);
-          max-width: calc(100vw - 1rem);
-          margin-top: max(env(safe-area-inset-top), 0.5rem);
+          --palette-safe-top: max(env(safe-area-inset-top), 0.5rem);
           /* Clear the home indicator while the soft keyboard is closed, and
              collapse the inset when --scion-kb-open is 1 (set on <html> by
              client/viewport.ts) so notched phones do not leave a gap above
              the keyboard, matching chat-composer.ts. */
-          margin-bottom: max(
+          --palette-safe-bottom: max(
             0.375rem,
             calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
           );
+          width: calc(100vw - 1rem);
+          max-width: calc(100vw - 1rem);
+          margin-top: var(--palette-safe-top);
+          margin-bottom: var(--palette-safe-bottom);
           height: calc(
-            var(--palette-vvh, 100dvh) - max(env(safe-area-inset-top), 0.5rem) - max(
-                0.375rem,
-                calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
-              )
+            var(--palette-vvh, 100dvh) - var(--palette-safe-top) - var(--palette-safe-bottom)
           );
           max-height: calc(
-            var(--palette-vvh, 100dvh) - max(env(safe-area-inset-top), 0.5rem) - max(
-                0.375rem,
-                calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
-              )
+            var(--palette-vvh, 100dvh) - var(--palette-safe-top) - var(--palette-safe-bottom)
           );
         }
 

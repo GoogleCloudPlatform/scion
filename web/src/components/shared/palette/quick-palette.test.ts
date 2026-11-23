@@ -1808,15 +1808,19 @@ describe('scion-quick-palette: mobile bottom search bar and wide layout contract
 
     expect(decl(host, '--palette-chrome-height')).toBeUndefined();
 
+    expect(decl(panel, '--palette-safe-top')).toContain('env(safe-area-inset-top)');
+    expect(decl(panel, '--palette-safe-bottom')).toContain('env(safe-area-inset-bottom');
+    expect(decl(panel, '--palette-safe-bottom')).toContain('--scion-kb-open');
     expect(decl(panel, 'width')).toBe('calc(100vw - 1rem)');
     expect(decl(panel, 'max-width')).toBe('calc(100vw - 1rem)');
-    expect(decl(panel, 'margin-top')).toContain('env(safe-area-inset-top)');
-    expect(decl(panel, 'margin-bottom')).toContain('env(safe-area-inset-bottom');
-    expect(decl(panel, 'margin-bottom')).toContain('--scion-kb-open');
+    expect(decl(panel, 'margin-top')).toBe('var(--palette-safe-top)');
+    expect(decl(panel, 'margin-bottom')).toBe('var(--palette-safe-bottom)');
     expect(decl(panel, 'height')).toContain('var(--palette-vvh, 100dvh)');
-    expect(decl(panel, 'height')).toContain('--scion-kb-open');
+    expect(decl(panel, 'height')).toContain('var(--palette-safe-top)');
+    expect(decl(panel, 'height')).toContain('var(--palette-safe-bottom)');
     expect(decl(panel, 'max-height')).toContain('var(--palette-vvh, 100dvh)');
-    expect(decl(panel, 'max-height')).toContain('--scion-kb-open');
+    expect(decl(panel, 'max-height')).toContain('var(--palette-safe-top)');
+    expect(decl(panel, 'max-height')).toContain('var(--palette-safe-bottom)');
     expect(decl(panel, 'border-radius')).toBeUndefined();
 
     expect(decl(body, 'display')).toBe('flex');
