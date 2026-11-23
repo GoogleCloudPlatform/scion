@@ -486,24 +486,12 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 		return
 	}
 	q := s.triggerQueueLocked(dqStore)
-	disp, err := s.newTriggerDispatcher(q)
-	if err != nil {
-		slog.Warn("hub.triggers: dispatcher not created", "error", err)
-		return
-	}
-	metrics := serverTriggerMetrics{srv: s}
-	opts := trigger.DrainerOptions{
-		QueueStore: dqStore,
-		Queue:      q,
-		Owner:      s.HubID(),
-		Metrics:    metrics,
-	}
-	d, err := disp.NewDrainer(opts)
+	d, err := s.triggerDrainer(dqStore, q)
 	if err != nil {
 		slog.Warn("hub.triggers: event drainer not started", "error", err)
 		return
 	}
-	rd, err := disp.NewFireRetryDrainer(opts)
+	rd, err := s.triggerRetryDrainer(dqStore, q)
 	if err != nil {
 		slog.Warn("hub.triggers: fire retry drainer not started", "error", err)
 		return
