@@ -440,14 +440,22 @@ export function brandingFromConfig(raw: RawBrandingConfig | null | undefined): B
   };
 }
 
-export function hasAdvancedPaletteOverrides(raw: RawBrandingConfig | null | undefined): boolean {
-  const palette = raw?.palette;
-  if (!palette || typeof palette !== 'object') return false;
-  for (const val of Object.values(palette)) {
-    if (val && typeof val === 'object' && !Array.isArray(val)) {
-      if (
-        Object.values(val as Record<string, unknown>).some((v) => typeof v === 'string' && v !== '')
-      ) {
+/**
+ * Reports whether a relative path under `server.hub.branding` (including
+ * `palette.*` paths) is env-locked directly or via a parent `palette` /
+ * `palette.<mode|scale>` lock.
+ */
+export function isPaletteRelPathLocked(
+  envLockedKeys: ReadonlySet<string>,
+  relPath: string
+): boolean {
+  const full = `${BRANDING_KOANF_PREFIX}.${relPath}`;
+  if (envLockedKeys.has(full)) return true;
+  if (relPath.startsWith('palette.')) {
+    if (envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.palette`)) return true;
+    const parts = relPath.split('.');
+    if (parts.length >= 3) {
+      if (envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.palette.${parts[1]}`)) {
         return true;
       }
     }
@@ -512,8 +520,7 @@ export function buildBrandingDiff(
   envLockedKeys: ReadonlySet<string>
 ): Record<string, unknown> {
   const diff: Record<string, unknown> = {};
-  const isLocked = (relPath: string): boolean =>
-    envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.${relPath}`);
+  const isLocked = (relPath: string): boolean => isPaletteRelPathLocked(envLockedKeys, relPath);
 
   const topStrings: readonly ('name' | 'short_name' | 'subtitle' | 'accent_color')[] = [
     'name',
@@ -643,8 +650,7 @@ export function buildFileModeResetPayload(
   hasPalette: boolean
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
-  const isLocked = (relPath: string): boolean =>
-    envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.${relPath}`);
+  const isLocked = (relPath: string): boolean => isPaletteRelPathLocked(envLockedKeys, relPath);
 
   for (const key of [
     'name',

@@ -157,6 +157,12 @@ test.describe('Admin Branding (/admin/branding)', () => {
       const primaryScaleDetails = page.locator('[data-scale-details="primary"]');
       await page.getByRole('button', { name: /Primary Scale/ }).click();
       await expect(primaryScaleDetails).toHaveAttribute('open', '');
+
+      // Verify zero live status regions inside the palette editor (no screen-reader chatter)
+      await expect(page.locator('scion-branding-palette-editor').getByRole('status')).toHaveCount(
+        0
+      );
+
       const primary600Input = page.getByRole('textbox', { name: 'Primary 600', exact: true });
       await primary600Input.fill('#007268');
       await page.getByRole('button', { name: 'Save Branding' }).click();
@@ -170,6 +176,13 @@ test.describe('Admin Branding (/admin/branding)', () => {
       await expect(page.getByText('Branding settings saved and applied live')).toBeVisible({
         timeout: 15_000,
       });
+
+      // Confirm cleared scale persisted on server after reload
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await expect(page.getByRole('heading', { name: 'Branding', level: 1 })).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(page.locator('[data-palette-override-count]')).toHaveCount(0);
 
       // Reset All Branding via Shoelace <sl-dialog>
       await page.getByRole('button', { name: 'Reset All Branding' }).click();

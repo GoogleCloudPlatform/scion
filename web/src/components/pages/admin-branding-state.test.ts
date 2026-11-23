@@ -27,9 +27,10 @@ import {
   countPaletteOverrides,
   defaultPaletteFormState,
   formatKiB,
-  hasAdvancedPaletteOverrides,
+  hasPaletteFormOverrides,
   isBrandingDirty,
   isCuratedOrBuiltinFont,
+  isPaletteRelPathLocked,
   normalizeAssetDataUrl,
   paletteFormToRawConfig,
   parseDataUriInfo,
@@ -98,19 +99,29 @@ describe('admin-branding-state', () => {
     });
   });
 
-  describe('hasAdvancedPaletteOverrides', () => {
-    it('returns false when palette is absent or empty', () => {
-      expect(hasAdvancedPaletteOverrides(undefined)).toBe(false);
-      expect(hasAdvancedPaletteOverrides({})).toBe(false);
-      expect(hasAdvancedPaletteOverrides({ palette: {} })).toBe(false);
-      expect(hasAdvancedPaletteOverrides({ palette: { light: {}, primary: {} } })).toBe(false);
+  describe('hasPaletteFormOverrides & isPaletteRelPathLocked', () => {
+    it('reports whether any palette form override is set', () => {
+      const empty = defaultPaletteFormState();
+      expect(hasPaletteFormOverrides(empty)).toBe(false);
+      const withSemantic = { ...empty, light: { ...empty.light, primary: '#1d4ed8' } };
+      expect(hasPaletteFormOverrides(withSemantic)).toBe(true);
+      const withScale = { ...empty, neutral: { ...empty.neutral, '50': '#fafaf9' } };
+      expect(hasPaletteFormOverrides(withScale)).toBe(true);
     });
 
-    it('returns true when semantic or scale overrides exist', () => {
-      expect(hasAdvancedPaletteOverrides({ palette: { light: { primary: '#1d4ed8' } } })).toBe(
-        true
-      );
-      expect(hasAdvancedPaletteOverrides({ palette: { neutral: { '50': '#fafaf9' } } })).toBe(true);
+    it('matches direct, mode/scale parent, and root palette locks', () => {
+      const root = new Set([`${BRANDING_KOANF_PREFIX}.palette`]);
+      expect(isPaletteRelPathLocked(root, 'palette.light.primary')).toBe(true);
+      expect(isPaletteRelPathLocked(root, 'palette.primary.600')).toBe(true);
+      expect(isPaletteRelPathLocked(root, 'name')).toBe(false);
+
+      const mode = new Set([`${BRANDING_KOANF_PREFIX}.palette.light`]);
+      expect(isPaletteRelPathLocked(mode, 'palette.light.primary')).toBe(true);
+      expect(isPaletteRelPathLocked(mode, 'palette.dark.primary')).toBe(false);
+
+      const scale = new Set([`${BRANDING_KOANF_PREFIX}.palette.primary`]);
+      expect(isPaletteRelPathLocked(scale, 'palette.primary.600')).toBe(true);
+      expect(isPaletteRelPathLocked(scale, 'palette.neutral.600')).toBe(false);
     });
   });
 
@@ -279,6 +290,29 @@ describe('admin-branding-state', () => {
       expect(p.light.bg).toBe('');
       expect(p.dark.primary).toBe('');
       expect(p.primary).toEqual({});
+
+      // Whole-mode lock (palette.light) omits light while still clearing dark and scales
+      const modeLocked = new Set([`${BRANDING_KOANF_PREFIX}.palette.light`]);
+      const modeReset = buildFileModeResetPayload(modeLocked, true).palette as Record<
+        string,
+        unknown
+      >;
+      expect('light' in modeReset).toBe(false);
+      expect('dark' in modeReset).toBe(true);
+      expect(modeReset.primary).toEqual({});
+
+      // Scale-level and step-level locks preserve those scales while clearing unlocked scales
+      const scaleLocked = new Set([
+        `${BRANDING_KOANF_PREFIX}.palette.primary`,
+        `${BRANDING_KOANF_PREFIX}.palette.neutral.50`,
+      ]);
+      const scaleReset = buildFileModeResetPayload(scaleLocked, true).palette as Record<
+        string,
+        unknown
+      >;
+      expect('primary' in scaleReset).toBe(false);
+      expect('neutral' in scaleReset).toBe(false);
+      expect(scaleReset.success).toEqual({});
     });
   });
 

@@ -124,6 +124,11 @@ describe('admin-branding-palette', () => {
         SEMANTIC_KEYS.length * 2 + SCALE_NAMES.length * SCALE_STEPS.length
       );
       expect(new Set(labels).size).toBe(labels.length);
+
+      // R1: zero live regions (no sl-badge / role="status" / aria-live) in the palette editor
+      expect(
+        element.shadowRoot!.querySelectorAll('sl-badge, [role="status"], [aria-live]').length
+      ).toBe(0);
     });
 
     it('emits semantic change and per-key reset events', async () => {
@@ -199,6 +204,45 @@ describe('admin-branding-palette', () => {
       expect(query(element, '[data-token-contrast="primary.600"]')?.textContent).toContain(
         'AA Fail'
       );
+
+      // O1: a 422-opened scale panel can be collapsed immediately by the user
+      const primaryDetails = query<HTMLElement>(element, '[data-scale-details="primary"]')!;
+      primaryDetails.dispatchEvent(new CustomEvent('sl-hide', { bubbles: true }));
+      await element.updateComplete;
+      expect(primaryDetails.hasAttribute('open')).toBe(false);
+    });
+
+    it('labels customized unenforced tokens as Advisory rather than Stock (O2)', async () => {
+      const palette = paletteFromConfig({ light: { border: '#cbd5e1' } });
+      const resolved = resolveBrandingPalette({ palette: paletteFormToRawConfig(palette) });
+      element = await mountEditor({ palette, resolved, open: true });
+
+      expect(query(element, '[data-token-contrast="light.border"]')?.textContent).toContain(
+        'Advisory'
+      );
+      expect(query(element, '[data-token-contrast="dark.border"]')?.textContent).toContain('Stock');
+    });
+
+    it('renders all palette controls read-only when root palette key is env-locked (O5)', async () => {
+      const palette = paletteFromConfig({
+        light: { primary: '#0f766e' },
+        primary: { '600': '#007268' },
+      });
+      const resolved = resolveBrandingPalette({ palette: paletteFormToRawConfig(palette) });
+      const rootLock = `${BRANDING_KOANF_PREFIX}.palette`;
+      element = await mountEditor({
+        palette,
+        resolved,
+        open: true,
+        envLockedKeys: new Set([rootLock]),
+        envOverrides: [rootLock],
+        envValues: {},
+        settingsTier: 'db',
+      });
+
+      expect(query(element, '[data-palette-field="light.primary"]')).toBeNull();
+      expect(query(element, '[data-palette-scale="primary.600"]')).toBeNull();
+      expect(query(element, '[data-clear-scale="primary"]')?.hasAttribute('disabled')).toBe(true);
     });
 
     it('renders env-locked palette keys read-only without editable inputs', async () => {

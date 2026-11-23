@@ -85,6 +85,7 @@ import {
   hasPaletteFormOverrides,
   isBrandingDirty,
   isCuratedOrBuiltinFont,
+  isPaletteRelPathLocked,
   normalizeAssetDataUrl,
   paletteFormToRawConfig,
   parseDataUriInfo,
@@ -963,18 +964,7 @@ export class ScionPageAdminBranding extends LitElement {
 
   private clientFieldErrors(lockedSet: ReadonlySet<string>): Record<string, string> {
     const errs: Record<string, string> = {};
-    const isLocked = (relPath: string): boolean => {
-      const full = `${BRANDING_KOANF_PREFIX}.${relPath}`;
-      if (lockedSet.has(full)) return true;
-      if (relPath.startsWith('palette.') && lockedSet.has(`${BRANDING_KOANF_PREFIX}.palette`)) {
-        return true;
-      }
-      const parts = relPath.split('.');
-      if (parts[0] === 'palette' && parts.length >= 3) {
-        if (lockedSet.has(`${BRANDING_KOANF_PREFIX}.palette.${parts[1]}`)) return true;
-      }
-      return false;
-    };
+    const isLocked = (relPath: string): boolean => isPaletteRelPathLocked(lockedSet, relPath);
 
     if (this.customFontMode && this.draft.font_sans.trim() === '' && !isLocked('font_sans')) {
       errs.font_sans = 'Enter a Google Fonts family name or select a preset.';

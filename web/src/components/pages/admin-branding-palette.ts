@@ -27,7 +27,7 @@
  * already-registered Shoelace components and native `<input type="color">`.
  */
 
-import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { live } from 'lit/directives/live.js';
 
@@ -45,6 +45,7 @@ import {
   HEX_COLOR_RE,
   countPaletteOverrides,
   defaultPaletteFormState,
+  isPaletteRelPathLocked,
   type PaletteFormState,
 } from './admin-branding-state.js';
 import {
@@ -535,6 +536,42 @@ export class ScionBrandingPaletteEditor extends LitElement {
       gap: 0.25rem;
     }
 
+    /* Non-live contrast & count pills (avoid sl-badge role="status" live-region chatter) */
+    .contrast-pill,
+    .count-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.125rem 0.5rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      line-height: 1.3;
+      white-space: nowrap;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text-secondary, #475569);
+    }
+
+    .contrast-pill--success {
+      background: var(--scion-success-bg, #dcfce7);
+      color: var(--scion-success-text, #166534);
+      border-color: var(--scion-success-border, #86efac);
+    }
+
+    .contrast-pill--danger,
+    .count-pill--danger {
+      background: var(--scion-error-bg, #fef2f2);
+      color: var(--scion-error-text, #991b1b);
+      border-color: var(--scion-error-border, #fca5a5);
+    }
+
+    .count-pill--primary {
+      background: var(--scion-badge-primary-bg, #dbeafe);
+      color: var(--scion-badge-primary-text, #1e40af);
+      border-color: var(--scion-border, #e2e8f0);
+    }
+
     .reset-btn::part(base) {
       font-size: 0.8125rem;
       padding: 0.125rem;
@@ -638,18 +675,19 @@ export class ScionBrandingPaletteEditor extends LitElement {
     }
   `;
 
-  private isRelPathLocked(relPath: string): boolean {
-    const full = `${BRANDING_KOANF_PREFIX}.${relPath}`;
-    if (this.envLockedKeys.has(full)) return true;
-    if (this.envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.palette`)) return true;
-    const parts = relPath.split('.');
-    if (parts.length >= 3) {
-      // e.g. palette.light.primary -> also check palette.light
-      if (this.envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.${parts[0]}.${parts[1]}`)) {
-        return true;
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    if (changed.has('errorScales') && this.errorScales.size > 0) {
+      const next = new Set(this.openScales);
+      for (const scale of this.errorScales) {
+        next.add(scale);
       }
+      this.openScales = next;
     }
-    return false;
+  }
+
+  private isRelPathLocked(relPath: string): boolean {
+    return isPaletteRelPathLocked(this.envLockedKeys, relPath);
   }
 
   private countPaletteErrors(): number {
@@ -727,9 +765,19 @@ export class ScionBrandingPaletteEditor extends LitElement {
     this.openScales = next;
   }
 
-  private renderContrastBadge(badge: TokenContrastBadgeInfo, testId: string): TemplateResult {
+  private renderContrastBadge(
+    badge: TokenContrastBadgeInfo,
+    testId: string,
+    isCustomized = false
+  ): TemplateResult {
     const variant = !badge.enforced ? 'neutral' : badge.pass ? 'success' : 'danger';
-    const statusText = !badge.enforced ? 'Stock' : badge.pass ? 'AA Pass' : 'AA Fail';
+    const statusText = !badge.enforced
+      ? isCustomized
+        ? 'Advisory'
+        : 'Stock'
+      : badge.pass
+        ? 'AA Pass'
+        : 'AA Fail';
     const iconName = !badge.enforced
       ? 'info-circle'
       : badge.pass
@@ -737,9 +785,8 @@ export class ScionBrandingPaletteEditor extends LitElement {
         : 'exclamation-triangle';
 
     return html`
-      <sl-badge
-        variant=${variant}
-        pill
+      <span
+        class="contrast-pill contrast-pill--${variant}"
         data-token-contrast=${testId}
         data-contrast-status=${statusText.toLowerCase()}
       >
@@ -747,7 +794,7 @@ export class ScionBrandingPaletteEditor extends LitElement {
           <sl-icon name=${iconName} aria-hidden="true"></sl-icon>
           ${statusText} · ${formatContrastRatio(badge.ratio)}
         </span>
-      </sl-badge>
+      </span>
     `;
   }
 
@@ -842,7 +889,7 @@ export class ScionBrandingPaletteEditor extends LitElement {
 
         <div class="badge-row">
           <span>${badge.pairLabel}</span>
-          ${this.renderContrastBadge(badge, `${mode}.${meta.key}`)}
+          ${this.renderContrastBadge(badge, `${mode}.${meta.key}`, overrideVal.trim() !== '')}
         </div>
 
         ${clientErr
@@ -861,7 +908,7 @@ export class ScionBrandingPaletteEditor extends LitElement {
     const scaleLocked = this.isRelPathLocked(`palette.${scale}`);
     const scaleErrCount = this.countScaleErrors(scale);
     const scaleLevelErrs = this.serverFieldErrors[`palette.${scale}`] ?? [];
-    const isOpen = this.openScales.has(scale) || this.errorScales.has(scale);
+    const isOpen = this.openScales.has(scale);
 
     return html`
       <sl-details
@@ -878,7 +925,7 @@ export class ScionBrandingPaletteEditor extends LitElement {
         }}
         @sl-after-hide=${(e: Event) => {
           if (e.target !== e.currentTarget) return;
-          if (this.openScales.has(scale) || this.errorScales.has(scale)) {
+          if (this.openScales.has(scale)) {
             const inner = (e.currentTarget as HTMLElement).shadowRoot?.querySelector('details');
             if (inner && !inner.open) inner.open = true;
           }
@@ -896,13 +943,13 @@ export class ScionBrandingPaletteEditor extends LitElement {
             )}
           </span>
           ${overrideCount > 0
-            ? html`<sl-badge variant="primary" pill data-scale-override-count=${scale}
-                >${overrideCount} ${overrideCount === 1 ? 'override' : 'overrides'}</sl-badge
+            ? html`<span class="count-pill count-pill--primary" data-scale-override-count=${scale}
+                >${overrideCount} ${overrideCount === 1 ? 'override' : 'overrides'}</span
               >`
             : nothing}
           ${scaleErrCount > 0
-            ? html`<sl-badge variant="danger" pill
-                >${scaleErrCount} ${scaleErrCount === 1 ? 'error' : 'errors'}</sl-badge
+            ? html`<span class="count-pill count-pill--danger"
+                >${scaleErrCount} ${scaleErrCount === 1 ? 'error' : 'errors'}</span
               >`
             : nothing}
         </div>
@@ -1041,13 +1088,13 @@ export class ScionBrandingPaletteEditor extends LitElement {
           <sl-icon name="sliders" aria-hidden="true"></sl-icon>
           <span>Advanced Palette Overrides</span>
           ${overrideCount > 0
-            ? html`<sl-badge variant="primary" pill data-palette-override-count
-                >${overrideCount} ${overrideCount === 1 ? 'override' : 'overrides'}</sl-badge
+            ? html`<span class="count-pill count-pill--primary" data-palette-override-count
+                >${overrideCount} ${overrideCount === 1 ? 'override' : 'overrides'}</span
               >`
             : nothing}
           ${errCount > 0
-            ? html`<sl-badge variant="danger" pill data-palette-error-count
-                >${errCount} ${errCount === 1 ? 'error' : 'errors'}</sl-badge
+            ? html`<span class="count-pill count-pill--danger" data-palette-error-count
+                >${errCount} ${errCount === 1 ? 'error' : 'errors'}</span
               >`
             : nothing}
         </span>
