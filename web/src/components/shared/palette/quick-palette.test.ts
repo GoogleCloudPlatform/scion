@@ -1800,17 +1800,23 @@ describe('scion-quick-palette: mobile bottom search bar and wide layout contract
 
   it('mobile: card keeps its floating presentation and places the search bar at the bottom below results', () => {
     const rules = elementStyleRules('scion-quick-palette');
+    const host = rules.get(':host');
     const panel = rules.get(`${MOBILE} .palette-dialog::part(panel)`);
     const body = rules.get(`${MOBILE} .palette-dialog::part(body)`);
     const results = rules.get(`${MOBILE} .palette-results`);
     const inputRow = rules.get(`${MOBILE} .palette-input-row`);
 
+    expect(decl(host, '--palette-chrome-height')).toBeUndefined();
+
     expect(decl(panel, 'width')).toBe('calc(100vw - 1rem)');
     expect(decl(panel, 'max-width')).toBe('calc(100vw - 1rem)');
     expect(decl(panel, 'margin-top')).toContain('env(safe-area-inset-top)');
     expect(decl(panel, 'margin-bottom')).toContain('env(safe-area-inset-bottom');
+    expect(decl(panel, 'margin-bottom')).toContain('--scion-kb-open');
     expect(decl(panel, 'height')).toContain('var(--palette-vvh, 100dvh)');
+    expect(decl(panel, 'height')).toContain('--scion-kb-open');
     expect(decl(panel, 'max-height')).toContain('var(--palette-vvh, 100dvh)');
+    expect(decl(panel, 'max-height')).toContain('--scion-kb-open');
     expect(decl(panel, 'border-radius')).toBeUndefined();
 
     expect(decl(body, 'display')).toBe('flex');

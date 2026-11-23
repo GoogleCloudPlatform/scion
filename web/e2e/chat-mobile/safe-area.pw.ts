@@ -382,6 +382,75 @@ test('with the keyboard open the composer drops the bottom inset', async ({ page
   );
 });
 
+test('with the keyboard open the mobile quick switcher drops the bottom inset', async ({
+  page,
+}, testInfo) => {
+  skipUnlessChromium(testInfo.project.name);
+  test.skip(testInfo.project.name === 'desktop-1440', 'mobile layout only');
+  await openChatRail(page);
+  await forceSafeAreaInsets(page, PORTRAIT);
+
+  await page.locator('.v2-rail > .palette-footer > .palette-footer-btn').tap();
+  const dialog = page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
+  await expect(dialog).toBeVisible();
+
+  const readPanelBox = (): Promise<{ top: number; bottom: number; marginBottom: number }> =>
+    page.locator('scion-quick-palette').evaluate((host) => {
+      const dialogEl = host.shadowRoot!.querySelector('sl-dialog')!;
+      const panel = dialogEl.shadowRoot!.querySelector('[part~="panel"]')!;
+      const rect = panel.getBoundingClientRect();
+      const cs = getComputedStyle(panel);
+      return {
+        top: rect.top,
+        bottom: rect.bottom,
+        marginBottom: parseFloat(cs.marginBottom),
+      };
+    });
+
+  // Keyboard closed: card clears the home indicator (34px) and top notch (47px).
+  const viewport = page.viewportSize()!;
+  await expect(async () => {
+    const closedKb = await readPanelBox();
+    expect(closedKb.marginBottom, 'closed-kb margin-bottom = bottom inset').toBeCloseTo(
+      PORTRAIT.bottom,
+      0
+    );
+    expect(closedKb.top, 'panel clears top notch').toBeGreaterThanOrEqual(PORTRAIT.top - 0.5);
+    expect(viewport.height - closedKb.bottom, 'panel clears home indicator').toBeGreaterThanOrEqual(
+      PORTRAIT.bottom - 0.5
+    );
+  }).toPass({ timeout: 5_000 });
+
+  // Keyboard open: --scion-kb-open: 1 drops the bottom safe-area inset to 0.375rem (6px)
+  // so the search bar sits snug above the simulated keyboard (--palette-vvh: 460px).
+  const kbHeight = 460;
+  await page.evaluate((vvh) => {
+    document.documentElement.style.setProperty('--scion-kb-open', '1');
+    const chat = document.querySelector('scion-page-chat');
+    const palette = chat?.shadowRoot?.querySelector('scion-quick-palette') as HTMLElement | null;
+    palette?.style.setProperty('--palette-vvh', `${vvh}px`);
+  }, kbHeight);
+  await expect(async () => {
+    const openKb = await readPanelBox();
+    expect(openKb.marginBottom, 'open-kb margin-bottom collapses to 0.375rem').toBeCloseTo(6, 0);
+    expect(kbHeight - openKb.bottom, 'panel sits 0.375rem above keyboard').toBeLessThanOrEqual(7);
+    expect(kbHeight - openKb.bottom, 'panel stays within visual viewport').toBeGreaterThanOrEqual(
+      5
+    );
+  }).toPass({ timeout: 5_000 });
+
+  // Keyboard closed again: bottom safe-area inset is restored.
+  await page.evaluate(() => {
+    document.documentElement.style.removeProperty('--scion-kb-open');
+    const chat = document.querySelector('scion-page-chat');
+    const palette = chat?.shadowRoot?.querySelector('scion-quick-palette') as HTMLElement | null;
+    palette?.style.removeProperty('--palette-vvh');
+  });
+  await expect
+    .poll(async () => (await readPanelBox()).marginBottom)
+    .toBeCloseTo(PORTRAIT.bottom, 0);
+});
+
 test('landscape side insets pad the header and the chat columns', async ({ page }, testInfo) => {
   skipUnlessChromium(testInfo.project.name);
   const mobile = testInfo.project.name !== 'desktop-1440';

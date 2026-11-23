@@ -137,18 +137,6 @@ export class ScionQuickPalette extends LitElement {
   static override styles = [
     css`
       :host {
-        /* Combined height of the dialog's own chrome around the results
-           list at narrow widths: the input row, its border, the dialog's
-           own top/bottom margins, and -- where shown -- the keyboard-help
-           legend below the results. Measured empirically against this
-           exact layout: ~111px (6.9375rem) with the legend hidden (touch),
-           ~137px (8.5625rem) with it shown (a narrow but non-touch window,
-           since the legend is gated on touch, not on width). Rounded up
-           from the larger of the two with a small safety margin, as a named
-           property rather than a bare number in the max-height rule below,
-           so a future chrome change has one place to update. */
-        --palette-chrome-height: 9rem;
-
         /* Type scale: a dense default. A host with its own type scale
            sets these on the element to scale the palette with its page. */
         --palette-fs-xs: 0.625rem;
@@ -242,17 +230,24 @@ export class ScionQuickPalette extends LitElement {
           width: calc(100vw - 1rem);
           max-width: calc(100vw - 1rem);
           margin-top: max(env(safe-area-inset-top), 0.5rem);
-          margin-bottom: max(0.375rem, env(safe-area-inset-bottom, 0px));
+          /* Clear the home indicator while the soft keyboard is closed, and
+             collapse the inset when --scion-kb-open is 1 (set on <html> by
+             client/viewport.ts) so notched phones do not leave a gap above
+             the keyboard, matching chat-composer.ts. */
+          margin-bottom: max(
+            0.375rem,
+            calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
+          );
           height: calc(
             var(--palette-vvh, 100dvh) - max(env(safe-area-inset-top), 0.5rem) - max(
                 0.375rem,
-                env(safe-area-inset-bottom, 0px)
+                calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
               )
           );
           max-height: calc(
             var(--palette-vvh, 100dvh) - max(env(safe-area-inset-top), 0.5rem) - max(
                 0.375rem,
-                env(safe-area-inset-bottom, 0px)
+                calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
               )
           );
         }
