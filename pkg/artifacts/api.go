@@ -106,6 +106,31 @@ type ArtifactResponse struct {
 	// the archive route is on, says whether Version can be downloaded as
 	// one zip from /versions/{seq}/archive (ptone/scion#7106).
 	Archive *ArchiveInfo `json:"archive,omitempty"`
+	// ReviewDelivery, on a finalized review of an agent-owned artifact whose
+	// owner was suspended, reports whether the agent is being woken, was
+	// woken, or remains suspended (ptone/scion#8946). Omitted for running
+	// agents and non-agent owners.
+	ReviewDelivery *ReviewDeliveryInfo `json:"reviewDelivery,omitempty"`
+}
+
+// ReviewDeliveryStatus values describe what happened to the review notice
+// for an agent-owned artifact whose owner was suspended at finalize time.
+const (
+	ReviewDeliveryAutoWaking  = "auto_waking"
+	ReviewDeliveryWoken       = "woken"
+	ReviewDeliveryWaking      = "waking"
+	ReviewDeliverySuspended   = "suspended"
+	ReviewDeliveryWakeRefused = "wake_refused"
+	ReviewDeliveryWakeFailed  = "wake_failed"
+)
+
+// ReviewDeliveryInfo reports the delivery/wake outcome of a finalized review
+// when the owning agent was suspended.
+type ReviewDeliveryInfo struct {
+	Status    string `json:"status"`
+	AgentID   string `json:"agentId,omitempty"`
+	AgentSlug string `json:"agentSlug,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // CreateVersionRequest is the body of POST /api/v1/artifacts (create an
@@ -140,6 +165,17 @@ type FinalizeRequest struct {
 	// Base is the version a review was started from. It is required to
 	// finalize a review and ignored otherwise.
 	Base int `json:"base,omitempty"`
+	// OfferWake, on a review finalize, asks the host to answer 409
+	// agent_not_running (details.canWake=true) before committing when the
+	// owning agent is user-suspended and the caller may wake it, so the
+	// client can ask the user to confirm first. Ignored when Wake is true
+	// or on non-review versions.
+	OfferWake bool `json:"offer_wake,omitempty"`
+	// Wake, on a review finalize, asks the host to wake a suspended owning
+	// agent (when authorized) before delivering the review notice. A refused
+	// or failed wake never discards the review; the outcome is reported in
+	// ArtifactResponse.ReviewDelivery.
+	Wake bool `json:"wake,omitempty"`
 }
 
 // ManifestFile is one file of a version manifest.

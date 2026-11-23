@@ -21,6 +21,8 @@
  */
 
 import { apiFetch, extractApiError } from './api.js';
+import { wakeOfferFromErrorBody } from './wake-offer.js';
+import type { WakeOffer } from './wake-offer.js';
 
 export { ARTIFACTS_FLAG } from './artifacts-flag.js';
 
@@ -114,6 +116,27 @@ export interface ArtifactResponse {
    * whether the version's files can be downloaded as one zip.
    */
   archive?: ArtifactArchive;
+  /**
+   * On a finalized review of an agent-owned artifact whose owner was
+   * suspended (ptone/scion#8946): whether the agent is being woken, was
+   * woken, or remains suspended.
+   */
+  reviewDelivery?: ReviewDeliveryInfo;
+}
+
+export type ReviewDeliveryStatus =
+  | 'auto_waking'
+  | 'woken'
+  | 'waking'
+  | 'suspended'
+  | 'wake_refused'
+  | 'wake_failed';
+
+export interface ReviewDeliveryInfo {
+  status: ReviewDeliveryStatus;
+  agentId?: string;
+  agentSlug?: string;
+  message?: string;
 }
 
 /** ArtifactResponse.archive: the hub's answer for the version's zip download. */
@@ -580,6 +603,17 @@ export interface PublishRequest {
    * it the hub may refuse the publish (ReviewOpenError).
    */
   force?: boolean | undefined;
+  /**
+   * For a review finalize, ask the hub to offer a wake confirmation (409
+   * ReviewWakeOfferError) when the owning agent is user-suspended and the
+   * caller may wake it.
+   */
+  offerWake?: boolean | undefined;
+  /**
+   * For a review finalize, ask the hub to wake a suspended owning agent
+   * before delivering the review notice.
+   */
+  wake?: boolean | undefined;
 }
 
 /** A pending version that a failed publish left behind. */
@@ -669,6 +703,23 @@ async function reviewOpenError(res: Response): Promise<ReviewOpenError | null> {
   );
 }
 
+/**
+ * The hub paused a review finalize because the owning agent is user-suspended
+ * and the caller may wake it (409 agent_not_running with canWake=true).
+ * The pending version stays intact in `pending` so the caller can retry
+ * finalize with `wake: true` (confirmed) or `offerWake: false` (declined).
+ */
+export class ReviewWakeOfferError extends PublishError {
+  constructor(
+    message: string,
+    readonly offer: WakeOffer,
+    pending: PendingPublish | null
+  ) {
+    super(message, pending, 'agent_not_running');
+    this.name = 'ReviewWakeOfferError';
+  }
+}
+
 /** How long the hub keeps a version that was never finalized. */
 export const PENDING_VERSION_LIFETIME = '24 hours';
 
@@ -751,6 +802,14 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
         code
       );
     }
+    if (res.status === 409) {
+      const offer = wakeOfferFromErrorBody(body);
+      if (offer) {
+        const msg =
+          (body as { error?: { message?: string } }).error?.message || 'Agent is suspended';
+        throw new ReviewWakeOfferError(msg, offer, left());
+      }
+    }
     const message = prefix + (await extractApiError(res, `HTTP ${res.status}`));
     // The version is gone (404), no longer pending (409 conflict), or not
     // the caller's (403): another attempt must start a new version.
@@ -796,13 +855,18 @@ export async function publishFiles(req: PublishRequest): Promise<ArtifactRespons
   }
   let res: Response;
   try {
+    const finalizeBody: { base?: number | undefined; offer_wake?: boolean; wake?: boolean } = {
+      base: req.base,
+    };
+    if (req.offerWake) finalizeBody.offer_wake = true;
+    if (req.wake) finalizeBody.wake = true;
     res = await apiFetch(
       `${artifactPath(id)}/versions/${seq}/finalize`,
       req.kind === 'review'
         ? {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ base: req.base }),
+            body: JSON.stringify(finalizeBody),
           }
         : { method: 'POST' }
     );

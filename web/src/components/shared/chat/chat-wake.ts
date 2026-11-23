@@ -29,6 +29,9 @@
 
 import { showConfirm } from '../confirm-dialog.js';
 import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
+import type { WakeOffer } from '../../../client/wake-offer.js';
+export { wakeOfferFromErrorBody } from '../../../client/wake-offer.js';
+export type { WakeOffer } from '../../../client/wake-offer.js';
 
 /** Client-only dispatch state shown on the optimistic bubble while waking. */
 export const WAKING_DISPATCH_STATE = 'waking';
@@ -72,31 +75,6 @@ export const WAKE_RETRY_DELAY_MS = 3_000;
 /** Shown when a wake send's outcome could not be confirmed. */
 export const WAKE_OUTCOME_UNKNOWN_MESSAGE =
   'Could not confirm whether the message was delivered. Check the conversation before sending it again.';
-
-/** The agent a send offered to wake. */
-export interface WakeOffer {
-  agentId: string;
-  agentSlug: string;
-}
-
-/**
- * Reads a wake offer from a parsed error response body. Returns null unless
- * the hub explicitly said the caller may wake the agent: a permission gate
- * fails closed.
- */
-export function wakeOfferFromErrorBody(data: unknown): WakeOffer | null {
-  if (!data || typeof data !== 'object') return null;
-  const err = (data as { error?: unknown }).error;
-  if (!err || typeof err !== 'object') return null;
-  const { code, details } = err as { code?: unknown; details?: unknown };
-  if (code !== 'agent_not_running' || !details || typeof details !== 'object') return null;
-  const d = details as Record<string, unknown>;
-  if (d.canWake !== true) return null;
-  return {
-    agentId: typeof d.agentId === 'string' ? d.agentId : '',
-    agentSlug: typeof d.agentSlug === 'string' ? d.agentSlug : '',
-  };
-}
 
 /** The error message of a parsed error response body, or the fallback. */
 export function errorMessageFromBody(data: unknown, fallback: string): string {
@@ -181,15 +159,23 @@ export function wakeConfirmMessage(offer: WakeOffer): string {
   return `${name} is suspended. Wake it and send this message as its first input?`;
 }
 
+/** Optional text overrides for confirmWake when reused outside chat. */
+export interface ConfirmWakeOptions {
+  message?: string;
+  title?: string;
+  confirmText?: string;
+  cancelText?: string;
+}
+
 /**
- * Asks the user whether to wake the agent. Resolves true for "Wake and
- * send", false for Cancel (or Escape).
+ * Asks the user whether to wake the agent. Resolves true for confirm
+ * ("Wake and send" by default), false for Cancel (or Escape).
  */
-export function confirmWake(offer: WakeOffer): Promise<boolean> {
-  return showConfirm(wakeConfirmMessage(offer), {
-    title: 'Agent is suspended',
-    confirmText: 'Wake and send',
-    cancelText: 'Cancel',
+export function confirmWake(offer: WakeOffer, options?: ConfirmWakeOptions): Promise<boolean> {
+  return showConfirm(options?.message ?? wakeConfirmMessage(offer), {
+    title: options?.title ?? 'Agent is suspended',
+    confirmText: options?.confirmText ?? 'Wake and send',
+    cancelText: options?.cancelText ?? 'Cancel',
     variant: 'primary',
   });
 }

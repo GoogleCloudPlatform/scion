@@ -859,6 +859,25 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 	}
+	// Before claiming/committing a review, check whether a user-suspended
+	// owning agent should trigger a wake-confirmation offer (ptone/scion#8946).
+	// The pending version stays intact so the client can retry with wake=true
+	// (confirmed) or without offer_wake (declined).
+	if v.Kind == VersionKindReview && freq.OfferWake && !freq.Wake {
+		if offer := s.offerReviewWake(ctx, a, v); offer != nil {
+			writeJSON(w, http.StatusConflict, errorResponse{Error: errorBody{
+				Code:    "agent_not_running",
+				Message: fmt.Sprintf("Agent %q is suspended", offer.AgentSlug),
+				Details: map[string]any{
+					"agentId":   offer.AgentID,
+					"agentSlug": offer.AgentSlug,
+					"phase":     offer.Phase,
+					"canWake":   true,
+				},
+			}})
+			return
+		}
+	}
 	// Claim the version before any remote fetch, so that one finalize
 	// request completes it and concurrent ones answer 409 at once.
 	claim, err := b.store.ClaimFinalize(ctx, a.ID, seq, time.Now().Add(-staleFinalizeClaim))
@@ -929,10 +948,11 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
+	var delivery *ReviewDeliveryInfo
 	if ready.Kind == VersionKindReview {
-		s.notifyReview(ctx, updated, ready, access)
+		delivery = s.notifyReviewWithDelivery(ctx, w, updated, ready, access, freq.Wake)
 	}
-	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
+	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings, ReviewDelivery: delivery})
 }
 
 // maxFinalizeBodyBytes caps the JSON body of a finalize request.
