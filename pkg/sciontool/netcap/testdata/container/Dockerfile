@@ -16,5 +16,5 @@ RUN apt-get update \
   && chmod 0440 /etc/sudoers.d/scion-test
 COPY harness.sh /usr/local/bin/netcap-harness.sh
 RUN chmod 0755 /usr/local/bin/netcap-harness.sh \
-  && printf '#!/bin/sh\nset -e\niptables -t nat -F OUTPUT\niptables -N SCION_TEST_FW 2>/dev/null || true\n' > /usr/local/sbin/init-firewall.sh \
+  && printf '#!/bin/sh\nset -e\niptables -F\niptables -X\niptables -t nat -F OUTPUT\niptables -N SCION_TEST_FW 2>/dev/null || true\niptables -A INPUT -i lo -j ACCEPT\niptables -A OUTPUT -o lo -j ACCEPT\niptables -P INPUT DROP\niptables -P FORWARD DROP\niptables -P OUTPUT DROP\niptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\niptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT\niptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited\n' > /usr/local/sbin/init-firewall.sh \
   && chmod 0755 /usr/local/sbin/init-firewall.sh

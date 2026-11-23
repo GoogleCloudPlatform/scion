@@ -24,7 +24,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
-const metadataIP = "169.254.169.254"
+const (
+	metadataIP = "169.254.169.254"
+	loopbackIP = "127.0.0.1"
+)
+
+// runIPTables invokes iptables with the given arguments and returns combined
+// output. Overridden in unit tests to inspect exact rule arguments and
+// ordering without requiring CAP_NET_ADMIN.
+var runIPTables = execIPTables
+
+func execIPTables(args ...string) ([]byte, error) {
+	cmd, err := iptablesCmd(args...)
+	if err != nil {
+		return nil, err
+	}
+	return procreap.CombinedOutputManaged(cmd)
+}
 
 // iptablesCmd resolves "iptables" through rootexec.Resolve — never the
 // ambient PATH, which on substrate includes a directory the workload owns
@@ -45,12 +61,25 @@ func iptablesCmd(args ...string) (*exec.Cmd, error) {
 // setupIPTablesRedirect configures iptables to redirect traffic destined for
 // the GCE metadata server IP (169.254.169.254) to the local metadata sidecar.
 // This ensures tools that hardcode the metadata IP (e.g., curl) are intercepted.
+//
+// It also inserts a narrowly-scoped filter OUTPUT ACCEPT rule for the
+// post-REDIRECT loopback target (127.0.0.1:<port>). In Linux netfilter's
+// NF_INET_LOCAL_OUT hook, nat OUTPUT REDIRECT rewrites the destination to
+// 127.0.0.1:<port> and reroutes the skb to lo, but state->out remains the
+// pre-NAT egress interface (e.g., eth0) during filter OUTPUT evaluation. An
+// egress firewall that only allows `-o lo` and appends a catch-all OUTPUT
+// REJECT (such as init-firewall.sh) would otherwise reject the redirected
+// metadata traffic with icmp-admin-prohibited ("no route to host"). Inserting
+// the rule at position 1 allows only TCP traffic to 127.0.0.1:<port>, leaving
+// all non-allowlisted egress (including un-redirected traffic to 169.254.169.254)
+// rejected.
+//
 // Requires NET_ADMIN capability.
 func setupIPTablesRedirect(port int) error {
 	portStr := strconv.Itoa(port)
 
 	// Add a DNAT rule: redirect TCP traffic to 169.254.169.254:80 to localhost:port
-	args := []string{
+	natArgs := []string{
 		"-t", "nat",
 		"-A", "OUTPUT",
 		"-d", metadataIP,
@@ -60,23 +89,47 @@ func setupIPTablesRedirect(port int) error {
 		"--to-port", portStr,
 	}
 
-	cmd, err := iptablesCmd(args...)
-	if err != nil {
-		return fmt.Errorf("iptables redirect setup failed: %w", err)
-	}
-	output, err := procreap.CombinedOutputManaged(cmd)
+	output, err := runIPTables(natArgs...)
 	if err != nil {
 		return fmt.Errorf("iptables redirect setup failed: %w (output: %s)", err, string(output))
 	}
 
-	log.Info("iptables: redirecting %s:80 -> localhost:%s", metadataIP, portStr)
+	// Allow the redirected loopback flow in filter OUTPUT ahead of any
+	// catch-all REJECT/DROP rule installed by an egress firewall.
+	filterArgs := []string{
+		"-I", "OUTPUT", "1",
+		"-d", loopbackIP,
+		"-p", "tcp",
+		"--dport", portStr,
+		"-j", "ACCEPT",
+	}
+
+	output, err = runIPTables(filterArgs...)
+	if err != nil {
+		// Roll back the nat rule so partial state is not left behind.
+		cleanupNatArgs := []string{
+			"-t", "nat",
+			"-D", "OUTPUT",
+			"-d", metadataIP,
+			"-p", "tcp",
+			"--dport", "80",
+			"-j", "REDIRECT",
+			"--to-port", portStr,
+		}
+		if delOut, delErr := runIPTables(cleanupNatArgs...); delErr != nil {
+			log.Debug("iptables redirect rollback failed (non-fatal): %v (output: %s)", delErr, string(delOut))
+		}
+		return fmt.Errorf("iptables redirect filter accept setup failed: %w (output: %s)", err, string(output))
+	}
+
+	log.Info("iptables: redirecting %s:80 -> %s:%s", metadataIP, loopbackIP, portStr)
 	return nil
 }
 
-// cleanupIPTablesRedirect removes the iptables redirect rule.
+// cleanupIPTablesRedirect removes the iptables redirect and filter accept rules.
 func cleanupIPTablesRedirect(port int) {
 	portStr := strconv.Itoa(port)
-	args := []string{
+	natArgs := []string{
 		"-t", "nat",
 		"-D", "OUTPUT",
 		"-d", metadataIP,
@@ -85,14 +138,19 @@ func cleanupIPTablesRedirect(port int) {
 		"-j", "REDIRECT",
 		"--to-port", portStr,
 	}
-
-	cmd, err := iptablesCmd(args...)
-	if err != nil {
-		log.Debug("iptables cleanup failed (non-fatal): %v", err)
-		return
-	}
-	if output, err := procreap.CombinedOutputManaged(cmd); err != nil {
+	if output, err := runIPTables(natArgs...); err != nil {
 		log.Debug("iptables cleanup failed (non-fatal): %v (output: %s)", err, string(output))
+	}
+
+	filterArgs := []string{
+		"-D", "OUTPUT",
+		"-d", loopbackIP,
+		"-p", "tcp",
+		"--dport", portStr,
+		"-j", "ACCEPT",
+	}
+	if output, err := runIPTables(filterArgs...); err != nil {
+		log.Debug("iptables filter accept cleanup failed (non-fatal): %v (output: %s)", err, string(output))
 	}
 }
 
@@ -121,11 +179,7 @@ func setupMetadataBlock() (blockMethod, error) {
 		"-j", "REJECT",
 		"--reject-with", "icmp-port-unreachable",
 	}
-	cmd, err := iptablesCmd(rejectArgs...)
-	if err != nil {
-		return blockNone, fmt.Errorf("metadata blocking failed: %w", err)
-	}
-	output, err := procreap.CombinedOutputManaged(cmd)
+	output, err := runIPTables(rejectArgs...)
 	if err == nil {
 		log.Info("iptables: blocking TCP/80 traffic to %s (REJECT)", metadataIP)
 		return blockIPTables, nil
@@ -137,7 +191,10 @@ func setupMetadataBlock() (blockMethod, error) {
 
 // InstallInterceptionRules installs the iptables rules for metadata
 // interception in the current network namespace: a nat OUTPUT REDIRECT
-// to port, plus a filter OUTPUT REJECT for every mode other than assign.
+// to port, a filter OUTPUT ACCEPT rule at position 1 for the redirected
+// loopback destination (so an egress firewall's catch-all OUTPUT REJECT
+// does not block the redirected flow), and a filter OUTPUT REJECT for
+// un-redirected metadata traffic in every mode other than assign.
 // Intended for the runtime's short-lived netns-setup container.
 func InstallInterceptionRules(mode string, port int) error {
 	if err := runSetupIPTablesRedirect(port); err != nil {
@@ -164,12 +221,7 @@ func cleanupMetadataBlock(method blockMethod) {
 			"-j", "REJECT",
 			"--reject-with", "icmp-port-unreachable",
 		}
-		cmd, err := iptablesCmd(args...)
-		if err != nil {
-			log.Debug("iptables block cleanup failed (non-fatal): %v", err)
-			return
-		}
-		if output, err := procreap.CombinedOutputManaged(cmd); err != nil {
+		if output, err := runIPTables(args...); err != nil {
 			log.Debug("iptables block cleanup failed (non-fatal): %v (output: %s)", err, string(output))
 		}
 	}
