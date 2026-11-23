@@ -192,6 +192,7 @@ func TestCheckDoctorContainerImages_CapabilityAndVersionSkew(t *testing.T) {
 	assert.Equal(t, "warn", res[1].Status)
 	assert.Contains(t, res[1].Message, "missing the scion.sciontool.capabilities label")
 	assert.Contains(t, res[1].Message, "will not verify support before start and refuses to start if sciontool lacks netns-setup")
+	assert.Contains(t, res[1].Message, "images built with netns-setup support but without the label still start")
 	assert.NotEmpty(t, res[1].Remediation)
 
 	assert.Equal(t, "container-image-version[scion-codex:latest]", res[2].Name)
@@ -365,6 +366,7 @@ func TestCheckDoctorContainerImages_BasenameMatchingWithoutSettingsRegistry(t *t
 	fake := &fakeContainerCmd{
 		available: map[string]bool{"docker": true},
 		listOut: strings.Join([]string{
+			"ghcr.io/homebrew-scion/scion-claude:v0.5.0",
 			"ghcr.io/homebrew-scion/scion-claude:v0.4.0",
 			"localhost/scion/scion-claude:latest",
 			"ghcr.io/homebrew-scion/scion-claude:<none>",
@@ -374,8 +376,11 @@ func TestCheckDoctorContainerImages_BasenameMatchingWithoutSettingsRegistry(t *t
 			out string
 			err error
 		}{
+			"ghcr.io/homebrew-scion/scion-claude:v0.5.0": {
+				out: `{"org.opencontainers.image.version":"v0.5.0","org.opencontainers.image.revision":"111111111111"}`,
+			},
 			"ghcr.io/homebrew-scion/scion-claude:v0.4.0": {
-				out: `{"org.opencontainers.image.version":"v0.4.0","org.opencontainers.image.revision":"111111111111"}`,
+				out: `{"org.opencontainers.image.version":"v0.4.0","org.opencontainers.image.revision":"000000000000"}`,
 			},
 			"localhost/scion/scion-claude:latest": {
 				out: `{"scion.sciontool.capabilities":"netns-setup","org.opencontainers.image.version":"v0.4.0"}`,
@@ -386,29 +391,30 @@ func TestCheckDoctorContainerImages_BasenameMatchingWithoutSettingsRegistry(t *t
 	res := checkDoctorContainerImages("docker", configured, fake.deps("v0.5.0", "222222222222"))
 	// Expected:
 	// 0: container-images (pass)
-	// 1: container-image-capabilities[ghcr.io/homebrew-scion/scion-claude:v0.4.0] (warn)
-	// 2: container-image-version[ghcr.io/homebrew-scion/scion-claude:v0.4.0] (info)
-	// 3: container-image-version[localhost/scion/scion-claude:latest] (info)
+	// 1: container-image-capabilities[ghcr.io/homebrew-scion/scion-claude:v0.5.0] (warn)
+	// 2: container-image-version[ghcr.io/homebrew-scion/scion-claude:v0.5.0] (info, revision skew)
+	// 3: container-image-version[localhost/scion/scion-claude:latest] (info, version skew)
+	// Stale tag ghcr.io/homebrew-scion/scion-claude:v0.4.0 and dangling :<none> are NOT inspected.
 	require.Len(t, res, 4)
 	assert.Equal(t, "container-images", res[0].Name)
 	assert.Equal(t, "pass", res[0].Status)
 
-	assert.Equal(t, "container-image-capabilities[ghcr.io/homebrew-scion/scion-claude:v0.4.0]", res[1].Name)
+	assert.Equal(t, "container-image-capabilities[ghcr.io/homebrew-scion/scion-claude:v0.5.0]", res[1].Name)
 	assert.Equal(t, "warn", res[1].Status)
 	assert.Contains(t, res[1].Message, "will not verify support before start and refuses to start if sciontool lacks netns-setup")
+	assert.Contains(t, res[1].Message, "images built with netns-setup support but without the label still start")
 
-	assert.Equal(t, "container-image-version[ghcr.io/homebrew-scion/scion-claude:v0.4.0]", res[2].Name)
+	assert.Equal(t, "container-image-version[ghcr.io/homebrew-scion/scion-claude:v0.5.0]", res[2].Name)
 	assert.Equal(t, "info", res[2].Status)
-	assert.Contains(t, res[2].Message, "version v0.4.0 != local v0.5.0")
 	assert.Contains(t, res[2].Message, "revision 111111111111 != local 222222222222")
 
 	assert.Equal(t, "container-image-version[localhost/scion/scion-claude:latest]", res[3].Name)
 	assert.Equal(t, "info", res[3].Status)
 	assert.Contains(t, res[3].Message, "version v0.4.0 != local v0.5.0")
 
-	// Confirm both images were inspected and the dangling :<none> image was skipped.
+	// Confirm prefixed current-tag and :latest were inspected, and stale :v0.4.0 and :<none> were skipped.
 	require.Len(t, fake.calls, 3)
-	assert.Equal(t, "ghcr.io/homebrew-scion/scion-claude:v0.4.0", fake.calls[1][len(fake.calls[1])-1])
+	assert.Equal(t, "ghcr.io/homebrew-scion/scion-claude:v0.5.0", fake.calls[1][len(fake.calls[1])-1])
 	assert.Equal(t, "localhost/scion/scion-claude:latest", fake.calls[2][len(fake.calls[2])-1])
 }
 

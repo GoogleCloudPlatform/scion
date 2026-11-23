@@ -331,12 +331,12 @@ func checkDoctorImageCapabilities(img string, labels map[string]string) (scionru
 	var msg string
 	if rawCap == "" {
 		msg = fmt.Sprintf(
-			"Image %s is missing the %s label (no %q capability); with metadata mode block or assign on Docker/rootful Podman, the broker will not verify support before start and refuses to start if sciontool lacks netns-setup",
+			"Image %s is missing the %s label (no %q capability); with metadata mode block or assign on Docker/rootful Podman, the broker will not verify support before start and refuses to start if sciontool lacks netns-setup (images built with netns-setup support but without the label still start)",
 			img, scionruntime.ImageSciontoolCapabilitiesLabel, scionruntime.SciontoolCapNetnsSetup,
 		)
 	} else {
 		msg = fmt.Sprintf(
-			"Image %s label %s=%q lacks %q; with metadata mode block or assign on Docker/rootful Podman, the broker will not verify support before start and refuses to start if sciontool lacks netns-setup",
+			"Image %s label %s=%q lacks %q; with metadata mode block or assign on Docker/rootful Podman, the broker will not verify support before start and refuses to start if sciontool lacks netns-setup (images built with netns-setup support but without the label still start)",
 			img, scionruntime.ImageSciontoolCapabilitiesLabel, rawCap, scionruntime.SciontoolCapNetnsSetup,
 		)
 	}
@@ -414,21 +414,23 @@ func shortDoctorCommit(c string) string {
 }
 
 // matchLocalHarnessImages returns the sorted, deduplicated local images whose
-// repository basename matches any configured harness image (covering exact
-// matches, Hub-DB or custom registry prefixes, Podman localhost/ prefixes, and
-// older pulled tags). Untagged/dangling images (<none>) are ignored.
+// basename including tag (config.ImageBasename, with an omitted tag treated as
+// "latest") matches any configured harness image. Registry/path prefixes are
+// ignored so Hub-DB registries and Podman localhost/ prefixes match, while
+// stale pulled tags (not matching any configured or tag-rewritten ref) and
+// untagged/dangling images (<none>) are not matched.
 func matchLocalHarnessImages(localImages, configuredImages []string) []string {
 	if len(localImages) == 0 || len(configuredImages) == 0 {
 		return nil
 	}
 
-	repoBasenames := make(map[string]struct{}, len(configuredImages))
+	basenames := make(map[string]struct{}, len(configuredImages))
 	for _, ref := range configuredImages {
-		if repo := imageRepoBasename(ref); repo != "" {
-			repoBasenames[repo] = struct{}{}
+		if base := imageBasenameWithTag(ref); base != "" {
+			basenames[base] = struct{}{}
 		}
 	}
-	if len(repoBasenames) == 0 {
+	if len(basenames) == 0 {
 		return nil
 	}
 
@@ -438,7 +440,7 @@ func matchLocalHarnessImages(localImages, configuredImages []string) []string {
 		if local == "" || local == "<none>:<none>" || strings.HasSuffix(local, ":<none>") {
 			continue
 		}
-		if _, ok := repoBasenames[imageRepoBasename(local)]; ok {
+		if _, ok := basenames[imageBasenameWithTag(local)]; ok {
 			matchedSet[local] = struct{}{}
 		}
 	}
@@ -451,10 +453,13 @@ func matchLocalHarnessImages(localImages, configuredImages []string) []string {
 	return matched
 }
 
-func imageRepoBasename(ref string) string {
+func imageBasenameWithTag(ref string) string {
 	base := config.ImageBasename(strings.TrimSpace(ref))
-	if i := strings.IndexAny(base, ":@"); i >= 0 {
-		base = base[:i]
+	if base == "" {
+		return ""
+	}
+	if !strings.ContainsAny(base, ":@") {
+		base += ":latest"
 	}
 	return base
 }
