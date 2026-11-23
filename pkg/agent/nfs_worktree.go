@@ -33,6 +33,28 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// ErrLocalContainerNFSWorktreeUnsupported is returned when a local container
+// runtime (Docker, Podman, or Apple container) attempts to start a
+// worktree-per-agent workspace on shared (nfs) project storage (ptone/scion#8646).
+var ErrLocalContainerNFSWorktreeUnsupported = errors.New(
+	`"Worktree per agent" (worktree-per-agent) workspaces are not supported on shared (nfs) project storage for Docker, Podman, or Apple container runtimes: ` +
+		`use "Clone per agent" (clone-per-agent) on NFS, or run the project on a Runtime Broker using local project_storage`,
+)
+
+// checkLocalContainerNFSWorktree is the defense-in-depth guard in Manager.Start
+// ensuring a local container runtime (Docker, Podman, or Apple container)
+// cannot silently mount the shared NFS project workspace root when dispatched
+// in worktree-per-agent mode.
+func checkLocalContainerNFSWorktree(runtimeName string, emptyPerAgent bool, env map[string]string, agentName string) error {
+	if emptyPerAgent || !isLocalContainerRuntime(runtimeName) {
+		return nil
+	}
+	if store.ResolveWorkspaceSharingMode(env["SCION_WORKSPACE_MODE"]) != store.SharingModeWorktreePerAgent {
+		return nil
+	}
+	return fmt.Errorf("agent %q: %w", agentName, ErrLocalContainerNFSWorktreeUnsupported)
+}
+
 // nfsWorktreeSelection decides whether an agent on the NFS workspace backend
 // gets its own git worktree (worktrees/<agent name> under the project's
 // shared checkout) instead of mounting the shared checkout itself.

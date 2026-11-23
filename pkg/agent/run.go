@@ -2363,6 +2363,14 @@ authDone:
 		// with server.project_storage gets the warning too.
 		warnK8sWorkspaceBackendDropped(m.Runtime.Name(), settings.Server.EffectiveWorkspaceStorage(), nil)
 		if backend.Name() == "nfs" {
+			// Defense-in-depth: local container runtimes (Docker, Podman, Apple
+			// container) do not support worktree-per-agent on shared (NFS)
+			// storage. Refuse before any NFS leaf creation or workspace
+			// overwrite so agents never silently share the project root
+			// (ptone/scion#8646).
+			if err := checkLocalContainerNFSWorktree(m.Runtime.Name(), emptyPerAgent, opts.Env, opts.Name); err != nil {
+				return nil, err
+			}
 			// A broker only warns about invalid workspace_storage at
 			// startup, so check the ids here, before any leaf directory
 			// is created on the export and before the runtime uses them

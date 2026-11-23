@@ -39,7 +39,7 @@ The shared `.git` root is mounted **read-only**. Only `objects/`, `refs/`, `logs
 
 - **Isolation:** per-agent working tree; shared history.
 - **Requires git:** yes.
-- **Availability:** used automatically for **repositories linked to the local workstation Hub**, and for **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the Runtime Broker; see [Linked git projects](/scion/local/workspace/#linked-git-projects)). Not supported on Kubernetes or Cloud Run Instances (use `clone-per-agent` on Kubernetes, `clone-per-agent` or `shared-plain` on Cloud Run Instances, or run `worktree-per-agent` projects on a Docker, Podman or Apple Runtime Broker; local `cloudrun-sandbox` is unaffected).
+- **Availability:** used automatically for **repositories linked to the local workstation Hub**, and for **Hub-managed git projects** created with workspace mode `worktree-per-agent` (requires git 2.48 or later on the Runtime Broker; see [Linked git projects](/scion/local/workspace/#linked-git-projects)). Not supported on Kubernetes, Cloud Run Instances, or shared (`nfs`) project storage with Docker, Podman, or Apple `container` (use `clone-per-agent` on Kubernetes or NFS, `clone-per-agent` or `shared-plain` on Cloud Run Instances, or run `worktree-per-agent` projects on a Docker, Podman, or Apple Runtime Broker using local `project_storage`; local `cloudrun-sandbox` is unaffected).
 - **Best for:** local git projects where multiple agents work in parallel on the same repository.
 
 ### Clone-per-agent

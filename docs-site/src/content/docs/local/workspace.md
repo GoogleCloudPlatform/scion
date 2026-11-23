@@ -283,7 +283,10 @@ project, whichever broker an agent lands on.
 To give agents on a remote Hub git worktrees instead of separate clones, create the project with the
 `worktree-per-agent` [workspace sharing mode](/scion/local/workspaces-and-sharing/): the broker then
 makes a worktree per agent of its own shared clone. The mode is set when the project is created on
-the Hub and cannot be changed later.
+the Hub and cannot be changed later. `worktree-per-agent` is not supported on shared (`nfs`) project
+storage for Docker, Podman, or Apple `container` runtimes (agent create, start, and restart are
+refused with `412 unsupported_capability`): use `clone-per-agent` on NFS, or run the project on a
+Runtime Broker using local `project_storage`.
 
 #### Git that Scion runs on the host
 
@@ -495,7 +498,10 @@ init` lists `.scion/agents/` in `.gitignore`) and start the agent again.
 
 On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
 shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets
-its own clone of the repository, or run the project on a local or Docker Runtime Broker.
+its own clone of the repository, or run the project on a Docker, Podman, or Apple Runtime Broker
+using local `project_storage` (not `nfs`). On shared (`nfs`) project storage, Docker, Podman, and
+Apple `container` also refuse `worktree-per-agent` at create, start, and restart (`412
+unsupported_capability`); use `clone-per-agent` on NFS instead.
 
 ---
 
