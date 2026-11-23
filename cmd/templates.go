@@ -1348,14 +1348,17 @@ func isDefinitivePendingSyncError(err error) bool {
 // (transport errors, 5xx, conflicts, or a failed Get) leave an active template
 // untouched.
 func cleanupPendingTemplate(ctx context.Context, templates hubclient.TemplateService, templateID string, syncErr error, afterConflict bool) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+
 	shouldDelete := !afterConflict && isDefinitivePendingSyncError(syncErr)
 	if !shouldDelete {
-		tpl, getErr := templates.Get(ctx, templateID)
+		tpl, getErr := templates.Get(cleanupCtx, templateID)
 		if getErr != nil || tpl == nil || tpl.Status != "pending" {
 			return
 		}
 	}
-	if delErr := templates.Delete(ctx, templateID); delErr != nil {
+	if delErr := templates.Delete(cleanupCtx, templateID); delErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to clean up pending template %s: %v\n", templateID, delErr)
 	}
 }

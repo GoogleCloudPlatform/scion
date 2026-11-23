@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -703,4 +704,68 @@ func TestIsDefinitivePendingSyncError(t *testing.T) {
 	require.False(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusConflict}))
 	require.False(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusInternalServerError}))
 	require.False(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusServiceUnavailable}))
+}
+
+func TestCleanupPendingTemplate_DecouplesCanceledContext(t *testing.T) {
+	t.Run("deletes_pending_template_when_parent_context_canceled", func(t *testing.T) {
+		var getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "pending",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		hubCtx := newTemplateSyncHubCtx(t, server)
+		cleanupPendingTemplate(ctx, hubCtx.Client.Templates(), "new-tpl-id", context.DeadlineExceeded, false)
+
+		require.Equal(t, 1, getCalls, "cleanup must query template status even when parent context is canceled")
+		require.Equal(t, 1, deleteCalls, "cleanup must delete confirmed pending template even when parent context is canceled")
+	})
+
+	t.Run("preserves_active_template_when_parent_context_canceled", func(t *testing.T) {
+		var getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "active",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		hubCtx := newTemplateSyncHubCtx(t, server)
+		cleanupPendingTemplate(ctx, hubCtx.Client.Templates(), "new-tpl-id", context.DeadlineExceeded, false)
+
+		require.Equal(t, 1, getCalls, "cleanup must query template status even when parent context is canceled")
+		require.Equal(t, 0, deleteCalls, "cleanup must not delete an active template")
+	})
 }
