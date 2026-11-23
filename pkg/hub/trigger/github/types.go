@@ -34,13 +34,14 @@ const (
 	PayloadVerified = "github-hmac-sha256+projected"
 )
 
-// Supported GitHub webhook event families in Stage 3 (§5.1; push is G2b).
+// Supported GitHub webhook event families in Stage 3 (§5.1).
 const (
 	EventPullRequest              = "pull_request"
 	EventIssues                   = "issues"
 	EventIssueComment             = "issue_comment"
 	EventPullRequestReview        = "pull_request_review"
 	EventPullRequestReviewComment = "pull_request_review_comment"
+	EventPush                     = "push"
 )
 
 // Stage 3 attribute, list, and projected payload size bounds (§4.3, §5.2–5.8).
@@ -50,12 +51,23 @@ const (
 	DefaultMaxListsBytes      = 8 * 1024
 	MaxSubjectBytes           = 256
 
-	MaxTitleBytes       = 512
-	MaxBodyBytes        = 4 * 1024
-	MaxDiffHunkBytes    = 1024
-	MaxCommandNameRunes = 32
-	MaxCommandArgsBytes = 1024
-	MaxCommandLineBytes = 1024
+	MaxTitleBytes             = 512
+	MaxHeadMessageBytes       = 512
+	MaxPushCommits            = 20
+	MaxPushCommitFiles        = 20
+	MaxPushRefBytes           = 1024
+	MaxPushSHABytes           = 64
+	MaxPushTimestampBytes     = 64
+	MaxPushCommitURLBytes     = 256
+	MaxPushCommitMessageBytes = 512
+	MaxPushActorNameBytes     = 256
+	MaxPushFilePathBytes      = 1024
+	MaxPushRepoStringBytes    = 256
+	MaxBodyBytes              = 4 * 1024
+	MaxDiffHunkBytes          = 1024
+	MaxCommandNameRunes       = 32
+	MaxCommandArgsBytes       = 1024
+	MaxCommandLineBytes       = 1024
 
 	// StaleThreshold is the §4.4 replay-protection freshness window: when
 	// Options.ReceivedAt - Result.OccurredAt exceeds 24h, Normalize sets
@@ -95,6 +107,7 @@ type Options struct {
 	MaxPayloadBytes     int
 	MaxBodyBytes        int
 	MaxTitleBytes       int
+	MaxHeadMessageBytes int
 	MaxDiffHunkBytes    int
 	MaxCommandArgsBytes int
 	MaxCommandLineBytes int
@@ -119,6 +132,13 @@ func (o Options) maxTitleBytes() int {
 		return o.MaxTitleBytes
 	}
 	return MaxTitleBytes
+}
+
+func (o Options) maxHeadMessageBytes() int {
+	if o.MaxHeadMessageBytes > 0 {
+		return o.MaxHeadMessageBytes
+	}
+	return MaxHeadMessageBytes
 }
 
 func (o Options) maxDiffHunkBytes() int {
@@ -237,7 +257,8 @@ func IsSupportedEvent(eventName string) bool {
 		EventIssues,
 		EventIssueComment,
 		EventPullRequestReview,
-		EventPullRequestReviewComment:
+		EventPullRequestReviewComment,
+		EventPush:
 		return true
 	default:
 		return false

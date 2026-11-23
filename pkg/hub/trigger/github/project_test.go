@@ -27,11 +27,15 @@ import (
 )
 
 func projectPayload(raw []byte, maxBytes int) ([]byte, bool, error) {
+	return projectPayloadForEvent("", raw, maxBytes)
+}
+
+func projectPayloadForEvent(eventName string, raw []byte, maxBytes int) ([]byte, bool, error) {
 	root, err := decodeJSONObject(raw)
 	if err != nil {
 		return nil, false, err
 	}
-	return projectDecodedPayload(root, maxBytes)
+	return projectDecodedPayload(root, eventName, maxBytes)
 }
 
 func TestProjectPayload_StripsBloatAndReducesObjects(t *testing.T) {
@@ -405,11 +409,11 @@ func TestProjectDecodedPayload_ReducesPRBranchReposBeforeSanitizeWithoutMutating
 	bloatedRoot := buildRoot(1500)
 
 	minAllocs := testing.AllocsPerRun(10, func() {
-		_, _, err := projectDecodedPayload(minimalRoot, DefaultMaxPayloadBytes)
+		_, _, err := projectDecodedPayload(minimalRoot, EventPullRequest, DefaultMaxPayloadBytes)
 		require.NoError(t, err)
 	})
 	bloatedAllocs := testing.AllocsPerRun(10, func() {
-		_, _, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+		_, _, err := projectDecodedPayload(bloatedRoot, EventPullRequest, DefaultMaxPayloadBytes)
 		require.NoError(t, err)
 	})
 
@@ -431,13 +435,13 @@ func TestProjectDecodedPayload_ReducesPRBranchReposBeforeSanitizeWithoutMutating
 	assert.Contains(t, rawBaseRepo, "bloat_1499", "caller base.repo map must retain all raw fields")
 
 	// Output must be identical between minimal and bloated raw branch repos, and across repeated calls.
-	outMin, truncMin, err := projectDecodedPayload(minimalRoot, DefaultMaxPayloadBytes)
+	outMin, truncMin, err := projectDecodedPayload(minimalRoot, EventPullRequest, DefaultMaxPayloadBytes)
 	require.NoError(t, err)
 	assert.False(t, truncMin)
-	outBloat1, truncBloat1, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+	outBloat1, truncBloat1, err := projectDecodedPayload(bloatedRoot, EventPullRequest, DefaultMaxPayloadBytes)
 	require.NoError(t, err)
 	assert.False(t, truncBloat1)
-	outBloat2, _, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+	outBloat2, _, err := projectDecodedPayload(bloatedRoot, EventPullRequest, DefaultMaxPayloadBytes)
 	require.NoError(t, err)
 	assert.Equal(t, string(outMin), string(outBloat1))
 	assert.Equal(t, string(outBloat1), string(outBloat2))
@@ -558,4 +562,426 @@ func TestProjectPayload_Tier5ProtectsHTMLURLAndPath(t *testing.T) {
 		assert.False(t, res.Handled)
 		assert.Nil(t, res.Payload)
 	})
+}
+
+func TestProjectPayload_PushKeepsHeadCommitAndCapsCommitsAt20(t *testing.T) {
+	manyFiles := make([]string, 30)
+	for i := range manyFiles {
+		manyFiles[i] = fmt.Sprintf("pkg/file_%02d.go", i)
+	}
+	commits := make([]map[string]any, 25)
+	for i := range commits {
+		commits[i] = map[string]any{
+			"id":        fmt.Sprintf("%040d", i+1),
+			"tree_id":   fmt.Sprintf("%040d", i+100),
+			"distinct":  true,
+			"message":   fmt.Sprintf("commit %d", i+1),
+			"timestamp": "2026-05-01T10:00:00Z",
+			"url":       "https://github.com/octo-org/octo-repo/commit/" + fmt.Sprintf("%040d", i+1),
+			"author":    map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"committer": map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"added":     manyFiles,
+			"removed":   []string{},
+			"modified":  manyFiles,
+			"extra_key": "should-be-dropped",
+		}
+	}
+	raw, err := json.Marshal(map[string]any{
+		"ref":          "refs/heads/main",
+		"before":       fmt.Sprintf("%040d", 0),
+		"after":        fmt.Sprintf("%040d", 25),
+		"created":      false,
+		"deleted":      false,
+		"forced":       false,
+		"organization": map[string]any{"login": "octo-org", "id": 99},
+		"enterprise":   map[string]any{"id": 7, "name": "Octo Corp"},
+		"installation": map[string]any{"id": 42, "repositories_url": "https://api.github.com/installation/repositories"},
+		"sender":       map[string]any{"login": "monalisa", "id": 201, "type": "User", "avatar_url": "https://avatars.example/201"},
+		"repository": map[string]any{
+			"id":             1001,
+			"full_name":      "octo-org/octo-repo",
+			"name":           "octo-repo",
+			"private":        false,
+			"default_branch": "main",
+			"html_url":       "https://github.com/octo-org/octo-repo",
+			"archive_url":    "https://api.github.com/repos/octo-org/octo-repo/{archive_format}",
+			"owner":          map[string]any{"login": "octo-org", "id": 99, "type": "Organization", "avatar_url": "https://avatars.example/99"},
+		},
+		"pusher":      map[string]any{"name": "monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+		"head_commit": commits[24],
+		"commits":     commits,
+	})
+	require.NoError(t, err)
+
+	out, truncated, err := projectPayloadForEvent(EventPush, raw, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.True(t, truncated, "cutting commits >20 and file arrays >20 must flag payload_truncated")
+
+	var proj map[string]any
+	require.NoError(t, json.Unmarshal(out, &proj))
+	assert.NotContains(t, proj, "organization")
+	assert.NotContains(t, proj, "enterprise")
+	assert.Equal(t, "refs/heads/main", proj["ref"])
+	assert.NotNil(t, proj["head_commit"])
+
+	// O3: pusher is reduced to {name, username} with no email.
+	pusherMap, ok := proj["pusher"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "monalisa", pusherMap["name"])
+	assert.Equal(t, "monalisa", pusherMap["username"])
+	assert.NotContains(t, pusherMap, "email")
+
+	// R1: commits capped at 20, reduced fields kept (including url), no email, file arrays capped at 20.
+	projCommits, ok := proj["commits"].([]any)
+	require.True(t, ok)
+	require.Len(t, projCommits, MaxPushCommits)
+	firstCommit, ok := projCommits[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, fmt.Sprintf("%040d", 1), firstCommit["id"])
+	assert.Equal(t, "https://github.com/octo-org/octo-repo/commit/"+fmt.Sprintf("%040d", 1), firstCommit["url"])
+	assert.NotContains(t, firstCommit, "extra_key")
+	authorMap, ok := firstCommit["author"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "Monalisa", authorMap["name"])
+	assert.Equal(t, "monalisa", authorMap["username"])
+	assert.NotContains(t, authorMap, "email")
+	addedArr, ok := firstCommit["added"].([]any)
+	require.True(t, ok)
+	assert.Len(t, addedArr, MaxPushCommitFiles)
+
+	repoMap, ok := proj["repository"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, repoMap, "archive_url")
+	senderMap, ok := proj["sender"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, senderMap, "avatar_url")
+}
+
+func TestNormalize_PushLargeFileListsBoundedByPushShrinkTier(t *testing.T) {
+	// R1 regression test: 25 commits each touching 50 long file paths across
+	// added/removed/modified must succeed (Handled, payload_truncated=true,
+	// PayloadBytes <= 64 KiB) rather than failing projection with an error.
+	longPaths := make([]string, 50)
+	for i := range longPaths {
+		longPaths[i] = fmt.Sprintf("services/payments/internal/handlers/v2/subpackage/refund_handler_%03d.go", i)
+	}
+	commits := make([]map[string]any, 25)
+	for i := range commits {
+		commits[i] = map[string]any{
+			"id":        fmt.Sprintf("%040d", i+1),
+			"tree_id":   fmt.Sprintf("%040d", i+1000),
+			"distinct":  true,
+			"message":   fmt.Sprintf("feat: update payment handler batch %d", i+1),
+			"timestamp": "2026-05-01T11:00:00Z",
+			"url":       "https://github.com/octo-org/octo-repo/commit/" + fmt.Sprintf("%040d", i+1),
+			"author":    map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"committer": map[string]any{"name": "Monalisa", "username": "monalisa", "email": "monalisa@example.com"},
+			"added":     longPaths,
+			"removed":   longPaths,
+			"modified":  longPaths,
+		}
+	}
+	raw, err := json.Marshal(map[string]any{
+		"ref":          "refs/heads/main",
+		"before":       fmt.Sprintf("%040d", 0),
+		"after":        fmt.Sprintf("%040d", 25),
+		"created":      false,
+		"deleted":      false,
+		"forced":       false,
+		"commits":      commits,
+		"head_commit":  commits[24],
+		"pusher":       map[string]any{"name": "monalisa", "email": "monalisa@example.com"},
+		"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+		"sender":       map[string]any{"login": "monalisa", "id": 201, "type": "User"},
+		"installation": map[string]any{"id": 987654},
+	})
+	require.NoError(t, err)
+
+	res, err := Normalize(EventPush, "d-large-push", raw, Options{AppSlug: "octo-app"})
+	require.NoError(t, err)
+	assert.True(t, res.Handled)
+	assert.True(t, res.Truncated)
+	assert.Equal(t, "true", res.Attributes["payload_truncated"])
+	assert.LessOrEqual(t, res.PayloadBytes, DefaultMaxPayloadBytes)
+	assert.Equal(t, "25", res.Attributes["commit_count"])
+	assert.Equal(t, "true", res.Attributes["lists_truncated"])
+	assert.Len(t, res.Lists["commits"], MaxPushCommits)
+
+	var proj map[string]any
+	require.NoError(t, json.Unmarshal(res.Payload, &proj))
+	projCommits, ok := proj["commits"].([]any)
+	require.True(t, ok)
+	require.Len(t, projCommits, MaxPushCommits)
+	first, ok := projCommits[0].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, first, "added")
+	assert.NotContains(t, first, "removed")
+	assert.NotContains(t, first, "modified")
+}
+
+func TestNormalize_PushWorstCaseBoundedByConstruction(t *testing.T) {
+	// R1 worst-case test: 2048 commits with every field far beyond its maximum
+	// (3000-byte author/committer names, 4000-byte message, 1000-byte url,
+	// 200-byte ids/timestamps, 50 x 2000-byte file paths, ~9 KB ref, large
+	// repository/sender fields) must succeed with PayloadBytes <= 64 KiB,
+	// payload_truncated=true, and Handled=true.
+	longName := strings.Repeat("é", 1500) // 3000 bytes, multi-byte UTF-8
+	longMsg := strings.Repeat("m", 4000)
+	longURL := "https://github.com/octo-org/octo-repo/commit/" + strings.Repeat("u", 1000)
+	longID := strings.Repeat("a", 200)
+	longPath := "services/deep/" + strings.Repeat("p", 2000) + ".go"
+	longPaths := make([]string, 50)
+	for i := range longPaths {
+		longPaths[i] = longPath
+	}
+
+	commits := make([]map[string]any, 2048)
+	for i := range commits {
+		commits[i] = map[string]any{
+			"id":        longID,
+			"tree_id":   longID,
+			"distinct":  true,
+			"message":   longMsg,
+			"timestamp": strings.Repeat("t", 200),
+			"url":       longURL,
+			"author":    map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+			"committer": map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+			"added":     longPaths,
+			"removed":   longPaths,
+			"modified":  longPaths,
+		}
+	}
+	headCommit := map[string]any{
+		"id":        strings.Repeat("b", 200),
+		"tree_id":   strings.Repeat("c", 200),
+		"distinct":  true,
+		"message":   longMsg,
+		"timestamp": "2026-05-01T11:00:00Z",
+		"url":       longURL,
+		"author":    map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+		"committer": map[string]any{"name": longName, "username": longName, "email": "x@example.com"},
+		"added":     longPaths,
+		"removed":   longPaths,
+		"modified":  longPaths,
+	}
+
+	longRef := "refs/heads/" + strings.Repeat("r", 9*1024)
+	raw, err := json.Marshal(map[string]any{
+		"ref":         longRef,
+		"before":      strings.Repeat("0", 40),
+		"after":       strings.Repeat("f", 40),
+		"created":     false,
+		"deleted":     false,
+		"forced":      true,
+		"commits":     commits,
+		"head_commit": headCommit,
+		"pusher":      map[string]any{"name": longName, "username": longName, "email": "p@example.com"},
+		"repository": map[string]any{
+			"id":             1296269,
+			"name":           "octo-repo",
+			"full_name":      "octo-org/octo-repo",
+			"private":        false,
+			"default_branch": strings.Repeat("d", 500),
+			"html_url":       "https://github.com/octo-org/octo-repo/" + strings.Repeat("h", 1000),
+			"pushed_at":      1777630500,
+			"owner": map[string]any{
+				"login": "octo-org",
+				"id":    100,
+				"type":  strings.Repeat("o", 200),
+			},
+		},
+		"sender": map[string]any{
+			"login": "monalisa",
+			"id":    201,
+			"type":  strings.Repeat("s", 200),
+		},
+		"installation": map[string]any{"id": 987654},
+	})
+	require.NoError(t, err)
+
+	res, err := Normalize(EventPush, "d-worst-case", raw, Options{AppSlug: "octo-app"})
+	require.NoError(t, err)
+	assert.True(t, res.Handled)
+	assert.True(t, res.Truncated)
+	assert.Equal(t, "true", res.Attributes["payload_truncated"])
+	assert.Equal(t, "true", res.Attributes["ref_truncated"])
+	assert.LessOrEqual(t, len(res.Attributes["ref"]), MaxPushRefBytes)
+	assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
+	assert.LessOrEqual(t, res.PayloadBytes, DefaultMaxPayloadBytes)
+	assert.True(t, utf8.Valid(res.Payload))
+	assert.Equal(t, "2048", res.Attributes["commit_count"])
+
+	// Also verify pathological JSON-escape expansion (control chars expanding 6x)
+	// in protected "name" fields does not cause Tier 5 to refuse a push delivery.
+	escName := strings.Repeat("\x01", 3000)
+	escCommits := make([]map[string]any, 30)
+	for i := range escCommits {
+		escCommits[i] = map[string]any{
+			"id":        fmt.Sprintf("%040d", i+1),
+			"tree_id":   fmt.Sprintf("%040d", i+100),
+			"distinct":  true,
+			"message":   strings.Repeat("\x01", 1000),
+			"timestamp": "2026-05-01T11:00:00Z",
+			"url":       longURL,
+			"author":    map[string]any{"name": escName, "username": escName},
+			"committer": map[string]any{"name": escName, "username": escName},
+		}
+	}
+	escRaw, err := json.Marshal(map[string]any{
+		"ref":          "refs/heads/main",
+		"before":       strings.Repeat("0", 40),
+		"after":        strings.Repeat("f", 40),
+		"commits":      escCommits,
+		"head_commit":  escCommits[29],
+		"pusher":       map[string]any{"name": escName, "username": escName},
+		"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+		"sender":       map[string]any{"login": "monalisa", "id": 201, "type": "User"},
+		"installation": map[string]any{"id": 987654},
+	})
+	require.NoError(t, err)
+
+	escRes, err := Normalize(EventPush, "d-worst-escape", escRaw, Options{AppSlug: "octo-app"})
+	require.NoError(t, err)
+	assert.True(t, escRes.Handled)
+	assert.True(t, escRes.Truncated)
+	assert.Equal(t, "true", escRes.Attributes["payload_truncated"])
+	assert.LessOrEqual(t, escRes.PayloadBytes, DefaultMaxPayloadBytes)
+}
+
+func TestProjectPayload_PushStructuralPropertyBound(t *testing.T) {
+	// R1 structural property test: derive every key path emitted by the push
+	// projection from a complete baseline push payload (plus non-push decoys
+	// action/number), then replace each path one at a time with:
+	//   1) an 8,000-key nested object (> 80 KiB),
+	//   2) a 100 KB digit json.Number,
+	//   3) a 100 KB string.
+	// Every mutation must project cleanly with err == nil and len(out) <= 64 KiB.
+	baseRaw := []byte(`{
+		"ref": "refs/heads/main",
+		"before": "0000000000000000000000000000000000000000",
+		"after": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		"created": false,
+		"deleted": false,
+		"forced": false,
+		"pusher": {"name": "monalisa", "username": "monalisa"},
+		"head_commit": {
+			"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"tree_id": "1111111111111111111111111111111111111111",
+			"distinct": true,
+			"message": "feat: baseline",
+			"timestamp": "2026-05-01T10:00:00Z",
+			"url": "https://github.com/octo-org/octo-repo/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"author": {"name": "Monalisa", "username": "monalisa"},
+			"committer": {"name": "Monalisa", "username": "monalisa"},
+			"added": ["a.go"],
+			"removed": ["b.go"],
+			"modified": ["c.go"]
+		},
+		"commits": [{
+			"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"tree_id": "1111111111111111111111111111111111111111",
+			"distinct": true,
+			"message": "feat: baseline",
+			"timestamp": "2026-05-01T10:00:00Z",
+			"url": "https://github.com/octo-org/octo-repo/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"author": {"name": "Monalisa", "username": "monalisa"},
+			"committer": {"name": "Monalisa", "username": "monalisa"},
+			"added": ["a.go"],
+			"removed": ["b.go"],
+			"modified": ["c.go"]
+		}],
+		"repository": {
+			"id": 1296269,
+			"full_name": "octo-org/octo-repo",
+			"name": "octo-repo",
+			"private": false,
+			"default_branch": "main",
+			"html_url": "https://github.com/octo-org/octo-repo",
+			"owner": {"id": 100, "login": "octo-org", "type": "Organization"}
+		},
+		"sender": {"id": 201, "login": "monalisa", "type": "User"},
+		"installation": {"id": 987654}
+	}`)
+
+	baseRoot, err := decodeJSONObject(baseRaw)
+	require.NoError(t, err)
+	baseOut, baseTrunc, err := projectDecodedPayload(baseRoot, EventPush, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.False(t, baseTrunc)
+
+	projRoot, err := decodeJSONObject(baseOut)
+	require.NoError(t, err)
+
+	// Dynamically collect every emitted path in projRoot so newly added keys are covered automatically.
+	var paths [][]string
+	var collect func(node any, prefix []string)
+	collect = func(node any, prefix []string) {
+		switch m := node.(type) {
+		case map[string]any:
+			for k, v := range m {
+				p := append(append([]string(nil), prefix...), k)
+				paths = append(paths, p)
+				collect(v, p)
+			}
+		case []any:
+			if len(m) > 0 {
+				p := append(append([]string(nil), prefix...), "0")
+				paths = append(paths, p)
+				collect(m[0], p)
+			}
+		}
+	}
+	collect(projRoot, nil)
+	// Also test non-push top-level decoys that must never pass through on push.
+	paths = append(paths, []string{"action"}, []string{"number"})
+	require.Greater(t, len(paths), 40, "expected all emitted push projection paths to be discovered")
+
+	hugeObj := make(map[string]any, 8000)
+	for i := 0; i < 8000; i++ {
+		hugeObj[fmt.Sprintf("k%04d", i)] = "v"
+	}
+	hugeNum := json.Number(strings.Repeat("9", 100*1024))
+	hugeStr := strings.Repeat("x", 100*1024)
+
+	adversarial := []struct {
+		name string
+		val  any
+	}{
+		{name: "huge_object", val: hugeObj},
+		{name: "100kb_number", val: hugeNum},
+		{name: "100kb_string", val: hugeStr},
+	}
+
+	setAtPath := func(root map[string]any, path []string, val any) {
+		var cur any = root
+		for i := 0; i < len(path)-1; i++ {
+			seg := path[i]
+			switch node := cur.(type) {
+			case map[string]any:
+				cur = node[seg]
+			case []any:
+				cur = node[0]
+			}
+		}
+		last := path[len(path)-1]
+		switch node := cur.(type) {
+		case map[string]any:
+			node[last] = val
+		case []any:
+			node[0] = val
+		}
+	}
+
+	for _, path := range paths {
+		pathLabel := strings.Join(path, ".")
+		for _, adv := range adversarial {
+			mutated, err := decodeJSONObject(baseRaw)
+			require.NoError(t, err)
+			setAtPath(mutated, path, adv.val)
+
+			out, _, err := projectDecodedPayload(mutated, EventPush, DefaultMaxPayloadBytes)
+			require.NoErrorf(t, err, "path=%s variant=%s must not fail push projection", pathLabel, adv.name)
+			assert.LessOrEqualf(t, len(out), DefaultMaxPayloadBytes, "path=%s variant=%s exceeded 64 KiB", pathLabel, adv.name)
+		}
+	}
 }

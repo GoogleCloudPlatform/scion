@@ -976,6 +976,75 @@ func TestHandleGetGitHubApp_TriggersReadiness(t *testing.T) {
 		}
 	})
 
+	t.Run("push_event_is_optional", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			events []string
+		}{
+			{
+				name: "without_push",
+				events: []string{
+					"issue_comment",
+					"issues",
+					"pull_request",
+					"pull_request_review",
+					"pull_request_review_comment",
+				},
+			},
+			{
+				name: "with_push",
+				events: []string{
+					"issue_comment",
+					"issues",
+					"pull_request",
+					"pull_request_review",
+					"pull_request_review_comment",
+					"push",
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				mockGH := newMockAppEndpoint(t, http.StatusOK, map[string]any{
+					"id":     42,
+					"slug":   "ready-scion",
+					"events": tc.events,
+					"permissions": map[string]string{
+						"contents":      "write",
+						"issues":        "write",
+						"metadata":      "read",
+						"pull_requests": "write",
+					},
+				})
+				srv, _ := testServer(t)
+				setGitHubTriggersExperiment(t, srv, true)
+				srv.mu.Lock()
+				srv.config.GitHubAppConfig = GitHubAppServerConfig{
+					AppID:           42,
+					PrivateKey:      testGitHubAppPrivateKeyPEM(t),
+					WebhookSecret:   "whsec",
+					WebhooksEnabled: true,
+					APIBaseURL:      mockGH.server.URL,
+				}
+				srv.mu.Unlock()
+
+				rec := doRequest(t, srv, http.MethodGet, "/api/v1/github-app", nil)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("GET /api/v1/github-app: %d %s", rec.Code, rec.Body.String())
+				}
+				var resp GitHubAppConfigResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if resp.Triggers == nil || !resp.Triggers.Ready {
+					t.Fatalf("expected ready=true (%s), got %+v", tc.name, resp.Triggers)
+				}
+				if len(resp.Triggers.MissingEvents) != 0 {
+					t.Errorf("expected no missing events (%s), got %v", tc.name, resp.Triggers.MissingEvents)
+				}
+			})
+		}
+	})
+
 	t.Run("content_free_error_when_get_app_fails", func(t *testing.T) {
 		const secretLeak = "SECRET_UPSTREAM_BODY_DO_NOT_LEAK"
 		mockGH := newMockAppEndpoint(t, http.StatusUnauthorized, `{"message":"Bad credentials `+secretLeak+`"}`)

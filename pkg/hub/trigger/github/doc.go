@@ -21,7 +21,7 @@
 //
 // # Supported Event Families
 //
-// Normalize handles the five Stage 3 content event families (§5.1):
+// Normalize handles the six Stage 3 content event families (§5.1):
 //   - pull_request (opened, synchronize, reopened, closed, ready_for_review,
 //     converted_to_draft, edited, labeled, unlabeled, assigned, unassigned,
 //     review_requested, review_request_removed, plus any unlisted action with
@@ -31,10 +31,11 @@
 //   - issue_comment (created, edited, deleted, plus any unlisted action)
 //   - pull_request_review (submitted, edited, dismissed, plus any unlisted action)
 //   - pull_request_review_comment (created, edited, deleted, plus any unlisted action)
+//   - push (no action; produces github.push with subject github:<owner>/<repo>@<ref>)
 //
 // Event families outside this table (including ping, installation,
-// installation_repositories, check_run, and push prior to G2b) return
-// Result{Handled: false} with a nil error.
+// installation_repositories, and check_run) return Result{Handled: false} with
+// a nil error.
 //
 // # Command Grammar and Bot Senders
 //

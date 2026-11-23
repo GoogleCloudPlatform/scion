@@ -63,38 +63,156 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 }
 
 // projectDecodedPayload builds the §5.8 bounded JSON projection from a decoded root object.
-func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, error) {
+//
+// For push events (eventName == EventPush), every projected scalar and array is
+// bounded by construction via an explicit typed allow-list (capped UTF-8
+// strings, int64 parsed from json.Number, or bools; zero sanitizeValue or
+// arbitrary JSON pass-through) so a valid push delivery cannot fail projection
+// under the 64 KiB (DefaultMaxPayloadBytes) ceiling. payload_truncated is set
+// whenever commits[:20] slicing, per-commit file-array reduction (count > 20 or
+// path > 1 KiB), any push scalar cap/type-mismatch omission, or a shrink tier
+// applies.
+//
+// Worst-case push projection arithmetic (normal UTF-8, after Tier 4b drops
+// commit added/removed/modified file arrays):
+//   - Per commit (up to 21 objects: commits[:20] + head_commit):
+//     id (64) + tree_id (64) + timestamp (64) + url (256) + message (512) +
+//     distinct (5) + author{name(256),username(256)} (512) +
+//     committer{name(256),username(256)} (512) + JSON keys/syntax (~190)
+//     <= 2,179 bytes/commit -> 21 * 2,179 = 45,759 bytes.
+//   - Top-level push fields:
+//     ref (1,024) + before (64) + after (64) + created/deleted/forced (~40) +
+//     pusher{name(256),username(256)} (~547) <= ~1,750 bytes.
+//   - Reduced repository: id (int64 <= 20) + private (5) + full_name (256) +
+//     name (256) + default_branch (256) + html_url (256) +
+//     owner{id (int64 <= 20), login (256), type (64)} + keys/syntax (~150)
+//     <= ~1,540 bytes.
+//   - Reduced sender: id (int64 <= 20) + login (256) + type (64) + syntax (~45)
+//     <= ~385 bytes.
+//   - Reduced installation: id (int64 <= 20) + syntax (~25) <= ~45 bytes.
+//   - Total <= ~49,479 bytes (< 65,536 bytes; >16 KiB headroom).
+//
+// Even under pathological JSON-escape expansion (e.g. control characters
+// expanding 6x) or a caller-configured smaller maxBytes, Tier 5 shrinks
+// unprotected push strings and Tier 5b shrinks commit/pusher names so Tier 5's
+// protected-key set cannot cause a refusal for push.
+func projectDecodedPayload(root map[string]any, eventName string, maxBytes int) ([]byte, bool, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxPayloadBytes
 	}
 
+	isPush := eventName == EventPush
 	proj := make(map[string]any)
-	if v, ok := root["action"]; ok {
-		proj["action"] = sanitizeValue(v)
-	}
-	if v, ok := root["number"]; ok {
-		proj["number"] = sanitizeValue(v)
-	}
-	for _, key := range keptPrimaryKeys {
-		val, ok := root[key]
-		if !ok || val == nil {
-			continue
+	reducedTruncated := false
+
+	if isPush {
+		if copyCappedString(proj, root, "ref", MaxPushRefBytes) {
+			reducedTruncated = true
 		}
-		if key == "pull_request" {
-			if prMap, isMap := val.(map[string]any); isMap {
-				val = reducePRBranchRepos(prMap)
+		for _, shaKey := range []string{"before", "after"} {
+			if copyCappedString(proj, root, shaKey, MaxPushSHABytes) {
+				reducedTruncated = true
 			}
 		}
-		proj[key] = sanitizeValue(val)
-	}
-	if repoMap, ok := root["repository"].(map[string]any); ok {
-		proj["repository"] = reduceRepository(repoMap)
-	}
-	if senderMap, ok := root["sender"].(map[string]any); ok {
-		proj["sender"] = reduceActor(senderMap)
-	}
-	if instMap, ok := root["installation"].(map[string]any); ok {
-		proj["installation"] = reduceInstallation(instMap)
+		for _, boolKey := range []string{"created", "deleted", "forced"} {
+			if copyBool(proj, root, boolKey) {
+				reducedTruncated = true
+			}
+		}
+		if rawHead, exists := root["head_commit"]; exists && rawHead != nil {
+			if headMap, ok := rawHead.(map[string]any); ok {
+				reduced, cut := reducePushCommit(headMap)
+				proj["head_commit"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawPusher, exists := root["pusher"]; exists && rawPusher != nil {
+			if pusherMap, ok := rawPusher.(map[string]any); ok {
+				reduced, cut := reducePushActor(pusherMap)
+				proj["pusher"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawCommits, exists := root["commits"]; exists && rawCommits != nil {
+			if arr, isArr := rawCommits.([]any); isArr {
+				if len(arr) > MaxPushCommits {
+					arr = arr[:MaxPushCommits]
+					reducedTruncated = true
+				}
+				reduced := make([]any, 0, len(arr))
+				for _, elem := range arr {
+					if cm, isMap := elem.(map[string]any); isMap {
+						rc, cut := reducePushCommit(cm)
+						reduced = append(reduced, rc)
+						reducedTruncated = reducedTruncated || cut
+					} else {
+						reducedTruncated = true
+					}
+				}
+				proj["commits"] = reduced
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawRepo, exists := root["repository"]; exists && rawRepo != nil {
+			if repoMap, ok := rawRepo.(map[string]any); ok {
+				reduced, cut := reducePushRepository(repoMap)
+				proj["repository"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawSender, exists := root["sender"]; exists && rawSender != nil {
+			if senderMap, ok := rawSender.(map[string]any); ok {
+				reduced, cut := reducePushSender(senderMap)
+				proj["sender"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
+		}
+		if rawInst, exists := root["installation"]; exists && rawInst != nil {
+			if instMap, ok := rawInst.(map[string]any); ok {
+				reduced, cut := reducePushInstallation(instMap)
+				proj["installation"] = reduced
+				reducedTruncated = reducedTruncated || cut
+			} else {
+				reducedTruncated = true
+			}
+		}
+	} else {
+		if v, ok := root["action"]; ok {
+			proj["action"] = sanitizeValue(v)
+		}
+		if v, ok := root["number"]; ok {
+			proj["number"] = sanitizeValue(v)
+		}
+		for _, key := range keptPrimaryKeys {
+			val, ok := root[key]
+			if !ok || val == nil {
+				continue
+			}
+			if key == "pull_request" {
+				if prMap, isMap := val.(map[string]any); isMap {
+					val = reducePRBranchRepos(prMap)
+				}
+			}
+			proj[key] = sanitizeValue(val)
+		}
+		if repoMap, ok := root["repository"].(map[string]any); ok {
+			proj["repository"] = reduceRepository(repoMap)
+		}
+		if senderMap, ok := root["sender"].(map[string]any); ok {
+			proj["sender"] = reduceActor(senderMap)
+		}
+		if instMap, ok := root["installation"].(map[string]any); ok {
+			proj["installation"] = reduceInstallation(instMap)
+		}
 	}
 
 	encoded, err := encodeCompactJSON(proj)
@@ -102,13 +220,13 @@ func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, err
 		return nil, false, err
 	}
 	if len(encoded) <= maxBytes {
-		return encoded, false, nil
+		return encoded, reducedTruncated, nil
 	}
 
 	// §5.8 fallback: truncate body fields (longest first) to fit within maxBytes,
 	// then secondary text fields (changes.*.from, diff_hunk), then non-essential
 	// containers if still oversize.
-	encoded, err = shrinkProjectedToFit(proj, encoded, maxBytes)
+	encoded, err = shrinkProjectedToFit(proj, isPush, encoded, maxBytes)
 	if err != nil {
 		return nil, false, err
 	}
@@ -167,6 +285,173 @@ func reduceInstallation(inst map[string]any) map[string]any {
 	out := make(map[string]any, 1)
 	copySanitizedKeys(out, inst, "id")
 	return out
+}
+
+func truncateCleanString(s string, maxBytes int) (string, bool) {
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "\uFFFD")
+	}
+	if len(s) <= maxBytes {
+		return s, false
+	}
+	return truncateUTF8(s, maxBytes), true
+}
+
+func copyCappedString(dst, src map[string]any, key string, maxBytes int) bool {
+	raw, ok := src[key]
+	if !ok || raw == nil {
+		return false
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return true
+	}
+	capped, cut := truncateCleanString(s, maxBytes)
+	dst[key] = capped
+	return cut
+}
+
+func copyInt64(dst, src map[string]any, key string) bool {
+	raw, ok := src[key]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return true
+		}
+		dst[key] = n
+		return false
+	case int64:
+		dst[key] = v
+		return false
+	default:
+		return true
+	}
+}
+
+func copyBool(dst, src map[string]any, key string) bool {
+	raw, ok := src[key]
+	if !ok || raw == nil {
+		return false
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return true
+	}
+	dst[key] = b
+	return false
+}
+
+func reducePushInstallation(inst map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, 1)
+	cutID := copyInt64(out, inst, "id")
+	return out, cutID
+}
+
+func reducePushActor(actor map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, 2)
+	cutName := copyCappedString(out, actor, "name", MaxPushActorNameBytes)
+	cutUser := copyCappedString(out, actor, "username", MaxPushActorNameBytes)
+	return out, cutName || cutUser
+}
+
+func reducePushSender(actor map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, 3)
+	cutLogin := copyCappedString(out, actor, "login", MaxPushRepoStringBytes)
+	cutID := copyInt64(out, actor, "id")
+	cutType := copyCappedString(out, actor, "type", MaxPushSHABytes)
+	return out, cutLogin || cutID || cutType
+}
+
+func reducePushRepository(repo map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, 7)
+	truncated := copyInt64(out, repo, "id")
+	if copyBool(out, repo, "private") {
+		truncated = true
+	}
+	for _, key := range []string{"full_name", "name", "default_branch", "html_url"} {
+		if copyCappedString(out, repo, key, MaxPushRepoStringBytes) {
+			truncated = true
+		}
+	}
+	if rawOwner, exists := repo["owner"]; exists && rawOwner != nil {
+		if owner, ok := rawOwner.(map[string]any); ok {
+			reducedOwner, cutOwner := reducePushSender(owner)
+			out["owner"] = reducedOwner
+			truncated = truncated || cutOwner
+		} else {
+			truncated = true
+		}
+	}
+	return out, truncated
+}
+
+func reducePushCommit(commit map[string]any) (map[string]any, bool) {
+	out := make(map[string]any, 11)
+	truncated := copyCappedString(out, commit, "id", MaxPushSHABytes)
+	if copyCappedString(out, commit, "tree_id", MaxPushSHABytes) {
+		truncated = true
+	}
+	if copyCappedString(out, commit, "message", MaxPushCommitMessageBytes) {
+		truncated = true
+	}
+	if copyCappedString(out, commit, "timestamp", MaxPushTimestampBytes) {
+		truncated = true
+	}
+	if copyCappedString(out, commit, "url", MaxPushCommitURLBytes) {
+		truncated = true
+	}
+	if copyBool(out, commit, "distinct") {
+		truncated = true
+	}
+	if rawAuthor, exists := commit["author"]; exists && rawAuthor != nil {
+		if author, ok := rawAuthor.(map[string]any); ok {
+			reduced, cut := reducePushActor(author)
+			out["author"] = reduced
+			truncated = truncated || cut
+		} else {
+			truncated = true
+		}
+	}
+	if rawCommitter, exists := commit["committer"]; exists && rawCommitter != nil {
+		if committer, ok := rawCommitter.(map[string]any); ok {
+			reduced, cut := reducePushActor(committer)
+			out["committer"] = reduced
+			truncated = truncated || cut
+		} else {
+			truncated = true
+		}
+	}
+	for _, listKey := range []string{"added", "removed", "modified"} {
+		rawVal, exists := commit[listKey]
+		if !exists || rawVal == nil {
+			continue
+		}
+		rawList, ok := rawVal.([]any)
+		if !ok {
+			truncated = true
+			continue
+		}
+		if len(rawList) > MaxPushCommitFiles {
+			rawList = rawList[:MaxPushCommitFiles]
+			truncated = true
+		}
+		paths := make([]any, 0, len(rawList))
+		for _, elem := range rawList {
+			if p, isStr := elem.(string); isStr {
+				capped, cut := truncateCleanString(p, MaxPushFilePathBytes)
+				paths = append(paths, capped)
+				truncated = truncated || cut
+			} else {
+				truncated = true
+			}
+		}
+		out[listKey] = paths
+	}
+	return out, truncated
 }
 
 func copySanitizedKeys(dst, src map[string]any, keys ...string) {
@@ -242,7 +527,7 @@ func (r stringFieldRef) set(s string) {
 	r.parent[r.key] = s
 }
 
-func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]byte, error) {
+func shrinkProjectedToFit(proj map[string]any, isPush bool, encoded []byte, maxBytes int) ([]byte, error) {
 	var err error
 
 	// Tier 1: truncate pre-edit previous values in "changes" ("from", longest first)
@@ -284,17 +569,58 @@ func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]
 		return encoded, nil
 	}
 
+	// Tier 4b (push): drop commit file-path arrays from commits[], then from
+	// head_commit, so large pushes with many long file paths stay bounded without
+	// failing projection.
+	if commitsArr, ok := proj["commits"].([]any); ok {
+		if dropCommitFileArrays(commitsArr) {
+			encoded, err = encodeCompactJSON(proj)
+			if err != nil {
+				return nil, err
+			}
+			if len(encoded) <= maxBytes {
+				return encoded, nil
+			}
+		}
+	}
+	if headMap, ok := proj["head_commit"].(map[string]any); ok {
+		if dropCommitFileArraysFromMap(headMap) {
+			encoded, err = encodeCompactJSON(proj)
+			if err != nil {
+				return nil, err
+			}
+			if len(encoded) <= maxBytes {
+				return encoded, nil
+			}
+		}
+	}
+
 	// Tier 5: truncate any remaining large non-identity strings inside primary objects.
 	protected := map[string]bool{
 		"action": true, "full_name": true, "name": true, "login": true,
-		"type": true, "ref": true, "sha": true, "state": true,
-		"html_url": true, "path": true,
+		"type": true, "ref": true, "sha": true, "before": true, "after": true,
+		"state": true, "html_url": true, "path": true,
 	}
 	encoded, err = shrinkSubtreeFieldsLongestFirst(proj, proj, encoded, maxBytes, func(key string) bool {
 		return !protected[key]
 	}, truncateUTF8)
 	if err != nil {
 		return nil, err
+	}
+	if isPush && len(encoded) > maxBytes {
+		// Tier 5b (push): under pathological JSON-escape expansion (or small
+		// custom maxBytes), allow shrinking commit author/committer/pusher
+		// names so Tier 5's "name" protection cannot cause a refusal for push.
+		for _, subKey := range []string{"commits", "head_commit", "pusher"} {
+			if sub, ok := proj[subKey]; ok {
+				encoded, err = shrinkSubtreeFieldsLongestFirst(proj, sub, encoded, maxBytes, func(key string) bool {
+					return key == "name"
+				}, truncateUTF8)
+				if err != nil || len(encoded) <= maxBytes {
+					return encoded, err
+				}
+			}
+		}
 	}
 	if len(encoded) > maxBytes {
 		return nil, fmt.Errorf("github trigger: projected payload (%d bytes) exceeds MaxPayloadBytes (%d bytes)", len(encoded), maxBytes)
@@ -377,6 +703,29 @@ func collectStringFieldRefs(v any, matchKey func(string) bool) []stringFieldRef 
 	}
 	walk(v)
 	return out
+}
+
+func dropCommitFileArrays(commits []any) bool {
+	changed := false
+	for _, elem := range commits {
+		if m, ok := elem.(map[string]any); ok {
+			if dropCommitFileArraysFromMap(m) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func dropCommitFileArraysFromMap(m map[string]any) bool {
+	changed := false
+	for _, key := range []string{"added", "removed", "modified"} {
+		if _, exists := m[key]; exists {
+			delete(m, key)
+			changed = true
+		}
+	}
+	return changed
 }
 
 func capNestedArrays(v any, limit int) {

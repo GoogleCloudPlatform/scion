@@ -1,0 +1,41 @@
+{
+  "ref": "refs/heads/feat/obsolete",
+  "before": "2222333344445555666677778888999900001111",
+  "after": "0000000000000000000000000000000000000000",
+  "created": false,
+  "deleted": true,
+  "forced": false,
+  "base_ref": null,
+  "compare": "https://github.com/octo-org/octo-repo/compare/222233334444...000000000000",
+  "commits": [],
+  "head_commit": null,
+  "pusher": {
+    "name": "monalisa",
+    "email": "monalisa@example.com"
+  },
+  "repository": {
+    "id": 1296269,
+    "name": "octo-repo",
+    "full_name": "octo-org/octo-repo",
+    "private": false,
+    "default_branch": "main",
+    "created_at": 1579046400,
+    "pushed_at": 1777632300,
+    "html_url": "https://github.com/octo-org/octo-repo",
+    "owner": {
+      "name": "octo-org",
+      "email": "octo-org@example.com",
+      "login": "octo-org",
+      "id": 100,
+      "type": "Organization"
+    }
+  },
+  "sender": {
+    "login": "monalisa",
+    "id": 201,
+    "type": "User"
+  },
+  "installation": {
+    "id": 987654
+  }
+}

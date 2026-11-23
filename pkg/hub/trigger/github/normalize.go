@@ -15,6 +15,8 @@
 package github
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,14 +57,17 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		return Result{}, err
 	}
 
-	actionRaw, err := reqString(root, "action", "action")
-	if err != nil {
-		return Result{}, err
+	var action string
+	if eventName != EventPush {
+		actionRaw, err := reqString(root, "action", "action")
+		if err != nil {
+			return Result{}, err
+		}
+		if !isActionIdent(actionRaw) {
+			return Result{}, errors.New("github trigger: invalid action identifier")
+		}
+		action = strings.ToLower(actionRaw)
 	}
-	if !isActionIdent(actionRaw) {
-		return Result{}, errors.New("github trigger: invalid action identifier")
-	}
-	action := strings.ToLower(actionRaw)
 
 	instMap, err := reqMap(root, "installation", "installation")
 	if err != nil {
@@ -144,8 +149,10 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		"repo_private":    strconv.FormatBool(repoPrivate),
 		"installation_id": strconv.FormatInt(installationID, 10),
 		"event":           eventName,
-		"action":          action,
 		"sender":          senderLogin,
+	}
+	if action != "" {
+		attrs["action"] = action
 	}
 	if defaultBranch != "" {
 		attrs["default_branch"] = defaultBranch
@@ -163,9 +170,11 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	lists := make(map[string][]string)
 
 	var (
-		number         int64
-		occurredAt     time.Time
-		rawCommandBody string
+		number               int64
+		pushRef              string
+		pushCommitsTruncated bool
+		occurredAt           time.Time
+		rawCommandBody       string
 	)
 
 	switch eventName {
@@ -179,12 +188,19 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		number, occurredAt, rawCommandBody, err = normalizePullRequestReview(root, action, repoFullName, opts, attrs, lists)
 	case EventPullRequestReviewComment:
 		number, occurredAt, rawCommandBody, err = normalizePullRequestReviewComment(root, action, repoFullName, opts, attrs, lists)
+	case EventPush:
+		pushRef, occurredAt, pushCommitsTruncated, err = normalizePush(root, repoMap, defaultBranch, opts, attrs, lists)
 	}
 	if err != nil {
 		return base, err
 	}
 
-	subject := fmt.Sprintf("github:%s#%d", repoFullName, number)
+	var subject string
+	if eventName == EventPush {
+		subject = formatPushSubject(repoFullName, pushRef)
+	} else {
+		subject = fmt.Sprintf("github:%s#%d", repoFullName, number)
+	}
 	if len(subject) > MaxSubjectBytes || !allPrintable(subject) {
 		return base, errors.New("github trigger: derived subject exceeds bounds or contains non-printable characters")
 	}
@@ -203,7 +219,7 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	maxCmdLine := opts.maxCommandLineBytes()
 	applyCommandAttributes(attrs, commandEligible, rawCommandBody, opts.AppSlug, opts.MentionAliases, maxCmdArgs, maxCmdLine)
 
-	projected, truncated, err := projectDecodedPayload(root, opts.maxPayloadBytes())
+	projected, truncated, err := projectDecodedPayload(root, eventName, opts.maxPayloadBytes())
 	if err != nil {
 		return base, err
 	}
@@ -215,11 +231,16 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 	if err != nil {
 		return base, err
 	}
-	if listsTruncated {
+	if pushCommitsTruncated || listsTruncated {
 		attrs["lists_truncated"] = "true"
 	}
 	if err := enforceAttributesCeiling(attrs, DefaultMaxAttributesBytes); err != nil {
 		return base, err
+	}
+
+	eventType := SourceKind + "." + eventName
+	if action != "" {
+		eventType += "." + action
 	}
 
 	return Result{
@@ -227,7 +248,7 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		SourceKind:        SourceKind,
 		SourceID:          strconv.FormatInt(installationID, 10),
 		DeliveryID:        deliveryID,
-		Type:              SourceKind + "." + eventName + "." + action,
+		Type:              eventType,
 		Subject:           subject,
 		OccurredAt:        occurredAt,
 		Attributes:        attrs,
@@ -734,6 +755,183 @@ func normalizePullRequestReviewComment(
 	return number, occurredAt, rawBody, nil
 }
 
+func normalizePush(
+	root map[string]any,
+	repoMap map[string]any,
+	defaultBranch string,
+	opts Options,
+	attrs map[string]string,
+	lists map[string][]string,
+) (string, time.Time, bool, error) {
+	ref, err := reqString(root, "ref", "ref")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	if !allPrintableNonSpace(ref) {
+		return "", time.Time{}, false, errors.New("github trigger: invalid ref")
+	}
+	before, err := reqString(root, "before", "before")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	if !isGitSHAHex(before) {
+		return "", time.Time{}, false, errors.New("github trigger: before must be a 40- or 64-character lowercase hex SHA")
+	}
+	after, err := reqString(root, "after", "after")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	if !isGitSHAHex(after) {
+		return "", time.Time{}, false, errors.New("github trigger: after must be a 40- or 64-character lowercase hex SHA")
+	}
+	forced, err := optBool(root, "forced", "forced")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	created, err := optBool(root, "created", "created")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+	deleted, err := optBool(root, "deleted", "deleted")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+
+	isDefaultBranch := defaultBranch != "" && ref == "refs/heads/"+defaultBranch
+	cleanRef := cleanUTF8(ref)
+	if len(cleanRef) > MaxPushRefBytes {
+		attrs["ref"] = truncateUTF8(cleanRef, MaxPushRefBytes)
+		attrs["ref_truncated"] = "true"
+	} else {
+		attrs["ref"] = cleanRef
+	}
+	attrs["before"] = before
+	attrs["after"] = after
+	attrs["is_default_branch"] = strconv.FormatBool(isDefaultBranch)
+	attrs["forced"] = strconv.FormatBool(forced)
+	attrs["created"] = strconv.FormatBool(created)
+	attrs["deleted"] = strconv.FormatBool(deleted)
+
+	if rawPusher, exists := root["pusher"]; exists && rawPusher != nil {
+		pusherMap, ok := rawPusher.(map[string]any)
+		if !ok {
+			return "", time.Time{}, false, errors.New("github trigger: pusher must be a JSON object")
+		}
+		if name := optCleanString(pusherMap, "name"); name != "" {
+			attrs["pusher"] = truncateUTF8(name, MaxPushActorNameBytes)
+		}
+	}
+
+	commitSHAs := []string{}
+	commitCount := 0
+	commitsTruncated := false
+	if rawCommits, exists := root["commits"]; exists && rawCommits != nil {
+		arr, ok := rawCommits.([]any)
+		if !ok {
+			return "", time.Time{}, false, errors.New("github trigger: commits must be a JSON array")
+		}
+		commitCount = len(arr)
+		if commitCount > MaxPushCommits {
+			commitsTruncated = true
+		}
+		limit := commitCount
+		if limit > MaxPushCommits {
+			limit = MaxPushCommits
+		}
+		commitSHAs = make([]string, 0, limit)
+		for i := 0; i < limit; i++ {
+			if m, ok := arr[i].(map[string]any); ok {
+				if sha := optCleanString(m, "id"); isGitSHAHex(sha) {
+					commitSHAs = append(commitSHAs, sha)
+				}
+			}
+		}
+	}
+	attrs["commit_count"] = strconv.Itoa(commitCount)
+	lists["commits"] = commitSHAs
+
+	pushedAt, err := optUnixOrRFC3339Timestamp(repoMap, "pushed_at", "repository.pushed_at")
+	if err != nil {
+		return "", time.Time{}, false, err
+	}
+
+	var headCommitTS time.Time
+	if rawHead, exists := root["head_commit"]; exists && rawHead != nil {
+		headCommitMap, ok := rawHead.(map[string]any)
+		if !ok {
+			return "", time.Time{}, false, errors.New("github trigger: head_commit must be a JSON object")
+		}
+		if msg := optCleanString(headCommitMap, "message"); msg != "" {
+			attrs["head_message"] = truncateUTF8(msg, opts.maxHeadMessageBytes())
+		}
+		ts, _, err := optTimestamp(headCommitMap, "timestamp", "head_commit.timestamp")
+		if err != nil {
+			return "", time.Time{}, false, err
+		}
+		headCommitTS = ts
+	}
+
+	occurredAt := firstNonZeroTime(pushedAt, headCommitTS)
+	return ref, occurredAt, commitsTruncated, nil
+}
+
+// formatPushSubject formats github:<owner>/<repo>@<ref> bounded to MaxSubjectBytes.
+// When the full subject exceeds 256 bytes, it deterministically truncates the ref
+// on a UTF-8 rune boundary and appends "~<first 12 hex of sha256(ref)>" (§4.3).
+func formatPushSubject(repoFullName, ref string) string {
+	full := "github:" + repoFullName + "@" + ref
+	if len(full) <= MaxSubjectBytes {
+		return full
+	}
+	sum := sha256.Sum256([]byte(ref))
+	suffix := "~" + hex.EncodeToString(sum[:])[:12]
+	prefixBase := "github:" + repoFullName + "@"
+	maxRefPrefix := MaxSubjectBytes - len(prefixBase) - len(suffix)
+	if maxRefPrefix < 0 {
+		maxRefPrefix = 0
+	}
+	return prefixBase + truncateUTF8(ref, maxRefPrefix) + suffix
+}
+
+func isGitSHAHex(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func optUnixOrRFC3339Timestamp(m map[string]any, key, label string) (time.Time, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return time.Time{}, nil
+	}
+	switch x := v.(type) {
+	case json.Number:
+		sec, err := x.Int64()
+		if err != nil || sec <= 0 {
+			return time.Time{}, fmt.Errorf("github trigger: %s must be a positive Unix epoch integer", label)
+		}
+		return time.Unix(sec, 0).UTC(), nil
+	case string:
+		if x == "" {
+			return time.Time{}, nil
+		}
+		t, err := time.Parse(time.RFC3339Nano, x)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("github trigger: invalid RFC3339 timestamp in %s: %w", label, err)
+		}
+		return t.UTC(), nil
+	default:
+		return time.Time{}, fmt.Errorf("github trigger: %s must be a Unix epoch integer or RFC3339 string", label)
+	}
+}
+
 func populatePRCommon(
 	prMap map[string]any,
 	number int64,
@@ -906,6 +1104,7 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"command_args",
 		"issue_title",
 		"title",
+		"head_message",
 	}
 	for _, key := range priorityKeys {
 		for len(encoded) > maxBytes {
@@ -952,6 +1151,8 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"stale": true, "payload_truncated": true, "lists_truncated": true,
 		"mention_detection": true, "mention": true, "command": true,
 		"head_ref": true, "head_sha": true, "base_ref": true, "base_sha": true,
+		"ref": true, "ref_truncated": true, "before": true, "after": true, "is_default_branch": true,
+		"forced": true, "created": true, "deleted": true, "commit_count": true,
 		"comment_id": true, "review_id": true, "line": true, "path": true,
 		"html_url": true, "comment_url": true, "issue_url": true, "pull_request_url": true,
 	}

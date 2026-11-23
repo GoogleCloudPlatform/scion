@@ -1,0 +1,121 @@
+{
+  "handled": true,
+  "source_kind": "github",
+  "source_id": "987654",
+  "delivery_id": "00000000-0000-4000-8000-non-default-branch",
+  "type": "github.push",
+  "subject": "github:octo-org/octo-repo@refs/heads/feat/retry-backoff",
+  "occurred_at": "2026-05-01T10:25:00Z",
+  "installation_id": 987654,
+  "repo_full_name": "octo-org/octo-repo",
+  "sender_login": "octocat",
+  "sender_id": 202,
+  "sender_type": "User",
+  "payload_bytes": 1500,
+  "truncated": false,
+  "attributes": {
+    "after": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+    "before": "00112233445566778899aabbccddeeff00112233",
+    "commit_count": "1",
+    "created": "false",
+    "default_branch": "main",
+    "deleted": "false",
+    "delivery": "00000000-0000-4000-8000-non-default-branch",
+    "event": "push",
+    "forced": "false",
+    "head_message": "fix: tune backoff ceiling on feature branch",
+    "installation_id": "987654",
+    "is_default_branch": "false",
+    "provider": "github",
+    "pusher": "octocat",
+    "ref": "refs/heads/feat/retry-backoff",
+    "repo": "octo-org/octo-repo",
+    "repo_name": "octo-repo",
+    "repo_owner": "octo-org",
+    "repo_private": "true",
+    "sender": "octocat",
+    "sender_id": "202",
+    "sender_type": "User"
+  },
+  "lists": {
+    "commits": [
+      "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+    ]
+  },
+  "projected_payload": {
+    "after": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+    "before": "00112233445566778899aabbccddeeff00112233",
+    "commits": [
+      {
+        "added": [],
+        "author": {
+          "name": "The Octocat",
+          "username": "octocat"
+        },
+        "committer": {
+          "name": "The Octocat",
+          "username": "octocat"
+        },
+        "distinct": true,
+        "id": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+        "message": "fix: tune backoff ceiling on feature branch",
+        "modified": [
+          "pkg/retry/backoff.go"
+        ],
+        "removed": [],
+        "timestamp": "2026-05-01T10:25:00Z",
+        "tree_id": "cccc333333333333333333333333333333333333",
+        "url": "https://github.com/octo-org/octo-repo/commit/c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+      }
+    ],
+    "created": false,
+    "deleted": false,
+    "forced": false,
+    "head_commit": {
+      "added": [],
+      "author": {
+        "name": "The Octocat",
+        "username": "octocat"
+      },
+      "committer": {
+        "name": "The Octocat",
+        "username": "octocat"
+      },
+      "distinct": true,
+      "id": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+      "message": "fix: tune backoff ceiling on feature branch",
+      "modified": [
+        "pkg/retry/backoff.go"
+      ],
+      "removed": [],
+      "timestamp": "2026-05-01T10:25:00Z",
+      "tree_id": "cccc333333333333333333333333333333333333",
+      "url": "https://github.com/octo-org/octo-repo/commit/c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+    },
+    "installation": {
+      "id": 987654
+    },
+    "pusher": {
+      "name": "octocat"
+    },
+    "ref": "refs/heads/feat/retry-backoff",
+    "repository": {
+      "default_branch": "main",
+      "full_name": "octo-org/octo-repo",
+      "html_url": "https://github.com/octo-org/octo-repo",
+      "id": 1296269,
+      "name": "octo-repo",
+      "owner": {
+        "id": 100,
+        "login": "octo-org",
+        "type": "Organization"
+      },
+      "private": true
+    },
+    "sender": {
+      "id": 202,
+      "login": "octocat",
+      "type": "User"
+    }
+  }
+}

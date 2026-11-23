@@ -29,7 +29,6 @@ import (
 
 func TestNormalize_UnsupportedFamiliesNotHandled(t *testing.T) {
 	for _, fam := range []string{
-		"push",
 		"ping",
 		"installation",
 		"installation_repositories",
@@ -1086,5 +1085,408 @@ func TestNormalize_PerformedViaAppIDAndIsOwnAppActor(t *testing.T) {
 		assert.NotContains(t, res.Attributes, "mention_detection")
 		assert.Equal(t, "ping", res.Attributes["command"])
 		assert.Equal(t, "now", res.Attributes["command_args"])
+	})
+}
+
+func TestNormalize_Push(t *testing.T) {
+	baseNow := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("default_branch_and_no_command_parsing", func(t *testing.T) {
+		payload := []byte(`{
+			"ref": "refs/heads/main",
+			"before": "00112233445566778899aabbccddeeff00112233",
+			"after": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"created": false,
+			"deleted": false,
+			"forced": false,
+			"commits": [
+				{"id": "1111111111111111111111111111111111111111", "message": "first"},
+				{"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "message": "@scion /review do not parse"}
+			],
+			"head_commit": {
+				"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+				"message": "@scion /review do not parse",
+				"timestamp": "2026-05-01T11:30:00Z"
+			},
+			"pusher": {"name": "monalisa", "email": "monalisa@example.com"},
+			"repository": {
+				"id": 1001,
+				"name": "octo-repo",
+				"full_name": "octo-org/octo-repo",
+				"private": true,
+				"default_branch": "main",
+				"owner": {"login": "octo-org", "id": 100, "type": "Organization"}
+			},
+			"sender": {"login": "monalisa", "id": 201, "type": "User"},
+			"installation": {"id": 9901}
+		}`)
+
+		// Even with an empty AppSlug, push must never parse commands or set mention_detection.
+		for _, slug := range []string{"scion", ""} {
+			res, err := Normalize(EventPush, "deliv-push-1", payload, Options{
+				AppSlug:    slug,
+				ReceivedAt: baseNow,
+			})
+			require.NoError(t, err)
+			assert.True(t, res.Handled)
+			assert.Equal(t, "github.push", res.Type)
+			assert.Equal(t, "", res.Action)
+			assert.Equal(t, "github:octo-org/octo-repo@refs/heads/main", res.Subject)
+			assert.Equal(t, time.Date(2026, 5, 1, 11, 30, 0, 0, time.UTC), res.OccurredAt)
+			assert.Equal(t, "refs/heads/main", res.Attributes["ref"])
+			assert.Equal(t, "00112233445566778899aabbccddeeff00112233", res.Attributes["before"])
+			assert.Equal(t, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", res.Attributes["after"])
+			assert.Equal(t, "monalisa", res.Attributes["pusher"])
+			assert.Equal(t, "true", res.Attributes["is_default_branch"])
+			assert.Equal(t, "false", res.Attributes["forced"])
+			assert.Equal(t, "false", res.Attributes["created"])
+			assert.Equal(t, "false", res.Attributes["deleted"])
+			assert.Equal(t, "2", res.Attributes["commit_count"])
+			assert.Equal(t, "@scion /review do not parse", res.Attributes["head_message"])
+			assert.Equal(t, "push", res.Attributes["event"])
+			assert.NotContains(t, res.Attributes, "action")
+			assert.NotContains(t, res.Attributes, "number")
+			assert.NotContains(t, res.Attributes, "mention")
+			assert.NotContains(t, res.Attributes, "command")
+			assert.NotContains(t, res.Attributes, "mention_detection")
+			assert.NotContains(t, res.Attributes, "stale")
+			assert.Equal(t, []string{
+				"1111111111111111111111111111111111111111",
+				"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			}, res.Lists["commits"])
+		}
+	})
+
+	t.Run("stale_when_head_commit_older_than_24h_and_fallback_on_delete", func(t *testing.T) {
+		stalePayload := []byte(`{
+			"ref": "refs/tags/v1.0.0",
+			"before": "0000000000000000000000000000000000000000",
+			"after": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"created": true,
+			"deleted": false,
+			"forced": false,
+			"commits": [],
+			"head_commit": {
+				"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+				"message": "old commit",
+				"timestamp": "2026-04-30T11:59:59Z"
+			},
+			"repository": {"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender": {"login": "alice", "id": 3, "type": "User"},
+			"installation": {"id": 10}
+		}`)
+		res, err := Normalize(EventPush, "d-stale", stalePayload, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, "false", res.Attributes["is_default_branch"])
+		assert.Equal(t, "true", res.Attributes["stale"])
+
+		delPayload := []byte(`{
+			"ref": "refs/heads/old",
+			"before": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"after": "0000000000000000000000000000000000000000",
+			"created": false,
+			"deleted": true,
+			"forced": false,
+			"commits": [],
+			"head_commit": null,
+			"repository": {"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender": {"login": "alice", "id": 3, "type": "User"},
+			"installation": {"id": 10}
+		}`)
+		resDel, err := Normalize(EventPush, "d-del", delPayload, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, baseNow, resDel.OccurredAt)
+		assert.NotContains(t, resDel.Attributes, "stale")
+		assert.NotContains(t, resDel.Attributes, "head_message")
+		assert.Equal(t, "true", resDel.Attributes["deleted"])
+		assert.Equal(t, "0", resDel.Attributes["commit_count"])
+		assert.Empty(t, resDel.Lists["commits"])
+	})
+
+	t.Run("over_20_commits_bounds_list_and_sets_lists_truncated", func(t *testing.T) {
+		commits := make([]map[string]any, 25)
+		for i := range commits {
+			commits[i] = map[string]any{
+				"id":        fmt.Sprintf("%040d", i+1),
+				"message":   fmt.Sprintf("commit %d", i+1),
+				"timestamp": "2026-05-01T11:00:00Z",
+			}
+		}
+		raw, err := json.Marshal(map[string]any{
+			"ref":          "refs/heads/main",
+			"before":       fmt.Sprintf("%040d", 0),
+			"after":        fmt.Sprintf("%040d", 25),
+			"commits":      commits,
+			"head_commit":  commits[24],
+			"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-many", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, "25", res.Attributes["commit_count"])
+		assert.Equal(t, "true", res.Attributes["lists_truncated"])
+		require.Len(t, res.Lists["commits"], MaxPushCommits)
+		assert.Equal(t, fmt.Sprintf("%040d", 1), res.Lists["commits"][0])
+		assert.Equal(t, fmt.Sprintf("%040d", 20), res.Lists["commits"][19])
+
+		var proj map[string]any
+		require.NoError(t, json.Unmarshal(res.Payload, &proj))
+		projCommits, ok := proj["commits"].([]any)
+		require.True(t, ok)
+		assert.Len(t, projCommits, MaxPushCommits)
+	})
+
+	t.Run("oversize_head_message_utf8_safe_truncation", func(t *testing.T) {
+		// 511 ASCII bytes + multi-byte UTF-8 rune straddling the 512-byte boundary.
+		msg := strings.Repeat("a", MaxHeadMessageBytes-1) + "ééé"
+		raw, err := json.Marshal(map[string]any{
+			"ref":          "refs/heads/main",
+			"before":       fmt.Sprintf("%040d", 1),
+			"after":        fmt.Sprintf("%040d", 2),
+			"commits":      []any{},
+			"head_commit":  map[string]any{"id": fmt.Sprintf("%040d", 2), "message": msg, "timestamp": "2026-05-01T11:00:00Z"},
+			"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-utf8", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		got := res.Attributes["head_message"]
+		assert.LessOrEqual(t, len(got), MaxHeadMessageBytes)
+		assert.True(t, utf8.ValidString(got))
+		assert.Equal(t, strings.Repeat("a", MaxHeadMessageBytes-1), got)
+	})
+
+	t.Run("own_app_sender_guard_covers_bot_pushes", func(t *testing.T) {
+		botPush := []byte(`{
+			"ref": "refs/heads/main",
+			"before": "00112233445566778899aabbccddeeff00112233",
+			"after": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"commits": [],
+			"head_commit": {"id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "message": "bot commit", "timestamp": "2026-05-01T11:00:00Z"},
+			"repository": {"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender": {"login": "scion-app[bot]", "id": 999, "type": "Bot"},
+			"installation": {"id": 10}
+		}`)
+		res, err := Normalize(EventPush, "d-bot", botPush, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.True(t, res.IsOwnApp("scion-app"))
+		assert.True(t, res.IsOwnAppActor("scion-app", 778899))
+		assert.False(t, res.IsOwnAppActor("other-app", 778899))
+	})
+
+	t.Run("occurred_at_prefers_repository_pushed_at_over_old_commit_and_on_delete", func(t *testing.T) {
+		recentPushedAt := baseNow.Add(-10 * time.Minute).UTC()
+		// Branch created from a commit older than 24h, but pushed 10m ago: NOT stale.
+		oldCommitRecentPush, err := json.Marshal(map[string]any{
+			"ref":     "refs/heads/release/v2",
+			"before":  strings.Repeat("0", 40),
+			"after":   "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"created": true,
+			"deleted": false,
+			"forced":  false,
+			"commits": []any{},
+			"head_commit": map[string]any{
+				"id":        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+				"message":   "ancient commit",
+				"timestamp": "2026-04-01T00:00:00Z",
+			},
+			"repository": map[string]any{
+				"id":             1,
+				"name":           "r",
+				"full_name":      "o/r",
+				"default_branch": "main",
+				"pushed_at":      recentPushedAt.Unix(),
+			},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+		res, err := Normalize(EventPush, "d-o1-branch", oldCommitRecentPush, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, recentPushedAt, res.OccurredAt)
+		assert.NotContains(t, res.Attributes, "stale")
+
+		// Deleted-branch push (no head_commit) uses repository.pushed_at when present.
+		delWithPushedAt, err := json.Marshal(map[string]any{
+			"ref":         "refs/heads/old-branch",
+			"before":      "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"after":       strings.Repeat("0", 40),
+			"created":     false,
+			"deleted":     true,
+			"forced":      false,
+			"commits":     []any{},
+			"head_commit": nil,
+			"repository": map[string]any{
+				"id":             1,
+				"name":           "r",
+				"full_name":      "o/r",
+				"default_branch": "main",
+				"pushed_at":      recentPushedAt.Unix(),
+			},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+		resDel, err := Normalize(EventPush, "d-o1-del", delWithPushedAt, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, recentPushedAt, resDel.OccurredAt)
+		assert.NotContains(t, resDel.Attributes, "stale")
+	})
+
+	t.Run("long_ref_uses_deterministic_hashed_subject_bounded_to_256", func(t *testing.T) {
+		longRef := "refs/heads/" + strings.Repeat("feature-branch-", 16) // 251 bytes; full subject > 256
+		require.Greater(t, len(longRef), 240)
+		raw, err := json.Marshal(map[string]any{
+			"ref":          longRef,
+			"before":       strings.Repeat("0", 40),
+			"after":        strings.Repeat("a", 64), // also exercises 64-char SHA-256 hex (O4)
+			"commits":      []any{},
+			"head_commit":  nil,
+			"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-long-ref", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.True(t, res.Handled)
+		assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
+		assert.True(t, utf8.ValidString(res.Subject))
+		assert.Equal(t, formatPushSubject("octo-org/octo-repo", longRef), res.Subject)
+		assert.Contains(t, res.Subject, "~")
+		assert.Equal(t, longRef, res.Attributes["ref"])
+		assert.Equal(t, strings.Repeat("a", 64), res.Attributes["after"])
+
+		// Determinism on second call and UTF-8 rune-safe truncation for multi-byte refs.
+		utf8Ref := "refs/heads/" + strings.Repeat("é", 130) // 271 bytes
+		subj := formatPushSubject("octo-org/octo-repo", utf8Ref)
+		assert.LessOrEqual(t, len(subj), MaxSubjectBytes)
+		assert.True(t, utf8.ValidString(subj))
+		assert.Equal(t, subj, formatPushSubject("octo-org/octo-repo", utf8Ref))
+	})
+
+	t.Run("huge_9kb_ref_caps_ref_attribute_and_preserves_full_ref_subject", func(t *testing.T) {
+		hugeRef := "refs/heads/" + strings.Repeat("a", 9*1024)
+		raw, err := json.Marshal(map[string]any{
+			"ref":          hugeRef,
+			"before":       strings.Repeat("0", 40),
+			"after":        strings.Repeat("b", 40),
+			"commits":      []any{},
+			"head_commit":  nil,
+			"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-9kb-ref", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.True(t, res.Handled)
+		assert.Equal(t, "true", res.Attributes["ref_truncated"])
+		assert.Equal(t, MaxPushRefBytes, len(res.Attributes["ref"]))
+		assert.Equal(t, formatPushSubject("octo-org/octo-repo", hugeRef), res.Subject)
+		assert.LessOrEqual(t, len(res.Subject), MaxSubjectBytes)
+		assert.Equal(t, "false", res.Attributes["is_default_branch"])
+	})
+
+	t.Run("is_default_branch_rejects_nested_branch_and_tag_named_main", func(t *testing.T) {
+		for _, ref := range []string{"refs/heads/feat/main", "refs/tags/main"} {
+			t.Run(ref, func(t *testing.T) {
+				raw, err := json.Marshal(map[string]any{
+					"ref":          ref,
+					"before":       strings.Repeat("0", 40),
+					"after":        strings.Repeat("c", 40),
+					"commits":      []any{},
+					"head_commit":  nil,
+					"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+					"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+					"installation": map[string]any{"id": 10},
+				})
+				require.NoError(t, err)
+
+				res, err := Normalize(EventPush, "d-def-branch", raw, Options{ReceivedAt: baseNow})
+				require.NoError(t, err)
+				assert.Equal(t, "false", res.Attributes["is_default_branch"])
+			})
+		}
+	})
+
+	t.Run("lists_commits_filters_out_non_sha_ids", func(t *testing.T) {
+		sha40 := strings.Repeat("1", 40)
+		sha64 := strings.Repeat("2", 64)
+		raw, err := json.Marshal(map[string]any{
+			"ref":    "refs/heads/main",
+			"before": strings.Repeat("0", 40),
+			"after":  sha40,
+			"commits": []map[string]any{
+				{"id": sha40, "message": "valid 40"},
+				{"id": "not-a-sha", "message": "bad short"},
+				{"id": strings.Repeat("A", 40), "message": "bad uppercase"},
+				{"id": sha64, "message": "valid 64"},
+			},
+			"head_commit":  nil,
+			"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-sha-filter", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.Equal(t, "4", res.Attributes["commit_count"])
+		assert.Equal(t, []string{sha40, sha64}, res.Lists["commits"])
+	})
+
+	t.Run("non_printable_unicode_ref_refused_as_invalid_ref", func(t *testing.T) {
+		for _, badRef := range []string{
+			"refs/heads/main\u200b",
+			"refs/heads/feat/👨\u200d👩",
+		} {
+			raw, err := json.Marshal(map[string]any{
+				"ref":          badRef,
+				"before":       strings.Repeat("0", 40),
+				"after":        strings.Repeat("a", 40),
+				"commits":      []any{},
+				"head_commit":  nil,
+				"repository":   map[string]any{"id": 1, "name": "octo-repo", "full_name": "octo-org/octo-repo", "default_branch": "main"},
+				"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+				"installation": map[string]any{"id": 10},
+			})
+			require.NoError(t, err)
+
+			res, err := Normalize(EventPush, "d-nonprint-ref", raw, Options{ReceivedAt: baseNow})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid ref")
+			assert.False(t, res.Handled)
+		}
+	})
+
+	t.Run("oversize_pusher_name_capped_at_256_bytes", func(t *testing.T) {
+		longPusher := strings.Repeat("p", MaxPushActorNameBytes-1) + "ééé"
+		raw, err := json.Marshal(map[string]any{
+			"ref":          "refs/heads/main",
+			"before":       strings.Repeat("0", 40),
+			"after":        strings.Repeat("a", 40),
+			"commits":      []any{},
+			"head_commit":  nil,
+			"pusher":       map[string]any{"name": longPusher, "email": "p@example.com"},
+			"repository":   map[string]any{"id": 1, "name": "r", "full_name": "o/r", "default_branch": "main"},
+			"sender":       map[string]any{"login": "alice", "id": 3, "type": "User"},
+			"installation": map[string]any{"id": 10},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPush, "d-long-pusher", raw, Options{ReceivedAt: baseNow})
+		require.NoError(t, err)
+		assert.LessOrEqual(t, len(res.Attributes["pusher"]), MaxPushActorNameBytes)
+		assert.True(t, utf8.ValidString(res.Attributes["pusher"]))
+		assert.Equal(t, strings.Repeat("p", MaxPushActorNameBytes-1), res.Attributes["pusher"])
 	})
 }

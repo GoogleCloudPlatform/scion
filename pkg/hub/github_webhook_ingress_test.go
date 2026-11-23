@@ -1797,3 +1797,132 @@ func TestGitHubWebhookIngress_PartialFanOut500EmitsErrorReceiptAudit(t *testing.
 	assert.Contains(t, []string{projA.ID, projB.ID}, committedProjID)
 	assert.Equal(t, GitHubWebhookStatusQueued, evMap["status"])
 }
+
+func samplePushPayload(t *testing.T, instID int64, repoFullName, ref, senderLogin, senderType string, commitTime time.Time) []byte {
+	t.Helper()
+	parts := strings.SplitN(repoFullName, "/", 2)
+	owner, repo := "acme", "widgets"
+	if len(parts) == 2 {
+		owner, repo = parts[0], parts[1]
+	}
+	raw, err := json.Marshal(map[string]any{
+		"ref":     ref,
+		"before":  "00112233445566778899aabbccddeeff00112233",
+		"after":   "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		"created": false,
+		"deleted": false,
+		"forced":  false,
+		"commits": []map[string]any{
+			{
+				"id":        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+				"message":   "feat: add push event support",
+				"timestamp": commitTime.UTC().Format(time.RFC3339),
+				"url":       "https://github.com/" + repoFullName + "/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			},
+		},
+		"head_commit": map[string]any{
+			"id":        "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+			"message":   "feat: add push event support",
+			"timestamp": commitTime.UTC().Format(time.RFC3339),
+			"url":       "https://github.com/" + repoFullName + "/commit/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+		},
+		"pusher": map[string]any{
+			"name":  senderLogin,
+			"email": senderLogin + "@example.com",
+		},
+		"installation": map[string]any{
+			"id": instID,
+		},
+		"repository": map[string]any{
+			"id":             101,
+			"name":           repo,
+			"full_name":      repoFullName,
+			"private":        true,
+			"default_branch": "main",
+			"html_url":       "https://github.com/" + repoFullName,
+			"owner": map[string]any{
+				"login": owner,
+				"id":    10,
+				"type":  "Organization",
+			},
+		},
+		"sender": map[string]any{
+			"login": senderLogin,
+			"id":    202,
+			"type":  senderType,
+		},
+	})
+	require.NoError(t, err)
+	return raw
+}
+
+func TestGitHubWebhookIngress_PushEvent(t *testing.T) {
+	f := setupGitHubIngressFixture(t)
+	ctx := context.Background()
+
+	projA := f.createCandidateProject(t, "push-a", "https://github.com/acme/widgets.git", f.instID)
+	projB := f.createCandidateProject(t, "push-b", "git@github.com:ACME/WIDGETS.git", f.instID)
+
+	body := samplePushPayload(t, f.instID, "acme/widgets", "refs/heads/main", "alice", "User", f.currentTime().Add(-2*time.Minute))
+	delivID := uuid.NewString()
+
+	// 1. Signed push delivery creates one event per candidate project with github.push and correct subject.
+	rec := f.postDelivery(t, githubtrigger.EventPush, delivID, body, nil)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var resp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, GitHubWebhookStatusQueued, resp.Status)
+	assert.Equal(t, delivID, resp.Delivery)
+	require.Len(t, resp.Events, 2)
+
+	seenProjects := make(map[string]string, 2)
+	for _, pe := range resp.Events {
+		assert.Equal(t, GitHubWebhookStatusQueued, pe.Status)
+		seenProjects[pe.ProjectID] = pe.EventID
+
+		ev, err := f.store.GetTriggerEvent(ctx, pe.EventID)
+		require.NoError(t, err)
+		assert.Equal(t, store.TriggerSourceKindGitHub, ev.SourceKind)
+		assert.Equal(t, strconv.FormatInt(f.instID, 10), ev.SourceID)
+		assert.Equal(t, "github.push", ev.Type)
+		assert.Equal(t, "github:acme/widgets@refs/heads/main", ev.Subject)
+		assert.Equal(t, "refs/heads/main", ev.Attributes["ref"])
+		assert.Equal(t, "true", ev.Attributes["is_default_branch"])
+		assert.Equal(t, "1", ev.Attributes["commit_count"])
+		assert.Equal(t, "feat: add push event support", ev.Attributes["head_message"])
+		assert.Equal(t, []string{"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"}, ev.Lists["commits"])
+	}
+	assert.Contains(t, seenProjects, projA.ID)
+	assert.Contains(t, seenProjects, projB.ID)
+
+	// 2. Redelivery with same delivery ID returns duplicate and creates no new events.
+	recDup := f.postDelivery(t, githubtrigger.EventPush, delivID, body, nil)
+	require.Equal(t, http.StatusAccepted, recDup.Code, recDup.Body.String())
+	var dupResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recDup.Body.Bytes(), &dupResp))
+	assert.Equal(t, GitHubWebhookStatusDuplicate, dupResp.Status)
+	require.Len(t, dupResp.Events, 2)
+	for _, pe := range dupResp.Events {
+		assert.Equal(t, GitHubWebhookStatusDuplicate, pe.Status)
+		assert.Equal(t, seenProjects[pe.ProjectID], pe.EventID)
+	}
+
+	// 3. Replay of identical signed body with a fresh delivery GUID also deduplicates.
+	recReplay := f.postDelivery(t, githubtrigger.EventPush, uuid.NewString(), body, nil)
+	require.Equal(t, http.StatusAccepted, recReplay.Code, recReplay.Body.String())
+	var replayResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recReplay.Body.Bytes(), &replayResp))
+	assert.Equal(t, GitHubWebhookStatusDuplicate, replayResp.Status)
+
+	// 4. Own-App push (sender <app-slug>[bot], type Bot) is ignored before row creation.
+	botBody := samplePushPayload(t, f.instID, "acme/widgets", "refs/heads/main", "scion-bot[bot]", "Bot", f.currentTime().Add(-time.Minute))
+	beforeSelf := f.srv.githubWebhookIngress.selfIgnoredCount.Load()
+	recSelf := f.postDelivery(t, githubtrigger.EventPush, uuid.NewString(), botBody, nil)
+	require.Equal(t, http.StatusAccepted, recSelf.Code, recSelf.Body.String())
+	var selfResp GitHubWebhookAcceptedResponse
+	require.NoError(t, json.Unmarshal(recSelf.Body.Bytes(), &selfResp))
+	assert.Equal(t, GitHubWebhookStatusIgnored, selfResp.Status)
+	assert.Equal(t, "self", selfResp.Reason)
+	assert.Equal(t, beforeSelf+1, f.srv.githubWebhookIngress.selfIgnoredCount.Load())
+}

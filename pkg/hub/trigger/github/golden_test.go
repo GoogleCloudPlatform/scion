@@ -52,7 +52,7 @@ type goldenSnapshot struct {
 }
 
 // section51Matrix lists every (family, action) pair in Stage 3 design §5.1
-// (push excluded; push is G2b).
+// (push has no action, represented as "").
 var section51Matrix = map[string][]string{
 	EventPullRequest: {
 		"opened",
@@ -93,6 +93,9 @@ var section51Matrix = map[string][]string{
 		"created",
 		"edited",
 		"deleted",
+	},
+	EventPush: {
+		"",
 	},
 }
 
@@ -168,7 +171,9 @@ func TestNormalize_GoldenFixturesAndSection51Coverage(t *testing.T) {
 			assert.Equal(t, string(res.Payload), string(res2.Payload))
 
 			// Universal §16 item 2 invariants across all object-bearing events.
-			assert.NotEmpty(t, res.Attributes["author_association"], "author_association must be present on every object-bearing event")
+			if eventName != EventPush {
+				assert.NotEmpty(t, res.Attributes["author_association"], "author_association must be present on every object-bearing event")
+			}
 			assert.False(t, res.OccurredAt.IsZero())
 			assert.NotEqual(t, fixedReceivedAt, res.OccurredAt, "OccurredAt must come from the object timestamp, not fallback ReceivedAt")
 			assert.LessOrEqual(t, res.PayloadBytes, DefaultMaxPayloadBytes)
@@ -194,7 +199,10 @@ func TestNormalize_GoldenFixturesAndSection51Coverage(t *testing.T) {
 	// Verify every single (family, action) pair in §5.1 has at least one golden test.
 	for family, actions := range section51Matrix {
 		for _, action := range actions {
-			wantType := SourceKind + "." + family + "." + action
+			wantType := SourceKind + "." + family
+			if action != "" {
+				wantType += "." + action
+			}
 			assert.True(t, coveredTypes[wantType], "missing golden fixture coverage for §5.1 event type %s", wantType)
 		}
 	}
