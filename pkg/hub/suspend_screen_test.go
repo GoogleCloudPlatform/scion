@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -478,4 +479,107 @@ func TestSuspendScreen_AutoSuspendPaths(t *testing.T) {
 		_, err = s.GetAgentSuspendScreen(ctx, a.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
+}
+
+func TestSuspendScreen_ShellAgentNeverCapturedOrServed(t *testing.T) {
+	ctx := context.Background()
+	disp := &suspendScreenDispatcher{tmuxOutput: "ghp_secret_shell_token\n"}
+	srv, s := testServer(t)
+	srv.SetDispatcher(disp)
+	setExperimentOverrides(t, srv, map[string]bool{
+		experiments.SuspendScreen: true,
+		experiments.IdleSuspend:   true,
+	})
+	broker, project := newQuotaTestBrokerAndProject(t, s, "screen-shell")
+
+	owner := &store.User{
+		ID:          tid("screen-shell-owner"),
+		Email:       "screen-shell-owner@test.com",
+		DisplayName: "screen-shell-owner",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	ensureHubMembership(ctx, s, owner.ID)
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      owner.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	shellAgent := &store.Agent{
+		ID:              tid("agent-screen-shell-1"),
+		Slug:            "screen-shell-1",
+		Name:            "screen-shell-1",
+		ProjectID:       project.ID,
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		RuntimeBrokerID: broker.ID,
+		Runtime:         "docker",
+		Phase:           string(state.PhaseRunning),
+		HarnessConfig:   config.ShellHarnessConfigName,
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: config.ShellHarnessConfigName,
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, shellAgent))
+
+	// Direct capture must return nil without executing tmux capture-pane.
+	assert.Nil(t, srv.captureSuspendScreen(ctx, disp, shellAgent))
+	assert.Zero(t, disp.tmuxCalls, "captureSuspendScreen must not exec into an execution container")
+
+	// Even if a pre-existing screen row is present in the store, neither read
+	// route may serve it for an execution container.
+	require.NoError(t, s.PutAgentSuspendScreen(ctx, &store.AgentSuspendScreen{
+		AgentID:    shellAgent.ID,
+		Content:    "stale secret output\n",
+		CapturedAt: time.Now().UTC(),
+	}))
+	for _, path := range []string{
+		"/api/v1/agents/" + shellAgent.ID + "/screen",
+		"/api/v1/projects/" + project.ID + "/agents/" + shellAgent.Slug + "/screen",
+	} {
+		rec := doRequestAsUser(t, srv, owner, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "stored screen must not be served for execution container on %s: %s", path, rec.Body.String())
+	}
+
+	// Manual suspend must not capture the pane and must clear any stale row.
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/agents/"+shellAgent.ID+"/suspend", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Zero(t, disp.tmuxCalls, "manual suspend must not exec tmux capture-pane for execution container")
+	_, err = s.GetAgentSuspendScreen(ctx, shellAgent.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "manual suspend should clear any stale screen row")
+
+	// Idle auto-suspend must also skip capture for execution containers.
+	idleShell := &store.Agent{
+		ID:                tid("agent-screen-shell-2"),
+		Slug:              "screen-shell-2",
+		Name:              "screen-shell-2",
+		ProjectID:         project.ID,
+		OwnerID:           owner.ID,
+		CreatedBy:         owner.ID,
+		RuntimeBrokerID:   broker.ID,
+		Runtime:           "docker",
+		Phase:             string(state.PhaseRunning),
+		Activity:          string(state.ActivityIdle),
+		LastActivityEvent: time.Now().UTC().Add(-2 * time.Hour),
+		HarnessConfig:     config.ShellHarnessConfigName,
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: config.ShellHarnessConfigName,
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, idleShell))
+
+	ok := srv.autoSuspendAgent(ctx, disp, idleShell, state.SuspendReasonIdle)
+	require.True(t, ok)
+	assert.Zero(t, disp.tmuxCalls, "idle auto-suspend must not exec tmux capture-pane for execution container")
+	_, err = s.GetAgentSuspendScreen(ctx, idleShell.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
