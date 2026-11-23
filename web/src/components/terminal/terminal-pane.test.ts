@@ -2036,10 +2036,20 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
       );
     });
 
+    // Pre-mounted empty alert live region exists before triggering Resume.
+    const preErrorRegion = page.shadowRoot?.querySelector<HTMLElement>(
+      '.error-state .resume-error[role="alert"][data-testid="terminal-resume-error"]'
+    );
+    expect(preErrorRegion).not.toBeNull();
+    expect(preErrorRegion?.textContent?.trim()).toBe('');
+    expect(preErrorRegion?.classList.contains('idle')).toBe(true);
+
     page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
 
     await vi.waitFor(() => {
       const errEl = page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]');
+      expect(errEl).toBe(preErrorRegion);
+      expect(errEl?.classList.contains('idle')).toBe(false);
       expect(errEl?.textContent).toContain('Broker unavailable');
       expect(errEl?.getAttribute('role')).toBe('alert');
     });
@@ -2058,10 +2068,26 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
     source.onopen?.();
     await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
 
+    const preStatusRegion = page.shadowRoot?.querySelector<HTMLElement>(
+      '.error-state .resume-progress[role="status"]'
+    );
+    const preErrorRegion = page.shadowRoot?.querySelector<HTMLElement>(
+      '.error-state .resume-error[role="alert"][data-testid="terminal-resume-error"]'
+    );
+    expect(preStatusRegion).not.toBeNull();
+    expect(preStatusRegion?.getAttribute('aria-live')).toBe('polite');
+    expect(preStatusRegion?.getAttribute('aria-atomic')).toBe('true');
+    expect(preStatusRegion?.textContent?.trim()).toBe('');
+    expect(preStatusRegion?.classList.contains('idle')).toBe(true);
+    expect(preErrorRegion).not.toBeNull();
+    expect(preErrorRegion?.textContent?.trim()).toBe('');
+    expect(preErrorRegion?.classList.contains('idle')).toBe(true);
+
     page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
     await vi.waitFor(() => {
       const statusEl = page.shadowRoot?.querySelector('.error-state [role="status"]');
-      expect(statusEl).not.toBeNull();
+      expect(statusEl).toBe(preStatusRegion);
+      expect(statusEl?.classList.contains('idle')).toBe(false);
       expect(statusEl?.getAttribute('aria-live')).toBe('polite');
       expect(statusEl?.textContent).toMatch(/starting/i);
     });
@@ -2076,9 +2102,13 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
     );
     await vi.waitFor(() => {
       const errEl = page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]');
-      expect(errEl).not.toBeNull();
+      expect(errEl).toBe(preErrorRegion);
+      expect(errEl?.classList.contains('idle')).toBe(false);
+      expect(errEl?.textContent?.trim()).not.toBe('');
       expect(errEl?.getAttribute('role')).toBe('alert');
     });
+    expect(preStatusRegion?.textContent?.trim()).toBe('');
+    expect(preStatusRegion?.classList.contains('idle')).toBe(true);
     expect(FakeSocket.instances).toHaveLength(0);
   });
 
@@ -2223,6 +2253,16 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
       );
     });
 
+    // Pre-mounted empty status live region exists before triggering Resume.
+    const preStatusRegion = page.shadowRoot?.querySelector<HTMLElement>(
+      '.error-state .resume-progress[role="status"]'
+    );
+    expect(preStatusRegion).not.toBeNull();
+    expect(preStatusRegion?.getAttribute('aria-live')).toBe('polite');
+    expect(preStatusRegion?.getAttribute('aria-atomic')).toBe('true');
+    expect(preStatusRegion?.textContent?.trim()).toBe('');
+    expect(preStatusRegion?.classList.contains('idle')).toBe(true);
+
     const btn = page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!;
     btn.click();
     btn.click();
@@ -2230,15 +2270,16 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
     expect(startPosts).toBe(1);
     await page.updateComplete;
     const statusEl = page.shadowRoot?.querySelector('.error-state [role="status"]');
-    expect(statusEl).not.toBeNull();
+    expect(statusEl).toBe(preStatusRegion);
+    expect(statusEl?.classList.contains('idle')).toBe(false);
     expect(statusEl?.getAttribute('aria-live')).toBe('polite');
     expect(statusEl?.textContent).toMatch(/resuming/i);
 
     resolveStart(json({ id: agentId, name: 'test-agent', phase: 'starting' }));
     await vi.waitFor(() => {
-      expect(page.shadowRoot?.querySelector('.error-state [role="status"]')?.textContent).toMatch(
-        /starting/i
-      );
+      const startingEl = page.shadowRoot?.querySelector('.error-state [role="status"]');
+      expect(startingEl).toBe(preStatusRegion);
+      expect(startingEl?.textContent).toMatch(/starting/i);
     });
     expect(startPosts).toBe(1);
   });
@@ -2276,10 +2317,19 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
       return Promise.resolve(json({ ok: true }));
     });
 
+    const preErrorRegion = page.shadowRoot?.querySelector<HTMLElement>(
+      '.error-state .resume-error[role="alert"][data-testid="terminal-resume-error"]'
+    );
+    expect(preErrorRegion).not.toBeNull();
+    expect(preErrorRegion?.textContent?.trim()).toBe('');
+    expect(preErrorRegion?.classList.contains('idle')).toBe(true);
+
     page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
 
     await vi.waitFor(() => {
       const errEl = page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]');
+      expect(errEl).toBe(preErrorRegion);
+      expect(errEl?.classList.contains('idle')).toBe(false);
       expect(errEl?.textContent).toContain('Forbidden: lifecycle permission required');
       expect(errEl?.getAttribute('role')).toBe('alert');
     });
@@ -2321,6 +2371,15 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
         }),
       })
     );
+    await page.updateComplete;
+
+    // Metadata availability === 'deleted' clears the suspend hint on its own
+    // before markUnavailable('agent-deleted', ...) runs.
+    expect(page.shadowRoot?.querySelector('.suspend-hint')).toBeNull();
+    expect(page.shadowRoot?.querySelector('.error-state')?.textContent).not.toContain(
+      'Suspended by a user'
+    );
+
     page.session?.markUnavailable('agent-deleted', 'Agent was deleted.');
     await page.updateComplete;
 
@@ -2380,7 +2439,23 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
       'Suspended by a user'
     );
 
-    // Clicking Resume renders polite status live region while in flight.
+    // Pre-mounted empty live regions exist in the disconnected overlay before triggering Resume.
+    const preStatusRegion = page.shadowRoot?.querySelector<HTMLElement>(
+      '.disconnected-overlay .overlay-resume-status[role="status"]'
+    );
+    const preErrorRegion = page.shadowRoot?.querySelector<HTMLElement>(
+      '.disconnected-overlay .overlay-resume-error[role="alert"][data-testid="terminal-resume-error"]'
+    );
+    expect(preStatusRegion).not.toBeNull();
+    expect(preStatusRegion?.getAttribute('aria-live')).toBe('polite');
+    expect(preStatusRegion?.getAttribute('aria-atomic')).toBe('true');
+    expect(preStatusRegion?.textContent?.trim()).toBe('');
+    expect(preStatusRegion?.classList.contains('idle')).toBe(true);
+    expect(preErrorRegion).not.toBeNull();
+    expect(preErrorRegion?.textContent?.trim()).toBe('');
+    expect(preErrorRegion?.classList.contains('idle')).toBe(true);
+
+    // Clicking Resume populates the same polite status live region while in flight.
     page
       .shadowRoot!.querySelector<HTMLElement>(
         '.disconnected-overlay [data-testid="terminal-resume-btn"]'
@@ -2388,19 +2463,26 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
       .click();
     await page.updateComplete;
     const statusEl = page.shadowRoot?.querySelector('.disconnected-overlay [role="status"]');
-    expect(statusEl).not.toBeNull();
+    expect(statusEl).toBe(preStatusRegion);
+    expect(statusEl?.classList.contains('idle')).toBe(false);
     expect(statusEl?.getAttribute('aria-live')).toBe('polite');
     expect(statusEl?.textContent).toMatch(/resuming/i);
+    expect(preErrorRegion?.textContent?.trim()).toBe('');
+    expect(preErrorRegion?.classList.contains('idle')).toBe(true);
 
-    // 503 renders inline role="alert" in overlay without duplicate toast.
+    // 503 populates the same inline role="alert" in overlay without duplicate toast.
     resolveStart(json({ error: { message: 'Broker unavailable' } }, 503));
     await vi.waitFor(() => {
       const errEl = page.shadowRoot?.querySelector(
         '.disconnected-overlay [data-testid="terminal-resume-error"]'
       );
+      expect(errEl).toBe(preErrorRegion);
+      expect(errEl?.classList.contains('idle')).toBe(false);
       expect(errEl?.textContent).toContain('Broker unavailable');
       expect(errEl?.getAttribute('role')).toBe('alert');
     });
+    expect(preStatusRegion?.textContent?.trim()).toBe('');
+    expect(preStatusRegion?.classList.contains('idle')).toBe(true);
     expect(showToast).not.toHaveBeenCalled();
 
     // Deleting the suspended agent removes the stale suspend hint and Resume button from overlay.

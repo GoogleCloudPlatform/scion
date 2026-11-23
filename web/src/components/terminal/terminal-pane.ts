@@ -652,6 +652,18 @@ export class ScionTerminalPane extends LitElement {
       line-height: 1.5;
     }
 
+    /* Always rendered so screen readers see the live regions before text
+       arrives; positioned out of flex flow while idle so gap adds no space. */
+    .disconnected-overlay .overlay-resume-status.idle,
+    .disconnected-overlay .overlay-resume-error.idle {
+      position: absolute;
+      height: 0;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      pointer-events: none;
+    }
+
     .idle-overlay {
       position: absolute;
       top: 0;
@@ -806,6 +818,16 @@ export class ScionTerminalPane extends LitElement {
       max-width: 420px;
       margin-bottom: 0.75rem;
       line-height: 1.5;
+    }
+
+    /* Always rendered so screen readers see the live regions before text
+       arrives; they take no space while idle. */
+    .error-state .resume-progress.idle,
+    .error-state .resume-error.idle {
+      height: 0;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
     }
 
     .error-state .error-actions {
@@ -2468,9 +2490,14 @@ export class ScionTerminalPane extends LitElement {
             : ''}
         </div>
         <div class="error-state">
-          ${this.isResumingOrStarting
-            ? html`
-                <div class="resume-progress" role="status" aria-live="polite" aria-atomic="true">
+          <div
+            class="resume-progress ${this.isResumingOrStarting ? '' : 'idle'}"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            ${this.isResumingOrStarting
+              ? html`
                   <div class="spinner"></div>
                   <p class="resume-status-title">
                     ${this.resumeState === 'resuming' ? 'Resuming Agent' : 'Starting Agent'}
@@ -2480,17 +2507,26 @@ export class ScionTerminalPane extends LitElement {
                       ? 'Sending resume request...'
                       : 'Waiting for agent to start. Terminal will connect automatically.'}
                   </div>
-                </div>
-              `
+                `
+              : nothing}
+          </div>
+          ${this.isResumingOrStarting
+            ? nothing
             : html`
                 <p>${this.isUnavailableState ? 'Agent Unavailable' : 'Terminal Unavailable'}</p>
                 <div class="error-detail">${this.error}</div>
                 ${suspendHint ? html`<div class="suspend-hint">${suspendHint}</div>` : nothing}
-                ${this.resumeError
-                  ? html`<div class="resume-error" role="alert" data-testid="terminal-resume-error">
-                      ${this.resumeError}
-                    </div>`
-                  : nothing}
+              `}
+          <div
+            class="resume-error ${!this.isResumingOrStarting && this.resumeError ? '' : 'idle'}"
+            role="alert"
+            data-testid="terminal-resume-error"
+          >
+            ${!this.isResumingOrStarting && this.resumeError ? this.resumeError : nothing}
+          </div>
+          ${this.isResumingOrStarting
+            ? nothing
+            : html`
                 ${this.showResumeUnauthorizedHint
                   ? html`<div
                       class="resume-unauthorized"
@@ -2656,18 +2692,21 @@ export class ScionTerminalPane extends LitElement {
               ${this.attempting || this.isResumingOrStarting
                 ? html`<sl-spinner></sl-spinner>`
                 : nothing}
+              <div
+                class="overlay-resume-status ${this.isResumingOrStarting ? '' : 'idle'}"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                ${this.isResumingOrStarting
+                  ? html`<span class="overlay-title">${this.overlayTitle}</span>
+                      ${this.overlayDetail
+                        ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
+                        : nothing}`
+                  : nothing}
+              </div>
               ${this.isResumingOrStarting
-                ? html`<div
-                    class="overlay-resume-status"
-                    role="status"
-                    aria-live="polite"
-                    aria-atomic="true"
-                  >
-                    <span class="overlay-title">${this.overlayTitle}</span>
-                    ${this.overlayDetail
-                      ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
-                      : nothing}
-                  </div>`
+                ? nothing
                 : html`<span class="overlay-title">${this.overlayTitle}</span>
                     ${this.overlayDetail
                       ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
@@ -2678,14 +2717,18 @@ export class ScionTerminalPane extends LitElement {
                     return hint ? html`<span class="overlay-detail">${hint}</span>` : nothing;
                   })()
                 : nothing}
-              ${!this.attempting && !this.isResumingOrStarting && this.resumeError
-                ? html`<span
-                    class="overlay-resume-error"
-                    role="alert"
-                    data-testid="terminal-resume-error"
-                    >${this.resumeError}</span
-                  >`
-                : nothing}
+              <span
+                class="overlay-resume-error ${!this.attempting &&
+                !this.isResumingOrStarting &&
+                this.resumeError
+                  ? ''
+                  : 'idle'}"
+                role="alert"
+                data-testid="terminal-resume-error"
+                >${!this.attempting && !this.isResumingOrStarting && this.resumeError
+                  ? this.resumeError
+                  : nothing}</span
+              >
               ${!this.attempting && !this.isResumingOrStarting && this.showResumeUnauthorizedHint
                 ? html`<span class="overlay-detail" data-testid="terminal-resume-unauthorized"
                     >Only the agent's owner or a project owner/admin can resume it.</span
