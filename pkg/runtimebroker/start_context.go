@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -293,6 +294,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// A flat cloudrun instance likewise refuses worktree-per-agent ahead of
 	// every ownership, project-file or worktree side effect (ptone/scion#7865).
 	if sce := s.flatCloudRunWorktreePerAgentRefusal(in); sce != nil {
+		return nil, sce
+	}
+	// A flat local-container instance on shared (NFS) project storage likewise
+	// refuses worktree-per-agent ahead of any side effect (ptone/scion#8646).
+	if sce := s.flatLocalContainerNFSWorktreePerAgentRefusal(in); sce != nil {
 		return nil, sce
 	}
 	// An ephemeral start is refused, before any side effect, unless the hub
@@ -607,6 +613,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if isCloudRunRuntimeName(dispatchRuntimeType) && effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) {
 		return nil, cloudRunWorktreePerAgentRefusalError(in.Name)
+	}
+	if isLocalContainerRuntimeName(dispatchRuntimeType) &&
+		effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) &&
+		s.isNFSProjectStorage(in.ProjectPath) {
+		return nil, localContainerNFSWorktreePerAgentRefusalError(in.Name)
 	}
 	// Ephemeral persistence on the runtime this dispatch resolved (the
 	// profile's, not only the broker default the capability describes),
@@ -1798,6 +1809,82 @@ func (s *Server) createCloudRunWorktreePerAgentRefusal(req CreateAgentRequest) *
 	})
 	if perr == nil && isCloudRunRuntimeName(rtName) {
 		return cloudRunWorktreePerAgentRefusalError(req.Name)
+	}
+	return nil
+}
+
+// isLocalContainerRuntimeName reports whether name identifies a local container
+// runtime that bind-mounts host paths directly: Docker, Podman, or Apple
+// `container` ("container" or "apple-container").
+func isLocalContainerRuntimeName(name string) bool {
+	return localContainerRuntime(name) || name == "apple-container"
+}
+
+func localContainerNFSWorktreePerAgentRefusalError(agentName string) *startContextError {
+	return &startContextError{
+		Status:  http.StatusPreconditionFailed,
+		Code:    ErrCodeUnsupportedCapability,
+		Message: fmt.Sprintf("agent %q: %s", agentName, agent.ErrLocalContainerNFSWorktreeUnsupported.Error()),
+	}
+}
+
+// isNFSProjectStorage reports whether the broker's effective project/workspace
+// storage backend is "nfs". It checks the broker's startup-resolved
+// StorageLayout and WorkspaceStorageBackend first, falling back to effective
+// settings for projectPath only when neither ServerConfig field is set.
+func (s *Server) isNFSProjectStorage(projectPath string) bool {
+	if s.config.StorageLayout.Backend == projectfs.BackendNFS || s.config.WorkspaceStorageBackend == "nfs" {
+		return true
+	}
+	if s.config.StorageLayout.Backend != "" || s.config.WorkspaceStorageBackend != "" {
+		return false
+	}
+	projectDir, err := config.GetResolvedProjectDir(projectPath)
+	if err != nil {
+		return false
+	}
+	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil || vs == nil || vs.Server == nil {
+		return false
+	}
+	ws := vs.Server.EffectiveWorkspaceStorage()
+	return ws != nil && ws.Backend == "nfs"
+}
+
+func (s *Server) flatLocalContainerTarget() bool {
+	fi := s.config.FlatInstance
+	if fi == nil {
+		return false
+	}
+	if fi.Instance.RuntimeTarget != nil && isLocalContainerRuntimeName(string(fi.Instance.RuntimeTarget.Type)) {
+		return true
+	}
+	return fi.Identity != nil && isLocalContainerRuntimeName(string(fi.Identity.RuntimeTarget.Type))
+}
+
+func (s *Server) flatLocalContainerNFSWorktreePerAgentRefusal(in startContextInputs) *startContextError {
+	if !s.flatLocalContainerTarget() ||
+		!effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) ||
+		!s.isNFSProjectStorage(in.ProjectPath) {
+		return nil
+	}
+	return localContainerNFSWorktreePerAgentRefusalError(in.Name)
+}
+
+func (s *Server) createLocalContainerNFSWorktreePerAgentRefusal(req CreateAgentRequest) *startContextError {
+	if !effectiveWorktreePerAgentDispatch(req.WorkspaceMode, req.ResolvedEnv, req.Config) {
+		return nil
+	}
+	if !s.isNFSProjectStorage(req.ProjectPath) {
+		return nil
+	}
+	rtName, perr := s.resolveRuntimeNameForOpts(api.StartOptions{
+		Name:        req.Name,
+		ProjectPath: req.ProjectPath,
+		Profile:     createRequestProfile(req),
+	})
+	if perr == nil && isLocalContainerRuntimeName(rtName) {
+		return localContainerNFSWorktreePerAgentRefusalError(req.Name)
 	}
 	return nil
 }

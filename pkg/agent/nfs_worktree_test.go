@@ -171,18 +171,59 @@ func TestStartNFSWorktree_OtherModesUnchanged(t *testing.T) {
 	}
 }
 
-// Other runtimes on the NFS backend are unaffected by worktree mode.
-func TestStartNFSWorktree_NonKubernetesUnaffected(t *testing.T) {
-	mountRoot := filepath.Join(t.TempDir(), "nfs")
-	ws := nfsTestWorkspaceDir(mountRoot)
-	require.NoError(t, os.MkdirAll(ws, 0o770))
-	writeStateSentinel(t, ws)
+// Local container runtimes (Docker, Podman, Apple container) refuse
+// worktree-per-agent on shared (NFS) workspace storage instead of silently
+// mounting the project's shared NFS workspace root (ptone/scion#8646).
+func TestStartNFSWorktree_LocalContainerRuntimesRefused(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", "container", "apple-container"} {
+		t.Run("refused/"+rt, func(t *testing.T) {
+			mountRoot := filepath.Join(t.TempDir(), "nfs")
+			ws := nfsTestWorkspaceDir(mountRoot)
+			require.NoError(t, os.MkdirAll(ws, 0o770))
+			writeStateSentinel(t, ws)
 
-	cfg, wtAtRun, err := startNFSWorktreeAgent(t, "docker", mountRoot, "worktree-per-agent")
-	require.NoError(t, err)
-	assert.False(t, wtAtRun)
-	assert.Empty(t, cfg.NFSWorktreeName)
-	assert.NotEqual(t, "/repo-root/worktrees/test-agent", cfg.ContainerWorkspace)
+			f := newSharedDirStorageRunFixture(t)
+			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+			ran := false
+			mockRT := &runtime.MockRuntime{
+				NameFunc: func() string { return rt },
+				RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+					ran = true
+					return "mock-id", nil
+				},
+			}
+			_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+				Name:        "test-agent",
+				ProjectPath: f.projectScionDir,
+				NoAuth:      true,
+				Env: map[string]string{
+					"SCION_PROJECT_ID":     testNFSWorkspaceProjectID,
+					"SCION_WORKSPACE_MODE": "worktree-per-agent",
+				},
+				GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git"},
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrLocalContainerNFSWorktreeUnsupported)
+			assert.Contains(t, err.Error(), "worktree-per-agent")
+			assert.Contains(t, err.Error(), "clone-per-agent")
+			assert.Contains(t, err.Error(), "project_storage")
+			assert.False(t, ran, "runtime.Run must not be called when refusing worktree-per-agent on NFS")
+		})
+	}
+
+	// Regression: shared-plain on Docker with NFS still works.
+	t.Run("allowed/docker/shared-plain", func(t *testing.T) {
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		ws := nfsTestWorkspaceDir(mountRoot)
+		require.NoError(t, os.MkdirAll(ws, 0o770))
+		writeStateSentinel(t, ws)
+
+		cfg, wtAtRun, err := startNFSWorktreeAgent(t, "docker", mountRoot, "shared-plain")
+		require.NoError(t, err)
+		assert.False(t, wtAtRun)
+		assert.Empty(t, cfg.NFSWorktreeName)
+		assert.Equal(t, ws, cfg.Workspace)
+	})
 }
 
 // ensureNFSWorktreeLeaf: no-op outside Kubernetes/NFS, nothing created

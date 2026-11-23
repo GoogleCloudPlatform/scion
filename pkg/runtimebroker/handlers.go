@@ -1407,6 +1407,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		markAttemptFailed(status, sce.Error())
 		return
 	}
+	// Likewise refuse worktree-per-agent on shared (NFS) project storage for
+	// local container runtimes (Docker, Podman, Apple container) before any
+	// env-gather, hydration, or worktree provisioning (ptone/scion#8646).
+	if sce := s.createLocalContainerNFSWorktreePerAgentRefusal(req); sce != nil {
+		span.SetStatus(codes.Error, startContextSpanText(sce))
+		status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+		markAttemptFailed(status, sce.Error())
+		return
+	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
