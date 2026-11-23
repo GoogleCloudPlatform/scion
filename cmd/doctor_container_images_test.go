@@ -17,6 +17,8 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -289,12 +291,81 @@ func TestDoctorConfiguredHarnessImages_RewritesAndOverrides(t *testing.T) {
 		},
 	}
 
-	got := doctorConfiguredHarnessImages(vs, "", "v1.2.3")
+	t.Setenv("HOME", t.TempDir())
+	got := doctorConfiguredHarnessImages("", vs, "", "v1.2.3")
 	assert.Contains(t, got, "scion-claude:latest")
 	assert.Contains(t, got, "scion-claude:v1.2.3")
 	assert.Contains(t, got, "ghcr.io/example/scion-claude:latest")
 	assert.Contains(t, got, "ghcr.io/example/scion-claude:v1.2.3")
 	assert.Contains(t, got, "custom.io/team/scion-gemini:v2")
+}
+
+func TestDoctorConfiguredHarnessImages_OnDiskBaseDirAndInspection(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_IMAGE_TAG", "")
+
+	claudeDir := filepath.Join(tmpHome, ".scion", "harness-configs", "claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(claudeDir, "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:latest\n"),
+		0o644,
+	))
+
+	// Default settings have empty harness_configs and harness_overrides.
+	vs := &config.VersionedSettings{ActiveProfile: "local"}
+	configured := doctorConfiguredHarnessImages("", vs, "", "v1.0.0")
+	require.Contains(t, configured, "scion-claude:latest")
+
+	fake := &fakeContainerCmd{
+		available: map[string]bool{"docker": true},
+		listOut:   "scion-claude:latest\n",
+		inspect: map[string]struct {
+			out string
+			err error
+		}{
+			"scion-claude:latest": {
+				out: `{"org.opencontainers.image.version":"v0.9.0"}`,
+			},
+		},
+	}
+
+	res := checkDoctorContainerImages("docker", configured, fake.deps("v1.0.0", "abcdef123456"))
+	require.Len(t, res, 3)
+	assert.Equal(t, "container-images", res[0].Name)
+	assert.Equal(t, "pass", res[0].Status)
+	assert.Equal(t, "container-image-capabilities[scion-claude:latest]", res[1].Name)
+	assert.Equal(t, "warn", res[1].Status)
+	assert.Equal(t, "container-image-version[scion-claude:latest]", res[2].Name)
+	assert.Equal(t, "info", res[2].Status)
+	require.Len(t, fake.calls, 2)
+	assert.Equal(t, []string{"docker", "image", "inspect", "--format", "{{json .Config.Labels}}", "scion-claude:latest"}, fake.calls[1])
+}
+
+func TestCheckDoctorContainerImages_NonLocalRuntimesSkipSkewChecks(t *testing.T) {
+	for _, rt := range []string{"kubernetes", "k8s", "cloudrun", "cloudrun-flat"} {
+		t.Run(rt, func(t *testing.T) {
+			fake := &fakeContainerCmd{
+				available: map[string]bool{"docker": true},
+				listOut:   "scion-claude:latest\n",
+				inspect: map[string]struct {
+					out string
+					err error
+				}{
+					"scion-claude:latest": {
+						out: `{}`,
+					},
+				},
+			}
+			res := checkDoctorContainerImages(rt, []string{"scion-claude:latest"}, fake.deps("v1.0.0", "abcdef123456"))
+			require.Len(t, res, 1, "non-local runtime must skip per-image skew checks")
+			assert.Equal(t, "container-images", res[0].Name)
+			assert.Equal(t, "pass", res[0].Status)
+			assert.Len(t, fake.calls, 1, "must not call image inspect for non-local runtime")
+		})
+	}
 }
 
 func TestCheckDoctorContainerImages_OffTagBuildComparesRevision(t *testing.T) {

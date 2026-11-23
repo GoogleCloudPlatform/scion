@@ -52,12 +52,15 @@ func defaultContainerImagesDoctorDeps() containerImagesDoctorDeps {
 }
 
 // checkDoctorContainerImagesHere performs D7 (local container images and
-// image skew checks) using the active project's effective settings when
-// available, falling back to globalSettings.
+// image skew checks) using the active project's effective settings and
+// on-disk harness-config directories when available, falling back to
+// globalSettings.
 func checkDoctorContainerImagesHere(globalSettings *config.VersionedSettings) []scionruntime.CheckResult {
+	var projectDir string
 	vs := globalSettings
 	if resolved, err := resolveActiveProjectPath(); err == nil {
-		if projectDir, dirErr := config.GetResolvedProjectDir(resolved); dirErr == nil {
+		if dir, dirErr := config.GetResolvedProjectDir(resolved); dirErr == nil {
+			projectDir = dir
 			if eff, _, effErr := config.LoadEffectiveSettings(projectDir); effErr == nil && eff != nil {
 				vs = eff
 			}
@@ -71,29 +74,42 @@ func checkDoctorContainerImagesHere(globalSettings *config.VersionedSettings) []
 		}
 	}
 
-	configuredImages := doctorConfiguredHarnessImages(vs, profile, version.Version)
+	configuredImages := doctorConfiguredHarnessImages(projectDir, vs, profile, version.Version)
 	return checkDoctorContainerImages(activeRuntime, configuredImages, defaultContainerImagesDoctorDeps())
 }
 
 // doctorConfiguredHarnessImages collects the deduplicated container image
-// references configured across all harness configs (with profile overrides,
-// image_registry, and image_tag rewrites applied).
-func doctorConfiguredHarnessImages(vs *config.VersionedSettings, profileName, binaryVersion string) []string {
-	if vs == nil {
-		return nil
+// references configured across on-disk harness-config directories
+// (~/.scion/harness-configs and <projectDir>/harness-configs) and settings
+// (harness_configs, profile harness_overrides, and flat broker
+// agent_defaults.harness_overrides), with image_registry and image_tag
+// rewrites applied.
+func doctorConfiguredHarnessImages(projectDir string, vs *config.VersionedSettings, profileName, binaryVersion string) []string {
+	baseImages := make(map[string]string)
+	if dirs, err := config.ListHarnessConfigDirs(projectDir); err == nil {
+		for _, d := range dirs {
+			if d != nil && d.Name != "" {
+				baseImages[d.Name] = strings.TrimSpace(d.Config.Image)
+			}
+		}
 	}
 
-	namesSet := make(map[string]struct{}, len(vs.HarnessConfigs))
-	for name := range vs.HarnessConfigs {
+	namesSet := make(map[string]struct{}, len(baseImages))
+	for name := range baseImages {
 		namesSet[name] = struct{}{}
 	}
-	effectiveProfile := profileName
-	if effectiveProfile == "" {
-		effectiveProfile = vs.ActiveProfile
-	}
-	if p, ok := vs.Profiles[effectiveProfile]; ok {
-		for name := range p.HarnessOverrides {
+	if vs != nil {
+		for name := range vs.HarnessConfigs {
 			namesSet[name] = struct{}{}
+		}
+		effectiveProfile := profileName
+		if effectiveProfile == "" {
+			effectiveProfile = vs.ActiveProfile
+		}
+		if p, ok := vs.Profiles[effectiveProfile]; ok {
+			for name := range p.HarnessOverrides {
+				namesSet[name] = struct{}{}
+			}
 		}
 	}
 
@@ -110,32 +126,50 @@ func doctorConfiguredHarnessImages(vs *config.VersionedSettings, profileName, bi
 	imageTag, _ := config.EffectiveImageTag(imageTagSetting, binaryVersion)
 
 	seen := make(map[string]struct{})
-	addImage := func(ref string) {
-		ref = strings.TrimSpace(ref)
-		if ref == "" {
+	addImageWithRewrites := func(img, reg, tag string) {
+		img = strings.TrimSpace(img)
+		if img == "" {
 			return
 		}
-		seen[ref] = struct{}{}
+		seen[img] = struct{}{}
+		if reg != "" {
+			seen[config.RewriteImageRegistry(img, reg)] = struct{}{}
+		}
+		if tag != "" {
+			seen[config.RewriteImageTag(img, tag)] = struct{}{}
+		}
+		if reg != "" || tag != "" {
+			seen[config.RewriteImageRef(img, reg, tag)] = struct{}{}
+		}
 	}
 
 	for _, name := range names {
-		hc, err := vs.ResolveHarnessConfig(profileName, name)
-		if err != nil {
-			continue
+		img := baseImages[name]
+		if vs != nil {
+			if hc, err := vs.ResolveHarnessConfig(profileName, name); err == nil && strings.TrimSpace(hc.Image) != "" {
+				img = strings.TrimSpace(hc.Image)
+			}
 		}
-		img := strings.TrimSpace(hc.Image)
-		if img == "" {
-			continue
-		}
-		addImage(img)
-		if imageRegistry != "" {
-			addImage(config.RewriteImageRegistry(img, imageRegistry))
-		}
-		if imageTag != "" {
-			addImage(config.RewriteImageTag(img, imageTag))
-		}
-		if imageRegistry != "" || imageTag != "" {
-			addImage(config.RewriteImageRef(img, imageRegistry, imageTag))
+		addImageWithRewrites(img, imageRegistry, imageTag)
+	}
+
+	// Also pick up flat broker instance defaults (server.broker.instances) for
+	// local Docker targets when present.
+	if vs != nil && vs.Server != nil && vs.Server.Broker != nil {
+		for _, inst := range vs.Server.Broker.Instances {
+			if inst.AgentDefaults == nil {
+				continue
+			}
+			if inst.RuntimeTarget != nil && isNonLocalDoctorRuntime(strings.ToLower(strings.TrimSpace(inst.RuntimeTarget.Type))) {
+				continue
+			}
+			instReg := imageRegistry
+			if r := strings.TrimSpace(inst.AgentDefaults.ImageRegistry); r != "" {
+				instReg = r
+			}
+			for _, override := range inst.AgentDefaults.HarnessOverrides {
+				addImageWithRewrites(override.Image, instReg, imageTag)
+			}
 		}
 	}
 
@@ -147,19 +181,22 @@ func doctorConfiguredHarnessImages(vs *config.VersionedSettings, profileName, bi
 	return out
 }
 
+func isNonLocalDoctorRuntime(rt string) bool {
+	return rt == "kubernetes" || rt == "k8s" || strings.HasPrefix(rt, "cloudrun")
+}
+
 // checkDoctorContainerImages performs D7: Container images check (local) and
 // inspects local Docker/Podman images matching configured harness images for
 // sciontool capability and OCI version/revision skew.
 func checkDoctorContainerImages(activeRuntime string, configuredImages []string, deps containerImagesDoctorDeps) []scionruntime.CheckResult {
+	defaults := defaultContainerImagesDoctorDeps()
 	lookPath := deps.lookPath
 	if lookPath == nil {
-		lookPath = exec.LookPath
+		lookPath = defaults.lookPath
 	}
 	runCmd := deps.runCmd
 	if runCmd == nil {
-		runCmd = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, name, args...).Output()
-		}
+		runCmd = defaults.runCmd
 	}
 
 	rt := strings.ToLower(strings.TrimSpace(activeRuntime))
@@ -243,6 +280,12 @@ func checkDoctorContainerImages(activeRuntime string, configuredImages []string,
 		Message: fmt.Sprintf("%d scion image(s) found via %s", scionImageCount, containerCLI),
 	}}
 
+	// Non-local runtimes (Kubernetes, Cloud Run) pull images remotely rather
+	// than using local Docker/Podman images, so skip local image skew checks.
+	if isNonLocalDoctorRuntime(rt) {
+		return results
+	}
+
 	matched := matchLocalHarnessImages(images, configuredImages, containerCLI)
 	for _, img := range matched {
 		inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -281,7 +324,7 @@ func parseDoctorImageLabels(raw []byte) (map[string]string, bool) {
 }
 
 func checkDoctorImageCapabilities(img string, labels map[string]string) (scionruntime.CheckResult, bool) {
-	if doctorImageHasCapability(labels, scionruntime.SciontoolCapNetnsSetup) {
+	if scionruntime.ImageHasCapability(labels, scionruntime.SciontoolCapNetnsSetup) {
 		return scionruntime.CheckResult{}, false
 	}
 	rawCap := strings.TrimSpace(labels[scionruntime.ImageSciontoolCapabilitiesLabel])
@@ -303,19 +346,6 @@ func checkDoctorImageCapabilities(img string, labels map[string]string) (scionru
 		Message:     msg,
 		Remediation: "Rebuild or pull an agent image matching this scion binary",
 	}, true
-}
-
-func doctorImageHasCapability(labels map[string]string, capability string) bool {
-	if len(labels) == 0 || capability == "" {
-		return false
-	}
-	raw := labels[scionruntime.ImageSciontoolCapabilitiesLabel]
-	for _, part := range strings.Split(raw, ",") {
-		if strings.TrimSpace(part) == capability {
-			return true
-		}
-	}
-	return false
 }
 
 func checkDoctorImageVersionSkew(img string, labels map[string]string, localVersion, localCommit string) (scionruntime.CheckResult, bool) {

@@ -3079,6 +3079,12 @@ const (
 //nolint:staticcheck // ST1005: fixed user-facing refusal text.
 var ErrImageLacksNetnsSetup = errors.New("agent start refused: metadata interception version skew (image_lacks_netns_setup): the agent image does not advertise sciontool netns-setup support required by this broker. Rebuild or update the agent image to a build matching this broker, or set the metadata mode to passthrough explicitly to opt out.")
 
+// ImageHasCapability reports whether labels contains capability in the
+// comma-separated ImageSciontoolCapabilitiesLabel value.
+func ImageHasCapability(labels map[string]string, capability string) bool {
+	return imageHasCapability(labels, capability)
+}
+
 func imageHasCapability(labels map[string]string, capability string) bool {
 	if len(labels) == 0 || capability == "" {
 		return false
