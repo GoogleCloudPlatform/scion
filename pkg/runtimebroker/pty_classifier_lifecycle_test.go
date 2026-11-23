@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -164,6 +166,13 @@ exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
 		require.NoError(t, err, "new-session output: %s", out)
 		t.Cleanup(func() { _, _ = tmuxCommand("kill-server") })
 
+		// Disable tmux's paste-detection heuristic (default assume-paste-time
+		// is 1ms) on this private fixture server so rapid programmatic writes
+		// over the test stream cannot be misclassified as pasted text and
+		// bypass the C-b d detach keybinding.
+		out, err = tmuxCommand("set", "-g", "assume-paste-time", "0")
+		require.NoError(t, err, "set assume-paste-time output: %s", out)
+
 		brokerConn, hubConn, cleanup := newWSPair(t)
 		defer cleanup()
 		client := &ControlChannelClient{
@@ -179,16 +188,37 @@ exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
 		}
 
 		closedCh := make(chan ptyClassifierCloseMsg, 4)
+		ptyReady := make(chan struct{})
+		var ptyReadyOnce sync.Once
 		readerDone := make(chan struct{})
 		go func() {
 			defer close(readerDone)
 			for {
-				var m ptyClassifierCloseMsg
+				var m struct {
+					Type     string `json:"type"`
+					StreamID string `json:"streamId"`
+					Code     int    `json:"code"`
+					Reason   string `json:"reason"`
+					Data     []byte `json:"data,omitempty"`
+				}
 				if err := hubConn.ReadJSON(&m); err != nil {
 					return
 				}
-				if m.Type == wsprotocol.TypeStreamClose {
-					closedCh <- m
+				switch m.Type {
+				case wsprotocol.TypeStream:
+					// Ignore the synthetic active-window OSC sent before
+					// readFromPTY starts; any other stream bytes come from
+					// the real tmux PTY after terminal initialization.
+					if len(m.Data) > 0 && !bytes.HasPrefix(m.Data, []byte("\033]7337;")) {
+						ptyReadyOnce.Do(func() { close(ptyReady) })
+					}
+				case wsprotocol.TypeStreamClose:
+					closedCh <- ptyClassifierCloseMsg{
+						Type:     m.Type,
+						StreamID: m.StreamID,
+						Code:     m.Code,
+						Reason:   m.Reason,
+					}
 				}
 			}
 		}()
@@ -207,7 +237,7 @@ exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
 		t.Cleanup(func() {
 			select {
 			case <-done:
-			case <-time.After(5 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Error("handlePTYStream did not return during cleanup")
 			}
 		})
@@ -215,7 +245,19 @@ exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
 		require.Eventually(t, func() bool {
 			out, err := tmuxCommand("list-clients", "-t", "scion", "-F", "#{client_width}x#{client_height}")
 			return err == nil && out == "80x24"
-		}, 5*time.Second, 20*time.Millisecond, "one real tmux client should attach")
+		}, 10*time.Second, 20*time.Millisecond, "one real tmux client should attach")
+
+		select {
+		case <-ptyReady:
+		case <-readerDone:
+			select {
+			case <-ptyReady:
+			default:
+				t.Fatal("reader goroutine exited before PTY became ready")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for initial tmux PTY output")
+		}
 
 		// waitForTmuxSession's readiness poll also runs has-session checks
 		// before the attach succeeds, and those land in the same probe log.
@@ -228,7 +270,7 @@ exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
 
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(15 * time.Second):
 			t.Fatal("handlePTYStream did not return")
 		}
 
@@ -242,6 +284,17 @@ exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
 
 	t.Run("detach-client gives 1000", func(t *testing.T) {
 		msg, ok, _, _ := runAttach(t, "classifier-detach", func(t *testing.T, h attachHarness) {
+			// ptyReady above already ordered this after tmux's initial terminal
+			// output (which follows terminal setup). Probe once with a unique
+			// marker and wait for it to echo through the pane so we know tmux's
+			// input loop is reading keystrokes before C-b d, without sending
+			// extra input on the tick that observes readiness.
+			h.handler.dataCh <- []byte("scion-ready\n")
+			require.Eventually(t, func() bool {
+				out, err := h.tmuxCommand("capture-pane", "-p", "-t", "scion")
+				return err == nil && strings.Contains(out, "scion-ready")
+			}, 5*time.Second, 20*time.Millisecond, "tmux client should echo readiness marker before detach")
+
 			// C-b d: the tmux detach keystroke, delivered exactly as a real
 			// client keypress would arrive over the stream.
 			h.handler.dataCh <- []byte{2, 'd'}
