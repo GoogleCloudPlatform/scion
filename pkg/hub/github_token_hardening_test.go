@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -253,7 +254,14 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 	t.Run("pull_and_list_hide_credential_file_secrets", func(t *testing.T) {
 		f := newMaterialFixture(t, "gh-file-pull")
 		f.recordAgentEdge(t)
-		enableAgentSecrets(t, f.Server, f.Store)
+		raw := json.RawMessage(`{"overrides":{"hub.agent_secrets":true}}`)
+		_, err := f.Store.UpsertHubSetting(ctx, "experiments", raw, "test", -1, "managed")
+		require.NoError(t, err)
+		ops := NewOperationalSettings(f.Store, emptyKoanf(), emptyKoanf())
+		_, err = ops.Refresh(ctx)
+		require.NoError(t, err)
+		f.Server.SetOperationalSettings(ops)
+		require.True(t, f.Server.experimentEnabled(experiments.AgentSecrets))
 		ag, err := f.Store.GetAgent(ctx, f.AgentID)
 		require.NoError(t, err)
 		if ag.AppliedConfig == nil {
