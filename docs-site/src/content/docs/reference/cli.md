@@ -633,7 +633,7 @@ Waits for new messages in a conversation using server-side long-polling (`GET /a
     - `--cursor <cursor>`: Resume strictly after an opaque cursor returned by a previous watch call (takes precedence over `--after-message` and `--from-start`).
     - `--after-message <id>`: Resume after a specific message ID in the conversation (for example the message you just sent).
     - `--from-start`: With no `--cursor` or `--after-message`, replay retained history from the beginning (`start=beginning`) instead of starting from now (`start=head`).
-    - `--filter <string>`: Message filter: `others` (default; excludes caller's own sends), `all` (includes all messages), or `addressed` (for a user, currently means messages not sent by you that were sent explicitly to you as the message's `recipient`; body `@`-mentions in group threads do not match — use `others` for group threads).
+    - `--filter <string>`: Message filter: `others` (default; excludes caller's own sends), `all` (includes all messages), or `addressed` (for a user, matches messages not sent by you that were sent explicitly to you as `recipient`, or where you have a `message_addressees` row — no production path writes user addressee rows today; body `@`-mentions in group threads do not match, so use `others` for group threads).
     - `--limit <int>`: Maximum number of messages per poll / one-shot result (`1`–`200`, default `50`).
     - `--json` / `--format json`: Machine-readable output (single JSON object in `--once` mode; NDJSON in stream mode).
 - **Exit codes:**

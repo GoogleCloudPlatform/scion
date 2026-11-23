@@ -292,6 +292,58 @@ func TestBackfillConversationMessageSeqs_RepairsDuplicateSeqs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(6), head2)
 	assert.Equal(t, int64(3), got(idDup1A))
+
+	// Duplicate-only conversation (NO NULL rows): exercises the UNION ... HAVING COUNT(*) > 1
+	// branch of listConversationsNeedingSeqBackfill independently of NULL-seq detection.
+	convDupOnly := seedFeedConversation(t, cs, projectID)
+	convDupOnlyUUID := uuid.MustParse(convDupOnly.ID)
+	idOnly1 := uuid.MustParse("00000000-0000-0000-0000-000000000060")
+	idOnly2 := uuid.MustParse("00000000-0000-0000-0000-000000000061")
+	for _, tc := range []struct {
+		id      uuid.UUID
+		created time.Time
+		body    string
+	}{
+		{idOnly1, t1, "dup-only-orig"},
+		{idOnly2, t2, "dup-only-collision"},
+	} {
+		_, saveErr := client.Message.Create().
+			SetID(tc.id).
+			SetProjectID(projUUID).
+			SetConversationID(convDupOnlyUUID).
+			SetSender("user:alice").
+			SetSenderID("u1").
+			SetRecipient("agent:a").
+			SetRecipientID("a1").
+			SetMsg(tc.body).
+			SetType("chat").
+			SetDispatchState(store.MessageDispatchDispatched).
+			SetCreated(tc.created).
+			SetConversationSeq(1).
+			Save(ctx)
+		require.NoError(t, saveErr)
+	}
+	_, err = cs.DB().ExecContext(ctx, "UPDATE conversations SET last_message_seq = 1 WHERE id = ?", convDupOnly.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+
+	sOnly1, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly1.String())
+	require.NoError(t, err)
+	sOnly2, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly2.String())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), sOnly1)
+	assert.Equal(t, int64(2), sOnly2)
+
+	dupOnlyHead, err := cs.ConversationHeadSeq(ctx, convDupOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), dupOnlyHead)
+
+	// Idempotent re-run on duplicate-only conversation.
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+	dupOnlyHead2, err := cs.ConversationHeadSeq(ctx, convDupOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), dupOnlyHead2)
 }
 
 // Criterion 11: ListConversationFeed applies others/addressed/all correctly,

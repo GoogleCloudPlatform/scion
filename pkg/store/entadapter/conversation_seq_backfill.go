@@ -191,7 +191,9 @@ func BackfillConversationSeqInTx(
 
 	// Assign base + ROW_NUMBER() OVER (ORDER BY created ASC, id ASC) to all
 	// NULL-seq rows and any duplicate-seq rows beyond the earliest row per
-	// distinct non-NULL conversation_seq. Supported on SQLite >= 3.33 and Postgres.
+	// distinct non-NULL conversation_seq. Re-sequencing a duplicate gives
+	// at-least-once redelivery to a watcher past the old seq (intentional:
+	// preferable to silent message loss). Supported on SQLite >= 3.33 and Postgres.
 	updateMsgs := fmt.Sprintf(`
 		UPDATE %s
 		SET conversation_seq = sub.seq

@@ -215,4 +215,50 @@ func TestBackfillConversationMessageSeqs_DuplicateSeqs_Postgres(t *testing.T) {
 	head2, err := cs.ConversationHeadSeq(ctx, conv.ID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), head2)
+
+	// Duplicate-only conversation (NO NULL rows): exercises the UNION ... HAVING COUNT(*) > 1
+	// branch independently of NULL-seq detection on Postgres.
+	convDupOnly := seedFeedConversation(t, cs, projectID)
+	convDupOnlyUUID := uuid.MustParse(convDupOnly.ID)
+	idOnly1 := uuid.MustParse("00000000-0000-0000-0000-000000000201")
+	idOnly2 := uuid.MustParse("00000000-0000-0000-0000-000000000202")
+	for _, tc := range []struct {
+		id      uuid.UUID
+		created time.Time
+		body    string
+	}{
+		{idOnly1, t1, "pg-dup-only-orig"},
+		{idOnly2, t2, "pg-dup-only-collision"},
+	} {
+		_, saveErr := client.Message.Create().
+			SetID(tc.id).
+			SetProjectID(projUUID).
+			SetConversationID(convDupOnlyUUID).
+			SetSender("user:alice").
+			SetSenderID("u1").
+			SetRecipient("agent:a").
+			SetRecipientID("a1").
+			SetMsg(tc.body).
+			SetType("chat").
+			SetDispatchState(store.MessageDispatchDispatched).
+			SetCreated(tc.created).
+			SetConversationSeq(1).
+			Save(ctx)
+		require.NoError(t, saveErr)
+	}
+	_, err = cs.DB().ExecContext(ctx, "UPDATE conversations SET last_message_seq = 1 WHERE id = $1::uuid", convDupOnly.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
+
+	sOnly1, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly1.String())
+	require.NoError(t, err)
+	sOnly2, err := cs.MessageConversationSeq(ctx, convDupOnly.ID, idOnly2.String())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), sOnly1)
+	assert.Equal(t, int64(2), sOnly2)
+
+	dupOnlyHead, err := cs.ConversationHeadSeq(ctx, convDupOnly.ID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), dupOnlyHead)
 }
