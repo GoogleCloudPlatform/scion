@@ -67,7 +67,7 @@ func (h *LoggingHandler) eventToTag(event *hooks.Event) string {
 	case hooks.EventPreStart:
 		return string(state.PhaseStarting)
 	case hooks.EventPostStart:
-		return string(state.ActivityWorking)
+		return string(state.ActivityInitializing)
 	case hooks.EventPreStop:
 		return string(state.PhaseStopping)
 	default:

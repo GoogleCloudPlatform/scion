@@ -64,6 +64,7 @@ func TestStatusHandler_UpdatePhase(t *testing.T) {
 }
 
 func TestStatusHandler_Handle(t *testing.T) {
+	t.Setenv(envInitialTask, "1")
 	tmpDir := t.TempDir()
 	statusPath := filepath.Join(tmpDir, "agent-info.json")
 
@@ -962,9 +963,9 @@ func TestStatusHandler_WriteUsesMode0644(t *testing.T) {
 	assert.Equal(t, os.FileMode(0644), fi.Mode().Perm())
 }
 
-// Every readiness event must move the local activity off initializing, so
-// `sciontool init` can use the local file to avoid overwriting a hook-set
-// activity.
+// Every readiness event must move the local activity off initializing on a
+// tasked start, so `sciontool init` can use the local file to avoid
+// overwriting a hook-set activity.
 func TestStatusHandler_ReadinessEventsReplaceInitializing(t *testing.T) {
 	events := map[string]string{
 		hooks.EventSessionStart:     "working",
@@ -980,6 +981,7 @@ func TestStatusHandler_ReadinessEventsReplaceInitializing(t *testing.T) {
 	}
 	for name, want := range events {
 		t.Run(name, func(t *testing.T) {
+			t.Setenv(envInitialTask, "1")
 			statusPath := filepath.Join(t.TempDir(), "agent-info.json")
 			h := &StatusHandler{StatusPath: statusPath}
 			require.NoError(t, h.Handle(&hooks.Event{Name: hooks.EventPostStart}))
@@ -1132,14 +1134,17 @@ func TestSessionStart_InPlaceKeepsParentQuestionInOwnerHeldWait(t *testing.T) {
 	}
 }
 
-// Every other source (new, missing or unknown) behaves as before: any held
-// status, including a notification wait with its owner list, becomes
-// working with no marker, and the Hub gets running/working "Session
-// started".
+// Every other source (new, missing or unknown) behaves as before on a tasked
+// start (and for any non-initializing state): any held status, including a
+// notification wait with its owner list, becomes working with no marker, and
+// the Hub gets running/working "Session started".
 func TestSessionStart_NewSourcesUnchanged(t *testing.T) {
 	for _, source := range []string{"startup", "resume", "new", "fork", "", "weird"} {
 		for _, held := range []string{"blocked", "idle", "completed", "limits_exceeded", "crashed", "waiting_for_input", "notification", "initializing", "thinking"} {
 			t.Run(source+"/"+held, func(t *testing.T) {
+				if held == "initializing" {
+					t.Setenv(envInitialTask, "1")
+				}
 				sh, hh, sent := hubRecorderSetup(t)
 				switch held {
 				case "notification":
@@ -1158,6 +1163,42 @@ func TestSessionStart_NewSourcesUnchanged(t *testing.T) {
 			})
 		}
 	}
+}
+
+// On a promptless start (SCION_INITIAL_TASK unset), a new-session SessionStart
+// while still initializing leaves initializing in place and sends no Hub
+// working report, so sciontool init's readiness watcher can transition
+// initializing -> idle once readiness settles. Once past initializing (e.g.
+// idle or completed), a new session still transitions to working.
+func TestSessionStart_PromptlessKeepsInitializing(t *testing.T) {
+	for _, source := range []string{"startup", "resume", "new", "fork", ""} {
+		t.Run("initializing/"+source, func(t *testing.T) {
+			t.Setenv(envInitialTask, "")
+			sh, hh, sent := hubRecorderSetup(t)
+			require.NoError(t, sh.Handle(&hooks.Event{Name: hooks.EventPostStart}))
+			before := readAgentInfoMap(t, sh.StatusPath)
+			require.Equal(t, "initializing", before["activity"])
+
+			got, info := sessionStartStep(t, sh, hh, sent, claudeSessionStart(t, source))
+			assert.Equal(t, before, info, "local state unchanged while initializing on promptless start")
+			assert.Equal(t, "initializing", info["activity"])
+			assert.Empty(t, got, "no Hub working report while initializing on promptless start")
+		})
+	}
+
+	t.Run("prompt_replaces_initializing_without_initial_task", func(t *testing.T) {
+		t.Setenv(envInitialTask, "")
+		sh, hh, sent := hubRecorderSetup(t)
+		require.NoError(t, sh.Handle(&hooks.Event{Name: hooks.EventPostStart}))
+
+		got, info := sessionStartStep(t, sh, hh, sent, &hooks.Event{
+			Name: hooks.EventPromptSubmit,
+			Data: hooks.EventData{Prompt: "hello"},
+		})
+		assert.Equal(t, "thinking", info["activity"])
+		require.Len(t, got, 1)
+		assert.Equal(t, "thinking", got[0].Activity)
+	})
 }
 
 // A sub-agent's clear or compact session-start takes the held sub-agent

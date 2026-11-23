@@ -65,7 +65,7 @@ func TestLoggingHandler_Handle(t *testing.T) {
 		{
 			name:        "PostStart",
 			event:       &hooks.Event{Name: hooks.EventPostStart},
-			wantContain: "Container ready",
+			wantContain: "[initializing] Container ready",
 		},
 		{
 			name:        "PreStop",

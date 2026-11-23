@@ -46,6 +46,11 @@ type readyWatchConfig struct {
 	// state.ReadyStrategyIdle, settle transitions initializing -> idle with
 	// message "Execution container ready".
 	Strategy string
+	// HasInitialTask reports whether the agent was started with an initial
+	// task (SCION_INITIAL_TASK=1). When true, readiness transitions
+	// initializing -> working; when false (promptless start), readiness
+	// transitions initializing -> idle.
+	HasInitialTask bool
 	// Start is when the harness (tmux) was launched.
 	Start time.Time
 
@@ -181,7 +186,7 @@ func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutc
 			return readyOutcomeSettled
 		case hookMode && !markerSeen && !now.Before(cfg.Start.Add(deadline)):
 			if markReady(ctx, cfg, "Harness readiness not confirmed by deadline; assuming ready") {
-				log.Info("Harness readiness: no ready hook event within %s; reporting working", deadline)
+				log.Info("Harness readiness: no ready hook event within %s; reporting %s", deadline, readyTargetActivity(cfg))
 			}
 			return readyOutcomeDeadline
 		}
@@ -194,10 +199,21 @@ func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutc
 	}
 }
 
-// markReady swaps the local activity from initializing to working and, if
-// that happened, reports working to the hub. It reports whether it swapped.
+// readyTargetActivity returns the activity markReady transitions initializing
+// to once readiness settles: working when the agent was started with an
+// initial task, idle when started without one.
+func readyTargetActivity(cfg readyWatchConfig) state.Activity {
+	if cfg.HasInitialTask {
+		return state.ActivityWorking
+	}
+	return state.ActivityIdle
+}
+
+// markReady swaps the local activity from initializing to the target ready
+// activity (working with an initial task, idle without one) and, if that
+// happened, reports it to the hub. It reports whether it swapped.
 func markReady(ctx context.Context, cfg readyWatchConfig, message string) bool {
-	return markReadyActivity(ctx, cfg, state.ActivityWorking, message)
+	return markReadyActivity(ctx, cfg, readyTargetActivity(cfg), message)
 }
 
 // markReadyActivity swaps the local activity from initializing to target and,

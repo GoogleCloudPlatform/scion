@@ -57,6 +57,7 @@ func (f *readyWatchFixture) cfg(nonce, mode string, start time.Time) readyWatchC
 	return readyWatchConfig{
 		Nonce:          nonce,
 		Mode:           mode,
+		HasInitialTask: true,
 		Start:          start,
 		PollInterval:   5 * time.Millisecond,
 		Settle:         60 * time.Millisecond,
@@ -121,9 +122,11 @@ func afterFirstPoll(t *testing.T, cfg *readyWatchConfig, write func()) {
 	}
 }
 
-// Hook mode: the hook fires after init's report. The hook's own handlers move
-// the activity off initializing, so the watcher reports nothing.
+// Hook mode: the hook fires after init's report. On a tasked start, the hook's
+// own handlers move the activity off initializing, so the watcher reports
+// nothing.
 func TestWatchHarnessReady_HookMarkerAfterStart(t *testing.T) {
+	t.Setenv(envInitialTask, "1")
 	f := newReadyWatchFixture(t)
 	nonce := "abc123"
 	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
@@ -477,5 +480,122 @@ func TestWatchHarnessReady_ZeroSettle(t *testing.T) {
 	cfg.PollInterval = time.Hour
 	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeSettled {
 		t.Fatalf("outcome = %s, want settled", got)
+	}
+}
+
+// Promptless start (hook mode): SessionStart leaves initializing in place and
+// writes the ready marker; once readiness settles, the watcher moves
+// initializing -> idle locally and reports idle to the hub.
+func TestWatchHarnessReady_PromptlessHookMarkerMovesToIdle(t *testing.T) {
+	t.Setenv(envInitialTask, "")
+	f := newReadyWatchFixture(t)
+	nonce := "abc123"
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	cfg.HasInitialTask = false
+	afterFirstPoll(t, &cfg, func() {
+		if err := f.status.Handle(&hooks.Event{Name: hooks.EventSessionStart, Data: hooks.EventData{Source: "startup"}}); err != nil {
+			t.Errorf("session-start hook: %v", err)
+		}
+		writeMarker(t, nonce)
+	})
+	got := watchHarnessReady(context.Background(), cfg)
+	if got != readyOutcomeHookMarker {
+		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityIdle}) {
+		t.Errorf("hub reports = %v, want [idle]", r)
+	}
+	if a := f.status.CurrentActivity(); a != state.ActivityIdle {
+		t.Errorf("local activity = %s, want idle", a)
+	}
+}
+
+// Promptless start (hook mode, marker already present at watch start):
+// SessionStart kept initializing so syncLocalActivity is a no-op and markReady
+// transitions initializing -> idle once settled.
+func TestWatchHarnessReady_PromptlessHookMarkerBeforeStartMovesToIdle(t *testing.T) {
+	t.Setenv(envInitialTask, "")
+	f := newReadyWatchFixture(t)
+	nonce := "abc123"
+	if err := f.status.Handle(&hooks.Event{Name: hooks.EventSessionStart, Data: hooks.EventData{Source: "startup"}}); err != nil {
+		t.Fatal(err)
+	}
+	writeMarker(t, nonce)
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	cfg.HasInitialTask = false
+	got := watchHarnessReady(context.Background(), cfg)
+	if got != readyOutcomeHookMarker {
+		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityIdle}) {
+		t.Errorf("hub reports = %v, want [idle]", r)
+	}
+	if a := f.status.CurrentActivity(); a != state.ActivityIdle {
+		t.Errorf("local activity = %s, want idle", a)
+	}
+}
+
+// Promptless start (settle mode): moves initializing -> idle at Start+Settle.
+func TestWatchHarnessReady_PromptlessSettleMovesToIdle(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	start := time.Now()
+	cfg := f.cfg("abc123", state.ReadyModeSettle, start)
+	cfg.HasInitialTask = false
+	got := watchHarnessReady(context.Background(), cfg)
+	if got != readyOutcomeSettled {
+		t.Fatalf("outcome = %s, want settled", got)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityIdle}) {
+		t.Errorf("hub reports = %v, want [idle]", r)
+	}
+	if a := f.status.CurrentActivity(); a != state.ActivityIdle {
+		t.Errorf("local activity = %s, want idle", a)
+	}
+}
+
+// Promptless start (hook deadline): if no ready marker arrives before deadline,
+// transitions initializing -> idle.
+func TestWatchHarnessReady_PromptlessHookDeadlineMovesToIdle(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	cfg := f.cfg("abc123", state.ReadyModeHook, time.Now())
+	cfg.HasInitialTask = false
+	got := watchHarnessReady(context.Background(), cfg)
+	if got != readyOutcomeDeadline {
+		t.Fatalf("outcome = %s, want deadline", got)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityIdle}) {
+		t.Errorf("hub reports = %v, want [idle]", r)
+	}
+	if a := f.status.CurrentActivity(); a != state.ActivityIdle {
+		t.Errorf("local activity = %s, want idle", a)
+	}
+}
+
+// Promptless start: if a prompt arrives before readiness settles, the watcher
+// must not overwrite thinking with idle.
+func TestWatchHarnessReady_PromptlessPromptBeforeSettleStaysThinking(t *testing.T) {
+	t.Setenv(envInitialTask, "")
+	f := newReadyWatchFixture(t)
+	nonce := "abc123"
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	cfg.HasInitialTask = false
+	afterFirstPoll(t, &cfg, func() {
+		if err := f.status.Handle(&hooks.Event{Name: hooks.EventSessionStart, Data: hooks.EventData{Source: "startup"}}); err != nil {
+			t.Errorf("session-start hook: %v", err)
+		}
+		writeMarker(t, nonce)
+		if err := f.status.Handle(&hooks.Event{Name: hooks.EventPromptSubmit, Data: hooks.EventData{Prompt: "work"}}); err != nil {
+			t.Errorf("prompt-submit hook: %v", err)
+		}
+	})
+	got := watchHarnessReady(context.Background(), cfg)
+	if got != readyOutcomeHookMarker {
+		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+	}
+	if r := f.reports(); len(r) != 0 {
+		t.Errorf("hub reports = %v, want none", r)
+	}
+	if a := f.status.CurrentActivity(); a != state.ActivityThinking {
+		t.Errorf("local activity = %s, want thinking", a)
 	}
 }

@@ -1434,15 +1434,16 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// watcher the hook may have reported before it (see
 		// watchHarnessReady). It never blocks init.
 		readyCfg := readyWatchConfig{
-			Nonce:         readyNonce,
-			Mode:          readyMode,
-			Strategy:      readySpec.Strategy,
-			Start:         harnessLaunchedAt,
-			Settle:        readySpec.Settle,
-			Deadline:      readySpec.Timeout,
-			MarkerTime:    harnessReadyMarkerTime,
-			LocalActivity: statusHandler.CurrentActivity,
-			ReplaceLocal:  statusHandler.ReplaceActivityIf,
+			Nonce:          readyNonce,
+			Mode:           readyMode,
+			Strategy:       readySpec.Strategy,
+			HasInitialTask: os.Getenv(envInitialTask) == "1",
+			Start:          harnessLaunchedAt,
+			Settle:         readySpec.Settle,
+			Deadline:       readySpec.Timeout,
+			MarkerTime:     harnessReadyMarkerTime,
+			LocalActivity:  statusHandler.CurrentActivity,
+			ReplaceLocal:   statusHandler.ReplaceActivityIf,
 		}
 		if hubClient != nil && hubClient.IsConfigured() {
 			readyCfg.Report = func(ctx context.Context, activity state.Activity, message string) error {
