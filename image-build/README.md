@@ -169,6 +169,20 @@ When two steps in the same run depend on each other, the orchestrator threads `B
 
 **Release tag warning.** When HEAD is exactly on a git tag (`git describe --tags --exact-match`) and `--tag` is not given, `build-images.sh` prints a warning that the images will be tagged `:latest`, not `:<git tag>`, and suggests `--tag <git tag>`. The default stays `latest`; passing `--tag latest` explicitly silences the warning.
 
+### Release binaries (`--binaries release`)
+
+By default (`--binaries source`), `scion-base` and `scion-omni` compile `scion` and `sciontool` from source inside the container build. Pass `--binaries release` to instead download the published Linux release tarballs (`scion-linux-<arch>.tar.gz`, `sciontool-linux-<arch>.tar.gz`) and `SHA256SUMS` from GitHub Releases, verify each tarball against its own `SHA256SUMS` line, and extract them directly into `/usr/local/bin` (still running `lib/assert-no-cgo.sh` on `sciontool`).
+
+- **Tag and checkout requirements:** `--tag` names the GitHub Release to download and must match `vX.Y.Z`, `vX.Y.Z-preview.N`, `vX.Y.Z-rc.N`, or `nightly-YYYYMMDD`. The git checkout must sit **exactly** on that tag (`exact_tag_version` equals `--tag`) so image OCI labels (`VERSION`, `GIT_COMMIT`) and files copied from the checkout match the downloaded binaries.
+- **Older releases:** releases cut before `sciontool-linux-{amd64,arm64}.tar.gz` assets were added fail with an error stating that the release predates sciontool assets and directing you to re-run with `--binaries source`. There is no automatic fallback to source compilation.
+- **Trade-offs:** release builds skip `go mod download`, `go build`, and (in `omni`) the web frontend build, and carry the exact bytes users download from GitHub Releases. The release `scion` binary embeds the web UI and is built with `CGO_ENABLED=0`, so `scion-base` (and images inheriting from it) grows by the size of the web bundle; no cgo functionality is lost because SQLite uses pure-Go `modernc.org/sqlite`.
+- **Scope:** applies to `image-build/scion-base/Dockerfile` (`scion` and `sciontool`; `scion-hub` inherits it) and `image-build/omni/Dockerfile` (`scion` only). The repo-root `Dockerfile` (`hub-gke`) is unchanged. Supported by `local-docker`, `local-podman`, and `cloud-build`.
+
+```bash
+git checkout v0.4.0-preview.4
+image-build/scripts/build-images.sh --target common --tag v0.4.0-preview.4 --binaries release
+```
+
 ### Base guard, `--allow-stale-base` and `--strict-base`
 
 Targets that stack on a base without building it check that the base exists before anything is built:
@@ -542,7 +556,7 @@ lineages. The `cloud-build` path uses `gcloudignore-omni` to include web source
 files that the default `.gcloudignore` excludes (the omni Dockerfile runs
 `npm install && npm run build` to embed the web frontend).
 
-These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_REGISTRY`, and (in the five that build `scion-base`: `all`, `common`, `scion-base`, `thick`/`thick-prep`, `omni`) `$_VERSION`, all forwarded by the orchestrator. `_TAG` defaults to `latest` in every YAML's `substitutions:` block; `_VERSION` defaults to `''` in the YAMLs that declare it, so a manual `gcloud builds submit` that omits either still works. The orchestrator itself only forwards a non-empty `_VERSION` when `HEAD` is on an exact git tag (see "Build provenance and stale sciontool" above) — off-tag, it relies on that yaml default.
+These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_REGISTRY`, and (in the five that build `scion-base` or `scion-omni`: `all`, `common`, `scion-base`, `thick`/`thick-prep`, `omni`) `$_VERSION`, `$_BUILD_TIME`, `$_SCION_BINARIES` (default `'source'`), and `$_SCION_RELEASE_TAG` (default `''`), all forwarded by the orchestrator. `_TAG` defaults to `latest` in every YAML's `substitutions:` block; `_VERSION` defaults to `''` in the YAMLs that declare it, so a manual `gcloud builds submit` that omits either still works. The orchestrator itself only forwards a non-empty `_VERSION` when `HEAD` is on an exact git tag (see "Build provenance and stale sciontool" above) — off-tag, it relies on that yaml default — and only forwards `_SCION_BINARIES` and `_SCION_RELEASE_TAG` when `--binaries release` is set.
 
 The aggregate `cloudbuild-harnesses.yaml`, `cloudbuild-common.yaml`,
 `cloudbuild.yaml`, and `cloudbuild-thick.yaml` files are static snapshots of

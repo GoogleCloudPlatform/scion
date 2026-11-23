@@ -66,7 +66,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-base'
     entrypoint: 'bash'
-    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-base:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/core-base:$_SHORT_SHA', '--build-arg', 'GIT_COMMIT=$_COMMIT_SHA', '--build-arg', 'VERSION=$_VERSION', '--build-arg', 'BUILD_TIME=$_BUILD_TIME', '-t', '$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-base:$_TAG', '-f', 'image-build/scion-base/Dockerfile', '--pull', '--push', '.']
+    args: ['/workspace/image-build/scripts/buildx-record-digest.sh', '$_REGISTRY/scion-base:$_TAG', 'buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/core-base:$_SHORT_SHA', '--build-arg', 'GIT_COMMIT=$_COMMIT_SHA', '--build-arg', 'VERSION=$_VERSION', '--build-arg', 'BUILD_TIME=$_BUILD_TIME', '--build-arg', 'SCION_BINARIES=$_SCION_BINARIES', '--build-arg', 'SCION_RELEASE_TAG=$_SCION_RELEASE_TAG', '-t', '$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-base:$_TAG', '-f', 'image-build/scion-base/Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
       - 'PATH=/builder/home/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -175,6 +175,8 @@ substitutions:
   _TAG: 'latest'
   _VERSION: ''
   _BUILD_TIME: ''
+  _SCION_BINARIES: 'source'
+  _SCION_RELEASE_TAG: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'

@@ -282,6 +282,12 @@ step_build_args() {
       if [[ -n "${BUILD_TIME:-}" ]]; then
         echo "BUILD_TIME=${BUILD_TIME}"
       fi
+      if [[ "${BINARIES:-source}" == "release" ]]; then
+        echo "SCION_BINARIES=release"
+        if [[ -n "${RELEASE_TAG:-}" ]]; then
+          echo "SCION_RELEASE_TAG=${RELEASE_TAG}"
+        fi
+      fi
       ;;
     scion-hub)
       echo "BASE_IMAGE=${prefix}scion-base:${BASE_TAG}"
@@ -304,6 +310,12 @@ step_build_args() {
       # build host clock when it is empty.
       if [[ -n "${BUILD_TIME:-}" ]]; then
         echo "BUILD_TIME=${BUILD_TIME}"
+      fi
+      if [[ "${BINARIES:-source}" == "release" ]]; then
+        echo "SCION_BINARIES=release"
+        if [[ -n "${RELEASE_TAG:-}" ]]; then
+          echo "SCION_RELEASE_TAG=${RELEASE_TAG}"
+        fi
       fi
       ;;
     *)

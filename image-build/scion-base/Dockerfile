@@ -15,10 +15,11 @@
 
 # Scion Base Image - Adds sciontool and scion user on top of core-base
 ARG BASE_IMAGE
+ARG SCION_BINARIES=source
 FROM ${BASE_IMAGE} AS base
 
-# Builder stage for sciontool compilation
-FROM base AS builder
+# Builder stage for source compilation
+FROM base AS builder-source
 USER root
 WORKDIR /src
 ENV PATH="/usr/local/go/bin:${PATH}"
@@ -75,6 +76,27 @@ RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
     go build -buildvcs=false -tags no_embed_web -ldflags="${SCION_LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/ && \
     CGO_ENABLED=0 go build -buildvcs=false -tags no_embed_web -ldflags="${SCIONTOOL_LDFLAGS}" -o /usr/local/bin/sciontool ./cmd/sciontool/ && \
     bash /opt/scion-image-build/lib/assert-no-cgo.sh /usr/local/bin/sciontool
+
+# Builder stage for GitHub release binaries (skips go mod download and go build
+# under BuildKit; guarded for builders that evaluate unreachable stages).
+FROM base AS builder-release
+USER root
+ARG SCION_BINARIES=source
+ARG TARGETARCH
+ARG SCION_RELEASE_TAG
+ENV PATH="/usr/local/go/bin:${PATH}"
+COPY image-build/lib/assert-no-cgo.sh /opt/scion-image-build/lib/assert-no-cgo.sh
+COPY image-build/lib/install-release-binaries.sh /opt/scion-image-build/lib/install-release-binaries.sh
+RUN if [ "${SCION_BINARIES}" = "release" ]; then \
+      bash /opt/scion-image-build/lib/install-release-binaries.sh \
+        --tag "${SCION_RELEASE_TAG}" \
+        --arch "${TARGETARCH}" \
+        --dest /usr/local/bin \
+        scion sciontool && \
+      bash /opt/scion-image-build/lib/assert-no-cgo.sh /usr/local/bin/sciontool; \
+    fi
+
+FROM builder-${SCION_BINARIES} AS builder
 
 # Final stage
 FROM base

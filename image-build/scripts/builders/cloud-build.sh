@@ -207,6 +207,8 @@ builder_run_target() {
   # (off-tag builds), not a placeholder — same convention as hack/version.sh.
   local version_val="${VERSION:-}"
   local build_time_val="${BUILD_TIME:-}"
+  local binaries_val="${BINARIES:-source}"
+  local release_tag_val="${RELEASE_TAG:-}"
 
   local subs="_TAG=${tag}"
   if grep -q '_SHORT_SHA' "${config}"; then
@@ -226,6 +228,14 @@ builder_run_target() {
   # `_BUILD_TIME: ''` default makes the Dockerfile use the build clock.
   if [[ -n "${build_time_val}" ]] && grep -qE '\$\{?_BUILD_TIME([^A-Za-z0-9_]|$)' "${config}"; then
     subs="${subs},_BUILD_TIME=${build_time_val}"
+  fi
+  # Release-binaries mode: omit in source mode so the yaml's `_SCION_BINARIES: 'source'`
+  # and `_SCION_RELEASE_TAG: ''` defaults apply. Only pass when the template references them.
+  if [[ "${binaries_val}" == "release" ]] && grep -qE '\$\{?_SCION_BINARIES([^A-Za-z0-9_]|$)' "${config}"; then
+    subs="${subs},_SCION_BINARIES=${binaries_val}"
+  fi
+  if [[ -n "${release_tag_val}" ]] && grep -qE '\$\{?_SCION_RELEASE_TAG([^A-Za-z0-9_]|$)' "${config}"; then
+    subs="${subs},_SCION_RELEASE_TAG=${release_tag_val}"
   fi
   if [[ -n "${registry}" ]]; then
     subs="${subs},_REGISTRY=${registry}"

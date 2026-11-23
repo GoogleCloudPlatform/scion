@@ -27,10 +27,11 @@
 # where <tag> is a release version (e.g. v0.1.0) or "latest".
 
 ARG BASE_IMAGE
+ARG SCION_BINARIES=source
 FROM ${BASE_IMAGE} AS base
 
-# ---- Hub-capable scion builder ----
-FROM base AS hub-builder
+# ---- Hub-capable scion builder (from source) ----
+FROM base AS hub-builder-source
 USER root
 WORKDIR /src
 ENV CGO_ENABLED=1
@@ -70,6 +71,26 @@ RUN BUILD_TIME="${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
         LDFLAGS="${LDFLAGS} -X ${SCION_PKG}.Version=${VERSION}"; \
     fi && \
     go build -buildvcs=false -ldflags="${LDFLAGS}" -o /usr/local/bin/scion ./cmd/scion/
+
+# ---- Hub-capable scion builder (from GitHub release) ----
+# Release scion tarballs already embed the web UI, so no npm or Go build is
+# needed. Skipped by BuildKit in source mode; guarded for builders that
+# evaluate unreachable stages.
+FROM base AS hub-builder-release
+USER root
+ARG SCION_BINARIES=source
+ARG TARGETARCH
+ARG SCION_RELEASE_TAG
+COPY image-build/lib/install-release-binaries.sh /opt/scion-image-build/lib/install-release-binaries.sh
+RUN if [ "${SCION_BINARIES}" = "release" ]; then \
+      bash /opt/scion-image-build/lib/install-release-binaries.sh \
+        --tag "${SCION_RELEASE_TAG}" \
+        --arch "${TARGETARCH}" \
+        --dest /usr/local/bin \
+        scion; \
+    fi
+
+FROM hub-builder-${SCION_BINARIES} AS hub-builder
 
 # ---- Final stage ----
 FROM base
