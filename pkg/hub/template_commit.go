@@ -277,6 +277,18 @@ func (s *Server) checkTemplateAgentConfig(ctx context.Context, templateName stri
 	}
 	data, err := read(ctx, nextEff.Path)
 	if errors.Is(err, errTemplateFileTooLarge) {
+		if s.experimentEnabled(experiments.TemplateConfigValidation) {
+			return &invalidAgentConfigError{
+				templateName: templateName,
+				fileName:     nextEff.Path,
+				findings: []config.ValidationError{{
+					Path:    "",
+					Message: fmt.Sprintf("too large to validate (exceeds %d bytes)", maxTemplateFileSize),
+				}},
+			}
+		}
+		slog.WarnContext(ctx, "template commit: agent config too large to validate (experiment off)",
+			"template", templateName, "file", nextEff.Path, "max_bytes", maxTemplateFileSize)
 		return nil
 	}
 	if err != nil {
