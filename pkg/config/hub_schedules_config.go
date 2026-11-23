@@ -35,7 +35,7 @@ const (
 
 	// DefaultScheduleMaxActivePerProject is the default of
 	// server.hub.schedules.max_active_per_project.
-	DefaultScheduleMaxActivePerProject = 50
+	DefaultScheduleMaxActivePerProject = 100
 
 	// ScheduleMaxActivePerProjectLimit is the largest accepted
 	// server.hub.schedules.max_active_per_project.

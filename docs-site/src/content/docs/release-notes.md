@@ -14,6 +14,10 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Default `server.hub.schedules.max_active_per_project` cap raised to 100
+
+The default per-project cap on active recurring schedules (`server.hub.schedules.max_active_per_project`) has been raised from `50` to `100` so projects with routine per-agent schedules (such as nightly retrospectives, heartbeats, and sweeps) have more headroom before new schedule creates are refused with `429` (`quota_exceeded`). Setting `0` still disables the cap, and the maximum allowed value (`10000`) is unchanged. See [Server Configuration — Recurring schedules](/scion/reference/server-config/#recurring-schedules-serverhubschedules).
+
 ## Metadata interception: runtime-managed `netns-setup`, broker/image upgrade order, and skew guards
 
 For Docker and rootful Podman agents using `block` or `assign` metadata mode (outside `host` networking), metadata interception rules are now installed by a short-lived `sciontool netns-setup` setup container sharing the agent's network namespace rather than inside the agent container, so the agent container itself no longer receives `CAP_NET_ADMIN`.
