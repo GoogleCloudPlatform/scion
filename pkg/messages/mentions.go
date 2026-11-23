@@ -140,7 +140,8 @@ func isNumericOrHexToken(s string) bool {
 			continue
 		}
 		allDigits = false
-		if (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+		isHexLetter := (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHexLetter {
 			return false
 		}
 	}

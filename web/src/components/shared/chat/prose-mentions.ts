@@ -208,6 +208,8 @@ function isValidCodeSpanEmailLocal(s: string): boolean {
  * non-mention literal. Matches `minHexIDLength` in `pkg/messages/mentions.go`.
  */
 const MIN_HEX_ID_LENGTH = 7;
+const ALL_DIGITS_RE = /^[0-9]+$/;
+const ALL_HEX_RE = /^[0-9a-fA-F]+$/;
 
 /**
  * Whether `s` is a bare numeric token (all ASCII digits, e.g. `10`) or a bare
@@ -217,19 +219,8 @@ const MIN_HEX_ID_LENGTH = 7;
  */
 function isNumericOrHexToken(s: string): boolean {
   if (s.length === 0) return false;
-  let allDigits = true;
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c >= 0x30 && c <= 0x39) {
-      continue;
-    }
-    allDigits = false;
-    const isHexLetter = (c >= 0x61 && c <= 0x66) || (c >= 0x41 && c <= 0x46);
-    if (!isHexLetter) {
-      return false;
-    }
-  }
-  return allDigits || s.length >= MIN_HEX_ID_LENGTH;
+  if (ALL_DIGITS_RE.test(s)) return true;
+  return s.length >= MIN_HEX_ID_LENGTH && ALL_HEX_RE.test(s);
 }
 
 /**

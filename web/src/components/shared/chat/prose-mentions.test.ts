@@ -90,8 +90,7 @@ describe('extractProseMentionTokens', () => {
 
   it('ignores bare numeric and hex ID/SHA tokens while keeping valid slugs and emails', () => {
     const fullSha = '847772c4cf1e6e1a692cb12ebd06c718ebcb7d4e';
-    const body =
-      `Reviewed @10 items at @5aaf533a and @847772c and @${fullSha} with @alice, @e2e, @abe, @agent-10, and @10@example.com.`;
+    const body = `Reviewed @10 items at @5aaf533a and @847772c and @${fullSha} with @alice, @e2e, @abe, @agent-10, and @10@example.com.`;
 
     expect(extractProseMentionTokens(body)).toEqual([
       'alice',
