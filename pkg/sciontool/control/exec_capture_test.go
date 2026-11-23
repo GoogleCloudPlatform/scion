@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -436,4 +437,55 @@ func TestExecLinux_TailCapture(t *testing.T) {
 			t.Fatalf("tail missing end marker")
 		}
 	})
+}
+
+// TestExecCapture_WriteExecNoHTMLEscape is a regression test ensuring writeExec
+// disables HTML escaping so valid JSON output <= 64 KiB containing '<', '>', '&'
+// does not expand past MaxExecCaptureBytes on the wire and get rejected by
+// ParseExecStatusAnswer.
+func TestExecCapture_WriteExecNoHTMLEscape(t *testing.T) {
+	// Each "<b>a&b</b>" is 10 raw bytes and expands to 35 bytes if HTML-escaped
+	// (3 '<', 2 '>', 1 '&' -> +25 bytes per repeat). 2400 repeats = 24,012 raw
+	// bytes (<= 64 KiB) vs ~84,012 HTML-escaped bytes (> 64 KiB).
+	rawJSON := `{"html":"` + strings.Repeat("<b>a&b</b>", 2400) + `"}`
+	if len(rawJSON) > agentcontrol.MaxExecCaptureBytes {
+		t.Fatalf("test setup error: rawJSON len=%d > %d", len(rawJSON), agentcontrol.MaxExecCaptureBytes)
+	}
+
+	b := &boundedBuffer{cap: agentcontrol.MaxExecCaptureBytes}
+	if _, err := b.Write([]byte(rawJSON)); err != nil {
+		t.Fatal(err)
+	}
+	status, compact := b.finalizeJSON()
+	if status != agentcontrol.ExecOutputCaptured {
+		t.Fatalf("finalizeJSON status = %q, want captured", status)
+	}
+
+	ans := finishedAnswer(http.StatusOK, execFinal{
+		outcome:      agentcontrol.ExecOutcomeOK,
+		exitCode:     0,
+		durationMS:   4,
+		outputBytes:  int64(len(rawJSON)),
+		capture:      agentcontrol.ExecCaptureJSON,
+		outputStatus: status,
+		output:       compact,
+	}, false, true)
+
+	rec := httptest.NewRecorder()
+	writeExec(rec, ans)
+
+	if strings.Contains(rec.Body.String(), `\u003c`) || strings.Contains(rec.Body.String(), `\u003e`) || strings.Contains(rec.Body.String(), `\u0026`) {
+		t.Fatalf("writeExec HTML-escaped JSON output on the wire")
+	}
+
+	parsed, err := agentcontrol.ParseExecStatusAnswer(rec.Code, rec.Body.Bytes(), agentcontrol.ExecCaptureJSON)
+	if err != nil {
+		t.Fatalf("ParseExecStatusAnswer failed: %v (wire len=%d)", err, rec.Body.Len())
+	}
+	if parsed.OutputStatus != agentcontrol.ExecOutputCaptured {
+		t.Fatalf("OutputStatus = %q, want captured", parsed.OutputStatus)
+	}
+	if string(parsed.Output) != rawJSON {
+		t.Fatalf("parsed output mismatch: got len=%d, want len=%d", len(parsed.Output), len(rawJSON))
+	}
 }

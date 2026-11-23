@@ -25,6 +25,7 @@ import (
 	"go/token"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -89,7 +90,7 @@ func TestScheduledExecCapture_OneShotJSONIntegration(t *testing.T) {
 
 	canary := "CAPTURECANARY-" + uuid.NewString()
 	eventsURL := "/api/v1/projects/" + f.launched.ProjectID + "/scheduled-events"
-	rec := requestAsIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
+	rec := requestAsSessionIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
 		EventType:     "exec",
 		FireIn:        "1h",
 		AgentID:       f.launched.ID,
@@ -171,7 +172,7 @@ func TestScheduledExecCapture_OldSciontoolRefusedCaptureUnsupported(t *testing.T
 	f.ca = f.startControlAgentAsWithFeatures(t, f.public.URL, f.launched.RunID, true, false, f.opts, f.capture.wrap)
 
 	eventsURL := "/api/v1/projects/" + f.launched.ProjectID + "/scheduled-events"
-	rec := requestAsIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
+	rec := requestAsSessionIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
 		EventType:     "exec",
 		FireIn:        "1h",
 		AgentID:       f.launched.ID,
@@ -195,7 +196,7 @@ func TestScheduledExecCapture_OldSciontoolRefusedCaptureUnsupported(t *testing.T
 	assert.Equal(t, 0, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "no exec-start must be sent when feature is absent")
 
 	// Default non-capture fire on the same old agent still succeeds.
-	recDef := requestAsIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
+	recDef := requestAsSessionIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
 		EventType: "exec",
 		FireIn:    "1h",
 		AgentID:   f.launched.ID,
@@ -238,7 +239,7 @@ func TestScheduledExecCapture_StartReplay200PollsStatus(t *testing.T) {
 	})
 
 	eventsURL := "/api/v1/projects/" + f.launched.ProjectID + "/scheduled-events"
-	rec := requestAsIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
+	rec := requestAsSessionIdentity(t, f.srv, f.owner, http.MethodPost, eventsURL, CreateScheduledEventRequest{
 		EventType:     "exec",
 		FireIn:        "1h",
 		AgentID:       f.launched.ID,
@@ -327,6 +328,31 @@ func (l *captureLogWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
+// requestAsSessionIdentity serves a request through the route mux with both
+// identity and an interactive session credential context so schedule/event
+// authoring records session authority (InitiatorCredentialKindSession).
+func requestAsSessionIdentity(t *testing.T, srv *Server, identity Identity, method, path string, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	var bodyBytes []byte
+	if body != nil {
+		var err error
+		bodyBytes, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	ctx := contextWithIdentity(req.Context(), identity)
+	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive})
+	if user, ok := identity.(UserIdentity); ok {
+		ctx = context.WithValue(ctx, userContextKey{}, user)
+	}
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req.WithContext(ctx))
+	return rec
+}
+
 // TestScheduledExecCapture_RecurringScheduleAuthorityAndTail verifies A11:
 // creating a recurring exec schedule with captureOutput:"tail" and PATCHing
 // captureOutput requires live agent.attach (same authority as command changes)
@@ -338,7 +364,7 @@ func TestScheduledExecCapture_RecurringScheduleAuthorityAndTail(t *testing.T) {
 	owner := authUser(f.owner)
 
 	// Non-exec schedule rejects captureOutput convenience field.
-	recMsg := requestAsIdentity(t, f.srv, owner, http.MethodPost, schedURL, map[string]any{
+	recMsg := requestAsSessionIdentity(t, f.srv, owner, http.MethodPost, schedURL, map[string]any{
 		"name":          "msg-no-cap",
 		"cronExpr":      "0 * * * *",
 		"eventType":     "message",
@@ -349,7 +375,7 @@ func TestScheduledExecCapture_RecurringScheduleAuthorityAndTail(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, recMsg.Code, recMsg.Body.String())
 
 	// Create recurring exec schedule with captureOutput:"tail".
-	recCreate := requestAsIdentity(t, f.srv, owner, http.MethodPost, schedURL, map[string]any{
+	recCreate := requestAsSessionIdentity(t, f.srv, owner, http.MethodPost, schedURL, map[string]any{
 		"name":          "exec-tail-sched",
 		"cronExpr":      "0 * * * *",
 		"eventType":     "exec",
@@ -359,23 +385,24 @@ func TestScheduledExecCapture_RecurringScheduleAuthorityAndTail(t *testing.T) {
 	})
 	require.Equal(t, http.StatusCreated, recCreate.Code, recCreate.Body.String())
 	var created struct {
-		ID                    string `json:"id"`
-		Payload               string `json:"payload"`
-		AuthorizationRevision int    `json:"authorizationRevision"`
+		ID      string `json:"id"`
+		Payload string `json:"payload"`
 	}
 	require.NoError(t, json.Unmarshal(recCreate.Body.Bytes(), &created))
-	assert.Equal(t, 1, created.AuthorizationRevision)
+	afterCreate, err := f.store.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, afterCreate.AuthorizationRevision)
 	assert.Contains(t, created.Payload, `"captureOutput":"tail"`)
 
 	// Non-attach reader sees captureOutput in redactedExecPayload, without argv.
 	reader := setupNonAdminUser(t, f.store, []string{"scheduled_event.read", "scheduled_event.list", "scheduled_event.update"})
-	recRed := requestAsIdentity(t, f.srv, reader, http.MethodGet, schedURL+"/"+created.ID, nil)
+	recRed := requestAsSessionIdentity(t, f.srv, reader, http.MethodGet, schedURL+"/"+created.ID, nil)
 	require.Equal(t, http.StatusOK, recRed.Code, recRed.Body.String())
 	assert.Contains(t, recRed.Body.String(), `\"captureOutput\":\"tail\"`)
 	assert.Contains(t, recRed.Body.String(), `\"commandRedacted\":true`)
 
 	// Non-attach reader cannot PATCH captureOutput.
-	recDenied := requestAsIdentity(t, f.srv, reader, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
+	recDenied := requestAsSessionIdentity(t, f.srv, reader, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
 		"captureOutput": "json",
 	})
 	assert.GreaterOrEqual(t, recDenied.Code, http.StatusBadRequest)
@@ -384,7 +411,7 @@ func TestScheduledExecCapture_RecurringScheduleAuthorityAndTail(t *testing.T) {
 	assert.Equal(t, 1, afterDenied.AuthorizationRevision)
 
 	// Attach holder PATCHing captureOutput tail -> json bumps AuthorizationRevision.
-	recPatch1 := requestAsIdentity(t, f.srv, owner, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
+	recPatch1 := requestAsSessionIdentity(t, f.srv, owner, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
 		"captureOutput": "json",
 	})
 	require.Equal(t, http.StatusOK, recPatch1.Code, recPatch1.Body.String())
@@ -394,7 +421,7 @@ func TestScheduledExecCapture_RecurringScheduleAuthorityAndTail(t *testing.T) {
 	assert.Contains(t, after1.Payload, `"captureOutput":"json"`)
 
 	// PATCHing captureOutput to "none" clears it and bumps AuthorizationRevision again.
-	recPatch2 := requestAsIdentity(t, f.srv, owner, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
+	recPatch2 := requestAsSessionIdentity(t, f.srv, owner, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
 		"captureOutput": "none",
 	})
 	require.Equal(t, http.StatusOK, recPatch2.Code, recPatch2.Body.String())

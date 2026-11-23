@@ -490,7 +490,9 @@ func finishedAnswer(status int, f execFinal, replayed bool, includeOutput bool) 
 func writeExec(w http.ResponseWriter, a execAnswer) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(a.status)
-	_ = json.NewEncoder(w).Encode(a.resp)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(a.resp)
 }
 
 // logStart and logFinish write the content-free info lines (SEC-P3): ids,
