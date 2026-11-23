@@ -76,6 +76,7 @@ type ScheduledExecEvent struct {
 	Argv0          string
 	ShellForm      bool
 	TimeoutSeconds int
+	CaptureMode    string
 
 	// Reason is the detailed reason code of a refusal or skip.
 	Reason string
@@ -83,10 +84,11 @@ type ScheduledExecEvent struct {
 	// event id).
 	OperationID string
 	// Outcome group (outcome action).
-	Outcome     string
-	ExitCode    *int
-	DurationMS  *int64
-	OutputBytes *int64
+	Outcome      string
+	ExitCode     *int
+	DurationMS   *int64
+	OutputBytes  *int64
+	OutputStatus string
 
 	RequestID string
 	Timestamp time.Time
@@ -133,6 +135,7 @@ func scheduledExecAuditAttrs(e *ScheduledExecEvent) []slog.Attr {
 	if e.TimeoutSeconds > 0 {
 		attrs = append(attrs, slog.Int("timeout_seconds", e.TimeoutSeconds))
 	}
+	add("capture_mode", e.CaptureMode)
 	add("reason", e.Reason)
 	add("operation_id", e.OperationID)
 	add("outcome", e.Outcome)
@@ -145,6 +148,7 @@ func scheduledExecAuditAttrs(e *ScheduledExecEvent) []slog.Attr {
 	if e.OutputBytes != nil {
 		attrs = append(attrs, slog.Int64("output_bytes", *e.OutputBytes))
 	}
+	add("output_status", e.OutputStatus)
 	add("request_id", e.RequestID)
 	if !e.Timestamp.IsZero() {
 		attrs = append(attrs, slog.Time("event_time", e.Timestamp.UTC()))
@@ -189,6 +193,7 @@ func newScheduledExecAuthoringAudit(ctx context.Context, action, projectID, even
 	}
 	cred := GetCredentialContextFromContext(ctx)
 	e.ActorCredentialKind, e.ActorCredentialID = string(cred.Kind), cred.ID
+	e.CaptureMode = p.CaptureOutput
 	return e.withCommand(p.Command, p.timeout())
 }
 
@@ -212,6 +217,7 @@ func newScheduleExecAuthoringAudit(ctx context.Context, action string, sc store.
 	e.ActorCredentialKind, e.ActorCredentialID = string(cred.Kind), cred.ID
 	if p != nil {
 		e.TargetAgentID = p.AgentID
+		e.CaptureMode = p.CaptureOutput
 		e.withCommand(p.Command, p.timeout())
 	} else {
 		e.TargetAgentID = execPayloadTarget(sc.Payload)
@@ -258,6 +264,7 @@ func newExecFireAudit(ctx context.Context, action string, req hubfire.FireReques
 	}
 	if p != nil {
 		e.TargetAgentID = p.AgentID
+		e.CaptureMode = p.CaptureOutput
 		e.withCommand(p.Command, p.timeout())
 	}
 	return e
@@ -293,6 +300,7 @@ func newScheduledExecRunAudit(run store.ScheduledExecRun) *ScheduledExecEvent {
 		CommandSHA256:           run.CommandSHA256,
 		Argc:                    run.Argc,
 		TimeoutSeconds:          run.TimeoutSeconds,
+		CaptureMode:             run.CaptureMode,
 		Timestamp:               time.Now().UTC(),
 	}
 }

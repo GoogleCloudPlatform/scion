@@ -46,6 +46,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/execrunoutput"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -1685,6 +1686,16 @@ func init() {
 	envvarDescID := envvarFields[0].Descriptor()
 	// envvar.DefaultID holds the default value on creation for the id field.
 	envvar.DefaultID = envvarDescID.Default.(func() uuid.UUID)
+	execrunoutputFields := schema.ExecRunOutput{}.Fields()
+	_ = execrunoutputFields
+	// execrunoutputDescContent is the schema descriptor for content field.
+	execrunoutputDescContent := execrunoutputFields[4].Descriptor()
+	// execrunoutput.ContentValidator is a validator for the "content" field. It is called by the builders before save.
+	execrunoutput.ContentValidator = execrunoutputDescContent.Validators[0].(func([]byte) error)
+	// execrunoutputDescCreatedAt is the schema descriptor for created_at field.
+	execrunoutputDescCreatedAt := execrunoutputFields[5].Descriptor()
+	// execrunoutput.DefaultCreatedAt holds the default value on creation for the created_at field.
+	execrunoutput.DefaultCreatedAt = execrunoutputDescCreatedAt.Default.(func() time.Time)
 	externalidentityFields := schema.ExternalIdentity{}.Fields()
 	_ = externalidentityFields
 	// externalidentityDescProvider is the schema descriptor for provider field.
@@ -3137,16 +3148,24 @@ func init() {
 	scheduledexecrunDescStartedAt := scheduledexecrunFields[15].Descriptor()
 	// scheduledexecrun.DefaultStartedAt holds the default value on creation for the started_at field.
 	scheduledexecrun.DefaultStartedAt = scheduledexecrunDescStartedAt.Default.(func() time.Time)
+	// scheduledexecrunDescCaptureMode is the schema descriptor for capture_mode field.
+	scheduledexecrunDescCaptureMode := scheduledexecrunFields[23].Descriptor()
+	// scheduledexecrun.DefaultCaptureMode holds the default value on creation for the capture_mode field.
+	scheduledexecrun.DefaultCaptureMode = scheduledexecrunDescCaptureMode.Default.(string)
+	// scheduledexecrunDescOutputStatus is the schema descriptor for output_status field.
+	scheduledexecrunDescOutputStatus := scheduledexecrunFields[24].Descriptor()
+	// scheduledexecrun.DefaultOutputStatus holds the default value on creation for the output_status field.
+	scheduledexecrun.DefaultOutputStatus = scheduledexecrunDescOutputStatus.Default.(string)
 	// scheduledexecrunDescRuntime is the schema descriptor for runtime field.
-	scheduledexecrunDescRuntime := scheduledexecrunFields[23].Descriptor()
+	scheduledexecrunDescRuntime := scheduledexecrunFields[25].Descriptor()
 	// scheduledexecrun.DefaultRuntime holds the default value on creation for the runtime field.
 	scheduledexecrun.DefaultRuntime = scheduledexecrunDescRuntime.Default.(string)
 	// scheduledexecrunDescLaunchID is the schema descriptor for launch_id field.
-	scheduledexecrunDescLaunchID := scheduledexecrunFields[24].Descriptor()
+	scheduledexecrunDescLaunchID := scheduledexecrunFields[26].Descriptor()
 	// scheduledexecrun.DefaultLaunchID holds the default value on creation for the launch_id field.
 	scheduledexecrun.DefaultLaunchID = scheduledexecrunDescLaunchID.Default.(string)
 	// scheduledexecrunDescPollSeq is the schema descriptor for poll_seq field.
-	scheduledexecrunDescPollSeq := scheduledexecrunFields[26].Descriptor()
+	scheduledexecrunDescPollSeq := scheduledexecrunFields[28].Descriptor()
 	// scheduledexecrun.DefaultPollSeq holds the default value on creation for the poll_seq field.
 	scheduledexecrun.DefaultPollSeq = scheduledexecrunDescPollSeq.Default.(int64)
 	// scheduledexecrunDescID is the schema descriptor for id field.

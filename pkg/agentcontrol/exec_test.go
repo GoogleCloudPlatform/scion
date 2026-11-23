@@ -106,14 +106,14 @@ func TestParseExecStartAnswer(t *testing.T) {
 }
 
 func TestParseExecStatusAnswer(t *testing.T) {
-	res, err := ParseExecStatusAnswer(http.StatusOK, []byte(`{"state":"finished","outcome":"nonzero","exit_code":3,"duration_ms":10,"output_bytes":2}`))
+	res, err := ParseExecStatusAnswer(http.StatusOK, []byte(`{"state":"finished","outcome":"nonzero","exit_code":3,"duration_ms":10,"output_bytes":2}`), ExecCaptureNone)
 	if err != nil || !res.Finished() || res.ExitCode != 3 || res.DurationMS != 10 || res.OutputBytes != 2 {
 		t.Fatalf("finished: %+v %v", res, err)
 	}
-	if res, err := ParseExecStatusAnswer(http.StatusOK, []byte(`{"state":"running"}`)); err != nil || res.State != ExecStateRunning {
+	if res, err := ParseExecStatusAnswer(http.StatusOK, []byte(`{"state":"running"}`), ExecCaptureNone); err != nil || res.State != ExecStateRunning {
 		t.Fatalf("running: %+v %v", res, err)
 	}
-	if res, err := ParseExecStatusAnswer(http.StatusNotFound, []byte(`{"state":"unknown"}`)); err != nil || res.State != ExecStateUnknown {
+	if res, err := ParseExecStatusAnswer(http.StatusNotFound, []byte(`{"state":"unknown"}`), ExecCaptureNone); err != nil || res.State != ExecStateUnknown {
 		t.Fatalf("unknown: %+v %v", res, err)
 	}
 	for _, c := range []struct {
@@ -127,7 +127,7 @@ func TestParseExecStatusAnswer(t *testing.T) {
 		{400, `{"outcome":"invalid","field":"run_id"}`},
 		{200, `{"state":"finished","outcome":"ok","exit_code":0,"duration_ms":-1,"output_bytes":0}`},
 	} {
-		if res, err := ParseExecStatusAnswer(c.status, []byte(c.body)); !errors.Is(err, ErrExecSchema) {
+		if res, err := ParseExecStatusAnswer(c.status, []byte(c.body), ExecCaptureNone); !errors.Is(err, ErrExecSchema) {
 			t.Errorf("%d %s: got %+v, %v; want a schema error", c.status, c.body, res, err)
 		}
 	}

@@ -348,6 +348,7 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 		NotAfter:                now.Add(execSeamDuration(&scheduledExecNotAfter)),
 		LeaseUntil:              now.Add(time.Duration(timeout)*time.Second + execSeamDuration(&scheduledExecLeaseGrace)),
 		Outcome:                 store.ScheduledExecOutcomeStarting,
+		CaptureMode:             p.CaptureOutput,
 		Runtime:                 target.Runtime,
 		LaunchID:                target.RunID,
 	}
@@ -449,6 +450,7 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 		Argv:           p.Command,
 		TimeoutS:       timeout,
 		NotAfterUnixMS: run.NotAfter.UnixMilli(),
+		Capture:        p.CaptureOutput,
 	})
 	stopStart()
 	cancelStart()
@@ -458,6 +460,8 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 		switch {
 		case errors.Is(startErr, ErrExecSchedulesDisabled):
 			return skipRun(execReasonDisabled, "experiment_off_at_start")
+		case errors.Is(startErr, errExecCaptureUnsupported):
+			return failRun(execReasonCaptureUnsupported)
 		case errors.Is(startErr, router.ErrNoSession), errors.Is(startErr, ErrAgentControlNotAdvertised),
 			errors.Is(startErr, ErrAgentExecLaunchChanged), errors.Is(startErr, store.ErrNotFound):
 			return skipRun(execReasonUnavailable, "executor_unavailable")
@@ -477,7 +481,14 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	switch res.Status {
 	case http.StatusAccepted, http.StatusOK:
 		if res.Finished() {
-			// start_failed at 202, or a replay of a finished run.
+			// For a capture run, a finished exec-start answer (200 replay)
+			// never carries output; hand off to the tracker so exec-status
+			// fetches outcome plus output before the CAS runs. start_failed
+			// has no output and still finishes immediately.
+			if run.CaptureMode != "" && res.Outcome != agentcontrol.ExecOutcomeStartFailed {
+				return track()
+			}
+			// start_failed at 202, or a replay of a finished non-capture run.
 			outcome, status, reason := scheduledExecFinalOutcome(res, timeout)
 			fireStatus := hubfire.FireStatusFired
 			if status == store.ScheduledEventFailed {

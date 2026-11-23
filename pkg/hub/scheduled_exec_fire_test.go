@@ -178,7 +178,7 @@ func (f *execRouteFixture) waitUntracked(t *testing.T, id string) {
 func (f *execRouteFixture) waitAgentFinished(t *testing.T, id string) {
 	t.Helper()
 	require.Eventually(t, func() bool {
-		res, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, id)
+		res, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, id, "")
 		return err == nil && res.Finished()
 	}, 20*time.Second, 20*time.Millisecond)
 }
@@ -399,7 +399,7 @@ func TestScheduledExecFire_HubGate(t *testing.T) {
 			assert.Equal(t, "exit status 5", f.getEvent(t, admitted.ID).Error)
 
 			// The status client itself is not gated.
-			res, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, admitted.ID)
+			res, err := f.srv.AgentExecRunStatus(context.Background(), f.launched.ID, f.launched.RunID, admitted.ID, "")
 			require.NoError(t, err)
 			assert.True(t, res.Finished())
 		})

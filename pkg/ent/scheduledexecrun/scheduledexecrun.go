@@ -60,6 +60,10 @@ const (
 	FieldDurationMs = "duration_ms"
 	// FieldOutputBytes holds the string denoting the output_bytes field in the database.
 	FieldOutputBytes = "output_bytes"
+	// FieldCaptureMode holds the string denoting the capture_mode field in the database.
+	FieldCaptureMode = "capture_mode"
+	// FieldOutputStatus holds the string denoting the output_status field in the database.
+	FieldOutputStatus = "output_status"
 	// FieldRuntime holds the string denoting the runtime field in the database.
 	FieldRuntime = "runtime"
 	// FieldLaunchID holds the string denoting the launch_id field in the database.
@@ -106,6 +110,8 @@ var Columns = []string{
 	FieldExitCode,
 	FieldDurationMs,
 	FieldOutputBytes,
+	FieldCaptureMode,
+	FieldOutputStatus,
 	FieldRuntime,
 	FieldLaunchID,
 	FieldLastPolledAt,
@@ -141,6 +147,10 @@ var (
 	CommandSha256Validator func(string) error
 	// DefaultStartedAt holds the default value on creation for the "started_at" field.
 	DefaultStartedAt func() time.Time
+	// DefaultCaptureMode holds the default value on creation for the "capture_mode" field.
+	DefaultCaptureMode string
+	// DefaultOutputStatus holds the default value on creation for the "output_status" field.
+	DefaultOutputStatus string
 	// DefaultRuntime holds the default value on creation for the "runtime" field.
 	DefaultRuntime string
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
@@ -299,6 +309,16 @@ func ByDurationMs(opts ...sql.OrderTermOption) OrderOption {
 // ByOutputBytes orders the results by the output_bytes field.
 func ByOutputBytes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldOutputBytes, opts...).ToFunc()
+}
+
+// ByCaptureMode orders the results by the capture_mode field.
+func ByCaptureMode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCaptureMode, opts...).ToFunc()
+}
+
+// ByOutputStatus orders the results by the output_status field.
+func ByOutputStatus(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldOutputStatus, opts...).ToFunc()
 }
 
 // ByRuntime orders the results by the runtime field.

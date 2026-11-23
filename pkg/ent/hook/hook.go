@@ -489,6 +489,18 @@ func (f EnvVarFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, erro
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.EnvVarMutation", m)
 }
 
+// The ExecRunOutputFunc type is an adapter to allow the use of ordinary
+// function as ExecRunOutput mutator.
+type ExecRunOutputFunc func(context.Context, *ent.ExecRunOutputMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ExecRunOutputFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ExecRunOutputMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ExecRunOutputMutation", m)
+}
+
 // The ExternalIdentityFunc type is an adapter to allow the use of ordinary
 // function as ExternalIdentity mutator.
 type ExternalIdentityFunc func(context.Context, *ent.ExternalIdentityMutation) (ent.Value, error)

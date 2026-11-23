@@ -52,6 +52,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/execrunoutput"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
@@ -224,6 +225,7 @@ func checkColumn(t, c string) error {
 			durablequeueitem.Table:              durablequeueitem.ValidColumn,
 			entitlementbinding.Table:            entitlementbinding.ValidColumn,
 			envvar.Table:                        envvar.ValidColumn,
+			execrunoutput.Table:                 execrunoutput.ValidColumn,
 			externalidentity.Table:              externalidentity.ValidColumn,
 			gcpserviceaccount.Table:             gcpserviceaccount.ValidColumn,
 			githubresolutioncache.Table:         githubresolutioncache.ValidColumn,

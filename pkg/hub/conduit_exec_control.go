@@ -55,6 +55,12 @@ var ErrExecSchedulesDisabled = errors.New("agent exec: exec schedules are disabl
 // replacement incarnation.
 var ErrAgentExecLaunchChanged = errors.New("agent exec: the agent's launch changed")
 
+// errExecCaptureUnsupported: the run requested output capture, but the pinned
+// agent session's Hello.capabilities.features does not advertise
+// exec_capture.v1. Nothing was sent; the fire is recorded as failed
+// (capture_unsupported).
+var errExecCaptureUnsupported = errors.New("agent exec: target session does not advertise exec_capture.v1")
+
 // AgentExecLaunchChangedError wraps ErrAgentExecLaunchChanged.
 type AgentExecLaunchChangedError struct {
 	AgentID string
@@ -105,7 +111,11 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
-	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStart, body)
+	var requireFeature string
+	if req.Capture != "" {
+		requireFeature = agentcontrol.FeatureExecCapture
+	}
+	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStart, body, requireFeature)
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
@@ -119,8 +129,9 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 // flags (AC18): turning hub.exec_schedules or hub.conduit off stops new
 // starts but never the outcome recovery of runs already admitted. It needs
 // only a conduit router. A 400 is a schema error (the hub sent a bad
-// request).
-func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runID string) (agentcontrol.ExecResult, error) {
+// request). captureMode is the capture mode requested for the run ("" for
+// non-capture runs).
+func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runID, captureMode string) (agentcontrol.ExecResult, error) {
 	req := agentcontrol.ExecStatusRequest{V: agentcontrol.ExecVersion, RunID: runID}
 	if err := req.Validate(); err != nil {
 		return agentcontrol.ExecResult{}, err
@@ -129,11 +140,11 @@ func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runI
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
-	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStatus, body)
+	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStatus, body, "")
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
-	return agentcontrol.ParseExecStatusAnswer(status, resp)
+	return agentcontrol.ParseExecStatusAnswer(status, resp, captureMode)
 }
 
 // callAgentExec calls an exec route on the agent's launch launchID only
@@ -142,7 +153,7 @@ func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runI
 // incarnation facts (callAgentControlPinned), so the call can reach only a
 // session of launch launchID, locally or through another relay, never a
 // replacement incarnation.
-func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route string, body []byte) (int, []byte, error) {
+func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route string, body []byte, requireFeature string) (int, []byte, error) {
 	if launchID == "" {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
@@ -159,7 +170,7 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 	if agent.RunID != launchID {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
-	return s.callAgentControlPinned(ctx, agent, route, body, execSeamDuration(&scheduledExecCallTimeout))
+	return s.callAgentControlPinned(ctx, agent, route, body, requireFeature, execSeamDuration(&scheduledExecCallTimeout))
 }
 
 // callAgentControlPinned is callAgentControlJSON for an agent snapshot the
@@ -177,7 +188,7 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 // experiment flag, only that a router exists: the caller owns the gate
 // (StartAgentExecRun gates new starts; AgentExecRunStatus recovers admitted
 // runs whatever the flags, AC18).
-func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent, route string, body []byte, timeout time.Duration) (int, []byte, error) {
+func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent, route string, body []byte, requireFeature string, timeout time.Duration) (int, []byte, error) {
 	rtr := s.conduitRouter()
 	if rtr == nil {
 		return 0, nil, router.ErrNoSession
@@ -205,6 +216,9 @@ func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent,
 		}
 		if !slices.Contains(res.Session.Info().Capabilities.GetRpc(), route) {
 			return fmt.Errorf("%w: agent %s, route %s", ErrAgentControlNotAdvertised, agent.ID, route)
+		}
+		if requireFeature != "" && !slices.Contains(res.Session.Info().Capabilities.GetFeatures(), requireFeature) {
+			return fmt.Errorf("%w: agent %s, feature %s", errExecCaptureUnsupported, agent.ID, requireFeature)
 		}
 		resp, err := res.Session.Call(ctx, rpc)
 		if err != nil {

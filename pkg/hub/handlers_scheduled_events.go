@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -57,9 +58,11 @@ type CreateScheduledEventRequest struct {
 	NoAuth   bool   `json:"noAuth,omitempty"`
 
 	// Convenience fields for "exec" events (ptone/scion#7883), with
-	// AgentID/AgentName: the argv and its timeout (0: 60 seconds).
+	// AgentID/AgentName: the argv, timeout (0: 60 seconds), and optional
+	// captureOutput ("none", "json", or "tail").
 	Command        []string `json:"command,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	CaptureOutput  string   `json:"captureOutput,omitempty"`
 }
 
 // ListScheduledEventsResponse is the API response for listing scheduled events.
@@ -272,6 +275,16 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 	}
 
 	// Determine the action for authorization based on method and path.
+	var eventID, subAction string
+	if eventPath != "" {
+		if idx := strings.IndexByte(eventPath, '/'); idx >= 0 {
+			eventID = eventPath[:idx]
+			subAction = eventPath[idx+1:]
+		} else {
+			eventID = eventPath
+		}
+	}
+
 	var action Action
 	if eventPath == "" {
 		switch r.Method {
@@ -283,6 +296,16 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
 		}
+	} else if subAction != "" {
+		if subAction != "output" {
+			NotFound(w, "Scheduled event endpoint")
+			return
+		}
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		action = ActionRead
 	} else {
 		switch r.Method {
 		case http.MethodGet:
@@ -318,8 +341,12 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	if subAction == "output" {
+		s.getScheduledEventOutput(w, r, projectID, eventID)
+		return
+	}
+
 	// Individual event endpoint
-	eventID := eventPath
 	switch r.Method {
 	case http.MethodGet:
 		s.getScheduledEvent(w, r, projectID, eventID)

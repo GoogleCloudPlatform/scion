@@ -15,6 +15,7 @@
 package control
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"encoding/json"
@@ -29,6 +30,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -57,6 +59,12 @@ const (
 	execTombMax   = 256
 	execTombTTL   = 60 * time.Minute
 	execTombFloor = 10 * time.Minute
+	// execOutputBudget and execOutputTTL bound captured output bytes held
+	// across tombstones in sciontool (PID 1) memory: at most 4 MiB total
+	// (64 full captures) and 15 minutes from finish, after which output is
+	// dropped (outputStatus becomes expired) while the tombstone itself stays.
+	execOutputBudget = 4 * 1024 * 1024
+	execOutputTTL    = 15 * time.Minute
 	// execMaxBody bounds an exec request body: the argv bounds plus JSON
 	// escaping (up to 6 bytes per byte) and the other fields.
 	execMaxBody = 6*agentcontrol.MaxExecArgvBytes + 4096
@@ -92,14 +100,19 @@ type execBinding struct {
 	digest     string
 	timeoutS   int
 	launchID   string
+	capture    string
 }
 
-// execFinal is a finished run's outcome: never output or error text.
+// execFinal is a finished run's outcome and, when capture was requested, its
+// bounded captured output and status.
 type execFinal struct {
-	outcome     string
-	exitCode    int
-	durationMS  int64
-	outputBytes int64
+	outcome      string
+	exitCode     int
+	durationMS   int64
+	outputBytes  int64
+	capture      string
+	outputStatus string
+	output       []byte
 }
 
 // execRun is a live run: reserved in the live map before its spawn, until
@@ -150,6 +163,7 @@ type execSpec struct {
 	timeout   time.Duration
 	killGrace time.Duration
 	waitDelay time.Duration
+	capture   string
 }
 
 // execProcess is a started run. wait blocks until the run is over: the
@@ -175,7 +189,7 @@ func newExecRoute(o ExecOptions) *execRoute {
 	if e.now == nil {
 		e.now = time.Now
 	}
-	e.tombs = newExecTombs(execTombMax, execTombTTL, execTombFloor)
+	e.tombs = newExecTombs(execTombMax, execTombTTL, execTombFloor, execOutputBudget, execOutputTTL)
 	return e
 }
 
@@ -214,6 +228,7 @@ func (e *execRoute) startRun(ctx context.Context, req *agentcontrol.ExecStartReq
 		digest:     agentcontrol.ExecArgvDigest(req.Argv),
 		timeoutS:   req.TimeoutS,
 		launchID:   e.opts.LaunchID,
+		capture:    req.Capture,
 	}
 	deadline := time.UnixMilli(req.NotAfterUnixMS).Add(agentcontrol.ExecClockTolerance)
 
@@ -226,11 +241,13 @@ func (e *execRoute) startRun(ctx context.Context, req *agentcontrol.ExecStartReq
 		return e.replayLive(ctx, run)
 	}
 	if t, ok := e.tombs.get(e.now(), req.RunID); ok {
+		binding, final := t.binding, t.final
 		e.mu.Unlock()
-		if t.binding != b {
+		if binding != b {
 			return execRefusal(http.StatusConflict, agentcontrol.ExecOutcomeMismatch)
 		}
-		return finishedAnswer(http.StatusOK, t.final, true)
+		// Never include output on exec-start, even on a 200 finished replay.
+		return finishedAnswer(http.StatusOK, final, true, false)
 	}
 	// A new run_id. Nothing below spawns once the deadline has passed.
 	if receipt.After(deadline) {
@@ -282,7 +299,7 @@ func (e *execRoute) startRun(ctx context.Context, req *agentcontrol.ExecStartReq
 		final := execFinal{outcome: agentcontrol.ExecOutcomeStartFailed}
 		e.finish(run, final)
 		close(run.decided)
-		return finishedAnswer(http.StatusAccepted, final, false)
+		return finishedAnswer(http.StatusAccepted, final, false, false)
 	}
 	close(run.decided)
 	go func() {
@@ -311,7 +328,7 @@ func (e *execRoute) replayLive(ctx context.Context, run *execRun) execAnswer {
 		return execAnswer{status: http.StatusOK, resp: agentcontrol.ExecResponse{State: agentcontrol.ExecStateRunning, Replayed: true}}
 	}
 	if t, ok := e.tombs.get(e.now(), run.runID); ok {
-		return finishedAnswer(http.StatusOK, t.final, true)
+		return finishedAnswer(http.StatusOK, t.final, true, false)
 	}
 	// Finished and already gone from the store: never restart it.
 	return execRefusal(http.StatusConflict, agentcontrol.ExecOutcomeMismatch)
@@ -369,6 +386,7 @@ func (e *execRoute) prepare(req *agentcontrol.ExecStartRequest) (execSpec, error
 		timeout:   time.Duration(req.TimeoutS) * time.Second,
 		killGrace: e.killGrace,
 		waitDelay: e.waitDelay,
+		capture:   req.Capture,
 	}, nil
 }
 
@@ -411,7 +429,7 @@ func (e *execRoute) status(ctx context.Context, runID string) execAnswer {
 		return execAnswer{status: http.StatusOK, resp: agentcontrol.ExecResponse{State: agentcontrol.ExecStateRunning}}
 	}
 	if t, ok := e.tombs.get(e.now(), runID); ok {
-		return finishedAnswer(http.StatusOK, t.final, false)
+		return finishedAnswer(http.StatusOK, t.final, false, true)
 	}
 	return execAnswer{status: http.StatusNotFound, resp: agentcontrol.ExecResponse{State: agentcontrol.ExecStateUnknown}}
 }
@@ -448,11 +466,23 @@ func execRefusal(status int, outcome string) execAnswer {
 	return execAnswer{status: status, resp: agentcontrol.ExecResponse{Outcome: outcome}}
 }
 
-func finishedAnswer(status int, f execFinal, replayed bool) execAnswer {
+func finishedAnswer(status int, f execFinal, replayed bool, includeOutput bool) execAnswer {
 	resp := agentcontrol.ExecResponse{State: agentcontrol.ExecStateFinished, Outcome: f.outcome, Replayed: replayed}
 	if f.outcome != agentcontrol.ExecOutcomeStartFailed {
 		code, dur, n := f.exitCode, f.durationMS, f.outputBytes
 		resp.ExitCode, resp.DurationMS, resp.OutputBytes = &code, &dur, &n
+		if includeOutput && f.capture != "" {
+			resp.OutputStatus = f.outputStatus
+			if f.outputStatus == agentcontrol.ExecOutputCaptured || f.outputStatus == agentcontrol.ExecOutputTruncated {
+				switch f.capture {
+				case agentcontrol.ExecCaptureJSON:
+					resp.Output = json.RawMessage(f.output)
+				case agentcontrol.ExecCaptureTail:
+					b, _ := json.Marshal(string(f.output))
+					resp.Output = json.RawMessage(b)
+				}
+			}
+		}
 	}
 	return execAnswer{status: status, resp: resp}
 }
@@ -464,20 +494,27 @@ func writeExec(w http.ResponseWriter, a execAnswer) {
 }
 
 // logStart and logFinish write the content-free info lines (SEC-P3): ids,
-// status, outcome and numbers only; never argv, output or error text.
+// status, outcome, capture mode, output_status and numbers only; never argv,
+// output bytes or error text.
 func (e *execRoute) logStart(req *agentcontrol.ExecStartRequest, a execAnswer) {
-	log.Info("%s", execLogLine("exec-start", req.RunID, req.ScheduleID, a))
+	log.Info("%s", execLogLine("exec-start", req.RunID, req.ScheduleID, req.Capture, "", a))
 }
 
 func (e *execRoute) logFinish(run *execRun, f execFinal) {
-	log.Info("%s", execLogLine("exec-finish", run.runID, run.binding.scheduleID, finishedAnswer(0, f, false)))
+	log.Info("%s", execLogLine("exec-finish", run.runID, run.binding.scheduleID, run.binding.capture, f.outputStatus, finishedAnswer(0, f, false, false)))
 }
 
-func execLogLine(what, runID, scheduleID string, a execAnswer) string {
+func execLogLine(what, runID, scheduleID, capture, outputStatus string, a execAnswer) string {
 	line := fmt.Sprintf("Control: %s run_id=%s schedule_id=%s status=%d state=%s outcome=%s replayed=%t",
 		what, runID, scheduleID, a.status, a.resp.State, a.resp.Outcome, a.resp.Replayed)
 	if a.resp.ExitCode != nil {
 		line += fmt.Sprintf(" exit_code=%d duration_ms=%d output_bytes=%d", *a.resp.ExitCode, *a.resp.DurationMS, *a.resp.OutputBytes)
+	}
+	if capture != "" {
+		line += fmt.Sprintf(" capture=%s", capture)
+	}
+	if outputStatus != "" {
+		line += fmt.Sprintf(" output_status=%s", outputStatus)
 	}
 	return line
 }
@@ -573,6 +610,61 @@ func (c *countingDiscard) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// boundedBuffer captures up to cap bytes lazily without ever allocating more
+// than cap bytes. Once more than cap bytes arrive it sets overflow, frees the
+// buffer, and continues counting and draining.
+type boundedBuffer struct {
+	cap      int
+	buf      []byte
+	overflow bool
+	n        int64
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.n += int64(len(p))
+	if b.overflow || len(p) == 0 {
+		return len(p), nil
+	}
+	need := len(b.buf) + len(p)
+	if need > b.cap {
+		b.overflow = true
+		b.buf = nil
+		return len(p), nil
+	}
+	if cap(b.buf) < need {
+		newCap := cap(b.buf) * 2
+		if newCap < need {
+			newCap = need
+		}
+		if newCap > b.cap {
+			newCap = b.cap
+		}
+		grown := make([]byte, len(b.buf), newCap)
+		copy(grown, b.buf)
+		b.buf = grown
+	}
+	b.buf = append(b.buf, p...)
+	return len(p), nil
+}
+
+func (b *boundedBuffer) finalizeJSON() (string, []byte) {
+	if b.overflow {
+		return agentcontrol.ExecOutputTooLarge, nil
+	}
+	trimmed := bytes.Trim(b.buf, " \t\r\n")
+	if len(trimmed) == 0 {
+		return agentcontrol.ExecOutputEmpty, nil
+	}
+	if !utf8.Valid(trimmed) || !json.Valid(trimmed) {
+		return agentcontrol.ExecOutputInvalidJSON, nil
+	}
+	var compacted bytes.Buffer
+	if err := json.Compact(&compacted, trimmed); err != nil {
+		return agentcontrol.ExecOutputInvalidJSON, nil
+	}
+	return agentcontrol.ExecOutputCaptured, compacted.Bytes()
+}
+
 // ExecEnabled reports whether sciontool should register the exec routes:
 // the platform runs them (Linux) and the agent was launched with
 // hub.exec_schedules in SCION_HUB_EXPERIMENTS (sent by the hub only while
@@ -590,40 +682,105 @@ func ExecEnabled(getenv func(string) string) bool {
 	return false
 }
 
-// execTomb is a finished run: its binding and outcome only.
+// execTomb is a finished run: its binding, outcome, and (until output TTL or
+// budget eviction) its bounded captured output.
 type execTomb struct {
 	runID      string
 	binding    execBinding
 	final      execFinal
 	finishedAt time.Time
+	outputElem *list.Element // membership in execTombs.outputOrder when len(final.output) > 0
 }
 
 // execTombs holds finished-run tombstones (D9-S2): at most max, each kept
 // ttl, LRU, but an entry younger than floor is never evicted. Callers
 // reserve a slot (canReserve) before a run spawns, so put never needs to
 // evict an entry under the floor.
+//
+// Captured outputs held across tombstones are bounded separately by
+// outputBudget (total bytes) and outputTTL (from finishedAt): oldest outputs
+// are dropped first (outputStatus becomes expired, output becomes nil) while
+// the tombstone itself (binding plus outcome) remains for idempotency.
 type execTombs struct {
-	max   int
-	ttl   time.Duration
-	floor time.Duration
-	order *list.List // front = most recently used
-	byKey map[string]*list.Element
+	max             int
+	ttl             time.Duration
+	floor           time.Duration
+	outputBudget    int
+	outputTTL       time.Duration
+	outputBytesHeld int
+	order           *list.List // front = most recently used
+	outputOrder     *list.List // front = newest finishedAt; back = oldest finishedAt
+	byKey           map[string]*list.Element
 }
 
-func newExecTombs(max int, ttl, floor time.Duration) *execTombs {
-	return &execTombs{max: max, ttl: ttl, floor: floor, order: list.New(), byKey: map[string]*list.Element{}}
+func newExecTombs(max int, ttl, floor time.Duration, outputBudget int, outputTTL time.Duration) *execTombs {
+	return &execTombs{
+		max:          max,
+		ttl:          ttl,
+		floor:        floor,
+		outputBudget: outputBudget,
+		outputTTL:    outputTTL,
+		order:        list.New(),
+		outputOrder:  list.New(),
+		byKey:        map[string]*list.Element{},
+	}
 }
 
-// purge drops tombstones older than ttl.
+// dropOutput releases t's held output bytes and marks its outputStatus expired
+// while keeping the tombstone intact.
+func (s *execTombs) dropOutput(t *execTomb) {
+	if t.outputElem != nil {
+		s.outputOrder.Remove(t.outputElem)
+		t.outputElem = nil
+	}
+	if len(t.final.output) > 0 {
+		s.outputBytesHeld -= len(t.final.output)
+		t.final.output = nil
+		t.final.outputStatus = agentcontrol.ExecOutputExpired
+	}
+}
+
+// detachOutput removes t from output accounting when the tombstone itself is
+// being removed or replaced.
+func (s *execTombs) detachOutput(t *execTomb) {
+	if t.outputElem != nil {
+		s.outputOrder.Remove(t.outputElem)
+		t.outputElem = nil
+	}
+	if len(t.final.output) > 0 {
+		s.outputBytesHeld -= len(t.final.output)
+		t.final.output = nil
+	}
+}
+
+// expireOutputs drops captured outputs older than outputTTL, oldest first.
+func (s *execTombs) expireOutputs(now time.Time) {
+	if s.outputTTL <= 0 {
+		return
+	}
+	for el := s.outputOrder.Back(); el != nil; {
+		prev := el.Prev()
+		t := el.Value.(*execTomb)
+		if now.Sub(t.finishedAt) <= s.outputTTL {
+			break
+		}
+		s.dropOutput(t)
+		el = prev
+	}
+}
+
+// purge drops tombstones older than ttl and expires outputs older than outputTTL.
 func (s *execTombs) purge(now time.Time) {
 	for el := s.order.Front(); el != nil; {
 		next := el.Next()
 		if t := el.Value.(*execTomb); now.Sub(t.finishedAt) > s.ttl {
+			s.detachOutput(t)
 			s.order.Remove(el)
 			delete(s.byKey, t.runID)
 		}
 		el = next
 	}
+	s.expireOutputs(now)
 }
 
 // canReserve reports whether n more tombstones fit without evicting one
@@ -646,23 +803,45 @@ func (s *execTombs) get(now time.Time, runID string) (*execTomb, bool) {
 	}
 	t := el.Value.(*execTomb)
 	if now.Sub(t.finishedAt) > s.ttl {
+		s.detachOutput(t)
 		s.order.Remove(el)
 		delete(s.byKey, runID)
 		return nil, false
+	}
+	if s.outputTTL > 0 && len(t.final.output) > 0 && now.Sub(t.finishedAt) > s.outputTTL {
+		s.dropOutput(t)
 	}
 	s.order.MoveToFront(el)
 	return t, true
 }
 
 // put stores t, finished at now, evicting least recently used entries at
-// or above the floor while the store is over max.
+// or above the floor while the store is over max, and dropping oldest outputs
+// while held output bytes exceed outputBudget.
 func (s *execTombs) put(now time.Time, t *execTomb) {
 	t.finishedAt = now
 	if el, ok := s.byKey[t.runID]; ok {
+		s.detachOutput(el.Value.(*execTomb))
 		s.order.Remove(el)
 	}
-	s.byKey[t.runID] = s.order.PushFront(t)
 	s.purge(now)
+	if len(t.final.output) > 0 {
+		for s.outputBudget > 0 && s.outputBytesHeld+len(t.final.output) > s.outputBudget {
+			oldest := s.outputOrder.Back()
+			if oldest == nil {
+				break
+			}
+			s.dropOutput(oldest.Value.(*execTomb))
+		}
+		if s.outputBudget > 0 && len(t.final.output) > s.outputBudget {
+			t.final.output = nil
+			t.final.outputStatus = agentcontrol.ExecOutputExpired
+		} else if len(t.final.output) > 0 {
+			t.outputElem = s.outputOrder.PushFront(t)
+			s.outputBytesHeld += len(t.final.output)
+		}
+	}
+	s.byKey[t.runID] = s.order.PushFront(t)
 	for s.order.Len() > s.max {
 		victim := (*list.Element)(nil)
 		for el := s.order.Back(); el != nil; el = el.Prev() {
@@ -676,8 +855,10 @@ func (s *execTombs) put(now time.Time, t *execTomb) {
 			// bound rather than grow.
 			victim = s.order.Back()
 		}
+		vt := victim.Value.(*execTomb)
+		s.detachOutput(vt)
 		s.order.Remove(victim)
-		delete(s.byKey, victim.Value.(*execTomb).runID)
+		delete(s.byKey, vt.runID)
 	}
 }
 

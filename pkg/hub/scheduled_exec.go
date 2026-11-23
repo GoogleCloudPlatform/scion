@@ -77,6 +77,9 @@ type scheduledExecPayload struct {
 	Command []string `json:"command"`
 	// TimeoutSeconds is 0 (the default, 60) to agentcontrol.MaxExecTimeoutSec.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
+	// CaptureOutput opts into bounded output capture: "", "none" (stored as
+	// absent), "json", or "tail".
+	CaptureOutput string `json:"captureOutput,omitempty"`
 	// Wake is reserved for waking suspended targets (F1); it must be false.
 	Wake bool `json:"wake,omitempty"`
 }
@@ -131,6 +134,13 @@ func (p *scheduledExecPayload) validate() error {
 	}
 	if p.TimeoutSeconds < 0 || p.TimeoutSeconds > agentcontrol.MaxExecTimeoutSec {
 		return &scheduledExecPayloadError{field: "timeoutSeconds"}
+	}
+	switch p.CaptureOutput {
+	case "", "none":
+		p.CaptureOutput = ""
+	case agentcontrol.ExecCaptureJSON, agentcontrol.ExecCaptureTail:
+	default:
+		return &scheduledExecPayloadError{field: "captureOutput"}
 	}
 	if p.Wake {
 		return &scheduledExecPayloadError{field: "wake"}
@@ -203,21 +213,22 @@ func scheduledExecShellForm(argv []string) bool {
 // every project schedule reader sees. They never carry argv, output or a
 // detailed refusal reason; the audit log and slog carry the reason.
 const (
-	execReasonDisabled         = "exec schedules disabled"
-	execReasonMissedWindow     = "missed window"
-	execReasonRefused          = "exec refused"
-	execReasonTargetNotRunning = "target not running"
-	execReasonOverlap          = "previous run in progress"
-	execReasonCapacity         = "capacity"
-	execReasonUnavailable      = "agent executor unavailable"
-	execReasonStartFailed      = "command failed to start"
-	execReasonDispatchFailed   = "exec dispatch failed"
-	execReasonStartExpired     = "start expired (check agent clock)"
-	execReasonAgentRestarted   = "agent restarted during run"
-	execReasonAgentStopped     = "agent stopped during run"
-	execReasonOutcomeUnknown   = "run outcome unknown"
-	execReasonShuttingDown     = "hub shutting down"
-	execReasonNotDispatched    = "hub restarted before dispatch"
+	execReasonDisabled           = "exec schedules disabled"
+	execReasonMissedWindow       = "missed window"
+	execReasonRefused            = "exec refused"
+	execReasonTargetNotRunning   = "target not running"
+	execReasonOverlap            = "previous run in progress"
+	execReasonCapacity           = "capacity"
+	execReasonUnavailable        = "agent executor unavailable"
+	execReasonCaptureUnsupported = "capture_unsupported"
+	execReasonStartFailed        = "command failed to start"
+	execReasonDispatchFailed     = "exec dispatch failed"
+	execReasonStartExpired       = "start expired (check agent clock)"
+	execReasonAgentRestarted     = "agent restarted during run"
+	execReasonAgentStopped       = "agent stopped during run"
+	execReasonOutcomeUnknown     = "run outcome unknown"
+	execReasonShuttingDown       = "hub shutting down"
+	execReasonNotDispatched      = "hub restarted before dispatch"
 )
 
 // execReasonExitStatus is the text of a non-zero exit (D6).

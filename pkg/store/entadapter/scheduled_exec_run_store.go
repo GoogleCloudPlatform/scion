@@ -24,6 +24,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/execrunoutput"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
@@ -62,6 +63,8 @@ func entScheduledExecRunToStore(e *ent.ScheduledExecRun) store.ScheduledExecRun 
 		ExitCode:                e.ExitCode,
 		DurationMS:              e.DurationMs,
 		OutputBytes:             e.OutputBytes,
+		CaptureMode:             e.CaptureMode,
+		OutputStatus:            e.OutputStatus,
 		Runtime:                 e.Runtime,
 		LaunchID:                e.LaunchID,
 		LastPolledAt:            e.LastPolledAt,
@@ -145,7 +148,9 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 			SetLaunchID(run.LaunchID).
 			SetNillableExitCode(run.ExitCode).
 			SetNillableDurationMs(run.DurationMS).
-			SetNillableOutputBytes(run.OutputBytes)
+			SetNillableOutputBytes(run.OutputBytes).
+			SetCaptureMode(run.CaptureMode).
+			SetOutputStatus(run.OutputStatus)
 		if sid != nil {
 			create.SetScheduleID(*sid)
 		}
@@ -288,6 +293,9 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 	if !finalExecOutcome(fin.Outcome) {
 		return false, store.ErrInvalidInput
 	}
+	if len(fin.Output) > store.MaxExecRunOutputBytes {
+		return false, store.ErrInvalidInput
+	}
 	eid, err := parseUUID(fin.EventID)
 	if err != nil {
 		return false, err
@@ -314,6 +322,7 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 			SetNillableExitCode(fin.ExitCode).
 			SetNillableDurationMs(fin.DurationMS).
 			SetNillableOutputBytes(fin.OutputBytes).
+			SetOutputStatus(fin.OutputStatus).
 			Save(ctx)
 		if err != nil {
 			return mapError(err)
@@ -322,6 +331,18 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 			return nil
 		}
 		won = true
+		if len(fin.Output) > 0 {
+			if _, err := c.ExecRunOutput.Create().
+				SetID(eid).
+				SetOwnerKind(execrunoutput.OwnerKindScheduledExec).
+				SetProjectID(runRow.ProjectID).
+				SetCaptureMode(runRow.CaptureMode).
+				SetContent(fin.Output).
+				SetCreatedAt(finishedAt.UTC()).
+				Save(ctx); err != nil {
+				return mapError(err)
+			}
+		}
 		if fin.EventStatus != "" {
 			upd := c.ScheduledEvent.Update().
 				Where(
@@ -354,6 +375,25 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 		return false, err
 	}
 	return won, nil
+}
+
+// GetScheduledExecRunOutput returns the captured output bytes for runID from
+// exec_run_outputs, or store.ErrNotFound when no output row exists.
+func (s *ScheduleStore) GetScheduledExecRunOutput(ctx context.Context, runID string) ([]byte, error) {
+	uid, err := parseUUID(runID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := s.client.ExecRunOutput.Query().
+		Where(
+			execrunoutput.IDEQ(uid),
+			execrunoutput.OwnerKindEQ(execrunoutput.OwnerKindScheduledExec),
+		).
+		Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return row.Content, nil
 }
 
 // ListExpiredScheduledExecRuns returns up to limit unfinished runs whose

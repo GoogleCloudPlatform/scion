@@ -92,6 +92,8 @@ type Tx struct {
 	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
+	// ExecRunOutput is the client for interacting with the ExecRunOutput builders.
+	ExecRunOutput *ExecRunOutputClient
 	// ExternalIdentity is the client for interacting with the ExternalIdentity builders.
 	ExternalIdentity *ExternalIdentityClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
@@ -407,6 +409,7 @@ func (tx *Tx) init() {
 	tx.DurableQueueItem = NewDurableQueueItemClient(tx.config)
 	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
+	tx.ExecRunOutput = NewExecRunOutputClient(tx.config)
 	tx.ExternalIdentity = NewExternalIdentityClient(tx.config)
 	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
 	tx.GitHubResolutionCache = NewGitHubResolutionCacheClient(tx.config)

@@ -212,7 +212,7 @@ func (f *execFixture) start(t *testing.T, req agentcontrol.ExecStartRequest) (in
 func (f *execFixture) status(t *testing.T, n int) (int, agentcontrol.ExecResponse) {
 	t.Helper()
 	code, resp, raw := postExec(t, f.h, RouteExecStatus, agentcontrol.ExecStatusRequest{V: 1, RunID: uuidN(n)})
-	if _, err := agentcontrol.ParseExecStatusAnswer(code, []byte(raw)); err != nil {
+	if _, err := agentcontrol.ParseExecStatusAnswer(code, []byte(raw), agentcontrol.ExecCaptureNone); err != nil {
 		t.Errorf("exec-status answer %d %s fails the hub schema: %v", code, raw, err)
 	}
 	return code, resp
@@ -910,7 +910,7 @@ func TestLookPathEnv(t *testing.T) {
 
 func TestExecTombsUnit(t *testing.T) {
 	now := time.Unix(0, 0)
-	s := newExecTombs(3, time.Hour, 10*time.Minute)
+	s := newExecTombs(3, time.Hour, 10*time.Minute, execOutputBudget, execOutputTTL)
 	put := func(id string) { s.put(now, &execTomb{runID: id}) }
 	put("a")
 	put("b")
