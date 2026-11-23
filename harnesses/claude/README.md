@@ -45,11 +45,35 @@ claude/
 ## Egress Firewall
 
 `init-firewall.sh` restricts outbound traffic to GitHub, the npm registry,
-Anthropic endpoints and the host network. It runs only at container start:
-when the agent's environment has `SCION_INIT_FIREWALL=1`, `sciontool init`
-runs the script as root before anything else starts. If the script fails,
-the agent does not start. Unset, empty or a false value (`0`, `false`)
+Anthropic endpoints, Visual Studio update/marketplace endpoints, and the
+container's default gateway host (`/32`) plus any distinct broker-written host
+alias (`host.docker.internal` / `host.containers.internal`). It runs only at
+container start: when the agent's environment has `SCION_INIT_FIREWALL=1`,
+`sciontool` runs the script as root before anything else starts. If the script
+fails, the agent does not start. Unset, empty or a false value (`0`, `false`)
 means no firewall; any other value is an error.
+
+Key rules enforced by `init-firewall.sh`:
+
+- **IPv6 default drop:** When `ip6tables` is available, IPv6 `INPUT`, `FORWARD`,
+  and `OUTPUT` default policies are set to `DROP` (allowing loopback,
+  established/related traffic, and IPv6 DNS nameservers from `/etc/resolv.conf`)
+  with an explicit `OUTPUT` `REJECT` (`icmp6-adm-prohibited`) so dual-stack
+  clients fall back to IPv4 immediately. If IPv6 is enabled on any non-loopback
+  interface and `ip6tables` is unavailable, the script fails closed and refuses
+  startup.
+- **Gateway `/32` only:** Only the default gateway's `/32` address (and any
+  distinct `/32` address resolved for `host.docker.internal` or
+  `host.containers.internal`) is permitted. Sibling containers on the same
+  Docker bridge `/24` are not reachable.
+- **Outbound `tcp/22` off by default:** Arbitrary outbound SSH (`tcp/22`) is no
+  longer unconditionally allowed. SSH to allowlisted hosts (such as GitHub)
+  continues to work because the `allowed-domains` ipset rule permits all ports
+  to allowlisted IPs.
+- **IP-set limitation:** Domain names are resolved at container startup via
+  `getent ahostsv4` into an IPv4 ipset. Shared CDN and front-end IP addresses
+  are inherent to IP-set filtering and may be shared with other services hosted
+  on the same edge IPs.
 
 Set the variable in one of these places:
 
@@ -83,8 +107,10 @@ firewall was installed, before any workload runs. If the firewall or
 metadata interception was installed and that removal fails, the agent does
 not start; otherwise a failed removal is only logged.
 
-The allow-list covers the host's /24 network but no other Hub address, so an
-agent whose Hub is elsewhere cannot reach it with the firewall on.
+The allow-list covers only the default gateway's `/32` address (and distinct
+host-alias `/32` addresses), not the wider `/24` subnet or any other Hub
+address, so sibling containers on the same bridge and a Hub elsewhere cannot
+be reached with the firewall on.
 
 ## Build the Image
 
