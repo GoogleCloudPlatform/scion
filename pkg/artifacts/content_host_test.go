@@ -356,7 +356,7 @@ func TestContentHostCredentialsChangeNothing(t *testing.T) {
 	// two openSharedLink calls cannot change the view capability expiry in
 	// Content-Security-Policy. Offset from wall clock to confirm the seam is
 	// used.
-	fixed := time.Now().Add(2 * time.Minute).Truncate(time.Second)
+	fixed := time.Now().UTC().Add(2 * time.Minute).Truncate(time.Second)
 	f.svc.nowFn = func() time.Time { return fixed }
 	bare := f.openSharedLink(testContentURL, testContentHost, token, nil)
 	withCreds := f.openSharedLink(testContentURL, testContentHost, token, map[string]string{
