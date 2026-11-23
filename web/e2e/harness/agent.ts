@@ -141,6 +141,8 @@ export interface DecisionPromptInput {
   choices: ChoiceOptionInput[];
   /** Optional recommended choice id or label. */
   default?: string;
+  /** Optional free-form Other option (`true` for the default label). */
+  allow_other?: boolean | { label?: string; description?: string; placeholder?: string };
 }
 
 export interface AgentRecipientOptions {
