@@ -146,6 +146,7 @@ var requestPathSites = []requestPathSite{
 	{"port_view.go", "redirectToPortLink", "URL.EscapedPath", 1, "routing: builds the relative Location of the port link; never logged"},
 	{"proxy_write_guard.go", "acceptableWriteBody", "URL.Path", 2, "comparison: matches the upload and policy report routes for the accepted body types; never logged"},
 	{"proxy_write_guard.go", "isStateChangingAPIRequest", "URL.Path", 1, "comparison: limits the proxy-mode request checks to /api/v1 routes; never logged"},
+	{"proxy_write_guard.go", "isStateChangingWebAuthRequest", "URL.Path", 1, "comparison: limits the web proxy-mode request checks to /auth/* (excluding /auth/test-identity/redeem) and /api/v1/auth/test-login; never logged"},
 	{"pty_handlers.go", "Server.handleAgentPTY", "URL.Path", 1, "routing: extracts the agent id"},
 	{"redact.go", "IsCredentialURL", "URL(bare)", 1, "the redaction predicate"},
 	{"redact.go", "RedactURL", "URL(bare)", 1, "the redaction helper"},

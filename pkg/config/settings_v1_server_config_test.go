@@ -550,6 +550,7 @@ func TestVersionedEnvKeyMapper_DeepServerNesting(t *testing.T) {
 		// JWT proxy auth provider keys
 		{"SCION_SERVER_AUTH_PROXY_PROVIDER", "server.auth.proxy.provider"},
 		{"SCION_SERVER_AUTH_PROXY_JWT_HEADER", "server.auth.proxy.jwt.header"},
+		{"SCION_SERVER_AUTH_PROXY_JWT_IDENTITY_HEADERS", "server.auth.proxy.jwt.identity_headers"},
 		{"SCION_SERVER_AUTH_PROXY_JWT_ALGORITHM", "server.auth.proxy.jwt.algorithm"},
 		{"SCION_SERVER_AUTH_PROXY_JWT_ISSUER", "server.auth.proxy.jwt.issuer"},
 		{"SCION_SERVER_AUTH_PROXY_JWT_AUDIENCE", "server.auth.proxy.jwt.audience"},
@@ -980,4 +981,42 @@ server:
 	gc := ConvertV1ServerToGlobalConfig(vs.Server)
 	assert.Equal(t, "info", gc.LogLevel)
 	assert.Empty(t, ConvertGlobalToV1ServerConfig(gc).LogFormat)
+}
+
+func TestV1JWTAuthConfig_IdentityHeaders_SchemaAndRoundTrip(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+server:
+  auth:
+    mode: proxy
+    proxy:
+      provider: jwt
+      jwt:
+        header: X-Custom-JWT
+        identity_headers:
+          - X-Proxy-User-Email
+          - X-Proxy-User-Id
+        algorithm: RS256
+        jwks_url: https://auth.example.com/.well-known/jwks.json
+`)
+	_, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+
+	var vs VersionedSettings
+	require.NoError(t, yaml.Unmarshal(data, &vs))
+	require.NotNil(t, vs.Server)
+	require.NotNil(t, vs.Server.Auth)
+	require.NotNil(t, vs.Server.Auth.Proxy)
+	require.NotNil(t, vs.Server.Auth.Proxy.JWT)
+	assert.Equal(t, []string{"X-Proxy-User-Email", "X-Proxy-User-Id"}, vs.Server.Auth.Proxy.JWT.IdentityHeaders)
+
+	gc := ConvertV1ServerToGlobalConfig(vs.Server)
+	require.NotNil(t, gc.Auth.Proxy)
+	require.NotNil(t, gc.Auth.Proxy.JWT)
+	assert.Equal(t, []string{"X-Proxy-User-Email", "X-Proxy-User-Id"}, gc.Auth.Proxy.JWT.IdentityHeaders)
+
+	rt := ConvertGlobalToV1ServerConfig(gc)
+	require.NotNil(t, rt.Auth.Proxy)
+	require.NotNil(t, rt.Auth.Proxy.JWT)
+	assert.Equal(t, []string{"X-Proxy-User-Email", "X-Proxy-User-Id"}, rt.Auth.Proxy.JWT.IdentityHeaders)
 }

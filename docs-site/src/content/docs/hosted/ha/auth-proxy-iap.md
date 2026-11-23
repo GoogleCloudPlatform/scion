@@ -163,6 +163,9 @@ server:
       provider: jwt
       jwt:
         header: X-Auth-Proxy-JWT     # default
+        identity_headers:            # optional: extra proxy user headers stripped from agent port proxy requests
+          - X-Auth-Proxy-Email
+          - X-Auth-Proxy-User-Id
         algorithm: RS256             # required; asymmetric algorithms only
         issuer: https://auth.example.com
         audience: scion-hub
