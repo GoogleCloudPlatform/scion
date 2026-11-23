@@ -39,8 +39,10 @@ import {
   validateGitRemote,
 } from '../../client/git-remote.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
+import { current, projectsRoot } from '../../client/crumbs.js';
 import type { PageData } from '../../shared/types.js';
 import { can, isEmptyPerAgentWorkspace } from '../../shared/types.js';
+import '../shared/breadcrumb.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
@@ -535,20 +537,6 @@ export class ScionPageProjectCreate extends LitElement {
   static override styles = css`
     :host {
       display: block;
-    }
-
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
     }
 
     .page-header {
@@ -1322,10 +1310,9 @@ export class ScionPageProjectCreate extends LitElement {
 
   override render() {
     return html`
-      <a href="/projects" class="back-link">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to Projects
-      </a>
+      <scion-breadcrumb
+        .crumbs=${[projectsRoot(), current('New project', false)]}
+      ></scion-breadcrumb>
 
       <div class="page-header">
         <h1>

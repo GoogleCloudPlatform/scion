@@ -47,7 +47,9 @@ interface HarnessConfigEntry {
 }
 
 import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
-import { projectDisplayName } from '../../client/project-label.js';
+import { agentParentTrail, current, type Named } from '../../client/crumbs.js';
+import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
+import '../shared/breadcrumb.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { isFlatBroker, runtimeTargetLabel } from '../../shared/runtime-target.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
@@ -230,20 +232,6 @@ export class ScionPageAgentCreate extends LitElement {
   static override styles = css`
     :host {
       display: block;
-    }
-
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
     }
 
     .page-header {
@@ -1023,11 +1011,27 @@ export class ScionPageAgentCreate extends LitElement {
   // Render
   // ═══════════════════════════════════════════════════════════════════
 
+  private parentCrumbs(allowPending: boolean) {
+    if (this.sourceProject) {
+      const named: Named = {
+        id: this.sourceProject.id,
+        label: projectDisplayName(this.sourceProject, this.sourceProject.id),
+      };
+      return agentParentTrail(named);
+    }
+    if (this.projectFromUrl && this.projectId.trim()) {
+      const cached = projectLabelNow(this.projectId);
+      return agentParentTrail(allowPending ? cached : { id: cached.id, label: cached.label });
+    }
+    return agentParentTrail(null);
+  }
+
   override render() {
     // After the first load the form stays mounted during a reload, so the
     // user's Additional Options edits (kept in the form) survive it.
     if (this.loading && !this.loadedOnce) {
       return html`
+        <scion-breadcrumb .crumbs=${this.parentCrumbs(true)}></scion-breadcrumb>
         <div class="loading-state">
           <sl-spinner></sl-spinner>
           <p>Loading...</p>
@@ -1035,19 +1039,10 @@ export class ScionPageAgentCreate extends LitElement {
       `;
     }
 
-    const sourceProjectLabel = this.sourceProject
-      ? projectDisplayName(this.sourceProject, this.sourceProject.id)
-      : '';
-    const backHref = this.sourceProject ? `/projects/${this.sourceProject.id}` : '/agents';
-    const backLabel = this.sourceProject
-      ? `To ${sourceProjectLabel || 'Project'}`
-      : 'Back to Agents';
+    const crumbs = [...this.parentCrumbs(false), current('New agent', false)];
 
     return html`
-      <a href="${backHref}" class="back-link" title=${sourceProjectLabel || nothing}>
-        <sl-icon name="arrow-left"></sl-icon>
-        ${backLabel}
-      </a>
+      <scion-breadcrumb .crumbs=${crumbs}></scion-breadcrumb>
 
       <div class="page-header">
         <h1>

@@ -54,7 +54,7 @@ import {
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
 import { agentParentTrail, current, type Named } from '../../client/crumbs.js';
-import { projectDisplayName } from '../../client/project-label.js';
+import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
 import { isZeroDurationLimit } from '../../shared/duration-limit.js';
 
 interface AgentNotificationsResponse {
@@ -1019,11 +1019,17 @@ export class ScionPageAgentDetail extends LitElement {
         label: projectLabel || this.project.id,
       };
     }
-    if (this.agent?.projectId && projectLabel) {
-      return {
-        id: this.agent.projectId,
-        label: projectLabel,
-      };
+    if (this.agent?.projectId) {
+      if (projectLabel) {
+        return {
+          id: this.agent.projectId,
+          label: projectLabel,
+        };
+      }
+      const cached = projectLabelNow(this.agent.projectId);
+      if (!cached.pending) {
+        return cached;
+      }
     }
     return null;
   }

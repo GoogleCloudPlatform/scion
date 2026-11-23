@@ -25,8 +25,10 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current, projectTrail, projectsRoot, type Named } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
-import { projectDisplayName } from '../../client/project-label.js';
+import { projectDisplayName, projectLabelNow } from '../../client/project-label.js';
+import '../shared/breadcrumb.js';
 import '../shared/schedule-list.js';
 
 interface Project {
@@ -62,20 +64,6 @@ export class ScionPageProjectSchedules extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0;
-    }
-
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-      font-size: 0.875rem;
-      color: var(--scion-primary, #3b82f6);
-      text-decoration: none;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      text-decoration: underline;
     }
 
     .subtitle {
@@ -170,9 +158,27 @@ export class ScionPageProjectSchedules extends LitElement {
     }
   }
 
+  private projectNamed(allowPending: boolean): Named | null {
+    if (!this.projectId) return null;
+    if (this.project) {
+      return {
+        id: this.projectId,
+        label: projectDisplayName(this.project, this.projectId),
+      };
+    }
+    const cached = projectLabelNow(this.projectId);
+    return allowPending ? cached : { id: cached.id, label: cached.label };
+  }
+
+  private ancestorCrumbs(allowPending: boolean) {
+    const project = this.projectNamed(allowPending);
+    return project ? projectTrail(project) : [projectsRoot()];
+  }
+
   override render() {
     if (this.loading) {
       return html`
+        <scion-breadcrumb .crumbs=${this.ancestorCrumbs(true)}></scion-breadcrumb>
         <div class="loading-state">
           <sl-spinner></sl-spinner>
           <p>Loading...</p>
@@ -182,6 +188,7 @@ export class ScionPageProjectSchedules extends LitElement {
 
     if (this.error) {
       return html`
+        <scion-breadcrumb .crumbs=${this.ancestorCrumbs(false)}></scion-breadcrumb>
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <h2>Failed to Load</h2>
@@ -195,12 +202,10 @@ export class ScionPageProjectSchedules extends LitElement {
     }
 
     const projectName = projectDisplayName(this.project, this.projectId) || 'Project';
+    const crumbs = [...this.ancestorCrumbs(false), current('Schedules', false)];
 
     return html`
-      <a class="back-link" href="/projects/${encodeURIComponent(this.projectId)}">
-        <sl-icon name="arrow-left"></sl-icon>
-        Back to ${projectName}
-      </a>
+      <scion-breadcrumb .crumbs=${crumbs}></scion-breadcrumb>
 
       <div class="header">
         <h1>Recurring Schedules</h1>

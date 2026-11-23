@@ -36,6 +36,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { agentParentTrail, current, type Named } from '../../client/crumbs.js';
+import { cachedProjectLabel, projectDisplayName } from '../../client/project-label.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { navigateTo } from '../../client/navigation.js';
 import { lifecycleActionErrorMessage } from '../../client/agent-delete.js';
@@ -553,8 +555,8 @@ export class ScionPageAgentEdit extends LitElement {
               Reincarnate…
             </sl-button>`
           : nothing}
-        <a href="/agents/${encodeURIComponent(this.agentId)}" class="back" data-testid="back"
-          >Back to agent</a
+        <a href="/agents/${encodeURIComponent(this.agentId)}" class="cancel-link" data-testid="back"
+          >Cancel</a
         >
       </div>
     `;
@@ -577,19 +579,53 @@ export class ScionPageAgentEdit extends LitElement {
     </sl-radio-group>`;
   }
 
+  private projectNamed(): Named | null {
+    const projectId = this.agent?.projectId;
+    if (!projectId) return null;
+    const label =
+      projectDisplayName({
+        name: this.agent?.project,
+        slug: this.agent?.projectSlug,
+      }) || cachedProjectLabel(projectId);
+    return { id: projectId, label: label || projectId };
+  }
+
+  private ancestorCrumbs(allowPending: boolean) {
+    const parent = agentParentTrail(this.projectNamed());
+    if (!this.agentId) return parent;
+    const agentLabel = this.agent?.name || this.agentId;
+    return [
+      ...parent,
+      {
+        label: agentLabel,
+        href: `/agents/${encodeURIComponent(this.agentId)}`,
+        truncate: true,
+        ...(allowPending && !this.agent ? { pending: true } : {}),
+      },
+    ];
+  }
+
   override render() {
     if (this.notFound) return html`<scion-page-404></scion-page-404>`;
     if (this.loading) {
-      return html`<div class="loading"><sl-spinner></sl-spinner></div>`;
+      return html`
+        <scion-breadcrumb .crumbs=${this.ancestorCrumbs(true)}></scion-breadcrumb>
+        <div class="loading"><sl-spinner></sl-spinner></div>
+      `;
     }
     const agent = this.agent;
     if (!agent) {
-      return html`<sl-alert variant="danger" open
-        >${this.error ?? 'Failed to load agent'}</sl-alert
-      >`;
+      return html`
+        <scion-breadcrumb .crumbs=${this.ancestorCrumbs(false)}></scion-breadcrumb>
+        <sl-alert variant="danger" open>${this.error ?? 'Failed to load agent'}</sl-alert>
+      `;
     }
     return html`
       <scion-detail-header heading=${agent.name || this.agentId}>
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[...this.ancestorCrumbs(false), current('Edit', false)]}
+        ></scion-breadcrumb>
         ${agentStatusBadge(agent)}
       </scion-detail-header>
       ${this.conflict
@@ -682,7 +718,7 @@ export class ScionPageAgentEdit extends LitElement {
       gap: 0.75rem;
       margin-top: 1rem;
     }
-    .back {
+    .cancel-link {
       margin-left: auto;
     }
   `;

@@ -311,7 +311,11 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'renderHeader',
       icon: 'sl-icon.[file-earmark-richtext]',
-      back: [['/projects/p-1', 'p-1']],
+      crumbs: [
+        ['Projects', '/projects'],
+        ['p-1', '/projects/p-1'],
+        [LONG_NAME, undefined],
+      ],
       badges: [],
       meta: ['meta'],
       // The actions hide while the artifact is being edited.
@@ -335,7 +339,11 @@ const cases: Array<[string, PageCase]> = [
       },
       method: 'render',
       icon: null,
-      back: [['/settings?tab=service-accounts', 'Hub Resources']],
+      crumbs: [
+        ['Hub Resources', '/settings'],
+        ['Service Accounts', '/settings?tab=service-accounts'],
+        [`${LONG_NAME}@example-project.iam.gserviceaccount.com`, undefined],
+      ],
       badges: [],
       meta: ['display-name'],
       noActions: {
@@ -413,6 +421,10 @@ const BACK_LINK_SELECTORS = [
   '.header-top',
   '.breadcrumb',
   '.breadcrumb a',
+  '.crumbs',
+  '.crumbs a',
+  '.editor-back-link',
+  '.back',
 ];
 
 const loaded = new Map<string, Map<string, string>>();
@@ -541,65 +553,115 @@ describe('project detail linked badge', () => {
   });
 });
 
-describe('project-scoped template and harness config back links', () => {
-  it.each([
+describe('project-scoped template and harness config breadcrumbs', () => {
+  it.each<[string, CrumbTuple[]]>([
     [
       'template',
       [
-        ['/projects/p-1/settings?tab=templates', 'Templates'],
-        ['/projects/p-1/settings', 'p-1 Settings'],
+        ['Projects', '/projects'],
+        ['p-1', '/projects/p-1'],
+        ['Settings', '/projects/p-1/settings'],
+        ['Templates', '/projects/p-1/settings?tab=templates'],
+        [LONG_NAME, undefined],
       ],
     ],
     [
       'harness config',
       [
-        ['/projects/p-1/settings?tab=harness-configs', 'Harness Configs'],
-        ['/projects/p-1/settings', 'p-1 Settings'],
+        ['Projects', '/projects'],
+        ['p-1', '/projects/p-1'],
+        ['Settings', '/projects/p-1/settings'],
+        ['Harness Configs', '/projects/p-1/settings?tab=harness-configs'],
+        [LONG_NAME, undefined],
       ],
     ],
-  ])('%s hands both links to the back slot in order', (label, expected) => {
+  ])('%s hands the project-scoped breadcrumb to the back slot', (label, expected) => {
     const c = cases.find(([l]) => l === label)![1];
     const header = renderHeader({ ...c, state: { ...c.state, projectId: 'p-1' } });
     const back = Array.from(header.querySelectorAll(':scope > [slot="back"]'));
-    expect(back.map((n) => n.tagName.toLowerCase())).toEqual([
-      'scion-back-link',
-      'scion-back-link',
-    ]);
-    expect(back.map((n) => [n.getAttribute('href'), n.textContent?.trim()])).toEqual(expected);
+    expect(back.map((n) => n.tagName.toLowerCase())).toEqual(['scion-breadcrumb']);
+    expect(crumbTuples(header)).toEqual(expected);
   });
 });
 
 /**
- * Error states have no header, so the back link stands alone there; it is
- * the same shared scion-back-link.
+ * Non-detail-header pages migrated to scion-breadcrumb keep no copy of
+ * back-link or ad-hoc breadcrumb CSS.
  */
 describe.each([
-  ['broker', './broker-detail.js', 'scion-page-broker-detail', '/brokers', 'Back to Brokers'],
-  ['skill', './skill-detail.js', 'scion-page-skill-detail', '/skills', 'Back to Skills'],
+  ['project-settings', './project-settings.js', 'scion-page-project-settings'],
+  ['project-schedules', './project-schedules.js', 'scion-page-project-schedules'],
+  ['project-decisions', './project-decisions.js', 'scion-page-project-decisions'],
+  ['project-create', './project-create.js', 'scion-page-project-create'],
+  ['agent-create', './agent-create.js', 'scion-page-agent-create'],
+  ['agent-edit', './agent-edit.js', 'scion-page-agent-edit'],
+])('%s page navigation CSS guard', (_label, module, tag) => {
+  it('keeps no copy of the back-link or ad-hoc breadcrumb CSS', async () => {
+    await import(/* @vite-ignore */ module);
+    const ctor = customElements.get(tag) as unknown as { elementStyles: CSSResult[] };
+    const rules = styleRules(ctor.elementStyles.map((s) => s.cssText).join('\n'));
+    for (const sel of BACK_LINK_SELECTORS) expect(rules.has(sel), sel).toBe(false);
+  });
+});
+
+/**
+ * Error states have no header, so the navigation stands alone there: either
+ * the shared scion-breadcrumb (migrated pages) or scion-back-link (remaining).
+ */
+describe.each<[string, string, string, string, string, CrumbTuple[] | undefined]>([
+  [
+    'broker',
+    './broker-detail.js',
+    'scion-page-broker-detail',
+    '/brokers',
+    'Back to Brokers',
+    undefined,
+  ],
+  ['skill', './skill-detail.js', 'scion-page-skill-detail', '/skills', 'Back to Skills', undefined],
   [
     'group',
     './admin-group-detail.js',
     'scion-page-admin-group-detail',
     '/admin/groups',
     'Back to Groups',
+    undefined,
   ],
-  ['project', './project-detail.js', 'scion-page-project-detail', '/projects', 'Projects', true],
+  [
+    'project',
+    './project-detail.js',
+    'scion-page-project-detail',
+    '/projects',
+    'Projects',
+    [['Projects', '/projects']],
+  ],
   [
     'skill registry',
     './admin-skill-registry-detail.js',
     'scion-page-admin-skill-registry-detail',
     '/admin/skill-registries',
     'Back to Registries',
+    undefined,
   ],
-  ['role', './admin-role-detail.js', 'scion-page-admin-role-detail', '/admin/roles', 'Roles'],
+  [
+    'role',
+    './admin-role-detail.js',
+    'scion-page-admin-role-detail',
+    '/admin/roles',
+    'Roles',
+    undefined,
+  ],
   [
     'gcp service account',
     './gcp-service-account-detail.js',
     'scion-page-gcp-service-account-detail',
     '/settings?tab=service-accounts',
     'Hub Resources',
+    [
+      ['Hub Resources', '/settings'],
+      ['Service Accounts', '/settings?tab=service-accounts'],
+    ],
   ],
-])('%s error state', (_label, module, tag, href, text, usesBreadcrumb) => {
+])('%s error state', (_label, module, tag, href, text, expectedCrumbs) => {
   it('renders the shared navigation on its own', async () => {
     await import(/* @vite-ignore */ module);
     const el = document.createElement(tag);
@@ -607,11 +669,11 @@ describe.each([
     const host = document.createElement('div');
     render((el as unknown as { render: () => TemplateResult }).render(), host);
     expect(host.querySelector('scion-detail-header')).toBeNull();
-    if (usesBreadcrumb) {
+    if (expectedCrumbs) {
       const crumbs = host.querySelectorAll('scion-breadcrumb');
       expect(crumbs).toHaveLength(1);
       expect(crumbs[0].hasAttribute('slot')).toBe(false);
-      expect(crumbTuples(host)).toEqual([[text, href]]);
+      expect(crumbTuples(host)).toEqual(expectedCrumbs);
       expect(host.querySelector('scion-back-link')).toBeNull();
     } else {
       const links = host.querySelectorAll('scion-back-link');
@@ -620,6 +682,6 @@ describe.each([
       expect(links[0].hasAttribute('slot')).toBe(false);
       expect(links[0].textContent?.trim()).toBe(text);
     }
-    expect(host.querySelector('a.back-link, .breadcrumb')).toBeNull();
+    expect(host.querySelector('a.back-link, .breadcrumb, .crumbs')).toBeNull();
   });
 });

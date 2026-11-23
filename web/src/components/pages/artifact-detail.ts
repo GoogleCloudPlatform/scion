@@ -49,8 +49,9 @@ import { customElement, property, query, state } from 'lit/decorators.js';
 
 import type { PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current, projectTrail, projectsRoot, type Named } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
-import { cachedProjectLabel } from '../../client/project-label.js';
+import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
 import { addLeaveGuard, navigateTo, stripBasePath } from '../../client/navigation.js';
 import { ACCOUNT_TEARDOWN_EVENT } from '../../utils/auth.js';
 import {
@@ -537,6 +538,8 @@ export class ScionPageArtifactDetail extends LitElement {
   pageData: PageData | null = null;
 
   @state() private projectId = '';
+  @state() private projectNamed: Named | null = null;
+  private resolvedProjectId = '';
   @state() private artifactId = '';
   /** Version in the URL; 0 shows the current version. */
   @state() private seq = 0;
@@ -1201,7 +1204,37 @@ export class ScionPageArtifactDetail extends LitElement {
     window.addEventListener(ACCOUNT_TEARDOWN_EVENT, this.onAccountTeardown);
     this.removeLeaveGuard = addLeaveGuard(() => this.onLeaveGuard());
     this.versionsCheckedAt = Date.now();
+    this.syncProjectLabel();
     void this.load();
+  }
+
+  protected override willUpdate(changed: PropertyValues): void {
+    super.willUpdate(changed);
+    if (changed.has('projectId') || changed.has('data')) {
+      this.syncProjectLabel();
+    }
+  }
+
+  private syncProjectLabel(): void {
+    if (this.notFound || this.data?.scopeDeleted || this.origin === 'artifacts') {
+      this.projectNamed = null;
+      this.resolvedProjectId = '';
+      return;
+    }
+    const id = this.homeProject.trim();
+    if (!id) {
+      this.projectNamed = null;
+      this.resolvedProjectId = '';
+      return;
+    }
+    if (id === this.resolvedProjectId) return;
+    this.resolvedProjectId = id;
+    this.projectNamed = projectLabelNow(id);
+    void resolveProjectLabel(id).then((resolved) => {
+      if (this.homeProject.trim() === id) {
+        this.projectNamed = resolved;
+      }
+    });
   }
 
   private get versionPath(): string {
@@ -1658,27 +1691,54 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   /**
-   * Where the back link goes, and where a delete returns to: the Artifacts
-   * list when the page was opened from it (ptone/scion#6847) or the home
-   * project was deleted, the home project otherwise.
+   * Where a delete returns to: the Artifacts list when the page was opened
+   * from it (ptone/scion#6847) or the home project was deleted, the home
+   * project otherwise.
    */
-  private get backTarget(): { href: string; label: string; truncate: boolean; tooltip: string } {
+  private get backTargetHref(): string {
     if (this.data?.scopeDeleted || this.origin === 'artifacts') {
-      return { href: '/artifacts', label: 'Artifacts', truncate: false, tooltip: '' };
+      return '/artifacts';
     }
-    const projectName = cachedProjectLabel(this.homeProject);
-    return {
-      href: `/projects/${encodeURIComponent(this.homeProject)}`,
-      label: projectName || 'Project',
-      truncate: !!projectName,
-      tooltip: projectName,
-    };
+    return `/projects/${encodeURIComponent(this.homeProject)}`;
+  }
+
+  /** Ancestor breadcrumb trail (Projects / {project} or Artifacts). */
+  private parentCrumbs(allowPending: boolean) {
+    if (this.data?.scopeDeleted || this.origin === 'artifacts') {
+      return [{ label: 'Artifacts', href: '/artifacts' }];
+    }
+    const id = this.homeProject.trim();
+    if (!id) {
+      return [projectsRoot()];
+    }
+    const resolved = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
+    const project: Named = allowPending ? resolved : { id: resolved.id, label: resolved.label };
+    return projectTrail(project);
+  }
+
+  /** Loaded breadcrumb trail, adding the version crumb on `/v/:seq`. */
+  private headerCrumbs() {
+    const a = this.data!.artifact;
+    const parent = this.parentCrumbs(true);
+    if (this.seq > 0) {
+      const latestHref = artifactPagePath(
+        { id: this.artifactId || a.id, scopeRef: this.homeProject },
+        0,
+        this.origin
+      );
+      return [
+        ...parent,
+        { label: a.title, href: latestHref, truncate: true },
+        current(`Version ${this.seq}`, false),
+      ];
+    }
+    return [...parent, current(a.title)];
   }
 
   /** After a delete: say so, and go back to where the artifact was listed (mock S8). */
   private onDeleted(deleted: Artifact): void {
     this.deleteOpen = false;
-    const target = this.backTarget.href;
+    const target = this.backTargetHref;
     showToast(`Deleted “${deleted.title}”.`, 'success');
     navigateTo(target);
   }
@@ -2738,13 +2798,17 @@ export class ScionPageArtifactDetail extends LitElement {
 
   override render(): TemplateResult | typeof nothing {
     if (this.loading) {
-      return html`<div class="loading-state"><sl-spinner></sl-spinner></div>`;
+      return html`
+        <scion-breadcrumb .crumbs=${this.parentCrumbs(true)}></scion-breadcrumb>
+        <div class="loading-state"><sl-spinner></sl-spinner></div>
+      `;
     }
     if (this.notFound) {
       return html`${this.renderReviewNotice()}<scion-page-404></scion-page-404>`;
     }
     if (this.error) {
       return html`
+        <scion-breadcrumb .crumbs=${this.parentCrumbs(false)}></scion-breadcrumb>
         ${this.renderReviewNotice()}
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
@@ -2960,16 +3024,9 @@ export class ScionPageArtifactDetail extends LitElement {
       (!!v || this.canEdit || this.canReview || accessActions || this.canRetire);
     // A deleted home project has no page: go back to the artifacts list
     // instead (ptone/scion#4588).
-    const back = this.backTarget;
     return html`
       <scion-detail-header heading=${a.title}>
-        <scion-back-link
-          slot="back"
-          href=${back.href}
-          ?truncate=${back.truncate}
-          tooltip=${back.tooltip}
-          >${back.label}</scion-back-link
-        >
+        <scion-breadcrumb slot="back" .crumbs=${this.headerCrumbs()}></scion-breadcrumb>
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
         ${this.currentIsReview
           ? html`<sl-badge variant="warning" pill>

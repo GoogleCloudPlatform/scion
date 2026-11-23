@@ -23,14 +23,15 @@
  * (/settings/harness-configs/{id}).
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, HarnessConfig } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current, scopedResourceTrail, type Named } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
-import { cachedProjectLabel } from '../../client/project-label.js';
+import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
 import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
@@ -98,6 +99,11 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   @property({ type: String })
   projectId = '';
+
+  @state()
+  private projectNamed: Named | null = null;
+
+  private resolvedProjectId = '';
 
   @property({ type: String })
   harnessConfigId = '';
@@ -520,33 +526,55 @@ export class ScionPageHarnessConfigDetail extends LitElement {
         }
       }
     }
+    this.syncProjectLabel();
     void this.loadHarnessConfig();
   }
 
-  /** Back-navigation links — project scope returns to project settings, hub scope to Hub Resources. */
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    if (changed.has('projectId')) {
+      this.syncProjectLabel();
+    }
+  }
+
+  private syncProjectLabel(): void {
+    const id = this.projectId.trim();
+    if (!id) {
+      this.projectNamed = null;
+      this.resolvedProjectId = '';
+      return;
+    }
+    if (id === this.resolvedProjectId) return;
+    this.resolvedProjectId = id;
+    this.projectNamed = projectLabelNow(id);
+    void resolveProjectLabel(id).then((resolved) => {
+      if (this.projectId.trim() === id) {
+        this.projectNamed = resolved;
+      }
+    });
+  }
+
+  private projectParentCrumbs(allowPending: boolean) {
+    const id = this.projectId.trim();
+    const resolved = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
+    const project: Named = allowPending ? resolved : { id: resolved.id, label: resolved.label };
+    return scopedResourceTrail(
+      { kind: 'project', project },
+      {
+        plural: 'Harness Configs',
+        projectTab: 'harness-configs',
+        hubTab: 'harness-configs',
+      }
+    );
+  }
+
+  /** Non-project back-navigation links (hub scope migrates in Phase 2b). */
   private backLinks(): Array<{
     href: string;
     label: string;
     truncate?: boolean;
     tooltip?: string;
   }> {
-    if (this.projectId) {
-      const projectName = cachedProjectLabel(this.projectId);
-      const settingsLabel = projectName ? `${projectName} Settings` : 'Project Settings';
-      const encodedProjectId = encodeURIComponent(this.projectId);
-      return [
-        {
-          href: `/projects/${encodedProjectId}/settings?tab=harness-configs`,
-          label: 'Harness Configs',
-        },
-        {
-          href: `/projects/${encodedProjectId}/settings`,
-          label: settingsLabel,
-          truncate: !!projectName,
-          tooltip: projectName ? settingsLabel : '',
-        },
-      ];
-    }
     return [{ href: '/settings?tab=harness-configs', label: 'Hub Resources' }];
   }
 
@@ -620,10 +648,18 @@ export class ScionPageHarnessConfigDetail extends LitElement {
 
   override render() {
     if (this.loading) {
-      return html`<div class="loading-state"><sl-spinner></sl-spinner></div>`;
+      return html`
+        ${this.projectId
+          ? html`<scion-breadcrumb .crumbs=${this.projectParentCrumbs(true)}></scion-breadcrumb>`
+          : nothing}
+        <div class="loading-state"><sl-spinner></sl-spinner></div>
+      `;
     }
     if (this.error) {
       return html`
+        ${this.projectId
+          ? html`<scion-breadcrumb .crumbs=${this.projectParentCrumbs(false)}></scion-breadcrumb>`
+          : nothing}
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error}</p>
@@ -644,16 +680,21 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     const canDelete = can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage');
     return html`
       <scion-detail-header heading=${hc.displayName || hc.name}>
-        ${this.backLinks().map(
-          (link) =>
-            html`<scion-back-link
+        ${this.projectId
+          ? html`<scion-breadcrumb
               slot="back"
-              href=${link.href}
-              ?truncate=${!!link.truncate}
-              tooltip=${link.tooltip ?? ''}
-              >${link.label}</scion-back-link
-            >`
-        )}
+              .crumbs=${[...this.projectParentCrumbs(true), current(hc.displayName || hc.name)]}
+            ></scion-breadcrumb>`
+          : this.backLinks().map(
+              (link) =>
+                html`<scion-back-link
+                  slot="back"
+                  href=${link.href}
+                  ?truncate=${!!link.truncate}
+                  tooltip=${link.tooltip ?? ''}
+                  >${link.label}</scion-back-link
+                >`
+            )}
         <sl-icon slot="icon" name="sliders"></sl-icon>
         ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
         ${hc.description

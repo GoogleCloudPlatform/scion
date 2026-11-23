@@ -401,24 +401,30 @@ describe('artifact page', () => {
   });
 
   it("links back to the artifact's own project, not the one in the URL", async () => {
-    // The back link is the shared scion-back-link in the header's back slot.
-    const backHref = (page: Element, expectedLabel: string): string | null => {
-      const link = page.shadowRoot!.querySelector(
-        'scion-detail-header > scion-back-link[slot="back"]'
-      );
-      expect(link?.textContent?.trim()).toBe(expectedLabel);
-      return link!.getAttribute('href');
+    const projectCrumb = (page: Element) => {
+      const bc = page.shadowRoot!.querySelector<
+        HTMLElement & { crumbs: readonly { label: string; href?: string }[] }
+      >('scion-detail-header > scion-breadcrumb[slot="back"]');
+      return bc?.crumbs.map((c) => [c.label, c.href]) ?? [];
     };
     mockFetch(artifact('design.md', 'text/markdown'));
     const el = await mount(true); // URL project is p-1; scopeRef is p-1 too
-    expect(backHref(el, 'p-1')).toBe('/projects/p-1');
+    expect(projectCrumb(el)).toEqual([
+      ['Projects', '/projects'],
+      ['p-1', '/projects/p-1'],
+      ['Design', undefined],
+    ]);
     document.body.innerHTML = '';
 
     const meta = artifact('design.md', 'text/markdown');
     meta.artifact.scopeRef = 'home-project';
     mockFetch(meta);
     const el2 = await mount(true);
-    expect(backHref(el2, 'home-project')).toBe('/projects/home-project');
+    expect(projectCrumb(el2)).toEqual([
+      ['Projects', '/projects'],
+      ['home-project', '/projects/home-project'],
+      ['Design', undefined],
+    ]);
   });
 
   it('links back to the artifacts list when the home project was deleted (ptone/scion#4588)', async () => {
@@ -428,11 +434,13 @@ describe('artifact page', () => {
       { crossProjectSharing: true }
     );
     const el = await mount(true);
-    const link = el.shadowRoot!.querySelector(
-      'scion-detail-header > scion-back-link[slot="back"]'
-    )!;
-    expect(link.textContent!.trim()).toBe('Artifacts');
-    expect(link.getAttribute('href')).toBe('/artifacts');
+    const bc = el.shadowRoot!.querySelector<
+      HTMLElement & { crumbs: readonly { label: string; href?: string }[] }
+    >('scion-detail-header > scion-breadcrumb[slot="back"]')!;
+    expect(bc.crumbs.map((c) => [c.label, c.href])).toEqual([
+      ['Artifacts', '/artifacts'],
+      ['Design', undefined],
+    ]);
     const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
       homeDeleted: boolean;
     };
@@ -2310,11 +2318,13 @@ describe('artifact page: refresh, origin and version labels', () => {
       write: () => new Response(null, { status: 204 }),
     });
     const el = await mountAs(`/projects/p-1/artifacts/${ID}?from=artifacts`);
-    const back = el.shadowRoot!.querySelector(
-      'scion-detail-header > scion-back-link[slot="back"]'
-    )!;
-    expect(text(back)).toBe('Artifacts');
-    expect(back.getAttribute('href')).toBe('/artifacts');
+    const bc = el.shadowRoot!.querySelector<
+      HTMLElement & { crumbs: readonly { label: string; href?: string }[] }
+    >('scion-detail-header > scion-breadcrumb[slot="back"]')!;
+    expect(bc.crumbs.map((c) => [c.label, c.href])).toEqual([
+      ['Artifacts', '/artifacts'],
+      ['Design', undefined],
+    ]);
 
     const nav = onNav();
     try {
@@ -2344,11 +2354,14 @@ describe('artifact page: refresh, origin and version labels', () => {
       write: () => new Response(null, { status: 204 }),
     });
     const el = await mountAs();
-    const back = el.shadowRoot!.querySelector(
-      'scion-detail-header > scion-back-link[slot="back"]'
-    )!;
-    expect(text(back)).toBe('p-1');
-    expect(back.getAttribute('href')).toBe('/projects/p-1');
+    const bc = el.shadowRoot!.querySelector<
+      HTMLElement & { crumbs: readonly { label: string; href?: string }[] }
+    >('scion-detail-header > scion-breadcrumb[slot="back"]')!;
+    expect(bc.crumbs.map((c) => [c.label, c.href])).toEqual([
+      ['Projects', '/projects'],
+      ['p-1', '/projects/p-1'],
+      ['Design', undefined],
+    ]);
     const nav = onNav();
     try {
       headerButton(el, 'Delete…').click();

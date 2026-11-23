@@ -46,6 +46,47 @@ export function projectTrail(p: Named): Crumb[] {
   return [projectsRoot(), entity(p.label, `/projects/${enc(p.id)}`, p.pending)];
 }
 
+/** `Projects / {project} / Settings` (all linked). */
+export function projectSettingsTrail(p: Named): Crumb[] {
+  return [...projectTrail(p), { label: 'Settings', href: `/projects/${enc(p.id)}/settings` }];
+}
+
+export type ResourceScope =
+  | { kind: 'project'; project: Named }
+  | { kind: 'user' }
+  | { kind: 'hub' };
+
+export interface ScopedResourceSpec {
+  plural: string;
+  projectTab: string;
+  hubTab: string;
+  profilePath?: string;
+}
+
+/** Parent chain for template / harness-config / service-account detail pages. */
+export function scopedResourceTrail(scope: ResourceScope, res: ScopedResourceSpec): Crumb[] {
+  switch (scope.kind) {
+    case 'project':
+      return [
+        ...projectSettingsTrail(scope.project),
+        {
+          label: res.plural,
+          href: `/projects/${enc(scope.project.id)}/settings?tab=${res.projectTab}`,
+        },
+      ];
+    case 'hub':
+      return [
+        { label: 'Hub Resources', href: '/settings' },
+        { label: res.plural, href: `/settings?tab=${res.hubTab}` },
+      ];
+    case 'user':
+      return [
+        { label: 'Profile', href: '/profile' },
+        { label: res.plural, href: res.profilePath! },
+      ];
+  }
+}
+
 /** Agent parent trail: `Projects / {project}` when known, else `Agents`. */
 export function agentParentTrail(project: Named | null): Crumb[] {
   return project ? projectTrail(project) : [{ label: 'Agents', href: '/agents' }];
