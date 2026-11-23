@@ -35,6 +35,6 @@ func (execNilAgentRowStore) GetAgent(context.Context, string) (*store.Agent, err
 // missing agent (ErrNotFound) before anything is routed or sent.
 func TestCallAgentExec_NilAgentRowNotSent(t *testing.T) {
 	s := &Server{store: execNilAgentRowStore{}}
-	_, _, err := s.callAgentExec(context.Background(), "agent-1", "launch-1", agentcontrol.RouteExecStatus, []byte(`{}`))
+	_, _, err := s.callAgentExec(context.Background(), "agent-1", "launch-1", agentcontrol.RouteExecStatus, []byte(`{}`), "")
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
