@@ -6,13 +6,17 @@ package commands
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
@@ -230,25 +234,45 @@ func metadataProtectionPreflight(cfg *metadata.Config) error {
 	}
 }
 
-// Seams and parameters for waitForRedirect.
+// maxProbeBodyBytes bounds the response body read during redirect probe
+// verification so an unexpected responder cannot cause unbounded allocation.
+const maxProbeBodyBytes = 128
+
+// Seams and parameters for waitForRedirect and verifyIPv6MetadataBlocked.
 var (
 	redirectProbeBaseURL        = "http://169.254.169.254"
 	redirectProbeAttemptTimeout = time.Second
-	redirectProbeDeadline       = 180 * time.Second
+	// redirectProbeDeadline must exceed pkg/runtime's netnsSetupTimeout (3m)
+	// so init does not time out before the setup container finishes installing
+	// rules.
+	redirectProbeDeadline = 210 * time.Second
+	// legacyRedirectProbeDeadline bounds the redirect probe on the legacy
+	// in-container path, where rules are installed synchronously before probing.
+	legacyRedirectProbeDeadline = 10 * time.Second
 	redirectProbeInterval       = 100 * time.Millisecond
 	runWaitForRedirect          = waitForRedirect
+
+	ipv6ProbeAddrs   = []string{"[fd20:ce::254]:80", "[fd00:ec2::254]:80"}
+	ipv6ProbeTimeout = 2 * time.Second
+	ipv6ProbeDial    = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, network, addr)
+	}
+	runNetnsHasIPv6      = metadata.NetnsHasIPv6
+	runVerifyIPv6Blocked = verifyIPv6MetadataBlocked
 )
 
 // waitForRedirect polls the metadata IP on the emulator's per-boot random
-// probe path until the emulator answers HTTP 204 No Content, proving that the
-// runtime's setup container has installed the nat OUTPUT REDIRECT rule.
-// Returns errMetadataProtectionUnavailable if the deadline expires or ctx is
-// cancelled.
-func waitForRedirect(ctx context.Context, probePath string) error {
-	if probePath == "" {
-		log.Error("Metadata redirect probe path is empty")
+// probe path until the emulator answers HTTP 200 OK with the expected per-boot
+// probe token, proving that the nat OUTPUT REDIRECT rule reaches this emulator
+// instance. Returns errMetadataProtectionUnavailable if the deadline expires
+// or ctx is cancelled.
+func waitForRedirect(ctx context.Context, probePath, probeToken string) error {
+	if probePath == "" || probeToken == "" {
+		log.Error("Metadata redirect probe path or token is empty")
 		return errMetadataProtectionUnavailable
 	}
+	wantToken := []byte(probeToken)
 	client := &http.Client{
 		Timeout: redirectProbeAttemptTimeout,
 		Transport: &http.Transport{
@@ -269,14 +293,27 @@ func waitForRedirect(ctx context.Context, probePath string) error {
 		}
 		resp, err := client.Do(req)
 		if err == nil {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxProbeBodyBytes+1))
 			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusNoContent {
+			switch {
+			case resp.StatusCode != http.StatusOK:
+				lastErr = fmt.Errorf("unexpected status %d", resp.StatusCode)
+			case readErr != nil:
+				lastErr = fmt.Errorf("read probe body: %w", readErr)
+			case len(body) > maxProbeBodyBytes:
+				lastErr = fmt.Errorf("probe response body exceeded %d bytes", maxProbeBodyBytes)
+			case subtle.ConstantTimeCompare(body, wantToken) == 1:
 				log.Info("Metadata redirect verified via probe")
 				return nil
+			default:
+				lastErr = errors.New("probe response token mismatch")
 			}
-			lastErr = fmt.Errorf("unexpected status %d", resp.StatusCode)
 		} else {
 			lastErr = err
+		}
+		if ctx.Err() != nil {
+			log.Error("Metadata redirect verification cancelled: %v", ctx.Err())
+			return errMetadataProtectionUnavailable
 		}
 		if time.Now().After(deadline) {
 			log.Error("Metadata redirect verification timed out after %s: %v", redirectProbeDeadline, lastErr)
@@ -291,6 +328,45 @@ func waitForRedirect(ctx context.Context, probePath string) error {
 		case <-timer.C:
 		}
 	}
+}
+
+// verifyIPv6MetadataBlocked performs a negative TCP connect probe against the
+// IPv6 cloud metadata endpoints when IPv6 is enabled in the network namespace.
+// Connection refusal, network/host unreachability, and timeout all pass; a
+// successful TCP connection fails closed with errMetadataProtectionUnavailable.
+func verifyIPv6MetadataBlocked(ctx context.Context) error {
+	if !runNetnsHasIPv6() {
+		return nil
+	}
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		reachable string
+	)
+	for _, addr := range ipv6ProbeAddrs {
+		wg.Add(1)
+		go func(target string) {
+			defer wg.Done()
+			dialCtx, cancel := context.WithTimeout(ctx, ipv6ProbeTimeout)
+			defer cancel()
+			conn, err := ipv6ProbeDial(dialCtx, "tcp", target)
+			if err == nil {
+				_ = conn.Close()
+				mu.Lock()
+				if reachable == "" {
+					reachable = target
+				}
+				mu.Unlock()
+			}
+		}(addr)
+	}
+	wg.Wait()
+	if reachable != "" {
+		log.Error("IPv6 metadata endpoint %s is reachable; refusing to start the harness", reachable)
+		return errMetadataProtectionUnavailable
+	}
+	log.Info("IPv6 metadata endpoints verified unreachable")
+	return nil
 }
 
 // removeTransportTokenOnRefusal removes the transport token file and its

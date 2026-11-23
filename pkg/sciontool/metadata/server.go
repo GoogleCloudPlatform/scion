@@ -295,6 +295,7 @@ type Server struct {
 	shutdownToken     string
 	shutdownTokenPath string
 	probePath         string
+	probeToken        string
 
 	// Hub refusals of the access token and of identity tokens (refusal.go),
 	// and the shared 429 rate-limit backoff window.
@@ -449,9 +450,12 @@ func selectLinkLocalAddress(found []string) (string, error) {
 
 // New creates a new metadata server.
 func New(cfg Config) *Server {
-	var probeBuf [32]byte
-	if _, err := rand.Read(probeBuf[:]); err != nil {
+	var probePathBuf, probeTokenBuf [32]byte
+	if _, err := rand.Read(probePathBuf[:]); err != nil {
 		panic(fmt.Sprintf("metadata: generate probe path: %v", err))
+	}
+	if _, err := rand.Read(probeTokenBuf[:]); err != nil {
+		panic(fmt.Sprintf("metadata: generate probe token: %v", err))
 	}
 	return &Server{
 		config:         cfg,
@@ -462,16 +466,24 @@ func New(cfg Config) *Server {
 		accessRefusal:  newRefusalState(),
 		idRefusal:      newRefusalState(),
 		rateLimit:      newRateLimitState(),
-		probePath:      "/" + hex.EncodeToString(probeBuf[:]),
+		probePath:      "/" + hex.EncodeToString(probePathBuf[:]),
+		probeToken:     hex.EncodeToString(probeTokenBuf[:]),
 	}
 }
 
 // ProbePath returns the per-boot random path that the server answers with
-// HTTP 204 No Content in every mode without requiring Metadata-Flavor.
-// Used by sciontool init to verify that the runtime's metadata redirect
-// reaches this emulator before starting any workload.
+// HTTP 200 OK and the per-boot probe token in every mode without requiring
+// Metadata-Flavor. Used by sciontool init to verify that the metadata
+// redirect reaches this emulator before starting any workload.
 func (s *Server) ProbePath() string {
 	return s.probePath
+}
+
+// ProbeToken returns the per-boot random token returned in the body of the
+// probe endpoint. Used by sciontool init to verify that the probe response
+// came from this emulator instance.
+func (s *Server) ProbeToken() string {
+	return s.probeToken
 }
 
 func (s *Server) buildMux() http.Handler {
@@ -490,7 +502,10 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	w.Header().Set("Content-Type", "text/plain")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, s.probeToken)
 }
 
 // Start starts the metadata server in the background. Returns immediately.
@@ -610,8 +625,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Seams for tests: the iptables helpers need root and NET_ADMIN.
 var (
-	runSetupIPTablesRedirect = setupIPTablesRedirect
-	runSetupMetadataBlock    = setupMetadataBlock
+	runSetupIPTablesRedirect  = setupIPTablesRedirect
+	runSetupMetadataBlock     = setupMetadataBlock
+	runSetupIPv6MetadataBlock = setupIPv6MetadataBlock
+	runNetnsHasIPv6           = NetnsHasIPv6
 )
 
 // Stop gracefully shuts down the server. It closes the listener synchronously

@@ -982,8 +982,15 @@ func RunInit(args []string, opts InitRunOptions) int {
 		} else {
 			log.Info("GCP metadata server started (mode=%s, port=%d)", metaCfg.Mode, metaCfg.Port)
 			if runtimeManagedInterception {
-				if err := runWaitForRedirect(metaCtx, metadataServer.ProbePath()); err != nil {
+				if err := runWaitForRedirect(metaCtx, metadataServer.ProbePath(), metadataServer.ProbeToken()); err != nil {
 					log.Error("Metadata redirect verification failed (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
+					reportInitFailure(agentHome, err)
+					removeTransportTokenOnRefusal()
+					stagedTokenCleanExit = true
+					return 1
+				}
+				if err := runVerifyIPv6Blocked(metaCtx); err != nil {
+					log.Error("IPv6 metadata verification failed (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
 					reportInitFailure(agentHome, err)
 					removeTransportTokenOnRefusal()
 					stagedTokenCleanExit = true
@@ -993,6 +1000,23 @@ func RunInit(args []string, opts InitRunOptions) int {
 				if err := runInstallInterceptionRules(metaCfg.Mode, metaCfg.Port); err != nil {
 					log.Error("Legacy in-container metadata interception setup failed (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
 					reportInitFailure(agentHome, errMetadataProtectionUnavailable)
+					removeTransportTokenOnRefusal()
+					stagedTokenCleanExit = true
+					return 1
+				}
+				legacyProbeCtx, legacyProbeCancel := context.WithTimeout(metaCtx, legacyRedirectProbeDeadline)
+				probeErr := runWaitForRedirect(legacyProbeCtx, metadataServer.ProbePath(), metadataServer.ProbeToken())
+				legacyProbeCancel()
+				if probeErr != nil {
+					log.Error("Legacy in-container metadata redirect verification failed (mode=%s); not starting the harness: %v", metaCfg.Mode, probeErr)
+					reportInitFailure(agentHome, probeErr)
+					removeTransportTokenOnRefusal()
+					stagedTokenCleanExit = true
+					return 1
+				}
+				if err := runVerifyIPv6Blocked(metaCtx); err != nil {
+					log.Error("Legacy in-container IPv6 metadata verification failed (mode=%s); not starting the harness: %v", metaCfg.Mode, err)
+					reportInitFailure(agentHome, err)
 					removeTransportTokenOnRefusal()
 					stagedTokenCleanExit = true
 					return 1

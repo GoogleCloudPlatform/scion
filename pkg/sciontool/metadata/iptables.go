@@ -16,8 +16,11 @@ package metadata
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
@@ -42,6 +45,44 @@ func execIPTables(args ...string) ([]byte, error) {
 	return procreap.CombinedOutputManaged(cmd)
 }
 
+// ipv6MetadataAddrs are the cloud metadata service IPv6 endpoints (GCE, AWS)
+// blocked on TCP/80 whenever IPv6 is enabled in the container network namespace.
+var ipv6MetadataAddrs = []string{"fd20:ce::254", "fd00:ec2::254"}
+
+// procRoot is the mount path of procfs; overridden in tests.
+var procRoot = "/proc"
+
+// NetnsHasIPv6 reports whether any non-loopback network interface in the
+// current network namespace has IPv6 enabled (disable_ipv6 == 0).
+func NetnsHasIPv6() bool {
+	return netnsHasIPv6InRoot(procRoot)
+}
+
+func netnsHasIPv6InRoot(root string) bool {
+	confDir := filepath.Join(root, "sys", "net", "ipv6", "conf")
+	entries, err := os.ReadDir(confDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "all" || name == "default" || name == "lo" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(confDir, name, "disable_ipv6"))
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(raw)) == "0" {
+			return true
+		}
+	}
+	return false
+}
+
 // iptablesCmd resolves "iptables" through rootexec.Resolve — never the
 // ambient PATH, which on substrate includes a directory the workload owns
 // outright — and builds its environment from scratch: this runs as root,
@@ -52,6 +93,18 @@ func iptablesCmd(args ...string) (*exec.Cmd, error) {
 	path, err := rootexec.Resolve("iptables")
 	if err != nil {
 		return nil, fmt.Errorf("resolve iptables: %w", err)
+	}
+	cmd := exec.Command(path, args...)
+	cmd.Env = rootexec.Env()
+	return cmd, nil
+}
+
+// ip6tablesCmd resolves "ip6tables" through rootexec.Resolve with a clean
+// environment, matching iptablesCmd.
+func ip6tablesCmd(args ...string) (*exec.Cmd, error) {
+	path, err := rootexec.Resolve("ip6tables")
+	if err != nil {
+		return nil, fmt.Errorf("resolve ip6tables: %w", err)
 	}
 	cmd := exec.Command(path, args...)
 	cmd.Env = rootexec.Env()
@@ -189,22 +242,63 @@ func setupMetadataBlock() (blockMethod, error) {
 	return blockNone, fmt.Errorf("metadata blocking failed: iptables: %v", err)
 }
 
+// runIP6Tables runs ip6tables via ip6tablesCmd; overridden in unit tests to
+// inspect exact arguments without requiring CAP_NET_ADMIN.
+var runIP6Tables = func(args ...string) ([]byte, error) {
+	cmd, err := ip6tablesCmd(args...)
+	if err != nil {
+		return nil, err
+	}
+	return procreap.CombinedOutputManaged(cmd)
+}
+
+// setupIPv6MetadataBlock blocks outbound TCP/80 traffic to IPv6 cloud metadata
+// endpoints in the filter OUTPUT chain using tcp-reset. Non-HTTP traffic
+// (such as DNS) is untouched.
+func setupIPv6MetadataBlock() error {
+	for _, addr := range ipv6MetadataAddrs {
+		args := []string{
+			"-A", "OUTPUT",
+			"-d", addr + "/128",
+			"-p", "tcp",
+			"--dport", "80",
+			"-j", "REJECT",
+			"--reject-with", "tcp-reset",
+		}
+		output, err := runIP6Tables(args...)
+		if err != nil {
+			return fmt.Errorf("ipv6 metadata blocking failed for %s: %w (output: %s)", addr, err, string(output))
+		}
+		log.Info("ip6tables: blocking TCP/80 traffic to %s/128 (REJECT)", addr)
+	}
+	return nil
+}
+
 // InstallInterceptionRules installs the iptables rules for metadata
-// interception in the current network namespace: a nat OUTPUT REDIRECT
+// interception in the current network namespace: an IPv4 nat OUTPUT REDIRECT
 // to port, a filter OUTPUT ACCEPT rule at position 1 for the redirected
 // loopback destination (so an egress firewall's catch-all OUTPUT REJECT
-// does not block the redirected flow), and a filter OUTPUT REJECT for
-// un-redirected metadata traffic in every mode other than assign.
-// Intended for the runtime's short-lived netns-setup container.
+// does not block the redirected flow), an IPv4 filter OUTPUT REJECT for
+// un-redirected metadata traffic in every mode other than assign, and—when
+// IPv6 is enabled in the network namespace—IPv6 filter OUTPUT REJECT rules
+// for cloud metadata endpoints in all modes.
+// Intended for the runtime's short-lived netns-setup container and legacy
+// in-container setup.
 func InstallInterceptionRules(mode string, port int) error {
 	if err := runSetupIPTablesRedirect(port); err != nil {
 		return fmt.Errorf("%w: redirect: %v", ErrInterceptionUnavailable, err)
 	}
-	if mode == modeAssign {
-		return nil
+	if mode != modeAssign {
+		if _, err := runSetupMetadataBlock(); err != nil {
+			return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
+		}
 	}
-	if _, err := runSetupMetadataBlock(); err != nil {
-		return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
+	if runNetnsHasIPv6() {
+		if err := runSetupIPv6MetadataBlock(); err != nil {
+			return fmt.Errorf("%w: ipv6 filter rule: %v", ErrInterceptionUnavailable, err)
+		}
+	} else {
+		log.Info("IPv6 not enabled in netns; skipping IPv6 metadata rules")
 	}
 	return nil
 }

@@ -90,8 +90,10 @@ func TestStartFailureIsFatal(t *testing.T) {
 func stubInterception(t *testing.T, redirectErr, blockErr error) (redirectCalled, blockCalled *bool) {
 	t.Helper()
 	origRedirect, origBlock := runSetupIPTablesRedirect, runSetupMetadataBlock
+	origHasIPv6, origIPv6Block := runNetnsHasIPv6, runSetupIPv6MetadataBlock
 	t.Cleanup(func() {
 		runSetupIPTablesRedirect, runSetupMetadataBlock = origRedirect, origBlock
+		runNetnsHasIPv6, runSetupIPv6MetadataBlock = origHasIPv6, origIPv6Block
 	})
 	var r, b bool
 	runSetupIPTablesRedirect = func(int) error {
@@ -105,6 +107,8 @@ func stubInterception(t *testing.T, redirectErr, blockErr error) (redirectCalled
 		}
 		return blockIPTables, nil
 	}
+	runNetnsHasIPv6 = func() bool { return false }
+	runSetupIPv6MetadataBlock = func() error { return nil }
 	return &r, &b
 }
 
@@ -239,25 +243,52 @@ func TestProbeHandler_ExactPathEveryMode(t *testing.T) {
 	for _, mode := range []string{modeAssign, modeBlock, "unknown-coerced"} {
 		t.Run(mode, func(t *testing.T) {
 			s := New(Config{Mode: mode, Port: 18380})
+			s2 := New(Config{Mode: mode, Port: 18380})
 			path := s.ProbePath()
+			token := s.ProbeToken()
 			if len(path) != 65 || path[0] != '/' {
 				t.Fatalf("ProbePath() = %q, want leading '/' + 64 hex chars", path)
 			}
+			if len(token) != 64 {
+				t.Fatalf("ProbeToken() = %q, want 64 hex chars", token)
+			}
+			if token == path[1:] {
+				t.Fatal("ProbeToken() must be independent of ProbePath()")
+			}
+			if token == s2.ProbeToken() || path == s2.ProbePath() {
+				t.Fatal("distinct Server instances must generate distinct probe paths and tokens")
+			}
 			h := s.buildMux()
 
-			// Exact probe path answers 204 without Metadata-Flavor.
+			// Exact probe path answers 200 with text/plain, Cache-Control: no-store,
+			// and the per-boot probe token without requiring Metadata-Flavor.
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-			if rec.Code != http.StatusNoContent {
-				t.Errorf("GET %s status = %d, want 204", path, rec.Code)
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s status = %d, want 200", path, rec.Code)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "text/plain" {
+				t.Errorf("Content-Type = %q, want text/plain", got)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+			if got := rec.Body.String(); got != token {
+				t.Errorf("body = %q, want %q", got, token)
 			}
 
-			// Other paths do not answer 204.
-			for _, other := range []string{path + "/extra", "/not-the-probe", "/computeMetadata/v1/"} {
+			// Wrong paths return 404 when Metadata-Flavor is present and never
+			// return the probe token.
+			for _, other := range []string{path + "/extra", "/not-the-probe"} {
+				req := httptest.NewRequest(http.MethodGet, other, nil)
+				req.Header.Set("Metadata-Flavor", "Google")
 				rec2 := httptest.NewRecorder()
-				h.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, other, nil))
-				if rec2.Code == http.StatusNoContent {
-					t.Errorf("GET %s unexpectedly returned 204", other)
+				h.ServeHTTP(rec2, req)
+				if rec2.Code != http.StatusNotFound {
+					t.Errorf("GET %s (with Metadata-Flavor) status = %d, want 404", other, rec2.Code)
+				}
+				if rec2.Body.String() == token {
+					t.Errorf("GET %s unexpectedly returned probe token", other)
 				}
 			}
 		})
@@ -287,28 +318,47 @@ func TestInstallInterceptionRules(t *testing.T) {
 	tests := []struct {
 		name        string
 		mode        string
+		hasIPv6     bool
 		redirectErr error
 		blockErr    error
+		ipv6Err     error
 		wantErr     bool
 		wantBlock   bool
+		wantIPv6    bool
 	}{
-		{name: "block succeeds", mode: modeBlock, wantBlock: true},
-		{name: "assign succeeds", mode: modeAssign, wantBlock: false},
-		{name: "redirect fails", mode: modeBlock, redirectErr: failure, wantErr: true, wantBlock: false},
-		{name: "filter fails", mode: modeBlock, blockErr: failure, wantErr: true, wantBlock: true},
+		{name: "block succeeds no ipv6", mode: modeBlock, wantBlock: true},
+		{name: "assign succeeds no ipv6", mode: modeAssign, wantBlock: false},
+		{name: "block succeeds with ipv6", mode: modeBlock, hasIPv6: true, wantBlock: true, wantIPv6: true},
+		{name: "assign succeeds with ipv6", mode: modeAssign, hasIPv6: true, wantBlock: false, wantIPv6: true},
+		{name: "redirect fails", mode: modeBlock, hasIPv6: true, redirectErr: failure, wantErr: true},
+		{name: "filter fails", mode: modeBlock, hasIPv6: true, blockErr: failure, wantErr: true, wantBlock: true},
+		{name: "ipv6 fails in block mode", mode: modeBlock, hasIPv6: true, ipv6Err: failure, wantErr: true, wantBlock: true, wantIPv6: true},
+		{name: "ipv6 fails in assign mode", mode: modeAssign, hasIPv6: true, ipv6Err: failure, wantErr: true, wantBlock: false, wantIPv6: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			redirectCalled, blockCalled := stubInterception(t, tt.redirectErr, tt.blockErr)
+			var ipv6Called bool
+			runNetnsHasIPv6 = func() bool { return tt.hasIPv6 }
+			runSetupIPv6MetadataBlock = func() error {
+				ipv6Called = true
+				return tt.ipv6Err
+			}
 			err := InstallInterceptionRules(tt.mode, 18380)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("InstallInterceptionRules() = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, ErrInterceptionUnavailable) {
+				t.Errorf("error = %v, want wrapped ErrInterceptionUnavailable", err)
 			}
 			if !*redirectCalled {
 				t.Error("redirect was not called")
 			}
 			if *blockCalled != tt.wantBlock {
 				t.Errorf("block called = %v, want %v", *blockCalled, tt.wantBlock)
+			}
+			if ipv6Called != tt.wantIPv6 {
+				t.Errorf("ipv6 block called = %v, want %v", ipv6Called, tt.wantIPv6)
 			}
 		})
 	}
