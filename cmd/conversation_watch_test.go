@@ -18,9 +18,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -34,6 +41,19 @@ type fakeWatchConvService struct {
 
 func (f *fakeWatchConvService) Watch(ctx context.Context, conversationID string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
 	return f.fn(ctx, conversationID, opts)
+}
+
+// flushingChunkBuffer records each flushed snapshot to assert per-event flushing.
+type flushingChunkBuffer struct {
+	bytes.Buffer
+	flushes int
+	chunks  []string
+}
+
+func (b *flushingChunkBuffer) Flush() error {
+	b.flushes++
+	b.chunks = append(b.chunks, b.String())
+	return nil
 }
 
 // Criterion 16: --once exits 0 and prints the message; timeout exits 124 and
@@ -65,8 +85,9 @@ func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
 			},
 		}
 
-		err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+		err := executeConversationWatch(context.Background(), svc, watchParams{
 			ConversationID: "conv-1",
+			Once:           true,
 			Filter:         "others",
 			Limit:          50,
 			Timeout:        5 * time.Second,
@@ -97,8 +118,9 @@ func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
 			},
 		}
 
-		err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+		err := executeConversationWatch(context.Background(), svc, watchParams{
 			ConversationID: "conv-1",
+			Once:           true,
 			Filter:         "others",
 			Limit:          50,
 			Timeout:        20 * time.Millisecond,
@@ -127,8 +149,9 @@ func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
 			},
 		}
 
-		err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+		err := executeConversationWatch(context.Background(), svc, watchParams{
 			ConversationID: "conv-1",
+			Once:           true,
 			Cursor:         "stale",
 			Filter:         "others",
 			Limit:          50,
@@ -140,7 +163,7 @@ func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
 		assert.Equal(t, 3, exitCodeFor(err))
 	})
 
-	t.Run("context cancel exits 130", func(t *testing.T) {
+	t.Run("context cancel exits 130 in --once mode", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -150,8 +173,9 @@ func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
 			},
 		}
 
-		err := executeConversationWatchOnce(ctx, svc, watchOnceParams{
+		err := executeConversationWatch(ctx, svc, watchParams{
 			ConversationID: "conv-1",
+			Once:           true,
 			Filter:         "others",
 			Limit:          50,
 			Stdout:         &stdout,
@@ -184,8 +208,9 @@ func TestConversationWatchOnce_AfterMessagePassed(t *testing.T) {
 		},
 	}
 
-	err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+	err := executeConversationWatch(context.Background(), svc, watchParams{
 		ConversationID: "conv-1",
+		Once:           true,
 		AfterMessage:   "sent-msg-1",
 		Filter:         "others",
 		Limit:          50,
@@ -201,19 +226,20 @@ func TestConversationWatchOnce_AfterMessagePassed(t *testing.T) {
 func TestConversationWatch_Gating(t *testing.T) {
 	assert.True(t, windowsAllowed["conversation.watch"], "conversation.watch must be in windowsAllowed")
 	assert.False(t, agentAllowed["conversation.watch"], "conversation.watch must be absent from agentAllowed (D2 host-only)")
+	_, isInteractive := interactiveOnlyCommands["scion conversation watch"]
+	assert.False(t, isInteractive, "conversation watch must not be in interactiveOnlyCommands")
 }
 
-// Regression test (O3): when the --timeout budget has already elapsed before
-// the next poll iteration, executeConversationWatchOnce exits 124 without
-// issuing another Watch call with Wait == 0 (which would omit wait and block
-// for the server's 30s default).
+// Regression test (O3): when the --timeout budget has already elapsed after
+// the first poll, executeConversationWatch exits 124 without issuing another
+// Watch call with Wait == 0 (which would omit wait and block for 30s).
 func TestConversationWatchOnce_ExpiredBudgetDoesNotPollWithZeroWait(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	calls := 0
 	svc := &fakeWatchConvService{
 		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
 			calls++
-			assert.Greater(t, opts.Wait, time.Duration(0), "Watch must never be called with Wait==0 under --timeout")
+			assert.Greater(t, opts.Wait, time.Duration(0), "Watch must never be called with Wait==0 when budget remains")
 			time.Sleep(15 * time.Millisecond)
 			return &hubclient.WatchResult{
 				Events:     []hubclient.WatchEvent{},
@@ -223,8 +249,9 @@ func TestConversationWatchOnce_ExpiredBudgetDoesNotPollWithZeroWait(t *testing.T
 		},
 	}
 
-	err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+	err := executeConversationWatch(context.Background(), svc, watchParams{
 		ConversationID: "conv-1",
+		Once:           true,
 		Cursor:         "cur-0",
 		Filter:         "others",
 		Limit:          50,
@@ -271,8 +298,9 @@ func TestConversationWatchOnce_AccumulatesTruncatedAcrossPolls(t *testing.T) {
 			},
 		}
 
-		err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+		err := executeConversationWatch(context.Background(), svc, watchParams{
 			ConversationID: "conv-1",
+			Once:           true,
 			Cursor:         "cur-0",
 			Filter:         "others",
 			Limit:          50,
@@ -312,8 +340,9 @@ func TestConversationWatchOnce_AccumulatesTruncatedAcrossPolls(t *testing.T) {
 			},
 		}
 
-		err := executeConversationWatchOnce(context.Background(), svc, watchOnceParams{
+		err := executeConversationWatch(context.Background(), svc, watchParams{
 			ConversationID: "conv-1",
+			Once:           true,
 			Cursor:         "cur-0",
 			Filter:         "others",
 			Limit:          50,
@@ -329,4 +358,665 @@ func TestConversationWatchOnce_AccumulatesTruncatedAcrossPolls(t *testing.T) {
 		assert.True(t, got.TimedOut)
 		assert.True(t, got.Truncated)
 	})
+}
+
+// Criterion 18: Stream --json writes valid NDJSON, one object per line,
+// flushed per event, plus cursor heartbeat lines on empty timed-out polls.
+func TestConversationWatchStream_NDJSONAndHeartbeats(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout flushingChunkBuffer
+	var stderr bytes.Buffer
+	var seenCursors []string
+	call := 0
+
+	svc := &fakeWatchConvService{
+		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			call++
+			seenCursors = append(seenCursors, opts.Cursor)
+			assert.Equal(t, watchMaxServerWait, opts.Wait, "without --timeout, wait should be 55s")
+			switch call {
+			case 1:
+				// Batch of two events: each must be written as its own NDJSON line and flushed individually.
+				return &hubclient.WatchResult{
+					Events: []hubclient.WatchEvent{
+						{
+							EventID:     "msg:m1",
+							Type:        "conversation.message.created",
+							OccurredAt:  time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC),
+							Cursor:      "cur-1",
+							ResourceURI: "scion://conversations/conv-1/messages/m1",
+							Data:        &store.Message{ID: "m1", Sender: "agent:a", Recipient: "user:u", Msg: "first"},
+						},
+						{
+							EventID:     "msg:m2",
+							Type:        "conversation.message.created",
+							OccurredAt:  time.Date(2026, 11, 21, 10, 0, 1, 0, time.UTC),
+							Cursor:      "cur-2",
+							ResourceURI: "scion://conversations/conv-1/messages/m2",
+							Data:        &store.Message{ID: "m2", Sender: "agent:a", Recipient: "user:u", Msg: "second"},
+						},
+					},
+					NextCursor: "cur-2",
+				}, nil
+			case 2:
+				// Empty poll timeout: must emit a cursor heartbeat line.
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-2",
+					TimedOut:   true,
+				}, nil
+			case 3:
+				// One more event, then cancel to end stream cleanly.
+				cancel()
+				return &hubclient.WatchResult{
+					Events: []hubclient.WatchEvent{
+						{
+							EventID:     "msg:m3",
+							Type:        "conversation.message.created",
+							OccurredAt:  time.Date(2026, 11, 21, 10, 0, 5, 0, time.UTC),
+							Cursor:      "cur-3",
+							ResourceURI: "scion://conversations/conv-1/messages/m3",
+							Data:        &store.Message{ID: "m3", Sender: "agent:a", Recipient: "user:u", Msg: "third"},
+						},
+					},
+					NextCursor: "cur-3",
+				}, nil
+			default:
+				return nil, context.Canceled
+			}
+		},
+	}
+
+	err := executeConversationWatch(ctx, svc, watchParams{
+		ConversationID: "conv-1",
+		Once:           false,
+		Filter:         "others",
+		Limit:          50,
+		JSON:           true,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+	})
+	require.NoError(t, err, "SIGINT/SIGTERM in stream mode must exit 0")
+	assert.Empty(t, stderr.String(), "stream --json must not write next-cursor to stderr")
+	assert.Equal(t, []string{"", "cur-2", "cur-2"}, seenCursors)
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	require.Len(t, lines, 4, "expected 3 event lines + 1 heartbeat line")
+	assert.Equal(t, 4, stdout.flushes, "must flush once per emitted NDJSON line")
+
+	var e1, e2, e3 hubclient.WatchEvent
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &e1))
+	assert.Equal(t, "msg:m1", e1.EventID)
+	assert.Equal(t, "cur-1", e1.Cursor)
+
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &e2))
+	assert.Equal(t, "msg:m2", e2.EventID)
+	assert.Equal(t, "cur-2", e2.Cursor)
+
+	var hb map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[2]), &hb))
+	assert.Equal(t, "cursor", hb["type"])
+	assert.Equal(t, "cur-2", hb["nextCursor"])
+
+	require.NoError(t, json.Unmarshal([]byte(lines[3]), &e3))
+	assert.Equal(t, "msg:m3", e3.EventID)
+	assert.Equal(t, "cur-3", e3.Cursor)
+}
+
+func TestConversationWatchStream_PlainRendererAndStderrCursor(t *testing.T) {
+	prevZone := clitime.Zone()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(prevZone)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout flushingChunkBuffer
+	var stderr bytes.Buffer
+	call := 0
+	ts := time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)
+
+	svc := &fakeWatchConvService{
+		fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			call++
+			if call == 1 {
+				return &hubclient.WatchResult{
+					Events: []hubclient.WatchEvent{
+						{
+							EventID:    "msg:m1",
+							Type:       "conversation.message.created",
+							OccurredAt: ts,
+							Cursor:     "cur-1",
+							Data: &store.Message{
+								ID:        "m1",
+								Sender:    "agent:reviewer",
+								Recipient: "user:alice",
+								Msg:       "looks good",
+							},
+						},
+					},
+					NextCursor: "cur-1",
+				}, nil
+			}
+			cancel()
+			return nil, context.Canceled
+		},
+	}
+
+	err := executeConversationWatch(ctx, svc, watchParams{
+		ConversationID: "conv-1",
+		Once:           false,
+		Filter:         "others",
+		Limit:          50,
+		JSON:           false,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, stdout.flushes)
+	assert.Equal(t, "[2026-11-21 10:00:00 UTC] agent:reviewer -> user:alice\nlooks good\n", stdout.String())
+	assert.Equal(t, "next-cursor: cur-1\n", stderr.String())
+}
+
+func TestConversationWatchStream_TimeoutExitsZero(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	var seenWaits []time.Duration
+	call := 0
+
+	svc := &fakeWatchConvService{
+		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			call++
+			seenWaits = append(seenWaits, opts.Wait)
+			time.Sleep(25 * time.Millisecond)
+			return &hubclient.WatchResult{
+				Events:     []hubclient.WatchEvent{},
+				NextCursor: "cur-timeout",
+				TimedOut:   true,
+			}, nil
+		},
+	}
+
+	err := executeConversationWatch(context.Background(), svc, watchParams{
+		ConversationID: "conv-1",
+		Once:           false,
+		Filter:         "others",
+		Limit:          50,
+		Timeout:        20 * time.Millisecond,
+		JSON:           false,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+	})
+	require.NoError(t, err, "stream mode reaching --timeout must exit 0")
+	assert.Equal(t, 1, call)
+	assert.LessOrEqual(t, seenWaits[0], 20*time.Millisecond)
+	assert.Equal(t, "next-cursor: cur-timeout\n", stderr.String())
+}
+
+func TestConversationWatchStream_RetryBackoffWithFakeServer(t *testing.T) {
+	var attempt atomic.Int32
+	var receivedCursors []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempt.Add(1)
+		receivedCursors = append(receivedCursors, r.URL.Query().Get("cursor"))
+		w.Header().Set("Content-Type", "application/json")
+		switch n {
+		case 1:
+			// First poll succeeds and establishes cur-1.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"events": []map[string]any{
+					{
+						"eventId": "msg:m1",
+						"type":    "conversation.message.created",
+						"cursor":  "cur-1",
+						"data":    map[string]any{"id": "m1", "sender": "agent:a", "msg": "one"},
+					},
+				},
+				"nextCursor": "cur-1",
+			})
+		case 2:
+			// Transient 503.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": "unavailable", "message": "hub restarting"},
+			})
+		case 3:
+			// Transient 429 with Retry-After header.
+			w.Header().Set("Retry-After", "4")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": "rate_limited", "message": "slow down"},
+			})
+		case 4:
+			// Transient 500.
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": "internal_error", "message": "db blip"},
+			})
+		default:
+			// Recovery: must resume from last good cursor cur-1.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"events": []map[string]any{
+					{
+						"eventId": "msg:m2",
+						"type":    "conversation.message.created",
+						"cursor":  "cur-2",
+						"data":    map[string]any{"id": "m2", "sender": "agent:a", "msg": "two"},
+					},
+				},
+				"nextCursor": "cur-2",
+			})
+		}
+	}))
+	defer srv.Close()
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	var sleepCalls []time.Duration
+	var backoffAttempts []int
+	var backoffRetryAfters []time.Duration
+
+	// Wrap client.Conversations() so we cancel right after the 5th request delivers m2.
+	wrapped := &fakeWatchConvService{
+		fn: func(c context.Context, convID string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			res, wErr := client.Conversations().Watch(c, convID, opts)
+			if wErr == nil && res.NextCursor == "cur-2" {
+				cancel()
+			}
+			return res, wErr
+		},
+	}
+
+	err = executeConversationWatch(ctx, wrapped, watchParams{
+		ConversationID: "conv-1",
+		Once:           false,
+		Filter:         "others",
+		Limit:          50,
+		JSON:           true,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+		Backoff: func(a int, ra time.Duration) time.Duration {
+			backoffAttempts = append(backoffAttempts, a)
+			backoffRetryAfters = append(backoffRetryAfters, ra)
+			return watchBackoffDuration(a, ra)
+		},
+		Sleep: func(_ context.Context, d time.Duration) error {
+			sleepCalls = append(sleepCalls, d)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int32(5), attempt.Load())
+	// Every retry after m1 must pass cur-1 (last good cursor).
+	assert.Equal(t, []string{"", "cur-1", "cur-1", "cur-1", "cur-1"}, receivedCursors)
+	assert.Equal(t, []int{1, 2, 3}, backoffAttempts)
+	assert.Equal(t, []time.Duration{0, 4 * time.Second, 0}, backoffRetryAfters)
+	require.Len(t, sleepCalls, 3)
+	assert.GreaterOrEqual(t, sleepCalls[1], 4*time.Second, "429 Retry-After must be honored")
+	for _, d := range sleepCalls {
+		assert.LessOrEqual(t, d, watchMaxBackoff)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	require.Len(t, lines, 2)
+}
+
+func TestConversationWatchStream_NetworkErrorRetries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	call := 0
+	sleeps := 0
+
+	svc := &fakeWatchConvService{
+		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			call++
+			if call == 1 {
+				return nil, errors.New("connection refused")
+			}
+			assert.Equal(t, "cur-0", opts.Cursor, "must retry from initial cursor")
+			cancel()
+			return &hubclient.WatchResult{
+				Events: []hubclient.WatchEvent{
+					{EventID: "msg:m1", Type: "conversation.message.created", Cursor: "cur-1"},
+				},
+				NextCursor: "cur-1",
+			}, nil
+		},
+	}
+
+	err := executeConversationWatch(ctx, svc, watchParams{
+		ConversationID: "conv-1",
+		Cursor:         "cur-0",
+		Filter:         "others",
+		Limit:          50,
+		JSON:           true,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+		Sleep: func(_ context.Context, _ time.Duration) error {
+			sleeps++
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, call)
+	assert.Equal(t, 1, sleeps)
+}
+
+func TestConversationWatchStream_TerminalStatusesDoNotRetry(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       int
+		code         string
+		message      string
+		wantExitCode int
+		wantContains string
+	}{
+		{
+			name:         "400 invalid_cursor",
+			status:       http.StatusBadRequest,
+			code:         "invalid_cursor",
+			message:      "malformed cursor",
+			wantExitCode: 1,
+			wantContains: "invalid cursor",
+		},
+		{
+			name:         "400 bad request",
+			status:       http.StatusBadRequest,
+			code:         "invalid_request",
+			message:      "bad filter",
+			wantExitCode: 1,
+			wantContains: "bad filter",
+		},
+		{
+			name:         "401 unauthorized",
+			status:       http.StatusUnauthorized,
+			code:         "unauthorized",
+			message:      "token expired",
+			wantExitCode: 1,
+			wantContains: "token expired",
+		},
+		{
+			name:         "403 forbidden",
+			status:       http.StatusForbidden,
+			code:         "forbidden",
+			message:      "access denied",
+			wantExitCode: 1,
+			wantContains: "access denied",
+		},
+		{
+			name:         "404 conversation not found",
+			status:       http.StatusNotFound,
+			code:         "not_found",
+			message:      "Conversation not found",
+			wantExitCode: 1,
+			wantContains: "Conversation not found",
+		},
+		{
+			name:         "410 cursor expired",
+			status:       http.StatusGone,
+			code:         "cursor_expired",
+			message:      "cursor from future",
+			wantExitCode: 3,
+			wantContains: "cursor expired",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{"code": tc.code, "message": tc.message},
+				})
+			}))
+			defer srv.Close()
+
+			client, err := hubclient.New(srv.URL)
+			require.NoError(t, err)
+
+			var stdout, stderr bytes.Buffer
+			err = executeConversationWatch(context.Background(), client.Conversations(), watchParams{
+				ConversationID: "conv-1",
+				Once:           false,
+				Cursor:         "cur-x",
+				Filter:         "others",
+				Limit:          50,
+				JSON:           true,
+				Stdout:         &stdout,
+				Stderr:         &stderr,
+				Sleep: func(_ context.Context, _ time.Duration) error {
+					t.Fatal("terminal error must not trigger backoff sleep")
+					return nil
+				},
+			})
+			require.Error(t, err)
+			assert.Equal(t, int32(1), calls.Load(), "terminal status must not retry")
+			assert.Equal(t, tc.wantExitCode, exitCodeFor(err))
+			assert.Contains(t, err.Error(), tc.wantContains)
+		})
+	}
+}
+
+// Deferred P1 item 6a: detect both "route" (experiment off) and
+// "Conversation action" (older Hub) 404s as unsupported Hub, while preserving
+// genuine "Conversation not found" 404s.
+func TestConversationWatch_OldHubUnsupported404Detection(t *testing.T) {
+	cases := []struct {
+		name            string
+		message         string
+		wantUnsupported bool
+	}{
+		{
+			name:            "experiment disabled route not found",
+			message:         "route not found",
+			wantUnsupported: true,
+		},
+		{
+			name:            "older hub conversation action not found",
+			message:         "Conversation action not found",
+			wantUnsupported: true,
+		},
+		{
+			name:            "plain 404 page not found",
+			message:         "404 page not found",
+			wantUnsupported: true,
+		},
+		{
+			name:            "genuine missing conversation",
+			message:         "Conversation not found",
+			wantUnsupported: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			svc := &fakeWatchConvService{
+				fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+					return nil, &apiclient.APIError{
+						StatusCode: http.StatusNotFound,
+						Code:       apiclient.ErrCodeNotFound,
+						Message:    tc.message,
+					}
+				},
+			}
+
+			err := executeConversationWatch(context.Background(), svc, watchParams{
+				ConversationID: "conv-1",
+				Once:           true,
+				Filter:         "others",
+				Limit:          50,
+				Stdout:         &stdout,
+				Stderr:         &stderr,
+			})
+			require.Error(t, err)
+			if tc.wantUnsupported {
+				assert.Contains(t, err.Error(), "this Hub does not support conversation watch")
+			} else {
+				assert.NotContains(t, err.Error(), "this Hub does not support conversation watch")
+				assert.Contains(t, err.Error(), tc.message)
+			}
+		})
+	}
+}
+
+// Deferred P1 item 6b: a tiny --timeout (e.g. 1ns) with no --cursor still
+// performs one immediate (wait=0) poll so the caller always receives a cursor.
+func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
+	t.Run("--once mode with 1ns timeout gets nextCursor on timeout", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		calls := 0
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				calls++
+				assert.True(t, opts.Immediate, "tiny expired timeout on first poll must set Immediate=true (wait=0)")
+				assert.Equal(t, time.Duration(0), opts.Wait)
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-initial-head",
+					TimedOut:   true,
+				}, nil
+			},
+		}
+
+		err := executeConversationWatch(context.Background(), svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           true,
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        time.Nanosecond,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+		})
+		require.Error(t, err)
+		assert.Equal(t, 124, exitCodeFor(err))
+		assert.Equal(t, 1, calls)
+
+		var got hubclient.WatchResult
+		require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+		assert.True(t, got.TimedOut)
+		assert.Equal(t, "cur-initial-head", got.NextCursor)
+	})
+
+	t.Run("stream mode with 1ns timeout gets heartbeat and exits 0", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		calls := 0
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				calls++
+				assert.True(t, opts.Immediate)
+				assert.Equal(t, time.Duration(0), opts.Wait)
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-stream-head",
+					TimedOut:   true,
+				}, nil
+			},
+		}
+
+		err := executeConversationWatch(context.Background(), svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           false,
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        time.Nanosecond,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 1, calls)
+
+		var hb map[string]any
+		require.NoError(t, json.Unmarshal(stdout.Bytes(), &hb))
+		assert.Equal(t, "cursor", hb["type"])
+		assert.Equal(t, "cur-stream-head", hb["nextCursor"])
+	})
+}
+
+func TestConversationWatch_SignalDuringBackoffSleep(t *testing.T) {
+	t.Run("stream mode exits 0 and emits last good cursor", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		var stdout, stderr bytes.Buffer
+		call := 0
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				call++
+				if call == 1 {
+					return &hubclient.WatchResult{
+						Events:     []hubclient.WatchEvent{},
+						NextCursor: "cur-good",
+						TimedOut:   true,
+					}, nil
+				}
+				return nil, &apiclient.APIError{StatusCode: http.StatusBadGateway, Message: "bad gateway"}
+			},
+		}
+
+		err := executeConversationWatch(ctx, svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           false,
+			Filter:         "others",
+			Limit:          50,
+			JSON:           false,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+			Sleep: func(_ context.Context, _ time.Duration) error {
+				cancel()
+				return context.Canceled
+			},
+		})
+		require.NoError(t, err)
+		assert.Contains(t, stderr.String(), "next-cursor: cur-good\n")
+	})
+
+	t.Run("--once mode exits 130", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		var stdout, stderr bytes.Buffer
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				return nil, &apiclient.APIError{StatusCode: http.StatusServiceUnavailable, Message: "unavailable"}
+			},
+		}
+
+		err := executeConversationWatch(ctx, svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           true,
+			Filter:         "others",
+			Limit:          50,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+			Sleep: func(_ context.Context, _ time.Duration) error {
+				cancel()
+				return context.Canceled
+			},
+		})
+		require.Error(t, err)
+		assert.Equal(t, 130, exitCodeFor(err))
+	})
+}
+
+func TestWatchBackoffDuration_JitterAndCap(t *testing.T) {
+	for attempt := 1; attempt <= 10; attempt++ {
+		d := watchBackoffDuration(attempt, 0)
+		assert.Greater(t, d, time.Duration(0), "attempt %d must be > 0", attempt)
+		assert.LessOrEqual(t, d, watchMaxBackoff, "attempt %d must be <= 30s", attempt)
+	}
+	// Retry-After is honored up to watchMaxBackoff.
+	assert.Equal(t, 12*time.Second, watchBackoffDuration(1, 12*time.Second))
+	assert.Equal(t, watchMaxBackoff, watchBackoffDuration(1, 90*time.Second))
 }
