@@ -633,6 +633,27 @@ func TestExpandDecisionBellTopic_AuthzParityMatrix(t *testing.T) {
 		uInvited := mkUser("invited", store.UserStatusInvited, store.UserKindHuman, nil)
 		bind(store.RoleBindingPrincipalUser, uInvited.ID, store.RoleScopeProject, proj.ID, memberRD.ID, nil, nil)
 
+		// 21-23. Shared group carrying a raw-inserted system hub-admin binding
+		// plus a project-viewer binding on proj, containing a human, a
+		// test_fixture, and an expired test_hub_admin together. Verifies that
+		// per-user clamping over shared group bindings preserves the human's
+		// system hub-admin grant while clamping the fixture to viewer-only and
+		// dropping all bindings for the expired test_hub_admin without
+		// cross-contaminating the batch.
+		grpSharedSysAdmin := mkGroup("grp-shared-sys-admin")
+		bind(store.RoleBindingPrincipalGroup, grpSharedSysAdmin.ID, store.RoleScopeProject, proj.ID, viewerRD.ID, nil, nil)
+		_, err = rawStore.DB().ExecContext(ctx,
+			`INSERT INTO role_bindings (id, principal_type, principal_id, role_definition_id, scope_type, scope_id, created_by, membership_kind, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			api.NewUUID(), store.RoleBindingPrincipalGroup, grpSharedSysAdmin.ID, hubAdminRD.ID, store.RoleScopeSystem, "", "test", "", now,
+		)
+		require.NoError(t, err)
+		uSharedGrpHuman := mkUser("shared-grp-human", store.UserStatusActive, store.UserKindHuman, nil)
+		uSharedGrpFixture := mkUser("shared-grp-fixture", store.UserStatusActive, store.UserKindTestFixture, &future)
+		uSharedGrpExpAdmin := mkUser("shared-grp-exp-admin", store.UserStatusActive, store.UserKindTestHubAdmin, &past)
+		addToGroup(grpSharedSysAdmin.ID, uSharedGrpHuman.ID)
+		addToGroup(grpSharedSysAdmin.ID, uSharedGrpFixture.ID)
+		addToGroup(grpSharedSysAdmin.ID, uSharedGrpExpAdmin.ID)
+
 		// Sequential oracle for every user in the matrix (no preload, fresh ctx).
 		type userVerdict struct {
 			active   bool
@@ -742,6 +763,9 @@ func TestExpandDecisionBellTopic_AuthzParityMatrix(t *testing.T) {
 		assert.False(t, postingSet[uInvited.ID], "invited user must NOT post")
 		assert.Equal(t, adminTierEnabled, postingSet[uTestHubAdminLive.ID], "live test_hub_admin follows admin tier switch")
 		assert.Equal(t, adminTierEnabled, postingSet[uTestSuperAdminLive.ID], "live test_super_admin follows admin tier switch")
+		assert.True(t, postingSet[uSharedGrpHuman.ID], "human in shared sys-admin + viewer group must post")
+		assert.False(t, postingSet[uSharedGrpFixture.ID], "test_fixture in shared sys-admin + viewer group must be clamped and NOT post")
+		assert.False(t, postingSet[uSharedGrpExpAdmin.ID], "expired test_hub_admin in shared sys-admin + viewer group must NOT post")
 	}
 
 	t.Run("admin_tier_enabled", func(t *testing.T) { runMatrix(t, true) })

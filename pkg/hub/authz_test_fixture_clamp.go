@@ -191,17 +191,6 @@ func setAuthzTestAdminTier(svc *AuthzService, enabled func(kind string) bool, no
 	c.mu.Unlock()
 }
 
-// isFixture reports whether userID is a test-fixture user, reading the row
-// once per user (kindForPrincipalVia). A missing user is not a fixture and
-// is not cached; a read error is returned and never cached.
-func (c *testFixtureGrantClamp) isFixture(ctx context.Context, userID string) (bool, error) {
-	k, err := kindForPrincipalVia(ctx, c.Store, c.cache, userID)
-	if err != nil {
-		return false, err
-	}
-	return k.Found && k.Kind == store.UserKindTestFixture, nil
-}
-
 // principalKind is the stored kind of a user principal, as read by
 // kindForPrincipalVia, the one place hub code reads it for an
 // authorization or containment decision.
