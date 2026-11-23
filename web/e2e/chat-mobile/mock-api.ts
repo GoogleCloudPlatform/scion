@@ -159,12 +159,16 @@ export async function setupChatMobileMocks(page: Page): Promise<void> {
   );
   await page.route(/\/api\/v1\/agents(\?|$)/, (route) => route.fulfill({ json: { agents: [] } }));
   await page.route('**/api/v1/users**', (route) => route.fulfill({ json: { users: [] } }));
-  // Only used by the desktop checks that the document never scrolls on
-  // /, /projects and /agents (outside the chat shell) — chat itself never
-  // calls these.
-  await page.route(/\/api\/v1\/projects(\?|$)/, (route) =>
-    route.fulfill({ json: { projects: [] } })
-  );
+  // Without `?slug=`, used by desktop checks that the document never scrolls on
+  // /, /projects and /agents (outside the chat shell). With `?slug=`, chat's
+  // cold-load/reload route resolver (`resolveProjectBySlug`) looks up the space
+  // before `/api/v1/chat/spaces` finishes loading, so match the mocked spaces.
+  const mockProjects = [PROJECT_A, PROJECT_B, PROJECT_C];
+  await page.route(/\/api\/v1\/projects(\?|$)/, (route) => {
+    const slug = new URL(route.request().url()).searchParams.get('slug');
+    const projects = slug ? mockProjects.filter((p) => p.slug === slug) : [];
+    return route.fulfill({ json: { projects, totalCount: projects.length } });
+  });
 
   await page.route(/\/api\/v1\/chat\/spaces$/, (route) =>
     route.fulfill({

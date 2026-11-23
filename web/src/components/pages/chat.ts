@@ -2616,6 +2616,7 @@ export class ScionPageChat extends LitElement {
         this.parseV2Route();
         return;
       }
+      if (this._projectIdToSlug.size > 0) this.clearRouteOpenPanel();
       return;
     }
 
@@ -2792,6 +2793,7 @@ export class ScionPageChat extends LitElement {
     // A conversation closing puts the mobile view back on the rail. With none
     // open the panel stays put: this runs again on every rail reload, and the
     // page starts on the rail, or on the panel its history entry recorded.
+    this.clearRouteOpenPanel();
     if (this.v2Conversation) this.mobilePanel = 'left';
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view (no header toggle available)
@@ -2804,7 +2806,10 @@ export class ScionPageChat extends LitElement {
    */
   private async resolveSlugAndOpenThread(slug: string, threadId: string): Promise<void> {
     const projectId = await this.resolveProjectBySlug(slug);
-    if (!projectId) return;
+    if (!projectId) {
+      if (this.routeNamesThread(slug, threadId)) this.clearRouteOpenPanel();
+      return;
+    }
     // While the lookup was in flight the rail may have opened this thread
     // (and the user swiped away from it), or the user may have moved on to
     // another conversation. Only open it if the URL still names it and it is
@@ -2842,10 +2847,14 @@ export class ScionPageChat extends LitElement {
     // The rail can load during the await and the user open a thread from it,
     // or the page be rebuilt; only open the space if it is still what the
     // URL names on this page.
-    if (projectId && this.routeNamesSpace(slug)) {
+    if (!this.routeNamesSpace(slug)) return;
+    if (projectId) {
       void this.selectSpaceBySlug(slug, projectId);
+    } else {
+      // If resolution fails, leave the URL in place — it's just a 404 space —
+      // and clear the pending route-open marker so nothing stays armed.
+      this.clearRouteOpenPanel();
     }
-    // If resolution fails, leave the URL in place — it's just a 404 space.
   }
 
   /**
@@ -2924,11 +2933,13 @@ export class ScionPageChat extends LitElement {
         peerId: '',
         peerKind: 'user',
       };
-      this.mobilePanel = 'center';
+      this.mobilePanel = this.takeRouteOpenPanel('center');
       void this.loadV2Members(projectId);
       dispatchPageTitle(this, `#${target.name}`, 'Chat');
       // Update URL to include the thread
       navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(target.id)}`);
+    } else {
+      this.clearRouteOpenPanel();
     }
   }
 
@@ -3852,6 +3863,7 @@ export class ScionPageChat extends LitElement {
     }
 
     // 4. Unable to resolve — log error.
+    if (opts?.fromRoute) this.clearRouteOpenPanel();
     console.error('Unable to open DM — user identity not available. Please refresh the page.');
   }
 
@@ -4904,8 +4916,7 @@ export class ScionPageChat extends LitElement {
    * `popstate`. See chat-panel-history.
    */
   private goToPanel(target: ChatPanel): void {
-    this._restoredPanel = null;
-    this._routeOpenPending = false;
+    this.clearRouteOpenPanel();
     if (target === this.mobilePanel) return;
     const move =
       this.isMobileViewport() && this.ownsPanelHistory()
@@ -4915,13 +4926,22 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * Clear any pending route-open panel state so a later layout change or
+   * route open falls back to its normal default instead of using a stale
+   * restored panel.
+   */
+  private clearRouteOpenPanel(): void {
+    this._restoredPanel = null;
+    this._routeOpenPending = false;
+  }
+
+  /**
    * The panel to show for a conversation opened from the URL: the one the
    * history entry recorded, the first time, otherwise `fallback`.
    */
   private takeRouteOpenPanel(fallback: ChatPanel): ChatPanel {
     const panel = this._restoredPanel ?? fallback;
-    this._restoredPanel = null;
-    this._routeOpenPending = false;
+    this.clearRouteOpenPanel();
     return panel;
   }
 
@@ -4960,8 +4980,7 @@ export class ScionPageChat extends LitElement {
     }
     const panel = this._panelHistory.popped(e.state, !this.isMobileLayout);
     if (!panel) return;
-    this._restoredPanel = null;
-    this._routeOpenPending = false;
+    this.clearRouteOpenPanel();
     if (panel === this.mobilePanel) return;
     if (this.mobilePanel === 'center') this.dismissKeyboard();
     this.mobilePanel = panel;
@@ -5029,8 +5048,7 @@ export class ScionPageChat extends LitElement {
    */
   private pushChatPath(path: string): void {
     const seq = this._userNavSeq;
-    this._restoredPanel = null;
-    this._routeOpenPending = false;
+    this.clearRouteOpenPanel();
     // Reopening what the URL already names (the open thread picked again,
     // the open DM's peer clicked) adds no entry: Back would only land on the
     // same conversation. In the mobile layout the panel change it makes is
