@@ -101,6 +101,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 
 	const rawSpec = `{
 	  "version": 1,
+	  "inputs": ["probe.text"],
 	  "questions": [
 	    {"id": "is_outage", "type": "binary", "instructions": "Does the text report a service outage?"},
 	    {
@@ -126,13 +127,30 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 		ruleengine.GrantIO(systemone.DialectName),
 		ruleengine.Grant(ruleengine.DialectCEL),
 	))
+	const testEnvName = "system_one_test_env"
+	require.NoError(t, systemone.RegisterConsumerEnvironment(re, testSystemOneConsumer, spec.ContentEnvironment{
+		Name:    testEnvName,
+		Version: 1,
+		Fields: []spec.FieldDecl{
+			{Name: spec.ProbeFieldText, Kind: spec.FieldKindText, MaxBytes: spec.ProbeMaxBytes, Trust: spec.TrustUntrusted},
+		},
+		MaxTotalBytes: spec.ProbeMaxBytes,
+	}))
+
+	proj := &store.Project{
+		ID:      "00000000-0000-0000-0000-00000000d100",
+		Name:    "System One Live Parity Project",
+		Slug:    "s1-live-parity-proj",
+		OwnerID: admin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
 
 	// Phase 1: Initially OFF — Supports stays true for the test-granted consumer, admin routes 404, Compile returns UnsupportedDialectError.
 	assert.True(t, re.Supports(testSystemOneConsumer, systemone.DialectName))
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
 	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.Error(t, err)
 	var unsupErr *ruleengine.UnsupportedDialectError
@@ -157,6 +175,8 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	require.NoError(t, err)
 	instRow.Endpoint = tlsSrv.URL
 	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
+	_, _, err = s.AddProjectSystemOneInstance(ctx, proj.ID, "ts-reg-live")
+	require.NoError(t, err)
 
 	// Evaluate via admin /probe endpoint.
 	probeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/ts-reg-live/probe", ProbeSystemOneInstanceRequest{
@@ -177,12 +197,15 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	// Compile and evaluate the identical spec via srv.RuleEngine().
 	compiledWhileOn, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 
 	engDec, err := re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
-		Payload: systemone.ProbeInput(syntheticText),
+		Payload: systemone.Request{
+			Input:     systemone.ProbeInput(syntheticText),
+			ProjectID: proj.ID,
+		},
 	}, ruleengine.Budget{})
 	require.NoError(t, err)
 	assert.Equal(t, ruleengine.Kind(spec.KindRoute), engDec.Kind)
@@ -209,7 +232,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 
 	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.Error(t, err)
 	var unsupOff *ruleengine.UnsupportedDialectError
@@ -220,7 +243,10 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	assert.Equal(t, `unsupported dialect "system_one" for consumer "system_one_test": unknown_dialect`, err.Error())
 
 	_, err = re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
-		Payload: systemone.ProbeInput(syntheticText),
+		Payload: systemone.Request{
+			Input:     systemone.ProbeInput(syntheticText),
+			ProjectID: proj.ID,
+		},
 	}, ruleengine.Budget{})
 	require.Error(t, err)
 	var failedOff *ruleengine.FailedError
@@ -238,12 +264,15 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
 	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 
 	engDecAgain, err := re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
-		Payload: systemone.ProbeInput(syntheticText),
+		Payload: systemone.Request{
+			Input:     systemone.ProbeInput(syntheticText),
+			ProjectID: proj.ID,
+		},
 	}, ruleengine.Budget{})
 	require.NoError(t, err)
 	assert.Equal(t, "auth", engDecAgain.String)
@@ -288,6 +317,7 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 
 	const rawSpec = `{
 	  "version": 1,
+	  "inputs": ["probe.text"],
 	  "questions": [{"id": "q1", "type": "binary", "instructions": "Does this report an outage?"}],
 	  "output": {"question": "q1"}
 	}`
@@ -455,32 +485,42 @@ func TestSystemOneRules_DialectForwardsProjectIDForProjectScopedNamedSecret(t *t
 	re := srv.RuleEngine()
 	require.NotNil(t, re)
 	require.NoError(t, re.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+	const testEnvName = "system_one_test_projsec_env"
+	require.NoError(t, systemone.RegisterConsumerEnvironment(re, testSystemOneConsumer, spec.ContentEnvironment{
+		Name:    testEnvName,
+		Version: 1,
+		Fields: []spec.FieldDecl{
+			{Name: spec.ProbeFieldText, Kind: spec.FieldKindText, MaxBytes: spec.ProbeMaxBytes, Trust: spec.TrustUntrusted},
+		},
+		MaxTotalBytes: spec.ProbeMaxBytes,
+	}))
 
 	const rawRule = `{
 	  "version": 1,
+	  "inputs": ["probe.text"],
 	  "binding": {"instance": "gemini-proj-sec"},
 	  "questions": [{"id": "q1", "type": "binary", "instructions": "Does the text report an outage?"}],
 	  "output": {"question": "q1"}
 	}`
 	compiled, err := re.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 
-	// 1. Bare Input (no ProjectID) fails closed with invalid_request (0 provider calls).
+	// 1. Bare Input (no ProjectID) fails closed with no_eligible_instance (0 provider calls).
 	_, err = re.Evaluate(ctx, compiled, ruleengine.Input{
 		Payload: systemone.ProbeInput("no project id"),
 	}, ruleengine.Budget{})
 	require.Error(t, err)
 	var failedErr *ruleengine.FailedError
 	require.ErrorAs(t, err, &failedErr)
-	assert.Equal(t, string(systemoneprovider.FailInvalidRequest), failedErr.Reason)
+	assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), failedErr.Reason)
 	assert.Zero(t, providerCalls.Load())
 
 	// 2. Allowlist the instance for projID, then Request with authorized ProjectID
 	// resolves the project-scoped secret through the dialect.
-	_, err = s.AddProjectSystemOneInstance(ctx, projID, "gemini-proj-sec")
+	_, _, err = s.AddProjectSystemOneInstance(ctx, projID, "gemini-proj-sec")
 	require.NoError(t, err)
 
 	elemIdx := 1

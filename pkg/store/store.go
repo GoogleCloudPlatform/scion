@@ -40,6 +40,11 @@ var (
 	// to 400 invalid_cursor (ptone/scion#3062).
 	ErrInvalidCursor = fmt.Errorf("%w: invalid cursor", ErrInvalidInput)
 
+	// ErrSystemOneAllowlistLimitExceeded is returned when a project's System One
+	// instance allowlist would exceed MaxProjectSystemOneInstances entries. It
+	// wraps ErrInvalidInput.
+	ErrSystemOneAllowlistLimitExceeded = fmt.Errorf("%w: project System One instance allowlist exceeds maximum of %d entries", ErrInvalidInput, MaxProjectSystemOneInstances)
+
 	// ErrActiveReservationExists is returned by CreateUsageReservation when
 	// the resource already holds an active (released_at IS NULL)
 	// reservation for the same limit definition: the unique active
@@ -1976,24 +1981,38 @@ type ProjectStore interface {
 	// ErrNotFound if the project does not exist.
 	GetProjectSystemOneInstances(ctx context.Context, projectID string) ([]string, error)
 
-	// SetProjectSystemOneInstances replaces the project's System One instance
-	// allowlist with a validated, deduplicated, sorted slice of instance names.
-	// Returns the stored slice, ErrInvalidInput on invalid names, or
-	// ErrNotFound if the project does not exist.
-	SetProjectSystemOneInstances(ctx context.Context, projectID string, instances []string) ([]string, error)
+	// SetProjectSystemOneInstances atomically replaces the project's System One
+	// instance allowlist with a validated, deduplicated, sorted slice of
+	// instance names (capped at MaxProjectSystemOneInstances). Returns the
+	// previous and stored slices, ErrInvalidInput /
+	// ErrSystemOneAllowlistLimitExceeded on invalid input, or ErrNotFound if the
+	// project does not exist.
+	SetProjectSystemOneInstances(ctx context.Context, projectID string, instances []string) (before []string, after []string, err error)
 
 	// AddProjectSystemOneInstance atomically adds instanceName to the project's
-	// System One instance allowlist (idempotent). Returns the updated sorted
-	// list, ErrInvalidInput on an invalid name, or ErrNotFound if the project
-	// does not exist.
-	AddProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, error)
+	// System One instance allowlist (idempotent, capped at
+	// MaxProjectSystemOneInstances). Returns the previous and updated sorted
+	// lists, ErrInvalidInput / ErrSystemOneAllowlistLimitExceeded on invalid
+	// input, or ErrNotFound if the project does not exist.
+	AddProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) (before []string, after []string, err error)
 
 	// RemoveProjectSystemOneInstance atomically removes instanceName from the
-	// project's System One instance allowlist (idempotent). Returns the updated
-	// sorted list, ErrInvalidInput on an invalid name, or ErrNotFound if the
-	// project does not exist.
-	RemoveProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, error)
+	// project's System One instance allowlist (idempotent). Returns the previous
+	// and updated sorted lists, ErrInvalidInput on an invalid name, or
+	// ErrNotFound if the project does not exist.
+	RemoveProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) (before []string, after []string, err error)
+
+	// PruneSystemOneInstanceFromAllProjects atomically removes instanceName from
+	// every project's System One instance allowlist and returns the number of
+	// projects updated. Called when a hub System One instance is deleted so
+	// recreating an instance with the same name never silently re-authorizes
+	// projects that previously allowed the deleted instance.
+	PruneSystemOneInstanceFromAllProjects(ctx context.Context, instanceName string) (int, error)
 }
+
+// MaxProjectSystemOneInstances is the maximum number of hub System One instance
+// names allowed in a single project's allowlist.
+const MaxProjectSystemOneInstances = 64
 
 // ProjectFilter defines criteria for filtering projects.
 type ProjectFilter struct {

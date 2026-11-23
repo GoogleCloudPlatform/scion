@@ -113,6 +113,10 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 	require.NoError(t, err)
 	member, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-authz-member", store.SystemRoleHubMember))
 	require.NoError(t, err)
+	otherOwner, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-authz-other-owner", store.SystemRoleHubMember))
+	require.NoError(t, err)
+	customRoleUser, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-authz-custom", store.SystemRoleHubMember))
+	require.NoError(t, err)
 
 	proj := &store.Project{
 		ID:      uuid.NewString(),
@@ -122,8 +126,32 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, proj))
 
+	otherProj := &store.Project{
+		ID:      uuid.NewString(),
+		Name:    "Other Project",
+		Slug:    "s1-authz-other",
+		OwnerID: otherOwner.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, otherProj))
+
+	// Seed hub System One instances so allowlist mutations pass existence validation.
+	for _, instName := range []string{
+		"inst-owner", "inst-projadmin", "inst-hubadmin", "inst-superadmin",
+		"inst-uat", "inst-uat-hub", "inst-uat-denied", "inst-x", "inst-agent",
+	} {
+		require.NoError(t, s.CreateSystemOneInstance(ctx, &store.SystemOneInstance{
+			ID:       uuid.NewString(),
+			Name:     instName,
+			Adapter:  "typesafe",
+			Model:    "jev-1.14.0",
+			Endpoint: "https://api.typesafe.ai",
+			Auth:     store.SystemOneInstanceAuth{Kind: store.SystemOneAuthKindAPIKey, SecretName: "s1-sec-" + instName},
+			Enabled:  true,
+		}))
+	}
+
 	// Bind project roles.
-	bindRole := func(u *store.User, roleName string) {
+	bindRole := func(targetProjID string, u *store.User, roleName string) {
 		role, rErr := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
 		require.NoError(t, rErr)
 		_, rbErr := s.CreateRoleBinding(ctx, &store.RoleBinding{
@@ -132,13 +160,33 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 			PrincipalType:    "user",
 			PrincipalID:      u.ID,
 			ScopeType:        store.RoleScopeProject,
-			ScopeID:          proj.ID,
+			ScopeID:          targetProjID,
 		})
 		require.NoError(t, rbErr)
 	}
-	bindRole(owner, store.ProjectRoleOwner)
-	bindRole(projAdmin, store.ProjectRoleAdmin)
-	bindRole(member, store.ProjectRoleMember)
+	bindRole(proj.ID, owner, store.ProjectRoleOwner)
+	bindRole(proj.ID, projAdmin, store.ProjectRoleAdmin)
+	bindRole(proj.ID, member, store.ProjectRoleMember)
+	bindRole(otherProj.ID, otherOwner, store.ProjectRoleOwner)
+
+	// Create a custom project role that grants project.manage_system_one_instances
+	// without being project-owner or project-admin, to verify the owner/admin rule.
+	customRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		ID:          uuid.NewString(),
+		Name:        "custom-s1-manager",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"project.read", "project.manage_system_one_instances"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               uuid.NewString(),
+		RoleDefinitionID: customRole.ID,
+		PrincipalType:    "user",
+		PrincipalID:      customRoleUser.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          proj.ID,
+	})
+	require.NoError(t, err)
 
 	basePath := "/api/v1/projects/" + proj.ID + "/system-one/instances"
 
@@ -192,6 +240,34 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 	rec = doProjectSystemOneBearerReq(t, srv, http.MethodGet, basePath, uatWithoutScope, nil)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
+	// 4b. Other-project owner and other-project UAT MUST be denied (403).
+	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, otherOwner, http.MethodGet, basePath, nil).Code)
+	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, otherOwner, http.MethodPut, basePath+"/inst-x", nil).Code)
+	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, otherOwner, http.MethodDelete, basePath+"/inst-uat", nil).Code)
+
+	otherProjUAT := projectOpsMint(t, srv, otherOwner.ID, projectBoundary(otherProj.ID), "project:manage_system_one_instances")
+	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodGet, basePath, otherProjUAT, nil).Code)
+	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodPut, basePath+"/inst-x", otherProjUAT, nil).Code)
+	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodDelete, basePath+"/inst-uat", otherProjUAT, nil).Code)
+
+	// 4c. Hub-boundary UAT minted by project owner with project:manage_system_one_instances IS allowed (200).
+	hubBoundaryOwnerUAT := projectOpsMint(t, srv, owner.ID, hubBoundary(), "project:manage_system_one_instances")
+	rec = doProjectSystemOneBearerReq(t, srv, http.MethodPut, basePath+"/inst-uat-hub", hubBoundaryOwnerUAT, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doProjectSystemOneBearerReq(t, srv, http.MethodDelete, basePath+"/inst-uat-hub", hubBoundaryOwnerUAT, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 4d. Scoped UAT minted by a hub admin who is NOT a member of proj MUST be denied (403).
+	hubAdminNonMemberUAT := projectOpsMint(t, srv, hubAdmin.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
+	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodPut, basePath+"/inst-x", hubAdminNonMemberUAT, nil).Code)
+	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodDelete, basePath+"/inst-uat", hubAdminNonMemberUAT, nil).Code)
+
+	// 4e. Non-owner/admin holding a custom role granting project.manage_system_one_instances
+	// (and a UAT minted by them) MUST be denied (403) by the owner/admin rule.
+	assert.Equal(t, http.StatusForbidden, doRequestAsUser(t, srv, customRoleUser, http.MethodPut, basePath+"/inst-x", nil).Code)
+	customRoleUAT := projectOpsMint(t, srv, customRoleUser.ID, projectBoundary(proj.ID), "project:manage_system_one_instances")
+	assert.Equal(t, http.StatusForbidden, doProjectSystemOneBearerReq(t, srv, http.MethodPut, basePath+"/inst-x", customRoleUAT, nil).Code)
+
 	// 5. Agent JWT MUST be denied on GET, PUT, DELETE.
 	agentIdent := dcAgentIdentity(uuid.NewString(), proj.ID, AgentRoleBaseline)
 	doAsAgent := func(method, path string) *httptest.ResponseRecorder {
@@ -205,6 +281,80 @@ func TestProjectSystemOneInstances_AuthzMatrixAndExperimentGate(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, doAsAgent(http.MethodGet, basePath).Code)
 	assert.Equal(t, http.StatusForbidden, doAsAgent(http.MethodPut, basePath+"/inst-agent").Code)
 	assert.Equal(t, http.StatusForbidden, doAsAgent(http.MethodDelete, basePath+"/inst-uat").Code)
+}
+
+func TestProjectSystemOneInstances_UnknownInstanceAndDeletePrune(t *testing.T) {
+	ctx := context.Background()
+	srv, s, _ := newSystemOneTestServer(t, true)
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-o1-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	proj := &store.Project{
+		ID:      uuid.NewString(),
+		Name:    "System One Existence & Prune Project",
+		Slug:    "s1-exist-prune",
+		OwnerID: admin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	basePath := "/api/v1/projects/" + proj.ID + "/system-one/instances"
+
+	// 1. Adding or setting a non-existent instance name returns 422 unknown_instance.
+	addMissing := doRequestAsUser(t, srv, admin, http.MethodPut, basePath+"/does-not-exist", nil)
+	require.Equal(t, http.StatusUnprocessableEntity, addMissing.Code, addMissing.Body.String())
+	assert.Contains(t, addMissing.Body.String(), "unknown_instance")
+
+	setMissing := doRequestAsUser(t, srv, admin, http.MethodPut, basePath, SetProjectSystemOneInstancesRequest{
+		Instances: []string{"does-not-exist"},
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, setMissing.Code, setMissing.Body.String())
+	assert.Contains(t, setMissing.Body.String(), "unknown_instance")
+
+	// Removing a non-existent valid slug stays idempotent (200).
+	delMissing := doRequestAsUser(t, srv, admin, http.MethodDelete, basePath+"/does-not-exist", nil)
+	require.Equal(t, http.StatusOK, delMissing.Code, delMissing.Body.String())
+
+	// 2. Tiny positive limits.ratePerSec (< 1e-6) is rejected at instance create time (400).
+	tinyRateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "tiny-rate-inst",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-offline-tiny-rate-0001"},
+		"limits":  map[string]any{"ratePerSec": 1e-11},
+	})
+	require.Equal(t, http.StatusBadRequest, tinyRateRec.Code, tinyRateRec.Body.String())
+
+	// 3. Create instance, allowlist it on proj, delete the hub instance ->
+	// proj's allowlist is pruned immediately, and recreating an instance with
+	// the same name does NOT silently re-authorize proj.
+	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "reusable-inst",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-offline-reusable-0001"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	addRec := doRequestAsUser(t, srv, admin, http.MethodPut, basePath+"/reusable-inst", nil)
+	require.Equal(t, http.StatusOK, addRec.Code, addRec.Body.String())
+
+	delInstRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/reusable-inst", nil)
+	require.Equal(t, http.StatusNoContent, delInstRec.Code, delInstRec.Body.String())
+
+	gotAfterDelete, err := s.GetProjectSystemOneInstances(ctx, proj.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotAfterDelete, "deleting hub instance must prune it from project allowlists")
+
+	recreateRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "reusable-inst",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-offline-reusable-0002"},
+	})
+	require.Equal(t, http.StatusCreated, recreateRec.Code, recreateRec.Body.String())
+
+	gotAfterRecreate, err := s.GetProjectSystemOneInstances(ctx, proj.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotAfterRecreate, "recreating an instance with the same name must not silently re-authorize proj")
 }
 
 type s1CountingSecretBackend struct {
@@ -283,15 +433,26 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 
 	re := srv.RuleEngine()
 	require.NoError(t, re.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+	const testEnvName = "system_one_e2e_env"
+	require.NoError(t, systemone.RegisterConsumerEnvironment(re, testSystemOneConsumer, spec.ContentEnvironment{
+		Name:    testEnvName,
+		Version: 1,
+		Fields: []spec.FieldDecl{
+			{Name: spec.ProbeFieldText, Kind: spec.FieldKindText, MaxBytes: spec.ProbeMaxBytes, Trust: spec.TrustUntrusted},
+		},
+		MaxTotalBytes: spec.ProbeMaxBytes,
+	}))
 
 	const rawRule = `{
 	  "version": 1,
+	  "inputs": ["probe.text"],
 	  "binding": {"instance": "ts-allow"},
 	  "questions": [{"id": "q1", "type": "binary", "instructions": "Is this urgent?"}],
 	  "output": {"question": "q1"}
 	}`
 	const rawRuleMissingSec = `{
 	  "version": 1,
+	  "inputs": ["probe.text"],
 	  "binding": {"instance": "ts-missing-secret"},
 	  "questions": [{"id": "q1", "type": "binary", "instructions": "Is this urgent?"}],
 	  "output": {"question": "q1"}
@@ -300,7 +461,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	// 1. Compile with project context refuses unlisted instance (0 secret reads).
 	_, err = re.Compile(systemone.WithProjectID(ctx, proj.ID), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.Error(t, err)
 	ce, ok := spec.AsCompileError(err)
@@ -311,7 +472,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	// Compile without project context (e.g. hub-level) to test evaluation refusal.
 	compiled, err := re.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 
@@ -333,7 +494,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 	// still returns no_eligible_instance with 0 secret reads (not auth).
 	compiledMissingSec, err := re.Compile(ctx, systemone.DialectName, rawRuleMissingSec, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 	_, err = re.Evaluate(ctx, compiledMissingSec, ruleengine.Input{
@@ -381,7 +542,7 @@ func TestProjectSystemOneInstances_CompileEvaluateRemovalSecretIndependenceAndPr
 
 	_, err = re.Compile(systemone.WithProjectID(ctx, proj.ID), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: testSystemOneConsumer,
-		Name:     spec.ProbeEnvironmentName,
+		Name:     testEnvName,
 	})
 	require.NoError(t, err)
 

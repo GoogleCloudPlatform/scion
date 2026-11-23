@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -1352,31 +1353,37 @@ func TestProject_SystemOneAllowedInstances(t *testing.T) {
 	assert.Empty(t, got)
 	assert.NotNil(t, got)
 
-	// Add is idempotent, sorted, and deduplicated.
-	got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "typesafe-b")
+	// Add is idempotent, sorted, and deduplicated; returns before and after snapshots.
+	before, got, err := ps.AddProjectSystemOneInstance(ctx, p.ID, "typesafe-b")
 	require.NoError(t, err)
+	assert.Empty(t, before)
 	assert.Equal(t, []string{"typesafe-b"}, got)
 
-	got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "gemini-a")
+	before, got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "gemini-a")
 	require.NoError(t, err)
+	assert.Equal(t, []string{"typesafe-b"}, before)
 	assert.Equal(t, []string{"gemini-a", "typesafe-b"}, got)
 
-	got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "gemini-a")
+	before, got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "gemini-a")
 	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a", "typesafe-b"}, before)
 	assert.Equal(t, []string{"gemini-a", "typesafe-b"}, got)
 
 	// Remove is idempotent.
-	got, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "typesafe-b")
+	before, got, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "typesafe-b")
 	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a", "typesafe-b"}, before)
 	assert.Equal(t, []string{"gemini-a"}, got)
 
-	got, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "nonexistent")
+	before, got, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "nonexistent")
 	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a"}, before)
 	assert.Equal(t, []string{"gemini-a"}, got)
 
 	// Set replaces full list with deduplication and sorting.
-	got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"zeta-1", "alpha-1", "zeta-1"})
+	before, got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"zeta-1", "alpha-1", "zeta-1"})
 	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a"}, before)
 	assert.Equal(t, []string{"alpha-1", "zeta-1"}, got)
 
 	got, err = ps.GetProjectSystemOneInstances(ctx, p.ID)
@@ -1384,26 +1391,138 @@ func TestProject_SystemOneAllowedInstances(t *testing.T) {
 	assert.Equal(t, []string{"alpha-1", "zeta-1"}, got)
 
 	// Clearing via Set(nil) empties the list.
-	got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, nil)
+	before, got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, nil)
 	require.NoError(t, err)
+	assert.Equal(t, []string{"alpha-1", "zeta-1"}, before)
 	assert.Empty(t, got)
 
+	// 64-entry cap enforced atomically inside store for both Set and Add.
+	maxNames := make([]string, store.MaxProjectSystemOneInstances)
+	for i := range maxNames {
+		maxNames[i] = fmt.Sprintf("inst-%03d", i)
+	}
+	_, got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, maxNames)
+	require.NoError(t, err)
+	assert.Len(t, got, store.MaxProjectSystemOneInstances)
+
+	// Adding an already-present entry at the cap succeeds idempotently.
+	_, got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "inst-000")
+	require.NoError(t, err)
+	assert.Len(t, got, store.MaxProjectSystemOneInstances)
+
+	// Adding a 65th distinct entry fails with ErrSystemOneAllowlistLimitExceeded.
+	_, _, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "inst-overflow")
+	assert.ErrorIs(t, err, store.ErrSystemOneAllowlistLimitExceeded)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Set with 65 distinct entries fails with ErrSystemOneAllowlistLimitExceeded.
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, p.ID, append(maxNames, "inst-overflow"))
+	assert.ErrorIs(t, err, store.ErrSystemOneAllowlistLimitExceeded)
+
 	// Invalid names fail with ErrInvalidInput.
-	_, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "INVALID NAME!")
+	_, _, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "INVALID NAME!")
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
-	_, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "")
+	_, _, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "")
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
-	_, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"valid-1", "Bad_Upper"})
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"valid-1", "Bad_Upper"})
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 
 	// Missing project returns ErrNotFound.
 	missingID := uuid.NewString()
 	_, err = ps.GetProjectSystemOneInstances(ctx, missingID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
-	_, err = ps.SetProjectSystemOneInstances(ctx, missingID, []string{"alpha-1"})
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, missingID, []string{"alpha-1"})
 	assert.ErrorIs(t, err, store.ErrNotFound)
-	_, err = ps.AddProjectSystemOneInstance(ctx, missingID, "alpha-1")
+	_, _, err = ps.AddProjectSystemOneInstance(ctx, missingID, "alpha-1")
 	assert.ErrorIs(t, err, store.ErrNotFound)
-	_, err = ps.RemoveProjectSystemOneInstance(ctx, missingID, "alpha-1")
+	_, _, err = ps.RemoveProjectSystemOneInstance(ctx, missingID, "alpha-1")
 	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// PruneSystemOneInstanceFromAllProjects removes the named instance across projects.
+	p2 := newProject(2)
+	p3 := newProject(3)
+	require.NoError(t, ps.CreateProject(ctx, p2))
+	require.NoError(t, ps.CreateProject(ctx, p3))
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"shared-inst", "keep-me"})
+	require.NoError(t, err)
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, p2.ID, []string{"shared-inst"})
+	require.NoError(t, err)
+	_, _, err = ps.SetProjectSystemOneInstances(ctx, p3.ID, []string{"other-inst"})
+	require.NoError(t, err)
+
+	pruned, err := ps.PruneSystemOneInstanceFromAllProjects(ctx, "shared-inst")
+	require.NoError(t, err)
+	assert.Equal(t, 2, pruned)
+
+	got1, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"keep-me"}, got1)
+	got2, err := ps.GetProjectSystemOneInstances(ctx, p2.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got2)
+	got3, err := ps.GetProjectSystemOneInstances(ctx, p3.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"other-inst"}, got3)
+
+	_, err = ps.PruneSystemOneInstanceFromAllProjects(ctx, "INVALID!")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestProject_SystemOneAllowedInstances_ConcurrentAddRemove(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	p := newProject(10)
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	const workers = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		name := fmt.Sprintf("conc-inst-%02d", i)
+		go func() {
+			defer wg.Done()
+			_, _, err := ps.AddProjectSystemOneInstance(ctx, p.ID, name)
+			if err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	got, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	require.Len(t, got, workers, "concurrent adds must not lose updates")
+
+	// Concurrently remove the even-numbered entries; all odd entries must remain.
+	errs2 := make(chan error, workers/2)
+	for i := 0; i < workers; i += 2 {
+		wg.Add(1)
+		name := fmt.Sprintf("conc-inst-%02d", i)
+		go func() {
+			defer wg.Done()
+			_, _, err := ps.RemoveProjectSystemOneInstance(ctx, p.ID, name)
+			if err != nil {
+				errs2 <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs2)
+	for err := range errs2 {
+		require.NoError(t, err)
+	}
+
+	got, err = ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	var wantOdd []string
+	for i := 1; i < workers; i += 2 {
+		wantOdd = append(wantOdd, fmt.Sprintf("conc-inst-%02d", i))
+	}
+	assert.Equal(t, wantOdd, got, "concurrent removes must not lose updates")
 }

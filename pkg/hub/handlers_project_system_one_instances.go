@@ -28,7 +28,6 @@ import (
 
 const (
 	maxProjectSystemOneInstancesBodyBytes = 32 * 1024
-	maxProjectSystemOneInstancesCount     = 64
 	projectSystemOneManageRuleMessage     = "Only active project owners, project administrators, or Hub administrators can manage a project's System One instance allowlist"
 )
 
@@ -217,20 +216,38 @@ func (s *Server) handleSetProjectSystemOneInstances(w http.ResponseWriter, r *ht
 	if !readBoundedJSONStrict(w, r, maxProjectSystemOneInstancesBodyBytes, &req) {
 		return
 	}
-	if len(req.Instances) > maxProjectSystemOneInstancesCount {
-		ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", maxProjectSystemOneInstancesCount), nil)
+	if len(req.Instances) > store.MaxProjectSystemOneInstances {
+		ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", store.MaxProjectSystemOneInstances), nil)
 		return
 	}
+	seen := make(map[string]struct{}, len(req.Instances))
 	for _, raw := range req.Instances {
-		if !store.IsValidSystemOneInstanceName(strings.TrimSpace(raw)) {
+		name := strings.TrimSpace(raw)
+		if !store.IsValidSystemOneInstanceName(name) {
 			ValidationError(w, fmt.Sprintf("invalid instance name %q: must be a lowercase alphanumeric slug (1..63 characters)", raw), nil)
+			return
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		if _, getErr := s.store.GetSystemOneInstanceByName(ctx, name); getErr != nil {
+			if errors.Is(getErr, store.ErrNotFound) {
+				writeError(w, http.StatusUnprocessableEntity, "unknown_instance", fmt.Sprintf("System One instance %q does not exist", name), nil)
+				return
+			}
+			slog.Error("failed to verify System One instance existence", "project_id", project.ID, "instance", name, "error", getErr)
+			RuntimeError(w, "Failed to verify System One instance")
 			return
 		}
 	}
 
-	before, _ := s.store.GetProjectSystemOneInstances(ctx, project.ID)
-	updated, err := s.store.SetProjectSystemOneInstances(ctx, project.ID, req.Instances)
+	before, updated, err := s.store.SetProjectSystemOneInstances(ctx, project.ID, req.Instances)
 	if err != nil {
+		if errors.Is(err, store.ErrSystemOneAllowlistLimitExceeded) {
+			ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", store.MaxProjectSystemOneInstances), nil)
+			return
+		}
 		if errors.Is(err, store.ErrInvalidInput) {
 			ValidationError(w, "invalid instance allowlist", nil)
 			return
@@ -277,24 +294,22 @@ func (s *Server) handleAddProjectSystemOneInstance(w http.ResponseWriter, r *htt
 		ValidationError(w, fmt.Sprintf("invalid instance name %q: must be a lowercase alphanumeric slug (1..63 characters)", instanceName), nil)
 		return
 	}
-
-	before, _ := s.store.GetProjectSystemOneInstances(ctx, project.ID)
-	if len(before) >= maxProjectSystemOneInstancesCount {
-		alreadyPresent := false
-		for _, cur := range before {
-			if cur == name {
-				alreadyPresent = true
-				break
-			}
-		}
-		if !alreadyPresent {
-			ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", maxProjectSystemOneInstancesCount), nil)
+	if _, getErr := s.store.GetSystemOneInstanceByName(ctx, name); getErr != nil {
+		if errors.Is(getErr, store.ErrNotFound) {
+			writeError(w, http.StatusUnprocessableEntity, "unknown_instance", fmt.Sprintf("System One instance %q does not exist", name), nil)
 			return
 		}
+		slog.Error("failed to verify System One instance existence", "project_id", project.ID, "instance", name, "error", getErr)
+		RuntimeError(w, "Failed to verify System One instance")
+		return
 	}
 
-	updated, err := s.store.AddProjectSystemOneInstance(ctx, project.ID, name)
+	before, updated, err := s.store.AddProjectSystemOneInstance(ctx, project.ID, name)
 	if err != nil {
+		if errors.Is(err, store.ErrSystemOneAllowlistLimitExceeded) {
+			ValidationError(w, fmt.Sprintf("instances exceeds maximum of %d entries", store.MaxProjectSystemOneInstances), nil)
+			return
+		}
 		if errors.Is(err, store.ErrInvalidInput) {
 			ValidationError(w, "invalid instance name", nil)
 			return
@@ -342,8 +357,7 @@ func (s *Server) handleRemoveProjectSystemOneInstance(w http.ResponseWriter, r *
 		return
 	}
 
-	before, _ := s.store.GetProjectSystemOneInstances(ctx, project.ID)
-	updated, err := s.store.RemoveProjectSystemOneInstance(ctx, project.ID, name)
+	before, updated, err := s.store.RemoveProjectSystemOneInstance(ctx, project.ID, name)
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
 			ValidationError(w, "invalid instance name", nil)

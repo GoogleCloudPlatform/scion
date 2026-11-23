@@ -196,6 +196,6 @@ func init() {
 	projectSystemOneCmd.AddCommand(projectSystemOneRemoveCmd)
 	projectSystemOneCmd.AddCommand(projectSystemOneSetCmd)
 
-	projectSystemOneCmd.PersistentFlags().StringVar(&projectSystemOneProject, "project", "", "Project ID or slug")
+	projectSystemOneCmd.PersistentFlags().StringVar(&projectSystemOneProject, "project", "", "Project ID")
 	projectSystemOneSetCmd.Flags().BoolVar(&projectSystemOneClear, "clear", false, "Clear the project's allowed System One instances")
 }

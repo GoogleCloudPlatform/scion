@@ -3515,9 +3515,34 @@ func TestSystemOneInstances_Item8_ProviderPinnedSecretNames(t *testing.T) {
 				Enabled:  true,
 			}))
 
+			binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check."}]}`)
+
+			// On the first crafted row, also verify that when the instance is NOT
+			// allowlisted for proj, the D1 allowlist gate rejects with
+			// no_eligible_instance and 0 SecretBackend.Get calls.
+			if i == 0 && j == 0 {
+				providerHits.Store(0)
+				countingBackend.getCalls.Store(0)
+				unlistedRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/"+craftedName+"/probe", map[string]any{
+					"project": proj.ID,
+					"spec":    binSpec,
+					"probe":   map[string]any{"text": "Unlisted project check."},
+				})
+				require.Equal(t, http.StatusOK, unlistedRec.Code)
+				var unlistedResp ProbeSystemOneInstanceResponse
+				require.NoError(t, json.Unmarshal(unlistedRec.Body.Bytes(), &unlistedResp))
+				assert.Equal(t, systemoneruntime.ClassFailed, unlistedResp.Class)
+				assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), unlistedResp.Reason)
+				assert.Zero(t, providerHits.Load())
+				assert.Zero(t, countingBackend.getCalls.Load())
+			}
+
+			// Allowlist craftedName on proj so probe exercises G4 pinned-name refusal.
+			_, _, err := s.SetProjectSystemOneInstances(ctx, proj.ID, []string{craftedName})
+			require.NoError(t, err)
+
 			providerHits.Store(0)
 			countingBackend.getCalls.Store(0)
-			binSpec := json.RawMessage(`{"version":1,"questions":[{"id":"q_ok","type":"binary","instructions":"Check."}]}`)
 			pRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/"+craftedName+"/probe", map[string]any{
 				"project": proj.ID,
 				"spec":    binSpec,

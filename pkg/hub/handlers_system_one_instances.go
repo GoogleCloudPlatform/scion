@@ -747,6 +747,10 @@ func parseSystemOneLimits(dto *SystemOneInstanceLimitsDTO) (store.SystemOneInsta
 	if math.IsNaN(dto.RatePerSec) || math.IsInf(dto.RatePerSec, 0) || dto.RatePerSec < 0 {
 		return store.SystemOneInstanceLimits{}, errors.New("limits.ratePerSec must be a finite number >= 0")
 	}
+	const minPositiveSystemOneRatePerSec = 1e-6
+	if dto.RatePerSec > 0 && dto.RatePerSec < minPositiveSystemOneRatePerSec {
+		return store.SystemOneInstanceLimits{}, fmt.Errorf("limits.ratePerSec must be 0 or >= %g", minPositiveSystemOneRatePerSec)
+	}
 	if dto.MaxInputTokens < 0 {
 		return store.SystemOneInstanceLimits{}, errors.New("limits.maxInputTokens must be >= 0")
 	}
@@ -1287,10 +1291,23 @@ func (s *Server) deleteSystemOneInstance(w http.ResponseWriter, r *http.Request,
 
 	s.SystemOneRuntime().ForgetInstance(inst.ID)
 
+	prunedProjects, pruneErr := s.store.PruneSystemOneInstanceFromAllProjects(ctx, inst.Name)
+	if pruneErr != nil {
+		s.logSystemOneAudit().Error("Failed to prune deleted System One instance from project allowlists",
+			"instance_id", inst.ID,
+			"instance_name", inst.Name,
+			"actor_id", user.ID(),
+			"error", pruneErr,
+		)
+		InternalError(w)
+		return
+	}
+
 	s.logSystemOneAudit().Info("System One instance deleted",
 		"instance_id", inst.ID,
 		"instance_name", inst.Name,
 		"secret_name", inst.Auth.SecretName,
+		"pruned_projects", prunedProjects,
 		"actor_id", user.ID(),
 	)
 
