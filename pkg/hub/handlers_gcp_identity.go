@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1717,14 +1718,20 @@ const (
 	maxLoggedAudienceLen   = 512
 )
 
-// truncateLoggedAudience bounds an audience string before writing it to
+// truncateLoggedAudience bounds an audience string to at most
+// maxLoggedAudienceLen bytes on a UTF-8 rune boundary before writing it to
 // warning or audit logs so oversized caller-supplied audiences cannot bloat
-// log records. The full audience is still passed to GCP.
+// log records or produce invalid UTF-8. The full audience is still passed to
+// GCP.
 func truncateLoggedAudience(audience string) string {
-	if len(audience) > maxLoggedAudienceLen {
-		return audience[:maxLoggedAudienceLen]
+	if len(audience) <= maxLoggedAudienceLen {
+		return audience
 	}
-	return audience
+	cut := maxLoggedAudienceLen
+	for cut > 0 && !utf8.RuneStart(audience[cut]) {
+		cut--
+	}
+	return audience[:cut]
 }
 
 // extractRateLimitedAudience performs a strictly bounded best-effort read of

@@ -34,6 +34,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -540,6 +541,29 @@ func TestHandleAgentGCPIdentityToken_AuditRecordsAudience(t *testing.T) {
 		require.NotNil(t, auditRec, "expected GCP token audit event to be emitted")
 		require.Equal(t, overlong[:maxLoggedAudienceLen], auditRec["audience"])
 		require.NotContains(t, buf.String(), "test-id-token", "audit log must not contain token material")
+	})
+
+	t.Run("success/overlong-multibyte-utf8-boundary", func(t *testing.T) {
+		// Place a 3-byte UTF-8 rune ("€", 0xE2 0x82 0xAC) starting at byte
+		// maxLoggedAudienceLen-1 so a naive byte slice would split it mid-rune.
+		prefix := strings.Repeat("a", maxLoggedAudienceLen-1)
+		multibyte := prefix + "€tail"
+		buf := captureAuditLogs(t)
+		f.Server.auditLogger = NewLogAuditLogger("[Test]", false)
+
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/gcp-identity-token",
+			map[string]string{"audience": multibyte}, f.Token)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		require.Equal(t, multibyte, gen.lastAudience, "full audience must still be passed to GenerateIDToken")
+
+		auditRec := auditRecordWithMsg(t, buf, "GCP token audit event")
+		require.NotNil(t, auditRec, "expected GCP token audit event to be emitted")
+		got, ok := auditRec["audience"].(string)
+		require.True(t, ok, "audience must be a string")
+		require.LessOrEqual(t, len(got), maxLoggedAudienceLen)
+		require.True(t, utf8.ValidString(got), "truncated audience must be valid UTF-8")
+		require.NotContains(t, got, "\ufffd", "truncated audience must not contain UTF-8 replacement chars")
+		require.Equal(t, prefix, got)
 	})
 
 	t.Run("failure", func(t *testing.T) {
