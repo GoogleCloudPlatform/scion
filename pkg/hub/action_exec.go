@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
@@ -72,8 +73,9 @@ import (
 //     under LockTriggerQuota.
 //  2. Fire-time re-check (Preauthorize, resolveRecordedAuthority, Authorize):
 //     strict payload decode; hub.exec_schedules + hub.conduit; reload endpoint
-//     and re-check trigger.SourceReplayProtected; resolveRecordedAuthority;
-//     frozen ceiling EffectCeilingAllows(agent.attach); live authorizeAgentTargetAction
+//     and re-check trigger.SourceReplayProtected plus non-hub_token webhook
+//     delivery id (M1); resolveRecordedAuthority; frozen ceiling
+//     EffectCeilingAllows(agent.attach); live authorizeAgentTargetAction
 //     (ActionAttach); fireStanding; target preflight; per-trigger exec fire rate cap.
 //  3. Read-time argv redaction (trigger_response.go):
 //     command revealed only when the caller holds live agent.attach on the stored
@@ -208,12 +210,30 @@ func (a *execAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) 
 			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReasonSourceNotReplayProtected))
 			return &FireRefusal{Reason: execReasonSourceNotReplayProtected}, nil
 		}
+		if !execWebhookDeliveryProtected(req.Event, ep) {
+			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReasonMissingDeliveryID))
+			return &FireRefusal{Reason: execReasonMissingDeliveryID}, nil
+		}
 		return nil, nil
 	}
 	if !req.FireAt.IsZero() && time.Since(req.FireAt) > scheduledExecMaxWindow {
 		return nil, a.skipExecFire(ctx, req, p, execReasonMissedWindow, "missed_window")
 	}
 	return nil, nil
+}
+
+// execWebhookDeliveryProtected enforces the M1 replay rule for webhook-sourced
+// exec fires: a non-hub_token webhook delivery must carry a non-empty delivery
+// id (ev.Attributes["delivery"]). P4a will consolidate this into a shared
+// helper alongside dispatch_agent.
+func execWebhookDeliveryProtected(ev *hubfire.FireEvent, ep *store.WebhookEndpoint) bool {
+	if ev == nil || ev.SourceKind != store.TriggerSourceKindWebhook {
+		return true
+	}
+	if ep != nil && ep.SignatureMode == "hub_token" {
+		return true
+	}
+	return strings.TrimSpace(ev.Attributes["delivery"]) != ""
 }
 
 func (a *execAction) OnAuthorityRefused(ctx context.Context, req hubfire.FireRequest, err error) string {

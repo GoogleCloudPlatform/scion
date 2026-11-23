@@ -115,7 +115,9 @@ func TestTriggerExec_AuthoringRefusalsAndCaps(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "source_not_replay_protected")
 
-	// Refusal 2: subject mode reuse -> 400.
+	// Refusal 2: subject mode reuse -> 400 at HTTP layer and exec-specific message
+	// directly in authorizeTriggerExecAuthoring (pins the guard even after reuse
+	// is enabled globally for other action types).
 	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
 		Name:    "exec-bad-reuse",
 		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
@@ -123,6 +125,39 @@ func TestTriggerExec_AuthoringRefusalsAndCaps(t *testing.T) {
 		Action:  TriggerActionSpec{Type: store.TriggerActionExec, AgentID: f.targetAgent.ID, Command: []string{"true"}},
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	scionEpModel, err := f.store.GetWebhookEndpoint(context.Background(), scionEp.ID)
+	require.NoError(t, err)
+	directRec := httptest.NewRecorder()
+	directReq := authoredRequest(t, f.ownerAuth, http.MethodPost, "/api/v1/projects/"+f.projectID+"/triggers", nil)
+	_, _, directOK := f.srv.authorizeTriggerExecAuthoring(
+		directRec,
+		directReq,
+		f.projectID,
+		store.TriggerSourceKindWebhook,
+		scionEpModel,
+		"reuse",
+		&TriggerActionSpec{Type: store.TriggerActionExec, AgentID: f.targetAgent.ID, Command: []string{"true"}},
+		store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		store.AuthorityProvenance{SourcePrincipalKind: "user", SourcePrincipalID: f.owner.ID},
+	)
+	assert.False(t, directOK)
+	require.Equal(t, http.StatusBadRequest, directRec.Code, directRec.Body.String())
+	assert.Contains(t, directRec.Body.String(), "subject mode reuse is not supported for exec triggers")
+
+	// Refusal 2b: non-exec field on TriggerActionSpec -> 400 (allow-list check).
+	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "exec-bad-extra-field",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionExec,
+			AgentID: f.targetAgent.ID,
+			Command: []string{"true"},
+			Body:    "disallowed",
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "exec triggers take agentId or agentName")
 
 	// Refusal 3: templating in argv -> 400 templating_not_allowed_in_argv.
 	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
@@ -512,6 +547,7 @@ func TestTriggerExec_SkipHoldsClaimUntilRunEnds(t *testing.T) {
 
 	fireOnce := func(subject string) (string, hubfire.FireOutcome) {
 		now := time.Now().UTC()
+		delivID := api.NewUUID()
 		ev := &store.TriggerEvent{
 			ID:         api.NewUUID(),
 			ProjectID:  projectID,
@@ -519,9 +555,10 @@ func TestTriggerExec_SkipHoldsClaimUntilRunEnds(t *testing.T) {
 			SourceID:   ep.ID,
 			Type:       "webhook.received",
 			Subject:    subject,
-			DedupKey:   api.NewUUID(),
+			DedupKey:   delivID,
 			OccurredAt: now,
 			ReceivedAt: now,
+			Attributes: map[string]string{"delivery": delivID},
 			Status:     store.TriggerEventStatusPending,
 		}
 		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
@@ -559,6 +596,7 @@ func TestTriggerExec_SkipHoldsClaimUntilRunEnds(t *testing.T) {
 				SourceID:   ev.SourceID,
 				Type:       ev.Type,
 				Subject:    subject,
+				Attributes: ev.Attributes,
 				Trigger: &hubfire.FireTriggerRef{
 					ID:          tr.ID,
 					Name:        tr.Name,
@@ -660,6 +698,11 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 
 	makeReq := func(attrs map[string]string) (string, hubfire.FireRequest) {
 		now := time.Now().UTC()
+		delivID := api.NewUUID()
+		fullAttrs := map[string]string{"delivery": delivID}
+		for k, v := range attrs {
+			fullAttrs[k] = v
+		}
 		ev := &store.TriggerEvent{
 			ID:         api.NewUUID(),
 			ProjectID:  projectID,
@@ -667,10 +710,10 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 			SourceID:   ep.ID,
 			Type:       "webhook.received",
 			Subject:    "s1",
-			DedupKey:   api.NewUUID(),
+			DedupKey:   delivID,
 			OccurredAt: now,
 			ReceivedAt: now,
-			Attributes: attrs,
+			Attributes: fullAttrs,
 			Status:     store.TriggerEventStatusPending,
 		}
 		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
@@ -707,7 +750,7 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 				SourceID:   ev.SourceID,
 				Type:       ev.Type,
 				Subject:    ev.Subject,
-				Attributes: attrs,
+				Attributes: fullAttrs,
 				Trigger:    &hubfire.FireTriggerRef{ID: tr.ID, Name: tr.Name, SubjectMode: store.TriggerSubjectModeNew},
 			},
 			Executor: hubfire.ExecutorContext{Kind: "trigger_drainer", ID: "trigger_event:" + ev.ID},
@@ -735,6 +778,14 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 	assert.Equal(t, hubfire.FireStatusRefused, out2.Status)
 	assert.Equal(t, execReasonContextInvalid, out2.Error)
 	assert.Equal(t, startsBefore, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "oversize context must not send exec-start")
+
+	// 2b. NUL byte in context subject -> refused before exec-start (O4: refuse, never alter).
+	_, req2b := makeReq(map[string]string{"big": "ok"})
+	req2b.Event.Subject = "bad\x00subject"
+	out2b := f.srv.fireAction(ctx, req2b)
+	assert.Equal(t, hubfire.FireStatusRefused, out2b.Status)
+	assert.Equal(t, execReasonContextInvalid, out2b.Error)
+	assert.Equal(t, startsBefore, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "NUL subject must not send exec-start")
 
 	// 3. Sweeper recovery of a fire_id-owned run whose tracker was lost (restart mid-run).
 	f.capture.answer = func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
@@ -771,4 +822,160 @@ func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerFireStatusFired, gotF3.Status)
 	assert.NotNil(t, gotF3.FinishedAt)
+}
+
+// TestTriggerExec_FireTimeReplayAndDeliveryIDRefusals verifies:
+//   - M1 replay rule: a non-hub_token webhook delivery without a delivery id is
+//     refused at fire time with execReasonMissingDeliveryID, zero exec-start
+//     RPCs, and a trigger.fire.exec.refused audit record;
+//   - O1 fire-time replay re-check: when a scion_v1 endpoint is downgraded to
+//     body_only after authoring, firing refuses with
+//     execReasonSourceNotReplayProtected, zero exec-start RPCs, and a
+//     trigger.fire.exec.refused audit record.
+func TestTriggerExec_FireTimeReplayAndDeliveryIDRefusals(t *testing.T) {
+	f := newExecRouteFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+	auditCol := &triggerExecAuditCollector{}
+	f.srv.SetAuditLogger(auditCol)
+	f.startAgent(t)
+
+	ctx := context.Background()
+	projectID := f.launched.ProjectID
+	ep := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           projectID,
+		Name:                "replay-recheck-hook",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    f.owner.ID(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		SecretVersion:       1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(ctx, ep))
+	bodyOnlyEp := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           projectID,
+		Name:                "replay-recheck-body-only",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    f.owner.ID(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeBodyOnly,
+		SecretVersion:       1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(ctx, bodyOnlyEp))
+
+	payloadJSON, err := (&scheduledExecPayload{
+		AgentID:        f.launched.ID,
+		AgentName:      f.launched.Slug,
+		Command:        []string{"true"},
+		TimeoutSeconds: 30,
+	}).encode()
+	require.NoError(t, err)
+
+	tr := &store.Trigger{
+		ID:            api.NewUUID(),
+		ProjectID:     projectID,
+		Name:          "replay-recheck-trig",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionExec,
+		ActionPayload: payloadJSON,
+		SubjectMode:   store.TriggerSubjectModeNew,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID(),
+			InitiatorCredentialKind: "session",
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, tr))
+
+	makeFire := func(sourceID string, attrs map[string]string) hubfire.FireRequest {
+		now := time.Now().UTC()
+		ev := &store.TriggerEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   sourceID,
+			Type:       "webhook.received",
+			Subject:    "s1",
+			DedupKey:   api.NewUUID(),
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: attrs,
+			Status:     store.TriggerEventStatusPending,
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+		tf := &store.TriggerFire{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			TriggerID:  tr.ID,
+			EventID:    ev.ID,
+			Subject:    "s1",
+			ActionType: store.TriggerActionExec,
+			Status:     store.TriggerFireStatusFiring,
+			LeaseUntil: now.Add(10 * time.Minute),
+			StartedAt:  now,
+			CreatedAt:  now,
+		}
+		claimed, _, cErr := f.store.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, cErr)
+		require.True(t, claimed)
+		return hubfire.FireRequest{
+			ProjectID: projectID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    tr.InitiatorAttribution,
+				Ceiling:        tr.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   tr.ID,
+				FireID:         tf.ID,
+			},
+			ActionType: store.TriggerActionExec,
+			Payload:    tr.ActionPayload,
+			Event: &hubfire.FireEvent{
+				ID:         ev.ID,
+				ProjectID:  projectID,
+				SourceKind: ev.SourceKind,
+				SourceID:   ev.SourceID,
+				Type:       ev.Type,
+				Subject:    ev.Subject,
+				Attributes: attrs,
+				Trigger:    &hubfire.FireTriggerRef{ID: tr.ID, Name: tr.Name, SubjectMode: store.TriggerSubjectModeNew},
+			},
+			Executor: hubfire.ExecutorContext{Kind: "trigger_drainer", ID: "trigger_event:" + ev.ID},
+		}
+	}
+
+	// 1. M1: scion_v1 webhook delivery without delivery id -> refused before exec-start.
+	outNoDeliv := f.srv.fireAction(ctx, makeFire(ep.ID, map[string]string{"event": "push"}))
+	assert.Equal(t, hubfire.FireStatusRefused, outNoDeliv.Status)
+	assert.Equal(t, execReasonMissingDeliveryID, outNoDeliv.Error)
+	assert.Equal(t, 0, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)),
+		"missing delivery id must not send exec-start")
+
+	// 2. O1: fire arriving from a non-replay-protected body_only endpoint -> fire-time
+	// Preauthorize re-check refuses even when delivery id is present (kills mutant m5).
+	outDowngraded := f.srv.fireAction(ctx, makeFire(bodyOnlyEp.ID, map[string]string{"delivery": api.NewUUID()}))
+	assert.Equal(t, hubfire.FireStatusRefused, outDowngraded.Status)
+	assert.Equal(t, execReasonSourceNotReplayProtected, outDowngraded.Error)
+	assert.Equal(t, 0, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)),
+		"body_only endpoint must not send exec-start")
+
+	// Verify both refusals emitted trigger.fire.exec.refused audit records.
+	auditCol.mu.Lock()
+	var refusedReasons []string
+	for _, ev := range auditCol.events {
+		if ev.Action == ScheduledExecAuditRefused && ev.TriggerID == tr.ID {
+			refusedReasons = append(refusedReasons, ev.Reason)
+		}
+	}
+	auditCol.mu.Unlock()
+	assert.Contains(t, refusedReasons, execReasonMissingDeliveryID)
+	assert.Contains(t, refusedReasons, execReasonSourceNotReplayProtected)
 }

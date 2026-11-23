@@ -20,6 +20,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -670,11 +671,17 @@ func (s *Server) authorizeTriggerExecAuthoring(
 			"exec triggers require a replay-protected source", nil)
 		return "", "", false
 	}
-	if spec.Message != "" || spec.Interrupt || spec.Plain || spec.Wake ||
-		spec.NameConflict != "" || spec.Template != "" || spec.Task != "" || spec.Branch != "" ||
-		len(spec.Labels) > 0 || spec.Ephemeral || spec.GithubToken != "" || spec.AgentRole != "" ||
-		spec.ReuseMessage != "" || len(spec.UntrustedVars) > 0 || spec.NoAuth ||
-		spec.Body != "" || spec.Target != "" || spec.ReplyInThread {
+	// Allow-list of TriggerActionSpec fields valid on exec triggers: zeroing
+	// only the allowed fields must leave the rest of the struct empty so any
+	// future field added to TriggerActionSpec is rejected by default.
+	stripped := *spec
+	stripped.Type = ""
+	stripped.AgentID = ""
+	stripped.AgentName = ""
+	stripped.Command = nil
+	stripped.TimeoutSeconds = 0
+	stripped.ContextAttributes = nil
+	if !reflect.ValueOf(stripped).IsZero() {
 		ValidationError(w, "exec triggers take agentId or agentName, command, timeoutSeconds, and contextAttributes only", nil)
 		return "", "", false
 	}

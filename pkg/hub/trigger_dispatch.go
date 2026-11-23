@@ -212,7 +212,8 @@ func sanitizeTriggerFireError(ctx context.Context, action FireAction, req hubfir
 		execReasonRateLimit,
 		execReasonSubjectBusy,
 		execReasonContextInvalid,
-		execReasonContextUnsupported:
+		execReasonContextUnsupported,
+		execReasonMissingDeliveryID:
 		return raw
 	}
 	if req.ActionType == "dispatch_agent" && rawErr != nil {

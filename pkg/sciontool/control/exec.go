@@ -375,6 +375,8 @@ func (e *execRoute) prepare(req *agentcontrol.ExecStartRequest) (execSpec, error
 	env = setEnv(env, "PWD", dir)
 	if req.TriggerContext != "" {
 		env = setEnv(env, agentcontrol.ExecTriggerContextEnvName, req.TriggerContext)
+	} else {
+		env = unsetEnv(env, agentcontrol.ExecTriggerContextEnvName)
 	}
 	path, err := lookPathEnv(req.Argv[0], envValue(env, "PATH"), dir)
 	if err != nil {
@@ -606,6 +608,16 @@ func setEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(out, key+"="+value)
+}
+
+func unsetEnv(env []string, key string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); k != key {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // countingDiscard counts and discards a run's output (D2 = b, SEC-P2):

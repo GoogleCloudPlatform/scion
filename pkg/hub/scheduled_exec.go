@@ -242,11 +242,18 @@ func buildTriggerExecContext(req hubfire.FireRequest, allowAttrs []string) (stri
 	if req.Event == nil {
 		return "", errors.New("missing trigger event for exec context")
 	}
+	subject := req.Event.Subject
+	if req.Event.Trigger != nil && req.Event.Trigger.FireSubject != "" {
+		subject = req.Event.Trigger.FireSubject
+	}
+	if subject != "" && (!utf8.ValidString(subject) || strings.IndexByte(subject, 0) >= 0) {
+		return "", errors.New("trigger context subject violates bounds")
+	}
 	payload := triggerExecContextPayload{
 		EventID:   req.Event.ID,
 		TriggerID: req.Authority.DefinitionID,
 		FireID:    req.Authority.FireID,
-		Subject:   req.Event.Subject,
+		Subject:   subject,
 	}
 	if len(allowAttrs) > 0 && len(req.Event.Attributes) > 0 {
 		attrs := make(map[string]string, len(allowAttrs))
@@ -363,6 +370,7 @@ const (
 	execReasonSubjectBusy              = "subject busy"
 	execReasonContextInvalid           = "trigger context invalid"
 	execReasonContextUnsupported       = "sciontool lacks exec_context.v1"
+	execReasonMissingDeliveryID        = "webhook delivery missing delivery id"
 )
 
 // execReasonExitStatus is the text of a non-zero exit (D6).

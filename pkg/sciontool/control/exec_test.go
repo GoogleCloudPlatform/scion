@@ -1029,4 +1029,29 @@ func TestExecTriggerContextEnvAndBinding(t *testing.T) {
 	if code, resp := f.start(t, badVer); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldV {
 		t.Fatalf("v2 request = %d %+v, want 400 invalid v", code, resp)
 	}
+
+	// Schedule-originated run (TriggerContext == "") must unset any inherited
+	// SCION_TRIGGER_CONTEXT from the harness environment so it never leaks.
+	fLeak := newExecFixture(t, func(o *ExecOptions) {
+		o.Env = func() ([]string, error) {
+			return []string{
+				"PATH=/usr/bin:/bin",
+				"HOME=/tmp",
+				agentcontrol.ExecTriggerContextEnvName + `={"leaked":true}`,
+			}, nil
+		}
+	})
+	schedReq := fLeak.startReq(53, "sched-clean")
+	if code, resp := fLeak.start(t, schedReq); code != http.StatusAccepted || resp.State != agentcontrol.ExecStateRunning {
+		t.Fatalf("schedule start = %d %+v, want 202 running", code, resp)
+	}
+	fLeak.fx.mu.Lock()
+	schedProc := fLeak.fx.procs["sched-clean"]
+	fLeak.fx.mu.Unlock()
+	if schedProc == nil {
+		t.Fatal("no proc spawned for tag sched-clean")
+	}
+	if got := envValue(schedProc.specs.env, agentcontrol.ExecTriggerContextEnvName); got != "" {
+		t.Fatalf("schedule run inherited SCION_TRIGGER_CONTEXT = %q, want unset", got)
+	}
 }
