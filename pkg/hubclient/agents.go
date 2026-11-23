@@ -1098,6 +1098,13 @@ type OutboundMessageRequest struct {
 	Decisions json.RawMessage `json:"decisions,omitempty"`
 	// DecisionsUpdate lets Decisions replace decisions whose keys exist.
 	DecisionsUpdate bool `json:"decisions_update,omitempty"`
+	// SecretRequests makes the message a secret request prompt: the requested
+	// keys as a JSON array of SecretRequestInput. The hub validates them (the
+	// hub.agent_secrets experiment); Msg is then the optional intro.
+	SecretRequests json.RawMessage `json:"secret_requests,omitempty"`
+	// SecretRequestsUpdate lets SecretRequests replace pending secret requests
+	// whose keys already exist.
+	SecretRequestsUpdate bool `json:"secret_requests_update,omitempty"`
 }
 
 // DecisionSendResult is one decision of a sent decision prompt.
@@ -1167,6 +1174,10 @@ type OutboundMessageResult struct {
 	// Decisions lists the decisions of a decision prompt, one per decision
 	// sent; empty for any other message.
 	Decisions []DecisionSendResult `json:"decisions,omitempty"`
+
+	// SecretRequests lists the secret requests of a secret-request prompt, one
+	// per key sent; empty for any other message.
+	SecretRequests []messages.SecretRequestSendResult `json:"secret_requests,omitempty"`
 }
 
 // SendOutboundMessage sends a message from an agent via the outbound endpoint.
