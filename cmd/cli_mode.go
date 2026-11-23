@@ -207,11 +207,16 @@ var agentAllowed = map[string]bool{
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
 
-	// Project-scoped secret reads as the calling agent (ptone/scion#5013).
-	// secret.set stays out: agents write secrets with sciontool secret set.
-	"secret":      true,
-	"secret.get":  true,
-	"secret.list": true,
+	// Project-scoped secret reads and agent self-service secret requests as
+	// the calling agent (ptone/scion#5013, ptone/scion#8747). secret.set stays
+	// out: agents write secrets with sciontool secret set. Hub routes enforce
+	// AgentIdentity and hub.agent_secrets on secret.request.*.
+	"secret":                  true,
+	"secret.get":              true,
+	"secret.list":             true,
+	"secret.request":          true,
+	"secret.request.list":     true,
+	"secret.request.withdraw": true,
 
 	// Decision self-service as the calling agent (ptone/scion#7797,
 	// decision Q1; withdraw ptone/scion#8190). Hub routes enforce

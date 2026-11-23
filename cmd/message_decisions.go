@@ -132,8 +132,8 @@ func validateDecisionFlags(agentTarget, group bool) error {
 		return newUsageError("--decisions and --decisions-file are mutually exclusive")
 	}
 	if !decisionsRequested() {
-		if msgDecisionsUpdate {
-			return newUsageError("--update is valid only with --decisions or --decisions-file")
+		if msgDecisionsUpdate && !secretRequestsRequested() {
+			return newUsageError("--update is valid only with --decisions, --decisions-file, --secret-request, or --secret-request-file")
 		}
 		return nil
 	}

@@ -39,8 +39,9 @@ const windowsHubTokenPath = "hub" + ".token"
 // unsupported on Windows until someone adds it here deliberately, after
 // checking that it touches no local file path that is not protected on
 // Windows. The server, the Runtime Broker and agent-mode commands are
-// deliberately absent (whoami, expose and unexpose read in-container token
-// files). Widening the set is a product decision.
+// deliberately absent (whoami, expose, unexpose, and secret / secret.request.*
+// require an in-container agent identity and token). Widening the set is a
+// product decision.
 var windowsAllowed = map[string]bool{
 	"list":          true,
 	"ssh":           true,
