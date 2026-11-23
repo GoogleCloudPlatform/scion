@@ -123,3 +123,104 @@ func TestBuildPod_NoBlockIdentityUnchanged(t *testing.T) {
 		t.Errorf("expected no Workload Identity node selector, got %v", pod.Spec.NodeSelector)
 	}
 }
+
+// TestBuildPod_MetadataModeLabel verifies that buildPod stamps
+// scion.metadata-mode from KubernetesBlockIdentity or SCION_METADATA_MODE,
+// ignores unrecognized values, strips caller-supplied overrides, and never
+// mutates config.Labels.
+func TestBuildPod_MetadataModeLabel(t *testing.T) {
+	cases := []struct {
+		name      string
+		blockID   bool
+		env       []string
+		labels    map[string]string
+		wantMode  string
+		wantLabel bool
+	}{
+		{
+			name:      "block identity sets block and overrides spoofed label",
+			blockID:   true,
+			env:       []string{"SCION_METADATA_MODE=passthrough"},
+			labels:    map[string]string{"scion.name": "a1", k8sMetadataModeLabel: "passthrough"},
+			wantMode:  "block",
+			wantLabel: true,
+		},
+		{
+			name:      "env block sets block",
+			env:       []string{"SCION_METADATA_MODE=block"},
+			wantMode:  "block",
+			wantLabel: true,
+		},
+		{
+			name:      "env assign sets assign",
+			env:       []string{"SCION_METADATA_MODE=assign"},
+			wantMode:  "assign",
+			wantLabel: true,
+		},
+		{
+			name:      "env passthrough sets passthrough",
+			env:       []string{"SCION_METADATA_MODE=passthrough"},
+			wantMode:  "passthrough",
+			wantLabel: true,
+		},
+		{
+			name:      "last env entry wins",
+			env:       []string{"SCION_METADATA_MODE=passthrough", "SCION_METADATA_MODE=block"},
+			wantMode:  "block",
+			wantLabel: true,
+		},
+		{
+			name:      "unrecognized env value omits label and strips caller label",
+			env:       []string{"SCION_METADATA_MODE=invalid/value"},
+			labels:    map[string]string{"scion.name": "a2", k8sMetadataModeLabel: "assign"},
+			wantLabel: false,
+		},
+		{
+			name:      "unset env omits label and strips caller label",
+			labels:    map[string]string{"scion.name": "a3", k8sMetadataModeLabel: "block"},
+			wantLabel: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _, _ := newTestK8sRuntime()
+			var origLabels map[string]string
+			if tc.labels != nil {
+				origLabels = make(map[string]string, len(tc.labels))
+				for k, v := range tc.labels {
+					origLabels[k] = v
+				}
+			}
+
+			pod, err := rt.buildPod("default", RunConfig{
+				Name:                    "mode-label-test",
+				Image:                   "example.com/image:v1",
+				UnixUsername:            "scion",
+				Harness:                 &EnvHarness{},
+				Env:                     tc.env,
+				Labels:                  tc.labels,
+				KubernetesBlockIdentity: tc.blockID,
+			})
+			if err != nil {
+				t.Fatalf("buildPod: %v", err)
+			}
+
+			got, ok := pod.Labels[k8sMetadataModeLabel]
+			if ok != tc.wantLabel {
+				t.Fatalf("pod.Labels[%q] present = %v (%q), want present=%v", k8sMetadataModeLabel, ok, got, tc.wantLabel)
+			}
+			if tc.wantLabel && got != tc.wantMode {
+				t.Errorf("pod.Labels[%q] = %q, want %q", k8sMetadataModeLabel, got, tc.wantMode)
+			}
+			if len(tc.labels) != len(origLabels) {
+				t.Errorf("caller's Labels length mutated: got %v, want %v", tc.labels, origLabels)
+			}
+			for k, v := range origLabels {
+				if tc.labels[k] != v {
+					t.Errorf("caller's Labels[%q] mutated: got %q, want %q", k, tc.labels[k], v)
+				}
+			}
+		})
+	}
+}
