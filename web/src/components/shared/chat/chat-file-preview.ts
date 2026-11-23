@@ -54,9 +54,13 @@ import {
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
 import {
+  artifactDownloadUrl,
   artifactFileUrl,
   artifactPagePath,
+  baseName,
   formatArtifactRef,
+  isInlineType,
+  isRemoteFile,
   rendererFor,
   type ArtifactFile,
   type ArtifactResponse,
@@ -111,6 +115,11 @@ export interface ArtifactPreviewTarget {
   /** Pinned version, or 0 for the current one. */
   seq: number;
   name: string;
+  /**
+   * Optional file path within the version to preview instead of the entry
+   * file (e.g., when opened from the artifact page's Files tab).
+   */
+  filePath?: string;
 }
 
 /** What `<scion-chat-file-preview>` renders: an attachment, a resolved path, a gs:// object or an artifact. */
@@ -152,6 +161,17 @@ interface ArtifactInfo {
    * (shared/untrusted-view-frame.ts); its bytes are never fetched here.
    */
   htmlView?: { url: string; remoteImages: boolean };
+  /**
+   * Set when previewing a specific file of the artifact (Files tab), so the
+   * footer offers raw/download actions for that file rather than "Open in
+   * artifact viewer".
+   */
+  fileMode?: {
+    rawUrl: string;
+    downloadUrl: string;
+    downloadName: string;
+    inline: boolean;
+  };
 }
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
@@ -692,7 +712,10 @@ export class ScionChatFilePreview extends LitElement {
       const data = (await res.json()) as ArtifactResponse;
       if (gen !== this.generation) return;
       const version = data.version;
-      const entry = version?.files.find((f) => f.path === version.entryPath);
+      const requestedPath = target.filePath;
+      const entry = requestedPath
+        ? version?.files.find((f) => !isRemoteFile(f) && f.path === requestedPath)
+        : version?.files.find((f) => f.path === version.entryPath);
       if (!version || !entry) {
         this.loadState = {
           ...base,
@@ -703,18 +726,38 @@ export class ScionChatFilePreview extends LitElement {
         return;
       }
       const artifact: ArtifactInfo = {
-        title: data.artifact.title,
+        title: requestedPath ? baseName(entry.path) : data.artifact.title,
         version: version.seq,
-        entry: version.entryPath,
+        entry: entry.path,
         pageUrl: artifactPagePath(data.artifact),
         current: version.seq === data.artifact.currentSeq,
         ownerKind: data.artifact.ownerKind,
         ownerRef: data.artifact.ownerRef,
         homeProject: data.artifact.scopeRef,
+        ...(requestedPath
+          ? {
+              fileMode: {
+                rawUrl: artifactFileUrl(data.artifact.id, version.seq, entry.path),
+                downloadUrl: artifactDownloadUrl(data.artifact.id, version.seq, entry.path),
+                downloadName: baseName(entry.path),
+                inline: isInlineType(entry.mediaType),
+              },
+            }
+          : {}),
       };
       const renderer = rendererFor(entry.mediaType);
       if (renderer === 'html') {
-        await this.loadArtifactView(data, version.seq, artifact, base, gen, controller);
+        if (entry.path === version.entryPath) {
+          await this.loadArtifactView(data, version.seq, artifact, base, gen, controller);
+        } else {
+          this.loadState = {
+            ...base,
+            status: 'ready',
+            isBinary: true,
+            binaryMessage: GENERIC_CANNOT_PREVIEW_MESSAGE,
+            artifact,
+          };
+        }
         return;
       }
       if (
@@ -725,7 +768,9 @@ export class ScionChatFilePreview extends LitElement {
           ...base,
           status: 'ready',
           isBinary: true,
-          binaryMessage: ARTIFACT_NOT_PREVIEWABLE_MESSAGE,
+          binaryMessage: requestedPath
+            ? GENERIC_CANNOT_PREVIEW_MESSAGE
+            : ARTIFACT_NOT_PREVIEWABLE_MESSAGE,
           artifact,
         };
         return;
@@ -1112,8 +1157,18 @@ export class ScionChatFilePreview extends LitElement {
   private renderArtifactDialog(target: ArtifactPreviewTarget) {
     const state = this.loadState;
     const info = state.artifact;
-    const label = state.unavailable ? 'Artifact unavailable' : (info?.title ?? target.name);
-    const secondary = info && !state.unavailable ? this.artifactFooterText(info) : '';
+    const isFile = !!target.filePath;
+    const label = state.unavailable
+      ? isFile
+        ? 'File unavailable'
+        : 'Artifact unavailable'
+      : (info?.title ?? target.name);
+    const secondary =
+      info && !state.unavailable
+        ? info.fileMode
+          ? info.entry
+          : this.artifactFooterText(info)
+        : '';
     return html`
       <sl-dialog
         class="file-preview-dialog"
@@ -1134,21 +1189,62 @@ export class ScionChatFilePreview extends LitElement {
         ${this.renderBody()}
         <div slot="footer" class="footer">
           <span class="path" title=${secondary}>${secondary}</span>
-          <sl-button size="small" @click=${() => this.copyArtifactRef(target)}>
-            <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
-            ${this.copied ? 'Copied!' : 'Copy link'}
-          </sl-button>
-          ${state.unavailable
-            ? html`<sl-button size="small" @click=${() => this.close()}>Close</sl-button>`
-            : nothing}
-          ${info && !state.unavailable
+          ${isFile
             ? html`
-                <sl-button size="small" variant="primary" href=${info.pageUrl}>
-                  <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
-                  Open in artifact viewer
-                </sl-button>
+                ${state.unavailable
+                  ? html`<sl-button size="small" @click=${() => this.close()}>Close</sl-button>`
+                  : nothing}
+                ${info?.fileMode && !state.unavailable
+                  ? html`
+                      ${info.htmlView
+                        ? html`<sl-button
+                            size="small"
+                            href=${info.htmlView.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+                            Open in new tab
+                          </sl-button>`
+                        : info.fileMode.inline
+                          ? html`<sl-button
+                              size="small"
+                              href=${info.fileMode.rawUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+                              Open raw
+                            </sl-button>`
+                          : nothing}
+                      <sl-button
+                        size="small"
+                        href=${info.fileMode.downloadUrl}
+                        download=${info.fileMode.downloadName}
+                      >
+                        <sl-icon slot="prefix" name="download"></sl-icon>
+                        Download
+                      </sl-button>
+                    `
+                  : nothing}
               `
-            : nothing}
+            : html`
+                <sl-button size="small" @click=${() => this.copyArtifactRef(target)}>
+                  <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
+                  ${this.copied ? 'Copied!' : 'Copy link'}
+                </sl-button>
+                ${state.unavailable
+                  ? html`<sl-button size="small" @click=${() => this.close()}>Close</sl-button>`
+                  : nothing}
+                ${info && !state.unavailable
+                  ? html`
+                      <sl-button size="small" variant="primary" href=${info.pageUrl}>
+                        <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+                        Open in artifact viewer
+                      </sl-button>
+                    `
+                  : nothing}
+              `}
         </div>
       </sl-dialog>
     `;

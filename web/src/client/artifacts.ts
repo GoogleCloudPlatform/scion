@@ -277,6 +277,16 @@ export function artifactFileUrl(id: string, seq: number, path: string, stream = 
   return `/api/v1/artifacts/${encodeURIComponent(id)}${version}/files/${encodedPath}${query}`;
 }
 
+/**
+ * URL that forces a file download (Content-Disposition: attachment) for every
+ * media type, including types the browser would otherwise show inline and
+ * cross-origin object-storage redirects where the HTML download attribute is
+ * ignored (ptone/scion#8958).
+ */
+export function artifactDownloadUrl(id: string, seq: number, path: string): string {
+  return `${artifactFileUrl(id, seq, path)}?download=1`;
+}
+
 /** The zip of every file of version seq (ptone/scion#7106). */
 export function artifactArchiveUrl(id: string, seq: number): string {
   return `/api/v1/artifacts/${encodeURIComponent(id)}/versions/${seq}/archive`;

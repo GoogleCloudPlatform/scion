@@ -36,6 +36,11 @@ import (
 // the parameter changes nothing there.
 const paramStream = "stream"
 
+// paramDownload forces Content-Disposition: attachment for every media type,
+// including inline-safe types and cross-origin object-storage redirects
+// (ptone/scion#8958).
+const paramDownload = "download"
+
 // paramResolve selects a CriticMarkup projection of a text file:
 // "clean" (reject every mark) or "accept" (accept every mark). It implies
 // stream, because the hub produces the bytes. Files that are not text are
@@ -411,7 +416,7 @@ func serveResolved(w http.ResponseWriter, r *http.Request, b backend, f *File, m
 	ctx := r.Context()
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Content-Disposition", contentDisposition(f.MediaType, f.Path))
+	h.Set("Content-Disposition", contentDispositionFor(f.MediaType, f.Path, wantsDownload(r)))
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "private, no-cache")
 	h.Set("Content-Security-Policy", fileCSP)
@@ -486,10 +491,20 @@ func serveFile(w http.ResponseWriter, r *http.Request, b backend, f *File, how d
 	serveFileTTL(w, r, b, f, how, immutable, signedURLTTL)
 }
 
+// wantsDownload reports whether the request asks for attachment disposition
+// via ?download=1 or ?download=true.
+func wantsDownload(r *http.Request) bool {
+	switch r.URL.Query().Get(paramDownload) {
+	case "1", "true":
+		return true
+	}
+	return false
+}
+
 // serveFileTTL is serveFile with ttl as the lifetime of a redirect URL.
 func serveFileTTL(w http.ResponseWriter, r *http.Request, b backend, f *File, how delivery, immutable bool, ttl time.Duration) {
 	ctx := r.Context()
-	disposition := contentDisposition(f.MediaType, f.Path)
+	disposition := contentDispositionFor(f.MediaType, f.Path, wantsDownload(r))
 	ctype := responseContentType(f.MediaType)
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")

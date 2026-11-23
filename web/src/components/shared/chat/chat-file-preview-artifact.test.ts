@@ -444,4 +444,175 @@ describe('scion-chat-file-preview artifact target', () => {
     await Promise.resolve();
     expect(writeText).toHaveBeenCalledWith(`scion://artifact/${ID}@2`);
   });
+
+  describe('specific file preview mode (filePath)', () => {
+    function multiFileMeta(seq = 2) {
+      return {
+        artifact: {
+          id: ID,
+          ref: `scion://artifact/${ID}`,
+          scopeRef: 'proj-1',
+          ownerKind: 'agent',
+          ownerRef: 'agent-1',
+          title: 'Bundle',
+          currentSeq: 3,
+        },
+        version: {
+          seq,
+          entryPath: 'README.md',
+          state: 'ready',
+          files: [
+            { path: 'README.md', size: 12, sha256: 'a', mediaType: 'text/markdown' },
+            { path: 'docs/guide.md', size: 20, sha256: 'b', mediaType: 'text/markdown' },
+            { path: 'src/app.js', size: 30, sha256: 'c', mediaType: 'text/javascript' },
+            { path: 'img/shot.png', size: 40, sha256: 'd', mediaType: 'image/png' },
+            { path: 'extra/page.html', size: 50, sha256: 'e', mediaType: 'text/html' },
+            { path: 'report.pdf', size: 60, sha256: 'f', mediaType: 'application/pdf' },
+          ],
+        },
+      };
+    }
+
+    async function openFile(filePath: string, seq = 2): Promise<ScionChatFilePreview> {
+      const el = document.createElement('scion-chat-file-preview') as ScionChatFilePreview;
+      document.body.appendChild(el);
+      el.target = {
+        kind: 'artifact',
+        id: ID,
+        seq,
+        name: filePath.split('/').pop() ?? filePath,
+        filePath,
+      };
+      for (let i = 0; i < 8; i++) {
+        await Promise.resolve();
+        await el.updateComplete;
+      }
+      return el;
+    }
+
+    it('renders a non-entry markdown file in the sandboxed artifact frame with Open raw and Download', async () => {
+      apiFetchMock.mockImplementation((path: string) =>
+        Promise.resolve(path.includes('/files/') ? text('# Guide\n\nBody') : json(multiFileMeta(2)))
+      );
+      const el = await openFile('docs/guide.md', 2);
+
+      expect(artifactCalls()).toEqual([
+        `/api/v1/artifacts/${ID}/versions/2`,
+        `/api/v1/artifacts/${ID}/versions/2/files/docs/guide.md?stream=1`,
+      ]);
+      expect(q(el, 'sl-dialog')?.getAttribute('label')).toBe('guide.md');
+      expect(q(el, '.version-badge')?.textContent?.trim()).toBe('v2');
+      const frame = q<ScionArtifactMarkdownFrame>(el, 'scion-artifact-markdown-frame');
+      expect(frame).toBeInstanceOf(ScionArtifactMarkdownFrameCtor);
+      expect(frame?.content).toBe('# Guide\n\nBody');
+      expect(frame?.entryPath).toBe('docs/guide.md');
+      expect(q(el, '.footer .path')?.textContent).toBe('docs/guide.md');
+      expect(buttons(el)).toEqual(['Open raw', 'Download']);
+      const [rawBtn, dlBtn] = Array.from(el.shadowRoot!.querySelectorAll('.footer sl-button'));
+      expect(rawBtn.getAttribute('href')).toBe(
+        `/api/v1/artifacts/${ID}/versions/2/files/docs/guide.md`
+      );
+      expect(rawBtn.getAttribute('target')).toBe('_blank');
+      expect(rawBtn.getAttribute('rel')).toBe('noopener noreferrer');
+      expect(dlBtn.getAttribute('href')).toBe(
+        `/api/v1/artifacts/${ID}/versions/2/files/docs/guide.md?download=1`
+      );
+      expect(dlBtn.getAttribute('download')).toBe('guide.md');
+    });
+
+    it('renders a non-inline code file in the read-only code editor with Download only', async () => {
+      apiFetchMock.mockImplementation((path: string) =>
+        Promise.resolve(
+          path.includes('/files/') ? text('export const x = 1;\n') : json(multiFileMeta(2))
+        )
+      );
+      const el = await openFile('src/app.js', 2);
+
+      expect(artifactCalls()).toEqual([
+        `/api/v1/artifacts/${ID}/versions/2`,
+        `/api/v1/artifacts/${ID}/versions/2/files/src/app.js?stream=1`,
+      ]);
+      const editor = q<HTMLElement & { content: string; readonly: boolean }>(
+        el,
+        'scion-code-editor'
+      );
+      expect(editor).not.toBeNull();
+      expect(editor?.content).toBe('export const x = 1;\n');
+      expect(editor?.hasAttribute('readonly')).toBe(true);
+      expect(buttons(el)).toEqual(['Download']);
+    });
+
+    it('renders an image file with object URL preview and Open raw + Download', async () => {
+      const origCreate = URL.createObjectURL;
+      const origRevoke = URL.revokeObjectURL;
+      URL.createObjectURL = () => 'blob:shot-1';
+      URL.revokeObjectURL = vi.fn();
+      try {
+        apiFetchMock.mockImplementation((path: string) =>
+          Promise.resolve(
+            path.includes('/files/')
+              ? { ok: true, status: 200, blob: () => Promise.resolve(new Blob(['png'])) }
+              : json(multiFileMeta(2))
+          )
+        );
+        const el = await openFile('img/shot.png', 2);
+        expect(q<HTMLImageElement>(el, 'img.file-preview-image')?.getAttribute('src')).toBe(
+          'blob:shot-1'
+        );
+        expect(buttons(el)).toEqual(['Open raw', 'Download']);
+      } finally {
+        URL.createObjectURL = origCreate;
+        URL.revokeObjectURL = origRevoke;
+      }
+    });
+
+    it('renders an HTML entry file via a minted view in the sandboxed frame with Open in new tab and Download', async () => {
+      apiFetchMock.mockImplementation((path: string, options?: RequestInit) =>
+        Promise.resolve(
+          path.endsWith('/view') && options?.method === 'POST'
+            ? json({ url: VIEW_URL, expiresAt: '2099-01-01T00:00:00Z' })
+            : json(htmlMeta(3))
+        )
+      );
+      const el = await openFile('index.html', 3);
+
+      expect(artifactCalls()).toEqual([
+        `/api/v1/artifacts/${ID}/versions/3`,
+        `/api/v1/artifacts/${ID}/versions/3/view`,
+      ]);
+      const frame = q(el, 'iframe');
+      expect(frame?.getAttribute('sandbox')).toBe('allow-scripts');
+      expect(frame?.getAttribute('src')).toBe(VIEW_URL);
+      expect(buttons(el)).toEqual(['Open in new tab', 'Download']);
+      const [openTabBtn] = Array.from(el.shadowRoot!.querySelectorAll('.footer sl-button'));
+      expect(openTabBtn.getAttribute('href')).toBe(VIEW_URL);
+      expect(openTabBtn.getAttribute('rel')).toBe('noopener noreferrer');
+    });
+
+    it('does not mint a view or fetch raw bytes for a non-entry HTML file', async () => {
+      apiFetchMock.mockResolvedValue(json(multiFileMeta(2)));
+      const el = await openFile('extra/page.html', 2);
+
+      expect(artifactCalls()).toEqual([`/api/v1/artifacts/${ID}/versions/2`]);
+      expect(q(el, 'iframe')).toBeNull();
+      expect(q(el, 'scion-code-editor')).toBeNull();
+      expect(q(el, '.file-preview-placeholder')?.textContent).toContain('Use the Download button');
+      expect(buttons(el)).toEqual(['Download']);
+    });
+
+    it.each([403, 404])(
+      'enforces the same unavailable state for %i in filePath mode without exposing raw or download links',
+      async (status) => {
+        apiFetchMock.mockResolvedValue(json({}, status));
+        const el = await openFile('docs/guide.md', 2);
+
+        expect(q(el, 'sl-dialog')?.getAttribute('label')).toBe('File unavailable');
+        expect(q(el, '.file-preview-placeholder.error')?.textContent).toContain(
+          ARTIFACT_UNAVAILABLE_MESSAGE
+        );
+        expect(q(el, '.footer .path')?.textContent).toBe('');
+        expect(buttons(el)).toEqual(['Close']);
+      }
+    );
+  });
 });

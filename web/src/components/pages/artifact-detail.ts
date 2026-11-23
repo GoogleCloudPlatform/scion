@@ -75,6 +75,7 @@ import {
   DraftConflictError,
   MAX_INLINE_TEXT_BYTES,
   artifactArchiveUrl,
+  artifactDownloadUrl,
   artifactFileUrl,
   artifactOriginOf,
   artifactPagePath,
@@ -138,6 +139,8 @@ import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
 import '../shared/artifact-delete-dialog.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
 import '../shared/code-editor.js';
+import '../shared/chat/chat-file-preview.js';
+import type { ArtifactPreviewTarget } from '../shared/chat/chat-file-preview.js';
 import './not-found.js';
 import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
@@ -469,6 +472,8 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private accessOpen = false;
   /** The Delete artifact confirmation is open. */
   @state() private deleteOpen = false;
+  /** The file currently open in the shared file viewer from the Files tab. */
+  @state() private previewFile: ArtifactPreviewTarget | null = null;
   /**
    * The hub's cross-project sharing setting, from the grants response (read
    * only for a caller who manages the artifact). The hub refuses every move
@@ -1058,6 +1063,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.view = null;
     this.viewError = null;
     this.viewExpired = false;
+    this.previewFile = null;
     this.crossProjectSharing = false;
     this.savedDraft = null;
     if (this.viewTimer) clearTimeout(this.viewTimer);
@@ -2640,6 +2646,13 @@ export class ScionPageArtifactDetail extends LitElement {
           ></scion-artifact-move-dialog>`
         : nothing}
       ${this.renderDraftDialogs()}
+      <scion-chat-file-preview
+        .target=${this.previewFile}
+        .currentUserId=${this.pageData?.user?.id ?? ''}
+        @chat-file-preview-close=${(): void => {
+          this.previewFile = null;
+        }}
+      ></scion-chat-file-preview>
     `;
   }
 
@@ -2911,7 +2924,7 @@ export class ScionPageArtifactDetail extends LitElement {
                 ${v && f && ownFiles.length === 1
                   ? html`<sl-button
                       size="small"
-                      href=${artifactFileUrl(this.artifactId, v.seq, f.path)}
+                      href=${artifactDownloadUrl(this.artifactId, v.seq, f.path)}
                       download=${baseName(f.path)}
                     >
                       <sl-icon slot="prefix" name="download"></sl-icon>
@@ -2952,7 +2965,11 @@ export class ScionPageArtifactDetail extends LitElement {
           <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
           Open raw
         </sl-button>`
-      : html`<sl-button size="small" href=${href} download=${baseName(f.path)}>
+      : html`<sl-button
+          size="small"
+          href=${artifactDownloadUrl(this.artifactId, seq, f.path)}
+          download=${baseName(f.path)}
+        >
           <sl-icon slot="prefix" name="download"></sl-icon>
           Download
         </sl-button>`;
@@ -3080,6 +3097,13 @@ export class ScionPageArtifactDetail extends LitElement {
     `;
   }
 
+  private canPreviewFile(f: ArtifactFile, v: ArtifactVersion): boolean {
+    const kind = rendererFor(f.mediaType);
+    if (kind === 'download') return false;
+    if (kind === 'html') return f.path === v.entryPath;
+    return true;
+  }
+
   private renderFiles(): TemplateResult {
     const v = this.data?.version;
     if (!v) return html`<div class="download-state">This artifact has no published content.</div>`;
@@ -3127,22 +3151,38 @@ export class ScionPageArtifactDetail extends LitElement {
                 <td class="muted">${formatBytes(x.size)}</td>
                 <td class="muted">${x.mediaType}</td>
                 <td class="actions-cell">
-                  ${isInlineType(x.mediaType)
+                  ${this.canPreviewFile(x, v)
                     ? html`<sl-icon-button
                         name="eye"
-                        label=${`Open ${x.path}`}
-                        href=${href}
-                        target="_blank"
+                        label=${`View ${x.path}`}
+                        @click=${(): void => {
+                          this.previewFile = {
+                            kind: 'artifact',
+                            id: this.artifactId,
+                            seq: v.seq,
+                            name: baseName(x.path),
+                            filePath: x.path,
+                          };
+                        }}
                       ></sl-icon-button>`
                     : html`<sl-icon-button
                         name="eye"
                         label="Not shown in the browser"
                         disabled
                       ></sl-icon-button>`}
+                  ${isInlineType(x.mediaType)
+                    ? html`<sl-icon-button
+                        name="box-arrow-up-right"
+                        label=${`Open raw ${x.path}`}
+                        href=${href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      ></sl-icon-button>`
+                    : nothing}
                   <sl-icon-button
                     name="download"
                     label=${`Download ${x.path}`}
-                    href=${href}
+                    href=${artifactDownloadUrl(this.artifactId, v.seq, x.path)}
                     download=${baseName(x.path)}
                   ></sl-icon-button>
                 </td>
@@ -3314,7 +3354,7 @@ export class ScionPageArtifactDetail extends LitElement {
             ? html`<sl-icon-button
                 name="download"
                 label=${`Download v${x.seq}`}
-                href=${artifactFileUrl(this.artifactId, x.seq, x.entryPath)}
+                href=${artifactDownloadUrl(this.artifactId, x.seq, x.entryPath)}
                 download=${baseName(x.entryPath)}
               ></sl-icon-button>`
             : nothing}

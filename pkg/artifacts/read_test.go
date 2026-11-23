@@ -260,6 +260,50 @@ func TestGetFileRedirectsOnObjectStore(t *testing.T) {
 	}
 }
 
+func TestGetFileDownloadForcesAttachment(t *testing.T) {
+	for _, objStore := range []bool{false, true} {
+		mode := "local"
+		if objStore {
+			mode = "object_store"
+		}
+		t.Run(mode, func(t *testing.T) {
+			f := newFixture(t, objStore)
+			for _, tc := range []struct {
+				name string
+				body string
+			}{
+				{"notes.md", "# Title\n"},
+				{"plain.txt", "hello"},
+				{"shot.png", "png-ish"},
+				{"report.pdf", "%PDF-1.7"},
+			} {
+				pub := f.publish(agentA, tc.name, []byte(tc.body), "")
+				base := "/api/v1/artifacts/" + pub.Artifact.ID + "/versions/1/files/" + tc.name
+				wantDisp := "attachment; filename=" + tc.name
+				for _, q := range []string{"?download=1", "?download=true"} {
+					rec := f.do(&agentB, http.MethodGet, base+q, nil, nil)
+					wantStatus := http.StatusOK
+					if objStore {
+						wantStatus = http.StatusFound
+					}
+					if rec.Code != wantStatus {
+						t.Fatalf("%s%s: status %d, want %d", tc.name, q, rec.Code, wantStatus)
+					}
+					if got := rec.Header().Get("Content-Disposition"); got != wantDisp {
+						t.Errorf("%s%s: Content-Disposition = %q, want %q", tc.name, q, got, wantDisp)
+					}
+					if objStore {
+						rs := f.blobs.(*redirectingStorage)
+						if rs.last.ResponseContentDisposition != wantDisp {
+							t.Errorf("%s%s: signed URL ResponseContentDisposition = %q, want %q", tc.name, q, rs.last.ResponseContentDisposition, wantDisp)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestGetFilePaths(t *testing.T) {
 	f := newFixture(t, false)
 	pub := f.publish(agentA, "a b.txt", []byte("spaced"), "")
