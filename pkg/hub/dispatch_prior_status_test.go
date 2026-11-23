@@ -169,6 +169,7 @@ func TestNotificationEventStatus_StoppedAndHaltedRetainedCompleted(t *testing.T)
 		{"stopped with synthetic DELETED matches DELETED", string(state.PhaseStopped), "DELETED", "DELETED"},
 		{"stopped with empty activity matches stopped", string(state.PhaseStopped), "", string(state.PhaseStopped)},
 		{"halted with retained completed matches halted", string(state.PhaseHalted), string(state.ActivityCompleted), string(state.PhaseHalted)},
+		{"halted with synthetic ERROR matches ERROR", string(state.PhaseHalted), "ERROR", "ERROR"},
 		{"suspended with retained completed matches suspended", string(state.PhaseSuspended), string(state.ActivityCompleted), string(state.PhaseSuspended)},
 		{"running with completed matches completed", string(state.PhaseRunning), string(state.ActivityCompleted), string(state.ActivityCompleted)},
 	}
@@ -312,7 +313,13 @@ func TestExecDispatchStartAndRestart_PreservesPriorStatusAcrossDeferredHandoff(t
 	}
 
 	d, client, ag := autoExposeDispatchFixture(t)
+	srv, _ := testServerOnMigratedStore(t, d.store)
+	srv.SetDispatcher(d)
+
+	ownerID := tid("deferred-prior-status-owner")
+	createTestUserWithProjectRole(t, d.store, ownerID, "deferred-prior-status-owner@example.com", ag.ProjectID, store.ProjectRoleMember)
 	ag.ID = tid("deferred-prior-status-agent")
+	ag.OwnerID = ownerID
 	ag.Phase = string(state.PhaseStarting)
 	ag.Activity = "" // cleared by requester's beginStartDispatch before deferring
 	ag.AppliedConfig = &store.AgentAppliedConfig{
@@ -320,11 +327,6 @@ func TestExecDispatchStartAndRestart_PreservesPriorStatusAcrossDeferredHandoff(t
 		CreateInputs: &store.AgentCreateInputs{},
 	}
 	require.NoError(t, d.store.CreateAgent(ctx, ag))
-
-	srv, err := New(DefaultServerConfig(), d.store)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = srv.Close() })
-	srv.SetDispatcher(d)
 
 	startArgsRaw, err := MarshalDispatchArgs(&StartDispatchArgs{PriorStatus: ps})
 	require.NoError(t, err)
