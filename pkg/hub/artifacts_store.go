@@ -103,16 +103,19 @@ func (s *Server) artifactsEnabled() bool {
 // expects an artifact store, artifacts are enabled, and the store is not yet
 // ready. Returns "" when /readyz should not be blocked on the artifact store.
 func (s *Server) artifactStoreNotReadyReason() string {
-	if !s.artifactsEnabled() {
-		return ""
-	}
 	s.mu.RLock()
 	st := s.artifactStoreState
 	s.mu.RUnlock()
 	switch st {
 	case artifactStoreInitializing:
+		if !s.artifactsEnabled() {
+			return ""
+		}
 		return "artifact store initializing"
 	case artifactStoreFailed:
+		if !s.artifactsEnabled() {
+			return ""
+		}
 		return "artifact store not available"
 	default:
 		return ""
