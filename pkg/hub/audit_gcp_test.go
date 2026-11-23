@@ -86,6 +86,38 @@ func TestLogGCPTokenGeneration_NilLogger(t *testing.T) {
 		"agent-123", "project-456", "sa@project.iam.gserviceaccount.com", "sa-789", true, "")
 }
 
+func TestLogGCPIdentityTokenGeneration(t *testing.T) {
+	mock := &mockAuditLogger{}
+	ctx := context.Background()
+
+	LogGCPIdentityTokenGeneration(ctx, mock,
+		"agent-123", "project-456", "sa@project.iam.gserviceaccount.com", "sa-789",
+		"https://target.example.com", true, "")
+
+	if len(mock.gcpEvents) != 1 {
+		t.Fatalf("expected 1 GCP event, got %d", len(mock.gcpEvents))
+	}
+
+	event := mock.gcpEvents[0]
+	if event.EventType != GCPTokenEventIdentityToken {
+		t.Errorf("expected event type %q, got %q", GCPTokenEventIdentityToken, event.EventType)
+	}
+	if event.Audience != "https://target.example.com" {
+		t.Errorf("expected audience %q, got %q", "https://target.example.com", event.Audience)
+	}
+	if !event.Success {
+		t.Error("expected success=true")
+	}
+	if event.Timestamp.IsZero() {
+		t.Error("expected non-zero timestamp")
+	}
+
+	// Nil logger should not panic.
+	LogGCPIdentityTokenGeneration(ctx, nil,
+		"agent-123", "project-456", "sa@project.iam.gserviceaccount.com", "sa-789",
+		"https://target.example.com", false, "failed")
+}
+
 func TestLogAuditLogger_LogGCPTokenEvent(t *testing.T) {
 	logger := NewLogAuditLogger("[Test]", false)
 

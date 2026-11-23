@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1686,8 +1687,8 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		if s.gcpTokenMetrics != nil {
 			s.gcpTokenMetrics.RecordIDTokenRequest(false, time.Since(start))
 		}
-		LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventIdentityToken,
-			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, false, err.Error())
+		LogGCPIdentityTokenGeneration(r.Context(), s.auditLogger,
+			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, truncateLoggedAudience(req.Audience), false, err.Error())
 		writeError(w, http.StatusBadGateway, "gcp_token_failed",
 			"identity token generation failed: "+err.Error(), nil)
 		return
@@ -1696,8 +1697,8 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 	if s.gcpTokenMetrics != nil {
 		s.gcpTokenMetrics.RecordIDTokenRequest(true, time.Since(start))
 	}
-	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventIdentityToken,
-		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, true, "")
+	LogGCPIdentityTokenGeneration(r.Context(), s.auditLogger,
+		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, truncateLoggedAudience(req.Audience), true, "")
 	writeJSON(w, http.StatusOK, token)
 }
 
@@ -1717,6 +1718,22 @@ const (
 	maxLoggedAudienceLen   = 512
 )
 
+// truncateLoggedAudience bounds an audience string to at most
+// maxLoggedAudienceLen bytes on a UTF-8 rune boundary before writing it to
+// warning or audit logs so oversized caller-supplied audiences cannot bloat
+// log records or produce invalid UTF-8. The full audience is still passed to
+// GCP.
+func truncateLoggedAudience(audience string) string {
+	if len(audience) <= maxLoggedAudienceLen {
+		return audience
+	}
+	cut := maxLoggedAudienceLen
+	for cut > 0 && !utf8.RuneStart(audience[cut]) {
+		cut--
+	}
+	return audience[:cut]
+}
+
 // extractRateLimitedAudience performs a strictly bounded best-effort read of
 // the audience field from a rate-limited /gcp-identity-token request body so
 // the 429 warning log can attribute the target audience.
@@ -1732,10 +1749,7 @@ func extractRateLimitedAudience(r *http.Request) string {
 	if err := json.Unmarshal(data, &req); err != nil {
 		return ""
 	}
-	if len(req.Audience) > maxLoggedAudienceLen {
-		return req.Audience[:maxLoggedAudienceLen]
-	}
-	return req.Audience
+	return truncateLoggedAudience(req.Audience)
 }
 
 // mintCreateErrorMessage renders the error body for a failed
