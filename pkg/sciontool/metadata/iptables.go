@@ -49,6 +49,12 @@ func execIPTables(args ...string) ([]byte, error) {
 // blocked on TCP/80 whenever IPv6 is enabled in the container network namespace.
 var ipv6MetadataAddrs = []string{"fd20:ce::254", "fd00:ec2::254"}
 
+// IPv6MetadataAddrs returns a copy of the cloud metadata service IPv6
+// endpoints blocked on TCP/80 when IPv6 is enabled in the network namespace.
+func IPv6MetadataAddrs() []string {
+	return append([]string(nil), ipv6MetadataAddrs...)
+}
+
 // procRoot is the mount path of procfs; overridden in tests.
 var procRoot = "/proc"
 
@@ -275,30 +281,41 @@ func setupIPv6MetadataBlock() error {
 }
 
 // InstallInterceptionRules installs the iptables rules for metadata
-// interception in the current network namespace: an IPv4 nat OUTPUT REDIRECT
-// to port, a filter OUTPUT ACCEPT rule at position 1 for the redirected
-// loopback destination (so an egress firewall's catch-all OUTPUT REJECT
-// does not block the redirected flow), an IPv4 filter OUTPUT REJECT for
-// un-redirected metadata traffic in every mode other than assign, and—when
-// IPv6 is enabled in the network namespace—IPv6 filter OUTPUT REJECT rules
-// for cloud metadata endpoints in all modes.
+// interception in the current network namespace:
+//  1. When IPv6 is enabled in the network namespace, IPv6 filter OUTPUT REJECT
+//     rules for cloud metadata endpoints (in all modes).
+//  2. For every mode other than assign, an IPv4 filter OUTPUT REJECT rule for
+//     un-redirected metadata traffic.
+//  3. A filter OUTPUT ACCEPT rule at position 1 for the redirected loopback
+//     destination (so an egress firewall's catch-all OUTPUT REJECT does not
+//     block the redirected flow), followed LAST by the IPv4 nat OUTPUT
+//     REDIRECT rule to port.
+//
+// Ordering invariant: the IPv4 nat OUTPUT REDIRECT rule MUST be the final rule
+// installed overall. On the runtime-managed interception path, sciontool init's
+// IPv4 redirect probe is the synchronization barrier and passes as soon as
+// REDIRECT exists. Installing REDIRECT last guarantees that a passing probe
+// implies all filter, loopback accept, and IPv6 rules are already in place,
+// and that any earlier failure leaves REDIRECT uninstalled so init fails
+// closed. Packet semantics are unaffected because nat OUTPUT rewrites
+// redirected packets to loopback before filter.
 // Intended for the runtime's short-lived netns-setup container and legacy
 // in-container setup.
 func InstallInterceptionRules(mode string, port int) error {
-	if err := runSetupIPTablesRedirect(port); err != nil {
-		return fmt.Errorf("%w: redirect: %v", ErrInterceptionUnavailable, err)
-	}
-	if mode != modeAssign {
-		if _, err := runSetupMetadataBlock(); err != nil {
-			return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
-		}
-	}
 	if runNetnsHasIPv6() {
 		if err := runSetupIPv6MetadataBlock(); err != nil {
 			return fmt.Errorf("%w: ipv6 filter rule: %v", ErrInterceptionUnavailable, err)
 		}
 	} else {
 		log.Info("IPv6 not enabled in netns; skipping IPv6 metadata rules")
+	}
+	if mode != modeAssign {
+		if _, err := runSetupMetadataBlock(); err != nil {
+			return fmt.Errorf("%w: filter rule: %v", ErrInterceptionUnavailable, err)
+		}
+	}
+	if err := runSetupIPTablesRedirect(port); err != nil {
+		return fmt.Errorf("%w: redirect: %v", ErrInterceptionUnavailable, err)
 	}
 	return nil
 }

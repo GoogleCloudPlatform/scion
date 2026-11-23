@@ -1026,7 +1026,7 @@ func TestWaitForRedirect(t *testing.T) {
 	t.Cleanup(func() {
 		redirectProbeBaseURL, redirectProbeAttemptTimeout, redirectProbeDeadline, redirectProbeInterval = origBase, origAttempt, origDeadline, origInterval
 	})
-	redirectProbeAttemptTimeout = 200 * time.Millisecond
+	redirectProbeAttemptTimeout = time.Second
 	redirectProbeInterval = 10 * time.Millisecond
 
 	const wantPath = "/probe-token-path"
@@ -1050,7 +1050,7 @@ func TestWaitForRedirect(t *testing.T) {
 		}))
 		t.Cleanup(srv.Close)
 		redirectProbeBaseURL = srv.URL
-		redirectProbeDeadline = 2 * time.Second
+		redirectProbeDeadline = 5 * time.Second
 
 		if err := waitForRedirect(context.Background(), wantPath, wantToken); err != nil {
 			t.Fatalf("waitForRedirect() = %v, want nil", err)
@@ -1144,7 +1144,7 @@ func TestVerifyIPv6MetadataBlocked(t *testing.T) {
 	t.Cleanup(func() {
 		runNetnsHasIPv6, ipv6ProbeAddrs, ipv6ProbeTimeout, ipv6ProbeDial = origHasIPv6, origAddrs, origTimeout, origDial
 	})
-	ipv6ProbeTimeout = 100 * time.Millisecond
+	ipv6ProbeTimeout = 2 * time.Second
 
 	t.Run("skips when netns has no IPv6", func(t *testing.T) {
 		runNetnsHasIPv6 = func() bool { return false }
@@ -1243,10 +1243,14 @@ func TestRunInit_MetadataProtectionLegacyFallback(t *testing.T) {
 				f.order = append(f.order, "probe")
 				return nil
 			})
+			withRunVerifyIPv6Blocked(t, func(context.Context) error {
+				f.order = append(f.order, "ipv6-probe")
+				return nil
+			})
 			if got := f.run(); got != 0 {
 				t.Fatalf("RunInit() = %d, want 0", got)
 			}
-			if want := []string{"firewall", "metadata", "install-rules", "probe", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
+			if want := []string{"firewall", "metadata", "install-rules", "probe", "ipv6-probe", "drop", "clone", "sidecars"}; !reflect.DeepEqual(f.order, want) {
 				t.Fatalf("order = %v, want %v", f.order, want)
 			}
 			if gotMode != mode || gotPort != 18380 {

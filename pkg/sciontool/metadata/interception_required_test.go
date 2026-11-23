@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"testing"
 )
 
@@ -316,34 +317,107 @@ func TestStart_RuntimeSourceSkipsInContainerInterception(t *testing.T) {
 func TestInstallInterceptionRules(t *testing.T) {
 	failure := errors.New("exit status 4")
 	tests := []struct {
-		name        string
-		mode        string
-		hasIPv6     bool
-		redirectErr error
-		blockErr    error
-		ipv6Err     error
-		wantErr     bool
-		wantBlock   bool
-		wantIPv6    bool
+		name         string
+		mode         string
+		hasIPv6      bool
+		redirectErr  error
+		blockErr     error
+		ipv6Err      error
+		wantErr      bool
+		wantOrder    []string
+		wantRedirect bool
 	}{
-		{name: "block succeeds no ipv6", mode: modeBlock, wantBlock: true},
-		{name: "assign succeeds no ipv6", mode: modeAssign, wantBlock: false},
-		{name: "block succeeds with ipv6", mode: modeBlock, hasIPv6: true, wantBlock: true, wantIPv6: true},
-		{name: "assign succeeds with ipv6", mode: modeAssign, hasIPv6: true, wantBlock: false, wantIPv6: true},
-		{name: "redirect fails", mode: modeBlock, hasIPv6: true, redirectErr: failure, wantErr: true},
-		{name: "filter fails", mode: modeBlock, hasIPv6: true, blockErr: failure, wantErr: true, wantBlock: true},
-		{name: "ipv6 fails in block mode", mode: modeBlock, hasIPv6: true, ipv6Err: failure, wantErr: true, wantBlock: true, wantIPv6: true},
-		{name: "ipv6 fails in assign mode", mode: modeAssign, hasIPv6: true, ipv6Err: failure, wantErr: true, wantBlock: false, wantIPv6: true},
+		{
+			name:         "block succeeds no ipv6",
+			mode:         modeBlock,
+			wantOrder:    []string{"filter", "redirect"},
+			wantRedirect: true,
+		},
+		{
+			name:         "assign succeeds no ipv6",
+			mode:         modeAssign,
+			wantOrder:    []string{"redirect"},
+			wantRedirect: true,
+		},
+		{
+			name:         "block succeeds with ipv6 installs redirect last",
+			mode:         modeBlock,
+			hasIPv6:      true,
+			wantOrder:    []string{"ipv6", "filter", "redirect"},
+			wantRedirect: true,
+		},
+		{
+			name:         "assign succeeds with ipv6 installs redirect last",
+			mode:         modeAssign,
+			hasIPv6:      true,
+			wantOrder:    []string{"ipv6", "redirect"},
+			wantRedirect: true,
+		},
+		{
+			name:         "redirect fails after ipv6 and filter",
+			mode:         modeBlock,
+			hasIPv6:      true,
+			redirectErr:  failure,
+			wantErr:      true,
+			wantOrder:    []string{"ipv6", "filter", "redirect"},
+			wantRedirect: true,
+		},
+		{
+			name:         "filter fails prevents redirect",
+			mode:         modeBlock,
+			hasIPv6:      true,
+			blockErr:     failure,
+			wantErr:      true,
+			wantOrder:    []string{"ipv6", "filter"},
+			wantRedirect: false,
+		},
+		{
+			name:         "ipv6 fails in block mode prevents filter and redirect",
+			mode:         modeBlock,
+			hasIPv6:      true,
+			ipv6Err:      failure,
+			wantErr:      true,
+			wantOrder:    []string{"ipv6"},
+			wantRedirect: false,
+		},
+		{
+			name:         "ipv6 fails in assign mode prevents redirect",
+			mode:         modeAssign,
+			hasIPv6:      true,
+			ipv6Err:      failure,
+			wantErr:      true,
+			wantOrder:    []string{"ipv6"},
+			wantRedirect: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			redirectCalled, blockCalled := stubInterception(t, tt.redirectErr, tt.blockErr)
-			var ipv6Called bool
+			origRedirect, origBlock := runSetupIPTablesRedirect, runSetupMetadataBlock
+			origHasIPv6, origIPv6Block := runNetnsHasIPv6, runSetupIPv6MetadataBlock
+			t.Cleanup(func() {
+				runSetupIPTablesRedirect, runSetupMetadataBlock = origRedirect, origBlock
+				runNetnsHasIPv6, runSetupIPv6MetadataBlock = origHasIPv6, origIPv6Block
+			})
+			var order []string
+			var redirectCalled bool
 			runNetnsHasIPv6 = func() bool { return tt.hasIPv6 }
 			runSetupIPv6MetadataBlock = func() error {
-				ipv6Called = true
+				order = append(order, "ipv6")
 				return tt.ipv6Err
 			}
+			runSetupMetadataBlock = func() (blockMethod, error) {
+				order = append(order, "filter")
+				if tt.blockErr != nil {
+					return blockNone, tt.blockErr
+				}
+				return blockIPTables, nil
+			}
+			runSetupIPTablesRedirect = func(int) error {
+				redirectCalled = true
+				order = append(order, "redirect")
+				return tt.redirectErr
+			}
+
 			err := InstallInterceptionRules(tt.mode, 18380)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("InstallInterceptionRules() = %v, wantErr %v", err, tt.wantErr)
@@ -351,14 +425,11 @@ func TestInstallInterceptionRules(t *testing.T) {
 			if tt.wantErr && !errors.Is(err, ErrInterceptionUnavailable) {
 				t.Errorf("error = %v, want wrapped ErrInterceptionUnavailable", err)
 			}
-			if !*redirectCalled {
-				t.Error("redirect was not called")
+			if !reflect.DeepEqual(order, tt.wantOrder) {
+				t.Errorf("call order = %v, want %v", order, tt.wantOrder)
 			}
-			if *blockCalled != tt.wantBlock {
-				t.Errorf("block called = %v, want %v", *blockCalled, tt.wantBlock)
-			}
-			if ipv6Called != tt.wantIPv6 {
-				t.Errorf("ipv6 block called = %v, want %v", ipv6Called, tt.wantIPv6)
+			if redirectCalled != tt.wantRedirect {
+				t.Errorf("redirect called = %v, want %v", redirectCalled, tt.wantRedirect)
 			}
 		})
 	}

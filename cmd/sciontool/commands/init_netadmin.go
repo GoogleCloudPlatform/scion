@@ -252,7 +252,7 @@ var (
 	redirectProbeInterval       = 100 * time.Millisecond
 	runWaitForRedirect          = waitForRedirect
 
-	ipv6ProbeAddrs   = []string{"[fd20:ce::254]:80", "[fd00:ec2::254]:80"}
+	ipv6ProbeAddrs   = defaultIPv6ProbeAddrs()
 	ipv6ProbeTimeout = 2 * time.Second
 	ipv6ProbeDial    = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		var d net.Dialer
@@ -261,6 +261,15 @@ var (
 	runNetnsHasIPv6      = metadata.NetnsHasIPv6
 	runVerifyIPv6Blocked = verifyIPv6MetadataBlocked
 )
+
+func defaultIPv6ProbeAddrs() []string {
+	addrs := metadata.IPv6MetadataAddrs()
+	targets := make([]string, len(addrs))
+	for i, addr := range addrs {
+		targets[i] = net.JoinHostPort(addr, "80")
+	}
+	return targets
+}
 
 // waitForRedirect polls the metadata IP on the emulator's per-boot random
 // probe path until the emulator answers HTTP 200 OK with the expected per-boot
