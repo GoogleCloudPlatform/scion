@@ -508,6 +508,26 @@ func TestTriggerG4a_Reuse_AuthoringRequiresWakeAuthority(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, recUAT.Code, recUAT.Body.String())
 	assert.Contains(t, recUAT.Body.String(), "reuse requires wake authority")
 
+	// 2b. UAT whose hop ceiling includes agent:lifecycle succeeds authoring a reuse trigger.
+	uatWithLifecycle := scheduleTestUAT(t, baseUser, projBoundary,
+		"trigger:create", "trigger:update", "trigger:read", "webhook_endpoint:read", "agent:message", "agent:lifecycle")
+	uatWakeCtx := contextWithIdentity(ctx, uatWithLifecycle)
+	uatWakeCtx = contextWithCredentialContext(uatWakeCtx, credentialContextForIdentity(uatWithLifecycle))
+	recUATOK := f.doJSON(t, uatWakeCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:    "uat-reuse-with-wake",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:   &TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeReuse},
+			Action: TriggerActionSpec{
+				Type:    store.TriggerActionMessage,
+				AgentID: agNoWake.ID,
+				Message: "hi",
+			},
+		})
+	require.Equal(t, http.StatusCreated, recUATOK.Code, recUATOK.Body.String())
+
 	// Create a valid trigger with mode=new via session user, then try to PATCH to reuse via UAT without lifecycle.
 	recNew := f.doJSON(t, userCtx, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),

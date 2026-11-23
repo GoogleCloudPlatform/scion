@@ -119,13 +119,17 @@ type TriggerSubjectPatchSpec struct {
 }
 
 // authorizeTriggerReuseSubject enforces Stage 3 §6.2: authoring a reuse trigger
-// requires wake authority (agent.lifecycle) in the author's ceiling, returning
-// HTTP 400 "reuse requires wake authority" when absent.
-func authorizeTriggerReuseSubject(w http.ResponseWriter, subjectMode string, ceiling store.EffectCeiling) bool {
+// requires wake authority (agent.lifecycle) in the author's hop ceiling,
+// returning HTTP 400 "reuse requires wake authority" when absent.
+func authorizeTriggerReuseSubject(w http.ResponseWriter, subjectMode string, ceiling store.EffectCeiling, prov store.AuthorityProvenance) bool {
 	if subjectMode != store.TriggerSubjectModeReuse {
 		return true
 	}
-	if !EffectCeilingAllows(ceiling, scheduledWakePermission, false) {
+	if !EffectCeilingAllows(
+		uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling),
+		scheduledWakePermission,
+		false,
+	) {
 		ValidationError(w, "reuse requires wake authority", nil)
 		return false
 	}
@@ -471,7 +475,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
-	if !authorizeTriggerReuseSubject(w, subjectMode, ceiling) {
+	if !authorizeTriggerReuseSubject(w, subjectMode, ceiling, prov) {
 		return
 	}
 
@@ -982,7 +986,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if !ok {
 			return
 		}
-		if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling) {
+		if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling, prov) {
 			return
 		}
 		if oldSourceKind != store.TriggerSourceKindGitHub &&
@@ -1182,7 +1186,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
-	if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling) {
+	if !authorizeTriggerReuseSubject(w, tr.SubjectMode, ceiling, prov) {
 		return
 	}
 	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.SourceKind, ep, tr.MatchTypes, tr.ActionType, tr.ActionPayload, ceiling, prov)
