@@ -1129,9 +1129,16 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 
 		case store.TriggerSubjectModeReuse:
-			// Stage 3 §6.2 (rev 1.16) & §6.5: look up live subject claim via subjectLive.
-			includeFiring := tr.ActionType != store.TriggerActionDispatchAgent
-			_, claim, lErr := d.subjectLive(fireCtx, tr.ID, fireSubject, fire.ID, includeFiring)
+			// Stage 3 §6.2 (rev 1.16) & §6.5: reuse (claim lookup, deferral, wake
+			// delivery) applies only to dispatch_agent; non-dispatch actions
+			// (message, github.comment) run their own action even when a live
+			// subject claim remains from an earlier dispatch_agent configuration.
+			if tr.ActionType != store.TriggerActionDispatchAgent {
+				out = d.core.Fire(fireCtx, req)
+				break
+			}
+			// Look up live subject claim via subjectLive.
+			_, claim, lErr := d.subjectLive(fireCtx, tr.ID, fireSubject, fire.ID, false)
 			switch {
 			case lErr != nil:
 				d.logger.Warn("trigger: subjectLive check failed for reuse",

@@ -19,6 +19,7 @@ package trigger_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -1349,4 +1350,104 @@ func TestDispatcher_Reuse_DeferPausedUsesTruthfulReasonAndIncompleteCreateDefers
 	require.Len(t, fires.Items, 1)
 	assert.Equal(t, store.TriggerFireStatusSkipped, fires.Items[0].Status)
 	assert.Equal(t, trigger.ErrFireDeferCancelled, fires.Items[0].Error)
+}
+
+func TestDispatcher_Reuse_NonDispatchActionRunsOwnActionDespiteLiveClaim(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	projID := seedProjectForDispatch(t, cs)
+
+	now := time.Date(2026, 11, 23, 17, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	claims := trigger.NewSubjectClaims(cs, cs, clock)
+
+	// Start as dispatch_agent + reuse and bind a live subject claim to oldAg.
+	tr := makeActiveTrigger(projID, "", "reuse-patched-action", []string{"github.issue_comment.created"})
+	tr.SourceKind = store.TriggerSourceKindGitHub
+	tr.ActionType = store.TriggerActionDispatchAgent
+	tr.SubjectMode = store.TriggerSubjectModeReuse
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
+
+	oldAg := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "old-claimed-ag",
+		Name:      "old-claimed-ag",
+		ProjectID: projID,
+		Phase:     "suspended",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, oldAg))
+
+	targetAg := &store.Agent{
+		ID:        uuid.NewString(),
+		Slug:      "message-target-ag",
+		Name:      "message-target-ag",
+		ProjectID: projID,
+		Phase:     "running",
+	}
+	require.NoError(t, cs.CreateAgent(ctx, targetAg))
+
+	const subject = "github:octo/repo#99"
+	c, _, err := claims.Claim(ctx, tr.ID, subject, uuid.NewString(), uuid.NewString())
+	require.NoError(t, err)
+	require.NoError(t, claims.Bind(ctx, c, oldAg.ID))
+
+	core := &g4aTestCore{}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:          core,
+		Store:         cs,
+		SubjectClaims: claims,
+		Now:           clock,
+	})
+	require.NoError(t, err)
+
+	mkEv := func(dedup string) string {
+		id := uuid.NewString()
+		require.NoError(t, cs.CreateTriggerEvent(ctx, &store.TriggerEvent{
+			ID:         id,
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindGitHub,
+			SourceID:   "1001",
+			Type:       "github.issue_comment.created",
+			Subject:    subject,
+			DedupKey:   dedup,
+			OccurredAt: now,
+			ReceivedAt: now,
+			Status:     store.TriggerEventStatusPending,
+		}))
+		return id
+	}
+
+	// 1. Update trigger from dispatch_agent+reuse to message+reuse while oldAg claim is live.
+	msgPayload := fmt.Sprintf(`{"agentId":%q,"message":"hello target"}`, targetAg.ID)
+	tr.ActionType = store.TriggerActionMessage
+	tr.ActionPayload = msgPayload
+	require.NoError(t, cs.UpdateTrigger(ctx, tr, store.TriggerFieldMask{ActionType: true, ActionPayload: true}, 1, true, nil))
+
+	ev1 := mkEv("del-non-dispatch-msg")
+	res1 := disp.HandleItem(ctx, makeEventItem(ev1, projID), nil)
+	assert.True(t, res1.Done)
+	assert.Zero(t, res1.RetryAt)
+
+	fired := core.firedRequests()
+	require.Len(t, fired, 1)
+	assert.Equal(t, store.TriggerActionMessage, fired[0].ActionType)
+	assert.Equal(t, msgPayload, fired[0].Payload)
+	assert.NotContains(t, fired[0].Payload, oldAg.ID, "old claimed agent must not be targeted or woken")
+
+	// 2. Update trigger to github.comment+reuse while oldAg claim is still live.
+	commentPayload := `{"body":"automated comment"}`
+	tr.ActionType = store.TriggerActionGitHubComment
+	tr.ActionPayload = commentPayload
+	require.NoError(t, cs.UpdateTrigger(ctx, tr, store.TriggerFieldMask{ActionType: true, ActionPayload: true}, 1, true, nil))
+	ev2 := mkEv("del-non-dispatch-ghcomment")
+	res2 := disp.HandleItem(ctx, makeEventItem(ev2, projID), nil)
+	assert.True(t, res2.Done)
+	assert.Zero(t, res2.RetryAt)
+
+	fired = core.firedRequests()
+	require.Len(t, fired, 2)
+	assert.Equal(t, store.TriggerActionGitHubComment, fired[1].ActionType)
+	assert.Equal(t, commentPayload, fired[1].Payload)
+	assert.NotContains(t, fired[1].Payload, oldAg.ID, "old claimed agent must not be targeted or woken")
 }

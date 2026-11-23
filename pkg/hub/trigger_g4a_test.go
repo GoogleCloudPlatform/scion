@@ -994,3 +994,95 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 		assert.Equal(t, trigger.ErrFireCoalesced, fRes.Items[0].Error)
 	}
 }
+
+func TestTriggerG4a_Reuse_PatchedToMessageRunsOwnAction(t *testing.T) {
+	ctx := context.Background()
+	f := newTriggerDispatchAgentFixture(t, "s3-g4a-reuse-patch-msg")
+	require.NoError(t, f.sched.srv.createProjectOwnerRoleBinding(ctx, f.sched.proj.ID, f.sched.creator.ID))
+	userCtx := f.userAuth(t, f.sched.creator)
+	ep := f.createEndpoint(t, userCtx, "reuse-patch-msg-ep")
+
+	var createCalls atomic.Int32
+	tracker := &reuseTrackingBrokerClient{
+		headlessGatherBrokerClient: f.client,
+		storeForUpd:                f.sched.store,
+		onBeforeCreate: func(_ *RemoteCreateAgentRequest) error {
+			createCalls.Add(1)
+			return nil
+		},
+	}
+	f.sched.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.sched.store, tracker, false, slog.Default()))
+
+	// Create a separate running agent that the PATCHed message action will target.
+	targetAg := &store.Agent{
+		ID:              uuid.NewString(),
+		Slug:            "patch-msg-target",
+		Name:            "patch-msg-target",
+		ProjectID:       f.sched.proj.ID,
+		RuntimeBrokerID: f.sched.broker.ID,
+		Phase:           string(state.PhaseRunning),
+		Activity:        string(state.ActivityWaitingForInput),
+		OwnerID:         f.sched.creator.ID,
+	}
+	require.NoError(t, f.sched.store.CreateAgent(ctx, targetAg))
+
+	// 1. Create a dispatch_agent + reuse trigger.
+	rec := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:    "reuse-then-patch-msg",
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:   &TriggerMatchSpec{Types: []string{"webhook.opened"}},
+			Subject: &TriggerSubjectSpec{Mode: store.TriggerSubjectModeReuse},
+			Action: TriggerActionSpec{
+				Type:         store.TriggerActionDispatchAgent,
+				Task:         "handle ${event.id}",
+				ReuseMessage: "follow-up ${event.id}",
+			},
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var trigResp TriggerResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &trigResp))
+
+	// 2. First event dispatches an agent and binds a live subject claim.
+	recW1 := f.postSignedWebhook(t, ep, "del-patch-msg-1", "opened", "sub-42", []byte(`{"n":1}`))
+	require.Equal(t, http.StatusAccepted, recW1.Code, recW1.Body.String())
+	f.drainOneTriggerEvent(t)
+	require.Equal(t, int32(1), createCalls.Load())
+
+	subjectKey := "webhook:" + ep.ID + "/sub-42"
+	claim, err := f.sched.store.GetActiveTriggerSubjectClaim(ctx, trigResp.ID, subjectKey)
+	require.NoError(t, err)
+	require.NotEmpty(t, claim.AgentID)
+
+	// Mark the claimed agent suspended so any unintended wake would call StartAgent.
+	oldAg, err := f.sched.store.GetAgent(ctx, claim.AgentID)
+	require.NoError(t, err)
+	oldAg.Phase = string(state.PhaseSuspended)
+	oldAg.Activity = ""
+	require.NoError(t, f.sched.store.UpdateAgent(ctx, oldAg))
+
+	// 3. PATCH the trigger from dispatch_agent to message while keeping subject.mode=reuse.
+	recPatch := f.doJSON(t, userCtx, http.MethodPatch,
+		fmt.Sprintf("/api/v1/projects/%s/triggers/%s", f.sched.proj.ID, trigResp.ID),
+		UpdateTriggerRequest{
+			Action: &TriggerActionSpec{
+				Type:    store.TriggerActionMessage,
+				AgentID: targetAg.ID,
+				Message: "own message action for ${event.id}",
+			},
+		})
+	require.Equal(t, http.StatusOK, recPatch.Code, recPatch.Body.String())
+
+	// 4. Next event on the same subject must run the message action against targetAg,
+	// and must NOT wake or message oldAg.
+	recW2 := f.postSignedWebhook(t, ep, "del-patch-msg-2", "opened", "sub-42", []byte(`{"n":2}`))
+	require.Equal(t, http.StatusAccepted, recW2.Code, recW2.Body.String())
+	f.drainOneTriggerEvent(t)
+
+	assert.Empty(t, tracker.starts(), "old claimed agent must not be woken")
+	msgs := tracker.messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, targetAg.Slug, msgs[0].AgentID)
+	assert.Contains(t, msgs[0].Message, "own message action")
+}
