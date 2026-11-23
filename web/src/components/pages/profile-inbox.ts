@@ -552,6 +552,8 @@ export class ScionPageProfileInbox extends LitElement {
                 <dd>${item.projectName || 'Unknown'}</dd>
                 <dt>Injection</dt>
                 <dd>${item.injectionMode || 'default'}</dd>
+                <dt>Inherited by child agents</dt>
+                <dd data-confirm-allow-progeny>${item.allowProgeny ? 'Yes' : 'No'}</dd>
               </dl>
             `
           : nothing}

@@ -415,6 +415,130 @@ func TestUserMeInboxSummary_SingleflightCoalescing(t *testing.T) {
 	}
 }
 
+func TestUserMeInboxSummary_SingleflightDistinctTokensDoNotCoalesce(t *testing.T) {
+	f := newChatFixture(t)
+	setInboxDashboardExperiment(t, f.srv, true)
+
+	tokA := f.mint(t, f.member, hubBoundary(), "inbox:read")
+	tokB := f.mint(t, f.member, hubBoundary(), "inbox:read", "project:read")
+
+	var calls atomic.Int32
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+
+	f.srv.inboxSourcesForTest = []inboxSourceEntry{
+		{
+			key: InboxCategoryApprovals,
+			run: func(_ context.Context, v inboxViewer, _ int, _ string) InboxCategory {
+				calls.Add(1)
+				entered <- struct{}{}
+				<-release
+				count := 1
+				if v.token != nil && v.token.HasScope("project:read") {
+					count = 2
+				}
+				return InboxCategory{
+					State:             InboxStateOK,
+					Count:             count,
+					CountsTowardTotal: true,
+					Href:              "/profile/secrets",
+					Previews:          []any{},
+				}
+			},
+		},
+		{key: InboxCategoryWaiting, run: inboxDisabledCategory("/agents")},
+		{key: InboxCategoryReviews, run: inboxDisabledCategory("/artifacts?review_pending=1&owner=me")},
+		{key: InboxCategoryChat, run: inboxDisabledCategory("/chat?filter=unread")},
+		{key: InboxCategoryDecisions, run: inboxDisabledCategory("/profile/decisions?tab=pending")},
+	}
+
+	var wg sync.WaitGroup
+	var totalA, totalB int
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		totalA = decodeInboxSummary(t, f.call(t, tokA, http.MethodGet, userMeInboxSummaryPath, nil)).Total
+	}()
+	go func() {
+		defer wg.Done()
+		totalB = decodeInboxSummary(t, f.call(t, tokB, http.MethodGet, userMeInboxSummaryPath, nil)).Total
+	}()
+
+	// Both distinct tokens must enter the source concurrently rather than coalescing.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			close(release)
+			t.Fatal("timed out waiting for both distinct tokens to execute without coalescing")
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	assert.Equal(t, int32(2), calls.Load(), "distinct UATs for the same user and boundary must not coalesce")
+	assert.Equal(t, 1, totalA)
+	assert.Equal(t, 2, totalB)
+}
+
+type inboxStubPendingSecretsStore struct {
+	store.Store
+	rows []store.PendingSecret
+}
+
+func (s *inboxStubPendingSecretsStore) ListPendingSecretsByOwner(_ context.Context, _, _ string) ([]store.PendingSecret, error) {
+	return s.rows, nil
+}
+
+func TestUserMeInboxSummary_ApprovalsCappedUsesLiveCount(t *testing.T) {
+	srv, rawStore := testServer(t)
+	now := time.Now().UTC()
+
+	var rows []store.PendingSecret
+	for i := 0; i < 3; i++ {
+		rows = append(rows, store.PendingSecret{
+			ID:        api.NewUUID(),
+			Key:       "LIVE_" + string(rune('A'+i)),
+			Scope:     store.ScopeUser,
+			Created:   now.Add(-time.Hour),
+			ExpiresAt: now.Add(time.Duration(i+1) * time.Hour),
+		})
+	}
+	for i := 0; i < store.PendingSecretOwnerCap; i++ {
+		rows = append(rows, store.PendingSecret{
+			ID:        api.NewUUID(),
+			Key:       "EXPIRED_" + api.NewUUID(),
+			Scope:     store.ScopeUser,
+			Created:   now.Add(-48 * time.Hour),
+			ExpiresAt: now.Add(-time.Minute),
+		})
+	}
+
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *inboxStubPendingSecretsStore {
+		return &inboxStubPendingSecretsStore{Store: inner, rows: rows}
+	})
+	setInboxDashboardExperiment(t, srv, true)
+
+	u := &store.User{
+		ID:          tid("inbox-capped-user"),
+		Email:       "capped@example.com",
+		DisplayName: "Capped User",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     now,
+	}
+	require.NoError(t, rawStore.CreateUser(context.Background(), u))
+
+	rec := doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath, nil)
+	resp := decodeInboxSummary(t, rec)
+	approvals := resp.Categories[InboxCategoryApprovals]
+	assert.Equal(t, InboxStateOK, approvals.State)
+	assert.Equal(t, 3, approvals.Count)
+	assert.False(t, approvals.Capped, "expired rows must not mark approvals capped")
+	assert.False(t, resp.TotalCapped)
+	assert.Equal(t, 3, resp.Total)
+}
+
 func TestUserMeInboxSummary_PendingSecretApproveRejectHints(t *testing.T) {
 	f := newPendingFixture(t, "inbox-hints")
 	pub := NewChannelEventPublisher()

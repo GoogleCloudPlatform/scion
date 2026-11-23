@@ -207,6 +207,8 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
 
       const confirmBtn = page.shadowRoot?.querySelector<HTMLElement>('[data-confirm-approve-btn]');
       expect(confirmBtn).not.toBeNull();
+      const allowProgenyEl = page.shadowRoot?.querySelector('[data-confirm-allow-progeny]');
+      expect(allowProgenyEl?.textContent?.trim()).toBe('Yes');
       confirmBtn!.click();
       await flush();
       await page.updateComplete;

@@ -108,7 +108,12 @@ func (v inboxViewer) credKey() string {
 	if v.token == nil {
 		return "session"
 	}
-	return "uat:" + tokenBoundaryProject(v.token)
+	if cid := v.token.CredentialID(); cid != "" {
+		return "uat:" + cid
+	}
+	scopes := append([]string(nil), v.token.ScopedScopes()...)
+	sort.Strings(scopes)
+	return "uat:" + tokenBoundaryProject(v.token) + ":" + strings.Join(scopes, ",")
 }
 
 type inboxSourceFunc func(ctx context.Context, v inboxViewer, previews int, chatFilter string) InboxCategory
@@ -373,7 +378,7 @@ func (s *Server) inboxApprovalsCategory(ctx context.Context, v inboxViewer, prev
 	return InboxCategory{
 		State:             InboxStateOK,
 		Count:             len(live),
-		Capped:            len(rows) >= store.PendingSecretOwnerCap,
+		Capped:            len(live) >= store.PendingSecretOwnerCap,
 		CountsTowardTotal: true,
 		Href:              href,
 		Previews:          items,
