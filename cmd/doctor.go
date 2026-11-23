@@ -727,7 +727,9 @@ func (r *doctorReport) localSettingsChecks() {
 	// D6: Telemetry Pipeline (local check)
 	r.add(&r.HubChecks, checkDoctorTelemetry())
 	// D7: Container Images (local check)
-	r.add(&r.HubChecks, checkDoctorContainerImages())
+	for _, c := range checkDoctorContainerImagesHere(nfsSettings) {
+		r.add(&r.HubChecks, c)
+	}
 	// D8: Credential Validity (local check)
 	r.add(&r.HubChecks, checkDoctorCredentialValidity())
 }
@@ -1337,74 +1339,6 @@ func checkDoctorTelemetry() scionruntime.CheckResult {
 		Name:    "telemetry",
 		Status:  "pass",
 		Message: fmt.Sprintf("Telemetry endpoint %s is reachable", endpoint),
-	}
-}
-
-// checkDoctorContainerImages performs D7: Container images check (local).
-// Note: This is a simplified check that scans for any images with "scion" in
-// the name. The design specifies checking per-configured-harness images, but
-// that requires loading the project's harness config which adds complexity.
-// A future enhancement could load harness configs and verify each image.
-func checkDoctorContainerImages() scionruntime.CheckResult {
-	// Find a container CLI (docker or podman)
-	var containerCLI string
-	for _, cli := range []string{"docker", "podman"} {
-		if _, err := exec.LookPath(cli); err == nil {
-			containerCLI = cli
-			break
-		}
-	}
-
-	if containerCLI == "" {
-		return scionruntime.CheckResult{
-			Name:    "container-images",
-			Status:  "skip",
-			Message: "No container runtime CLI found (docker/podman)",
-		}
-	}
-
-	imgCtx, imgCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer imgCancel()
-	out, err := exec.CommandContext(imgCtx, containerCLI, "images", "--format", "{{.Repository}}:{{.Tag}}").Output()
-	if err != nil {
-		return scionruntime.CheckResult{
-			Name:    "container-images",
-			Status:  "skip",
-			Message: fmt.Sprintf("Could not list %s images: %v", containerCLI, err),
-		}
-	}
-
-	imageOutput := strings.TrimSpace(string(out))
-	if imageOutput == "" {
-		return scionruntime.CheckResult{
-			Name:        "container-images",
-			Status:      "warn",
-			Message:     fmt.Sprintf("No scion container images found via %s", containerCLI),
-			Remediation: "Pull scion images or check image_registry configuration",
-		}
-	}
-
-	images := strings.Split(imageOutput, "\n")
-	scionImageCount := 0
-	for _, img := range images {
-		if strings.Contains(img, "scion") {
-			scionImageCount++
-		}
-	}
-
-	if scionImageCount == 0 {
-		return scionruntime.CheckResult{
-			Name:        "container-images",
-			Status:      "warn",
-			Message:     fmt.Sprintf("No scion container images found via %s", containerCLI),
-			Remediation: "Pull scion images or check image_registry configuration",
-		}
-	}
-
-	return scionruntime.CheckResult{
-		Name:    "container-images",
-		Status:  "pass",
-		Message: fmt.Sprintf("%d scion image(s) found via %s", scionImageCount, containerCLI),
 	}
 }
 
