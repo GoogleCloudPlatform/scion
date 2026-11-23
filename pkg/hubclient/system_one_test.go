@@ -290,6 +290,47 @@ func TestSystemOne_ProbeModelsAndSpec(t *testing.T) {
 	assert.InDelta(t, 0.91, evalResp.Evaluation.Answers["q1"].NativeMetrics["typesafe.confidence"].Value, 1e-6)
 }
 
+func TestSystemOne_ListAdapters(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/admin/system-one/adapters", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ListSystemOneAdaptersResponse{
+			Adapters: []SystemOneAdapterCapability{
+				{
+					ID:              "gemini_decisions",
+					Version:         "0.1.0",
+					DisplayName:     "Gemini Decisions",
+					DefaultEndpoint: "https://generativelanguage.googleapis.com",
+					ModelRequired:   true,
+					AuthModes: []SystemOneAdapterAuthMode{
+						{Mode: "owned_api_key", AuthKind: "api_key", TransportScheme: "header:x-goog-api-key", CustomEndpointAllowed: true},
+						{Mode: "secret_ref", AuthKind: "api_key", TransportScheme: "header:x-goog-api-key", CustomEndpointAllowed: false},
+						{Mode: "google_access_token", AuthKind: "google_access_token", TransportScheme: "google_access_token", CustomEndpointAllowed: false, ScopesRequired: true},
+					},
+					AllowedSecretNames:  []string{"GEMINI_API_KEY", "GEMINI_ALT_KEY"},
+					DefaultSecretName:   "GEMINI_API_KEY",
+					AllowedSecretScopes: []string{"hub", "project", "project_or_hub"},
+					DefaultSecretScope:  "project_or_hub",
+				},
+			},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	resp, err := c.SystemOne().ListAdapters(context.Background())
+	require.NoError(t, err)
+	require.Len(t, resp.Adapters, 1)
+	assert.Equal(t, "gemini_decisions", resp.Adapters[0].ID)
+	assert.Equal(t, []string{"GEMINI_API_KEY", "GEMINI_ALT_KEY"}, resp.Adapters[0].AllowedSecretNames)
+	assert.Equal(t, "project_or_hub", resp.Adapters[0].DefaultSecretScope)
+}
+
 func TestSystemOne_WritesDoNotRetry(t *testing.T) {
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

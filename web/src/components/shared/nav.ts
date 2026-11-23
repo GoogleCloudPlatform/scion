@@ -20,13 +20,17 @@
  * Provides the main sidebar navigation with Shoelace integration
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts-flag.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  isFeatureEnabled,
+  SYSTEM_ONE_FLAG,
+} from '../../utils/feature-flags.js';
 import {
   type AdminStatus,
   hasAnyPermission,
@@ -92,6 +96,12 @@ const ADMIN_SCOPEABLE_ITEMS: NavItem[] = [
   { path: '/admin/branding', label: 'Branding', icon: 'palette' },
   { path: '/admin/federation', label: 'Federation', icon: 'globe' },
   { path: '/admin/integrations', label: 'Integrations', icon: 'plug' },
+  {
+    path: '/admin/system-one',
+    label: 'System One Providers',
+    icon: 'robot',
+    flag: SYSTEM_ONE_FLAG,
+  },
   { path: '/admin/scheduler', label: 'Scheduler', icon: 'clock' },
   { path: '/admin/users', label: 'Users', icon: 'people' },
   { path: '/admin/groups', label: 'Groups', icon: 'diagram-3' },
@@ -149,6 +159,20 @@ export class ScionNav extends LitElement {
 
   /** Tracks the user ID for which admin capabilities were last checked. */
   private adminCheckUserId: string | null = null;
+
+  private readonly onFeatureFlagsChanged = (): void => {
+    this.requestUpdate();
+  };
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
+  }
+
+  override disconnectedCallback(): void {
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFeatureFlagsChanged);
+    super.disconnectedCallback();
+  }
 
   override updated(changedProperties: Map<PropertyKey, unknown>): void {
     if (changedProperties.has('user')) {
@@ -449,6 +473,14 @@ export class ScionNav extends LitElement {
   override render() {
     const isSuperAdmin = this.user?.role === 'admin';
 
+    const visibleAdminItems = this.adminStatus
+      ? visibleItems(ADMIN_SCOPEABLE_ITEMS).filter(
+          (item) =>
+            NAV_PERMISSION_MAP[item.path] &&
+            hasAnyPermission(this.adminStatus, NAV_PERMISSION_MAP[item.path])
+        )
+      : [];
+
     return html`
       <div class="logo">
         ${renderSidebarBrand({
@@ -463,92 +495,19 @@ export class ScionNav extends LitElement {
             <div class="nav-section">
               <div class="nav-section-title">${section.title}</div>
               <ul class="nav-list">
-                ${visibleItems(section.items).map(
-                  (item) => html`
-                    <li class="nav-item">
-                      <sl-tooltip
-                        style="display: block;"
-                        content="${item.label}"
-                        placement="right"
-                        ?disabled=${!this.collapsed}
-                        hoist
-                      >
-                        <a
-                          href="${item.path}"
-                          class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                          @click=${(e: Event) => this.handleNavClick(e, item.path)}
-                        >
-                          <sl-icon name="${item.icon}"></sl-icon>
-                          <span class="nav-link-text">${item.label}</span>
-                        </a>
-                      </sl-tooltip>
-                    </li>
-                  `
-                )}
+                ${visibleItems(section.items).map((item) => this.renderNavItem(item))}
               </ul>
             </div>
           `
         )}
-        ${this.adminStatus &&
-        (isSuperAdmin ||
-          ADMIN_SCOPEABLE_ITEMS.some(
-            (item) =>
-              NAV_PERMISSION_MAP[item.path] &&
-              hasAnyPermission(this.adminStatus, NAV_PERMISSION_MAP[item.path])
-          ))
+        ${this.adminStatus && (isSuperAdmin || visibleAdminItems.length > 0)
           ? html`
               <div class="nav-section admin-section">
                 <div class="nav-section-title">Admin</div>
                 <ul class="nav-list">
-                  ${ADMIN_SCOPEABLE_ITEMS.filter(
-                    (item) =>
-                      NAV_PERMISSION_MAP[item.path] &&
-                      hasAnyPermission(this.adminStatus, NAV_PERMISSION_MAP[item.path])
-                  ).map(
-                    (item) => html`
-                      <li class="nav-item">
-                        <sl-tooltip
-                          style="display: block;"
-                          content="${item.label}"
-                          placement="right"
-                          ?disabled=${!this.collapsed}
-                          hoist
-                        >
-                          <a
-                            href="${item.path}"
-                            class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                            @click=${(e: Event) => this.handleNavClick(e, item.path)}
-                          >
-                            <sl-icon name="${item.icon}"></sl-icon>
-                            <span class="nav-link-text">${item.label}</span>
-                          </a>
-                        </sl-tooltip>
-                      </li>
-                    `
-                  )}
+                  ${visibleAdminItems.map((item) => this.renderNavItem(item))}
                   ${isSuperAdmin
-                    ? ADMIN_SUPERADMIN_ITEMS.map(
-                        (item) => html`
-                          <li class="nav-item">
-                            <sl-tooltip
-                              style="display: block;"
-                              content="${item.label}"
-                              placement="right"
-                              ?disabled=${!this.collapsed}
-                              hoist
-                            >
-                              <a
-                                href="${item.path}"
-                                class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                                @click=${(e: Event) => this.handleNavClick(e, item.path)}
-                              >
-                                <sl-icon name="${item.icon}"></sl-icon>
-                                <span class="nav-link-text">${item.label}</span>
-                              </a>
-                            </sl-tooltip>
-                          </li>
-                        `
-                      )
+                    ? ADMIN_SUPERADMIN_ITEMS.map((item) => this.renderNavItem(item))
                     : ''}
                 </ul>
               </div>
@@ -570,6 +529,29 @@ export class ScionNav extends LitElement {
               <span class="collapse-toggle-text">Collapse</span>
             </button>
           `}
+    `;
+  }
+
+  private renderNavItem(item: NavItem): TemplateResult {
+    return html`
+      <li class="nav-item">
+        <sl-tooltip
+          style="display: block;"
+          content="${item.label}"
+          placement="right"
+          ?disabled=${!this.collapsed}
+          hoist
+        >
+          <a
+            href="${item.path}"
+            class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
+            @click=${(e: Event) => this.handleNavClick(e, item.path)}
+          >
+            <sl-icon name="${item.icon}"></sl-icon>
+            <span class="nav-link-text">${item.label}</span>
+          </a>
+        </sl-tooltip>
+      </li>
     `;
   }
 

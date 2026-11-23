@@ -1111,6 +1111,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// System One provider instances (ptone/scion#8044; 404 while hub.system_one
 	// is off). Session only (CREDENTIAL_MANAGEMENT): instances store and
 	// exercise hub-scoped internal API keys.
+	"/api/v1/admin/system-one/adapters": {
+		Pattern: "/api/v1/admin/system-one/adapters", RouteID: "admin.systemOne.adapters",
+		Classification: RouteHubAdmin,
+		Permission:     "system_one_instance.read", Resource: "system_one_instance", Action: "read",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
 	"/api/v1/admin/system-one/instances": {
 		Pattern: "/api/v1/admin/system-one/instances", RouteID: "admin.systemOne.instances",
 		Classification: RouteHubAdmin,

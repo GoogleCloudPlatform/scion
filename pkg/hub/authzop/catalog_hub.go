@@ -1167,6 +1167,7 @@ var hubOperations = []OperationSpec{
 		Domain:      "systemone.instance",
 		Description: "List and read hub-scoped System One provider instances (redacted; stored API keys are never returned); interactive session only",
 		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/system-one/adapters", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/system-one/instances", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/system-one/instances/{name}", Method: "GET"},
 		},

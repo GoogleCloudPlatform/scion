@@ -40,6 +40,7 @@
     "./groups/*.ts",
     "./harness/*.ts",
     "./roles/*.ts",
+    "./system-one/*.ts",
     "./terminal-coordinator/*.ts",
     "./tokens/*.ts",
     "../playwright-chromium.ts",

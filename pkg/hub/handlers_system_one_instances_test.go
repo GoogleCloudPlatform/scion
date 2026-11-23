@@ -50,7 +50,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
-const systemOneAdminPath = "/api/v1/admin/system-one/instances"
+const (
+	systemOneAdminPath    = "/api/v1/admin/system-one/instances"
+	systemOneAdaptersPath = "/api/v1/admin/system-one/adapters"
+)
 
 type testSystemOnePublicResolver struct{}
 
@@ -4509,4 +4512,191 @@ func TestSystemOneInstances_L1_ProbeProjectRequiresSecretRead(t *testing.T) {
 			}
 		}
 	}
+}
+
+type systemOneCountingFailingDialer struct {
+	dials atomic.Int32
+}
+
+func (d *systemOneCountingFailingDialer) DialContext(_ context.Context, _, addr string) (net.Conn, error) {
+	d.dials.Add(1)
+	return nil, fmt.Errorf("outbound provider dial to %s must not occur during GET /adapters", addr)
+}
+
+type systemOneCountingSecretBackend struct {
+	secret.SecretBackend
+	getCalls atomic.Int32
+	setCalls atomic.Int32
+	delCalls atomic.Int32
+}
+
+func (b *systemOneCountingSecretBackend) Get(ctx context.Context, key, scope, scopeID string) (*secret.SecretWithValue, error) {
+	b.getCalls.Add(1)
+	return b.SecretBackend.Get(ctx, key, scope, scopeID)
+}
+
+func (b *systemOneCountingSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
+	b.setCalls.Add(1)
+	return b.SecretBackend.Set(ctx, input)
+}
+
+func (b *systemOneCountingSecretBackend) Delete(ctx context.Context, key, scope, scopeID string) error {
+	b.delCalls.Add(1)
+	return b.SecretBackend.Delete(ctx, key, scope, scopeID)
+}
+
+func TestSystemOneAdapters_CapabilitiesAndNoIO(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("experiment off returns 404 to admin", func(t *testing.T) {
+		srv, s, _ := newSystemOneTestServer(t, false)
+		superAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-adapters-off-super", store.SystemRoleSuperAdmin))
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, srv, superAdmin, http.MethodGet, systemOneAdaptersPath, nil)
+		assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	})
+
+	t.Run("authz and method enforcement", func(t *testing.T) {
+		srv, s, _ := newSystemOneTestServer(t, true)
+		hubAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-adapters-admin", store.SystemRoleHubAdmin))
+		require.NoError(t, err)
+		hubMember, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-adapters-member", store.SystemRoleHubMember))
+		require.NoError(t, err)
+		hubViewer, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-adapters-viewer", store.SystemRoleHubViewer))
+		require.NoError(t, err)
+
+		// Unauthenticated -> 401.
+		unauthReq := httptest.NewRequest(http.MethodGet, systemOneAdaptersPath, nil)
+		unauthRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(unauthRec, unauthReq)
+		assert.Equal(t, http.StatusUnauthorized, unauthRec.Code)
+
+		// Non-admin roles -> 403.
+		for _, u := range []*store.User{hubMember, hubViewer} {
+			rec := doRequestAsUser(t, srv, u, http.MethodGet, systemOneAdaptersPath, nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "user %s", u.Email)
+		}
+
+		// Unsupported methods -> 405 for admin when experiment is enabled.
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+			rec := doRequestAsUser(t, srv, hubAdmin, method, systemOneAdaptersPath, nil)
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, "method %s", method)
+		}
+	})
+
+	t.Run("returns capabilities with operator extras and performs zero I/O, ADC, or secret reads", func(t *testing.T) {
+		srv, s, localBackend := newSystemOneTestServer(t, true)
+		hubAdmin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-adapters-cap-admin", store.SystemRoleHubAdmin))
+		require.NoError(t, err)
+
+		// Seed a Hub secret with a canary value and wrap the backend to assert zero reads.
+		const secretCanary = "canary-never-read-by-adapters-endpoint-999"
+		_, _, err = localBackend.Set(ctx, &secret.SetSecretInput{
+			Name:       "GEMINI_API_KEY",
+			Value:      secretCanary,
+			SecretType: store.SecretTypeEnvironment,
+			Target:     "GEMINI_API_KEY",
+			Scope:      store.ScopeHub,
+			ScopeID:    srv.hubID,
+			CreatedBy:  hubAdmin.ID,
+			UpdatedBy:  hubAdmin.ID,
+		})
+		require.NoError(t, err)
+
+		countingBackend := &systemOneCountingSecretBackend{SecretBackend: localBackend}
+		srv.SetSecretBackend(countingBackend)
+
+		// Configure operator extra secret names snapshot (including one invalid name to verify filtering).
+		srv.mu.Lock()
+		srv.config.StartupServerSettings = &config.V1ServerConfig{
+			Hub: &config.V1ServerHubConfig{
+				SystemOne: &config.V1ServerHubSystemOneConfig{
+					SecretNames: map[string][]string{
+						geminidecisions.AdapterName: {"GEMINI_TEAM_KEY", "systemone.instance.bad"},
+						jevwire.AdapterNameTypeSafe: {"TYPESAFE_IGNORED"},
+					},
+				},
+			},
+		}
+		srv.systemOneExtraSecretNamesSnapshotted = false
+		srv.systemOneExtraSecretNames = nil
+		srv.mu.Unlock()
+
+		// Install counting ADC provider that fails if ever invoked.
+		var adcCalls atomic.Int32
+		srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+			adcCalls.Add(1)
+			return nil, errors.New("ADC discovery must not be called by /adapters")
+		})
+
+		// Install counting, failing egress dialer so any outbound provider I/O fails and is counted.
+		egressDialer := &systemOneCountingFailingDialer{}
+		srv.SetSystemOneRuntimeOptionsForTesting(t, systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(testSystemOnePublicResolver{}, egressDialer),
+		))
+
+		rec := doRequestAsUser(t, srv, hubAdmin, http.MethodGet, systemOneAdaptersPath, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		// Assert zero secret reads, zero ADC discovery, zero outbound provider dials, and content-free response.
+		assert.Zero(t, countingBackend.getCalls.Load(), "GET /adapters must not read secrets")
+		assert.Zero(t, countingBackend.setCalls.Load(), "GET /adapters must not write secrets")
+		assert.Zero(t, countingBackend.delCalls.Load(), "GET /adapters must not delete secrets")
+		assert.Zero(t, adcCalls.Load(), "GET /adapters must not trigger ADC discovery")
+		assert.Zero(t, egressDialer.dials.Load(), "GET /adapters must not perform outbound provider I/O")
+		assert.NotContains(t, rec.Body.String(), secretCanary)
+
+		var resp ListSystemOneAdaptersResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+		byID := make(map[string]SystemOneAdapterCapabilityDTO, len(resp.Adapters))
+		for _, a := range resp.Adapters {
+			byID[a.ID] = a
+		}
+
+		// Verify gemini_decisions capabilities.
+		gem, ok := byID[geminidecisions.AdapterName]
+		require.True(t, ok, "gemini_decisions adapter must be present")
+		assert.Equal(t, "Gemini Decisions", gem.DisplayName)
+		assert.Equal(t, geminidecisions.DefaultEndpoint, gem.DefaultEndpoint)
+		assert.True(t, gem.ModelRequired)
+		assert.False(t, gem.SupportsModelListing)
+		assert.Equal(t, []string{"GEMINI_API_KEY", "GEMINI_TEAM_KEY"}, gem.AllowedSecretNames)
+		assert.Equal(t, "GEMINI_API_KEY", gem.DefaultSecretName)
+		assert.Equal(t, []string{"hub", "project", "project_or_hub"}, gem.AllowedSecretScopes)
+		assert.Equal(t, "project_or_hub", gem.DefaultSecretScope)
+
+		gemModes := make(map[string]SystemOneAdapterAuthModeDTO, len(gem.AuthModes))
+		for _, m := range gem.AuthModes {
+			gemModes[m.Mode] = m
+		}
+		require.Contains(t, gemModes, "owned_api_key")
+		assert.True(t, gemModes["owned_api_key"].CustomEndpointAllowed)
+		assert.Equal(t, store.SystemOneAuthKindAPIKey, gemModes["owned_api_key"].AuthKind)
+
+		require.Contains(t, gemModes, "secret_ref")
+		assert.False(t, gemModes["secret_ref"].CustomEndpointAllowed)
+		assert.Equal(t, store.SystemOneAuthKindAPIKey, gemModes["secret_ref"].AuthKind)
+
+		require.Contains(t, gemModes, "google_access_token")
+		assert.False(t, gemModes["google_access_token"].CustomEndpointAllowed)
+		assert.True(t, gemModes["google_access_token"].ScopesRequired)
+		assert.Equal(t, store.SystemOneAuthKindGoogleAccessToken, gemModes["google_access_token"].AuthKind)
+
+		// Verify typesafe capabilities (no SecretNamePolicy -> owned_api_key only).
+		ts, ok := byID[jevwire.AdapterNameTypeSafe]
+		require.True(t, ok, "typesafe adapter must be present")
+		assert.Equal(t, "TypeSafe", ts.DisplayName)
+		assert.Equal(t, jevwire.DefaultTypeSafeEndpoint, ts.DefaultEndpoint)
+		assert.True(t, ts.ModelRequired)
+		assert.True(t, ts.SupportsModelListing)
+		assert.Empty(t, ts.AllowedSecretNames)
+		assert.Empty(t, ts.AllowedSecretScopes)
+		assert.Empty(t, ts.DefaultSecretScope)
+		require.Len(t, ts.AuthModes, 1)
+		assert.Equal(t, "owned_api_key", ts.AuthModes[0].Mode)
+		assert.Equal(t, "bearer", ts.AuthModes[0].TransportScheme)
+		assert.True(t, ts.AuthModes[0].CustomEndpointAllowed)
+	})
 }

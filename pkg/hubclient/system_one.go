@@ -28,11 +28,19 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
-const systemOneInstancesBasePath = "/api/v1/admin/system-one/instances"
+const (
+	systemOneAdaptersPath      = "/api/v1/admin/system-one/adapters"
+	systemOneInstancesBasePath = "/api/v1/admin/system-one/instances"
+)
 
 // SystemOneService handles administrative operations on Hub-managed System One
-// provider instances (/api/v1/admin/system-one/instances).
+// provider instances (/api/v1/admin/system-one/instances) and adapter
+// capability discovery (/api/v1/admin/system-one/adapters).
 type SystemOneService interface {
+	// ListAdapters returns non-secret capability metadata for registered
+	// System One provider adapters.
+	ListAdapters(ctx context.Context) (*ListSystemOneAdaptersResponse, error)
+
 	// CreateInstance registers a new System One provider instance.
 	CreateInstance(ctx context.Context, req *CreateSystemOneInstanceRequest) (*SystemOneInstance, error)
 
@@ -177,6 +185,40 @@ type ListSystemOneInstancesResponse struct {
 	TotalCount int                 `json:"totalCount"`
 }
 
+// SystemOneAdapterAuthMode describes one authentication mode supported by a
+// registered System One adapter.
+type SystemOneAdapterAuthMode struct {
+	Mode                  string `json:"mode"`
+	AuthKind              string `json:"authKind"`
+	TransportScheme       string `json:"transportScheme,omitempty"`
+	CustomEndpointAllowed bool   `json:"customEndpointAllowed"`
+	ScopesRequired        bool   `json:"scopesRequired,omitempty"`
+}
+
+// SystemOneAdapterCapability is the non-secret capability metadata for a
+// registered System One provider adapter returned by
+// GET /api/v1/admin/system-one/adapters.
+type SystemOneAdapterCapability struct {
+	ID                   string                     `json:"id"`
+	Version              string                     `json:"version,omitempty"`
+	DisplayName          string                     `json:"displayName,omitempty"`
+	ProviderRetention    string                     `json:"providerRetention,omitempty"`
+	DefaultEndpoint      string                     `json:"defaultEndpoint,omitempty"`
+	ModelRequired        bool                       `json:"modelRequired"`
+	SupportsModelListing bool                       `json:"supportsModelListing"`
+	AuthModes            []SystemOneAdapterAuthMode `json:"authModes"`
+	AllowedSecretNames   []string                   `json:"allowedSecretNames,omitempty"`
+	DefaultSecretName    string                     `json:"defaultSecretName,omitempty"`
+	AllowedSecretScopes  []string                   `json:"allowedSecretScopes,omitempty"`
+	DefaultSecretScope   string                     `json:"defaultSecretScope,omitempty"`
+}
+
+// ListSystemOneAdaptersResponse is the response body for
+// GET /api/v1/admin/system-one/adapters.
+type ListSystemOneAdaptersResponse struct {
+	Adapters []SystemOneAdapterCapability `json:"adapters"`
+}
+
 // ProbeSystemOneInput holds the synthetic probe content passed to
 // POST /api/v1/admin/system-one/instances/{name}/probe.
 type ProbeSystemOneInput struct {
@@ -231,6 +273,14 @@ type ProbeSystemOneInstanceResponse struct {
 
 func systemOneInstancePath(name string) string {
 	return systemOneInstancesBasePath + "/" + url.PathEscape(name)
+}
+
+func (s *systemOneService) ListAdapters(ctx context.Context) (*ListSystemOneAdaptersResponse, error) {
+	resp, err := s.c.get(ctx, systemOneAdaptersPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ListSystemOneAdaptersResponse](resp)
 }
 
 func (s *systemOneService) CreateInstance(ctx context.Context, req *CreateSystemOneInstanceRequest) (*SystemOneInstance, error) {

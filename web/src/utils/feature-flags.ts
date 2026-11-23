@@ -329,6 +329,19 @@ export function idleSuspendEnabled(): boolean {
 }
 
 /**
+ * System One provider administration (hub.system_one, ptone/scion#8044 / #8779):
+ * gates the System One Providers admin navigation entry and page. Presentation
+ * only: the hub enforces the experiment (404 when off) and admin permissions on
+ * every /api/v1/admin/system-one/* route. Default OFF.
+ */
+export const SYSTEM_ONE_FLAG = 'hub.system_one';
+
+/** Whether System One admin UI surfaces are enabled in this session. */
+export function systemOneEnabled(): boolean {
+  return isFeatureEnabled(SYSTEM_ONE_FLAG);
+}
+
+/**
  * Effective permissions viewer (hub.effective_permissions, ptone/scion#8439):
  * shows the two-tab Roles dialog (Effective roles + Effective permissions) on
  * the admin Users page. Presentation only: the hub gates GET/HEAD

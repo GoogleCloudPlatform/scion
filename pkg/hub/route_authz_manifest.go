@@ -225,6 +225,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides
 	"/api/v1/admin/profiling":                    "admin", // Admin profiling switches (session only)
 	"/api/v1/admin/chat-retention":               "admin", // Admin chat retention settings (session only)
+	"/api/v1/admin/system-one/adapters":          "admin", // System One provider adapter capabilities (session only; 404 when hub.system_one is off)
 	"/api/v1/admin/system-one/instances":         "admin", // System One provider instances (session only; 404 when hub.system_one is off)
 	"/api/v1/admin/system-one/instances/":        "admin", // System One provider instance by name and probe (session only; 404 when hub.system_one is off)
 	"/api/v1/admin/conduit/grant-keys/rotate":    "admin", // POST: rotate the conduit grant signing key; returns kids and timestamps only; 404 when hub.conduit is off

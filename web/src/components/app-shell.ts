@@ -62,6 +62,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/admin/branding': 'Branding',
   '/admin/federation': 'Federation',
   '/admin/integrations': 'Integrations',
+  '/admin/system-one': 'System One Providers',
   '/admin/roles': 'Roles',
   '/admin/role-bindings': 'Role Bindings',
   '/admin/quotas': 'Quotas',
