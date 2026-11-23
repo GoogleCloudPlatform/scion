@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
 
 // Project message policy routes (ptone/scion#8047, ptone/scion#8048):
@@ -850,7 +851,9 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		RejectReason:      req.RejectReason,
 		RejectRemediation: req.RejectRemediation,
 	}
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
+	// Attach project.ID to ctx so System One authoring enforces the P2b
+	// per-project instance allowlist via ValidateCompiled.
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(systemoneruntime.WithEvalProjectID(ctx, project.ID), w, project.ID, spec, true)
 	if !ok {
 		return
 	}
@@ -999,7 +1002,15 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 		RejectReason:      candidate.RejectReason,
 		RejectRemediation: candidate.RejectRemediation,
 	}
-	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
+	// Attach project.ID to ctx so System One authoring enforces the P2b
+	// per-project instance allowlist via ValidateCompiled, except when purely
+	// disabling an existing policy (so operators can always turn off a policy
+	// whose bound instance was removed from the allowlist).
+	authorCtx := ctx
+	if req.SystemOneRule != nil || candidate.Enabled {
+		authorCtx = systemoneruntime.WithEvalProjectID(ctx, project.ID)
+	}
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(authorCtx, w, project.ID, spec, true)
 	if !ok {
 		return
 	}
@@ -1196,6 +1207,11 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		RejectReason:      effective.RejectReason,
 		RejectRemediation: effective.RejectRemediation,
 	}
+	// Note: handleTestMessagePolicy intentionally validates syntax/schema/CEL
+	// here without project allowlist short-circuiting so live evaluation runs
+	// through System One Runtime.Evaluate with ProjectID + RequireProject=true
+	// and reports allowlist refusal as class=failed, reason=no_eligible_instance
+	// (with 0 provider requests and 0 secret reads).
 	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, false)
 	if !ok {
 		return

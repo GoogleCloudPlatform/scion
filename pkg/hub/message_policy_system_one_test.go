@@ -43,7 +43,7 @@ import (
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
 
-func mpgEnableSystemOne(t *testing.T, srv *Server, s store.Store, instanceName string, handler http.HandlerFunc) (*httptest.Server, *store.User) {
+func mpgEnableSystemOne(t *testing.T, srv *Server, s store.Store, projectID, instanceName string, handler http.HandlerFunc) (*httptest.Server, *store.User) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -89,6 +89,10 @@ func mpgEnableSystemOne(t *testing.T, srv *Server, s store.Store, instanceName s
 	require.NoError(t, err)
 	instRow.Endpoint = tlsSrv.URL
 	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
+	if projectID != "" {
+		_, err = s.AddProjectSystemOneInstance(ctx, projectID, instanceName)
+		require.NoError(t, err)
+	}
 
 	return tlsSrv, admin
 }
@@ -117,7 +121,7 @@ func mpgWaitForDecisionCount(t *testing.T, s store.Store, projectID string, want
 func TestMessagePolicySystemOne_AuthoringMatrixAndPolicyTest(t *testing.T) {
 	f := newMPHFixture(t, true)
 	var providerCalls atomic.Int32
-	mpgEnableSystemOne(t, f.srv, f.s, "ts-authoring", func(w http.ResponseWriter, _ *http.Request) {
+	mpgEnableSystemOne(t, f.srv, f.s, f.project, "ts-authoring", func(w http.ResponseWriter, _ *http.Request) {
 		providerCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -254,7 +258,7 @@ func TestMessagePolicySystemOne_ShadowDeliveryAndContentFreeProjection(t *testin
 	const bodyCanary = "SHADOW_CONFIDENTIAL_BODY_CANARY_7711"
 
 	var providerCalls atomic.Int32
-	mpgEnableSystemOne(t, f.srv, f.s, "ts-shadow", func(w http.ResponseWriter, _ *http.Request) {
+	mpgEnableSystemOne(t, f.srv, f.s, f.project.ID, "ts-shadow", func(w http.ResponseWriter, _ *http.Request) {
 		providerCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -325,7 +329,7 @@ func TestMessagePolicySystemOne_EnforceOutcomesAndFailClosedMatrix(t *testing.T)
 	var handlerMode atomic.Int32
 	var providerCalls atomic.Int32
 
-	_, admin := mpgEnableSystemOne(t, f.srv, f.s, "ts-enforce", func(w http.ResponseWriter, r *http.Request) {
+	_, admin := mpgEnableSystemOne(t, f.srv, f.s, f.project.ID, "ts-enforce", func(w http.ResponseWriter, r *http.Request) {
 		providerCalls.Add(1)
 		switch handlerMode.Load() {
 		case 1:
@@ -646,6 +650,8 @@ func TestMessagePolicySystemOne_I3AuthorizedProjectIDAndProjectScopedSecret(t *t
 		},
 	})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	_, err = f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-i3-mp")
+	require.NoError(t, err)
 
 	pol := &store.MessagePolicy{
 		ProjectID:     f.project.ID,
@@ -788,6 +794,10 @@ func TestMessagePolicySystemOne_TestEndpointAuthorityAndCredentialMatrix(t *test
 	createInst := func(body map[string]any) {
 		rec := doRequestAsUser(t, f.srv, superAdmin, http.MethodPost, systemOneAdminPath, body)
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		if name, ok := body["name"].(string); ok && name != "" {
+			_, aErr := f.s.AddProjectSystemOneInstance(ctx, f.project, name)
+			require.NoError(t, aErr)
+		}
 	}
 	createInst(map[string]any{
 		"name":    "inst-owned",
@@ -1120,6 +1130,8 @@ func TestMessagePolicySystemOne_FullBodyLimitsRunBeforeCredentialIO(t *testing.T
 		},
 	})
 	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	_, err = f.s.AddProjectSystemOneInstance(ctx, f.project.ID, "gemini-oversize")
+	require.NoError(t, err)
 
 	// Oversize body: 9000 'é' runes (<= 16000 rune ingress limit, 18000 bytes > 16384 byte field limit).
 	oversizeBody := strings.Repeat("é", 9000)
@@ -1199,4 +1211,327 @@ func TestMessagePolicySystemOne_FullBodyLimitsRunBeforeCredentialIO(t *testing.T
 	assert.True(t, proj.Truncated, "oversize truncate must record truncated=true in EvaluationProjection")
 	require.Len(t, proj.InputFields, 1)
 	assert.True(t, proj.InputFields[0].Truncated)
+}
+
+func TestMessagePolicySystemOne_P2bAllowlistAndCapacityEnforcement(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.MessagePolicies, experiments.Decisions, experiments.SystemOne:
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.srv.experiments = reg
+
+	innerBackend := secret.NewLocalBackend(f.s, "test-hub-id", "test-secret-signing-key")
+	countingSecrets := &mpCountingSecretBackend{SecretBackend: innerBackend}
+	f.srv.SetSecretBackend(countingSecrets)
+	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		return nil, egress.ErrAuth
+	})
+
+	var providerCalls atomic.Int32
+	var holdNext atomic.Bool
+	inFlightEntered := make(chan struct{}, 4)
+	releaseInFlight := make(chan struct{})
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		if holdNext.CompareAndSwap(true, false) {
+			inFlightEntered <- struct{}{}
+			select {
+			case <-releaseInFlight:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"answers": {"asks_choice": {"type": "noul", "noul": 0.04, "confidence": 0.96}},
+			"usage": {"total_input_tokens": 14, "total_output_tokens": 6, "total_tokens": 20}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	// Short admission wait so capacity rejection is fast and deterministic.
+	f.srv.config.SystemOneAdmissionWait = 25 * time.Millisecond
+	f.srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(hubDialectPublicResolver{}, hubDialectTargetDialer{targetAddr: tlsSrv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+
+	adminID := hubConfigTokenUser(t, f.s, "mp-p2b-admin", store.SystemRoleSuperAdmin)
+	admin, err := f.s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+
+	owner := projectOpsUser(t, f.s, "mp-p2b-owner", false)
+	projectOpsGrant(t, f.s, owner, f.project.ID, store.ProjectRoleOwner)
+
+	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      "AIza-p2b-project-key",
+		SecretType: store.SecretTypeVariable,
+		Scope:      store.ScopeProject,
+		ScopeID:    f.project.ID,
+	})
+	require.NoError(t, err)
+
+	// Create a System One instance with maxInFlight=1 and a project-scoped named secret ref.
+	// Initially it is NOT on f.project's allowlist (empty by default).
+	createInstRec := doRequestAsUser(t, f.srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gemini-p2b",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"limits":  map[string]any{"maxInFlight": 1},
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": systemoneprovider.DefaultGeminiAPIKeySecretName, "scope": systemoneprovider.SecretScopeProject},
+		},
+	})
+	require.Equal(t, http.StatusCreated, createInstRec.Code, createInstRec.Body.String())
+
+	mpBase := "/api/v1/projects/" + f.project.ID + "/message-policies"
+	allowlistPath := "/api/v1/projects/" + f.project.ID + "/system-one/instances/gemini-p2b"
+	s1Rule := `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"gemini-p2b"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`
+
+	// 1. Authoring refusal while instance is NOT on the project allowlist.
+	sBefore := countingSecrets.getCalls.Load()
+	pBefore := providerCalls.Load()
+	authorDeniedRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase, CreateMessagePolicyRequest{
+		Name:          "p2b-unlisted",
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `judgment_flags.asks_choice`,
+		SystemOneRule: s1Rule,
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+	})
+	require.Equal(t, http.StatusBadRequest, authorDeniedRec.Code, authorDeniedRec.Body.String())
+	assert.Contains(t, authorDeniedRec.Body.String(), messagepolicy.ErrCodeInvalidRule)
+	assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "unlisted authoring must make 0 secret reads")
+	assert.Equal(t, pBefore, providerCalls.Load(), "unlisted authoring must make 0 provider requests")
+
+	// 2. Allowlist gemini-p2b on f.project, then create shadow and enforce policies.
+	allowRec := mphSessionDo(t, f.srv, owner, http.MethodPut, allowlistPath, nil)
+	require.Equal(t, http.StatusOK, allowRec.Code, allowRec.Body.String())
+
+	shadowEnabled := true
+	shadowRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase, CreateMessagePolicyRequest{
+		Name:          "a-p2b-shadow",
+		Enabled:       &shadowEnabled,
+		Mode:          store.MessagePolicyModeShadow,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `judgment_flags.asks_choice`,
+		SystemOneRule: s1Rule,
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+	})
+	require.Equal(t, http.StatusCreated, shadowRec.Code, shadowRec.Body.String())
+	var shadowCreated MessagePolicyResponse
+	require.NoError(t, json.Unmarshal(shadowRec.Body.Bytes(), &shadowCreated))
+
+	enforceEnabled := false
+	enforceRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase, CreateMessagePolicyRequest{
+		Name:          "b-p2b-enforce",
+		Enabled:       &enforceEnabled,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `judgment_flags.asks_choice`,
+		SystemOneRule: s1Rule,
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		RejectReason:  "Policy failed.",
+	})
+	require.Equal(t, http.StatusCreated, enforceRec.Code, enforceRec.Body.String())
+	var enforceCreated MessagePolicyResponse
+	require.NoError(t, json.Unmarshal(enforceRec.Body.Bytes(), &enforceCreated))
+
+	setEnabled := func(policyID string, on bool) {
+		p, gErr := f.s.GetMessagePolicy(ctx, policyID)
+		require.NoError(t, gErr)
+		p.Enabled = on
+		require.NoError(t, f.s.UpdateMessagePolicy(ctx, p))
+	}
+
+	// 3. Remove gemini-p2b from the project allowlist -> immediate no_eligible_instance
+	//    with 0 provider requests AND 0 secret reads across shadow, enforce, and /test.
+	rmRec := mphSessionDo(t, f.srv, owner, http.MethodDelete, allowlistPath, nil)
+	require.Equal(t, http.StatusOK, rmRec.Code, rmRec.Body.String())
+
+	t.Run("allowlist_refusal_shadow", func(t *testing.T) {
+		s0 := countingSecrets.getCalls.Load()
+		p0 := providerCalls.Load()
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Shadow send while unlisted.",
+		})
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		decs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 1)
+		assert.Equal(t, store.MessagePolicyModeShadow, decs[0].Mode)
+		assert.Equal(t, store.MessagePolicyClassFailed, decs[0].Class)
+		assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), decs[0].CELErrorReason)
+		assert.Equal(t, s0, countingSecrets.getCalls.Load(), "shadow allowlist refusal must make 0 secret reads")
+		assert.Equal(t, p0, providerCalls.Load(), "shadow allowlist refusal must make 0 provider requests")
+	})
+
+	t.Run("allowlist_refusal_enforce", func(t *testing.T) {
+		setEnabled(shadowCreated.ID, false)
+		setEnabled(enforceCreated.ID, true)
+
+		s0 := countingSecrets.getCalls.Load()
+		p0 := providerCalls.Load()
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Enforce send while unlisted.",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+		decs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 2)
+		var enfDec *store.MessagePolicyDecision
+		for i := range decs {
+			if decs[i].PolicyID == enforceCreated.ID {
+				enfDec = &decs[i]
+				break
+			}
+		}
+		require.NotNil(t, enfDec)
+		assert.Equal(t, store.MessagePolicyClassFailed, enfDec.Class)
+		assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), enfDec.CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionRejected, enfDec.Action)
+		assert.Equal(t, s0, countingSecrets.getCalls.Load(), "enforce allowlist refusal must make 0 secret reads")
+		assert.Equal(t, p0, providerCalls.Load(), "enforce allowlist refusal must make 0 provider requests")
+	})
+
+	t.Run("allowlist_refusal_test_endpoint_saved_and_inline", func(t *testing.T) {
+		s0 := countingSecrets.getCalls.Load()
+		p0 := providerCalls.Load()
+
+		// Saved policy /test.
+		savedRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+enforceCreated.ID+"/test", TestMessagePolicyRequest{
+			Sample: &MessagePolicyTestSample{
+				Surface: store.MessagePolicySurfaceAgentToUser,
+				Body:    "Saved policy test while unlisted.",
+			},
+		})
+		require.Equal(t, http.StatusOK, savedRec.Code, savedRec.Body.String())
+		var savedResp TestMessagePolicyResponse
+		require.NoError(t, json.Unmarshal(savedRec.Body.Bytes(), &savedResp))
+		assert.Equal(t, store.MessagePolicyClassFailed, savedResp.Class)
+		assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), savedResp.ReasonCode)
+		assert.Equal(t, store.MessagePolicyOutcomeReject, savedResp.Outcome)
+
+		// Inline /test.
+		inlineRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/test", TestMessagePolicyRequest{
+			ViolationRule: `judgment_flags.asks_choice`,
+			SystemOneRule: s1Rule,
+			OnUncertain:   store.MessagePolicyOutcomeReject,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+			Sample: &MessagePolicyTestSample{
+				Surface: store.MessagePolicySurfaceAgentToUser,
+				Body:    "Inline test while unlisted.",
+			},
+		})
+		require.Equal(t, http.StatusOK, inlineRec.Code, inlineRec.Body.String())
+		var inlineResp TestMessagePolicyResponse
+		require.NoError(t, json.Unmarshal(inlineRec.Body.Bytes(), &inlineResp))
+		assert.Equal(t, store.MessagePolicyClassFailed, inlineResp.Class)
+		assert.Equal(t, string(systemoneprovider.FailNoEligibleInstance), inlineResp.ReasonCode)
+		assert.Equal(t, store.MessagePolicyOutcomeReject, inlineResp.Outcome)
+
+		assert.Equal(t, s0, countingSecrets.getCalls.Load(), "/test allowlist refusal must make 0 secret reads")
+		assert.Equal(t, p0, providerCalls.Load(), "/test allowlist refusal must make 0 provider requests")
+	})
+
+	// 4. Re-allowlist gemini-p2b and saturate its maxInFlight=1 slot -> capacity
+	//    rejection across shadow, enforce, and /test with 0 additional provider requests.
+	reAllowRec := mphSessionDo(t, f.srv, owner, http.MethodPut, allowlistPath, nil)
+	require.Equal(t, http.StatusOK, reAllowRec.Code, reAllowRec.Body.String())
+
+	holdNext.Store(true)
+	holderDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		holderDone <- mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+enforceCreated.ID+"/test", TestMessagePolicyRequest{
+			Sample: &MessagePolicyTestSample{
+				Surface: store.MessagePolicySurfaceAgentToUser,
+				Body:    "Occupies maxInFlight=1 slot.",
+			},
+		})
+	}()
+	select {
+	case <-inFlightEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for holder request to enter mock provider")
+	}
+
+	pWhileFull := providerCalls.Load()
+
+	t.Run("capacity_enforce", func(t *testing.T) {
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Enforce send at capacity.",
+		})
+		require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+		decs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 3)
+		assert.Equal(t, store.MessagePolicyClassFailed, decs[0].Class)
+		assert.Equal(t, string(systemoneprovider.FailCapacity), decs[0].CELErrorReason)
+		assert.Equal(t, store.MessagePolicyActionRejected, decs[0].Action)
+		assert.Equal(t, pWhileFull, providerCalls.Load(), "capacity enforce refusal must make 0 additional provider requests")
+	})
+
+	t.Run("capacity_shadow", func(t *testing.T) {
+		setEnabled(enforceCreated.ID, false)
+		setEnabled(shadowCreated.ID, true)
+
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Shadow send at capacity.",
+		})
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		decs := mpgWaitForDecisionCount(t, f.s, f.project.ID, 4)
+		assert.Equal(t, store.MessagePolicyModeShadow, decs[0].Mode)
+		assert.Equal(t, store.MessagePolicyClassFailed, decs[0].Class)
+		assert.Equal(t, string(systemoneprovider.FailCapacity), decs[0].CELErrorReason)
+		assert.Equal(t, pWhileFull, providerCalls.Load(), "capacity shadow refusal must make 0 additional provider requests")
+	})
+
+	t.Run("capacity_test_endpoint", func(t *testing.T) {
+		capRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+enforceCreated.ID+"/test", TestMessagePolicyRequest{
+			Sample: &MessagePolicyTestSample{
+				Surface: store.MessagePolicySurfaceAgentToUser,
+				Body:    "Policy test at capacity.",
+			},
+		})
+		require.Equal(t, http.StatusOK, capRec.Code, capRec.Body.String())
+		var capResp TestMessagePolicyResponse
+		require.NoError(t, json.Unmarshal(capRec.Body.Bytes(), &capResp))
+		assert.Equal(t, store.MessagePolicyClassFailed, capResp.Class)
+		assert.Equal(t, string(systemoneprovider.FailCapacity), capResp.ReasonCode)
+		assert.Equal(t, store.MessagePolicyOutcomeReject, capResp.Outcome)
+		assert.Equal(t, pWhileFull, providerCalls.Load(), "capacity /test refusal must make 0 additional provider requests")
+	})
+
+	// Release the held slot and verify subsequent evaluation succeeds.
+	close(releaseInFlight)
+	holderRec := <-holderDone
+	require.Equal(t, http.StatusOK, holderRec.Code, holderRec.Body.String())
+
+	afterRec := mphSessionDo(t, f.srv, owner, http.MethodPost, mpBase+"/"+enforceCreated.ID+"/test", TestMessagePolicyRequest{
+		Sample: &MessagePolicyTestSample{
+			Surface: store.MessagePolicySurfaceAgentToUser,
+			Body:    "Post-capacity test succeeds.",
+		},
+	})
+	require.Equal(t, http.StatusOK, afterRec.Code, afterRec.Body.String())
+	var afterResp TestMessagePolicyResponse
+	require.NoError(t, json.Unmarshal(afterRec.Body.Bytes(), &afterResp))
+	assert.Equal(t, store.MessagePolicyClassPass, afterResp.Class)
 }

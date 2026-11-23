@@ -21,6 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	s1spec "github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 // Classification describes the outcome class and reason of evaluating one
@@ -146,6 +148,19 @@ func ClassifyError(err error) Classification {
 		return Classification{
 			Class:      ClassFailed,
 			Reason:     ReasonCompileError,
+			Evaluation: eval,
+		}
+	}
+
+	var s1CompErr *s1spec.CompileError
+	if errors.As(err, &s1CompErr) {
+		reason := ReasonCompileError
+		if s1CompErr.Category == s1spec.CategoryBinding {
+			reason = string(systemoneprovider.FailNoEligibleInstance)
+		}
+		return Classification{
+			Class:      ClassFailed,
+			Reason:     reason,
 			Evaluation: eval,
 		}
 	}
