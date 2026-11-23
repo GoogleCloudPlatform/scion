@@ -1,0 +1,47 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Example Kubernetes NetworkPolicy restricting egress from `block`-mode Scion
+# agent pods so they cannot reach the cloud metadata server (169.254.169.254/32)
+# or the GKE metadata server (169.254.169.252/32).
+#
+# IMPORTANT PREREQUISITES & CAVEATS:
+# - Requires an enforcing CNI (for example GKE Dataplane V2 or Calico). On a
+#   cluster without NetworkPolicy enforcement, `kubectl apply` succeeds
+#   silently without enforcing the rule.
+# - Must NOT be applied to `assign` or `passthrough` pods, which legitimately
+#   reach the GKE metadata server for Workload Identity tokens. The selector
+#   below targets only pods carrying `scion.metadata-mode: block`.
+# - Replace `scion-agents` with your agent namespace before applying.
+# - On dual-stack clusters, add an IPv6 egress rule (for example `::/0` except
+#   `fd20:ce::254/128` and `fd00:ec2::254/128`) if pods require IPv6 egress.
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scion-block-agent-metadata-egress
+  namespace: scion-agents
+spec:
+  podSelector:
+    matchLabels:
+      scion.metadata-mode: block
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+              - 169.254.169.252/32
