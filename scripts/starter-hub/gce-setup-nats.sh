@@ -107,9 +107,8 @@ gcloud compute ssh "${INSTANCE_NAME}" --zone="${ZONE}" --command '
 
     # 5. Install systemd unit file
     echo "Installing systemd unit..."
-    sudo mv /tmp/nats-server.service /etc/systemd/system/nats-server.service
-    sudo chown root:root /etc/systemd/system/nats-server.service
-    sudo chmod 644 /etc/systemd/system/nats-server.service
+    sudo install -o root -g root -m 0644 /tmp/nats-server.service /etc/systemd/system/nats-server.service
+    rm -f /tmp/nats-server.service
     sudo systemctl daemon-reload
 
     # 6. Enable and start
