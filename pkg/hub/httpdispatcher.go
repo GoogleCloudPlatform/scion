@@ -48,10 +48,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// permissionProjectSecretRead is the registry permission ID that governs an
-// agent reading secrets during resolution (pkg/hub/permissions/registry.go).
-// It is declared on ResourceProject, so it cannot be derived from a
-// resource type of "secret".
+// permissionProjectSecretRead is the registry permission ID declared on
+// ResourceProject (pkg/hub/permissions/registry.go). In non-test code it is
+// kept for the compatibility progeny/secret relationship row
+// (storeProgenyAdapter.ReadPermissions, TestRelationshipCharacterization_Progeny);
+// dispatcher resolution authorizes user-scope progeny secrets via secret.use.
 const permissionProjectSecretRead = "project.secret_read"
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.

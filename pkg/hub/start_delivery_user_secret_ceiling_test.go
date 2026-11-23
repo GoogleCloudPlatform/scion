@@ -1017,6 +1017,109 @@ func TestStartDelivery_MemberProgenyParity(t *testing.T) {
 		})
 	}
 
+	// Accepted decision (ptone/scion#2536): start and restart admit
+	// viewer-only roots' own allowProgeny user secrets via secret.use; the
+	// runtime read and list path is intentionally stricter (requires
+	// membership beyond viewer) until its separate follow-up.
+	t.Run("role=project-viewer (accepted: start/restart admit; runtime read/list stricter)", func(t *testing.T) {
+		f := newSDFixtureWithRole(t, "sd-mp-viewer", store.ProjectRoleViewer)
+		ctx := context.Background()
+
+		// Confirm project-viewer lacks project.secret_read.
+		u, err := f.Store.GetUser(ctx, f.UserID)
+		require.NoError(t, err)
+		userIdent := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")
+		dec := f.Server.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   Resource{Type: permissions.ResourceProject, ID: f.ProjectID},
+			Action:     ActionRead,
+			Permission: permissionProjectSecretRead,
+		})
+		require.False(t, dec.Allowed, "project-viewer must not hold project.secret_read")
+
+		// Another user's allowProgeny secret in the same project.
+		otherUserID := tid("mp-viewer-other")
+		createDCUser(t, f.Store, otherUserID, "mp-viewer-other@test.com", f.ProjectID, store.ProjectRoleOwner)
+		const otherKey = "SD_OTHER_USER_SHARED_KEY"
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: otherKey, Value: "other-user-val",
+			SecretType: store.SecretTypeEnvironment, Target: otherKey,
+			Scope: store.ScopeUser, ScopeID: otherUserID,
+			InjectionMode: store.InjectionModeAlways, AllowProgeny: true,
+			CreatedBy: otherUserID, UpdatedBy: otherUserID,
+		})
+		require.NoError(t, err)
+		otherMeta, err := f.Server.secretBackend.GetMeta(ctx, otherKey, store.ScopeUser, otherUserID)
+		require.NoError(t, err)
+
+		// A project-scope secret for the non-user-scope fail-closed check.
+		const projKey = "SD_VIEWER_PROJ_NONUSER_KEY"
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: projKey, Value: "viewer-proj-val",
+			SecretType: store.SecretTypeEnvironment, Target: projKey,
+			Scope: store.ScopeProject, ScopeID: f.ProjectID,
+			InjectionMode: store.InjectionModeAlways,
+			CreatedBy:     otherUserID, UpdatedBy: otherUserID,
+		})
+		require.NoError(t, err)
+		projMeta, err := f.Server.secretBackend.GetMeta(ctx, projKey, store.ScopeProject, f.ProjectID)
+		require.NoError(t, err)
+
+		child, childTok, _ := f.progeny(t, "mp-child-viewer", true)
+
+		// Start and restart admit the viewer's own allowProgeny user secrets
+		// and withhold unshared user secrets.
+		assert.Equal(t, sdDelivery{always: true, asNeeded: true, private: false},
+			sdStartDelivery(t, f.disp, f.Store, child),
+			"viewer-only root child start/restart delivers own allowProgeny user secrets and withholds unshared")
+
+		// Runtime read and agent secret list are intentionally stricter
+		// (refuse viewer-only roots) until their separate follow-up.
+		assert.False(t, f.read(t, child, childTok, sdAlwaysKey),
+			"viewer-only root child runtime read always is intentionally refused until follow-up")
+		assert.False(t, f.read(t, child, childTok, sdAsNeededKey),
+			"viewer-only root child runtime read as_needed is intentionally refused until follow-up")
+		assert.False(t, f.read(t, child, childTok, sdPrivateKey),
+			"viewer-only root child runtime read private is refused")
+		assert.Empty(t, f.listUserSecretKeys(t, child, childTok),
+			"viewer-only root child agent secret list is intentionally empty until follow-up")
+
+		// Still NOT another user's secrets at start/restart or directly via AuthzCheck.
+		agent, err := f.Store.GetAgent(ctx, child)
+		require.NoError(t, err)
+		resolved, _, err := f.disp.resolveSecrets(ctx, agent)
+		require.NoError(t, err)
+		for _, r := range resolved {
+			assert.NotEqual(t, otherKey, r.Name, "viewer-only root child must not receive another user's secret at start")
+		}
+		for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
+			selected, _, err := f.disp.selectDeliverySecrets(ctx, newDeliverySelector(f.disp.authzService, agent, purpose), agent)
+			require.NoError(t, err)
+			for _, r := range selected {
+				assert.NotEqual(t, otherKey, r.Name, "viewer-only root child must not receive another user's secret on %s", purpose)
+			}
+		}
+
+		opts, _ := f.disp.startSecretResolveOpts(ctx, agent, nil)
+		require.NotNil(t, opts)
+		require.NotNil(t, opts.AuthzCheck)
+
+		ownMeta, err := f.Server.secretBackend.GetMeta(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+		require.NoError(t, err)
+		assert.True(t, opts.AuthzCheck(*ownMeta), "viewer-only root own allowProgeny user secret should be allowed")
+		assert.False(t, opts.AuthzCheck(*otherMeta), "another user's allowProgeny user secret must be denied")
+
+		// Still NOT non-user scopes (project, hub, empty).
+		assert.False(t, opts.AuthzCheck(*projMeta), "project-scope secret must fail closed for viewer-only root")
+		assert.False(t, opts.AuthzCheck(secret.SecretMeta{
+			ID: tid("viewer-hub-secret"), Name: "VIEWER_HUB_KEY", Scope: store.ScopeHub, ScopeID: "hub",
+		}), "hub-scope secret must fail closed for viewer-only root")
+		assert.False(t, opts.AuthzCheck(secret.SecretMeta{
+			ID: ownMeta.ID, Name: ownMeta.Name, Scope: "", ScopeID: f.UserID,
+		}), "empty-scope secret must fail closed for viewer-only root")
+	})
+
 	// Negative parity cases under project-member (and explicit
 	// project.secret_read-without-secret.use controls).
 	type negBuilt struct{ agentID, token string }
