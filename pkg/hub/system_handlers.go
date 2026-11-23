@@ -503,6 +503,10 @@ type OnboardingStatus struct {
 	// save: the saved hub value, else the settings-file value, never a node
 	// env (ptone/scion#3916).
 	ImageRegistrySaveable string `json:"imageRegistrySaveable,omitempty"`
+	// ImageTag is the effective hub-scope image tag applied to bundled
+	// scion-* images (for example a release version like v0.4.0-preview.3),
+	// or empty when images keep their default :latest tag.
+	ImageTag string `json:"imageTag,omitempty"`
 }
 
 // harnessesSeeded reports whether at least one active global harness config
@@ -617,6 +621,7 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 	} else {
 		status.ImageRegistrySaveable = fileImageRegistryWithoutOps()
 	}
+	status.ImageTag = s.hubScopeImageTag()
 
 	// BuildAvailable: true only if the build script can be resolved
 	status.BuildAvailable = resolveBuildScript() != ""

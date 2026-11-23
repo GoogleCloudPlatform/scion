@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -113,8 +114,9 @@ With --global, it initializes in the user's home folder.`,
 			} else if !remoteHub {
 				fmt.Println()
 				fmt.Println("Note: image_registry is not configured. Agents cannot start without it.")
-				fmt.Println("  Build images first — see image-build/README.md")
-				fmt.Println("  Then run: scion config set --global image_registry <your-registry>")
+				fmt.Printf("  Public images: scion config set --global image_registry %s\n", defaultImageRegistrySuggestion)
+				fmt.Println("  Custom images: build and push first (see image-build/README.md), then run:")
+				fmt.Println("                 scion config set --global image_registry <your-registry>")
 			}
 
 			// Prompt for Hub registration if Hub is configured
@@ -477,32 +479,52 @@ func resolveInitImageRegistry(flag, fileValue, envValue string, prompt func() st
 	return prompt(), ""
 }
 
+// defaultImageRegistrySuggestion is the public registry suggested by
+// 'scion init --machine' when no registry is configured, matching
+// DEFAULT_REGISTRY_SUGGESTION in the web onboarding wizard.
+const defaultImageRegistrySuggestion = "ghcr.io/homebrew-scion"
+
 // promptImageRegistry prompts the user for their container image registry path.
-// Returns the entered value or empty string if skipped.
+// Returns the entered value (defaulting to defaultImageRegistrySuggestion on
+// bare Enter in an interactive terminal) or empty string if skipped or
+// non-interactive.
 func promptImageRegistry() string {
 	if nonInteractive {
 		return ""
 	}
+	return promptImageRegistryFrom(os.Stdin, os.Stderr, util.IsTerminal())
+}
 
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Scion runs agents in containers. You need to build and push container images")
-	fmt.Fprintln(os.Stderr, "to a registry you control before starting agents.")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "  See: image-build/README.md for build instructions")
-	fmt.Fprintln(os.Stderr, "  Quick start: image-build/scripts/build-images.sh --registry <registry> --push")
-	fmt.Fprintln(os.Stderr)
+func promptImageRegistryFrom(in io.Reader, out io.Writer, isTTY bool) string {
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Scion runs agents in containers and needs a container image registry.")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  Public images:   %s (release builds pull :<version>)\n", defaultImageRegistrySuggestion)
+	_, _ = fmt.Fprintln(out, "  Custom registry: build and push images — see image-build/README.md")
+	_, _ = fmt.Fprintln(out, "  Local images:    localhost/scion")
+	_, _ = fmt.Fprintln(out)
 
-	if !util.IsTerminal() {
+	if !isTTY {
 		return ""
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Fprint(os.Stderr, "Image registry path (e.g., ghcr.io/myorg) — enter to skip: ")
+	reader := bufio.NewReader(in)
+	_, _ = fmt.Fprintf(out, "Image registry path [%s] (or 'skip' to leave unset): ", defaultImageRegistrySuggestion)
 	input, err := reader.ReadString('\n')
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return ""
 	}
-	return strings.TrimSpace(input)
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		if errors.Is(err, io.EOF) {
+			return ""
+		}
+		return defaultImageRegistrySuggestion
+	}
+	if strings.EqualFold(trimmed, "skip") {
+		return ""
+	}
+	return trimmed
 }
 
 func init() {
@@ -511,5 +533,5 @@ func init() {
 
 	projectInitCmd.Flags().BoolVar(&globalInit, "global", false, "Initialize the global project in the home directory")
 	projectInitCmd.Flags().BoolVar(&machineInit, "machine", false, "Perform full machine-level setup (seeds harness-configs, templates, settings)")
-	projectInitCmd.Flags().StringVar(&initImageRegistry, "image-registry", "", "Container image registry path (e.g., ghcr.io/myorg)")
+	projectInitCmd.Flags().StringVar(&initImageRegistry, "image-registry", "", "Container image registry path (e.g., "+defaultImageRegistrySuggestion+" or ghcr.io/myorg)")
 }

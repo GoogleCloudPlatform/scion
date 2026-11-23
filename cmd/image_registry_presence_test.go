@@ -15,11 +15,15 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -105,8 +109,79 @@ func writeHomeSettingsYAML(t *testing.T, home, content string) {
 func TestImageRegistryPresenceHint_LinksReleaseBuild(t *testing.T) {
 	t.Setenv(config.EnvMaintenanceImageRegistry, "")
 	msg := brokerRegistryMissingError().Error()
+	assert.Contains(t, msg, defaultImageRegistrySuggestion)
 	assert.Contains(t, msg, "See image-build/README.md")
 	assert.Contains(t, msg, "image-build/README.md#build-images-for-a-release")
 	assert.Contains(t, msg, "run image-build/scripts/build-release-images.sh <version>")
 	assert.Contains(t, msg, "image_tag")
+}
+
+func TestPromptImageRegistryFrom(t *testing.T) {
+	t.Run("bare enter accepts default public registry", func(t *testing.T) {
+		var out bytes.Buffer
+		got := promptImageRegistryFrom(strings.NewReader("\n"), &out, true)
+		assert.Equal(t, defaultImageRegistrySuggestion, got)
+		assert.Contains(t, out.String(), defaultImageRegistrySuggestion)
+		assert.Contains(t, out.String(), "image-build/README.md")
+		assert.Contains(t, out.String(), "localhost/scion")
+	})
+
+	t.Run("custom registry overrides default", func(t *testing.T) {
+		var out bytes.Buffer
+		got := promptImageRegistryFrom(strings.NewReader("us-central1-docker.pkg.dev/my-proj/scion\n"), &out, true)
+		assert.Equal(t, "us-central1-docker.pkg.dev/my-proj/scion", got)
+	})
+
+	t.Run("skip leaves registry unset", func(t *testing.T) {
+		for _, word := range []string{"skip\n", "SKIP\n", "  Skip  \n"} {
+			var out bytes.Buffer
+			got := promptImageRegistryFrom(strings.NewReader(word), &out, true)
+			assert.Equal(t, "", got, "input=%q", word)
+		}
+	})
+
+	t.Run("EOF without newline leaves registry unset", func(t *testing.T) {
+		var out bytes.Buffer
+		got := promptImageRegistryFrom(strings.NewReader(""), &out, true)
+		assert.Equal(t, "", got)
+	})
+
+	t.Run("EOF with non-empty input uses entered registry", func(t *testing.T) {
+		var out bytes.Buffer
+		got := promptImageRegistryFrom(strings.NewReader("ghcr.io/myorg"), &out, true)
+		assert.Equal(t, "ghcr.io/myorg", got)
+	})
+
+	t.Run("non-EOF read error discards partial input", func(t *testing.T) {
+		var out bytes.Buffer
+		got := promptImageRegistryFrom(partialErrReader{data: "ghcr.io/partial", err: errors.New("terminal read failed")}, &out, true)
+		assert.Equal(t, "", got)
+	})
+
+	t.Run("non-TTY prints hints and leaves registry unset", func(t *testing.T) {
+		var out bytes.Buffer
+		got := promptImageRegistryFrom(strings.NewReader("\n"), &out, false)
+		assert.Equal(t, "", got)
+		assert.Contains(t, out.String(), defaultImageRegistrySuggestion)
+		assert.NotContains(t, out.String(), "Image registry path [")
+	})
+}
+
+func TestInitImageRegistryFlagHelpMentionsDefaultSuggestion(t *testing.T) {
+	for _, flag := range []*cobra.Command{initCmd, projectInitCmd} {
+		f := flag.Flags().Lookup("image-registry")
+		if assert.NotNil(t, f, "command %s missing --image-registry flag", flag.Name()) {
+			assert.Contains(t, f.Usage, defaultImageRegistrySuggestion)
+		}
+	}
+}
+
+type partialErrReader struct {
+	data string
+	err  error
+}
+
+func (r partialErrReader) Read(p []byte) (int, error) {
+	n := copy(p, r.data)
+	return n, r.err
 }

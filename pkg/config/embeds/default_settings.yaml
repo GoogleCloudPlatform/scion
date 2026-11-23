@@ -33,8 +33,9 @@ default_harness_config: antigravity
 
 # Container image registry path (REQUIRED)
 # Set this to the registry where your scion images are hosted.
-# Build images first — see image-build/README.md for instructions.
-# Example: ghcr.io/myorg, us-central1-docker.pkg.dev/myproject/scion
+# Public release images: ghcr.io/homebrew-scion
+# Or build your own — see image-build/README.md for instructions.
+# Examples: ghcr.io/homebrew-scion, ghcr.io/myorg, us-central1-docker.pkg.dev/myproject/scion
 # SCION_IMAGE_REGISTRY in the environment is a node override: it beats this
 # value and any value saved in the hub (it is not written to this file).
 image_registry: ""

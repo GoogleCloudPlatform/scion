@@ -19,6 +19,7 @@ import { apiFetch } from '../../client/api.js';
 import {
   BROKER_RESTART_HINT,
   registryPrefill,
+  registryPreviewImage,
   welcomeProjectLabel,
   welcomeResultNote,
   type WelcomePhase,
@@ -55,6 +56,7 @@ interface OnboardingPage extends HTMLElement {
   handleSaveRegistryAndNext(): Promise<void>;
   handleHarnessesNext(): Promise<void>;
   registryInput: string;
+  imageTag: string;
   brokerRestartNeeded: boolean;
   handleSaveRegistry(): Promise<void>;
   welcomePhase: WelcomePhase;
@@ -322,6 +324,58 @@ describe('onboarding registry step: pre-fill', () => {
     const p = registryPrefill({ imageRegistry: 'old.example/scion' });
     expect(p.input).toBe('old.example/scion');
     expect(p.fromNodeEnv).toBe(false);
+  });
+});
+
+describe('onboarding registry step: preview image tag', () => {
+  afterEach(() => {
+    sessionStorage.clear();
+  });
+
+  it('uses the hub imageTag when reported and falls back to latest otherwise', () => {
+    expect(registryPreviewImage('ghcr.io/homebrew-scion', 'v0.4.0-preview.3')).toBe(
+      'ghcr.io/homebrew-scion/scion-claude:v0.4.0-preview.3'
+    );
+    expect(registryPreviewImage('ghcr.io/homebrew-scion', '')).toBe(
+      'ghcr.io/homebrew-scion/scion-claude:latest'
+    );
+    expect(registryPreviewImage('ghcr.io/homebrew-scion')).toBe(
+      'ghcr.io/homebrew-scion/scion-claude:latest'
+    );
+    expect(registryPreviewImage('  ', 'v0.4.0')).toBe('your-registry/scion-claude:v0.4.0');
+  });
+
+  it('renders the release tag from /api/v1/system/status in the registry step preview', async () => {
+    vi.mocked(apiFetch).mockImplementation((path) => {
+      if (path === '/api/v1/system/status') {
+        return Promise.resolve(
+          jsonResponse({
+            initialized: true,
+            identitySet: true,
+            runtimeOK: true,
+            harnessesSeeded: false,
+            hasWorkspace: false,
+            complete: false,
+            imageTag: 'v0.4.0-preview.3',
+          })
+        );
+      }
+      return Promise.resolve(jsonResponse({}, 404));
+    });
+    const el = createPage();
+    document.body.appendChild(el);
+    try {
+      await vi.waitFor(() => {
+        expect(el.loading).toBe(false);
+      });
+      el.currentStep = 3;
+      await el.updateComplete;
+      const text = el.shadowRoot?.textContent ?? '';
+      expect(text).toContain('ghcr.io/homebrew-scion/scion-claude:v0.4.0-preview.3');
+      expect(text).not.toContain('scion-claude:latest');
+    } finally {
+      el.remove();
+    }
   });
 });
 
