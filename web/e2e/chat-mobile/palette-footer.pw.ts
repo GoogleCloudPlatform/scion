@@ -140,3 +140,80 @@ test('@static the button stays put while the spaces list scrolls', async ({ page
   expect(scrolled).toBeGreaterThan(0);
   expect(await railButton(page).boundingBox()).toEqual(before);
 });
+
+test('@static phone: open switcher moves search bar to the bottom above results and replaces the footer button until closed with X', async ({
+  page,
+}, testInfo) => {
+  test.skip(isDesktop(testInfo.project.name), 'mobile layout only');
+  await openChatRail(page);
+  await railButton(page).tap();
+  await expect(paletteDialog(page)).toBeVisible();
+  await page.waitForTimeout(300);
+
+  // The redundant Quick switcher footer button is hidden while open on mobile.
+  await expect(railButton(page)).toBeHidden();
+
+  const viewport = page.viewportSize()!;
+  const layout = await page.locator('scion-quick-palette').evaluate((host) => {
+    const root = host.shadowRoot!;
+    const inputRow = root.querySelector('.palette-input-row')!.getBoundingClientRect();
+    const results = root.querySelector('.palette-results')!.getBoundingClientRect();
+    return {
+      inputTop: inputRow.top,
+      inputBottom: inputRow.bottom,
+      inputHeight: inputRow.height,
+      resultsTop: results.top,
+      resultsBottom: results.bottom,
+    };
+  });
+
+  // Results sit above the search bar, and the search bar sits at the bottom of the screen
+  // in the same footprint (0.375rem bottom margin/padding) as the Quick switcher footer button.
+  expect(layout.resultsBottom).toBeLessThanOrEqual(layout.inputTop + 1);
+  expect(viewport.height - layout.inputBottom).toBeLessThanOrEqual(FOOTER_PAD_PX);
+  expect(viewport.height - layout.inputBottom).toBeGreaterThanOrEqual(0);
+  expect(Math.round(layout.inputHeight)).toBeGreaterThanOrEqual(44);
+
+  // Simulated reduced visual viewport (on-screen keyboard open): search bar stays above keyboard.
+  const keyboardLayout = await page.locator('scion-quick-palette').evaluate((host) => {
+    (host as HTMLElement).style.setProperty('--palette-vvh', '400px');
+    const root = host.shadowRoot!;
+    const inputRow = root.querySelector('.palette-input-row')!.getBoundingClientRect();
+    const results = root.querySelector('.palette-results')!.getBoundingClientRect();
+    return {
+      inputTop: inputRow.top,
+      inputBottom: inputRow.bottom,
+      resultsBottom: results.bottom,
+    };
+  });
+  expect(keyboardLayout.inputBottom).toBeLessThanOrEqual(401);
+  expect(keyboardLayout.resultsBottom).toBeLessThanOrEqual(keyboardLayout.inputTop + 1);
+
+  // Clicking X closes the switcher and restores the footer button.
+  await page.locator('scion-quick-palette sl-dialog').locator('[part~="close-button"]').click();
+  await expect(paletteDialog(page)).toBeHidden();
+  await expect(railButton(page)).toBeVisible();
+  await expect(railButton(page)).toBeFocused();
+});
+
+test('@static wide layout: open switcher keeps search bar at the top above results', async ({
+  page,
+}, testInfo) => {
+  test.skip(!isDesktop(testInfo.project.name), 'desktop layout only');
+  await openChatRail(page);
+  await railButton(page).click();
+  await expect(paletteDialog(page)).toBeVisible();
+  await page.waitForTimeout(300);
+
+  const layout = await page.locator('scion-quick-palette').evaluate((host) => {
+    const root = host.shadowRoot!;
+    const inputRow = root.querySelector('.palette-input-row')!.getBoundingClientRect();
+    const results = root.querySelector('.palette-results')!.getBoundingClientRect();
+    return {
+      inputBottom: inputRow.bottom,
+      resultsTop: results.top,
+    };
+  });
+  expect(layout.inputBottom).toBeLessThanOrEqual(layout.resultsTop + 1);
+  await expect(railButton(page)).toBeVisible();
+});

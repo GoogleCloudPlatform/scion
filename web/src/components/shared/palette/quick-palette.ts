@@ -137,18 +137,6 @@ export class ScionQuickPalette extends LitElement {
   static override styles = [
     css`
       :host {
-        /* Combined height of the dialog's own chrome around the results
-           list at narrow widths: the input row, its border, the dialog's
-           own top/bottom margins, and -- where shown -- the keyboard-help
-           legend below the results. Measured empirically against this
-           exact layout: ~111px (6.9375rem) with the legend hidden (touch),
-           ~137px (8.5625rem) with it shown (a narrow but non-touch window,
-           since the legend is gated on touch, not on width). Rounded up
-           from the larger of the two with a small safety margin, as a named
-           property rather than a bare number in the max-height rule below,
-           so a future chrome change has one place to update. */
-        --palette-chrome-height: 9rem;
-
         /* Type scale: a dense default. A host with its own type scale
            sets these on the element to scale the palette with its page. */
         --palette-fs-xs: 0.625rem;
@@ -231,44 +219,70 @@ export class ScionQuickPalette extends LitElement {
 
       @media (max-width: 768px) {
         .palette-dialog::part(panel) {
-          /* Near-full-width and top-anchored (see ::part(base) below): a
-             centred panel puts the lower results under the iOS on-screen
-             keyboard, which anchoring at the top avoids. Shoelace's own
-             dialog part sets max-width to calc(100% - var(--sl-spacing-2x-large))
-             (2.25rem, i.e. 36px, by default) on this same part, which
-             otherwise clamps width below well before 100vw - 1rem at narrow
-             widths (354px, not 374px, at a 390px viewport) -- this rule
-             needs its own max-width to actually win that clamp, not just a
-             width.
-             Specificity is not what decides this either way: per CSS
-             Cascade 4's "Context" rule, a ::part() declaration from this
-             outer tree always wins over the shadow tree's own styles for a
-             given property, regardless of either rule's specificity or
-             source order -- which is exactly why plain width above already
-             took effect on its own. max-width only needed its own explicit
-             declaration here because the clamp comes from that same
-             property, not because of any specificity contest. */
+          /* Keep the existing top-anchored floating card over the dimmed
+             overlay, stretched down to the bottom of the visual viewport so
+             the search bar at the bottom of the card replaces the pinned
+             "Quick switcher" footer button in thumb reach, directly above
+             the on-screen keyboard (--palette-vvh tracks
+             window.visualViewport.height while open). Shoelace's own dialog
+             part sets max-width and max-height clamps, so override both
+             alongside width and height. */
+          --palette-safe-top: max(env(safe-area-inset-top), 0.5rem);
+          /* Clear the home indicator while the soft keyboard is closed, and
+             collapse the inset when --scion-kb-open is 1 (set on <html> by
+             client/viewport.ts) so notched phones do not leave a gap above
+             the keyboard, matching chat-composer.ts. */
+          --palette-safe-bottom: max(
+            0.375rem,
+            calc(env(safe-area-inset-bottom, 0px) * (1 - var(--scion-kb-open, 0)))
+          );
           width: calc(100vw - 1rem);
           max-width: calc(100vw - 1rem);
-          margin-top: max(env(safe-area-inset-top), 0.5rem);
+          margin-top: var(--palette-safe-top);
+          margin-bottom: var(--palette-safe-bottom);
+          height: calc(
+            var(--palette-vvh, 100dvh) - var(--palette-safe-top) - var(--palette-safe-bottom)
+          );
+          max-height: calc(
+            var(--palette-vvh, 100dvh) - var(--palette-safe-top) - var(--palette-safe-bottom)
+          );
         }
 
         .palette-dialog::part(base) {
           align-items: flex-start;
         }
 
+        .palette-dialog::part(body) {
+          display: flex;
+          flex-direction: column;
+          flex: 1;
+          min-height: 0;
+          overflow: hidden;
+        }
+
         .palette-results {
+          order: 1;
+          flex: 1;
+          min-height: 0;
           grid-template-columns: 1fr;
-          /* Neither vh nor dvh shrinks for the iOS keyboard, so a fixed 50vh
-             here would leave the bottom rows hidden under it --
-             --palette-vvh (set from window.visualViewport's own height while
-             open, see _onVisualViewportResize) does shrink.
-             --palette-chrome-height (defined on :host above) is the
-             dialog's own header, input row and margins. Falls back to
-             100dvh when visualViewport isn't available at all, so this
-             never regresses to an unbounded scroller. */
-          max-height: calc(var(--palette-vvh, 100dvh) - var(--palette-chrome-height));
+          align-content: start;
+          max-height: none;
           overscroll-behavior: contain;
+        }
+
+        .palette-help {
+          order: 2;
+          flex: 0 0 auto;
+        }
+
+        .palette-input-row {
+          order: 3;
+          flex: 0 0 auto;
+          box-sizing: border-box;
+          min-height: 44px;
+          padding: 0.375rem 0.75rem;
+          border-bottom: none;
+          border-top: 1px solid var(--scion-border);
         }
       }
 
