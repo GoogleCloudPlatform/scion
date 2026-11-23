@@ -69,6 +69,9 @@ type TriggerService interface {
 
 	// History lists fire history records for a trigger definition.
 	History(ctx context.Context, id string, opts *ListTriggerFiresOptions) (*ListTriggerFiresResponse, error)
+
+	// Render compiles and renders all template slots of a trigger against a stored event without firing.
+	Render(ctx context.Context, id, eventID string) (*TriggerRenderResponse, error)
 }
 
 // TriggerEventService handles read-only trigger event operations scoped to a project.
@@ -201,13 +204,62 @@ type TriggerMatchPatchSpec struct {
 
 // TriggerActionSpec holds the action executed when a trigger matches.
 type TriggerActionSpec struct {
-	Type      string `json:"type"`
-	AgentID   string `json:"agentId,omitempty"`
-	AgentName string `json:"agentName,omitempty"`
-	Message   string `json:"message,omitempty"`
-	Interrupt bool   `json:"interrupt,omitempty"`
-	Plain     bool   `json:"plain,omitempty"`
-	Wake      bool   `json:"wake,omitempty"`
+	Type          string            `json:"type"`
+	AgentID       string            `json:"agentId,omitempty"`
+	AgentName     string            `json:"agentName,omitempty"`
+	Message       string            `json:"message,omitempty"`
+	Interrupt     bool              `json:"interrupt,omitempty"`
+	Plain         bool              `json:"plain,omitempty"`
+	Wake          bool              `json:"wake,omitempty"`
+	NameConflict  string            `json:"nameConflict,omitempty"`
+	Template      string            `json:"template,omitempty"`
+	Task          string            `json:"task,omitempty"`
+	Branch        string            `json:"branch,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Ephemeral     bool              `json:"ephemeral,omitempty"`
+	GithubToken   string            `json:"githubToken,omitempty"`
+	AgentRole     string            `json:"agentRole,omitempty"`
+	ReuseMessage  string            `json:"reuseMessage,omitempty"`
+	UntrustedVars []string          `json:"untrustedVars,omitempty"`
+	NoAuth        bool              `json:"noAuth,omitempty"`
+}
+
+// TriggerRenderUsedVar describes one placeholder path expanded during trigger render preview.
+type TriggerRenderUsedVar struct {
+	Path  string `json:"path"`
+	Class string `json:"class"`
+}
+
+// TriggerRenderSlotResult holds the rendered text and used variables for one slot.
+type TriggerRenderSlotResult struct {
+	Rendered   string                 `json:"rendered"`
+	Used       []TriggerRenderUsedVar `json:"used"`
+	Templating string                 `json:"templating,omitempty"`
+}
+
+// TriggerRenderSlots holds rendered slot outputs keyed by slot name.
+type TriggerRenderSlots struct {
+	Task         *TriggerRenderSlotResult           `json:"task,omitempty"`
+	Name         *TriggerRenderSlotResult           `json:"name,omitempty"`
+	Branch       *TriggerRenderSlotResult           `json:"branch,omitempty"`
+	Labels       map[string]TriggerRenderSlotResult `json:"labels,omitempty"`
+	ReuseMessage *TriggerRenderSlotResult           `json:"reuseMessage,omitempty"`
+	Message      *TriggerRenderSlotResult           `json:"message,omitempty"`
+	Body         *TriggerRenderSlotResult           `json:"body,omitempty"`
+}
+
+// TriggerRenderError describes one compile or render failure for a slot.
+type TriggerRenderError struct {
+	Slot    string `json:"slot"`
+	Path    string `json:"path,omitempty"`
+	Kind    string `json:"kind"`
+	Message string `json:"message,omitempty"`
+}
+
+// TriggerRenderResponse is the response from POST /triggers/{id}/render?eventId=<id>.
+type TriggerRenderResponse struct {
+	Slots  TriggerRenderSlots   `json:"slots"`
+	Errors []TriggerRenderError `json:"errors"`
 }
 
 // TriggerSubjectSpec configures per-subject handling for a trigger.
@@ -511,6 +563,22 @@ func (s *triggerService) History(ctx context.Context, id string, opts *ListTrigg
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ListTriggerFiresResponse](resp)
+}
+
+func (s *triggerService) Render(ctx context.Context, id, eventID string) (*TriggerRenderResponse, error) {
+	query := url.Values{}
+	if eventID != "" {
+		query.Set("eventId", eventID)
+	}
+	path := s.basePath() + "/" + url.PathEscape(id) + "/render"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	resp, err := s.c.post(ctx, path, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[TriggerRenderResponse](resp)
 }
 
 func (s *triggerEventService) Get(ctx context.Context, id string) (*TriggerEventDetail, error) {

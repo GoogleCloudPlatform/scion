@@ -73,6 +73,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 	origWake := triggerPresetApplyWake
 	origPlain := triggerPresetApplyPlain
 	origDispatch := triggerPresetApplyDispatch
+	origDispatchFlags := triggerPresetApplyDispatchFlags
 	origComment := triggerPresetApplyComment
 	origDryRun := triggerPresetApplyDryRun
 	t.Cleanup(func() {
@@ -89,6 +90,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 		triggerPresetApplyWake = origWake
 		triggerPresetApplyPlain = origPlain
 		triggerPresetApplyDispatch = origDispatch
+		triggerPresetApplyDispatchFlags = origDispatchFlags
 		triggerPresetApplyComment = origComment
 		triggerPresetApplyDryRun = origDryRun
 	})
@@ -105,6 +107,7 @@ func resetTriggerPresetFlags(t *testing.T) {
 	triggerPresetApplyWake = false
 	triggerPresetApplyPlain = false
 	triggerPresetApplyDispatch = false
+	triggerPresetApplyDispatchFlags = dispatchAgentFlagValues{}
 	triggerPresetApplyComment = ""
 	triggerPresetApplyDryRun = false
 }
@@ -249,26 +252,28 @@ func TestTriggerPresetCLI_ApplyDryRunFieldCoercionAndActionValidation(t *testing
 	assert.Contains(t, dryOut, "Compiled preset: github.command (v1)")
 	assert.Contains(t, dryOut, `1/1 [cel] "event.attributes.command == 'review'"`)
 
-	// 2. Reject unavailable actions clearly.
+	// 2. Reject unavailable github.comment action clearly, and validate dispatch-agent required flags.
 	triggerPresetApplyDryRun = false
-	triggerPresetApplyDispatch = true
-	err := runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "dispatch_agent")
-	assert.Contains(t, err.Error(), "not yet available")
-
-	triggerPresetApplyDispatch = false
 	triggerPresetApplyComment = "hello"
-	err = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
+	err := runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "github.comment")
 	assert.Contains(t, err.Error(), "not yet available")
 
 	triggerPresetApplyComment = ""
-	triggerPresetApplyAction = "dispatch_agent"
+	triggerPresetApplyAction = "github.comment"
 	err = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not yet available")
+
+	triggerPresetApplyAction = "message"
+	triggerPresetApplyDispatch = true
+	triggerPresetApplyName = "pr-dispatch"
+	err = runTriggerPresetApply(triggerPresetApplyCmd, []string{"github.command"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--template is required")
+	triggerPresetApplyDispatch = false
+	triggerPresetApplyName = ""
 
 	// 3. Invalid --field syntax and invalid bool value return usage errors.
 	triggerPresetApplyAction = "message"

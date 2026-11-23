@@ -35,18 +35,19 @@ import (
 var (
 	triggerPresetListSource string
 
-	triggerPresetApplyName        string
-	triggerPresetApplyDescription string
-	triggerPresetApplyFields      []string
-	triggerPresetApplyAction      string
-	triggerPresetApplyAgent       string
-	triggerPresetApplyMessage     string
-	triggerPresetApplyInterrupt   bool
-	triggerPresetApplyWake        bool
-	triggerPresetApplyPlain       bool
-	triggerPresetApplyDispatch    bool
-	triggerPresetApplyComment     string
-	triggerPresetApplyDryRun      bool
+	triggerPresetApplyName          string
+	triggerPresetApplyDescription   string
+	triggerPresetApplyFields        []string
+	triggerPresetApplyAction        string
+	triggerPresetApplyAgent         string
+	triggerPresetApplyMessage       string
+	triggerPresetApplyInterrupt     bool
+	triggerPresetApplyWake          bool
+	triggerPresetApplyPlain         bool
+	triggerPresetApplyDispatch      bool
+	triggerPresetApplyDispatchFlags dispatchAgentFlagValues
+	triggerPresetApplyComment       string
+	triggerPresetApplyDryRun        bool
 )
 
 var triggerPresetCmd = &cobra.Command{
@@ -329,48 +330,59 @@ func parsePresetListValue(key, raw string) ([]string, error) {
 	return out, nil
 }
 
-func validateTriggerPresetApplyAction(cmd *cobra.Command, dryRun bool) (hubclient.TriggerActionSpec, error) {
-	if triggerPresetApplyDispatch {
-		return hubclient.TriggerActionSpec{}, newUsageError(`action "dispatch_agent" is not yet available; only "message" (--agent and --message) is supported`)
-	}
+func validateTriggerPresetApplyAction(cmd *cobra.Command, dryRun bool) (hubclient.TriggerActionSpec, []string, error) {
 	if (cmd != nil && cmd.Flags().Changed("comment")) || strings.TrimSpace(triggerPresetApplyComment) != "" {
-		return hubclient.TriggerActionSpec{}, newUsageError(`action "github.comment" is not yet available; only "message" (--agent and --message) is supported`)
+		return hubclient.TriggerActionSpec{}, nil, newUsageError(`action "github.comment" is not yet available; supported actions: message, dispatch-agent`)
 	}
-	actionKind := strings.TrimSpace(triggerPresetApplyAction)
-	if actionKind != "" && actionKind != "message" {
-		if actionKind == "dispatch_agent" || actionKind == "github.comment" {
-			return hubclient.TriggerActionSpec{}, newUsageError(`action %q is not yet available; only "message" (--agent and --message) is supported`, actionKind)
+	rawAction := strings.TrimSpace(triggerPresetApplyAction)
+	if rawAction == "github.comment" {
+		return hubclient.TriggerActionSpec{}, nil, newUsageError(`action "github.comment" is not yet available; supported actions: message, dispatch-agent`)
+	}
+	if triggerPresetApplyDispatch {
+		if rawAction != "" && rawAction != "message" && rawAction != "dispatch-agent" && rawAction != "dispatch_agent" {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError(`unsupported action %q; supported actions: message, dispatch-agent`, rawAction)
 		}
-		return hubclient.TriggerActionSpec{}, newUsageError(`unsupported action %q; only "message" (--agent and --message) is supported`, actionKind)
+		rawAction = "dispatch-agent"
+	}
+	actionKind, err := normalizeTriggerActionKind(rawAction)
+	if err != nil {
+		return hubclient.TriggerActionSpec{}, nil, err
 	}
 	if dryRun {
-		return hubclient.TriggerActionSpec{}, nil
+		return hubclient.TriggerActionSpec{}, nil, nil
 	}
 
 	if strings.TrimSpace(triggerPresetApplyName) == "" {
-		return hubclient.TriggerActionSpec{}, newUsageError("--name is required")
-	}
-	agentRef := strings.TrimSpace(triggerPresetApplyAgent)
-	if agentRef == "" {
-		return hubclient.TriggerActionSpec{}, newUsageError("--agent is required")
-	}
-	if strings.TrimSpace(triggerPresetApplyMessage) == "" {
-		return hubclient.TriggerActionSpec{}, newUsageError("--message is required")
+		return hubclient.TriggerActionSpec{}, nil, newUsageError("--name is required")
 	}
 
-	action := hubclient.TriggerActionSpec{
-		Type:      "message",
-		Message:   triggerPresetApplyMessage,
-		Interrupt: triggerPresetApplyInterrupt,
-		Wake:      triggerPresetApplyWake,
-		Plain:     triggerPresetApplyPlain,
+	switch actionKind {
+	case "dispatch_agent":
+		allowExplicit := cmd != nil && cmd.Flags().Changed("allow")
+		return buildDispatchAgentActionSpec(&triggerPresetApplyDispatchFlags, allowExplicit)
+
+	default:
+		agentRef := strings.TrimSpace(triggerPresetApplyAgent)
+		if agentRef == "" {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--agent is required")
+		}
+		if strings.TrimSpace(triggerPresetApplyMessage) == "" {
+			return hubclient.TriggerActionSpec{}, nil, newUsageError("--message is required")
+		}
+		action := hubclient.TriggerActionSpec{
+			Type:      "message",
+			Message:   triggerPresetApplyMessage,
+			Interrupt: triggerPresetApplyInterrupt,
+			Wake:      triggerPresetApplyWake,
+			Plain:     triggerPresetApplyPlain,
+		}
+		if uuid.Validate(agentRef) == nil {
+			action.AgentID = agentRef
+		} else {
+			action.AgentName = agentRef
+		}
+		return action, nil, nil
 	}
-	if uuid.Validate(agentRef) == nil {
-		action.AgentID = agentRef
-	} else {
-		action.AgentName = agentRef
-	}
-	return action, nil
 }
 
 func formatTriggerPresetCompileError(err error) error {
@@ -451,7 +463,7 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		return newUsageError("preset ID is required")
 	}
 
-	action, err := validateTriggerPresetApplyAction(cmd, triggerPresetApplyDryRun)
+	action, derivedUntrusted, err := validateTriggerPresetApplyAction(cmd, triggerPresetApplyDryRun)
 	if err != nil {
 		return err
 	}
@@ -540,9 +552,11 @@ func runTriggerPresetApply(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	printDerivedUntrustedVars(derivedUntrusted)
+
 	created, err := hubCtx.Client.Triggers(projectID).Create(ctx, createReq)
 	if err != nil {
-		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger from preset: %w", formatTriggerRuleError(err)))
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger from preset: %w", formatTriggerAPIError(err)))
 	}
 
 	if isTriggerJSONOutput() {
@@ -592,10 +606,6 @@ func printCompiledTriggerPreset(c *hubclient.CompiledTriggerPreset) {
 }
 
 func printCreatedPresetTrigger(created *hubclient.Trigger) {
-	agentLabel := created.Action.AgentName
-	if agentLabel == "" {
-		agentLabel = created.Action.AgentID
-	}
 	fmt.Printf("Trigger created: %s\n", triggerTerminalText(created.ID, false))
 	fmt.Printf("  Name:    %s\n", triggerTerminalText(created.Name, false))
 	if presetLabel := formatTriggerMatchFormLabel(created.Match.Form); presetLabel != "" {
@@ -615,7 +625,7 @@ func printCreatedPresetTrigger(created *hubclient.Trigger) {
 	if created.Subject.Expr != "" {
 		fmt.Printf("  Subject: %q\n", created.Subject.Expr)
 	}
-	fmt.Printf("  Agent:   %s\n", triggerTerminalText(agentLabel, false))
+	printTriggerActionSummary(created.Action)
 	fmt.Printf("  Status:  %s\n", triggerTerminalText(triggerStatusLabel(created.Status, created.StatusReason), false))
 }
 
@@ -646,13 +656,14 @@ func init() {
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyName, "name", "", "Trigger name (required unless --dry-run)")
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyDescription, "description", "", "Optional trigger description")
 	triggerPresetApplyCmd.Flags().StringArrayVar(&triggerPresetApplyFields, "field", nil, "Preset field in key=value form (repeatable)")
-	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyAction, "action", "message", `Action kind (currently only "message" is supported)`)
-	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyAgent, "agent", "", "Target agent name or ID (required unless --dry-run)")
-	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyMessage, "message", "", "Message delivered to the target agent (required unless --dry-run)")
+	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyAction, "action", "message", `Action kind ("message" or "dispatch-agent")`)
+	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyAgent, "agent", "", "Target agent name or ID (required for --action message unless --dry-run)")
+	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyMessage, "message", "", "Message delivered to the target agent (required for --action message unless --dry-run)")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyInterrupt, "interrupt", false, "Interrupt the target agent")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyWake, "wake", false, "Resume the target agent if suspended when the trigger fires")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyPlain, "plain", false, "Deliver message text without sender prefix")
-	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyDispatch, "dispatch", false, "Dispatch an agent (not yet available)")
+	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyDispatch, "dispatch", false, "Shorthand for --action dispatch-agent")
+	bindDispatchAgentFlags(triggerPresetApplyCmd.Flags(), &triggerPresetApplyDispatchFlags)
 	triggerPresetApplyCmd.Flags().StringVar(&triggerPresetApplyComment, "comment", "", "Post a GitHub comment (not yet available)")
 	triggerPresetApplyCmd.Flags().BoolVar(&triggerPresetApplyDryRun, "dry-run", false, "Compile and print the rule without creating a trigger")
 }

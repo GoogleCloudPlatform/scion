@@ -193,6 +193,12 @@ func (s *Server) handleTriggers(w http.ResponseWriter, r *http.Request, projectI
 					return
 				}
 				authzAction = ActionRead
+			case "render":
+				if r.Method != http.MethodPost {
+					MethodNotAllowed(w, http.MethodPost)
+					return
+				}
+				authzAction = ActionRead
 			default:
 				NotFound(w, "Trigger action")
 				return
@@ -237,6 +243,8 @@ func (s *Server) handleTriggers(w http.ResponseWriter, r *http.Request, projectI
 			s.resumeTrigger(w, r, projectID, triggerID)
 		case "history":
 			s.getTriggerHistory(w, r, projectID, triggerID)
+		case "render":
+			s.renderTrigger(w, r, projectID, triggerID)
 		}
 	})(w, r)
 }
