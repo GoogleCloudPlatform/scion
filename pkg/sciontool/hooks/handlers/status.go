@@ -324,8 +324,14 @@ func (h *StatusHandler) Handle(event *hooks.Event) error {
 
 	// New work events (prompt-submit, agent-start, and a session-start of a
 	// new session): always update activity unconditionally — clears any
-	// sticky state.
+	// sticky state. For a promptless start (SCION_INITIAL_TASK != "1"), a
+	// session-start while still initializing leaves initializing in place so
+	// sciontool init's readiness watcher transitions it to idle once
+	// readiness settles.
 	if isNewWorkEvent(event.Name) {
+		if event.Name == hooks.EventSessionStart && !hasInitialTask() {
+			return h.updateSessionStartWithoutInitialTask(result.activity)
+		}
 		return h.UpdateActivity(result.activity, "")
 	}
 
@@ -1173,6 +1179,33 @@ func (h *StatusHandler) writeAgentInfoLocked(info map[string]interface{}) error 
 		return fmt.Errorf("writing %s: %w", h.StatusPath, err)
 	}
 	return nil
+}
+
+// envInitialTask is set to "1" in the container environment when the agent was
+// started with an initial task (pkg/agent/run.go).
+const envInitialTask = "SCION_INITIAL_TASK"
+
+// hasInitialTask reports whether this container was started with an initial
+// task.
+func hasInitialTask() bool {
+	return os.Getenv(envInitialTask) == "1"
+}
+
+// updateSessionStartWithoutInitialTask handles a new-session EventSessionStart
+// when the container was started without an initial task. While the agent is
+// still initializing, it leaves initializing in place so sciontool init's
+// readiness watcher transitions initializing -> idle once harness readiness
+// settles. Once past initializing (e.g. a later new session), it writes
+// activity unconditionally like any other new-work event. It is one locked
+// update.
+func (h *StatusHandler) updateSessionStartWithoutInitialTask(activity state.Activity) error {
+	return h.update(func(info map[string]interface{}) bool {
+		if current, _ := info["activity"].(string); current == string(state.ActivityInitializing) {
+			return false
+		}
+		applyActivity(info, activity, "")
+		return true
+	})
 }
 
 // isNewWorkEvent returns true for events that indicate new work is starting.

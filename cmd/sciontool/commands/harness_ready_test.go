@@ -476,6 +476,7 @@ func TestProcessHookData_LocalActivityWrittenBeforeReadyMarker(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	scrubScionEnv(t)
+	t.Setenv(envInitialTask, "1")
 	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
 	origDialect := hookDialect
 	hookDialect = "claude"
@@ -509,6 +510,43 @@ func TestProcessHookData_LocalActivityWrittenBeforeReadyMarker(t *testing.T) {
 	require.Equal(t, []string{"working"}, atMarker, "local activity must be written before the marker")
 	data, err := os.ReadFile(ready)
 	require.NoError(t, err, "the ready marker is still written")
+	got, ok := state.ParseReadyMarker(string(data))
+	require.True(t, ok)
+	assert.Equal(t, nonce, got)
+}
+
+// On a promptless start (SCION_INITIAL_TASK unset), SessionStart still writes
+// the ready marker while leaving local activity initializing so init's
+// readiness watcher transitions initializing -> idle once settled.
+func TestProcessHookData_PromptlessSessionStartKeepsInitializingAndWritesMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	scrubScionEnv(t)
+	setTestLogPath(t, filepath.Join(tmpDir, "agent.log"))
+	origDialect := hookDialect
+	hookDialect = "claude"
+	t.Cleanup(func() { hookDialect = origDialect })
+
+	initRun, ready := useReadinessPaths(t, t.TempDir())
+	nonce := "fedcba9876543210"
+	require.NoError(t, os.WriteFile(initRun, []byte(state.FormatInitRun(nonce, state.ReadyModeHook)), 0o644))
+
+	statusPath := filepath.Join(tmpDir, "agent-info.json")
+	require.NoError(t, os.WriteFile(statusPath, []byte(`{"phase":"running","activity":"initializing"}`), 0o644))
+
+	payload, _ := json.Marshal(map[string]interface{}{"hook_event_name": "SessionStart", "source": "startup"})
+	require.NoError(t, processHookData(payload))
+
+	var info struct {
+		Activity string `json:"activity"`
+	}
+	raw, err := os.ReadFile(statusPath)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &info))
+	assert.Equal(t, "initializing", info.Activity)
+
+	data, err := os.ReadFile(ready)
+	require.NoError(t, err, "the ready marker must still be written")
 	got, ok := state.ParseReadyMarker(string(data))
 	require.True(t, ok)
 	assert.Equal(t, nonce, got)

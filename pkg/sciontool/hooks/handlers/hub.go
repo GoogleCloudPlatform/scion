@@ -124,6 +124,13 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session restarted ("+source+")")
 			break
 		}
+		// Promptless start: StatusHandler ran first and kept initializing so
+		// sciontool init's readiness watcher can transition initializing ->
+		// idle once harness readiness settles. Do not report working here.
+		if readLocalActivity() == string(state.ActivityInitializing) {
+			log.Debug("Hub: Skipping working on session start (local activity still initializing)")
+			return nil
+		}
 		// New session - report running phase with working activity (clears any sticky)
 		log.Debug("Hub: Reporting running/working (session start)")
 		err = h.client.ReportState(ctx, state.PhaseRunning, state.ActivityWorking, "Session started")
