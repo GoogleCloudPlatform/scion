@@ -1781,6 +1781,13 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			BadRequest(w, "target path must not contain '..'")
 			return
 		}
+		if scope == store.ScopeAgent && !strings.HasPrefix(target, "~/") {
+			ValidationError(w, "agent-written file secrets must target a path under the agent home (~/...)", map[string]interface{}{
+				"field": "target",
+				"value": target,
+			})
+			return
+		}
 		if !strings.HasPrefix(target, "/") && !strings.HasPrefix(target, "~/") {
 			ValidationError(w, "file secret target must be an absolute path (or start with ~/)", map[string]interface{}{
 				"field": "target",

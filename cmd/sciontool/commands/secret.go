@@ -69,16 +69,17 @@ the current agent (requires the hub.agent_secrets experiment).
 If VALUE is "-", the secret value is read from stdin (up to 64 KiB) so it
 stays out of process listings. For non-file types, a single trailing newline
 is trimmed from stdin.
+Prefer - (stdin): values given as arguments are visible in process listings and shell history.
 
 If VALUE starts with @, the remainder is treated as a file path. The file
 contents are read and base64-encoded, and --type defaults to "file".
 
 Examples:
+  # Store an agent-scoped secret from stdin
+  printf '%s' "$TOKEN" | sciontool secret set MY_AGENT_TOKEN - --scope agent
+
   # Store a simple environment variable secret
   sciontool secret set MY_API_KEY "sk-abc123"
-
-  # Store an agent-scoped secret from stdin (avoids argv exposure)
-  printf '%s' "$TOKEN" | sciontool secret set MY_AGENT_TOKEN - --scope agent
 
   # Store a credential file
   sciontool secret set CLAUDE_AUTH @~/.claude/.credentials.json

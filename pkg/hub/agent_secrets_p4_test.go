@@ -550,3 +550,46 @@ func TestAgentSelfWrite_SetsProjectIDOnAgentScopeBackendInput(t *testing.T) {
 	assert.Equal(t, agentX.ID, rec.inputs[0].ScopeID)
 	assert.Equal(t, project.ID, rec.inputs[0].ProjectID, "agent self-write must populate ProjectID for GCP scion-project-id label attribution")
 }
+
+func TestAgentSelfWrite_FileTargetRestrictedToAgentHome(t *testing.T) {
+	srv, _, _, _, agentX, _ := setupP4AgentSecretsFixture(t, true)
+	scopes := []AgentTokenScope{ScopeAgentStatusUpdate}
+	val := base64.StdEncoding.EncodeToString([]byte("file-contents"))
+
+	// Agent-scope file target outside ~/ is refused with 400 validation error.
+	rr := doP4AsAgent(t, srv, agentX, scopes, http.MethodPut,
+		"/api/v1/agents/"+agentX.ID+"/secrets/ETC_FILE",
+		AgentSetSecretRequest{
+			Value:  val,
+			Type:   store.SecretTypeFile,
+			Target: "/etc/x",
+			Scope:  store.ScopeAgent,
+		})
+	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+	assert.Equal(t, "agent-written file secrets must target a path under the agent home (~/...)", errResp.Error.Message)
+
+	// Agent-scope file target under ~/ is accepted.
+	rr = doP4AsAgent(t, srv, agentX, scopes, http.MethodPut,
+		"/api/v1/agents/"+agentX.ID+"/secrets/HOME_FILE",
+		AgentSetSecretRequest{
+			Value:  val,
+			Type:   store.SecretTypeFile,
+			Target: "~/x",
+			Scope:  store.ScopeAgent,
+		})
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	// Project-scope agent file write with /etc/x is unchanged.
+	rr = doP4AsAgent(t, srv, agentX, scopes, http.MethodPut,
+		"/api/v1/agents/"+agentX.ID+"/secrets/PROJ_FILE",
+		AgentSetSecretRequest{
+			Value:  val,
+			Type:   store.SecretTypeFile,
+			Target: "/etc/x",
+			Scope:  store.ScopeProject,
+		})
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+}
