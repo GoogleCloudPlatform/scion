@@ -2023,7 +2023,11 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 	// Agent-scope reads (or default agent-then-project when experiment is on)
 	// do not require project:secret:read at the precheck stage.
 	requireProjectReadScope := !agentSecretsOn || rawScope == store.ScopeProject || rawScope == store.ScopeUser
-	facts, reason, status := s.materialRuntimePrecheckOpts(ctx, ident, requireProjectReadScope)
+	// A viewer-only root is admitted only for explicit user-scope allowProgeny
+	// reads (ptone/scion#8875); project, agent, and default (project or
+	// agent-then-project) reads stay refused at check 5.
+	allowViewerRoot := rawScope == store.ScopeUser
+	facts, reason, status := s.materialRuntimePrecheckAllowViewer(ctx, ident, requireProjectReadScope, allowViewerRoot)
 	if status != 0 {
 		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, nil, reason, nil))
 		if status == http.StatusInternalServerError {
@@ -2147,7 +2151,12 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 
 	scope := r.URL.Query().Get("scope")
 	requireProjectReadScope := !agentSecretsOn || scope == store.ScopeProject || scope == store.ScopeUser
-	facts, reason, status := s.materialRuntimePrecheckOpts(ctx, ident, requireProjectReadScope)
+	// A viewer-only root is admitted only when the request includes user scope
+	// (scope=user, multi-scope empty, or scope=all when agent secrets are
+	// enabled) and the token holds project:secret:read; scope=project,
+	// scope=agent, and unknown scopes stay refused at check 5 (ptone/scion#8875).
+	allowViewerRoot := (scope == "" || (agentSecretsOn && scope == "all") || scope == store.ScopeUser) && ident != nil && ident.HasScope(ScopeProjectSecretRead)
+	facts, reason, status := s.materialRuntimePrecheckAllowViewer(ctx, ident, requireProjectReadScope, allowViewerRoot)
 	if status != 0 {
 		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, nil, reason, nil))
 		if status == http.StatusInternalServerError {
@@ -2207,25 +2216,35 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 	items := make([]MaterialSelectionEventItem, 0)
 
 	if includeAgent {
-		metas, err := s.secretBackend.List(ctx, secret.Filter{
-			Scope:   store.ScopeAgent,
-			ScopeID: facts.Agent.ID,
-		})
-		if err != nil {
-			emitListExitItem(store.ScopeAgent, facts.Agent.ID, GrantAgentSelfRead, "")
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
-			return
-		}
-		for _, m := range metas {
-			if m.SecretType == store.SecretTypeInternal {
-				continue
-			}
-			secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target, Scope: store.ScopeAgent})
+		if facts.RootViewerOnly {
+			// A viewer-only root is admitted solely for user-scope progeny
+			// secrets (ptone/scion#8875); agent-scope secrets stay refused
+			// without reading backend metadata.
 			items = append(items, materialSelectionItem(ItemResult{
-				Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeAgent, ScopeID: facts.Agent.ID, Grant: GrantAgentSelfRead, Meta: m},
-				Allowed:   true,
-				Reason:    ReasonAllowed,
+				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeAgent, ScopeID: facts.Agent.ID, Grant: GrantAgentSelfRead},
+				Reason:    ReasonMembershipRequired,
 			}, "", ""))
+		} else {
+			metas, err := s.secretBackend.List(ctx, secret.Filter{
+				Scope:   store.ScopeAgent,
+				ScopeID: facts.Agent.ID,
+			})
+			if err != nil {
+				emitListExitItem(store.ScopeAgent, facts.Agent.ID, GrantAgentSelfRead, "")
+				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
+				return
+			}
+			for _, m := range metas {
+				if m.SecretType == store.SecretTypeInternal {
+					continue
+				}
+				secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target, Scope: store.ScopeAgent})
+				items = append(items, materialSelectionItem(ItemResult{
+					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeAgent, ScopeID: facts.Agent.ID, Grant: GrantAgentSelfRead, Meta: m},
+					Allowed:   true,
+					Reason:    ReasonAllowed,
+				}, "", ""))
+			}
 		}
 	}
 
@@ -2234,6 +2253,14 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 			items = append(items, materialSelectionItem(ItemResult{
 				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
 				Reason:    ReasonCapabilityRequired,
+			}, "project.secret_read", ""))
+		} else if facts.RootViewerOnly {
+			// A viewer-only root is admitted solely for user-scope progeny
+			// secrets (ptone/scion#8875); project-scope secrets stay refused
+			// without reading backend metadata.
+			items = append(items, materialSelectionItem(ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonMembershipRequired,
 			}, "project.secret_read", ""))
 		} else {
 			var cache projectDecisionCache

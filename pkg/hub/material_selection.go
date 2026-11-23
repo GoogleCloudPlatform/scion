@@ -110,6 +110,11 @@ type TargetFacts struct {
 	Ancestry  []string       // Agent.Ancestry as stored; never extended
 	Root      ProvenanceRoot // ProvenanceRoot{Kind: "user", ID: Ancestry[0]} (check 3), confirmed by check 5
 	Project   *store.Project // loaded by ProjectID
+	// RootViewerOnly is true when check 5 admitted the root user solely via
+	// the built-in project-viewer role (not beyond-viewer membership or
+	// system authority). Non-user scopes must refuse requests with
+	// RootViewerOnly set (ptone/scion#8875).
+	RootViewerOnly bool
 }
 
 // SourceRef identifies the user or agent that authored a user-scoped item,
@@ -181,6 +186,13 @@ const (
 func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity, facts *TargetFacts, scope, key string, decisionCache *projectDecisionCache) (item ItemResult, value *secret.SecretWithValue, permission, detail string) {
 	switch scope {
 	case store.ScopeAgent:
+		if facts != nil && facts.RootViewerOnly {
+			item = ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeAgent, ScopeID: facts.Agent.ID, Grant: GrantAgentSelfRead},
+				Reason:    ReasonMembershipRequired,
+			}
+			return item, nil, permission, detail
+		}
 		item = s.authorizeRuntimeAgentItem(ctx, key, facts)
 	case store.ScopeProject:
 		permission = "project.secret_read"
@@ -188,6 +200,13 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 			item = ItemResult{
 				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
 				Reason:    ReasonCapabilityRequired,
+			}
+			return item, nil, permission, detail
+		}
+		if facts != nil && facts.RootViewerOnly {
+			item = ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonMembershipRequired,
 			}
 			return item, nil, permission, detail
 		}

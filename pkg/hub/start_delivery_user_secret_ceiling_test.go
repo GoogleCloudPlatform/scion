@@ -38,6 +38,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -45,10 +46,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -965,19 +968,20 @@ func (f *sdFixture) listUserSecretKeys(t *testing.T, agentID, token string) []st
 }
 
 // TestStartDelivery_MemberProgenyParity verifies start, restart, runtime read
-// and agent secret list parity for a project-member (who does not hold
-// project.secret_read) alongside project-owner and project-admin, across
+// and agent secret list parity for project-viewer and project-member (neither
+// holds project.secret_read) alongside project-owner and project-admin, across
 // parent(full) and child(full) agents and negative authorization cases
-// (ptone/scion#2536).
+// (ptone/scion#2536, ptone/scion#8875).
 func TestStartDelivery_MemberProgenyParity(t *testing.T) {
-	// Positive parity across built-in project roles: member, admin, owner.
-	for _, role := range []string{store.ProjectRoleMember, store.ProjectRoleAdmin, store.ProjectRoleOwner} {
+	// Positive parity across built-in project roles: viewer, member, admin, owner.
+	for _, role := range []string{store.ProjectRoleViewer, store.ProjectRoleMember, store.ProjectRoleAdmin, store.ProjectRoleOwner} {
 		t.Run("role="+role, func(t *testing.T) {
 			f := newSDFixtureWithRole(t, "sd-mp-"+role, role)
 
-			// Confirm project-member truly lacks project.secret_read so the
-			// test proves user-scope progeny does not depend on it.
-			if role == store.ProjectRoleMember {
+			// Confirm project-viewer and project-member truly lack
+			// project.secret_read so the test proves user-scope progeny does
+			// not depend on it.
+			if role == store.ProjectRoleViewer || role == store.ProjectRoleMember {
 				u, err := f.Store.GetUser(context.Background(), f.UserID)
 				require.NoError(t, err)
 				userIdent := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")
@@ -988,7 +992,7 @@ func TestStartDelivery_MemberProgenyParity(t *testing.T) {
 					Action:     ActionRead,
 					Permission: permissionProjectSecretRead,
 				})
-				require.False(t, dec.Allowed, "project-member must not hold project.secret_read")
+				require.False(t, dec.Allowed, "%s must not hold project.secret_read", role)
 			}
 
 			// Direct parent(full) agent (owner path): start, restart, runtime
@@ -1017,11 +1021,11 @@ func TestStartDelivery_MemberProgenyParity(t *testing.T) {
 		})
 	}
 
-	// Accepted decision (ptone/scion#2536): start and restart admit
-	// viewer-only roots' own allowProgeny user secrets via secret.use; the
-	// runtime read and list path is intentionally stricter (requires
-	// membership beyond viewer) until its separate follow-up.
-	t.Run("role=project-viewer (accepted: start/restart admit; runtime read/list stricter)", func(t *testing.T) {
+	// Accepted decision (ptone/scion#2536, ptone/scion#8875): start, restart,
+	// runtime read and runtime list all admit viewer-only roots' own
+	// allowProgeny user secrets via secret.use, while another user's secrets
+	// and non-user scopes stay refused.
+	t.Run("role=project-viewer (aligned: start/restart/runtime parity; other users and non-user scopes refused)", func(t *testing.T) {
 		f := newSDFixtureWithRole(t, "sd-mp-viewer", store.ProjectRoleViewer)
 		ctx := context.Background()
 
@@ -1074,16 +1078,20 @@ func TestStartDelivery_MemberProgenyParity(t *testing.T) {
 			sdStartDelivery(t, f.disp, f.Store, child),
 			"viewer-only root child start/restart delivers own allowProgeny user secrets and withholds unshared")
 
-		// Runtime read and agent secret list are intentionally stricter
-		// (refuse viewer-only roots) until their separate follow-up.
-		assert.False(t, f.read(t, child, childTok, sdAlwaysKey),
-			"viewer-only root child runtime read always is intentionally refused until follow-up")
-		assert.False(t, f.read(t, child, childTok, sdAsNeededKey),
-			"viewer-only root child runtime read as_needed is intentionally refused until follow-up")
+		// Runtime read and agent secret list align with start/restart for the
+		// viewer's own allowProgeny user secrets, while withholding unshared
+		// and another user's rows (ptone/scion#8875).
+		assert.True(t, f.read(t, child, childTok, sdAlwaysKey),
+			"viewer-only root child runtime read always must match start")
+		assert.True(t, f.read(t, child, childTok, sdAsNeededKey),
+			"viewer-only root child runtime read as_needed must match start")
 		assert.False(t, f.read(t, child, childTok, sdPrivateKey),
 			"viewer-only root child runtime read private is refused")
-		assert.Empty(t, f.listUserSecretKeys(t, child, childTok),
-			"viewer-only root child agent secret list is intentionally empty until follow-up")
+		assert.False(t, f.read(t, child, childTok, otherKey),
+			"viewer-only root child runtime read of another user's secret is refused")
+		assert.ElementsMatch(t, []string{sdAlwaysKey, sdAsNeededKey},
+			f.listUserSecretKeys(t, child, childTok),
+			"viewer-only root child agent secret list must match start")
 
 		// Still NOT another user's secrets at start/restart or directly via AuthzCheck.
 		agent, err := f.Store.GetAgent(ctx, child)
@@ -1261,4 +1269,560 @@ func TestStartDelivery_ProgenyAuthzCheckNonUserScopeFailClosed(t *testing.T) {
 			}), "empty-scope secret must fail closed on progeny AuthzCheck")
 		})
 	}
+}
+
+type sdScopeCountingBackend struct {
+	secret.SecretBackend
+	listByScope    map[string]int
+	getMetaByScope map[string]int
+}
+
+func newSDScopeCountingBackend(inner secret.SecretBackend) *sdScopeCountingBackend {
+	return &sdScopeCountingBackend{
+		SecretBackend:  inner,
+		listByScope:    map[string]int{},
+		getMetaByScope: map[string]int{},
+	}
+}
+
+func (b *sdScopeCountingBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	b.listByScope[filter.Scope]++
+	return b.SecretBackend.List(ctx, filter)
+}
+
+func (b *sdScopeCountingBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
+	b.getMetaByScope[scope]++
+	return b.SecretBackend.GetMeta(ctx, name, scope, scopeID)
+}
+
+func enableAgentSecretsForSDTest(t *testing.T, srv *Server, s store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	raw := json.RawMessage(`{"overrides":{"hub.agent_secrets":true}}`)
+	_, err := s.UpsertHubSetting(ctx, "experiments", raw, "test", -1, "managed")
+	require.NoError(t, err)
+	ops := NewOperationalSettings(s, emptyKoanf(), emptyKoanf())
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	srv.SetOperationalSettings(ops)
+	require.True(t, srv.experimentEnabled(experiments.AgentSecrets))
+}
+
+// TestStartDelivery_ViewerRootRuntimeParityAndNegatives verifies that a
+// viewer-only root user's own allowProgeny user-scope secrets are delivered
+// and readable consistently across start, restart, runtime get (?scope=user),
+// and runtime list (?scope=user, ?scope=all, and default multi-scope), while
+// every non-user scope (project and agent), other user's row, unshared/internal
+// row, and negative ceiling/principal condition remains refused
+// (ptone/scion#8875).
+func TestStartDelivery_ViewerRootRuntimeParityAndNegatives(t *testing.T) {
+	const (
+		projSecretKey  = "VIEWER_PROJ_SECRET"
+		agentSecretKey = "VIEWER_AGENT_SECRET"
+		internalKey    = "VIEWER_INTERNAL_USER_SECRET"
+		otherUserKey   = "VIEWER_OTHER_USER_SECRET"
+		projSecretVal  = "proj-secret-val"
+		agentSecretVal = "agent-secret-val"
+		internalVal    = "internal-secret-val"
+		otherUserVal   = "other-user-val"
+	)
+
+	seedAgentSecret := func(t *testing.T, f *sdFixture, agentID string) {
+		t.Helper()
+		_, _, err := f.Server.secretBackend.Set(context.Background(), &secret.SetSecretInput{
+			Name: agentSecretKey, Value: agentSecretVal,
+			SecretType: store.SecretTypeEnvironment, Target: agentSecretKey,
+			Scope: store.ScopeAgent, ScopeID: agentID,
+			InjectionMode: store.InjectionModeAlways,
+			CreatedBy:     f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+	}
+
+	seedExtraSecrets := func(t *testing.T, f *sdFixture) {
+		t.Helper()
+		ctx := context.Background()
+		_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: projSecretKey, Value: projSecretVal,
+			SecretType: store.SecretTypeEnvironment, Target: projSecretKey,
+			Scope: store.ScopeProject, ScopeID: f.ProjectID,
+			InjectionMode: store.InjectionModeAlways,
+			CreatedBy:     f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: internalKey, Value: internalVal,
+			SecretType: store.SecretTypeInternal, Target: internalKey,
+			Scope: store.ScopeUser, ScopeID: f.UserID,
+			InjectionMode: store.InjectionModeAlways, AllowProgeny: true,
+			CreatedBy: f.UserID, UpdatedBy: f.UserID,
+		})
+		require.NoError(t, err)
+		otherUser := tid("viewer-other-u")
+		createDCUser(t, f.Store, otherUser, otherUser+"@test.com", f.ProjectID, store.ProjectRoleOwner)
+		_, _, err = f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+			Name: otherUserKey, Value: otherUserVal,
+			SecretType: store.SecretTypeEnvironment, Target: otherUserKey,
+			Scope: store.ScopeUser, ScopeID: otherUser,
+			InjectionMode: store.InjectionModeAlways, AllowProgeny: true,
+			CreatedBy: otherUser, UpdatedBy: otherUser,
+		})
+		require.NoError(t, err)
+	}
+
+	assertDenied403 := func(t *testing.T, rec *httptest.ResponseRecorder, label string) {
+		t.Helper()
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s: expected 403, got %d (%s)", label, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), agentSecretAccessDeniedMessage, "%s: expected neutral denied message", label)
+	}
+
+	t.Run("positive parity: direct and group-derived project-viewer", func(t *testing.T) {
+		for _, mode := range []string{"direct", "group"} {
+			t.Run(mode, func(t *testing.T) {
+				f := newSDFixture(t, "sd-vr-"+mode)
+				ctx := context.Background()
+				removeUserProjectBindings(t, f.Store, f.UserID, f.ProjectID)
+				if mode == "direct" {
+					grantProjectRole(t, f.Store, f.UserID, f.ProjectID, store.ProjectRoleViewer)
+				} else {
+					g := &store.Group{
+						ID: tid("sd-vr-grp"), Name: "viewers-" + mode, Slug: "viewers-" + tid("vg")[:8],
+						GroupType: store.GroupTypeExplicit,
+					}
+					require.NoError(t, f.Store.CreateGroup(ctx, g))
+					require.NoError(t, f.Store.AddGroupMember(ctx, &store.GroupMember{
+						GroupID: g.ID, MemberType: store.GroupMemberTypeUser, MemberID: f.UserID, Role: store.GroupMemberRoleMember,
+					}))
+					rd, err := f.Store.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+					require.NoError(t, err)
+					_, err = f.Store.CreateRoleBinding(ctx, &store.RoleBinding{
+						RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalGroup, PrincipalID: g.ID,
+						ScopeType: store.RoleScopeProject, ScopeID: f.ProjectID, CreatedBy: "test",
+					})
+					require.NoError(t, err)
+				}
+
+				m := f.Server.CheckEffectiveMembership(ctx, f.UserID, f.ProjectID)
+				require.NoError(t, m.Err)
+				require.True(t, m.IsMember && m.ViewerOnly && !m.AdmitsBeyondViewer(), "precondition: viewer-only membership")
+
+				seedExtraSecrets(t, f)
+
+				// Depth-1 direct agent (ancestry [user], owner path): start/restart
+				// delivers always, as_needed, and private; runtime read/list admits
+				// only the allowProgeny rows and refuses non-user scopes.
+				directAgent, directTok := f.direct(t, "vr-direct-"+mode, true)
+				seedAgentSecret(t, f, directAgent)
+				assert.Equal(t, sdDelivery{always: true, asNeeded: true, private: true},
+					sdStartDelivery(t, f.disp, f.Store, directAgent), "depth-1 direct start/restart delivery")
+				for key, wantVal := range map[string]string{sdAlwaysKey: sdAlwaysValue, sdAsNeededKey: sdAsNeededValue} {
+					rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+						"/api/v1/agents/"+directAgent+"/secrets/"+key+"?scope=user", nil, directTok)
+					require.Equal(t, http.StatusOK, rec.Code, "depth-1 get %s?scope=user: %s", key, rec.Body.String())
+					var resp AgentGetSecretResponse
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+					decoded, err := base64.StdEncoding.DecodeString(resp.Value)
+					require.NoError(t, err)
+					assert.Equal(t, wantVal, string(decoded))
+				}
+				for _, deniedKey := range []string{sdPrivateKey, internalKey, otherUserKey} {
+					rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+						"/api/v1/agents/"+directAgent+"/secrets/"+deniedKey+"?scope=user", nil, directTok)
+					assert.Equal(t, http.StatusNotFound, rec.Code, "depth-1 get %s?scope=user must be 404", deniedKey)
+				}
+				assert.ElementsMatch(t, []string{sdAlwaysKey, sdAsNeededKey},
+					f.listUserSecretKeys(t, directAgent, directTok), "depth-1 list ?scope=user")
+				assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+					"/api/v1/agents/"+directAgent+"/secrets/"+projSecretKey+"?scope=project", nil, directTok),
+					"depth-1 get ?scope=project")
+				assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+					"/api/v1/agents/"+directAgent+"/secrets/"+agentSecretKey+"?scope=agent", nil, directTok),
+					"depth-1 get ?scope=agent")
+
+				child, childTok, _ := f.progeny(t, "vr-child-"+mode, true)
+				seedAgentSecret(t, f, child)
+				assert.Equal(t, sdDelivery{always: true, asNeeded: true, private: false},
+					sdStartDelivery(t, f.disp, f.Store, child), "start/restart delivery")
+
+				// Runtime get ?scope=user returns viewer root's allowProgeny rows with exact values.
+				for key, wantVal := range map[string]string{sdAlwaysKey: sdAlwaysValue, sdAsNeededKey: sdAsNeededValue} {
+					rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+						"/api/v1/agents/"+child+"/secrets/"+key+"?scope=user", nil, childTok)
+					require.Equal(t, http.StatusOK, rec.Code, "get %s?scope=user: %s", key, rec.Body.String())
+					var resp AgentGetSecretResponse
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+					decoded, err := base64.StdEncoding.DecodeString(resp.Value)
+					require.NoError(t, err)
+					assert.Equal(t, wantVal, string(decoded))
+				}
+
+				// Unshared (allowProgeny=false), internal, and other user's rows stay 404.
+				for _, deniedKey := range []string{sdPrivateKey, internalKey, otherUserKey} {
+					rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+						"/api/v1/agents/"+child+"/secrets/"+deniedKey+"?scope=user", nil, childTok)
+					assert.Equal(t, http.StatusNotFound, rec.Code, "get %s?scope=user must be 404", deniedKey)
+				}
+
+				// Runtime list ?scope=user returns only allowProgeny non-internal user rows.
+				assert.ElementsMatch(t, []string{sdAlwaysKey, sdAsNeededKey},
+					f.listUserSecretKeys(t, child, childTok), "list ?scope=user")
+
+				// Wrap backend and auditor to assert zero backend List calls and
+				// membership_required audit items for refused scopes.
+				spy := newSDScopeCountingBackend(f.Server.secretBackend)
+				f.Server.SetSecretBackend(spy)
+				auditor := newRecordingMaterialAuditor()
+				f.Server.SetAuditLogger(auditor)
+
+				assertMultiScopeList := func(t *testing.T, urlPath string, expectAgentRefusal bool) {
+					t.Helper()
+					spy.listByScope = map[string]int{}
+					auditor.events = nil
+					rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, urlPath, nil, childTok)
+					require.Equal(t, http.StatusOK, rec.Code, "list %s: %s", urlPath, rec.Body.String())
+					var listResp AgentListSecretsResponse
+					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listResp))
+					listKeys := make([]string, 0, len(listResp.Secrets))
+					for _, s := range listResp.Secrets {
+						listKeys = append(listKeys, s.Key)
+					}
+					assert.ElementsMatch(t, []string{sdAlwaysKey, sdAsNeededKey}, listKeys,
+						"list %s must return only viewer root's allowProgeny user rows", urlPath)
+					assert.Equal(t, 0, spy.listByScope[store.ScopeProject],
+						"list %s must not call backend List for project scope", urlPath)
+					assert.Equal(t, 0, spy.listByScope[store.ScopeAgent],
+						"list %s must not call backend List for agent scope", urlPath)
+					require.NotEmpty(t, auditor.events, "list %s must emit a MaterialSelectionEvent", urlPath)
+					ev := auditor.events[len(auditor.events)-1]
+					var sawProjRefusal, sawAgentRefusal bool
+					for _, it := range ev.Items {
+						if it.Scope == store.ScopeProject && it.Reason == ReasonMembershipRequired {
+							sawProjRefusal = true
+						}
+						if it.Scope == store.ScopeAgent && it.Reason == ReasonMembershipRequired {
+							sawAgentRefusal = true
+						}
+					}
+					assert.True(t, sawProjRefusal, "list %s must audit project refusal with membership_required, got %+v", urlPath, ev.Items)
+					if expectAgentRefusal {
+						assert.True(t, sawAgentRefusal, "list %s must audit agent refusal with membership_required, got %+v", urlPath, ev.Items)
+					}
+				}
+
+				// With AgentSecrets off: empty-scope list returns only user rows
+				// and audits project refusal with membership_required.
+				assertMultiScopeList(t, "/api/v1/agents/"+child+"/secrets", false)
+
+				// With AgentSecrets on: empty-scope and scope=all lists return only
+				// user rows, make zero backend List calls for project or agent scope,
+				// and audit both refused scopes with membership_required.
+				enableAgentSecretsForSDTest(t, f.Server, f.Store)
+				assertMultiScopeList(t, "/api/v1/agents/"+child+"/secrets", true)
+				assertMultiScopeList(t, "/api/v1/agents/"+child+"/secrets?scope=all", true)
+			})
+		}
+	})
+
+	t.Run("non-user scopes and precheck remain refused for viewer-only root", func(t *testing.T) {
+		f := newSDFixtureWithRole(t, "sd-vr-nonuser", store.ProjectRoleViewer)
+		seedExtraSecrets(t, f)
+		child, childTok, _ := f.progeny(t, "vr-nu-child", true)
+		seedAgentSecret(t, f, child)
+
+		// With AgentSecrets disabled:
+		// GET ?scope=project -> 403
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets/"+projSecretKey+"?scope=project", nil, childTok),
+			"get ?scope=project")
+		// GET with empty scope (defaults to project) -> 403
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets/"+projSecretKey, nil, childTok),
+			"get (empty scope)")
+		// GET ?scope=agent -> 403
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets/"+agentSecretKey+"?scope=agent", nil, childTok),
+			"get ?scope=agent (exp off)")
+		// LIST ?scope=project -> 403
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets?scope=project", nil, childTok),
+			"list ?scope=project")
+		// LIST ?scope=agent -> 403
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets?scope=agent", nil, childTok),
+			"list ?scope=agent (exp off)")
+		// LIST ?scope=all when AgentSecrets is disabled -> 403 (unknown scope)
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets?scope=all", nil, childTok),
+			"list ?scope=all (exp off)")
+		// POST /api/v1/agent/secrets (fetch) -> 403
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodPost,
+			"/api/v1/agent/secrets", secretFetchRequest{Keys: []string{projSecretKey}}, childTok),
+			"POST /api/v1/agent/secrets (exp off)")
+
+		// With AgentSecrets enabled: agent scope, default agent-then-project get,
+		// project scope, and POST /api/v1/agent/secrets all stay refused (403).
+		enableAgentSecretsForSDTest(t, f.Server, f.Store)
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets/"+agentSecretKey+"?scope=agent", nil, childTok),
+			"get ?scope=agent (exp on)")
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets/"+agentSecretKey, nil, childTok),
+			"get empty scope agent-then-project (exp on)")
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets/"+projSecretKey+"?scope=project", nil, childTok),
+			"get ?scope=project (exp on)")
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets?scope=agent", nil, childTok),
+			"list ?scope=agent (exp on)")
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+child+"/secrets?scope=project", nil, childTok),
+			"list ?scope=project (exp on)")
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodPost,
+			"/api/v1/agent/secrets", secretFetchRequest{Keys: []string{agentSecretKey, projSecretKey}}, childTok),
+			"POST /api/v1/agent/secrets (exp on)")
+
+		// Non-full child (no ScopeProjectSecretRead) under viewer-only root with
+		// AgentSecrets enabled must still get 403 on multi-scope list (empty and
+		// scope=all), not 200 empty.
+		roChild, _, _ := f.progeny(t, "vr-nu-ro-child", true)
+		setAgentRole(t, f.Store, roChild, AgentRoleReadOnly)
+		roRec, err := f.Store.GetAgent(context.Background(), roChild)
+		require.NoError(t, err)
+		roTok := mintRecordedMaterialToken(t, f.Server, f.Store, roChild, f.ProjectID,
+			ScopesForRole(AgentRoleReadOnly), roRec.Ancestry)
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+roChild+"/secrets", nil, roTok),
+			"non-full viewer child list (empty scope, exp on)")
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+roChild+"/secrets?scope=all", nil, roTok),
+			"non-full viewer child list (?scope=all, exp on)")
+		assertDenied403(t, doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			"/api/v1/agents/"+roChild+"/secrets?scope=agent", nil, roTok),
+			"non-full viewer child list (?scope=agent, exp on)")
+
+		// Direct materialRuntimePrecheck and materialRuntimePrecheckOpts still
+		// return 403/membership_required.
+		agent, err := f.Store.GetAgent(context.Background(), child)
+		require.NoError(t, err)
+		ident := newFullAgentIdentity(child, f.ProjectID, agent.Ancestry, []AgentTokenScope{ScopeProjectSecretRead})
+		_, reason, status := f.Server.materialRuntimePrecheck(context.Background(), ident)
+		assert.Equal(t, http.StatusForbidden, status)
+		assert.Equal(t, ReasonMembershipRequired, reason)
+		_, reason, status = f.Server.materialRuntimePrecheckOpts(context.Background(), ident, false)
+		assert.Equal(t, http.StatusForbidden, status)
+		assert.Equal(t, ReasonMembershipRequired, reason)
+
+		// Precheck with allowViewerRoot=true sets RootViewerOnly=true, and
+		// selectRuntimeMaterial refuses both ScopeProject and ScopeAgent as
+		// defense in depth without reading backend metadata.
+		facts, reason, status := f.Server.materialRuntimePrecheckAllowViewer(context.Background(), ident, true, true)
+		require.Equal(t, 0, status, "allowViewerRoot precheck reason=%s", reason)
+		require.True(t, facts.RootViewerOnly, "viewer-only admission must set TargetFacts.RootViewerOnly")
+
+		spy := newSDScopeCountingBackend(f.Server.secretBackend)
+		f.Server.SetSecretBackend(spy)
+
+		var cache projectDecisionCache
+		item, sv, _, _ := f.Server.selectRuntimeMaterial(context.Background(), ident, facts, store.ScopeProject, projSecretKey, &cache)
+		assert.False(t, item.Allowed, "selectRuntimeMaterial must refuse ScopeProject when RootViewerOnly is true")
+		assert.False(t, item.Selected)
+		assert.Nil(t, sv)
+		assert.Equal(t, ReasonMembershipRequired, item.Reason)
+		assert.Equal(t, 0, spy.getMetaByScope[store.ScopeProject], "selectRuntimeMaterial must not read project metadata when RootViewerOnly")
+
+		agentItem, agentSV, _, _ := f.Server.selectRuntimeMaterial(context.Background(), ident, facts, store.ScopeAgent, agentSecretKey, &cache)
+		assert.False(t, agentItem.Allowed, "selectRuntimeMaterial must refuse ScopeAgent when RootViewerOnly is true")
+		assert.False(t, agentItem.Selected)
+		assert.Nil(t, agentSV)
+		assert.Equal(t, ReasonMembershipRequired, agentItem.Reason)
+		assert.Equal(t, 0, spy.getMetaByScope[store.ScopeAgent], "selectRuntimeMaterial must not read agent metadata when RootViewerOnly")
+	})
+
+	t.Run("negative ceiling and principal states under viewer-only root", func(t *testing.T) {
+		type negBuilt struct {
+			agentID string
+			token   string
+			// wantStatus overrides the expected HTTP status on runtime get/list
+			// when a request fails before per-item evaluation (403 precheck or
+			// 401 token middleware for held agents). 0 means per-item refusal
+			// (404 on get, 200 empty on list).
+			wantStatus int
+		}
+		negCases := []struct {
+			name  string
+			build func(t *testing.T, f *sdFixture) negBuilt
+		}{
+			{
+				name: "suspended viewer root",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, _ := f.progeny(t, "vrn-susp", true)
+					setUserStatus(t, f.Store, f.UserID, store.UserStatusSuspended)
+					return negBuilt{child, tok, http.StatusForbidden}
+				},
+			},
+			{
+				name: "removed viewer root (no project binding)",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, _ := f.progeny(t, "vrn-rem", true)
+					removeUserProjectBindings(t, f.Store, f.UserID, f.ProjectID)
+					agent, err := f.Store.GetAgent(context.Background(), child)
+					require.NoError(t, err)
+					ident := newFullAgentIdentity(child, f.ProjectID, agent.Ancestry, []AgentTokenScope{ScopeProjectSecretRead})
+					_, reason, status := f.Server.materialRuntimePrecheckAllowViewer(context.Background(), ident, true, true)
+					assert.Equal(t, http.StatusForbidden, status, "removed root must fail at check 5 even with allowViewerRoot")
+					assert.Equal(t, ReasonMembershipRequired, reason, "removed root must be refused with membership_required")
+					return negBuilt{child, tok, http.StatusForbidden}
+				},
+			},
+			{
+				name: "caged test admin with project-viewer",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					ctx := context.Background()
+					cagedID := tid("vrn-caged")
+					exp := time.Now().Add(time.Hour)
+					issuedBy := f.UserID
+					issuanceID := tid("vrn-caged-iss")
+					hubAdminRD, err := f.Store.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
+					require.NoError(t, err)
+					_, err = f.Store.CreateTestAdminUser(ctx, &store.User{
+						ID: cagedID, Email: cagedID + "@" + store.TestHubAdminEmailDomain, DisplayName: "caged",
+						Role: store.TestAdminRole(store.UserKindTestHubAdmin),
+						Kind: store.UserKindTestHubAdmin, Status: store.UserStatusActive,
+						ExpiresAt: &exp, IssuedBy: &issuedBy, IssuanceID: &issuanceID,
+					}, hubAdminRD.ID)
+					require.NoError(t, err)
+					grantProjectRole(t, f.Store, cagedID, f.ProjectID, store.ProjectRoleViewer)
+					sdShareOwnerSecrets(t, f.Server.secretBackend, cagedID)
+					f.Server.testIdentities.enabled = true
+					setAuthzTestAdminTier(f.Server.authzService, func(string) bool { return true }, time.Now)
+					parent, _ := f.agent(t, "vrn-caged-p", []string{cagedID})
+					f.recordEdge(t, store.DelegationPrincipalUser, cagedID, parent, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+					child, tok := f.agent(t, "vrn-caged-c", []string{cagedID, parent})
+					f.recordEdge(t, store.DelegationPrincipalAgent, parent, child, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+					agent, err := f.Store.GetAgent(ctx, child)
+					require.NoError(t, err)
+					ident := newFullAgentIdentity(child, f.ProjectID, agent.Ancestry, []AgentTokenScope{ScopeProjectSecretRead})
+					_, reason, status := f.Server.materialRuntimePrecheckAllowViewer(ctx, ident, true, true)
+					assert.Equal(t, http.StatusForbidden, status, "caged test admin with project-viewer must stay 403 at precheck")
+					assert.Equal(t, ReasonMembershipRequired, reason, "caged test admin refusal reason must stay membership_required")
+					return negBuilt{child, tok, http.StatusForbidden}
+				},
+			},
+			{
+				name: "non-full child role (no project:secret:read scope)",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, _, _ := f.progeny(t, "vrn-nofull", true)
+					setAgentRole(t, f.Store, child, AgentRoleReadOnly)
+					agent, err := f.Store.GetAgent(context.Background(), child)
+					require.NoError(t, err)
+					tok := mintRecordedMaterialToken(t, f.Server, f.Store, child, f.ProjectID,
+						ScopesForRole(AgentRoleReadOnly), agent.Ancestry)
+					return negBuilt{child, tok, http.StatusForbidden}
+				},
+			},
+			{
+				name: "intermediate parent read-only (no secret.use)",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, parent := f.progeny(t, "vrn-parent-ro", true)
+					setAgentRole(t, f.Store, parent, AgentRoleReadOnly)
+					return negBuilt{child, tok, 0}
+				},
+			},
+			{
+				name: "intermediate parent held",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, parent := f.progeny(t, "vrn-parent-held", true)
+					holdAgent(t, f.Store, parent, f.ProjectID, f.UserID)
+					return negBuilt{child, tok, 0}
+				},
+			},
+			{
+				name: "held child agent",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, _ := f.progeny(t, "vrn-child-held", true)
+					holdAgent(t, f.Store, child, f.ProjectID, f.UserID)
+					agent, err := f.Store.GetAgent(context.Background(), child)
+					require.NoError(t, err)
+					ident := newFullAgentIdentity(child, f.ProjectID, agent.Ancestry, []AgentTokenScope{ScopeProjectSecretRead})
+					_, reason, status := f.Server.materialRuntimePrecheckAllowViewer(context.Background(), ident, true, true)
+					assert.Equal(t, http.StatusForbidden, status, "held child must be refused at precheck even with allowViewerRoot")
+					assert.Equal(t, ReasonDeniedByPolicy, reason)
+					return negBuilt{child, tok, http.StatusUnauthorized}
+				},
+			},
+			{
+				name: "viewer root constrained from secret.use (S4b)",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, _ := f.progeny(t, "vrn-s4b", true)
+					constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+					return negBuilt{child, tok, 0}
+				},
+			},
+			{
+				name: "child agent constrained from secret.use (step 7c)",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, _ := f.progeny(t, "vrn-7c", true)
+					constrainAllBut(t, f.Store, "agent", child, secretUsePermission)
+					return negBuilt{child, tok, 0}
+				},
+			},
+			{
+				name: "unrecorded provenance hop",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, parent := f.progeny(t, "vrn-unrec", false)
+					createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parent,
+						store.DelegationPrincipalAgent, child,
+						store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
+					return negBuilt{child, tok, 0}
+				},
+			},
+			{
+				name: "bounded edge without secret.use",
+				build: func(t *testing.T, f *sdFixture) negBuilt {
+					child, tok, parent := f.progeny(t, "vrn-bounded", false)
+					f.recordEdge(t, store.DelegationPrincipalAgent, parent, child,
+						boundedCeiling("project.read", permissionProjectSecretRead), nil)
+					return negBuilt{child, tok, 0}
+				},
+			},
+		}
+
+		for i, tc := range negCases {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newSDFixtureWithRole(t, "sd-vrn-"+string(rune('a'+i)), store.ProjectRoleViewer)
+				b := tc.build(t, f)
+
+				assert.Equal(t, sdDelivery{}, sdStartDelivery(t, f.disp, f.Store, b.agentID),
+					"start/restart delivery must refuse")
+				recGet := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+					"/api/v1/agents/"+b.agentID+"/secrets/"+sdAlwaysKey+"?scope=user", nil, b.token)
+				switch b.wantStatus {
+				case http.StatusForbidden:
+					assertDenied403(t, recGet, "runtime get ?scope=user")
+				case http.StatusUnauthorized:
+					assert.Equal(t, http.StatusUnauthorized, recGet.Code, "runtime get ?scope=user must be 401")
+				default:
+					assert.Equal(t, http.StatusNotFound, recGet.Code, "runtime get ?scope=user must be 404, got %d (%s)", recGet.Code, recGet.Body.String())
+				}
+				assert.False(t, f.read(t, b.agentID, b.token, sdAsNeededKey),
+					"runtime read of %s must refuse", sdAsNeededKey)
+				assert.Empty(t, f.listUserSecretKeys(t, b.agentID, b.token),
+					"runtime list ?scope=user must be empty")
+				// Multi-scope list must also return empty or the expected refusal status.
+				recList := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+					"/api/v1/agents/"+b.agentID+"/secrets", nil, b.token)
+				switch b.wantStatus {
+				case http.StatusForbidden:
+					assertDenied403(t, recList, "runtime list (no scope)")
+				case http.StatusUnauthorized:
+					assert.Equal(t, http.StatusUnauthorized, recList.Code, "runtime list (no scope) must be 401")
+				default:
+					require.Equal(t, http.StatusOK, recList.Code)
+					var lr AgentListSecretsResponse
+					require.NoError(t, json.Unmarshal(recList.Body.Bytes(), &lr))
+					assert.Empty(t, lr.Secrets, "multi-scope list must be empty")
+				}
+			})
+		}
+	})
 }

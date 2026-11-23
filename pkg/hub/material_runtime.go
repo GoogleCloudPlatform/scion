@@ -52,8 +52,18 @@ func (s *Server) materialRuntimePrecheck(ctx context.Context, ident AgentIdentit
 // materialRuntimePrecheckOpts is materialRuntimePrecheck with an option to
 // defer check 4 (ScopeProjectSecretRead) to project/user scope branches so
 // an agent can read its own agent-scoped secrets without holding
-// project:secret:read (ptone/scion#8742).
+// project:secret:read (ptone/scion#8742). Viewer-only roots remain refused.
 func (s *Server) materialRuntimePrecheckOpts(ctx context.Context, ident AgentIdentity, requireProjectReadScope bool) (*TargetFacts, string, int) {
+	return s.materialRuntimePrecheckAllowViewer(ctx, ident, requireProjectReadScope, false)
+}
+
+// materialRuntimePrecheckAllowViewer is materialRuntimePrecheckOpts with an
+// option to admit a root user whose only project membership is the built-in
+// project-viewer role, for user-scope allowProgeny secret reads and lists only
+// (ptone/scion#8875). When admission succeeds solely via project-viewer, the
+// returned TargetFacts has RootViewerOnly set so non-user scopes (project and
+// agent) still refuse.
+func (s *Server) materialRuntimePrecheckAllowViewer(ctx context.Context, ident AgentIdentity, requireProjectReadScope, allowViewerRoot bool) (*TargetFacts, string, int) {
 	if ident == nil {
 		return nil, ReasonTargetUnresolved, http.StatusForbidden
 	}
@@ -138,8 +148,13 @@ func (s *Server) materialRuntimePrecheckOpts(ctx context.Context, ident AgentIde
 	if m.Err != nil {
 		return nil, ReasonBackendError, http.StatusInternalServerError
 	}
-	// The project-viewer role alone does not admit (ptone/scion#5519).
+	// The project-viewer role alone does not admit project-scope material
+	// (ptone/scion#5519). For user-scope allowProgeny reads and lists, a
+	// viewer-only root is admitted when allowViewerRoot is true and
+	// TargetFacts.RootViewerOnly records that non-user scopes must still refuse
+	// (ptone/scion#8875).
 	admitted := m.AdmitsBeyondViewer()
+	viewerOnly := false
 	if !admitted {
 		if s.authzService == nil {
 			return nil, ReasonBackendError, http.StatusInternalServerError
@@ -157,6 +172,16 @@ func (s *Server) materialRuntimePrecheckOpts(ctx context.Context, ident AgentIde
 			return nil, ReasonBackendError, http.StatusInternalServerError
 		}
 		admitted = ok
+	}
+	if !admitted && allowViewerRoot && m.IsMember && m.ViewerOnly {
+		caged, err := s.authzService.principalIsCagedTestAdmin(ctx, root.ID)
+		if err != nil {
+			return nil, ReasonBackendError, http.StatusInternalServerError
+		}
+		if !caged {
+			admitted = true
+			viewerOnly = true
+		}
 	}
 	if !admitted {
 		return nil, ReasonMembershipRequired, http.StatusForbidden
@@ -185,11 +210,12 @@ func (s *Server) materialRuntimePrecheckOpts(ctx context.Context, ident AgentIde
 	}
 
 	return &TargetFacts{
-		Agent:     rec,
-		ProjectID: rec.ProjectID,
-		Ancestry:  rec.Ancestry,
-		Root:      root,
-		Project:   project,
+		Agent:          rec,
+		ProjectID:      rec.ProjectID,
+		Ancestry:       rec.Ancestry,
+		Root:           root,
+		Project:        project,
+		RootViewerOnly: viewerOnly,
 	}, ReasonAllowed, 0
 }
 
