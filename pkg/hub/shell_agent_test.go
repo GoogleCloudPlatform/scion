@@ -1578,7 +1578,7 @@ func TestShellAgentLogs_RequireAttach(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, owner))
 	require.NoError(t, s.CreateUser(ctx, otherMember))
 	for _, u := range []*store.User{owner, otherMember} {
-		require.NoError(t, srv.EnsureProjectRoleBinding(ctx, project.ID, store.PrincipalTypeUser, u.ID, store.ProjectRoleMember))
+		bindProjectRole(t, s, project.ID, u.ID, "project-member")
 	}
 
 	shellAgent := &store.Agent{
@@ -1627,7 +1627,7 @@ func TestShellAgentLogs_RequireAttach(t *testing.T) {
 		require.NoError(t, s.CreateAgent(ctx, a))
 	}
 	agentToken := srv.generateRecordedAgentToken(t, callerAgent.ID, project.ID,
-		[]AgentTokenScope{ScopeAgentRead, ScopeAgentLifecycle}, nil)
+		[]AgentTokenScope{ScopeProjectRead, ScopeAgentLifecycle}, nil)
 
 	routesFor := func(agent *store.Agent) []struct {
 		name string
