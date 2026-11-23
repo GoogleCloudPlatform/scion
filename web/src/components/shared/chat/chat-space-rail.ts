@@ -2177,8 +2177,8 @@ export class ScionChatSpaceRail extends LitElement {
       const rollupIsOlder = this._spacesStartedAt < pending.at;
       if (listIsOlder && rollupIsOlder) {
         // Both predate the change: apply it the normal way, row and badge.
-        if (pending.kind === 'read') this.markThreadRead(thread.id);
-        else this.markThreadUnread(thread.id);
+        if (pending.kind === 'read') this.markThreadRead(thread.id, projectId);
+        else this.markThreadUnread(thread.id, projectId);
       } else if (listIsOlder) {
         // The badge already reflects it; only the row is behind. Where
         // unread is not tracked there is no unread dot to restore, as in
@@ -3714,14 +3714,12 @@ export class ScionChatSpaceRail extends LitElement {
     this.groupContextMenuTarget = null;
   }
 
-  // _projectId is kept for the call site's symmetry with the other context-menu
-  // actions; markThreadRead finds the thread's space itself.
-  private async handleMarkRead(thread: ChatSpaceThread, _projectId: string): Promise<void> {
+  private async handleMarkRead(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     // The server requires the watermark to move to a specific message. Without
     // an ID it rejects the request, and the dot comes back on the next reload.
     if (!thread.lastMessageId) {
-      this.markThreadRead(thread.id);
+      this.markThreadRead(thread.id, projectId);
       return;
     }
     try {
@@ -3738,10 +3736,42 @@ export class ScionChatSpaceRail extends LitElement {
       // uses. The badge arithmetic lives there and nowhere else: doing it
       // inline here is how "Mark as read" on an already-read thread came to
       // decrement the badge on every click (#1029).
-      this.markThreadRead(thread.id);
+      this.markThreadRead(thread.id, projectId);
     } catch {
       // Non-critical
     }
+  }
+
+  /** Lazily rebuilt `threadId -> projectId` index for `this.threadsBySpace`. */
+  private _threadProjectIndex = new Map<string, string>();
+  private _threadProjectIndexSource: Map<string, ChatSpaceThread[]> | null = null;
+
+  private getThreadProjectIndex(): Map<string, string> {
+    if (this._threadProjectIndexSource !== this.threadsBySpace) {
+      const index = new Map<string, string>();
+      for (const [projectId, threads] of this.threadsBySpace) {
+        for (const t of threads) {
+          index.set(t.id, projectId);
+        }
+      }
+      this._threadProjectIndex = index;
+      this._threadProjectIndexSource = this.threadsBySpace;
+    }
+    return this._threadProjectIndex;
+  }
+
+  /**
+   * Look up a loaded thread directly in `projectId` when the caller knows it,
+   * or via the `threadId -> projectId` index otherwise.
+   */
+  private findLoadedThread(
+    threadId: string,
+    projectId?: string
+  ): { projectId: string; thread: ChatSpaceThread } | null {
+    const resolvedProjectId = projectId ?? this.getThreadProjectIndex().get(threadId);
+    if (!resolvedProjectId) return null;
+    const thread = this.threadsBySpace.get(resolvedProjectId)?.find((t) => t.id === threadId);
+    return thread ? { projectId: resolvedProjectId, thread } : null;
   }
 
   /**
@@ -3754,15 +3784,15 @@ export class ScionChatSpaceRail extends LitElement {
    * thread only leaves it if it was in it: an already-read thread and a muted
    * one both take nothing off, or they would eat another thread's unread.
    */
-  markThreadRead(threadId: string): void {
-    for (const [projectId, threads] of this.threadsBySpace) {
-      const target = threads.find((t) => t.id === threadId);
-      if (!target || (!target.hasUnread && !target.hasUnreadMention)) continue;
-      this.updateThread(projectId, threadId, { hasUnread: false, hasUnreadMention: false });
-      if (!target.muted) this.adjustSpaceUnread(projectId, -1);
+  markThreadRead(threadId: string, projectId?: string): void {
+    const found = this.findLoadedThread(threadId, projectId);
+    if (found) {
+      if (!found.thread.hasUnread && !found.thread.hasUnreadMention) return;
+      this.updateThread(found.projectId, threadId, { hasUnread: false, hasUnreadMention: false });
+      if (!found.thread.muted) this.adjustSpaceUnread(found.projectId, -1);
       return;
     }
-    this.refreshRollupForUnloadedThread(threadId, 'read');
+    this.refreshRollupForUnloadedThread(threadId, 'read', projectId);
   }
 
   /**
@@ -3771,15 +3801,22 @@ export class ScionChatSpaceRail extends LitElement {
    * cannot be adjusted locally. While lists are loading, the change waits
    * for the one holding the thread (see `applyPendingReadState`); with none
    * loading, the rollup is refreshed from the server (reloads coalesce).
-   * With every list loaded, the thread is in no space the rail shows and
-   * there is nothing to fix.
+   * With the target space (or every space) already loaded, the thread is in
+   * no space the rail shows and there is nothing to fix.
    */
-  private refreshRollupForUnloadedThread(threadId: string, kind: 'read' | 'unread'): void {
-    for (const threads of this.threadsBySpace.values()) {
-      if (threads.some((t) => t.id === threadId)) return;
+  private refreshRollupForUnloadedThread(
+    threadId: string,
+    kind: 'read' | 'unread',
+    projectId?: string
+  ): void {
+    if (projectId !== undefined) {
+      if (this.threadsBySpace.has(projectId)) return;
+    } else if (this.spaces.every((s) => this.threadsBySpace.has(s.projectId))) {
+      return;
     }
-    if (this.spaces.every((s) => this.threadsBySpace.has(s.projectId))) return;
-    if (this.loadingThreads.size > 0) {
+    const waitingOnList =
+      projectId !== undefined ? this.loadingThreads.has(projectId) : this.loadingThreads.size > 0;
+    if (waitingOnList) {
       // The list holding it is probably on its way (the thread just opened);
       // apply the change when it lands instead of reloading the whole rail.
       this._pendingReadState.set(threadId, { kind, at: chatLoadClock() });
@@ -3808,7 +3845,7 @@ export class ScionChatSpaceRail extends LitElement {
    * render guard for an already-unread or empty thread, but this also
    * no-ops defensively for the same reasons handleMarkRead does.
    */
-  private async handleMarkUnread(thread: ChatSpaceThread, _projectId: string): Promise<void> {
+  private async handleMarkUnread(thread: ChatSpaceThread, projectId: string): Promise<void> {
     this.contextMenuTarget = null;
     if (thread.hasUnread || !thread.lastMessageId) return;
     try {
@@ -3817,7 +3854,7 @@ export class ScionChatSpaceRail extends LitElement {
         { method: 'POST' }
       );
       if (!res.ok) return;
-      this.markThreadUnread(thread.id);
+      this.markThreadUnread(thread.id, projectId);
       // Same-tab suppression must not wait on the SSE round trip: if this
       // thread is the one currently open, the page needs to know right now,
       // not once its own echo comes back.
@@ -3840,18 +3877,18 @@ export class ScionChatSpaceRail extends LitElement {
    * tabs reports the same change over the read-state SSE event (see
    * chat.ts's _handleOwnReadStateSSE).
    */
-  markThreadUnread(threadId: string): void {
-    for (const [projectId, threads] of this.threadsBySpace) {
-      const target = threads.find((t) => t.id === threadId);
-      if (!target || target.hasUnread) continue;
+  markThreadUnread(threadId: string, projectId?: string): void {
+    const found = this.findLoadedThread(threadId, projectId);
+    if (found) {
+      if (found.thread.hasUnread) return;
       // Where unread is not tracked the server reports no unread, and the
       // badge leaves the space out: a local dot would disagree with both.
-      if (!this.isUnreadTracked(projectId)) return;
-      this.updateThread(projectId, threadId, { hasUnread: true });
-      if (!target.muted) this.adjustSpaceUnread(projectId, 1);
+      if (!this.isUnreadTracked(found.projectId)) return;
+      this.updateThread(found.projectId, threadId, { hasUnread: true });
+      if (!found.thread.muted) this.adjustSpaceUnread(found.projectId, 1);
       return;
     }
-    this.refreshRollupForUnloadedThread(threadId, 'unread');
+    this.refreshRollupForUnloadedThread(threadId, 'unread', projectId);
   }
 
   /**
