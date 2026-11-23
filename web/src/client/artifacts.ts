@@ -1090,10 +1090,19 @@ export async function deleteReviewDraft(
 export function safeReviewDownloadName(entryPath: string, base: number): string {
   const fallback = `review-of-v${base}.md`;
   if (!entryPath) return fallback;
-  // Reject control characters anywhere in the path or trailing separators.
+  // Reject control characters anywhere in the path, absolute/volume/UNC paths,
+  // or trailing separators.
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001f\u007f]/.test(entryPath)) return fallback;
-  if (entryPath.endsWith('/') || entryPath.endsWith('\\')) return fallback;
+  if (
+    entryPath.startsWith('/') ||
+    entryPath.startsWith('\\') ||
+    /^[A-Za-z]:/.test(entryPath) ||
+    entryPath.endsWith('/') ||
+    entryPath.endsWith('\\')
+  ) {
+    return fallback;
+  }
   const parts = entryPath.split(/[/\\]/);
   const last = parts[parts.length - 1] ?? '';
   if (!last || last === '.' || last === '..' || last.includes(':') || /^[A-Za-z]:/.test(last)) {

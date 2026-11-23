@@ -100,6 +100,9 @@ interface DraftServerState {
   draft: ReviewDraft | null;
   currentSeq: number;
   requests: Array<{ method: string; url: string; body?: string }>;
+  canPublish?: boolean;
+  canReview?: boolean;
+  fileText?: string;
   nextPutResponse?: () => Response;
   holdPut?: (res: Response) => Promise<Response>;
   nextDeleteResponse?: () => Response;
@@ -108,6 +111,8 @@ interface DraftServerState {
 
 function mockHub(state: DraftServerState): void {
   const meta = artifact(state.currentSeq);
+  if (state.canPublish !== undefined) meta.canPublish = state.canPublish;
+  if (state.canReview !== undefined) meta.canReview = state.canReview;
   vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url =
       typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -134,6 +139,7 @@ function mockHub(state: DraftServerState): void {
           entry: string;
           body: string;
           note: string;
+          carried?: { base: number; body: string } | null;
         };
         const curRev = state.draft?.rev ?? 0;
         if (parsed.rev !== curRev) {
@@ -161,7 +167,7 @@ function mockHub(state: DraftServerState): void {
           entry: parsed.entry,
           body: parsed.body,
           note: parsed.note,
-          carried: null,
+          carried: parsed.carried ?? null,
           savedAt,
           createdAt: state.draft?.createdAt ?? savedAt,
         };
@@ -206,11 +212,16 @@ function mockHub(state: DraftServerState): void {
       );
     }
     if (url.includes('/files/plan.md')) {
-      return reply(new Response(BASE_TEXT, { status: 200 }));
+      return reply(new Response(state.fileText ?? BASE_TEXT, { status: 200 }));
     }
     if (url.includes('/versions')) {
+      const versions = Array.from({ length: state.currentSeq }, (_, i) => ({
+        ...meta.version!,
+        seq: state.currentSeq - i,
+        ref: `art:${ARTIFACT_ID}@${state.currentSeq - i}`,
+      }));
       return reply(
-        new Response(JSON.stringify({ versions: [meta.version], discarded: [] }), {
+        new Response(JSON.stringify({ versions, discarded: [] }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         })
@@ -325,7 +336,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     mockHub(state);
     const el = await mountPage();
 
-    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
     await settle(el);
 
     const editor = el.shadowRoot!.querySelector(
@@ -368,13 +379,14 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     mockHub(state);
     const el = await mountPage();
 
-    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
     await settle(el);
 
     const dialog = el.shadowRoot!.querySelector('sl-dialog.stale-draft-dialog');
     expect(dialog).not.toBeNull();
-    expect(dialog?.textContent).toContain('version 1');
-    expect(dialog?.textContent).toContain('version 2');
+    const dialogText = (dialog?.textContent ?? '').replace(/\s+/g, ' ');
+    expect(dialogText).toContain('version 1');
+    expect(dialogText).toContain('version 2');
 
     // Discard deletes the stale draft and enters fresh Review mode on v2.
     dialog!.querySelector<HTMLElement>('sl-button.stale-draft-discard')!.click();
@@ -418,7 +430,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
 
     // Re-enter, make another unsaved change, and choose Discard changes:
     // reverts without sending DELETE to the hub.
-    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
     await settle(el);
     el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
       new CustomEvent('content-changed', { detail: { content: 'Unsaved extra text' } })
@@ -505,7 +517,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     mockHub(state);
     const el = await mountPage();
 
-    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
     await settle(el);
 
     // Make an unacknowledged edit that still passes client-side marksOnly check
@@ -743,7 +755,7 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     mockHub(state);
     const el = await mountPage();
 
-    findButton(el, '.header-actions sl-button', 'Review')!.click();
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
     await settle(el);
 
     const status = el.shadowRoot!.querySelector('.g-toolbar .draft-status');
@@ -751,5 +763,324 @@ describe('ScionPageArtifactDetail review drafts (Phase 2)', () => {
     expect(status?.textContent).toContain('Draft saved');
     expect(findButton(el, '.edit-footer sl-button', 'Save Draft')).toBeDefined();
     expect(findButton(el, '.edit-footer sl-button', 'Submit Review')).toBeDefined();
+  });
+});
+
+describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    resetServerFlagStateForTests();
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+    };
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
+  });
+
+  it('shows private Draft badge in History, version menu, and next to Resume draft without auto-entering Review mode (O1, A5)', async () => {
+    const state: DraftServerState = {
+      draft: {
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: 'Draft note',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 2,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    // Parallel GET /review-draft happened on page load.
+    expect(
+      state.requests.filter((r) => r.method === 'GET' && r.url.includes('/review-draft'))
+    ).toHaveLength(1);
+
+    // O1: page load does NOT auto-enter Review mode.
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).toBeNull();
+
+    // Review button reads "Resume draft" with a Draft badge next to it.
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeDefined();
+    const headerBadge = el.shadowRoot!.querySelector('.header-actions .review-draft-badge');
+    expect(headerBadge?.textContent?.trim()).toBe('Draft');
+
+    // History table shows the Draft chip only on the draft's base row (v1), not v2.
+    const rows = Array.from(
+      el.shadowRoot!.querySelectorAll('sl-tab-panel[name="history"] tbody tr')
+    );
+    expect(rows).toHaveLength(2);
+    const v2Row = rows.find((r) => r.querySelector('strong')?.textContent === 'v2')!;
+    const v1Row = rows.find((r) => r.querySelector('strong')?.textContent === 'v1')!;
+    expect(v2Row.querySelector('.draft-chip-badge')).toBeNull();
+    expect(v1Row.querySelector('.draft-chip-badge')?.textContent?.trim()).toBe('Draft');
+    const chipTooltip = v1Row.querySelector('.draft-chip-trigger sl-tooltip');
+    expect(chipTooltip?.getAttribute('content')).toMatch(
+      /Your saved review draft, saved \d{2}:\d{2}/
+    );
+    expect(v1Row.querySelector('.draft-chip-resume')?.textContent).toContain('Resume');
+    expect(v1Row.querySelector('.draft-chip-discard')?.textContent).toContain('Discard draft');
+
+    // Header version menu shows Draft badge on v1 and Resume/Discard menu items.
+    const menuItems = Array.from(el.shadowRoot!.querySelectorAll('.version-menu sl-menu-item'));
+    const v1MenuItem = menuItems.find((m) => m.getAttribute('value') === '1')!;
+    const v2MenuItem = menuItems.find((m) => m.getAttribute('value') === '2')!;
+    expect(v1MenuItem.querySelector('.draft-chip-badge')?.textContent?.trim()).toBe('Draft');
+    expect(v2MenuItem.querySelector('.draft-chip-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.version-menu-draft-resume')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('.version-menu-draft-discard')).not.toBeNull();
+  });
+
+  it('hides all Draft badges when GET /review-draft returns null (non-author) or caller has no review access', async () => {
+    const state: DraftServerState = { draft: null, currentSeq: 1, requests: [] };
+    mockHub(state);
+    const el = await mountPage();
+
+    expect(findButton(el, '.header-actions sl-button', 'Review')).toBeDefined();
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.draft-chip-badge')).toBeNull();
+
+    // Caller without review access makes no GET /review-draft request at all.
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    const noAccess: DraftServerState = {
+      draft: null,
+      currentSeq: 1,
+      requests: [],
+      canPublish: false,
+      canReview: false,
+    };
+    mockHub(noAccess);
+    await mountPage();
+    expect(noAccess.requests.some((r) => r.url.includes('/review-draft'))).toBe(false);
+  });
+
+  it('shows no Draft badge and makes no GET /review-draft when the experiment is off (A6)', async () => {
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: false,
+    };
+    const state: DraftServerState = {
+      draft: {
+        rev: 1,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    expect(state.requests.some((r) => r.url.includes('/review-draft'))).toBe(false);
+    expect(findButton(el, '.header-actions sl-button', 'Review')).toBeDefined();
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.draft-chip-badge')).toBeNull();
+  });
+
+  it('resumes byte-exact from the History chip menu with no replace prompt and shows fail-closed notice in graphical view', async () => {
+    window.__SCION_FEATURES__ = {
+      [ARTIFACTS_FLAG]: true,
+      [ARTIFACT_REVIEW_EDITOR_FLAG]: true,
+      [ARTIFACTS_REVIEW_DRAFTS_FLAG]: true,
+    };
+    const state: DraftServerState = {
+      draft: {
+        rev: 4,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: 'Byte-exact note',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    // Select "Resume" on the History row draft chip menu.
+    const chipMenu = el.shadowRoot!.querySelector('.draft-chip-menu sl-menu')!;
+    chipMenu.dispatchEvent(new CustomEvent('sl-select', { detail: { item: { value: 'resume' } } }));
+    await settle(el);
+
+    // No replace confirmation dialog; editor opens with byte-exact body and note.
+    expect(el.shadowRoot!.querySelector('sl-dialog')).toBeNull();
+    const internals = el as unknown as {
+      reviewing: boolean;
+      reviewText: string;
+      reviewNote: string;
+      draftController?: { currentRev: number };
+    };
+    expect(internals.reviewing).toBe(true);
+    expect(internals.reviewText).toBe(MARKED_TEXT);
+    expect(internals.reviewNote).toBe('Byte-exact note');
+    expect(internals.draftController?.currentRev).toBe(4);
+
+    // Fail-closed marks notice in graphical view (v3 §7.1).
+    const hint = el.shadowRoot!.querySelector('.hint-strip');
+    expect(hint?.textContent).toContain('read-only in the graphical view');
+  });
+
+  it('discards a draft from the History chip with confirmation and DELETE ?rev=', async () => {
+    const state: DraftServerState = {
+      draft: {
+        rev: 5,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    const chipMenu = el.shadowRoot!.querySelector('.draft-chip-menu sl-menu')!;
+    chipMenu.dispatchEvent(
+      new CustomEvent('sl-select', { detail: { item: { value: 'discard' } } })
+    );
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-discard-dialog');
+    expect(dialog).not.toBeNull();
+    expect((dialog?.textContent ?? '').replace(/\s+/g, ' ')).toContain("can't be undone");
+
+    // Cancel keeps the draft.
+    dialog!.querySelector<HTMLElement>('sl-button.draft-discard-cancel')!.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-discard-dialog')).toBeNull();
+    expect(state.draft?.rev).toBe(5);
+
+    // Re-open and confirm discard.
+    chipMenu.dispatchEvent(
+      new CustomEvent('sl-select', { detail: { item: { value: 'discard' } } })
+    );
+    await el.updateComplete;
+    el.shadowRoot!.querySelector<HTMLElement>('sl-button.draft-discard-confirm')!.click();
+    await settle(el);
+
+    const delReq = state.requests.find(
+      (r) => r.method === 'DELETE' && r.url.includes('/review-draft')
+    );
+    expect(delReq?.url).toContain('?rev=5');
+    expect(state.draft).toBeNull();
+    expect(el.shadowRoot!.querySelector('.draft-chip-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')).toBeNull();
+    expect(findButton(el, '.header-actions sl-button', 'Review')).toBeDefined();
+  });
+
+  it('moves a stale-base draft to the current version with read-only carried text, preserving v1 until edited (v3 §7.4)', async () => {
+    const V2_TEXT = 'We ship in Q3 with updated milestones.\n';
+    const state: DraftServerState = {
+      draft: {
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: 'v1 note',
+        carried: null,
+        savedAt: '2026-11-21T17:00:00Z',
+        createdAt: '2026-11-21T16:50:00Z',
+      },
+      currentSeq: 2,
+      fileText: V2_TEXT,
+      requests: [],
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    // Open stale-draft dialog via Resume draft.
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.stale-draft-dialog');
+    expect(dialog).not.toBeNull();
+    const moveBtn = dialog!.querySelector<HTMLElement>('sl-button.stale-draft-move')!;
+    expect(moveBtn.textContent).toContain('Move my review to v2');
+
+    // Click Move my review to v2.
+    moveBtn.click();
+    await settle(el);
+
+    // Editor starts on v2 text, carried panel shows v1 draft read-only.
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & { content: string };
+    expect(editor.content).toBe(V2_TEXT);
+    const carriedPanel = el.shadowRoot!.querySelector('sl-details.carried-review');
+    expect(carriedPanel).not.toBeNull();
+    expect(carriedPanel?.getAttribute('summary')).toContain('v1');
+    expect(carriedPanel?.querySelector('pre')?.textContent).toBe(MARKED_TEXT);
+
+    // Before typing: NO PUT sent; abandoning leaves the v1 draft untouched on the hub.
+    expect(state.requests.some((r) => r.method === 'PUT' && r.url.includes('/review-draft'))).toBe(
+      false
+    );
+    findButton(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await settle(el);
+    expect(state.draft?.base).toBe(1);
+    expect(state.draft?.body).toBe(MARKED_TEXT);
+
+    // Move again, now type a mark on v2 and Save Draft.
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+    el.shadowRoot!.querySelector<HTMLElement>('sl-button.stale-draft-move')!.click();
+    await settle(el);
+
+    const v2Marked = 'We ship in {~~Q3~>Q4~~} with updated milestones.\n';
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: v2Marked } })
+    );
+    await el.updateComplete;
+    findButton(el, '.edit-footer sl-button', 'Save Draft')!.click();
+    await settle(el);
+
+    expect(state.draft?.rev).toBe(3);
+    expect(state.draft?.base).toBe(2);
+    expect(state.draft?.body).toBe(v2Marked);
+    expect(state.draft?.carried).toEqual({ base: 1, body: MARKED_TEXT });
+
+    // Close and resume the moved draft: carried text is still shown read-only!
+    findButton(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await settle(el);
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+
+    const resumedCarried = el.shadowRoot!.querySelector('sl-details.carried-review');
+    expect(resumedCarried).not.toBeNull();
+    expect(resumedCarried?.querySelector('pre')?.textContent).toBe(MARKED_TEXT);
+
+    // Dismiss carried text and save: clears carried on the hub.
+    resumedCarried!.querySelector<HTMLElement>('sl-button.carried-dismiss-btn')!.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('sl-details.carried-review')).toBeNull();
+    findButton(el, '.edit-footer sl-button', 'Save Draft')!.click();
+    await settle(el);
+    expect(state.draft?.rev).toBe(4);
+    expect(state.draft?.carried).toBeNull();
   });
 });
