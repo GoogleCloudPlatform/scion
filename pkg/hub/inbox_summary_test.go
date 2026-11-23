@@ -162,6 +162,22 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	assert.Equal(t, InboxStateOK, sessResp.Categories[InboxCategoryWaiting].State)
 	assert.Equal(t, 0, sessResp.Categories[InboxCategoryWaiting].Count)
 	assert.Equal(t, "/agents", sessResp.Categories[InboxCategoryWaiting].Href)
+	assert.NotNil(t, sessResp.Categories[InboxCategoryWaiting].AgentIDs)
+	assert.Empty(t, sessResp.Categories[InboxCategoryWaiting].AgentIDs)
+
+	// Verify raw JSON wire shape: waiting always emits "agentIds": [] when state=="ok"
+	// and count==0, while other categories omit "agentIds".
+	var rawResp struct {
+		Categories map[string]map[string]any `json:"categories"`
+	}
+	require.NoError(t, json.Unmarshal(sessRec.Body.Bytes(), &rawResp))
+	waitingRawAgentIDs, hasWaitingAgentIDs := rawResp.Categories[InboxCategoryWaiting]["agentIds"]
+	assert.True(t, hasWaitingAgentIDs, "waiting category must always include agentIds when state is ok")
+	assert.Equal(t, []any{}, waitingRawAgentIDs)
+	for _, otherKey := range []string{InboxCategoryApprovals, InboxCategoryDecisions, InboxCategoryReviews, InboxCategoryChat} {
+		_, hasAgentIDs := rawResp.Categories[otherKey]["agentIds"]
+		assert.False(t, hasAgentIDs, "category %s must omit agentIds", otherKey)
+	}
 	for _, disabledKey := range []string{InboxCategoryDecisions, InboxCategoryReviews, InboxCategoryChat} {
 		cat := sessResp.Categories[disabledKey]
 		assert.Equal(t, InboxStateDisabled, cat.State, "category %s", disabledKey)
@@ -910,4 +926,122 @@ func TestUserMeInboxSummary_WaitingStatusHints(t *testing.T) {
 	// PublishAgentDeleted sends no inbox hint (§5.2).
 	pub.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)
 	drainNoEvent(ownerCh, "agent deleted")
+}
+
+func TestUserMeInboxSummary_WaitingOrderingByActivitySince(t *testing.T) {
+	srv, rawStore := testServer(t)
+	base := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	t0 := base
+	t1 := base.Add(1 * time.Minute)
+	t2 := base.Add(2 * time.Minute)
+	t3 := base.Add(3 * time.Minute)
+	t4 := base.Add(4 * time.Minute)
+	t5 := base.Add(5 * time.Minute)
+
+	// Created earlier (t0), but entered waiting_for_input later (ActivitySince = t3).
+	olderCreatedNewerSince := store.Agent{
+		ID:            api.NewUUID(),
+		Slug:          "older-created",
+		Name:          "Older Created",
+		ProjectID:     api.NewUUID(),
+		Phase:         string(state.PhaseRunning),
+		Activity:      string(state.ActivityWaitingForInput),
+		Created:       t0,
+		ActivitySince: &t3,
+	}
+	// Created later (t2), but has an older ActivitySince (t1) -> MUST sort first.
+	newerCreatedOlderSince := store.Agent{
+		ID:            api.NewUUID(),
+		Slug:          "newer-created-older-since",
+		Name:          "Newer Created Older Since",
+		ProjectID:     api.NewUUID(),
+		Phase:         string(state.PhaseRunning),
+		Activity:      string(state.ActivityWaitingForInput),
+		Created:       t2,
+		ActivitySince: &t1,
+	}
+	// Nil ActivitySince falls back to LastActivityEvent (t2) -> sorts second.
+	nilSinceLastActivity := store.Agent{
+		ID:                api.NewUUID(),
+		Slug:              "nil-since-last-activity",
+		Name:              "Nil Since LastActivity",
+		ProjectID:         api.NewUUID(),
+		Phase:             string(state.PhaseRunning),
+		Activity:          string(state.ActivityWaitingForInput),
+		Created:           t4,
+		LastActivityEvent: t2,
+	}
+	// Nil ActivitySince and zero LastActivityEvent falls back to Updated (t4) -> sorts fourth.
+	nilSinceUpdated := store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "nil-since-updated",
+		Name:      "Nil Since Updated",
+		ProjectID: api.NewUUID(),
+		Phase:     string(state.PhaseRunning),
+		Activity:  string(state.ActivityWaitingForInput),
+		Created:   t0,
+		Updated:   t4,
+	}
+	// Nil ActivitySince and zero LastActivityEvent/Updated falls back to Created (t5) -> sorts fifth.
+	nilSinceCreated := store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "nil-since-created",
+		Name:      "Nil Since Created",
+		ProjectID: api.NewUUID(),
+		Phase:     string(state.PhaseRunning),
+		Activity:  string(state.ActivityWaitingForInput),
+		Created:   t5,
+	}
+
+	installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *inboxStubAgentsStore {
+		return &inboxStubAgentsStore{
+			Store: inner,
+			agents: []store.Agent{
+				olderCreatedNewerSince,
+				nilSinceCreated,
+				nilSinceUpdated,
+				newerCreatedOlderSince,
+				nilSinceLastActivity,
+			},
+		}
+	})
+	setInboxDashboardExperiment(t, srv, true)
+
+	u := &store.User{
+		ID:          tid("inbox-wait-order-user"),
+		Email:       "waitorder@example.com",
+		DisplayName: "Wait Order",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     base,
+	}
+	require.NoError(t, rawStore.CreateUser(context.Background(), u))
+
+	resp := decodeInboxSummary(t, doRequestAsUser(t, srv, u, http.MethodGet, userMeInboxSummaryPath+"?previews=5", nil))
+	waiting := resp.Categories[InboxCategoryWaiting]
+	assert.Equal(t, InboxStateOK, waiting.State)
+	assert.Equal(t, 5, waiting.Count)
+
+	wantOrder := []string{
+		newerCreatedOlderSince.ID,
+		nilSinceLastActivity.ID,
+		olderCreatedNewerSince.ID,
+		nilSinceUpdated.ID,
+		nilSinceCreated.ID,
+	}
+	assert.Equal(t, wantOrder, waiting.AgentIDs)
+
+	require.Len(t, waiting.Previews, 5)
+	gotPreviewIDs := make([]string, 5)
+	gotSince := make([]time.Time, 5)
+	for i, raw := range waiting.Previews {
+		b, err := json.Marshal(raw)
+		require.NoError(t, err)
+		var p InboxWaitingAgentPreview
+		require.NoError(t, json.Unmarshal(b, &p))
+		gotPreviewIDs[i] = p.AgentID
+		gotSince[i] = p.Since
+	}
+	assert.Equal(t, wantOrder, gotPreviewIDs)
+	assert.Equal(t, []time.Time{t1, t2, t3, t4, t5}, gotSince)
 }

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -82,6 +83,24 @@ type InboxCategory struct {
 	Previews          []any          `json:"previews"`
 	AgentIDs          []string       `json:"agentIds,omitempty"`
 	Breakdown         map[string]int `json:"breakdown,omitempty"`
+}
+
+// MarshalJSON preserves a non-nil empty AgentIDs slice as `"agentIds": []`
+// (for the "waiting" category when state == "ok" and count == 0) while
+// omitting the field when AgentIDs is nil (all other categories and error state).
+func (c InboxCategory) MarshalJSON() ([]byte, error) {
+	type alias InboxCategory
+	if c.AgentIDs != nil && len(c.AgentIDs) == 0 {
+		type withEmptyAgentIDs struct {
+			alias
+			AgentIDs []string `json:"agentIds"`
+		}
+		return json.Marshal(withEmptyAgentIDs{
+			alias:    alias(c),
+			AgentIDs: []string{},
+		})
+	}
+	return json.Marshal(alias(c))
 }
 
 // InboxApprovalPreview is one preview item in the "approvals" category.
