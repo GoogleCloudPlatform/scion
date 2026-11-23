@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -2386,4 +2387,66 @@ func TestAgentStore_SetAgentAnnotation(t *testing.T) {
 	require.NoError(t, s.UpdateAgent(ctx, got))
 	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", "x"), store.ErrNotFound)
 	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, uuid.NewString(), "k", "v"), store.ErrNotFound)
+}
+
+func TestAgentStore_ListAgents_ActivityFilter(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	ownerA := uuid.NewString()
+	ownerB := uuid.NewString()
+
+	seed := func(name, ownerID, phase, activity string, deleted bool) *store.Agent {
+		a := makeAgent(projectID, name)
+		a.OwnerID = ownerID
+		a.Phase = phase
+		a.Activity = activity
+		require.NoError(t, s.CreateAgent(ctx, a))
+		if deleted {
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			got.DeletedAt = time.Now().UTC()
+			require.NoError(t, s.UpdateAgent(ctx, got))
+		}
+		return a
+	}
+
+	waitingA := seed("waiting-a", ownerA, "running", "waiting_for_input", false)
+	_ = seed("thinking-a", ownerA, "running", "thinking", false)
+	_ = seed("stopped-a", ownerA, "stopped", "", false)
+	_ = seed("deleted-waiting-a", ownerA, "running", "waiting_for_input", true)
+	waitingB := seed("waiting-b", ownerB, "running", "waiting_for_input", false)
+
+	// Activity alone matches all non-deleted waiting agents across owners.
+	res, err := s.ListAgents(ctx, store.AgentFilter{Activity: "waiting_for_input"}, store.ListOptions{})
+	require.NoError(t, err)
+	gotIDs := make([]string, len(res.Items))
+	for i, item := range res.Items {
+		gotIDs[i] = item.ID
+	}
+	assert.ElementsMatch(t, []string{waitingA.ID, waitingB.ID}, gotIDs)
+	assert.Equal(t, 2, res.TotalCount)
+
+	// Combined with OwnerID and Phase, narrows to ownerA's live running waiting agent.
+	filterA := store.AgentFilter{
+		OwnerID:  ownerA,
+		Phase:    "running",
+		Activity: "waiting_for_input",
+	}
+	resA, err := s.ListAgents(ctx, filterA, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, resA.Items, 1)
+	assert.Equal(t, waitingA.ID, resA.Items[0].ID)
+
+	countA, err := s.CountAgents(ctx, filterA)
+	require.NoError(t, err)
+	assert.Equal(t, 1, countA)
+
+	// Unset Activity omits the JSON key so existing list cursor bindings stay stable.
+	emptyJSON, err := json.Marshal(store.AgentFilter{OwnerID: ownerA, Phase: "running"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(emptyJSON), "Activity")
+	withActivityJSON, err := json.Marshal(filterA)
+	require.NoError(t, err)
+	assert.Contains(t, string(withActivityJSON), `"Activity":"waiting_for_input"`)
 }

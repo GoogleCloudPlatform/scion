@@ -1366,8 +1366,12 @@ type AgentFilter struct {
 	ProjectID       string
 	RuntimeBrokerID string
 	Phase           string
-	OwnerID         string
-	IncludeDeleted  bool // If true, include soft-deleted agents in results
+	// Activity, when non-empty, restricts results to agents whose runtime
+	// activity equals this value (e.g. "waiting_for_input"). omitempty keeps
+	// list cursor bindings (a hash of the encoded filter) unchanged when unset.
+	Activity       string `json:",omitempty"`
+	OwnerID        string
+	IncludeDeleted bool // If true, include soft-deleted agents in results
 
 	// OrRunIntent, when non-empty, widens Phase: an agent matches when its
 	// phase equals Phase OR its run_intent equals OrRunIntent. When Phase is
