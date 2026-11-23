@@ -524,34 +524,37 @@ func (s *Server) expireHeldMessagesForAgent(ctx context.Context, agentID, fixedR
 	if s == nil || s.store == nil || agentID == "" {
 		return
 	}
-	finCtx, finCancel := finalizationContext(ctx)
-	defer finCancel()
-
-	hasHold, err := s.store.HasAgentDeliveryHold(finCtx, agentID)
-	if err != nil {
-		slog.Error("message-hold: check delivery hold failed", "agent_id", agentID, "error", err)
-		return
-	}
-	if !hasHold {
-		return
-	}
-	expired, err := s.store.ExpireHeldMessagesForAgent(finCtx, agentID, fixedReason)
-	if err != nil {
-		slog.Error("message-hold: expire held messages for agent failed",
-			"agent_id", agentID, "reason", fixedReason, "error", err)
-		return
-	}
-	if len(expired) == 0 {
-		return
-	}
-	if s.messageLog != nil {
-		s.messageLog.Info("expired held messages for agent",
-			"agent_id", agentID,
-			"expired_count", len(expired),
-			"reason", fixedReason,
-		)
-	}
-	s.notifyExpiredHeldMessages(finCtx, expired, fixedReason)
+	_ = runBestEffortCleanupStep(ctx, finalizationTimeout, nil,
+		"expire_held_messages", "Recovered panic expiring held messages for agent",
+		[]any{"agent_id", agentID, "reason", fixedReason},
+		func(finCtx context.Context) error {
+			hasHold, err := s.store.HasAgentDeliveryHold(finCtx, agentID)
+			if err != nil {
+				slog.Error("message-hold: check delivery hold failed", "agent_id", agentID, "error", err)
+				return nil
+			}
+			if !hasHold {
+				return nil
+			}
+			expired, err := s.store.ExpireHeldMessagesForAgent(finCtx, agentID, fixedReason)
+			if err != nil {
+				slog.Error("message-hold: expire held messages for agent failed",
+					"agent_id", agentID, "reason", fixedReason, "error", err)
+				return nil
+			}
+			if len(expired) == 0 {
+				return nil
+			}
+			if s.messageLog != nil {
+				s.messageLog.Info("expired held messages for agent",
+					"agent_id", agentID,
+					"expired_count", len(expired),
+					"reason", fixedReason,
+				)
+			}
+			s.notifyExpiredHeldMessages(finCtx, expired, fixedReason)
+			return nil
+		})
 }
 
 // expirePastDeadlineHeldMessagesForAgent expires past-deadline awaiting_session

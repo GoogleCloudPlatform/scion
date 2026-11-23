@@ -109,82 +109,87 @@ func isRealThirdPartyLifecycleTransition(prevPhase, prevSuspendReason, action st
 // for user creators) runs in a detached background goroutine so a slow or
 // unreachable subscriber never holds up the HTTP response.
 func (s *Server) notifyThirdPartyLifecycleAction(ctx context.Context, agent *store.Agent, action, reason string) {
-	if agent == nil || agent.ID == "" || agent.CreatedBy == "" {
+	if s == nil || ctx == nil || agent == nil || agent.ID == "" || agent.CreatedBy == "" {
 		return
 	}
 	if action != api.AgentActionStop && action != api.AgentActionSuspend {
 		return
 	}
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil || identity.ID() == "" {
-		return
-	}
-	// Skip creator-initiated and self-initiated actions.
-	if identity.ID() == agent.CreatedBy || identity.ID() == agent.ID {
-		return
-	}
-
-	s.mu.RLock()
-	nd := s.notificationDispatcher
-	s.mu.RUnlock()
-	if nd == nil {
-		return
-	}
-
-	phase := string(state.PhaseStopped)
-	status := "STOPPED"
-	if action == api.AgentActionSuspend {
-		phase = string(state.PhaseSuspended)
-		status = "SUSPENDED"
-	}
-
-	now := time.Now().UTC()
-
-	// Only attach the third-party notification to an existing creator
-	// subscription when the subsequent PublishAgentStatus event will compute
-	// the same notification status. When a stopped agent retains a terminal
-	// activity (such as limits_exceeded or crashed), handleEvent computes that
-	// terminal activity rather than STOPPED; storing a STOPPED row on a
-	// subscription matching both would overwrite GetLastNotification and cause
-	// handleEvent to re-fire a stale terminal notice. Using the creator-fallback
-	// subscription delivers the third-party notice while leaving the real
-	// subscription's deduplication history intact (ptone/scion#8695).
-	postWriteStatus := notificationEventStatus(agentStatusEvent(agent, now))
-	matchExistingSub := strings.EqualFold(postWriteStatus, status)
-
-	sub := nd.resolveThirdPartyCreatorSubscription(ctx, agent, status, matchExistingSub)
-	if sub == nil {
-		return
-	}
-
-	actorLabel := s.thirdPartyActorLabel(ctx, identity)
-	message := thirdPartyLifecycleMessage(agent.Slug, action, actorLabel, now, reason)
-	evt := AgentStatusEvent{
-		AgentID:   agent.ID,
-		ProjectID: agent.ProjectID,
-		Phase:     phase,
-	}
-
-	notif := nd.storeNotification(ctx, sub, evt, message)
-	if notif == nil {
-		return
-	}
-
-	subCopy := *sub
-	agentSnapshot := *agent
-	s.thirdPartyStopDispatches.Add(1)
-	go func() {
-		defer s.thirdPartyStopDispatches.Done()
-		defer func() {
-			if rec := recover(); rec != nil {
-				s.agentLifecycleLog.Error("third-party lifecycle notification panicked",
-					"agent_id", agentSnapshot.ID, "action", action, "panic", fmt.Sprint(rec))
+	logger := s.lifecycleLogger()
+	_ = runBestEffortCleanupStep(ctx, finalizationTimeout, logger,
+		"notify_third_party_lifecycle", "Recovered panic preparing third-party lifecycle notification",
+		[]any{"agent_id", agent.ID, "action", action},
+		func(persistCtx context.Context) error {
+			identity := GetIdentityFromContext(persistCtx)
+			if identity == nil || identity.ID() == "" {
+				return nil
 			}
-		}()
-		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), thirdPartyStopDispatchTimeout)
-		defer cancel()
-		nd.dispatchStoredNotification(dctx, &subCopy, notif, &agentSnapshot)
-	}()
+			// Skip creator-initiated and self-initiated actions.
+			if identity.ID() == agent.CreatedBy || identity.ID() == agent.ID {
+				return nil
+			}
+
+			s.mu.RLock()
+			nd := s.notificationDispatcher
+			s.mu.RUnlock()
+			if nd == nil {
+				return nil
+			}
+
+			phase := string(state.PhaseStopped)
+			status := "STOPPED"
+			if action == api.AgentActionSuspend {
+				phase = string(state.PhaseSuspended)
+				status = "SUSPENDED"
+			}
+
+			now := time.Now().UTC()
+
+			// Only attach the third-party notification to an existing creator
+			// subscription when the subsequent PublishAgentStatus event will compute
+			// the same notification status. When a stopped agent retains a terminal
+			// activity (such as limits_exceeded or crashed), handleEvent computes that
+			// terminal activity rather than STOPPED; storing a STOPPED row on a
+			// subscription matching both would overwrite GetLastNotification and cause
+			// handleEvent to re-fire a stale terminal notice. Using the creator-fallback
+			// subscription delivers the third-party notice while leaving the real
+			// subscription's deduplication history intact (ptone/scion#8695).
+			postWriteStatus := notificationEventStatus(agentStatusEvent(agent, now))
+			matchExistingSub := strings.EqualFold(postWriteStatus, status)
+
+			sub := nd.resolveThirdPartyCreatorSubscription(persistCtx, agent, status, matchExistingSub)
+			if sub == nil {
+				return nil
+			}
+
+			actorLabel := s.thirdPartyActorLabel(persistCtx, identity)
+			message := thirdPartyLifecycleMessage(agent.Slug, action, actorLabel, now, reason)
+			evt := AgentStatusEvent{
+				AgentID:   agent.ID,
+				ProjectID: agent.ProjectID,
+				Phase:     phase,
+			}
+
+			notif := nd.storeNotification(persistCtx, sub, evt, message)
+			if notif == nil {
+				return nil
+			}
+
+			subCopy := *sub
+			agentSnapshot := *agent
+			s.thirdPartyStopDispatches.Add(1)
+			go func() {
+				defer s.thirdPartyStopDispatches.Done()
+				_ = runBestEffortCleanupStep(ctx, thirdPartyStopDispatchTimeout, logger,
+					"dispatch_third_party_lifecycle_notification", "third-party lifecycle notification panicked",
+					[]any{"agent_id", agentSnapshot.ID, "action", action},
+					func(dctx context.Context) error {
+						nd.dispatchStoredNotification(dctx, &subCopy, notif, &agentSnapshot)
+						return nil
+					})
+			}()
+			return nil
+		})
 }
 
 // resolveThirdPartyCreatorSubscription resolves the notification subscription

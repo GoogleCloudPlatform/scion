@@ -396,6 +396,50 @@ func TestSuspendRevoke_TimeoutBoundsSlowRevoker(t *testing.T) {
 
 		assertHasWarnLog(t, logs.String(), "agent delegation grants not revoked", agent.ID, context.DeadlineExceeded.Error())
 	})
+
+	t.Run("delegation_grants_narrow_timeout", func(t *testing.T) {
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendRevokeHardeningStore {
+			return &suspendRevokeHardeningStore{Store: inner, fault: f}
+		})
+		srv, s, user, project := setupCredentialTestServerOn(t, srv, s)
+		agent := createCredTestAgent(t, s, tid("agent-susp-timeout-narrow"), project.ID, user.ID)
+		grant, _ := seedSuspendHardeningGrant(t, s, agent, user.ID)
+
+		logs := captureSuspendHardeningLogs(t)
+		var txCalls atomic.Int32
+		var narrowSawDeadline atomic.Bool
+		fault.Arm()
+
+		synctest.Test(t, func(t *testing.T) {
+			srv.revokeAgentDelegationGrantsBestEffortWith(
+				context.Background(),
+				store.AgentDelegationGrantFilter{AgentID: agent.ID},
+				revokeReasonAgentSuspended,
+				func(ctx context.Context, _ store.Store) (store.AgentDelegationGrantFilter, error) {
+					txCalls.Add(1)
+					if _, ok := ctx.Deadline(); ok {
+						narrowSawDeadline.Store(true)
+					}
+					<-ctx.Done()
+					return store.AgentDelegationGrantFilter{AgentID: agent.ID}, ctx.Err()
+				},
+			)
+			synctest.Wait()
+		})
+
+		assert.False(t, wrapped.withTxCalled.Load())
+		assert.Equal(t, int32(1), txCalls.Load(), "narrow timeout must not trigger un-narrowed fallback attempt")
+		assert.True(t, narrowSawDeadline.Load(), "narrow step must receive bounded revokeCtx")
+
+		gotGrant, err := s.GetAgentDelegationGrant(context.Background(), grant.ID)
+		require.NoError(t, err)
+		assert.Nil(t, gotGrant.RevokedAt, "timed-out narrow revoke must leave grant unrevoked")
+
+		logStr := logs.String()
+		assertHasWarnLog(t, logStr, "agent delegation grants not revoked", agent.ID, context.DeadlineExceeded.Error())
+		assert.NotContains(t, logStr, "agent delegation revocation not narrowed",
+			"timed-out narrow step must skip the fallback warning")
+	})
 }
 
 func TestSuspendRevoke_NormalPathUnchanged(t *testing.T) {

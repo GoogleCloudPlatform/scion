@@ -158,30 +158,32 @@ func (s *Server) preSuspendProbes(ctx context.Context, d AgentDispatcher, a *sto
 
 // persistSuspendScreen updates the stored screen to match this suspend:
 // upserts when cap != nil, deletes any older row when cap == nil. Best-effort,
-// detached from request cancellation with a short timeout; logs at Warn on
-// failure and never returns an error or logs screen content.
+// detached from request cancellation with a short timeout and panic recovery;
+// logs at Warn on failure and never returns an error or logs screen content.
 func (s *Server) persistSuspendScreen(ctx context.Context, agentID string, cap *capturedScreen) {
-	if !s.experimentEnabled(experiments.SuspendScreen) {
+	if s == nil || s.store == nil || agentID == "" || !s.experimentEnabled(experiments.SuspendScreen) {
 		return
 	}
-	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), suspendScreenWriteTimeout)
-	defer cancel()
-
-	if cap != nil {
-		err := s.store.PutAgentSuspendScreen(wctx, &store.AgentSuspendScreen{
-			AgentID:    agentID,
-			Content:    cap.Content,
-			Truncated:  cap.Truncated,
-			CapturedAt: cap.CapturedAt,
+	_ = runBestEffortCleanupStep(ctx, suspendScreenWriteTimeout, s.lifecycleLogger(),
+		"persist_suspend_screen", "Recovered panic persisting pre-suspend terminal screen",
+		[]any{"agent_id", agentID},
+		func(wctx context.Context) error {
+			if cap != nil {
+				if err := s.store.PutAgentSuspendScreen(wctx, &store.AgentSuspendScreen{
+					AgentID:    agentID,
+					Content:    cap.Content,
+					Truncated:  cap.Truncated,
+					CapturedAt: cap.CapturedAt,
+				}); err != nil {
+					slog.Warn("Persisting pre-suspend terminal screen failed", "agent_id", agentID, "error", err)
+				}
+				return nil
+			}
+			if err := s.store.DeleteAgentSuspendScreen(wctx, agentID); err != nil {
+				slog.Warn("Clearing stale pre-suspend terminal screen failed", "agent_id", agentID, "error", err)
+			}
+			return nil
 		})
-		if err != nil {
-			slog.Warn("Persisting pre-suspend terminal screen failed", "agent_id", agentID, "error", err)
-		}
-		return
-	}
-	if err := s.store.DeleteAgentSuspendScreen(wctx, agentID); err != nil {
-		slog.Warn("Clearing stale pre-suspend terminal screen failed", "agent_id", agentID, "error", err)
-	}
 }
 
 // agentScreenResponse is the JSON response for GET .../agents/{id}/screen.

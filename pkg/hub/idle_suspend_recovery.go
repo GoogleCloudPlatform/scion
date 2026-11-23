@@ -123,7 +123,7 @@ func (s *Server) recordIdleSuspendCommit(ctx context.Context, agentID, runID str
 		acancel()
 		if err == nil {
 			if !recorded && attempt > 0 {
-				if fresh, gerr := s.store.GetAgent(rctx, agentID); gerr == nil && fresh != nil &&
+				if fresh := s.getAgentBestEffort(rctx, agentID, "recordIdleSuspendCommit"); fresh != nil &&
 					fresh.Phase == string(state.PhaseSuspended) && fresh.RunID == runID &&
 					fresh.IdleSuspendClaimUntil != nil && sameStamp(*fresh.IdleSuspendClaimUntil, claimUntil) {
 					return true, nil

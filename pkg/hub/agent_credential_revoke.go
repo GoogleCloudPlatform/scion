@@ -75,11 +75,38 @@ func revokeAgentCredentialsBestEffort(ctx context.Context, credStore store.Agent
 		slog.Warn("Skipping agent credential revoke: no credential store configured", "agent_id", agentID, "reason", reason)
 		return
 	}
-	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCredentialRevokeTimeout)
-	defer cancel()
-	if err := revokeAgentCredentials(revokeCtx, credStore, agentID, reason); err != nil {
-		slog.Warn("Failed to revoke agent credentials", "agent_id", agentID, "reason", reason, "error", err)
+	_ = runBestEffortCleanupStep(ctx, agentCredentialRevokeTimeout, nil,
+		"revoke_agent_credentials", "Recovered panic revoking agent credentials",
+		[]any{"agent_id", agentID, "reason", reason},
+		func(revokeCtx context.Context) error {
+			if err := revokeAgentCredentials(revokeCtx, credStore, agentID, reason); err != nil {
+				slog.Warn("Failed to revoke agent credentials", "agent_id", agentID, "reason", reason, "error", err)
+			}
+			return nil
+		})
+}
+
+// revokeAgentCredentialBestEffort revokes a single credential (e.g., the old
+// credential superseded by a token refresh) on a detached, bounded context
+// with panic recovery so client cancellation or a store panic cannot leave
+// the superseded credential unlogged or abort the refresh response
+// (ptone/scion#8862).
+func revokeAgentCredentialBestEffort(ctx context.Context, credStore store.AgentCredentialStore, agentID, credentialID, reason string) {
+	if credStore == nil {
+		slog.Warn("Skipping old credential revoke after refresh: no credential store configured",
+			"agent_id", agentID, "credential_id", credentialID, "reason", reason)
+		return
 	}
+	_ = runBestEffortCleanupStep(ctx, agentCredentialRevokeTimeout, nil,
+		"revoke_agent_credential", "Recovered panic revoking old credential after refresh",
+		[]any{"agent_id", agentID, "credential_id", credentialID, "reason", reason},
+		func(revokeCtx context.Context) error {
+			if err := credStore.RevokeAgentCredential(revokeCtx, credentialID, "system", reason); err != nil {
+				slog.Warn("Failed to revoke old credential after refresh",
+					"agent_id", agentID, "credential_id", credentialID, "error", err)
+			}
+			return nil
+		})
 }
 
 // errNoAgentCredentialStore is returned by revokeAgentCredentials when no
