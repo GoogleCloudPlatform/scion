@@ -153,8 +153,8 @@ func TestProjectAgentListToken_RequiresAgentListOnTheProject(t *testing.T) {
 	f := newInboxFixture(t)
 	path := "/api/v1/projects/" + f.projA + "/agents"
 
-	assert.Equal(t, http.StatusForbidden, f.call(t, f.mint(t, f.admin, projectBoundary(f.projA), "agent:read"), http.MethodGet, path, nil).Code, "agent:read is not the list permission")
-	assert.Equal(t, http.StatusForbidden, f.call(t, f.mint(t, f.admin, projectBoundary(f.projB), "agent:list"), http.MethodGet, path, nil).Code, "the project is outside the boundary")
+	assert.Equal(t, http.StatusNotFound, f.call(t, f.mint(t, f.admin, projectBoundary(f.projA), "agent:read"), http.MethodGet, path, nil).Code, "agent:read is not the list permission")
+	assert.Equal(t, http.StatusNotFound, f.call(t, f.mint(t, f.admin, projectBoundary(f.projB), "agent:list"), http.MethodGet, path, nil).Code, "the project is outside the boundary")
 
 	listA := decodeListPage(t, f.call(t, f.mint(t, f.admin, projectBoundary(f.projA), "agent:list"), http.MethodGet, path, nil), "agents")
 	assert.Equal(t, []string{f.agentA.ID}, listA.IDs)

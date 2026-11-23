@@ -857,15 +857,15 @@ func TestAgentCompactView_DeletionDetailAdminClasses(t *testing.T) {
 	// and both enrichment functions with a federated admin identity.
 	//
 	// Pinned statuses, observed in a run: the project endpoints deny with
-	// 403 (principal resolution fails closed in the authorize check), and
+	// 404 (principal resolution fails closed in authorizeReadAction), and
 	// the global list answers 500 "unable to resolve authorization", because
 	// listAgents treats the same principal resolution error from
 	// ResolveListScopes as a server error. Both views answer the same (the
 	// harness compares status and body), and no rows are read either way.
 	federatedCells := map[string]int{
 		"federated-admin global":        http.StatusInternalServerError,
-		"federated-admin project":       http.StatusForbidden,
-		"federated-admin other-project": http.StatusForbidden,
+		"federated-admin project":       http.StatusNotFound,
+		"federated-admin other-project": http.StatusNotFound,
 	}
 	for cell, status := range federatedCells {
 		assert.Equal(t, map[int]bool{status: true}, tally.cellStatus[cell], "%s: first-page statuses", cell)

@@ -160,7 +160,7 @@ func TestListProjectAgentsSorted_HubAdminNonMember_DeniedAtGate(t *testing.T) {
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
 	rec := doRequestAsUser(t, f.srv, hubAdmin, http.MethodGet, f.listPath("sort=updated"), nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Len(t, emitter.records, 1, "exactly the agent.list gate decision; hub-admin's curated permissions do not include agent.list")
 }
 
