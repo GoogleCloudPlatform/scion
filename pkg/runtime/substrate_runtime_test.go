@@ -2934,7 +2934,7 @@ func TestNewSubstrateRuntime_MemoizedAcrossCalls(t *testing.T) {
 
 	cfg := &config.V1SubstrateConfig{
 		APIEndpoint:    "api.ate-system.svc:443",
-		RouterEndpoint: server.URL,
+		RouterEndpoint: "https://atenet-router.ate-system.svc",
 	}
 
 	// Simulates the broker's first `scion start`: GetRuntime resolves a
@@ -3011,8 +3011,8 @@ func TestNewSubstrateRuntime_DifferentConfigsGetDifferentInstances(t *testing.T)
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
-	cfgA := &config.V1SubstrateConfig{APIEndpoint: "a.example:443", RouterEndpoint: "http://a"}
-	cfgB := &config.V1SubstrateConfig{APIEndpoint: "b.example:443", RouterEndpoint: "http://b"}
+	cfgA := &config.V1SubstrateConfig{APIEndpoint: "a.example:443", RouterEndpoint: "https://a.example"}
+	cfgB := &config.V1SubstrateConfig{APIEndpoint: "b.example:443", RouterEndpoint: "https://b.example"}
 
 	rtA, err := NewSubstrateRuntime(cfgA)
 	if err != nil {
@@ -3027,6 +3027,35 @@ func TestNewSubstrateRuntime_DifferentConfigsGetDifferentInstances(t *testing.T)
 	}
 	if built != 2 {
 		t.Errorf("substrateRuntimeBuilder called %d times, want 2 (one per distinct config)", built)
+	}
+}
+
+func TestNewSubstrateRuntime_RejectsPlaintextRouterEndpoint(t *testing.T) {
+	resetSubstrateRuntimeRegistryForTest(t)
+
+	built := 0
+	origBuilder := substrateRuntimeBuilder
+	substrateRuntimeBuilder = func(cfg config.V1SubstrateConfig) (*SubstrateRuntime, error) {
+		built++
+		return nil, errors.New("builder must not be called for plaintext router_endpoint")
+	}
+	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
+
+	_, err := NewSubstrateRuntime(&config.V1SubstrateConfig{
+		APIEndpoint:    "api.ate-system.svc:443",
+		RouterEndpoint: "http://atenet-router.ate-system.svc:80",
+	})
+	if err == nil {
+		t.Fatal("NewSubstrateRuntime(http:// router_endpoint) = nil error, want refusal")
+	}
+	if !errors.Is(err, ErrSubstrateProfileInvalid) {
+		t.Errorf("error = %v, want ErrSubstrateProfileInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "https://") {
+		t.Errorf("error = %v, want message requiring https://", err)
+	}
+	if built != 0 {
+		t.Errorf("builder called %d times, want 0", built)
 	}
 }
 
@@ -3060,8 +3089,8 @@ func TestSubstrateAgentState_SharedAcrossConfigChange(t *testing.T) {
 	}
 	t.Cleanup(func() { substrateRuntimeBuilder = origBuilder })
 
-	cfgA := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL}
-	cfgB := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: server.URL, EgressAllow: []string{"api.example.com"}}
+	cfgA := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: "https://atenet-router.ate-system.svc"}
+	cfgB := &config.V1SubstrateConfig{APIEndpoint: "api.example:443", RouterEndpoint: "https://atenet-router.ate-system.svc", EgressAllow: []string{"api.example.com"}}
 
 	rtA, err := NewSubstrateRuntime(cfgA)
 	if err != nil {
@@ -3149,7 +3178,7 @@ func TestGetRuntime_Substrate_SettingsBased_Memoized(t *testing.T) {
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80"
+					"router_endpoint": "https://atenet-router.ate-system.svc"
 				}
 			}
 		},

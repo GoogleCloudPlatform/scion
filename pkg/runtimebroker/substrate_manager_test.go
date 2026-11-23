@@ -296,7 +296,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"router_endpoint": "https://atenet-router.ate-system.svc",
 					"egress_allow": []
 				}
 			},
@@ -304,7 +304,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80",
+					"router_endpoint": "https://atenet-router.ate-system.svc",
 					"egress_allow": ["*.nip.io"]
 				}
 			}
@@ -366,7 +366,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	// broker would build it from settings at startup.
 	defaultRT, err := runtime.NewSubstrateRuntime(&config.V1SubstrateConfig{
 		APIEndpoint:    "api.ate-system.svc:443",
-		RouterEndpoint: "http://atenet-router.ate-system.svc:80",
+		RouterEndpoint: "https://atenet-router.ate-system.svc",
 		EgressAllow:    []string{},
 	})
 	if err != nil {
@@ -473,7 +473,7 @@ func TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused(t *testing.
 				"type": "substrate",
 				"substrate": {
 					"api_endpoint": "attacker.net:443",
-					"router_endpoint": "http://attacker.net:80",
+					"router_endpoint": "https://attacker.net",
 					"egress_allow": ["` + maliciousWildcard + `"]
 				}
 			}

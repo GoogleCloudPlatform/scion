@@ -3359,25 +3359,28 @@ type V1SubstrateConfig struct {
 	// APIEndpoint is the ateapi Control gRPC endpoint, e.g.
 	// "api.ate-system.svc:443".
 	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty" koanf:"api_endpoint"`
-	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
-	// to reach an actor's control server, e.g.
-	// "http://atenet-router.ate-system.svc:80". Used as a base URL (scheme
-	// required), not a bare host:port. This hop is plain HTTP: CAFile and
-	// ClusterTrustBundle below apply only to the ateapi Control gRPC dial
-	// (APIEndpoint), not to this one, and there is no separate TLS setting
-	// for it (see substrate-runtime.md §10).
+	// RouterEndpoint is the atenet-router HTTPS endpoint the broker uses to
+	// reach an actor's port 80 (the control server), e.g.
+	// "https://atenet-router.ate-system.svc" (Service port 443). Used as a
+	// base URL (scheme required), not a bare host:port. Substrate v1's
+	// router serves only mTLS: see RouterCAFile, RouterClientCertFile and
+	// RouterServerName. Other actor ports go through RouterConnectEndpoint.
 	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
 	// TokenAudience is the audience requested for the in-cluster
 	// ServiceAccount TokenRequest used to authenticate to the ateapi
 	// Control API. Defaults to "api.ate-system.svc" when empty.
 	TokenAudience string `json:"token_audience,omitempty" yaml:"token_audience,omitempty" koanf:"token_audience"`
 	// CAFile is a path to a PEM CA bundle used to verify the ateapi Control
-	// gRPC server certificate.
+	// gRPC server certificate (re-read when its content changes), and
+	// atenet-router when RouterCAFile is unset. When both this and
+	// ClusterTrustBundle are empty, the dialer pools live
+	// servicedns.podcert.ate.dev/identity ClusterTrustBundles.
 	CAFile string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
 	// ClusterTrustBundle names a Kubernetes ClusterTrustBundle object
-	// holding the CA used to verify the ateapi Control gRPC server
-	// certificate. When both this and CAFile are set, the dialer prefers
-	// ClusterTrustBundle.
+	// (certificates.k8s.io/v1, falling back to v1beta1, refreshed
+	// periodically) holding the CA used to verify ateapi (and atenet-router
+	// when RouterCAFile is unset). When both this and CAFile are set, the
+	// dialer prefers ClusterTrustBundle.
 	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
 	// SandboxClass is deprecated and rejected by validation: Substrate v1
 	// takes the sandbox class from the WorkerPool's spec.sandboxClasses,
@@ -3457,6 +3460,28 @@ type V1SubstrateConfig struct {
 	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
 	// Defaults to 10 minutes when empty.
 	TemplateReadyTimeout string `json:"template_ready_timeout,omitempty" yaml:"template_ready_timeout,omitempty" koanf:"template_ready_timeout"`
+	// RouterCAFile is a PEM CA bundle verifying the atenet-router serving
+	// certificate. Empty uses the ateapi trust source (cluster_trust_bundle,
+	// ca_file, or the servicedns ClusterTrustBundles).
+	RouterCAFile string `json:"router_ca_file,omitempty" yaml:"router_ca_file,omitempty" koanf:"router_ca_file"`
+	// RouterClientCertFile is the PEM credential bundle (certificate chain
+	// and private key) presented to atenet-router for mTLS. Re-read on every
+	// handshake. Defaults to
+	// "/run/podidentity.podcert.ate.dev/credential-bundle.pem".
+	RouterClientCertFile string `json:"router_client_cert_file,omitempty" yaml:"router_client_cert_file,omitempty" koanf:"router_client_cert_file"`
+	// RouterServerName is the TLS server name verified on atenet-router.
+	// Defaults to router_endpoint's host.
+	RouterServerName string `json:"router_server_name,omitempty" yaml:"router_server_name,omitempty" koanf:"router_server_name"`
+	// RouterConnectEndpoint is the atenet-router CONNECT-over-TLS
+	// "host:port" used for actor ports other than 80. Defaults to
+	// router_endpoint's host on port 8444.
+	RouterConnectEndpoint string `json:"router_connect_endpoint,omitempty" yaml:"router_connect_endpoint,omitempty" koanf:"router_connect_endpoint"`
+	// APIClientCertFile is an optional PEM credential bundle presented to
+	// ateapi for mTLS. When ateapi accepts the client certificate, it
+	// authenticates the broker by its SPIFFE pod identity instead of the
+	// bearer token; TokenRequest RBAC remains required because substrate.Dial
+	// still attaches per-RPC ServiceAccount token credentials alongside mTLS.
+	APIClientCertFile string `json:"api_client_cert_file,omitempty" yaml:"api_client_cert_file,omitempty" koanf:"api_client_cert_file"`
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.

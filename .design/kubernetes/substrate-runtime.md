@@ -25,8 +25,8 @@ fidelity) and resumed onto any free worker. scion maps one agent onto one actor.
 
 ```
  hub ──control channel──> scion runtime broker (in-cluster pod)
-                              │ gRPC (ServiceAccount token)              │ HTTP, ate-target-actor header
-                              ▼                                          ▼
+                              │ gRPC (TLS 1.3, TokenRequest or mTLS)   │ mTLS (:443 -> :8443, :8444 CONNECT)
+                              ▼                                        ▼
                      api.ate-system (/substrate.ateapi.v1.Control)  atenet-router ──> actor: sciontool substrate-serve :80
                                                                                         └─ tmux ─ harness (claude, ...)
  actor egress (EgressPolicy: Http / Https / TlsPassthrough) ──> hub, git host, model API, telemetry
@@ -34,26 +34,36 @@ fidelity) and resumed onto any free worker. scion maps one agent onto one actor.
 
 - **The broker is the existing scion runtime broker binary**, with the
   `substrate` runtime compiled in, deployed as a Kubernetes Deployment inside
-  the Substrate cluster (`deploy/substrate/`). It authenticates to ateapi
-  with an in-cluster ServiceAccount token obtained via the Kubernetes
-  TokenRequest API (audience `api.ate-system.svc` by default), not a
-  projected volume (`pkg/runtime/substrate/dialer.go`).
-- **The router is Substrate's own `atenet-router`.** Inbound requests carry
-  the header `ate-target-actor: <atespace>/<actor>`
-  (`pkg/runtime/substrate/router.go`'s `TargetActorHeader`) to address a
-  specific actor. An inbound request to a suspended actor auto-resumes it.
+  the Substrate cluster (`deploy/substrate/`). It reaches `ateapi`
+  (`/substrate.ateapi.v1.Control/*`, TLS 1.3, `dns:///` + `round_robin`)
+  using an in-cluster ServiceAccount token obtained via the Kubernetes
+  TokenRequest API (audience `api.ate-system.svc` by default) and an optional
+  projected mTLS client certificate (`api_client_cert_file`), and verifies
+  serving certificates dynamically via `cluster_trust_bundle`, `ca_file`, or
+  `servicedns.podcert.ate.dev/identity` `ClusterTrustBundle` listing
+  (`pkg/runtime/substrate/dialer.go`, `grpc.go`, `tlssource.go`).
+- **The router is Substrate's own `atenet-router`.** `RouterClient`
+  (`pkg/runtime/substrate/router.go`) enforces TLS 1.3 mTLS
+  (`NewRouterTLSSource`, reloading `router_client_cert_file` per handshake),
+  sends port-80 control traffic to `router_endpoint` (`:443` -> `:8443`), and
+  tunnels non-80 actor ports via HTTP/1.1 `CONNECT <actor>:<port>` on
+  `router_connect_endpoint` (`:8444`), carrying
+  `ate-target-actor: <atespace>/<actor>` (`TargetActorHeader`). Transient
+  router `503` responses are retried with bounded backoff; pooled CONNECT
+  transports are discarded via `DropActor` on actor delete/cleanup. An
+  inbound request to a suspended actor auto-resumes it.
 - **The only new code that runs inside the actor is `sciontool substrate-serve`**
   (§5), shipped in the agent image as the template's entrypoint.
-- **Why an in-cluster broker, not a remote one:** Substrate has no
-  authorization on its control API (`ateapi`) or its inbound router — any
-  caller that can reach them controls the whole install. Reaching them from
-  outside the cluster through a LoadBalancer/Ingress would expose both
-  unauthenticated surfaces beyond the cluster boundary, so the broker (and
-  therefore the only holder of ateapi credentials) must run in-cluster. This
-  is also why the bootstrap-nonce fallback (§5.2) additionally
-  depends on a NetworkPolicy restricting router ingress to the broker
-  namespace (`deploy/substrate/README.md`), rather than relying on
-  authorization Substrate itself doesn't provide.
+- **Why an in-cluster broker, not a remote one:** Substrate v1.0.0 enforces
+  authorization on both `ateapi` (OpenFGA `AccessPolicy` + namespace label
+  `ate.dev/api-access: "true"`) and `atenet-router` (SPIFFE mTLS
+  `ATE_INGRESS_ALLOWED_SPIFFE_IDS`). Running the broker in-cluster gives it
+  direct Kubernetes `TokenRequest`, projected `PodCertificate`, and projected
+  `ClusterTrustBundle` identity alongside internal service DNS without exposing
+  `ateapi` or `atenet-router` outside the cluster. Layering
+  `cluster/networkpolicy.yaml` restricts router ingress to the broker
+  namespace on TLS ports `8443`/`8444` only as defense in depth alongside the
+  bootstrap-nonce fallback (§5.2).
 - **ateapi client:** `go.ate.dev/substrate/api/ateapi/v1` (`v1.0.0`, Go
   package `ateapi`, service `substrate.ateapi.v1.Control`), vendored under
   `third_party/ateapipb/` (imported as alias `ateapipb`) with its license and
@@ -74,9 +84,14 @@ fidelity) and resumed onto any free worker. scion maps one agent onto one actor.
 | Key | Meaning |
 |---|---|
 | `api_endpoint` | ateapi Control gRPC endpoint, e.g. `api.ate-system.svc:443`. |
-| `router_endpoint` | atenet-router inbound endpoint, e.g. `http://atenet-router.ate-system.svc:80`. |
+| `router_endpoint` | atenet-router HTTPS (mTLS) base URL for port-80 traffic, e.g. `https://atenet-router.ate-system.svc`. |
 | `token_audience` | Audience for the in-cluster ServiceAccount TokenRequest. Defaults to `api.ate-system.svc`. |
-| `ca_file` / `cluster_trust_bundle` | Verify the ateapi server certificate against a PEM file or a `ClusterTrustBundle` (the router client does not use it; `router_endpoint` is plain HTTP today, §10); when both are set, `cluster_trust_bundle` wins. |
+| `ca_file` / `cluster_trust_bundle` | Verify `ateapi` (and `atenet-router` when `router_ca_file` is unset) against a PEM file (re-read when its content changes) or a named `ClusterTrustBundle` (refreshed periodically). When both are unset, lists `ClusterTrustBundle`s with signer `servicedns.podcert.ate.dev/identity` and label `podcert.ate.dev/canarying=live` (30s cache TTL, up to 1h stale fallback, `certificates.k8s.io/v1` falling back to `v1beta1`). When both are set, `cluster_trust_bundle` wins. |
+| `router_ca_file` | Optional PEM CA bundle specifically for `atenet-router`, re-read when its content changes; falls back to `cluster_trust_bundle` / `ca_file` / CTB list. |
+| `router_client_cert_file` | PEM credential bundle (certificate chain and private key) presented to `atenet-router` for mTLS, re-read on every handshake. Defaults to `/run/podidentity.podcert.ate.dev/credential-bundle.pem`. |
+| `router_server_name` | Optional TLS server name verified on `atenet-router` (defaults to `router_endpoint`'s host). |
+| `router_connect_endpoint` | Optional `CONNECT`-over-TLS `host:port` for actor ports other than 80 (defaults to `<router_endpoint host>:8444`). |
+| `api_client_cert_file` | Optional PEM credential bundle presented to `ateapi` for mTLS, re-read on every handshake (when accepted, `ateapi` authenticates the broker's SPIFFE ID rather than the bearer token; `TokenRequest` RBAC remains required because `substrate.Dial` attaches per-RPC bearer credentials alongside mTLS). |
 | `sandbox_class` | Deprecated and rejected in Substrate v1.0.0: sandbox class comes from the `WorkerPool`'s `spec.sandboxClasses` (`ate.dev/v1`), selected via `worker_selector`. |
 | `sandbox_config_name` | Deprecated and rejected in Substrate v1.0.0: `SandboxConfig` is referenced by the `WorkerPool`'s `spec.sandboxClasses[].configRef`, selected via `worker_selector`. |
 | `worker_selector` | Copied into the ActorTemplate's `workerSelector`, matched against a `WorkerPool`'s own `metadata.labels` (not a Pod label — see `deploy/substrate/README.md`). |
@@ -100,13 +115,16 @@ on every runtime.
 `NewSubstrateRuntime` memoizes one `*SubstrateRuntime` (and its dialed gRPC
 `ClientConn`) per distinct `V1SubstrateConfig` for the life of the broker
 process — see the memoization comment on `substrateRuntimesMu`
-(`pkg/runtime/substrate_runtime.go`). A CA rotation
-behind the same `ca_file`/`cluster_trust_bundle` value does not take effect
-until the broker process restarts.
+(`pkg/runtime/substrate_runtime.go`). Both CAs (`ca_file`/`router_ca_file`
+re-read on change, or `ClusterTrustBundle` refreshed every 30s with up to 1h
+stale fallback) and `PodCertificate` client bundles (`GetClientCertificate`
+re-read on every handshake) reload dynamically without restarting the broker
+(`pkg/runtime/substrate/tlssource.go`).
 
 **The runtime block is operator-only.** Every key in the table above —
-endpoints, CA/trust-bundle, token audience, `egress_allow`, everything
-under a `type: substrate` entry in `runtimes.<name>` — must be defined in
+endpoints, CA/trust-bundle/client-cert paths, token audience, `egress_allow`,
+everything under a `type: substrate` entry in `runtimes.<name>` — must be
+defined in
 the broker's own operator (global, `~/.scion`) settings, never in a
 project's merged settings (an in-repo `.scion/settings.*`, or a hub-managed
 project's own settings file). A project may only *select* an
@@ -401,9 +419,8 @@ limit even before the surrounding JSON envelope (`env`, `start_cmd`,
 names only the cap and the total size, never a path or content.
 
 **Hygiene:** home file contents (`settings.json` can carry env) are
-secret-grade — never logged or put in an error — but ride the same
-plaintext broker→router hop auth/secret files already ride (§6, §10); the
-exposure is not narrower for home files than for the other two sources.
+secret-grade — never logged or put in an error — and cross the broker→router
+hop encrypted inside TLS 1.3 mTLS (§6).
 
 **Lifecycle hook redirect.** `writeBootstrapFile` chowns every file and
 directory it writes to the scion user (§8's home-ownership model) — except
@@ -555,11 +572,10 @@ hop:
 - `redactErr` (`pkg/sciontool/substrate/helpers.go`) is the named seam for
   this invariant on the serve side; any new error path added to the server
   must be checked against it.
-- **Known residual exposure:** the broker→router hop carries the bootstrap
-  payload, including home/auth/secret file contents, in plaintext in the
-  current fixture (`router_endpoint: http://...`). This is out of
-  scope (§10) and covered by the NetworkPolicy plus first-bootstrap-wins
-  nonce (§5.2), not by transport encryption.
+- **Transport encryption:** the broker→router hop uses TLS 1.3 mTLS
+  (`NewRouterTLSSource`, `PodCertificate` + `servicedns` CA, reloaded per
+  handshake), protecting bootstrap payloads (including composed home, auth,
+  and secret files) and `/exec` traffic in transit.
 
 ## 7. Egress model
 
@@ -886,10 +902,12 @@ hook that runs dropped instead of as root — fail-closed, never the reverse.
 `Delete(id)`: `GetActor` first (best effort, to capture the actor's UID),
 then `DeleteActorEgressPolicy` (`name: "default"`, ignoring `NotFound`), then
 `DeleteActor` (with `options.uid` when known; Substrate v1 terminates actors in
-any state, also tolerating `NotFound`), then drop the in-memory `control_token`
-for `<atespace>/<actor>` and, when the UID was captured (or returned by
-`DeleteActor`), `substrateAgentRecords[uid]` too. The ActorTemplate itself is
-never deleted by `Delete` — template GC is future work (§11).
+any state, also tolerating `NotFound`), then `r.router.DropActor(atespace,
+actorName)` to close any pooled CONNECT transports for that actor, then drop
+the in-memory `control_token` for `<atespace>/<actor>` and, when the UID was
+captured (or returned by `DeleteActor`), `substrateAgentRecords[uid]` too. The
+ActorTemplate itself is never deleted by `Delete` — template GC is future work
+(§11).
 
 **Delete is fire-and-forget.** The broker counts `DeleteActor`
 being accepted (not erroring) as success; it does not confirm the actor
@@ -1049,10 +1067,6 @@ every runtime — not a substrate-specific mechanism:
   (generic, not substrate-specific — `pkg/runtimebroker/controlchannel.go`).
   **Operator mitigation:** warm the template before first use — see
   `deploy/substrate/README.md`.
-- **The broker→router hop is plaintext HTTP**, and bootstrap credentials
-  (including the composed home, §5.4) cross it. Mitigated only by
-  the NetworkPolicy and first-bootstrap-wins nonce (§5.2), not by transport
-  encryption. See `deploy/substrate/README.md` for the fix options.
 - **PID-1 exit is not observed by Substrate.** A post-bootstrap init failure
   leaves a `RUNNING` actor holding a worker; `healthz` reports
   `init-failed`, but the hub only shows an error if the direct status report
@@ -1108,8 +1122,6 @@ every runtime — not a substrate-specific mechanism:
 - **HTTPS egress inspection (`HttpsRule`) requires the sdsmint MITM gateway**
   and `egress_trust_bundle` (§7.1); without it, public port-443 hosts use
   `TlsPassthrough` (SNI-filtered without TLS decryption).
-- **The dialer's trust material is pinned for the broker process's
-  lifetime** (§2), not re-read per agent start.
 - **The every-prefix symlink guard (§5.5) is not a general TOCTOU
   guarantee** — it depends on `substrate-serve` being the sole writer during
   bootstrap.
@@ -1124,9 +1136,6 @@ every runtime — not a substrate-specific mechanism:
   set a digest-pinned template `image:` by hand.
 - Identity-derived bootstrap nonce (`MintActorJwt`), replacing the current
   fallback (§5.2).
-- Seal the bootstrap payload end-to-end, or move the router endpoint to its
-  TLS listener with a `ClusterTrustBundle` CA, closing the broker→router
-  plaintext gap (§6, §10).
 - `Suspender` capability (`Suspend`/`Resume`) using Substrate's `MEMORY`
   snapshot fidelity, plus the `$HOME` durableDir layout needed for `Stop`
   to keep the workspace instead of deleting the actor (§4's `Stop` row).
@@ -1156,9 +1165,7 @@ every runtime — not a substrate-specific mechanism:
   state) instead of the current fire-and-forget `Delete` (§9).
 - Doctor integration for the substrate profile (API reachability, auth,
   atespace create permission, WorkerPool capacity, snapshot bucket, router
-  reachability).
-- Re-read the dialer's trust material per handshake instead of pinning it
-  for the broker process's lifetime (§2).
+  mTLS reachability).
 - A concrete exemption mechanism for a bootstrap target that must traverse
   a system symlink, if a real case ever needs one (§5.5) — none is known
   today, and an ownership heuristic can't reliably separate a benign

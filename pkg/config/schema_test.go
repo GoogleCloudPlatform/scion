@@ -1805,7 +1805,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: "api.ate-system.svc:443"
-      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      router_endpoint: "https://atenet-router.ate-system.svc"
       egress_trust_bundle: egress-mitm.ate.dev
 `)
 	errors, err := ValidateSettings(data, "1")
@@ -1821,7 +1821,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: "api.ate-system.svc:443"
-      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      router_endpoint: "https://atenet-router.ate-system.svc"
       egress_trust_bundle: ""
 `)
 	errors, err := ValidateSettings(data, "1")
@@ -1837,7 +1837,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: "api.ate-system.svc:443"
-      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      router_endpoint: "https://atenet-router.ate-system.svc"
       egress_trust_bundle: some-other-bundle
 `)
 	errors, err := ValidateSettings(data, "1")
@@ -1853,7 +1853,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: "api.ate-system.svc:443"
-      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      router_endpoint: "https://atenet-router.ate-system.svc"
       bogus_field: "nope"
 `)
 	errors, err := ValidateSettings(data, "1")

@@ -898,3 +898,28 @@ func TestValidate_DeprecatedSandboxFields(t *testing.T) {
 		}
 	}
 }
+
+func TestValidate_RouterEndpointRequiresHTTPS(t *testing.T) {
+	for _, okURL := range []string{
+		"",
+		"https://atenet-router.ate-system.svc",
+		"https://atenet-router.ate-system.svc:443",
+		"HTTPS://atenet-router.ate-system.svc",
+	} {
+		if err := Validate(&config.V1SubstrateConfig{RouterEndpoint: okURL}); err != nil {
+			t.Errorf("Validate(RouterEndpoint=%q) = %v, want nil", okURL, err)
+		}
+	}
+	for _, badURL := range []string{
+		"http://atenet-router.ate-system.svc:80",
+		"http://atenet-router.ate-system.svc",
+		"atenet-router.ate-system.svc:443",
+		"https://",
+		"ftp://atenet-router.ate-system.svc",
+	} {
+		err := Validate(&config.V1SubstrateConfig{RouterEndpoint: badURL})
+		if err == nil || !strings.Contains(err.Error(), "router_endpoint") || !strings.Contains(err.Error(), "https://") {
+			t.Errorf("Validate(RouterEndpoint=%q) = %v, want error naming router_endpoint and https://", badURL, err)
+		}
+	}
+}

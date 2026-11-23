@@ -35,7 +35,7 @@ const operatorSubstrateSettings = `{
 			"type": "substrate",
 			"substrate": {
 				"api_endpoint": "api.ate-system.svc:443",
-				"router_endpoint": "http://atenet-router.ate-system.svc:80",
+				"router_endpoint": "https://atenet-router.ate-system.svc",
 				"egress_allow": ["storage.googleapis.com"]
 			}
 		}
@@ -80,9 +80,11 @@ var operatorOnlyRows = []struct {
 	projectSettings string
 	// wantAPIEndpoint and wantEgress are the merged (effective) values the
 	// row must produce, checked before validating so a refused row is known
-	// to be refused for the override it was written to exercise.
+	// to be refused for the override it was written to exercise. checkMerged
+	// optionally checks an additional merged field (e.g. a TLS override).
 	wantAPIEndpoint string
 	wantEgress      []string
+	checkMerged     func(t *testing.T, sc *config.V1SubstrateConfig)
 	wantRefused     bool
 }{
 	{
@@ -94,7 +96,7 @@ var operatorOnlyRows = []struct {
 					"type": "substrate",
 					"substrate": {
 						"api_endpoint": "attacker.net:443",
-						"router_endpoint": "http://atenet-router.ate-system.svc:80",
+						"router_endpoint": "https://atenet-router.ate-system.svc",
 						"egress_allow": ["*.evil.net"]
 					}
 				}
@@ -135,6 +137,106 @@ var operatorOnlyRows = []struct {
 		wantRefused:     true,
 	},
 	{
+		name: "router_ca_file-only override",
+		projectSettings: `{
+			"schema_version": "1",
+			"runtimes": {
+				"substrate-prod": {
+					"type": "substrate",
+					"substrate": {"router_ca_file": "/tmp/attacker-ca.pem"}
+				}
+			}
+		}`,
+		wantAPIEndpoint: "api.ate-system.svc:443",
+		wantEgress:      []string{"storage.googleapis.com"},
+		checkMerged: func(t *testing.T, sc *config.V1SubstrateConfig) {
+			if sc.RouterCAFile != "/tmp/attacker-ca.pem" {
+				t.Fatalf("effective router_ca_file = %q, want /tmp/attacker-ca.pem", sc.RouterCAFile)
+			}
+		},
+		wantRefused: true,
+	},
+	{
+		name: "router_client_cert_file-only override",
+		projectSettings: `{
+			"schema_version": "1",
+			"runtimes": {
+				"substrate-prod": {
+					"type": "substrate",
+					"substrate": {"router_client_cert_file": "/tmp/attacker-cert.pem"}
+				}
+			}
+		}`,
+		wantAPIEndpoint: "api.ate-system.svc:443",
+		wantEgress:      []string{"storage.googleapis.com"},
+		checkMerged: func(t *testing.T, sc *config.V1SubstrateConfig) {
+			if sc.RouterClientCertFile != "/tmp/attacker-cert.pem" {
+				t.Fatalf("effective router_client_cert_file = %q, want /tmp/attacker-cert.pem", sc.RouterClientCertFile)
+			}
+		},
+		wantRefused: true,
+	},
+	{
+		name: "router_server_name-only override",
+		projectSettings: `{
+			"schema_version": "1",
+			"runtimes": {
+				"substrate-prod": {
+					"type": "substrate",
+					"substrate": {"router_server_name": "attacker.example.com"}
+				}
+			}
+		}`,
+		wantAPIEndpoint: "api.ate-system.svc:443",
+		wantEgress:      []string{"storage.googleapis.com"},
+		checkMerged: func(t *testing.T, sc *config.V1SubstrateConfig) {
+			if sc.RouterServerName != "attacker.example.com" {
+				t.Fatalf("effective router_server_name = %q, want attacker.example.com", sc.RouterServerName)
+			}
+		},
+		wantRefused: true,
+	},
+	{
+		name: "router_connect_endpoint-only override",
+		projectSettings: `{
+			"schema_version": "1",
+			"runtimes": {
+				"substrate-prod": {
+					"type": "substrate",
+					"substrate": {"router_connect_endpoint": "attacker.example.com:8444"}
+				}
+			}
+		}`,
+		wantAPIEndpoint: "api.ate-system.svc:443",
+		wantEgress:      []string{"storage.googleapis.com"},
+		checkMerged: func(t *testing.T, sc *config.V1SubstrateConfig) {
+			if sc.RouterConnectEndpoint != "attacker.example.com:8444" {
+				t.Fatalf("effective router_connect_endpoint = %q, want attacker.example.com:8444", sc.RouterConnectEndpoint)
+			}
+		},
+		wantRefused: true,
+	},
+	{
+		name: "api_client_cert_file-only override",
+		projectSettings: `{
+			"schema_version": "1",
+			"runtimes": {
+				"substrate-prod": {
+					"type": "substrate",
+					"substrate": {"api_client_cert_file": "/tmp/attacker-api-cert.pem"}
+				}
+			}
+		}`,
+		wantAPIEndpoint: "api.ate-system.svc:443",
+		wantEgress:      []string{"storage.googleapis.com"},
+		checkMerged: func(t *testing.T, sc *config.V1SubstrateConfig) {
+			if sc.APIClientCertFile != "/tmp/attacker-api-cert.pem" {
+				t.Fatalf("effective api_client_cert_file = %q, want /tmp/attacker-api-cert.pem", sc.APIClientCertFile)
+			}
+		},
+		wantRefused: true,
+	},
+	{
 		name: "identical re-declaration",
 		projectSettings: `{
 			"schema_version": "1",
@@ -143,7 +245,7 @@ var operatorOnlyRows = []struct {
 					"type": "substrate",
 					"substrate": {
 						"api_endpoint": "api.ate-system.svc:443",
-						"router_endpoint": "http://atenet-router.ate-system.svc:80",
+						"router_endpoint": "https://atenet-router.ate-system.svc",
 						"egress_allow": ["storage.googleapis.com"]
 					}
 				}
@@ -192,6 +294,9 @@ func TestValidateOperatorOnlySubstrateProfile_ProjectRedeclaresOperatorRuntime(t
 			}
 			if got := strings.Join(rtConfig.Substrate.EgressAllow, ","); got != strings.Join(row.wantEgress, ",") {
 				t.Fatalf("effective egress_allow = %v, want %v", rtConfig.Substrate.EgressAllow, row.wantEgress)
+			}
+			if row.checkMerged != nil {
+				row.checkMerged(t, rtConfig.Substrate)
 			}
 
 			err = ValidateOperatorOnlySubstrateProfile(vs, "substrate")
@@ -264,7 +369,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: api.operator.example.com:443
-      router_endpoint: http://router.operator.example.com:80
+      router_endpoint: https://router.operator.example.com
 profiles:
   substrate:
     runtime: substrate-prod
@@ -280,7 +385,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: api.operator.example.com:443
-      router_endpoint: http://router.operator.example.com:80
+      router_endpoint: https://router.operator.example.com
 profiles:
   "":
     runtime: substrate-prod
@@ -296,7 +401,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: api.project.example.com:443
-      router_endpoint: http://router.project.example.com:80
+      router_endpoint: https://router.project.example.com
 profiles:
   "":
     runtime: project-substrate
@@ -580,7 +685,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: api.operator.example.com:443
-      router_endpoint: http://router.operator.example.com:80
+      router_endpoint: https://router.operator.example.com
 profiles:
   "":
     runtime: substrate-prod
@@ -604,7 +709,7 @@ runtimes:
     type: substrate
     substrate:
       api_endpoint: api.operator.example.com:443
-      router_endpoint: http://router.operator.example.com:80
+      router_endpoint: https://router.operator.example.com
 profiles:
   "":
     runtime: project-copy

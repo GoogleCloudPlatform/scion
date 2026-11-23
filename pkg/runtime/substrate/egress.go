@@ -17,6 +17,7 @@ package substrate
 import (
 	"fmt"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -135,11 +136,29 @@ func Validate(s *config.V1SubstrateConfig) error {
 	if s.SandboxConfigName != "" {
 		return fmt.Errorf("%ssandbox_config_name is no longer supported by Substrate v1.0.0: the sandbox configuration comes from the WorkerPool's spec.sandboxClasses[].configRef, selected with worker_selector; remove sandbox_config_name", prefix)
 	}
+	if s.RouterEndpoint != "" {
+		if err := ValidateRouterEndpoint(s.RouterEndpoint); err != nil {
+			return fmt.Errorf("%srouter_endpoint: %w", prefix, err)
+		}
+	}
 	if err := ValidateEgressAllow(s.EgressAllow); err != nil {
 		return fmt.Errorf("%segress_allow: %w", prefix, err)
 	}
 	if err := ValidateEgressTrustBundle(s.EgressTrustBundle); err != nil {
 		return fmt.Errorf("%segress_trust_bundle: %w", prefix, err)
+	}
+	return nil
+}
+
+// ValidateRouterEndpoint requires router_endpoint to be an https:// URL with
+// a non-empty host. Substrate v1 serves atenet-router over TLS 1.3 mTLS only,
+// so plaintext http:// (or scheme-less) router URLs fail closed at validation
+// rather than risking a plaintext downgrade of bootstrap/exec traffic.
+func ValidateRouterEndpoint(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	u, err := url.Parse(trimmed)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" {
+		return fmt.Errorf("%q must use https:// with a host (plaintext http:// is not supported)", raw)
 	}
 	return nil
 }

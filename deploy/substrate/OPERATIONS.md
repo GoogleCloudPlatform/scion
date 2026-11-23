@@ -176,12 +176,12 @@ kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
 #    grpcurl -insecure/-plaintext against a real cluster endpoint.
 #
 #    Per deployment, fill in: <atespace> and <actor> (from step 0); the
-#    CA bundle passed to -cacert, which is the CA that signs the
-#    api.${ATE_SYSTEM_NAMESPACE}.svc certificate (cluster-internal, not in a
-#    public trust store; with the settings this deployment uses it is the
-#    ClusterTrustBundle named by substrate.cluster_trust_bundle, or the file
-#    named by substrate.ca_file if you use that instead); and a host to run
-#    grpcurl from that can resolve and reach api.${ATE_SYSTEM_NAMESPACE}.svc:443
+#    CA bundle passed to -cacert, which is the live servicedns
+#    ClusterTrustBundle signing api.${ATE_SYSTEM_NAMESPACE}.svc (projected
+#    into the broker pod at
+#    /run/podidentity.podcert.ate.dev/servicedns-ca/trust-bundle.pem, or
+#    fetched below by signer/canarying label); and a host to run grpcurl
+#    from that can resolve and reach api.${ATE_SYSTEM_NAMESPACE}.svc:443
 #    directly (inside the cluster network) -- it is a headless,
 #    cluster-internal service name, so it does not resolve from a
 #    workstation (see the workstation form after the in-cluster form below).
@@ -194,8 +194,8 @@ kubectl -n "${BROKER_NAMESPACE}" get pod "$POD" \
 #    '${ATE_TOKEN}'. The export and both calls run in a subshell, so
 #    ATE_TOKEN is gone as soon as it exits -- whether or not the calls
 #    inside succeed -- with no separate `unset` needed.
-kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
-  -o jsonpath='{.spec.trustBundle}' > ate-ca.pem
+kubectl get clustertrustbundles -l podcert.ate.dev/canarying=live \
+  -o jsonpath='{range .items[?(@.spec.signerName=="servicedns.podcert.ate.dev/identity")]}{.spec.trustBundle}{"\n"}{end}' > ate-ca.pem
 (
   export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
     --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
@@ -445,9 +445,11 @@ this broker are:
 - gVisor snapshots only restoring on a matching CPU platform — see
   `cluster/README.md`, "gVisor node pool".
 - NetworkPolicy enforcement requiring an enforcing CNI with no built-in
-  check, and router ingress having no authorization of its own — see
-  `cluster/README.md`, "Enabling NetworkPolicy enforcement", and
-  `README.md`, "Known limitations".
+  check — see `cluster/README.md`, "Enabling NetworkPolicy enforcement", and
+  `README.md`, "Known limitations". (Router ingress and API ingress now both
+  enforce identity authentication in Substrate v1.0.0 via
+  `ATE_INGRESS_ALLOWED_SPIFFE_IDS` and OpenFGA `AccessPolicy`, layered with
+  NetworkPolicy.)
 - `worker_selector` matching the wrong label silently reporting "no free
   workers" instead of a selector-mismatch error — see `cluster/README.md`,
   "`worker_selector`".
@@ -478,9 +480,6 @@ this broker are:
   and its working directory exactly like a delete would — there is no
   "stopped but resumable" state to come back to. See
   `pkg/runtime/substrate_runtime.go`'s `Stop` doc comment.
-- **The broker's own CA/trust-bundle is read once, at dial time.** Rotating
-  the CA or trust bundle a broker uses to reach ateapi/the router requires
-  restarting the broker process — there is no live-reload path.
 - **The broker container runs as root.** The default target of the repo-root
   `Dockerfile` has no `USER` directive, so `broker.yaml`'s pod spec
   deliberately does not set `runAsNonRoot`/`runAsUser` (setting them against a root-only image would
@@ -494,14 +493,16 @@ this broker are:
   agent image is enforced. Recommend pinning `BROKER_IMAGE` by digest
   (`@sha256:...`) anyway when cutting a broker release, for the same
   supply-chain reasons.
-- The broker→router hop is plaintext HTTP, and bootstrap credentials cross
-  it; NetworkPolicy and the single-use, first-caller-wins bootstrap guard
-  mitigate this, not transport encryption. The guard is NOT a nonce check —
-  the actor does not verify the bootstrap nonce the broker generates; it
-  simply accepts whichever caller claims bootstrap first and refuses every
-  later attempt, and the broker treats a conflict (meaning some other
-  caller claimed first) as a hijack and deletes the actor. See `README.md`
-  for the fix options.
+- **Bootstrap uses a single-use, first-caller-wins guard rather than an
+  identity-derived nonce.** The broker→router hop is encrypted and
+  authenticated via TLS 1.3 mTLS (`ATE_INGRESS_ALLOWED_SPIFFE_IDS`) layered
+  with `cluster/networkpolicy.yaml`, and both server CAs (`ca_file`,
+  `router_ca_file`, `ClusterTrustBundle`) and projected `PodCertificate`
+  client bundles reload dynamically without restarting the broker. Inside
+  the actor, however, `sciontool substrate-serve` does not verify the
+  bootstrap nonce the broker generates; it simply accepts whichever caller
+  claims bootstrap first and refuses every later attempt, and the broker
+  treats a conflict (409) as a hijack and deletes the actor.
 - **`/exec` does not run a login shell.** The actor's control server runs
   each exec command as the unprivileged `scion` user by switching uid and
   gid directly, in that user's home directory, and refuses a user that

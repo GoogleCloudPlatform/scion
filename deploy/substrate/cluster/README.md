@@ -11,20 +11,21 @@ own tooling (see "Install order" below).
 | File | What it is | When to apply |
 |---|---|---|
 | `workerpool.yaml` | A `WorkerPool` (Substrate CRD `ate.dev/v1`) dedicated to scion actors, referencing a `SandboxConfig` via `spec.sandboxClasses[].configRef`, sized for a Claude Code-class workload, tolerating the gVisor node taint. | After Substrate is installed (the CRD and `SandboxConfig` must already exist), before the broker's first `scion start`. |
-| `networkpolicy.yaml` | Three `NetworkPolicy` objects: the router ingress restriction (a cluster/`ate-system` prerequisite, not broker-specific — see `../broker.yaml`), and a default-deny ingress baseline each for the worker namespace and the broker namespace. See "NetworkPolicy objects" below. | After NetworkPolicy enforcement is enabled on the cluster (below), alongside the broker deploy. |
+| `networkpolicy.yaml` | Three `NetworkPolicy` objects: the router ingress restriction (TLS ports `8443` and `8444` only — a cluster/`ate-system` prerequisite, not broker-specific — see `../broker.yaml`), and a default-deny ingress baseline each for the worker namespace and the broker namespace. See "NetworkPolicy objects" below. | After NetworkPolicy enforcement is enabled on the cluster (below), alongside the broker deploy. |
 
 ## Cluster requirements (not manifests — cluster/project setup)
 
 These aren't Kubernetes objects this folder can apply; they're GKE/cluster
 properties to get right before Substrate is installed at all.
 
-- **GKE version**: Substrate's control-plane objects (`PodCertificateRequest`,
-  `ClusterTrustBundle`) used the `certificates.k8s.io/v1beta1` API on the
-  version this was built against. GKE 1.37 serves only `v1` — check which
-  API version your target Substrate commit uses before picking a cluster
-  version. On GKE 1.36, the `v1beta1` APIs must be enabled **at cluster
-  creation**; this is not fixable on an existing cluster. Check what your
-  cluster actually serves with:
+- **GKE version**: Substrate v1.0.0 uses `ClusterTrustBundle` and
+  `PodCertificateRequest` (`certificates.k8s.io/v1` on GKE 1.37+, with
+  automatic client fallback to `v1beta1` in
+  `pkg/runtime/substrate/tlssource.go`). On GKE 1.36, `certificates.k8s.io/v1beta1`
+  must be enabled **at cluster creation** (not fixable on an existing
+  cluster), and the kubelet/API-server must support projected
+  `clusterTrustBundle` and `podCertificate` volume sources used by
+  `../broker.yaml`. Check what your cluster actually serves with:
   ```sh
   kubectl api-resources --api-group=certificates.k8s.io
   ```
@@ -77,7 +78,9 @@ properties to get right before Substrate is installed at all.
    (record which commit you installed; behavior in this README and in
    `../README.md` was verified against Substrate v1.0.0, and drift is
    possible). This is what creates the `WorkerPool`/`SandboxConfig`/`CSIDriverConfig`
-   (`ate.dev/v1`) CRDs, `ate-system` namespace, `ateapi`, and `atenet-router`.
+   (`ate.dev/v1`) CRDs, `ate-system` namespace, `ateapi`, `atenet-router`,
+   and the `servicedns.podcert.ate.dev/identity` / `podidentity.podcert.ate.dev/identity`
+   certificate signers.
 3. Enable NetworkPolicy enforcement (below) — do this before applying
    `networkpolicy.yaml`; applying a NetworkPolicy object on a cluster with no
    enforcing CNI succeeds and enforces nothing, silently.
@@ -211,9 +214,11 @@ top of that controller-generated baseline, not replacements for it.
 
 - **`atenet-router-restrict-ingress`** (`${ATE_SYSTEM_NAMESPACE}`) —
   restricts `atenet-router` ingress to the broker namespace
-  (`${BROKER_NAMESPACE}`). It lives here, rather than in `../broker.yaml`,
-  because it's a cluster/`ate-system` prerequisite rather than a
-  broker-specific resource. Rollback: `kubectl delete networkpolicy atenet-router-restrict-ingress -n "${ATE_SYSTEM_NAMESPACE}"`.
+  (`${BROKER_NAMESPACE}`) on TLS ports `8443` and `8444` only (plaintext
+  ports `8080`/`8081` are closed), layering network isolation on top of
+  Substrate v1.0.0's mandatory SPIFFE mTLS. It lives here, rather than in
+  `../broker.yaml`, because it's a cluster/`ate-system` prerequisite rather
+  than a broker-specific resource. Rollback: `kubectl delete networkpolicy atenet-router-restrict-ingress -n "${ATE_SYSTEM_NAMESPACE}"`.
   Note: a `kubectl apply --prune` workflow scoped to `../broker.yaml` alone
   would delete this object, since `../broker.yaml` does not contain it —
   apply (and prune) `networkpolicy.yaml` and `../broker.yaml` together, or

@@ -40,11 +40,22 @@ same convention.
 
 ## Why an in-cluster broker
 
-Substrate has no authorization on its control API or inbound router — see
-`.design/kubernetes/substrate-runtime.md` §1. The broker needs both the
-`ateapi` service and the `atenet-router` reachable, and must run in-cluster
-rather than reach in over a LoadBalancer/Ingress that would expose those
-unauthenticated surfaces beyond the cluster boundary.
+In Substrate v1.0.0, both control-plane surfaces enforce authentication and
+authorization:
+
+- `ateapi` verifies Kubernetes `TokenRequest` bearer tokens (or mTLS client
+  certificates when `api_client_cert_file` is set), enforces OpenFGA
+  `AccessPolicy` permissions, and limits network ingress to namespaces labeled
+  `ate.dev/api-access: "true"`.
+- `atenet-router` requires TLS 1.3 mTLS on ports `443` (mapped to `8443`) and
+  `8444` (`CONNECT`), and verifies client certificates against
+  `ATE_INGRESS_ALLOWED_SPIFFE_IDS`.
+
+The broker runs in-cluster so it sits directly inside the cluster network beside
+`api.${ATE_SYSTEM_NAMESPACE}.svc` and `atenet-router.${ATE_SYSTEM_NAMESPACE}.svc`
+and receives Kubernetes-native workload identity (`TokenRequest`, projected
+`PodCertificate`, and projected `ClusterTrustBundle`) without exposing `ateapi`
+or `atenet-router` outside the cluster boundary.
 
 ## Pin the agent image by digest (REQUIRED)
 
@@ -131,27 +142,31 @@ every manifest.
 
 | Placeholder | Meaning |
 |---|---|
-| `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in. **Also the value the router NetworkPolicy's `namespaceSelector` is pinned to** — see the callout below the table. |
+| `BROKER_NAMESPACE` | Namespace the broker Deployment and its RBAC live in. Labeled `ate.dev/api-access: "true"` by `broker.yaml`, pinned by `cluster/networkpolicy.yaml`, and embedded in the broker's SPIFFE ID and OpenFGA `AccessPolicy` bindings (see below). |
 | `BROKER_IMAGE` | Branch-built image containing the `scion` binary (see "Building the broker image") |
 | `ATE_SYSTEM_NAMESPACE` | Namespace hosting `ateapi` and `atenet-router` (upstream default: `ate-system`) |
-| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in. Not read by anything this manifest applies (agent logs are not currently supported on the substrate runtime — see "Known limitations" below); used only for locating Substrate's own controller-generated worker `NetworkPolicy` and for the verification commands below |
+| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the actor **worker pods** run in. Not read by anything `broker.yaml` applies (agent logs are not currently supported on the substrate runtime — see "Known limitations" below); used by `cluster/workerpool.yaml`, `cluster/networkpolicy.yaml`, and the verification commands below |
 | `HUB_ENDPOINT` | The scion hub's URL |
 | `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) |
 | `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename |
-| `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying `ateapi` TLS (the router hop is plaintext today — see below) |
 | `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see `cluster/README.md`, "`worker_selector`"). In Substrate v1.0.0, `sandbox_class` and `sandbox_config_name` moved to the `WorkerPool` (`cluster/workerpool.yaml` `spec.sandboxClasses[].configRef`). |
 | `SNAPSHOT_STORAGE_URI` | Optional bucket/prefix for actor snapshots (`snapshot_config.storage_location`; requires Substrate's `PerTemplateSnapshotLocation` preview gate; leave empty to use `ate-api`'s `--snapshot-location`) |
 
-**`BROKER_NAMESPACE` is baked into the router NetworkPolicy at apply time,
-not read live.** The router `NetworkPolicy`'s `namespaceSelector` matches on
-`${BROKER_NAMESPACE}`'s resolved value — a literal namespace name in the
-rendered manifest, the same way every other placeholder here resolves once
-at `envsubst` time. If you later rename the broker's namespace, or redeploy
-the broker into a different one, that `NetworkPolicy` object still points at
-the *old* namespace until you re-render and re-apply it with the new value —
-the broker's Deployment moving does not update it. The symptom is
-exec/bootstrap timing out talking to the router even though the broker pod
-itself looks healthy, because the router now refuses it.
+(Note: CA trust uses the projected `servicedns.podcert.ate.dev/identity`
+`ClusterTrustBundle` mounted via `ca_file` in `broker.yaml` — with dynamic
+`ClusterTrustBundle` `list` fallback when `ca_file` and `cluster_trust_bundle`
+are unset — rather than a static `CLUSTER_TRUST_BUNDLE_NAME` placeholder.)
+
+**`BROKER_NAMESPACE` is baked into the router NetworkPolicy and router SPIFFE
+allowlist at apply time, not read live.** The router `NetworkPolicy`'s
+`namespaceSelector` matches on `${BROKER_NAMESPACE}`'s resolved value, and
+`atenet-router`'s `ATE_INGRESS_ALLOWED_SPIFFE_IDS` plus the OpenFGA
+`AccessPolicy` name `scion-substrate-broker` in `${BROKER_NAMESPACE}`. If you
+later rename the broker's namespace, or redeploy the broker into a different
+one, re-render `cluster/networkpolicy.yaml`, update
+`ATE_INGRESS_ALLOWED_SPIFFE_IDS` and the `AccessPolicy` bindings, and re-apply.
+The symptom otherwise is exec/bootstrap or API calls failing with
+TLS/permission/timeout errors even though the broker pod itself looks healthy.
 
 **`egress_allow` entries are validated, and rejected entries block the
 broker from starting an agent.** An actor's own egress policy must never let
@@ -192,13 +207,15 @@ operator-only.** A project's merged settings (an in-repo `.scion/settings.*`,
 or a hub-managed project's own settings file) may only *select* an
 operator-defined substrate profile by name; it may never define or override
 `api_endpoint`, `router_endpoint`, `ca_file`/`cluster_trust_bundle`,
-`token_audience`, `egress_allow`, or any other key in this table. The broker
-refuses to construct a substrate runtime outright — a clear config error,
-never a silent merge — if a project's settings define a substrate runtime
-block that doesn't match the operator's own global settings byte for byte.
-This matters because this block is exactly what a hijacked or malicious repo
-would need to control to redirect the bootstrap payload (hub token, resolved
-secrets) to an attacker endpoint, or to widen egress arbitrarily.
+`router_ca_file`, `router_client_cert_file`, `router_server_name`,
+`router_connect_endpoint`, `api_client_cert_file`, `token_audience`,
+`egress_allow`, or any other key in this table. The broker refuses to construct
+a substrate runtime outright — a clear config error, never a silent merge — if
+a project's settings define a substrate runtime block that doesn't match the
+operator's own global settings byte for byte. This matters because this block
+is exactly what a hijacked or malicious repo would need to control to redirect
+the bootstrap payload (hub token, resolved secrets) to an attacker endpoint, or
+to widen egress arbitrarily.
 
 ### `egress_trust_bundle`: only needed under sdsmint
 
@@ -309,6 +326,47 @@ ConfigMap.
    (or delete + recreate) with the refreshed file. There is no in-cluster
    rotation mechanism today.
 
+## Substrate authorization and router allowlist
+
+Substrate v1.0.0 requires explicit authorization on both `ateapi` (OpenFGA
+`AccessPolicy`) and `atenet-router` (`ATE_INGRESS_ALLOWED_SPIFFE_IDS`):
+
+### `ateapi` OpenFGA `AccessPolicy`
+
+Grant permissions to **both** broker identities in the `AccessPolicy`
+(TokenRequest bearer authentication resolves to the Kubernetes ServiceAccount
+principal, while pod-cert mTLS via `api_client_cert_file` resolves to the
+SPIFFE identity):
+
+```sh
+kubectl ate create access-policy --global -f - <<EOF
+metadata:
+  name: default
+bindings:
+  - role: owner
+    members:
+      - user:system:serviceaccount:${BROKER_NAMESPACE}:scion-substrate-broker
+      - user:spiffe://cluster.local/ns/${BROKER_NAMESPACE}/sa/scion-substrate-broker
+EOF
+```
+
+(If a global policy already exists, update it with `kubectl ate get access-policy --global`
+and `kubectl ate update access-policy --global -f ...` rather than
+overwriting existing members.)
+
+### `atenet-router` SPIFFE mTLS allowlist
+
+`atenet-router` only accepts mTLS connections from SPIFFE identities listed
+in `ATE_INGRESS_ALLOWED_SPIFFE_IDS`. Add the broker's SPIFFE ID to the router
+Deployment/configuration in `${ATE_SYSTEM_NAMESPACE}` (comma-separated if other
+clients are present):
+
+```text
+spiffe://cluster.local/ns/${BROKER_NAMESPACE}/sa/scion-substrate-broker
+```
+
+Updating `ATE_INGRESS_ALLOWED_SPIFFE_IDS` rolls the `atenet-router` pod.
+
 ## Apply order
 
 ```sh
@@ -326,21 +384,20 @@ export SUBSTRATE_WORKER_NAMESPACE=scion-agents
 export HUB_ENDPOINT=...
 export HUB_BROKER_ID=...
 export HUB_CONNECTION_NAME=scion-integration
-export CLUSTER_TRUST_BUNDLE_NAME='servicedns.podcert.ate.dev:identity:primary-bundle'
 # Must match the target WorkerPool's own metadata.labels, NOT a Pod label —
 # see cluster/README.md, "worker_selector".
 export WORKER_SELECTOR_KEY=pool
 export WORKER_SELECTOR_VALUE=scion-agents
-export SNAPSHOT_STORAGE_URI=gs://<your-bucket>/scion/
+export SNAPSHOT_STORAGE_URI=gs://<your-bucket>/scion/   # or "" if using server --snapshot-location
 
 envsubst < deploy/substrate/broker.yaml > /tmp/broker.rendered.yaml
 
 # 2. Validate before touching the cluster (see "Validation" below).
 
-# 3. Namespace + RBAC + ConfigMap first, so the Secret step below has
-#    somewhere to land and the Deployment has everything it needs the
-#    moment it starts. (The router NetworkPolicy is applied separately, in
-#    step 0, from cluster/networkpolicy.yaml.)
+# 3. Namespace (labeled ate.dev/api-access=true) + RBAC + ConfigMap + Deployment
+#    first, so the Secret step below has somewhere to land and the Deployment
+#    has everything it needs the moment it starts. (The router NetworkPolicy is
+#    applied separately, in step 0, from cluster/networkpolicy.yaml.)
 kubectl apply -f /tmp/broker.rendered.yaml
 
 # 4. Create the Secret (see "Secret creation" above) — do this AFTER step 3
@@ -349,6 +406,10 @@ kubectl apply -f /tmp/broker.rendered.yaml
 #    pod in ContainerCreating with a FailedMount event, not CrashLoopBackOff,
 #    until the Secret exists.
 kubectl create secret generic scion-substrate-broker-hub-credentials ...
+
+# 5. Grant ateapi AccessPolicy permissions and add the broker SPIFFE ID to
+#    atenet-router's ATE_INGRESS_ALLOWED_SPIFFE_IDS (see "Substrate
+#    authorization and router allowlist" above).
 ```
 
 `envsubst` isn't preinstalled everywhere; on Debian/Ubuntu it's in the
@@ -365,8 +426,10 @@ access at all. Two options that don't require one:
 
 ```sh
 # Static schema validation: https://github.com/yannh/kubeconform
+# Note: broker.yaml uses projected clusterTrustBundle and podCertificate
+# volume sources (Kubernetes 1.35+).
 go install github.com/yannh/kubeconform/cmd/kubeconform@latest
-kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/broker.rendered.yaml
+kubeconform -strict -summary -kubernetes-version 1.35.0 /tmp/broker.rendered.yaml
 
 # Once you *do* have cluster access:
 kubectl apply --dry-run=client -f /tmp/broker.rendered.yaml
@@ -486,7 +549,11 @@ curl -s localhost:9800/healthz
 # Broker registered and heartbeating (from a machine with hub access):
 scion runtime-broker status --broker "${HUB_BROKER_ID}"
 
-# TokenRequest RBAC works (the runtime actually reaches ateapi):
+# Projected certificates mounted cleanly (check events/mounts):
+kubectl -n "${BROKER_NAMESPACE}" describe pod -l app=scion-substrate-broker
+
+# TokenRequest RBAC works (always required: substrate.Dial attaches per-RPC
+# ServiceAccount bearer credentials alongside optional api_client_cert_file mTLS):
 kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker | grep -i "substrate: mint ateapi token"
 
 # active_profile: substrate is doing its job — the broker's own heartbeat
@@ -495,23 +562,26 @@ kubectl -n "${BROKER_NAMESPACE}" logs deploy/scion-substrate-broker | grep -i "d
 # Expect: no output.
 
 # ---- Router NetworkPolicy: verify this on the cluster, not just that it
-# applied. Confirm the policy blocks an out-of-namespace caller and allows
-# an in-namespace one: ----
+# applied. In v1.0.0, networkpolicy.yaml only permits TLS ports 8443 (443->8443)
+# and 8444 from BROKER_NAMESPACE, and atenet-router requires mTLS. ----
 
-# (a) From a throwaway pod OUTSIDE the broker namespace: must be refused.
+# (a) From a throwaway pod OUTSIDE the broker namespace: must be refused by NetworkPolicy.
 kubectl run netpol-probe --rm -it --restart=Never \
   --namespace default \
   --image=curlimages/curl -- \
-  curl -sS --max-time 5 "http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc/scion/v1/healthz"
-# Expect: a timeout/connection error (dropped by the NetworkPolicy) — any
-# HTTP status at all means the policy did NOT block the request.
+  curl -skS --max-time 5 "https://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc/scion/v1/healthz"
+# Expect: a timeout/connection error (dropped by the NetworkPolicy) — reaching
+# the TLS handshake means the policy did NOT block the request.
 
-# (b) From a throwaway pod INSIDE the broker namespace: must connect.
+# (b) From a throwaway pod INSIDE the broker namespace: reaches :8443 TLS,
+#     fails at mTLS client-cert verification (no PodCertificate on the throwaway
+#     pod) rather than timing out; plaintext :80 times out because 8080 is closed.
 kubectl run netpol-probe --rm -it --restart=Never \
   --namespace "${BROKER_NAMESPACE}" \
   --image=curlimages/curl -- \
-  curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' \
-  "http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc/scion/v1/healthz"
+  curl -skS --max-time 5 "https://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc/scion/v1/healthz"
+# Expect: TLS handshake/certificate alert (TCP permitted by NetworkPolicy;
+# enforced by router mTLS), NOT a TCP connect timeout.
 
 # ---- Worker-namespace NetworkPolicy: this manifest does NOT create one —
 # Substrate's own atecontroller auto-creates a per-WorkerPool NetworkPolicy
@@ -588,13 +658,15 @@ Once the broker is `Ready` and registered (verification commands above):
   brand-new actor from the template, not a resumed one — any uncommitted
   work in the stopped actor's workspace is lost. Push before stopping.
 - **Bootstrap auth is a fallback, not an identity-derived nonce.**
-  `sciontool substrate-serve` defaults to accepting any bearer
+  While `atenet-router` now enforces TLS 1.3 mTLS
+  (`ATE_INGRESS_ALLOWED_SPIFFE_IDS`) on the broker→router hop,
+  `sciontool substrate-serve` still defaults to accepting any bearer
   token, relying on a single-shot "first bootstrap wins" check plus multiple
   NetworkPolicies from *different owners*: the router policy (restricting
-  `atenet-router` ingress to the broker namespace), the worker policy
-  Substrate itself generates per `WorkerPool` (restricting worker-pod
-  ingress to `atenet-router` pods within `ATE_SYSTEM_NAMESPACE`), and the
-  default-deny ingress baseline this deployment adds for the worker
+  `atenet-router` ingress to the broker namespace on TLS ports `8443`/`8444`),
+  the worker policy Substrate itself generates per `WorkerPool` (restricting
+  worker-pod ingress to `atenet-router` pods within `ATE_SYSTEM_NAMESPACE`),
+  and the default-deny ingress baseline this deployment adds for the worker
   namespace. All three live in `cluster/networkpolicy.yaml` and
   `cluster/README.md` (see "Files" below), not in this file. NetworkPolicy
   objects targeting the same pods are OR'd
@@ -617,10 +689,10 @@ Once the broker is `Ready` and registered (verification commands above):
   reason — a documented Kubernetes/GKE networking property, not something
   specific to this manifest.
 - **Metrics/monitoring scraping is not accounted for.** The router
-  NetworkPolicy only opens its client-facing ports to the broker namespace;
-  it does not add an allow for a metrics scraper reaching an admin/metrics
-  port directly. If router metrics go missing after applying this policy,
-  that's the first thing to check.
+  NetworkPolicy only opens its client-facing TLS ports (`8443`, `8444`) to the
+  broker namespace; it does not add an allow for a metrics scraper reaching an
+  admin/metrics port directly. If router metrics go missing after applying this
+  policy, that's the first thing to check.
 - **The precise worker-pod-to-router allow rule is Substrate's
   responsibility, not this folder's.** This deployment adds a default-deny
   ingress floor for the worker namespace (`cluster/networkpolicy.yaml`), but
@@ -635,19 +707,10 @@ Once the broker is `Ready` and registered (verification commands above):
 - **No Helm chart, no template GC, no doctor integration.** This is a
   minimal fixture. The polished chart, template garbage collection, and
   automated pre-flight checks are future work.
-- **No in-cluster credential rotation.** See "Secret creation" step 3.
-- **Bootstrap files — including the composed agent home — cross the
-  broker→router hop in plaintext.** The router endpoint in this fixture is
-  plain HTTP, and the router client has no CA configured. Out of scope for
-  the same reasons the existing plaintext-hop risk is:
-  this is meant for a dedicated cluster, router ingress is restricted to the
-  broker namespace, and the single-shot bootstrap check applies. A shared
-  cluster needs the router's TLS listener with a CA, or an end-to-end sealed
-  payload, before this ships beyond a dedicated cluster.
-- **The dialer's trust material is pinned for the broker process's
-  lifetime, not re-read per agent start.** Rotating the CA behind
-  `ca_file`/`cluster_trust_bundle` does not take effect until the broker
-  process restarts (a rolling restart is sufficient).
+- **No in-cluster Hub-credential rotation.** See "Secret creation" step 3.
+  (Server CAs via `ca_file`/`router_ca_file`/`ClusterTrustBundle` and workload
+  client certs via projected `PodCertificate` reload automatically without
+  restarting the broker.)
 - **Logs.** `scion logs` and the web log view return an explicit
   not-supported error for a substrate agent: worker pods are
   shared across atespaces and users, so an unfiltered worker-pod log read
@@ -680,10 +743,11 @@ Once the broker is `Ready` and registered (verification commands above):
 
 ## Files
 
-- `broker.yaml` — Namespace, ServiceAccount, RBAC (TokenRequest-on-self,
-  ClusterTrustBundle read), ConfigMap (substrate runtime profile), and
-  Deployment. The router NetworkPolicy lives in `cluster/networkpolicy.yaml`
-  — see that file and `cluster/README.md`.
+- `broker.yaml` — Namespace (labeled `ate.dev/api-access: "true"`),
+  ServiceAccount, RBAC (TokenRequest-on-self, `ClusterTrustBundle` `get`/`list`),
+  ConfigMap (substrate runtime profile), and Deployment (with projected
+  `ClusterTrustBundle` + `PodCertificate` TLS volume). The router NetworkPolicy
+  lives in `cluster/networkpolicy.yaml` — see that file and `cluster/README.md`.
 - `settings.example.yaml` — the same runtime/profile shape as `broker.yaml`'s
   ConfigMap, standalone, for reference or for a non-Kubernetes broker.
 - `cluster/` — cluster-level prerequisites, including both NetworkPolicy

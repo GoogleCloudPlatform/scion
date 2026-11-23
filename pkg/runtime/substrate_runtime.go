@@ -303,16 +303,26 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		TokenAudience:      sc.TokenAudience,
 		CAFile:             sc.CAFile,
 		ClusterTrustBundle: sc.ClusterTrustBundle,
+		ClientCertFile:     sc.APIClientCertFile,
 	})
 	if err != nil {
 		return nil, err
 	}
+	routerTLS, err := substrate.NewRouterTLSSource(ctx, k8sClient.Clientset, &sc)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
 
 	return &SubstrateRuntime{
-		cfg:            sc,
-		client:         substrate.NewControlClient(conn),
-		conn:           conn,
-		router:         substrate.NewRouterClient(sc.RouterEndpoint),
+		cfg:    sc,
+		client: substrate.NewControlClient(conn),
+		conn:   conn,
+		router: substrate.NewRouterClientWithOptions(substrate.RouterOptions{
+			Endpoint:        sc.RouterEndpoint,
+			ConnectEndpoint: sc.RouterConnectEndpoint,
+			TLS:             routerTLS,
+		}),
 		k8sClient:      k8sClient.Clientset,
 		now:            time.Now,
 		sleep:          time.Sleep,
@@ -494,6 +504,9 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			Actor:   &ateapipb.ObjectRef{Atespace: atespace, Name: actorName},
 			Options: deleteOptionsForUID(actorUID),
 		})
+		if r.router != nil {
+			r.router.DropActor(atespace, actorName)
+		}
 	}
 
 	// Step 5: egress policy. (r.cfg was already validated at the top of
@@ -721,6 +734,9 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
 		delete(substrateAgentRecords, uid)
 	}
 	substrateAgentStateMu.Unlock()
+	if r.router != nil {
+		r.router.DropActor(atespace, actorName)
+	}
 	return nil
 }
 
