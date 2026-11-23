@@ -36,6 +36,8 @@ func canonicalHarnessName(name string) string {
 		return "codex"
 	case "generic":
 		return "generic"
+	case config.ShellHarnessConfigName:
+		return config.ShellHarnessConfigName
 	default:
 		return ""
 	}

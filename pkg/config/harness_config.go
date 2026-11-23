@@ -35,6 +35,11 @@ import (
 
 const harnessConfigsDirName = "harness-configs"
 
+// ShellHarnessConfigName is the reserved name of the built-in shell harness
+// config used for user-specified execution containers (ptone/scion#8812).
+// Unlike "generic", it cannot be shadowed by on-disk or Hub-stored configs.
+const ShellHarnessConfigName = "shell"
+
 // ErrHarnessConfigNotFound marks a FindHarnessConfigDir failure where the
 // named harness-config was not found in any searched location (template,
 // project, or global directories). Wrapped into the returned error so
@@ -123,6 +128,16 @@ const (
 	HarnessConfigSourceUnresolved HarnessConfigSource = "unresolved"
 )
 
+// BuiltinShellHarnessConfigDir returns the synthetic built-in harness-config
+// entry for the reserved "shell" execution container harness (ptone/scion#8812).
+func BuiltinShellHarnessConfigDir() *HarnessConfigDir {
+	return &HarnessConfigDir{
+		Name:   ShellHarnessConfigName,
+		Config: HarnessConfigEntry{Harness: ShellHarnessConfigName, Image: "scion-base:latest", User: "scion"},
+		Source: HarnessConfigSourceBuiltin,
+	}
+}
+
 // ResolveHarnessConfigDir is the single resolution order for an agent's
 // harness-config directory, shared by provisioning (pkg/agent), harness
 // construction (pkg/harness.Resolve) and the runtime broker's preflights
@@ -145,6 +160,9 @@ const (
 func ResolveHarnessConfigDir(hydratedPath, name, projectPath string, templatePaths ...string) (*HarnessConfigDir, error) {
 	if err := checkLookupName(name); err != nil {
 		return nil, err
+	}
+	if name == ShellHarnessConfigName {
+		return BuiltinShellHarnessConfigDir(), nil
 	}
 	if hydratedPath != "" {
 		hcDir, err := LoadHarnessConfigDir(hydratedPath)
@@ -369,6 +387,11 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	if err := checkLookupName(name); err != nil {
 		return nil, err
 	}
+	// The "shell" harness config is reserved and cannot be shadowed by any
+	// template, project, or global directory (ptone/scion#8812).
+	if name == ShellHarnessConfigName {
+		return BuiltinShellHarnessConfigDir(), nil
+	}
 
 	// Track which directories were searched so the error message is actionable.
 	var searched []string
@@ -467,8 +490,18 @@ func loadHarnessConfigsFromDir(parentDir string, into map[string]*HarnessConfigD
 		if !entry.IsDir() {
 			continue
 		}
+		if entry.Name() == ShellHarnessConfigName {
+			slog.Warn("skipping reserved on-disk harness-config directory",
+				"name", entry.Name(), "path", filepath.Join(parentDir, entry.Name()))
+			continue
+		}
 		hc, err := LoadHarnessConfigDir(filepath.Join(parentDir, entry.Name()))
 		if err != nil {
+			continue
+		}
+		if hc.Name == ShellHarnessConfigName {
+			slog.Warn("skipping reserved on-disk harness-config",
+				"name", hc.Name, "path", hc.Path)
 			continue
 		}
 		into[hc.Name] = hc

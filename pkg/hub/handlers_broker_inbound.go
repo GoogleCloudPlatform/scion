@@ -249,6 +249,12 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Shell execution containers cannot receive inbound bridge messages (S5).
+	if isShellAgent(agent) {
+		WriteAgentDMError(w, shellAgentNotMessageableError(agent))
+		return
+	}
+
 	// Reject messages to non-running agents (including running rows with an
 	// active idle-suspend claim, treated as suspended).
 	if agent.IdleSuspendClaimActive {

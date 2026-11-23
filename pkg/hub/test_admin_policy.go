@@ -702,6 +702,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.TemplateConfigValidation:     testAdminPolicyDeny,
 	experiments.AgentSecrets:                 testAdminPolicyDeny,
 	experiments.CodeSpanMentions:             testAdminPolicyDeny,
+	experiments.ExecContainers:               testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
@@ -1092,7 +1093,17 @@ func (d *HTTPAgentDispatcher) applyTestAdminSecretScopes(ctx context.Context, ag
 // as_needed pass); the TZ chain (resolveStorageTZ)
 // reads only TZ and keeps every scope.
 func (d *HTTPAgentDispatcher) envScopesForDispatch(ctx context.Context, agent *store.Agent) []store.EnvVarFilter {
-	filters := d.envScopesInPrecedenceOrder(agent)
+	var filters []store.EnvVarFilter
+	if isShellAgent(agent) {
+		// Shell execution containers receive only the owning user's user-scope
+		// env vars (plus reserved SCION_* control variables), never project,
+		// broker, hub, or progeny env (ptone/scion#8817 H2).
+		if agent.OwnerID != "" {
+			filters = []store.EnvVarFilter{{Scope: store.ScopeUser, ScopeID: agent.OwnerID}}
+		}
+	} else {
+		filters = d.envScopesInPrecedenceOrder(agent)
+	}
 	restricted, allowed, root := d.testAdminRootScopes(ctx, agent)
 	if !restricted {
 		return filters

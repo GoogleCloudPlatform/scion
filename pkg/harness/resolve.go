@@ -65,6 +65,23 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 
 	hcDir, hcErr := config.ResolveHarnessConfigDir(opts.ConfigDirPath, opts.Name, opts.ProjectPath, opts.TemplatePaths...)
 
+	// The reserved built-in "shell" harness config always resolves to Shell,
+	// regardless of settings overlays or on-disk directories (ptone/scion#8812).
+	if opts.Name == config.ShellHarnessConfigName {
+		builtin := config.BuiltinShellHarnessConfigDir()
+		entry := builtin.Config
+		if hcDir != nil {
+			entry = hcDir.Config
+		}
+		return &ResolvedHarness{
+			Harness:        &Shell{},
+			ConfigName:     opts.Name,
+			ConfigDir:      hcDir,
+			Config:         entry,
+			Implementation: config.ShellHarnessConfigName,
+		}, nil
+	}
+
 	declared := declaredConfig(opts.Name, hcDir, opts.Settings, opts.ProfileName)
 	entry := withBundleReady(declared)
 	// config.yaml's agent-home path fields are checked when it is parsed;
@@ -72,6 +89,13 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	// a future overlay field cannot bypass that check.
 	if err := config.ValidateHarnessHomePaths(entry); err != nil {
 		return nil, fmt.Errorf("harness-config %q: %w", opts.Name, err)
+	}
+	// Only the reserved built-in "shell" config may resolve to the Shell
+	// harness (ptone/scion#8812 §3.2): a non-reserved config declaring
+	// harness: shell would bypass Hub-side shell-agent protections.
+	if entry.Harness == config.ShellHarnessConfigName {
+		return nil, fmt.Errorf("harness-config %q: harness %q is reserved for the built-in %q harness config",
+			opts.Name, config.ShellHarnessConfigName, config.ShellHarnessConfigName)
 	}
 
 	// 1. Container-script harness (provisioner block present)

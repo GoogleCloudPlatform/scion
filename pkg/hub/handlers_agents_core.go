@@ -1998,6 +1998,12 @@ func (s *Server) createAgentInProject(
 		// No existing agent — fall through to create.
 	}
 
+	// Track whether the caller explicitly requested a template before any
+	// defaulting rung (project annotation, hub default, implicit "default")
+	// fills req.Template. Shell execution containers refuse explicit templates
+	// and drop defaulted ones.
+	templateExplicit := req.Template != ""
+
 	// Apply project-level default template if no template specified in request
 	templateFromProjectDefault := false
 	if req.Template == "" && project != nil && project.Annotations != nil {
@@ -2603,6 +2609,10 @@ func (s *Server) createAgentInProject(
 		agent.Detached = true
 	}
 
+	// Track whether the resolved template itself is what supplies the "shell"
+	// harness config (when neither request nor project annotation set one).
+	templateSuppliedShellHC := templateSuppliesShellHarnessConfig(resolvedTemplate, agent, project)
+
 	// Apply project-level defaults, hub operational defaults, and the
 	// template/harness-config derivation pipeline. See deriveAgentConfig.
 	// It fails only when workspace storage did not respond; that is answered
@@ -2615,6 +2625,21 @@ func (s *Server) createAgentInProject(
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			InternalError(w)
 		}
+		return
+	}
+
+	edgeDelegatorType := store.DelegationPrincipalUser
+	if GetAgentIdentityFromContext(ctx) != nil {
+		edgeDelegatorType = store.DelegationPrincipalAgent
+	}
+
+	// Shell execution container admission (ptone/scion#8812 §3.2, §3.4 S6, §7).
+	if denial := s.checkShellAgentCreateAdmission(agent, shellAgentCreateOpts{
+		IsHumanPrincipal:        isHumanShellCreatePrincipal(GetIdentityFromContext(ctx), edgeDelegatorType),
+		TemplateExplicit:        templateExplicit,
+		TemplateSuppliedShellHC: templateSuppliedShellHC,
+	}); denial != nil {
+		denial.write(w)
 		return
 	}
 
@@ -2654,10 +2679,6 @@ func (s *Server) createAgentInProject(
 	// The agent row, identity keys, delegation edge (with the frozen
 	// provenance and ceiling), the create audit record and the optional
 	// notification subscription commit in one transaction, or none do.
-	edgeDelegatorType := store.DelegationPrincipalUser
-	if GetAgentIdentityFromContext(ctx) != nil {
-		edgeDelegatorType = store.DelegationPrincipalAgent
-	}
 	createAudit := &store.MutationAuditRecord{
 		MutationType:      mutationTypeAgentDelegation,
 		CanDelegateResult: "allow",

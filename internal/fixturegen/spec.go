@@ -1073,6 +1073,16 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		{Table: "user_exec_containers", Rows: []row{
+			{
+				"id":         "c1d00000-0000-0000-0000-000000000002",
+				"user_id":    userID,
+				"agent_id":   agentID,
+				"created_at": baseTime,
+				"updated_at": baseTime,
+			},
+		}},
+
 		// ---- Conduit session registry (relay_instances is the FK parent of
 		// conduit_sessions; conduit_principal_epochs is standalone) ----
 		{Table: "relay_instances", Rows: []row{

@@ -48,6 +48,9 @@ const (
 	// KindProcess (Tier 2) is a process outside the baseline set whose CPU
 	// time advanced by at least MinCPUTicks since the previous sample.
 	KindProcess Kind = "process"
+	// KindAttached reports an interactive terminal client attached to the
+	// tmux session (shell execution containers only; guards idle-suspend).
+	KindAttached Kind = "attached"
 )
 
 // ToolCallStallCap is how long after a tool call began its live process
@@ -109,6 +112,10 @@ type Config struct {
 	// is the TUI, 2 when it is a launcher that spawns the TUI as a child
 	// (Codex). Capped at MaxHarnessRootDepth.
 	HarnessRootDepth int
+	// CheckAttached, when non-nil, reports whether an interactive terminal
+	// client is attached to the container's tmux session. Scoped to shell
+	// execution containers (ptone/scion#8812 §3.3).
+	CheckAttached func() bool
 }
 
 // MaxHarnessRootDepth caps Config.HarnessRootDepth: a deeper launcher
@@ -119,10 +126,11 @@ const MaxHarnessRootDepth = 4
 // of /proc. It is not safe for concurrent use; the heartbeat loop calls it
 // from one goroutine.
 type Sampler struct {
-	agentUID  int
-	isManaged func(pid int) bool
-	rootDepth int
-	procRoot  string
+	agentUID      int
+	isManaged     func(pid int) bool
+	checkAttached func() bool
+	rootDepth     int
+	procRoot      string
 	// prev holds each process's CPU time at the previous sample; nil until
 	// the first sample, which only records the baseline.
 	prev map[int]procSample
@@ -174,7 +182,13 @@ func NewSampler(cfg Config) *Sampler {
 		isManaged = procreap.IsManagedPID
 	}
 	depth := min(max(cfg.HarnessRootDepth, 1), MaxHarnessRootDepth)
-	return &Sampler{agentUID: cfg.AgentUID, isManaged: isManaged, rootDepth: depth, procRoot: "/proc"}
+	return &Sampler{
+		agentUID:      cfg.AgentUID,
+		isManaged:     isManaged,
+		checkAttached: cfg.CheckAttached,
+		rootDepth:     depth,
+		procRoot:      "/proc",
+	}
 }
 
 // sample walks the /proc tree at s.procRoot once and returns the live work
@@ -192,6 +206,18 @@ func NewSampler(cfg Config) *Sampler {
 // counted.
 func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) *LiveWork {
 	procs := readProcs(s.procRoot)
+	// For shell execution containers (where CheckAttached is configured),
+	// attachment takes precedence over CPU/tool work so an attached-but-busy
+	// shell still reports KindAttached and refreshes the hub's idle-suspend
+	// window. LLM agents leave CheckAttached nil and are unaffected.
+	if s.checkAttached != nil && s.checkAttached() {
+		s.recordCPU(procs)
+		return &LiveWork{
+			Kind:          KindAttached,
+			SuppressStall: false,
+			Detail:        "terminal attached",
+		}
+	}
 	excluded, harness := s.baseline(procs)
 	tool := s.toolCall(procs, excluded, harness, now, act, actSince)
 	if tool != nil && tool.SuppressStall {
@@ -201,7 +227,10 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 	if work := s.cpuWork(procs, excluded); work != nil {
 		return work
 	}
-	return tool
+	if tool != nil {
+		return tool
+	}
+	return nil
 }
 
 // recordCPU records every process's CPU time for the next sample's Tier 2

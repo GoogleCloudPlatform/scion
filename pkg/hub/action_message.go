@@ -178,6 +178,11 @@ func (a *messageAction) Authorize(
 		return nil, &FireRefusal{Reason: err.Error()}, nil
 	}
 
+	// Shell execution containers cannot receive messages (ptone/scion#8812 §3.4 S5).
+	if isShellAgent(agent) {
+		return nil, &FireRefusal{Reason: shellAgentNotMessageableError(agent).Message}, nil
+	}
+
 	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review).
 	// O-a (p2a-r2 review): checked AFTER send authorization and standing, not
 	// before — a denied caller must learn nothing about the recipient's

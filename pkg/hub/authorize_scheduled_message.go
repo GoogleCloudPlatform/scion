@@ -363,6 +363,15 @@ func (s *Server) validateMessageAuthoringTarget(
 		}
 	}
 
+	if isShellAgent(agent) {
+		dmErr := shellAgentNotMessageableError(agent)
+		return "", &messageAuthoringError{
+			httpStatus: dmErr.HTTPStatus,
+			code:       dmErr.Code,
+			message:    dmErr.Message,
+		}
+	}
+
 	if isTrigger {
 		encoded, err := json.Marshal(MessageEventPayload{
 			AgentID:   agent.ID,

@@ -492,6 +492,8 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}, creatorName, childRole)
 	pinResolvedCreateProfile(agent, project, scheduledBroker, false)
 
+	templateExplicit := templateName != ""
+
 	templateFromProjectDefault := false
 	if templateName == "" && project != nil && project.Annotations != nil {
 		if dt := project.Annotations[projectSettingDefaultTemplate]; dt != "" {
@@ -601,8 +603,22 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 	}
 
+	templateSuppliedShellHC := templateSuppliesShellHarnessConfig(tmpl, agent, project)
+
 	if err := s.deriveAgentConfig(ctx, agent, project, tmpl); err != nil {
 		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+	}
+
+	// Shell execution container admission (ptone/scion#8812 §3.2, §3.4 S6, §7):
+	// enforce human-only creation (user/dev allowlist + user principal kind),
+	// hub.exec_containers flag, no initial task, and no templates on the
+	// headless dispatch_agent path as well as HTTP create.
+	if denial := s.checkShellAgentCreateAdmission(agent, shellAgentCreateOpts{
+		IsHumanPrincipal:        isHumanShellCreatePrincipal(hc.Identity, hc.Authority.PrincipalKind),
+		TemplateExplicit:        templateExplicit,
+		TemplateSuppliedShellHC: templateSuppliedShellHC,
+	}); denial != nil {
+		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, denial)
 	}
 
 	// Inject allow-listed event data environment variables after deriveAgentConfig

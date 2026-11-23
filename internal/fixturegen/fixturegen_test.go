@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 110
+const expectedTableCount = 111
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -109,6 +109,9 @@ func TestFixtureLoadable(t *testing.T) {
 	// field.UUID("id", ...) column.
 	workspace, err := entadapter.NewUserTerminalWorkspaceStore(client).GetUserTerminalWorkspace(ctx, userID)
 	require.NoError(t, err, "user_terminal_workspaces fixture row must be readable via UserTerminalWorkspaceStore")
+	execContainer, err := entadapter.NewUserExecContainerStore(client).GetUserExecContainer(ctx, userID)
+	require.NoError(t, err, "user_exec_containers fixture row must be readable via UserExecContainerStore")
+	require.Equal(t, agentID, execContainer.AgentID)
 	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
 	assert.Equal(t, agentID, workspace.FrontmostAgentID)
 

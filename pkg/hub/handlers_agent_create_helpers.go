@@ -857,7 +857,14 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// is ambiguous: the project may well have an override we simply failed to
 	// read, and silently staging the hub script in that case would run the
 	// wrong code. On an ambiguous error we log and stage nothing.
-	if project != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
+	if isShellAgent(agent) {
+		// Shell execution containers never run project or hub pre-start hooks
+		// (security audit H3 / ptone/scion#8812 I1).
+		if agent.AppliedConfig != nil {
+			agent.AppliedConfig.ProjectPreStartHookID = ""
+			agent.AppliedConfig.ProjectPreStartHookScript = ""
+		}
+	} else if project != nil && agent.AppliedConfig != nil && agent.AppliedConfig.ProjectPreStartHookID == "" {
 		hook, hookErr := s.store.GetActiveProjectPreStartHook(ctx, project.ID)
 		switch {
 		case hookErr == nil:
@@ -1500,6 +1507,13 @@ func (s *Server) handleExistingAgent(
 	// returns 409 Conflict before any broker/pin mutation runs.
 	if req.ManagedAgent != isManagedAgentRuntime(existingAgent.Runtime) {
 		return existingAgentConflict
+	}
+
+	// Shell execution containers never accept an initial task (ptone/scion#8812 §3.2).
+	if isShellAgent(existingAgent) && strings.TrimSpace(req.Task) != "" {
+		writeError(w, http.StatusBadRequest, ErrCodeTaskNotSupported,
+			"execution containers do not support an initial task", nil)
+		return existingAgentErrored
 	}
 
 	// Flat Runtime Broker checks for the branch this request takes, before

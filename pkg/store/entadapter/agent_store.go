@@ -30,6 +30,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
@@ -2227,6 +2228,24 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	stampActivitySince(upd.Mutation(), current.Phase, current.Activity, now)
 
+	// Shell execution container attached-terminal guard (ptone/scion#8812 §3.3, AC2):
+	// while a terminal client is attached, refresh activity_since so idle-suspend
+	// measures IdleSuspendAfter from detach rather than from container ready time.
+	// Scoped strictly to shell agents in running/idle so LLM-agent behavior is unchanged.
+	if su.LiveWork != nil && su.LiveWork.Kind == "attached" && isShellEntAgent(current) {
+		effPhase, ok := upd.Mutation().Phase()
+		if !ok && !upd.Mutation().PhaseCleared() {
+			effPhase = current.Phase
+		}
+		effActivity, ok := upd.Mutation().Activity()
+		if !ok && !upd.Mutation().ActivityCleared() {
+			effActivity = current.Activity
+		}
+		if effPhase == string(state.PhaseRunning) && strings.EqualFold(effActivity, string(state.ActivityIdle)) {
+			upd.SetActivitySince(now)
+		}
+	}
+
 	if err := upd.Exec(ctx); err != nil {
 		return mapError(err)
 	}
@@ -3417,6 +3436,17 @@ func harnessConfigOf(cfg *store.AgentAppliedConfig) string {
 		return ""
 	}
 	return cfg.HarnessConfig
+}
+
+// isShellEntAgent reports whether the stored ent.Agent uses the reserved
+// built-in "shell" harness config.
+//
+// The indexed harness_config shadow column (populated unconditionally from
+// AppliedConfig.HarnessConfig via harnessConfigOf on CreateAgent and
+// UpdateAgent) is the authoritative store-level source, matching
+// pkg/hub.isShellAgent without raw-decoding applied_config JSON.
+func isShellEntAgent(a *ent.Agent) bool {
+	return a != nil && a.HarnessConfig == config.ShellHarnessConfigName
 }
 
 // parseTimeString parses a status update's started_at string, accepting the

@@ -25,6 +25,9 @@ import (
 )
 
 func New(harnessName string) api.Harness {
+	if harnessName == config.ShellHarnessConfigName {
+		return &Shell{}
+	}
 	if h := newFromEmbedFS(harnessName); h != nil {
 		return h
 	}

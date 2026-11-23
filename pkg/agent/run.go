@@ -531,36 +531,42 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// a restart of such an agent whose template disappeared keeps that
 	// recorded value instead of dropping to Hub settings or the file
 	// default, as an agent with no template name does.
+	// Shell execution containers take no template chain, no template env layer,
+	// and no template-derived launch inputs (security audit H1 / H1-R).
+	isShell := harnessConfigName == config.ShellHarnessConfigName || harnessName == config.ShellHarnessConfigName
+
 	templateUnresolvable := false
 	templateName := ""
-	if opts.Template != "" && filepath.IsAbs(opts.Template) {
-		templateName = opts.Template
-	}
-	if templateName == "" && hydrated {
-		templateUnresolvable = true
-		util.Debugf("image resolution: template was loaded from a content-addressed cache, not resolved by name")
-	}
-	if templateName == "" && !hydrated {
-		if provenance != nil {
-			templateName = provenance.Template
-		} else if finalScionCfg != nil && finalScionCfg.Info != nil {
-			templateName = finalScionCfg.Info.Template
-		}
-	}
-	if templateName == "" && !hydrated {
-		templateName = opts.Template
-	}
 	var templatePaths []string
 	var templateChain []*config.Template
-	if templateName != "" {
-		if chain, err := config.GetTemplateChainInProject(ctx, templateName, opts.ProjectPath); err == nil {
-			templateChain = chain
-			for _, tpl := range chain {
-				templatePaths = append(templatePaths, tpl.Path)
-			}
-		} else {
+	if !isShell {
+		if opts.Template != "" && filepath.IsAbs(opts.Template) {
+			templateName = opts.Template
+		}
+		if templateName == "" && hydrated {
 			templateUnresolvable = true
-			util.Debugf("image resolution: template %q could not be resolved: %v", templateName, err)
+			util.Debugf("image resolution: template was loaded from a content-addressed cache, not resolved by name")
+		}
+		if templateName == "" && !hydrated {
+			if provenance != nil {
+				templateName = provenance.Template
+			} else if finalScionCfg != nil && finalScionCfg.Info != nil {
+				templateName = finalScionCfg.Info.Template
+			}
+		}
+		if templateName == "" && !hydrated {
+			templateName = opts.Template
+		}
+		if templateName != "" {
+			if chain, err := config.GetTemplateChainInProject(ctx, templateName, opts.ProjectPath); err == nil {
+				templateChain = chain
+				for _, tpl := range chain {
+					templatePaths = append(templatePaths, tpl.Path)
+				}
+			} else {
+				templateUnresolvable = true
+				util.Debugf("image resolution: template %q could not be resolved: %v", templateName, err)
+			}
 		}
 	}
 
@@ -836,18 +842,22 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// opts.Template unset (so image and harness-config resolution are
 	// unchanged); the broker hydrates the template and passes its path in
 	// opts.TemplateEnvSource for the template env only.
-	envChain := templateChain
-	if envChain == nil && opts.TemplateEnvSource != "" {
-		if chain, err := config.GetTemplateChainInProject(ctx, opts.TemplateEnvSource, opts.ProjectPath); err == nil {
-			envChain = chain
-		} else {
-			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
+	var envChain []*config.Template
+	var templateEnv map[string]string
+	if !isShell {
+		envChain = templateChain
+		if envChain == nil && opts.TemplateEnvSource != "" {
+			if chain, err := config.GetTemplateChainInProject(ctx, opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+				envChain = chain
+			} else {
+				util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
+			}
 		}
-	}
-	templateEnv := templateChainEnv(envChain)
-	if envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "") {
-		if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
-			warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
+		templateEnv = templateChainEnv(envChain)
+		if envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "") {
+			if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
+				warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
+			}
 		}
 	}
 
@@ -1076,7 +1086,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	aliasHarness := harnessName
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
-		if opts.Template != "" && (filepath.IsAbs(opts.Template) || !hydrated) {
+		if !isShell && opts.Template != "" && (filepath.IsAbs(opts.Template) || !hydrated) {
 			tplName := opts.Template
 			if !filepath.IsAbs(tplName) {
 				// For an agent with broker-side image provenance, the
@@ -1348,7 +1358,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// will not fire, so the hook would silently not run — worse than aborting.
 	// Called unconditionally: with an empty script the helper clears any file
 	// staged by an earlier occupant of this agent home.
-	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript) }); err != nil {
+	// Defence in depth (security audit H3 / ptone/scion#8812 I1): shell
+	// execution containers never run a project/hub pre-start hook; forcing an
+	// empty script also removes any stale staged file.
+	preStartHookScript := opts.ProjectPreStartHookScript
+	if harnessConfigName == config.ShellHarnessConfigName || h.Name() == config.ShellHarnessConfigName {
+		preStartHookScript = ""
+	}
+	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, preStartHookScript) }); err != nil {
 		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
 	}
 
@@ -1606,7 +1623,10 @@ authDone:
 		}
 	}
 
-	template := agentTemplateDisplayName(opts.TemplateName, finalScionCfg)
+	template := ""
+	if !isShell {
+		template = agentTemplateDisplayName(opts.TemplateName, finalScionCfg)
+	}
 
 	if opts.Env == nil {
 		opts.Env = make(map[string]string)
@@ -4481,7 +4501,7 @@ func resolveAuthEnvOverlayWithPolicy(opts *api.StartOptions, settings *config.Ve
 	// Profile env is fully retired — profiles.<p>.env was removed from both
 	// the struct and the JSON schema (G3-full). This reads the harness config
 	// only. See design §0.3.
-	if settings != nil && harnessConfigName != "" {
+	if settings != nil && harnessConfigName != "" && harnessConfigName != config.ShellHarnessConfigName {
 		if hcEntry, err := settings.ResolveHarnessConfig(profileName, harnessConfigName); err == nil && len(hcEntry.Env) > 0 {
 			// Check hub-only broker keys first so broker-mode accounting and
 			// warnings stay accurate even for SCION_* hub-only keys (e.g.

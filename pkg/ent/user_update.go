@@ -19,6 +19,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userexeccontainer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
@@ -304,6 +305,25 @@ func (_u *UserUpdate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpdate
 	return _u.SetTerminalWorkspaceID(v.ID)
 }
 
+// SetExecContainerID sets the "exec_container" edge to the UserExecContainer entity by ID.
+func (_u *UserUpdate) SetExecContainerID(id uuid.UUID) *UserUpdate {
+	_u.mutation.SetExecContainerID(id)
+	return _u
+}
+
+// SetNillableExecContainerID sets the "exec_container" edge to the UserExecContainer entity by ID if the given value is not nil.
+func (_u *UserUpdate) SetNillableExecContainerID(id *uuid.UUID) *UserUpdate {
+	if id != nil {
+		_u = _u.SetExecContainerID(*id)
+	}
+	return _u
+}
+
+// SetExecContainer sets the "exec_container" edge to the UserExecContainer entity.
+func (_u *UserUpdate) SetExecContainer(v *UserExecContainer) *UserUpdate {
+	return _u.SetExecContainerID(v.ID)
+}
+
 // SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
 func (_u *UserUpdate) SetTestIdentityLoginCodeID(id uuid.UUID) *UserUpdate {
 	_u.mutation.SetTestIdentityLoginCodeID(id)
@@ -415,6 +435,12 @@ func (_u *UserUpdate) RemoveExternalIdentities(v ...*ExternalIdentity) *UserUpda
 // ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
 func (_u *UserUpdate) ClearTerminalWorkspace() *UserUpdate {
 	_u.mutation.ClearTerminalWorkspace()
+	return _u
+}
+
+// ClearExecContainer clears the "exec_container" edge to the UserExecContainer entity.
+func (_u *UserUpdate) ClearExecContainer() *UserUpdate {
+	_u.mutation.ClearExecContainer()
 	return _u
 }
 
@@ -770,6 +796,35 @@ func (_u *UserUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 		}
 		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
+	if _u.mutation.ExecContainerCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.ExecContainerTable,
+			Columns: []string{user.ExecContainerColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userexeccontainer.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ExecContainerIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.ExecContainerTable,
+			Columns: []string{user.ExecContainerColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userexeccontainer.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
 	if _u.mutation.TestIdentityLoginCodeCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.O2O,
@@ -1087,6 +1142,25 @@ func (_u *UserUpdateOne) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserUpd
 	return _u.SetTerminalWorkspaceID(v.ID)
 }
 
+// SetExecContainerID sets the "exec_container" edge to the UserExecContainer entity by ID.
+func (_u *UserUpdateOne) SetExecContainerID(id uuid.UUID) *UserUpdateOne {
+	_u.mutation.SetExecContainerID(id)
+	return _u
+}
+
+// SetNillableExecContainerID sets the "exec_container" edge to the UserExecContainer entity by ID if the given value is not nil.
+func (_u *UserUpdateOne) SetNillableExecContainerID(id *uuid.UUID) *UserUpdateOne {
+	if id != nil {
+		_u = _u.SetExecContainerID(*id)
+	}
+	return _u
+}
+
+// SetExecContainer sets the "exec_container" edge to the UserExecContainer entity.
+func (_u *UserUpdateOne) SetExecContainer(v *UserExecContainer) *UserUpdateOne {
+	return _u.SetExecContainerID(v.ID)
+}
+
 // SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
 func (_u *UserUpdateOne) SetTestIdentityLoginCodeID(id uuid.UUID) *UserUpdateOne {
 	_u.mutation.SetTestIdentityLoginCodeID(id)
@@ -1198,6 +1272,12 @@ func (_u *UserUpdateOne) RemoveExternalIdentities(v ...*ExternalIdentity) *UserU
 // ClearTerminalWorkspace clears the "terminal_workspace" edge to the UserTerminalWorkspace entity.
 func (_u *UserUpdateOne) ClearTerminalWorkspace() *UserUpdateOne {
 	_u.mutation.ClearTerminalWorkspace()
+	return _u
+}
+
+// ClearExecContainer clears the "exec_container" edge to the UserExecContainer entity.
+func (_u *UserUpdateOne) ClearExecContainer() *UserUpdateOne {
+	_u.mutation.ClearExecContainer()
 	return _u
 }
 
@@ -1576,6 +1656,35 @@ func (_u *UserUpdateOne) sqlSave(ctx context.Context) (_node *User, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.ExecContainerCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.ExecContainerTable,
+			Columns: []string{user.ExecContainerColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userexeccontainer.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ExecContainerIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.ExecContainerTable,
+			Columns: []string{user.ExecContainerColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userexeccontainer.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

@@ -18,6 +18,9 @@ An isolated worker: one LLM-plus-harness loop in its own container with its own 
 ### Sub-agent
 An agent spawned by another agent; "sub" only from the orchestrating user's view, since it is a full agent in capability.
 
+### Execution container
+Any agent running the reserved built-in `shell` harness-config (no LLM harness). Users log into CLI tools inside it manually so credentials stay in the container's `$HOME` (never in `/workspace`) and are never exposed to LLM agents, and may register one in their user profile as their *default execution container* for approved commands.
+
 ### Reincarnation
 Migrating an existing agent to a new *generation*: the Hub re-resolves its template, image, and harness-config, then starts it again with the same agent ID and slug and a handoff as its first task. Done with [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). Distinct from *restart* (same config) and *resume* (same harness session).
 

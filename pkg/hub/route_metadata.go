@@ -320,6 +320,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/users/me/terminal-workspace", RouteID: "users.me.terminalWorkspace",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/users/me/exec-container": {
+		Pattern: "/api/v1/users/me/exec-container", RouteID: "users.me.execContainer",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/users/me/decisions": {
 		Pattern: "/api/v1/users/me/decisions", RouteID: "users.me.decisions",
 		Classification: RouteAuthenticated,

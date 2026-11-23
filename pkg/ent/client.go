@@ -123,6 +123,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userexeccontainer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 )
@@ -346,6 +347,8 @@ type Client struct {
 	UserDeletion *UserDeletionClient
 	// UserDeletionAgent is the client for interacting with the UserDeletionAgent builders.
 	UserDeletionAgent *UserDeletionAgentClient
+	// UserExecContainer is the client for interacting with the UserExecContainer builders.
+	UserExecContainer *UserExecContainerClient
 	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
 	UserTerminalWorkspace *UserTerminalWorkspaceClient
 	// WebhookEndpoint is the client for interacting with the WebhookEndpoint builders.
@@ -468,6 +471,7 @@ func (c *Client) init() {
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
 	c.UserDeletion = NewUserDeletionClient(c.config)
 	c.UserDeletionAgent = NewUserDeletionAgentClient(c.config)
+	c.UserExecContainer = NewUserExecContainerClient(c.config)
 	c.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(c.config)
 	c.WebhookEndpoint = NewWebhookEndpointClient(c.config)
 }
@@ -669,6 +673,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
 		UserDeletion:                  NewUserDeletionClient(cfg),
 		UserDeletionAgent:             NewUserDeletionAgentClient(cfg),
+		UserExecContainer:             NewUserExecContainerClient(cfg),
 		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
 		WebhookEndpoint:               NewWebhookEndpointClient(cfg),
 	}, nil
@@ -797,6 +802,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UserAccessToken:               NewUserAccessTokenClient(cfg),
 		UserDeletion:                  NewUserDeletionClient(cfg),
 		UserDeletionAgent:             NewUserDeletionAgentClient(cfg),
+		UserExecContainer:             NewUserExecContainerClient(cfg),
 		UserTerminalWorkspace:         NewUserTerminalWorkspaceClient(cfg),
 		WebhookEndpoint:               NewWebhookEndpointClient(cfg),
 	}, nil
@@ -856,8 +862,8 @@ func (c *Client) Use(hooks ...Hook) {
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
 		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Use(hooks...)
 	}
@@ -895,8 +901,8 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
 		c.TriggerSubjectClaim, c.UsageReservation, c.User, c.UserAccessToken,
-		c.UserDeletion, c.UserDeletionAgent, c.UserTerminalWorkspace,
-		c.WebhookEndpoint,
+		c.UserDeletion, c.UserDeletionAgent, c.UserExecContainer,
+		c.UserTerminalWorkspace, c.WebhookEndpoint,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -1119,6 +1125,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UserDeletion.mutate(ctx, m)
 	case *UserDeletionAgentMutation:
 		return c.UserDeletionAgent.mutate(ctx, m)
+	case *UserExecContainerMutation:
+		return c.UserExecContainer.mutate(ctx, m)
 	case *UserTerminalWorkspaceMutation:
 		return c.UserTerminalWorkspace.mutate(ctx, m)
 	case *WebhookEndpointMutation:
@@ -15575,6 +15583,22 @@ func (c *UserClient) QueryTerminalWorkspace(_m *User) *UserTerminalWorkspaceQuer
 	return query
 }
 
+// QueryExecContainer queries the exec_container edge of a User.
+func (c *UserClient) QueryExecContainer(_m *User) *UserExecContainerQuery {
+	query := (&UserExecContainerClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, id),
+			sqlgraph.To(userexeccontainer.Table, userexeccontainer.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, user.ExecContainerTable, user.ExecContainerColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // QueryTestIdentityLoginCode queries the test_identity_login_code edge of a User.
 func (c *UserClient) QueryTestIdentityLoginCode(_m *User) *TestIdentityLoginCodeQuery {
 	query := (&TestIdentityLoginCodeClient{config: c.config}).Query()
@@ -16047,6 +16071,155 @@ func (c *UserDeletionAgentClient) mutate(ctx context.Context, m *UserDeletionAge
 	}
 }
 
+// UserExecContainerClient is a client for the UserExecContainer schema.
+type UserExecContainerClient struct {
+	config
+}
+
+// NewUserExecContainerClient returns a client for the UserExecContainer from the given config.
+func NewUserExecContainerClient(c config) *UserExecContainerClient {
+	return &UserExecContainerClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `userexeccontainer.Hooks(f(g(h())))`.
+func (c *UserExecContainerClient) Use(hooks ...Hook) {
+	c.hooks.UserExecContainer = append(c.hooks.UserExecContainer, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `userexeccontainer.Intercept(f(g(h())))`.
+func (c *UserExecContainerClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UserExecContainer = append(c.inters.UserExecContainer, interceptors...)
+}
+
+// Create returns a builder for creating a UserExecContainer entity.
+func (c *UserExecContainerClient) Create() *UserExecContainerCreate {
+	mutation := newUserExecContainerMutation(c.config, OpCreate)
+	return &UserExecContainerCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UserExecContainer entities.
+func (c *UserExecContainerClient) CreateBulk(builders ...*UserExecContainerCreate) *UserExecContainerCreateBulk {
+	return &UserExecContainerCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UserExecContainerClient) MapCreateBulk(slice any, setFunc func(*UserExecContainerCreate, int)) *UserExecContainerCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UserExecContainerCreateBulk{err: fmt.Errorf("calling to UserExecContainerClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UserExecContainerCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UserExecContainerCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UserExecContainer.
+func (c *UserExecContainerClient) Update() *UserExecContainerUpdate {
+	mutation := newUserExecContainerMutation(c.config, OpUpdate)
+	return &UserExecContainerUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UserExecContainerClient) UpdateOne(_m *UserExecContainer) *UserExecContainerUpdateOne {
+	mutation := newUserExecContainerMutation(c.config, OpUpdateOne, withUserExecContainer(_m))
+	return &UserExecContainerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UserExecContainerClient) UpdateOneID(id uuid.UUID) *UserExecContainerUpdateOne {
+	mutation := newUserExecContainerMutation(c.config, OpUpdateOne, withUserExecContainerID(id))
+	return &UserExecContainerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UserExecContainer.
+func (c *UserExecContainerClient) Delete() *UserExecContainerDelete {
+	mutation := newUserExecContainerMutation(c.config, OpDelete)
+	return &UserExecContainerDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UserExecContainerClient) DeleteOne(_m *UserExecContainer) *UserExecContainerDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UserExecContainerClient) DeleteOneID(id uuid.UUID) *UserExecContainerDeleteOne {
+	builder := c.Delete().Where(userexeccontainer.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UserExecContainerDeleteOne{builder}
+}
+
+// Query returns a query builder for UserExecContainer.
+func (c *UserExecContainerClient) Query() *UserExecContainerQuery {
+	return &UserExecContainerQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUserExecContainer},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UserExecContainer entity by its id.
+func (c *UserExecContainerClient) Get(ctx context.Context, id uuid.UUID) (*UserExecContainer, error) {
+	return c.Query().Where(userexeccontainer.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UserExecContainerClient) GetX(ctx context.Context, id uuid.UUID) *UserExecContainer {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryUser queries the user edge of a UserExecContainer.
+func (c *UserExecContainerClient) QueryUser(_m *UserExecContainer) *UserQuery {
+	query := (&UserClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(userexeccontainer.Table, userexeccontainer.FieldID, id),
+			sqlgraph.To(user.Table, user.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, userexeccontainer.UserTable, userexeccontainer.UserColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *UserExecContainerClient) Hooks() []Hook {
+	return c.hooks.UserExecContainer
+}
+
+// Interceptors returns the client interceptors.
+func (c *UserExecContainerClient) Interceptors() []Interceptor {
+	return c.inters.UserExecContainer
+}
+
+func (c *UserExecContainerClient) mutate(ctx context.Context, m *UserExecContainerMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UserExecContainerCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UserExecContainerUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UserExecContainerUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UserExecContainerDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UserExecContainer mutation op: %q", m.Op())
+	}
+}
+
 // UserTerminalWorkspaceClient is a client for the UserTerminalWorkspace schema.
 type UserTerminalWorkspaceClient struct {
 	config
@@ -16357,7 +16530,7 @@ type (
 		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
 		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
 		TriggerFire, TriggerSubjectClaim, UsageReservation, User, UserAccessToken,
-		UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
+		UserDeletion, UserDeletionAgent, UserExecContainer, UserTerminalWorkspace,
 		WebhookEndpoint []ent.Hook
 	}
 	inters struct {
@@ -16386,7 +16559,7 @@ type (
 		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
 		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
 		TriggerFire, TriggerSubjectClaim, UsageReservation, User, UserAccessToken,
-		UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
+		UserDeletion, UserDeletionAgent, UserExecContainer, UserTerminalWorkspace,
 		WebhookEndpoint []ent.Interceptor
 	}
 )

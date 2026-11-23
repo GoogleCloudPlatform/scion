@@ -451,6 +451,18 @@ func (s *Server) authorizeAgentTargetAction(ctx context.Context, identity Identi
 		return &agentTargetDenial{status: http.StatusForbidden, reason: "delegated credential may not act on agents"}
 	}
 
+	// Shell execution containers hold human CLI credentials (ptone/scion#8812
+	// §3.4 S1-S3): human principals only. Deny agent principals outright,
+	// including ancestors and same-project agents with ScopeAgentLifecycle.
+	// Keyed on the agent, not the experiment flag.
+	if isShellAgent(target) && identity.Type() == "agent" {
+		return &agentTargetDenial{
+			status:  http.StatusForbidden,
+			message: "execution container: human principals only",
+			reason:  "execution container: human principals only",
+		}
+	}
+
 	switch identity.Type() {
 	case "agent":
 		agentIdent, ok := identity.(AgentIdentity)

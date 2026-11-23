@@ -110,6 +110,14 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Shell execution containers hold human CLI credentials (ptone/scion#8812
+	// §3.4 S1, G3): no agent principal or delegated agent credential may attach.
+	// Keyed on the agent, not the experiment flag.
+	if isShellAgent(agent) && (isDelegatedAgentIdentity(identity) || identity.Type() == "agent") {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "execution container: human principals only", nil)
+		return
+	}
+
 	// An agent delegated credential is decided by its own procedure, on
 	// this handshake only; the established session is not re-checked
 	// (.design/agent-delegation.md §16.6). Every other caller kind keeps
@@ -197,6 +205,10 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 // which is a new handshake). A denial answers 403 forbidden and never
 // carries the decision's reason (.design/agent-delegation.md §11.4).
 func (s *Server) authorizeDelegatedAttach(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent) bool {
+	if isShellAgent(agent) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "execution container: human principals only", nil)
+		return false
+	}
 	decision := s.authzService.Decide(r.Context(), AuthzRequest{
 		Principal:  principalContextForIdentity(identity),
 		Credential: credentialContextForIdentity(identity),

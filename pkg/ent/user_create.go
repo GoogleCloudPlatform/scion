@@ -19,6 +19,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userexeccontainer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/google/uuid"
 )
@@ -394,6 +395,25 @@ func (_c *UserCreate) SetTerminalWorkspace(v *UserTerminalWorkspace) *UserCreate
 	return _c.SetTerminalWorkspaceID(v.ID)
 }
 
+// SetExecContainerID sets the "exec_container" edge to the UserExecContainer entity by ID.
+func (_c *UserCreate) SetExecContainerID(id uuid.UUID) *UserCreate {
+	_c.mutation.SetExecContainerID(id)
+	return _c
+}
+
+// SetNillableExecContainerID sets the "exec_container" edge to the UserExecContainer entity by ID if the given value is not nil.
+func (_c *UserCreate) SetNillableExecContainerID(id *uuid.UUID) *UserCreate {
+	if id != nil {
+		_c = _c.SetExecContainerID(*id)
+	}
+	return _c
+}
+
+// SetExecContainer sets the "exec_container" edge to the UserExecContainer entity.
+func (_c *UserCreate) SetExecContainer(v *UserExecContainer) *UserCreate {
+	return _c.SetExecContainerID(v.ID)
+}
+
 // SetTestIdentityLoginCodeID sets the "test_identity_login_code" edge to the TestIdentityLoginCode entity by ID.
 func (_c *UserCreate) SetTestIdentityLoginCodeID(id uuid.UUID) *UserCreate {
 	_c.mutation.SetTestIdentityLoginCodeID(id)
@@ -710,6 +730,22 @@ func (_c *UserCreate) createSpec() (*User, *sqlgraph.CreateSpec) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(userterminalworkspace.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.ExecContainerIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   user.ExecContainerTable,
+			Columns: []string{user.ExecContainerColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(userexeccontainer.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

@@ -979,7 +979,15 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 	// empty script removes any previously staged file, so a hook that no
 	// longer applies (e.g. deactivated between generations, or on a
 	// first-time resume) cannot survive on a reused agent home.
-	if err := harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript); err != nil {
+	// Defence in depth (security audit H3 / ptone/scion#8812 I1): shell
+	// execution containers never stage a project/hub pre-start hook; forcing
+	// an empty script also clears any stale staged file.
+	preStartHookScript := opts.ProjectPreStartHookScript
+	if opts.HarnessConfig == config.ShellHarnessConfigName ||
+		(cfg != nil && (cfg.HarnessConfig == config.ShellHarnessConfigName || cfg.Harness == config.ShellHarnessConfigName)) {
+		preStartHookScript = ""
+	}
+	if err := harness.WriteProjectPreStartHook(agentHome, preStartHookScript); err != nil {
 		return fmt.Errorf("stage project pre-start hook: %w", err)
 	}
 
@@ -1550,9 +1558,20 @@ type resolvedTemplate struct {
 // dir for provisioning, launch (Start's harness.Resolve) and the runtime
 // broker's policy gate.
 func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessConfig, projectPath, projectDir, profileName string, settings *config.VersionedSettings, inlineCfg *api.ScionConfig) (*resolvedTemplate, error) {
-	chain, err := templateChainFor(ctx, templateName, projectPath, settings)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load template: %w", err)
+	// Shell execution containers take no template (security audit H1 / H1-R):
+	// do not resolve or merge a local "default" or named template chain when
+	// the request or inline config already selects the reserved "shell"
+	// harness config.
+	isShellRequested := harnessConfig == config.ShellHarnessConfigName ||
+		(inlineCfg != nil && (inlineCfg.HarnessConfig == config.ShellHarnessConfigName || inlineCfg.Harness == config.ShellHarnessConfigName))
+
+	var chain []*config.Template
+	if !isShellRequested {
+		var err error
+		chain, err = templateChainFor(ctx, templateName, projectPath, settings)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load template: %w", err)
+		}
 	}
 
 	// Each template contributes its job keys only (ptone/scion#4524):
@@ -1592,6 +1611,19 @@ func resolveTemplateAndHarnessConfig(ctx context.Context, templateName, harnessC
 		return nil, err
 	}
 	harnessConfigName := hcResolution.Name
+
+	// If settings/profile resolved harnessConfigName to "shell" after a
+	// template chain was loaded, discard the template chain and rebuild
+	// finalScionCfg from inlineCfg only so no template job keys or paths reach
+	// a shell container.
+	if harnessConfigName == config.ShellHarnessConfigName && len(chain) > 0 {
+		chain = nil
+		templateWarnings = nil
+		finalScionCfg = &api.ScionConfig{}
+		if inlineCfg != nil {
+			finalScionCfg = config.MergeScionConfig(finalScionCfg, inlineCfg)
+		}
+	}
 
 	// Load harness-config from disk (check template dirs first)
 	var templatePaths []string
@@ -2611,14 +2643,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		return "", "", nil, fmt.Errorf("failed to copy harness-config home %q: %w", harnessConfigName, err)
 	}
 
-	// Step 2: Copy template home → agentHome (overlay; template files win on conflict)
+	// Step 2: Copy template home → agentHome (overlay; template files win on conflict).
+	// Defence in depth (security audit H1 / ptone/scion#8812 I1): shell
+	// execution containers never inherit template home files (such as .bashrc
+	// or .scion/hooks/pre-start.d); skip the template chain so they fall
+	// through to the embedded default home floor only.
 	templateHomeCopied := false
-	for _, tpl := range chain {
-		copied, err := overlayHomeLayer(agentHomeDir, tpl.OpenDir)
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
+	if harnessConfigName != config.ShellHarnessConfigName {
+		for _, tpl := range chain {
+			copied, err := overlayHomeLayer(agentHomeDir, tpl.OpenDir)
+			if err != nil {
+				return "", "", nil, fmt.Errorf("failed to copy template home %s: %w", templateRef(tpl), err)
+			}
+			templateHomeCopied = templateHomeCopied || copied
 		}
-		templateHomeCopied = templateHomeCopied || copied
 	}
 
 	// Safety net: an agent must never come up without its base home files.
@@ -2787,7 +2825,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		hConfig, err := settings.ResolveHarnessConfig(profileName, harnessConfigName)
 		if err == nil {
 			settingsCfg := &api.ScionConfig{}
-			if hConfig.Env != nil {
+			if hConfig.Env != nil && harnessConfigName != config.ShellHarnessConfigName {
 				settingsCfg.Env, _ = sanitizeHarnessConfigEnv(hConfig.Env, "settings", false)
 			}
 			if hConfig.Volumes != nil {
@@ -2887,7 +2925,12 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// than the raw templateName which may be a cache path or remote URI. A
 	// content-hash cache directory is never recorded as the name; the slug
 	// carried in ctx is used instead when known.
-	displayTemplateName, templateHash := infoTemplateFields(ctx, templateName, chain)
+	// Shell execution containers record no template (security audit H1-R) so
+	// subsequent Starts never resolve a local "default" template chain.
+	var displayTemplateName, templateHash string
+	if harnessConfigName != config.ShellHarnessConfigName {
+		displayTemplateName, templateHash = infoTemplateFields(ctx, templateName, chain)
+	}
 	projectID, _ := config.ReadProjectID(projectDir)
 	info := &api.AgentInfo{
 		Project:               projectName,

@@ -1303,7 +1303,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// Without this, NoAuth blanket-suppresses all secrets including
 		// GITHUB_TOKEN, causing git clone failures (#1165).
 		if agent.ProjectID != "" && d.secretBackend != nil {
-			projectValue := d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
+			projectValue := ""
+			if !isShellAgent(agent) {
+				projectValue = d.noAuthCreateGitToken(ctx, agent, secret.ScopeProject, agent.ProjectID)
+			}
 
 			// Fall back to the creating user's profile-level GITHUB_TOKEN,
 			// mirroring the cascade in resolveCloneToken. Users who store
@@ -3416,7 +3419,7 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorageWithSource(ctx context.Contex
 	// whose creator is in the ancestry chain. These are added at user-scope
 	// precedence — project/broker env vars with the same key will already
 	// have overridden them.
-	if agent != nil && len(agent.Ancestry) > 1 {
+	if agent != nil && len(agent.Ancestry) > 1 && !isShellAgent(agent) {
 		progenyVars, err := d.store.ListProgenyEnvVars(ctx, agent.Ancestry)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("list progeny env vars: %w", err)
@@ -3540,15 +3543,20 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		}
 	}
 
-	// 2. Check secrets (all scopes via backend.Resolve).
+	// 2. Check secrets (all scopes via backend.Resolve; shell agents are
+	// restricted to the owning user's user-scope secrets only).
 	// Only environment-type secrets can be mapped to env key=value pairs.
-	if d.secretBackend != nil {
-		if resolveOpts == nil && d.agentSecretsEnabled() && agent != nil && agent.ID != "" {
+	if d.secretBackend != nil && agent != nil && (!isShellAgent(agent) || agent.OwnerID != "") {
+		projectID, brokerID := agent.ProjectID, agent.RuntimeBrokerID
+		if isShellAgent(agent) {
+			projectID, brokerID = "", ""
+		} else if resolveOpts == nil && d.agentSecretsEnabled() && agent != nil && agent.ID != "" {
 			resolveOpts = &secret.ResolveOpts{AgentID: agent.ID}
 		}
 		resolved, err := d.secretBackend.Resolve(
-			ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+			ctx, agent.OwnerID, projectID, brokerID, resolveOpts)
 		if err == nil {
+			resolved = filterShellUserSecrets(agent, resolved)
 			resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 		}
 		if errors.Is(err, secret.ErrResolveDecrypt) {
@@ -5569,7 +5577,7 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 	}
 
 	opts := &secret.ResolveOpts{}
-	if len(ancestry) > 1 {
+	if len(ancestry) > 1 && !isShellAgent(agent) {
 		if d.debug {
 			d.log.Debug("progeny resolution enabled",
 				"agent_id", agentID, "ancestry_len", len(ancestry),
@@ -5655,7 +5663,7 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			return ceiling.Allowed
 		}
 	}
-	if d.agentSecretsEnabled() && agentID != "" {
+	if d.agentSecretsEnabled() && agentID != "" && !isShellAgent(agent) {
 		opts.AgentID = agentID
 	}
 	return opts, gate
@@ -5710,21 +5718,32 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"brokerID", agent.RuntimeBrokerID,
 		)
 	}
+	// Shell execution containers receive only the owning user's user-scope
+	// secrets, never project, broker, hub, or progeny secrets (ptone/scion#8817 H2).
+	if isShellAgent(agent) && agent.OwnerID == "" {
+		return nil, nil, nil
+	}
+
 	// The start-time checks on the progeny and owner user-scope paths
 	// (startSecretResolveOpts).
 	// One evaluation of the test-admin scope restriction, for both the
 	// start-time checks' keep decision and the restriction itself.
 	ta := d.testAdminScopesFor(ctx, agent)
 	resolveOpts, gate := d.startSecretResolveOpts(ctx, agent, &ta)
-	if resolveOpts == nil && d.agentSecretsEnabled() && agent != nil && agent.ID != "" {
+	if resolveOpts == nil && d.agentSecretsEnabled() && agent != nil && agent.ID != "" && !isShellAgent(agent) {
 		resolveOpts = &secret.ResolveOpts{AgentID: agent.ID}
 	}
 
-	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, agent.ProjectID, agent.RuntimeBrokerID, resolveOpts)
+	projectID, brokerID := agent.ProjectID, agent.RuntimeBrokerID
+	if isShellAgent(agent) {
+		projectID, brokerID = "", ""
+	}
+	resolved, err := d.secretBackend.Resolve(ctx, agent.OwnerID, projectID, brokerID, resolveOpts)
 	gate.flush(ctx, ownerMaterialSiteResolveSecrets)
 	if err != nil {
 		return nil, nil, err
 	}
+	resolved = filterShellUserSecrets(agent, resolved)
 	resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, ta.restricted, ta.allowed, ta.root)
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
@@ -5774,6 +5793,26 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"asNeededKeys", asNeededKeys)
 	}
 	return result, asNeededKeys, nil
+}
+
+// filterShellUserSecrets restricts resolved secrets for shell execution
+// containers to the owning user's own user-scope rows only, stripping hub,
+// project, broker, and progeny rows (ptone/scion#8817 H2). For non-shell
+// agents it returns resolved unchanged.
+func filterShellUserSecrets(agent *store.Agent, resolved []secret.SecretWithValue) []secret.SecretWithValue {
+	if !isShellAgent(agent) {
+		return resolved
+	}
+	if agent.OwnerID == "" || len(resolved) == 0 {
+		return nil
+	}
+	out := resolved[:0:0]
+	for _, sv := range resolved {
+		if sv.Scope == store.ScopeUser && sv.ScopeID == agent.OwnerID {
+			out = append(out, sv)
+		}
+	}
+	return out
 }
 
 // applyHubGCPMetadataModeEnv writes the hub's authoritative GCP identity

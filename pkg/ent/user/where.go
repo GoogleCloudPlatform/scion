@@ -1436,6 +1436,29 @@ func HasTerminalWorkspaceWith(preds ...predicate.UserTerminalWorkspace) predicat
 	})
 }
 
+// HasExecContainer applies the HasEdge predicate on the "exec_container" edge.
+func HasExecContainer() predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, ExecContainerTable, ExecContainerColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasExecContainerWith applies the HasEdge predicate on the "exec_container" edge with a given conditions (other predicates).
+func HasExecContainerWith(preds ...predicate.UserExecContainer) predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := newExecContainerStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // HasTestIdentityLoginCode applies the HasEdge predicate on the "test_identity_login_code" edge.
 func HasTestIdentityLoginCode() predicate.User {
 	return predicate.User(func(s *sql.Selector) {

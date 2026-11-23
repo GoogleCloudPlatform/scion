@@ -186,6 +186,15 @@ const ConduitDeliver = "hub.conduit_deliver"
 // and the web UI shows the exec authoring option only while it is on.
 const ExecSchedules = "hub.exec_schedules"
 
+// ExecContainers gates user-specified execution containers (ptone/scion#8812):
+// creating shell-harness agents and registering/reading a user's default
+// execution container. While it is off, shell-agent creation returns 400
+// (experiment_disabled), GET/PUT /api/v1/users/me/exec-container return 404,
+// and ResolveExecContainer returns unconfigured. DELETE stays ungated so a
+// user can always clear their registration, and the reserved "shell" harness
+// config name and shell-agent security protections apply unconditionally.
+const ExecContainers = "hub.exec_containers"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
@@ -1187,6 +1196,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7579",
 		Owner:       "templates",
 		ReviewBy:    "2027-05-31",
+	},
+	{
+		Name:        ExecContainers,
+		Title:       "Execution containers",
+		Description: "Lets users start execution containers (--harness shell) and register one in their profile as their default execution container. While off, creating execution containers is refused, GET/PUT /api/v1/users/me/exec-container answer 404, and existing execution containers keep all human-only protections.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8812",
+		Owner:       "@ptone",
+		ReviewBy:    "2027-03-31",
 	},
 }
 

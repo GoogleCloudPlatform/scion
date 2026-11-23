@@ -1760,14 +1760,31 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		return nil, newChatSendError(http.StatusInternalServerError, "INTERNAL", "no agent to route to", nil)
 	}
 
+	// Skip shell execution containers silently when other routed agents exist;
+	// only refuse when every routed agent is a shell container (ptone/scion#8812 §3.4 S5).
+	originalPrimaryIsShell := isShellAgent(agents[0])
+	nonShell := make([]*store.Agent, 0, len(agents))
+	for _, a := range agents {
+		if !isShellAgent(a) {
+			nonShell = append(nonShell, a)
+		}
+	}
+	if len(nonShell) == 0 {
+		dmErr := shellAgentNotMessageableError(agents[0])
+		return nil, newChatSendError(dmErr.HTTPStatus, dmErr.Code, dmErr.Message, nil)
+	}
+	agents = nonShell
 	primaryAgent := agents[0]
 
-	// The primary agent (agents[0]) always gets TypeInstruction. Secondaries
-	// (agents[1:]) get TypeMention via the fan-out path. The primary is the
-	// thread's implicit agent or the first-mentioned agent — it is never a
-	// "mention" recipient regardless of how the list was assembled.
+	// The primary agent (agents[0]) normally gets TypeInstruction (or TypeReply).
+	// Secondaries (agents[1:]) get TypeMention via the fan-out path. If the
+	// original primary was a dropped shell execution container, keep
+	// TypeMention so dropping the shell recipient does not change the remaining
+	// agents' message type.
 	msgType := messages.TypeInstruction
-	if replyToID != "" {
+	if originalPrimaryIsShell {
+		msgType = messages.TypeMention
+	} else if replyToID != "" {
 		msgType = messages.TypeReply
 	}
 
@@ -2357,6 +2374,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// Handle additional mentioned agents (fan-out).
 	if len(agents) > 1 {
 		for _, mentionAgent := range agents[1:] {
+			if isShellAgent(mentionAgent) {
+				continue
+			}
 			// Phase 3 msg-authz: Check message authorization on each mentioned agent.
 			// Replaces the ActionAttach check — chat v2 mention fan-out is messaging.
 			mentionAllowed, _, _ := s.authorizeAgentMessage(ctx, user, mentionAgent, false)

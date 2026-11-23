@@ -113,6 +113,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userexeccontainer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 	"github.com/google/uuid"
@@ -3895,6 +3896,22 @@ func init() {
 	userdeletionagentDescID := userdeletionagentFields[0].Descriptor()
 	// userdeletionagent.DefaultID holds the default value on creation for the id field.
 	userdeletionagent.DefaultID = userdeletionagentDescID.Default.(func() uuid.UUID)
+	userexeccontainerFields := schema.UserExecContainer{}.Fields()
+	_ = userexeccontainerFields
+	// userexeccontainerDescCreatedAt is the schema descriptor for created_at field.
+	userexeccontainerDescCreatedAt := userexeccontainerFields[3].Descriptor()
+	// userexeccontainer.DefaultCreatedAt holds the default value on creation for the created_at field.
+	userexeccontainer.DefaultCreatedAt = userexeccontainerDescCreatedAt.Default.(func() time.Time)
+	// userexeccontainerDescUpdatedAt is the schema descriptor for updated_at field.
+	userexeccontainerDescUpdatedAt := userexeccontainerFields[4].Descriptor()
+	// userexeccontainer.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	userexeccontainer.DefaultUpdatedAt = userexeccontainerDescUpdatedAt.Default.(func() time.Time)
+	// userexeccontainer.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	userexeccontainer.UpdateDefaultUpdatedAt = userexeccontainerDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// userexeccontainerDescID is the schema descriptor for id field.
+	userexeccontainerDescID := userexeccontainerFields[0].Descriptor()
+	// userexeccontainer.DefaultID holds the default value on creation for the id field.
+	userexeccontainer.DefaultID = userexeccontainerDescID.Default.(func() uuid.UUID)
 	userterminalworkspaceFields := schema.UserTerminalWorkspace{}.Fields()
 	_ = userterminalworkspaceFields
 	// userterminalworkspaceDescSchemaVersion is the schema descriptor for schema_version field.

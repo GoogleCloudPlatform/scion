@@ -472,6 +472,11 @@ func DeliverEnabled(getenv func(string) string, hasTmux bool) bool {
 	if !hasTmux {
 		return false
 	}
+	// Harnesses with Delivery: none (e.g. the built-in shell execution
+	// container) never register the deliver-message control route (S5).
+	if strings.TrimSpace(getenv("SCION_HARNESS")) == "shell" {
+		return false
+	}
 	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {
 		if strings.TrimSpace(name) == ExperimentConduitDeliver {
 			return true

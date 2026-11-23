@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 429
+**Operations:** 430
 
 ## Table of Contents
 
@@ -266,6 +266,7 @@
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
+- [user.execcontainer](#userexeccontainer) — Read, set, or clear the caller's own execution container registration
 - [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
 - [user.skillinjection.read](#userskillinjectionread) — List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
 - [template.user.read](#templateuserread) — List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
@@ -10213,6 +10214,52 @@
 ### Exemptions
 
 - **authentication_only:** The path names no user; the subject is always the caller, so no resource permission applies (scope: caller's own terminal workspace) — waives: `base_permission`
+
+---
+
+## user.execcontainer
+
+**Domain:** user
+
+**Description:** Read, set, or clear the caller's own execution container registration
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/exec-container` |
+| http_route | PUT | `/api/v1/users/me/exec-container` |
+| http_route | DELETE | `/api/v1/users/me/exec-container` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `update-resource`, `delete-resource`
+
+### Audit
+
+- **Event Type:** `user.exec_container.set, user.exec_container.clear`
+- **Context Fields:** actor_id
+- **Before Fields:** agent_id
+- **After Fields:** agent_id
+- **Atomic:** No
+- **Non-Atomic Justification:** Single-row per-user upsert/delete; best-effort synchronous mutation audit follows PutUserExecContainer and DeleteUserExecContainer
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+### Exemptions
+
+- **authentication_only:** The path names no user; the subject is always the caller, so no resource permission applies (scope: caller's own execution container registration) — waives: `base_permission`
 
 ---
 

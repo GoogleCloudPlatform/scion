@@ -226,6 +226,8 @@ type Tx struct {
 	UserDeletion *UserDeletionClient
 	// UserDeletionAgent is the client for interacting with the UserDeletionAgent builders.
 	UserDeletionAgent *UserDeletionAgentClient
+	// UserExecContainer is the client for interacting with the UserExecContainer builders.
+	UserExecContainer *UserExecContainerClient
 	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
 	UserTerminalWorkspace *UserTerminalWorkspaceClient
 	// WebhookEndpoint is the client for interacting with the WebhookEndpoint builders.
@@ -468,6 +470,7 @@ func (tx *Tx) init() {
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
 	tx.UserDeletion = NewUserDeletionClient(tx.config)
 	tx.UserDeletionAgent = NewUserDeletionAgentClient(tx.config)
+	tx.UserExecContainer = NewUserExecContainerClient(tx.config)
 	tx.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(tx.config)
 	tx.WebhookEndpoint = NewWebhookEndpointClient(tx.config)
 }
