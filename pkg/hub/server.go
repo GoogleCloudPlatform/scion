@@ -7374,6 +7374,7 @@ func (s *Server) registerSchedulerHandlers() {
 	// Hourly: a pending secret past its expiry is already treated as gone
 	// on every path; this deletes its row and releases its held value.
 	s.registerPendingSecretExpiry(s.scheduler)
+	s.registerSecretRequestExpiry(s.scheduler)
 	// Not a singleton: this instance can only self-heal the providers of
 	// brokers it personally holds a live local control-channel socket for
 	// (see brokerProviderSelfHealHandler), so every instance must run it.

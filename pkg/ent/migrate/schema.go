@@ -3483,6 +3483,79 @@ var (
 			},
 		},
 	}
+	// SecretRequestsColumns holds the columns for the "secret_requests" table.
+	SecretRequestsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "agent_id", Type: field.TypeUUID},
+		{Name: "agent_name", Type: field.TypeString},
+		{Name: "key", Type: field.TypeString, Size: 128},
+		{Name: "key_norm", Type: field.TypeString, Size: 128},
+		{Name: "version", Type: field.TypeInt},
+		{Name: "description", Type: field.TypeString, Size: 2147483647, Default: ""},
+		{Name: "secret_type", Type: field.TypeEnum, Enums: []string{"environment", "file", "variable"}, Default: "environment"},
+		{Name: "target", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "message_id", Type: field.TypeUUID},
+		{Name: "position", Type: field.TypeInt},
+		{Name: "intro_length", Type: field.TypeInt, Default: 0},
+		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "chat_key", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"pending", "fulfilling", "fulfilled", "replaced", "withdrawn", "dismissed", "expired"}, Default: "pending"},
+		{Name: "replaced_by_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "replaced_at", Type: field.TypeTime, Nullable: true},
+		{Name: "withdrawn_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "withdrawn_by", Type: field.TypeString, Nullable: true, Size: 32},
+		{Name: "resolved_by_user_id", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "resolved_by_name", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "resolved_by_email", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "dismiss_reason", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "surface", Type: field.TypeEnum, Nullable: true, Enums: []string{"native", "standalone_page"}},
+		{Name: "idempotency_key", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "response_message_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "secret_version", Type: field.TypeInt, Nullable: true},
+		{Name: "claimed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "expires_at", Type: field.TypeTime},
+		{Name: "resolved_at", Type: field.TypeTime, Nullable: true},
+	}
+	// SecretRequestsTable holds the schema information for the "secret_requests" table.
+	SecretRequestsTable = &schema.Table{
+		Name:       "secret_requests",
+		Columns:    SecretRequestsColumns,
+		PrimaryKey: []*schema.Column{SecretRequestsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "secretrequest_agent_id_key_norm_version",
+				Unique:  true,
+				Columns: []*schema.Column{SecretRequestsColumns[2], SecretRequestsColumns[5], SecretRequestsColumns[6]},
+			},
+			{
+				Name:    "secretrequest_agent_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{SecretRequestsColumns[2], SecretRequestsColumns[15]},
+			},
+			{
+				Name:    "secretrequest_status_expires_at",
+				Unique:  false,
+				Columns: []*schema.Column{SecretRequestsColumns[15], SecretRequestsColumns[30]},
+			},
+			{
+				Name:    "secretrequest_status_claimed_at",
+				Unique:  false,
+				Columns: []*schema.Column{SecretRequestsColumns[15], SecretRequestsColumns[28]},
+			},
+			{
+				Name:    "secretrequest_message_id_position",
+				Unique:  false,
+				Columns: []*schema.Column{SecretRequestsColumns[10], SecretRequestsColumns[11]},
+			},
+			{
+				Name:    "secretrequest_project_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{SecretRequestsColumns[1], SecretRequestsColumns[29]},
+			},
+		},
+	}
 	// SkillsColumns holds the columns for the "skills" table.
 	SkillsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -4536,6 +4609,7 @@ var (
 		ScheduledExecPollCursorsTable,
 		ScheduledExecRunsTable,
 		SecretsTable,
+		SecretRequestsTable,
 		SkillsTable,
 		SkillInjectionsTable,
 		SkillRegistriesTable,
@@ -4786,6 +4860,9 @@ func init() {
 	}
 	SecretsTable.Annotation = &entsql.Annotation{
 		Table: "secrets",
+	}
+	SecretRequestsTable.Annotation = &entsql.Annotation{
+		Table: "secret_requests",
 	}
 	SkillsTable.Annotation = &entsql.Annotation{
 		Table: "skills",

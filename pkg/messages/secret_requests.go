@@ -462,7 +462,7 @@ func RenderSecretRequestFallback(intro, agentName, projectName string, items []S
 		b.WriteString(it.Key)
 		b.WriteString("`")
 		if it.Version > 0 {
-			b.WriteString(fmt.Sprintf(" (v%d)", it.Version))
+			fmt.Fprintf(&b, " (v%d)", it.Version)
 		}
 		if it.SecretType != "" && it.SecretType != SecretRequestTypeEnvironment {
 			b.WriteString(" [")
@@ -482,7 +482,7 @@ func RenderSecretRequestFallback(intro, agentName, projectName string, items []S
 	}
 	b.WriteString("\n")
 	if standaloneURL != "" {
-		b.WriteString(fmt.Sprintf("Provide this secret in the Hub (sign-in required): %s\n\n", standaloneURL))
+		fmt.Fprintf(&b, "Provide this secret in the Hub (sign-in required): %s\n\n", standaloneURL)
 	}
 	b.WriteString("Do not paste secret values into chat; values are stored directly in the Hub and readable only by the requesting agent.")
 	return b.String()

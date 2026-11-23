@@ -93,6 +93,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/secretrequest"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
@@ -3184,6 +3185,98 @@ func init() {
 	secretDescID := secretFields[0].Descriptor()
 	// secret.DefaultID holds the default value on creation for the id field.
 	secret.DefaultID = secretDescID.Default.(func() uuid.UUID)
+	secretrequestFields := schema.SecretRequest{}.Fields()
+	_ = secretrequestFields
+	// secretrequestDescKey is the schema descriptor for key field.
+	secretrequestDescKey := secretrequestFields[4].Descriptor()
+	// secretrequest.KeyValidator is a validator for the "key" field. It is called by the builders before save.
+	secretrequest.KeyValidator = func() func(string) error {
+		validators := secretrequestDescKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key string) error {
+			for _, fn := range fns {
+				if err := fn(key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// secretrequestDescKeyNorm is the schema descriptor for key_norm field.
+	secretrequestDescKeyNorm := secretrequestFields[5].Descriptor()
+	// secretrequest.KeyNormValidator is a validator for the "key_norm" field. It is called by the builders before save.
+	secretrequest.KeyNormValidator = func() func(string) error {
+		validators := secretrequestDescKeyNorm.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(key_norm string) error {
+			for _, fn := range fns {
+				if err := fn(key_norm); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// secretrequestDescVersion is the schema descriptor for version field.
+	secretrequestDescVersion := secretrequestFields[6].Descriptor()
+	// secretrequest.VersionValidator is a validator for the "version" field. It is called by the builders before save.
+	secretrequest.VersionValidator = secretrequestDescVersion.Validators[0].(func(int) error)
+	// secretrequestDescDescription is the schema descriptor for description field.
+	secretrequestDescDescription := secretrequestFields[7].Descriptor()
+	// secretrequest.DefaultDescription holds the default value on creation for the description field.
+	secretrequest.DefaultDescription = secretrequestDescDescription.Default.(string)
+	// secretrequestDescTarget is the schema descriptor for target field.
+	secretrequestDescTarget := secretrequestFields[9].Descriptor()
+	// secretrequest.TargetValidator is a validator for the "target" field. It is called by the builders before save.
+	secretrequest.TargetValidator = secretrequestDescTarget.Validators[0].(func(string) error)
+	// secretrequestDescPosition is the schema descriptor for position field.
+	secretrequestDescPosition := secretrequestFields[11].Descriptor()
+	// secretrequest.PositionValidator is a validator for the "position" field. It is called by the builders before save.
+	secretrequest.PositionValidator = secretrequestDescPosition.Validators[0].(func(int) error)
+	// secretrequestDescIntroLength is the schema descriptor for intro_length field.
+	secretrequestDescIntroLength := secretrequestFields[12].Descriptor()
+	// secretrequest.DefaultIntroLength holds the default value on creation for the intro_length field.
+	secretrequest.DefaultIntroLength = secretrequestDescIntroLength.Default.(int)
+	// secretrequest.IntroLengthValidator is a validator for the "intro_length" field. It is called by the builders before save.
+	secretrequest.IntroLengthValidator = secretrequestDescIntroLength.Validators[0].(func(int) error)
+	// secretrequestDescChatKey is the schema descriptor for chat_key field.
+	secretrequestDescChatKey := secretrequestFields[14].Descriptor()
+	// secretrequest.ChatKeyValidator is a validator for the "chat_key" field. It is called by the builders before save.
+	secretrequest.ChatKeyValidator = secretrequestDescChatKey.Validators[0].(func(string) error)
+	// secretrequestDescWithdrawnBy is the schema descriptor for withdrawn_by field.
+	secretrequestDescWithdrawnBy := secretrequestFields[19].Descriptor()
+	// secretrequest.WithdrawnByValidator is a validator for the "withdrawn_by" field. It is called by the builders before save.
+	secretrequest.WithdrawnByValidator = secretrequestDescWithdrawnBy.Validators[0].(func(string) error)
+	// secretrequestDescResolvedByUserID is the schema descriptor for resolved_by_user_id field.
+	secretrequestDescResolvedByUserID := secretrequestFields[20].Descriptor()
+	// secretrequest.ResolvedByUserIDValidator is a validator for the "resolved_by_user_id" field. It is called by the builders before save.
+	secretrequest.ResolvedByUserIDValidator = secretrequestDescResolvedByUserID.Validators[0].(func(string) error)
+	// secretrequestDescResolvedByName is the schema descriptor for resolved_by_name field.
+	secretrequestDescResolvedByName := secretrequestFields[21].Descriptor()
+	// secretrequest.ResolvedByNameValidator is a validator for the "resolved_by_name" field. It is called by the builders before save.
+	secretrequest.ResolvedByNameValidator = secretrequestDescResolvedByName.Validators[0].(func(string) error)
+	// secretrequestDescResolvedByEmail is the schema descriptor for resolved_by_email field.
+	secretrequestDescResolvedByEmail := secretrequestFields[22].Descriptor()
+	// secretrequest.ResolvedByEmailValidator is a validator for the "resolved_by_email" field. It is called by the builders before save.
+	secretrequest.ResolvedByEmailValidator = secretrequestDescResolvedByEmail.Validators[0].(func(string) error)
+	// secretrequestDescIdempotencyKey is the schema descriptor for idempotency_key field.
+	secretrequestDescIdempotencyKey := secretrequestFields[25].Descriptor()
+	// secretrequest.IdempotencyKeyValidator is a validator for the "idempotency_key" field. It is called by the builders before save.
+	secretrequest.IdempotencyKeyValidator = secretrequestDescIdempotencyKey.Validators[0].(func(string) error)
+	// secretrequestDescCreatedAt is the schema descriptor for created_at field.
+	secretrequestDescCreatedAt := secretrequestFields[29].Descriptor()
+	// secretrequest.DefaultCreatedAt holds the default value on creation for the created_at field.
+	secretrequest.DefaultCreatedAt = secretrequestDescCreatedAt.Default.(func() time.Time)
+	// secretrequestDescID is the schema descriptor for id field.
+	secretrequestDescID := secretrequestFields[0].Descriptor()
+	// secretrequest.DefaultID holds the default value on creation for the id field.
+	secretrequest.DefaultID = secretrequestDescID.Default.(func() uuid.UUID)
 	skillFields := schema.Skill{}.Fields()
 	_ = skillFields
 	// skillDescName is the schema descriptor for name field.

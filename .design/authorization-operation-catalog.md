@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 431
+**Operations:** 434
 
 ## Table of Contents
 
@@ -225,6 +225,9 @@
 - [chat.decision.read](#chatdecisionread) — Read one version of a decision prompt decision. Needs read access to the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read for a thread; the caller in a user slot of a DM key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.decisions is off
 - [chat.decision.answer](#chatdecisionanswer) — Answer a decision prompt decision by choice id (the label is copied from the stored row) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a decision-response message, delivers it to the asking agent and publishes decision.updated. 404 while web.decisions is off
 - [chat.decisionprompt.answer](#chatdecisionpromptanswer) — Answer every actionable decision of a decision prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one decision-response message in one transaction, delivers it to the asking agent and publishes decision.updated per row. 404 while web.decisions is off
+- [chat.secretrequest.read](#chatsecretrequestread) — Read a secret-request card (metadata and per-key status, never secret values) plus canRespond and reason. Requires a signed-in user session, recipient membership on the prompt's conversation, and agent.read on the requesting agent. 404 while hub.agent_secrets is off
+- [chat.secretrequest.fulfill](#chatsecretrequestfulfill) — Fulfill all pending keys of a secret-request card, storing each value at agent scope in the secret backend, notifying the requesting agent via a secret-response message, and emitting fulfilled audit events (never values). Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off
+- [chat.secretrequest.dismiss](#chatsecretrequestdismiss) — Dismiss all or a subset of pending keys on a secret-request card with an optional reason, notifying the requesting agent via a secret-response message and emitting dismissed audit events. Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off
 - [chat.decisionprompt.dismiss](#chatdecisionpromptdismiss) — Dismiss open decisions of a decision prompt without answering, once the version is at least 5 minutes old, with an optional plain-text reason (up to 500 characters) and surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key; a UAT also needs inbox:write and the prompt's project inside its boundary), surviving chat retention purge of the prompt message. Agents get 403 users_only, visitors and non-session/non-UAT credentials get 403, and a user a live asking agent takes no messages from gets 403 MESSAGE_DENIED. A missing or unreadable prompt is 404; a too-recent version is 409 too_recent with details.availableAt; an already-settled prompt is 409 dismiss_changed (with details.availableAt when a listed row is too recent). Records one outcome=dismiss ($dismissed) answer row per dismissed decision with a shared batch id and one decision-response message in one transaction, delivers it to a live asking agent, and reports deliveryStatus: delivered, held (for the agent's next session), gone (stored without failure, not sent), unreachable (a suspended or stopped asker: stored failed, not sent), failed, or none when nothing new was dismissed; and publishes decision.updated per row. 404 while web.decisions is off
 - [chat.projectdecisions.list](#chatprojectdecisionslist) — List pending decision prompts or the append-only recorded answer log for a project, with live waitingOnYou and waitingOnOthers counts and filter facets. Needs project:read on the project, then scopes every prompt, log entry, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
 - [chat.userdecisions.list](#chatuserdecisionslist) — List pending decision prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 while web.decisions is off
@@ -8559,6 +8562,134 @@
 - `pkg/hub:TestDecisionSetAnswer_RecordsAndDeliversOneResponse`
 - `pkg/hub:TestDecisionSetAnswer_ChangedSet409`
 - `pkg/hub:TestDecisionSetAnswer_Authorization`
+
+---
+
+## chat.secretrequest.read
+
+**Domain:** chat
+
+**Description:** Read a secret-request card (metadata and per-key status, never secret values) plus canRespond and reason. Requires a signed-in user session, recipient membership on the prompt's conversation, and agent.read on the requesting agent. 404 while hub.agent_secrets is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/secret-requests/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestSecretRequests_EndToEnd`
+
+---
+
+## chat.secretrequest.fulfill
+
+**Domain:** chat
+
+**Description:** Fulfill all pending keys of a secret-request card, storing each value at agent scope in the secret backend, notifying the requesting agent via a secret-response message, and emitting fulfilled audit events (never values). Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/secret-requests/{messageId}/fulfill` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent
+
+**Effects:** `create-resource`, `update-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.secretrequest.fulfill`
+- **Context Fields:** actor_id, message_id, agent_id, key
+- **After Fields:** secret_version
+- **Atomic:** No
+- **Non-Atomic Justification:** Claim CAS, backend.Set, finish CAS with response message, then fire-and-forget agent delivery
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** idempotencyKey (optional)
+- **Retry:** repeating the call with the same idempotencyKey from the same user replays the fulfilled result
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestSecretRequests_EndToEnd`
+
+---
+
+## chat.secretrequest.dismiss
+
+**Domain:** chat
+
+**Description:** Dismiss all or a subset of pending keys on a secret-request card with an optional reason, notifying the requesting agent via a secret-response message and emitting dismissed audit events. Requires a signed-in user session, same-origin browser check, recipient membership, and agent.attach on the requesting agent. 404 while hub.agent_secrets is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/secret-requests/{messageId}/dismiss` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `INTERACTIVE_STATE`)
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent
+
+**Effects:** `create-resource`, `update-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.secretrequest.dismiss`
+- **Context Fields:** actor_id, message_id, agent_id, key
+- **After Fields:** response_message_id
+- **Atomic:** No
+- **Non-Atomic Justification:** Dismiss CAS and response message are stored in one transaction before fire-and-forget agent delivery
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** idempotencyKey (optional)
+- **Retry:** repeating the call with the same idempotencyKey from the same user replays the dismissed result
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestSecretRequests_EndToEnd`
 
 ---
 

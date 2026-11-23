@@ -228,6 +228,16 @@ func TestKindSpec_KindRegisteredEventTypesAndConflictCodes(t *testing.T) {
 	if _, ok := LookupKind("exec_action"); ok {
 		t.Fatalf("UnregisterKind(exec_action) did not remove kind")
 	}
+
+	// Duplicate registration panics to prevent silent allow-list overwrites.
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatalf("RegisterKind on duplicate name %q did not panic", DecisionKindSpec.Name)
+			}
+		}()
+		RegisterKind(DecisionKindSpec)
+	}()
 }
 
 // Seam test C4: a row needs no message anchor; identity is (asker, key, version).
@@ -239,6 +249,33 @@ func TestAnchor_Optional(t *testing.T) {
 	anchored := Anchor{MessageID: "msg-1", BlockIndex: 2}
 	if anchored.IsZero() {
 		t.Fatalf("populated Anchor.IsZero() = true, want false")
+	}
+	srAnchor := Anchor{MessageID: "sr-msg-1"}
+	if srAnchor.IsZero() || srAnchor.BlockIndex != 0 {
+		t.Fatalf("secret-request Anchor unexpected: %+v", srAnchor)
+	}
+
+	// Verify SecretRequestKindSpec is pre-registered and classifies fulfilling/fulfilled cleanly.
+	spec, ok := LookupKind(KindSecretRequest)
+	if !ok {
+		t.Fatalf("LookupKind(%q) = false, want true", KindSecretRequest)
+	}
+	if got := ConflictCode(spec, SecretRequestClaimedStatus); got != ConflictSubmitting {
+		t.Fatalf("ConflictCode(fulfilling) = %q, want %q", got, ConflictSubmitting)
+	}
+	if got := ConflictCode(spec, SecretRequestResolvedStatus); got != ConflictAlreadyFulfilled {
+		t.Fatalf("ConflictCode(fulfilled) = %q, want %q", got, ConflictAlreadyFulfilled)
+	}
+	if !spec.AcceptsEventType(EventFulfilled) || !spec.AcceptsEventType(EventClaimRecovered) {
+		t.Fatalf("SecretRequestKindSpec must accept fulfilled and claim_recovered")
+	}
+	for _, k := range []string{"secret_type", "target", "secret_version"} {
+		if !spec.AcceptsDetailKey(k) {
+			t.Errorf("SecretRequestKindSpec must allow detail key %q", k)
+		}
+	}
+	if spec.AcceptsDetailKey("value") {
+		t.Errorf("SecretRequestKindSpec must reject detail key \"value\"")
 	}
 
 	// PlanRepost and Head (with ResolvedAt) operate without any message anchor.
@@ -374,77 +411,62 @@ func TestNormalizeReason(t *testing.T) {
 	}
 }
 
-func TestParseWithdrawRequest(t *testing.T) {
+func TestValidateWithdrawRequest(t *testing.T) {
 	opts := WithdrawParseOptions{MaxKeys: 10, KeyLabel: "decision key"}
 
-	req, ferr := ParseWithdrawRequest(strings.NewReader(`{"keys":[" D234 ","1"],"wholeSet":true,"reason":"  done  "}`), opts)
-	if ferr != nil {
+	req := &WithdrawRequest{Keys: []string{" D234 ", "1"}, WholeSet: true, Reason: "  done  "}
+	if ferr := ValidateWithdrawRequest(req, opts); ferr != nil {
 		t.Fatalf("unexpected error: %v", ferr)
 	}
 	if len(req.Keys) != 2 || req.Keys[0] != "D234" || req.Keys[1] != "1" || !req.WholeSet || req.Reason != "done" {
-		t.Fatalf("unexpected parsed withdraw: %+v", req)
-	}
-
-	// Trailing data accepted (json.NewDecoder first-value semantics).
-	req, ferr = ParseWithdrawRequest(strings.NewReader(`{"keys":["D234"]} trailing`), opts)
-	if ferr != nil || len(req.Keys) != 1 || req.Keys[0] != "D234" {
-		t.Fatalf("trailing data: got %+v, %v", req, ferr)
-	}
-
-	// Case-insensitive struct field matching.
-	req, ferr = ParseWithdrawRequest(strings.NewReader(`{"Keys":["D234"],"WholeSet":true,"Reason":"ok"}`), opts)
-	if ferr != nil || len(req.Keys) != 1 || !req.WholeSet || req.Reason != "ok" {
-		t.Fatalf("case-insensitive keys: got %+v, %v", req, ferr)
+		t.Fatalf("unexpected validated withdraw: %+v", req)
 	}
 
 	// Duplicate case-insensitively.
-	_, ferr = ParseWithdrawRequest(strings.NewReader(`{"keys":["D234","d234"]}`), opts)
+	ferr := ValidateWithdrawRequest(&WithdrawRequest{Keys: []string{"D234", "d234"}}, opts)
 	if ferr == nil || ferr.Field != "keys" || !strings.Contains(ferr.Message, "duplicate decision key") {
 		t.Fatalf("expected duplicate error, got %+v", ferr)
 	}
 
 	// Empty keys.
-	_, ferr = ParseWithdrawRequest(strings.NewReader(`{"keys":[]}`), opts)
+	ferr = ValidateWithdrawRequest(&WithdrawRequest{Keys: []string{}}, opts)
 	if ferr == nil || ferr.Field != "keys" {
 		t.Fatalf("expected empty keys error, got %+v", ferr)
 	}
 
 	// Blank key element.
-	_, ferr = ParseWithdrawRequest(strings.NewReader(`{"keys":["   "]}`), opts)
+	ferr = ValidateWithdrawRequest(&WithdrawRequest{Keys: []string{"   "}}, opts)
 	if ferr == nil || ferr.Field != "keys" {
 		t.Fatalf("expected blank key error, got %+v", ferr)
 	}
 
 	// Too-long reason.
 	longReason := strings.Repeat("a", MaxReasonRunes+1)
-	_, ferr = ParseWithdrawRequest(strings.NewReader(`{"keys":["D1"],"reason":"`+longReason+`"}`), opts)
+	ferr = ValidateWithdrawRequest(&WithdrawRequest{Keys: []string{"D1"}, Reason: longReason}, opts)
 	if ferr == nil || ferr.Field != "reason" {
 		t.Fatalf("expected reason too long error, got %+v", ferr)
 	}
-
-	// Malformed JSON.
-	_, ferr = ParseWithdrawRequest(strings.NewReader(`{bad`), opts)
-	if ferr == nil || !ferr.InvalidJSON {
-		t.Fatalf("expected invalid JSON error, got %+v", ferr)
-	}
 }
 
-func TestParseAndValidateDismissRequest(t *testing.T) {
-	// Empty body is allowed.
-	req, ferr := ParseDismissRequest(strings.NewReader(""), DismissParseOptions{})
-	if ferr != nil || len(req.RowIDs) != 0 || req.Reason != "" {
-		t.Fatalf("empty body: got %+v, %v", req, ferr)
+func TestValidateDismissRequest(t *testing.T) {
+	// Empty request is allowed.
+	req := &DismissRequest{}
+	if ferr := ValidateDismissRequest(req, DismissParseOptions{}); ferr != nil {
+		t.Fatalf("empty request: got %v", ferr)
 	}
 
-	// Default rowIds field (case-insensitive via struct decoding).
-	req, ferr = ParseDismissRequest(strings.NewReader(`{"RowIds":["r1","r2"],"Reason":"  nope ","Surface":"native","IdempotencyKey":"k1"}`), DismissParseOptions{MaxRowIDs: 10})
-	if ferr != nil || len(req.RowIDs) != 2 || req.Reason != "nope" || req.Surface != "native" || req.IdempotencyKey != "k1" {
-		t.Fatalf("case-insensitive dismiss parse: got %+v, %v", req, ferr)
+	// Trims reason.
+	req = &DismissRequest{RowIDs: []string{"r1", "r2"}, Reason: "  nope ", Surface: "native", IdempotencyKey: "k1"}
+	if ferr := ValidateDismissRequest(req, DismissParseOptions{MaxRowIDs: 10}); ferr != nil {
+		t.Fatalf("unexpected error: %v", ferr)
+	}
+	if req.Reason != "nope" {
+		t.Fatalf("expected trimmed reason, got %q", req.Reason)
 	}
 
 	// ValidateDismissRequest with custom RowIDsField ("decisionIds") for caller-decoded structs.
 	custom := &DismissRequest{RowIDs: []string{"1", "2", "3"}}
-	ferr = ValidateDismissRequest(custom, DismissParseOptions{
+	ferr := ValidateDismissRequest(custom, DismissParseOptions{
 		RowIDsField: "decisionIds",
 		MaxRowIDs:   2,
 	})
@@ -454,13 +476,13 @@ func TestParseAndValidateDismissRequest(t *testing.T) {
 
 	// Idempotency key too long.
 	longKey := strings.Repeat("x", MaxIdempotencyKeyLen+1)
-	_, ferr = ParseDismissRequest(strings.NewReader(`{"idempotencyKey":"`+longKey+`"}`), DismissParseOptions{})
+	ferr = ValidateDismissRequest(&DismissRequest{IdempotencyKey: longKey}, DismissParseOptions{})
 	if ferr == nil || ferr.Field != "idempotencyKey" {
 		t.Fatalf("expected idempotencyKey error, got %+v", ferr)
 	}
 
 	// Invalid surface.
-	_, ferr = ParseDismissRequest(strings.NewReader(`{"surface":"bogus"}`), DismissParseOptions{
+	ferr = ValidateDismissRequest(&DismissRequest{Surface: "bogus"}, DismissParseOptions{
 		NormalizeSurface: func(string) (string, bool) { return "", false },
 		SurfaceError:     func(raw string) string { return "bad surface " + raw },
 	})

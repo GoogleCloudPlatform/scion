@@ -1053,6 +1053,18 @@ func (f SecretFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, erro
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SecretMutation", m)
 }
 
+// The SecretRequestFunc type is an adapter to allow the use of ordinary
+// function as SecretRequest mutator.
+type SecretRequestFunc func(context.Context, *ent.SecretRequestMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f SecretRequestFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.SecretRequestMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SecretRequestMutation", m)
+}
+
 // The SkillFunc type is an adapter to allow the use of ordinary
 // function as Skill mutator.
 type SkillFunc func(context.Context, *ent.SkillMutation) (ent.Value, error)
