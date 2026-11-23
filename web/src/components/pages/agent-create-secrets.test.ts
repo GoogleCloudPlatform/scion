@@ -228,6 +228,45 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     expect(rowEl.innerHTML).not.toContain('s3cr3t');
   });
 
+  it('keeps file textarea mounted across multiple keystrokes while focused, then masks on blur', async () => {
+    const { form } = await mountCreate(true);
+    form.shadowRoot!.querySelector<HTMLElement>('[data-testid="add-secret-row"]')!.click();
+    await form.updateComplete;
+
+    const rowEl = form.shadowRoot!.querySelector<HTMLElement>('[data-testid="secret-row"]')!;
+    const keyInput = rowEl.querySelector<Valued>('[data-field="key"]')!;
+    keyInput.value = 'DEPLOY_KEY';
+    keyInput.dispatchEvent(new Event('sl-input'));
+    const typeSelect = rowEl.querySelector<Valued>('[data-field="type"]')!;
+    typeSelect.value = 'file';
+    typeSelect.dispatchEvent(new Event('sl-change'));
+    await form.updateComplete;
+
+    const textarea = rowEl.querySelector<Valued>('sl-textarea[data-field="value"]')!;
+    expect(textarea).not.toBeNull();
+
+    textarea.dispatchEvent(new Event('sl-focus'));
+    await form.updateComplete;
+
+    for (const partial of ['p', 'pe', 'pem-body']) {
+      textarea.value = partial;
+      textarea.dispatchEvent(new Event('sl-input'));
+      await form.updateComplete;
+      // Same textarea instance remains mounted while focused
+      expect(rowEl.querySelector('sl-textarea[data-field="value"]')).toBe(textarea);
+      expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).toBeNull();
+    }
+    expect(form.collectSecrets()[0].value).toBe('pem-body');
+
+    // On blur, textarea is replaced by the masked placeholder with no plaintext in DOM
+    textarea.dispatchEvent(new Event('sl-blur'));
+    await form.updateComplete;
+    expect(rowEl.querySelector('sl-textarea')).toBeNull();
+    expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).not.toBeNull();
+    expect(rowEl.textContent).not.toContain('pem-body');
+    expect(rowEl.innerHTML).not.toContain('pem-body');
+  });
+
   it('omits secrets from POST body when none are entered', async () => {
     const { page } = await mountCreate(true);
     await page.handleSubmit(new Event('submit'));

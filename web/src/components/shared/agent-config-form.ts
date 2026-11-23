@@ -2243,7 +2243,7 @@ export class ScionAgentConfigForm extends LitElement {
 
               <div class="secret-row-value">
                 ${row.type === 'file'
-                  ? !row.revealed && row.value !== ''
+                  ? !row.revealed && !row.editing && row.value !== ''
                     ? html`
                         <div class="secret-file-masked" data-testid="secret-file-masked">
                           <sl-icon name="lock"></sl-icon>
@@ -2265,6 +2265,8 @@ export class ScionAgentConfigForm extends LitElement {
                           placeholder="Paste file contents (e.g. private key)"
                           .value=${row.value}
                           ?disabled=${this.disabled}
+                          @sl-focus=${() => this.updateSecretRow(i, { editing: true })}
+                          @sl-blur=${() => this.updateSecretRow(i, { editing: false })}
                           @sl-input=${(e: Event) =>
                             this.updateSecretRow(i, {
                               value: (e.target as HTMLElement & { value: string }).value,
@@ -2292,7 +2294,11 @@ export class ScionAgentConfigForm extends LitElement {
                   label=${row.revealed ? 'Hide value' : 'Show value'}
                   data-action="toggle-reveal"
                   ?disabled=${this.disabled}
-                  @click=${() => this.updateSecretRow(i, { revealed: !row.revealed })}
+                  @click=${() =>
+                    this.updateSecretRow(i, {
+                      revealed: !row.revealed,
+                      editing: false,
+                    })}
                 ></sl-icon-button>
               </div>
 

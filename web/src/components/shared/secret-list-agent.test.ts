@@ -347,6 +347,27 @@ describe('scion-secret-list — agent scope and existing scopes', () => {
     ]);
   });
 
+  it('reloads secrets when disconnected and re-attached to the DOM', async () => {
+    const calls = installFetch([]);
+    const el = await mountList({
+      scope: 'agent',
+      scopeId: 'agent-reconn',
+      compact: true,
+    });
+    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(1);
+
+    el.remove();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 30));
+    await el.updateComplete;
+
+    expect(calls.filter((c) => c.method === 'GET').map((c) => c.url)).toEqual([
+      '/api/v1/secrets?scope=agent&scopeId=agent-reconn',
+      '/api/v1/secrets?scope=agent&scopeId=agent-reconn',
+    ]);
+  });
+
   it('hides pending secret actions when readonly is true', async () => {
     vi.stubGlobal(
       'fetch',

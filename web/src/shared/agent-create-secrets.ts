@@ -46,6 +46,8 @@ export interface AgentSecretDraftRow {
   target: string;
   injectionMode: InjectionMode;
   revealed: boolean;
+  /** Transient UI-only flag: true while the file textarea has focus. */
+  editing?: boolean;
 }
 
 /** Creates a blank secret row with the hub's defaults (environment, as_needed). */
@@ -57,6 +59,7 @@ export function emptyAgentSecretRow(): AgentSecretDraftRow {
     target: '',
     injectionMode: 'as_needed',
     revealed: false,
+    editing: false,
   };
 }
 
