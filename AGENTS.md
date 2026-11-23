@@ -18,6 +18,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 | Experimental features | `docs-site/src/content/docs/reference/experiments.md` |
 | Workspace or worktree provisioning | `docs-site/src/content/docs/local/workspace.md` ("Linked git projects") |
 | Building on another unmerged branch (stacked PRs) | `docs-repo/agents/stacked-branches.md` |
+| Adding or changing a user-visible runtime launch failure | `docs-repo/agents/typed-launch-failures.md` |
 
 ## Sandbox
 
