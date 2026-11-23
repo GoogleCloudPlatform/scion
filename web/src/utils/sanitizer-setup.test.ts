@@ -59,6 +59,21 @@ describe('vitest DOM sanitizer setup guard', () => {
     expect(fragment.querySelector('p')?.textContent).toBe('safe');
   });
 
+  it('continues sanitizing siblings after a <template> element', () => {
+    const afterTemplate = '<template><b>x</b></template><p onclick="alert(1)">t</p>';
+    const cleanHtml = DOMPurify.sanitize(afterTemplate);
+    const tpl = document.createElement('template');
+    tpl.innerHTML = cleanHtml;
+    expect(disallowedLeft(tpl.content)).toEqual([]);
+    expect(tpl.content.querySelector('p')?.textContent).toBe('t');
+
+    const removedAfterTemplate =
+      '<template><b>x</b></template><script>alert(1)</script><img src="/x.png" onerror="alert(1)">';
+    const fragment = DOMPurify.sanitize(removedAfterTemplate, { RETURN_DOM_FRAGMENT: true });
+    expect(disallowedLeft(fragment)).toEqual([]);
+    expect(fragment.querySelector('img')?.getAttribute('src')).toBe('/x.png');
+  });
+
   it('executes DOMPurify hooks in getMarkdownRenderer without per-file opt-ins', async () => {
     const renderer = await getMarkdownRenderer();
     const fragment = renderer.renderFragment('[docs](https://example.com/docs)');

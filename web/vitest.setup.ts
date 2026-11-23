@@ -58,8 +58,13 @@ if (typeof document !== 'undefined') {
       return false;
     };
 
+    // Descend through childNodes rather than firstChild/lastChild: Happy DOM's
+    // HTMLTemplateElement.firstChild/lastChild return nodes inside
+    // template.content (whose parentNode is the detached DocumentFragment),
+    // whereas childNodes is empty for <template> as in browsers.
     const nextInTree = (root: Node, node: Node): Node | null => {
-      if (node.firstChild) return node.firstChild;
+      const first = node.childNodes[0];
+      if (first) return first;
       for (let cur: Node | null = node; cur && cur !== root; cur = cur.parentNode) {
         if (cur.nextSibling) return cur.nextSibling;
       }
@@ -70,7 +75,9 @@ if (typeof document !== 'undefined') {
       if (node === root) return root;
       if (node.previousSibling) {
         let cur: Node = node.previousSibling;
-        while (cur.lastChild) cur = cur.lastChild;
+        while (cur.childNodes.length) {
+          cur = cur.childNodes[cur.childNodes.length - 1]!;
+        }
         return cur;
       }
       return node.parentNode ?? root;
