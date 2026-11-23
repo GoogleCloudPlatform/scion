@@ -65,12 +65,14 @@ import { ReviewHeartbeat } from '../../client/review-heartbeat.js';
 import {
   ReviewDraftController,
   draftStatusText,
+  formatDraftTime,
   type DraftSnapshot,
 } from '../../client/review-draft.js';
 import { showToast } from '../../utils/toast.js';
 import { copyToClipboard, copyWithToast, showCopyFailedToast } from '../../utils/clipboard.js';
 import {
   ARTIFACTS_FLAG,
+  DraftConflictError,
   MAX_INLINE_TEXT_BYTES,
   artifactArchiveUrl,
   artifactFileUrl,
@@ -236,6 +238,7 @@ export type ReviewHint =
   | 'earlier'
   | 'moved'
   | 'source-own'
+  | 'resumed-draft'
   | 'composing'
   | 'code-run'
   | 'generic'
@@ -278,6 +281,10 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     title:
       "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
     body: 'You can still change them there.',
+  },
+  'resumed-draft': {
+    title: 'Suggestions from before you left are read-only in the graphical view.',
+    body: 'You can change them in Source.',
   },
   composing: {
     title: "Finish the text you're typing first.",
@@ -434,12 +441,21 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Durable review draft autosave controller while Review mode is open. */
   private draftController: ReviewDraftController | null = null;
   @state() private draftSnapshot: DraftSnapshot | null = null;
+  /** The caller's private saved review draft discovered on page load (Phase 3). */
+  @state() private savedDraft: ReviewDraft | null = null;
+  /** Read-only earlier review text kept after moving a stale review to the current version. */
+  @state() private carriedReview: { base: number; body: string; entry: string } | null = null;
   @state() private draftCancelOpen = false;
   @state() private draftCancelBusy = false;
   @state() private draftConflictBusy = false;
+  @state() private draftDiscardTarget: { base: number; rev: number } | null = null;
+  @state() private draftDiscardBusy = false;
+  @state() private draftDiscardConflict = false;
+  @state() private draftDiscardError: string | null = null;
   @state() private staleDraft: { draft: ReviewDraft; currentSeq: number } | null = null;
   @state() private staleDraftBusy = false;
   @state() private staleDraftError: string | null = null;
+  @state() private staleReviewError = false;
   @state() private reviewLoadingDraft = false;
   private draftLoadGen = 0;
   private removeLeaveGuard: (() => void) | null = null;
@@ -823,6 +839,50 @@ export class ScionPageArtifactDetail extends LitElement {
       .draft-status-wrap.danger {
         color: var(--sl-color-danger-700, #b91c1c);
       }
+      .review-action-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+      .draft-chip-trigger {
+        appearance: none;
+        background: transparent;
+        border: 0;
+        padding: 0;
+        margin-left: 0.35rem;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        vertical-align: middle;
+      }
+      .draft-chip-trigger:focus-visible {
+        outline: 2px solid var(--sl-color-primary-600);
+        outline-offset: 2px;
+        border-radius: var(--scion-radius-sm);
+      }
+      .carried-review {
+        margin-bottom: 0.75rem;
+      }
+      .carried-review pre {
+        margin: 0 0 0.5rem;
+        padding: 0.75rem;
+        overflow-x: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: var(--scion-bg);
+        border: 1px solid var(--scion-border);
+        border-radius: var(--scion-radius-sm);
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.8125rem;
+      }
+      .carried-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+      .stale-review-actions {
+        margin-top: 0.5rem;
+      }
       .g-toolbar .narrow {
         display: none;
       }
@@ -999,6 +1059,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.viewError = null;
     this.viewExpired = false;
     this.crossProjectSharing = false;
+    this.savedDraft = null;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     try {
@@ -1021,6 +1082,11 @@ export class ScionPageArtifactDetail extends LitElement {
       this.resolveNames();
       void this.loadVersions(0, gen);
       if (data.canManage) void this.loadCrossProjectSharing(gen);
+      if (this.reviewDraftsEnabled && (data.canPublish || data.canReview)) {
+        void this.loadSavedDraft(gen);
+      } else {
+        this.savedDraft = null;
+      }
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
@@ -1097,6 +1163,11 @@ export class ScionPageArtifactDetail extends LitElement {
       this.resolveNames();
       void this.loadVersions(0, gen);
       if (data.canManage) void this.loadCrossProjectSharing(gen);
+      if (this.reviewDraftsEnabled && (data.canPublish || data.canReview)) {
+        void this.loadSavedDraft(gen);
+      } else {
+        this.savedDraft = null;
+      }
       if (kind === 'html' && version) {
         void this.loadView(version.seq);
       } else {
@@ -1130,7 +1201,24 @@ export class ScionPageArtifactDetail extends LitElement {
     if (Date.now() - this.versionsCheckedAt < VERSIONS_RECHECK_MS) return;
     this.versionsCheckedAt = Date.now();
     void this.loadVersions(0, this.loadGen);
+    if (this.reviewDraftsEnabled && (this.canPublish || this.canReviewOnly)) {
+      void this.loadSavedDraft(this.loadGen);
+    }
   };
+
+  /** Loads the caller's private review draft for this artifact (Phase 3). */
+  private async loadSavedDraft(gen: number): Promise<void> {
+    if (!this.reviewDraftsEnabled || !this.artifactId) return;
+    const draftGen = this.draftLoadGen;
+    try {
+      const res = await getReviewDraft(this.artifactId);
+      if (gen !== this.loadGen || draftGen !== this.draftLoadGen) return;
+      this.noteSeq(res.currentSeq);
+      this.savedDraft = res.draft;
+    } catch {
+      if (gen === this.loadGen && draftGen === this.draftLoadGen) this.savedDraft = null;
+    }
+  }
 
   private async loadText(file: ArtifactFile, gen: number): Promise<void> {
     const seq = this.data?.version?.seq ?? 0;
@@ -1518,8 +1606,13 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewNote = '';
     this.reviewPreview = '';
     this.discardedReview = null;
+    this.carriedReview = null;
+    this.savedDraft = null;
     this.draftCancelOpen = false;
+    this.draftDiscardTarget = null;
+    this.draftDiscardConflict = false;
     this.staleDraft = null;
+    this.staleReviewError = false;
   };
 
   private onLeaveGuard(): boolean {
@@ -1546,21 +1639,29 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private async startReviewWithDraft(): Promise<void> {
     if (this.reviewLoadingDraft) return;
-    const v = this.data?.version;
-    if (!v || !this.artifactId) return;
+    if (!this.artifactId) return;
     const gen = ++this.draftLoadGen;
     this.reviewLoadingDraft = true;
     this.staleDraft = null;
     this.staleDraftError = null;
     try {
       const res = await getReviewDraft(this.artifactId);
-      if (gen !== this.draftLoadGen || !this.data?.version) return;
+      if (gen !== this.draftLoadGen) return;
+      this.noteSeq(res.currentSeq);
+      this.savedDraft = res.draft;
       const draft = res.draft;
       if (draft && draft.base < res.currentSeq) {
-        // Phase 2: stale-base draft offers Download/Discard only (move flow is Phase 3).
         this.staleDraft = { draft, currentSeq: res.currentSeq };
         return;
       }
+      // If the page is currently showing an older version (e.g. Resume clicked
+      // from History while viewing a prior version), load the current version first.
+      if (!this.showsCurrent || this.data?.version?.seq !== res.currentSeq || this.text === null) {
+        this.seq = 0;
+        await this.load();
+        if (gen !== this.draftLoadGen) return;
+      }
+      if (!this.data?.version || !this.canReview) return;
       if (draft && draft.base === this.data.version.seq) {
         this.enterReviewSession({
           body: draft.body,
@@ -1568,6 +1669,8 @@ export class ScionPageArtifactDetail extends LitElement {
           rev: draft.rev,
           savedAt: draft.savedAt,
           carried: draft.carried,
+          carriedEntry: draft.entry,
+          carriedPersisted: draft.carried !== null,
         });
         return;
       }
@@ -1579,7 +1682,7 @@ export class ScionPageArtifactDetail extends LitElement {
         carried: null,
       });
     } catch {
-      if (gen !== this.draftLoadGen || !this.data?.version) return;
+      if (gen !== this.draftLoadGen || !this.data?.version || !this.canReview) return;
       // Do not block reviewing if GET fails; a subsequent PUT will surface any 409 safely.
       this.enterReviewSession({
         body: lfText(this.text),
@@ -1599,6 +1702,8 @@ export class ScionPageArtifactDetail extends LitElement {
     rev: number;
     savedAt: string | null;
     carried: CarriedReviewDraft | null;
+    carriedEntry?: string;
+    carriedPersisted?: boolean;
   }): void {
     this.disposeDraftController();
     this.reviewText = init.body;
@@ -1606,6 +1711,15 @@ export class ScionPageArtifactDetail extends LitElement {
     this.reviewHint = null;
     this.reviewNotice = null;
     this.discardedReview = null;
+    this.staleReviewError = false;
+    const v = this.data?.version;
+    this.carriedReview = init.carried
+      ? {
+          base: init.carried.base,
+          body: init.carried.body,
+          entry: init.carriedEntry ?? v?.entryPath ?? '',
+        }
+      : null;
     this.reviewNote = init.note;
     this.reviewError = null;
     this.draftCancelOpen = false;
@@ -1613,7 +1727,6 @@ export class ScionPageArtifactDetail extends LitElement {
     this.criticView = 'marks';
     this.reviewing = true;
     this.reviewGraphical = this.graphicalReview;
-    const v = this.data?.version;
     if (this.reviewDraftsEnabled && v && this.artifactId) {
       this.draftController = new ReviewDraftController({
         artifactId: this.artifactId,
@@ -1624,9 +1737,23 @@ export class ScionPageArtifactDetail extends LitElement {
         initialRev: init.rev,
         initialSavedAt: init.savedAt,
         carried: init.carried,
+        ...(init.carriedPersisted !== undefined ? { carriedPersisted: init.carriedPersisted } : {}),
         readState: () => ({ body: this.reviewText, note: this.reviewNote }),
         onChange: (snap) => {
           this.draftSnapshot = snap;
+          if (snap.status === 'saved' && snap.rev > 0 && snap.savedAt && this.draftController) {
+            const ack = this.draftController.lastAcknowledged;
+            this.savedDraft = {
+              rev: snap.rev,
+              base: this.draftController.currentBase,
+              entry: this.draftController.currentEntry,
+              body: ack.body,
+              note: ack.note,
+              carried: this.draftController.currentCarried,
+              savedAt: snap.savedAt,
+              createdAt: this.savedDraft?.createdAt ?? snap.savedAt,
+            };
+          }
         },
       });
       this.draftSnapshot = this.draftController.getSnapshot();
@@ -1638,6 +1765,12 @@ export class ScionPageArtifactDetail extends LitElement {
       this.largeConfirmed = false;
       this.releaseChoice();
       void this.sizeReview(this.reviewText, ++this.reviewRuns);
+      if (init.rev > 0 && init.savedAt) {
+        const counts = countCritic(init.body);
+        if (counts.suggestions + counts.comments + counts.highlights > 0) {
+          this.showHint('resumed-draft');
+        }
+      }
     }
   }
 
@@ -1896,13 +2029,17 @@ export class ScionPageArtifactDetail extends LitElement {
       if (draftCtrl && this.draftController === draftCtrl) {
         const delResult = await draftCtrl.deleteAfterSubmit();
         this.disposeDraftController();
-        if (delResult === 'conflict') {
+        if (delResult === 'deleted') {
+          this.savedDraft = null;
+        } else if (delResult === 'conflict') {
           this.reviewNotice =
             'Your review was saved. A newer draft from another device or tab was kept.';
         }
       }
       this.reviewPending = null;
       this.reviewing = false;
+      this.carriedReview = null;
+      this.staleReviewError = false;
       this.showCurrentVersion();
     } catch (err) {
       if (draftCtrl && this.draftController === draftCtrl) {
@@ -1912,6 +2049,7 @@ export class ScionPageArtifactDetail extends LitElement {
         // Keep the buffer, draft rev, and beforeunload guard intact without
         // sending DELETE (design-delta §2.1 & §6 A3).
         this.reviewPending = null;
+        this.staleReviewError = true;
         this.reviewError =
           'Your review was not saved: a newer version was published, or is being published. Your draft and edits are kept intact.';
         return;
@@ -2005,6 +2143,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.draftCancelOpen = false;
     this.reviewing = false;
     this.discardedReview = null;
+    this.carriedReview = null;
+    this.staleReviewError = false;
   }
 
   /** Leaves Review mode without submitting; asks when there are unsaved draft changes. */
@@ -2067,6 +2207,10 @@ export class ScionPageArtifactDetail extends LitElement {
         this.reviewText = loaded.body;
         this.reviewNote = loaded.note;
         this.reviewPreview = loaded.body;
+        this.carriedReview = loaded.carried
+          ? { base: loaded.carried.base, body: loaded.carried.body, entry: loaded.entry }
+          : null;
+        this.savedDraft = loaded;
         if (this.reviewGraphical) {
           this.refreshReviewSize(loaded.body);
         }
@@ -2092,6 +2236,152 @@ export class ScionPageArtifactDetail extends LitElement {
     downloadTextFile(safeReviewDownloadName(v.entryPath, v.seq), this.reviewText);
   };
 
+  private draftChipTooltip(d: ReviewDraft): string {
+    const hhmm = formatDraftTime(d.savedAt);
+    return hhmm ? `Your saved review draft, saved ${hhmm}` : 'Your saved review draft';
+  }
+
+  private openDiscardDraftDialog(): void {
+    if (!this.savedDraft) return;
+    this.draftDiscardError = null;
+    this.draftDiscardConflict = false;
+    this.draftDiscardTarget = { base: this.savedDraft.base, rev: this.savedDraft.rev };
+  }
+
+  private closeDiscardDraftDialog(): void {
+    this.draftDiscardTarget = null;
+    this.draftDiscardConflict = false;
+    this.draftDiscardError = null;
+  }
+
+  private async confirmDiscardDraft(): Promise<void> {
+    const target = this.draftDiscardTarget;
+    if (!target || this.draftDiscardBusy || this.draftDiscardConflict) return;
+    this.draftDiscardBusy = true;
+    this.draftDiscardError = null;
+    try {
+      await deleteReviewDraft(this.artifactId, { rev: target.rev });
+      this.savedDraft = null;
+      this.closeDiscardDraftDialog();
+    } catch (err) {
+      if (err instanceof DraftConflictError) {
+        this.draftDiscardConflict = true;
+        this.draftDiscardError =
+          'This draft was updated on another device or tab. Close this dialog and review the latest draft before discarding.';
+        void this.loadSavedDraft(this.loadGen);
+      } else {
+        this.draftDiscardError =
+          err instanceof Error ? err.message : 'Could not discard the saved draft';
+      }
+    } finally {
+      this.draftDiscardBusy = false;
+    }
+  }
+
+  /**
+   * Moves a stale-base saved draft to the current version (v3 §7.4):
+   * restarts Review mode on the current version's text with the earlier
+   * review text kept read-only as `carried`. Nothing is written to the hub
+   * until the reviewer edits the new review, so abandoning the move loses
+   * nothing.
+   */
+  private async moveStaleDraftToCurrent(): Promise<void> {
+    const stale = this.staleDraft;
+    if (!stale || this.staleDraftBusy) return;
+    this.staleDraftBusy = true;
+    this.staleDraftError = null;
+    try {
+      if (
+        !this.showsCurrent ||
+        this.data?.version?.seq !== stale.currentSeq ||
+        this.text === null
+      ) {
+        this.seq = 0;
+        await this.load();
+      }
+      this.staleDraft = null;
+      if (!this.canReview || !this.data?.version) {
+        this.reviewNotice = this.staleReviewNotice();
+        this.carriedReview = {
+          base: stale.draft.base,
+          body: stale.draft.body,
+          entry: stale.draft.entry,
+        };
+        return;
+      }
+      this.enterReviewSession({
+        body: lfText(this.text),
+        note: stale.draft.note,
+        rev: stale.draft.rev,
+        savedAt: null,
+        carried: { base: stale.draft.base, body: stale.draft.body },
+        carriedEntry: stale.draft.entry,
+        carriedPersisted: false,
+      });
+    } catch (err) {
+      this.staleDraftError =
+        err instanceof Error ? err.message : 'Could not load the current version';
+    } finally {
+      this.staleDraftBusy = false;
+    }
+  }
+
+  /**
+   * Moves an active review whose submit was refused with `stale_review` onto
+   * the current version while keeping the reviewer's earlier text read-only.
+   * Persists any pending edits on the old base first so abandoning the moved
+   * session cannot silently drop unsaved work.
+   */
+  private async moveCurrentReviewToLatest(): Promise<void> {
+    const v = this.data?.version;
+    if (!v || this.reviewBusy) return;
+    if (this.reviewGraphical && this.reviewView === 'graphical' && !this.takeGraphicalText())
+      return;
+    const oldBase = v.seq;
+    const oldEntry = v.entryPath;
+    const draftCtrl = this.draftController;
+    this.reviewBusy = true;
+    try {
+      if (draftCtrl) {
+        draftCtrl.notifyChange();
+        const saved = await draftCtrl.saveNow();
+        if (!this.reviewing || this.draftController !== draftCtrl) return;
+        if (!saved || draftCtrl.isDirty) {
+          this.reviewError =
+            'Could not save your pending edits to your draft before moving. Save or download your review before moving to the current version.';
+          return;
+        }
+      }
+      const oldBody = this.reviewText;
+      const oldNote = this.reviewNote;
+      const oldRev = draftCtrl?.currentRev ?? this.savedDraft?.rev ?? 0;
+      const draftGen = this.draftLoadGen;
+      this.seq = 0;
+      await this.load();
+      if (!this.reviewing || draftGen !== this.draftLoadGen) return;
+      if (!this.canReview || !this.data?.version) {
+        this.closeReviewMode();
+        this.reviewNotice = this.staleReviewNotice();
+        this.carriedReview = { base: oldBase, body: oldBody, entry: oldEntry };
+        return;
+      }
+      this.enterReviewSession({
+        body: lfText(this.text),
+        note: oldNote,
+        rev: oldRev,
+        savedAt: null,
+        carried: { base: oldBase, body: oldBody },
+        carriedEntry: oldEntry,
+        carriedPersisted: false,
+      });
+    } catch (err) {
+      if (!this.reviewing) return;
+      this.reviewError = err instanceof Error ? err.message : 'Could not load the current version';
+    } finally {
+      this.reviewBusy = false;
+    }
+  }
+
   private async discardStaleDraft(): Promise<void> {
     const stale = this.staleDraft;
     if (!stale || this.staleDraftBusy) return;
@@ -2099,7 +2389,17 @@ export class ScionPageArtifactDetail extends LitElement {
     this.staleDraftError = null;
     try {
       await deleteReviewDraft(this.artifactId, { rev: stale.draft.rev });
+      this.savedDraft = null;
       this.staleDraft = null;
+      if (
+        !this.showsCurrent ||
+        this.data?.version?.seq !== stale.currentSeq ||
+        this.text === null
+      ) {
+        this.seq = 0;
+        await this.load();
+      }
+      if (!this.canReview || !this.data?.version) return;
       this.enterReviewSession({
         body: lfText(this.text),
         note: '',
@@ -2114,6 +2414,16 @@ export class ScionPageArtifactDetail extends LitElement {
       this.staleDraftBusy = false;
     }
   }
+
+  private async copyCarried(): Promise<void> {
+    if (!this.carriedReview) return;
+    await copyWithToast(this.carriedReview.body);
+  }
+
+  private dismissCarried = (): void => {
+    this.carriedReview = null;
+    this.draftController?.clearCarried();
+  };
 
   private async copyDiscarded(): Promise<void> {
     if (this.discardedReview === null) return;
@@ -2377,12 +2687,21 @@ export class ScionPageArtifactDetail extends LitElement {
 
   private renderVersionMenu(): TemplateResult {
     const v = this.data!.version;
+    const draft = this.reviewDraftsEnabled ? this.savedDraft : null;
     return html`
-      <sl-dropdown>
+      <sl-dropdown class="version-menu">
         <sl-button slot="trigger" size="small" caret> Version ${this.versionLabel(v)} </sl-button>
         <sl-menu
-          @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void =>
-            this.goToVersion(Number(e.detail.item.value))}
+          @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void => {
+            const val = e.detail.item.value;
+            if (val === 'draft:resume') {
+              void this.startReviewWithDraft();
+            } else if (val === 'draft:discard') {
+              this.openDiscardDraftDialog();
+            } else {
+              this.goToVersion(Number(val));
+            }
+          }}
         >
           ${this.versionsError
             ? html`<sl-menu-item disabled>${this.versionsError}</sl-menu-item>`
@@ -2391,10 +2710,26 @@ export class ScionPageArtifactDetail extends LitElement {
                   <sl-menu-item value=${String(x.seq)} ?checked=${x.seq === v?.seq} type="checkbox">
                     ${this.versionLabel(x)} · ${this.kindAndAuthor(x)} ·
                     ${formatInstant(x.createdAt)}
+                    ${draft && x.seq === draft.base
+                      ? html`<sl-tooltip slot="suffix" content=${this.draftChipTooltip(draft)}>
+                          <sl-badge class="draft-chip-badge" pill variant="warning">Draft</sl-badge>
+                        </sl-tooltip>`
+                      : nothing}
                     ${x.note ? html`<span class="menu-note">${x.note}</span>` : nothing}
                   </sl-menu-item>
                 `
               )}
+          ${draft
+            ? html`<sl-divider></sl-divider>
+                <sl-menu-item class="version-menu-draft-resume" value="draft:resume">
+                  <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                  Resume draft (v${draft.base})
+                </sl-menu-item>
+                <sl-menu-item class="version-menu-draft-discard" value="draft:discard">
+                  <sl-icon slot="prefix" name="trash"></sl-icon>
+                  Discard draft
+                </sl-menu-item>`
+            : nothing}
         </sl-menu>
       </sl-dropdown>
     `;
@@ -2484,14 +2819,32 @@ export class ScionPageArtifactDetail extends LitElement {
                     </sl-button>`
                   : nothing}
                 ${this.canReview
-                  ? html`<sl-button
-                      size="small"
-                      ?disabled=${this.refreshing}
-                      @click=${this.startReview}
-                    >
-                      <sl-icon slot="prefix" name="chat-text"></sl-icon>
-                      Review
-                    </sl-button>`
+                  ? this.reviewDraftsEnabled && this.savedDraft
+                    ? html`<span class="review-action-wrap">
+                        <sl-button
+                          size="small"
+                          class="review-btn resume-draft-btn"
+                          ?disabled=${this.refreshing || this.reviewLoadingDraft}
+                          @click=${this.startReview}
+                        >
+                          <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                          Resume draft
+                        </sl-button>
+                        <sl-tooltip content=${this.draftChipTooltip(this.savedDraft)}>
+                          <sl-badge class="review-draft-badge" pill variant="warning"
+                            >Draft</sl-badge
+                          >
+                        </sl-tooltip>
+                      </span>`
+                    : html`<sl-button
+                        size="small"
+                        class="review-btn"
+                        ?disabled=${this.refreshing || this.reviewLoadingDraft}
+                        @click=${this.startReview}
+                      >
+                        <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                        Review
+                      </sl-button>`
                   : nothing}
                 ${this.manageAccess && showManageAccess(this.accessCaps)
                   ? html`<sl-button
@@ -2902,12 +3255,44 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private renderVersionRow(x: ArtifactVersion, shown: number | undefined): TemplateResult {
+    const draft = this.reviewDraftsEnabled ? this.savedDraft : null;
+    const hasDraft = !!draft && x.seq === draft.base;
     return html`
       <tr>
         <td>
           <strong>v${x.seq}</strong>
           ${x.seq === this.latestSeq
             ? html`<sl-badge pill variant="success">current</sl-badge>`
+            : nothing}
+          ${hasDraft
+            ? html`<sl-dropdown class="draft-chip-menu" placement="bottom-start">
+                <button
+                  type="button"
+                  slot="trigger"
+                  class="draft-chip-trigger"
+                  aria-label="Saved review draft actions"
+                >
+                  <sl-tooltip content=${this.draftChipTooltip(draft)}>
+                    <sl-badge class="draft-chip-badge" pill variant="warning">Draft</sl-badge>
+                  </sl-tooltip>
+                </button>
+                <sl-menu
+                  @sl-select=${(e: CustomEvent<{ item: { value: string } }>): void => {
+                    const action = e.detail.item.value;
+                    if (action === 'resume') void this.startReviewWithDraft();
+                    else if (action === 'discard') this.openDiscardDraftDialog();
+                  }}
+                >
+                  <sl-menu-item class="draft-chip-resume" value="resume">
+                    <sl-icon slot="prefix" name="chat-text"></sl-icon>
+                    Resume
+                  </sl-menu-item>
+                  <sl-menu-item class="draft-chip-discard" value="discard">
+                    <sl-icon slot="prefix" name="trash"></sl-icon>
+                    Discard draft
+                  </sl-menu-item>
+                </sl-menu>
+              </sl-dropdown>`
             : nothing}
         </td>
         <td>
@@ -3079,14 +3464,53 @@ export class ScionPageArtifactDetail extends LitElement {
     </sl-details>`;
   }
 
-  /** Why Review mode closed, with the discarded text, outside Review mode. */
+  /** The reviewer's earlier draft text kept read-only after moving to a newer version (v3 §7.4). */
+  private renderCarriedReview(): TemplateResult | typeof nothing {
+    const c = this.carriedReview;
+    if (!c) return nothing;
+    return html`<sl-details
+      class="carried-review"
+      open
+      summary=${`Your earlier review of v${c.base} (read-only)`}
+    >
+      <pre>${c.body}</pre>
+      <div class="carried-actions">
+        <sl-button
+          size="small"
+          class="carried-copy-btn"
+          @click=${(): void => void this.copyCarried()}
+        >
+          <sl-icon slot="prefix" name="clipboard"></sl-icon>
+          Copy
+        </sl-button>
+        <sl-button
+          size="small"
+          class="carried-download-btn"
+          @click=${(): void => downloadTextFile(safeReviewDownloadName(c.entry, c.base), c.body)}
+        >
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Download
+        </sl-button>
+        <sl-button
+          size="small"
+          variant="text"
+          class="carried-dismiss-btn"
+          @click=${this.dismissCarried}
+        >
+          Dismiss
+        </sl-button>
+      </div>
+    </sl-details>`;
+  }
+
+  /** Why Review mode closed, with the discarded or carried text, outside Review mode. */
   private renderReviewNotice(): TemplateResult | typeof nothing {
     if (!this.reviewNotice) return nothing;
     return html`<sl-alert class="review-notice" variant="warning" open>
         <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
         ${this.reviewNotice}
       </sl-alert>
-      ${this.renderDiscarded()}`;
+      ${this.renderCarriedReview()} ${this.renderDiscarded()}`;
   }
 
   /**
@@ -3110,7 +3534,10 @@ export class ScionPageArtifactDetail extends LitElement {
         ? 'image'
         : hint === 'load-failed'
           ? 'exclamation-triangle'
-          : hint === 'source-own' || hint === 'large' || hint === 'too-large'
+          : hint === 'source-own' ||
+              hint === 'resumed-draft' ||
+              hint === 'large' ||
+              hint === 'too-large'
             ? 'info-circle'
             : 'slash-circle';
     const action =
@@ -3118,6 +3545,7 @@ export class ScionPageArtifactDetail extends LitElement {
       hint === 'load-failed' ||
       hint === 'earlier' ||
       hint === 'source-own' ||
+      hint === 'resumed-draft' ||
       hint === 'large' ||
       hint === 'too-large'
         ? nothing
@@ -3347,9 +3775,23 @@ export class ScionPageArtifactDetail extends LitElement {
         ? html`<sl-alert variant="danger" open>
             <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
             ${this.reviewError}
+            ${this.staleReviewError
+              ? html`<div class="stale-review-actions">
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    class="move-review-btn"
+                    ?loading=${this.reviewBusy}
+                    @click=${(): void => void this.moveCurrentReviewToLatest()}
+                  >
+                    Move my review to the current version
+                  </sl-button>
+                </div>`
+              : nothing}
           </sl-alert>`
         : nothing}
-      ${this.renderDiscarded()} ${this.renderReviewFooter(marks, marksOnly)}
+      ${this.renderCarriedReview()} ${this.renderDiscarded()}
+      ${this.renderReviewFooter(marks, marksOnly)}
     `;
   }
 
@@ -3437,9 +3879,22 @@ export class ScionPageArtifactDetail extends LitElement {
         ? html`<sl-alert variant="danger" open>
             <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
             ${this.reviewError}
+            ${this.staleReviewError
+              ? html`<div class="stale-review-actions">
+                  <sl-button
+                    size="small"
+                    variant="primary"
+                    class="move-review-btn"
+                    ?loading=${this.reviewBusy}
+                    @click=${(): void => void this.moveCurrentReviewToLatest()}
+                  >
+                    Move my review to the current version
+                  </sl-button>
+                </div>`
+              : nothing}
           </sl-alert>`
         : nothing}
-      ${this.renderDiscarded()}
+      ${this.renderCarriedReview()} ${this.renderDiscarded()}
       <div class="review-panes">
         <scion-code-editor
           class="review-editor"
@@ -3655,8 +4110,9 @@ export class ScionPageArtifactDetail extends LitElement {
           >
             <p>
               You have a saved draft review of version ${stale.draft.base}, but version
-              ${stale.currentSeq} has been published since. Download a copy or discard the older
-              draft to review version ${stale.currentSeq}.
+              ${stale.currentSeq} has been published since. Move your review to version
+              ${stale.currentSeq} to keep your earlier text read-only alongside it, download a copy,
+              or discard the older draft.
             </p>
             ${this.staleDraftError
               ? html`<sl-alert variant="danger" open>
@@ -3692,6 +4148,55 @@ export class ScionPageArtifactDetail extends LitElement {
               variant="danger"
               ?loading=${this.staleDraftBusy}
               @click=${(): void => void this.discardStaleDraft()}
+              >Discard draft</sl-button
+            >
+            <sl-button
+              slot="footer"
+              class="stale-draft-move"
+              variant="primary"
+              autofocus
+              ?loading=${this.staleDraftBusy}
+              @click=${(): void => void this.moveStaleDraftToCurrent()}
+              >Move my review to v${stale.currentSeq}</sl-button
+            >
+          </sl-dialog>`
+        : nothing}
+      ${this.draftDiscardTarget
+        ? html`<sl-dialog
+            class="draft-discard-dialog"
+            label="Discard saved draft?"
+            open
+            @sl-request-close=${(e: Event): void => {
+              if (this.draftDiscardBusy) e.preventDefault();
+              else this.closeDiscardDraftDialog();
+            }}
+          >
+            <p>
+              Delete your saved review draft of version ${this.draftDiscardTarget.base}? This can't
+              be undone.
+            </p>
+            ${this.draftDiscardError
+              ? html`<sl-alert variant="danger" open>
+                  <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+                  ${this.draftDiscardError}
+                </sl-alert>`
+              : nothing}
+            <sl-button
+              slot="footer"
+              class="draft-discard-cancel"
+              ?disabled=${this.draftDiscardBusy}
+              @click=${(): void => {
+                this.closeDiscardDraftDialog();
+              }}
+              >${this.draftDiscardConflict ? 'Close' : 'Cancel'}</sl-button
+            >
+            <sl-button
+              slot="footer"
+              class="draft-discard-confirm"
+              variant="danger"
+              ?disabled=${this.draftDiscardConflict}
+              ?loading=${this.draftDiscardBusy}
+              @click=${(): void => void this.confirmDiscardDraft()}
               >Discard draft</sl-button
             >
           </sl-dialog>`

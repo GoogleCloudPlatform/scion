@@ -96,6 +96,12 @@ export interface ReviewDraftControllerOptions {
   initialRev?: number;
   initialSavedAt?: string | null;
   carried?: CarriedReviewDraft | null;
+  /**
+   * True when `carried` is already persisted on the hub (resuming a moved
+   * draft); false when starting a fresh move that has not been written yet
+   * (so dismissing before typing does not overwrite the older-base draft).
+   */
+  carriedPersisted?: boolean;
   /** Reads the current editor buffer and note (after flushing any editor debounce). */
   readState: () => ReviewDraftBuffer;
   /** Called whenever the snapshot changes so the hosting component can re-render. */
@@ -158,6 +164,8 @@ export class ReviewDraftController {
   private base: number;
   private entry: string;
   private carried: CarriedReviewDraft | null;
+  private hadPersistedCarried: boolean;
+  private carriedDismissedDirty = false;
   private readonly opts: ReviewDraftControllerOptions;
   private readonly getFn: NonNullable<ReviewDraftControllerOptions['get']>;
   private readonly putFn: NonNullable<ReviewDraftControllerOptions['put']>;
@@ -191,6 +199,9 @@ export class ReviewDraftController {
     this.base = opts.base;
     this.entry = opts.entry;
     this.carried = opts.carried ?? null;
+    this.hadPersistedCarried =
+      this.carried !== null &&
+      (opts.carriedPersisted ?? ((opts.initialRev ?? 0) > 0 && !!opts.initialSavedAt));
     this.getFn = opts.get ?? getReviewDraft;
     this.putFn = opts.put ?? putReviewDraft;
     this.delFn = opts.del ?? deleteReviewDraft;
@@ -217,15 +228,44 @@ export class ReviewDraftController {
     return this.rev;
   }
 
+  /** Base version sequence this controller saves against. */
+  get currentBase(): number {
+    return this.base;
+  }
+
+  /** Entry file path this controller saves against. */
+  get currentEntry(): string {
+    return this.entry;
+  }
+
+  /** Carried earlier review text kept alongside the current draft, if any. */
+  get currentCarried(): CarriedReviewDraft | null {
+    return this.carried;
+  }
+
   /** Last body acknowledged by the hub (or the starting text before any save). */
   get lastAcknowledged(): ReviewDraftBuffer {
     return { body: this.ackedBody, note: this.ackedNote };
   }
 
-  /** True when the current buffer or note differs from the last hub-acknowledged state. */
+  /** True when the current buffer, note, or dismissed carried text differs from the last hub-acknowledged state. */
   get isDirty(): boolean {
     const cur = this.opts.readState();
-    return cur.body !== this.ackedBody || cur.note !== this.ackedNote;
+    return cur.body !== this.ackedBody || cur.note !== this.ackedNote || this.carriedDismissedDirty;
+  }
+
+  /**
+   * Clears the read-only carried text. When the carried text was already
+   * persisted on the hub, marks the draft dirty so the next save clears it;
+   * for an unwritten move, leaves the older-base draft untouched.
+   */
+  clearCarried(): void {
+    if (this.disposed || this.carried === null) return;
+    this.carried = null;
+    if (this.hadPersistedCarried) {
+      this.carriedDismissedDirty = true;
+      this.notifyChange();
+    }
   }
 
   /** True when leaving the page or closing Review mode would lose unacknowledged edits. */
@@ -270,7 +310,8 @@ export class ReviewDraftController {
       this.pausedReason = null;
     }
 
-    const dirty = cur.body !== this.ackedBody || cur.note !== this.ackedNote;
+    const dirty =
+      cur.body !== this.ackedBody || cur.note !== this.ackedNote || this.carriedDismissedDirty;
     if (!dirty) {
       this.clearAutosaveTimer();
       this.clearRetryTimer();
@@ -403,6 +444,8 @@ export class ReviewDraftController {
     this.base = d.base;
     this.entry = d.entry;
     this.carried = d.carried;
+    this.hadPersistedCarried = d.carried !== null;
+    this.carriedDismissedDirty = false;
     this.ackedBody = d.body;
     this.ackedNote = d.note;
     this.savedAt = d.savedAt;
@@ -476,7 +519,7 @@ export class ReviewDraftController {
       entry: this.entry,
       body: snap.body,
       note: snap.note,
-      ...(this.carried ? { carried: this.carried } : {}),
+      carried: this.carried,
       clientSavedAt: this.nowFn().toISOString(),
     };
 
@@ -506,6 +549,8 @@ export class ReviewDraftController {
       this.savedAt = res.savedAt;
       this.ackedBody = snap.body;
       this.ackedNote = snap.note;
+      this.hadPersistedCarried = this.carried !== null;
+      this.carriedDismissedDirty = false;
       this.retryDelayMs = this.retryMinMs;
       this.pausedReason = null;
       this.conflict = null;

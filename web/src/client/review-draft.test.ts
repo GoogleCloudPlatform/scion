@@ -53,7 +53,10 @@ describe('safeReviewDownloadName (C6)', () => {
       '.',
       '..',
       '.md',
+      '..md',
+      '...md',
       '/.md',
+      '/etc/plan.md',
       'dir/',
       'dir\\',
       'a/..',
@@ -61,7 +64,9 @@ describe('safeReviewDownloadName (C6)', () => {
       'C:',
       'C:plan.md',
       'C:\\',
+      'C:\\plan.md',
       '\\\\server\\share\\',
+      '\\\\server\\share\\plan.md',
       'bad\x00name.md',
       'bad\nname.md',
       'bad\x7fname.md',
@@ -631,5 +636,90 @@ describe('ReviewDraftController', () => {
       if (origCaches) Object.defineProperty(globalThis, 'caches', origCaches);
       else delete (globalThis as Record<string, unknown>).caches;
     }
+  });
+
+  it('tracks carried text on a fresh move without writing until edited, and clears persisted carried on dismiss', async () => {
+    const carried = { base: 1, body: 'Old v1 draft {++mark++}\n' };
+    const put = vi.fn().mockImplementation((_id, req: { rev: number }) =>
+      Promise.resolve({
+        rev: req.rev + 1,
+        savedAt: '2026-11-22T10:00:00Z',
+        currentSeq: 2,
+      })
+    );
+    let body = 'Fresh v2 text.\n';
+    const note = '';
+    const snapshots: DraftSnapshot[] = [];
+
+    // 1. Fresh move (carriedPersisted: false): clean until edited, dismiss does not write.
+    const moved = new ReviewDraftController({
+      artifactId: 'art-1',
+      base: 2,
+      entry: 'plan.md',
+      initialBody: body,
+      initialNote: note,
+      initialRev: 3,
+      initialSavedAt: null,
+      carried,
+      carriedPersisted: false,
+      readState: () => ({ body, note }),
+      onChange: (s) => snapshots.push(s),
+      put,
+      get: vi.fn(),
+      del: vi.fn(),
+    });
+    expect(moved.isDirty).toBe(false);
+    expect(moved.getSnapshot().status).toBe('empty');
+    expect(put).not.toHaveBeenCalled();
+
+    // Edit and save: sends rev 3 -> 4 with base 2 and carried attached.
+    body = 'Fresh v2 text.{++new++}\n';
+    moved.notifyChange();
+    await moved.saveNow();
+    expect(put).toHaveBeenCalledTimes(1);
+    expect(put.mock.calls[0][1]).toMatchObject({
+      rev: 3,
+      base: 2,
+      body: 'Fresh v2 text.{++new++}\n',
+      carried,
+    });
+    expect(moved.currentRev).toBe(4);
+    expect(moved.isDirty).toBe(false);
+
+    // Now that carried is persisted on the hub, clearCarried() marks dirty and saves carried: null.
+    moved.clearCarried();
+    expect(moved.isDirty).toBe(true);
+    expect(moved.currentCarried).toBeNull();
+    await moved.saveNow();
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(put.mock.calls[1][1]).toMatchObject({
+      rev: 4,
+      base: 2,
+      carried: null,
+    });
+    expect(moved.isDirty).toBe(false);
+    moved.dispose();
+
+    // 2. Dismissing carried on an unwritten move keeps isDirty false so the v1 draft is untouched.
+    const unwritten = new ReviewDraftController({
+      artifactId: 'art-1',
+      base: 2,
+      entry: 'plan.md',
+      initialBody: 'Fresh v2 text.\n',
+      initialNote: '',
+      initialRev: 3,
+      initialSavedAt: null,
+      carried,
+      carriedPersisted: false,
+      readState: () => ({ body: 'Fresh v2 text.\n', note: '' }),
+      onChange: () => {},
+      put,
+      get: vi.fn(),
+      del: vi.fn(),
+    });
+    unwritten.clearCarried();
+    expect(unwritten.isDirty).toBe(false);
+    expect(put).toHaveBeenCalledTimes(2);
+    unwritten.dispose();
   });
 });
