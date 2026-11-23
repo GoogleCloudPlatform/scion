@@ -615,10 +615,30 @@ const SuspendScreen = "hub.suspend_screen"
 // stored value is true while the experiment is off.
 const AdminManagedBrokers = "hub.admin_managed_brokers"
 
+// FiltersQueryDialect gates the unified key:value filter query dialect across
+// hub list endpoints and the web UI's <scion-filter-box> (ptone/scion#9018).
+// Server layer: while off, GET /api/v1/agents ignores the q parameter; while
+// on, q is parsed, validated, and pushed down to store predicates (400
+// invalid_filter_query on invalid queries). Web layer: while off, views render
+// their existing filter controls; while on, adopted views render the unified
+// filter box. Default off.
+const FiltersQueryDialect = "filters.query_dialect"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        FiltersQueryDialect,
+		Title:       "Unified filter query dialect",
+		Description: "Enables the unified Gmail/GitHub-style key:value filter query dialect (q=) on supported list endpoints and replaces view-specific filter inputs with <scion-filter-box> in the web UI. Server layer: while off, GET /api/v1/agents ignores q; while on, q is parsed, validated, and translated into store predicates. Web layer: selects <scion-filter-box> on adopted list views.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#9018",
+		Owner:       "ui",
+		ReviewBy:    "2027-05-23",
+	},
 	{
 		Name:        AgentSecrets,
 		Title:       "Agent-scoped secrets",

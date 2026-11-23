@@ -33,6 +33,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostedguard"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
@@ -602,7 +604,93 @@ func (s *Server) agentListQueryFilter(ctx context.Context, w http.ResponseWriter
 		}
 		filter.Labels = parsed
 	}
+
+	if rawQ := query.Get("q"); rawQ != "" && s.experimentEnabled(experiments.FiltersQueryDialect) {
+		parsed, fqErr := filterquery.Parse(rawQ, schemas.Agents.HasKey)
+		if fqErr != nil {
+			writeInvalidFilterQuery(w, fqErr)
+			return store.AgentFilter{}, false
+		}
+		if vErr := schemas.Agents.Validate(parsed); vErr != nil {
+			writeInvalidFilterQuery(w, vErr)
+			return store.AgentFilter{}, false
+		}
+		filter.Query = filterQueryToAgentStoreTerms(parsed)
+	}
 	return filter, true
+}
+
+func writeInvalidFilterQuery(w http.ResponseWriter, fqErr *filterquery.Error) {
+	writeError(w, http.StatusBadRequest, ErrCodeInvalidFilterQuery, fqErr.Message, map[string]interface{}{
+		"offset": fqErr.Offset,
+		"length": fqErr.Length,
+	})
+}
+
+// filterQueryToAgentStoreTerms translates a validated agents filter query into
+// canonicalized store.QueryTerms so cursor bindings are deterministic.
+func filterQueryToAgentStoreTerms(q filterquery.Query) *store.QueryTerms {
+	if q.IsEmpty() {
+		return nil
+	}
+	qt := &store.QueryTerms{
+		Text: q.Text,
+	}
+	if len(q.ExcludeText) > 0 {
+		excl := append([]string(nil), q.ExcludeText...)
+		sort.Strings(excl)
+		qt.ExcludeText = slices.Compact(excl)
+	}
+	if len(q.Terms) > 0 {
+		terms := make([]store.QueryTerm, 0, len(q.Terms))
+		for _, t := range q.Terms {
+			vals := make([]string, len(t.Values))
+			for i, v := range t.Values {
+				if t.Key == "label" {
+					vals[i] = v
+				} else {
+					vals[i] = strings.ToLower(v)
+				}
+			}
+			sort.Strings(vals)
+			vals = slices.Compact(vals)
+
+			op := store.QueryOpEq
+			if t.Key == "label" {
+				allHasKey := true
+				allEq := true
+				for _, v := range vals {
+					if strings.Contains(v, "=") {
+						allHasKey = false
+					} else {
+						allEq = false
+					}
+				}
+				if allHasKey {
+					op = store.QueryOpHasKey
+				} else if allEq {
+					op = store.QueryOpLabelEq
+				}
+			}
+			terms = append(terms, store.QueryTerm{
+				Field:  t.Key,
+				Values: vals,
+				Negate: t.Negate,
+				Op:     op,
+			})
+		}
+		sort.Slice(terms, func(i, j int) bool {
+			if terms[i].Field != terms[j].Field {
+				return terms[i].Field < terms[j].Field
+			}
+			if terms[i].Negate != terms[j].Negate {
+				return !terms[i].Negate
+			}
+			return strings.Join(terms[i].Values, ",") < strings.Join(terms[j].Values, ",")
+		})
+		qt.Terms = terms
+	}
+	return qt
 }
 
 // addAgentCreateIfAnyProjectAllows adds "create" to the agents list's
