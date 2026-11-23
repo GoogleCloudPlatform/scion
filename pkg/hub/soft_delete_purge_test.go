@@ -89,6 +89,12 @@ func (p *purgeCountingStore) PurgeOldTriggerSubjectClaims(_ context.Context, _ t
 	return 0, nil
 }
 
+func (p *purgeCountingStore) PurgeExpiredRotatedWebhookSecrets(_ context.Context, _ time.Time, _ time.Duration) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return 0, nil
+}
+
 func (p *purgeCountingStore) counts() (agents, events int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
