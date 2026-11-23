@@ -107,10 +107,20 @@ func TestTriggerSubjectClaimStore_LifecycleAndAbandonedTakeover(t *testing.T) {
 	require.NotNil(t, existing)
 	assert.Equal(t, agent1, existing.AgentID)
 
-	// 7. Releasing c2 allows fire3 to take over and clears agent_id/bound_at/released_at.
+	// 7. Explicit ReleaseTriggerSubjectClaim refuses to release a BOUND claim
+	// (protects against an ambiguous COMMIT error releasing a committed bind).
 	released, err = cs.ReleaseTriggerSubjectClaim(ctx, c2.ID, fire2, tLater)
 	require.NoError(t, err)
-	assert.True(t, released)
+	assert.False(t, released, "explicit Release must not release a bound claim (agent_id IS NOT NULL)")
+
+	stillActive, err := cs.GetActiveTriggerSubjectClaim(ctx, trigID, "pr-1")
+	require.NoError(t, err)
+	assert.Equal(t, agent1, stillActive.AgentID)
+
+	// Releasing bound claims for agent1 allows fire3 to take over and clears agent_id/bound_at/released_at.
+	nReleased, err := cs.ReleaseTriggerSubjectClaimsForAgent(ctx, agent1, tLater)
+	require.NoError(t, err)
+	assert.Equal(t, 1, nReleased)
 
 	_, err = cs.GetActiveTriggerSubjectClaim(ctx, trigID, "pr-1")
 	assert.ErrorIs(t, err, store.ErrNotFound)

@@ -920,6 +920,14 @@ type AgentCreateInputs struct {
 	// (hub-managed workspace path, shared-workspace default branch) ran.
 	Branch    string `json:"branch,omitempty"`
 	Workspace string `json:"workspace,omitempty"`
+
+	// HomeFilesPending is true from agent row commit until the create dispatch
+	// delivers the agent's required create-time HomeFiles (e.g. a trigger's
+	// .scion/trigger-event.json). While true, generic start paths refuse to
+	// launch the agent so a concurrent start can never start it without its
+	// event file. Cleared once the create dispatch succeeds (or an accepted
+	// async create launch reports succeeded).
+	HomeFilesPending bool `json:"homeFilesPending,omitempty"`
 }
 
 // Project type constants.

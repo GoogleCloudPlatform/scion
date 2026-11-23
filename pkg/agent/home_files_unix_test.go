@@ -19,6 +19,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,10 +98,8 @@ func TestHomeFiles_WrittenOnCreateBeforeContainerStarts(t *testing.T) {
 	fx := newHomeFilesTestFixture(t)
 
 	eventPayload := []byte("{\"type\":\"trigger.event\",\"event_id\":\"ev-123\",\"fire_id\":\"fi-456\"}\n")
-	metaPayload := []byte("{\"source\":\"webhook\"}\n")
 	files := []api.HomeFile{
-		{Path: ".scion/trigger-event.json", Mode: 0o600, Content: eventPayload},
-		{Path: ".scion/triggers/meta.json", Mode: 0o644, Content: metaPayload},
+		{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: eventPayload},
 	}
 
 	verifiedBeforeRun := false
@@ -190,9 +189,9 @@ func TestHomeFiles_WrittenOnProvisionOnlyCreate(t *testing.T) {
 }
 
 func TestHomeFiles_SymlinkEscapeRefusedByConfinement(t *testing.T) {
-	t.Run("writeProvisionHomeFiles refuses symlinked .scion and symlinked subdir and never writes through leaf symlink", func(t *testing.T) {
+	t.Run("writeProvisionHomeFiles refuses symlinked .scion and unlinks leaf symlink without following", func(t *testing.T) {
 		outsideDir := t.TempDir()
-		victim := filepath.Join(outsideDir, "victim.json")
+		victim := filepath.Join(outsideDir, "trigger-event.json")
 		if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -203,42 +202,37 @@ func TestHomeFiles_SymlinkEscapeRefusedByConfinement(t *testing.T) {
 			t.Fatal(err)
 		}
 		err := writeProvisionHomeFiles(homeA, []api.HomeFile{
-			{Path: ".scion/victim.json", Mode: 0o600, Content: []byte("attacker")},
+			{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte("attacker")},
 		})
 		if err == nil {
 			t.Fatal("expected refusal when .scion is a symlink, got nil")
 		}
 
-		// Case B: .scion/sub is a symlink outside agentHome -> refused.
+		// Case B: leaf .scion/trigger-event.json is a symlink to victim -> symlink
+		// is unlinked (not followed), regular file is created exclusively, and
+		// outside victim is untouched.
 		homeB := t.TempDir()
 		mkdirAll(t, filepath.Join(homeB, ".scion"))
-		if err := os.Symlink(outsideDir, filepath.Join(homeB, ".scion", "sub")); err != nil {
-			t.Fatal(err)
-		}
-		err = writeProvisionHomeFiles(homeB, []api.HomeFile{
-			{Path: ".scion/sub/victim.json", Mode: 0o600, Content: []byte("attacker")},
-		})
-		if err == nil {
-			t.Fatal("expected refusal when .scion/sub is a symlink, got nil")
-		}
-
-		// Case C: leaf .scion/trigger-event.json is a symlink to victim -> replaced atomically, victim untouched.
-		homeC := t.TempDir()
-		mkdirAll(t, filepath.Join(homeC, ".scion"))
-		leafPath := filepath.Join(homeC, ".scion", "trigger-event.json")
+		leafPath := filepath.Join(homeB, ".scion", "trigger-event.json")
 		if err := os.Symlink(victim, leafPath); err != nil {
 			t.Fatal(err)
 		}
-		if err := writeProvisionHomeFiles(homeC, []api.HomeFile{
-			{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte("safe-content")},
+		if err := writeProvisionHomeFiles(homeB, []api.HomeFile{
+			{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte("safe-content")},
 		}); err != nil {
-			t.Fatalf("leaf replacement failed: %v", err)
+			t.Fatalf("writeProvisionHomeFiles over leaf symlink failed: %v", err)
 		}
 		info, err := os.Lstat(leafPath)
 		if err != nil || !info.Mode().IsRegular() {
-			t.Fatalf("expected replaced leaf to be regular file, stat err=%v mode=%v", err, info.Mode())
+			t.Fatalf("expected regular file after unlinking leaf symlink, stat err=%v mode=%v", err, info.Mode())
 		}
-
+		gotLeaf, err := os.ReadFile(leafPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(gotLeaf) != "safe-content" {
+			t.Errorf("leaf content = %q, want %q", gotLeaf, "safe-content")
+		}
 		gotVictim, err := os.ReadFile(victim)
 		if err != nil {
 			t.Fatal(err)
@@ -246,51 +240,102 @@ func TestHomeFiles_SymlinkEscapeRefusedByConfinement(t *testing.T) {
 		if string(gotVictim) != "untouched" {
 			t.Errorf("outside victim file modified: got %q", gotVictim)
 		}
+
+		// Case C: writeHomeFileExclusive directly still refuses an existing file with os.ErrExist.
+		if err := writeHomeFileExclusive(homeB, api.TriggerEventHomeFilePath, []byte("overwrite"), 0o600); !errors.Is(err, os.ErrExist) {
+			t.Fatalf("writeHomeFileExclusive over existing file = %v, want os.ErrExist", err)
+		}
 	})
 
-	t.Run("Start refuses symlinked subdir under .scion before container launch", func(t *testing.T) {
+	t.Run("Start replaces leftover existing HomeFile in reused agent dir with new event body", func(t *testing.T) {
 		fx := newHomeFilesTestFixture(t)
 
-		outsideDir := t.TempDir()
-		victim := filepath.Join(outsideDir, "event.json")
-		if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		// Seed a leftover agent dir where .scion is a real directory (so earlier
-		// pre-start hook cleanup succeeds) and .scion/escaped is a symlink outside home,
-		// ensuring Start reaches writeProvisionHomeFiles and refuses there.
-		agentDir := filepath.Join(fx.projectScionDir, "agents", "leftover-link-agent")
+		// Seed a leftover agent dir where .scion/trigger-event.json already exists
+		// (e.g. reused name under soft_delete_retain_files).
+		agentDir := filepath.Join(fx.projectScionDir, "agents", "leftover-file-agent")
 		agentHome := filepath.Join(agentDir, "home")
 		mkdirAll(t, filepath.Join(agentDir, "workspace"))
 		mkdirAll(t, filepath.Join(agentHome, ".scion"))
 		writeFile(t, filepath.Join(agentDir, "scion-agent.json"), `{"harness":"gemini","default_harness_config":"test-harness"}`)
-		if err := os.Symlink(outsideDir, filepath.Join(agentHome, ".scion", "escaped")); err != nil {
+		existingPath := filepath.Join(agentHome, ".scion", "trigger-event.json")
+		if err := os.WriteFile(existingPath, []byte("leftover-content"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 
 		opts := api.StartOptions{
-			Name:           "leftover-link-agent",
+			Name:           "leftover-file-agent",
 			ProjectPath:    fx.projectScionDir,
 			NoAuth:         true,
 			FreshProvision: true,
 			HomeFiles: []api.HomeFile{
-				{Path: ".scion/escaped/event.json", Mode: 0o600, Content: []byte("attacker")},
+				{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte("new-content")},
 			},
 			GitClone: &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main"},
 		}
-		if _, err := fx.mgr.Start(context.Background(), opts); err == nil {
-			t.Fatal("expected Start() to refuse writing HomeFile when .scion/escaped is a symlink, got nil")
+		if _, err := fx.mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("expected Start() to succeed on reused agent dir with leftover trigger-event.json, got: %v", err)
 		}
-		if fx.runCalls != 0 {
-			t.Errorf("expected container not to start, got %d Run calls", fx.runCalls)
+		if fx.runCalls != 1 {
+			t.Errorf("expected 1 container Run call, got %d", fx.runCalls)
+		}
+		got, err := os.ReadFile(existingPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "new-content" {
+			t.Errorf("trigger-event.json = %q, want %q", got, "new-content")
+		}
+	})
+
+	t.Run("Start removes planted symlink at HomeFile path without following target", func(t *testing.T) {
+		fx := newHomeFilesTestFixture(t)
+
+		outsideDir := t.TempDir()
+		victim := filepath.Join(outsideDir, "victim.json")
+		if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		agentDir := filepath.Join(fx.projectScionDir, "agents", "leftover-symlink-agent")
+		agentHome := filepath.Join(agentDir, "home")
+		mkdirAll(t, filepath.Join(agentDir, "workspace"))
+		mkdirAll(t, filepath.Join(agentHome, ".scion"))
+		writeFile(t, filepath.Join(agentDir, "scion-agent.json"), `{"harness":"gemini","default_harness_config":"test-harness"}`)
+		leafPath := filepath.Join(agentHome, ".scion", "trigger-event.json")
+		if err := os.Symlink(victim, leafPath); err != nil {
+			t.Fatal(err)
+		}
+
+		opts := api.StartOptions{
+			Name:           "leftover-symlink-agent",
+			ProjectPath:    fx.projectScionDir,
+			NoAuth:         true,
+			FreshProvision: true,
+			HomeFiles: []api.HomeFile{
+				{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte("fresh-event")},
+			},
+			GitClone: &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main"},
+		}
+		if _, err := fx.mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("Start() failed over planted leaf symlink: %v", err)
+		}
+		info, err := os.Lstat(leafPath)
+		if err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("expected regular file at %s, err=%v mode=%v", leafPath, err, info.Mode())
+		}
+		got, err := os.ReadFile(leafPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != "fresh-event" {
+			t.Errorf("leaf content = %q, want %q", got, "fresh-event")
 		}
 		gotVictim, err := os.ReadFile(victim)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if string(gotVictim) != "untouched" {
-			t.Errorf("outside victim file modified: got %q", gotVictim)
+			t.Errorf("symlink target modified: got %q, want %q", gotVictim, "untouched")
 		}
 	})
 }
@@ -433,7 +478,13 @@ func TestHomeFiles_ReservedPathsRefused(t *testing.T) {
 		".scion/hooks/pre-start.d/20-harness-provision",
 		".scion/hooks/pre-start.d/99-custom",
 		".scion/hooks/pre-start.d",
+		".scion/hooks/post-start",
+		".scion/hooks/pre-start.sh",
+		".scion/hooks/session-end.d/x",
 		".scion/hooks",
+		".scion/Secrets.json",
+		".scion/Project-ID",
+		".scion/HOOKS/Post-Start",
 		".scion/harness",
 		".scion/harness/manifest.json",
 		".scion/harness/secrets/API_KEY",
@@ -449,18 +500,18 @@ func TestHomeFiles_ReservedPathsRefused(t *testing.T) {
 			}
 			err := ValidateHomeFiles(files)
 			if err == nil {
-				t.Fatalf("ValidateHomeFiles(%q) = nil, want reserved-path refusal", rel)
-			}
-			if !strings.Contains(err.Error(), "reserved") {
-				t.Errorf("ValidateHomeFiles(%q) error = %q, want substring 'reserved'", rel, err.Error())
+				t.Fatalf("ValidateHomeFiles(%q) = nil, want refusal", rel)
 			}
 			if strings.Contains(err.Error(), canary) {
 				t.Errorf("ValidateHomeFiles(%q) leaked content: %q", rel, err.Error())
 			}
+			if _, collides := collidesWithReservedHomePath(rel); !collides {
+				t.Errorf("collidesWithReservedHomePath(%q) = false, want true (defense in depth)", rel)
+			}
 
 			home := t.TempDir()
 			if werr := writeProvisionHomeFiles(home, files); werr == nil {
-				t.Fatalf("writeProvisionHomeFiles(%q) = nil, want reserved-path refusal", rel)
+				t.Fatalf("writeProvisionHomeFiles(%q) = nil, want refusal", rel)
 			}
 		})
 	}
@@ -485,4 +536,89 @@ func TestHomeFiles_ReservedPathsRefused(t *testing.T) {
 			t.Errorf("expected 0 container Run calls, got %d", fx.runCalls)
 		}
 	})
+}
+
+func TestHomeFiles_TriggerEventFileEnvResolvedFromContainerUser(t *testing.T) {
+	findEnv := func(env []string, key string) (string, bool) {
+		prefix := key + "="
+		for _, entry := range env {
+			if strings.HasPrefix(entry, prefix) {
+				return strings.TrimPrefix(entry, prefix), true
+			}
+		}
+		return "", false
+	}
+
+	cases := []struct {
+		name     string
+		user     string
+		hubEnv   map[string]string
+		wantPath string
+	}{
+		{
+			name:     "non-scion user sets resolved path when hub omits env",
+			user:     "alice",
+			hubEnv:   nil,
+			wantPath: "/home/alice/.scion/trigger-event.json",
+		},
+		{
+			name: "non-scion user overrides hub hard-coded /home/scion path",
+			user: "alice",
+			hubEnv: map[string]string{
+				api.EnvTriggerEventFile: "/home/scion/.scion/trigger-event.json",
+			},
+			wantPath: "/home/alice/.scion/trigger-event.json",
+		},
+		{
+			name: "root user resolves to /root/.scion/trigger-event.json",
+			user: "root",
+			hubEnv: map[string]string{
+				api.EnvTriggerEventFile: "/home/scion/.scion/trigger-event.json",
+			},
+			wantPath: "/root/.scion/trigger-event.json",
+		},
+		{
+			name:     "default scion user resolves to /home/scion/.scion/trigger-event.json",
+			user:     "scion",
+			hubEnv:   nil,
+			wantPath: "/home/scion/.scion/trigger-event.json",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newHomeFilesTestFixture(t)
+
+			// Override harness-config user for this test case.
+			hcPath := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness", "config.yaml")
+			writeFile(t, hcPath, "harness: gemini\nuser: "+tc.user+"\nimage: test-image:latest\n")
+
+			var gotEnv []string
+			fx.onRun = func(cfg runtime.RunConfig) {
+				gotEnv = append([]string(nil), cfg.Env...)
+			}
+
+			opts := api.StartOptions{
+				Name:           "trigger-user-" + tc.user,
+				ProjectPath:    fx.projectScionDir,
+				NoAuth:         true,
+				FreshProvision: true,
+				Env:            tc.hubEnv,
+				HomeFiles: []api.HomeFile{
+					{Path: api.TriggerEventHomeFilePath, Mode: 0o600, Content: []byte(`{"event_id":"ev-1"}`)},
+				},
+				GitClone: &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main"},
+			}
+			if _, err := fx.mgr.Start(context.Background(), opts); err != nil {
+				t.Fatalf("Start() failed: %v", err)
+			}
+			got, ok := findEnv(gotEnv, api.EnvTriggerEventFile)
+			if !ok {
+				t.Fatalf("expected %s to be set in container env", api.EnvTriggerEventFile)
+			}
+			if got != tc.wantPath {
+				t.Errorf("%s = %q, want %q", api.EnvTriggerEventFile, got, tc.wantPath)
+			}
+		})
+	}
 }

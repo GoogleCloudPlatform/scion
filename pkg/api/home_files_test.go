@@ -26,7 +26,6 @@ func TestValidateHomeFiles(t *testing.T) {
 	canaryBytes := []byte(secretCanary)
 
 	exactMax := bytes.Repeat([]byte("a"), MaxHomeFilesTotalBytes)
-	halfMax := bytes.Repeat([]byte("b"), MaxHomeFilesTotalBytes/2)
 
 	tests := []struct {
 		name    string
@@ -44,23 +43,56 @@ func TestValidateHomeFiles(t *testing.T) {
 		{
 			name: "single valid 0600 file ok",
 			files: []HomeFile{
-				{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte(`{"event_id":"e1"}`)},
+				{Path: TriggerEventHomeFilePath, Mode: 0o600, Content: []byte(`{"event_id":"e1"}`)},
 			},
 		},
 		{
-			name: "single valid 0644 nested file and empty content ok",
+			name: "single valid 0644 file with empty content ok",
 			files: []HomeFile{
-				{Path: ".scion/triggers/context.json", Mode: 0o644, Content: nil},
+				{Path: TriggerEventHomeFilePath, Mode: 0o644, Content: nil},
 			},
 		},
 		{
-			name: "max 4 files ok",
+			name: "unregistered path under .scion/ refused",
 			files: []HomeFile{
-				{Path: ".scion/f1.json", Mode: 0o600, Content: []byte("1")},
-				{Path: ".scion/f2.json", Mode: 0o644, Content: []byte("2")},
-				{Path: ".scion/sub/f3.json", Mode: 0o600, Content: []byte("3")},
-				{Path: ".scion/sub/deep/f4.json", Mode: 0o644, Content: []byte("4")},
+				{Path: ".scion/triggers/context.json", Mode: 0o644, Content: canaryBytes},
 			},
+			wantErr: "not an allowed home file path",
+		},
+		{
+			name: "case variant of allowed path refused",
+			files: []HomeFile{
+				{Path: ".scion/Trigger-Event.json", Mode: 0o600, Content: canaryBytes},
+			},
+			wantErr: "not an allowed home file path",
+		},
+		{
+			name: "case variant of reserved file refused",
+			files: []HomeFile{
+				{Path: ".scion/Secrets.json", Mode: 0o600, Content: canaryBytes},
+			},
+			wantErr: "not an allowed home file path",
+		},
+		{
+			name: "hooks post-start path refused",
+			files: []HomeFile{
+				{Path: ".scion/hooks/post-start", Mode: 0o600, Content: canaryBytes},
+			},
+			wantErr: "not an allowed home file path",
+		},
+		{
+			name: "hooks pre-start.sh path refused",
+			files: []HomeFile{
+				{Path: ".scion/hooks/pre-start.sh", Mode: 0o600, Content: canaryBytes},
+			},
+			wantErr: "not an allowed home file path",
+		},
+		{
+			name: "hooks session-end.d path refused",
+			files: []HomeFile{
+				{Path: ".scion/hooks/session-end.d/x", Mode: 0o600, Content: canaryBytes},
+			},
+			wantErr: "not an allowed home file path",
 		},
 		{
 			name: "5 files refused",
@@ -76,29 +108,13 @@ func TestValidateHomeFiles(t *testing.T) {
 		{
 			name: "total size exact 64 KiB single file ok",
 			files: []HomeFile{
-				{Path: ".scion/max.bin", Mode: 0o600, Content: exactMax},
-			},
-		},
-		{
-			name: "total size exact 64 KiB across two files ok",
-			files: []HomeFile{
-				{Path: ".scion/half1.bin", Mode: 0o600, Content: halfMax},
-				{Path: ".scion/half2.bin", Mode: 0o644, Content: halfMax},
+				{Path: TriggerEventHomeFilePath, Mode: 0o600, Content: exactMax},
 			},
 		},
 		{
 			name: "total size 64 KiB + 1 single file refused",
 			files: []HomeFile{
-				{Path: ".scion/over.bin", Mode: 0o600, Content: append(append([]byte{}, exactMax...), 'x')},
-			},
-			wantErr: "exceeds",
-		},
-		{
-			name: "total size 64 KiB + 1 across multiple files refused",
-			files: []HomeFile{
-				{Path: ".scion/half1.bin", Mode: 0o600, Content: halfMax},
-				{Path: ".scion/half2.bin", Mode: 0o600, Content: halfMax},
-				{Path: ".scion/extra.bin", Mode: 0o600, Content: []byte(secretCanary)[:1]},
+				{Path: TriggerEventHomeFilePath, Mode: 0o600, Content: append(append([]byte{}, exactMax...), 'x')},
 			},
 			wantErr: "exceeds",
 		},
@@ -279,10 +295,11 @@ func TestValidateHomeFiles(t *testing.T) {
 			wantErr: "duplicate",
 		},
 		{
-			name: "path exact 256 bytes ok",
+			name: "path exact 256 bytes unregistered refused",
 			files: []HomeFile{
 				{Path: ".scion/" + strings.Repeat("a", MaxHomeFilePathBytes-len(".scion/")), Mode: 0o600, Content: canaryBytes},
 			},
+			wantErr: "not an allowed home file path",
 		},
 		{
 			name: "path 257 bytes refused",

@@ -95,7 +95,7 @@ func (s *stubClaimStore) BindTriggerSubjectClaim(_ context.Context, claimID, fir
 
 func (s *stubClaimStore) ReleaseTriggerSubjectClaim(_ context.Context, claimID, fireID string, releasedAt time.Time) (bool, error) {
 	for _, c := range s.active {
-		if c.ID == claimID && c.FireID == fireID && c.State == store.TriggerSubjectClaimStateActive {
+		if c.ID == claimID && c.FireID == fireID && c.State == store.TriggerSubjectClaimStateActive && c.AgentID == "" {
 			c.State = store.TriggerSubjectClaimStateReleased
 			rt := releasedAt
 			c.ReleasedAt = &rt
@@ -104,6 +104,20 @@ func (s *stubClaimStore) ReleaseTriggerSubjectClaim(_ context.Context, claimID, 
 		}
 	}
 	return false, nil
+}
+
+func (s *stubClaimStore) ReleaseTriggerSubjectClaimsForAgent(_ context.Context, agentID string, releasedAt time.Time) (int, error) {
+	n := 0
+	for _, c := range s.active {
+		if c.AgentID == agentID && c.State == store.TriggerSubjectClaimStateActive {
+			c.State = store.TriggerSubjectClaimStateReleased
+			rt := releasedAt
+			c.ReleasedAt = &rt
+			s.released = append(s.released, c.ID)
+			n++
+		}
+	}
+	return n, nil
 }
 
 func (s *stubClaimStore) GetActiveTriggerSubjectClaim(_ context.Context, triggerID, subject string) (*store.TriggerSubjectClaim, error) {

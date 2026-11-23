@@ -259,6 +259,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 &&
 		(answer.Result == store.LaunchReportResultApplied || answer.Result == store.LaunchReportResultCompleted) {
 		s.recordLaunchReportEcho(ctx, agentID, brokerID, req.LaunchID, req.Agent)
+		s.clearAgentHomeFilesPending(ctx, &updated)
 	}
 
 	// A write that changed the row (applied, or a 409 stale_launch that

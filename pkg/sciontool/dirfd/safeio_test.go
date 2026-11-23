@@ -1040,3 +1040,54 @@ func TestRelUnderRoot_RejectsSiblingThatSharesPrefix(t *testing.T) {
 		t.Fatalf("expected ErrPathEscapesRoot for a sibling directory sharing root's string prefix, got %v", err)
 	}
 }
+
+func TestWriteFileNoFollow_CreateExclusive(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "event.json")
+
+	// First write succeeds when target does not exist.
+	if err := WriteFileNoFollow(target, []byte("first"), 0o600, 0, 0, CreateExclusive); err != nil {
+		t.Fatalf("CreateExclusive initial write failed: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("content = %q, want %q", got, "first")
+	}
+
+	// Second write to existing regular file fails with os.ErrExist and preserves content.
+	err = WriteFileNoFollow(target, []byte("second"), 0o600, 0, 0, CreateExclusive)
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("expected os.ErrExist on existing file, got %v", err)
+	}
+	got, err = os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "first" {
+		t.Fatalf("existing content overwritten: got %q, want %q", got, "first")
+	}
+
+	// Write to existing symlink fails with os.ErrExist and leaves target untouched.
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("untouched"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+	err = WriteFileNoFollow(link, []byte("overwrite"), 0o600, 0, 0, CreateExclusive)
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("expected os.ErrExist on existing symlink, got %v", err)
+	}
+	gotVictim, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotVictim) != "untouched" {
+		t.Fatalf("symlink victim modified: got %q", gotVictim)
+	}
+}

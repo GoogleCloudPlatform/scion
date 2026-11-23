@@ -497,6 +497,17 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, opts St
 		}
 		return err
 	}
+	// Refuse to launch an agent whose create-time HomeFiles (e.g. a trigger's
+	// .scion/trigger-event.json) have not yet been delivered by its create
+	// dispatch. Prevents a concurrent manual start from starting the agent
+	// without its event file (P1c-1 O-C / sec L2).
+	if agentHomeFilesPending(agent) {
+		opts.Dispatch.rollback(ctx)
+		if opts.Existing != nil {
+			opts.Existing.finish(startReleased)
+		}
+		return errHomeFilesNotDelivered
+	}
 	// The effective resting phase (ptone/scion#4669): an error row that
 	// remembers a created or provisioning phase a failed asynchronous start
 	// began from is still a provisioned agent that never ran. Read before
@@ -1187,6 +1198,9 @@ func (s *Server) writeStartClaimError(ctx context.Context, w http.ResponseWriter
 		writeErrorFromErr(w, err, "")
 		return true
 	case s.writeStartInProgress(w, err):
+		return true
+	case errors.Is(err, errHomeFilesNotDelivered):
+		Conflict(w, "the agent cannot be started yet: create-time home files have not been delivered yet; retry once creation completes; if creation failed, delete and re-create the agent")
 		return true
 	case errors.Is(err, store.ErrClaimPredicate):
 		Conflict(w, "the agent cannot be started now: it is being deleted or reincarnated")

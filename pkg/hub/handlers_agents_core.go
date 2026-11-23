@@ -3397,7 +3397,7 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 		dst.Runtime = src.Runtime
 	}
 	if src.AppliedConfig != nil {
-		dst.AppliedConfig = src.AppliedConfig
+		mergeDispatchedAppliedConfig(dst, src)
 	}
 	if src.Message != "" {
 		dst.Message = src.Message
@@ -3817,6 +3817,15 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	if agent.Phase != string(state.PhaseProvisioning) && agent.Phase != string(state.PhaseCreated) {
 		writeError(w, http.StatusConflict, "invalid_state",
 			fmt.Sprintf("agent is in '%s' phase; env submission only valid during provisioning", agent.Phase), nil)
+		return
+	}
+
+	// Refuse before taking a start claim if create-time HomeFiles have not yet
+	// been delivered (P1c-4a R1): an env-submit dispatch carries no HomeFiles
+	// and must not launch a trigger agent without its event file or hold the
+	// start claim against the trigger's own create dispatch.
+	if agentHomeFilesPending(agent) {
+		s.writeStartClaimError(ctx, w, errHomeFilesNotDelivered, agent.ID)
 		return
 	}
 

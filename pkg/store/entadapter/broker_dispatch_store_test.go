@@ -138,6 +138,99 @@ func TestBrokerDispatch_CompleteAndFail(t *testing.T) {
 	assert.Equal(t, 1, got2.Attempts, "failure bumps the attempt counter")
 }
 
+func TestBrokerDispatch_ScrubsHomeFilesOnTerminalState(t *testing.T) {
+	client := enttest.NewClient(t)
+	s := NewBrokerDispatchStore(client)
+	ctx := context.Background()
+
+	const canary = "c2VjcmV0LWV2ZW50LWJvZHk=" // base64("secret-event-body")
+
+	t.Run("CompleteBrokerDispatch clears create args containing only homeFiles", func(t *testing.T) {
+		d := newDispatch(uuid.NewString(), "create")
+		d.Args = `{"homeFiles":[{"path":".scion/trigger-event.json","mode":384,"content":"` + canary + `"}]}`
+		require.NoError(t, s.InsertBrokerDispatch(ctx, d))
+		won, err := s.ClaimBrokerDispatch(ctx, d.ID, "hub-1")
+		require.NoError(t, err)
+		require.True(t, won)
+
+		require.NoError(t, s.CompleteBrokerDispatch(ctx, d.ID, `{}`))
+		got, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(d.ID))
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStateDone, got.State)
+		assert.Empty(t, got.Args)
+		assert.NotContains(t, got.Args, canary)
+	})
+
+	t.Run("CompleteBrokerDispatch removes homeFiles from finalize_env while preserving env", func(t *testing.T) {
+		d := newDispatch(uuid.NewString(), "finalize_env")
+		d.Args = `{"env":{"FOO":"bar"},"homeFiles":[{"path":".scion/trigger-event.json","mode":384,"content":"` + canary + `"}]}`
+		require.NoError(t, s.InsertBrokerDispatch(ctx, d))
+		won, err := s.ClaimBrokerDispatch(ctx, d.ID, "hub-1")
+		require.NoError(t, err)
+		require.True(t, won)
+
+		require.NoError(t, s.CompleteBrokerDispatch(ctx, d.ID, `{"success":true}`))
+		got, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(d.ID))
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStateDone, got.State)
+		assert.NotContains(t, got.Args, "homeFiles")
+		assert.NotContains(t, got.Args, canary)
+		assert.Contains(t, got.Args, `"FOO":"bar"`)
+	})
+
+	t.Run("FailBrokerDispatch clears homeFiles from args", func(t *testing.T) {
+		d := newDispatch(uuid.NewString(), "create")
+		d.Args = `{"homeFiles":[{"path":".scion/trigger-event.json","mode":384,"content":"` + canary + `"}]}`
+		require.NoError(t, s.InsertBrokerDispatch(ctx, d))
+		won, err := s.ClaimBrokerDispatch(ctx, d.ID, "hub-1")
+		require.NoError(t, err)
+		require.True(t, won)
+
+		require.NoError(t, s.FailBrokerDispatch(ctx, d.ID, "broker refused", ""))
+		got, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(d.ID))
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStateFailed, got.State)
+		assert.Empty(t, got.Args)
+		assert.NotContains(t, got.Args, canary)
+	})
+
+	t.Run("ReapStuckDispatch scrubs homeFiles on max-attempts failure but keeps them on requeue", func(t *testing.T) {
+		dFail := newDispatch(uuid.NewString(), "create")
+		dFail.Args = `{"homeFiles":[{"path":".scion/trigger-event.json","mode":384,"content":"` + canary + `"}]}`
+		require.NoError(t, s.InsertBrokerDispatch(ctx, dFail))
+		_, err := s.ClaimBrokerDispatch(ctx, dFail.ID, "hub-1")
+		require.NoError(t, err)
+
+		dRetry := newDispatch(uuid.NewString(), "create")
+		dRetry.Args = `{"homeFiles":[{"path":".scion/trigger-event.json","mode":384,"content":"` + canary + `"}]}`
+		require.NoError(t, s.InsertBrokerDispatch(ctx, dRetry))
+		_, err = s.ClaimBrokerDispatch(ctx, dRetry.ID, "hub-1")
+		require.NoError(t, err)
+
+		staleAt := time.Now().Add(-10 * time.Minute)
+		require.NoError(t, client.BrokerDispatch.UpdateOneID(uuid.MustParse(dFail.ID)).
+			SetAttempts(3).SetUpdatedAt(staleAt).Exec(ctx))
+		require.NoError(t, client.BrokerDispatch.UpdateOneID(uuid.MustParse(dRetry.ID)).
+			SetAttempts(1).SetUpdatedAt(staleAt).Exec(ctx))
+
+		requeued, failed, err := s.ReapStuckDispatch(ctx, time.Now().Add(-5*time.Minute), 3)
+		require.NoError(t, err)
+		assert.Equal(t, 1, requeued)
+		assert.Equal(t, 1, failed)
+
+		gotFail, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(dFail.ID))
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStateFailed, gotFail.State)
+		assert.Empty(t, gotFail.Args)
+		assert.NotContains(t, gotFail.Args, canary)
+
+		gotRetry, err := client.BrokerDispatch.Get(ctx, uuid.MustParse(dRetry.ID))
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStatePending, gotRetry.State)
+		assert.Contains(t, gotRetry.Args, canary, "requeued dispatch must retain homeFiles for retry")
+	})
+}
+
 func TestMarkMessageDispatched_Dedupe(t *testing.T) {
 	client := enttest.NewClient(t)
 	cs := NewCompositeStore(client)

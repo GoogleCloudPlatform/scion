@@ -16,7 +16,9 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
@@ -188,13 +190,50 @@ func (s *BrokerDispatchStore) ClaimBrokerDispatch(ctx context.Context, id, hubIn
 	return affected == 1, nil
 }
 
+// scrubHomeFilesFromDispatchArgs removes the "homeFiles" field (which may carry
+// up to 64 KiB of trigger event bodies) from a serialized broker_dispatch.args
+// JSON object when the row reaches a terminal state (done/failed). Returns
+// (scrubbed, true) if args was modified, or (raw, false) if no homeFiles key
+// was present.
+func scrubHomeFilesFromDispatchArgs(raw string) (string, bool) {
+	if !strings.Contains(raw, `"homeFiles"`) {
+		return raw, false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+		// Unparseable args containing the key: clear completely rather than
+		// retaining potentially sensitive event bodies.
+		return "", true
+	}
+	if _, ok := obj["homeFiles"]; !ok {
+		return raw, false
+	}
+	delete(obj, "homeFiles")
+	if len(obj) == 0 {
+		return "", true
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return "", true
+	}
+	return string(out), true
+}
+
 // CompleteBrokerDispatch marks a dispatch done and records its result JSON.
 // The update is guarded by state=in_progress (CAS) so a done or failed
 // dispatch cannot be flipped by a stale or duplicate completion call.
+// Any HomeFiles payload in broker_dispatch.args is scrubbed in the same update.
 func (s *BrokerDispatchStore) CompleteBrokerDispatch(ctx context.Context, id, result string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
+	}
+	cur, err := s.client.BrokerDispatch.Query().
+		Where(brokerdispatch.IDEQ(uid), brokerdispatch.StateEQ(store.DispatchStateInProgress)).
+		Select(brokerdispatch.FieldArgs).
+		Only(ctx)
+	if err != nil {
+		return mapError(err)
 	}
 	upd := s.client.BrokerDispatch.Update().
 		Where(brokerdispatch.IDEQ(uid), brokerdispatch.StateEQ(store.DispatchStateInProgress)).
@@ -202,6 +241,13 @@ func (s *BrokerDispatchStore) CompleteBrokerDispatch(ctx context.Context, id, re
 		SetUpdatedAt(time.Now())
 	if result != "" {
 		upd.SetResult(result)
+	}
+	if scrubbed, changed := scrubHomeFilesFromDispatchArgs(cur.Args); changed {
+		if scrubbed == "" {
+			upd.ClearArgs()
+		} else {
+			upd.SetArgs(scrubbed)
+		}
 	}
 	affected, err := upd.Save(ctx)
 	if err != nil {
@@ -218,11 +264,19 @@ func (s *BrokerDispatchStore) CompleteBrokerDispatch(ctx context.Context, id, re
 // is written in the same update, so a reader that sees the failed state also
 // sees its result. The update is guarded by state=in_progress (CAS) so a
 // completed or already-failed dispatch cannot be overwritten by a stale
-// failure call.
+// failure call. Any HomeFiles payload in broker_dispatch.args is scrubbed in
+// the same update.
 func (s *BrokerDispatchStore) FailBrokerDispatch(ctx context.Context, id, errMsg, result string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
+	}
+	cur, err := s.client.BrokerDispatch.Query().
+		Where(brokerdispatch.IDEQ(uid), brokerdispatch.StateEQ(store.DispatchStateInProgress)).
+		Select(brokerdispatch.FieldArgs).
+		Only(ctx)
+	if err != nil {
+		return mapError(err)
 	}
 	upd := s.client.BrokerDispatch.Update().
 		Where(brokerdispatch.IDEQ(uid), brokerdispatch.StateEQ(store.DispatchStateInProgress)).
@@ -232,6 +286,13 @@ func (s *BrokerDispatchStore) FailBrokerDispatch(ctx context.Context, id, errMsg
 		SetUpdatedAt(time.Now())
 	if result != "" {
 		upd.SetResult(result)
+	}
+	if scrubbed, changed := scrubHomeFilesFromDispatchArgs(cur.Args); changed {
+		if scrubbed == "" {
+			upd.ClearArgs()
+		} else {
+			upd.SetArgs(scrubbed)
+		}
 	}
 	affected, err := upd.Save(ctx)
 	if err != nil {
@@ -769,7 +830,36 @@ func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore
 		return 0, 0, mapError(err)
 	}
 
-	failed, err = s.client.BrokerDispatch.Update().
+	// Scrub HomeFiles content from any stuck rows about to be marked failed.
+	hfRows, err := s.client.BrokerDispatch.Query().
+		Where(stuckPred, brokerdispatch.AttemptsGTE(maxAttempts), brokerdispatch.ArgsContains(`"homeFiles"`)).
+		Select(brokerdispatch.FieldID, brokerdispatch.FieldArgs).
+		All(ctx)
+	if err != nil {
+		return requeued, 0, mapError(err)
+	}
+	for _, r := range hfRows {
+		upd := s.client.BrokerDispatch.Update().
+			Where(brokerdispatch.IDEQ(r.ID), stuckPred, brokerdispatch.AttemptsGTE(maxAttempts)).
+			SetState(store.DispatchStateFailed).
+			SetError("reaper: max attempts exceeded").
+			AddAttempts(1).
+			SetUpdatedAt(now)
+		if scrubbed, changed := scrubHomeFilesFromDispatchArgs(r.Args); changed {
+			if scrubbed == "" {
+				upd.ClearArgs()
+			} else {
+				upd.SetArgs(scrubbed)
+			}
+		}
+		n, uerr := upd.Save(ctx)
+		if uerr != nil {
+			return requeued, failed, mapError(uerr)
+		}
+		failed += n
+	}
+
+	remainingFailed, err := s.client.BrokerDispatch.Update().
 		Where(stuckPred, brokerdispatch.AttemptsGTE(maxAttempts)).
 		SetState(store.DispatchStateFailed).
 		SetError("reaper: max attempts exceeded").
@@ -777,8 +867,9 @@ func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore
 		SetUpdatedAt(now).
 		Save(ctx)
 	if err != nil {
-		return requeued, 0, mapError(err)
+		return requeued, failed, mapError(err)
 	}
+	failed += remainingFailed
 
 	return requeued, failed, nil
 }

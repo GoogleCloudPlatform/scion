@@ -227,7 +227,9 @@ func (s *TriggerStore) BindTriggerSubjectClaim(ctx context.Context, claimID, fir
 	return affected > 0, nil
 }
 
-// ReleaseTriggerSubjectClaim transitions an active claim held by fireID to released.
+// ReleaseTriggerSubjectClaim transitions an active unbound claim (agent_id IS NULL)
+// held by fireID to released. Bound claims are left intact so an ambiguous commit
+// error on agent creation cannot release a claim that actually committed.
 func (s *TriggerStore) ReleaseTriggerSubjectClaim(ctx context.Context, claimID, fireID string, releasedAt time.Time) (bool, error) {
 	cid, err := parseUUID(claimID)
 	if err != nil {
@@ -242,6 +244,7 @@ func (s *TriggerStore) ReleaseTriggerSubjectClaim(ctx context.Context, claimID, 
 			triggersubjectclaim.IDEQ(cid),
 			triggersubjectclaim.FireIDEQ(fid),
 			triggersubjectclaim.StateEQ(store.TriggerSubjectClaimStateActive),
+			triggersubjectclaim.AgentIDIsNil(),
 		).
 		SetState(store.TriggerSubjectClaimStateReleased).
 		SetReleasedAt(releasedAt.UTC().Truncate(time.Microsecond)).

@@ -1182,6 +1182,13 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			candidate = suffixed
 			continue
 		}
+		var held *store.ClaimHeldError
+		if errors.As(createErr, &held) {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusSkipped,
+				Error:  "agent start already in progress",
+			}, nil
+		}
 		return hubfire.FireOutcome{}, createErr
 	}
 }
