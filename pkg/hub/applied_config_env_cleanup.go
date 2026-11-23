@@ -274,7 +274,7 @@ func (e *AppliedConfigEnvCleanupExecutor) keysToStrip(ctx context.Context, agent
 	plainValues := e.resolvablePlainValues(ctx, cfg, envVarsByKey)
 
 	isKnownSecret := func(k string) bool {
-		if api.IsBlockedInstallationGitHubEnvKey(k) {
+		if isBlockedInstallationGitHubEnvKey(k) {
 			return true
 		}
 		if envVar, ok := envVarsByKey[k]; ok && envVar.Secret {
