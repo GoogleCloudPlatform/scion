@@ -2026,7 +2026,7 @@ type V1ServerHubSchedulesConfig struct {
 	// (e.g. "5m"; default "5m", "0s" turns the check off, at most "24h").
 	MinInterval string `json:"min_interval,omitempty" yaml:"min_interval,omitempty" koanf:"min_interval"`
 	// MaxActivePerProject caps the active recurring schedules of one
-	// project (default 50; 0 = no cap).
+	// project (default 100; 0 = no cap).
 	MaxActivePerProject *int `json:"max_active_per_project,omitempty" yaml:"max_active_per_project,omitempty" koanf:"max_active_per_project"`
 }
 

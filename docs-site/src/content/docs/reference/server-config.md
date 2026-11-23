@@ -100,7 +100,7 @@ Limits on recurring (cron) schedules of every kind (`message`, `dispatch_agent`,
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `min_interval` | duration | `"5m"` | Shortest interval a schedule's cron expression may fire at, from its minute and hour fields (for example `0,1 * * * *` fires one minute apart and is refused at `5m`). `"0s"` turns the check off; at most `"24h"`. The default matches the default `launch_timeout`: a `dispatch_agent` schedule starts an agent on every fire, and a wake-message schedule every minute keeps an agent from ever idling. Refused with `400`. Env: `SCION_SERVER_HUB_SCHEDULES_MININTERVAL`. |
-| `max_active_per_project` | int | `50` | Most active recurring schedules one project may hold, of every kind together (exec schedules also keep their own limits). `0` means no cap; at most `10000`. Refused with `429` (`quota_exceeded`). Env: `SCION_SERVER_HUB_SCHEDULES_MAXACTIVEPERPROJECT`. |
+| `max_active_per_project` | int | `100` | Most active recurring schedules one project may hold, of every kind together (exec schedules also keep their own limits). `0` means no cap; at most `10000`. Refused with `429` (`quota_exceeded`). Env: `SCION_SERVER_HUB_SCHEDULES_MAXACTIVEPERPROJECT`. |
 
 The user who created a schedule can pause or delete it even without the `scheduled_event.update` or `scheduled_event.delete` permission (project members hold neither), when signed in interactively and still able to read the project's schedules. Resuming and editing still need `scheduled_event.update`.
 

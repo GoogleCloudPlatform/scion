@@ -23,9 +23,16 @@ func TestHubSchedulesConfig(t *testing.T) {
 	if err != nil || d != DefaultScheduleMinInterval {
 		t.Fatalf("default min interval = %s, %v", d, err)
 	}
+	if DefaultScheduleMaxActivePerProject != 100 {
+		t.Fatalf("DefaultScheduleMaxActivePerProject = %d, want 100", DefaultScheduleMaxActivePerProject)
+	}
 	n, err := HubSchedulesConfig{}.MaxActivePerProjectValue()
 	if err != nil || n != DefaultScheduleMaxActivePerProject {
 		t.Fatalf("default max active = %d, %v", n, err)
+	}
+	zero := 0
+	if n, err := (HubSchedulesConfig{MaxActivePerProject: &zero}).MaxActivePerProjectValue(); err != nil || n != 0 {
+		t.Fatalf("zero max active = %d, %v (want 0, nil)", n, err)
 	}
 	for _, ok := range []string{"0s", "1m", "15m", "24h"} {
 		if err := (HubSchedulesConfig{MinInterval: ok}).Validate(); err != nil {

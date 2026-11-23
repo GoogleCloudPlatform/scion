@@ -687,7 +687,7 @@ type ServerConfig struct {
 	// ScheduleMaxActivePerProject
 	// (server.hub.schedules.max_active_per_project) caps the active
 	// recurring schedules of one project, of every kind. Zero means no cap;
-	// the server command resolves the setting's default (50).
+	// the server command resolves the setting's default (100).
 	ScheduleMaxActivePerProject int
 
 	// DefaultMessageMode (server.hub.default_message_mode) is the message
