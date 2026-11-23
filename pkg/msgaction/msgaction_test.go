@@ -230,14 +230,16 @@ func TestKindSpec_KindRegisteredEventTypesAndConflictCodes(t *testing.T) {
 	}
 
 	// Duplicate registration panics to prevent silent allow-list overwrites.
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatalf("RegisterKind on duplicate name %q did not panic", DecisionKindSpec.Name)
-			}
-		}()
-		RegisterKind(DecisionKindSpec)
-	}()
+	for _, spec := range []KindSpec{DecisionKindSpec, SecretRequestKindSpec} {
+		func(s KindSpec) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Fatalf("RegisterKind on duplicate name %q did not panic", s.Name)
+				}
+			}()
+			RegisterKind(s)
+		}(spec)
+	}
 }
 
 // Seam test C4: a row needs no message anchor; identity is (asker, key, version).

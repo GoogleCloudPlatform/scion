@@ -58,7 +58,5 @@ var SecretRequestKindSpec = KindSpec{
 }
 
 func init() {
-	kindRegistryMu.Lock()
-	kindRegistry[SecretRequestKindSpec.Name] = SecretRequestKindSpec
-	kindRegistryMu.Unlock()
+	RegisterKind(SecretRequestKindSpec)
 }
