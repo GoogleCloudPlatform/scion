@@ -19,7 +19,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -267,4 +269,356 @@ func TestGetUsageSummary_NonBrokerLimit_Unaffected(t *testing.T) {
 	}
 	require.NotNil(t, found)
 	assert.Equal(t, 1, found.ActiveCount)
+}
+
+// TestQuotaUsage_MaxProjectsPerUser_AdminAndMyUsageMatchEnforcement proves the
+// fix for ptone/scion#6036 for max_projects_per_user: project creation reserves
+// at ("system", "system") (handlers_projects_core.go), so admin usage summary,
+// admin usage-by-limit, and per-user /usage/me must all query that exact scope
+// instead of ("system", "").
+func TestQuotaUsage_MaxProjectsPerUser_AdminAndMyUsageMatchEnforcement(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Set a finite default ceiling so project creation records reservations
+	// and enforces the cap.
+	setUserProjectQuotaCeiling(t, s, 2)
+
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxProjectsPerUser)
+	require.NoError(t, err)
+
+	userA := seedHubMemberNoProjects(t, s, "quota-proj-a")
+	userB := seedHubMemberNoProjects(t, s, "quota-proj-b")
+
+	createProjectAs := func(u *store.User, name string, wantStatus int) string {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, u, http.MethodPost, "/api/v1/projects", map[string]string{
+			"name": name,
+		})
+		require.Equal(t, wantStatus, rec.Code, "body: %s", rec.Body.String())
+		if wantStatus != http.StatusCreated {
+			return ""
+		}
+		var created store.Project
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+		return created.ID
+	}
+
+	// userA creates 2 projects (at limit); a 3rd must be refused with 429.
+	projA1 := createProjectAs(userA, "proj-a1", http.StatusCreated)
+	createProjectAs(userA, "proj-a2", http.StatusCreated)
+	createProjectAs(userA, "proj-a3-blocked", http.StatusTooManyRequests)
+
+	// userB creates 1 project.
+	createProjectAs(userB, "proj-b1", http.StatusCreated)
+
+	// Sanity check: enforcement sees 2 for userA and 1 for userB.
+	require.Equal(t, int64(2), countProjectQuotaReservations(t, s, userA.ID))
+	require.Equal(t, int64(1), countProjectQuotaReservations(t, s, userB.ID))
+
+	// 1. Admin usage summary must report 3 active reservations across both users.
+	summaryRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+	require.Equal(t, http.StatusOK, summaryRec.Code, "body: %s", summaryRec.Body.String())
+	var summary usageSummaryResponse
+	require.NoError(t, json.Unmarshal(summaryRec.Body.Bytes(), &summary))
+	var summaryEntry *usageSummaryEntry
+	for i := range summary.Items {
+		if summary.Items[i].LimitDefinition.ID == def.ID {
+			summaryEntry = &summary.Items[i]
+			break
+		}
+	}
+	require.NotNil(t, summaryEntry, "summary must include max_projects_per_user")
+	assert.Equal(t, 3, summaryEntry.ActiveCount)
+
+	// 2. Admin usage-by-limit must list all 3 reservations at ("system", "system").
+	detailRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+def.ID, nil)
+	require.Equal(t, http.StatusOK, detailRec.Code, "body: %s", detailRec.Body.String())
+	var detail usageByLimitResponse
+	require.NoError(t, json.Unmarshal(detailRec.Body.Bytes(), &detail))
+	assert.Equal(t, 3, detail.TotalActive)
+	require.Len(t, detail.Reservations, 3)
+	for _, r := range detail.Reservations {
+		assert.Equal(t, store.QuotaScopeSystem, r.ScopeType)
+		assert.Equal(t, store.QuotaScopeSystem, r.ScopeID)
+	}
+
+	// 3. Per-user /usage/me must report each user's own count and effective limit.
+	myProjectUsage := func(u *store.User) myUsageEntry {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/usage/me", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var resp myUsageResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		for _, entry := range resp.Items {
+			if entry.LimitDefinition.ID == def.ID {
+				return entry
+			}
+		}
+		t.Fatalf("max_projects_per_user missing from /usage/me for %s", u.ID)
+		return myUsageEntry{}
+	}
+
+	entryA := myProjectUsage(userA)
+	assert.Equal(t, int64(2), entryA.Current)
+	assert.Equal(t, int64(2), entryA.Max)
+
+	entryB := myProjectUsage(userB)
+	assert.Equal(t, int64(1), entryB.Current)
+	assert.Equal(t, int64(2), entryB.Max)
+
+	// 4. Raising userA's effective limit via an entitlement binding must be
+	// reflected in /usage/me and allow another project.
+	seedBinding(t, s, def.ID, store.EntitlementSubjectUser, userA.ID, store.QuotaScopeSystem, store.QuotaScopeSystem, 4)
+	entryA = myProjectUsage(userA)
+	assert.Equal(t, int64(2), entryA.Current)
+	assert.Equal(t, int64(4), entryA.Max)
+
+	createProjectAs(userA, "proj-a3-allowed", http.StatusCreated)
+	entryA = myProjectUsage(userA)
+	assert.Equal(t, int64(3), entryA.Current)
+
+	// 5. Deleting a project releases its reservation across admin and /usage/me.
+	delRec := doRequestAsUser(t, srv, userA, http.MethodDelete, "/api/v1/projects/"+projA1, nil)
+	require.Equal(t, http.StatusNoContent, delRec.Code, "body: %s", delRec.Body.String())
+
+	entryA = myProjectUsage(userA)
+	assert.Equal(t, int64(2), entryA.Current)
+
+	summaryRec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+	require.Equal(t, http.StatusOK, summaryRec.Code)
+	require.NoError(t, json.Unmarshal(summaryRec.Body.Bytes(), &summary))
+	for i := range summary.Items {
+		if summary.Items[i].LimitDefinition.ID == def.ID {
+			assert.Equal(t, 3, summary.Items[i].ActiveCount)
+		}
+	}
+}
+
+// groupReservationStore wraps store.Store to keep group-scoped
+// UsageReservations in memory while delegating everything else. The SQLite Ent
+// schema does not include "group" in usage_reservation.scope_type yet
+// (ptone/scion#3082), so tests that create real max_members_per_group
+// reservations through the HTTP handlers use this wrapper for both srv.store
+// and srv.quotaService.
+type groupReservationStore struct {
+	store.Store
+	mu     sync.Mutex
+	active map[string]*store.UsageReservation
+}
+
+func (g *groupReservationStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+func (g *groupReservationStore) TryAdvisoryLockObject(ctx context.Context, class store.AdvisoryLockKey, obj int32) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+func (g *groupReservationStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
+	if r.ScopeType != store.QuotaScopeGroup {
+		return g.Store.CreateUsageReservation(ctx, r)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	key := r.LimitDefinitionID + "\x00" + r.ResourceID
+	if _, exists := g.active[key]; exists {
+		return nil, store.ErrActiveReservationExists
+	}
+	cp := *r
+	if cp.ID == "" {
+		cp.ID = uuid.New().String()
+	}
+	if cp.CreatedAt.IsZero() {
+		cp.CreatedAt = time.Now()
+	}
+	g.active[key] = &cp
+	return &cp, nil
+}
+
+func (g *groupReservationStore) CountActiveReservations(ctx context.Context, limitDefinitionID, subjectID, scopeType, scopeID string) (int64, error) {
+	if scopeType != store.QuotaScopeGroup {
+		return g.Store.CountActiveReservations(ctx, limitDefinitionID, subjectID, scopeType, scopeID)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var n int64
+	for _, r := range g.active {
+		if r.LimitDefinitionID == limitDefinitionID && r.SubjectID == subjectID &&
+			r.ScopeType == scopeType && r.ScopeID == scopeID {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (g *groupReservationStore) CountActiveReservationsByScope(ctx context.Context, limitDefinitionID, scopeType string) (map[string]int64, error) {
+	if scopeType != store.QuotaScopeGroup {
+		return g.Store.CountActiveReservationsByScope(ctx, limitDefinitionID, scopeType)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	counts := make(map[string]int64)
+	for _, r := range g.active {
+		if r.LimitDefinitionID == limitDefinitionID && r.ScopeType == scopeType {
+			counts[r.ScopeID]++
+		}
+	}
+	return counts, nil
+}
+
+func (g *groupReservationStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
+	if scopeType != store.QuotaScopeGroup {
+		return g.Store.ListActiveReservationsByScopeType(ctx, limitDefinitionID, scopeType)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []*store.UsageReservation
+	for _, r := range g.active {
+		if r.LimitDefinitionID == limitDefinitionID && r.ScopeType == scopeType {
+			cp := *r
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (g *groupReservationStore) GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*store.UsageReservation, error) {
+	g.mu.Lock()
+	if r, ok := g.active[limitDefinitionID+"\x00"+resourceID]; ok {
+		cp := *r
+		g.mu.Unlock()
+		return &cp, nil
+	}
+	g.mu.Unlock()
+	return g.Store.GetActiveReservation(ctx, limitDefinitionID, resourceID)
+}
+
+func (g *groupReservationStore) ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error {
+	g.mu.Lock()
+	key := limitDefinitionID + "\x00" + resourceID
+	if _, ok := g.active[key]; ok {
+		delete(g.active, key)
+		g.mu.Unlock()
+		return nil
+	}
+	g.mu.Unlock()
+	return g.Store.ReleaseReservation(ctx, limitDefinitionID, resourceID)
+}
+
+// TestQuotaUsage_MaxMembersPerGroup_AdminUsageMatchesEnforcement proves the fix
+// for ptone/scion#6036 for max_members_per_group: group member additions
+// reserve at scope_type="group", scope_id=groupID (handlers_groups.go), so
+// admin usage summary and usage-by-limit must aggregate across group scope
+// instead of querying ("system", "").
+func TestQuotaUsage_MaxMembersPerGroup_AdminUsageMatchesEnforcement(t *testing.T) {
+	ctx := context.Background()
+
+	// Verify first against the real SQLite store that querying group scope
+	// in admin usage endpoints succeeds cleanly with 0 active reservations.
+	t.Run("sqlite store read succeeds with zero active", func(t *testing.T) {
+		srv, s := testServer(t)
+		def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxMembersPerGroup)
+		require.NoError(t, err)
+
+		rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+def.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var detail usageByLimitResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+		assert.Equal(t, 0, detail.TotalActive)
+	})
+
+	// Exercise the real add-member/remove-member HTTP paths with a finite
+	// max_members_per_group ceiling and assert admin usage matches enforcement.
+	t.Run("admin summary and detail match group member enforcement", func(t *testing.T) {
+		srv, s, wrapped, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *groupReservationStore {
+			return &groupReservationStore{
+				Store:  inner,
+				active: make(map[string]*store.UsageReservation),
+			}
+		})
+		srv.quotaService = &QuotaService{store: wrapped, logger: slog.Default()}
+
+		def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxMembersPerGroup)
+		require.NoError(t, err)
+		def.DefaultValue = 2
+		_, err = s.UpdateLimitDefinition(ctx, def)
+		require.NoError(t, err)
+
+		groupA := &store.Group{
+			ID: uuid.New().String(), Name: "Quota Group A", Slug: "quota-group-a",
+			GroupType: store.GroupTypeExplicit, OwnerID: DevUserID, CreatedBy: DevUserID,
+		}
+		groupB := &store.Group{
+			ID: uuid.New().String(), Name: "Quota Group B", Slug: "quota-group-b",
+			GroupType: store.GroupTypeExplicit, OwnerID: DevUserID, CreatedBy: DevUserID,
+		}
+		require.NoError(t, s.CreateGroup(ctx, groupA))
+		require.NoError(t, s.CreateGroup(ctx, groupB))
+
+		u1 := seedHubMemberNoProjects(t, s, "grp-mem-1")
+		u2 := seedHubMemberNoProjects(t, s, "grp-mem-2")
+		u3 := seedHubMemberNoProjects(t, s, "grp-mem-3")
+
+		addMember := func(groupID, userID string, wantStatus int) {
+			t.Helper()
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+groupID+"/members", map[string]string{
+				"memberType": store.GroupMemberTypeUser,
+				"memberId":   userID,
+			})
+			require.Equal(t, wantStatus, rec.Code, "body: %s", rec.Body.String())
+		}
+
+		// Add 2 members to groupA (hits limit); a 3rd must be refused with 429.
+		addMember(groupA.ID, u1.ID, http.StatusCreated)
+		addMember(groupA.ID, u2.ID, http.StatusCreated)
+		addMember(groupA.ID, u3.ID, http.StatusTooManyRequests)
+
+		// Add 1 member to groupB.
+		addMember(groupB.ID, u3.ID, http.StatusCreated)
+
+		// 1. Admin usage summary must report 3 active reservations across both groups.
+		summaryRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage", nil)
+		require.Equal(t, http.StatusOK, summaryRec.Code, "body: %s", summaryRec.Body.String())
+		var summary usageSummaryResponse
+		require.NoError(t, json.Unmarshal(summaryRec.Body.Bytes(), &summary))
+		var summaryEntry *usageSummaryEntry
+		for i := range summary.Items {
+			if summary.Items[i].LimitDefinition.ID == def.ID {
+				summaryEntry = &summary.Items[i]
+				break
+			}
+		}
+		require.NotNil(t, summaryEntry, "summary must include max_members_per_group")
+		assert.Equal(t, 3, summaryEntry.ActiveCount)
+
+		// 2. Admin usage-by-limit must list all 3 reservations across groupA and groupB.
+		detailRec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+def.ID, nil)
+		require.Equal(t, http.StatusOK, detailRec.Code, "body: %s", detailRec.Body.String())
+		var detail usageByLimitResponse
+		require.NoError(t, json.Unmarshal(detailRec.Body.Bytes(), &detail))
+		assert.Equal(t, 3, detail.TotalActive)
+		require.Len(t, detail.Reservations, 3)
+
+		perGroup := make(map[string]int)
+		for _, r := range detail.Reservations {
+			assert.Equal(t, store.QuotaScopeGroup, r.ScopeType)
+			perGroup[r.ScopeID]++
+		}
+		assert.Equal(t, 2, perGroup[groupA.ID])
+		assert.Equal(t, 1, perGroup[groupB.ID])
+
+		// 3. Removing a member releases its reservation and drops admin counts to 2.
+		delRec := doRequest(t, srv, http.MethodDelete, "/api/v1/groups/"+groupA.ID+"/members/"+store.GroupMemberTypeUser+"/"+u1.ID, nil)
+		require.Equal(t, http.StatusNoContent, delRec.Code, "body: %s", delRec.Body.String())
+
+		detailRec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+def.ID, nil)
+		require.Equal(t, http.StatusOK, detailRec.Code)
+		require.NoError(t, json.Unmarshal(detailRec.Body.Bytes(), &detail))
+		assert.Equal(t, 2, detail.TotalActive)
+		assert.Len(t, detail.Reservations, 2)
+	})
 }

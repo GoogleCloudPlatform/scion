@@ -275,8 +275,9 @@ func (c *brokerScopedQueryCountingStore) ungroupedCounts() int {
 // ListActiveReservationsByScopeType call and no per-broker
 // ListActiveReservations call, and the usage summary uses one aggregate
 // CountActiveReservationsByScope call per scoped limit: one for
-// max_agents_per_broker and one for max_agents_per_project
-// (ptone/scion#6033), and none per broker or per project.
+// max_agents_per_broker, one for max_agents_per_project (ptone/scion#6033),
+// one for max_members_per_group, and one for max_projects_per_user
+// (ptone/scion#6036), and none per broker, per project, or per group.
 func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 	srv, s, counting, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *brokerScopedQueryCountingStore {
 		return &brokerScopedQueryCountingStore{Store: inner, fault: sw}
@@ -311,7 +312,7 @@ func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		byScopeType, countByScope, perBrokerList := counting.counts()
 		assert.Equal(t, 0, byScopeType)
-		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
+		assert.Equal(t, 4, countByScope, "one aggregate call each for max_agents_per_broker, max_agents_per_project, max_members_per_group, and max_projects_per_user")
 		assert.Equal(t, 0, perBrokerList)
 		assert.Equal(t, 0, counting.perProjectLists())
 		assert.Equal(t, 0, counting.ungroupedCounts())
@@ -349,7 +350,7 @@ func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 		byScopeType, countByScope, perBrokerList := counting.counts()
 		assert.Equal(t, 0, byScopeType)
-		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
+		assert.Equal(t, 4, countByScope, "one aggregate call each for max_agents_per_broker, max_agents_per_project, max_members_per_group, and max_projects_per_user")
 		assert.Equal(t, 0, perBrokerList)
 		assert.Equal(t, 0, counting.perProjectLists(), "no per-project reservation list")
 		assert.Equal(t, 0, counting.ungroupedCounts(), "no per-project reservation count")
