@@ -2982,16 +2982,42 @@ func (s *TriggerStore) FinishWaitingTriggerFire(
 	return affected > 0, nil
 }
 
-func (s *TriggerStore) RecordWaitingTriggerFireAttempt(ctx context.Context, id string, attempts int, errMsg string) (bool, error) {
+func (s *TriggerStore) ClaimWaitingTriggerFire(ctx context.Context, id string, attempts int, leaseUntil time.Time) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	if leaseUntil.IsZero() {
+		return false, store.ErrInvalidInput
+	}
+	u := s.client.TriggerFire.Update().
+		Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusWaiting)).
+		SetStatus(store.TriggerFireStatusFiring).
+		SetLeaseUntil(leaseUntil.UTC()).
+		ClearFinishedAt()
+	if attempts > 0 {
+		u.SetAttempts(attempts)
+	}
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}
+
+func (s *TriggerStore) ReturnFiringTriggerFireToWaiting(ctx context.Context, id string, errMsg string) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
 	}
 	u := s.client.TriggerFire.Update().
-		Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusWaiting)).
-		SetAttempts(attempts)
+		Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusFiring)).
+		SetStatus(store.TriggerFireStatusWaiting).
+		ClearFinishedAt()
 	if errMsg != "" {
 		u.SetError(errMsg)
+	} else {
+		u.ClearError()
 	}
 	affected, err := u.Save(ctx)
 	if err != nil {

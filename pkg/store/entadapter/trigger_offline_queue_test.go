@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package entadapter
 
 import (
@@ -133,17 +135,36 @@ func TestTriggerOfflineQueueStore_ParkFinishAttemptListAndCaps(t *testing.T) {
 	assert.True(t, loaded1.WaitUntil.UTC().Equal(waitUntil))
 	assert.Nil(t, loaded1.FinishedAt)
 
-	// RecordWaitingTriggerFireAttempt updates attempts while waiting.
-	updated, err := cs.RecordWaitingTriggerFireAttempt(ctx, f1.ID, 2, "target not running")
+	// ClaimWaitingTriggerFire atomically transitions f1 waiting -> firing with a
+	// fresh lease and bumped attempt count; a second claim on the firing row is
+	// a CAS no-op.
+	retryLease := base.Add(12 * time.Minute)
+	claimed, err := cs.ClaimWaitingTriggerFire(ctx, f1.ID, 2, retryLease)
 	require.NoError(t, err)
-	assert.True(t, updated)
+	assert.True(t, claimed)
+	claimedAgain, err := cs.ClaimWaitingTriggerFire(ctx, f1.ID, 3, retryLease)
+	require.NoError(t, err)
+	assert.False(t, claimedAgain, "second claim on firing row must not succeed")
 	loaded1, err = cs.GetTriggerFire(ctx, f1.ID)
 	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFiring, loaded1.Status)
 	assert.Equal(t, 2, loaded1.Attempts)
 
-	// FinishWaitingTriggerFire transitions f1 -> fired and f2 -> expired.
+	// ReturnFiringTriggerFireToWaiting returns f1 firing -> waiting when still offline.
+	returned, err := cs.ReturnFiringTriggerFireToWaiting(ctx, f1.ID, "target not running")
+	require.NoError(t, err)
+	assert.True(t, returned)
+	loaded1, err = cs.GetTriggerFire(ctx, f1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusWaiting, loaded1.Status)
+	assert.Equal(t, 2, loaded1.Attempts)
+
+	// Claim again for attempt 3 and finish from firing via FinishTriggerFire.
+	claimed, err = cs.ClaimWaitingTriggerFire(ctx, f1.ID, 3, retryLease)
+	require.NoError(t, err)
+	assert.True(t, claimed)
 	finAt := base.Add(5 * time.Minute)
-	ok, err := cs.FinishWaitingTriggerFire(ctx, f1.ID, store.TriggerFireStatusFired, "msg-1", agentA, "", finAt, 3)
+	ok, err := cs.FinishTriggerFire(ctx, f1.ID, store.TriggerFireStatusFired, "msg-1", agentA, "", finAt)
 	require.NoError(t, err)
 	assert.True(t, ok)
 
@@ -152,6 +173,7 @@ func TestTriggerOfflineQueueStore_ParkFinishAttemptListAndCaps(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok2)
 
+	// FinishWaitingTriggerFire transitions f2 -> expired.
 	ok, err = cs.FinishWaitingTriggerFire(ctx, f2.ID, store.TriggerFireStatusExpired, "", agentA, "offline queue expired", finAt, 2)
 	require.NoError(t, err)
 	assert.True(t, ok)
@@ -174,6 +196,21 @@ func TestTriggerOfflineQueueStore_ParkFinishAttemptListAndCaps(t *testing.T) {
 	require.NoError(t, err, "waiting fire must not be purged")
 	_, err = cs.GetTriggerFire(ctx, f4.ID)
 	require.NoError(t, err, "firing fire must not be purged")
+
+	// A retry-claimed waiting row (f3) whose replica crashes before finishing is
+	// reaped by ReapExpiredTriggerFires once lease_until elapses, without re-delivery.
+	crashLease := base.Add(15 * time.Minute)
+	claimed, err = cs.ClaimWaitingTriggerFire(ctx, f3.ID, 2, crashLease)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	reaped, err := cs.ReapExpiredTriggerFires(ctx, crashLease.Add(time.Second), 10)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, reaped, 1)
+	loaded3, err := cs.GetTriggerFire(ctx, f3.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFailed, loaded3.Status)
+	assert.Equal(t, "hub restarted during fire", loaded3.Error)
+	assert.Equal(t, 2, loaded3.Attempts)
 }
 
 func TestTriggerOfflineQueueStore_ConcurrentCapEnforcement(t *testing.T) {

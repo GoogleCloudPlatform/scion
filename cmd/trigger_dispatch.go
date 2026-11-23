@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -277,11 +278,6 @@ func deriveMessageUntrustedVars(raw string) ([]string, error) {
 	return derived, nil
 }
 
-const (
-	minTriggerQueueTTLSeconds = 60
-	maxTriggerQueueTTLSeconds = 172_800
-)
-
 func parseTriggerQueueTTL(raw string) (int, error) {
 	d, err := time.ParseDuration(raw)
 	if err != nil {
@@ -291,7 +287,7 @@ func parseTriggerQueueTTL(raw string) (int, error) {
 		return 0, newUsageError("invalid --queue-ttl %q: must be a whole number of seconds", triggerTerminalText(raw, false))
 	}
 	secs := int(d / time.Second)
-	if secs < minTriggerQueueTTLSeconds || secs > maxTriggerQueueTTLSeconds {
+	if secs < store.MinMessageQueueTTLSeconds || secs > store.MaxMessageQueueTTLSeconds {
 		return 0, newUsageError("--queue-ttl must be between 60s and 48h (got %s)", d)
 	}
 	return secs, nil

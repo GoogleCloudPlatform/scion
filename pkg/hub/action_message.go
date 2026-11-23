@@ -31,11 +31,8 @@ import (
 
 // Message action offline policy constants (Stage 2 §6.1).
 const (
-	MessageOfflineSkip            = "skip"
-	MessageOfflineQueue           = "queue"
-	DefaultMessageQueueTTLSeconds = 86_400
-	MinMessageQueueTTLSeconds     = 60
-	MaxMessageQueueTTLSeconds     = 172_800
+	MessageOfflineSkip  = "skip"
+	MessageOfflineQueue = "queue"
 )
 
 // messageAction implements FireAction and FirePayloadValidator for deferred

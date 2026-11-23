@@ -227,12 +227,12 @@ func (s *Server) validateMessageAuthoringTarget(
 			}
 		case MessageOfflineQueue:
 			if parsed.QueueTTLSeconds == 0 {
-				parsed.QueueTTLSeconds = DefaultMessageQueueTTLSeconds
-			} else if parsed.QueueTTLSeconds < MinMessageQueueTTLSeconds || parsed.QueueTTLSeconds > MaxMessageQueueTTLSeconds {
+				parsed.QueueTTLSeconds = store.DefaultMessageQueueTTLSeconds
+			} else if parsed.QueueTTLSeconds < store.MinMessageQueueTTLSeconds || parsed.QueueTTLSeconds > store.MaxMessageQueueTTLSeconds {
 				return "", &messageAuthoringError{
 					httpStatus: http.StatusBadRequest,
 					code:       "invalid_value",
-					message:    fmt.Sprintf("queueTtlSeconds must be between %d and %d", MinMessageQueueTTLSeconds, MaxMessageQueueTTLSeconds),
+					message:    fmt.Sprintf("queueTtlSeconds must be between %d and %d", store.MinMessageQueueTTLSeconds, store.MaxMessageQueueTTLSeconds),
 					details:    map[string]interface{}{"field": "queueTtlSeconds"},
 				}
 			}

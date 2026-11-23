@@ -17,6 +17,7 @@ package trigger_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -378,6 +379,17 @@ func TestHandleFireRetryItem_LifecycleBranches(t *testing.T) {
 		assert.Equal(t, trigger.ErrFireTargetDeleted, ms.byFireID[fire.ID].Error)
 	})
 
+	t.Run("event deleted skips with event deleted", func(t *testing.T) {
+		ms, core, disp, _, fire, item := setup(t)
+		delete(ms.events, fire.EventID)
+		res := disp.HandleFireRetryItem(ctx, item, nil)
+		assert.True(t, res.Done)
+		assert.Zero(t, core.fireCalls.Load())
+		assert.Equal(t, store.TriggerFireStatusSkipped, ms.byFireID[fire.ID].Status)
+		assert.Equal(t, trigger.ErrFireEventDeleted, ms.byFireID[fire.ID].Error)
+		assert.Equal(t, trigger.FireSkipReasonEventDeleted, trigger.NormalizeFireSkipReason(trigger.ErrFireEventDeleted))
+	})
+
 	t.Run("backoff bounded by wait_until", func(t *testing.T) {
 		_, core, disp, _, fire, item := setup(t)
 		soon := now.Add(15 * time.Second)
@@ -389,4 +401,286 @@ func TestHandleFireRetryItem_LifecycleBranches(t *testing.T) {
 		assert.False(t, res.Done)
 		assert.Equal(t, soon, res.RetryAt, "RetryAt must be clamped to wait_until")
 	})
+}
+
+type failingFinishTriggerStore struct {
+	*memTriggerStore
+	failures atomic.Int32
+}
+
+func (s *failingFinishTriggerStore) FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error) {
+	if s.failures.Add(1) == 1 {
+		return false, errors.New("injected: connection reset")
+	}
+	return s.memTriggerStore.FinishTriggerFire(ctx, id, status, resultRef, targetAgentID, errMsg, finishedAt)
+}
+
+type captureFireAuditSink struct {
+	mu      sync.Mutex
+	records []trigger.FireAuditRecord
+}
+
+func (s *captureFireAuditSink) RecordFire(_ context.Context, rec trigger.FireAuditRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, rec)
+}
+
+func TestHandleFireRetryItem_AtMostOnceOnFinishFailureAndReap(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	ms := newMemTriggerStore()
+	targetID := uuid.NewString()
+
+	tr := &store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     uuid.NewString(),
+		Name:          "at-most-once-finish-fail",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      uuid.NewString(),
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"` + targetID + `","message":"hi","offline":"queue"}`,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 3,
+		},
+	}
+	ms.triggers = append(ms.triggers, tr)
+	ev := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  tr.ProjectID,
+		SourceKind: tr.SourceKind,
+		SourceID:   tr.SourceID,
+		Type:       "webhook.received",
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusProcessed,
+	}
+	ms.events[ev.ID] = ev
+	wu := now.Add(time.Hour)
+	fire := &store.TriggerFire{
+		ID:            uuid.NewString(),
+		ProjectID:     tr.ProjectID,
+		TriggerID:     tr.ID,
+		EventID:       ev.ID,
+		ActionType:    store.TriggerActionMessage,
+		Status:        store.TriggerFireStatusWaiting,
+		TargetAgentID: targetID,
+		WaitUntil:     &wu,
+		Attempts:      1,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 3,
+		},
+	}
+	ms.byFireID[fire.ID] = fire
+
+	var deliveries atomic.Int32
+	core := &fakeRetryCore{
+		targetState: trigger.RetryTargetDeliverable,
+		fireFn: func(context.Context, hubfire.FireRequest) hubfire.FireOutcome {
+			deliveries.Add(1)
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusFired,
+				ResultRef:     "msg-1",
+				TargetAgentID: targetID,
+			}
+		},
+	}
+	fs := &failingFinishTriggerStore{memTriggerStore: ms}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: fs,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	qp, _ := json.Marshal(trigger.FireRetryQueuePayload{Version: trigger.FireRetryQueuePayloadVersion, FireID: fire.ID})
+	item := durablequeue.Item{
+		Kind:      trigger.FireRetryQueueKind,
+		DedupKey:  trigger.FireRetryDedupPrefix + fire.ID,
+		ProjectID: tr.ProjectID,
+		Payload:   qp,
+	}
+
+	// Attempt 1: claims waiting -> firing, delivers once, then FinishTriggerFire fails.
+	res1 := disp.HandleFireRetryItem(ctx, item, nil)
+	assert.False(t, res1.Done)
+	assert.Error(t, res1.Err)
+	assert.Equal(t, int32(1), deliveries.Load())
+	assert.Equal(t, store.TriggerFireStatusFiring, ms.byFireID[fire.ID].Status)
+	assert.Equal(t, 2, ms.byFireID[fire.ID].Attempts)
+
+	// Attempt 2 (drainer retry): sees status == firing (!= waiting) and returns Done
+	// without re-delivering.
+	res2 := disp.HandleFireRetryItem(ctx, item, nil)
+	assert.True(t, res2.Done)
+	assert.NoError(t, res2.Err)
+	assert.Equal(t, int32(1), deliveries.Load(), "waiting fire must never be delivered twice")
+
+	// Stuck firing row is recovered by ReapExpiredTriggerFires once lease_until expires.
+	reaped, err := ms.ReapExpiredTriggerFires(ctx, now.Add(trigger.FireLeaseHorizon+time.Second), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reaped)
+	assert.Equal(t, store.TriggerFireStatusFailed, ms.byFireID[fire.ID].Status)
+	assert.Equal(t, "hub restarted during fire", ms.byFireID[fire.ID].Error)
+	assert.Equal(t, int32(1), deliveries.Load())
+}
+
+func TestHandleFireRetryItem_AtMostOnceUnderConcurrentLeaseLoss(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	ms := newMemTriggerStore()
+	targetID := uuid.NewString()
+
+	tr := &store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     uuid.NewString(),
+		Name:          "at-most-once-concurrent",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      uuid.NewString(),
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"` + targetID + `","message":"hi","offline":"queue"}`,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 1,
+		},
+	}
+	ms.triggers = append(ms.triggers, tr)
+	ev := &store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  tr.ProjectID,
+		SourceKind: tr.SourceKind,
+		SourceID:   tr.SourceID,
+		Type:       "webhook.received",
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusProcessed,
+	}
+	ms.events[ev.ID] = ev
+	wu := now.Add(time.Hour)
+	fire := &store.TriggerFire{
+		ID:            uuid.NewString(),
+		ProjectID:     tr.ProjectID,
+		TriggerID:     tr.ID,
+		EventID:       ev.ID,
+		ActionType:    store.TriggerActionMessage,
+		Status:        store.TriggerFireStatusWaiting,
+		TargetAgentID: targetID,
+		WaitUntil:     &wu,
+		Attempts:      1,
+		InitiatorAttribution: store.InitiatorAttribution{
+			AuthorizationRevision: 1,
+		},
+	}
+	ms.byFireID[fire.ID] = fire
+
+	var deliveries atomic.Int32
+	core := &fakeRetryCore{
+		targetState: trigger.RetryTargetDeliverable,
+		fireFn: func(context.Context, hubfire.FireRequest) hubfire.FireOutcome {
+			deliveries.Add(1)
+			time.Sleep(15 * time.Millisecond)
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusFired,
+				ResultRef:     "msg-concurrent",
+				TargetAgentID: targetID,
+			}
+		},
+	}
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:  core,
+		Store: ms,
+		Now:   func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	qp, _ := json.Marshal(trigger.FireRetryQueuePayload{Version: trigger.FireRetryQueuePayloadVersion, FireID: fire.ID})
+	item := durablequeue.Item{
+		Kind:      trigger.FireRetryQueueKind,
+		DedupKey:  trigger.FireRetryDedupPrefix + fire.ID,
+		ProjectID: tr.ProjectID,
+		Payload:   qp,
+	}
+
+	const workers = 4
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res := disp.HandleFireRetryItem(ctx, item, nil)
+			assert.True(t, res.Done)
+			assert.NoError(t, res.Err)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, int32(1), deliveries.Load(), "concurrent retry handlers must deliver at most once")
+	assert.Equal(t, store.TriggerFireStatusFired, ms.byFireID[fire.ID].Status)
+}
+
+func TestDispatcher_ParkWaitingFallbackEmitsAuditRecord(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	ms := newMemTriggerStore()
+	auditSink := &captureFireAuditSink{}
+	targetID := uuid.NewString()
+
+	tr := store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     uuid.NewString(),
+		Name:          "fallback-audit",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      uuid.NewString(),
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionMessage,
+		ActionPayload: `{"agentId":"` + targetID + `","message":"hello","offline":"queue"}`,
+		Status:        store.TriggerStatusActive,
+		CreatedAt:     now,
+	}
+	ms.triggers = append(ms.triggers, &tr)
+	ev := store.TriggerEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  tr.ProjectID,
+		SourceKind: tr.SourceKind,
+		SourceID:   tr.SourceID,
+		Type:       "webhook.received",
+		Subject:    "webhook:1",
+		ReceivedAt: now,
+		Status:     store.TriggerEventStatusPending,
+	}
+	ms.events[ev.ID] = &ev
+
+	core := &fakeRetryCore{
+		fireFn: func(_ context.Context, _ hubfire.FireRequest) hubfire.FireOutcome {
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusWaiting,
+				Error:         trigger.ErrFireTargetNotRunning,
+				TargetAgentID: targetID,
+			}
+		},
+	}
+	// Queue is intentionally nil to exercise the defensive fallback path.
+	disp, err := trigger.NewDispatcher(trigger.DispatcherConfig{
+		Core:      core,
+		Store:     ms,
+		FireAudit: auditSink,
+		Now:       func() time.Time { return now },
+	})
+	require.NoError(t, err)
+
+	payload, _ := json.Marshal(trigger.EventQueuePayload{Version: trigger.EventQueuePayloadVersion, EventID: ev.ID})
+	res := disp.HandleItem(ctx, durablequeue.Item{
+		Kind:      trigger.EventQueueKind,
+		DedupKey:  ev.ID,
+		ProjectID: tr.ProjectID,
+		Payload:   payload,
+		Attempts:  1,
+	}, nil)
+	assert.True(t, res.Done)
+
+	require.Len(t, auditSink.records, 1)
+	assert.Equal(t, store.TriggerFireStatusSkipped, auditSink.records[0].Status)
+	assert.Equal(t, trigger.FireSkipReasonTargetNotRunning, auditSink.records[0].Reason)
 }

@@ -39,10 +39,6 @@ const (
 	FireRetryMaxAge         = 72 * time.Hour
 	FireRetryMaxRows        = 50_000
 
-	DefaultMessageQueueTTLSeconds = 86_400
-	MinMessageQueueTTLSeconds     = 60
-	MaxMessageQueueTTLSeconds     = 172_800
-
 	MaxWaitingFiresPerTarget  = 100
 	MaxWaitingFiresPerProject = 1000
 
@@ -54,6 +50,7 @@ const (
 	ErrFireOfflineQueueExpired  = "offline queue expired"
 	ErrFireDroppedByQueueLimits = "dropped by queue limits"
 	ErrFireTriggerChanged       = "trigger changed"
+	ErrFireEventDeleted         = "event deleted"
 	ErrFireTargetDeleted        = "target deleted"
 	ErrFireTargetNotRunning     = "target not running"
 )
@@ -294,7 +291,7 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 	ev, err := d.store.GetTriggerEvent(ctx, fire.EventID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-			if fErr := d.finishWaitingFire(ctx, fire, store.TriggerFireStatusSkipped, "", fire.TargetAgentID, ErrFireTriggerChanged, now, fire.Attempts, nil); fErr != nil {
+			if fErr := d.finishWaitingFire(ctx, fire, store.TriggerFireStatusSkipped, "", fire.TargetAgentID, ErrFireEventDeleted, now, fire.Attempts, nil); fErr != nil {
 				return durablequeue.Result{Err: errors.New("trigger: skip waiting fire failed")}
 			}
 			return durablequeue.Result{Done: true}
@@ -313,11 +310,26 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 		}
 	}
 
+	// Atomically claim the waiting fire (waiting -> firing with lease) BEFORE
+	// invoking Core.Fire so a replica crash, lost lease, or transient terminal
+	// write failure after delivery can never cause a second delivery (Stage 2
+	// §6.2 at-most-once delivery invariant). Any stuck firing row is reaped to
+	// failed "hub restarted during fire" once lease_until expires.
+	nextAttempts := fire.Attempts + 1
+	claimNow := d.now().UTC()
+	claimed, cErr := d.store.ClaimWaitingTriggerFire(ctx, fire.ID, nextAttempts, claimNow.Add(FireLeaseHorizon))
+	if cErr != nil {
+		d.logger.Warn("trigger: failed to claim waiting fire for retry", "fireID", fire.ID, "error", cErr)
+		return durablequeue.Result{Err: errors.New("trigger: claim waiting fire failed")}
+	}
+	if !claimed {
+		return durablequeue.Result{Done: true}
+	}
+
 	var rawPayload []byte
 	if ev.Payload != "" {
 		rawPayload = []byte(ev.Payload)
 	}
-	nextAttempts := fire.Attempts + 1
 	tracker := newTriggerFireTracker(ctx, d.core)
 	req := hubfire.FireRequest{
 		ProjectID: tr.ProjectID,
@@ -372,18 +384,23 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 		// If the deadline passed during the attempt (e.g. a 90s wake), expire
 		// immediately instead of scheduling another retry.
 		if fire.WaitUntil != nil && !finishedAt.Before(*fire.WaitUntil) {
-			if fErr := d.finishWaitingFire(ctx, fire, store.TriggerFireStatusExpired, "", targetID, ErrFireOfflineQueueExpired, finishedAt, nextAttempts, nil); fErr != nil {
+			if fErr := d.finishFiringRetryFire(ctx, fire, store.TriggerFireStatusExpired, "", targetID, ErrFireOfflineQueueExpired, finishedAt, nil); fErr != nil {
 				return durablequeue.Result{Err: errors.New("trigger: expire waiting fire failed")}
 			}
 			return durablequeue.Result{Done: true}
 		}
 
 		writeCtx, cancelWrite := storeWriteContext(ctx)
-		if _, rErr := d.store.RecordWaitingTriggerFireAttempt(writeCtx, fire.ID, nextAttempts, out.Error); rErr != nil {
-			d.logger.Warn("trigger: failed to record waiting fire attempt",
-				"fireID", fire.ID, "attempts", nextAttempts, "error", rErr)
-		}
+		returned, rErr := d.store.ReturnFiringTriggerFireToWaiting(writeCtx, fire.ID, out.Error)
 		cancelWrite()
+		if rErr != nil {
+			d.logger.Warn("trigger: failed to return firing retry to waiting",
+				"fireID", fire.ID, "attempts", nextAttempts, "error", rErr)
+			return durablequeue.Result{Err: errors.New("trigger: return waiting fire failed")}
+		}
+		if !returned {
+			return durablequeue.Result{Done: true}
+		}
 
 		retryAt := finishedAt.Add(FireRetryBackoff(nextAttempts))
 
@@ -421,10 +438,36 @@ func (d *Dispatcher) HandleFireRetryItem(ctx context.Context, item durablequeue.
 	}
 
 	statusStr := normalizeFireStatus(out.Status, out.Error)
-	if fErr := d.finishWaitingFire(ctx, fire, statusStr, out.ResultRef, targetID, out.Error, finishedAt, nextAttempts, out.AfterRecord); fErr != nil {
+	if fErr := d.finishFiringRetryFire(ctx, fire, statusStr, out.ResultRef, targetID, out.Error, finishedAt, out.AfterRecord); fErr != nil {
 		return durablequeue.Result{Err: errors.New("trigger: finish waiting fire failed")}
 	}
 	return durablequeue.Result{Done: true}
+}
+
+func (d *Dispatcher) finishFiringRetryFire(
+	ctx context.Context,
+	fire *store.TriggerFire,
+	status, resultRef, targetAgentID, errMsg string,
+	finishedAt time.Time,
+	afterRecord func(context.Context),
+) error {
+	writeCtx, cancelWrite := storeWriteContext(ctx)
+	defer cancelWrite()
+
+	finished, err := d.store.FinishTriggerFire(writeCtx, fire.ID, status, resultRef, targetAgentID, errMsg, finishedAt)
+	if err != nil {
+		d.logger.Warn("trigger: failed to finish claimed retry fire",
+			"fireID", fire.ID, "triggerID", fire.TriggerID, "status", status, "error", err)
+		return err
+	}
+	if !finished {
+		return nil
+	}
+	if afterRecord != nil {
+		afterRecord(writeCtx)
+	}
+	d.recordWaitingFireTerminal(writeCtx, fire, status, errMsg, finishedAt)
+	return nil
 }
 
 func (d *Dispatcher) finishWaitingFire(
@@ -505,6 +548,19 @@ func (d *Dispatcher) parkWaitingFire(
 		if finished {
 			d.recordFireMetric(tr.ActionType, store.TriggerFireStatusSkipped, ErrFireTargetNotRunning)
 			_ = d.store.RecordTriggerFire(ctx, tr.ID, finishedAt, store.TriggerFireStatusSkipped, ErrFireTargetNotRunning)
+			if d.fireAudit != nil {
+				d.fireAudit.RecordFire(ctx, FireAuditRecord{
+					ProjectID:      tr.ProjectID,
+					TriggerID:      tr.ID,
+					EventID:        ev.ID,
+					FireID:         fire.ID,
+					ActionType:     tr.ActionType,
+					Status:         store.TriggerFireStatusSkipped,
+					MatchedThrough: fire.MatchedThrough,
+					DecidedDialect: fire.DecidedDialect,
+					Reason:         FireSkipReasonTargetNotRunning,
+				})
+			}
 		}
 		return nil
 	}
@@ -627,13 +683,13 @@ func extractMessageQueueTTL(rawPayload string) int {
 		_ = json.Unmarshal([]byte(rawPayload), &partial)
 	}
 	if partial.QueueTTLSeconds <= 0 {
-		return DefaultMessageQueueTTLSeconds
+		return store.DefaultMessageQueueTTLSeconds
 	}
-	if partial.QueueTTLSeconds < MinMessageQueueTTLSeconds {
-		return MinMessageQueueTTLSeconds
+	if partial.QueueTTLSeconds < store.MinMessageQueueTTLSeconds {
+		return store.MinMessageQueueTTLSeconds
 	}
-	if partial.QueueTTLSeconds > MaxMessageQueueTTLSeconds {
-		return MaxMessageQueueTTLSeconds
+	if partial.QueueTTLSeconds > store.MaxMessageQueueTTLSeconds {
+		return store.MaxMessageQueueTTLSeconds
 	}
 	return partial.QueueTTLSeconds
 }

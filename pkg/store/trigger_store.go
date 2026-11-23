@@ -109,6 +109,13 @@ const (
 // MaxTriggerSubjectBytes is the maximum byte length of a trigger subject claim key (§5.6).
 const MaxTriggerSubjectBytes = 256
 
+// Message action offline queue TTL bounds in seconds (Stage 2 §6.1).
+const (
+	DefaultMessageQueueTTLSeconds = 86_400
+	MinMessageQueueTTLSeconds     = 60
+	MaxMessageQueueTTLSeconds     = 172_800
+)
+
 // TriggerSubjectAbandonedClaimTTL is the age after which an unbound active
 // claim (agent_id IS NULL) is considered abandoned and eligible for takeover
 // or maintenance release (Stage 2 §5.6, §18 S16).
@@ -438,8 +445,9 @@ type TriggerStore interface {
 	FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error)
 	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
 	ParkTriggerFireWaiting(ctx context.Context, id, projectID, targetAgentID, errMsg string, waitUntil time.Time, maxPerTarget, maxPerProject int) (parked bool, capExceeded bool, err error)
+	ClaimWaitingTriggerFire(ctx context.Context, id string, attempts int, leaseUntil time.Time) (bool, error)
+	ReturnFiringTriggerFireToWaiting(ctx context.Context, id string, errMsg string) (bool, error)
 	FinishWaitingTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time, attempts int) (bool, error)
-	RecordWaitingTriggerFireAttempt(ctx context.Context, id string, attempts int, errMsg string) (bool, error)
 	ListWaitingFiresForTarget(ctx context.Context, targetAgentID string, limit int) ([]string, error)
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)

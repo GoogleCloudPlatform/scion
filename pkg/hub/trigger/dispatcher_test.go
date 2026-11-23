@@ -547,17 +547,31 @@ func (m *memTriggerStore) FinishWaitingTriggerFire(_ context.Context, id, status
 	f.FinishedAt = &t
 	return true, nil
 }
-func (m *memTriggerStore) RecordWaitingTriggerFireAttempt(_ context.Context, id string, attempts int, errMsg string) (bool, error) {
+func (m *memTriggerStore) ClaimWaitingTriggerFire(_ context.Context, id string, attempts int, leaseUntil time.Time) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	f, ok := m.byFireID[id]
 	if !ok || f.Status != store.TriggerFireStatusWaiting {
 		return false, nil
 	}
-	f.Attempts = attempts
-	if errMsg != "" {
-		f.Error = errMsg
+	f.Status = store.TriggerFireStatusFiring
+	f.LeaseUntil = leaseUntil.UTC()
+	f.FinishedAt = nil
+	if attempts > 0 {
+		f.Attempts = attempts
 	}
+	return true, nil
+}
+func (m *memTriggerStore) ReturnFiringTriggerFireToWaiting(_ context.Context, id string, errMsg string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.byFireID[id]
+	if !ok || f.Status != store.TriggerFireStatusFiring {
+		return false, nil
+	}
+	f.Status = store.TriggerFireStatusWaiting
+	f.FinishedAt = nil
+	f.Error = errMsg
 	return true, nil
 }
 func (m *memTriggerStore) ListWaitingFiresForTarget(_ context.Context, targetAgentID string, limit int) ([]string, error) {
@@ -648,8 +662,23 @@ func (m *memTriggerStore) AgentHasFiredTriggerForEvent(context.Context, string, 
 func (m *memTriggerStore) EventHasTriggerFireForResultRef(context.Context, string, string) (bool, error) {
 	return false, nil
 }
-func (m *memTriggerStore) ReapExpiredTriggerFires(context.Context, time.Time, int) (int, error) {
-	return 0, nil
+func (m *memTriggerStore) ReapExpiredTriggerFires(_ context.Context, now time.Time, limit int) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	reaped := 0
+	for _, f := range m.byFireID {
+		if f.Status == store.TriggerFireStatusFiring && !f.LeaseUntil.After(now.UTC()) {
+			f.Status = store.TriggerFireStatusFailed
+			f.Error = "hub restarted during fire"
+			fin := now.UTC()
+			f.FinishedAt = &fin
+			reaped++
+			if limit > 0 && reaped >= limit {
+				break
+			}
+		}
+	}
+	return reaped, nil
 }
 func (m *memTriggerStore) PurgeOldTriggerHistory(context.Context, time.Time) (int, int, error) {
 	return 0, 0, nil

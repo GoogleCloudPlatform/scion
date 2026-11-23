@@ -530,11 +530,16 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 
 // runTriggerAgentStatusNudger subscribes to agent status transitions and nudges
 // waiting offline-queued message fires when their target agent transitions into
-// running (Stage 2 §6.2 item 4).
+// running (Stage 2 §6.2 item 4). Repeated status/activity updates while an
+// agent is already running are ignored so steady-state agent traffic does not
+// issue unnecessary waiting-fire lookups.
 func (s *Server) runTriggerAgentStatusNudger(ctx context.Context, q *durablequeue.StoreQueue) {
 	if s == nil || s.events == nil || q == nil || s.store == nil {
 		return
 	}
+	const maxTrackedAgentPhases = 10_000
+	lastPhase := make(map[string]string)
+
 	ch, unsubscribe := s.events.Subscribe("project.*.agent.status")
 	defer unsubscribe()
 	for {
@@ -552,7 +557,15 @@ func (s *Server) runTriggerAgentStatusNudger(ctx context.Context, q *durablequeu
 			if err := json.Unmarshal(evt.Data, &statusEvt); err != nil {
 				continue
 			}
-			if statusEvt.AgentID == "" || statusEvt.Phase != string(state.PhaseRunning) {
+			if statusEvt.AgentID == "" || statusEvt.Phase == "" {
+				continue
+			}
+			prev := lastPhase[statusEvt.AgentID]
+			if len(lastPhase) >= maxTrackedAgentPhases {
+				clear(lastPhase)
+			}
+			lastPhase[statusEvt.AgentID] = statusEvt.Phase
+			if statusEvt.Phase != string(state.PhaseRunning) || prev == string(state.PhaseRunning) {
 				continue
 			}
 			if !s.experimentEnabled(experiments.Triggers) {

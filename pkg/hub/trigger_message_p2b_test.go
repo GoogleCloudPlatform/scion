@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func TestTriggerMessageP2b_AuthoringAndScheduleRefusals(t *testing.T) {
 		var tr TriggerResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tr))
 		assert.Equal(t, MessageOfflineQueue, tr.Action.Offline)
-		assert.Equal(t, DefaultMessageQueueTTLSeconds, tr.Action.QueueTTLSeconds)
+		assert.Equal(t, store.DefaultMessageQueueTTLSeconds, tr.Action.QueueTTLSeconds)
 		assert.Equal(t, []string{"event.attributes.number", "event.payload.title"}, tr.Action.UntrustedVars)
 	})
 
@@ -148,7 +149,7 @@ func TestTriggerMessageP2b_AuthoringAndScheduleRefusals(t *testing.T) {
 			{MessageOfflineSkip, 120},
 			{"", 120},
 			{MessageOfflineQueue, 59},
-			{MessageOfflineQueue, MaxMessageQueueTTLSeconds + 1},
+			{MessageOfflineQueue, store.MaxMessageQueueTTLSeconds + 1},
 		}
 		for _, tc := range cases {
 			rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
@@ -761,4 +762,84 @@ func (h *hookedTriggerCore) Experiment(name string) bool {
 
 func (h *hookedTriggerCore) CheckRetryTarget(ctx context.Context, agentID string) (trigger.RetryTargetState, error) {
 	return h.inner.CheckRetryTarget(ctx, agentID)
+}
+
+type countingWaitingListStore struct {
+	store.Store
+	listCalls atomic.Int32
+}
+
+func (s *countingWaitingListStore) ListWaitingFiresForTarget(ctx context.Context, targetAgentID string, limit int) ([]string, error) {
+	s.listCalls.Add(1)
+	return s.Store.ListWaitingFiresForTarget(ctx, targetAgentID, limit)
+}
+
+func TestTriggerMessageP2b_NudgerOnlyQueriesOnTransitionIntoRunning(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+
+	counting := &countingWaitingListStore{Store: f.store}
+	nudgeSrv := &Server{
+		config:      f.srv.config,
+		store:       counting,
+		events:      pub,
+		experiments: f.srv.experiments,
+	}
+	nudgeSrv.SetOperationalSettings(f.srv.GetOperationalSettings())
+	require.True(t, nudgeSrv.experimentEnabled("hub.triggers"))
+
+	dqStore, ok := f.store.(store.DurableQueueStore)
+	require.True(t, ok)
+	q := durablequeue.NewQueue(dqStore)
+
+	nudgeCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		nudgeSrv.runTriggerAgentStatusNudger(nudgeCtx, q)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// Allow the subscription goroutine to register on the event publisher.
+	time.Sleep(25 * time.Millisecond)
+
+	publish := func(phase, activity string) {
+		ag := *f.targetAgent
+		ag.ProjectID = f.projectID
+		ag.Phase = phase
+		ag.Activity = activity
+		pub.PublishAgentStatus(ctx, &ag)
+	}
+
+	// First transition into running triggers 1 lookup.
+	publish(string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return counting.listCalls.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Repeated activity updates while still running must NOT trigger lookups.
+	publish(string(state.PhaseRunning), string(state.ActivityThinking))
+	publish(string(state.PhaseRunning), string(state.ActivityWaitingForInput))
+	publish(string(state.PhaseRunning), string(state.ActivityIdle))
+	time.Sleep(80 * time.Millisecond)
+	assert.Equal(t, int32(1), counting.listCalls.Load(), "repeated running activity updates must not query waiting fires")
+
+	// Transition out of running (suspended) does not query; transitioning back
+	// into running triggers a 2nd lookup.
+	publish(string(state.PhaseSuspended), "")
+	publish(string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return counting.listCalls.Load() == 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Another steady-state running activity update stays at 2.
+	publish(string(state.PhaseRunning), string(state.ActivityThinking))
+	time.Sleep(80 * time.Millisecond)
+	assert.Equal(t, int32(2), counting.listCalls.Load())
 }

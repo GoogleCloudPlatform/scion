@@ -106,6 +106,7 @@ const (
 	FireSkipReasonCommentRateLimited         = "comment_rate_limited"
 	FireSkipReasonOfflineQueueFull           = "offline_queue_full"
 	FireSkipReasonTriggerChanged             = "trigger_changed"
+	FireSkipReasonEventDeleted               = "event_deleted"
 	FireSkipReasonTargetDeleted              = "target_deleted"
 	FireSkipReasonTargetNotRunning           = "target_not_running"
 	FireSkipReasonOther                      = "other"
@@ -130,6 +131,7 @@ func FireSkipReasons() []string {
 		FireSkipReasonCommentRateLimited,
 		FireSkipReasonOfflineQueueFull,
 		FireSkipReasonTriggerChanged,
+		FireSkipReasonEventDeleted,
 		FireSkipReasonTargetDeleted,
 		FireSkipReasonTargetNotRunning,
 		FireSkipReasonOther,
@@ -168,6 +170,8 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonOfflineQueueFull
 	case ErrFireTriggerChanged:
 		return FireSkipReasonTriggerChanged
+	case ErrFireEventDeleted:
+		return FireSkipReasonEventDeleted
 	case ErrFireTargetDeleted:
 		return FireSkipReasonTargetDeleted
 	case ErrFireTargetNotRunning:
