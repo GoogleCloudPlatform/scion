@@ -131,6 +131,30 @@ func TestRunSecretSet_AgentScopeArgvAndStdin(t *testing.T) {
 		assert.Equal(t, "agent", fake.setCalls[0].scope)
 	})
 
+	t.Run("stdin value trims CRLF and preserves lone trailing CR for env", func(t *testing.T) {
+		resetSecretFlags(t)
+		fake.setCalls = nil
+		secretScope = "agent"
+
+		cmd := &cobra.Command{}
+		cmd.Flags().BoolVar(&secretAllowProgeny, "allow-progeny", false, "")
+		cmd.SetIn(strings.NewReader("crlf-token\r\n"))
+
+		require.NoError(t, runSecretSet(cmd, []string{"CRLF_KEY", "-"}))
+		require.Len(t, fake.setCalls, 1)
+		decoded, err := base64.StdEncoding.DecodeString(fake.setCalls[0].value)
+		require.NoError(t, err)
+		assert.Equal(t, "crlf-token", string(decoded))
+
+		fake.setCalls = nil
+		cmd.SetIn(strings.NewReader("lone-cr\r"))
+		require.NoError(t, runSecretSet(cmd, []string{"CR_KEY", "-"}))
+		require.Len(t, fake.setCalls, 1)
+		decoded, err = base64.StdEncoding.DecodeString(fake.setCalls[0].value)
+		require.NoError(t, err)
+		assert.Equal(t, "lone-cr\r", string(decoded))
+	})
+
 	t.Run("stdin value preserves trailing newline for file type", func(t *testing.T) {
 		resetSecretFlags(t)
 		fake.setCalls = nil

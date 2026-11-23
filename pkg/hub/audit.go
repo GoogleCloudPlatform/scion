@@ -231,6 +231,8 @@ type AgentSecretReadEvent struct {
 }
 
 // AgentSecretWriteEvent represents an auditable agent secret write (set or delete) event.
+// It covers write attempts that reached the secret backend; pre-backend refusals
+// (validation, auth, standing, policy) are not recorded.
 // Security: this event MUST NEVER contain secret values.
 type AgentSecretWriteEvent struct {
 	Operation  string    `json:"operation"` // "set" or "delete"

@@ -1521,14 +1521,18 @@ type AgentSetSecretRequest struct {
 // LogValue redacts the secret value so AgentSetSecretRequest can never leak
 // secret material into structured logs.
 func (r AgentSetSecretRequest) LogValue() slog.Value {
-	return slog.GroupValue(
+	attrs := []slog.Attr{
 		slog.String("value", "[REDACTED]"),
 		slog.String("encoding", r.Encoding),
 		slog.String("type", r.Type),
 		slog.String("target", r.Target),
 		slog.Bool("force", r.Force),
 		slog.String("scope", r.Scope),
-	)
+	}
+	if r.AllowProgeny != nil {
+		attrs = append(attrs, slog.Bool("allow_progeny", *r.AllowProgeny))
+	}
+	return slog.GroupValue(attrs...)
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -1844,6 +1848,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		AllowProgeny: allowProgeny,
 		CreatedBy:    createdBy,
 		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
+	}
+	if scope == store.ScopeAgent {
+		input.ProjectID = projectID
 	}
 
 	created, meta, err := s.secretBackend.Set(ctx, input)

@@ -514,3 +514,39 @@ func TestAgentSelfWrite_AuditAndCanaryNeverLogged(t *testing.T) {
 		assert.NotContains(t, logBuf.String(), needle, "canary leaked in captured slog output")
 	}
 }
+
+type recordingSetSecretBackend struct {
+	secret.SecretBackend
+	mu     sync.Mutex
+	inputs []*secret.SetSecretInput
+}
+
+func (b *recordingSetSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
+	b.mu.Lock()
+	cp := *input
+	b.inputs = append(b.inputs, &cp)
+	b.mu.Unlock()
+	return b.SecretBackend.Set(ctx, input)
+}
+
+func TestAgentSelfWrite_SetsProjectIDOnAgentScopeBackendInput(t *testing.T) {
+	srv, _, _, project, agentX, _ := setupP4AgentSecretsFixture(t, true)
+	rec := &recordingSetSecretBackend{SecretBackend: srv.GetSecretBackend()}
+	srv.SetSecretBackend(rec)
+
+	scopes := []AgentTokenScope{ScopeAgentStatusUpdate}
+	rr := doP4AsAgent(t, srv, agentX, scopes, http.MethodPut,
+		"/api/v1/agents/"+agentX.ID+"/secrets/PROJ_LABEL_KEY",
+		AgentSetSecretRequest{
+			Value: base64.StdEncoding.EncodeToString([]byte("val")),
+			Scope: store.ScopeAgent,
+		})
+	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	require.Len(t, rec.inputs, 1)
+	assert.Equal(t, store.ScopeAgent, rec.inputs[0].Scope)
+	assert.Equal(t, agentX.ID, rec.inputs[0].ScopeID)
+	assert.Equal(t, project.ID, rec.inputs[0].ProjectID, "agent self-write must populate ProjectID for GCP scion-project-id label attribution")
+}
