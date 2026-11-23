@@ -77,31 +77,56 @@ while read -r cidr; do
     ipset add allowed-domains "$cidr"
 done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 
-# Resolve and add other allowed domains
-for domain in \
-    "registry.npmjs.org" \
-    "api.anthropic.com" \
-    "sentry.io" \
-    "statsig.anthropic.com" \
-    "statsig.com" \
-    "marketplace.visualstudio.com" \
-    "vscode.blob.core.windows.net" \
-    "update.code.visualstudio.com"; do
+resolve_and_add_domain() {
+    local domain="$1"
+    local required="$2"
+
     echo "Resolving $domain..."
-    ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}')
+    local ips
+    if ! ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}'); then
+        ips=""
+    fi
     if [ -z "$ips" ]; then
-        echo "ERROR: Failed to resolve $domain"
-        exit 1
+        if [ "$required" = "true" ]; then
+            echo "ERROR: Failed to resolve required domain $domain" >&2
+            exit 1
+        fi
+        echo "WARNING: Failed to resolve optional domain $domain; skipping" >&2
+        return 0
     fi
 
+    local ip
     while read -r ip; do
         if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            echo "ERROR: Invalid IP from DNS for $domain: $ip"
+            echo "ERROR: Invalid IP from DNS for $domain: $ip" >&2
             exit 1
         fi
         echo "Adding $ip for $domain"
         ipset add allowed-domains "$ip"
     done < <(echo "$ips")
+}
+
+# Resolve and add required allowed domains
+REQUIRED_DOMAINS=(
+    "api.anthropic.com"
+)
+
+# Resolve and add optional allowed domains (telemetry and ancillary hosts)
+OPTIONAL_DOMAINS=(
+    "registry.npmjs.org"
+    "sentry.io"
+    "statsig.com"
+    "marketplace.visualstudio.com"
+    "vscode.blob.core.windows.net"
+    "update.code.visualstudio.com"
+)
+
+for domain in "${REQUIRED_DOMAINS[@]}"; do
+    resolve_and_add_domain "$domain" "true"
+done
+
+for domain in "${OPTIONAL_DOMAINS[@]}"; do
+    resolve_and_add_domain "$domain" "false"
 done
 
 # Get host IP from default route
