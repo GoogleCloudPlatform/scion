@@ -36,9 +36,13 @@ ensure_rule() {
     fi
 }
 
-# Verify DOCKER-USER exists (created by dockerd).
+# Verify we are running as root and DOCKER-USER exists (created by dockerd).
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    echo "error: cannot read iptables chain DOCKER-USER (run as root with dockerd running)" >&2
+    exit 1
+fi
 if ! iptables -L DOCKER-USER -n >/dev/null 2>&1; then
-    echo "error: iptables chain DOCKER-USER does not exist (is dockerd running?)" >&2
+    echo "error: cannot read iptables chain DOCKER-USER (run as root with dockerd running)" >&2
     exit 1
 fi
 
@@ -54,9 +58,13 @@ done
 
 # Drop HTTP (TCP/80) to IPv6 cloud metadata endpoints (GCE, AWS) when ip6tables
 # and the IPv6 DOCKER-USER chain are present.
-if command -v ip6tables >/dev/null 2>&1 && ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
-    for iface in docker0 br-+; do
-        ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd20:ce::254/128 -p tcp --dport 80 -j DROP
-        ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd00:ec2::254/128 -p tcp --dport 80 -j DROP
-    done
+if command -v ip6tables >/dev/null 2>&1; then
+    if ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
+        for iface in docker0 br-+; do
+            ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd20:ce::254/128 -p tcp --dport 80 -j DROP
+            ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd00:ec2::254/128 -p tcp --dport 80 -j DROP
+        done
+    else
+        echo "warning: ip6tables is installed but chain DOCKER-USER does not exist; skipping IPv6 metadata block rules" >&2
+    fi
 fi

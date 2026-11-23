@@ -88,6 +88,8 @@ An idempotent script version is provided at `deploy/host-hardening/scion-metadat
 
 ## Persisting across reboots
 
+The `systemd` unit and `cloud-init` snippet below persist the `nftables` ruleset. They do **not** persist the `iptables` / `DOCKER-USER` script above; to persist `DOCKER-USER` rules across reboots, either switch to the `nftables` unit below or run `scion-metadata-block-iptables.sh` from a `systemd` oneshot unit with `After=docker.service` and `Requires=docker.service` (or a `docker.service` drop-in `ExecStartPost=`).
+
 ### systemd oneshot unit
 
 Install the unit at `/etc/systemd/system/scion-metadata-block.service` (canonical file: `deploy/host-hardening/scion-metadata-block.service`) so the ruleset loads before container daemons start:
@@ -95,8 +97,9 @@ Install the unit at `/etc/systemd/system/scion-metadata-block.service` (canonica
 ```ini
 [Unit]
 Description=Scion host-level cloud metadata block for bridged containers
-After=network-pre.target
-Before=docker.service podman.service
+Wants=network-pre.target
+Before=network-pre.target docker.service podman.service
+After=nftables.service
 
 [Service]
 Type=oneshot
@@ -167,8 +170,9 @@ write_files:
     content: |
       [Unit]
       Description=Scion host-level cloud metadata block for bridged containers
-      After=network-pre.target
-      Before=docker.service podman.service
+      Wants=network-pre.target
+      Before=network-pre.target docker.service podman.service
+      After=nftables.service
 
       [Service]
       Type=oneshot
@@ -230,7 +234,8 @@ spec:
 :::caution[Enforcing CNI required; do not apply to `passthrough` / `assign` pods; allow in-cluster peers]
 - **Enforcing CNI required:** Kubernetes `NetworkPolicy` objects are enforced only when the cluster runs an enforcing CNI such as **GKE Dataplane V2** or **Calico**. Without an enforcing CNI, `kubectl apply` succeeds silently without blocking traffic.
 - **Keep scoped to `block` pods:** Do not widen the `podSelector` to match `passthrough` pods (which include Workload Identity `assign` pods). Those pods legitimately reach the GKE metadata server for Workload Identity tokens.
-- **In-cluster peers on Cilium / GKE Dataplane V2:** `ipBlock: 0.0.0.0/0` does not match in-cluster pod IPs on Cilium / GKE Dataplane V2. The example includes an explicit `kube-dns` egress rule so DNS continues to work; add matching `namespaceSelector` / `podSelector` egress rules for any other in-cluster peers your agents must reach (such as an in-cluster Scion Hub or internal HTTP proxies).
+- **In-cluster peers on Cilium / GKE Dataplane V2:** `ipBlock: 0.0.0.0/0` does not match in-cluster pod IPs on Cilium / GKE Dataplane V2. The example includes an explicit `kube-dns` egress rule so DNS continues to work; add matching `namespaceSelector` / `podSelector` egress rules for any other in-cluster peers your agents must reach (such as an in-cluster Scion Hub or internal HTTP proxies). If NodeLocal DNSCache is enabled, also allow egress to its address and port (typically `169.254.20.10/32` UDP/TCP 53).
+- **Existing pods after upgrade:** Pods created by older Runtime Brokers carry no `scion.metadata-mode` label, so this policy does not select them until they are recreated.
 - **Dual-stack clusters:** On clusters where pods require IPv6 egress, add an IPv6 `ipBlock` rule (`::/0` except `fd20:ce::254/128` and `fd00:ec2::254/128`).
 :::
 

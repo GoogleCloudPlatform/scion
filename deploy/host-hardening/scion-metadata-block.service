@@ -23,8 +23,9 @@
 
 [Unit]
 Description=Scion host-level cloud metadata block for bridged containers
-After=network-pre.target
-Before=docker.service podman.service
+Wants=network-pre.target
+Before=network-pre.target docker.service podman.service
+After=nftables.service
 
 [Service]
 Type=oneshot
