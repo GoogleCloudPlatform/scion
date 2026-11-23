@@ -320,7 +320,8 @@ notifications without implementing a separate release-discovery path.
 [`build-release.yml`](../.github/workflows/build-release.yml) runs when a stable, preview,
 release-candidate, or nightly tag is pushed. It:
 
-1. Builds the web UI and cross-compiles Scion for all supported platforms.
+1. Builds the web UI, cross-compiles Scion for all supported platforms, and builds `sciontool`
+   for Linux.
 2. Builds the Linux plugin binaries.
 3. Packages and uploads the build artifacts.
 4. Generates a `SHA256SUMS` checksums file covering every published asset.
@@ -584,6 +585,13 @@ The main `scion` binary is published for:
 Linux and macOS artifacts are gzip-compressed tar archives (`.tar.gz`) containing `scion`. Windows
 artifacts are zip archives (`.zip`) containing `scion.exe`. The Telegram, Discord, Slack, and Teams
 plugins are built for Linux on both amd64 and arm64; plugin builds are not published for macOS.
+
+`sciontool`, the in-container helper that runs as PID 1 in agent images, is published for Linux
+only, as `sciontool-linux-amd64.tar.gz` and `sciontool-linux-arm64.tar.gz` (each containing
+`sciontool`). It is built the same way `image-build/scion-base/Dockerfile` builds it: without cgo,
+with `-tags no_embed_web`, stamped with the release version, and checked by
+`image-build/lib/assert-no-cgo.sh`, so it can stand in for the `sciontool` that image builds
+compile. Releases cut before this asset was added do not have it.
 
 ## Release notes
 
