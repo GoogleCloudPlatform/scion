@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode"
@@ -711,4 +712,111 @@ func TestHandleBrokerMessageFailures_Deliveries(t *testing.T) {
 		assert.Equal(t, 1, resp.Marked)
 		assert.Equal(t, 0, resp.Delivered)
 	})
+
+	t.Run("cas_loss_to_concurrent_failure_or_delivery_ignored_without_sse", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			raceWrite func(ctx context.Context, inner store.Store, msgID string) error
+			wantState string
+		}{
+			{
+				name: "already_failed_before_cas",
+				raceWrite: func(ctx context.Context, inner store.Store, msgID string) error {
+					return inner.MarkMessageFailed(ctx, msgID, "concurrent failure")
+				},
+				wantState: store.MessageDispatchFailed,
+			},
+			{
+				name: "already_delivered_before_cas",
+				raceWrite: func(ctx context.Context, inner store.Store, msgID string) error {
+					won, err := inner.MarkMessageDelivered(ctx, msgID)
+					if err != nil {
+						return err
+					}
+					if !won {
+						return fmt.Errorf("expected concurrent MarkMessageDelivered to win")
+					}
+					return nil
+				},
+				wantState: store.MessageDispatchDelivered,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *casLossDeliveryStore {
+					return &casLossDeliveryStore{
+						Store: inner,
+						fault: f,
+						onBefore: func(ctx context.Context, msgID string) error {
+							return tc.raceWrite(ctx, inner, msgID)
+						},
+					}
+				})
+				ctx := context.Background()
+
+				projectID := setupBrokerTestProject(t, s)
+				target := setupBrokerTestAgent(t, s, projectID, "cas-loss-target", "running")
+
+				ev := NewChannelEventPublisher()
+				defer ev.Close()
+				srv.SetEventPublisher(ev)
+				ch, unsub := ev.Subscribe("agent." + target.ID + ".message")
+				defer unsub()
+
+				msgID := api.NewUUID()
+				require.NoError(t, s.CreateMessage(ctx, &store.Message{
+					ID:            msgID,
+					ProjectID:     projectID,
+					Sender:        "user:alice@example.com",
+					SenderID:      tid("user-alice-cas"),
+					Recipient:     "agent:" + target.Slug,
+					RecipientID:   target.ID,
+					Msg:           "hello cas race",
+					Type:          messages.TypeInstruction,
+					AgentID:       target.ID,
+					CreatedAt:     time.Now(),
+					DispatchState: store.MessageDispatchDispatched,
+				}))
+
+				fault.Arm()
+				rr, resp := postMessageReport(t, srv, target.RuntimeBrokerID, target.RuntimeBrokerID, messageDeliveryFailuresRequest{
+					Deliveries: []messageDeliveryConfirmation{{MessageID: msgID, AgentID: target.ID, ProjectID: target.ProjectID}},
+				})
+				require.Equal(t, http.StatusOK, rr.Code)
+				assert.Equal(t, int32(1), wrapped.calls.Load(),
+					"must reach MarkMessageDelivered CAS (not stop at pre-CAS switch)")
+				assert.Equal(t, 0, resp.Delivered)
+				assert.Equal(t, 1, resp.Ignored)
+
+				row, err := s.GetMessage(ctx, msgID)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantState, row.DispatchState)
+
+				select {
+				case evt := <-ch:
+					t.Fatalf("unexpected live SSE event published on CAS loss: %s", string(evt.Data))
+				default:
+				}
+			})
+		}
+	})
+}
+
+type casLossDeliveryStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	onBefore func(ctx context.Context, msgID string) error
+	calls    atomic.Int32
+}
+
+func (w *casLossDeliveryStore) MarkMessageDelivered(ctx context.Context, id string) (bool, error) {
+	if !w.fault.Active() {
+		return w.Store.MarkMessageDelivered(ctx, id)
+	}
+	w.calls.Add(1)
+	if w.onBefore != nil {
+		if err := w.onBefore(ctx, id); err != nil {
+			return false, err
+		}
+	}
+	return w.Store.MarkMessageDelivered(ctx, id)
 }

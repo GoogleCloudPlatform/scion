@@ -1362,7 +1362,7 @@ func TestConduitVsExec_SuccessHandlerOnlyOnExec(t *testing.T) {
 // through NewManager's deliverFlush, synchronous interrupt, and oversize split
 // flushes) so production wiring and per-sub-flush attribution are pinned.
 func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
-	newRealManager := func(t *testing.T, labelled bool, execs *[]string) *AgentManager {
+	newRealManager := func(t *testing.T, labelled bool, execs *[]string, execErr func() error) *AgentManager {
 		t.Helper()
 		orig := conduitDeliverRuntimes
 		conduitDeliverRuntimes = map[string]bool{"mock": true}
@@ -1381,14 +1381,24 @@ func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
 			},
 			ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
 				mu.Lock()
-				defer mu.Unlock()
 				*execs = append(*execs, strings.Join(cmd, " "))
+				mu.Unlock()
+				if execErr != nil {
+					if err := execErr(); err != nil {
+						return "", err
+					}
+				}
 				return "", nil
 			},
 			ExecWithStdinFunc: func(_ context.Context, _ string, cmd []string, _ io.Reader) (string, error) {
 				mu.Lock()
-				defer mu.Unlock()
 				*execs = append(*execs, strings.Join(cmd, " "))
+				mu.Unlock()
+				if execErr != nil {
+					if err := execErr(); err != nil {
+						return "", err
+					}
+				}
 				return "", nil
 			},
 		}
@@ -1403,7 +1413,7 @@ func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
 
 	t.Run("buffered_exec_invokes_onSuccess_through_NewManager_deliverFlush", func(t *testing.T) {
 		var execs []string
-		m := newRealManager(t, false, &execs)
+		m := newRealManager(t, false, &execs, nil)
 
 		var calls atomic.Int32
 		ctx := WithDeliveryMessageID(
@@ -1423,9 +1433,37 @@ func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
 		}
 	})
 
+	t.Run("buffered_exec_failure_never_invokes_onSuccess", func(t *testing.T) {
+		var execs []string
+		m := newRealManager(t, false, &execs, func() error { return errors.New("tmux send-keys failed") })
+
+		var okCalls, failCalls atomic.Int32
+		ctx := WithDeliveryMessageID(
+			WithDeliverySuccessHandler(
+				WithDeliveryFailureHandler(context.Background(), func(error) { failCalls.Add(1) }),
+				func() { okCalls.Add(1) },
+			),
+			"m-buf-fail-1",
+		)
+		if err := m.Message(ctx, "test-agent", "", "hello buffered fail", false); err != nil {
+			t.Fatalf("Message: %v", err)
+		}
+		flushNow(m)
+
+		if got := okCalls.Load(); got != 0 {
+			t.Fatalf("onSuccess called %d times on buffered exec failure, want 0", got)
+		}
+		if got := failCalls.Load(); got != 1 {
+			t.Fatalf("onFailure called %d times on buffered exec failure, want 1", got)
+		}
+		if len(execs) == 0 {
+			t.Fatal("expected exec attempt before failure")
+		}
+	})
+
 	t.Run("buffered_conduit_delivered_does_not_invoke_onSuccess", func(t *testing.T) {
 		var execs []string
-		m := newRealManager(t, true, &execs)
+		m := newRealManager(t, true, &execs, nil)
 		d := &fakeDeliverer{answers: []fakeAnswer{answer(http.StatusOK, agentcontrol.OutcomeDelivered)}}
 		m.SetConduitDeliverer(d)
 
@@ -1449,7 +1487,7 @@ func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
 
 	t.Run("interrupt_exec_invokes_onSuccess", func(t *testing.T) {
 		var execs []string
-		m := newRealManager(t, false, &execs)
+		m := newRealManager(t, false, &execs, nil)
 
 		var calls atomic.Int32
 		ctx := WithDeliveryMessageID(
@@ -1467,9 +1505,36 @@ func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
 		}
 	})
 
+	t.Run("interrupt_exec_failure_never_invokes_onSuccess", func(t *testing.T) {
+		var execs []string
+		m := newRealManager(t, false, &execs, func() error { return errors.New("tmux interrupt send-keys failed") })
+
+		var okCalls, failCalls atomic.Int32
+		ctx := WithDeliveryMessageID(
+			WithDeliverySuccessHandler(
+				WithDeliveryFailureHandler(context.Background(), func(error) { failCalls.Add(1) }),
+				func() { okCalls.Add(1) },
+			),
+			"m-int-fail-1",
+		)
+		err := m.Message(ctx, "test-agent", "", "stop now fail", true)
+		if err == nil {
+			t.Fatal("expected error from failing interrupt exec delivery")
+		}
+		if got := okCalls.Load(); got != 0 {
+			t.Fatalf("onSuccess called %d times on interrupt exec failure, want 0", got)
+		}
+		if got := failCalls.Load(); got != 0 {
+			t.Fatalf("onFailure called %d times on synchronous interrupt path, want 0 (error returned directly)", got)
+		}
+		if len(execs) == 0 {
+			t.Fatal("expected exec attempt before failure")
+		}
+	})
+
 	t.Run("split_flush_attributes_onSuccess_per_subflush_and_failure_wins_on_later_group", func(t *testing.T) {
 		var execs []string
-		m := newRealManager(t, true, &execs)
+		m := newRealManager(t, true, &execs, nil)
 		// Sub-flush 0 falls back to exec and succeeds; sub-flush 1 gets a final
 		// conduit error (409 bound) so the split stops and sub-flushes 1..2 fail.
 		d := &fakeDeliverer{answers: []fakeAnswer{
@@ -1520,6 +1585,64 @@ func TestAgentManager_Message_SuccessHandlerWiring(t *testing.T) {
 		}
 		if d.calls() != 2 {
 			t.Fatalf("conduit calls = %d, want 2 (sub-flush 0 fallback + sub-flush 1 failure)", d.calls())
+		}
+	})
+
+	t.Run("split_flush_second_subflush_exec_failure_only_credits_first", func(t *testing.T) {
+		var execs []string
+		// Both sub-flush 0 and sub-flush 1 fall back to exec; exec succeeds for
+		// sub-flush 0 (d.calls() == 1) and fails for sub-flush 1 (d.calls() >= 2).
+		d := &fakeDeliverer{answers: []fakeAnswer{
+			{err: ErrConduitUnavailable},
+			{err: ErrConduitUnavailable},
+		}}
+		m := newRealManager(t, true, &execs, func() error {
+			if d.calls() >= 2 {
+				return errors.New("tmux exec failed on second split part")
+			}
+			return nil
+		})
+		m.SetConduitDeliverer(d)
+
+		var mu sync.Mutex
+		var succeeded []int
+		var failed []int
+		for i := range 3 {
+			idx := i
+			ctx := WithDeliveryMessageID(
+				WithDeliverySuccessHandler(
+					WithDeliveryFailureHandler(context.Background(), func(error) {
+						mu.Lock()
+						failed = append(failed, idx)
+						mu.Unlock()
+					}),
+					func() {
+						mu.Lock()
+						succeeded = append(succeeded, idx)
+						mu.Unlock()
+					},
+				),
+				fmt.Sprintf("m-split-exec-fail-%d", idx),
+			)
+			text := fmt.Sprintf("%d", idx) + strings.Repeat("z", 300*1024)
+			if err := m.Message(ctx, "test-agent", "", text, false); err != nil {
+				t.Fatalf("Message(%d): %v", idx, err)
+			}
+		}
+		flushNow(m)
+
+		mu.Lock()
+		defer mu.Unlock()
+		slices.Sort(succeeded)
+		slices.Sort(failed)
+		if !slices.Equal(succeeded, []int{0}) {
+			t.Fatalf("onSuccess fired for %v, want [0] only", succeeded)
+		}
+		if !slices.Equal(failed, []int{1, 2}) {
+			t.Fatalf("onFailure fired for %v, want [1 2]", failed)
+		}
+		if d.calls() != 2 {
+			t.Fatalf("conduit calls = %d, want 2 (sub-flush 0 fallback + sub-flush 1 fallback)", d.calls())
 		}
 	})
 }
