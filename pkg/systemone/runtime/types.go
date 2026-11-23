@@ -236,6 +236,28 @@ type InputFingerprint struct {
 	SHA256 string             `json:"sha256,omitempty"`
 }
 
+// SecretRefProvenance records content-free named-secret reference metadata for
+// an evaluation (PV3 brief Addendum F §§F2, F7). Secret values are never stored here.
+type SecretRefProvenance struct {
+	Name      string `json:"name"`
+	Scope     string `json:"scope,omitempty"`
+	ScopeUsed string `json:"scope_used,omitempty"`
+}
+
+// AuthProvenance records content-free, non-secret authentication metadata for
+// an evaluation (PV3 brief Addendum B §§B4, B6, B10; Addendum F §§F2, F7). Token
+// and secret values are never stored here.
+type AuthProvenance struct {
+	AuthKind            string               `json:"auth_kind,omitempty"`
+	SecretRef           *SecretRefProvenance `json:"secret_ref,omitempty"`
+	SecretVersion       int                  `json:"secret_version,omitempty"`
+	Scopes              []string             `json:"scopes,omitempty"`
+	QuotaProject        string               `json:"quota_project,omitempty"`
+	CredentialType      string               `json:"credential_type,omitempty"`
+	ServiceAccountEmail string               `json:"service_account_email,omitempty"`
+	ReasonHint          string               `json:"reason_hint,omitempty"`
+}
+
 // Evaluation is the content-free provenance record returned on every evaluation
 // path (in Decision.Eval on Success and inside EvaluationError on Uncertain and
 // Failed; runtime-design §8.1, P1 brief §1, §5).
@@ -246,10 +268,12 @@ type Evaluation struct {
 	Requested       spec.Binding            `json:"requested"`
 	ConfiguredModel string                  `json:"configured_model,omitempty"`
 	ResolvedModel   string                  `json:"resolved_model,omitempty"`
+	Auth            *AuthProvenance         `json:"auth,omitempty"`
 	Class           Class                   `json:"class"`
 	Reason          string                  `json:"reason,omitempty"`
 	Answers         map[string]AnswerRecord `json:"answers,omitempty"`
 	Uncertainty     []ThresholdCheck        `json:"uncertainty,omitempty"`
+	Usage           *provider.Usage         `json:"usage,omitempty"`
 	Notes           []string                `json:"notes,omitempty"`
 	Attempts        []Attempt               `json:"attempts,omitempty"`
 	FallbackUsed    bool                    `json:"fallback_used,omitempty"`
@@ -267,6 +291,24 @@ func (e *Evaluation) HasModelAliasReported() bool {
 		return false
 	}
 	return slices.Contains(e.Notes, provider.NoteModelAliasReported)
+}
+
+// HasModelUnreported reports whether Notes contains NoteModelUnreported
+// (indicating that the provider did not report a serving model identifier).
+func (e *Evaluation) HasModelUnreported() bool {
+	if e == nil {
+		return false
+	}
+	return slices.Contains(e.Notes, provider.NoteModelUnreported)
+}
+
+// HasUsageUnreported reports whether Notes contains NoteUsageUnreported
+// (indicating that provider token usage was absent rather than measured zero).
+func (e *Evaluation) HasUsageUnreported() bool {
+	if e == nil {
+		return false
+	}
+	return slices.Contains(e.Notes, provider.NoteUsageUnreported)
 }
 
 // EffectiveResolvedModel returns ResolvedModel when it identifies a concrete

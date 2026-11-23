@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/conformance"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
@@ -29,6 +30,7 @@ import (
 
 func typeSafeSuiteConfig() conformance.SuiteConfig {
 	return conformance.SuiteConfig{
+		Auth: egress.BearerPlacement,
 		ForbiddenHeaders: []string{
 			jevwire.HeaderDangerZoneImages,
 			jevwire.HeaderDangerZoneLongContext,
@@ -93,14 +95,23 @@ func TestTypeSafeConformance_FixturesF1ToF7(t *testing.T) {
 }
 
 // TestTypeSafeConformance_AllFixtureFilesCarrySyntheticDisclaimer guards that
-// every JSON file under testdata/ cites its documentation source and explicitly
-// states "synthetic from docs, not recorded from the live API".
+// all 7 TypeSafe fixtures exist under testdata/typesafe/ and that every JSON
+// fixture file across all provider subdirectories under testdata/ cites its
+// documentation source and explicitly states RequiredSyntheticNotice.
 func TestTypeSafeConformance_AllFixtureFilesCarrySyntheticDisclaimer(t *testing.T) {
-	matches, err := filepath.Glob(filepath.FromSlash("testdata/*/*.json"))
+	typeSafeMatches, err := filepath.Glob(filepath.FromSlash("testdata/typesafe/*.json"))
 	require.NoError(t, err)
-	require.Len(t, matches, 7, "expected all 7 synthetic fixtures F1-F7")
+	require.Len(t, typeSafeMatches, 7, "expected all 7 TypeSafe synthetic fixtures F1-F7")
+	for _, path := range typeSafeMatches {
+		bundle := conformance.LoadBundle(t, path)
+		assert.Equal(t, jevwire.AdapterNameTypeSafe, bundle.Adapter, "unexpected adapter in %s", path)
+		conformance.ValidateProvenance(t, path, bundle.Provenance)
+	}
 
-	for _, path := range matches {
+	allMatches, err := filepath.Glob(filepath.FromSlash("testdata/*/*.json"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(allMatches), len(typeSafeMatches))
+	for _, path := range allMatches {
 		bundle := conformance.LoadBundle(t, path)
 		conformance.ValidateProvenance(t, path, bundle.Provenance)
 	}

@@ -240,6 +240,7 @@
     "server.hub.platform_request_timeout",
     "server.hub.chat",
     "server.hub.system_one",
+    "server.hub.system_one.secret_names",
     "server.hub.schedules",
     "server.hub.default_message_mode",
     "server.relay"

@@ -23,6 +23,8 @@ package provider
 import (
 	"context"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
@@ -80,12 +82,13 @@ const (
 	BinaryTrueKey  = "true"
 	BinaryFalseKey = "false"
 
-	// Content-free provenance note constants (provider-design §6.1, §7.4; runtime-design §8.1).
+	// Content-free provenance note constants (provider-design §6.1, §7.4; runtime-design §8.1; PV3 brief §5.3).
 	NoteModelAliasReported         = "model_alias_reported"
 	NoteModelUnreported            = "model_unreported"
 	NoteClamped001To099            = "clamped_0.01_0.99"
 	NoteOptionsSortedByProvider    = "options_sorted_by_provider"
 	NoteConfidenceFormulaDeviation = "confidence_formula_deviation"
+	NoteUsageUnreported            = "usage_unreported"
 )
 
 var closedNotes = []string{
@@ -94,6 +97,7 @@ var closedNotes = []string{
 	NoteClamped001To099,
 	NoteOptionsSortedByProvider,
 	NoteConfidenceFormulaDeviation,
+	NoteUsageUnreported,
 }
 
 // AllNotes returns a copy of the closed set of content-free provenance note
@@ -112,7 +116,8 @@ func IsValidNote(note string) bool {
 		NoteModelUnreported,
 		NoteClamped001To099,
 		NoteOptionsSortedByProvider,
-		NoteConfidenceFormulaDeviation:
+		NoteConfidenceFormulaDeviation,
+		NoteUsageUnreported:
 		return true
 	default:
 		return false
@@ -130,7 +135,116 @@ const (
 	AuthKindGoogleAccessToken AuthKind = "google_access_token"
 	AuthKindGoogleIDToken     AuthKind = "google_id_token"
 	AuthKindAzureEntra        AuthKind = "azure_entra"
+
+	// InstanceAuthAPIKey is the canonical instance auth.kind identifier for
+	// API-key credentials in Capabilities.SupportedAuth.
+	InstanceAuthAPIKey = "api_key"
+
+	// GoogleScopePrefix is the required URL prefix for Google OAuth2 scopes on
+	// google_access_token System One instances (PV3 brief Addendum B §B3, E).
+	GoogleScopePrefix = "https://www.googleapis.com/auth/"
+
+	// OptionQuotaProject is the non-secret instance option key carrying an
+	// explicit GCP billing/quota project ID sent as x-goog-user-project on ADC
+	// bearer requests (PV3 brief Addendum B §B3, Addendum D).
+	OptionQuotaProject = "quota_project"
+
+	// QuotaProjectImplicit is the provenance display value recorded when a
+	// google_access_token instance leaves options["quota_project"] unset so the
+	// service account's associated project bills implicitly (Addendum D).
+	QuotaProjectImplicit = "implicit (service account association)"
+
+	// OptionSecretScope is the non-secret instance option key recording the
+	// secret-store lookup scope ("hub", "project", or "project_or_hub") when an
+	// api_key instance references a named Hub/project secret instead of an
+	// instance-internal systemone.instance.<id> secret (PV3 Addendum F §§F2, F7).
+	OptionSecretScope = "secret_scope"
+
+	// Named-secret lookup scopes for api_key System One instances (Addendum F).
+	SecretScopeHub          = "hub"
+	SecretScopeProject      = "project"
+	SecretScopeProjectOrHub = "project_or_hub"
+
+	// DefaultSecretRefScope is the lead/architect default lookup scope for named
+	// System One API-key secret references (Addendum F §F7).
+	DefaultSecretRefScope = SecretScopeProjectOrHub
+
+	// DefaultGeminiAPIKeySecretName is the default named-secret key for
+	// gemini_decisions api_key instances created without an inline API key
+	// (Addendum F §§F2, F4).
+	DefaultGeminiAPIKeySecretName = "GEMINI_API_KEY"
+
+	maxSecretRefNameBytes = 128
 )
+
+// SecretRefModeFromOptions inspects opts for the explicit named-secret
+// discriminator key (OptionSecretScope = "secret_scope").
+//
+// Key presence—never a secret-name prefix heuristic—decides the credential mode:
+//   - isNamedRef == true: options["secret_scope"] key is present (named Hub or
+//     project secret reference; the instance never owns or deletes the secret).
+//   - isNamedRef == false: options["secret_scope"] key is absent (legacy/inline
+//     instance-internal secret when auth.kind == "api_key").
+func SecretRefModeFromOptions(opts map[string]string) (scope string, isNamedRef bool) {
+	if len(opts) == 0 {
+		return "", false
+	}
+	raw, ok := opts[OptionSecretScope]
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(raw), true
+}
+
+// IsValidSecretRefScope reports whether scope is one of the allowed named-secret
+// resolution scopes ("hub", "project", or "project_or_hub").
+func IsValidSecretRefScope(scope string) bool {
+	switch scope {
+	case SecretScopeHub, SecretScopeProject, SecretScopeProjectOrHub:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSecretRefStartByte(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || b == '_'
+}
+
+func isSecretRefContByte(b byte) bool {
+	return isSecretRefStartByte(b) || (b >= '0' && b <= '9')
+}
+
+// IsValidSecretRefName reports whether name matches the named-secret identifier
+// grammar ^[A-Za-z_][A-Za-z0-9_]{0,127}$ (Addendum F §F2). Note that reserved
+// instance-internal secret names ("systemone.instance.<uuid>") contain dots and
+// never match this grammar.
+func IsValidSecretRefName(name string) bool {
+	if len(name) == 0 || len(name) > maxSecretRefNameBytes {
+		return false
+	}
+	if !isSecretRefStartByte(name[0]) {
+		return false
+	}
+	for i := 1; i < len(name); i++ {
+		if !isSecretRefContByte(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// FormatQuotaProjectProvenance formats the effective quota-project provenance
+// string for google_access_token instances (Addendum D):
+// "implicit (service account association)" when unset, or "explicit: <id>" when
+// an explicit quota_project option is configured.
+func FormatQuotaProjectProvenance(quotaProject string) string {
+	trimmed := strings.TrimSpace(quotaProject)
+	if trimmed == "" {
+		return QuotaProjectImplicit
+	}
+	return "explicit: " + trimmed
+}
 
 // AuthScheme describes the transport authentication scheme an adapter expects
 // pkg/systemone/egress to apply. It carries scheme metadata only, never
@@ -179,6 +293,7 @@ type Capabilities struct {
 	Abstains               bool                       `json:"abstains"`
 	SideEffectFree         bool                       `json:"side_effect_free"`
 	AuthScheme             AuthScheme                 `json:"auth_scheme"`
+	SupportedAuth          map[string]AuthScheme      `json:"supported_auth,omitempty"`
 	ProviderRetention      string                     `json:"provider_retention,omitempty"`
 }
 
@@ -278,4 +393,68 @@ type Adapter interface {
 // invoked during admin connectivity probes (P1 brief §2, §3; provider-design §7.4).
 type ModelLister interface {
 	ListModels(ctx context.Context, t Transport, inst InstanceView) ([]string, error)
+}
+
+// EndpointDefaulter is an optional SPI-adjacent extension implemented by
+// adapters that define a default HTTPS base URL when an instance is created
+// without an explicit endpoint (PV3 brief §6, Decision 4). Adapters that do not
+// implement EndpointDefaulter (or return an empty string) require an explicit
+// endpoint at instance creation time.
+type EndpointDefaulter interface {
+	DefaultEndpoint() string
+}
+
+// InstanceValidator is an optional SPI-adjacent extension implemented by
+// adapters that validate provider-specific instance configuration (for example
+// requiring a non-empty InstanceView.Model) at instance creation time without
+// coupling static Capabilities(InstanceView{}) discovery to instance fields.
+type InstanceValidator interface {
+	ValidateInstance(inst InstanceView) error
+}
+
+// DefaultSecretRefer is an optional SPI-adjacent extension implemented by
+// adapters that default api_key instances created without an inline API key to
+// a named Hub/project secret reference (for example "GEMINI_API_KEY" on
+// gemini_decisions; PV3 Addendum F §§F2, F4).
+type DefaultSecretRefer interface {
+	DefaultSecretRefName() string
+}
+
+// SecretNamePolicy is an optional SPI-adjacent extension implemented by
+// adapters that permit named Hub/project secret references (secret_ref),
+// returning the exact case-sensitive secret key names approved for this
+// provider (PV3 Addendum F §F10). Adapters that do not implement
+// SecretNamePolicy (or return no valid names) cannot use secret_ref.
+type SecretNamePolicy interface {
+	AllowedSecretNames() []string
+}
+
+// AllowedSecretNamesFor returns a deduplicated copy of the valid, exact-case
+// secret names declared by adapter's SecretNamePolicy, or nil when adapter is
+// nil or does not implement SecretNamePolicy.
+func AllowedSecretNamesFor(adapter Adapter) []string {
+	if adapter == nil {
+		return nil
+	}
+	pol, ok := adapter.(SecretNamePolicy)
+	if !ok {
+		return nil
+	}
+	raw := pol.AllowedSecretNames()
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, name := range raw {
+		if !IsValidSecretRefName(name) {
+			continue
+		}
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

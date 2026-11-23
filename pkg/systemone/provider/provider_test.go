@@ -66,7 +66,8 @@ func TestFailReasons_ClosedSetMatchesRuntimeDesign(t *testing.T) {
 
 func TestNotes_ClosedSet(t *testing.T) {
 	notes := provider.AllNotes()
-	require.Len(t, notes, 5)
+	require.Len(t, notes, 6)
+	assert.Contains(t, notes, provider.NoteUsageUnreported)
 	for _, n := range notes {
 		assert.True(t, provider.IsValidNote(n), "expected %q to be valid closed note", n)
 	}
@@ -100,12 +101,16 @@ type stubAdapter struct {
 	name           string
 	version        string
 	sideEffectFree bool
+	capsErr        error
 	models         []string
 }
 
 func (a *stubAdapter) Name() string    { return a.name }
 func (a *stubAdapter) Version() string { return a.version }
 func (a *stubAdapter) Capabilities(_ provider.InstanceView) (provider.Capabilities, error) {
+	if a.capsErr != nil {
+		return provider.Capabilities{}, a.capsErr
+	}
 	return provider.Capabilities{
 		Primitives: map[string]provider.PrimitiveLimits{
 			spec.PrimitiveBinary: {
@@ -140,13 +145,30 @@ func (a *stubAdapter) ListModels(_ context.Context, _ provider.Transport, _ prov
 	return a.models, nil
 }
 
+type stubValidatingAdapter struct {
+	stubAdapter
+}
+
+func (a *stubValidatingAdapter) ValidateInstance(inst provider.InstanceView) error {
+	if strings.TrimSpace(inst.Model) == "" {
+		return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance model is required")
+	}
+	return nil
+}
+
 func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	reg := provider.NewRegistry()
 
-	// Rejects nil, missing name/version, and SideEffectFree == false (runtime-design §4.3).
+	// Rejects nil, missing name/version, Capabilities(InstanceView{}) errors, and SideEffectFree == false (runtime-design §4.3).
 	require.Error(t, reg.Register(nil))
 	require.Error(t, reg.Register(&stubAdapter{name: "", version: "0.1.0", sideEffectFree: true}))
 	require.Error(t, reg.Register(&stubAdapter{name: "bad", version: "", sideEffectFree: true}))
+	require.Error(t, reg.Register(&stubAdapter{
+		name:           "caps-err",
+		version:        "0.1.0",
+		sideEffectFree: true,
+		capsErr:        provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "capabilities must not fail on zero InstanceView"),
+	}))
 	err := reg.Register(&stubAdapter{name: "mutating", version: "0.1.0", sideEffectFree: false})
 	require.ErrorIs(t, err, provider.ErrNotSideEffectFree)
 
@@ -155,10 +177,19 @@ func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	require.NoError(t, reg.Register(good))
 	require.ErrorIs(t, reg.Register(good), provider.ErrDuplicateAdapter)
 
+	// Adapters with static Capabilities(InstanceView{}) and optional InstanceValidator
+	// register cleanly without synthetic InstanceView fabrication.
+	modelReq := &stubValidatingAdapter{stubAdapter: stubAdapter{name: "gemini-test", version: "0.1.0", sideEffectFree: true}}
+	require.NoError(t, reg.Register(modelReq))
+	validator, hasValidator := provider.Adapter(modelReq).(provider.InstanceValidator)
+	require.True(t, hasValidator)
+	require.Error(t, validator.ValidateInstance(provider.InstanceView{}))
+	require.NoError(t, validator.ValidateInstance(provider.InstanceView{Model: "gemini-decision-1"}))
+
 	got, ok := reg.Get("typesafe-test")
 	require.True(t, ok)
 	assert.Equal(t, "typesafe-test", got.Name())
-	assert.Equal(t, []string{"typesafe-test"}, reg.Names())
+	assert.Equal(t, []string{"gemini-test", "typesafe-test"}, reg.Names())
 
 	// Optional ModelLister assertion works on registered adapter.
 	lister, ok := got.(provider.ModelLister)
@@ -166,6 +197,12 @@ func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 	models, err := lister.ListModels(context.Background(), nil, provider.InstanceView{Name: "inst-1"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"jev-1.14.0"}, models)
+
+	// Optional EndpointDefaulter and InstanceValidator are absent unless explicitly implemented.
+	_, hasDefaulter := got.(provider.EndpointDefaulter)
+	assert.False(t, hasDefaulter)
+	_, gotValidator := got.(provider.InstanceValidator)
+	assert.False(t, gotValidator)
 
 	// Capabilities.SpecLimits bridges directly into spec.ValidatePortable.
 	caps, err := got.Capabilities(provider.InstanceView{})
@@ -277,5 +314,101 @@ func TestDistributionAndTieHelpers(t *testing.T) {
 		pe, ok := provider.AsProviderError(err)
 		require.True(t, ok)
 		assert.Equal(t, provider.FailMalformedResponse, pe.Reason)
+	}
+}
+
+func TestValidateDistribution_SumToleranceFloatSlackBoundary(t *testing.T) {
+	// Synthetic from docs (ai.google.dev/gemini-api/docs/decisions-api):
+	// Gemini's documented 4-option "department" choice example has exact decimal
+	// sum 0.999, whose IEEE-754 binary64 sum (0.002+0.003+0.004+0.99) has
+	// |sum - 1| = 0.0010000000000000009 > float64(1e-3). The 1e-12 numerical
+	// float slack at the 1e-3 boundary accepts this without renormalization.
+	deptIDs := []string{"billing", "sales", "support", "other"}
+	docExample := map[string]float64{
+		"support": 0.99,
+		"billing": 0.004,
+		"sales":   0.003,
+		"other":   0.002,
+	}
+	require.NoError(t, provider.ValidateDistribution(docExample, deptIDs))
+	// Confirm ValidateDistribution never mutates or renormalizes the map.
+	assert.Equal(t, 0.99, docExample["support"])
+	assert.Equal(t, 0.004, docExample["billing"])
+	assert.Equal(t, 0.003, docExample["sales"])
+	assert.Equal(t, 0.002, docExample["other"])
+
+	// Upper 1e-3 boundary with symmetric binary64 representation also passes.
+	upperBoundary := map[string]float64{
+		"support": 0.99,
+		"billing": 0.005,
+		"sales":   0.003,
+		"other":   0.003, // decimal sum 1.001
+	}
+	require.NoError(t, provider.ValidateDistribution(upperBoundary, deptIDs))
+
+	// Sums just outside 1 ± (1e-3 + 1e-12), materially outside 1 ± 1e-3,
+	// out-of-bounds [0, 1] values, and non-finite values still fail as
+	// malformed_response and are never renormalized.
+	twoIDs := []string{"a", "b"}
+	rejectCases := []struct {
+		name string
+		ids  []string
+		dist map[string]float64
+	}{
+		{
+			name: "just_below_lower_boundary_1_minus_1e3_minus_1e9",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 0.5, "b": 0.5 - (1e-3 + 1e-9)},
+		},
+		{
+			name: "just_above_upper_boundary_1_plus_1e3_plus_1e9",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 0.5, "b": 0.5 + (1e-3 + 1e-9)},
+		},
+		{
+			name: "materially_below_sum_0_98",
+			ids:  deptIDs,
+			dist: map[string]float64{"support": 0.90, "billing": 0.04, "sales": 0.02, "other": 0.02},
+		},
+		{
+			name: "materially_above_sum_1_02",
+			ids:  deptIDs,
+			dist: map[string]float64{"support": 0.90, "billing": 0.06, "sales": 0.03, "other": 0.03},
+		},
+		{
+			name: "negative_within_sum_band",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 1.0, "b": -1e-12},
+		},
+		{
+			name: "above_one_within_sum_band",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": 1.0 + 1e-12, "b": 0.0},
+		},
+		{
+			name: "nan_value",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": math.NaN(), "b": 1.0},
+		},
+		{
+			name: "pos_inf_value",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": math.Inf(1), "b": 0.0},
+		},
+		{
+			name: "neg_inf_value",
+			ids:  twoIDs,
+			dist: map[string]float64{"a": math.Inf(-1), "b": 1.0},
+		},
+	}
+
+	for _, tc := range rejectCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := provider.ValidateDistribution(tc.dist, tc.ids)
+			require.Error(t, err)
+			pe, ok := provider.AsProviderError(err)
+			require.True(t, ok)
+			assert.Equal(t, provider.FailMalformedResponse, pe.Reason)
+		})
 	}
 }

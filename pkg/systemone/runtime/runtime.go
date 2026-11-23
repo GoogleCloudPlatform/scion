@@ -24,11 +24,13 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/textproto"
 	"net/url"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -108,8 +110,19 @@ type Config struct {
 	// Instances resolves configured provider instances. Optional when callers
 	// supply EvalOptions.Instance directly.
 	Instances InstanceSource
-	// Credentials supplies per-instance bearer API keys at request time.
+	// Credentials supplies per-instance bearer/header API keys at request time
+	// for API-key authentication modes.
 	Credentials CredentialSource
+	// TokenSource supplies per-instance OAuth/ADC access tokens at request time
+	// when Instance.Auth.Kind is "google_access_token". When nil,
+	// google_access_token evaluations fail closed with egress.ErrAuth (0 provider
+	// requests) and never fall back to Credentials.
+	TokenSource CredentialSource
+	// AllowedSecretNames optionally overrides how Runtime resolves the exact
+	// provider-pinned named-secret allowlist for an Adapter. When nil, Runtime
+	// uses provider.AllowedSecretNamesFor (failing closed when an adapter does
+	// not implement provider.SecretNamePolicy).
+	AllowedSecretNames func(adapter provider.Adapter) []string
 	// MaxEvalTime is the runtime-wide evaluation ceiling (server.hub.systemone.maxEvalTime;
 	// defaults to DefaultMaxEvalTime = 3s when <= 0, clamped to MaxAllowedEvalTime = 30s).
 	MaxEvalTime time.Duration
@@ -168,28 +181,142 @@ type EvalOptions struct {
 }
 
 type transportKey struct {
-	id         string
-	name       string
-	revision   int64
-	endpoint   string
-	authKind   string
-	secretName string
-	headerName string
-	audience   string
-	scopes     string
+	id               string
+	name             string
+	revision         int64
+	adapter          string
+	endpoint         string
+	authKind         string
+	secretName       string
+	isNamedSecretRef bool
+	secretScope      string
+	headerName       string
+	audience         string
+	scopes           string
+	quotaProject     string
+	placementKind    provider.AuthKind
+	placementHeader  string
+}
+
+type evalCallTrackerKey struct{}
+type evalProjectIDKey struct{}
+
+// WithEvalProjectID attaches a validated evaluation project ID to ctx so
+// CredentialSource implementations resolving project-scoped named secrets
+// receive the evaluation's own project over shared transports (PV3 Addendum F).
+func WithEvalProjectID(ctx context.Context, projectID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, evalProjectIDKey{}, strings.TrimSpace(projectID))
+}
+
+// EvalProjectIDFromContext returns the validated evaluation project ID attached
+// by Runtime.Evaluate or WithEvalProjectID, or "" when unset.
+func EvalProjectIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(evalProjectIDKey{}).(string)
+	return v
+}
+
+type evalCallTracker struct {
+	preCallAuthFailed  atomic.Bool
+	mu                 sync.Mutex
+	credType           string
+	saEmail            string
+	secretRefName      string
+	secretRefScopeUsed string
+	secretVersion      int
+}
+
+// RecordAuthIdentity records non-secret credential category metadata (such as
+// Google ADC credential type and service-account email) on the active
+// evaluation's content-free provenance record. Values failing identifier
+// sanitization are silently ignored; secret or token material must never be
+// passed here.
+func RecordAuthIdentity(ctx context.Context, credentialType, serviceAccountEmail string) {
+	if ctx == nil {
+		return
+	}
+	tracker, ok := ctx.Value(evalCallTrackerKey{}).(*evalCallTracker)
+	if !ok || tracker == nil {
+		return
+	}
+	cleanType, _ := sanitizeProviderIdentifier(credentialType)
+	cleanEmail, _ := sanitizeProviderIdentifier(serviceAccountEmail)
+	tracker.mu.Lock()
+	if cleanType != "" {
+		tracker.credType = cleanType
+	}
+	if cleanEmail != "" {
+		tracker.saEmail = cleanEmail
+	}
+	tracker.mu.Unlock()
+}
+
+func (t *evalCallTracker) authIdentity() (string, string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.credType, t.saEmail
+}
+
+// RecordSecretRefProvenance records non-secret named-secret resolution metadata
+// (secret name, effective scope used: "project" or "hub", and positive metadata
+// version) on the active evaluation's content-free provenance record. Values
+// failing grammar/enum checks are silently ignored; secret values must never be
+// passed here.
+func RecordSecretRefProvenance(ctx context.Context, name, scopeUsed string, version int) {
+	if ctx == nil {
+		return
+	}
+	tracker, ok := ctx.Value(evalCallTrackerKey{}).(*evalCallTracker)
+	if !ok || tracker == nil {
+		return
+	}
+	if !provider.IsValidSecretRefName(name) {
+		return
+	}
+	if scopeUsed != provider.SecretScopeHub && scopeUsed != provider.SecretScopeProject {
+		return
+	}
+	tracker.mu.Lock()
+	tracker.secretRefName = name
+	tracker.secretRefScopeUsed = scopeUsed
+	if version > 0 {
+		tracker.secretVersion = version
+	}
+	tracker.mu.Unlock()
+}
+
+func (t *evalCallTracker) secretRefProvenance() (string, string, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.secretRefName, t.secretRefScopeUsed, t.secretVersion
+}
+
+func markPreCallAuthFailed(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	if tracker, ok := ctx.Value(evalCallTrackerKey{}).(*evalCallTracker); ok && tracker != nil {
+		tracker.preCallAuthFailed.Store(true)
+	}
 }
 
 // Runtime executes compiled System One rules under bounded deadlines and
-// content-environment limits, producing typed Decisions and content-free
-// Evaluation provenance records (runtime-design §§6, 7.1, 7.7, 8.1).
+// content-free provenance records (runtime-design §§6, 7.1, 7.7, 8.1).
 type Runtime struct {
-	registry        *provider.Registry
-	instances       InstanceSource
-	credentials     CredentialSource
-	maxEvalTime     time.Duration
-	defaultInstance string
-	logger          *slog.Logger
-	egressOpts      []egress.Option
+	registry           *provider.Registry
+	instances          InstanceSource
+	credentials        CredentialSource
+	tokenSource        CredentialSource
+	allowedSecretNames func(provider.Adapter) []string
+	maxEvalTime        time.Duration
+	defaultInstance    string
+	logger             *slog.Logger
+	egressOpts         []egress.Option
 
 	transportMu sync.Mutex
 	transports  map[transportKey]provider.Transport
@@ -210,14 +337,21 @@ func New(cfg Config, opts ...Option) *Runtime {
 		maxEval = clampDuration(cfg.MaxEvalTime, MaxAllowedEvalTime)
 	}
 
+	allowedNames := cfg.AllowedSecretNames
+	if allowedNames == nil {
+		allowedNames = provider.AllowedSecretNamesFor
+	}
+
 	r := &Runtime{
-		registry:        reg,
-		instances:       cfg.Instances,
-		credentials:     cfg.Credentials,
-		maxEvalTime:     maxEval,
-		defaultInstance: cfg.DefaultInstance,
-		logger:          logger,
-		transports:      make(map[transportKey]provider.Transport),
+		registry:           reg,
+		instances:          cfg.Instances,
+		credentials:        cfg.Credentials,
+		tokenSource:        cfg.TokenSource,
+		allowedSecretNames: allowedNames,
+		maxEvalTime:        maxEval,
+		defaultInstance:    cfg.DefaultInstance,
+		logger:             logger,
+		transports:         make(map[transportKey]provider.Transport),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -371,8 +505,21 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	if caps.MaxQuestionsPerRequest > 0 && len(compiled.Spec.Questions) > caps.MaxQuestionsPerRequest {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailUnsupported)
 	}
-	if authReason := checkInstanceAuthSupport(caps.AuthScheme, inst.Auth); authReason != "" {
+	selectedScheme, authReason := selectInstanceAuthScheme(caps, inst)
+	if authReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, authReason)
+	}
+	eval.Auth = buildInitialAuthProvenance(inst, selectedScheme)
+	if !r.isNamedSecretAllowedForAdapter(adapter, inst) {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailAuth)
+	}
+	if projReason := checkInstanceProjectContext(inst, opts.ProjectID); projReason != "" {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, projReason)
+	}
+	if requiresPinnedDefaultEndpoint(inst, selectedScheme) {
+		if _, ok := provider.MatchesAdapterDefaultEndpoint(adapter, inst.Endpoint); !ok {
+			return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailAuth)
+		}
 	}
 
 	// Step 5: Tighten runtime-owned deadline with per-instance CallTimeout ceiling (§7.1).
@@ -389,10 +536,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
 	req := buildModelRequest(evalID, compiled, selectedFields)
 	instView := inst.View()
-	transport := r.transportForInstance(inst)
+	transport := r.transportForInstance(inst, selectedScheme)
+	callTracker := &evalCallTracker{}
+	callCtx := WithEvalProjectID(context.WithValue(attemptCtx, evalCallTrackerKey{}, callTracker), opts.ProjectID)
 
 	attemptStart := time.Now().UTC()
-	res, invokeErr, panicked := invokeSafely(attemptCtx, adapter, transport, instView, req)
+	res, invokeErr, panicked := invokeSafely(callCtx, adapter, transport, instView, req)
 	attemptDuration := time.Since(attemptStart)
 	callerErr := ctx.Err()
 	attemptErr := attemptCtx.Err()
@@ -415,6 +564,43 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		}
 	}
 
+	attemptRequests := 1
+	if callTracker.preCallAuthFailed.Load() || isPreCallEgressError(invokeErr) {
+		attemptRequests = 0
+	}
+	if credType, saEmail := callTracker.authIdentity(); credType != "" || saEmail != "" {
+		if eval.Auth == nil {
+			eval.Auth = &AuthProvenance{AuthKind: inst.Auth.Kind}
+		}
+		if credType != "" {
+			eval.Auth.CredentialType = credType
+		}
+		if saEmail != "" {
+			eval.Auth.ServiceAccountEmail = saEmail
+		}
+	}
+	if secName, scopeUsed, secVer := callTracker.secretRefProvenance(); secName != "" || scopeUsed != "" || secVer > 0 {
+		secScope, _ := provider.SecretRefModeFromOptions(inst.Options)
+		if eval.Auth == nil {
+			eval.Auth = &AuthProvenance{AuthKind: inst.Auth.Kind}
+		}
+		if eval.Auth.SecretRef == nil {
+			eval.Auth.SecretRef = &SecretRefProvenance{
+				Name:  secName,
+				Scope: secScope,
+			}
+		}
+		if secName != "" {
+			eval.Auth.SecretRef.Name = secName
+		}
+		if scopeUsed != "" {
+			eval.Auth.SecretRef.ScopeUsed = scopeUsed
+		}
+		if secVer > 0 {
+			eval.Auth.SecretVersion = secVer
+		}
+	}
+
 	attempt := Attempt{
 		Instance:          inst.Name,
 		InstanceRevision:  inst.Revision,
@@ -426,7 +612,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		Location:          inst.Location,
 		Started:           attemptStart,
 		Duration:          attemptDuration,
-		Requests:          1,
+		Requests:          attemptRequests,
 		Retries:           0,
 		HTTPStatusClass:   provider.HTTPStatusClass(res.HTTPStatus),
 	}
@@ -442,6 +628,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		reason, statusClass := classifyInvokeError(invokeErr, callerErr, attemptErr, attemptCause)
 		if statusClass != "" {
 			attempt.HTTPStatusClass = statusClass
+		}
+		if pe, ok := provider.AsProviderError(invokeErr); ok && provider.IsValidAuthHint(pe.AuthHint) {
+			if eval.Auth == nil {
+				eval.Auth = &AuthProvenance{AuthKind: inst.Auth.Kind}
+			}
+			eval.Auth.ReasonHint = pe.AuthHint
 		}
 		attempt.Outcome = AttemptFailed
 		attempt.Reason = string(reason)
@@ -476,6 +668,9 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	eval.Notes = mergeNotes(eval.Notes, res.Notes)
 	if cleanResolvedModel == "" {
 		eval.Notes = mergeNotes(eval.Notes, []string{provider.NoteModelUnreported})
+	}
+	if !eval.HasUsageUnreported() && hasMeasuredProviderUsage(res.Usage) {
+		eval.Usage = cloneProviderUsage(res.Usage)
 	}
 
 	// Step 7: Validate decoded answers, compute portable metrics, apply argmax/abstain/tie,
@@ -539,8 +734,20 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 		}
 		return nil, provider.NewProviderError(provider.FailInternal, false, 0, 0, "failed to inspect adapter capabilities")
 	}
-	if authReason := checkInstanceAuthSupport(caps.AuthScheme, inst.Auth); authReason != "" {
+	selectedScheme, authReason := selectInstanceAuthScheme(caps, inst)
+	if authReason != "" {
 		return nil, provider.NewProviderError(authReason, false, 0, 0, "instance auth scheme is not supported")
+	}
+	if !r.isNamedSecretAllowedForAdapter(adapter, inst) {
+		return nil, provider.NewProviderError(provider.FailAuth, false, 0, 0, "secret reference name is not permitted for adapter")
+	}
+	if projReason := checkInstanceProjectContext(inst, EvalProjectIDFromContext(ctx)); projReason != "" {
+		return nil, provider.NewProviderError(projReason, false, 0, 0, "project context is required for project-scoped secret reference")
+	}
+	if requiresPinnedDefaultEndpoint(inst, selectedScheme) {
+		if _, ok := provider.MatchesAdapterDefaultEndpoint(adapter, inst.Endpoint); !ok {
+			return nil, provider.NewProviderError(provider.FailAuth, false, 0, 0, "custom endpoint is not permitted for named-secret or google_access_token instances")
+		}
 	}
 
 	start := time.Now()
@@ -557,7 +764,7 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	callCtx, cancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
 	defer cancel()
 
-	models, err, listPanicked := listModelsSafely(callCtx, lister, r.transportForInstance(inst), inst.View())
+	models, err, listPanicked := listModelsSafely(callCtx, lister, r.transportForInstance(inst, selectedScheme), inst.View())
 	if listPanicked {
 		return nil, provider.NewProviderError(provider.FailInternal, false, 0, 0, "adapter panic recovered")
 	}
@@ -745,17 +952,52 @@ func canonicalScopesKey(scopes []string) string {
 	return b.String()
 }
 
-func (r *Runtime) transportForInstance(inst Instance) provider.Transport {
+func placementFromAuthScheme(scheme provider.AuthScheme, instOpts map[string]string) egress.Placement {
+	if scheme.Kind == provider.AuthKindGoogleAccessToken {
+		return egress.ADCBearerPlacement(instOpts[provider.OptionQuotaProject])
+	}
+	return egress.Placement{
+		Kind:       scheme.Kind,
+		HeaderName: scheme.HeaderName,
+	}
+}
+
+func canonicalPlacementKey(p egress.Placement) (provider.AuthKind, string) {
+	kind := p.Kind
+	if kind == "" {
+		kind = provider.AuthKindBearer
+	}
+	var hdr string
+	if p.HeaderName != "" {
+		hdr = textproto.CanonicalMIMEHeaderKey(p.HeaderName)
+	}
+	return kind, hdr
+}
+
+func (r *Runtime) transportForInstance(inst Instance, adapterScheme provider.AuthScheme) provider.Transport {
+	placement := placementFromAuthScheme(adapterScheme, inst.Options)
+	placementKind, placementHeader := canonicalPlacementKey(placement)
+	effScopes := inst.Auth.Scopes
+	if adapterScheme.Kind == provider.AuthKindGoogleAccessToken && len(effScopes) == 0 && len(adapterScheme.Scopes) > 0 {
+		effScopes = adapterScheme.Scopes
+	}
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
 	key := transportKey{
-		id:         inst.ID,
-		name:       inst.Name,
-		revision:   inst.Revision,
-		endpoint:   inst.Endpoint,
-		authKind:   inst.Auth.Kind,
-		secretName: inst.Auth.SecretName,
-		headerName: inst.Auth.HeaderName,
-		audience:   inst.Auth.Audience,
-		scopes:     canonicalScopesKey(inst.Auth.Scopes),
+		id:               inst.ID,
+		name:             inst.Name,
+		revision:         inst.Revision,
+		adapter:          inst.Adapter,
+		endpoint:         inst.Endpoint,
+		authKind:         inst.Auth.Kind,
+		secretName:       inst.Auth.SecretName,
+		isNamedSecretRef: isNamedRef,
+		secretScope:      secScope,
+		headerName:       inst.Auth.HeaderName,
+		audience:         inst.Auth.Audience,
+		scopes:           canonicalScopesKey(effScopes),
+		quotaProject:     placement.QuotaProject,
+		placementKind:    placementKind,
+		placementHeader:  placementHeader,
 	}
 	r.transportMu.Lock()
 	defer r.transportMu.Unlock()
@@ -775,14 +1017,30 @@ func (r *Runtime) transportForInstance(inst Instance) provider.Transport {
 	}
 
 	instSnap := cloneInstance(inst)
+	if len(effScopes) > 0 {
+		instSnap.Auth.Scopes = slices.Clone(effScopes)
+	}
 	creds := r.credentials
+	tokSrc := r.tokenSource
 	bearer := func(reqCtx context.Context) (string, error) {
-		if creds == nil {
+		src := creds
+		if instSnap.Auth.Kind == string(provider.AuthKindGoogleAccessToken) {
+			src = tokSrc
+		}
+		if src == nil {
+			markPreCallAuthFailed(reqCtx)
 			return "", egress.ErrAuth
 		}
-		return creds(reqCtx, instSnap)
+		tok, err := src(reqCtx, instSnap)
+		if err != nil || strings.TrimSpace(tok) == "" {
+			markPreCallAuthFailed(reqCtx)
+		}
+		return tok, err
 	}
-	tr := egress.NewClient(bearer, r.egressOpts...)
+	opts := make([]egress.Option, 0, len(r.egressOpts)+1)
+	opts = append(opts, egress.WithCredentialPlacement(placement))
+	opts = append(opts, r.egressOpts...)
+	tr := egress.NewClient(bearer, opts...)
 	r.transports[key] = tr
 	return tr
 }
@@ -910,23 +1168,197 @@ func checkMaxInputTokensBytes(totalBytes int, caps provider.Capabilities, limits
 	return ""
 }
 
-func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, instAuth InstanceAuth) provider.FailReason {
+func selectInstanceAuthScheme(caps provider.Capabilities, inst Instance) (provider.AuthScheme, provider.FailReason) {
+	if len(caps.SupportedAuth) > 0 {
+		kind := inst.Auth.Kind
+		if kind == "" {
+			if _, hasEmpty := caps.SupportedAuth[""]; !hasEmpty {
+				if caps.AuthScheme.Kind == provider.AuthKindNone {
+					kind = string(provider.AuthKindNone)
+				} else {
+					kind = provider.InstanceAuthAPIKey
+				}
+			}
+		}
+		scheme, ok := caps.SupportedAuth[kind]
+		if !ok {
+			return provider.AuthScheme{}, provider.FailUnsupported
+		}
+		if fail := checkInstanceAuthSupport(scheme, inst); fail != "" {
+			return provider.AuthScheme{}, fail
+		}
+		return scheme, ""
+	}
+
+	if fail := checkInstanceAuthSupport(caps.AuthScheme, inst); fail != "" {
+		return provider.AuthScheme{}, fail
+	}
+	return caps.AuthScheme, ""
+}
+
+func checkInstanceAuthSupport(adapterScheme provider.AuthScheme, inst Instance) provider.FailReason {
+	instAuth := inst.Auth
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
 	switch adapterScheme.Kind {
 	case provider.AuthKindBearer:
 		switch instAuth.Kind {
-		case "", "api_key", string(provider.AuthKindBearer):
+		case "", provider.InstanceAuthAPIKey, string(provider.AuthKindBearer):
+			if isNamedRef {
+				if !provider.IsValidSecretRefScope(secScope) || !provider.IsValidSecretRefName(instAuth.SecretName) {
+					return provider.FailInvalidRequest
+				}
+			}
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
+				return provider.FailInternal
+			}
 			return ""
 		default:
 			return provider.FailUnsupported
 		}
+	case provider.AuthKindHeader:
+		switch instAuth.Kind {
+		case "", provider.InstanceAuthAPIKey:
+			if isNamedRef {
+				if !provider.IsValidSecretRefScope(secScope) || !provider.IsValidSecretRefName(instAuth.SecretName) {
+					return provider.FailInvalidRequest
+				}
+			}
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
+				return provider.FailInternal
+			}
+			return ""
+		default:
+			return provider.FailUnsupported
+		}
+	case provider.AuthKindGoogleAccessToken:
+		if instAuth.Kind != string(provider.AuthKindGoogleAccessToken) {
+			return provider.FailUnsupported
+		}
+		if isNamedRef {
+			return provider.FailInvalidRequest
+		}
+		effScopes := instAuth.Scopes
+		if len(effScopes) == 0 && len(adapterScheme.Scopes) > 0 {
+			effScopes = adapterScheme.Scopes
+		}
+		if !hasValidGoogleOAuthScopes(effScopes) {
+			return provider.FailInvalidRequest
+		}
+		if qp := inst.Options[provider.OptionQuotaProject]; qp != "" {
+			if err := egress.ValidateQuotaProject(qp); err != nil {
+				return provider.FailInvalidRequest
+			}
+		}
+		if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
+			return provider.FailInternal
+		}
+		return ""
 	case provider.AuthKindNone:
 		if instAuth.Kind == "" || instAuth.Kind == string(provider.AuthKindNone) {
+			if isNamedRef {
+				return provider.FailInvalidRequest
+			}
+			if err := egress.ValidatePlacement(placementFromAuthScheme(adapterScheme, inst.Options)); err != nil {
+				return provider.FailInternal
+			}
 			return ""
 		}
 		return provider.FailUnsupported
 	default:
 		return provider.FailUnsupported
 	}
+}
+
+func checkInstanceProjectContext(inst Instance, projectID string) provider.FailReason {
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if !isNamedRef {
+		return ""
+	}
+	switch secScope {
+	case provider.SecretScopeProject, provider.SecretScopeProjectOrHub:
+		if strings.TrimSpace(projectID) == "" {
+			return provider.FailInvalidRequest
+		}
+	}
+	return ""
+}
+
+func (r *Runtime) isNamedSecretAllowedForAdapter(adapter provider.Adapter, inst Instance) bool {
+	_, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if !isNamedRef {
+		return true
+	}
+	return slices.Contains(r.allowedSecretNames(adapter), inst.Auth.SecretName)
+}
+
+func requiresPinnedDefaultEndpoint(inst Instance, selectedScheme provider.AuthScheme) bool {
+	_, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if isNamedRef {
+		return true
+	}
+	return selectedScheme.Kind == provider.AuthKindGoogleAccessToken ||
+		inst.Auth.Kind == string(provider.AuthKindGoogleAccessToken)
+}
+
+func isPreCallEgressError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return egress.IsAuthError(err) ||
+		egress.IsCredentialUnavailable(err) ||
+		egress.IsInvalidPlacement(err) ||
+		egress.IsSchemeNotAllowed(err) ||
+		egress.IsInvalidEndpoint(err) ||
+		egress.IsBlockedDestination(err)
+}
+
+func buildInitialAuthProvenance(inst Instance, selectedScheme provider.AuthScheme) *AuthProvenance {
+	secScope, isNamedRef := provider.SecretRefModeFromOptions(inst.Options)
+	if inst.Auth.Kind == "" && !isNamedRef {
+		return nil
+	}
+	authKind := inst.Auth.Kind
+	if authKind == "" && isNamedRef {
+		authKind = provider.InstanceAuthAPIKey
+	}
+	prov := &AuthProvenance{
+		AuthKind: authKind,
+	}
+	if isNamedRef {
+		prov.SecretRef = &SecretRefProvenance{
+			Name:  inst.Auth.SecretName,
+			Scope: secScope,
+		}
+	}
+	if selectedScheme.Kind == provider.AuthKindGoogleAccessToken {
+		scopes := inst.Auth.Scopes
+		if len(scopes) == 0 && len(selectedScheme.Scopes) > 0 {
+			scopes = selectedScheme.Scopes
+		}
+		if len(scopes) > 0 {
+			prov.Scopes = slices.Clone(scopes)
+		}
+		prov.QuotaProject = provider.FormatQuotaProjectProvenance(inst.Options[provider.OptionQuotaProject])
+	}
+	return prov
+}
+
+func hasValidGoogleOAuthScopes(scopes []string) bool {
+	if len(scopes) == 0 {
+		return false
+	}
+	for _, s := range scopes {
+		if !strings.HasPrefix(s, provider.GoogleScopePrefix) || len(s) <= len(provider.GoogleScopePrefix) {
+			return false
+		}
+		for i := 0; i < len(s); i++ {
+			b := s[i]
+			if b < 0x21 || b > 0x7e || b == '?' || b == '#' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func buildModelRequest(evalID string, compiled *spec.Compiled, selectedFields []provider.InputField) provider.ModelRequest {
@@ -1043,6 +1475,8 @@ func classifyInvokeError(
 		return provider.FailUnavailable, statusClass
 	case egress.IsAuthError(err):
 		return provider.FailAuth, statusClass
+	case egress.IsInvalidPlacement(err):
+		return provider.FailInternal, statusClass
 	case egress.IsRedirectBlocked(err),
 		egress.IsBlockedDestination(err),
 		egress.IsSchemeNotAllowed(err),
@@ -1153,6 +1587,25 @@ func mergeNotes(existing []string, added []string) []string {
 		out = append(out, n)
 	}
 	return out
+}
+
+func hasMeasuredProviderUsage(u provider.Usage) bool {
+	if u.InputTokens < 0 || u.OutputTokens < 0 {
+		return false
+	}
+	return u.InputTokens > 0 || u.OutputTokens > 0 || u.Truncated != nil
+}
+
+func cloneProviderUsage(u provider.Usage) *provider.Usage {
+	cp := provider.Usage{
+		InputTokens:  u.InputTokens,
+		OutputTokens: u.OutputTokens,
+	}
+	if u.Truncated != nil {
+		t := *u.Truncated
+		cp.Truncated = &t
+	}
+	return &cp
 }
 
 func cloneInstance(inst Instance) Instance {

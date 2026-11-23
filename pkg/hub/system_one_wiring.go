@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
@@ -27,11 +28,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/oidckeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
-	_ "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire" // register built-in "typesafe" System One adapter
+	_ "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/geminidecisions" // register built-in "gemini_decisions" System One adapter
+	_ "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider/jevwire"         // register built-in "typesafe" System One adapter
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -196,11 +199,14 @@ func (s *Server) SystemOneProviderRegistry() *systemoneprovider.Registry {
 }
 
 // initSystemOneRuntime constructs the Hub's System One runtime using the
-// configured MaxEvalTime ceiling, store-backed InstanceSource, and
-// pkg/secret-backed CredentialSource.
+// configured MaxEvalTime ceiling, store-backed InstanceSource,
+// pkg/secret-backed API-key CredentialSource, and Google ADC token cache.
 func (s *Server) initSystemOneRuntime() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.systemOneADCCache == nil {
+		s.systemOneADCCache = newHubSystemOneADCCache(defaultSystemOneADCProvider)
+	}
 	s.rebuildSystemOneRuntimeLocked()
 }
 
@@ -209,14 +215,21 @@ func (s *Server) rebuildSystemOneRuntimeLocked() {
 	if reg == nil {
 		reg = systemoneprovider.DefaultRegistry()
 	}
+	logger := logging.Subsystem("hub.system-one")
+	if !s.systemOneExtraSecretNamesSnapshotted {
+		s.systemOneExtraSecretNames = snapshotSystemOneExtraSecretNames(s.config, reg, logger)
+		s.systemOneExtraSecretNamesSnapshotted = true
+	}
 	credSrc := &hubSystemOneCredentialSource{srv: s}
 	rt := systemoneruntime.New(
 		systemoneruntime.Config{
-			Registry:    reg,
-			Instances:   &hubSystemOneInstanceSource{srv: s},
-			Credentials: credSrc.BearerToken,
-			MaxEvalTime: resolveSystemOneMaxEvalTime(s.config),
-			Logger:      logging.Subsystem("hub.system-one"),
+			Registry:           reg,
+			Instances:          &hubSystemOneInstanceSource{srv: s},
+			Credentials:        credSrc.APIKeyToken,
+			TokenSource:        credSrc.GoogleAccessToken,
+			AllowedSecretNames: s.allowedSecretNamesFor,
+			MaxEvalTime:        resolveSystemOneMaxEvalTime(s.config),
+			Logger:             logger,
 		},
 		s.systemOneRuntimeOpts...,
 	)
@@ -241,6 +254,22 @@ func (s *Server) SystemOneRuntime() *systemoneruntime.Runtime {
 		s.rebuildSystemOneRuntimeLocked()
 	}
 	return s.systemOneRuntime
+}
+
+// SetSystemOneRuntimeOptionsForTesting replaces optional runtime construction
+// options (such as loopback TLS test seams) and rebuilds the Hub's System One
+// runtime for offline integration tests.
+//
+// For tests only; production code must never call it.
+func (s *Server) SetSystemOneRuntimeOptionsForTesting(tb interface{ Helper() }, opts ...systemoneruntime.Option) {
+	if tb == nil {
+		panic("SetSystemOneRuntimeOptionsForTesting requires a non-nil testing.TB")
+	}
+	tb.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.systemOneRuntimeOpts = slices.Clone(opts)
+	s.rebuildSystemOneRuntimeLocked()
 }
 
 // storeSystemOneInstanceToRuntime converts a persisted store record into the
@@ -343,12 +372,115 @@ type hubSystemOneCredentialSource struct {
 	srv *Server
 }
 
-// BearerToken resolves the provider API key for inst from the Hub's secret
-// backend. Missing, deleted, or rejected secrets return egress.ErrAuth
-// (reason "auth"); other backend faults return egress.ErrCredentialUnavailable
-// (reason "unavailable"). Secret values and raw backend errors are never
-// included in returned errors.
+// BearerToken dispatches credential resolution by inst.Auth.Kind:
+// "api_key" (or empty) reads from the Hub's secret backend, and
+// "google_access_token" mints/reuses from the Hub's in-memory ADC token cache.
 func (c *hubSystemOneCredentialSource) BearerToken(ctx context.Context, inst systemoneruntime.Instance) (string, error) {
+	switch inst.Auth.Kind {
+	case "", store.SystemOneAuthKindAPIKey:
+		return c.APIKeyToken(ctx, inst)
+	case store.SystemOneAuthKindGoogleAccessToken:
+		return c.GoogleAccessToken(ctx, inst)
+	default:
+		return "", egress.ErrAuth
+	}
+}
+
+// getSecretValue is the single hub-internal SecretBackend.Get call site for
+// System One provider credentials (tracked by TestSecretBackendGet_CallersAreHubInternal).
+// Only store.ScopeHub and store.ScopeProject are ever consulted; user,
+// runtime_broker, and process environment variables are never read.
+func (c *hubSystemOneCredentialSource) getSecretValue(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
+	if scope != store.ScopeHub && scope != store.ScopeProject {
+		return nil, store.ErrNotFound
+	}
+	if scope == store.ScopeProject && strings.TrimSpace(scopeID) == "" {
+		return nil, store.ErrNotFound
+	}
+	return c.srv.secretBackend.Get(ctx, name, scope, scopeID)
+}
+
+func classifySecretBackendGetError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, secret.ErrNoSecretBackend) {
+		return egress.ErrCredentialUnavailable
+	}
+	if isSystemOneSecretAuthError(err) {
+		return egress.ErrAuth
+	}
+	return egress.ErrCredentialUnavailable
+}
+
+func isDefiniteSecretNotFound(err error) bool {
+	return errors.Is(err, store.ErrNotFound) || status.Code(err) == codes.NotFound
+}
+
+func isAllowedNamedSecretType(secretType string) bool {
+	switch secretType {
+	case "", // legacy => environment
+		store.SecretTypeEnvironment,
+		store.SecretTypeVariable:
+		return true
+	default:
+		return false
+	}
+}
+
+// isHubInfrastructureSecretKey reports whether key matches any Hub-owned
+// signing, capability, OIDC, conduit, or webhook secret key (defense-in-depth
+// alongside SecretTypeInternal refusal so even a legacy empty-typed row could
+// never be referenced by a System One named secret).
+func isHubInfrastructureSecretKey(key string) bool {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return false
+	}
+	if isWebhookEndpointReservedSecretKey(trimmed) {
+		return true
+	}
+	switch strings.ToLower(trimmed) {
+	case SecretKeyAgentSigningKey,
+		SecretKeyUserSigningKey,
+		SecretKeyDownloadSigningKey,
+		SecretKeyArtifactViewKey,
+		SecretKeyAttachmentDeliveryKey,
+		SecretKeyPortViewKey,
+		SecretKeyListCursorKey,
+		oidckeys.SecretKeyOIDCSigningKey,
+		oidckeys.SecretKeyOIDCKeyset,
+		conduitGrantKeySecretName:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateNamedSecretValue(sv *secret.SecretWithValue) error {
+	if sv == nil {
+		return egress.ErrAuth
+	}
+	if !isAllowedNamedSecretType(sv.SecretType) {
+		return egress.ErrAuth
+	}
+	if !isValidSystemOneAPIKey(sv.Value) {
+		return egress.ErrAuth
+	}
+	return nil
+}
+
+// APIKeyToken resolves the provider API key for inst from the Hub's secret
+// backend—either from the instance-internal secret (systemone.instance.<id>)
+// or from a named Hub/project secret reference (PV3 Addendum F §§F2, F7).
+// Missing, deleted, wrong-type, or rejected secrets return egress.ErrAuth
+// (reason "auth"); other backend faults return egress.ErrCredentialUnavailable
+// (reason "unavailable"). Secret values, process environment variables, and raw
+// backend errors are never read or included in returned errors.
+func (c *hubSystemOneCredentialSource) APIKeyToken(ctx context.Context, inst systemoneruntime.Instance) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -356,28 +488,26 @@ func (c *hubSystemOneCredentialSource) BearerToken(ctx context.Context, inst sys
 		return "", egress.ErrAuth
 	}
 	secretName := strings.TrimSpace(inst.Auth.SecretName)
+	secScope, isNamedRef := systemoneprovider.SecretRefModeFromOptions(inst.Options)
+	if isNamedRef {
+		if c.srv != nil && !c.srv.isPinnedInstanceEndpointAllowed(inst.Adapter, inst.Endpoint) {
+			return "", egress.ErrAuth
+		}
+		return c.resolveNamedSecretToken(ctx, inst.Adapter, inst.Auth.SecretName, secScope)
+	}
 	if secretName == "" || !strings.HasPrefix(secretName, systemOneSecretPrefix) {
+		return "", egress.ErrAuth
+	}
+	if inst.ID != "" && secretName != systemOneInstanceSecretName(inst.ID) {
 		return "", egress.ErrAuth
 	}
 	if c.srv == nil || c.srv.secretBackend == nil {
 		return "", egress.ErrCredentialUnavailable
 	}
 
-	sv, err := c.srv.secretBackend.Get(ctx, secretName, store.ScopeHub, c.srv.hubID)
+	sv, err := c.getSecretValue(ctx, secretName, store.ScopeHub, c.srv.hubID)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", ctxErr
-		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return "", err
-		}
-		if errors.Is(err, secret.ErrNoSecretBackend) {
-			return "", egress.ErrCredentialUnavailable
-		}
-		if isSystemOneSecretAuthError(err) {
-			return "", egress.ErrAuth
-		}
-		return "", egress.ErrCredentialUnavailable
+		return "", classifySecretBackendGetError(ctx, err)
 	}
 	if sv == nil {
 		return "", egress.ErrAuth
@@ -389,6 +519,237 @@ func (c *hubSystemOneCredentialSource) BearerToken(ctx context.Context, inst sys
 		return "", egress.ErrAuth
 	}
 	return sv.Value, nil
+}
+
+// snapshotSystemOneExtraSecretNames validates and freezes the operator-only
+// server.hub.system_one.secret_names map once at Hub startup against reg
+// (PV3 Addendum F §F10). Entries for unregistered adapters, adapters without
+// SecretNamePolicy, or invalid/reserved/infrastructure secret names are logged
+// as warnings and ignored.
+func snapshotSystemOneExtraSecretNames(cfg ServerConfig, reg *systemoneprovider.Registry, logger *slog.Logger) map[string][]string {
+	if cfg.StartupServerSettings == nil ||
+		cfg.StartupServerSettings.Hub == nil ||
+		cfg.StartupServerSettings.Hub.SystemOne == nil ||
+		len(cfg.StartupServerSettings.Hub.SystemOne.SecretNames) == 0 {
+		return nil
+	}
+	if reg == nil {
+		reg = systemoneprovider.DefaultRegistry()
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	configured := cfg.StartupServerSettings.Hub.SystemOne.SecretNames
+	adapterKeys := make([]string, 0, len(configured))
+	for k := range configured {
+		adapterKeys = append(adapterKeys, k)
+	}
+	slices.Sort(adapterKeys)
+
+	var out map[string][]string
+	for _, rawAdapter := range adapterKeys {
+		rawNames := configured[rawAdapter]
+		adapterID := strings.TrimSpace(rawAdapter)
+		adapter, ok := reg.Lookup(adapterID)
+		if !ok {
+			logger.Warn("ignoring server.hub.system_one.secret_names entry for unregistered adapter",
+				"setting", config.SystemOneSecretNamesKey,
+				"adapter", rawAdapter,
+			)
+			continue
+		}
+		base := systemoneprovider.AllowedSecretNamesFor(adapter)
+		if len(base) == 0 {
+			logger.Warn("ignoring server.hub.system_one.secret_names entry: adapter does not support named secret references",
+				"setting", config.SystemOneSecretNamesKey,
+				"adapter", adapter.Name(),
+			)
+			continue
+		}
+		var valid []string
+		for _, extra := range rawNames {
+			if !systemoneprovider.IsValidSecretRefName(extra) ||
+				isSystemOneReservedSecretKey(extra) ||
+				isHubInfrastructureSecretKey(extra) {
+				logger.Warn("ignoring invalid or reserved secret name in server.hub.system_one.secret_names",
+					"setting", config.SystemOneSecretNamesKey,
+					"adapter", adapter.Name(),
+					"secret_name", extra,
+				)
+				continue
+			}
+			if !slices.Contains(base, extra) && !slices.Contains(valid, extra) {
+				valid = append(valid, extra)
+			}
+		}
+		if len(valid) > 0 {
+			if out == nil {
+				out = make(map[string][]string)
+			}
+			out[adapter.Name()] = append(out[adapter.Name()], valid...)
+		}
+	}
+	return out
+}
+
+func (s *Server) extraSecretNamesForAdapter(adapterName string) []string {
+	if s == nil || adapterName == "" {
+		return nil
+	}
+	s.mu.RLock()
+	snapDone := s.systemOneExtraSecretNamesSnapshotted
+	var extras []string
+	if snapDone {
+		extras = s.systemOneExtraSecretNames[adapterName]
+	}
+	s.mu.RUnlock()
+	if snapDone {
+		return extras
+	}
+	s.mu.Lock()
+	if !s.systemOneExtraSecretNamesSnapshotted {
+		reg := s.systemOneRegistry
+		if reg == nil {
+			reg = systemoneprovider.DefaultRegistry()
+		}
+		s.systemOneExtraSecretNames = snapshotSystemOneExtraSecretNames(s.config, reg, logging.Subsystem("hub.system-one"))
+		s.systemOneExtraSecretNamesSnapshotted = true
+	}
+	extras = s.systemOneExtraSecretNames[adapterName]
+	s.mu.Unlock()
+	return extras
+}
+
+// allowedSecretNamesFor is the single Hub extension point returning the exact,
+// case-sensitive named-secret keys permitted for adapter: the union of
+// provider.SecretNamePolicy and the startup-snapshotted operator extras in
+// server.hub.system_one.secret_names for that adapter (PV3 Addendum F §F10).
+// Adapters without SecretNamePolicy always return nil (failing closed).
+func (s *Server) allowedSecretNamesFor(adapter systemoneprovider.Adapter) []string {
+	base := systemoneprovider.AllowedSecretNamesFor(adapter)
+	if len(base) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(base))
+	for _, name := range base {
+		if isSystemOneReservedSecretKey(name) || isHubInfrastructureSecretKey(name) {
+			continue
+		}
+		out = append(out, name)
+	}
+	for _, extra := range s.extraSecretNamesForAdapter(adapter.Name()) {
+		if !systemoneprovider.IsValidSecretRefName(extra) ||
+			isSystemOneReservedSecretKey(extra) ||
+			isHubInfrastructureSecretKey(extra) {
+			continue
+		}
+		if !slices.Contains(out, extra) {
+			out = append(out, extra)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (c *hubSystemOneCredentialSource) resolveNamedSecretToken(ctx context.Context, adapterName, secretName, secScope string) (string, error) {
+	if !systemoneprovider.IsValidSecretRefName(secretName) ||
+		isSystemOneReservedSecretKey(secretName) ||
+		isHubInfrastructureSecretKey(secretName) {
+		return "", egress.ErrAuth
+	}
+	if !systemoneprovider.IsValidSecretRefScope(secScope) {
+		return "", egress.ErrAuth
+	}
+	if c.srv == nil {
+		return "", egress.ErrAuth
+	}
+	adapter, ok := c.srv.SystemOneProviderRegistry().Lookup(strings.TrimSpace(adapterName))
+	if !ok || !slices.Contains(c.srv.allowedSecretNamesFor(adapter), secretName) {
+		return "", egress.ErrAuth
+	}
+	if c.srv.secretBackend == nil {
+		return "", egress.ErrCredentialUnavailable
+	}
+
+	switch secScope {
+	case systemoneprovider.SecretScopeHub:
+		sv, err := c.getSecretValue(ctx, secretName, store.ScopeHub, c.srv.hubID)
+		if err != nil {
+			return "", classifySecretBackendGetError(ctx, err)
+		}
+		if err := validateNamedSecretValue(sv); err != nil {
+			return "", err
+		}
+		systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeHub, sv.Version)
+		return sv.Value, nil
+
+	case systemoneprovider.SecretScopeProject:
+		evalProj := strings.TrimSpace(systemoneruntime.EvalProjectIDFromContext(ctx))
+		if evalProj == "" {
+			return "", egress.ErrAuth
+		}
+		sv, err := c.getSecretValue(ctx, secretName, store.ScopeProject, evalProj)
+		if err != nil {
+			return "", classifySecretBackendGetError(ctx, err)
+		}
+		if err := validateNamedSecretValue(sv); err != nil {
+			return "", err
+		}
+		systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeProject, sv.Version)
+		return sv.Value, nil
+
+	case systemoneprovider.SecretScopeProjectOrHub:
+		evalProj := strings.TrimSpace(systemoneruntime.EvalProjectIDFromContext(ctx))
+		if evalProj == "" {
+			return "", egress.ErrAuth
+		}
+		svProj, errProj := c.getSecretValue(ctx, secretName, store.ScopeProject, evalProj)
+		if errProj == nil {
+			if err := validateNamedSecretValue(svProj); err != nil {
+				return "", err
+			}
+			systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeProject, svProj.Version)
+			return svProj.Value, nil
+		}
+		if !isDefiniteSecretNotFound(errProj) {
+			return "", classifySecretBackendGetError(ctx, errProj)
+		}
+		svHub, errHub := c.getSecretValue(ctx, secretName, store.ScopeHub, c.srv.hubID)
+		if errHub != nil {
+			return "", classifySecretBackendGetError(ctx, errHub)
+		}
+		if err := validateNamedSecretValue(svHub); err != nil {
+			return "", err
+		}
+		systemoneruntime.RecordSecretRefProvenance(ctx, secretName, systemoneprovider.SecretScopeHub, svHub.Version)
+		return svHub.Value, nil
+
+	default:
+		return "", egress.ErrAuth
+	}
+}
+
+// isPinnedInstanceEndpointAllowed verifies that an instance using a shared
+// named secret or Hub-host ADC credentials targets the adapter's canonical
+// default HTTPS endpoint (PV3 Addendum F §F9). Bare unit-test instances that
+// omit both Adapter and Endpoint are permitted; any non-empty Endpoint or
+// named Adapter must satisfy MatchesAdapterDefaultEndpoint.
+func (s *Server) isPinnedInstanceEndpointAllowed(adapterName, endpoint string) bool {
+	trimmedAdapter := strings.TrimSpace(adapterName)
+	if trimmedAdapter == "" {
+		return strings.TrimSpace(endpoint) == ""
+	}
+	if s == nil {
+		return false
+	}
+	adapter, ok := s.SystemOneProviderRegistry().Lookup(trimmedAdapter)
+	if !ok {
+		return false
+	}
+	_, pinnedOK := systemoneprovider.MatchesAdapterDefaultEndpoint(adapter, endpoint)
+	return pinnedOK
 }
 
 // isSystemOneSecretAuthError reports whether err from SecretBackend.Get

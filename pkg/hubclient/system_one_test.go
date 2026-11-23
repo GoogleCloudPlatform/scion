@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
@@ -63,7 +62,7 @@ func TestSystemOne_CreateListGetDelete(t *testing.T) {
 				Adapter:  req.Adapter,
 				Model:    req.Model,
 				Endpoint: "https://api.typesafe.ai",
-				Auth: store.SystemOneInstanceAuth{
+				Auth: SystemOneInstanceAuthDTO{
 					Kind:       "api_key",
 					SecretName: "systemone.instance.inst-123",
 				},
@@ -87,7 +86,7 @@ func TestSystemOne_CreateListGetDelete(t *testing.T) {
 						Adapter:  q.Get("adapter"),
 						Model:    "jev-1.14.0",
 						Endpoint: "https://api.typesafe.ai",
-						Auth:     store.SystemOneInstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-123"},
+						Auth:     SystemOneInstanceAuthDTO{Kind: "api_key", SecretName: "systemone.instance.inst-123"},
 						Enabled:  q.Get("enabled") != "false",
 						Revision: 1,
 					},
@@ -109,7 +108,7 @@ func TestSystemOne_CreateListGetDelete(t *testing.T) {
 				Adapter:   "typesafe",
 				Model:     "jev-1.14.0",
 				Endpoint:  "https://api.typesafe.ai",
-				Auth:      store.SystemOneInstanceAuth{Kind: "api_key", SecretName: "systemone.instance.inst-123"},
+				Auth:      SystemOneInstanceAuthDTO{Kind: "api_key", SecretName: "systemone.instance.inst-123"},
 				Enabled:   true,
 				Revision:  2,
 				CreatedAt: now,

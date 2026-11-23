@@ -108,3 +108,38 @@ func carryOverBrokerInstances(raw map[string]interface{}, stored interface{}, pr
 var nullPreservedBrokerPaths = [][]string{
 	{"server", "broker", "instances"},
 }
+
+// storedSystemOneSecretNames returns the raw server.hub.system_one.secret_names
+// value of the settings map (nil when absent).
+func storedSystemOneSecretNames(raw map[string]interface{}) interface{} {
+	server, _ := raw["server"].(map[string]interface{})
+	hubMap, _ := server["hub"].(map[string]interface{})
+	so, _ := hubMap["system_one"].(map[string]interface{})
+	return so["secret_names"]
+}
+
+// carryOverSystemOneSecretNames restores a stored
+// server.hub.system_one.secret_names map after applySettingsUpdatesFromBody so
+// a file-mode PUT clearing server, server.hub, or server.hub.system_one with
+// null cannot erase the operator's startup-only secret-name policy.
+func carryOverSystemOneSecretNames(raw map[string]interface{}, stored interface{}) {
+	if stored == nil {
+		return
+	}
+	server, _ := raw["server"].(map[string]interface{})
+	if server == nil {
+		server = make(map[string]interface{})
+		raw["server"] = server
+	}
+	hubMap, _ := server["hub"].(map[string]interface{})
+	if hubMap == nil {
+		hubMap = make(map[string]interface{})
+		server["hub"] = hubMap
+	}
+	so, _ := hubMap["system_one"].(map[string]interface{})
+	if so == nil {
+		so = make(map[string]interface{})
+		hubMap["system_one"] = so
+	}
+	so["secret_names"] = stored
+}

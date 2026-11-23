@@ -22,12 +22,14 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/spf13/cobra"
 )
 
 type adminSystemOneProbeFlags struct {
 	models   bool
+	project  string
 	specFile string
 	text     string
 	textFile string
@@ -46,16 +48,29 @@ instance, either listing available provider models (--models) or evaluating an
 inline System One spec against synthetic probe text (--spec-file with --text or
 --text-file).
 
+Model listing (--models) requires an adapter that implements model discovery
+(such as typesafe); adapters without model listing (such as gemini_decisions)
+return an "adapter does not support model listing" validation error.
+
+When probing a project- or project_or_hub-scoped named-secret instance with
+--project, the caller must hold both project.read and project.secret_read on
+that project (even when project_or_hub would fall back to the Hub secret).
+
 Exits 0 when the probe completes with class "success", and non-zero when the
 evaluated outcome class is not "success" (for example "failed" or "uncertain")
 or the request fails. The probe result is still written to stdout before exiting.
 
 Examples:
-  # List models reported by the provider instance
+  # List models reported by a TypeSafe provider instance
   scion admin system-one instance probe typesafe-main --models
 
-  # Evaluate an inline spec (JSON or YAML) against synthetic text
+  # Evaluate an inline spec (JSON or YAML) against synthetic text on TypeSafe
   scion admin system-one instance probe typesafe-main \
+    --spec-file ./probe-spec.json \
+    --text "Synthetic test sample."
+
+  # Evaluate an inline spec against synthetic text on Gemini Decision 1
+  scion admin system-one instance probe gemini-main \
     --spec-file ./probe-spec.json \
     --text "Synthetic test sample."`,
 	Args: cobra.ExactArgs(1),
@@ -64,7 +79,8 @@ Examples:
 
 func init() {
 	f := adminSystemOneInstanceProbeCmd.Flags()
-	f.BoolVar(&adminSystemOneProbeOpts.models, "models", false, "Query models supported by the provider instance")
+	f.BoolVar(&adminSystemOneProbeOpts.models, "models", false, "Query models supported by the provider instance (requires adapter model-listing support, e.g. typesafe)")
+	f.StringVar(&adminSystemOneProbeOpts.project, "project", "", "Optional project ID or slug providing evaluation project context for project- or project_or_hub-scoped named secrets (requires project.read and project.secret_read on that project)")
 	f.StringVar(&adminSystemOneProbeOpts.specFile, "spec-file", "", "Path to inline System One spec or rule envelope (JSON or YAML, or '-' for stdin)")
 	f.StringVar(&adminSystemOneProbeOpts.text, "text", "", "Synthetic text bound to probe.text")
 	f.StringVar(&adminSystemOneProbeOpts.textFile, "text-file", "", "Path to file containing synthetic text bound to probe.text")
@@ -132,11 +148,16 @@ func buildAdminSystemOneProbeRequest(cmd *cobra.Command, opts adminSystemOneProb
 	kind := strings.TrimSpace(opts.kind)
 	ruleID := strings.TrimSpace(opts.ruleID)
 
+	projectRef := strings.TrimSpace(opts.project)
+
 	if opts.models {
 		if specFile != "" || textChanged || textFile != "" || kind != "" || ruleID != "" || len(opts.params) > 0 {
 			return nil, errors.New("--models cannot be combined with --spec-file, --text, --text-file, --kind, --rule-id, or --param")
 		}
-		return &hubclient.ProbeSystemOneInstanceRequest{Models: true}, nil
+		return &hubclient.ProbeSystemOneInstanceRequest{
+			Models:  true,
+			Project: projectRef,
+		}, nil
 	}
 
 	if specFile == "" {
@@ -187,11 +208,12 @@ func buildAdminSystemOneProbeRequest(cmd *cobra.Command, opts adminSystemOneProb
 	}
 
 	return &hubclient.ProbeSystemOneInstanceRequest{
-		Kind:   kind,
-		RuleID: ruleID,
-		Params: params,
-		Spec:   specRaw,
-		Probe:  &hubclient.ProbeSystemOneInput{Text: probeText},
+		Project: projectRef,
+		Kind:    kind,
+		RuleID:  ruleID,
+		Params:  params,
+		Spec:    specRaw,
+		Probe:   &hubclient.ProbeSystemOneInput{Text: probeText},
 	}, nil
 }
 
@@ -234,8 +256,63 @@ func renderAdminSystemOneEvaluationHuman(out io.Writer, eval *systemoneruntime.E
 	}
 	if eval.ResolvedModel != "" {
 		_, _ = fmt.Fprintf(out, "  Resolved Model:       %s\n", eval.ResolvedModel)
+	} else if eval.HasModelUnreported() {
+		_, _ = fmt.Fprintf(out, "  Resolved Model:       unreported (%s)\n", provider.NoteModelUnreported)
 	}
 	_, _ = fmt.Fprintf(out, "  Model Alias Reported: %t\n", eval.HasModelAliasReported())
+	if eval.Auth != nil {
+		if eval.Auth.AuthKind != "" {
+			_, _ = fmt.Fprintf(out, "  Auth Kind:            %s\n", eval.Auth.AuthKind)
+		}
+		if eval.Auth.SecretRef != nil && eval.Auth.SecretRef.Name != "" {
+			switch {
+			case eval.Auth.SecretRef.Scope != "" && eval.Auth.SecretRef.ScopeUsed != "":
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s (scope: %s, scope_used: %s)\n",
+					eval.Auth.SecretRef.Name, eval.Auth.SecretRef.Scope, eval.Auth.SecretRef.ScopeUsed)
+			case eval.Auth.SecretRef.ScopeUsed != "":
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s (scope_used: %s)\n",
+					eval.Auth.SecretRef.Name, eval.Auth.SecretRef.ScopeUsed)
+			case eval.Auth.SecretRef.Scope != "":
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s (scope: %s)\n",
+					eval.Auth.SecretRef.Name, eval.Auth.SecretRef.Scope)
+			default:
+				_, _ = fmt.Fprintf(out, "  Secret Ref:           %s\n", eval.Auth.SecretRef.Name)
+			}
+		}
+		if eval.Auth.SecretVersion > 0 {
+			_, _ = fmt.Fprintf(out, "  Secret Version:       %d\n", eval.Auth.SecretVersion)
+		}
+		if len(eval.Auth.Scopes) > 0 {
+			_, _ = fmt.Fprintf(out, "  Auth Scopes:          %s\n", strings.Join(eval.Auth.Scopes, ", "))
+		}
+		if eval.Auth.QuotaProject != "" {
+			_, _ = fmt.Fprintf(out, "  Quota Project:        %s\n", eval.Auth.QuotaProject)
+		} else if eval.Auth.AuthKind == string(provider.AuthKindGoogleAccessToken) {
+			_, _ = fmt.Fprintf(out, "  Quota Project:        %s\n", provider.FormatQuotaProjectProvenance(""))
+		}
+		if eval.Auth.CredentialType != "" {
+			_, _ = fmt.Fprintf(out, "  Credential Type:      %s\n", eval.Auth.CredentialType)
+		}
+		if eval.Auth.ServiceAccountEmail != "" {
+			_, _ = fmt.Fprintf(out, "  Service Account:      %s\n", eval.Auth.ServiceAccountEmail)
+		}
+		if eval.Auth.ReasonHint != "" {
+			_, _ = fmt.Fprintf(out, "  Auth Hint:            %s\n", eval.Auth.ReasonHint)
+		}
+	}
+	if eval.Usage != nil && !eval.HasUsageUnreported() {
+		if eval.Usage.Truncated != nil {
+			_, _ = fmt.Fprintf(out, "  Usage:                input_tokens=%d, output_tokens=%d, truncated=%t\n",
+				eval.Usage.InputTokens, eval.Usage.OutputTokens, *eval.Usage.Truncated)
+		} else {
+			_, _ = fmt.Fprintf(out, "  Usage:                input_tokens=%d, output_tokens=%d\n",
+				eval.Usage.InputTokens, eval.Usage.OutputTokens)
+		}
+	} else if eval.HasUsageUnreported() {
+		_, _ = fmt.Fprintf(out, "  Usage:                usage unavailable (%s)\n", provider.NoteUsageUnreported)
+	} else {
+		_, _ = fmt.Fprintf(out, "  Usage:                usage unavailable\n")
+	}
 	if len(eval.Notes) > 0 {
 		_, _ = fmt.Fprintf(out, "  Notes:                %s\n", strings.Join(eval.Notes, ", "))
 	}
@@ -297,6 +374,9 @@ func renderAdminSystemOneEvaluationHuman(out io.Writer, eval *systemoneruntime.E
 					parts = append(parts, fmt.Sprintf("%s=%.4f", name, ans.NativeMetrics[name].Value))
 				}
 				_, _ = fmt.Fprintf(out, "      native_metrics: %s\n", strings.Join(parts, ", "))
+			}
+			if len(ans.Notes) > 0 {
+				_, _ = fmt.Fprintf(out, "      notes: %s\n", strings.Join(ans.Notes, ", "))
 			}
 		}
 	}

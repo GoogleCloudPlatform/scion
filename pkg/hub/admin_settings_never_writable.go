@@ -60,6 +60,11 @@ var neverAPIWritableSettingsKeys = []string{
 	// whose X-Forwarded-Proto is trusted, so its trust set must not grow
 	// through the API.
 	config.TrustedProxiesKey,
+	// Operator-only extra named-secret keys per System One provider adapter
+	// (ptone/scion#8414, PV3 Addendum F §F10): read once at startup so
+	// hub.config.update cannot widen which Hub/project secrets an instance may
+	// reference.
+	config.SystemOneSecretNamesKey,
 }
 
 // withoutNeverAPIWritableKeys returns keys without every never-API-writable

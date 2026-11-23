@@ -1,0 +1,320 @@
+{
+  "fixture_id": "G3",
+  "description": "Gemini Decision 1 closed-choice encoding and decoding: verbatim documented department example summing to 0.999 in float64 (passes with G0 1e-12 numerical slack without renormalization), top-tie handling, abstain option preservation, and formula deviation note.",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/gemini-api/docs/decisions-api (documented department choice example: support 0.99, billing 0.004, sales 0.003, other 0.002; alphabetical sorting and tie-breaking)",
+      "https://ai.google.dev/api/decisions (v1beta ChoiceQuestion and ChoiceAnswer schema)"
+    ],
+    "unverified_items": ["U-G3", "U-G5"]
+  },
+  "invoke_cases": [
+    {
+      "name": "documented_department_choice_sum_0999_passes_without_renormalization",
+      "note": "Documented Gemini choice example verbatim: {0.99, 0.004, 0.003, 0.002} has decimal sum 0.999 and binary64 |sum-1| = 0.0010000000000000009; passes ValidateDistribution and metrics.Compute via G0 1e-12 boundary slack with zero renormalization.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "gemini-decision-1",
+        "input": "{\"probe.text\":\"My laptop won't turn on after the latest firmware update.\"}",
+        "questions": {
+          "department": {
+            "type": "choice",
+            "instructions": "Which department should handle this customer request?",
+            "criteria": {
+              "support": "Technical troubleshooting and product repairs",
+              "billing": "Invoices, charges, and payment methods",
+              "sales": "New purchases, upgrades, and quotes",
+              "other": "General questions outside support, billing, and sales"
+            }
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Which department should handle this customer request?",
+              "options": [
+                {
+                  "id": "support",
+                  "description": "Technical troubleshooting and product repairs"
+                },
+                {
+                  "id": "billing",
+                  "description": "Invoices, charges, and payment methods"
+                },
+                {
+                  "id": "sales",
+                  "description": "New purchases, upgrades, and quotes"
+                },
+                {
+                  "id": "other",
+                  "description": "General questions outside support, billing, and sales"
+                }
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "My laptop won't turn on after the latest firmware update.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"probabilities\":{\"billing\":0.004,\"other\":0.002,\"sales\":0.003,\"support\":0.99},\"confidence\":0.99}},\"usage\":{\"total_input_tokens\":64,\"total_output_tokens\":0,\"total_tokens\":64}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 64,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "department": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "support",
+            "distribution": {
+              "billing": 0.004,
+              "other": 0.002,
+              "sales": 0.003,
+              "support": 0.99
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.99,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "portable_metrics": {
+              "p_top": 0.99,
+              "margin": 0.986,
+              "norm_entropy": 0.04464587252897963
+            },
+            "notes": ["options_sorted_by_provider"]
+          }
+        }
+      }
+    },
+    {
+      "name": "choice_top_tie_alphabetically_first_key",
+      "note": "Gemini sorts option keys alphabetically and breaks exact ties to the alphabetically first key ('billing'); IsTie yields Tied=true and Choice=nil for runtime Uncertain(tie).",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Which department should handle this customer request?",
+              "options": [
+                {"id": "support", "description": "Technical support"},
+                {"id": "billing", "description": "Billing questions"},
+                {"id": "sales", "description": "Sales inquiries"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Need pricing details on my current plan renewal.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"billing\",\"probabilities\":{\"billing\":0.45,\"sales\":0.45,\"support\":0.10},\"confidence\":0.45}},\"usage\":{\"total_input_tokens\":52,\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 52,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "department": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": true,
+            "distribution": {
+              "billing": 0.45,
+              "sales": 0.45,
+              "support": 0.1
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.45,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["options_sorted_by_provider"]
+          }
+        }
+      }
+    },
+    {
+      "name": "choice_abstain_option_argmax_decoded_for_runtime",
+      "note": "Portable abstain:true option is sent as an ordinary option on the wire and returned as Choice when argmax.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Which department should handle this customer request?",
+              "options": [
+                {"id": "billing", "description": "Billing questions"},
+                {"id": "support", "description": "Technical support"},
+                {"id": "cannot_tell", "description": "Insufficient detail to decide", "abstain": true}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Hi!",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"cannot_tell\",\"probabilities\":{\"billing\":0.10,\"cannot_tell\":0.80,\"support\":0.10},\"confidence\":0.80}},\"usage\":{\"total_input_tokens\":45,\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 45,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "department": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "cannot_tell",
+            "distribution": {
+              "billing": 0.1,
+              "cannot_tell": 0.8,
+              "support": 0.1
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.8,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["options_sorted_by_provider"]
+          }
+        }
+      }
+    },
+    {
+      "name": "choice_confidence_formula_deviation_noted_not_rejected",
+      "note": "Synthetic from PV3 brief §5.3: |confidence - p_max| > 1e-3 adds confidence_formula_deviation without failing validation.",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "department",
+              "type": "choice",
+              "instructions": "Which department should handle this customer request?",
+              "options": [
+                {"id": "billing", "description": "Billing questions"},
+                {"id": "support", "description": "Technical support"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic confidence deviation check.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"answers\":{\"department\":{\"type\":\"choice\",\"choice\":\"support\",\"probabilities\":{\"billing\":0.15,\"support\":0.85},\"confidence\":0.60}},\"usage\":{\"total_input_tokens\":40,\"total_output_tokens\":0}}"
+      },
+      "expect_result": {
+        "resolved_model": "",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 40,
+          "output_tokens": 0
+        },
+        "notes": ["model_unreported"],
+        "answers": {
+          "department": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "support",
+            "distribution": {
+              "billing": 0.15,
+              "support": 0.85
+            },
+            "native_metrics": {
+              "gemini.confidence": {
+                "value": 0.6,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["options_sorted_by_provider", "confidence_formula_deviation"]
+          }
+        }
+      }
+    }
+  ]
+}

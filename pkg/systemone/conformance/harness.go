@@ -157,6 +157,10 @@ type RecordedRequest struct {
 // SuiteConfig configures wire-family invariants checked across every case in a
 // conformance run.
 type SuiteConfig struct {
+	// Auth configures the transport credential placement applied by
+	// pkg/systemone/egress and verified on every recorded outbound request.
+	// Zero value defaults to egress.BearerPlacement (Authorization: Bearer <canary>).
+	Auth egress.Placement
 	// ForbiddenHeaders lists HTTP header names that the adapter must never set
 	// on any outbound request (for example TypeSafe danger-zone headers).
 	ForbiddenHeaders []string
@@ -166,6 +170,21 @@ type SuiteConfig struct {
 	// DataChannelInspector optionally verifies that only the referenced input
 	// field names and requested question IDs appear in the wire request JSON.
 	DataChannelInspector func(t testing.TB, body []byte, expectedInputNames []string, expectedQuestionIDs []string)
+}
+
+func effectiveSuiteAuth(p egress.Placement) egress.Placement {
+	if p.Kind == "" && p.HeaderName == "" {
+		return egress.BearerPlacement
+	}
+	return p
+}
+
+func newSuiteTransport(srv *httptest.Server, cfg SuiteConfig) provider.Transport {
+	return egress.NewClient(
+		egress.StaticBearer(defaultCanaryBearer),
+		egress.WithCredentialPlacement(effectiveSuiteAuth(cfg.Auth)),
+		egress.WithLoopbackServerForTesting(srv.URL, srv.Client()),
+	)
 }
 
 // LoadBundle reads and parses a synthetic-from-docs FixtureBundle JSON file and
@@ -242,10 +261,7 @@ func runInvokeCase(t testing.TB, adapter provider.Adapter, tc InvokeCase, cfg Su
 	inst := instBase
 	inst.Endpoint = srv.URL
 
-	transport := egress.NewClient(
-		egress.StaticBearer(defaultCanaryBearer),
-		egress.WithLoopbackServerForTesting(srv.URL, srv.Client()),
-	)
+	transport := newSuiteTransport(srv, cfg)
 
 	res, err := adapter.Invoke(context.Background(), transport, inst, tc.Request)
 	reqs := recorded()
@@ -310,10 +326,7 @@ func runModelListCase(t testing.TB, adapter provider.Adapter, mc ModelListCase, 
 		Endpoint: srv.URL,
 		Options:  mc.InstanceOptions,
 	}
-	transport := egress.NewClient(
-		egress.StaticBearer(defaultCanaryBearer),
-		egress.WithLoopbackServerForTesting(srv.URL, srv.Client()),
-	)
+	transport := newSuiteTransport(srv, cfg)
 
 	models, err := lister.ListModels(context.Background(), transport, inst)
 	reqs := recorded()
@@ -338,7 +351,10 @@ func runModelListCase(t testing.TB, adapter provider.Adapter, mc ModelListCase, 
 // RunCapabilitiesCheck verifies adapter metadata, SideEffectFree registration
 // gate, namespaced native metric declarations, and portable spec compatibility
 // (provider-design §5.2, §12 AC-10).
-func RunCapabilitiesCheck(t testing.TB, adapter provider.Adapter, inst provider.InstanceView) {
+//
+// Native metrics must be namespaced under adapter.Name() or one of the
+// explicitly declaredNamespaces (for example "gemini" for "gemini_decisions").
+func RunCapabilitiesCheck(t testing.TB, adapter provider.Adapter, inst provider.InstanceView, declaredNamespaces ...string) {
 	t.Helper()
 	assert.NotEmpty(t, adapter.Name())
 	assert.NotEmpty(t, adapter.Version())
@@ -349,12 +365,11 @@ func RunCapabilitiesCheck(t testing.TB, adapter provider.Adapter, inst provider.
 	assert.Greater(t, caps.MaxQuestionsPerRequest, 0)
 	assert.Greater(t, caps.MaxInputTokens, 0)
 
-	prefix := adapter.Name() + "."
 	for _, nm := range caps.NativeMetrics {
 		assert.False(t, metrics.IsPortableMetric(nm.Name),
 			"native metric %q must never shadow a portable metric", nm.Name)
-		assert.True(t, strings.HasPrefix(nm.Name, prefix),
-			"native metric %q must be namespaced under %q", nm.Name, prefix)
+		assert.True(t, hasValidAdapterMetricNamespace(adapter.Name(), declaredNamespaces, nm.Name),
+			"native metric %q must be namespaced under adapter %q (or explicitly declared namespace %v)", nm.Name, adapter.Name(), declaredNamespaces)
 		assert.NotEmpty(t, nm.Unit)
 		assert.NotEmpty(t, nm.Source)
 	}
@@ -399,10 +414,7 @@ func RunUntrustedInputIsolationCheck(
 	callInst := inst
 	callInst.Endpoint = srv.URL
 
-	transport := egress.NewClient(
-		egress.StaticBearer(defaultCanaryBearer),
-		egress.WithLoopbackServerForTesting(srv.URL, srv.Client()),
-	)
+	transport := newSuiteTransport(srv, cfg)
 
 	req := provider.ModelRequest{
 		Rule: rule,
@@ -501,10 +513,60 @@ func startMockServer(t testing.TB, mock MockHTTPResponse) (*httptest.Server, fun
 	}
 }
 
+func hasValidAdapterMetricNamespace(adapterName string, declaredNamespaces []string, metricName string) bool {
+	ns, leaf, ok := strings.Cut(metricName, ".")
+	if !ok || ns == "" || leaf == "" {
+		return false
+	}
+	if ns == adapterName {
+		return true
+	}
+	for _, declared := range declaredNamespaces {
+		if declared != "" && ns == declared {
+			return true
+		}
+	}
+	return false
+}
+
+func assertSecretOnlyInHeader(t testing.TB, hdrs http.Header, allowedHeader, secret string) {
+	t.Helper()
+	for name, vals := range hdrs {
+		if allowedHeader != "" && strings.EqualFold(name, allowedHeader) {
+			continue
+		}
+		for _, v := range vals {
+			assert.NotContains(t, v, secret,
+				"credential leaked into unexpected header %q", name)
+		}
+	}
+}
+
 func assertCommonRequestGuards(t testing.TB, rec RecordedRequest, method string, cfg SuiteConfig) {
 	t.Helper()
-	assert.Equal(t, "Bearer "+defaultCanaryBearer, rec.Headers.Get("Authorization"),
-		"key must appear in Authorization header via egress RoundTripper")
+	auth := effectiveSuiteAuth(cfg.Auth)
+	switch auth.Kind {
+	case provider.AuthKindBearer:
+		assert.Equal(t, "Bearer "+defaultCanaryBearer, rec.Headers.Get("Authorization"),
+			"key must appear in Authorization header via egress RoundTripper")
+		assertSecretOnlyInHeader(t, rec.Headers, "Authorization", defaultCanaryBearer)
+	case provider.AuthKindHeader:
+		require.NotEmpty(t, auth.HeaderName, "SuiteConfig.Auth header placement requires HeaderName")
+		assert.Empty(t, rec.Headers.Get("Authorization"),
+			"Authorization header must never be sent with header credential placement")
+		assert.Equal(t, defaultCanaryBearer, rec.Headers.Get(auth.HeaderName),
+			"key must appear in %s header via egress RoundTripper", auth.HeaderName)
+		assertSecretOnlyInHeader(t, rec.Headers, auth.HeaderName, defaultCanaryBearer)
+	case provider.AuthKindNone:
+		assert.Empty(t, rec.Headers.Get("Authorization"),
+			"Authorization header must not be sent with none credential placement")
+		assertSecretOnlyInHeader(t, rec.Headers, "", defaultCanaryBearer)
+	default:
+		t.Fatalf("unsupported SuiteConfig.Auth kind %q", auth.Kind)
+	}
+	assert.Empty(t, rec.Query, "outbound request must not carry a URL query string")
+	assert.NotContains(t, rec.Path, defaultCanaryBearer,
+		"credential must never appear in outbound request path (AC-2)")
 	assert.NotContains(t, string(rec.Body), defaultCanaryBearer,
 		"credential must never appear in outbound request body (AC-2)")
 	assert.Empty(t, rec.Headers.Get("Content-Encoding"),
@@ -537,7 +599,7 @@ func assertExpectedError(t testing.TB, err error, want ExpectedError) {
 	t.Helper()
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), defaultCanaryBearer,
-		"bearer credential must never appear in errors")
+		"credential must never appear in errors")
 
 	if want.EgressSentinel != "" {
 		if want.ErrorBodyCanary != "" {
@@ -560,6 +622,9 @@ func assertExpectedError(t testing.TB, err error, want ExpectedError) {
 		case "invalid_endpoint":
 			assert.True(t, egress.IsInvalidEndpoint(err),
 				"expected egress invalid_endpoint sentinel pass-through, got %T: %v", err, err)
+		case "invalid_placement":
+			assert.True(t, egress.IsInvalidPlacement(err),
+				"expected egress invalid_placement sentinel pass-through, got %T: %v", err, err)
 		case "auth":
 			assert.True(t, egress.IsAuthError(err),
 				"expected egress auth sentinel pass-through, got %T: %v", err, err)

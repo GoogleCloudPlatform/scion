@@ -3126,9 +3126,12 @@ type Server struct {
 
 	// System One runtime and optional test overrides (system_one_wiring.go;
 	// gated on experiments.SystemOne). Guarded by mu.
-	systemOneRuntime     *systemoneruntime.Runtime
-	systemOneRegistry    *systemoneprovider.Registry
-	systemOneRuntimeOpts []systemoneruntime.Option
+	systemOneRuntime                     *systemoneruntime.Runtime
+	systemOneRegistry                    *systemoneprovider.Registry
+	systemOneRuntimeOpts                 []systemoneruntime.Option
+	systemOneADCCache                    *hubSystemOneADCCache
+	systemOneExtraSecretNames            map[string][]string
+	systemOneExtraSecretNamesSnapshotted bool
 
 	// Shared process-wide rule engine and CEL dialect (rule_engine.go; Stage 1 §7.0).
 	rules        *ruleengine.Engine

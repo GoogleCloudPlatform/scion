@@ -1922,6 +1922,17 @@
               "description": "Wall-clock budget for evaluating System One rules on a single message (e.g. '3s'; default '3s', must be > 0 and <= '30s').",
               "x-env-var": "SCION_SERVER_HUB_SYSTEMONE_MAXEVALTIME",
               "x-since": "1"
+            },
+            "secret_names": {
+              "type": "object",
+              "description": "Startup-only operator map of System One adapter ID to extra permitted named-secret keys (e.g. {\"gemini_decisions\": [\"MY_GEMINI_KEY\"]}). Layer-0; refused by the server-config API in every mode; changes require a Hub restart.",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "x-since": "1"
             }
           }
         },

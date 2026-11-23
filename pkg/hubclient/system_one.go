@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
@@ -65,15 +64,24 @@ type SystemOneInstanceLimitsDTO struct {
 	CallTimeout    string  `json:"callTimeout,omitempty"`
 }
 
+// SystemOneSecretRefDTO is the credential-free JSON wire representation of a
+// named Hub/project secret reference on a System One provider instance
+// (PV3 Addendum F §§F2, F7).
+type SystemOneSecretRefDTO struct {
+	Name  string `json:"name"`
+	Scope string `json:"scope,omitempty"`
+}
+
 // CreateSystemOneInstanceAuthRequest carries credential settings for creating a
 // System One provider instance. APIKey is write-only: it is stored as a
 // hub-scoped internal secret and never returned in any response or log.
 type CreateSystemOneInstanceAuthRequest struct {
-	Kind       string   `json:"kind,omitempty"`
-	APIKey     string   `json:"apiKey,omitempty"`
-	HeaderName string   `json:"headerName,omitempty"`
-	Scopes     []string `json:"scopes,omitempty"`
-	Audience   string   `json:"audience,omitempty"`
+	Kind       string                 `json:"kind,omitempty"`
+	APIKey     string                 `json:"apiKey,omitempty"`
+	SecretRef  *SystemOneSecretRefDTO `json:"secretRef,omitempty"`
+	HeaderName string                 `json:"headerName,omitempty"`
+	Scopes     []string               `json:"scopes,omitempty"`
+	Audience   string                 `json:"audience,omitempty"`
 }
 
 // LogValue redacts APIKey if the request struct is ever passed to slog.
@@ -112,27 +120,44 @@ func (r CreateSystemOneInstanceRequest) LogValue() slog.Value {
 	)
 }
 
+// SystemOneInstanceAuthDTO is the credential-free JSON wire representation of
+// authentication metadata on a System One provider instance response.
+// QuotaProject, CredentialType, and ServiceAccountEmail are read-only metadata
+// fields populated at response time for keyless ADC instances and never stored
+// as secrets.
+type SystemOneInstanceAuthDTO struct {
+	Kind                string                 `json:"kind"`
+	SecretName          string                 `json:"secretName,omitempty"`
+	SecretRef           *SystemOneSecretRefDTO `json:"secretRef,omitempty"`
+	HeaderName          string                 `json:"headerName,omitempty"`
+	Scopes              []string               `json:"scopes,omitempty"`
+	Audience            string                 `json:"audience,omitempty"`
+	QuotaProject        string                 `json:"quotaProject,omitempty"`
+	CredentialType      string                 `json:"credentialType,omitempty"`
+	ServiceAccountEmail string                 `json:"serviceAccountEmail,omitempty"`
+}
+
 // SystemOneInstance is the credential-free JSON wire representation of a
 // configured System One provider instance. Auth carries only reference metadata
-// (such as SecretName = "systemone.instance.<id>"); secret values are never
-// returned.
+// (such as SecretName = "systemone.instance.<id>" or non-secret ADC metadata);
+// secret and token values are never returned.
 type SystemOneInstance struct {
-	ID                  string                      `json:"id"`
-	Name                string                      `json:"name"`
-	Adapter             string                      `json:"adapter"`
-	Model               string                      `json:"model,omitempty"`
-	Endpoint            string                      `json:"endpoint"`
-	Location            string                      `json:"location,omitempty"`
-	Auth                store.SystemOneInstanceAuth `json:"auth"`
-	Options             map[string]string           `json:"options,omitempty"`
-	Limits              SystemOneInstanceLimitsDTO  `json:"limits,omitempty"`
-	AllowPrivateNetwork bool                        `json:"allowPrivateNetwork,omitempty"`
-	Enabled             bool                        `json:"enabled"`
-	Revision            int64                       `json:"revision"`
-	CreatedBy           string                      `json:"createdBy,omitempty"`
-	UpdatedBy           string                      `json:"updatedBy,omitempty"`
-	CreatedAt           time.Time                   `json:"createdAt"`
-	UpdatedAt           time.Time                   `json:"updatedAt"`
+	ID                  string                     `json:"id"`
+	Name                string                     `json:"name"`
+	Adapter             string                     `json:"adapter"`
+	Model               string                     `json:"model,omitempty"`
+	Endpoint            string                     `json:"endpoint"`
+	Location            string                     `json:"location,omitempty"`
+	Auth                SystemOneInstanceAuthDTO   `json:"auth"`
+	Options             map[string]string          `json:"options,omitempty"`
+	Limits              SystemOneInstanceLimitsDTO `json:"limits,omitempty"`
+	AllowPrivateNetwork bool                       `json:"allowPrivateNetwork,omitempty"`
+	Enabled             bool                       `json:"enabled"`
+	Revision            int64                      `json:"revision"`
+	CreatedBy           string                     `json:"createdBy,omitempty"`
+	UpdatedBy           string                     `json:"updatedBy,omitempty"`
+	CreatedAt           time.Time                  `json:"createdAt"`
+	UpdatedAt           time.Time                  `json:"updatedAt"`
 }
 
 // ListSystemOneInstancesOptions configures filtering and pagination on
@@ -167,6 +192,7 @@ func (p ProbeSystemOneInput) LogValue() slog.Value {
 // POST /api/v1/admin/system-one/instances/{name}/probe.
 type ProbeSystemOneInstanceRequest struct {
 	Models    bool                 `json:"models,omitempty"`
+	Project   string               `json:"project,omitempty"`
 	Kind      string               `json:"kind,omitempty"`
 	RuleID    string               `json:"ruleId,omitempty"`
 	Params    map[string]string    `json:"params,omitempty"`
@@ -179,6 +205,7 @@ type ProbeSystemOneInstanceRequest struct {
 func (r ProbeSystemOneInstanceRequest) LogValue() slog.Value {
 	return slog.GroupValue(
 		slog.Bool("models", r.Models),
+		slog.String("project", r.Project),
 		slog.String("kind", r.Kind),
 		slog.String("rule_id", r.RuleID),
 	)

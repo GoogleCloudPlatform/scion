@@ -805,9 +805,11 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// server object tells the merge which server fields were sent.
 	// server.broker.instances is kept unless the body set it explicitly.
 	storedInstances := storedBrokerInstances(raw)
+	storedSecretNames := storedSystemOneSecretNames(raw)
 	rawServer := rawServerObject(rawBody)
 	runtimeMergeWarnings := applySettingsUpdatesFromBody(raw, &req, rawBody)
 	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
+	carryOverSystemOneSecretNames(raw, storedSecretNames)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
 	if top, err := parseFieldPresence(rawBody); err == nil {

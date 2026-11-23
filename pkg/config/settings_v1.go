@@ -2024,6 +2024,10 @@ type V1ServerHubSystemOneConfig struct {
 	// MaxEvalTime bounds wall-clock evaluation of System One rules on a
 	// single message (e.g. "3s"; default "3s", hard max "30s").
 	MaxEvalTime string `json:"max_eval_time,omitempty" yaml:"max_eval_time,omitempty" koanf:"max_eval_time"`
+	// SecretNames maps System One adapter IDs to extra permitted named-secret
+	// keys (server.hub.system_one.secret_names). Startup/operator-only: never
+	// writable or echoed through the server-config API.
+	SecretNames map[string][]string `json:"secret_names,omitempty" yaml:"secret_names,omitempty" koanf:"secret_names"`
 }
 
 // V1ServerHubObservabilityConfig holds the switches for the hub's own
@@ -4883,7 +4887,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 		}
 		if so := v1.Hub.SystemOne; so != nil {
-			gc.Hub.SystemOne = HubSystemOneConfig{MaxEvalTime: so.MaxEvalTime}
+			gc.Hub.SystemOne = HubSystemOneConfig{
+				MaxEvalTime: so.MaxEvalTime,
+				SecretNames: cloneStringSliceMap(so.SecretNames),
+			}
 		}
 		if b := v1.Hub.Branding; b != nil {
 			gc.Hub.Branding = b.CloneValue()
@@ -5337,7 +5344,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		}
 	}
 	if so := gc.Hub.SystemOne; !so.IsZero() {
-		v1Hub.SystemOne = &V1ServerHubSystemOneConfig{MaxEvalTime: so.MaxEvalTime}
+		v1Hub.SystemOne = &V1ServerHubSystemOneConfig{
+			MaxEvalTime: so.MaxEvalTime,
+			SecretNames: so.CloneSecretNames(),
+		}
 	}
 	if b := gc.Hub.Branding; !b.IsZero() {
 		v1Hub.Branding = b.Clone()

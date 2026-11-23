@@ -1,0 +1,400 @@
+{
+  "fixture_id": "G6",
+  "description": "Gemini Decision 1 HTTP and transport error-mapping table (400 integer-code INVALID_ARGUMENT, 401, 403 unrestricted key/PERMISSION_DENIED, 404 model not found, 429 with Retry-After and google.rpc.RetryInfo.retryDelay, 500, 503, 504, connection failure, >1 MiB response, 302 redirect), proving content-free errors and zero retries.",
+  "adapter": "gemini_decisions",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API",
+    "sources": [
+      "https://ai.google.dev/gemini-api/docs/decisions-api (HTTP 400 validation limits)",
+      "https://ai.google.dev/gemini-api/docs/api-key (restricted/authorization key requirement; unrestricted key rejection)",
+      "https://ai.google.dev/gemini-api/docs/rate-limits (429 RESOURCE_EXHAUSTED and google.rpc.RetryInfo)"
+    ],
+    "unverified_items": ["U-G4"]
+  },
+  "invoke_cases": [
+    {
+      "name": "http_400_integer_code_invalid_argument",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"error\":{\"code\":400,\"message\":\"G6_CANARY_400_INVALID_ARGUMENT\",\"status\":\"INVALID_ARGUMENT\"}}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "G6_CANARY_400_INVALID_ARGUMENT"
+      }
+    },
+    {
+      "name": "http_401_unauthenticated",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 401,
+        "raw_body": "{\"error\":{\"code\":401,\"message\":\"G6_CANARY_401_INVALID_API_KEY\",\"status\":\"UNAUTHENTICATED\"}}"
+      },
+      "expect_error": {
+        "reason": "auth",
+        "retryable": false,
+        "http_status": 401,
+        "error_body_canary": "G6_CANARY_401_INVALID_API_KEY"
+      }
+    },
+    {
+      "name": "http_403_unrestricted_key_or_permission_denied",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 403,
+        "raw_body": "{\"error\":{\"code\":403,\"message\":\"G6_CANARY_403_UNRESTRICTED_STANDARD_KEY_REJECTED\",\"status\":\"PERMISSION_DENIED\"}}"
+      },
+      "expect_error": {
+        "reason": "auth",
+        "retryable": false,
+        "http_status": 403,
+        "error_body_canary": "G6_CANARY_403_UNRESTRICTED_STANDARD_KEY_REJECTED"
+      }
+    },
+    {
+      "name": "http_404_model_not_found",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 404,
+        "raw_body": "{\"error\":{\"code\":404,\"message\":\"G6_CANARY_404_MODEL_NOT_FOUND\",\"status\":\"NOT_FOUND\"}}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false,
+        "http_status": 404,
+        "error_body_canary": "G6_CANARY_404_MODEL_NOT_FOUND"
+      }
+    },
+    {
+      "name": "http_429_rate_limited_with_retry_after_header",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 429,
+        "headers": {
+          "Retry-After": "5"
+        },
+        "raw_body": "{\"error\":{\"code\":429,\"message\":\"G6_CANARY_429_RETRY_AFTER_HEADER\",\"status\":\"RESOURCE_EXHAUSTED\"}}"
+      },
+      "expect_error": {
+        "reason": "rate_limited",
+        "retryable": true,
+        "http_status": 429,
+        "retry_after_ms": 5000,
+        "error_body_canary": "G6_CANARY_429_RETRY_AFTER_HEADER"
+      }
+    },
+    {
+      "name": "http_429_rate_limited_with_google_rpc_retry_info",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 429,
+        "raw_body": "{\"error\":{\"code\":429,\"message\":\"G6_CANARY_429_RETRY_INFO_DETAIL\",\"status\":\"RESOURCE_EXHAUSTED\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.RetryInfo\",\"retryDelay\":\"2.5s\"}]}}"
+      },
+      "expect_error": {
+        "reason": "rate_limited",
+        "retryable": true,
+        "http_status": 429,
+        "retry_after_ms": 2500,
+        "error_body_canary": "G6_CANARY_429_RETRY_INFO_DETAIL"
+      }
+    },
+    {
+      "name": "http_429_retry_after_header_takes_precedence_over_retry_info",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 429,
+        "headers": {
+          "Retry-After": "8"
+        },
+        "raw_body": "{\"error\":{\"code\":429,\"message\":\"G6_CANARY_429_BOTH\",\"status\":\"RESOURCE_EXHAUSTED\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.RetryInfo\",\"retryDelay\":\"2s\"}]}}"
+      },
+      "expect_error": {
+        "reason": "rate_limited",
+        "retryable": true,
+        "http_status": 429,
+        "retry_after_ms": 8000,
+        "error_body_canary": "G6_CANARY_429_BOTH"
+      }
+    },
+    {
+      "name": "http_429_retry_after_http_date",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 429,
+        "retry_after_in_future": "10s",
+        "raw_body": "{\"error\":{\"code\":429,\"message\":\"G6_CANARY_429_DATE\",\"status\":\"RESOURCE_EXHAUSTED\"}}"
+      },
+      "expect_error": {
+        "reason": "rate_limited",
+        "retryable": true,
+        "http_status": 429,
+        "min_retry_after_ms": 1000,
+        "max_retry_after_ms": 15000,
+        "error_body_canary": "G6_CANARY_429_DATE"
+      }
+    },
+    {
+      "name": "http_500_internal_error",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 500,
+        "raw_body": "{\"error\":{\"code\":500,\"message\":\"G6_CANARY_500_INTERNAL\",\"status\":\"INTERNAL\"}}"
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true,
+        "http_status": 500,
+        "error_body_canary": "G6_CANARY_500_INTERNAL"
+      }
+    },
+    {
+      "name": "http_503_service_unavailable",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 503,
+        "raw_body": "{\"error\":{\"code\":503,\"message\":\"G6_CANARY_503_UNAVAILABLE\",\"status\":\"UNAVAILABLE\"}}"
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true,
+        "http_status": 503,
+        "error_body_canary": "G6_CANARY_503_UNAVAILABLE"
+      }
+    },
+    {
+      "name": "http_504_gateway_timeout",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 504,
+        "raw_body": "{\"error\":{\"code\":504,\"message\":\"G6_CANARY_504_TIMEOUT\",\"status\":\"DEADLINE_EXCEEDED\"}}"
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true,
+        "http_status": 504,
+        "error_body_canary": "G6_CANARY_504_TIMEOUT"
+      }
+    },
+    {
+      "name": "connection_drop_unavailable",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "drop_connection": true
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "name": "oversize_response_body_over_1mib_egress_passthrough",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "oversize_body_bytes": 1048577
+      },
+      "expect_error": {
+        "egress_sentinel": "response_too_large"
+      }
+    },
+    {
+      "name": "http_302_redirect_egress_passthrough",
+      "model": "gemini-decision-1",
+      "expected_path": "/v1beta/decisions",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {"id": "is_damaged", "type": "binary", "instructions": "Check."}
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Synthetic probe text.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 302,
+        "headers": {
+          "Location": "https://redirect.example/G6_REDIRECT_LOCATION_CANARY"
+        }
+      },
+      "expect_error": {
+        "egress_sentinel": "redirect_blocked",
+        "error_body_canary": "G6_REDIRECT_LOCATION_CANARY"
+      }
+    }
+  ]
+}

@@ -51,6 +51,14 @@ const (
 
 	// SumTolerance is the maximum allowed deviation of sum(p_i) from 1.0 (provider-design §6.3).
 	SumTolerance = 1e-3
+	// SumToleranceFloatSlack is numerical slack (1e-12) for IEEE-754 binary64
+	// representation at the existing SumTolerance (1e-3) boundary (for example
+	// {0.99, 0.004, 0.003, 0.002}, whose exact decimal sum is 0.999 where
+	// |sum - 1| exceeds float64(1e-3) by ~8.9e-19). It widens the accepted band
+	// by a negligible 1e-12—mathematically non-zero, far below reported
+	// probability precision—and is not a wider contract or provider-rounding
+	// accommodation.
+	SumToleranceFloatSlack = 1e-12
 )
 
 var (
@@ -170,7 +178,10 @@ func sortedValidatedProbs(dist map[string]float64) ([]float64, error) {
 	for i := len(probs) - 1; i >= 0; i-- {
 		sum += probs[i]
 	}
-	if math.Abs(sum-1.0) > SumTolerance {
+	// Compare against SumTolerance + 1e-12 for binary64 representation slack at
+	// the 1e-3 boundary (negligible 1e-12 widening, not a wider contract or
+	// provider-rounding accommodation).
+	if math.Abs(sum-1.0) > SumTolerance+SumToleranceFloatSlack {
 		return nil, fmt.Errorf("%w: sum = %v", ErrUnnormalizedDistribution, sum)
 	}
 	return probs, nil

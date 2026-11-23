@@ -119,3 +119,77 @@ func TestHubSystemOneConfig_V1RoundTripAndSchemaValidation(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, errs, "additionalProperties: false rejects unknown fields")
 }
+
+func TestHubSystemOneConfig_SecretNamesYAMLAndEnvAndRoundTrip(t *testing.T) {
+	assert.Equal(t, "server.hub.system_one.secret_names", SystemOneSecretNamesKey)
+	assert.True(t, HubSystemOneConfig{}.IsZero())
+	assert.False(t, HubSystemOneConfig{SecretNames: map[string][]string{"gemini_decisions": {"MY_GEMINI_KEY"}}}.IsZero())
+
+	t.Run("settings.yaml load and V1 round-trip", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		scionDir := filepath.Join(tmpDir, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0o755))
+		yamlBody := []byte(`schema_version: "1"
+server:
+  hub:
+    system_one:
+      max_eval_time: 4s
+      secret_names:
+        gemini_decisions:
+          - GEMINI_API_KEY_BILLING_B
+          - MY_Custom_Key
+`)
+		errs, err := ValidateSettings(yamlBody, "1")
+		require.NoError(t, err)
+		assert.Empty(t, errs)
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"), yamlBody, 0o644))
+
+		cfg, err := LoadGlobalConfig(t.TempDir())
+		require.NoError(t, err)
+		assert.Equal(t, "4s", cfg.Hub.SystemOne.MaxEvalTime)
+		assert.Equal(t, map[string][]string{
+			"gemini_decisions": {"GEMINI_API_KEY_BILLING_B", "MY_Custom_Key"},
+		}, cfg.Hub.SystemOne.SecretNames)
+
+		v1 := ConvertGlobalToV1ServerConfig(cfg)
+		require.NotNil(t, v1.Hub)
+		require.NotNil(t, v1.Hub.SystemOne)
+		assert.Equal(t, map[string][]string{
+			"gemini_decisions": {"GEMINI_API_KEY_BILLING_B", "MY_Custom_Key"},
+		}, v1.Hub.SystemOne.SecretNames)
+
+		// Mutating the V1 slice/map does not mutate GlobalConfig (deep copy).
+		v1.Hub.SystemOne.SecretNames["gemini_decisions"][0] = "MUTATED"
+		assert.Equal(t, "GEMINI_API_KEY_BILLING_B", cfg.Hub.SystemOne.SecretNames["gemini_decisions"][0])
+
+		back := ConvertV1ServerToGlobalConfig(v1)
+		assert.Equal(t, "MUTATED", back.Hub.SystemOne.SecretNames["gemini_decisions"][0])
+	})
+
+	t.Run("env JSON map and per-adapter override", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		scionDir := filepath.Join(tmpDir, ".scion")
+		require.NoError(t, os.MkdirAll(scionDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.yaml"),
+			[]byte("schema_version: \"1\"\nserver:\n  mode: workstation\n"), 0o644))
+
+		t.Setenv("SCION_SERVER_HUB_SYSTEM_ONE_SECRET_NAMES", `{"gemini_decisions":["FROM_JSON_MAP"],"typesafe":["IGNORED_LATER"]}`)
+		t.Setenv("SCION_SERVER_HUB_SYSTEM_ONE_SECRET_NAMES_GEMINI_DECISIONS", "GEMINI_API_KEY_BILLING_B, Exact_Case_Key")
+
+		unmatched := FindUnmatchedSettingsEnv([]string{
+			"SCION_SERVER_HUB_SYSTEM_ONE_SECRET_NAMES={}",
+			"SCION_SERVER_HUB_SYSTEM_ONE_SECRET_NAMES_GEMINI_DECISIONS=X",
+			"SCION_SERVER_HUB_SYSTEMONE_SECRETNAMES={}",
+		}, nil)
+		assert.Empty(t, unmatched)
+
+		cfg, err := LoadGlobalConfig(t.TempDir())
+		require.NoError(t, err)
+		assert.Equal(t, map[string][]string{
+			"gemini_decisions": {"GEMINI_API_KEY_BILLING_B", "Exact_Case_Key"},
+			"typesafe":         {"IGNORED_LATER"},
+		}, cfg.Hub.SystemOne.SecretNames)
+	})
+}

@@ -23,9 +23,11 @@
 //     refused via pkg/util/ssrfclient, dialing the validated IP directly.
 //   - All HTTP redirects (3xx) are refused without following or echoing the
 //     Location header.
-//   - Bearer authentication (Authorization: Bearer <key>) is injected inside
-//     RoundTrip onto a cloned request; the credential is never mutated onto the
-//     caller's *http.Request, never logged, and never echoed in errors.
+//   - Authentication (default Authorization: Bearer <key>, or adapter-declared
+//     header placement via WithCredentialPlacement) is injected inside RoundTrip
+//     onto a cloned request; the credential is never mutated onto the caller's
+//     *http.Request, never logged, and never echoed in errors. With header
+//     placement, Authorization is never set.
 //   - Response bodies are capped at MaxResponseBytes (1 MiB); exceeding the cap
 //     returns ErrResponseTooLarge so the runtime/adapter maps it to
 //     malformed_response.
@@ -44,6 +46,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient"
 )
 
@@ -86,6 +89,11 @@ var (
 	// resolve a credential (for example, due to a transient secret-store
 	// outage) before sending the request. Callers map this to FailUnavailable.
 	ErrCredentialUnavailable = errors.New("systemone egress: bearer credential source unavailable")
+
+	// ErrInvalidPlacement indicates WithCredentialPlacement was called with an
+	// unsupported auth kind or an invalid/reserved HTTP header name. Every
+	// request fails closed without dialing or falling back to Bearer.
+	ErrInvalidPlacement = errors.New("systemone egress: invalid credential placement")
 )
 
 // IsResponseTooLarge reports whether err was caused by a response body
@@ -127,8 +135,206 @@ func IsCredentialUnavailable(err error) bool {
 	return errors.Is(err, ErrCredentialUnavailable)
 }
 
-// BearerSource supplies the raw bearer API key (without the "Bearer " prefix)
-// at request time. The returned value is never logged or echoed in errors.
+// IsInvalidPlacement reports whether err was caused by an invalid credential
+// placement configuration (invalid/reserved header name or unsupported auth kind).
+func IsInvalidPlacement(err error) bool {
+	return errors.Is(err, ErrInvalidPlacement)
+}
+
+// maxPlacementHeaderNameBytes bounds custom API-key header names declared by adapters.
+const maxPlacementHeaderNameBytes = 128
+
+// HeaderQuotaProject is the canonical HTTP header name carrying the GCP billing
+// / quota project ID on keyless OAuth/ADC bearer requests (PV3 brief Addendum B
+// §§B3, B5). It is reserved so adapters cannot set or override it independently.
+const HeaderQuotaProject = "X-Goog-User-Project"
+
+const (
+	minGCPProjectIDLen = 6
+	maxGCPProjectIDLen = 30
+)
+
+// reservedPlacementHeaders lists lowercased hop-by-hop, framing, routing,
+// cookie, and bearer/proxy-auth HTTP header names that WithCredentialPlacement
+// must never overwrite or use as an API-key header.
+var reservedPlacementHeaders = map[string]struct{}{
+	"accept-encoding":     {},
+	"authorization":       {},
+	"connection":          {},
+	"content-encoding":    {},
+	"content-length":      {},
+	"content-type":        {},
+	"cookie":              {},
+	"expect":              {},
+	"forwarded":           {},
+	"host":                {},
+	"keep-alive":          {},
+	"proxy-authenticate":  {},
+	"proxy-authorization": {},
+	"proxy-connection":    {},
+	"set-cookie":          {},
+	"te":                  {},
+	"trailer":             {},
+	"trailers":            {},
+	"transfer-encoding":   {},
+	"upgrade":             {},
+	"user-agent":          {},
+	"via":                 {},
+	"www-authenticate":    {},
+	"x-forwarded-for":     {},
+	"x-forwarded-host":    {},
+	"x-forwarded-proto":   {},
+	"x-goog-user-project": {},
+}
+
+// Placement specifies where egress attaches the per-request credential inside
+// RoundTrip. Zero value defaults to Bearer (Authorization: Bearer <token>).
+// HeaderName comes from an adapter's declared Capabilities.AuthScheme, never
+// from admin or untrusted input, and is validated at construction. QuotaProject
+// is attached as X-Goog-User-Project solely on ADC Bearer placement and is
+// validated against the GCP project-ID grammar.
+type Placement struct {
+	Kind         provider.AuthKind
+	HeaderName   string
+	QuotaProject string
+}
+
+// BearerPlacement attaches the credential as "Authorization: Bearer <token>".
+var BearerPlacement = Placement{Kind: provider.AuthKindBearer}
+
+// ADCBearerPlacement constructs a Bearer Placement for Google OAuth/ADC access
+// tokens, optionally attaching "X-Goog-User-Project: <quotaProject>" when
+// quotaProject is non-empty.
+func ADCBearerPlacement(quotaProject string) Placement {
+	return Placement{Kind: provider.AuthKindBearer, QuotaProject: quotaProject}
+}
+
+// HeaderPlacement constructs a Placement that attaches the credential as
+// "<headerName>: <token>" instead of Authorization.
+func HeaderPlacement(headerName string) Placement {
+	return Placement{Kind: provider.AuthKindHeader, HeaderName: headerName}
+}
+
+// ValidateQuotaProject checks that projectID conforms to the GCP project-ID
+// grammar (6..30 characters: lowercase ASCII letter, followed by lowercase
+// ASCII letters/digits/hyphens, ending with a lowercase ASCII letter or digit).
+// Returned errors are content-free and never echo projectID.
+func ValidateQuotaProject(projectID string) error {
+	if !isGCPProjectID(projectID) {
+		return fmt.Errorf("%w: quota project must be a valid GCP project ID", ErrInvalidPlacement)
+	}
+	return nil
+}
+
+func isLowerAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
+}
+
+func isGCPProjectID(s string) bool {
+	if len(s) < minGCPProjectIDLen || len(s) > maxGCPProjectIDLen {
+		return false
+	}
+	if s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	if !isLowerAlnum(s[len(s)-1]) {
+		return false
+	}
+	for i := 1; i < len(s)-1; i++ {
+		b := s[i]
+		if !isLowerAlnum(b) && b != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateHeaderName verifies that name is a valid, non-reserved RFC 7230 token
+// suitable for header-based API-key placement. Returned errors are content-free
+// and never echo name.
+func ValidateHeaderName(name string) error {
+	if len(name) == 0 || len(name) > maxPlacementHeaderNameBytes || !isRFC7230Token(name) {
+		return fmt.Errorf("%w: header name must be a non-empty RFC 7230 token", ErrInvalidPlacement)
+	}
+	if _, reserved := reservedPlacementHeaders[strings.ToLower(name)]; reserved {
+		return fmt.Errorf("%w: header name is reserved or hop-by-hop", ErrInvalidPlacement)
+	}
+	return nil
+}
+
+// ValidatePlacement checks that p uses a supported AuthKind and valid header
+// metadata. Zero Placement{} (empty Kind and empty HeaderName) is valid and
+// normalizes to BearerPlacement. Returned errors are content-free.
+func ValidatePlacement(p Placement) error {
+	_, err := normalizePlacement(p)
+	return err
+}
+
+func normalizePlacement(p Placement) (Placement, error) {
+	switch p.Kind {
+	case "", provider.AuthKindBearer:
+		if p.HeaderName != "" {
+			return Placement{}, fmt.Errorf("%w: bearer placement must not specify a header name", ErrInvalidPlacement)
+		}
+		if p.QuotaProject != "" {
+			if err := ValidateQuotaProject(p.QuotaProject); err != nil {
+				return Placement{}, err
+			}
+		}
+		return Placement{
+			Kind:         provider.AuthKindBearer,
+			QuotaProject: p.QuotaProject,
+		}, nil
+	case provider.AuthKindHeader:
+		if p.QuotaProject != "" {
+			return Placement{}, fmt.Errorf("%w: header placement must not specify a quota project", ErrInvalidPlacement)
+		}
+		if err := ValidateHeaderName(p.HeaderName); err != nil {
+			return Placement{}, err
+		}
+		return Placement{
+			Kind:       provider.AuthKindHeader,
+			HeaderName: http.CanonicalHeaderKey(p.HeaderName),
+		}, nil
+	case provider.AuthKindNone:
+		if p.HeaderName != "" {
+			return Placement{}, fmt.Errorf("%w: none placement must not specify a header name", ErrInvalidPlacement)
+		}
+		if p.QuotaProject != "" {
+			return Placement{}, fmt.Errorf("%w: none placement must not specify a quota project", ErrInvalidPlacement)
+		}
+		return Placement{Kind: provider.AuthKindNone}, nil
+	default:
+		return Placement{}, fmt.Errorf("%w: unsupported credential placement kind", ErrInvalidPlacement)
+	}
+}
+
+func isRFC7230Token(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isRFC7230TChar(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isRFC7230TChar(b byte) bool {
+	if (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') {
+		return true
+	}
+	switch b {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
+}
+
+// BearerSource supplies the raw API key (without any "Bearer " prefix) at
+// request time. The returned value is never logged or echoed in errors.
 type BearerSource func(ctx context.Context) (string, error)
 
 // StaticBearer returns a BearerSource that yields key on every request.
@@ -138,16 +344,39 @@ func StaticBearer(key string) BearerSource {
 	}
 }
 
-// Option configures test seams on NewClient. Production callers pass no
-// options.
+// Option configures NewClient (such as WithCredentialPlacement in production
+// and *ForTesting seams in offline tests).
 type Option func(*clientConfig)
 
 type clientConfig struct {
+	placement    Placement
 	resolver     ssrfclient.Resolver
 	dialer       ssrfclient.Dialer
 	tlsConfig    *tls.Config
 	loopbackSeam *loopbackTestSeam
 	configErr    error
+}
+
+func (c *clientConfig) setConfigErr(err error) {
+	if err != nil && c.configErr == nil {
+		c.configErr = err
+	}
+}
+
+// WithCredentialPlacement configures where RoundTrip places the resolved API
+// key on the cloned outbound request. When omitted, NewClient defaults to
+// BearerPlacement ("Authorization: Bearer <token>"). With HeaderPlacement,
+// RoundTrip sets "<HeaderName>: <token>" and never sets Authorization. An
+// invalid placement fails closed on every request with ErrInvalidPlacement.
+func WithCredentialPlacement(p Placement) Option {
+	return func(c *clientConfig) {
+		norm, err := normalizePlacement(p)
+		if err != nil {
+			c.setConfigErr(err)
+			return
+		}
+		c.placement = norm
+	}
 }
 
 type loopbackTestSeam struct {
@@ -188,17 +417,17 @@ func WithLoopbackServerForTesting(serverURL string, serverClient *http.Client) O
 	return func(c *clientConfig) {
 		u, err := url.Parse(serverURL)
 		if err != nil || u.Opaque != "" || u.User != nil {
-			c.configErr = fmt.Errorf("%w: invalid test server URL", ErrInvalidEndpoint)
+			c.setConfigErr(fmt.Errorf("%w: invalid test server URL", ErrInvalidEndpoint))
 			return
 		}
 		scheme := strings.ToLower(u.Scheme)
 		if scheme != "http" && scheme != "https" {
-			c.configErr = fmt.Errorf("%w: unsupported test server scheme", ErrInvalidEndpoint)
+			c.setConfigErr(fmt.Errorf("%w: unsupported test server scheme", ErrInvalidEndpoint))
 			return
 		}
 		ip := net.ParseIP(u.Hostname())
 		if ip == nil || !ip.IsLoopback() || u.Port() == "" {
-			c.configErr = fmt.Errorf("%w: test server must bind a literal loopback IP and port", ErrInvalidEndpoint)
+			c.setConfigErr(fmt.Errorf("%w: test server must bind a literal loopback IP and port", ErrInvalidEndpoint))
 			return
 		}
 		tr := http.DefaultTransport
@@ -214,9 +443,12 @@ func WithLoopbackServerForTesting(serverURL string, serverClient *http.Client) O
 }
 
 // NewClient constructs an *http.Client configured as the System One provider
-// Transport. Production callers invoke NewClient(bearer) with no options.
+// Transport. Without WithCredentialPlacement, NewClient defaults to
+// Authorization: Bearer authentication.
 func NewClient(bearer BearerSource, opts ...Option) *http.Client {
-	cfg := &clientConfig{}
+	cfg := &clientConfig{
+		placement: BearerPlacement,
+	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(cfg)
@@ -241,6 +473,7 @@ func NewClient(bearer BearerSource, opts ...Option) *http.Client {
 
 	rt := &egressRoundTripper{
 		bearer:        bearer,
+		placement:     cfg.placement,
 		prodTransport: prodTransport,
 		loopbackSeam:  cfg.loopbackSeam,
 		configErr:     cfg.configErr,
@@ -256,6 +489,7 @@ func NewClient(bearer BearerSource, opts ...Option) *http.Client {
 
 type egressRoundTripper struct {
 	bearer        BearerSource
+	placement     Placement
 	prodTransport http.RoundTripper
 	loopbackSeam  *loopbackTestSeam
 	configErr     error
@@ -281,14 +515,29 @@ func (rt *egressRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 		return nil, err
 	}
 
-	token, err := rt.resolveToken(req.Context())
-	if err != nil {
-		closeRequestBody(req)
-		return nil, err
+	var token string
+	if rt.placement.Kind != provider.AuthKindNone {
+		token, err = rt.resolveToken(req.Context())
+		if err != nil {
+			closeRequestBody(req)
+			return nil, err
+		}
 	}
 
 	outReq := req.Clone(req.Context())
-	outReq.Header.Set("Authorization", "Bearer "+token)
+	outReq.Header.Del(HeaderQuotaProject)
+	switch rt.placement.Kind {
+	case provider.AuthKindNone:
+		outReq.Header.Del("Authorization")
+	case provider.AuthKindHeader:
+		outReq.Header.Del("Authorization")
+		outReq.Header.Set(rt.placement.HeaderName, token)
+	default:
+		outReq.Header.Set("Authorization", "Bearer "+token)
+		if rt.placement.QuotaProject != "" {
+			outReq.Header.Set(HeaderQuotaProject, rt.placement.QuotaProject)
+		}
+	}
 
 	resp, err := transport.RoundTrip(outReq)
 	if err != nil {

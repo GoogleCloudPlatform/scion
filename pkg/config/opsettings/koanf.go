@@ -124,9 +124,11 @@ var layer0Prefixes = []string{
 	// Web chat search limits (timeout, hub-wide cap) — read into
 	// ServerConfig at startup (ptone/scion#7586).
 	"server.hub.chat",
-	// System One rule evaluation ceiling (max_eval_time) — read into
-	// ServerConfig at startup (ptone/scion#8044).
+	// System One rule evaluation ceiling (max_eval_time) and operator-only
+	// provider named-secret extras (secret_names) — read into ServerConfig at
+	// startup (ptone/scion#8044, ptone/scion#8414).
 	"server.hub.system_one",
+	config.SystemOneSecretNamesKey,
 	// Recurring schedule limits — read into ServerConfig at startup.
 	"server.hub.schedules",
 	// Default message mode of new agents — read into ServerConfig at startup.
