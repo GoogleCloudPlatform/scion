@@ -10,7 +10,7 @@ own tooling (see "Install order" below).
 
 | File | What it is | When to apply |
 |---|---|---|
-| `workerpool.yaml` | A `WorkerPool` (Substrate CRD `ate.dev/v1alpha1`) dedicated to scion actors, sized for a Claude Code-class workload, tolerating the gVisor node taint. | After Substrate is installed (the CRD must already exist), before the broker's first `scion start`. |
+| `workerpool.yaml` | A `WorkerPool` (Substrate CRD `ate.dev/v1`) dedicated to scion actors, referencing a `SandboxConfig` via `spec.sandboxClasses[].configRef`, sized for a Claude Code-class workload, tolerating the gVisor node taint. | After Substrate is installed (the CRD and `SandboxConfig` must already exist), before the broker's first `scion start`. |
 | `networkpolicy.yaml` | Three `NetworkPolicy` objects: the router ingress restriction (a cluster/`ate-system` prerequisite, not broker-specific — see `../broker.yaml`), and a default-deny ingress baseline each for the worker namespace and the broker namespace. See "NetworkPolicy objects" below. | After NetworkPolicy enforcement is enabled on the cluster (below), alongside the broker deploy. |
 
 ## Cluster requirements (not manifests — cluster/project setup)
@@ -75,9 +75,9 @@ properties to get right before Substrate is installed at all.
 2. Agent Substrate itself — this is **out of scope for this folder**: use
    Substrate's own installer against `github.com/agent-substrate/substrate`
    (record which commit you installed; behavior in this README and in
-   `../README.md` was verified against a specific commit, and drift is
-   possible). This is what creates the `WorkerPool`/`SandboxConfig` CRDs,
-   `ate-system` namespace, `ateapi`, and `atenet-router`.
+   `../README.md` was verified against Substrate v1.0.0, and drift is
+   possible). This is what creates the `WorkerPool`/`SandboxConfig`/`CSIDriverConfig`
+   (`ate.dev/v1`) CRDs, `ate-system` namespace, `ateapi`, and `atenet-router`.
 3. Enable NetworkPolicy enforcement (below) — do this before applying
    `networkpolicy.yaml`; applying a NetworkPolicy object on a cluster with no
    enforcing CNI succeeds and enforces nothing, silently.
@@ -87,7 +87,8 @@ properties to get right before Substrate is installed at all.
    export WORKER_SELECTOR_KEY=pool
    export WORKER_SELECTOR_VALUE=scion-agents
    export WORKER_POOL_REPLICAS=2
-   export WORKER_IMAGE=...   # the Substrate-provided ateom worker image; see the table below
+   export SANDBOX_CONFIG_NAME=...   # SandboxConfig name (kubectl get sandboxconfig); moved here from broker settings in v1.0.0
+   export WORKER_IMAGE=...          # the Substrate-provided ateom worker image; see the table below
    export SUBSTRATE_VERSION_LABEL_KEY=ate.dev/substrate-version
    export SUBSTRATE_VERSION_LABEL_VALUE=...   # your installed Substrate commit/version; see "Cluster requirements" above
 
@@ -107,7 +108,7 @@ properties to get right before Substrate is installed at all.
 
 ## Validating `workerpool.yaml`
 
-`workerpool.yaml`'s `WorkerPool` object (`ate.dev/v1alpha1`) is a Substrate
+`workerpool.yaml`'s `WorkerPool` object (`ate.dev/v1`) is a Substrate
 CRD, not a builtin Kubernetes type — `kubeconform`'s default schema set has
 no schema for it, so a plain `kubeconform` run treats it as unrecognized
 rather than validated. Two options that actually check it:
@@ -125,13 +126,13 @@ git clone --depth 1 https://github.com/yannh/kubeconform.git /tmp/kubeconform-sr
 mkdir -p /tmp/crd-schemas
 (
   cd /tmp/crd-schemas
-  /tmp/openapi2jsonschema /tmp/ate.dev_workerpools.yaml   # writes workerpool_v1alpha1.json
-  cp workerpool_v1alpha1.json WorkerPool_v1alpha1.json    # match {{.ResourceKind}}'s case
+  /tmp/openapi2jsonschema /tmp/ate.dev_workerpools.yaml   # writes workerpool_v1.json
+  cp workerpool_v1.json WorkerPool_v1.json              # match {{.ResourceKind}}'s case
 )
 
 # Run this from the repo root, so the relative manifest path below resolves:
 envsubst < deploy/substrate/cluster/workerpool.yaml > /tmp/workerpool.rendered.yaml
-kubeconform -strict -summary -kubernetes-version 1.31.0 \
+kubeconform -strict -summary -kubernetes-version 1.35.0 \
   -schema-location default \
   -schema-location '/tmp/crd-schemas/{{ .ResourceKind }}_{{ .ResourceAPIVersion }}.json' \
   /tmp/workerpool.rendered.yaml
@@ -272,11 +273,12 @@ reuse the same values across every manifest in this folder.
 
 | Placeholder | Meaning | Used by |
 |---|---|---|
-| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the WorkerPool and its worker pods run in (shared with `../broker.yaml`) | `workerpool.yaml`, `networkpolicy.yaml` |
+| `SUBSTRATE_WORKER_NAMESPACE` | Namespace the WorkerPool and its worker pods run in | `workerpool.yaml`, `networkpolicy.yaml` |
 | `ATE_SYSTEM_NAMESPACE` | Namespace hosting `atenet-router` (shared with `../broker.yaml`) | `networkpolicy.yaml` |
 | `BROKER_NAMESPACE` | Namespace the broker runs in (shared with `../broker.yaml`) | `networkpolicy.yaml` |
 | `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | Label on the WorkerPool's own `metadata.labels` (shared with `../broker.yaml`'s `worker_selector`) | `workerpool.yaml` |
 | `WORKER_POOL_REPLICAS` | Number of worker pods — see "Sizing" below | `workerpool.yaml` |
+| `SANDBOX_CONFIG_NAME` | Cluster `SandboxConfig` object referenced by `spec.sandboxClasses[].configRef` (`kubectl get sandboxconfig`; moved from broker settings in v1.0.0) | `workerpool.yaml` |
 | `WORKER_IMAGE` | The Substrate-provided `ateom` worker image for your installed version/sandbox class — not a scion image; resolved by your Substrate install | `workerpool.yaml` |
 | `SUBSTRATE_VERSION_LABEL_KEY` / `SUBSTRATE_VERSION_LABEL_VALUE` | The node label your gVisor pool carries for the installed Substrate version (see "Cluster requirements" above) — drop the `nodeSelector` block entirely if your cluster doesn't label nodes this way | `workerpool.yaml` |
 

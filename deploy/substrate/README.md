@@ -139,9 +139,8 @@ every manifest.
 | `HUB_BROKER_ID` | The broker's stable UUID from `scion runtime-broker register` (not secret — see below) |
 | `HUB_CONNECTION_NAME` | The `--name` used at `register` time; also the credentials JSON filename |
 | `CLUSTER_TRUST_BUNDLE_NAME` | The `ClusterTrustBundle` object verifying `ateapi` TLS (the router hop is plaintext today — see below) |
-| `SANDBOX_CONFIG_NAME` | The `SandboxConfig` CRD instance actor templates use |
-| `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see `cluster/README.md`, "`worker_selector`") |
-| `SNAPSHOT_STORAGE_URI` | Bucket/prefix for actor snapshots |
+| `WORKER_SELECTOR_KEY` / `WORKER_SELECTOR_VALUE` | One label key/value pinning actors to a `WorkerPool` — matched against **the `WorkerPool` object's own `metadata.labels`**, not any Pod label (see `cluster/README.md`, "`worker_selector`"). In Substrate v1.0.0, `sandbox_class` and `sandbox_config_name` moved to the `WorkerPool` (`cluster/workerpool.yaml` `spec.sandboxClasses[].configRef`). |
+| `SNAPSHOT_STORAGE_URI` | Optional bucket/prefix for actor snapshots (`snapshot_config.storage_location`; requires Substrate's `PerTemplateSnapshotLocation` preview gate; leave empty to use `ate-api`'s `--snapshot-location`) |
 
 **`BROKER_NAMESPACE` is baked into the router NetworkPolicy at apply time,
 not read live.** The router `NetworkPolicy`'s `namespaceSelector` matches on
@@ -203,24 +202,28 @@ secrets) to an attacker endpoint, or to widen egress arbitrarily.
 
 ### `egress_trust_bundle`: only needed under sdsmint
 
-Substrate's plain `atenet-egress` only enforces `egress_allow` for TLS
-*passthrough* on ADDRESS rules — every rule `egress_allow` emits is a
-HostnameRule, which is enforced for HTTPS only under the **sdsmint** egress
-gateway (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`).
-Under sdsmint the gateway terminates every TLS connection and re-originates
-it with a per-SNI leaf certificate chained to its own CA — not the origin's
-— so an actor validating only the public roots rejects it and every HTTPS
-request fails.
+In Substrate v1.0.0, `buildEgressPolicy` emits protocol- and port-aware
+`EgressPolicy` rules: when `egress_trust_bundle` is unset, public hosts on
+port 443 use `TlsPassthrough` (SNI-filtered without TLS decryption, so actors
+validate origins against public roots); when `egress_trust_bundle` is set,
+public hosts on port 443 switch to `Https` (gateway-intercepted) for clusters
+running the **sdsmint** egress gateway
+(`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`). Under
+sdsmint the gateway terminates every TLS connection and re-originates it with
+a per-SNI leaf certificate chained to its own CA — not the origin's — so an
+actor validating only the public roots rejects it and every HTTPS request
+fails.
 
 Set `runtimes.<name>.substrate.egress_trust_bundle: egress-mitm.ate.dev` —
-the trust bundle name the vendored Substrate version resolves — **if and
-only if the cluster runs sdsmint and the actor makes any HTTPS/TLS
-request.** When set, `buildActorTemplate` (`pkg/runtime/substrate_template.go`)
-adds a `system-info` volume that projects the gateway's CA to
-`/run/ate/trust-bundle.pem`, and points `NODE_EXTRA_CA_CERTS`,
-`GIT_SSL_CAINFO`, `SSL_CERT_FILE`, and `CURL_CA_BUNDLE` at that file, plus
-`SSL_CERT_DIR=/run/ate`. See `docs/egress-trust-bundle.md` in
-agent-substrate/substrate for the full guide.
+the only egress-MITM trust bundle name scion/Substrate supports — **if and
+only if the cluster runs sdsmint and the actor makes any HTTPS/TLS request.** When set,
+`buildActorTemplate` (`pkg/runtime/substrate_template.go`) adds a
+`system-info` volume (`trust_bundle.names: ["egress-mitm.ate.dev"]`) that
+projects the gateway's CA to `/run/ate/trust-bundle.pem`, and points
+`NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`, `SSL_CERT_FILE`, and `CURL_CA_BUNDLE`
+at that file, plus `SSL_CERT_DIR=/run/ate`. See
+`docs/guides/egress-trust-bundle.md` in agent-substrate/substrate for the full
+guide.
 
 `SSL_CERT_DIR` makes the gateway CA **exclusive** for Go and Python's `ssl`
 module, but is only **additive** for curl, git, and Node — those keep
@@ -324,7 +327,6 @@ export HUB_ENDPOINT=...
 export HUB_BROKER_ID=...
 export HUB_CONNECTION_NAME=scion-integration
 export CLUSTER_TRUST_BUNDLE_NAME='servicedns.podcert.ate.dev:identity:primary-bundle'
-export SANDBOX_CONFIG_NAME=gvisor-default
 # Must match the target WorkerPool's own metadata.labels, NOT a Pod label —
 # see cluster/README.md, "worker_selector".
 export WORKER_SELECTOR_KEY=pool
@@ -372,7 +374,7 @@ kubectl apply --dry-run=server -f /tmp/broker.rendered.yaml   # catches RBAC/CRD
 ```
 
 `cluster/workerpool.yaml` uses a Substrate CRD (`WorkerPool`,
-`ate.dev/v1alpha1`) that a generic schema validator has no built-in schema
+`ate.dev/v1`) that a generic schema validator has no built-in schema
 for — see `cluster/README.md`, "Validating `workerpool.yaml`", for the
 CRD-schema `kubeconform` recipe (offline) and the `kubectl apply
 --dry-run=server` alternative (once Substrate is installed).

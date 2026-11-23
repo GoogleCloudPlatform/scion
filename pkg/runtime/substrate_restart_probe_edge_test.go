@@ -20,7 +20,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 const probeEdgeProjectID = "550e8400-e29b-41d4-a716-446655440000"
@@ -42,7 +42,7 @@ func TestSubstrateRestart_RecordlessActors_CountsActorsOnLaterPages(t *testing.T
 
 	running := &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING}
 	fc.listActors = func(req *ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		switch req.GetPageToken() {
+		switch req.GetOptions().GetPageToken() {
 		case "":
 			return &ateapipb.ListActorsResponse{NextPageToken: "p2"}, nil
 		case "p2":
@@ -50,7 +50,7 @@ func TestSubstrateRestart_RecordlessActors_CountsActorsOnLaterPages(t *testing.T
 				Actors: []*ateapipb.Actor{probeEdgeActor("late-agent", "uid-late", running)},
 			}, nil
 		default:
-			return nil, fmt.Errorf("unexpected page token %q", req.GetPageToken())
+			return nil, fmt.Errorf("unexpected page token %q", req.GetOptions().GetPageToken())
 		}
 	}
 

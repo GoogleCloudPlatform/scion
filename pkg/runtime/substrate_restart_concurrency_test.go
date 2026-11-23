@@ -20,7 +20,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // RecordlessActors reads substrateAgentRecords while Run/Delete may write

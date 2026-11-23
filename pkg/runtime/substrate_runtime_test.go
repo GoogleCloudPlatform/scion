@@ -44,7 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	sciontoolsubstrate "github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // -----------------------------------------------------------------------
@@ -76,6 +76,10 @@ func (c *callRecorder) list() []string {
 const fakeActorUID = "actor-uid-1"
 
 type fakeControlClient struct {
+	// ControlClient is nil: an RPC this fake does not implement panics,
+	// which a test notices immediately.
+	ateapipb.ControlClient
+
 	rec *callRecorder
 
 	createAtespace          func(*ateapipb.CreateAtespaceRequest) (*ateapipb.Atespace, error)
@@ -191,101 +195,21 @@ func (f *fakeControlClient) CreateActor(ctx context.Context, in *ateapipb.Create
 	f.rec.record("CreateActor")
 	return f.createActor(in)
 }
-func (f *fakeControlClient) UpdateActor(ctx context.Context, in *ateapipb.UpdateActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
-	f.rec.record("UpdateActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) SuspendActor(ctx context.Context, in *ateapipb.SuspendActorRequest, opts ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error) {
-	f.rec.record("SuspendActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) PauseActor(ctx context.Context, in *ateapipb.PauseActorRequest, opts ...grpc.CallOption) (*ateapipb.PauseActorResponse, error) {
-	f.rec.record("PauseActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
 func (f *fakeControlClient) ResumeActor(ctx context.Context, in *ateapipb.ResumeActorRequest, opts ...grpc.CallOption) (*ateapipb.ResumeActorResponse, error) {
 	f.rec.record("ResumeActor")
 	return f.resumeActor(in)
-}
-func (f *fakeControlClient) RevertActor(ctx context.Context, in *ateapipb.RevertActorRequest, opts ...grpc.CallOption) (*ateapipb.RevertActorResponse, error) {
-	f.rec.record("RevertActor")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
 }
 func (f *fakeControlClient) DeleteActor(ctx context.Context, in *ateapipb.DeleteActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
 	f.rec.record("DeleteActor")
 	return f.deleteActor(in)
 }
-func (f *fakeControlClient) GetActorEgressPolicy(ctx context.Context, in *ateapipb.GetActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
-	f.rec.record("GetActorEgressPolicy")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
 func (f *fakeControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapipb.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
 	f.rec.record("CreateActorEgressPolicy")
 	return f.createActorEgressPolicy(in)
 }
-func (f *fakeControlClient) UpdateActorEgressPolicy(ctx context.Context, in *ateapipb.UpdateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
-	f.rec.record("UpdateActorEgressPolicy")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
 func (f *fakeControlClient) DeleteActorEgressPolicy(ctx context.Context, in *ateapipb.DeleteActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
 	f.rec.record("DeleteActorEgressPolicy")
 	return f.deleteActorEgressPolicy(in)
-}
-func (f *fakeControlClient) MintActorJWT(ctx context.Context, in *ateapipb.MintActorJWTRequest, opts ...grpc.CallOption) (*ateapipb.MintActorJWTResponse, error) {
-	f.rec.record("MintActorJWT")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) MintActorCertificate(ctx context.Context, in *ateapipb.MintActorCertificateRequest, opts ...grpc.CallOption) (*ateapipb.MintActorCertificateResponse, error) {
-	f.rec.record("MintActorCertificate")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) CreateTag(ctx context.Context, in *ateapipb.CreateTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("CreateTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) GetTag(ctx context.Context, in *ateapipb.GetTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("GetTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListTags(ctx context.Context, in *ateapipb.ListTagsRequest, opts ...grpc.CallOption) (*ateapipb.ListTagsResponse, error) {
-	f.rec.record("ListTags")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) UpdateTag(ctx context.Context, in *ateapipb.UpdateTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("UpdateTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteTag(ctx context.Context, in *ateapipb.DeleteTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {
-	f.rec.record("DeleteTag")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListWorkers(ctx context.Context, in *ateapipb.ListWorkersRequest, opts ...grpc.CallOption) (*ateapipb.ListWorkersResponse, error) {
-	f.rec.record("ListWorkers")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) GetWorker(ctx context.Context, in *ateapipb.GetWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("GetWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) CreateWorker(ctx context.Context, in *ateapipb.CreateWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("CreateWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) UpdateWorker(ctx context.Context, in *ateapipb.UpdateWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("UpdateWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteWorker(ctx context.Context, in *ateapipb.DeleteWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("DeleteWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DrainWorker(ctx context.Context, in *ateapipb.DrainWorkerRequest, opts ...grpc.CallOption) (*ateapipb.Worker, error) {
-	f.rec.record("DrainWorker")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListWorkerActorAssignments(ctx context.Context, in *ateapipb.ListWorkerActorAssignmentsRequest, opts ...grpc.CallOption) (*ateapipb.ListWorkerActorAssignmentsResponse, error) {
-	f.rec.record("ListWorkerActorAssignments")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
 }
 func (f *fakeControlClient) ListActors(ctx context.Context, in *ateapipb.ListActorsRequest, opts ...grpc.CallOption) (*ateapipb.ListActorsResponse, error) {
 	f.rec.record("ListActors")
@@ -295,18 +219,6 @@ func (f *fakeControlClient) CreateAtespace(ctx context.Context, in *ateapipb.Cre
 	f.rec.record("CreateAtespace")
 	return f.createAtespace(in)
 }
-func (f *fakeControlClient) GetAtespace(ctx context.Context, in *ateapipb.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
-	f.rec.record("GetAtespace")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) ListAtespaces(ctx context.Context, in *ateapipb.ListAtespacesRequest, opts ...grpc.CallOption) (*ateapipb.ListAtespacesResponse, error) {
-	f.rec.record("ListAtespaces")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
-func (f *fakeControlClient) DeleteAtespace(ctx context.Context, in *ateapipb.DeleteAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
-	f.rec.record("DeleteAtespace")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
-}
 func (f *fakeControlClient) CreateActorTemplate(ctx context.Context, in *ateapipb.CreateActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
 	f.rec.record("CreateActorTemplate")
 	return f.createActorTemplate(in)
@@ -314,10 +226,6 @@ func (f *fakeControlClient) CreateActorTemplate(ctx context.Context, in *ateapip
 func (f *fakeControlClient) GetActorTemplate(ctx context.Context, in *ateapipb.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
 	f.rec.record("GetActorTemplate")
 	return f.getActorTemplate(in)
-}
-func (f *fakeControlClient) ListActorTemplates(ctx context.Context, in *ateapipb.ListActorTemplatesRequest, opts ...grpc.CallOption) (*ateapipb.ListActorTemplatesResponse, error) {
-	f.rec.record("ListActorTemplates")
-	return nil, status.Error(codes.Unimplemented, "not used in this fake")
 }
 func (f *fakeControlClient) DeleteActorTemplate(ctx context.Context, in *ateapipb.DeleteActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
 	f.rec.record("DeleteActorTemplate")
@@ -426,10 +334,18 @@ func newTestSubstrateHarness(t *testing.T, rec *callRecorder) (*SubstrateRuntime
 	fa := newFakeActorServer(rec)
 	server := httptest.NewServer(fa.handler())
 	rt := NewSubstrateRuntimeForTest(fc, substrate.NewRouterClient(server.URL), nil, config.V1SubstrateConfig{
-		SnapshotStorage:   "gs://bucket/prefix/",
-		SandboxConfigName: "gvisor-default",
+		SnapshotStorage: "gs://bucket/prefix/",
 	})
 	return rt, fc, fa, server.Close
+}
+
+func mustBuildActorTemplate(t *testing.T, atespace, templateName, imageDigest string, sc config.V1SubstrateConfig, resources *api.ResourceSpec) *ateapipb.ActorTemplate {
+	t.Helper()
+	tmpl, err := buildActorTemplate(atespace, templateName, imageDigest, sc, resources)
+	if err != nil {
+		t.Fatalf("buildActorTemplate() error = %v", err)
+	}
+	return tmpl
 }
 
 // resetSubstrateAgentStateForTest clears the process-wide
@@ -1262,9 +1178,7 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 	resources := &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}}
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
 	baseCfg := config.V1SubstrateConfig{
-		SandboxClass:      "gvisor",
-		SandboxConfigName: "gvisor-default",
-		SnapshotStorage:   "gs://bucket/prefix/",
+		SnapshotStorage: "gs://bucket/prefix/",
 	}
 
 	n1 := substrateTemplateName(image, baseCfg, resources)
@@ -1276,29 +1190,15 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 		t.Errorf("substrateTemplateName() = %q, want scion- prefix", n1)
 	}
 
-	microVMCfg := baseCfg
-	microVMCfg.SandboxClass = "microvm"
-	n3 := substrateTemplateName(image, microVMCfg, resources)
-	if n1 == n3 {
-		t.Error("substrateTemplateName() did not change with sandbox class")
-	}
-
 	n4 := substrateTemplateName(image, baseCfg, &api.ResourceSpec{Limits: api.ResourceList{CPU: "4"}})
 	if n1 == n4 {
 		t.Error("substrateTemplateName() did not change with resources")
 	}
 
 	n5 := substrateTemplateName(image, baseCfg, nil)
-	n6 := substrateTemplateName(image, baseCfg, config.BuiltinDefaultResources())
+	n6 := substrateTemplateName(image, baseCfg, &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}})
 	if n5 != n6 {
-		t.Error("substrateTemplateName() with nil resources did not match the resolved default resources (buildActorTemplate substitutes BuiltinDefaultResources for nil)")
-	}
-
-	configNameCfg := baseCfg
-	configNameCfg.SandboxConfigName = "other-config"
-	n7 := substrateTemplateName(image, configNameCfg, resources)
-	if n1 == n7 {
-		t.Error("substrateTemplateName() did not change with sandbox_config_name")
+		t.Error("substrateTemplateName() with nil resources did not match the resolved default resources")
 	}
 
 	workerSelectorCfg := baseCfg
@@ -1325,7 +1225,7 @@ func TestSubstrateTemplateName_Stable(t *testing.T) {
 // rather than lean on a default set.
 func TestBuildActorTemplate_SecurityContextGrantsExactlyRequiredCapabilities(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
-	tmpl := buildActorTemplate("scion-test", "scion-abc123", image, config.V1SubstrateConfig{}, nil)
+	tmpl := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, config.V1SubstrateConfig{}, nil)
 
 	if len(tmpl.GetContainers()) != 1 {
 		t.Fatalf("Containers = %d, want 1", len(tmpl.GetContainers()))
@@ -1359,9 +1259,9 @@ func TestBuildActorTemplate_WakeupProbeTargetsServeHealthz(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
 	for _, sc := range []config.V1SubstrateConfig{
 		{},
-		{SandboxClass: "microvm", EgressTrustBundle: "egress-mitm.ate.dev"},
+		{EgressTrustBundle: "egress-mitm.ate.dev"},
 	} {
-		tmpl := buildActorTemplate("scion-test", "scion-abc123", image, sc, nil)
+		tmpl := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, sc, nil)
 		if len(tmpl.GetContainers()) != 1 {
 			t.Fatalf("Containers = %d, want 1", len(tmpl.GetContainers()))
 		}
@@ -1386,13 +1286,13 @@ func TestBuildActorTemplate_WakeupProbeTargetsServeHealthz(t *testing.T) {
 // the next one, or what substrateTemplateName hashes for it.
 func TestBuildActorTemplate_WakeupProbeIsFreshPerCall(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
-	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+	cfg := config.V1SubstrateConfig{}
 	before := substrateTemplateName(image, cfg, nil)
 
-	first := buildActorTemplate("scion-test", "scion-abc123", image, cfg, nil)
+	first := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, cfg, nil)
 	first.GetContainers()[0].GetWakeupProbe().GetHttpGet().Path = "/mutated"
 
-	second := buildActorTemplate("scion-test", "scion-abc123", image, cfg, nil)
+	second := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, cfg, nil)
 	if got := second.GetContainers()[0].GetWakeupProbe().GetHttpGet().GetPath(); got != substrateHealthzPath {
 		t.Errorf("second template's WakeupProbe path = %q after mutating the first, want %q", got, substrateHealthzPath)
 	}
@@ -1410,7 +1310,7 @@ func TestBuildActorTemplate_WakeupProbeIsFreshPerCall(t *testing.T) {
 // the image fixed across all of its cases and never varies it, so this is
 // the only place that exercises this input.
 func TestSubstrateTemplateName_ChangesWithImageDigest(t *testing.T) {
-	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+	cfg := config.V1SubstrateConfig{}
 	image1 := "repo/image@sha256:" + strings.Repeat("a", 64)
 	image2 := "repo/image@sha256:" + strings.Repeat("b", 64)
 
@@ -1428,7 +1328,7 @@ func TestSubstrateTemplateName_ChangesWithImageDigest(t *testing.T) {
 // running with the old (missing) capabilities.
 func TestSubstrateTemplateName_ChangesWithCapabilitySet(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("b", 64)
-	cfg := config.V1SubstrateConfig{SandboxClass: "gvisor"}
+	cfg := config.V1SubstrateConfig{}
 
 	before := substrateTemplateName(image, cfg, nil)
 
@@ -2514,8 +2414,11 @@ func TestSubstrateList_Pagination(t *testing.T) {
 
 	var pageTokensSeen []string
 	fc.listActors = func(req *ateapipb.ListActorsRequest) (*ateapipb.ListActorsResponse, error) {
-		pageTokensSeen = append(pageTokensSeen, req.GetPageToken())
-		switch req.GetPageToken() {
+		if got := req.GetOptions().GetPageSize(); got != 1000 {
+			t.Errorf("ListActors page_size = %d, want 1000", got)
+		}
+		pageTokensSeen = append(pageTokensSeen, req.GetOptions().GetPageToken())
+		switch req.GetOptions().GetPageToken() {
 		case "":
 			return &ateapipb.ListActorsResponse{
 				Actors: []*ateapipb.Actor{
@@ -2533,7 +2436,7 @@ func TestSubstrateList_Pagination(t *testing.T) {
 				NextPageToken: "",
 			}, nil
 		default:
-			t.Fatalf("unexpected page token %q", req.GetPageToken())
+			t.Fatalf("unexpected page token %q", req.GetOptions().GetPageToken())
 			return nil, nil
 		}
 	}

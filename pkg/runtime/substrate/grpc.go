@@ -22,7 +22,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // Dial opens a gRPC connection to the ateapi Control service at

@@ -65,8 +65,10 @@ scion delete warm-template-check
 ```
 
 Re-warm before pointing real traffic at anything that changes the template's
-content-addressed name — a new image digest, resource shape, sandbox class,
-`worker_selector`, or `egress_trust_bundle`.
+content-addressed name — a new image digest, resource shape,
+`worker_selector`, or `egress_trust_bundle`. (In Substrate v1.0.0, sandbox
+class and `SandboxConfig` live on the `WorkerPool` via
+`cluster/workerpool.yaml` rather than in broker settings.)
 
 ## After a broker restart
 
@@ -198,15 +200,15 @@ kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
   export ATE_TOKEN="$(kubectl create token scion-substrate-broker -n "${BROKER_NAMESPACE}" \
     --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
   grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
-    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
-    api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/DeleteActorEgressPolicy
+    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"},"name":"default"}' \
+    api.${ATE_SYSTEM_NAMESPACE}.svc:443 substrate.ateapi.v1.Control/DeleteActorEgressPolicy
 
   #  Verify the policy is actually gone before touching the actor — an
   #  orphaned policy after this step is invisible to this whole mechanism, so
   #  this check matters, not just as a courtesy:
   grpcurl -cacert ate-ca.pem -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
-    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
-    api.${ATE_SYSTEM_NAMESPACE}.svc:443 ateapi.Control/GetActorEgressPolicy
+    -d '{"actor":{"atespace":"<atespace>","name":"<actor>"},"name":"default"}' \
+    api.${ATE_SYSTEM_NAMESPACE}.svc:443 substrate.ateapi.v1.Control/GetActorEgressPolicy
 )   # ATE_TOKEN is gone as soon as the subshell exits, whatever happened inside
 #    Expect a NotFound gRPC status. Anything else means the policy is still
 #    there; do not proceed to step 2 until it reads NotFound.
@@ -238,16 +240,15 @@ kubectl get clustertrustbundle "${CLUSTER_TRUST_BUNDLE_NAME}" \
 #          --audience api.${ATE_SYSTEM_NAMESPACE}.svc --duration 600s)"
 #        grpcurl -cacert ate-ca.pem -authority api.${ATE_SYSTEM_NAMESPACE}.svc \
 #          -expand-headers -H 'Authorization: Bearer ${ATE_TOKEN}' \
-#          -d '{"actor":{"atespace":"<atespace>","name":"<actor>"}}' \
-#          localhost:9555 ateapi.Control/DeleteActorEgressPolicy
+#          -d '{"actor":{"atespace":"<atespace>","name":"<actor>"},"name":"default"}' \
+#          localhost:9555 substrate.ateapi.v1.Control/DeleteActorEgressPolicy
 #        # (same substitution for the GetActorEgressPolicy verification
 #        # call above, run inside this same subshell)
 #      )
 #    Once verification reads NotFound, proceed to step 2.
 
-# 2. Delete the actor itself, any_state so a non-RUNNING actor isn't
-#    rejected:
-kubectl ate delete actor -a <atespace> <actor> --any-state
+# 2. Delete the actor itself (Substrate v1 terminates actors in any state):
+kubectl ate delete actor -a <atespace> <actor>
 
 # 3. Force-delete the hub's own agent record so it doesn't keep dispatching
 #    to an actor that no longer exists. There is no --force on the delete

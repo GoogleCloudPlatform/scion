@@ -30,6 +30,9 @@ metadata:
   labels:
     app.kubernetes.io/name: scion-substrate-broker
     app.kubernetes.io/part-of: scion-substrate-integration
+    # Substrate v1.0.0 gates network access to ateapi on caller namespace
+    # label ate.dev/api-access: "true".
+    ate.dev/api-access: "true"
 ---
 # The broker's own identity. It authenticates to ateapi (api.ate-system.svc)
 # by minting a token for *itself* via the Kubernetes TokenRequest API
@@ -160,8 +163,10 @@ data:
           router_endpoint: http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:80
           token_audience: api.${ATE_SYSTEM_NAMESPACE}.svc
           cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}
-          sandbox_class: gvisor
-          sandbox_config_name: ${SANDBOX_CONFIG_NAME}
+          # NOTE: Substrate v1.0.0 removed sandbox_class and sandbox_config_name
+          # from broker settings; they are now configured on WorkerPool
+          # (spec.sandboxClasses[].configRef) in deploy/substrate/cluster/workerpool.yaml.
+          #
           # workerSelector is matched against the target WorkerPool custom
           # resource's own metadata.labels — NOT any Kubernetes Pod label,
           # and NOT the ate.dev/worker-pool label atecontroller stamps onto
@@ -177,7 +182,7 @@ data:
           # correct value off the actual WorkerPool object.
           worker_selector:
             ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
-          snapshot_storage: ${SNAPSHOT_STORAGE_URI}
+          snapshot_storage: "${SNAPSHOT_STORAGE_URI}"
           egress_allow: []
           template_ready_timeout: 10m
     profiles:

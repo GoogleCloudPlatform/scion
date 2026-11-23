@@ -881,3 +881,20 @@ func TestEgressAllowCovers(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_DeprecatedSandboxFields(t *testing.T) {
+	for _, sc := range []*config.V1SubstrateConfig{
+		{SandboxClass: "gvisor"},
+		{SandboxConfigName: "gvisor-config"},
+	} {
+		err := Validate(sc)
+		if err == nil {
+			t.Fatalf("Validate(%+v) = nil, want a deprecation error", sc)
+		}
+		for _, want := range []string{"spec.sandboxClasses[].configRef", "worker_selector", "WorkerPool"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("Validate(%+v) error = %q, want it to name %q", sc, err, want)
+			}
+		}
+	}
+}

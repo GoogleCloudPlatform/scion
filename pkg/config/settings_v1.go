@@ -3379,17 +3379,23 @@ type V1SubstrateConfig struct {
 	// certificate. When both this and CAFile are set, the dialer prefers
 	// ClusterTrustBundle.
 	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
-	// SandboxClass selects the actor sandbox isolation technology
-	// ("gvisor" or "microvm"). Defaults to "gvisor" when empty.
+	// SandboxClass is deprecated and rejected by validation: Substrate v1
+	// takes the sandbox class from the WorkerPool's spec.sandboxClasses,
+	// selected through WorkerSelector. Kept so an old settings file fails
+	// with a message naming the replacement instead of a schema error.
 	SandboxClass string `json:"sandbox_class,omitempty" yaml:"sandbox_class,omitempty" koanf:"sandbox_class"`
-	// SandboxConfigName names the Substrate SandboxConfig CRD instance used
-	// by actor templates.
+	// SandboxConfigName is deprecated and rejected by validation: Substrate
+	// v1 takes the SandboxConfig from the WorkerPool's
+	// spec.sandboxClasses[].configRef, selected through WorkerSelector.
 	SandboxConfigName string `json:"sandbox_config_name,omitempty" yaml:"sandbox_config_name,omitempty" koanf:"sandbox_config_name"`
 	// WorkerSelector is copied into the ActorTemplate's workerSelector, to
 	// pin actors to a labeled WorkerPool.
 	WorkerSelector map[string]string `json:"worker_selector,omitempty" yaml:"worker_selector,omitempty" koanf:"worker_selector"`
-	// SnapshotStorage is the configured bucket/prefix used for the
-	// ActorTemplate's snapshotsConfig storage, e.g. "gs://bucket/prefix/".
+	// SnapshotStorage is the bucket/prefix sent as the ActorTemplate's
+	// snapshot_config.storage_location, e.g. "gs://bucket/prefix/".
+	// Substrate v1 accepts it only with its PerTemplateSnapshotLocation
+	// preview gate on; leave it empty to use the ate-api server's
+	// --snapshot-location.
 	SnapshotStorage string `json:"snapshot_storage,omitempty" yaml:"snapshot_storage,omitempty" koanf:"snapshot_storage"`
 	// EgressAllow lists additional hostnames allowed through the per-actor
 	// EgressPolicy, beyond the hub/git/model/telemetry hosts the runtime
@@ -3425,8 +3431,8 @@ type V1SubstrateConfig struct {
 	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
 	// EgressTrustBundle names a Substrate trust bundle to project into every
 	// actor as a system-info volume, so the actor can validate the egress
-	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
-	// Substrate d277088b).
+	// gateway's own TLS certificate (docs/guides/egress-trust-bundle.md in
+	// agent-substrate/substrate).
 	//
 	// Required iff the cluster runs the sdsmint egress gateway
 	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
@@ -3441,11 +3447,11 @@ type V1SubstrateConfig struct {
 	// Empty (the default) is off, and off is byte-identical to today: no
 	// system-info volume, no mount, no env. Validated by
 	// pkg/runtime/substrate.Validate: when non-empty it must be exactly
-	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
-	// supports. Kept as a string validated against a one-name allowlist,
-	// not a bool, deliberately: it mirrors Substrate's own
-	// trustBundle.name, and a future additional name needs only an
-	// allowlist entry here, not a schema change.
+	// "egress-mitm.ate.dev", the only egress-MITM trust bundle name
+	// scion/Substrate supports. Kept as a string validated against a one-name
+	// allowlist, not a bool, deliberately: it mirrors Substrate's own
+	// trustBundle.names, and a future additional name needs only an allowlist
+	// entry here, not a schema change.
 	EgressTrustBundle string `json:"egress_trust_bundle,omitempty" yaml:"egress_trust_bundle,omitempty" koanf:"egress_trust_bundle"`
 	// TemplateReadyTimeout bounds how long Run waits for a newly created
 	// ActorTemplate to become ready (a Go duration string, e.g. "10m").

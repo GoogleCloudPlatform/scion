@@ -20,16 +20,16 @@ operational procedure.
 
 Substrate is a Kubernetes-hosted actor runtime: **actors** (OCI containers in
 gVisor or microVM sandboxes) run on a shared pool of **worker** pods, at most
-one actor per worker at a time, and can be suspended to object storage and
-resumed onto any free worker. scion maps one agent onto one actor.
+one actor per worker at a time, and can be suspended to object storage (`MEMORY`
+fidelity) and resumed onto any free worker. scion maps one agent onto one actor.
 
 ```
  hub ──control channel──> scion runtime broker (in-cluster pod)
-                              │ gRPC (ServiceAccount token)   │ HTTP, ate-target-actor header
-                              ▼                                ▼
-                     api.ate-system (ateapi Control)    atenet-router ──> actor: sciontool substrate-serve :80
-                                                                            └─ tmux ─ harness (claude, ...)
- actor egress (HTTP(S) only, per-actor EgressPolicy) ──> hub, git host, model API, telemetry
+                              │ gRPC (ServiceAccount token)              │ HTTP, ate-target-actor header
+                              ▼                                          ▼
+                     api.ate-system (/substrate.ateapi.v1.Control)  atenet-router ──> actor: sciontool substrate-serve :80
+                                                                                        └─ tmux ─ harness (claude, ...)
+ actor egress (EgressPolicy: Http / Https / TlsPassthrough) ──> hub, git host, model API, telemetry
 ```
 
 - **The broker is the existing scion runtime broker binary**, with the
@@ -54,10 +54,11 @@ resumed onto any free worker. scion maps one agent onto one actor.
   depends on a NetworkPolicy restricting router ingress to the broker
   namespace (`deploy/substrate/README.md`), rather than relying on
   authorization Substrate itself doesn't provide.
-- **ateapi client:** `github.com/agent-substrate/substrate/pkg/proto/ateapipb`
-  (vendored under `third_party/ateapipb/`, with its license and source SHA
-  recorded there, to avoid pulling the upstream module's full transitive
-  dependency set into the build).
+- **ateapi client:** `go.ate.dev/substrate/api/ateapi/v1` (`v1.0.0`, Go
+  package `ateapi`, service `substrate.ateapi.v1.Control`), vendored under
+  `third_party/ateapipb/` (imported as alias `ateapipb`) with its license and
+  source SHA recorded there, to avoid pulling the upstream module's full
+  transitive dependency set into the build.
 - **Egress** from the actor is HTTP(S)-only and default-deny without an
   EgressPolicy — see §7. There is no WebSocket egress, so the hub
   port-forward tunnel and `sciontool` autoexpose are both disabled when
@@ -76,10 +77,10 @@ resumed onto any free worker. scion maps one agent onto one actor.
 | `router_endpoint` | atenet-router inbound endpoint, e.g. `http://atenet-router.ate-system.svc:80`. |
 | `token_audience` | Audience for the in-cluster ServiceAccount TokenRequest. Defaults to `api.ate-system.svc`. |
 | `ca_file` / `cluster_trust_bundle` | Verify the ateapi server certificate against a PEM file or a `ClusterTrustBundle` (the router client does not use it; `router_endpoint` is plain HTTP today, §10); when both are set, `cluster_trust_bundle` wins. |
-| `sandbox_class` | `gvisor` (default) or `microvm`. |
-| `sandbox_config_name` | The Substrate `SandboxConfig` CRD instance actor templates reference. |
+| `sandbox_class` | Deprecated and rejected in Substrate v1.0.0: sandbox class comes from the `WorkerPool`'s `spec.sandboxClasses` (`ate.dev/v1`), selected via `worker_selector`. |
+| `sandbox_config_name` | Deprecated and rejected in Substrate v1.0.0: `SandboxConfig` is referenced by the `WorkerPool`'s `spec.sandboxClasses[].configRef`, selected via `worker_selector`. |
 | `worker_selector` | Copied into the ActorTemplate's `workerSelector`, matched against a `WorkerPool`'s own `metadata.labels` (not a Pod label — see `deploy/substrate/README.md`). |
-| `snapshot_storage` | Bucket/prefix for the ActorTemplate's `snapshotsConfig` storage, e.g. `gs://bucket/prefix/`. |
+| `snapshot_storage` | Bucket/prefix sent as the ActorTemplate's `snapshot_config.storage_location`, e.g. `gs://bucket/prefix/` (accepted only with Substrate's `PerTemplateSnapshotLocation` preview gate; omit to use the `ate-api` server's `--snapshot-location`). |
 | `egress_allow` | Additional hostnames beyond the hub/git/model/telemetry hosts the runtime always adds (§7). Public FQDNs only — see `ValidateEgressAllow`. |
 | `egress_trust_bundle` | Names a Substrate trust bundle to project into the actor for the sdsmint MITM gateway (§7.1). Only `egress-mitm.ate.dev` is accepted. |
 | `template_ready_timeout` | Bounds how long `Run` waits for a newly created ActorTemplate to become ready. Go duration string; defaults to 10 minutes. |
@@ -147,38 +148,40 @@ same image/resources/sandbox share one template.
   `deploy/substrate/README.md` for the operator-facing setup step this
   requires.
 - **Template name** = `scion-` + the first 12 hex characters of
-  `sha256(image reference (digest-pinned), sandbox class, sandbox config name, worker_selector,
-  snapshot storage, effective resources, snapshot scope, the container's
-  added capabilities, substrate-serve entrypoint version, the container's
-  wakeup probe)`, plus
-  `egress_trust_bundle` appended only when it is non-empty. Same inputs
-  always produce the same name, so concurrent `Run`s for the same effective
-  template converge on one `CreateActorTemplate` instead of racing to create
-  distinct ones. The entrypoint version is folded in so a change to the
+  `sha256("v1", image reference (digest-pinned), worker_selector,
+  snapshot storage, effective template resource limits (`cpu_millicores`,
+  `memory_bytes`), snapshot fidelity (`SNAPSHOT_FIDELITY_MEMORY`), golden
+  snapshot mode (`GOLDEN_SNAPSHOT_MODE_ENABLED`), the container's added
+  capabilities, substrate-serve entrypoint version, the container's wakeup
+  probe)`, plus `egress_trust_bundle` appended only when it is non-empty. Same
+  inputs always produce the same name, so concurrent `Run`s for the same
+  effective template converge on one `CreateActorTemplate` instead of racing to
+  create distinct ones. The entrypoint version is folded in so a change to the
   `substrate-serve` wire protocol forces a new template rather than reusing
-  golden state built against an older one; resources are resolved against
-  `config.BuiltinDefaultResources` before hashing (a nil `*ResourceSpec`
-  would otherwise hash as empty and silently reuse a stale golden template
-  if the default ever changes). `egress_trust_bundle` is appended as its own
-  segment, not a fixed field, precisely so that leaving it empty keeps
-  existing golden templates on a plain install byte-identical and reused;
-  setting it changes the hash, since `buildActorTemplate`'s output genuinely
-  differs (a new `system-info` volume and Env — see §7.1).
+  golden state built against an older one; resources are resolved to their
+  effective millicore/byte limits (defaulting to `2` CPU / `4Gi` memory when
+  unset, matching `buildActorTemplate`) before hashing so a default change
+  never silently reuses a stale golden template. `egress_trust_bundle` is
+  appended only when non-empty, since setting it changes `buildActorTemplate`'s
+  output (a new `system-info` volume and Env — see §7.1).
 - **Contents:** one container running the pinned image, command
-  `["sciontool", "substrate-serve"]`, `Env` carrying no secrets and no
-  per-agent config ever (only the fixed CA-bundle paths when
-  `egress_trust_bundle` is set — see §7.1); cpu/memory limits from
-  `cfg.Resources` or runtime defaults; one `durableDir` volume at
-  `/workspace`; `snapshotsConfig` (`onPause`/`onCommit` = `DATA`, storage
-  from `snapshot_storage`); `sandboxConfig` (the configured sandbox class and
-  `SandboxConfig` name); `workerSelector` from config; a `wakeupProbe` on
-  `GET /scion/v1/healthz` port 80 (timeout 120s), so every wakeup, including
-  the golden actor's first boot, waits for `substrate-serve` to answer. A
-  miss crashes the actor, so an image whose entrypoint exits fails at
-  template time instead of producing a golden that cannot be restored.
-  (Substrate's API guide also states that a template whose containers all
-  declare a probe has its golden snapshot taken once the probe answers,
-  rather than after a fixed warm-up delay.)
+  `["/usr/local/bin/sciontool", "substrate-serve"]`, `Env` carrying no secrets
+  and no per-agent config ever (only the fixed CA-bundle paths when
+  `egress_trust_bundle` is set — see §7.1); template-level
+  `resources.limits` (`cpu_millicores` and `memory_bytes`, both required > 0 in
+  Substrate v1, from `cfg.Resources` limits -> requests -> defaults `2`/`4Gi`);
+  one `durableDir` volume at `/workspace`; `snapshot_config`
+  (`preferred_fidelity` = `SNAPSHOT_FIDELITY_MEMORY`,
+  `golden_snapshot_config.mode` = `GOLDEN_SNAPSHOT_MODE_ENABLED`, optional
+  `storage_location` from `snapshot_storage`); `worker_selector` from config
+  (the `WorkerPool` supplies `sandboxClasses[].configRef` in v1); a
+  `wakeup_probe` (`WakeupProbe` / `HttpGetAction`) on `GET /scion/v1/healthz`
+  port 80 (timeout 120s), so every wakeup, including the golden actor's first
+  boot, waits for `substrate-serve` to answer. A miss crashes the actor, so an
+  image whose entrypoint exits fails at template time instead of producing a
+  golden that cannot be restored. (Substrate's API guide also states that a
+  template whose containers all declare a probe has its golden snapshot taken
+  once the probe answers, rather than after a fixed warm-up delay.)
 - **Creating a template boots a golden actor and snapshots it.**
   `ensureActorTemplate` calls `GetActorTemplate`, and `CreateActorTemplate`
   if missing, then polls `GetActorTemplate` until the golden snapshot is
@@ -196,8 +199,8 @@ same image/resources/sandbox share one template.
 | `Name()` | Always `"substrate"` (§2). |
 | `Run(cfg)` | Steps below. |
 | `Delete(id)` | See §9. |
-| `Stop(id)` | Same as `Delete`, with a future-work marker: `SuspendActor(DATA)` plus the `$HOME` durableDir layout would keep the workspace and free the worker instead, but that lands with the suspend/resume work described in §11. Faking a "stopped" actor that is still running, or a "durable stop" that discarded the workspace, would both misreport what happened, so `Stop` stays honest by making it `Delete`. |
-| `List(labelFilter)` | `ListActors` across all atespaces (paginated), keeping only actors in a `scion-`-prefixed atespace (`substrateAtespacePrefix`) — `List` has no project context to scope the call. Substrate actors carry no labels of their own, so `AgentInfo` for a **record-having** actor (one this runtime instance has an in-memory record for, from its own `Run`, keyed by actor UID) reports the real agent slug as `Name`/`"scion.name"`. A **record-less** actor (no in-memory record — e.g. right after a broker restart) is reported under its raw, project-prefixed actor name instead, deliberately: it is never resolvable by a caller-supplied slug or project filter at all, so it can appear in an unfiltered listing without ever being actioned by the wrong caller (§9, §10). When a `"scion.name"` filter has no project-scoping key alongside it and more than one record-having actor shares that slug, `List` excludes all of them rather than guessing (§9). |
+| `Stop(id)` | Same as `Delete`, with a future-work marker: `SuspendActor` (`MEMORY` fidelity) plus the suspend/resume lifecycle would keep the actor and free the worker instead, but that lands with the suspend/resume work described in §11. Faking a "stopped" actor that is still running, or a "durable stop" that discarded the workspace, would both misreport what happened, so `Stop` stays honest by making it `Delete`. |
+| `List(labelFilter)` | `ListActors` across all atespaces (paginated via `ListOptions{PageSize: 1000, PageToken}`), keeping only actors in a `scion-`-prefixed atespace (`substrateAtespacePrefix`) — `List` has no project context to scope the call. Substrate actors carry no labels of their own, so `AgentInfo` for a **record-having** actor (one this runtime instance has an in-memory record for, from its own `Run`, keyed by actor UID) reports the real agent slug as `Name`/`"scion.name"`. A **record-less** actor (no in-memory record — e.g. right after a broker restart) is reported under its raw, project-prefixed actor name instead, deliberately: it is never resolvable by a caller-supplied slug or project filter at all, so it can appear in an unfiltered listing without ever being actioned by the wrong caller (§9, §10). When a `"scion.name"` filter has no project-scoping key alongside it and more than one record-having actor shares that slug, `List` excludes all of them rather than guessing (§9). |
 | `GetLogs(id)` | Returns `ErrLogsNotSupported` and makes no ateapi or Kubernetes call. Worker pods are shared across atespaces and users; reading one at the pod level would return other tenants' actor output — and any worker-level lines naming other atespaces — alongside the caller's own, so this is not currently supported. See `deploy/substrate/README.md`, "Known limitations" → "Logs", for the operator-facing `kubectl` alternative. |
 | `Exec(id, argv)` | `POST /scion/v1/exec` via the router, authorized with the `control_token` minted at bootstrap (§5.3), header `ate-target-actor: <atespace>/<actor>` (§1). Returns stdout; a non-zero exit becomes an error that includes stderr. |
 | `Attach`, `Sync`, `GetWorkspacePath` | Return errors stating they are not currently supported / naming the hub workspace API. Substrate has no exec/attach/TTY primitive, declared via the optional `runtime.AttachCapableRuntime` capability (`SupportsAttach() bool`, returning `false`; see `pkg/runtime/capabilities.go`). Every caller that would otherwise reach this checks that capability before dialing, but each only ever holds what it has on hand: the broker's own direct-connect PTY handler (`handleAgentAttach`, `pty_handlers.go`) and its control-channel counterpart (`handlePTYStream`, `controlchannel.go`) each already resolved a live runtime instance for the agent (`AgentLookupResult.Runtime`) and ask it directly via `scionrt.HasAttachSupport`, rejecting before any WebSocket upgrade or tmux exec. The CLI never holds a live instance and does not read broker metadata either: before dialing it asks the Hub's attach preflight (a plain `GET` of the agent's `/pty`), and the Hub decides from the stored broker record (`Profiles[].Attach`, falling back to `Capabilities.Attach`) whether to take the broker path, the agent path, or refuse with a 503 reason. `scion attach`, `scion start -a` and `scion resume -a` all go through that preflight; managed agents are still refused by the CLI up front. The web UI terminal uses the same Hub preflight. |
@@ -221,7 +224,8 @@ same image/resources/sandbox share one template.
 4. `CreateActor(atespace/name, template)`. An existing actor with the same
    name surfaces as `agent.ErrContainerNameInUse`.
 5. `CreateActorEgressPolicy` (§7).
-6. `ResumeActor`, then poll `GetActor` until `RUNNING` (bounded).
+6. `ResumeActor`; if the response does not already report `ACTOR_STATE_RUNNING`,
+   poll `GetActor` until `RUNNING` (bounded).
 7. Poll `GET /scion/v1/healthz` via the router until `awaiting-bootstrap`
    (bounded backoff).
 8. `POST /scion/v1/bootstrap`: env — see §5.3; `files` (§5.4) and `start_cmd`
@@ -559,8 +563,15 @@ hop:
 
 ## 7. Egress model
 
-`Run` creates a per-actor `EgressPolicy` (step 5, §4) with hostname rules
-for:
+`Run` creates a per-actor `EgressPolicy` (`name: "default"`, step 5, §4) using
+Substrate v1's protocol- and port-aware rules (`HttpRule`, `HttpsRule`,
+`TlsPassthroughRule`, each with explicit `Ports` and sorted hostnames, grouped
+by `(protocol, port)` with no duplicate `(host, port)` ties). Public hosts are
+emitted on port `443` as `TlsPassthrough` when `egress_trust_bundle` is unset
+(no gateway CA in the actor) or `Https` (gateway-intercepted) when
+`egress_trust_bundle` is set; the trusted hub endpoint gets an explicit-port
+`Http` rule for `http://` or the public TLS rule on its own port for `https://`.
+The allowlist covers:
 
 - the operator-configured hub endpoint host (never a creator/template
   override — see the trusted-hub-endpoint note in §5 or
@@ -628,20 +639,23 @@ check by the egress proxy itself could close that, and none is added here.
 
 ### 7.1 `egress_trust_bundle`: the sdsmint MITM gateway
 
-Substrate's plain `atenet-egress` enforces `egress_allow` only for TLS
-*passthrough* on address rules — every rule `egress_allow` emits is a
-HostnameRule, enforced for HTTPS only under the **sdsmint** gateway, which
+Without `egress_trust_bundle`, `buildEgressPolicy` emits `TlsPassthrough` rules
+on port 443 so actors verify origin certificates directly against public roots.
+When the cluster runs the **sdsmint** MITM egress gateway
+(`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`), the gateway
 terminates every TLS connection and re-originates it with a per-SNI leaf
-certificate chained to its own CA. An actor validating only public roots
+certificate chained to its own CA — an actor validating only public roots
 rejects that certificate and every HTTPS request fails.
 
-`egress_trust_bundle: egress-mitm.ate.dev` (the only name the vendored
-Substrate version resolves) is required if and only if the cluster runs
-sdsmint and the actor makes any HTTPS/TLS request. When set,
-`buildActorTemplate` adds a `system-info` volume projecting the gateway's CA
-to `/run/ate/trust-bundle.pem`, and sets `NODE_EXTRA_CA_CERTS`,
-`GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE` (all pointing at that
-file) and `SSL_CERT_DIR=/run/ate` — the shared variable names live in
+`egress_trust_bundle: egress-mitm.ate.dev` (the only egress-MITM trust bundle
+name scion/Substrate supports) is required if and only if the cluster runs
+sdsmint and the actor makes any HTTPS/TLS request. Setting it switches public port-443 egress rules
+from `TlsPassthrough` to `Https` (gateway-intercepted), and makes
+`buildActorTemplate` add a `system-info` volume (`trust_bundle.names:
+["egress-mitm.ate.dev"]`) projecting the gateway's CA to
+`/run/ate/trust-bundle.pem`, and set `NODE_EXTRA_CA_CERTS`, `GIT_SSL_CAINFO`,
+`SSL_CERT_FILE`, `CURL_CA_BUNDLE` (all pointing at that file) and
+`SSL_CERT_DIR=/run/ate` — the shared variable names live in
 `pkg/substrateenv.TrustBundleVarNames`, so `buildActorTemplate` and the
 serve-side exec path (§5.1, `runExec`'s own credential-drop environment)
 never drift apart. `SSL_CERT_DIR`
@@ -870,10 +884,11 @@ hook that runs dropped instead of as root — fail-closed, never the reverse.
 ## 9. Delete semantics
 
 `Delete(id)`: `GetActor` first (best effort, to capture the actor's UID),
-then `DeleteActorEgressPolicy` (ignoring `NotFound`), then
-`DeleteActor(any_state=true)` (also tolerating `NotFound`), then drop the
-in-memory `control_token` for `<atespace>/<actor>` and, when the UID was
-captured, `substrateAgentRecords[uid]` too. The ActorTemplate itself is
+then `DeleteActorEgressPolicy` (`name: "default"`, ignoring `NotFound`), then
+`DeleteActor` (with `options.uid` when known; Substrate v1 terminates actors in
+any state, also tolerating `NotFound`), then drop the in-memory `control_token`
+for `<atespace>/<actor>` and, when the UID was captured (or returned by
+`DeleteActor`), `substrateAgentRecords[uid]` too. The ActorTemplate itself is
 never deleted by `Delete` — template GC is future work (§11).
 
 **Delete is fire-and-forget.** The broker counts `DeleteActor`
@@ -1000,8 +1015,8 @@ every runtime — not a substrate-specific mechanism:
   the count to protect, whether or not its `DELETING` state itself ever
   resolves. The proto documents no transition out of `DELETING` back to a
   live state either: `RevertActor`, the one RPC that returns an actor to a
-  pre-delete state, only accepts CRASHED/RUNNING/PAUSED actors
-  (`third_party/ateapipb/ateapi.proto:46-47`), and a deleted actor simply
+  pre-delete state, only accepts CRASHED/RUNNING/SUSPENDED actors
+  (`third_party/ateapipb/ateapi.proto`), and a deleted actor simply
   stops being listed. `ActorStatus.state` is also required on every listed
   actor, so a listed actor's state is never zero-valued/unknown; DELETING
   actors are observed either to finish deleting or to stay stuck, and none
@@ -1090,8 +1105,9 @@ every runtime — not a substrate-specific mechanism:
   config image outranks the profile override (`pkg/agent/run.go`'s image
   resolution) — see §3 and `deploy/substrate/README.md` for the required
   setup step (a digest-pinned template `image:` or `--image`).
-- **The egress hostname-rule model requires the sdsmint MITM gateway**
-  (§7.1); the plain gateway enforces only address rules for TLS.
+- **HTTPS egress inspection (`HttpsRule`) requires the sdsmint MITM gateway**
+  and `egress_trust_bundle` (§7.1); without it, public port-443 hosts use
+  `TlsPassthrough` (SNI-filtered without TLS decryption).
 - **The dialer's trust material is pinned for the broker process's
   lifetime** (§2), not re-read per agent start.
 - **The every-prefix symlink guard (§5.5) is not a general TOCTOU
@@ -1106,15 +1122,15 @@ every runtime — not a substrate-specific mechanism:
   default — e.g. a runtime-aware harness-config seed, or resolving tags to
   digests generically — rather than requiring every substrate install to
   set a digest-pinned template `image:` by hand.
-- Identity-derived bootstrap nonce (`MintActorJWT`), replacing the current
+- Identity-derived bootstrap nonce (`MintActorJwt`), replacing the current
   fallback (§5.2).
 - Seal the bootstrap payload end-to-end, or move the router endpoint to its
   TLS listener with a `ClusterTrustBundle` CA, closing the broker→router
   plaintext gap (§6, §10).
-- `Suspender` capability (`Suspend`/`Resume`) using Substrate's FULL
-  snapshot scope, plus the `$HOME` durableDir layout needed for `Stop`
+- `Suspender` capability (`Suspend`/`Resume`) using Substrate's `MEMORY`
+  snapshot fidelity, plus the `$HOME` durableDir layout needed for `Stop`
   to keep the workspace instead of deleting the actor (§4's `Stop` row).
-- Credential rehydration after a FULL resume (the hub revokes agent
+- Credential rehydration after a `MEMORY` resume (the hub revokes agent
   credentials on suspend).
 - Eviction handling beyond "don't forward SIGTERM" (§5.6): watch for
   `WORKER_STATE_DRAINING`, and have the broker suspend proactively.

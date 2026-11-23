@@ -34,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // substrateEgressCall records one CreateActorEgressPolicy request, keyed by
@@ -157,7 +157,9 @@ func (f *fakeSubstrateControlClient) CreateActor(ctx context.Context, in *ateapi
 func (f *fakeSubstrateControlClient) CreateActorEgressPolicy(ctx context.Context, in *ateapipb.CreateActorEgressPolicyRequest, opts ...grpc.CallOption) (*ateapipb.EgressPolicy, error) {
 	var patterns []string
 	for _, rule := range in.GetEgressPolicy().GetRules() {
-		patterns = append(patterns, rule.GetHostnames().GetPatterns()...)
+		patterns = append(patterns, rule.GetHttp().GetHostnames()...)
+		patterns = append(patterns, rule.GetHttps().GetHostnames()...)
+		patterns = append(patterns, rule.GetTlsPassthrough().GetHostnames()...)
 	}
 	f.recorder.record(in.GetActor().GetName(), patterns)
 	return &ateapipb.EgressPolicy{}, nil

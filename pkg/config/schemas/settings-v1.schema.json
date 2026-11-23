@@ -648,14 +648,14 @@
             "token_audience": { "type": "string", "description": "TokenRequest audience for ateapi auth. Defaults to \"api.ate-system.svc\"." },
             "ca_file": { "type": "string", "description": "Path to a PEM CA bundle verifying the ateapi Control gRPC dial. Used when cluster_trust_bundle is empty." },
             "cluster_trust_bundle": { "type": "string", "description": "Name of a certificates.k8s.io ClusterTrustBundle verifying the ateapi Control gRPC dial. Takes precedence over ca_file." },
-            "sandbox_class": { "type": "string", "enum": ["gvisor", "microvm"], "default": "gvisor" },
-            "sandbox_config_name": { "type": "string", "description": "Name of the Substrate SandboxConfig CRD instance used by actor templates." },
+            "sandbox_class": { "type": "string", "enum": ["gvisor", "microvm"], "description": "Deprecated and rejected: Substrate v1 selects the sandbox class through the WorkerPool's spec.sandboxClasses; pin the pool with worker_selector." },
+            "sandbox_config_name": { "type": "string", "description": "Deprecated and rejected: Substrate v1 takes the SandboxConfig from the WorkerPool's spec.sandboxClasses[].configRef; pin the pool with worker_selector." },
             "worker_selector": {
               "type": "object",
               "additionalProperties": { "type": "string" },
               "description": "matchLabels copied into the ActorTemplate's workerSelector."
             },
-            "snapshot_storage": { "type": "string", "description": "Object-storage base URI for actor snapshots, e.g. \"gs://bucket/prefix/\"." },
+            "snapshot_storage": { "type": "string", "description": "Object-storage base URI for actor snapshots, e.g. \"gs://bucket/prefix/\". Sent as the template's snapshot_config.storage_location, which Substrate v1 accepts only with its PerTemplateSnapshotLocation preview gate; leave empty to use the ate-api server's --snapshot-location." },
             "egress_allow": {
               "type": "array",
               "items": { "type": "string" },

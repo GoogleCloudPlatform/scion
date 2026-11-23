@@ -39,13 +39,19 @@ runtimes:
       router_endpoint: http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:80
       token_audience: api.${ATE_SYSTEM_NAMESPACE}.svc
       cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}
-      sandbox_class: gvisor
-      sandbox_config_name: ${SANDBOX_CONFIG_NAME}
+      # NOTE: Substrate v1.0.0 removed `sandbox_class` and
+      # `sandbox_config_name` from broker settings; they are now configured on
+      # the target WorkerPool (`spec.sandboxClasses[].configRef` in
+      # deploy/substrate/cluster/workerpool.yaml), selected via worker_selector.
+      #
       # Matched against the target WorkerPool object's own metadata.labels
       # -- see deploy/substrate/cluster/README.md, "worker_selector".
       worker_selector:
         ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
-      snapshot_storage: ${SNAPSHOT_STORAGE_URI}
+      # Optional: sent as snapshot_config.storage_location (requires
+      # Substrate's PerTemplateSnapshotLocation preview gate; omit to use
+      # ate-api's --snapshot-location).
+      snapshot_storage: "${SNAPSHOT_STORAGE_URI}"
       # Only public FQDNs (optionally wildcarded) are accepted, and
       # rejects IPs/CIDRs, catch-alls, and internal-shaped or non-ICANN
       # hostnames -- see README.md, "egress_allow entries are validated".

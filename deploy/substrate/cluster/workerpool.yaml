@@ -21,12 +21,13 @@
 # is resolved with `envsubst` (or equivalent) before `kubectl apply`. Only
 # two of its placeholder names are actually SHARED with broker.yaml's
 # ConfigMap -- WORKER_SELECTOR_KEY and WORKER_SELECTOR_VALUE, which must
-# match so `worker_selector` resolves to these workers. SUBSTRATE_WORKER_NAMESPACE
-# is this manifest's own placeholder only; broker.yaml does not reference it.
+# match so `worker_selector` resolves to these workers. SUBSTRATE_WORKER_NAMESPACE,
+# WORKER_POOL_REPLICAS, SANDBOX_CONFIG_NAME, WORKER_IMAGE, and
+# SUBSTRATE_VERSION_LABEL_* are cluster/pool placeholders used here.
 # Resolve both manifests with one shared set of exported values regardless,
 # so the shared two never drift apart between them.
 #
-# WorkerPool is a Substrate CRD (apiVersion ate.dev/v1alpha1), not a builtin
+# WorkerPool is a Substrate CRD (apiVersion ate.dev/v1), not a builtin
 # Kubernetes type -- it only exists once Substrate itself is installed on
 # the cluster (deploy/substrate/cluster/README.md, "Install order").
 
@@ -37,7 +38,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: scion-substrate-integration
 ---
-apiVersion: ate.dev/v1alpha1
+apiVersion: ate.dev/v1
 kind: WorkerPool
 metadata:
   name: scion-agents
@@ -55,7 +56,10 @@ metadata:
     ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
 spec:
   replicas: ${WORKER_POOL_REPLICAS}
-  sandboxClass: gvisor
+  sandboxClasses:
+    - name: gvisor
+      configRef:
+        name: ${SANDBOX_CONFIG_NAME}
   # The Substrate-provided gVisor worker supervisor image, resolved by your
   # install (see cluster/README.md, "Install order"); not a scion image.
   workerImage: ${WORKER_IMAGE}

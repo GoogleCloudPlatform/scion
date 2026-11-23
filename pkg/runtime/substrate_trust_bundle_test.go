@@ -25,7 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/substratecaps"
 	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
-	"github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 // -----------------------------------------------------------------------
@@ -45,14 +45,12 @@ import (
 func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("c", 64)
 	sc := config.V1SubstrateConfig{
-		SandboxClass:      "microvm",
-		SandboxConfigName: "cfg-1",
-		WorkerSelector:    map[string]string{"pool": "x"},
-		SnapshotStorage:   "gs://bucket/prefix/",
+		WorkerSelector:  map[string]string{"pool": "x"},
+		SnapshotStorage: "gs://bucket/prefix/",
 	}
 	resources := &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}}
 
-	got := buildActorTemplate("scion-test", "scion-abc123", image, sc, resources)
+	got := mustBuildActorTemplate(t, "scion-test", "scion-abc123", image, sc, resources)
 
 	want := &ateapipb.ActorTemplate{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "scion-test", Name: "scion-abc123"},
@@ -68,12 +66,8 @@ func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *tes
 				SecurityContext: &ateapipb.SecurityContext{
 					Capabilities: &ateapipb.Capabilities{Add: slices.Clone(substratecaps.Names())},
 				},
-				Resources: &ateapipb.Resources{Limits: []*ateapipb.Limits{
-					{Name: "cpu", Quantity: "2"},
-					{Name: "memory", Quantity: "4Gi"},
-				}},
-				WakeupProbe: &ateapipb.ContainerWakeupProbe{
-					HttpGet:        &ateapipb.HTTPGetAction{Path: "/scion/v1/healthz", Port: 80},
+				WakeupProbe: &ateapipb.WakeupProbe{
+					HttpGet:        &ateapipb.HttpGetAction{Path: "/scion/v1/healthz", Port: 80},
 					TimeoutSeconds: 120,
 				},
 			},
@@ -81,32 +75,34 @@ func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *tes
 		Volumes: []*ateapipb.Volume{
 			{Name: "workspace", DurableDir: &ateapipb.DurableDirVolumeSource{}},
 		},
-		SnapshotsConfig: &ateapipb.SnapshotsConfig{
-			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
-			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
-			StorageLocation: sc.SnapshotStorage,
+		SnapshotConfig: &ateapipb.SnapshotConfig{
+			StorageLocation:   sc.SnapshotStorage,
+			PreferredFidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			GoldenSnapshotConfig: &ateapipb.GoldenSnapshotConfig{
+				Mode: ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_ENABLED,
+			},
 		},
-		SandboxConfig: &ateapipb.SandboxConfig{
-			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM,
-			ConfigName:   sc.SandboxConfigName,
-		},
+		Resources: &ateapipb.ResourceRequirements{Limits: &ateapipb.Resources{
+			CpuMillicores: 2000,
+			MemoryBytes:   4 << 30,
+		}},
 		WorkerSelector: &ateapipb.Selector{MatchLabels: sc.WorkerSelector},
 	}
 
 	if !proto.Equal(got, want) {
-		t.Errorf("buildActorTemplate() with EgressTrustBundle unset differs from the pre-change golden template:\ngot:  %s\nwant: %s", got, want)
+		t.Errorf("buildActorTemplate() with EgressTrustBundle unset differs from the golden template:\ngot:  %s\nwant: %s", got, want)
 	}
 }
 
 // TestBuildActorTemplate_EgressTrustBundleSet confirms the exact volume,
 // mount, and five env vars buildActorTemplate adds when EgressTrustBundle
-// is set — mirroring demos/egress/egress-mitm-template.yaml.tmpl
-// (agent-substrate/substrate d277088b) and docs/egress-trust-bundle.md.
+// is set — mirroring demos/egress/egress-template.yaml.tmpl
+// (agent-substrate/substrate v1.0.0) and docs/guides/egress-trust-bundle.md.
 func TestBuildActorTemplate_EgressTrustBundleSet(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("d", 64)
 	sc := config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
 
-	tmpl := buildActorTemplate("scion-test", "scion-def456", image, sc, nil)
+	tmpl := mustBuildActorTemplate(t, "scion-test", "scion-def456", image, sc, nil)
 
 	wantVolumes := []*ateapipb.Volume{
 		{Name: "workspace", DurableDir: &ateapipb.DurableDirVolumeSource{}},
@@ -116,8 +112,8 @@ func TestBuildActorTemplate_EgressTrustBundleSet(t *testing.T) {
 				DataSources: []*ateapipb.SystemInfoDataSource{
 					{
 						TrustBundle: &ateapipb.TrustBundleDataSource{
-							Name: "egress-mitm.ate.dev",
-							Path: "trust-bundle.pem",
+							Names: []string{"egress-mitm.ate.dev"},
+							Path:  "trust-bundle.pem",
 						},
 					},
 				},
@@ -179,7 +175,7 @@ func TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames(t *testing.T)
 	image := "repo/image@sha256:" + strings.Repeat("f", 64)
 	sc := config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
 
-	tmpl := buildActorTemplate("scion-test", "scion-fedcba", image, sc, nil)
+	tmpl := mustBuildActorTemplate(t, "scion-test", "scion-fedcba", image, sc, nil)
 
 	gotNames := make([]string, len(tmpl.GetContainers()[0].GetEnv()))
 	for i, e := range tmpl.GetContainers()[0].GetEnv() {
@@ -197,10 +193,10 @@ func TestBuildActorTemplate_EnvNamesMatchSharedTrustBundleVarNames(t *testing.T)
 // substrateTemplateNameFixture is one row of the table-driven
 // substrateTemplateName tests below: an image/config/resources input, and
 // the literal name substrateTemplateName produces for it with
-// EgressTrustBundle unset. Both rows were re-pinned when the container's
-// wakeup probe joined the hash input (see substrateWakeupProbeCacheKey):
-// that change deliberately gives every template a new name so existing
-// goldens, built without the probe, are rebuilt rather than reused.
+// EgressTrustBundle unset. Both rows were re-pinned for Substrate v1.0.0's
+// template hash (which prefixes "v1|", drops the removed sandbox_class /
+// sandbox_config_name fields, and hashes template-level CPU/memory limits
+// plus MEMORY snapshot fidelity and golden snapshot mode).
 type substrateTemplateNameFixture struct {
 	name      string
 	image     string
@@ -213,9 +209,8 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 	return []substrateTemplateNameFixture{
 		{
 			// The original fixture: pins the literal for the exact
-			// image/sandbox/config-name/snapshot-storage/resources shape
-			// substrateTemplateName has always hashed. A
-			// regression that starts hashing EgressTrustBundle
+			// image/snapshot-storage/resources shape substrateTemplateName
+			// hashes. A regression that starts hashing EgressTrustBundle
 			// unconditionally (e.g. always as an extra "%s" field, "" when
 			// unset) would change this literal even though the setting is
 			// off — exactly the silent golden-template reuse break this
@@ -223,28 +218,24 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 			name:  "base",
 			image: "repo/image@sha256:" + strings.Repeat("e", 64),
 			sc: config.V1SubstrateConfig{
-				SandboxClass:      "gvisor",
-				SandboxConfigName: "gvisor-default",
-				SnapshotStorage:   "gs://bucket/prefix/",
+				SnapshotStorage: "gs://bucket/prefix/",
 			},
 			resources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "2", Memory: "4Gi"}},
-			wantUnset: "scion-799faf9df0d7",
+			wantUnset: "scion-42877799ec2f",
 		},
 		{
 			// Worker selector set, resources nil (so buildActorTemplate's
-			// own nil->BuiltinDefaultResources() substitution is exercised
+			// own nil->default substitution is exercised
 			// in the hash input too). Strengthens the plain-install pin
 			// across a second, materially different fixture shape.
 			name:  "worker selector, nil resources",
 			image: "repo/image@sha256:" + strings.Repeat("g", 64),
 			sc: config.V1SubstrateConfig{
-				SandboxClass:      "gvisor",
-				SandboxConfigName: "gvisor-default",
-				WorkerSelector:    map[string]string{"pool": "scion-agents"},
-				SnapshotStorage:   "gs://bucket/prefix/",
+				WorkerSelector:  map[string]string{"pool": "scion-agents"},
+				SnapshotStorage: "gs://bucket/prefix/",
 			},
 			resources: nil,
-			wantUnset: "scion-078dcfd90843",
+			wantUnset: "scion-01ebbc00f223",
 		},
 	}
 }
@@ -265,7 +256,7 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 func TestBuildActorTemplate_LaunchArgv0IsAlwaysAbsolute(t *testing.T) {
 	for _, tc := range substrateTemplateNameFixtures() {
 		t.Run(tc.name, func(t *testing.T) {
-			tmpl := buildActorTemplate("scion-test", "scion-abc123", tc.image, tc.sc, tc.resources)
+			tmpl := mustBuildActorTemplate(t, "scion-test", "scion-abc123", tc.image, tc.sc, tc.resources)
 			for _, c := range tmpl.Containers {
 				if len(c.Command) == 0 {
 					t.Fatalf("container %q has an empty Command", c.Name)

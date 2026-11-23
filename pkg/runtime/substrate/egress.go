@@ -104,9 +104,13 @@ var egressAllowSpecialUseTLDs = map[string]string{
 	"onion": "the \"onion\" top-level domain is a special-use name for Tor hidden services (RFC 7686), not resolvable via the public DNS",
 }
 
-// Validate rejects an egress_allow list that would let a Substrate actor
-// reach the router, other in-cluster services, or "everything" through its
-// EgressPolicy. See ValidateEgressAllow for the exact rules.
+// Validate rejects a substrate configuration block that is malformed or
+// would let a Substrate actor reach the router, other in-cluster services,
+// or "everything" through its EgressPolicy. It checks:
+//
+//   - the removed sandbox_class / sandbox_config_name keys;
+//   - egress_allow (public hosts; see ValidateEgressAllow) and
+//     egress_trust_bundle.
 //
 // Threat model: the bootstrap nonce fallback (substrate-runtime.md §5.2)
 // trusts whichever caller reaches the control server's /bootstrap endpoint
@@ -124,40 +128,44 @@ func Validate(s *config.V1SubstrateConfig) error {
 	if s == nil {
 		return nil
 	}
+	const prefix = "runtimes.<name>.substrate."
+	if s.SandboxClass != "" {
+		return fmt.Errorf("%ssandbox_class is no longer supported by Substrate v1.0.0: the sandbox class comes from the WorkerPool's spec.sandboxClasses[].configRef, selected with worker_selector; remove sandbox_class", prefix)
+	}
+	if s.SandboxConfigName != "" {
+		return fmt.Errorf("%ssandbox_config_name is no longer supported by Substrate v1.0.0: the sandbox configuration comes from the WorkerPool's spec.sandboxClasses[].configRef, selected with worker_selector; remove sandbox_config_name", prefix)
+	}
 	if err := ValidateEgressAllow(s.EgressAllow); err != nil {
-		return fmt.Errorf("runtimes.<name>.substrate.egress_allow: %w", err)
+		return fmt.Errorf("%segress_allow: %w", prefix, err)
 	}
 	if err := ValidateEgressTrustBundle(s.EgressTrustBundle); err != nil {
-		return fmt.Errorf("runtimes.<name>.substrate.egress_trust_bundle: %w", err)
+		return fmt.Errorf("%segress_trust_bundle: %w", prefix, err)
 	}
 	return nil
 }
 
-// supportedEgressTrustBundle is the only trust bundle name the vendored
-// Substrate version (d277088b) resolves — see
-// docs/egress-trust-bundle.md and demos/egress/egress-mitm-template.yaml.tmpl
-// in agent-substrate/substrate. Kept as a single named constant rather than
-// a slice: ValidateEgressTrustBundle's doc comment explains why a future
-// second name is meant to grow this into an allowlist, not change the
-// field's type.
+// supportedEgressTrustBundle is the only egress-MITM trust bundle name
+// scion/Substrate supports — see docs/guides/egress-trust-bundle.md and
+// demos/egress/egress-template.yaml.tmpl in agent-substrate/substrate. Kept
+// as a single named constant rather than a slice: ValidateEgressTrustBundle's
+// doc comment explains why a future second name is meant to grow this into
+// an allowlist, not change the field's type.
 const supportedEgressTrustBundle = "egress-mitm.ate.dev"
 
 // ValidateEgressTrustBundle rejects an egress_trust_bundle value that is not
-// empty (off) and not exactly supportedEgressTrustBundle — the only name
-// Substrate d277088b's atelet actually resolves. An unsupported name would
-// not fail here; it would fail much later and much less clearly, at actor
-// start, with atelet's own "ClusterTrustBundle ... not found" (a name not on
-// its allowlist gets the same wording as one simply missing from the
-// cluster) or "is not supported by this deployment" error — see
-// docs/egress-trust-bundle.md's "Operational notes" table. Failing fast here
-// with an error that names the one supported value is strictly better than
-// forwarding an actor-start failure the operator would have to go dig a log
-// line out for.
+// empty (off) and not exactly supportedEgressTrustBundle — the only
+// egress-MITM trust bundle name scion/Substrate supports. An unsupported name
+// would not fail here; it would fail much later and much less clearly, at
+// actor start, with atelet's own "unknown trust bundle" error — see
+// docs/guides/egress-trust-bundle.md's "Operational notes". Failing fast
+// here with an error that names the one supported value is strictly better
+// than forwarding an actor-start failure the operator would have to go dig
+// a log line out for.
 func ValidateEgressTrustBundle(name string) error {
 	if name == "" || name == supportedEgressTrustBundle {
 		return nil
 	}
-	return fmt.Errorf("egress_trust_bundle %q is not supported; the only trust bundle name Substrate supports is %q", name, supportedEgressTrustBundle)
+	return fmt.Errorf("egress_trust_bundle %q is not supported; the only egress-MITM trust bundle name scion/Substrate supports is %q", name, supportedEgressTrustBundle)
 }
 
 // ValidateEgressAllow is allowlist-first: it accepts only public FQDNs —

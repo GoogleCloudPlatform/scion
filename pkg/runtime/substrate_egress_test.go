@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"fmt"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	ateapipb "github.com/GoogleCloudPlatform/scion/third_party/ateapipb"
 )
 
 func TestSubstrateEgressHostnames_TelemetryHost(t *testing.T) {
@@ -305,32 +307,152 @@ func TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow(t *testing.T) {
 	}
 }
 
-// TestBuildEgressPolicy_PatternsMatchInputVerbatim confirms every string in
-// hostnames lands in HostnameRule.patterns, in order, unmodified — no
-// re-normalization, no mangling, and (paired with
-// TestSubstrateEgressHostnames_RejectsIPShapedEgressAllow, which keeps
-// IP/CIDR entries out of that input list in the first place) nothing
-// IP-shaped ever reaches Patterns. Also confirms CIDRRule is never set:
-// everything goes through HostnameRule.patterns or not at all.
-func TestBuildEgressPolicy_PatternsMatchInputVerbatim(t *testing.T) {
-	hostnames := []string{"api.example.com", "*.github.com", "registry.npmjs.org"}
-	req := buildEgressPolicy("scion-proj", "agent-a", hostnames)
-
-	rules := req.GetEgressPolicy().GetRules()
-	if len(rules) != 1 {
-		t.Fatalf("buildEgressPolicy() = %d rules, want 1", len(rules))
-	}
-	if rules[0].GetCidrs() != nil {
-		t.Errorf("buildEgressPolicy() set a CIDRRule; it never sends one")
-	}
-	patterns := rules[0].GetHostnames().GetPatterns()
-	if len(patterns) != len(hostnames) {
-		t.Fatalf("buildEgressPolicy() patterns = %v, want exactly %v", patterns, hostnames)
-	}
-	for i, want := range hostnames {
-		if patterns[i] != want {
-			t.Errorf("buildEgressPolicy() pattern[%d] = %q, want %q (verbatim passthrough)", i, patterns[i], want)
+// policyHostsByRule flattens an egress policy into "protocol:port" ->
+// hostnames, failing on any rule that names more than one port.
+func policyHostsByRule(t *testing.T, req *ateapipb.CreateActorEgressPolicyRequest) map[string][]string {
+	t.Helper()
+	out := map[string][]string{}
+	for _, r := range req.GetEgressPolicy().GetRules() {
+		var proto string
+		var hosts []string
+		var ports *ateapipb.Ports
+		switch {
+		case r.GetHttp() != nil:
+			proto, hosts, ports = "http", r.GetHttp().GetHostnames(), r.GetHttp().GetPorts()
+		case r.GetHttps() != nil:
+			proto, hosts, ports = "https", r.GetHttps().GetHostnames(), r.GetHttps().GetPorts()
+		case r.GetTlsPassthrough() != nil:
+			proto, hosts, ports = "tls_passthrough", r.GetTlsPassthrough().GetHostnames(), r.GetTlsPassthrough().GetPorts()
+		default:
+			t.Fatalf("rule %v sets no protocol", r)
 		}
+		if len(ports.GetNumbers()) != 1 || ports.GetAll() != nil {
+			t.Fatalf("rule %v: want exactly one explicit port", r)
+		}
+		key := fmt.Sprintf("%s:%d", proto, ports.GetNumbers()[0])
+		if _, dup := out[key]; dup {
+			t.Fatalf("two rules for %s; rules must be grouped by (protocol, port)", key)
+		}
+		out[key] = hosts
+	}
+	return out
+}
+
+// assertNoPortTies fails if any hostname appears twice on the same port
+// across rules (Substrate rejects such ties at admission).
+func assertNoPortTies(t *testing.T, byRule map[string][]string) {
+	t.Helper()
+	seen := map[string]string{}
+	for key, hosts := range byRule {
+		port := key[strings.LastIndex(key, ":")+1:]
+		for _, h := range hosts {
+			k := h + "|" + port
+			if prev, ok := seen[k]; ok {
+				t.Fatalf("host %s appears on port %s in both %s and %s", h, port, prev, key)
+			}
+			seen[k] = key
+		}
+	}
+}
+
+// TestBuildEgressPolicy_V1Rules pins the Substrate v1 rule shape: public
+// hosts as TLS passthrough on 443 (no gateway CA in the actor), and an
+// http:// trusted hub as cleartext Http on its explicit port — grouped by
+// (protocol, port), hostnames sorted, no ties.
+func TestBuildEgressPolicy_V1Rules(t *testing.T) {
+	hostnames := []string{"api.example.com", "*.github.com", "hub.scion.svc.cluster.local"}
+	req, err := buildEgressPolicy("scion-proj", "agent-a", hostnames, "http://hub.scion.svc.cluster.local:8080", config.V1SubstrateConfig{})
+	if err != nil {
+		t.Fatalf("buildEgressPolicy() error = %v", err)
+	}
+	if req.GetEgressPolicy().GetMetadata().GetName() != "default" {
+		t.Errorf("policy name = %q, want default", req.GetEgressPolicy().GetMetadata().GetName())
+	}
+	byRule := policyHostsByRule(t, req)
+	want := map[string][]string{
+		"tls_passthrough:443": {"*.github.com", "api.example.com"},
+		"http:8080":           {"hub.scion.svc.cluster.local"},
+	}
+	if len(byRule) != len(want) {
+		t.Fatalf("rules = %v, want %v", byRule, want)
+	}
+	for k, hosts := range want {
+		if !slices.Equal(byRule[k], hosts) {
+			t.Errorf("rule %s hosts = %v, want %v", k, byRule[k], hosts)
+		}
+	}
+	assertNoPortTies(t, byRule)
+}
+
+// TestBuildEgressPolicy_MITMTrustBundleUsesHttps: with egress_trust_bundle
+// set, the actor trusts the gateway CA, so public hosts (and an https://
+// hub) are gateway-intercepted Https rules on 443.
+func TestBuildEgressPolicy_MITMTrustBundleUsesHttps(t *testing.T) {
+	sc := config.V1SubstrateConfig{EgressTrustBundle: "egress-mitm.ate.dev"}
+	req, err := buildEgressPolicy("scion-proj", "agent-a", []string{"api.example.com", "hub.example.com"}, "https://hub.example.com", sc)
+	if err != nil {
+		t.Fatalf("buildEgressPolicy() error = %v", err)
+	}
+	byRule := policyHostsByRule(t, req)
+	if len(byRule) != 1 || !slices.Equal(byRule["https:443"], []string{"api.example.com", "hub.example.com"}) {
+		t.Fatalf("rules = %v, want one https:443 rule for both hosts", byRule)
+	}
+}
+
+// TestBuildEgressPolicy_HubOnCustomTLSPort: an https:// hub on a non-443
+// port gets its own explicit-port rule instead of the public 443 one.
+func TestBuildEgressPolicy_HubOnCustomTLSPort(t *testing.T) {
+	req, err := buildEgressPolicy("scion-proj", "agent-a", []string{"api.example.com", "hub.example.com"}, "https://hub.example.com:8443", config.V1SubstrateConfig{})
+	if err != nil {
+		t.Fatalf("buildEgressPolicy() error = %v", err)
+	}
+	byRule := policyHostsByRule(t, req)
+	if !slices.Equal(byRule["tls_passthrough:443"], []string{"api.example.com"}) || !slices.Equal(byRule["tls_passthrough:8443"], []string{"hub.example.com"}) {
+		t.Fatalf("rules = %v, want the hub only on 8443", byRule)
+	}
+}
+
+// TestBuildEgressPolicy_TrustedHubNormalizedAndInvalidPortsRejected proves:
+//   - uppercase / trailing-dot TrustedHubEndpoint hostnames are normalized to
+//     lowercase without a trailing dot (matching egress_allow and Substrate v1
+//     rule requirements) and deduplicated cleanly;
+//   - invalid explicit ports (:0, :70000, :abc) return an error rather than
+//     silently falling back to default 80/443.
+func TestBuildEgressPolicy_TrustedHubNormalizedAndInvalidPortsRejected(t *testing.T) {
+	t.Run("uppercase and trailing dot normalized", func(t *testing.T) {
+		endpoint := "https://HUB.Example.COM.:8443"
+		sc := config.V1SubstrateConfig{EgressAllow: []string{"hub.example.com"}}
+		hosts, err := substrateEgressHostnames(RunConfig{TrustedHubEndpoint: endpoint}, map[string]string{}, sc)
+		if err != nil {
+			t.Fatalf("substrateEgressHostnames() error = %v", err)
+		}
+		if containsHost(hosts, "HUB.Example.COM.") || !containsHost(hosts, "hub.example.com") {
+			t.Fatalf("substrateEgressHostnames() = %v, want normalized hub.example.com only", hosts)
+		}
+		req, err := buildEgressPolicy("scion-proj", "agent-a", hosts, endpoint, sc)
+		if err != nil {
+			t.Fatalf("buildEgressPolicy() error = %v", err)
+		}
+		byRule := policyHostsByRule(t, req)
+		if !slices.Equal(byRule["tls_passthrough:8443"], []string{"hub.example.com"}) {
+			t.Fatalf("tls_passthrough:8443 = %v, want [hub.example.com]", byRule["tls_passthrough:8443"])
+		}
+		if containsHost(byRule["tls_passthrough:443"], "hub.example.com") {
+			t.Fatalf("tls_passthrough:443 = %v, hub on custom port 8443 should not also be on 443", byRule["tls_passthrough:443"])
+		}
+		assertNoPortTies(t, byRule)
+	})
+
+	for _, endpoint := range []string{
+		"https://hub.example.com:0",
+		"http://hub.example.com:70000",
+		"https://hub.example.com:abc",
+	} {
+		t.Run("invalid port "+endpoint, func(t *testing.T) {
+			if _, err := buildEgressPolicy("scion-proj", "agent-a", []string{"api.example.com"}, endpoint, config.V1SubstrateConfig{}); err == nil {
+				t.Errorf("buildEgressPolicy(%q) = nil error, want invalid-port error", endpoint)
+			}
+		})
 	}
 }
 
@@ -349,14 +471,17 @@ func TestSubstrateEgressPolicy_EndToEndNoIPPatterns(t *testing.T) {
 	if hostsErr != nil {
 		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
 	}
-	req := buildEgressPolicy("scion-proj", "agent-a", hosts)
-	patterns := req.GetEgressPolicy().GetRules()[0].GetHostnames().GetPatterns()
+	req, err := buildEgressPolicy("scion-proj", "agent-a", hosts, "", sc)
+	if err != nil {
+		t.Fatalf("buildEgressPolicy() error = %v", err)
+	}
+	patterns := policyHostsByRule(t, req)["tls_passthrough:443"]
 
 	if containsHost(patterns, "8.8.8.8") || containsHost(patterns, "10.0.0.0/8") {
-		t.Errorf("HostnameRule.patterns = %v, an IP/CIDR egress_allow entry reached it", patterns)
+		t.Errorf("rule hostnames = %v, an IP/CIDR egress_allow entry reached it", patterns)
 	}
 	if !containsHost(patterns, "github.com") {
-		t.Errorf("HostnameRule.patterns = %v, want the normalized form of GitHub.COM.", patterns)
+		t.Errorf("rule hostnames = %v, want the normalized form of GitHub.COM.", patterns)
 	}
 }
 
