@@ -14,8 +14,10 @@
 # limitations under the License.
 #
 # Host-level defense-in-depth iptables (DOCKER-USER) script blocking bridged
-# container HTTP access to cloud instance metadata endpoints (IPv4 and IPv6),
-# while keeping GCE DNS (UDP/TCP 53 on 169.254.169.254) allowed.
+# container HTTP access (TCP/80) to cloud instance metadata endpoints (IPv4 and
+# IPv6) from Docker bridges (docker0, br-+). The DROP rules match only TCP/80;
+# the RETURN rules make the GCE DNS (UDP/TCP 53 on 169.254.169.254) exemption
+# explicit.
 #
 # SCOPE CAVEAT: This applies to EVERY Docker-bridged container on the host,
 # including Scion agents in `passthrough` mode and non-Scion containers that
@@ -40,17 +42,21 @@ if ! iptables -L DOCKER-USER -n >/dev/null 2>&1; then
     exit 1
 fi
 
-# Drop HTTP (TCP/80) to IPv4 cloud metadata endpoint.
-# Inserted first so the DNS RETURN rules inserted after sit ahead of it.
-ensure_rule iptables DOCKER-USER -d 169.254.169.254/32 -p tcp --dport 80 -j DROP
+for iface in docker0 br-+; do
+    # Drop HTTP (TCP/80) to IPv4 cloud metadata endpoint.
+    # Inserted first so the explicit DNS RETURN rules sit ahead of it.
+    ensure_rule iptables DOCKER-USER -i "$iface" -d 169.254.169.254/32 -p tcp --dport 80 -j DROP
 
-# Keep GCE metadata-server DNS (UDP/TCP 53) allowed.
-ensure_rule iptables DOCKER-USER -d 169.254.169.254/32 -p tcp --dport 53 -j RETURN
-ensure_rule iptables DOCKER-USER -d 169.254.169.254/32 -p udp --dport 53 -j RETURN
+    # Make the GCE DNS (UDP/TCP 53) exemption explicit.
+    ensure_rule iptables DOCKER-USER -i "$iface" -d 169.254.169.254/32 -p tcp --dport 53 -j RETURN
+    ensure_rule iptables DOCKER-USER -i "$iface" -d 169.254.169.254/32 -p udp --dport 53 -j RETURN
+done
 
 # Drop HTTP (TCP/80) to IPv6 cloud metadata endpoints (GCE, AWS) when ip6tables
 # and the IPv6 DOCKER-USER chain are present.
 if command -v ip6tables >/dev/null 2>&1 && ip6tables -L DOCKER-USER -n >/dev/null 2>&1; then
-    ensure_rule ip6tables DOCKER-USER -d fd20:ce::254/128 -p tcp --dport 80 -j DROP
-    ensure_rule ip6tables DOCKER-USER -d fd00:ec2::254/128 -p tcp --dport 80 -j DROP
+    for iface in docker0 br-+; do
+        ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd20:ce::254/128 -p tcp --dport 80 -j DROP
+        ensure_rule ip6tables DOCKER-USER -i "$iface" -d fd00:ec2::254/128 -p tcp --dport 80 -j DROP
+    done
 fi

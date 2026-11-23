@@ -152,14 +152,17 @@ type KubernetesRuntime struct {
 const agentContainerName = "agent"
 
 // k8sMetadataModeLabel is the pod label recording the resolved metadata mode
-// ("block", "assign", or "passthrough") so cluster NetworkPolicy objects can
-// select block-mode agent pods without affecting assign or passthrough pods.
+// on Kubernetes ("block" or "passthrough", where "passthrough" includes
+// Workload Identity assign pods because the Runtime Broker rewrites assign to
+// passthrough before emitting SCION_METADATA_MODE). Cluster NetworkPolicy
+// objects can select on scion.metadata-mode=block without affecting
+// passthrough or assign pods.
 const k8sMetadataModeLabel = "scion.metadata-mode"
 
-// k8sMetadataModeLabelValue returns the canonical metadata mode for the pod
-// label ("block", "assign", or "passthrough"), or "" when none is configured.
-// KubernetesBlockIdentity takes precedence over env entries, and only the
-// three canonical mode names are accepted so arbitrary values never become
+// k8sMetadataModeLabelValue returns the canonical Kubernetes metadata mode for
+// the pod label ("block" or "passthrough"), or "" when none is configured.
+// KubernetesBlockIdentity takes precedence over env entries, and only those
+// canonical mode names are accepted so arbitrary values never become
 // Kubernetes label values.
 func k8sMetadataModeLabelValue(config RunConfig) string {
 	if config.KubernetesBlockIdentity {
@@ -172,7 +175,7 @@ func k8sMetadataModeLabelValue(config RunConfig) string {
 		}
 	}
 	switch mode {
-	case "block", "assign", "passthrough":
+	case "block", "passthrough":
 		return mode
 	default:
 		return ""

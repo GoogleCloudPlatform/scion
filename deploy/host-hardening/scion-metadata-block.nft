@@ -13,8 +13,12 @@
 # limitations under the License.
 #
 # Host-level defense-in-depth nftables ruleset blocking bridged container
-# HTTP access to cloud instance metadata endpoints (IPv4 and IPv6), while
-# keeping GCE DNS (UDP/TCP 53 on 169.254.169.254) allowed.
+# HTTP access (TCP/80) to cloud instance metadata endpoints (IPv4 and IPv6).
+# The drop rules match only TCP/80; the explicit accept rules make the GCE DNS
+# (UDP/TCP 53 on 169.254.169.254) exemption explicit.
+#
+# One rule per interface pattern is used (rather than wildcards inside an
+# anonymous set) so the ruleset loads across older nftables releases.
 #
 # SCOPE CAVEAT: This ruleset applies to EVERY bridged container on the host,
 # including Scion agents in `passthrough` mode and non-Scion containers that
@@ -33,13 +37,23 @@ table inet scion_metadata_block {
     chain forward {
         type filter hook forward priority filter - 1; policy accept;
 
-        # Keep GCE metadata-server DNS (UDP/TCP 53) allowed.
-        iifname { "docker0", "br-*", "podman*", "cni-*" } ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+        # Make the GCE DNS (UDP/TCP 53 on 169.254.169.254) exemption explicit
+        # (the drop rules below match only TCP/80).
+        iifname "docker0" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+        iifname "br-*" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+        iifname "podman*" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
+        iifname "cni-*" ip daddr 169.254.169.254 meta l4proto { udp, tcp } th dport 53 accept
 
         # Drop HTTP (TCP/80) to IPv4 cloud metadata endpoint.
-        iifname { "docker0", "br-*", "podman*", "cni-*" } ip daddr 169.254.169.254 tcp dport 80 drop
+        iifname "docker0" ip daddr 169.254.169.254 tcp dport 80 drop
+        iifname "br-*" ip daddr 169.254.169.254 tcp dport 80 drop
+        iifname "podman*" ip daddr 169.254.169.254 tcp dport 80 drop
+        iifname "cni-*" ip daddr 169.254.169.254 tcp dport 80 drop
 
         # Drop HTTP (TCP/80) to IPv6 cloud metadata endpoints (GCE, AWS).
-        iifname { "docker0", "br-*", "podman*", "cni-*" } ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+        iifname "docker0" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+        iifname "br-*" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+        iifname "podman*" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
+        iifname "cni-*" ip6 daddr { fd20:ce::254, fd00:ec2::254 } tcp dport 80 drop
     }
 }

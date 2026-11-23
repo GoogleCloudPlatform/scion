@@ -20,11 +20,18 @@
 # - Requires an enforcing CNI (for example GKE Dataplane V2 or Calico). On a
 #   cluster without NetworkPolicy enforcement, `kubectl apply` succeeds
 #   silently without enforcing the rule.
-# - Must NOT be applied to `assign` or `passthrough` pods, which legitimately
-#   reach the GKE metadata server for Workload Identity tokens. The selector
-#   below targets only pods carrying `scion.metadata-mode: block`.
+# - On Kubernetes, the Runtime Broker stamps `scion.metadata-mode=block` on
+#   block-mode pods and `scion.metadata-mode=passthrough` on passthrough pods
+#   (including Workload Identity `assign` pods, which are rewritten to
+#   `passthrough` before dispatch). Do NOT widen the selector to match
+#   `passthrough` pods, which legitimately reach the GKE metadata server.
+# - On Cilium / GKE Dataplane V2, `ipBlock: 0.0.0.0/0` does not match
+#   in-cluster pod IPs. The explicit `kube-dns` egress rule below preserves
+#   cluster DNS; add additional `namespaceSelector` / `podSelector` egress
+#   rules for any in-cluster peers agents must reach (such as an in-cluster
+#   Scion Hub or internal HTTP proxies).
 # - Replace `scion-agents` with your agent namespace before applying.
-# - On dual-stack clusters, add an IPv6 egress rule (for example `::/0` except
+# - On dual-stack clusters, add an IPv6 egress rule (`::/0` except
 #   `fd20:ce::254/128` and `fd00:ec2::254/128`) if pods require IPv6 egress.
 
 apiVersion: networking.k8s.io/v1
@@ -39,6 +46,21 @@ spec:
   policyTypes:
     - Egress
   egress:
+    # Allow cluster DNS (required on Cilium / GKE Dataplane V2 where ipBlock
+    # does not match in-cluster pod IPs).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow external IPv4 egress except cloud and GKE metadata servers.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0

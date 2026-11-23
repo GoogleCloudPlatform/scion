@@ -152,12 +152,9 @@ func TestBuildPod_MetadataModeLabel(t *testing.T) {
 			wantLabel: true,
 		},
 		{
-			name:      "env assign sets assign",
-			env:       []string{"SCION_METADATA_MODE=assign"},
-			wantMode:  "assign",
-			wantLabel: true,
-		},
-		{
+			// On Kubernetes, Workload Identity assign pods are rewritten to
+			// SCION_METADATA_MODE=passthrough by the Runtime Broker before
+			// dispatch, so they receive scion.metadata-mode=passthrough.
 			name:      "env passthrough sets passthrough",
 			env:       []string{"SCION_METADATA_MODE=passthrough"},
 			wantMode:  "passthrough",
