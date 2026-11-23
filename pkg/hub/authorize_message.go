@@ -159,19 +159,78 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 		return rd, nil
 	}
 
-	isMember := false
-	beyondViewer := false
-	bestRole := ""
 	for _, rb := range directBindings {
-		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+		if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
 			continue
 		}
 		if !isBindingActive(rb, now) {
 			continue
 		}
-		rd, rdErr := getRoleDef(rb.RoleDefinitionID)
-		if rdErr != nil {
+		if _, rdErr := getRoleDef(rb.RoleDefinitionID); rdErr != nil {
 			return EffectiveMembershipResult{Err: rdErr}
+		}
+	}
+
+	// 2. Group-derived bindings.
+	var groupBindings []*store.RoleBinding
+	groupIDs, err := st.GetEffectiveGroups(ctx, userID)
+	if err != nil {
+		return EffectiveMembershipResult{Err: fmt.Errorf("get effective groups for user %s: %w", userID, err)}
+	}
+	if len(groupIDs) > 0 {
+		var principals []store.PrincipalRef
+		for _, gid := range groupIDs {
+			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
+		}
+		groupBindings, err = st.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		if err != nil {
+			return EffectiveMembershipResult{Err: fmt.Errorf("list group bindings: %w", err)}
+		}
+		if groupBindings, err = clampBindingsForUser(ctx, st, authz, userID, groupBindings); err != nil {
+			return EffectiveMembershipResult{Err: fmt.Errorf("test identity clamp for user %s: %w", userID, err)}
+		}
+		for _, rb := range groupBindings {
+			if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+				continue
+			}
+			if !isBindingActive(rb, now) {
+				continue
+			}
+			if _, rdErr := getRoleDef(rb.RoleDefinitionID); rdErr != nil {
+				return EffectiveMembershipResult{Err: rdErr}
+			}
+		}
+	}
+
+	return evaluateEffectiveMembership(userID, projectID, now, directBindings, groupBindings, rdCache)
+}
+
+// evaluateEffectiveMembership computes effective project membership from
+// already-loaded, already-clamped direct and group role bindings and their
+// role definitions. It is pure (no store I/O) and shared between
+// checkEffectiveMembership and the N-principal bell preload path so membership
+// semantics cannot drift.
+func evaluateEffectiveMembership(
+	_ string,
+	projectID string,
+	now time.Time,
+	directBindings, groupBindings []*store.RoleBinding,
+	roleDefs map[string]*store.RoleDefinition,
+) EffectiveMembershipResult {
+	isMember := false
+	beyondViewer := false
+	bestRole := ""
+
+	for _, rb := range directBindings {
+		if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+			continue
+		}
+		if !isBindingActive(rb, now) {
+			continue
+		}
+		rd := roleDefs[rb.RoleDefinitionID]
+		if rd == nil {
+			return EffectiveMembershipResult{Err: fmt.Errorf("role definition %s is nil", rb.RoleDefinitionID)}
 		}
 		// A role that does not confer membership (project-visitor) is
 		// ignored.
@@ -189,49 +248,31 @@ func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzS
 		}
 	}
 
-	// 2. Group-derived bindings.
-	groupIDs, err := st.GetEffectiveGroups(ctx, userID)
-	if err != nil {
-		return EffectiveMembershipResult{Err: fmt.Errorf("get effective groups for user %s: %w", userID, err)}
-	}
-	if len(groupIDs) > 0 {
-		var principals []store.PrincipalRef
-		for _, gid := range groupIDs {
-			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
+	for _, rb := range groupBindings {
+		if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
+			continue
 		}
-		groupBindings, err := st.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
-		if err != nil {
-			return EffectiveMembershipResult{Err: fmt.Errorf("list group bindings: %w", err)}
+		if !isBindingActive(rb, now) {
+			continue
 		}
-		if groupBindings, err = clampBindingsForUser(ctx, st, authz, userID, groupBindings); err != nil {
-			return EffectiveMembershipResult{Err: fmt.Errorf("test identity clamp for user %s: %w", userID, err)}
+		rd := roleDefs[rb.RoleDefinitionID]
+		if rd == nil {
+			return EffectiveMembershipResult{Err: fmt.Errorf("role definition %s is nil", rb.RoleDefinitionID)}
 		}
-		for _, rb := range groupBindings {
-			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
-				continue
-			}
-			if !isBindingActive(rb, now) {
-				continue
-			}
-			rd, rdErr := getRoleDef(rb.RoleDefinitionID)
-			if rdErr != nil {
-				return EffectiveMembershipResult{Err: rdErr}
-			}
-			// Groups can only confer admin or member, never owner, and a
-			// role that does not confer membership is ignored. That second
-			// check is defensive: the store binds such a role only to a user
-			// principal (CreateVisitorRoleBinding), so no group binding of
-			// one is written today.
-			if builtInRoleName(rd) == store.ProjectRoleOwner || !rd.ConfersProjectMembership() {
-				continue
-			}
-			isMember = true
-			if !isBuiltInViewerRole(rd) {
-				beyondViewer = true
-			}
-			if store.IsBuiltInProjectMembershipRoleDef(rd) {
-				bestRole = higherProjectRole(bestRole, rd.Name)
-			}
+		// Groups can only confer admin or member, never owner, and a
+		// role that does not confer membership is ignored. That second
+		// check is defensive: the store binds such a role only to a user
+		// principal (CreateVisitorRoleBinding), so no group binding of
+		// one is written today.
+		if builtInRoleName(rd) == store.ProjectRoleOwner || !rd.ConfersProjectMembership() {
+			continue
+		}
+		isMember = true
+		if !isBuiltInViewerRole(rd) {
+			beyondViewer = true
+		}
+		if store.IsBuiltInProjectMembershipRoleDef(rd) {
+			bestRole = higherProjectRole(bestRole, rd.Name)
 		}
 	}
 
