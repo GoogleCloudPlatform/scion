@@ -140,6 +140,7 @@ type perfStoreOp uint8
 
 const (
 	perfStoreGetEffectiveGroups perfStoreOp = iota
+	perfStoreGetEffectiveGroupsForUsers
 	perfStoreGetEffectiveGroupsForAgent
 	perfStoreGetParentGroups
 	perfStoreGetUserGroups
@@ -164,6 +165,7 @@ const (
 
 var perfStoreOpNames = [perfStoreOpCount]string{
 	perfStoreGetEffectiveGroups:            "GetEffectiveGroups",
+	perfStoreGetEffectiveGroupsForUsers:    "GetEffectiveGroupsForUsers",
 	perfStoreGetEffectiveGroupsForAgent:    "GetEffectiveGroupsForAgent",
 	perfStoreGetParentGroups:               "GetParentGroups",
 	perfStoreGetUserGroups:                 "GetUserGroups",

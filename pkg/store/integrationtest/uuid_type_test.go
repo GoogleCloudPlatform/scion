@@ -90,3 +90,48 @@ func TestUUID_GetEffectiveGroupsForAgent_Postgres(t *testing.T) {
 	assert.True(t, found[projectGroup.ID], "expected implicit project_agents group")
 	assert.True(t, found[parentGroup.ID], "expected transitive parent group")
 }
+
+// TestUUID_GetEffectiveGroupsForUsers_Postgres verifies that the recursive CTE
+// in GetEffectiveGroupsForUsers correctly encodes uuid.UUID seed parameters on
+// Postgres (no SQLSTATE 42883 uuid = text error) and matches per-user
+// GetEffectiveGroups across direct, nested, and ungrouped users.
+func TestUUID_GetEffectiveGroupsForUsers_Postgres(t *testing.T) {
+	requirePG(t)
+	cs := newStore(t)
+	ctx := context.Background()
+
+	uDirect := makeUser("uuid-batch-direct@example.com")
+	uNested := makeUser("uuid-batch-nested@example.com")
+	uNone := makeUser("uuid-batch-none@example.com")
+	for _, u := range []*store.User{uDirect, uNested, uNone} {
+		require.NoError(t, cs.CreateUser(ctx, u))
+	}
+
+	parent := &store.Group{ID: uuid.NewString(), Name: "Parent Batch", Slug: "uuid-batch-parent-" + uuid.NewString()[:8]}
+	child := &store.Group{ID: uuid.NewString(), Name: "Child Batch", Slug: "uuid-batch-child-" + uuid.NewString()[:8]}
+	for _, g := range []*store.Group{parent, child} {
+		require.NoError(t, cs.CreateGroup(ctx, g))
+	}
+	require.NoError(t, cs.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: parent.ID, MemberType: store.GroupMemberTypeGroup, MemberID: child.ID, Role: store.GroupMemberRoleMember,
+	}))
+	require.NoError(t, cs.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: parent.ID, MemberType: store.GroupMemberTypeUser, MemberID: uDirect.ID, Role: store.GroupMemberRoleMember,
+	}))
+	require.NoError(t, cs.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: child.ID, MemberType: store.GroupMemberTypeUser, MemberID: uNested.ID, Role: store.GroupMemberRoleMember,
+	}))
+
+	ids := []string{uDirect.ID, uNested.ID, uNone.ID}
+	got, err := cs.GetEffectiveGroupsForUsers(ctx, ids)
+	require.NoError(t, err, "GetEffectiveGroupsForUsers must not fail with uuid/text mismatch on Postgres")
+
+	for _, uid := range ids {
+		want, err := cs.GetEffectiveGroups(ctx, uid)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, want, got[uid], "user %s effective groups must match GetEffectiveGroups", uid)
+	}
+	assert.ElementsMatch(t, []string{parent.ID}, got[uDirect.ID])
+	assert.ElementsMatch(t, []string{child.ID, parent.ID}, got[uNested.ID])
+	assert.Empty(t, got[uNone.ID])
+}

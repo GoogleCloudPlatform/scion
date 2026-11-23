@@ -116,6 +116,11 @@ func (c *perfIndependentCounter) GetEffectiveGroups(ctx context.Context, userID 
 	return c.Store.GetEffectiveGroups(ctx, userID)
 }
 
+func (c *perfIndependentCounter) GetEffectiveGroupsForUsers(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	c.note("GetEffectiveGroupsForUsers")
+	return c.Store.GetEffectiveGroupsForUsers(ctx, userIDs)
+}
+
 func (c *perfIndependentCounter) GetEffectiveGroupsForAgent(ctx context.Context, agentID string) ([]string, error) {
 	c.note("GetEffectiveGroupsForAgent")
 	return c.Store.GetEffectiveGroupsForAgent(ctx, agentID)

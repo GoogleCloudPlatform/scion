@@ -1014,6 +1014,173 @@ func (s *GroupStore) GetEffectiveGroups(ctx context.Context, userID string) ([]s
 	return s.walkEffectiveGroups(ctx, seedIDs)
 }
 
+const (
+	// effectiveGroupsUserChunkSize bounds the IN-list size per chunk in
+	// GetEffectiveGroupsForUsers.
+	effectiveGroupsUserChunkSize = 500
+
+	// effectiveGroupsSeedChunkSize bounds the number of UNION ALL arms in
+	// walkEffectiveGroupsBySeed so SQLite stays safely under its
+	// SQLITE_MAX_COMPOUND_SELECT (500) limit.
+	effectiveGroupsSeedChunkSize = 400
+)
+
+// GetEffectiveGroupsForUsers returns, per user, exactly what GetEffectiveGroups
+// returns for that user (same active/expiry rules, same transitive closure).
+// It runs at most two queries per <=500-user chunk: one GroupMembership IN query
+// and one recursive CTE over group_child_groups seeded from the union of direct
+// groups (chunked by seed count if the union exceeds SQLite's compound-select
+// ceiling).
+func (s *GroupStore) GetEffectiveGroupsForUsers(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	if len(userIDs) == 0 {
+		return map[string][]string{}, nil
+	}
+
+	uniqueUIDs := make([]uuid.UUID, 0, len(userIDs))
+	seenUID := make(map[uuid.UUID]struct{}, len(userIDs))
+	for _, raw := range userIDs {
+		uid, err := parseUUID(raw)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seenUID[uid]; ok {
+			continue
+		}
+		seenUID[uid] = struct{}{}
+		uniqueUIDs = append(uniqueUIDs, uid)
+	}
+
+	result := make(map[string][]string, len(uniqueUIDs))
+	for _, uid := range uniqueUIDs {
+		result[uid.String()] = []string{}
+	}
+
+	for start := 0; start < len(uniqueUIDs); start += effectiveGroupsUserChunkSize {
+		end := start + effectiveGroupsUserChunkSize
+		if end > len(uniqueUIDs) {
+			end = len(uniqueUIDs)
+		}
+		chunk := uniqueUIDs[start:end]
+
+		memberships, err := s.client.GroupMembership.Query().
+			Where(groupmembership.UserIDIn(chunk...)).
+			All(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		userDirect := make(map[uuid.UUID][]uuid.UUID, len(chunk))
+		userDirectSeen := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(chunk))
+		unionSeen := make(map[uuid.UUID]struct{})
+		unionSeeds := make([]uuid.UUID, 0)
+
+		for _, m := range s.activeMemberships(memberships) {
+			if m.UserID == nil {
+				continue
+			}
+			uid := *m.UserID
+			uSeen := userDirectSeen[uid]
+			if uSeen == nil {
+				uSeen = make(map[uuid.UUID]struct{})
+				userDirectSeen[uid] = uSeen
+			}
+			if _, ok := uSeen[m.GroupID]; !ok {
+				uSeen[m.GroupID] = struct{}{}
+				userDirect[uid] = append(userDirect[uid], m.GroupID)
+			}
+			if _, ok := unionSeen[m.GroupID]; !ok {
+				unionSeen[m.GroupID] = struct{}{}
+				unionSeeds = append(unionSeeds, m.GroupID)
+			}
+		}
+
+		if len(unionSeeds) == 0 {
+			continue
+		}
+
+		closureBySeed, err := s.walkEffectiveGroupsBySeed(ctx, unionSeeds)
+		if err != nil {
+			return nil, err
+		}
+
+		for uid, directGroups := range userDirect {
+			groupSeen := make(map[string]struct{}, len(directGroups))
+			effective := make([]string, 0, len(directGroups))
+			for _, seed := range directGroups {
+				for _, gid := range closureBySeed[seed] {
+					if _, ok := groupSeen[gid]; !ok {
+						groupSeen[gid] = struct{}{}
+						effective = append(effective, gid)
+					}
+				}
+			}
+			result[uid.String()] = effective
+		}
+	}
+
+	return result, nil
+}
+
+// walkEffectiveGroupsBySeed returns, for each seed group ID in seedIDs, the
+// slice of group IDs containing that seed and every group that transitively
+// contains it, walking group_child_groups upward via a recursive CTE.
+func (s *GroupStore) walkEffectiveGroupsBySeed(ctx context.Context, seedIDs []uuid.UUID) (map[uuid.UUID][]string, error) {
+	drv := s.client.Driver()
+	d := drv.Dialect()
+	closure := make(map[uuid.UUID][]string, len(seedIDs))
+
+	for start := 0; start < len(seedIDs); start += effectiveGroupsSeedChunkSize {
+		end := start + effectiveGroupsSeedChunkSize
+		if end > len(seedIDs) {
+			end = len(seedIDs)
+		}
+		chunk := seedIDs[start:end]
+
+		// Build seed clause with explicit Postgres ::uuid casts (same reason as
+		// walkEffectiveGroups: avoids SQLSTATE 42883 uuid = text).
+		parts := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			parts[i] = fmt.Sprintf("SELECT %s AS id", sqlUUIDPh(d, i+1))
+			args[i] = id
+		}
+		seed := strings.Join(parts, " UNION ALL ")
+
+		query := fmt.Sprintf(`WITH RECURSIVE seeds(id) AS (
+    %s
+),
+effective(seed_id, id) AS (
+    SELECT id, id FROM seeds
+    UNION
+    SELECT e.seed_id, gc.group_id FROM group_child_groups gc
+    JOIN effective e ON gc.parent_group_id = e.id
+)
+SELECT seed_id, id FROM effective`, seed)
+
+		rows := &entsql.Rows{}
+		if err := drv.Query(ctx, query, args, rows); err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var seedID, groupID uuid.UUID
+			if err := rows.Scan(&seedID, &groupID); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			closure[seedID] = append(closure[seedID], groupID.String())
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+
+	return closure, nil
+}
+
 // GetParentGroups returns all ancestor groups of the given group — groups that
 // transitively contain this group as a child — via a recursive CTE that walks
 // the parent_groups edge upward. The group itself is NOT included in the

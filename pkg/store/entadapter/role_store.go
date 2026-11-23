@@ -1051,12 +1051,23 @@ func (r *RoleStore) ListRoleBindingsForPrincipals(ctx context.Context, principal
 		return nil, nil
 	}
 
-	// Build OR predicates for each principal in the closure.
-	principalPreds := make([]predicate.RoleBinding, 0, len(principals))
+	// Group principals by type so each principal type emits one
+	// (principal_type = ? AND principal_id IN (...)) predicate instead of an
+	// N-branch OR tree. Preserves exact semantics while halving bind parameters
+	// and allowing single index-IN seeks on both SQLite and Postgres.
+	idsByType := make(map[string][]string, 2)
+	typeOrder := make([]string, 0, 2)
 	for _, p := range principals {
+		if _, ok := idsByType[p.Type]; !ok {
+			typeOrder = append(typeOrder, p.Type)
+		}
+		idsByType[p.Type] = append(idsByType[p.Type], p.ID)
+	}
+	principalPreds := make([]predicate.RoleBinding, 0, len(typeOrder))
+	for _, pt := range typeOrder {
 		principalPreds = append(principalPreds, rolebinding.And(
-			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(p.Type)),
-			rolebinding.PrincipalIDEQ(p.ID),
+			rolebinding.PrincipalTypeEQ(rolebinding.PrincipalType(pt)),
+			rolebinding.PrincipalIDIn(idsByType[pt]...),
 		))
 	}
 
