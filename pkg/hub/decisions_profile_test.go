@@ -1192,3 +1192,72 @@ func TestWaitingOnYouTotal(t *testing.T) {
 	_, _, err = f.srv.waitingOnYouTotal(context.Background(), f.bob.ID)
 	require.Error(t, err)
 }
+
+func TestUserMeDecisions_MadeRecordedDecisionFieldsAndFold(t *testing.T) {
+	f := newDecisionsFixture(t)
+	setDecisionsExperiment(t, f.srv, true)
+
+	// 1. Interpreted answer later confirmed on prof-conf (folds to 1 entry with interpretedAnswer).
+	_, resConf := f.topicPrompt(t, `[{"id":"prof-conf","question":"Use Postgres?","choices":[{"id":"pg","label":"Postgres","description":"Primary RDBMS"},{"id":"sq","label":"SQLite","description":"Local embedded"}],"default":"pg"}]`, false)
+	recordTestInterpretedForUser(t, f.store, f.project.ID, f.topicID, f.agent, f.bob, resConf.Decisions[0].RowID, "pg")
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, resConf.Decisions[0].RowID, map[string]interface{}{"choice_id": "pg"}).Code)
+	_, resConfV2 := f.topicPrompt(t, `[{"id":"prof-conf","question":"Use Postgres v2?","choices":["pg","sq"]}]`, true)
+
+	// 2. Unconfirmed interpreted answer on prof-unconf (awaitingConfirmation=true).
+	_, resUnconf := f.topicPrompt(t, `[{"id":"prof-unconf","question":"Enable cache?","choices":[{"id":"on","label":"On","description":"Warm L1"},{"id":"off","label":"Off"}]}]`, false)
+	recordTestInterpretedForUser(t, f.store, f.project.ID, f.topicID, f.agent, f.bob, resUnconf.Decisions[0].RowID, "on")
+
+	// 3. Other-enabled decision answered with $other (carries decision.other and otherText).
+	_, resOther := f.topicPrompt(t, `[{"id":"prof-other","question":"Target region?","choices":[{"id":"us","label":"US"}],"allow_other":{"label":"Custom region","description":"Specify region","placeholder":"europe-west4"}}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, resOther.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "europe-west4 canary",
+	}).Code)
+
+	checkEntries := func(label string, entries []ProjectDecisionLogEntryView) {
+		require.Len(t, entries, 3, "%s must have 1 entry per decision version", label)
+		byKey := map[string]ProjectDecisionLogEntryView{}
+		for _, e := range entries {
+			byKey[e.Decision.Key] = e
+		}
+		conf := byKey["prof-conf"]
+		assert.Equal(t, "pg", conf.Decision.DefaultChoiceID, label)
+		assert.Equal(t, store.DecisionStatusReplaced, conf.Decision.Status, label)
+		assert.Nil(t, conf.Decision.Other, label)
+		assert.Empty(t, conf.OtherText, label)
+		require.NotNil(t, conf.Decision.ReplacedBy, label)
+		assert.Equal(t, DecisionRef{RowID: resConfV2.Decisions[0].RowID, Version: 2}, *conf.Decision.ReplacedBy, label)
+		require.Len(t, conf.Decision.Choices, 2, label)
+		assert.Equal(t, "Primary RDBMS", conf.Decision.Choices[0].Description, label)
+		assert.False(t, conf.AwaitingConfirmation, label)
+		require.NotNil(t, conf.InterpretedAnswer, label)
+		assert.Equal(t, "pg", conf.InterpretedAnswer.ChoiceID, label)
+
+		unconf := byKey["prof-unconf"]
+		assert.Equal(t, store.DecisionStatusDecided, unconf.Decision.Status, label)
+		assert.Nil(t, unconf.Decision.ReplacedBy, label)
+		require.Len(t, unconf.Decision.Choices, 2, label)
+		assert.Equal(t, "Warm L1", unconf.Decision.Choices[0].Description, label)
+		assert.True(t, unconf.AwaitingConfirmation, label)
+		assert.Nil(t, unconf.InterpretedAnswer, label)
+
+		oth := byKey["prof-other"]
+		assert.Equal(t, store.DecisionStatusDecided, oth.Decision.Status, label)
+		require.NotNil(t, oth.Decision.Other, label)
+		assert.Equal(t, messages.OtherOption{
+			Label:       "Custom region",
+			Description: "Specify region",
+			Placeholder: "europe-west4",
+		}, *oth.Decision.Other, label)
+		assert.Equal(t, messages.ChoiceIDOther, oth.ChoiceID, label)
+		assert.Equal(t, "Custom region", oth.Label, label)
+		assert.Equal(t, "europe-west4 canary", oth.OtherText, label)
+	}
+
+	recent := decodeProfileMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=recent", nil))
+	checkEntries("sort=recent", recent.Entries)
+
+	byProj := decodeProfileMadeByProjectDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=project", nil))
+	require.Len(t, byProj.Groups, 1)
+	checkEntries("sort=project", byProj.Groups[0].Entries)
+}

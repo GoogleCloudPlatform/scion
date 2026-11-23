@@ -50,19 +50,22 @@ const (
 
 // AgentDecisionListItem is one decision version in GET /api/v1/agent/decisions.
 type AgentDecisionListItem struct {
-	RowID           string             `json:"rowId"`
-	Key             string             `json:"key"`
-	Ref             string             `json:"ref"`
-	Version         int                `json:"version"`
-	Status          string             `json:"status"`
-	Question        string             `json:"question"`
-	ConversationID  string             `json:"conversationId"`
-	PromptMessageID string             `json:"promptMessageId"`
-	CreatedAt       time.Time          `json:"createdAt"`
-	DecidedAt       *time.Time         `json:"decidedAt,omitempty"`
-	Withdrawn       *DecisionWithdrawn `json:"withdrawn,omitempty"`
-	Dismissed       *DecisionDismissed `json:"dismissed,omitempty"`
-	Answer          *AnswerView        `json:"answer,omitempty"`
+	RowID           string                `json:"rowId"`
+	Key             string                `json:"key"`
+	Ref             string                `json:"ref"`
+	Version         int                   `json:"version"`
+	Status          string                `json:"status"`
+	Question        string                `json:"question"`
+	Choices         []messages.Choice     `json:"choices"`
+	DefaultChoiceID string                `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption `json:"other,omitempty"`
+	ConversationID  string                `json:"conversationId"`
+	PromptMessageID string                `json:"promptMessageId"`
+	CreatedAt       time.Time             `json:"createdAt"`
+	DecidedAt       *time.Time            `json:"decidedAt,omitempty"`
+	Withdrawn       *DecisionWithdrawn    `json:"withdrawn,omitempty"`
+	Dismissed       *DecisionDismissed    `json:"dismissed,omitempty"`
+	Answer          *AnswerView           `json:"answer,omitempty"`
 }
 
 // AgentDecisionListResponse is the 200 envelope of GET /api/v1/agent/decisions.
@@ -278,6 +281,16 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 		if convID == "" {
 			convID = convByPrompt[d.MessageID]
 		}
+		choices := d.Choices
+		if choices == nil {
+			choices = []messages.Choice{}
+		}
+		eff := d.EffectiveAnswer()
+		ans := answerView(eff)
+		if ans != nil {
+			ans.PreviousChoiceLabel = previousChoiceLabel(eff, d)
+			ans.PreviousOtherText = previousOtherText(eff, d)
+		}
 		items[i] = AgentDecisionListItem{
 			RowID:           d.ID,
 			Key:             d.Key,
@@ -285,13 +298,16 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 			Version:         d.Version,
 			Status:          d.Status,
 			Question:        d.Question,
+			Choices:         choices,
+			DefaultChoiceID: d.DefaultChoiceID,
+			Other:           cloneOtherOption(d.Other),
 			ConversationID:  convID,
 			PromptMessageID: d.MessageID,
 			CreatedAt:       d.CreatedAt,
 			DecidedAt:       d.DecidedAt,
 			Withdrawn:       decisionWithdrawnView(d),
 			Dismissed:       decisionDismissedView(d),
-			Answer:          answerView(d.EffectiveAnswer()),
+			Answer:          ans,
 		}
 	}
 
@@ -351,11 +367,6 @@ func (s *Server) handleAgentDecisionShow(w http.ResponseWriter, r *http.Request,
 				rep.At = *d.ReplacedAt
 			}
 		}
-		var otherCopy *messages.OtherOption
-		if d.Other != nil {
-			cp := *d.Other
-			otherCopy = &cp
-		}
 		views[i] = AgentDecisionVersionView{
 			RowID:           d.ID,
 			Key:             d.Key,
@@ -367,7 +378,7 @@ func (s *Server) handleAgentDecisionShow(w http.ResponseWriter, r *http.Request,
 			PromptMessageID: d.MessageID,
 			Choices:         choices,
 			DefaultChoiceID: d.DefaultChoiceID,
-			Other:           otherCopy,
+			Other:           cloneOtherOption(d.Other),
 			ReplacedBy:      rep,
 			Withdrawn:       decisionWithdrawnView(d),
 			Dismissed:       decisionDismissedView(d),

@@ -78,15 +78,21 @@ const humanDecisionsMadeBody = `{
   "entries": [
     {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a1",
      "decision": {"rowId": "r9", "promptMessageId": "m9", "promptAvailable": true, "key": "migrate", "ref": "nc-x/migrate", "version": 2,
-                  "question": "Run the backfill on staging first?", "askerAgentId": "b", "askerAgentName": "nc-x"},
+                  "status": "decided", "question": "Run the backfill on staging first?",
+                  "choices": [{"id": "1", "label": "Yes"}, {"id": "2", "label": "No"}],
+                  "askerAgentId": "b", "askerAgentName": "nc-x"},
      "choiceId": "1", "label": "Yes", "matchedDefault": false, "answeredByUserId": "u-alice", "answeredByName": "Alice",
      "provenance": "direct", "outcome": "answer", "surface": "decisions_page", "sourceMessageAvailable": false,
      "at": "2026-11-12T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true},
     {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a2",
      "decision": {"rowId": "r8", "promptMessageId": "m8", "promptAvailable": true, "key": "migrate", "ref": "nc-x/migrate", "version": 1,
-                  "question": "Backfill before the cutover?", "askerAgentId": "b", "askerAgentName": "nc-x"},
-     "choiceId": "1", "label": "Yes", "matchedDefault": false, "answeredByUserId": "u-bob", "answeredByName": "Bob",
+                  "status": "replaced", "question": "Backfill before the cutover?", "defaultChoiceId": "1",
+                  "choices": [{"id": "1", "label": "Yes", "description": "Offline"}, {"id": "2", "label": "No"}],
+                  "replacedBy": {"rowId": "r9", "version": 2},
+                  "askerAgentId": "b", "askerAgentName": "nc-x"},
+     "choiceId": "1", "label": "Yes", "matchedDefault": true, "answeredByUserId": "u-bob", "answeredByName": "Bob",
      "provenance": "direct", "outcome": "confirm", "surface": "native", "sourceMessageAvailable": false,
+     "interpretedAnswer": {"choiceId": "1", "label": "Yes", "provenance": "agent_interpreted", "outcome": "answer", "surface": "native", "responseMessageId": "rm-0", "at": "2026-11-02T09:58:00Z"},
      "at": "2026-11-02T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true}
   ],
   "agents": [], "answerers": [], "conversations": []
@@ -557,13 +563,15 @@ const allProjectsDecisionsMadeBody = `{
   "entries": [
     {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a1",
      "decision": {"rowId": "r9", "promptMessageId": "m9", "promptAvailable": true, "key": "migrate", "ref": "nc-x/migrate", "version": 2,
-                  "question": "Run the backfill on staging first?", "askerAgentId": "b", "askerAgentName": "nc-x"},
+                  "status": "decided", "question": "Run the backfill on staging first?", "choices": [{"id": "1", "label": "Yes"}, {"id": "2", "label": "No"}],
+                  "askerAgentId": "b", "askerAgentName": "nc-x"},
      "choiceId": "1", "label": "Yes", "matchedDefault": false, "answeredByUserId": "u-alice", "answeredByName": "Alice",
      "provenance": "direct", "outcome": "answer", "surface": "decisions_page", "sourceMessageAvailable": false,
      "at": "2026-11-12T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true},
     {"project": {"id": "proj-2", "name": "Web Site", "slug": "web-site"}, "answerId": "a2",
      "decision": {"rowId": "r8", "promptMessageId": "m8", "promptAvailable": true, "key": "hero-img", "ref": "design-bot/hero-img", "version": 1,
-                  "question": "Use the dark hero image?", "askerAgentId": "c", "askerAgentName": "design-bot"},
+                  "status": "decided", "question": "Use the dark hero image?", "choices": [{"id": "1", "label": "Yes"}, {"id": "2", "label": "No"}],
+                  "askerAgentId": "c", "askerAgentName": "design-bot"},
      "choiceId": "2", "label": "No", "matchedDefault": false, "answeredByUserId": "u-bob", "answeredByName": "Bob",
      "provenance": "direct", "outcome": "confirm", "surface": "native", "sourceMessageAvailable": false,
      "at": "2026-11-02T10:00:00Z", "chatKey": "8e1f2d3c-2222-4b6c-8d9e-000000000002", "conversationLabel": "#landing", "conversationAvailable": true}
@@ -920,4 +928,75 @@ func TestDecisionsListHuman_AllProjectsFacetTruncation500(t *testing.T) {
 	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--conversation", dmTrunc)
 	require.NoError(t, err)
 	assert.Equal(t, dmTrunc, h.lastProfile().Get("conversation"))
+}
+
+func TestDecisionsListHuman_MadeJSONCarriesChoicesRecommendationAndFoldedFields(t *testing.T) {
+	fixDecisionsClock(t)
+	h := newHumanDecisionsHub(t)
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	richMadeEntries := `[
+	  {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a-conf",
+	   "decision": {"rowId": "r8", "promptMessageId": "m8", "promptAvailable": true, "key": "migrate", "ref": "nc-x/migrate", "version": 1,
+	                "status": "replaced", "question": "Backfill before the cutover?", "defaultChoiceId": "1",
+	                "choices": [{"id": "1", "label": "Yes", "description": "Offline backfill"}, {"id": "2", "label": "No", "description": "Live"}],
+	                "other": {"label": "Custom plan", "description": "Describe rollout", "placeholder": "e.g. phased"},
+	                "replacedBy": {"rowId": "r9", "version": 2}, "askerAgentId": "b", "askerAgentName": "nc-x"},
+	   "choiceId": "$other", "label": "Custom plan", "otherText": "phased 10% canary", "matchedDefault": false, "answeredByUserId": "u-bob", "answeredByName": "Bob",
+	   "provenance": "direct", "outcome": "override", "surface": "native", "sourceMessageAvailable": false,
+	   "interpretedAnswer": {"choiceId": "1", "label": "Yes", "provenance": "agent_interpreted", "outcome": "answer", "surface": "native", "responseMessageId": "rm-1", "at": "2026-11-02T09:58:00Z"},
+	   "at": "2026-11-02T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true},
+	  {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a-unconf",
+	   "decision": {"rowId": "r10", "promptMessageId": "m10", "promptAvailable": true, "key": "cache", "ref": "nc-x/cache", "version": 1,
+	                "status": "decided", "question": "Keep L1 cache warm?",
+	                "choices": [{"id": "warm", "label": "Warm"}, {"id": "cold", "label": "Cold"}],
+	                "askerAgentId": "b", "askerAgentName": "nc-x"},
+	   "choiceId": "warm", "label": "Warm", "matchedDefault": false, "answeredByUserId": "u-alice", "answeredByName": "Alice",
+	   "provenance": "agent_interpreted", "outcome": "answer", "awaitingConfirmation": true, "surface": "native", "sourceMessageAvailable": true,
+	   "at": "2026-11-12T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true}
+	]`
+	h.made = `{"counts":{"waitingOnYou":1,"waitingOnOthers":0},"entries":` + richMadeEntries + `,"agents":[],"answerers":[],"conversations":[]}`
+	h.profileMade = `{"counts":{"waitingOnYou":1,"waitingOnOthers":0},"entries":` + richMadeEntries + `,"agents":[],"answerers":[],"conversations":[],"projects":[],"truncatedProjects":false}`
+
+	// Text table stays unchanged (no extra columns or "(recommended)" marker).
+	textOut, err := runDecisionsTestCmd(t, "decisions", "list", "--made")
+	require.NoError(t, err)
+	assert.Contains(t, textOut, "WHEN            KEY      VER  QUESTION                      ANSWER                            ANSWERED BY  PROVENANCE   AGENT  CONVERSATION\n")
+	assert.NotContains(t, textOut, "recommended")
+	assert.NotContains(t, textOut, "Offline backfill")
+
+	// Project --made --json carries choices, defaultChoiceId, status, replacedBy, interpretedAnswer, and awaitingConfirmation.
+	projJSON, err := runDecisionsTestCmd(t, "decisions", "list", "--made", "--json")
+	require.NoError(t, err)
+	var projParsed hubclient.ProjectDecisionsResponse
+	require.NoError(t, json.Unmarshal([]byte(projJSON), &projParsed))
+	require.Len(t, projParsed.Entries, 2)
+	assert.Equal(t, "1", projParsed.Entries[0].Decision.DefaultChoiceID)
+	assert.Equal(t, "replaced", projParsed.Entries[0].Decision.Status)
+	require.NotNil(t, projParsed.Entries[0].Decision.ReplacedBy)
+	assert.Equal(t, 2, projParsed.Entries[0].Decision.ReplacedBy.Version)
+	require.Len(t, projParsed.Entries[0].Decision.Choices, 2)
+	assert.Equal(t, "Offline backfill", projParsed.Entries[0].Decision.Choices[0].Description)
+	require.NotNil(t, projParsed.Entries[0].Decision.Other)
+	assert.Equal(t, "Custom plan", projParsed.Entries[0].Decision.Other.Label)
+	assert.Equal(t, "Describe rollout", projParsed.Entries[0].Decision.Other.Description)
+	assert.Equal(t, "phased 10% canary", projParsed.Entries[0].OtherText)
+	require.NotNil(t, projParsed.Entries[0].InterpretedAnswer)
+	assert.Equal(t, "1", projParsed.Entries[0].InterpretedAnswer.ChoiceID)
+	assert.False(t, projParsed.Entries[0].AwaitingConfirmation)
+	assert.True(t, projParsed.Entries[1].AwaitingConfirmation)
+	assert.Nil(t, projParsed.Entries[1].InterpretedAnswer)
+
+	// Profile --all-projects --made --json carries the same fields.
+	profJSON, err := runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--made", "--json")
+	require.NoError(t, err)
+	var profParsed hubclient.MyDecisionsResponse
+	require.NoError(t, json.Unmarshal([]byte(profJSON), &profParsed))
+	require.Len(t, profParsed.Entries, 2)
+	assert.Equal(t, "1", profParsed.Entries[0].Decision.DefaultChoiceID)
+	require.NotNil(t, profParsed.Entries[0].Decision.Other)
+	assert.Equal(t, "Custom plan", profParsed.Entries[0].Decision.Other.Label)
+	assert.Equal(t, "phased 10% canary", profParsed.Entries[0].OtherText)
+	require.NotNil(t, profParsed.Entries[0].InterpretedAnswer)
+	assert.True(t, profParsed.Entries[1].AwaitingConfirmation)
 }

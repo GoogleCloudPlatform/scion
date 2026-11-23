@@ -222,20 +222,25 @@ func TestDecisionsList_TablePaginationAndJSON(t *testing.T) {
 					},
 				},
 				{
-					RowID:          "row-4",
-					Key:            "D101",
-					Ref:            "ag/D101",
-					Version:        1,
-					Status:         "decided",
-					Question:       "Override region?",
-					ConversationID: "conv-beta",
-					CreatedAt:      fixedNow.Add(-48 * time.Hour),
+					RowID:           "row-4",
+					Key:             "D101",
+					Ref:             "ag/D101",
+					Version:         1,
+					Status:          "decided",
+					Question:        "Override region?",
+					Choices:         []messages.Choice{{ID: "1", Label: "us", Description: "US Central"}, {ID: "2", Label: "eu", Description: "EU West"}},
+					DefaultChoiceID: "1",
+					Other:           &messages.OtherOption{Label: "Custom region", Description: "Any GCP region"},
+					ConversationID:  "conv-beta",
+					CreatedAt:       fixedNow.Add(-48 * time.Hour),
 					Answer: &hubclient.DecisionAnswerView{
-						ChoiceID:       "2",
-						Label:          "eu",
-						AnsweredByName: "Bob",
-						Provenance:     "direct",
-						Outcome:        "override",
+						ChoiceID:            messages.ChoiceIDOther,
+						Label:               "Custom region",
+						OtherText:           "europe-west4 canary",
+						AnsweredByName:      "Bob",
+						Provenance:          "direct",
+						Outcome:             "override",
+						PreviousChoiceLabel: "us",
 					},
 				},
 			},
@@ -263,12 +268,21 @@ func TestDecisionsList_TablePaginationAndJSON(t *testing.T) {
 	assert.Contains(t, out, "overridden")
 	assert.Contains(t, out, "5m ago")
 
-	// JSON output collects all pages into items.
+	// JSON output collects all pages into items, preserving choices, defaultChoiceId, and answer.previousChoiceLabel.
 	jsonOut, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "--json")
 	require.NoError(t, err)
 	var parsed hubclient.AgentDecisionListResponse
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
-	assert.Len(t, parsed.Items, 4)
+	require.Len(t, parsed.Items, 4)
+	assert.Equal(t, "1", parsed.Items[3].DefaultChoiceID)
+	require.Len(t, parsed.Items[3].Choices, 2)
+	assert.Equal(t, "US Central", parsed.Items[3].Choices[0].Description)
+	require.NotNil(t, parsed.Items[3].Other)
+	assert.Equal(t, "Custom region", parsed.Items[3].Other.Label)
+	assert.Equal(t, "Any GCP region", parsed.Items[3].Other.Description)
+	require.NotNil(t, parsed.Items[3].Answer)
+	assert.Equal(t, "us", parsed.Items[3].Answer.PreviousChoiceLabel)
+	assert.Equal(t, "europe-west4 canary", parsed.Items[3].Answer.OtherText)
 }
 
 func TestDecisionsShow_AllVersionsAndAllAnswerRows(t *testing.T) {
@@ -294,7 +308,7 @@ func TestDecisionsShow_AllVersionsAndAllAnswerRows(t *testing.T) {
 					ConversationID:  "conv-1",
 					PromptMessageID: "prompt-v1",
 					Choices: []messages.Choice{
-						{ID: "1", Label: "yes"},
+						{ID: "1", Label: "yes", Description: "Deploy immediately to production"},
 						{ID: "2", Label: "no"},
 					},
 					DefaultChoiceID: "1",
@@ -313,9 +327,10 @@ func TestDecisionsShow_AllVersionsAndAllAnswerRows(t *testing.T) {
 					PromptMessageID: "prompt-v2",
 					Choices: []messages.Choice{
 						{ID: "1", Label: "yes"},
-						{ID: "2", Label: "no"},
+						{ID: "2", Label: "no", Description: "   Hold   until   Monday   "},
 					},
 					DefaultChoiceID: "1",
+					Other:           &messages.OtherOption{Label: "Custom window", Description: "Specify maintenance window"},
 					CreatedAt:       t0,
 					DecidedAt:       &t1,
 					Answers: []hubclient.DecisionAnswerView{
@@ -330,8 +345,9 @@ func TestDecisionsShow_AllVersionsAndAllAnswerRows(t *testing.T) {
 							At:              t0,
 						},
 						{
-							ChoiceID:       "2",
-							Label:          "no",
+							ChoiceID:       messages.ChoiceIDOther,
+							Label:          "Custom window",
+							OtherText:      "Tuesday 02:00 UTC",
 							AnsweredByName: "Alice",
 							Provenance:     "direct",
 							Outcome:        "override",
@@ -348,11 +364,13 @@ func TestDecisionsShow_AllVersionsAndAllAnswerRows(t *testing.T) {
 	out, err := runDecisionsTestCmd(t, "decisions", "show", "D234")
 	require.NoError(t, err)
 	assert.Contains(t, out, "v1 [replaced] (replaced by v2)")
-	assert.Contains(t, out, "- 1: yes (default)")
+	assert.Contains(t, out, "    - 1: yes (recommended)\n      Deploy immediately to production\n    - 2: no\n")
+	assert.Contains(t, out, "    - 2: no\n      Hold until Monday\n    - $other  Custom window (free-form)\n      Specify maintenance window\n")
+	assert.NotContains(t, out, "(default)")
 	assert.Contains(t, out, "v2 [decided]")
 	assert.Contains(t, out, "yes (1) [interpreted] by Alice via native")
 	assert.Contains(t, out, "(source reply-msg-99)")
-	assert.Contains(t, out, "no (2) [overridden] by Alice via native")
+	assert.Contains(t, out, `Custom window "Tuesday 02:00 UTC" ($other) [overridden] by Alice via native at 2026-11-13 03:12 UTC`)
 
 	jsonOut, err := runDecisionsTestCmd(t, "decisions", "show", "D234", "--json")
 	require.NoError(t, err)
@@ -360,6 +378,9 @@ func TestDecisionsShow_AllVersionsAndAllAnswerRows(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
 	require.Len(t, parsed.Versions, 2)
 	assert.Len(t, parsed.Versions[1].Answers, 2)
+	require.NotNil(t, parsed.Versions[1].Other)
+	assert.Equal(t, "Custom window", parsed.Versions[1].Other.Label)
+	assert.Equal(t, "Tuesday 02:00 UTC", parsed.Versions[1].Answers[1].OtherText)
 }
 
 func TestDecisionsRecord_BothFormsAndErrorRendering(t *testing.T) {

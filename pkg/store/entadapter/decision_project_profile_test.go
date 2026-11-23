@@ -124,16 +124,22 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 	})
 	_ = answerSearchDecision(t, cs, pBusy, dmRow, "yes", bobID, "Bob", base.Add(10*time.Minute))
 
-	// Seed 2 answers in pSmall: one interpreted + overridden so enrichment is exercised.
+	// Seed 2 decisions in pSmall: small-1 interpreted + overridden (folds into 1 entry),
+	// and small-2 unconfirmed interpreted (stays as 1 entry with AwaitingConfirmation=true).
 	_, smallRow1 := seedSearchDecision(t, cs, searchSeed{
 		projectID: pSmall, agentID: agentB, agentName: "beta-bot", chatKey: topicSmall,
 		key: "small-1", question: "Keep cache warm?",
 		choices: []messages.Choice{{ID: "yes", Label: "Warm"}, {ID: "no", Label: "Cold"}},
 	})
+	_, smallRow2 := seedSearchDecision(t, cs, searchSeed{
+		projectID: pSmall, agentID: agentB, agentName: "beta-bot", chatKey: topicSmall,
+		key: "small-2", question: "Pin image digest?",
+		choices: []messages.Choice{{ID: "yes", Label: "Pin"}, {ID: "no", Label: "Float"}},
+	})
 	srcMsgID := uuid.New().String()
 	require.NoError(t, cs.CreateMessage(ctx, &store.Message{
 		ID: srcMsgID, ProjectID: pSmall, Sender: "user:" + aliceID, SenderID: aliceID,
-		Recipient: "group:topic", ThreadID: topicSmall, Msg: "warm please", CreatedAt: base.Add(-5 * time.Minute),
+		Recipient: "group:topic", ThreadID: topicSmall, Msg: "warm and pin please", CreatedAt: base.Add(-5 * time.Minute),
 	}))
 	interpRes, err := cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
 		InterpretedByAgentID: agentB,
@@ -141,7 +147,10 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 		AnsweredByUserID:     aliceID,
 		AnsweredByName:       "Alice",
 		Surface:              store.DecisionSurfaceNative,
-		Answers:              []store.InterpretedAnswerPair{{DecisionRowID: smallRow1, ChoiceID: "yes"}},
+		Answers: []store.InterpretedAnswerPair{
+			{DecisionRowID: smallRow1, ChoiceID: "yes"},
+			{DecisionRowID: smallRow2, ChoiceID: "yes"},
+		},
 		ResponseMessage: &store.Message{
 			ID: uuid.New().String(), ProjectID: pSmall, Sender: "agent:beta-bot", SenderID: agentB,
 			Recipient: "group:topic", ThreadID: topicSmall, Msg: "recorded", CreatedAt: base.Add(-4 * time.Minute),
@@ -149,11 +158,25 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 		FormatMessage: func(_ []store.InterpretedFormattedItem) string { return "recorded" },
 	})
 	require.NoError(t, err)
-	require.Len(t, interpRes.Answers, 1)
-	interpAnsID := interpRes.Answers[0].ID
+	require.Len(t, interpRes.Answers, 2)
+	var interpSmall1ID, interpSmall2ID string
+	for _, a := range interpRes.Answers {
+		switch a.DecisionRowID {
+		case smallRow1:
+			interpSmall1ID = a.ID
+		case smallRow2:
+			interpSmall2ID = a.ID
+		}
+	}
+	require.NotEmpty(t, interpSmall1ID)
+	require.NotEmpty(t, interpSmall2ID)
 	_, err = cs.DB().ExecContext(ctx,
 		rebindForDialect(cs.Dialect(), "UPDATE decision_answers SET created_at = ? WHERE id = ?"),
-		base.Add(1*time.Minute), interpAnsID)
+		base.Add(30*time.Second), interpSmall2ID)
+	require.NoError(t, err)
+	_, err = cs.DB().ExecContext(ctx,
+		rebindForDialect(cs.Dialect(), "UPDATE decision_answers SET created_at = ? WHERE id = ?"),
+		base.Add(1*time.Minute), interpSmall1ID)
 	require.NoError(t, err)
 
 	overrideAns, _, err := cs.RecordAnswer(ctx, &store.RecordAnswerInput{
@@ -183,7 +206,7 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 	}
 
 	// perProject=6 (5 + 1 sentinel for "more"): pBusy returns newest 6 of 7 (excluding secret DM),
-	// pSmall returns both 2 answers with PreviousChoiceLabel populated, pNone is omitted.
+	// pSmall returns 2 non-superseded entries (overrideAnsID with folded interpSmall1ID, plus unconfirmed interpSmall2ID), pNone is omitted.
 	byProj, err := cs.ListDecisionAnswersPerProject(ctx, projects, aliceKeys, store.ProjectDecisionAnswerFilter{}, 6)
 	require.NoError(t, err)
 	require.Len(t, byProj, 2)
@@ -195,9 +218,14 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 	}, answerIDs(byProj[pBusy]))
 
 	require.Len(t, byProj[pSmall], 2)
-	assert.Equal(t, []string{overrideAnsID, interpAnsID}, answerIDs(byProj[pSmall]))
+	assert.Equal(t, []string{overrideAnsID, interpSmall2ID}, answerIDs(byProj[pSmall]))
 	assert.Equal(t, "Warm", byProj[pSmall][0].PreviousChoiceLabel)
+	require.NotNil(t, byProj[pSmall][0].InterpretedAnswer)
+	assert.Equal(t, interpSmall1ID, byProj[pSmall][0].InterpretedAnswer.ID)
+	assert.False(t, byProj[pSmall][0].AwaitingConfirmation)
 	assert.True(t, byProj[pSmall][0].PromptExistsInMessages)
+	assert.True(t, byProj[pSmall][1].AwaitingConfirmation)
+	assert.Nil(t, byProj[pSmall][1].InterpretedAnswer)
 	assert.True(t, byProj[pSmall][1].SourceExistsInMessages)
 
 	// Filter by Provenance=overridden + Query.

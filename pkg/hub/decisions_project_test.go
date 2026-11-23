@@ -595,11 +595,13 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, tempBot))
 
-	// Entry 1 (oldest): Charlie answers a topic prompt from f.agent (surface="native"), then Charlie is deleted!
-	_, resCharlie := f.topicPrompt(t, `[{"id":"d-charlie","question":"Backfill before cutover?","choices":["yes","no"],"default":"yes"}]`, false)
-	rrCharlie := f.answer(t, charlie, resCharlie.Decisions[0].RowID, map[string]interface{}{"choice_id": "1", "surface": "native"})
+	// Entry 1 (oldest): Charlie answers a topic prompt from f.agent (surface="native"), then Charlie is deleted,
+	// and f.agent re-asks d-charlie with --update (creating v2) so d-charlie v1 is status=replaced with replacedBy -> v2!
+	_, resCharlie := f.topicPrompt(t, `[{"id":"d-charlie","question":"Backfill before cutover?","choices":[{"id":"yes","label":"Yes","description":"Run backfill offline"},{"id":"no","label":"No","description":"Backfill live"}],"default":"yes"}]`, false)
+	rrCharlie := f.answer(t, charlie, resCharlie.Decisions[0].RowID, map[string]interface{}{"choice_id": "yes", "surface": "native"})
 	require.Equal(t, http.StatusOK, rrCharlie.Code)
 	require.NoError(t, f.store.DeleteUser(ctx, charlie.ID))
+	_, resCharlieV2 := f.topicPrompt(t, `[{"id":"d-charlie","question":"Backfill v2?","choices":["yes","no"]}]`, true)
 
 	time.Sleep(5 * time.Millisecond)
 
@@ -675,13 +677,19 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 	_, gerr := f.store.GetAgent(ctx, tempBot.ID)
 	require.ErrorIs(t, gerr, store.ErrNotFound, "tempBot hard-deleted from agents table")
 
-	// Bob STILL sees dm-gone-bot on tab=pending, can GET /decisions/{rowId}, and can answer it (undeliverable semantics)!
+	//Bob sees d-charlie v2 and dm-gone-bot on tab=pending, can GET /decisions/{rowId}, and can answer dm-gone-bot (undeliverable semantics)!
 	bobPending := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=pending", nil))
-	require.Len(t, bobPending.Prompts, 1)
-	assert.Equal(t, "dm-gone-bot", bobPending.Prompts[0].Decisions[0].Key)
-	assert.Equal(t, "Ephemeral Bot", bobPending.Prompts[0].AskerAgentName)
-	assert.Equal(t, "DM with Ephemeral Bot", bobPending.Prompts[0].ConversationLabel)
-	assert.False(t, bobPending.Prompts[0].ConversationAvailable, "hard-deleted DM peer agent marks conversationAvailable=false")
+	require.Len(t, bobPending.Prompts, 2)
+	var gonePrompt *ProjectDecisionPromptView
+	for i := range bobPending.Prompts {
+		if bobPending.Prompts[i].Decisions[0].Key == "dm-gone-bot" {
+			gonePrompt = &bobPending.Prompts[i]
+		}
+	}
+	require.NotNil(t, gonePrompt)
+	assert.Equal(t, "Ephemeral Bot", gonePrompt.AskerAgentName)
+	assert.Equal(t, "DM with Ephemeral Bot", gonePrompt.ConversationLabel)
+	assert.False(t, gonePrompt.ConversationAvailable, "hard-deleted DM peer agent marks conversationAvailable=false")
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+resTemp.Decisions[0].RowID, nil).Code)
 
 	rrGoneDM := f.answer(t, f.bob, resTemp.Decisions[0].RowID, map[string]interface{}{
@@ -690,7 +698,50 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 	})
 	require.Equal(t, http.StatusOK, rrGoneDM.Code, "body: %s", rrGoneDM.Body.String())
 
-	// Now tab=made for Bob has 6 entries! Paginate 2 per page across 3 pages and verify order + fields.
+	// Also add 2 still-unconfirmed interpreted answers (d-unconf-soft and d-unconf-purge) so provenance=interpreted,
+	// awaitingConfirmation=true, and sourceMessageAvailable (soft-delete + hard-purge) are exercised!
+	time.Sleep(5 * time.Millisecond)
+	_, resUnconfSoft := f.topicPrompt(t, `[{"id":"d-unconf-soft","question":"Soft-delete source check?","choices":["yes","no"]}]`, false)
+	srcUnconfSoftID := api.NewUUID()
+	require.NoError(t, f.store.CreateMessage(ctx, &store.Message{
+		ID: srcUnconfSoftID, ProjectID: f.project.ID, Sender: "user:" + f.alice.ID, SenderID: f.alice.ID,
+		Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Type: messages.TypeChat, Channel: "slack", Msg: "d-unconf-soft: yes", CreatedAt: time.Now().UTC(),
+	}))
+	_, err = f.store.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agent.ID, SourceMessageID: srcUnconfSoftID,
+		AnsweredByUserID: f.alice.ID, AnsweredByName: f.alice.DisplayName, AnsweredByEmail: f.alice.Email,
+		Surface: store.DecisionSurfaceSlack,
+		Answers: []store.InterpretedAnswerPair{{DecisionRowID: resUnconfSoft.Decisions[0].RowID, ChoiceID: "1"}},
+		ResponseMessage: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+			Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		FormatMessage: func(_ []store.InterpretedFormattedItem) string { return "interpreted d-unconf-soft yes" },
+	})
+	require.NoError(t, err)
+
+	time.Sleep(5 * time.Millisecond)
+	_, resUnconfPurge := f.topicPrompt(t, `[{"id":"d-unconf-purge","question":"Purge source check?","choices":["yes","no"]}]`, false)
+	srcUnconfPurgeID := api.NewUUID()
+	require.NoError(t, f.store.CreateMessage(ctx, &store.Message{
+		ID: srcUnconfPurgeID, ProjectID: f.project.ID, Sender: "user:" + f.bob.ID, SenderID: f.bob.ID,
+		Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Type: messages.TypeChat, Channel: "web", Msg: "d-unconf-purge: yes", CreatedAt: time.Now().UTC(),
+	}))
+	_, err = f.store.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agent.ID, SourceMessageID: srcUnconfPurgeID,
+		AnsweredByUserID: f.bob.ID, AnsweredByName: f.bob.DisplayName, AnsweredByEmail: f.bob.Email,
+		Surface: store.DecisionSurfaceNative,
+		Answers: []store.InterpretedAnswerPair{{DecisionRowID: resUnconfPurge.Decisions[0].RowID, ChoiceID: "1"}},
+		ResponseMessage: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+			Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		FormatMessage: func(_ []store.InterpretedFormattedItem) string { return "interpreted d-unconf-purge yes" },
+	})
+	require.NoError(t, err)
+
+	// Now tab=made for Bob has 6 entries (1 per version: d-unconf-purge, d-unconf-soft, dm-gone-bot, d-conf, D9, d-charlie v1;
+	// superseded interpreted rows on d-conf and D9 are folded into InterpretedAnswer)! Paginate 2 per page across 3 pages.
 	var allEntries []ProjectDecisionLogEntryView
 	cursor := ""
 	pages := 0
@@ -710,42 +761,71 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 	assert.Equal(t, 3, pages, "6 entries at limit=2 paginate across 3 pages")
 	require.Len(t, allEntries, 6)
 
-	// Entry 0 (newest): dm-gone-bot answered by Bob (hard-deleted agent preserved!)
-	assert.Equal(t, "dm-gone-bot", allEntries[0].Decision.Key)
-	assert.Equal(t, "Ephemeral Bot", allEntries[0].Decision.AskerAgentName)
-	assert.False(t, allEntries[0].ConversationAvailable)
+	// Entry 0 & 1 (newest): unconfirmed interpreted entries with awaitingConfirmation=true and sourceMessageAvailable=true.
+	assert.Equal(t, "d-unconf-purge", allEntries[0].Decision.Key)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, allEntries[0].Provenance)
+	assert.True(t, allEntries[0].AwaitingConfirmation)
+	assert.Nil(t, allEntries[0].InterpretedAnswer)
+	assert.True(t, allEntries[0].SourceMessageAvailable)
 
-	// Entry 1 & 2: d-conf confirmed + interpreted
-	assert.Equal(t, "d-conf", allEntries[1].Decision.Key)
-	assert.Equal(t, store.DecisionOutcomeConfirm, allEntries[1].Outcome)
-	assert.Equal(t, "d-conf", allEntries[2].Decision.Key)
-	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, allEntries[2].Provenance)
+	assert.Equal(t, "d-unconf-soft", allEntries[1].Decision.Key)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, allEntries[1].Provenance)
+	assert.Equal(t, store.DecisionSurfaceSlack, allEntries[1].Surface)
+	assert.True(t, allEntries[1].AwaitingConfirmation)
+	assert.True(t, allEntries[1].SourceMessageAvailable)
+	assert.NotEmpty(t, allEntries[1].InterpretedByAgentName)
 
-	// Entry 3 & 4: D9 override ("no", previousChoiceLabel="yes", surface="decisions_page") + D9 interpreted ("yes", surface="slack", sourceMessageAvailable=true)
-	assert.Equal(t, "D9", allEntries[3].Decision.Key)
-	assert.Equal(t, store.DecisionOutcomeOverride, allEntries[3].Outcome)
-	assert.Equal(t, "no", allEntries[3].Label)
-	assert.Equal(t, "yes", allEntries[3].PreviousChoiceLabel)
-	assert.Equal(t, store.DecisionSurfaceDecisionsPage, allEntries[3].Surface)
+	// Entry 2: dm-gone-bot answered by Bob (hard-deleted agent preserved!)
+	assert.Equal(t, "dm-gone-bot", allEntries[2].Decision.Key)
+	assert.Equal(t, "Ephemeral Bot", allEntries[2].Decision.AskerAgentName)
+	assert.Equal(t, store.DecisionStatusDecided, allEntries[2].Decision.Status)
+	require.Len(t, allEntries[2].Decision.Choices, 2)
+	assert.False(t, allEntries[2].AwaitingConfirmation)
+	assert.Nil(t, allEntries[2].InterpretedAnswer)
+	assert.False(t, allEntries[2].ConversationAvailable)
 
+	// Entry 3: d-conf confirmed once, carrying folded InterpretedAnswer!
+	assert.Equal(t, "d-conf", allEntries[3].Decision.Key)
+	assert.Equal(t, store.DecisionOutcomeConfirm, allEntries[3].Outcome)
+	assert.False(t, allEntries[3].AwaitingConfirmation)
+	require.NotNil(t, allEntries[3].InterpretedAnswer)
+	assert.Equal(t, "1", allEntries[3].InterpretedAnswer.ChoiceID)
+	assert.Equal(t, "yes", allEntries[3].InterpretedAnswer.Label)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, allEntries[3].InterpretedAnswer.Provenance)
+	assert.Equal(t, srcConfID, allEntries[3].InterpretedAnswer.SourceMessageID)
+
+	// Entry 4: D9 override ("no", previousChoiceLabel="yes") carrying folded InterpretedAnswer ("yes", surface="slack")!
 	assert.Equal(t, "D9", allEntries[4].Decision.Key)
-	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, allEntries[4].Provenance)
-	assert.Equal(t, store.DecisionSurfaceSlack, allEntries[4].Surface)
-	assert.True(t, allEntries[4].SourceMessageAvailable)
-	assert.NotEmpty(t, allEntries[4].InterpretedByAgentName)
+	assert.Equal(t, store.DecisionOutcomeOverride, allEntries[4].Outcome)
+	assert.Equal(t, "no", allEntries[4].Label)
+	assert.Equal(t, "yes", allEntries[4].PreviousChoiceLabel)
+	assert.Equal(t, store.DecisionSurfaceDecisionsPage, allEntries[4].Surface)
+	assert.False(t, allEntries[4].AwaitingConfirmation)
+	require.NotNil(t, allEntries[4].InterpretedAnswer)
+	assert.Equal(t, "yes", allEntries[4].InterpretedAnswer.Label)
+	assert.Equal(t, store.DecisionSurfaceSlack, allEntries[4].InterpretedAnswer.Surface)
+	assert.Equal(t, srcMsgID, allEntries[4].InterpretedAnswer.SourceMessageID)
 
-	// Entry 5 (oldest): Charlie (deleted user -> AnsweredByUserID empty, AnsweredByName preserved!)
+	// Entry 5 (oldest): Charlie (deleted user -> AnsweredByUserID empty, AnsweredByName preserved;
+	// choices with descriptions, defaultChoiceId, status=replaced, and replacedBy -> v2 populated!).
 	assert.Equal(t, "d-charlie", allEntries[5].Decision.Key)
 	assert.Empty(t, allEntries[5].AnsweredByUserID, "deleted user's ID is cleared by ON DELETE SET NULL")
 	assert.Equal(t, "Charlie Temp", allEntries[5].AnsweredByName)
 	assert.True(t, allEntries[5].MatchedDefault)
+	assert.Equal(t, "yes", allEntries[5].Decision.DefaultChoiceID)
+	assert.Equal(t, store.DecisionStatusReplaced, allEntries[5].Decision.Status)
+	require.NotNil(t, allEntries[5].Decision.ReplacedBy)
+	assert.Equal(t, DecisionRef{RowID: resCharlieV2.Decisions[0].RowID, Version: 2}, *allEntries[5].Decision.ReplacedBy)
+	require.Len(t, allEntries[5].Decision.Choices, 2)
+	assert.Equal(t, "Run backfill offline", allEntries[5].Decision.Choices[0].Description)
+	assert.Equal(t, "Backfill live", allEntries[5].Decision.Choices[1].Description)
 
-	// Soft-delete D9's source reply -> sourceMessageAvailable becomes false; hard-purge srcConfID -> also false!
-	require.NoError(t, wcs.SetMessageDeleted(ctx, srcMsgID, time.Now().UTC()))
-	purgeMessages(t, f.store, f.project.ID, srcConfID)
+	// Soft-delete d-unconf-soft's source reply -> sourceMessageAvailable becomes false; hard-purge srcUnconfPurgeID -> also false!
+	require.NoError(t, wcs.SetMessageDeleted(ctx, srcUnconfSoftID, time.Now().UTC()))
+	purgeMessages(t, f.store, f.project.ID, srcUnconfPurgeID)
 
 	interpOnly := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=made&provenance=interpreted", nil))
-	require.Len(t, interpOnly.Entries, 2)
+	require.Len(t, interpOnly.Entries, 2, "only still-unconfirmed interpreted entries appear under provenance=interpreted")
 	assert.False(t, interpOnly.Entries[0].SourceMessageAvailable, "hard-purged source reply marks sourceMessageAvailable=false")
 	assert.False(t, interpOnly.Entries[1].SourceMessageAvailable, "soft-deleted source reply marks sourceMessageAvailable=false")
 
@@ -1146,8 +1226,10 @@ func TestProjectDecisions_EqualTimestampCursorTieBreak(t *testing.T) {
 
 type agentLookupCountingStore struct {
 	store.Store
-	getAgentCalls atomic.Int64
-	batchCalls    atomic.Int64
+	getAgentCalls           atomic.Int64
+	batchCalls              atomic.Int64
+	getDecisionCalls        atomic.Int64
+	getDecisionRowsByIDCall atomic.Int64
 }
 
 func (s *agentLookupCountingStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
@@ -1158,6 +1240,16 @@ func (s *agentLookupCountingStore) GetAgent(ctx context.Context, id string) (*st
 func (s *agentLookupCountingStore) GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
 	s.batchCalls.Add(1)
 	return s.Store.GetAgentsByIDsIncludingDeleted(ctx, ids)
+}
+
+func (s *agentLookupCountingStore) GetDecision(ctx context.Context, rowID string) (*store.Decision, error) {
+	s.getDecisionCalls.Add(1)
+	return s.Store.GetDecision(ctx, rowID)
+}
+
+func (s *agentLookupCountingStore) GetDecisionRowsByIDs(ctx context.Context, rowIDs []string) (map[string]*store.Decision, error) {
+	s.getDecisionRowsByIDCall.Add(1)
+	return s.Store.GetDecisionRowsByIDs(ctx, rowIDs)
 }
 
 func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
@@ -1279,15 +1371,20 @@ func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
 	assert.Equal(t, "Hard Asker Stored", byKey["b-hard"].AskerAgentName, "hard-deleted agent falls back to stored asker_agent_name")
 	assert.False(t, byKey["b-hard"].ConversationAvailable, "hard-deleted DM agent marks conversationAvailable=false")
 
-	// 3. tab=made: 0 GetAgent calls, 2 batch calls (1 for asking agents + 1 for interpreter-only agent), resolving InterpretedByAgentName!
+	// 3. tab=made: 0 GetAgent/GetDecision/GetDecisionRowsByIDs calls, 2 batch agent calls, resolving InterpretedByAgentName + AwaitingConfirmation!
 	counting.getAgentCalls.Store(0)
 	counting.batchCalls.Store(0)
+	counting.getDecisionCalls.Store(0)
+	counting.getDecisionRowsByIDCall.Store(0)
 	madeResp := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=made&limit=20", nil))
 	assert.Equal(t, int64(0), counting.getAgentCalls.Load(), "tab=made must issue zero per-agent GetAgent calls")
+	assert.Equal(t, int64(0), counting.getDecisionCalls.Load(), "tab=made must issue zero per-row GetDecision calls")
+	assert.Equal(t, int64(0), counting.getDecisionRowsByIDCall.Load(), "tab=made must derive replacedBy from already-loaded decision row")
 	assert.Equal(t, int64(2), counting.batchCalls.Load(), "tab=made batch-loads asking agents + missing interpreter agents")
 	require.Len(t, madeResp.Entries, 1)
 	assert.Equal(t, interpOnlyBot.ID, madeResp.Entries[0].InterpretedByAgentID)
 	assert.Equal(t, "Interpreter Only Bot", madeResp.Entries[0].InterpretedByAgentName)
+	assert.True(t, madeResp.Entries[0].AwaitingConfirmation)
 }
 
 // TestDecisions_SingleGateMatrixAndRetiredOverrides verifies S1 (ptone/scion#8223):
@@ -1433,4 +1530,68 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	assert.NotEqual(t, http.StatusNotFound, interpOn.Code, "POST /api/v1/agent/decisions/interpreted must be reachable when web.decisions is on")
 	wdOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/withdraw", map[string]interface{}{})
 	assert.NotEqual(t, http.StatusNotFound, wdOn.Code, "POST /api/v1/agent/decisions/withdraw must be reachable when web.decisions is on")
+}
+
+func TestProjectDecisions_MadeOtherOptionAndText(t *testing.T) {
+	f := newDecisionsFixture(t)
+	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
+
+	// 1. Direct $other answer on an Other-enabled decision.
+	_, resOther := f.topicPrompt(t, `[{"id":"region-other","question":"Which region?","choices":[{"id":"us","label":"US Central"}],"allow_other":{"label":"Custom region","description":"Any GCP region","placeholder":"e.g. europe-west4"}}]`, false)
+	ansRR := f.answer(t, f.bob, resOther.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "europe-west4 canary",
+	})
+	require.Equal(t, http.StatusOK, ansRR.Code, ansRR.Body.String())
+
+	// 2. Interpreted fixed choice later overridden with $other (folded interpretedAnswer + otherText).
+	_, resOverride := f.topicPrompt(t, `[{"id":"region-ovr","question":"Backup region?","choices":[{"id":"us","label":"US Central"},{"id":"eu","label":"EU West"}],"default":"us","allow_other":true}]`, false)
+	recordTestInterpretedForUser(t, f.store, f.project.ID, f.topicID, f.agent, f.bob, resOverride.Decisions[0].RowID, "us")
+	ovrRR := f.answer(t, f.bob, resOverride.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "asia-east1",
+	})
+	require.Equal(t, http.StatusOK, ovrRR.Code, ovrRR.Body.String())
+
+	// 3. Plain non-Other decision (must omit other and otherText).
+	_, resPlain := f.topicPrompt(t, `[{"id":"plain-yn","question":"Proceed?","choices":["yes","no"]}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, resPlain.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=made", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	made := decodeMadeDecisions(t, rr)
+	require.Len(t, made.Entries, 3)
+
+	byKey := map[string]ProjectDecisionLogEntryView{}
+	for _, e := range made.Entries {
+		byKey[e.Decision.Key] = e
+	}
+
+	direct := byKey["region-other"]
+	require.NotNil(t, direct.Decision.Other)
+	assert.Equal(t, messages.OtherOption{
+		Label:       "Custom region",
+		Description: "Any GCP region",
+		Placeholder: "e.g. europe-west4",
+	}, *direct.Decision.Other)
+	assert.Equal(t, messages.ChoiceIDOther, direct.ChoiceID)
+	assert.Equal(t, "Custom region", direct.Label)
+	assert.Equal(t, "europe-west4 canary", direct.OtherText)
+	assert.Nil(t, direct.InterpretedAnswer)
+
+	ovr := byKey["region-ovr"]
+	require.NotNil(t, ovr.Decision.Other)
+	assert.Equal(t, messages.DefaultOtherLabel, ovr.Decision.Other.Label)
+	assert.Equal(t, messages.ChoiceIDOther, ovr.ChoiceID)
+	assert.Equal(t, messages.DefaultOtherLabel, ovr.Label)
+	assert.Equal(t, "asia-east1", ovr.OtherText)
+	assert.Equal(t, store.DecisionOutcomeOverride, ovr.Outcome)
+	assert.Equal(t, "US Central", ovr.PreviousChoiceLabel)
+	require.NotNil(t, ovr.InterpretedAnswer)
+	assert.Equal(t, "us", ovr.InterpretedAnswer.ChoiceID)
+	assert.Empty(t, ovr.InterpretedAnswer.OtherText)
+
+	plain := byKey["plain-yn"]
+	assert.Nil(t, plain.Decision.Other)
+	assert.Empty(t, plain.OtherText)
 }

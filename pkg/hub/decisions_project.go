@@ -114,18 +114,23 @@ type ProjectDecisionPromptView struct {
 // ProjectDecisionSummaryView is the decision metadata embedded in one entry of
 // the tab=made decision log.
 type ProjectDecisionSummaryView struct {
-	RowID           string `json:"rowId"`
-	PromptMessageID string `json:"promptMessageId"`
-	PromptAvailable bool   `json:"promptAvailable"`
-	Key             string `json:"key"`
-	Ref             string `json:"ref"`
-	Version         int    `json:"version"`
-	Question        string `json:"question"`
-	AskerAgentID    string `json:"askerAgentId"`
-	AskerAgentName  string `json:"askerAgentName"`
+	RowID           string                `json:"rowId"`
+	PromptMessageID string                `json:"promptMessageId"`
+	PromptAvailable bool                  `json:"promptAvailable"`
+	Key             string                `json:"key"`
+	Ref             string                `json:"ref"`
+	Version         int                   `json:"version"`
+	Status          string                `json:"status"`
+	Question        string                `json:"question"`
+	Choices         []messages.Choice     `json:"choices"`
+	DefaultChoiceID string                `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption `json:"other,omitempty"`
+	ReplacedBy      *DecisionRef          `json:"replacedBy,omitempty"`
+	AskerAgentID    string                `json:"askerAgentId"`
+	AskerAgentName  string                `json:"askerAgentName"`
 }
 
-// ProjectDecisionLogEntryView is one append-only answer log line on tab=made.
+// ProjectDecisionLogEntryView is one Made-tab entry: a decision version's final answer, with any superseded interpreted answer folded in.
 type ProjectDecisionLogEntryView struct {
 	Project                ProjectDecisionProjectRef  `json:"project"`
 	AnswerID               string                     `json:"answerId"`
@@ -136,6 +141,8 @@ type ProjectDecisionLogEntryView struct {
 	MatchedDefault         bool                       `json:"matchedDefault"`
 	PreviousChoiceLabel    string                     `json:"previousChoiceLabel,omitempty"`
 	PreviousOtherText      string                     `json:"previousOtherText,omitempty"`
+	InterpretedAnswer      *AnswerView                `json:"interpretedAnswer,omitempty"`
+	AwaitingConfirmation   bool                       `json:"awaitingConfirmation,omitempty"`
 	AnsweredByUserID       string                     `json:"answeredByUserId,omitempty"`
 	AnsweredByName         string                     `json:"answeredByName"`
 	Provenance             string                     `json:"provenance"`
@@ -1432,6 +1439,19 @@ func (s *Server) buildProjectDecisionLogViews(
 			interpretedByName = resolveAgentName(a.InterpretedByAgentID, fallback)
 		}
 
+		choices := d.Choices
+		if choices == nil {
+			choices = []messages.Choice{}
+		}
+		var replacedBy *DecisionRef
+		if d.ReplacedByID != "" {
+			// The replacing version is always active.Version+1 (see loadKeyStates in decision_store.go).
+			replacedBy = &DecisionRef{
+				RowID:   d.ReplacedByID,
+				Version: d.Version + 1,
+			}
+		}
+
 		out = append(out, ProjectDecisionLogEntryView{
 			Project:  scope.projectRef(d.ProjectID),
 			AnswerID: a.ID,
@@ -1442,7 +1462,12 @@ func (s *Server) buildProjectDecisionLogViews(
 				Key:             d.Key,
 				Ref:             d.Ref(),
 				Version:         d.Version,
+				Status:          d.Status,
 				Question:        d.Question,
+				Choices:         choices,
+				DefaultChoiceID: d.DefaultChoiceID,
+				Other:           cloneOtherOption(d.Other),
+				ReplacedBy:      replacedBy,
 				AskerAgentID:    d.AskerAgentID,
 				AskerAgentName:  askerName,
 			},
@@ -1452,6 +1477,8 @@ func (s *Server) buildProjectDecisionLogViews(
 			MatchedDefault:         a.MatchedDefault,
 			PreviousChoiceLabel:    e.PreviousChoiceLabel,
 			PreviousOtherText:      e.PreviousOtherText,
+			InterpretedAnswer:      answerView(e.InterpretedAnswer),
+			AwaitingConfirmation:   e.AwaitingConfirmation,
 			AnsweredByUserID:       a.AnsweredByUserID,
 			AnsweredByName:         answererDisplayName(a),
 			Provenance:             a.Provenance,

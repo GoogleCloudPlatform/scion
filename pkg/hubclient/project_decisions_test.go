@@ -70,6 +70,53 @@ func TestProjectDecisionService_ListQueryAndSearchSupport(t *testing.T) {
 		t.Errorf("agents = %+v", resp.Agents)
 	}
 
+	// Made response with recorded choices, defaultChoiceId, status, replacedBy, interpretedAnswer, and awaitingConfirmation.
+	body = `{"counts":{"waitingOnYou":1,"waitingOnOthers":0},
+		"entries":[
+		  {"project":{"id":"proj-1","name":"Scion","slug":"scion"},"answerId":"ans-1",
+		   "decision":{"rowId":"r1","promptMessageId":"m1","promptAvailable":true,"key":"db","ref":"ag/db","version":1,
+		     "status":"replaced","question":"Which DB?","defaultChoiceId":"pg",
+		     "choices":[{"id":"pg","label":"Postgres","description":"Managed"},{"id":"sq","label":"SQLite"}],
+		     "other":{"label":"Custom DB","description":"Specify engine","placeholder":"e.g. DuckDB"},
+		     "replacedBy":{"rowId":"r2","version":2},"askerAgentId":"a1","askerAgentName":"bot"},
+		   "choiceId":"$other","label":"Custom DB","otherText":"DuckDB embedded","matchedDefault":false,"provenance":"direct","outcome":"override",
+		   "interpretedAnswer":{"choiceId":"pg","label":"Postgres","provenance":"agent_interpreted","outcome":"answer","surface":"native","responseMessageId":"rm-0","at":"2026-11-01T10:00:00Z"},
+		   "answeredByName":"Alice","surface":"decisions_page","at":"2026-11-01T10:05:00Z","chatKey":"t1","conversationLabel":"#release","conversationAvailable":true},
+		  {"project":{"id":"proj-1","name":"Scion","slug":"scion"},"answerId":"ans-2",
+		   "decision":{"rowId":"r3","promptMessageId":"m3","promptAvailable":true,"key":"cache","ref":"ag/cache","version":1,
+		     "status":"decided","question":"Cache?","choices":[{"id":"yes","label":"Yes"},{"id":"no","label":"No"}],
+		     "askerAgentId":"a1","askerAgentName":"bot"},
+		   "choiceId":"yes","label":"Yes","matchedDefault":false,"provenance":"agent_interpreted","outcome":"answer",
+		   "awaitingConfirmation":true,"answeredByName":"Alice","surface":"native","at":"2026-11-01T10:10:00Z","chatKey":"t1","conversationLabel":"#release","conversationAvailable":true}
+		],
+		"agents":[],"answerers":[],"conversations":[]}`
+	madeResp, err := c.ProjectDecisions("proj-1").List(context.Background(), &ListProjectDecisionsOptions{Tab: ProjectDecisionsTabMade})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(madeResp.Entries) != 2 {
+		t.Fatalf("len(madeResp.Entries) = %d, want 2", len(madeResp.Entries))
+	}
+	e0 := madeResp.Entries[0]
+	if e0.Decision.Status != "replaced" || e0.Decision.DefaultChoiceID != "pg" || len(e0.Decision.Choices) != 2 || e0.Decision.Choices[0].Description != "Managed" {
+		t.Fatalf("unexpected e0.Decision: %+v", e0.Decision)
+	}
+	if e0.Decision.ReplacedBy == nil || e0.Decision.ReplacedBy.RowID != "r2" || e0.Decision.ReplacedBy.Version != 2 {
+		t.Fatalf("unexpected e0.Decision.ReplacedBy: %+v", e0.Decision.ReplacedBy)
+	}
+	if e0.Decision.Other == nil || e0.Decision.Other.Label != "Custom DB" || e0.Decision.Other.Description != "Specify engine" || e0.Decision.Other.Placeholder != "e.g. DuckDB" {
+		t.Fatalf("unexpected e0.Decision.Other: %+v", e0.Decision.Other)
+	}
+	if e0.OtherText != "DuckDB embedded" {
+		t.Fatalf("unexpected e0.OtherText: %q", e0.OtherText)
+	}
+	if e0.InterpretedAnswer == nil || e0.InterpretedAnswer.ChoiceID != "pg" || e0.AwaitingConfirmation {
+		t.Fatalf("unexpected e0 fold fields: %+v", e0)
+	}
+	if !madeResp.Entries[1].AwaitingConfirmation || madeResp.Entries[1].InterpretedAnswer != nil {
+		t.Fatalf("unexpected e1 awaitingConfirmation: %+v", madeResp.Entries[1])
+	}
+
 	// No options: no query string. An older hub sends no conversations facet.
 	body = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],"agents":[],"answerers":[]}`
 	resp, err = c.ProjectDecisions("proj-1").List(context.Background(), nil)

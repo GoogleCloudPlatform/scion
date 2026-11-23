@@ -218,15 +218,18 @@ type ProjectDecisionAnswerFilter struct {
 	QueryChatKeys []string
 }
 
-// ProjectDecisionAnswerEntry is one append-only decision_answers log entry
-// enriched with its associated decision row, sibling agent_interpreted choice
-// label (when Outcome == DecisionOutcomeOverride), and message-availability
-// flags against the messages table.
+// ProjectDecisionAnswerEntry is one Made-tab decision_answers entry enriched
+// with its associated decision row, folded sibling agent_interpreted answer
+// (when a direct confirm/override/dismiss superseded it, design-8443 §4.2),
+// awaiting-confirmation flag (when an unconfirmed agent_interpreted row stands
+// on an active decision), and message-availability flags against messages.
 type ProjectDecisionAnswerEntry struct {
 	Answer                 *DecisionAnswer
 	Decision               *Decision
+	InterpretedAnswer      *DecisionAnswer
 	PreviousChoiceLabel    string
 	PreviousOtherText      string
+	AwaitingConfirmation   bool
 	PromptExistsInMessages bool
 	SourceExistsInMessages bool
 }
@@ -999,10 +1002,12 @@ type DecisionStore interface {
 	// projectIDs or chatKeys returns (nil, nil) without querying.
 	ListOpenPrompts(ctx context.Context, projectIDs, chatKeys []string) ([]*ProjectDecisionPrompt, error)
 
-	// ListDecisionAnswers lists append-only decision_answers entries
-	// belonging to decisions in projectIDs with chat_key in chatKeys,
-	// filtered by filter and ordered newest first by (created_at DESC, id
-	// DESC) with keyset cursor pagination. limit must be in [0,
+	// ListDecisionAnswers lists Made-tab decision_answers entries belonging to
+	// decisions in projectIDs with chat_key in chatKeys, excluding any
+	// agent_interpreted row superseded by a direct sibling on the same
+	// decision_row_id (folding that sibling into Entry.InterpretedAnswer),
+	// filtered by filter and ordered newest first by (created_at DESC, id DESC)
+	// with keyset cursor pagination. limit must be in [0,
 	// MaxDecisionListLimit]; limit == 0 validates inputs and returns (nil,
 	// "", nil). Empty projectIDs or chatKeys validates inputs and returns
 	// (nil, "", nil).
@@ -1011,9 +1016,9 @@ type DecisionStore interface {
 	// ListDecisionFacets returns, scoped strictly to decisions/answers in
 	// projectIDs whose chat_key is in chatKeys: the distinct asking agents
 	// (each with the asker_agent_name of its newest decision), the distinct
-	// answering users (at most 500, sorted by display name then ID), and
-	// the distinct chat keys that have at least one decision (a subset of
-	// chatKeys, in no particular order).
+	// answering users on non-superseded Made entries (at most 500, sorted by
+	// display name then ID), and the distinct chat keys that have at least one
+	// decision (a subset of chatKeys, in no particular order).
 	ListDecisionFacets(ctx context.Context, projectIDs, chatKeys []string) (agents, answerers []ProjectDecisionActor, convKeys []string, err error)
 
 	// ProjectsWithDecisions returns the distinct project IDs in projectIDs
@@ -1022,8 +1027,8 @@ type DecisionStore interface {
 	// projectIDs returns (nil, nil) without querying.
 	ProjectsWithDecisions(ctx context.Context, projectIDs []string) ([]string, error)
 
-	// ListDecisionAnswersPerProject lists up to perProject newest
-	// append-only decision_answers entries per project in projectIDs whose
+	// ListDecisionAnswersPerProject lists up to perProject newest non-superseded
+	// Made-tab decision_answers entries per project in projectIDs whose
 	// decision's chat_key is in chatKeysByProject[projectID], filtered by
 	// filter and ordered within each project by (created_at DESC, id DESC).
 	// Projects with no keys or no matching answers are omitted from the

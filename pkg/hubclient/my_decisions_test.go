@@ -41,7 +41,9 @@ func TestMyDecisionService_ListQueryAndOverviewGroups(t *testing.T) {
 	body = `{"counts":{"waitingOnYou":2,"waitingOnOthers":1},
 		"groups":[{"project":{"id":"proj-1","name":"Scion","slug":"scion"},"more":true,
 		  "entries":[{"project":{"id":"proj-1","name":"Scion","slug":"scion"},"answerId":"ans-1",
-		    "decision":{"rowId":"r1","key":"ship-now","version":1,"question":"Deploy?"},"choiceId":"1","label":"Yes"}]}],
+		    "decision":{"rowId":"r1","key":"ship-now","version":1,"status":"decided","question":"Deploy?","defaultChoiceId":"1",
+		      "choices":[{"id":"1","label":"Yes","description":"Deploy now"},{"id":"2","label":"No"}]},
+		    "choiceId":"1","label":"Yes","awaitingConfirmation":true}]}],
 		"agents":[{"id":"a1","name":"release-bot","projectId":"proj-1"}],
 		"answerers":[{"id":"u1","name":"Alice"}],
 		"conversations":[{"key":"t1","label":"#release","projectId":"proj-1"}],
@@ -80,6 +82,10 @@ func TestMyDecisionService_ListQueryAndOverviewGroups(t *testing.T) {
 	}
 	if len(resp.Groups) != 1 || !resp.Groups[0].More || len(resp.Groups[0].Entries) != 1 || resp.Groups[0].Entries[0].Decision.Key != "ship-now" {
 		t.Errorf("groups = %+v", resp.Groups)
+	}
+	ge := resp.Groups[0].Entries[0]
+	if ge.Decision.DefaultChoiceID != "1" || len(ge.Decision.Choices) != 2 || ge.Decision.Choices[0].Description != "Deploy now" || !ge.AwaitingConfirmation {
+		t.Errorf("group entry = %+v", ge)
 	}
 
 	// Nil options send no query parameters.

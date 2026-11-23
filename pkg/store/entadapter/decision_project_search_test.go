@@ -416,7 +416,8 @@ func TestDecisionSearch_MadeOtherTextAndPreviousOtherText(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Search by word in override's other_text returns the override entry with PreviousChoiceLabel & PreviousOtherText.
+	// Search by word in override's other_text returns the folded override entry
+	// with PreviousChoiceLabel, PreviousOtherText, and InterpretedAnswer.
 	entries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
 		Query: "SOUTHEAST1",
 	}, "", 50)
@@ -426,13 +427,67 @@ func TestDecisionSearch_MadeOtherTextAndPreviousOtherText(t *testing.T) {
 	assert.Equal(t, "asia-southeast1 canary", entries[0].Answer.OtherText)
 	assert.Equal(t, "Another region", entries[0].PreviousChoiceLabel)
 	assert.Equal(t, "europe-west4", entries[0].PreviousOtherText)
+	require.NotNil(t, entries[0].InterpretedAnswer)
+	assert.Equal(t, interpAnsID, entries[0].InterpretedAnswer.ID)
+	assert.Equal(t, "europe-west4", entries[0].InterpretedAnswer.OtherText)
 
-	// Search by word in interpreted entry's other_text finds that append-only log entry too.
-	interpEntries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+	// Search by word in a superseded interpreted entry's other_text returns no
+	// top-level entry after the Made fold (design-8443 §4.2, D2).
+	supersededEntries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
 		Query: "EUROPE-WEST4",
 	}, "", 50)
 	require.NoError(t, err)
+	assert.Empty(t, supersededEntries)
+
+	// Search by word in an unconfirmed interpreted entry's other_text still finds it.
+	unconfPrompt, err := cs.CreateDecisionPrompt(ctx, &store.DecisionPromptInput{
+		Message: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			Sender:    "agent:release-bot",
+			SenderID:  botID,
+			Recipient: "group:topic",
+			ThreadID:  topic,
+		},
+		AskerAgentID:   botID,
+		AskerAgentName: "release-bot",
+		Decisions: []messages.Decision{{
+			Key:      "region-unconf",
+			Question: "Which fallback region?",
+			Choices:  []messages.Choice{{ID: "1", Label: "us-central1"}},
+			Other:    &messages.OtherOption{Label: "Another region"},
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, unconfPrompt.Decisions, 1)
+
+	unconfRes, err := cs.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: botID,
+		SourceMessageID:      srcMsgID,
+		AnsweredByUserID:     aliceID,
+		AnsweredByName:       "Alice",
+		AnsweredByEmail:      "alice@example.com",
+		Surface:              store.DecisionSurfaceSlack,
+		Answers:              []store.InterpretedAnswerPair{{Key: "region-unconf", ChoiceID: messages.ChoiceIDOther, OtherText: "me-west1 fallback"}},
+		ResponseMessage: &store.Message{
+			ID:        uuid.New().String(),
+			ProjectID: projectID,
+			ThreadID:  topic,
+			Sender:    "agent:release-bot",
+			Recipient: "group:topic",
+			Msg:       "interpreted unconfirmed",
+		},
+	})
+	require.NoError(t, err)
+	unconfAnsID := unconfRes.Answers[0].ID
+
+	interpEntries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topic}, store.ProjectDecisionAnswerFilter{
+		Query: "ME-WEST1",
+	}, "", 50)
+	require.NoError(t, err)
 	require.Len(t, interpEntries, 1)
-	assert.Equal(t, interpAnsID, interpEntries[0].Answer.ID)
+	assert.Equal(t, unconfAnsID, interpEntries[0].Answer.ID)
+	assert.Equal(t, "me-west1 fallback", interpEntries[0].Answer.OtherText)
+	assert.True(t, interpEntries[0].AwaitingConfirmation)
 	assert.Empty(t, interpEntries[0].PreviousOtherText)
 }

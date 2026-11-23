@@ -110,12 +110,22 @@ func writeDecisionsShow(out io.Writer, resp *hubclient.AgentDecisionShowResponse
 		for _, c := range v.Choices {
 			suffix := ""
 			if v.DefaultChoiceID != "" && c.ID == v.DefaultChoiceID {
-				suffix = " (default)"
+				suffix = " (recommended)"
 			}
 			_, _ = fmt.Fprintf(out, "    - %s: %s%s\n", safeText(c.ID), collapseSingleLine(c.Label), suffix)
+			if desc := collapseSingleLine(c.Description); desc != "" {
+				_, _ = fmt.Fprintf(out, "      %s\n", desc)
+			}
 		}
 		if v.Other != nil {
-			_, _ = fmt.Fprintf(out, "    - %s  %s (free-form)\n", messages.ChoiceIDOther, collapseSingleLine(v.Other.Label))
+			lbl := collapseSingleLine(v.Other.Label)
+			if lbl == "" {
+				lbl = messages.DefaultOtherLabel
+			}
+			_, _ = fmt.Fprintf(out, "    - %s  %s (free-form)\n", messages.ChoiceIDOther, lbl)
+			if desc := collapseSingleLine(v.Other.Description); desc != "" {
+				_, _ = fmt.Fprintf(out, "      %s\n", desc)
+			}
 		}
 		if len(v.Answers) == 0 {
 			_, _ = fmt.Fprintln(out, "  Answers:      none")

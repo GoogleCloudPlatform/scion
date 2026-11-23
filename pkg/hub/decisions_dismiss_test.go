@@ -725,10 +725,16 @@ func TestDecisionPromptDismiss_SubsetsIdempotencyInterpretedMadeAndAgentEndpoint
 	require.Len(t, projMadeSearch.Entries, 2)
 	assert.Equal(t, "Misread + stale — quartz-token", projMadeSearch.Entries[0].DismissReason)
 
-	// Unfiltered Made keeps BOTH the interpreted answer and the dismissal on H-SUB-1!
+	// Unfiltered Made folds the interpreted answer into the dismissal entry on H-SUB-1 (design-8443 D2)!
 	projMadeAll := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.alice, http.MethodGet,
 		"/api/v1/projects/"+f.project.ID+"/decisions?tab=made&q=H-SUB-1", nil))
-	require.Len(t, projMadeAll.Entries, 2)
+	require.Len(t, projMadeAll.Entries, 1)
+	assert.Equal(t, store.DecisionOutcomeDismiss, projMadeAll.Entries[0].Outcome)
+	assert.Equal(t, store.DecisionStatusDismissed, projMadeAll.Entries[0].Decision.Status)
+	require.NotEmpty(t, projMadeAll.Entries[0].Decision.Choices)
+	assert.False(t, projMadeAll.Entries[0].AwaitingConfirmation)
+	require.NotNil(t, projMadeAll.Entries[0].InterpretedAnswer)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, projMadeAll.Entries[0].InterpretedAnswer.Provenance)
 
 	profMadeRR := doRequestAsUser(t, f.srv, f.alice, http.MethodGet,
 		"/api/v1/users/me/decisions?tab=made&provenance=dismissed&q=quartz-token", nil)

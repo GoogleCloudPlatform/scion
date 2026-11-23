@@ -206,6 +206,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 		Where(
 			decisionanswer.ProjectIDIn(projectUUIDs...),
 			decisionAnswerInChatKeys(keys),
+			notSupersededInterpretedAnswer(),
 		)
 	q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
 	if cursor != "" {
@@ -353,6 +354,7 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 			Where(
 				decisionanswer.ProjectIDEQ(pUUID),
 				decisionAnswerInChatKeys(projKeys),
+				notSupersededInterpretedAnswer(),
 			)
 		q = applyDecisionAnswerFilter(q, projFilter, agentUUID, provPred)
 		rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
@@ -440,8 +442,8 @@ func applyDecisionAnswerFilter(
 func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*ent.DecisionAnswer) ([]*store.ProjectDecisionAnswerEntry, error) {
 	decisionRowUUIDs := make([]uuid.UUID, 0, len(rows))
 	seenDec := make(map[uuid.UUID]bool, len(rows))
-	var overrideRowUUIDs []uuid.UUID
-	seenOverride := make(map[uuid.UUID]bool)
+	var siblingRowUUIDs []uuid.UUID
+	seenSibling := make(map[uuid.UUID]bool)
 	var msgUUIDsToCheck []uuid.UUID
 	seenMsgCheck := make(map[uuid.UUID]bool)
 
@@ -450,9 +452,9 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 			seenDec[r.DecisionRowID] = true
 			decisionRowUUIDs = append(decisionRowUUIDs, r.DecisionRowID)
 		}
-		if r.Outcome == decisionanswer.OutcomeOverride && !seenOverride[r.DecisionRowID] {
-			seenOverride[r.DecisionRowID] = true
-			overrideRowUUIDs = append(overrideRowUUIDs, r.DecisionRowID)
+		if r.Provenance == decisionanswer.ProvenanceDirect && r.Outcome != decisionanswer.OutcomeAnswer && !seenSibling[r.DecisionRowID] {
+			seenSibling[r.DecisionRowID] = true
+			siblingRowUUIDs = append(siblingRowUUIDs, r.DecisionRowID)
 		}
 		if r.SourceMessageID != nil && !seenMsgCheck[*r.SourceMessageID] {
 			seenMsgCheck[*r.SourceMessageID] = true
@@ -475,12 +477,11 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 		}
 	}
 
-	prevChoiceByRow := make(map[uuid.UUID]string)
-	prevOtherByRow := make(map[uuid.UUID]string)
-	if len(overrideRowUUIDs) > 0 {
+	interpByRow := make(map[uuid.UUID]*store.DecisionAnswer, len(siblingRowUUIDs))
+	if len(siblingRowUUIDs) > 0 {
 		interpRows, err := c.client.DecisionAnswer.Query().
 			Where(
-				decisionanswer.DecisionRowIDIn(overrideRowUUIDs...),
+				decisionanswer.DecisionRowIDIn(siblingRowUUIDs...),
 				decisionanswer.ProvenanceEQ(decisionanswer.ProvenanceAgentInterpreted),
 			).
 			All(ctx)
@@ -488,10 +489,7 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 			return nil, mapError(err)
 		}
 		for _, ir := range interpRows {
-			prevChoiceByRow[ir.DecisionRowID] = ir.ChoiceLabel
-			if ir.OtherText != nil {
-				prevOtherByRow[ir.DecisionRowID] = *ir.OtherText
-			}
+			interpByRow[ir.DecisionRowID] = answerToStore(ir)
 		}
 	}
 
@@ -513,9 +511,16 @@ func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*e
 			PromptExistsInMessages: existingMsgs[d.MessageID],
 			SourceExistsInMessages: ans.SourceMessageID != "" && existingMsgs[ans.SourceMessageID],
 		}
-		if ans.Outcome == store.DecisionOutcomeOverride {
-			entry.PreviousChoiceLabel = prevChoiceByRow[r.DecisionRowID]
-			entry.PreviousOtherText = prevOtherByRow[r.DecisionRowID]
+		if ans.Provenance == store.DecisionProvenanceDirect {
+			if interp := interpByRow[r.DecisionRowID]; interp != nil {
+				entry.InterpretedAnswer = interp
+				if ans.Outcome == store.DecisionOutcomeOverride {
+					entry.PreviousChoiceLabel = interp.ChoiceLabel
+					entry.PreviousOtherText = interp.OtherText
+				}
+			}
+		} else if ans.Provenance == store.DecisionProvenanceAgentInterpreted && !store.DecisionStatusTerminal(d.Status) {
+			entry.AwaitingConfirmation = true
 		}
 		entries = append(entries, entry)
 	}
@@ -549,6 +554,7 @@ func (c *CompositeStore) ListDecisionFacets(
 			decisionanswer.AnsweredByUserIDNotNil(),
 			decisionanswer.AnsweredByUserIDNEQ(""),
 			decisionAnswerInChatKeys(keys),
+			notSupersededInterpretedAnswer(),
 		).
 		Order(ent.Asc(decisionanswer.FieldAnsweredByUserID)).
 		Limit(maxProjectDecisionFacetItems).
@@ -635,6 +641,27 @@ func noDirectDecisionAnswer() predicate.Decision {
 					entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
 				)),
 		))
+	}
+}
+
+// notSupersededInterpretedAnswer excludes an agent_interpreted row when a
+// direct sibling (answer, confirm, override, or dismiss) exists for the same
+// decision_row_id (design-8443 §4.2, D2). Uses the unique index
+// (decision_row_id, provenance).
+func notSupersededInterpretedAnswer() predicate.DecisionAnswer {
+	return func(s *entsql.Selector) {
+		t := entsql.Table(decisionanswer.Table).As("da_dir")
+		s.Where(entsql.Not(entsql.And(
+			entsql.EQ(s.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceAgentInterpreted),
+			entsql.Exists(
+				entsql.Select(t.C(decisionanswer.FieldID)).
+					From(t).
+					Where(entsql.And(
+						entsql.ColumnsEQ(t.C(decisionanswer.FieldDecisionRowID), s.C(decisionanswer.FieldDecisionRowID)),
+						entsql.EQ(t.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
+					)),
+			),
+		)))
 	}
 }
 

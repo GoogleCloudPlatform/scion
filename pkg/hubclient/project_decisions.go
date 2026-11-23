@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
 // Tabs of GET /api/v1/projects/{id}/decisions.
@@ -108,15 +109,20 @@ type ProjectDecisionPrompt struct {
 
 // ProjectDecisionSummary is the decision of one tab=made log entry.
 type ProjectDecisionSummary struct {
-	RowID           string `json:"rowId"`
-	PromptMessageID string `json:"promptMessageId"`
-	PromptAvailable bool   `json:"promptAvailable"`
-	Key             string `json:"key"`
-	Ref             string `json:"ref"`
-	Version         int    `json:"version"`
-	Question        string `json:"question"`
-	AskerAgentID    string `json:"askerAgentId"`
-	AskerAgentName  string `json:"askerAgentName"`
+	RowID           string                `json:"rowId"`
+	PromptMessageID string                `json:"promptMessageId"`
+	PromptAvailable bool                  `json:"promptAvailable"`
+	Key             string                `json:"key"`
+	Ref             string                `json:"ref"`
+	Version         int                   `json:"version"`
+	Status          string                `json:"status"`
+	Question        string                `json:"question"`
+	Choices         []messages.Choice     `json:"choices"`
+	DefaultChoiceID string                `json:"defaultChoiceId,omitempty"`
+	Other           *messages.OtherOption `json:"other,omitempty"`
+	ReplacedBy      *DecisionRefView      `json:"replacedBy,omitempty"`
+	AskerAgentID    string                `json:"askerAgentId"`
+	AskerAgentName  string                `json:"askerAgentName"`
 }
 
 // ProjectDecisionLogEntry is one answer on tab=made.
@@ -130,6 +136,8 @@ type ProjectDecisionLogEntry struct {
 	MatchedDefault         bool                      `json:"matchedDefault"`
 	PreviousChoiceLabel    string                    `json:"previousChoiceLabel,omitempty"`
 	PreviousOtherText      string                    `json:"previousOtherText,omitempty"`
+	InterpretedAnswer      *DecisionAnswerView       `json:"interpretedAnswer,omitempty"`
+	AwaitingConfirmation   bool                      `json:"awaitingConfirmation,omitempty"`
 	AnsweredByUserID       string                    `json:"answeredByUserId,omitempty"`
 	AnsweredByName         string                    `json:"answeredByName"`
 	Provenance             string                    `json:"provenance"`

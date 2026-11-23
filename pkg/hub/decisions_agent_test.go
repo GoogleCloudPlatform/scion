@@ -161,8 +161,8 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
 
-	// Post D234 v1 + hub-keyed 1, interpret D234=1, Bob overrides D234=2, then repost D234 v2.
-	p1 := f.sendPromptToBob(t, twoDecisions, false)
+	// Post D234 v1 + hub-keyed 1 (with choice descriptions), interpret D234=1, Bob overrides D234=2, then repost D234 v2.
+	p1 := f.sendPromptToBob(t, `[{"id":"D234","question":"Ship the **feature** now?","choices":[{"id":"1","label":"yes","description":"Deploy immediately"},{"id":"2","label":"no","description":"Hold until Monday"}],"default":"1"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend","description":"Extend existing table"},{"id":"b","label":"New type"}]}]`, false)
 	reply := f.bobDMReply(t, p1.MessageID, "D234: yes")
 	recRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: reply.ID,
@@ -190,15 +190,19 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 		assert.NotEmpty(t, it.PromptMessageID)
 	}
 
-	// List decided: hub-keyed "1" (decided).
+	// List decided: hub-keyed "1" (decided), carrying choices (with descriptions) and empty previousChoiceLabel.
 	decRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=decided", nil)
 	require.Equal(t, http.StatusOK, decRR.Code)
 	var decOut AgentDecisionListResponse
 	require.NoError(t, json.Unmarshal(decRR.Body.Bytes(), &decOut))
 	require.Len(t, decOut.Items, 1)
 	assert.Equal(t, "1", decOut.Items[0].Key)
+	assert.Empty(t, decOut.Items[0].DefaultChoiceID)
+	require.Len(t, decOut.Items[0].Choices, 2)
+	assert.Equal(t, "Extend existing table", decOut.Items[0].Choices[0].Description)
 	require.NotNil(t, decOut.Items[0].Answer)
 	assert.Equal(t, "Extend", decOut.Items[0].Answer.Label)
+	assert.Empty(t, decOut.Items[0].Answer.PreviousChoiceLabel)
 
 	// List all with pagination (limit=2 -> 4 total items across 2 pages: D234 v1 replaced, 1 decided, D234 v2 pending, D900 pending).
 	all1RR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=all&limit=2", nil)
@@ -214,6 +218,24 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 	require.NoError(t, json.Unmarshal(all2RR.Body.Bytes(), &all2))
 	require.Len(t, all2.Items, 2)
 	assert.Empty(t, all2.NextCursor)
+
+	// Verify D234 v1 in state=all carries choices (with descriptions), defaultChoiceId="1", and answer.previousChoiceLabel="yes" on override!
+	var d234v1 *AgentDecisionListItem
+	for _, it := range append(append([]AgentDecisionListItem{}, all1.Items...), all2.Items...) {
+		itCopy := it
+		if itCopy.Key == "D234" && itCopy.Version == 1 {
+			d234v1 = &itCopy
+		}
+	}
+	require.NotNil(t, d234v1)
+	assert.Equal(t, "1", d234v1.DefaultChoiceID)
+	require.Len(t, d234v1.Choices, 2)
+	assert.Equal(t, "Deploy immediately", d234v1.Choices[0].Description)
+	assert.Equal(t, "Hold until Monday", d234v1.Choices[1].Description)
+	require.NotNil(t, d234v1.Answer)
+	assert.Equal(t, store.DecisionOutcomeOverride, d234v1.Answer.Outcome)
+	assert.Equal(t, "no", d234v1.Answer.Label)
+	assert.Equal(t, "yes", d234v1.Answer.PreviousChoiceLabel)
 
 	// Show D234 (case-insensitive "d234"): v1 has BOTH answers (interpreted + direct override), v2 is pending.
 	showRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/d234", nil)
@@ -252,6 +274,60 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 		rr := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?"+q, nil)
 		assert.Equal(t, http.StatusBadRequest, rr.Code, "%s: %s", q, rr.Body.String())
 	}
+}
+
+func TestAgentDecisions_ListAndShowOtherOptionAndText(t *testing.T) {
+	f := newDecisionsFixture(t)
+
+	pOther := f.sendPromptToBob(t, `[{"id":"REG","question":"Deploy region?","choices":[{"id":"us","label":"US Central"}],"allow_other":{"label":"Custom region","description":"Specify any GCP region","placeholder":"e.g. europe-west4"}}]`, false)
+	require.Len(t, pOther.Decisions, 1)
+	ansRR := f.answer(t, f.bob, pOther.Decisions[0].RowID, map[string]interface{}{
+		"choice_id":  messages.ChoiceIDOther,
+		"other_text": "europe-west4 canary",
+	})
+	require.Equal(t, http.StatusOK, ansRR.Code, ansRR.Body.String())
+
+	pPlain := f.sendPromptToBob(t, `[{"id":"PLAIN","question":"Proceed?","choices":["yes","no"]}]`, false)
+	require.Len(t, pPlain.Decisions, 1)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pPlain.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	listRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?state=decided", nil)
+	require.Equal(t, http.StatusOK, listRR.Code, listRR.Body.String())
+	var listOut AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal(listRR.Body.Bytes(), &listOut))
+	require.Len(t, listOut.Items, 2)
+	byKey := map[string]AgentDecisionListItem{}
+	for _, it := range listOut.Items {
+		byKey[it.Key] = it
+	}
+
+	reg := byKey["REG"]
+	require.NotNil(t, reg.Other)
+	assert.Equal(t, messages.OtherOption{
+		Label:       "Custom region",
+		Description: "Specify any GCP region",
+		Placeholder: "e.g. europe-west4",
+	}, *reg.Other)
+	require.NotNil(t, reg.Answer)
+	assert.Equal(t, messages.ChoiceIDOther, reg.Answer.ChoiceID)
+	assert.Equal(t, "Custom region", reg.Answer.Label)
+	assert.Equal(t, "europe-west4 canary", reg.Answer.OtherText)
+
+	plain := byKey["PLAIN"]
+	assert.Nil(t, plain.Other)
+	require.NotNil(t, plain.Answer)
+	assert.Empty(t, plain.Answer.OtherText)
+
+	showRR := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/REG", nil)
+	require.Equal(t, http.StatusOK, showRR.Code, showRR.Body.String())
+	var showOut AgentDecisionShowResponse
+	require.NoError(t, json.Unmarshal(showRR.Body.Bytes(), &showOut))
+	require.Len(t, showOut.Versions, 1)
+	require.NotNil(t, showOut.Versions[0].Other)
+	assert.Equal(t, *reg.Other, *showOut.Versions[0].Other)
+	require.Len(t, showOut.Versions[0].Answers, 1)
+	assert.Equal(t, messages.ChoiceIDOther, showOut.Versions[0].Answers[0].ChoiceID)
+	assert.Equal(t, "europe-west4 canary", showOut.Versions[0].Answers[0].OtherText)
 }
 
 func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) {

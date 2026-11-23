@@ -58,6 +58,12 @@ type DecisionReplacedBy struct {
 	At        time.Time `json:"at"`
 }
 
+// DecisionRef names a decision version by row ID and version number.
+type DecisionRef struct {
+	RowID   string `json:"rowId"`
+	Version int    `json:"version"`
+}
+
 // DecisionWithdrawn describes when, why, and by which agent a decision was withdrawn.
 type DecisionWithdrawn struct {
 	At     time.Time `json:"at"`
@@ -205,6 +211,15 @@ func answerView(a *store.DecisionAnswer) *AnswerView {
 	}
 }
 
+// cloneOtherOption returns a shallow copy of o, or nil when o is nil.
+func cloneOtherOption(o *messages.OtherOption) *messages.OtherOption {
+	if o == nil {
+		return nil
+	}
+	cp := *o
+	return &cp
+}
+
 // decisionView converts a stored decision. replacedBy, when the decision is
 // replaced, is the row that replaced it (nil when it could not be read).
 // minAge is the hub's effective dismiss minimum age (<= 0 defaults to
@@ -226,11 +241,8 @@ func decisionView(d *store.Decision, replacedBy *store.Decision, minAge time.Dur
 		Question:        d.Question,
 		DefaultChoiceID: d.DefaultChoiceID,
 		Choices:         d.Choices,
+		Other:           cloneOtherOption(d.Other),
 		Decision:        answerView(eff),
-	}
-	if d.Other != nil {
-		otherCopy := *d.Other
-		v.Other = &otherCopy
 	}
 	if !d.CreatedAt.IsZero() {
 		avail := d.CreatedAt.Add(minAge).UTC()
