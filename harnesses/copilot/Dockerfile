@@ -16,7 +16,11 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG COPILOT_CLI_VERSION=latest
+# Exact Copilot CLI release; bump deliberately rather than defaulting to a
+# floating tag (passing --build-arg COPILOT_CLI_VERSION=latest still works for
+# ad-hoc testing). The build-time smoke check below verifies that the installed
+# binary accepts every launch flag configured in config.yaml.
+ARG COPILOT_CLI_VERSION=1.0.114
 
 RUN mkdir -p /home/scion/.copilot /home/scion/.copilot/skills \
              /home/scion/.github && \
@@ -45,5 +49,56 @@ RUN ARCH=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && \
     fi && \
     curl -fsSL "$URL" | tar xz -C /usr/local/bin && \
     chmod +x /usr/local/bin/copilot
+
+# Build-time smoke check: parse the bundle launch flags from config.yaml and
+# invoke copilot with --version (which validates all flags before exiting and
+# records the installed version in the build log). Fails the image build if a
+# CLI release drops or renames a configured flag.
+RUN --mount=type=bind,source=config.yaml,target=/tmp/copilot-config.yaml,readonly \
+    python3 - /tmp/copilot-config.yaml <<'PY'
+import ast, os, re, shlex, subprocess, sys, tempfile
+
+cfg_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/copilot-config.yaml"
+lines = open(cfg_path, encoding="utf-8").read().splitlines()
+in_cmd, base, extra = False, [], []
+i = 0
+while i < len(lines):
+    raw = lines[i]
+    i += 1
+    stripped = raw.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    if not raw.startswith(" "):
+        in_cmd = stripped == "command:"
+        continue
+    if not in_cmd:
+        continue
+    m = re.match(r"^\s+([a-z_]+):\s*(.*)$", raw)
+    if not m:
+        continue
+    key, val = m.group(1), m.group(2).strip()
+    if key == "base":
+        if val.startswith("["):
+            base = ast.literal_eval(val)
+        else:
+            while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith("#") or re.match(r"^\s+-\s+", lines[i])):
+                bm = re.match(r"^\s+-\s+(.*)$", lines[i])
+                if bm:
+                    base.append(shlex.split(bm.group(1), comments=True)[0])
+                i += 1
+    elif key == "resume_flag" and val:
+        extra.extend(shlex.split(val, comments=True))
+    elif key == "task_flag" and val:
+        extra.extend(shlex.split(val, comments=True))
+        extra.append("smoke-check")
+
+if not base:
+    sys.exit("smoke-check: failed to parse command.base from config.yaml")
+cmd = list(base) + extra + ["--version"]
+print("smoke-check:", " ".join(shlex.quote(c) for c in cmd))
+with tempfile.TemporaryDirectory() as tmp_home:
+    env = dict(os.environ, HOME=tmp_home)
+    subprocess.run(cmd, check=True, env=env)
+PY
 
 CMD ["copilot"]
