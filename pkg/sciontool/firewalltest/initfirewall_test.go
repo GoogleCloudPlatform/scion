@@ -45,7 +45,7 @@ type runResult struct {
 
 func scriptPath(t *testing.T) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("..", "init-firewall.sh"))
+	p, err := filepath.Abs(filepath.Join("..", "..", "..", "harnesses", "claude", "init-firewall.sh"))
 	if err != nil {
 		t.Fatalf("resolve init-firewall.sh: %v", err)
 	}
