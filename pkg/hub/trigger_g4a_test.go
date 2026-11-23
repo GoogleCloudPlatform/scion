@@ -998,8 +998,17 @@ func TestTriggerG4a_ReuseWithCoalesceWindow(t *testing.T) {
 func TestTriggerG4a_Reuse_PatchedToMessageRunsOwnAction(t *testing.T) {
 	ctx := context.Background()
 	f := newTriggerDispatchAgentFixture(t, "s3-g4a-reuse-patch-msg")
-	require.NoError(t, f.sched.srv.createProjectOwnerRoleBinding(ctx, f.sched.proj.ID, f.sched.creator.ID))
-	userCtx := f.userAuth(t, f.sched.creator)
+	owner := &store.User{
+		ID:          uuid.NewString(),
+		Email:       "reuse-patch-owner@example.com",
+		DisplayName: "Reuse Patch Owner",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+		Created:     time.Now().UTC(),
+	}
+	require.NoError(t, f.sched.store.CreateUser(ctx, owner))
+	require.NoError(t, f.sched.srv.createProjectOwnerRoleBinding(ctx, f.sched.proj.ID, owner.ID))
+	userCtx := f.userAuth(t, owner)
 	ep := f.createEndpoint(t, userCtx, "reuse-patch-msg-ep")
 
 	var createCalls atomic.Int32
