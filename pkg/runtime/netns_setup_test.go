@@ -1100,6 +1100,44 @@ exit 0
 			t.Errorf("Delete() calls = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("DockerRuntime.DeleteResource cleans labelled setup containers", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mockDocker := filepath.Join(tmpDir, "mock-docker")
+		callLog := filepath.Join(tmpDir, "calls.log")
+		script := fmt.Sprintf(`#!/bin/sh
+echo "$@" >> %q
+if [ "$1" = "ps" ]; then
+  echo "aabbccddeeff"
+  exit 0
+fi
+exit 0
+`, callLog)
+		if err := os.WriteFile(mockDocker, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		rt := &DockerRuntime{Command: mockDocker}
+		err := rt.DeleteResource(context.Background(), api.ResourceHandle{
+			Kind: api.ResourceKindContainer,
+			Name: "test-agent",
+			UID:  "deadbeef9876",
+		})
+		if err != nil {
+			t.Fatalf("DeleteResource() error = %v", err)
+		}
+		raw, err := os.ReadFile(callLog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{
+			"ps -aq --no-trunc --filter label=scion.netns-setup=deadbeef9876",
+			"rm -f aabbccddeeff",
+			"rm -f deadbeef9876",
+		}
+		if got := strings.Split(strings.TrimSpace(string(raw)), "\n"); !reflect.DeepEqual(got, want) {
+			t.Errorf("DeleteResource() calls = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestDockerAndPodmanRun_FirewallWithoutMetadataInterceptionRefused(t *testing.T) {

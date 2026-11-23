@@ -25,8 +25,11 @@ package runtime
 //	SCION_NETCAP_TEST_SCIONTOOL=<that binary> \
 //	  go test -tags netcapcontainer -run TestContainer -v ./pkg/runtime/
 //
-// Optional: SCION_NETCAP_TEST_BASE overrides the test image's base image
-// (the Dockerfile's default is pinned by digest).
+// Optional:
+//   - SCION_NETCAP_TEST_ENGINE selects the container CLI binary (default "docker",
+//     e.g. "podman").
+//   - SCION_NETCAP_TEST_BASE overrides the test image's base image (the
+//     Dockerfile's default is pinned by digest).
 
 import (
 	"context"
@@ -63,6 +66,20 @@ const (
 	transportTokenPath  = "/home/scion/.scion/transport-token"
 )
 
+func containerEngineBin() string {
+	if bin := strings.TrimSpace(os.Getenv("SCION_NETCAP_TEST_ENGINE")); bin != "" {
+		return bin
+	}
+	return "docker"
+}
+
+func containerRuntimeName() string {
+	if strings.Contains(strings.ToLower(filepath.Base(containerEngineBin())), "podman") {
+		return "podman"
+	}
+	return "docker"
+}
+
 func docker(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	return dockerWithin(t, 5*time.Minute, args...)
@@ -72,7 +89,7 @@ func dockerWithin(t *testing.T, limit time.Duration, args ...string) (string, er
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, containerEngineBin(), args...)
 	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
@@ -133,12 +150,12 @@ func capHasNetRaw(t *testing.T, hex string) bool {
 }
 
 // agentCapFlagsFromRuntime extracts the capability flags (--cap-drop, --cap-add,
-// --privileged) emitted by buildCommonRunArgs for a Docker agent container in
-// the given metadata mode.
+// --privileged) emitted by buildCommonRunArgs for the configured container
+// runtime in the given metadata mode.
 func agentCapFlagsFromRuntime(t *testing.T, mode string) []string {
 	t.Helper()
 	cfg := RunConfig{
-		RuntimeName:          "docker",
+		RuntimeName:          containerRuntimeName(),
 		Harness:              &harness.Generic{},
 		Name:                 "netcap-agent",
 		UnixUsername:         "scion",
@@ -366,8 +383,9 @@ func TestContainer(t *testing.T) {
 	if sciontool == "" {
 		t.Skip("SCION_NETCAP_TEST_SCIONTOOL not set")
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not available")
+	engine := containerEngineBin()
+	if _, err := exec.LookPath(engine); err != nil {
+		t.Skipf("%s not available", engine)
 	}
 	buildTestImage(t)
 
