@@ -62,8 +62,40 @@ func TestHubSystemOneConfig_Validate(t *testing.T) {
 	}
 	assert.Equal(t, 3*time.Second, SystemOneDefaultMaxEvalTime)
 	assert.Equal(t, 30*time.Second, SystemOneMaxEvalTimeLimit)
+	assert.Equal(t, 4, SystemOneDefaultMaxInFlightPerProject)
+	assert.Equal(t, 100*time.Millisecond, SystemOneDefaultAdmissionWait)
 	assert.True(t, HubSystemOneConfig{}.IsZero())
 	assert.False(t, HubSystemOneConfig{MaxEvalTime: "5s"}.IsZero())
+
+	// MaxInFlightPerProject validation.
+	zero := 0
+	neg := -1
+	eight := 8
+	v, err := (HubSystemOneConfig{}).EffectiveMaxInFlightPerProject()
+	require.NoError(t, err)
+	assert.Equal(t, 4, v)
+	v, err = (HubSystemOneConfig{MaxInFlightPerProject: &zero}).EffectiveMaxInFlightPerProject()
+	require.NoError(t, err)
+	assert.Equal(t, 0, v)
+	assert.False(t, (HubSystemOneConfig{MaxInFlightPerProject: &zero}).IsZero())
+	v, err = (HubSystemOneConfig{MaxInFlightPerProject: &eight}).EffectiveMaxInFlightPerProject()
+	require.NoError(t, err)
+	assert.Equal(t, 8, v)
+	_, err = (HubSystemOneConfig{MaxInFlightPerProject: &neg}).EffectiveMaxInFlightPerProject()
+	require.Error(t, err)
+	require.Error(t, (HubSystemOneConfig{MaxInFlightPerProject: &neg}).Validate())
+
+	// AdmissionWait validation.
+	aw, err := (HubSystemOneConfig{}).AdmissionWaitDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 100*time.Millisecond, aw)
+	aw, err = (HubSystemOneConfig{AdmissionWait: "250ms"}).AdmissionWaitDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 250*time.Millisecond, aw)
+	assert.False(t, (HubSystemOneConfig{AdmissionWait: "250ms"}).IsZero())
+	require.Error(t, (HubSystemOneConfig{AdmissionWait: "0s"}).Validate())
+	require.Error(t, (HubSystemOneConfig{AdmissionWait: "31s"}).Validate())
+	require.Error(t, (HubSystemOneConfig{AdmissionWait: "bad"}).Validate())
 }
 
 func TestHubSystemOneConfig_EnvAndSchemaMapping(t *testing.T) {
@@ -109,7 +141,7 @@ func TestHubSystemOneConfig_V1RoundTripAndSchemaValidation(t *testing.T) {
 
 	assert.Nil(t, ConvertGlobalToV1ServerConfig(&GlobalConfig{}).Hub.SystemOne, "unset setting is omitted")
 
-	rawYAML := []byte("schema_version: \"1\"\nserver:\n  hub:\n    system_one:\n      max_eval_time: 15s\n")
+	rawYAML := []byte("schema_version: \"1\"\nserver:\n  hub:\n    system_one:\n      max_eval_time: 15s\n      max_in_flight_per_project: 6\n      admission_wait: 150ms\n")
 	errs, err := ValidateSettings(rawYAML, "1")
 	require.NoError(t, err)
 	assert.Empty(t, errs)

@@ -15,6 +15,8 @@
 package systemone
 
 import (
+	"context"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
@@ -79,6 +81,19 @@ type Request struct {
 // probe environment ("probe.text").
 func ProbeInput(text string) Input {
 	return runtime.ProbeInput(text)
+}
+
+// WithProjectID attaches a consumer-authorized project ID to ctx so authoring
+// (Compile) and runtime calls can enforce per-project instance allowlists
+// (t2-p2-trigger-binding-amendment D1) and project-scoped secret resolution.
+func WithProjectID(ctx context.Context, projectID string) context.Context {
+	return runtime.WithEvalProjectID(ctx, projectID)
+}
+
+// ProjectIDFromContext returns the validated project ID attached by
+// WithProjectID or runtime.WithEvalProjectID, or "" when unset.
+func ProjectIDFromContext(ctx context.Context) string {
+	return runtime.EvalProjectIDFromContext(ctx)
 }
 
 // EvaluationFrom extracts the *Evaluation provenance record from err via

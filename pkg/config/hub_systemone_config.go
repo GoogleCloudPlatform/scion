@@ -39,16 +39,37 @@ const (
 	// SystemOneMaxEvalTimeLimit is the hard upper bound on
 	// server.hub.system_one.max_eval_time.
 	SystemOneMaxEvalTimeLimit = 30 * time.Second
+
+	// SystemOneDefaultMaxInFlightPerProject is the default per-replica
+	// concurrency semaphore limit per project
+	// (server.hub.system_one.max_in_flight_per_project; runtime-design §§4.2, 7.2).
+	SystemOneDefaultMaxInFlightPerProject = 4
+
+	// SystemOneDefaultAdmissionWait is the default maximum duration an
+	// evaluation waits for per-project / per-instance admission permits before
+	// failing fast with capacity (server.hub.system_one.admission_wait;
+	// runtime-design §7.2).
+	SystemOneDefaultAdmissionWait = 100 * time.Millisecond
 )
 
 // HubSystemOneConfig holds Hub-wide System One rule evaluation settings
-// (server.hub.system_one). Values are kept as configured and checked by
-// Validate.
+// (server.hub.system_one). Concurrency and rate limits are per Hub replica.
+// Values are kept as configured and checked by Validate.
 type HubSystemOneConfig struct {
 	// MaxEvalTime bounds the wall-clock time spent evaluating System One
 	// rules for a single message ("" = SystemOneDefaultMaxEvalTime, maximum
 	// SystemOneMaxEvalTimeLimit).
 	MaxEvalTime string `json:"maxEvalTime,omitempty" yaml:"maxEvalTime,omitempty" koanf:"maxEvalTime"`
+
+	// MaxInFlightPerProject caps concurrent in-flight System One evaluations
+	// per project per Hub replica (nil = SystemOneDefaultMaxInFlightPerProject = 4,
+	// 0 = unlimited, negative values are rejected).
+	MaxInFlightPerProject *int `json:"maxInFlightPerProject,omitempty" yaml:"maxInFlightPerProject,omitempty" koanf:"maxInFlightPerProject"`
+
+	// AdmissionWait bounds how long an evaluation waits to acquire per-project
+	// and per-instance admission permits before failing fast with capacity
+	// ("" = SystemOneDefaultAdmissionWait = 100ms, maximum SystemOneMaxEvalTimeLimit).
+	AdmissionWait string `json:"admissionWait,omitempty" yaml:"admissionWait,omitempty" koanf:"admissionWait"`
 
 	// SecretNames maps System One adapter IDs to extra permitted named-secret
 	// keys (server.hub.system_one.secret_names; PV3 Addendum F §F10). Read once
@@ -59,7 +80,7 @@ type HubSystemOneConfig struct {
 
 // IsZero reports whether no System One hub setting is configured.
 func (c HubSystemOneConfig) IsZero() bool {
-	return c.MaxEvalTime == "" && len(c.SecretNames) == 0
+	return c.MaxEvalTime == "" && c.MaxInFlightPerProject == nil && c.AdmissionWait == "" && len(c.SecretNames) == 0
 }
 
 // CloneSecretNames returns a deep copy of c.SecretNames, or nil when empty.
@@ -179,8 +200,45 @@ func (c HubSystemOneConfig) MaxEvalTimeDuration() (time.Duration, error) {
 	return d, nil
 }
 
+// EffectiveMaxInFlightPerProject returns the per-replica per-project concurrency
+// limit (nil = SystemOneDefaultMaxInFlightPerProject = 4, 0 = unlimited).
+// Negative values are rejected.
+func (c HubSystemOneConfig) EffectiveMaxInFlightPerProject() (int, error) {
+	if c.MaxInFlightPerProject == nil {
+		return SystemOneDefaultMaxInFlightPerProject, nil
+	}
+	if *c.MaxInFlightPerProject < 0 {
+		return 0, fmt.Errorf("invalid server.hub.system_one.max_in_flight_per_project %d: must be >= 0", *c.MaxInFlightPerProject)
+	}
+	return *c.MaxInFlightPerProject, nil
+}
+
+// AdmissionWaitDuration parses AdmissionWait ("" = SystemOneDefaultAdmissionWait).
+// Values <= 0 or > SystemOneMaxEvalTimeLimit are rejected.
+func (c HubSystemOneConfig) AdmissionWaitDuration() (time.Duration, error) {
+	if c.AdmissionWait == "" {
+		return SystemOneDefaultAdmissionWait, nil
+	}
+	d, err := time.ParseDuration(c.AdmissionWait)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.hub.system_one.admission_wait %q: %w", c.AdmissionWait, err)
+	}
+	if d <= 0 || d > SystemOneMaxEvalTimeLimit {
+		return 0, fmt.Errorf("invalid server.hub.system_one.admission_wait %q: must be > 0 and <= %s", c.AdmissionWait, SystemOneMaxEvalTimeLimit)
+	}
+	return d, nil
+}
+
 // Validate checks every System One hub setting.
 func (c HubSystemOneConfig) Validate() error {
-	_, err := c.MaxEvalTimeDuration()
-	return err
+	if _, err := c.MaxEvalTimeDuration(); err != nil {
+		return err
+	}
+	if _, err := c.EffectiveMaxInFlightPerProject(); err != nil {
+		return err
+	}
+	if _, err := c.AdmissionWaitDuration(); err != nil {
+		return err
+	}
+	return nil
 }

@@ -42,6 +42,14 @@ const (
 	DefaultRuleTimeout = 2 * time.Second
 	// DefaultCallTimeout is the default per-instance CallTimeout ceiling when unset (5 s).
 	DefaultCallTimeout = 5 * time.Second
+	// DefaultAdmissionWait is the default maximum time Evaluate waits to acquire
+	// per-project/per-instance concurrency and rate admission permits before
+	// failing fast with FailCapacity (runtime-design §7.2).
+	DefaultAdmissionWait = 100 * time.Millisecond
+	// DefaultMaxInFlightPerProject is the default per-replica concurrency limit
+	// per project so one project cannot starve others on a shared instance
+	// (runtime-design §§4.2, 7.2).
+	DefaultMaxInFlightPerProject = 4
 	// BytesPerTokenPrecheck is the loose bytes-per-token upper-bound guard used
 	// for the pre-call MaxInputTokens check on non-silent adapters
 	// (TruncationNever / TruncationReported). Multibyte UTF-8 text (CJK, emoji)

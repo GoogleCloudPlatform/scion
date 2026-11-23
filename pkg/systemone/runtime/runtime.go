@@ -104,6 +104,37 @@ func (s *staticInstanceSource) ListInstances(_ context.Context) ([]Instance, err
 	return out, nil
 }
 
+// ProjectAllowlistSource resolves the per-project System One instance allowlist
+// without coupling pkg/systemone/runtime to pkg/store or pkg/hub
+// (t2-p2-trigger-binding-amendment D1; runtime-design §4.5 rule 4).
+//
+// Returning an empty slice means no hub instances are allowed for projectID
+// (default-empty everywhere, including workstation hubs).
+type ProjectAllowlistSource interface {
+	AllowedInstances(ctx context.Context, projectID string) ([]string, error)
+}
+
+type staticProjectAllowlist struct {
+	mu      sync.RWMutex
+	byProj  map[string][]string
+}
+
+// StaticProjectAllowlist constructs an in-memory ProjectAllowlistSource from a
+// map of projectID -> allowed instance names.
+func StaticProjectAllowlist(allowed map[string][]string) ProjectAllowlistSource {
+	cp := make(map[string][]string, len(allowed))
+	for k, v := range allowed {
+		cp[k] = slices.Clone(v)
+	}
+	return &staticProjectAllowlist{byProj: cp}
+}
+
+func (s *staticProjectAllowlist) AllowedInstances(_ context.Context, projectID string) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Clone(s.byProj[strings.TrimSpace(projectID)]), nil
+}
+
 // Config configures a Runtime executor.
 type Config struct {
 	// Registry is the provider Adapter registry. Defaults to provider.DefaultRegistry() when nil.
@@ -127,6 +158,21 @@ type Config struct {
 	// MaxEvalTime is the runtime-wide evaluation ceiling (server.hub.systemone.maxEvalTime;
 	// defaults to DefaultMaxEvalTime = 3s when <= 0, clamped to MaxAllowedEvalTime = 30s).
 	MaxEvalTime time.Duration
+	// MaxInFlightPerProject is the per-replica concurrency limit per project
+	// (server.hub.system_one.max_in_flight_per_project; runtime-design §§4.2, 7.2).
+	// <= 0 disables the per-project concurrency cap (unlimited, matching unset
+	// InstanceLimits.MaxInFlight); the Hub sets this to
+	// DefaultMaxInFlightPerProject (4) by default.
+	MaxInFlightPerProject int
+	// AdmissionWait is the maximum time Evaluate waits to acquire per-project
+	// and per-instance concurrency/rate admission permits before failing fast
+	// with FailCapacity (runtime-design §7.2). <= 0 uses DefaultAdmissionWait (100ms),
+	// clamped to MaxAllowedEvalTime.
+	AdmissionWait time.Duration
+	// ProjectAllowlist optionally enforces the per-project hub instance allowlist
+	// at authoring (ValidateCompiled) and evaluation (Evaluate, ListModels)
+	// before any credential resolution or provider I/O (D1).
+	ProjectAllowlist ProjectAllowlistSource
 	// DefaultInstance optionally names the fallback default instance when a
 	// portable rule omits Spec.Binding.Instance.
 	DefaultInstance string
@@ -161,6 +207,12 @@ type EvalOptions struct {
 	// ProjectID populates Evaluation.ProjectID. It MUST come from the
 	// consumer's authorized context, never untrusted caller input.
 	ProjectID string
+	// RequireProject instructs Evaluate to fail closed with
+	// FailNoEligibleInstance (0 provider requests, 0 secret reads) when
+	// ProjectID is empty and ProjectAllowlist is configured. Consumer paths that
+	// evaluate project content set this true; hub-admin probes without --project
+	// leave it false.
+	RequireProject bool
 	// MaxEvalTime optionally lowers MaxEvalTime for this evaluation (clamped to
 	// MaxAllowedEvalTime = 30s; effective ceiling is min(r.MaxEvalTime(),
 	// opts.MaxEvalTime), never raising above the Runtime's configured ceiling).
@@ -313,10 +365,12 @@ func markPreCallAuthFailed(ctx context.Context) {
 type Runtime struct {
 	registry           *provider.Registry
 	instances          InstanceSource
+	projectAllowlist   ProjectAllowlistSource
 	credentials        CredentialSource
 	tokenSource        CredentialSource
 	allowedSecretNames func(provider.Adapter) []string
 	maxEvalTime        time.Duration
+	admission          *admissionController
 	defaultInstance    string
 	logger             *slog.Logger
 	egressOpts         []egress.Option
@@ -339,6 +393,14 @@ func New(cfg Config, opts ...Option) *Runtime {
 	if cfg.MaxEvalTime > 0 {
 		maxEval = clampDuration(cfg.MaxEvalTime, MaxAllowedEvalTime)
 	}
+	maxPerProject := cfg.MaxInFlightPerProject
+	if maxPerProject < 0 {
+		maxPerProject = 0 // unlimited
+	}
+	admissionWait := DefaultAdmissionWait
+	if cfg.AdmissionWait > 0 {
+		admissionWait = clampDuration(cfg.AdmissionWait, MaxAllowedEvalTime)
+	}
 
 	allowedNames := cfg.AllowedSecretNames
 	if allowedNames == nil {
@@ -348,10 +410,12 @@ func New(cfg Config, opts ...Option) *Runtime {
 	r := &Runtime{
 		registry:           reg,
 		instances:          cfg.Instances,
+		projectAllowlist:   cfg.ProjectAllowlist,
 		credentials:        cfg.Credentials,
 		tokenSource:        cfg.TokenSource,
 		allowedSecretNames: allowedNames,
 		maxEvalTime:        maxEval,
+		admission:          newAdmissionController(maxPerProject, admissionWait),
 		defaultInstance:    cfg.DefaultInstance,
 		logger:             logger,
 		transports:         make(map[transportKey]provider.Transport),
@@ -400,9 +464,39 @@ func (r *Runtime) ValidateCompiled(ctx context.Context, compiled *spec.Compiled)
 		return nil
 	}
 
+	projectID := strings.TrimSpace(EvalProjectIDFromContext(ctx))
+	var allowedSet map[string]struct{}
+	checkAllowlist := projectID != "" && r.projectAllowlist != nil
+	if checkAllowlist {
+		allowed, err := r.projectAllowlist.AllowedInstances(ctx, projectID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return &spec.CompileError{
+				Path:     "spec.binding",
+				Category: spec.CategoryBinding,
+				Message:  fmt.Sprintf("failed to resolve allowed System One instances for project %q", projectID),
+			}
+		}
+		allowedSet = make(map[string]struct{}, len(allowed))
+		for _, name := range allowed {
+			allowedSet[name] = struct{}{}
+		}
+	}
+
 	var candidates []Instance
 	switch {
 	case compiled.Spec.Binding.Instance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[compiled.Spec.Binding.Instance]; !ok {
+				return &spec.CompileError{
+					Path:     "spec.binding.instance",
+					Category: spec.CategoryBinding,
+					Message:  fmt.Sprintf("instance %q is not allowed for project %q", compiled.Spec.Binding.Instance, projectID),
+				}
+			}
+		}
 		inst, found, err := r.instances.GetInstance(ctx, compiled.Spec.Binding.Instance)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -424,6 +518,15 @@ func (r *Runtime) ValidateCompiled(ctx context.Context, compiled *spec.Compiled)
 		candidates = []Instance{inst}
 
 	case r.defaultInstance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[r.defaultInstance]; !ok {
+				return &spec.CompileError{
+					Path:     "spec.binding",
+					Category: spec.CategoryBinding,
+					Message:  fmt.Sprintf("default instance %q is not allowed for project %q", r.defaultInstance, projectID),
+				}
+			}
+		}
 		inst, found, err := r.instances.GetInstance(ctx, r.defaultInstance)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -457,11 +560,24 @@ func (r *Runtime) ValidateCompiled(ctx context.Context, compiled *spec.Compiled)
 			}
 		}
 		for _, inst := range all {
-			if inst.Enabled {
-				candidates = append(candidates, inst)
+			if !inst.Enabled {
+				continue
 			}
+			if checkAllowlist {
+				if _, ok := allowedSet[inst.Name]; !ok {
+					continue
+				}
+			}
+			candidates = append(candidates, inst)
 		}
 		if len(candidates) == 0 {
+			if checkAllowlist {
+				return &spec.CompileError{
+					Path:     "spec.binding",
+					Category: spec.CategoryBinding,
+					Message:  fmt.Sprintf("no enabled System One instance is allowed for project %q", projectID),
+				}
+			}
 			return nil
 		}
 	}
@@ -547,6 +663,7 @@ func (r *Runtime) ForgetInstance(id string) {
 	if id == "" {
 		return
 	}
+	r.admission.forgetInstance(id)
 	r.transportMu.Lock()
 	defer r.transportMu.Unlock()
 	for key, tr := range r.transports {
@@ -709,6 +826,35 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(ctx.Err(), cause))
 	}
 
+	// Step 5b: Acquire per-replica admission permits (per-project semaphore,
+	// per-instance MaxInFlight semaphore, and per-instance RatePerSec token
+	// bucket), waiting at most min(admissionWait, attemptDeadline) before
+	// failing fast with FailCapacity and 0 provider requests (runtime-design §7.2).
+	admissionStart := time.Now().UTC()
+	releaseAdmission, admitted := r.admission.acquire(attemptCtx, strings.TrimSpace(opts.ProjectID), inst)
+	if !admitted {
+		admissionDur := time.Since(admissionStart)
+		reason := provider.FailCapacity
+		if errors.Is(ctx.Err(), context.Canceled) {
+			reason = provider.FailCanceled
+		}
+		eval.Attempts = []Attempt{{
+			Instance:         inst.Name,
+			InstanceRevision: inst.Revision,
+			Adapter:          adapter.Name(),
+			AdapterVersion:   adapter.Version(),
+			ConfiguredModel:  inst.Model,
+			Location:         inst.Location,
+			Started:          admissionStart,
+			Duration:         admissionDur,
+			Requests:         0,
+			Retries:          0,
+			Outcome:          AttemptFailed,
+			Reason:           string(reason),
+		}}
+		return r.finishFailed(ctx, compiled.Kind, start, eval, reason)
+	}
+
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
 	req := buildModelRequest(evalID, compiled, selectedFields, selectedChoiceSets)
 	instView := inst.View()
@@ -718,6 +864,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 
 	attemptStart := time.Now().UTC()
 	res, invokeErr, panicked := invokeSafely(callCtx, adapter, transport, instView, req)
+	releaseAdmission()
 	attemptDuration := time.Since(attemptStart)
 	callerErr := ctx.Err()
 	attemptErr := attemptCtx.Err()
@@ -892,6 +1039,18 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	if !inst.Enabled {
 		return nil, provider.NewProviderError(provider.FailNoEligibleInstance, false, 0, 0, "instance is disabled")
 	}
+	if projID := strings.TrimSpace(EvalProjectIDFromContext(ctx)); projID != "" && r.projectAllowlist != nil {
+		allowed, err := r.projectAllowlist.AllowedInstances(ctx, projID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, provider.NewProviderError(provider.FailUnavailable, true, 0, 0, "failed to resolve project instance allowlist")
+		}
+		if !slices.Contains(allowed, inst.Name) {
+			return nil, provider.NewProviderError(provider.FailNoEligibleInstance, false, 0, 0, "instance is not allowed for project")
+		}
+	}
 	adapter, ok := r.registry.Get(inst.Adapter)
 	if !ok {
 		return nil, provider.NewProviderError(provider.FailNoEligibleInstance, false, 0, 0, "adapter is not registered")
@@ -1021,6 +1180,34 @@ func (r *Runtime) resolveBinding(
 		return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 	}
 
+	// Per-project instance allowlist gate (D1; runtime-design §4.5 rule 4).
+	// Checked before any credential resolution, admission wait, or provider I/O.
+	projectID := strings.TrimSpace(opts.ProjectID)
+	var allowedSet map[string]struct{}
+	checkAllowlist := false
+	if r.projectAllowlist != nil {
+		if projectID == "" {
+			if opts.RequireProject {
+				return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+			}
+		} else {
+			checkAllowlist = true
+			allowed, err := r.projectAllowlist.AllowedInstances(resolveCtx, projectID)
+			if err != nil {
+				if callerCtx.Err() != nil || resolveCtx.Err() != nil {
+					return Instance{}, nil, provider.Capabilities{}, classifyContextCause(callerCtx.Err(), context.Cause(resolveCtx))
+				}
+				return Instance{}, nil, provider.Capabilities{}, provider.FailUnavailable
+			}
+			allowedSet = make(map[string]struct{}, len(allowed))
+			for _, name := range allowed {
+				allowedSet[name] = struct{}{}
+			}
+		}
+	} else if opts.RequireProject && projectID == "" {
+		return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+	}
+
 	var inst Instance
 	switch {
 	case opts.Instance != nil:
@@ -1030,6 +1217,11 @@ func (r *Runtime) resolveBinding(
 		inst = cloneInstance(*opts.Instance)
 
 	case compiled.Spec.Binding.Instance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[compiled.Spec.Binding.Instance]; !ok {
+				return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+			}
+		}
 		if r.instances == nil {
 			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 		}
@@ -1046,6 +1238,11 @@ func (r *Runtime) resolveBinding(
 		inst = cloneInstance(got)
 
 	case r.defaultInstance != "":
+		if checkAllowlist {
+			if _, ok := allowedSet[r.defaultInstance]; !ok {
+				return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+			}
+		}
 		if r.instances == nil {
 			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 		}
@@ -1074,14 +1271,26 @@ func (r *Runtime) resolveBinding(
 		}
 		var enabled []Instance
 		for _, candidate := range all {
-			if candidate.Enabled {
-				enabled = append(enabled, candidate)
+			if !candidate.Enabled {
+				continue
 			}
+			if checkAllowlist {
+				if _, ok := allowedSet[candidate.Name]; !ok {
+					continue
+				}
+			}
+			enabled = append(enabled, candidate)
 		}
 		if len(enabled) != 1 {
 			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
 		}
 		inst = cloneInstance(enabled[0])
+	}
+
+	if checkAllowlist {
+		if _, ok := allowedSet[inst.Name]; !ok {
+			return Instance{}, nil, provider.Capabilities{}, provider.FailNoEligibleInstance
+		}
 	}
 
 	if !inst.Enabled {

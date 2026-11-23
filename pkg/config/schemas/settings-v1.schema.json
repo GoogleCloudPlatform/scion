@@ -1937,6 +1937,19 @@
               "x-env-var": "SCION_SERVER_HUB_SYSTEMONE_MAXEVALTIME",
               "x-since": "1"
             },
+            "max_in_flight_per_project": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Per-replica concurrency limit per project for System One evaluations (default 4; 0 = unlimited). Limits apply per Hub replica.",
+              "x-env-var": "SCION_SERVER_HUB_SYSTEMONE_MAXINFLIGHTPERPROJECT",
+              "x-since": "1"
+            },
+            "admission_wait": {
+              "type": "string",
+              "description": "Maximum duration an evaluation waits for per-project and per-instance admission permits before failing fast with capacity (e.g. '100ms'; default '100ms', must be > 0 and <= '30s'). Limits apply per Hub replica.",
+              "x-env-var": "SCION_SERVER_HUB_SYSTEMONE_ADMISSIONWAIT",
+              "x-since": "1"
+            },
             "secret_names": {
               "type": "object",
               "description": "Startup-only operator map of System One adapter ID to extra permitted named-secret keys (e.g. {\"gemini_decisions\": [\"MY_GEMINI_KEY\"]}). Layer-0; refused by the server-config API in every mode; changes require a Hub restart.",

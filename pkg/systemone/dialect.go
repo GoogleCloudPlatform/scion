@@ -256,14 +256,19 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	}
 
 	var (
-		soInput Input
-		meta    evalContextMeta
+		soInput        Input
+		meta           evalContextMeta
+		requireProject bool
 	)
 	switch p := input.Payload.(type) {
 	case Input:
 		soInput = p
+		// Non-probe consumer environments require a consumer-authorized ProjectID
+		// so per-project egress allowlists fail closed when ProjectID is omitted.
+		requireProject = prog.compiled.Environment.Name != spec.ProbeEnvironmentName
 	case Request:
 		soInput = p.Input
+		requireProject = true
 		meta = evalContextMeta{
 			projectID: strings.TrimSpace(p.ProjectID),
 			ruleID:    strings.TrimSpace(p.RuleID),
@@ -292,6 +297,7 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 		Revision:             meta.revision,
 		ElementIndex:         meta.elementIndex,
 		ProjectID:            meta.projectID,
+		RequireProject:       requireProject,
 		EngineMaxEvalTime:    budget.MaxEvalTime,
 		EngineDeadlineMargin: ruleengine.EngineDeadlineMargin(budget.MaxEvalTime),
 	})
