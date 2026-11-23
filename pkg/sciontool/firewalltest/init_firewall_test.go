@@ -76,11 +76,32 @@ func runInitFirewall(t *testing.T, digResponses map[string]digResult) firewallRu
 	logDir := t.TempDir()
 	digLogPath := filepath.Join(logDir, "dig.log")
 	ipsetLogPath := filepath.Join(logDir, "ipset.log")
+	ipsetSeenPath := filepath.Join(logDir, "ipset-seen.log")
 
 	writeStub(t, binDir, "iptables-save", `exit 0`)
 	writeStub(t, binDir, "iptables", `exit 0`)
 	writeStub(t, binDir, "ipset", fmt.Sprintf(`printf '%%s\n' "$*" >> %q
-exit 0`, ipsetLogPath))
+exist=0
+args=()
+for arg in "$@"; do
+  if [ "$arg" = "-exist" ] || [ "$arg" = "-!" ]; then
+    exist=1
+  else
+    args+=("$arg")
+  fi
+done
+if [ "${args[0]:-}" = "add" ] && [ "${#args[@]}" -ge 3 ]; then
+  key="${args[1]} ${args[2]}"
+  if [ -f %q ] && grep -Fxq "$key" %q; then
+    if [ "$exist" -eq 0 ]; then
+      echo "ipset: Element cannot be added to the set: it's already added" >&2
+      exit 1
+    fi
+  else
+    printf '%%s\n' "$key" >> %q
+  fi
+fi
+exit 0`, ipsetLogPath, ipsetSeenPath, ipsetSeenPath, ipsetSeenPath))
 	writeStub(t, binDir, "ip", `echo "default via 172.17.0.1 dev eth0"`)
 	writeStub(t, binDir, "aggregate", `cat`)
 	writeStub(t, binDir, "jq", `case "$1" in
@@ -220,5 +241,19 @@ func TestInitFirewall_InvalidIPFailsClosed(t *testing.T) {
 	}
 	if strings.Contains(res.ipsetLog, "not-an-ip") {
 		t.Errorf("invalid IP must not be added to ipset, got:\n%s", res.ipsetLog)
+	}
+}
+
+func TestInitFirewall_DuplicateIPAcrossDomainsSucceeds(t *testing.T) {
+	responses := defaultDigResponses()
+	// Simulate two domains resolving to the same shared CDN IP.
+	responses["sentry.io"] = digResult{ips: []string{"104.16.25.34"}, exitCode: 0}
+
+	res := runInitFirewall(t, responses)
+	if res.err != nil {
+		t.Fatalf("expected init-firewall.sh to succeed when domains share an IP, got %v\nstdout:\n%s\nstderr:\n%s", res.err, res.stdout, res.stderr)
+	}
+	if strings.Count(res.ipsetLog, "add allowed-domains 104.16.25.34") < 2 {
+		t.Errorf("expected both domains to add shared IP with -exist, got:\n%s", res.ipsetLog)
 	}
 }

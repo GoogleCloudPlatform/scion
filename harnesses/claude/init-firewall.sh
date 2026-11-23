@@ -102,7 +102,7 @@ resolve_and_add_domain() {
             exit 1
         fi
         echo "Adding $ip for $domain"
-        ipset add allowed-domains "$ip"
+        ipset -exist add allowed-domains "$ip"
     done < <(echo "$ips")
 }
 
