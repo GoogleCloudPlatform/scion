@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -59,7 +60,7 @@ var (
 	errDisallowedHeadlessEventEnvKey       = errors.New("disallowed headless event env key")
 	errInvalidHeadlessEventEnvValue        = errors.New("headless event env value contains NUL byte")
 	errHeadlessEventFileTooLarge           = errors.New("headless create event file exceeds limit")
-	errHeadlessGitHubTokenUnsupported      = errors.New("headless create githubToken is not supported before Stage 2 P1c")
+	errHeadlessInvalidGitHubToken          = errors.New("headless create: invalid githubToken preference")
 	errHeadlessProvenancePrincipalMismatch = errors.New("headless create: edge provenance principal does not match authority principal")
 	errHeadlessInvalidEdgeProvenance       = errors.New("headless create: invalid scheduler edge provenance")
 	errHeadlessNoUsableRole                = errors.New("no usable role for the recorded authority; set noAuth: true or re-authorize the schedule")
@@ -128,9 +129,10 @@ type HeadlessCreate struct {
 	Branch   string
 	Labels   map[string]string // validated by pkg/labels (<=16, <=63 chars)
 
-	// GitHubToken reserves the Stage 2 P1c dispatch token precedence preference
-	// ("" | "installation" | "user_preferred"; "" keeps today's dispatch
-	// precedence; non-empty values are refused until Stage 2 P1c lands).
+	// GitHubToken controls GitHub token delivery precedence for the created
+	// agent (Stage 2 design §5.1a: "" | "installation" | "user_preferred").
+	// Copied to AppliedConfig.GitHubTokenPreference and CreateInputs so
+	// reincarnation preserves it.
 	GitHubToken string
 
 	// OnCommitTx, when non-nil, runs inside commitAgentCreate's transaction
@@ -315,8 +317,10 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	if hc.Name == "" {
 		return nil, fmt.Errorf("dispatch_agent payload: agentName is required")
 	}
-	if hc.GitHubToken != "" {
-		return nil, errHeadlessGitHubTokenUnsupported
+	switch hc.GitHubToken {
+	case "", DispatchAgentGitHubTokenInstallation, DispatchAgentGitHubTokenUserPreferred:
+	default:
+		return nil, fmt.Errorf("%w: %q", errHeadlessInvalidGitHubToken, hc.GitHubToken)
 	}
 	templateName := hc.Template
 	if !templateRefAllowed(templateName) {
@@ -491,6 +495,20 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		NoAuth: effectiveNoAuth,
 	}, creatorName, childRole)
 	pinResolvedCreateProfile(agent, project, scheduledBroker, false)
+	effectiveGitHubToken := hc.GitHubToken
+	parentUsesInst, err := s.parentAgentUsesInstallationGitHubToken(ctx, hc.Authority)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, hc.Authority.PrincipalID, err)
+	}
+	if parentUsesInst {
+		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
+	}
+	if effectiveGitHubToken != "" {
+		agent.AppliedConfig.GitHubTokenPreference = effectiveGitHubToken
+		if agent.AppliedConfig.CreateInputs != nil {
+			agent.AppliedConfig.CreateInputs.GitHubTokenPreference = effectiveGitHubToken
+		}
+	}
 
 	templateExplicit := templateName != ""
 
@@ -649,6 +667,13 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		ActorPrincipalKind: creatorIdentity.Type(),
 		ActorPrincipalID:   creatorIdentity.ID(),
 		CanDelegateResult:  "allow",
+	}
+	if effectiveGitHubToken != "" {
+		if summaryBytes, mErr := json.Marshal(map[string]string{
+			"github_token_preference": effectiveGitHubToken,
+		}); mErr == nil {
+			scheduledDispatchAudit.AfterSummary = string(summaryBytes)
+		}
 	}
 	initiator := s.scheduledInitiator(hc.Authority.Recorded.Attribution)
 	if initiatorMatchesExecutor(initiator, creatorIdentity) {

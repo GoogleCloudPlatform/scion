@@ -803,7 +803,7 @@ func TestGitHubTokenSourceLabel_RequiresAuthorization(t *testing.T) {
 			dispatcher.SetGitHubAppMinter(minter)
 			env := map[string]string{}
 			var classes map[string]api.EnvKind
-			dispatcher.injectLifecycleGitHubToken(ctx, agent, env, &classes, "DispatchAgentStart")
+			dispatcher.deliverGitHubToken(ctx, agent, env, &classes, nil, nil, "DispatchAgentStart")
 
 			assert.Equal(t, []string{source.ID}, minter.authorized)
 			if tc.allow {
@@ -1510,7 +1510,7 @@ func TestGitHubTokenRefresh_ResolvesSourceLikeCreate(t *testing.T) {
 		var classes map[string]api.EnvKind
 		stored, err := st.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
-		dispatcher.injectLifecycleGitHubToken(ctx, stored, env, &classes, "DispatchAgentStart")
+		dispatcher.deliverGitHubToken(ctx, stored, env, &classes, nil, nil, "DispatchAgentStart")
 		return rec.Code, refreshToken, env["GITHUB_TOKEN"], len(after) - len(before)
 	}
 	useSourceUser := func(t *testing.T, u *store.User) {

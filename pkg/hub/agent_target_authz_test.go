@@ -19,9 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -482,4 +485,203 @@ func TestAgentFullHistory_MessageLogs(t *testing.T) {
 
 	rec = f.asAgent(t, http.MethodGet, path+"/stream", nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "stream: without agent.attach: %s", rec.Body.String())
+}
+
+// crossAgentCallerFaultStore injects a transient GetAgent failure confined to
+// agentHasInstallationGitHubTokenPreference so standing checks and target
+// lookups succeed while the caller-preference check fails closed.
+type crossAgentCallerFaultStore struct {
+	store.Store
+	fault    *storeFaultSwitch
+	disarmed atomic.Bool
+}
+
+func (s *crossAgentCallerFaultStore) Disarm() { s.disarmed.Store(true) }
+
+func crossAgentCalledFrom(fn string) bool {
+	pcs := make([]uintptr, 64)
+	n := runtime.Callers(2, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, fn) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+func (s *crossAgentCallerFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fault.Active() && !s.disarmed.Load() && crossAgentCalledFrom("agentHasInstallationGitHubTokenPreference") {
+		return nil, errors.New("injected caller preference lookup fault")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// TestInstallationAgent_CrossAgentAttachAndLifecycleRefused verifies Stage 2
+// §5.1a cross-agent isolation: an installation-only agent (with default full
+// role and a live edge from the author) is refused ActionAttach and
+// ActionLifecycle on same-owner non-installation peers, may still act on its
+// own installation-only child, leaves user_preferred callers unchanged, and
+// fails closed when the caller-preference lookup errors.
+func TestInstallationAgent_CrossAgentAttachAndLifecycleRefused(t *testing.T) {
+	ctx := t.Context()
+	scopes := ScopesForRole(AgentRoleFull)
+
+	t.Run("installation_caller_refused_on_user_preferred_peer_and_allowed_on_child", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		markEdgeBackfillComplete(t, f.store)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+
+		f.caller.AppliedConfig = &store.AgentAppliedConfig{GitHubTokenPreference: DispatchAgentGitHubTokenInstallation}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.caller))
+
+		// Child of an installation parent inherits "installation".
+		f.child.AppliedConfig = &store.AgentAppliedConfig{GitHubTokenPreference: DispatchAgentGitHubTokenInstallation}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.child))
+
+		// Same-owner sibling holds default user_preferred precedence.
+		f.sibling.AppliedConfig = &store.AgentAppliedConfig{Env: map[string]string{"GITHUB_TOKEN": "ghp_peer_pat"}}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.sibling))
+		connectFixtureBroker(t, f, f.sibling)
+		connectFixtureBroker(t, f, f.child)
+
+		// ActionAttach routes on same-owner user_preferred peer -> 403.
+		rec := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "exec on peer: %s", rec.Body.String())
+
+		rec = f.asAgent(t, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents/"+f.sibling.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "project-nested exec on peer: %s", rec.Body.String())
+
+		rec = f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID+"/pty", nil, scopes...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "pty on peer: %s", rec.Body.String())
+
+		f.srv.logQueryService = nil
+		rec = f.asAgent(t, http.MethodGet, "/api/v1/agents/"+f.sibling.ID+"/message-logs", nil, scopes...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "message-logs on peer: %s", rec.Body.String())
+
+		// ActionLifecycle routes on same-owner user_preferred peer -> 403.
+		rec = f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/start", nil, scopes...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "start on peer: %s", rec.Body.String())
+
+		rec = f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/restart", nil, scopes...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "restart on peer: %s", rec.Body.String())
+
+		// Existing-agent resume-with-new-task branch (via agentLifecycleAllowed) -> 403.
+		rec = f.asAgent(t, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents",
+			CreateAgentRequest{Name: f.sibling.Slug, Task: "hijack peer"}, scopes...)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "resume-with-task on peer: %s", rec.Body.String())
+
+		// Own installation-only child -> passes authz (not 403).
+		rec = f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.child.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "exec on own child must pass authz: %s", rec.Body.String())
+
+		rec = f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.child.ID+"/start", nil, scopes...)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "start on own child must pass authz: %s", rec.Body.String())
+	})
+
+	t.Run("user_preferred_caller_unchanged", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		markEdgeBackfillComplete(t, f.store)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+		connectFixtureBroker(t, f, f.sibling)
+
+		rec := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "user_preferred caller exec on peer: %s", rec.Body.String())
+
+		rec = f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/start", nil, scopes...)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "user_preferred caller start on peer: %s", rec.Body.String())
+	})
+
+	t.Run("caller_lookup_fault_returns_503_and_deleted_caller_returns_403", func(t *testing.T) {
+		f := bypassAgentsSetup(t)
+		markEdgeBackfillComplete(t, f.store)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+		connectFixtureBroker(t, f, f.sibling)
+
+		fs, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *crossAgentCallerFaultStore {
+			return &crossAgentCallerFaultStore{Store: inner, fault: sw}
+		})
+		fault.Arm()
+		recExec := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
+		recStart := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/start", nil, scopes...)
+		fs.Disarm()
+
+		assert.Equal(t, http.StatusServiceUnavailable, recExec.Code, "exec must return 503 on transient caller lookup fault: %s", recExec.Body.String())
+		assert.Equal(t, http.StatusServiceUnavailable, recStart.Code, "start must return 503 on transient caller lookup fault: %s", recStart.Body.String())
+
+		// Deleted caller (store.ErrNotFound) stays 403.
+		require.NoError(t, f.store.DeleteAgent(ctx, f.caller.ID))
+		recDeleted := f.asAgent(t, http.MethodPost, "/api/v1/agents/"+f.sibling.ID+"/exec", map[string]any{"command": []string{"env"}}, scopes...)
+		assert.Equal(t, http.StatusForbidden, recDeleted.Code, "deleted caller must be refused with 403: %s", recDeleted.Body.String())
+	})
+
+	t.Run("peer_env_redacted_in_list_and_get_for_installation_caller", func(t *testing.T) {
+		const peerGHToken = "plainval_peer_gh_token_pat"
+		const childAllowedEnv = "child_allowed_env_val"
+
+		f := bypassAgentsSetup(t)
+		markEdgeBackfillComplete(t, f.store)
+		addProjectEdge(t, f.store, store.DelegationPrincipalUser, f.owner.ID, f.caller.ID, f.proj.ID)
+
+		f.sibling.AppliedConfig = &store.AgentAppliedConfig{
+			Env: map[string]string{
+				"GITHUB_TOKEN": "ghp_peer_pat_never_serialized",
+				"GH_TOKEN":     peerGHToken,
+			},
+		}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.sibling))
+
+		f.child.AppliedConfig = &store.AgentAppliedConfig{
+			GitHubTokenPreference: DispatchAgentGitHubTokenInstallation,
+			Env:                   map[string]string{"ALLOWED_CHILD_ENV": childAllowedEnv},
+		}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.child))
+
+		// Control: user_preferred caller sees peer GH_TOKEN in project agent list.
+		recCtrl := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil, scopes...)
+		require.Equal(t, http.StatusOK, recCtrl.Code, recCtrl.Body.String())
+		assert.Contains(t, recCtrl.Body.String(), peerGHToken, "control user_preferred caller sees peer env")
+
+		// Switch caller to installation-only: peer env is redacted in project list,
+		// global list, and single-agent GET, while own installation child env stays visible.
+		f.caller.AppliedConfig = &store.AgentAppliedConfig{GitHubTokenPreference: DispatchAgentGitHubTokenInstallation}
+		require.NoError(t, f.store.UpdateAgent(ctx, f.caller))
+
+		recList := f.asAgent(t, http.MethodGet, "/api/v1/projects/"+f.proj.ID+"/agents", nil, scopes...)
+		require.Equal(t, http.StatusOK, recList.Code, recList.Body.String())
+		assert.NotContains(t, recList.Body.String(), peerGHToken, "installation caller must not see peer GH_TOKEN in project list")
+		assert.NotContains(t, recList.Body.String(), "ghp_peer_pat_never_serialized")
+		assert.Contains(t, recList.Body.String(), childAllowedEnv, "installation caller still sees own installation child env")
+
+		recGlobal := f.asAgent(t, http.MethodGet, "/api/v1/agents", nil, scopes...)
+		require.Equal(t, http.StatusOK, recGlobal.Code, recGlobal.Body.String())
+		assert.NotContains(t, recGlobal.Body.String(), peerGHToken, "installation caller must not see peer GH_TOKEN in global list")
+
+		// Direct helper parity check for single-agent GET / PendingConfig / EffectiveNextRun
+		// and indeterminate propagation on transient lookup fault.
+		callerIdent := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.caller.ID},
+			ProjectID: f.proj.ID,
+			Scopes:    scopes,
+		}}
+		attachCap := &Capabilities{Actions: []string{string(ActionAttach)}}
+		assert.False(t, f.srv.envViewAllowed(ctx, callerIdent, f.sibling, attachCap), "envViewAllowed must deny installation caller viewing non-installation peer")
+		assert.True(t, f.srv.envViewAllowed(ctx, callerIdent, f.child, attachCap), "envViewAllowed must allow installation caller viewing own installation child")
+
+		allowed, indet := canIdentityViewAgentEnv(ctx, f.srv, callerIdent, f.sibling)
+		assert.False(t, allowed)
+		assert.False(t, indet)
+
+		fs2, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *crossAgentCallerFaultStore {
+			return &crossAgentCallerFaultStore{Store: inner, fault: sw}
+		})
+		fault.Arm()
+		allowedFault, indetFault := canIdentityViewAgentEnv(ctx, f.srv, callerIdent, f.sibling)
+		fs2.Disarm()
+		assert.False(t, allowedFault)
+		assert.True(t, indetFault, "transient caller lookup fault must report indeterminate=true")
+	})
 }

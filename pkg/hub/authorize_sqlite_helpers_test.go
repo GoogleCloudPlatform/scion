@@ -402,12 +402,11 @@ func msgAuthzAdminIdentity() UserIdentity {
 	return NewAuthenticatedUser(tid("msg-superadmin"), "admin@test.com", "Super Admin", store.UserRoleAdmin, "api")
 }
 
-const (
-	authzHelperProjectA = "authz-project-a"
-	authzHelperProjectB = "authz-project-b"
+var (
+	authzHelperProjectA = tid("authz-project-a")
+	authzHelperProjectB = tid("authz-project-b")
+	authzHelperAgentID  = tid("authz-caller-agent")
 )
-
-var authzHelperAgentID = tid("authz-caller-agent")
 
 // authzHelperCaptureLogs redirects the default slog logger into a buffer for the
 // duration of the test and returns the buffer. The denial log line is a
@@ -453,6 +452,25 @@ func authzHelperAdmin() UserIdentity {
 	return NewAuthenticatedUser(authzHelperAdminID, "admin@test.com", "Admin", store.UserRoleAdmin, "api")
 }
 
+// authzHelperSeedCallerAgent seeds the synthetic authzHelperAgentID row in
+// authzHelperProjectA so authorizeAgentTargetAction's caller-preference lookup
+// resolves a real non-installation agent row.
+func authzHelperSeedCallerAgent(t *testing.T, s store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.GetProject(ctx, authzHelperProjectA); err != nil {
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID: authzHelperProjectA, Name: "Authz Project A", Slug: authzHelperProjectA,
+		}))
+	}
+	if _, err := s.GetAgent(ctx, authzHelperAgentID); err != nil {
+		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+			ID: authzHelperAgentID, Slug: authzHelperAgentID, Name: "Authz Caller Agent",
+			ProjectID: authzHelperProjectA, Phase: string(state.PhaseRunning),
+		}))
+	}
+}
+
 // authzHelperSeedAdmin creates the admin user in the store with a super-admin
 // role binding so that the AK1 kernel grants access. Call once per testServer.
 func authzHelperSeedAdmin(t *testing.T, s store.Store) {
@@ -475,13 +493,25 @@ func authzHelperTargetAgent() *store.Agent {
 	}
 }
 
-// agentToken mints a recorded agent JWT for a synthetic caller "agent" in
-// callerProjectID with the given scopes. Because agent_credentials has no
-// foreign-key edge to agents, the caller does not need its own store.Agent row
-// for these routing tests, unlike authorizeAgentKeys' *target*, which must be a
-// real row.
+// agentToken mints a recorded agent JWT for a caller agent in callerProjectID
+// with the given scopes, seeding a minimal store.Agent row when callerProjectID
+// exists so authorizeAgentTargetAction's caller-preference lookup succeeds.
 func (f *agentKeysRouteFixture) agentToken(t *testing.T, callerAgentID, callerProjectID string, scopes ...AgentTokenScope) string {
 	t.Helper()
+	ctx := context.Background()
+	if callerAgentID != "" && callerProjectID != "" {
+		if _, err := f.store.GetProject(ctx, callerProjectID); err == nil {
+			if _, err := f.store.GetAgent(ctx, callerAgentID); errors.Is(err, store.ErrNotFound) {
+				require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+					ID:        callerAgentID,
+					Slug:      callerAgentID,
+					Name:      callerAgentID,
+					ProjectID: callerProjectID,
+					Phase:     string(state.PhaseRunning),
+				}))
+			}
+		}
+	}
 	return f.srv.generateRecordedAgentToken(t, callerAgentID, callerProjectID, scopes, nil)
 }
 

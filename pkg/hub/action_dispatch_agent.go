@@ -106,6 +106,7 @@ type dispatchAgentAuthorized struct {
 	edgeCeiling    store.EffectCeiling
 	edgeProvenance store.AuthorityProvenance
 	resolvedRole   headlessResolvedRole
+	project        *store.Project
 	projectName    string
 	sourceName     string
 	signatureMode  string
@@ -130,11 +131,11 @@ func (a *dispatchAgentAction) Detaches(_ hubfire.FireRequest) bool {
 // delegation-ceiling checks. Schedule authoring handlers continue authorizing
 // through authorizeScheduledDispatchAgentAuthoring.
 func (a *dispatchAgentAction) Validate(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, error) {
-	normalized, _, _, err := a.validateWithRole(ctx, caller, projectID, rawPayload)
+	normalized, _, _, err := a.validateWithRole(ctx, caller, projectID, "", rawPayload)
 	return normalized, err
 }
 
-func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Identity, projectID string, rawPayload string) (string, AgentRole, bool, error) {
+func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Identity, projectID string, sourceKind string, rawPayload string) (string, AgentRole, bool, error) {
 	if a == nil || a.srv == nil {
 		return "", "", false, errors.New("dispatch_agent action: server not configured")
 	}
@@ -206,21 +207,23 @@ func (a *dispatchAgentAction) validateWithRole(ctx context.Context, caller Ident
 		}
 	}
 
-	// GitHubToken enum and Stage 2 P1c-1 resolution (§5.1a).
+	// GitHubToken enum and authoring-time default resolution (Stage 2 §5.1a).
+	// Resolved value is stored so a later default change cannot re-point an
+	// existing rule: "" -> "installation" for github sources, "user_preferred"
+	// otherwise.
 	switch payload.GithubToken {
-	case "", DispatchAgentGitHubTokenUserPreferred:
-		payload.GithubToken = DispatchAgentGitHubTokenUserPreferred
-	case DispatchAgentGitHubTokenInstallation:
-		return "", "", false, &dispatchAgentValidationError{
-			status:  http.StatusBadRequest,
-			code:    "github_token_unsupported",
-			message: "githubToken \"installation\" is not yet supported",
+	case "":
+		if sourceKind == store.TriggerSourceKindGitHub {
+			payload.GithubToken = DispatchAgentGitHubTokenInstallation
+		} else {
+			payload.GithubToken = DispatchAgentGitHubTokenUserPreferred
 		}
+	case DispatchAgentGitHubTokenUserPreferred, DispatchAgentGitHubTokenInstallation:
 	default:
 		return "", "", false, &dispatchAgentValidationError{
 			status:  http.StatusBadRequest,
 			code:    "invalid_value",
-			message: fmt.Sprintf("unsupported githubToken %q (supported: user_preferred)", payload.GithubToken),
+			message: fmt.Sprintf("unsupported githubToken %q (supported: %s, %s)", payload.GithubToken, DispatchAgentGitHubTokenInstallation, DispatchAgentGitHubTokenUserPreferred),
 			details: map[string]any{"field": "githubToken"},
 		}
 	}
@@ -571,27 +574,27 @@ func (s *Server) authorizeDispatchAgentFire(
 	identity Identity,
 	requestedRole AgentRole,
 	noAuth bool,
-) (headlessResolvedRole, string, error) {
+) (headlessResolvedRole, *store.Project, error) {
 	if auth.PrincipalKind == store.DelegationPrincipalAgent {
 		agentIdent, ok := identity.(AgentIdentity)
 		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
-			return headlessResolvedRole{}, "", fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
+			return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
 	}
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return headlessResolvedRole{}, "", &dispatchAgentProjectNotFoundError{projectID: projectID}
+			return headlessResolvedRole{}, nil, &dispatchAgentProjectNotFoundError{projectID: projectID}
 		}
-		return headlessResolvedRole{}, "", fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
+		return headlessResolvedRole{}, nil, fmt.Errorf("%w: failed to resolve project %q: %w", errDispatchAgentProjectLookup, projectID, err)
 	}
 	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(ctx, project, auth, requestedRole, noAuth)
 	if err != nil {
-		return headlessResolvedRole{}, "", err
+		return headlessResolvedRole{}, nil, err
 	}
 
 	if decision := s.agentCreateDecision(ctx, identity, projectID); !decision.Allowed {
-		return headlessResolvedRole{}, "", fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
+		return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal %s %q is not authorized to create agents in project %q: %s",
 			auth.PrincipalKind, auth.PrincipalID, projectID, decision.Reason)
 	}
 
@@ -616,14 +619,14 @@ func (s *Server) authorizeDispatchAgentFire(
 			CanDelegateResult:  "deny",
 			CanDelegateReason:  delegateDecision.Reason,
 		})
-		return headlessResolvedRole{}, "", fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
+		return headlessResolvedRole{}, nil, fmt.Errorf("scheduled dispatch principal %s %q failed CanDelegate at fire time: %s",
 			auth.PrincipalKind, auth.PrincipalID, delegateDecision.Reason)
 	}
 	return headlessResolvedRole{
 		preCapRole:        preCapRole,
 		roleExplicit:      roleExplicit,
 		parentMessageMode: parentMessageMode,
-	}, project.Name, nil
+	}, project, nil
 }
 
 func (a *dispatchAgentAction) Authorize(
@@ -649,8 +652,10 @@ func (a *dispatchAgentAction) Authorize(
 		if payload.Ephemeral {
 			return nil, &FireRefusal{Reason: "ephemeral agents are not yet supported"}, nil
 		}
-		if payload.GithubToken != "" && payload.GithubToken != DispatchAgentGitHubTokenUserPreferred {
-			return nil, &FireRefusal{Reason: "githubToken mode is not yet supported"}, nil
+		switch payload.GithubToken {
+		case "", DispatchAgentGitHubTokenUserPreferred, DispatchAgentGitHubTokenInstallation:
+		default:
+			return nil, &FireRefusal{Reason: "unsupported githubToken mode"}, nil
 		}
 		if req.Event != nil {
 			var ep *store.WebhookEndpoint
@@ -677,7 +682,7 @@ func (a *dispatchAgentAction) Authorize(
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
 		requestedRole = AgentRole(payload.AgentRole)
 	}
-	resolvedRole, projectName, err := s.authorizeDispatchAgentFire(
+	resolvedRole, project, err := s.authorizeDispatchAgentFire(
 		ctx,
 		req.ProjectID,
 		fireID,
@@ -721,6 +726,10 @@ func (a *dispatchAgentAction) Authorize(
 		return nil, dispatchAgentRefusalReason(req, err), nil
 	}
 
+	var projectName string
+	if project != nil {
+		projectName = project.Name
+	}
 	return &dispatchAgentAuthorized{
 		payload:        payload,
 		auth:           auth,
@@ -729,6 +738,7 @@ func (a *dispatchAgentAction) Authorize(
 		edgeCeiling:    edgeCeiling,
 		edgeProvenance: edgeProvenance,
 		resolvedRole:   resolvedRole,
+		project:        project,
 		projectName:    projectName,
 		sourceName:     sourceName,
 		signatureMode:  signatureMode,
@@ -1005,11 +1015,56 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 	}
 
 	vars := buildDispatchTemplateVars(req, da)
-	frameOpt := triggertemplate.WithFrame(triggertemplate.FrameContext{
+
+	// Render author labels in deterministic key order, then merge hub provenance
+	// labels (hub wins) BEFORE rendering the task slot so the GitHub App mint
+	// project check sees the final labels (e.g. token-source project label).
+	mergedLabels := make(map[string]string, len(da.payload.Labels)+hubAppliedTriggerLabelCount)
+	if len(da.payload.Labels) > 0 {
+		keys := make([]string, 0, len(da.payload.Labels))
+		for k := range da.payload.Labels {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			val, rErr := renderTemplateSlot(da.payload.Labels[k], triggertemplate.SlotLabel, vars, da.payload.UntrustedVars)
+			if rErr != nil {
+				return a.refuseTemplateRender(req, triggertemplate.SlotLabel, rErr), nil
+			}
+			mergedLabels[k] = val
+		}
+	}
+	mergedLabels[triggerLabelKeyTrigger] = triggerID
+	mergedLabels[triggerLabelKeyTriggerEvent] = ev.ID
+	mergedLabels[triggerLabelKeyTriggerSource] = ev.SourceKind
+	if err := labels.Validate(mergedLabels); err != nil {
+		return a.refuseTemplateRender(req, triggertemplate.SlotLabel, &triggertemplate.RenderError{
+			Kind: triggertemplate.KindValueRejected,
+			Slot: triggertemplate.SlotLabel,
+		}), nil
+	}
+
+	fc := triggertemplate.FrameContext{
 		EndpointName:  da.sourceName,
 		SignatureMode: da.signatureMode,
 		EventID:       ev.ID,
-	})
+	}
+	effectiveGitHubToken := da.payload.GithubToken
+	if effectiveGitHubToken == "" && ev.SourceKind == store.TriggerSourceKindGitHub {
+		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
+	}
+	parentUsesInst, err := a.srv.parentAgentUsesInstallationGitHubToken(ctx, da.auth)
+	if err != nil {
+		return hubfire.FireOutcome{}, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, da.auth.PrincipalID, err)
+	}
+	if parentUsesInst {
+		effectiveGitHubToken = DispatchAgentGitHubTokenInstallation
+	}
+	if effectiveGitHubToken == DispatchAgentGitHubTokenInstallation &&
+		!a.srv.hasGitHubMintProjectForHeadless(ctx, da.project, da.auth, mergedLabels) {
+		fc.Notes = append(fc.Notes, "GitHub access is not available for this run.")
+	}
+	frameOpt := triggertemplate.WithFrame(fc)
 
 	renderedTask, err := renderTemplateSlot(da.payload.Task, triggertemplate.SlotTask, vars, da.payload.UntrustedVars, frameOpt)
 	if err != nil {
@@ -1041,32 +1096,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			}
 			renderedBranch = trimmed
 		}
-	}
-
-	// Render author labels in deterministic key order, then merge hub provenance labels (hub wins).
-	mergedLabels := make(map[string]string, len(da.payload.Labels)+hubAppliedTriggerLabelCount)
-	if len(da.payload.Labels) > 0 {
-		keys := make([]string, 0, len(da.payload.Labels))
-		for k := range da.payload.Labels {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		for _, k := range keys {
-			val, rErr := renderTemplateSlot(da.payload.Labels[k], triggertemplate.SlotLabel, vars, da.payload.UntrustedVars)
-			if rErr != nil {
-				return a.refuseTemplateRender(req, triggertemplate.SlotLabel, rErr), nil
-			}
-			mergedLabels[k] = val
-		}
-	}
-	mergedLabels[triggerLabelKeyTrigger] = triggerID
-	mergedLabels[triggerLabelKeyTriggerEvent] = ev.ID
-	mergedLabels[triggerLabelKeyTriggerSource] = ev.SourceKind
-	if err := labels.Validate(mergedLabels); err != nil {
-		return a.refuseTemplateRender(req, triggertemplate.SlotLabel, &triggertemplate.RenderError{
-			Kind: triggertemplate.KindValueRejected,
-			Slot: triggertemplate.SlotLabel,
-		}), nil
 	}
 
 	// Name resolution and normal create-path name checks (§5.3).
@@ -1119,13 +1148,6 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 		nameConflict = DispatchAgentNameConflictSuffix
 	}
 
-	// Pass "" to HeadlessCreate.GitHubToken for user_preferred (= today's
-	// precedence; createAgentHeadless refuses non-empty values until P1c-3).
-	headlessGitHubToken := ""
-	if da.payload.GithubToken != "" && da.payload.GithubToken != DispatchAgentGitHubTokenUserPreferred {
-		headlessGitHubToken = da.payload.GithubToken
-	}
-
 	resolvedRole := da.resolvedRole
 	candidate := baseSlug
 	for attempt := 0; ; attempt++ {
@@ -1144,7 +1166,7 @@ func (a *dispatchAgentAction) fireTriggerDispatchAgent(
 			Task:           renderedTask,
 			Branch:         renderedBranch,
 			Labels:         maps.Clone(mergedLabels),
-			GitHubToken:    headlessGitHubToken,
+			GitHubToken:    effectiveGitHubToken,
 			EventEnv:       eventEnv,
 			EventFile:      eventFileBytes,
 			Detached:       true,

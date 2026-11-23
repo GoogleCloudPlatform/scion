@@ -238,8 +238,18 @@ func (s *requesterGetAgentErrStore) GetAgent(ctx context.Context, id string) (*s
 // requester's own authority checks, which read the same edges.
 func TestReincarnateCycleCheckLookupFault503(t *testing.T) {
 	f := newKeepEdgeFixture(t)
-	f.srv.store = &requesterGetAgentErrStore{Store: f.srv.store, failID: f.other.ID}
+	// Mark target as installation-only so authorizeAgentLifecycle's
+	// cross-agent preference check skips the caller lookup and the injected
+	// fault hits the cycle check specifically.
 	target := mustGetAgent(t, f.s, f.target.ID)
+	if target.AppliedConfig == nil {
+		target.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	target.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+	require.NoError(t, f.s.UpdateAgent(context.Background(), target))
+
+	f.srv.store = &requesterGetAgentErrStore{Store: f.srv.store, failID: f.other.ID}
+	target = mustGetAgent(t, f.s, f.target.ID)
 	for _, dryRun := range []bool{true, false} {
 		rec := httptest.NewRecorder()
 		body := ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun, Role: string(AgentRoleBaseline)}

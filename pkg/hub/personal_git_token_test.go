@@ -349,13 +349,13 @@ func TestDispatch_AuthorizedSourceTokenNotProjectBound(t *testing.T) {
 	}
 }
 
-// injectLifecycleGitHubToken returns a token as the agent's own App token
+// deliverGitHubToken returns a token as the agent's own App token
 // only when it was minted for the agent's own project.
 func TestLifecycleGitHubToken_SourceTokenIsNotOwn(t *testing.T) {
 	f := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: "github.com/org/repo", sourceLabel: true, allowSource: true})
 	env := make(map[string]string)
 	var classifications map[string]api.EnvKind
-	own := f.d.injectLifecycleGitHubToken(context.Background(), f.agent, env, &classifications, "DispatchAgentStart")
+	_, _, own := f.d.deliverGitHubToken(context.Background(), f.agent, env, &classifications, nil, nil, "DispatchAgentStart")
 	require.True(t, f.minter.called, "fixture check: the authorized source must mint")
 	assert.Equal(t, tid("project-token-source"), f.minter.projectID)
 	assert.Equal(t, "github-app-token", env["GITHUB_TOKEN"])
@@ -364,7 +364,7 @@ func TestLifecycleGitHubToken_SourceTokenIsNotOwn(t *testing.T) {
 	g := newPersonalTokenFixture(t, personalTokenOpts{gitRemote: "github.com/org/repo", installation: true})
 	genv := make(map[string]string)
 	var gclassifications map[string]api.EnvKind
-	gown := g.d.injectLifecycleGitHubToken(context.Background(), g.agent, genv, &gclassifications, "DispatchAgentStart")
+	_, _, gown := g.d.deliverGitHubToken(context.Background(), g.agent, genv, &gclassifications, nil, nil, "DispatchAgentStart")
 	assert.Equal(t, "github-app-token", gown, "the agent's own project's token is returned as its own App token")
 }
 

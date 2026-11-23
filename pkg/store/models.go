@@ -546,6 +546,16 @@ type AgentAppliedConfig struct {
 	// Determines which JWT scopes the agent receives. Immutable after creation.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// GitHubTokenPreference controls GitHub token delivery precedence for
+	// trigger-dispatched agents (Stage 2 design §5.1a): "" or "user_preferred"
+	// keeps the default user-PAT-over-App precedence; "installation" drops all
+	// blocked GitHub token keys (GITHUB_TOKEN, GH_* aliases,
+	// SCION_USER_GITHUB_TOKEN) from every scope (user, project, hub, broker) so
+	// only the project's GitHub App installation token (or no GitHub token at
+	// all when none is installed) is delivered. Immutable after creation and
+	// preserved across reincarnation.
+	GitHubTokenPreference string `json:"githubTokenPreference,omitempty"`
+
 	// AgentRoleGrandfathered records that AgentRole was assigned by the
 	// pre-role backfill, not by an explicit grant. It is provenance only.
 	// No decision path may read this field to grant, widen, or exempt
@@ -928,6 +938,11 @@ type AgentCreateInputs struct {
 	// event file. Cleared once the create dispatch succeeds (or an accepted
 	// async create launch reports succeeded).
 	HomeFilesPending bool `json:"homeFilesPending,omitempty"`
+
+	// GitHubTokenPreference records the headless create's GitHub token
+	// delivery preference ("installation" | "user_preferred", or "" for
+	// interactive creates) so reincarnation preserves it (Stage 2 §5.1a).
+	GitHubTokenPreference string `json:"githubTokenPreference,omitempty"`
 }
 
 // Project type constants.

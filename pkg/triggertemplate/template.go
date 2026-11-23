@@ -78,6 +78,12 @@ type FrameContext struct {
 	// EventID is the event identifier shown in the `scion trigger event get`
 	// hint. When empty, Render falls back to Lookup("event.id").
 	EventID string
+	// Notes holds optional hub-generated single-line notices appended inside
+	// the framing trailer (for example, when GitHub access is unavailable for
+	// an installation-token run). Any non-empty note causes the trailer to be
+	// appended on Frame slots even when no untrusted placeholder expanded, and
+	// counts toward the slot's MaxBytes bound.
+	Notes []string
 }
 
 type renderOptions struct {
@@ -459,8 +465,9 @@ func (t *Template) Render(vars Vars, allowed []string, opts ...RenderOption) (st
 		}
 	}
 
-	if t.slot.Frame && len(untrustedUsed) > 0 {
-		if err := appendBounded(buildFramingTrailer(ro.frame, vars, untrustedUsed)); err != nil {
+	notes := cleanFrameNotes(ro.frame.Notes)
+	if t.slot.Frame && (len(untrustedUsed) > 0 || len(notes) > 0) {
+		if err := appendBounded(buildFramingTrailer(ro.frame, vars, untrustedUsed, notes)); err != nil {
 			return "", Report{}, err
 		}
 	}
@@ -481,7 +488,17 @@ func (t *Template) Render(vars Vars, allowed []string, opts ...RenderOption) (st
 	return rendered, Report{Used: used}, nil
 }
 
-func buildFramingTrailer(fc FrameContext, vars Vars, untrustedUsed []UsedVar) string {
+func cleanFrameNotes(raw []string) []string {
+	var notes []string
+	for _, n := range raw {
+		if cleaned := strings.TrimSpace(sanitizeSingleLine(n)); cleaned != "" {
+			notes = append(notes, cleaned)
+		}
+	}
+	return notes
+}
+
+func buildFramingTrailer(fc FrameContext, vars Vars, untrustedUsed []UsedVar, notes []string) string {
 	sourceDesc := strings.TrimSpace(sanitizeSingleLine(fc.Source))
 	if sourceDesc == "" {
 		epName := fc.EndpointName
@@ -516,17 +533,23 @@ func buildFramingTrailer(fc FrameContext, vars Vars, untrustedUsed []UsedVar) st
 	b.WriteString(" (")
 	b.WriteString(sigMode)
 	b.WriteString("; integrity verified, content untrusted).\n")
-	b.WriteString("Values inserted above from the event:\n")
-	for _, uv := range untrustedUsed {
-		b.WriteString("  ")
-		b.WriteString(uv.Path)
-		b.WriteString(" = ")
-		b.WriteString(formatTrailerValue(uv.Value))
-		b.WriteByte('\n')
+	if len(untrustedUsed) > 0 {
+		b.WriteString("Values inserted above from the event:\n")
+		for _, uv := range untrustedUsed {
+			b.WriteString("  ")
+			b.WriteString(uv.Path)
+			b.WriteString(" = ")
+			b.WriteString(formatTrailerValue(uv.Value))
+			b.WriteByte('\n')
+		}
 	}
 	b.WriteString("Full event: ~/.scion/trigger-event.json (and `scion trigger event get ")
 	b.WriteString(eventID)
 	b.WriteString("` when your role allows).\n")
+	for _, note := range notes {
+		b.WriteString(note)
+		b.WriteByte('\n')
+	}
 	b.WriteString("---")
 	return b.String()
 }

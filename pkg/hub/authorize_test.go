@@ -551,6 +551,7 @@ func TestAuthorizeAgentCreate_DenialIsLogged(t *testing.T) {
 func TestAuthorizeAgentLifecycle_IdentityKinds(t *testing.T) {
 	srv, s := testServer(t)
 	authzHelperSeedAdmin(t, s)
+	authzHelperSeedCallerAgent(t, s)
 	target := authzHelperTargetAgent()
 
 	tests := []struct {
@@ -633,7 +634,8 @@ func TestAuthorizeAgentLifecycle_IdentityKinds(t *testing.T) {
 // TestAuthorizeAgentLifecycle_PeerWithinProject pins the deliberate Q3 decision:
 // the lifecycle scope covers project peers, not only descendants.
 func TestAuthorizeAgentLifecycle_PeerWithinProject(t *testing.T) {
-	srv, _ := testServer(t)
+	srv, s := testServer(t)
+	authzHelperSeedCallerAgent(t, s)
 	peer := authzHelperTargetAgent()
 	peer.Ancestry = []string{"unrelated-user", "unrelated-agent"}
 

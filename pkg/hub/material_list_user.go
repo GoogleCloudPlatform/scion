@@ -103,6 +103,10 @@ func (s *Server) agentListUserSecrets(
 		if !m.AllowProgeny || !eligible[m.ID] {
 			continue
 		}
+		if usesInstallationGitHubToken(facts.Agent) &&
+			(isBlockedInstallationGitHubEnvKey(m.Name) || isBlockedInstallationGitHubEnvKey(m.Target)) {
+			continue
+		}
 		live, kind, _, lerr := s.progenySourceLive(ctx, m)
 		if lerr != nil {
 			slog.Error("agent list secrets: progeny source liveness check failed",
