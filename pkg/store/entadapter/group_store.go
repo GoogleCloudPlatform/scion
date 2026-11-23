@@ -1018,15 +1018,18 @@ const (
 	// effectiveGroupsUserChunkSize bounds the IN-list size per chunk in
 	// GetEffectiveGroupsForUsers.
 	effectiveGroupsUserChunkSize = 500
-
-	// effectiveGroupsSeedChunkSize bounds the number of UNION ALL arms in
-	// walkEffectiveGroupsBySeed so SQLite stays safely under its
-	// SQLITE_MAX_COMPOUND_SELECT (500) limit.
-	effectiveGroupsSeedChunkSize = 400
 )
+
+// effectiveGroupsSeedChunkSize bounds the number of UNION ALL arms in
+// walkEffectiveGroupsBySeed so SQLite stays safely under its
+// SQLITE_MAX_COMPOUND_SELECT (500) limit. Declared as a var so tests can
+// exercise multi-chunk CTE walks without creating >400 groups.
+var effectiveGroupsSeedChunkSize = 400
 
 // GetEffectiveGroupsForUsers returns, per user, exactly what GetEffectiveGroups
 // returns for that user (same active/expiry rules, same transitive closure).
+// The returned map is keyed by the exact userID strings passed by the caller
+// (preserving non-canonical forms such as uppercase UUIDs).
 // It runs at most two queries per <=500-user chunk: one GroupMembership IN query
 // and one recursive CTE over group_child_groups seeded from the union of direct
 // groups (chunked by seed count if the union exceeds SQLite's compound-select
@@ -1037,22 +1040,27 @@ func (s *GroupStore) GetEffectiveGroupsForUsers(ctx context.Context, userIDs []s
 	}
 
 	uniqueUIDs := make([]uuid.UUID, 0, len(userIDs))
-	seenUID := make(map[uuid.UUID]struct{}, len(userIDs))
+	rawByUID := make(map[uuid.UUID][]string, len(userIDs))
+	seenRaw := make(map[string]struct{}, len(userIDs))
 	for _, raw := range userIDs {
 		uid, err := parseUUID(raw)
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := seenUID[uid]; ok {
-			continue
+		if _, ok := rawByUID[uid]; !ok {
+			uniqueUIDs = append(uniqueUIDs, uid)
 		}
-		seenUID[uid] = struct{}{}
-		uniqueUIDs = append(uniqueUIDs, uid)
+		if _, dup := seenRaw[raw]; !dup {
+			seenRaw[raw] = struct{}{}
+			rawByUID[uid] = append(rawByUID[uid], raw)
+		}
 	}
 
-	result := make(map[string][]string, len(uniqueUIDs))
-	for _, uid := range uniqueUIDs {
-		result[uid.String()] = []string{}
+	result := make(map[string][]string, len(seenRaw))
+	for _, raws := range rawByUID {
+		for _, raw := range raws {
+			result[raw] = []string{}
+		}
 	}
 
 	for start := 0; start < len(uniqueUIDs); start += effectiveGroupsUserChunkSize {
@@ -1114,7 +1122,9 @@ func (s *GroupStore) GetEffectiveGroupsForUsers(ctx context.Context, userIDs []s
 					}
 				}
 			}
-			result[uid.String()] = effective
+			for _, raw := range rawByUID[uid] {
+				result[raw] = effective
+			}
 		}
 	}
 

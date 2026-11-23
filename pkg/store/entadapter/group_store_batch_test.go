@@ -154,6 +154,87 @@ func TestGetEffectiveGroupsForUsers_Parity(t *testing.T) {
 	assert.Empty(t, got[uExpiredOnly], "expired membership must not seed any group")
 	assert.ElementsMatch(t, []string{gMid.ID, gTop.ID}, got[uMixedExpiry], "only active membership seeds")
 	assert.ElementsMatch(t, []string{gCycA.ID, gCycB.ID}, got[uCycle])
+
+	// Non-canonical UUID casing (uppercase) must be preserved as the result map
+	// key and return the exact same effective groups as GetEffectiveGroups.
+	upperNested := strings.ToUpper(uNested)
+	upperNone := strings.ToUpper(uNone)
+	gotUpper, err := gs.GetEffectiveGroupsForUsers(ctx, []string{upperNested, uNested, upperNone})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{gLeaf.ID, gMid.ID, gTop.ID}, gotUpper[upperNested], "uppercase key must resolve groups")
+	assert.ElementsMatch(t, []string{gLeaf.ID, gMid.ID, gTop.ID}, gotUpper[uNested], "canonical key alongside uppercase must resolve groups")
+	_, hasUpperNone := gotUpper[upperNone]
+	assert.True(t, hasUpperNone, "uppercase key for ungrouped user must be present")
+	assert.Empty(t, gotUpper[upperNone])
+}
+
+// TestGetEffectiveGroupsForUsers_SeedChunking drives more distinct direct
+// groups than effectiveGroupsSeedChunkSize through walkEffectiveGroupsBySeed
+// and asserts multi-chunk CTE execution and full parity with
+// GetEffectiveGroups.
+func TestGetEffectiveGroupsForUsers_SeedChunking(t *testing.T) {
+	orig := effectiveGroupsSeedChunkSize
+	effectiveGroupsSeedChunkSize = 3
+	t.Cleanup(func() { effectiveGroupsSeedChunkSize = orig })
+
+	ctx := context.Background()
+	base := enttest.NewClient(t)
+	rec := &planRecordingDriver{Driver: base.Driver()}
+	gs := NewGroupStore(ent.NewClient(ent.Driver(rec)))
+
+	// Create 10 distinct direct groups (spanning 4 seed chunks of size 3: 3+3+3+1),
+	// each nested under a shared or distinct parent group.
+	const numDirect = 10
+	sharedParent := &store.Group{ID: uuid.NewString(), Name: "Shared Parent", Slug: "seed-shared-" + uuid.NewString()[:8]}
+	require.NoError(t, gs.CreateGroup(ctx, sharedParent))
+
+	userIDs := make([]string, numDirect)
+	for i := 0; i < numDirect; i++ {
+		uid := uuid.New()
+		_, err := base.User.Create().
+			SetID(uid).
+			SetEmail(fmt.Sprintf("seed-chunk-u-%d-%s@example.com", i, uid.String()[:8])).
+			SetDisplayName(fmt.Sprintf("Seed User %d", i)).
+			Save(ctx)
+		require.NoError(t, err)
+		userIDs[i] = uid.String()
+
+		directGrp := &store.Group{
+			ID:   uuid.NewString(),
+			Name: fmt.Sprintf("Direct %d", i),
+			Slug: fmt.Sprintf("seed-direct-%d-%s", i, uuid.NewString()[:8]),
+		}
+		require.NoError(t, gs.CreateGroup(ctx, directGrp))
+		if i%2 == 0 {
+			addChildGroup(t, gs, sharedParent, directGrp)
+		}
+		require.NoError(t, gs.AddGroupMember(ctx, &store.GroupMember{
+			GroupID:    directGrp.ID,
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   userIDs[i],
+			Role:       store.GroupMemberRoleMember,
+		}))
+	}
+
+	rec.mu.Lock()
+	rec.queries = nil
+	rec.mu.Unlock()
+
+	got, err := gs.GetEffectiveGroupsForUsers(ctx, userIDs)
+	require.NoError(t, err)
+	require.Len(t, got, numDirect)
+
+	rec.mu.Lock()
+	queryCount := len(rec.queries)
+	rec.mu.Unlock()
+	// 1 GroupMembership query + ceil(10 / 3) = 4 CTE queries = 5 queries total.
+	assert.Equal(t, 5, queryCount, "expected 1 membership query + 4 seed-chunked CTE queries")
+
+	for i, uid := range userIDs {
+		want, serr := gs.GetEffectiveGroups(ctx, uid)
+		require.NoError(t, serr)
+		assert.ElementsMatch(t, want, got[uid], "seed-chunked parity mismatch for user %d", i)
+	}
 }
 
 // TestGetEffectiveGroupsForUsers_Chunking verifies that batches exceeding the
