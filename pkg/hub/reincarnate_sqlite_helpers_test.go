@@ -152,3 +152,34 @@ type agentSnapshot struct {
 	reincState   string
 	applied      []byte
 }
+
+func activeEdgesForAgent(t *testing.T, s store.Store, agentID string) []*store.DelegationEdge {
+	t.Helper()
+	edges, err := s.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agentID)
+	require.NoError(t, err)
+	return edges
+}
+
+func assertEdgeRestoredToPrior(t *testing.T, s store.Store, agentID, recID string, priorEdge *store.DelegationEdge, cause store.EdgeDeactivationCause) {
+	t.Helper()
+	ctx := context.Background()
+	edges := activeEdgesForAgent(t, s, agentID)
+	require.Len(t, edges, 1, "exactly one active delegation edge")
+	assert.Equal(t, priorEdge.ID, edges[0].ID, "prior delegation edge is restored")
+	assert.Equal(t, priorEdge.Role, edges[0].Role, "delegation edge matches reverted config")
+	assert.Equal(t, priorEdge.DelegatorType, edges[0].DelegatorType)
+	assert.Equal(t, priorEdge.DelegatorID, edges[0].DelegatorID)
+	assert.Equal(t, priorEdge.AuthorityProvenance, edges[0].AuthorityProvenance)
+	assert.Equal(t, priorEdge.EffectCeiling, edges[0].EffectCeiling)
+
+	deactivated, err := s.GetDeactivatedDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, cause, recID)
+	require.NoError(t, err)
+	require.Len(t, deactivated, 1, "replacement edge deactivated with failure cause")
+	assert.Equal(t, recID, deactivated[0].ID)
+
+	sum := auditSummary(t, s, mutationTypeAgentReincarnateEdgeRestore, agentID)
+	assert.Equal(t, recID, sum["reincarnation_id"])
+	assert.Equal(t, string(cause), sum["cause"])
+	assert.EqualValues(t, 1, sum["deactivated"])
+	assert.EqualValues(t, 1, sum["reactivated"])
+}
