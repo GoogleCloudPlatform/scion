@@ -359,7 +359,7 @@ describe('artifact-detail review wake handling (#8946)', () => {
     expect(alert).not.toBeNull();
     expect(alert!.getAttribute('variant')).toBe('warning');
     expect(alert!.textContent).toContain(
-      'Review saved. @review-owner is suspended and will see it when resumed.'
+      'Review saved. @review-owner is suspended and was not notified.'
     );
   });
 
@@ -375,7 +375,17 @@ describe('artifact-detail review wake handling (#8946)', () => {
     expect(el.shadowRoot!.querySelector('.review-notice')).toBeNull();
   });
 
-  it('formats refused and failed wake delivery notices clearly', () => {
+  it('formats waking, refused, and failed wake delivery notices truthfully', () => {
+    expect(
+      reviewDeliveryNotice({
+        status: 'waking',
+        agentSlug: 'review-owner',
+      })
+    ).toEqual({
+      message: 'Review saved. @review-owner is starting and will receive the review.',
+      variant: 'primary',
+    });
+
     expect(
       reviewDeliveryNotice({
         status: 'wake_refused',
@@ -384,7 +394,7 @@ describe('artifact-detail review wake handling (#8946)', () => {
       })
     ).toEqual({
       message:
-        'Review saved, but @review-owner could not be woken: You do not have permission to wake this agent. It will see the review when resumed.',
+        'Review saved, but @review-owner could not be woken: You do not have permission to wake this agent. The agent was not notified.',
       variant: 'warning',
     });
 
@@ -396,7 +406,7 @@ describe('artifact-detail review wake handling (#8946)', () => {
       })
     ).toEqual({
       message:
-        'Review saved, but waking @review-owner failed: broker unavailable. It will see the review when resumed.',
+        'Review saved, but waking @review-owner failed: broker unavailable. The agent was not notified.',
       variant: 'warning',
     });
   });

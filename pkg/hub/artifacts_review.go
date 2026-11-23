@@ -91,30 +91,29 @@ func (s *Server) notifyArtifactReview(ctx context.Context, n artifacts.ReviewNot
 	_ = s.notifyArtifactReviewWithDelivery(ctx, nil, n)
 }
 
-// artifactReviewDeliverySlug returns agent.Slug only when the caller holds
-// ActionRead on agent (or when authz is unset), so a cross-project review
-// grantee who cannot read the owning agent never learns its slug via
-// reviewDelivery.
-func (s *Server) artifactReviewDeliverySlug(ctx context.Context, agent *store.Agent) string {
-	if agent == nil || agent.Slug == "" {
-		return ""
+// canReadArtifactOwnerAgent reports whether the caller holds ActionRead on
+// agent (or authz is unset). Both reviewDelivery.status and
+// reviewDelivery.agentSlug are gated on this check so a cross-project review
+// grantee who cannot read the owning agent learns neither its slug nor its
+// suspension state via reviewDelivery.
+func (s *Server) canReadArtifactOwnerAgent(ctx context.Context, agent *store.Agent) bool {
+	if agent == nil {
+		return false
 	}
 	if s.authzService == nil {
-		return agent.Slug
+		return true
 	}
 	caller := GetIdentityFromContext(ctx)
 	if isNilIdentity(caller) {
-		return ""
+		return false
 	}
-	if !s.authzService.CheckAccess(ctx, caller, agentResource(agent), ActionRead).Allowed {
-		return ""
-	}
-	return agent.Slug
+	return s.authzService.CheckAccess(ctx, caller, agentResource(agent), ActionRead).Allowed
 }
 
 // notifyArtifactReviewWithDelivery handles post-finalize review notification
 // and returns optional delivery/wake metadata when the owning agent was
-// suspended. For running agents and user owners it returns nil.
+// suspended. For running agents, user owners, and callers without ActionRead
+// on the owning agent it returns nil.
 //
 // Authorization invariants (ptone/scion#8946):
 //   - System-suspended (idle/stalled under lifecycle.idle_suspend): auto-wake
@@ -149,24 +148,26 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 		return nil
 	}
 
-	deliverySlug := s.artifactReviewDeliverySlug(ctx, agent)
+	canRead := s.canReadArtifactOwnerAgent(ctx, agent)
+	deliveryInfo := func(status, message string) *artifacts.ReviewDeliveryInfo {
+		if !canRead {
+			return nil
+		}
+		return &artifacts.ReviewDeliveryInfo{
+			Status:    status,
+			AgentID:   agent.ID,
+			AgentSlug: agent.Slug,
+			Message:   message,
+		}
+	}
 
 	// System-suspended (idle/stalled) or idle-suspending: auto-wake in the
 	// background using the same helper and queue as Decisions (#8517).
 	if s.canAutoWakeActionAsker(ctx, agent) {
 		if s.queueAutoWake(agent, s.artifactReviewAutoWakeItem(n)) {
-			return &artifacts.ReviewDeliveryInfo{
-				Status:    artifacts.ReviewDeliveryAutoWaking,
-				AgentID:   agent.ID,
-				AgentSlug: deliverySlug,
-			}
+			return deliveryInfo(artifacts.ReviewDeliveryAutoWaking, "")
 		}
-		return &artifacts.ReviewDeliveryInfo{
-			Status:    artifacts.ReviewDeliveryWakeFailed,
-			AgentID:   agent.ID,
-			AgentSlug: deliverySlug,
-			Message:   "hub is shutting down; could not wake agent",
-		}
+		return deliveryInfo(artifacts.ReviewDeliveryWakeFailed, "hub is shutting down; could not wake agent")
 	}
 
 	// User-suspended (or suspended while lifecycle.idle_suspend is off):
@@ -174,28 +175,14 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 	// refused or failed wake leaves the saved review intact and reports why.
 	if state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended {
 		if !n.Wake {
-			return &artifacts.ReviewDeliveryInfo{
-				Status:    artifacts.ReviewDeliverySuspended,
-				AgentID:   agent.ID,
-				AgentSlug: deliverySlug,
-			}
+			return deliveryInfo(artifacts.ReviewDeliverySuspended, "")
 		}
 		caller := GetIdentityFromContext(ctx)
 		if isNilIdentity(caller) || !s.agentLifecycleAllowed(ctx, caller, agent) {
-			return &artifacts.ReviewDeliveryInfo{
-				Status:    artifacts.ReviewDeliveryWakeRefused,
-				AgentID:   agent.ID,
-				AgentSlug: deliverySlug,
-				Message:   "You do not have permission to wake this agent",
-			}
+			return deliveryInfo(artifacts.ReviewDeliveryWakeRefused, "You do not have permission to wake this agent")
 		}
 		if s.agentHeldOrUnknown(ctx, agent.ID) {
-			return &artifacts.ReviewDeliveryInfo{
-				Status:    artifacts.ReviewDeliveryWakeRefused,
-				AgentID:   agent.ID,
-				AgentSlug: deliverySlug,
-				Message:   "Agent is held and cannot be woken",
-			}
+			return deliveryInfo(artifacts.ReviewDeliveryWakeRefused, "Agent is held and cannot be woken")
 		}
 		if w != nil {
 			extendWriteDeadlineForWake(w, 1)
@@ -210,19 +197,32 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 			}
 			slog.WarnContext(ctx, "artifacts: wake for review failed",
 				"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", agent.ID, "code", wakeErr.Code, "error", wakeErr.Message)
-			return &artifacts.ReviewDeliveryInfo{
-				Status:    status,
-				AgentID:   agent.ID,
-				AgentSlug: deliverySlug,
-				Message:   wakeErr.Message,
-			}
+			return deliveryInfo(status, wakeErr.Message)
 		}
 		if wakeRes != nil && wakeRes.Outcome == WakeDeferred {
-			return &artifacts.ReviewDeliveryInfo{
-				Status:    artifacts.ReviewDeliveryWaking,
-				AgentID:   agent.ID,
-				AgentSlug: deliverySlug,
+			if agent.StartClaimKind == store.StartClaimStop {
+				return deliveryInfo(artifacts.ReviewDeliveryWakeFailed, s.deferredReason(agent))
 			}
+			target := *agent
+			if !s.autoWakeWork.goTracked(func(bgCtx context.Context) {
+				waitCtx, cancelWait := context.WithTimeout(bgCtx, chatWakeResumeBudget)
+				err := s.awaitStartInProgress(waitCtx, &target)
+				cancelWait()
+				if err != nil {
+					slog.WarnContext(bgCtx, "artifacts: deferred wake did not become ready for review notice",
+						"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", target.ID, "error", err)
+					return
+				}
+				dctx, cancelDispatch := context.WithTimeout(bgCtx, artifactReviewNoticeTimeout)
+				defer cancelDispatch()
+				if err := s.deliverArtifactReview(dctx, n); err != nil {
+					slog.WarnContext(dctx, "artifacts: failed to deliver review notice after deferred wake",
+						"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", target.ID, "error", err)
+				}
+			}) {
+				return deliveryInfo(artifacts.ReviewDeliveryWakeFailed, "hub is shutting down; could not deliver review after wake")
+			}
+			return deliveryInfo(artifacts.ReviewDeliveryWaking, "")
 		}
 		dctx, cancelDispatch := context.WithTimeout(context.WithoutCancel(ctx), artifactReviewNoticeTimeout)
 		err := s.deliverArtifactReview(dctx, n)
@@ -231,11 +231,7 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 			slog.WarnContext(ctx, "artifacts: review notice not delivered after wake",
 				"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", agent.ID, "error", err)
 		}
-		return &artifacts.ReviewDeliveryInfo{
-			Status:    artifacts.ReviewDeliveryWoken,
-			AgentID:   agent.ID,
-			AgentSlug: deliverySlug,
-		}
+		return deliveryInfo(artifacts.ReviewDeliveryWoken, "")
 	}
 
 	// Running (or other non-suspended phase): keep existing async delivery

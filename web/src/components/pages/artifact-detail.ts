@@ -190,18 +190,18 @@ export function reviewDeliveryNotice(delivery: ReviewDeliveryInfo): {
       };
     case 'wake_refused':
       return {
-        message: `Review saved, but ${name} could not be woken${detail}. It will see the review when resumed.`,
+        message: `Review saved, but ${name} could not be woken${detail}. The agent was not notified.`,
         variant: 'warning',
       };
     case 'wake_failed':
       return {
-        message: `Review saved, but waking ${name} failed${detail}. It will see the review when resumed.`,
+        message: `Review saved, but waking ${name} failed${detail}. The agent was not notified.`,
         variant: 'warning',
       };
     case 'suspended':
     default:
       return {
-        message: `Review saved. ${name} is suspended and will see it when resumed.`,
+        message: `Review saved. ${name} is suspended and was not notified.`,
         variant: 'warning',
       };
   }

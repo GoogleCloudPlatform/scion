@@ -469,3 +469,180 @@ func TestArtifactReviewWake_RetryPendingVersionNoDoubleCommitOrDoubleNotify(t *t
 	assert.Len(t, f.disp.getStartCalls(), 1, "retry must not wake again")
 	assert.Len(t, f.disp.getMessageCalls(), 1, "retry must not notify again")
 }
+
+// TestArtifactReviewWake_DeferredWakeDeliversOnceStarted covers F1: when a
+// concurrent start already holds the agent's start claim (WakeDeferred), the
+// review notice must be delivered once that start brings the agent up rather
+// than being dropped. When a stop holds the claim, the response must report
+// wake_failed instead of promising delivery.
+func TestArtifactReviewWake_DeferredWakeDeliversOnceStarted(t *testing.T) {
+	t.Run("held start claim delivers review once agent becomes ready", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonUser)
+		ctx := context.Background()
+
+		claim, err := f.store.ClaimAgentStart(ctx, f.owner.ID, "other-start", store.StartClaimWake, "", time.Minute)
+		require.NoError(t, err)
+
+		seq := f.stageReview(t, f.adminUser)
+		rec := f.finalizeReview(t, f.adminUser, seq, artifacts.FinalizeRequest{
+			Base: f.currentSeq,
+			Wake: true,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, seq, resp.Artifact.CurrentSeq)
+		require.NotNil(t, resp.ReviewDelivery)
+		assert.Equal(t, artifacts.ReviewDeliveryWaking, resp.ReviewDelivery.Status)
+		assert.Equal(t, f.owner.Slug, resp.ReviewDelivery.AgentSlug)
+		assert.Empty(t, f.disp.getStartCalls(), "deferred wake must not issue a duplicate start")
+
+		// Simulate the other start bringing the agent to running/idle and releasing its claim.
+		require.NoError(t, f.store.UpdateAgentStatus(ctx, f.owner.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseStarting),
+		}))
+		require.NoError(t, f.store.UpdateAgentStatus(ctx, f.owner.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: "idle",
+		}))
+		_, err = f.store.ReleaseAgentStart(ctx, f.owner.ID, claim.ID, "other-start")
+		require.NoError(t, err)
+
+		require.Eventually(t, func() bool {
+			return len(f.disp.getMessageCalls()) == 1
+		}, 5*time.Second, 20*time.Millisecond, "deferred review notice must be delivered once the in-flight start becomes ready")
+		assert.Contains(t, f.disp.getMessageCalls()[0].Message, "A review (v2, by a user) was published")
+	})
+
+	t.Run("held stop claim reports wake_failed instead of waking", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonUser)
+		ctx := context.Background()
+
+		at, err := f.store.SetRunIntent(ctx, f.owner.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		stopClaim, err := f.store.ClaimAgentStop(ctx, f.owner.ID, "other-stop", at, time.Minute)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = f.store.ReleaseAgentStart(context.Background(), f.owner.ID, stopClaim.ID, "other-stop")
+		})
+
+		seq := f.stageReview(t, f.adminUser)
+		rec := f.finalizeReview(t, f.adminUser, seq, artifacts.FinalizeRequest{
+			Base: f.currentSeq,
+			Wake: true,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, seq, resp.Artifact.CurrentSeq)
+		require.NotNil(t, resp.ReviewDelivery)
+		assert.Equal(t, artifacts.ReviewDeliveryWakeFailed, resp.ReviewDelivery.Status)
+		assert.Contains(t, resp.ReviewDelivery.Message, "stop is in progress")
+		assert.Empty(t, f.disp.getStartCalls())
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+}
+
+// TestArtifactReviewWake_NonReaderGetsNoReviewDelivery covers F3 and F4: a
+// reviewer with an explicit review grant who cannot read the owning agent must
+// not learn the agent's slug or suspension status via reviewDelivery, while
+// system-suspended auto-wake still runs.
+func TestArtifactReviewWake_NonReaderGetsNoReviewDelivery(t *testing.T) {
+	addOutsiderReviewer := func(t *testing.T, f *artifactReviewWakeFixture, idSuffix string) *store.User {
+		t.Helper()
+		outsider := createTestUser(t, f.store, tid("rev-wake-outsider-"+idSuffix), "rev-wake-outsider-"+idSuffix+"@test.com")
+		_, err := f.db.Exec(
+			`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			"g-rev-outsider-"+idSuffix, f.artifactID, artifacts.SubjectPrincipal,
+			artifacts.PrincipalRef(artifacts.PrincipalKindUser, outsider.ID), artifacts.GrantReview,
+			time.Now().UTC().Format("2006-01-02T15:04:05.000000000Z07:00"),
+		)
+		require.NoError(t, err)
+		return outsider
+	}
+
+	t.Run("system-suspended owner still auto-wakes without disclosing status or slug", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		outsider := addOutsiderReviewer(t, f, "sys")
+		f.suspendOwner(t, state.SuspendReasonIdle)
+		f.readyOnStart(t)
+
+		seq := f.stageReview(t, outsider)
+		rec := f.finalizeReview(t, outsider, seq, artifacts.FinalizeRequest{
+			Base:      f.currentSeq,
+			OfferWake: true,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, seq, resp.Artifact.CurrentSeq)
+		assert.Nil(t, resp.ReviewDelivery, "reviewer without agent read must not learn suspension status or agent slug")
+
+		require.Eventually(t, func() bool {
+			return len(f.disp.getStartCalls()) == 1 && len(f.disp.getMessageCalls()) == 1
+		}, 5*time.Second, 20*time.Millisecond, "system-suspended owner must still auto-wake for non-reader reviewer")
+	})
+
+	t.Run("user-suspended owner omits reviewDelivery on offer_wake and wake", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		outsider := addOutsiderReviewer(t, f, "usr")
+		f.suspendOwner(t, state.SuspendReasonUser)
+
+		seq1 := f.stageReview(t, outsider)
+		rec1 := f.finalizeReview(t, outsider, seq1, artifacts.FinalizeRequest{
+			Base:      f.currentSeq,
+			OfferWake: true,
+		})
+		require.Equal(t, http.StatusOK, rec1.Code, rec1.Body.String())
+		var resp1 artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+		assert.Equal(t, seq1, resp1.Artifact.CurrentSeq)
+		assert.Nil(t, resp1.ReviewDelivery, "reviewer without agent read must not receive suspended reviewDelivery")
+		assert.Empty(t, f.disp.getStartCalls())
+
+		f.currentSeq = seq1
+		seq2 := f.stageReview(t, outsider)
+		rec2 := f.finalizeReview(t, outsider, seq2, artifacts.FinalizeRequest{
+			Base: f.currentSeq,
+			Wake: true,
+		})
+		require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
+		var resp2 artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+		assert.Equal(t, seq2, resp2.Artifact.CurrentSeq)
+		assert.Nil(t, resp2.ReviewDelivery, "reviewer without agent read must not receive wake_refused reviewDelivery")
+		assert.Empty(t, f.disp.getStartCalls())
+	})
+}
+
+// TestArtifactReviewWake_SystemSuspendedAdminNoOffer covers F5: a caller who
+// holds agent.lifecycle on a system-suspended owner must auto-wake directly on
+// offer_wake=true rather than receiving a 409 wake-confirm offer.
+func TestArtifactReviewWake_SystemSuspendedAdminNoOffer(t *testing.T) {
+	f := newArtifactReviewWakeFixture(t, true)
+	f.suspendOwner(t, state.SuspendReasonIdle)
+	f.readyOnStart(t)
+
+	seq := f.stageReview(t, f.adminUser)
+	rec := f.finalizeReview(t, f.adminUser, seq, artifacts.FinalizeRequest{
+		Base:      f.currentSeq,
+		OfferWake: true,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, seq, resp.Artifact.CurrentSeq)
+	require.NotNil(t, resp.ReviewDelivery)
+	assert.Equal(t, artifacts.ReviewDeliveryAutoWaking, resp.ReviewDelivery.Status)
+	assert.Equal(t, f.owner.Slug, resp.ReviewDelivery.AgentSlug)
+
+	require.Eventually(t, func() bool {
+		return len(f.disp.getStartCalls()) == 1 && len(f.disp.getMessageCalls()) == 1
+	}, 5*time.Second, 20*time.Millisecond)
+}
