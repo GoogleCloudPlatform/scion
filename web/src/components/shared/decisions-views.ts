@@ -598,6 +598,10 @@ export const decisionsPageSharedStyles: CSSResult = css`
     outline-offset: 1px;
   }
 
+  table.log td[data-decision-cell] {
+    white-space: nowrap;
+  }
+
   .rec-marker {
     font-size: 0.78rem;
     overflow-wrap: anywhere;
