@@ -28,11 +28,12 @@ import (
 )
 
 func hasCapFlag(args []string, flag, capName string) bool {
+	prefix := flag + "="
 	for i := 0; i < len(args); i++ {
-		if args[i] == flag && i+1 < len(args) && args[i+1] == capName {
+		if args[i] == flag && i+1 < len(args) && strings.EqualFold(args[i+1], capName) {
 			return true
 		}
-		if args[i] == flag+"="+capName {
+		if strings.HasPrefix(args[i], prefix) && strings.EqualFold(args[i][len(prefix):], capName) {
 			return true
 		}
 	}
@@ -116,6 +117,12 @@ func TestBuildCommonRunArgs_AgentCapabilities(t *testing.T) {
 						}
 						if hasCapFlag(args, "--cap-add", "NET_RAW") {
 							t.Errorf("agent container must never receive --cap-add NET_RAW (args: %v)", args)
+						}
+						if hasCapFlag(args, "--cap-add", "ALL") {
+							t.Errorf("agent container must never receive --cap-add ALL (args: %v)", args)
+						}
+						if hasAnyFlag(args, "--privileged") {
+							t.Errorf("agent container must never receive --privileged (args: %v)", args)
 						}
 					})
 				}
@@ -201,6 +208,12 @@ func TestRuntimeAdapters_AgentCapDropNetRaw(t *testing.T) {
 				}
 				if hasCapFlag(args, "--cap-add", "NET_RAW") {
 					t.Errorf("agent container must never receive --cap-add NET_RAW (args: %v)", args)
+				}
+				if hasCapFlag(args, "--cap-add", "ALL") {
+					t.Errorf("agent container must never receive --cap-add ALL (args: %v)", args)
+				}
+				if hasAnyFlag(args, "--privileged") {
+					t.Errorf("agent container must never receive --privileged (args: %v)", args)
 				}
 			})
 		}
