@@ -24,18 +24,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
-vi.mock('../shared/chat/chat-wake.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../shared/chat/chat-wake.js')>();
-  return {
-    ...actual,
-    confirmWake: vi.fn(),
-  };
-});
 
 import './artifact-detail.js';
 import { reviewDeliveryNotice } from './artifact-detail.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
-import { confirmWake } from '../shared/chat/chat-wake.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import type { ArtifactResponse, ReviewDeliveryInfo } from '../../client/artifacts.js';
 import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
@@ -188,7 +180,41 @@ function setupMockFetch(
   };
 }
 
-async function mountAndSubmitReview(): Promise<ScionPageArtifactDetail> {
+async function waitForWakeDialog(): Promise<HTMLElement> {
+  for (let i = 0; i < 40; i++) {
+    const dialog = document.body.querySelector<HTMLElement>('sl-dialog');
+    if (dialog) return dialog;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error('Expected wake confirm sl-dialog in document.body');
+}
+
+function clickDialogButton(dialog: HTMLElement, label: string): void {
+  const btn = Array.from(dialog.querySelectorAll<HTMLElement>('sl-button')).find(
+    (b) => b.textContent?.trim() === label
+  );
+  expect(btn, `dialog button "${label}"`).toBeDefined();
+  btn!.click();
+  // HappyDOM does not run Shoelace close animations, so emit sl-after-hide.
+  dialog.dispatchEvent(new Event('sl-after-hide'));
+}
+
+function dismissWakeDialog(
+  dialog: HTMLElement,
+  source: 'keyboard' | 'close-button' | 'overlay'
+): void {
+  dialog.dispatchEvent(
+    new CustomEvent('sl-request-close', {
+      detail: { source },
+      cancelable: true,
+    })
+  );
+  if (source !== 'overlay') {
+    dialog.dispatchEvent(new Event('sl-after-hide'));
+  }
+}
+
+async function mountAndEnterReview(): Promise<ScionPageArtifactDetail> {
   window.__SCION_FEATURES__ = { 'hub.artifacts': true };
   const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
   el.pageData = {
@@ -205,23 +231,49 @@ async function mountAndSubmitReview(): Promise<ScionPageArtifactDetail> {
   reviewBtn!.click();
   await settle(el);
 
-  // Update review text via the code editor event and click Save review.
+  // Update review text via the code editor event.
   const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
   editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED_TEXT } }));
   await el.updateComplete;
+  return el;
+}
+
+function clickSaveReview(el: ScionPageArtifactDetail): void {
   const saveBtn = Array.from(
     el.shadowRoot!.querySelectorAll<HTMLElement>('.edit-footer sl-button')
   ).find((b) => b.textContent?.includes('Save review'));
   expect(saveBtn).toBeDefined();
   saveBtn!.click();
+}
+
+async function mountAndSubmitReview(): Promise<ScionPageArtifactDetail> {
+  const el = await mountAndEnterReview();
+  clickSaveReview(el);
   await settle(el);
   return el;
+}
+
+function wakeOfferResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: 'agent_not_running',
+        message: 'Agent "review-owner" is suspended',
+        details: {
+          agentId: 'agent-1',
+          agentSlug: 'review-owner',
+          phase: 'suspended',
+          canWake: true,
+        },
+      },
+    }),
+    { status: 409 }
+  );
 }
 
 describe('artifact-detail review wake handling (#8946)', () => {
   beforeEach(() => {
     localStorage.setItem(ARTIFACTS_FLAG, '1');
-    vi.mocked(confirmWake).mockReset();
   });
 
   afterEach(() => {
@@ -247,7 +299,7 @@ describe('artifact-detail review wake handling (#8946)', () => {
 
     const el = await mountAndSubmitReview();
 
-    expect(confirmWake).not.toHaveBeenCalled();
+    expect(document.body.querySelector('sl-dialog')).toBeNull();
     expect(tracker.finalizeCalls).toHaveLength(1);
     expect(tracker.finalizeCalls[0].body).toEqual({ base: 1, offer_wake: true });
 
@@ -259,26 +311,9 @@ describe('artifact-detail review wake handling (#8946)', () => {
     );
   });
 
-  it('shows the shared wake-confirm dialog for a user-suspended owner and wakes on confirm', async () => {
-    vi.mocked(confirmWake).mockResolvedValue(true);
+  it('shows the wake-confirm dialog for a user-suspended owner and wakes on confirm', async () => {
     const tracker = setupMockFetch((idx) => {
-      if (idx === 0) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              code: 'agent_not_running',
-              message: 'Agent "review-owner" is suspended',
-              details: {
-                agentId: 'agent-1',
-                agentSlug: 'review-owner',
-                phase: 'suspended',
-                canWake: true,
-              },
-            },
-          }),
-          { status: 409 }
-        );
-      }
+      if (idx === 0) return wakeOfferResponse();
       return new Response(
         JSON.stringify(
           agentArtifact(2, {
@@ -291,17 +326,15 @@ describe('artifact-detail review wake handling (#8946)', () => {
       );
     });
 
-    const el = await mountAndSubmitReview();
-
-    expect(confirmWake).toHaveBeenCalledTimes(1);
-    expect(confirmWake).toHaveBeenCalledWith(
-      { agentId: 'agent-1', agentSlug: 'review-owner' },
-      {
-        message: '@review-owner is suspended. Wake it to deliver this review?',
-        confirmText: 'Wake and submit',
-        cancelText: 'Submit without waking',
-      }
+    const el = await mountAndEnterReview();
+    clickSaveReview(el);
+    const dialog = await waitForWakeDialog();
+    expect(dialog.textContent).toContain(
+      '@review-owner is suspended. Wake it to deliver this review?'
     );
+    clickDialogButton(dialog, 'Wake and submit');
+    await settle(el);
+
     // Reuses the same pending version without recreating or re-uploading.
     expect(tracker.createCount()).toBe(1);
     expect(tracker.uploadCount()).toBe(1);
@@ -315,26 +348,9 @@ describe('artifact-detail review wake handling (#8946)', () => {
     expect(alert!.textContent).toContain('Review saved. @review-owner was woken and notified.');
   });
 
-  it('saves without waking when the user declines the wake-confirm dialog', async () => {
-    vi.mocked(confirmWake).mockResolvedValue(false);
+  it('saves without waking when the user chooses Submit without waking', async () => {
     const tracker = setupMockFetch((idx) => {
-      if (idx === 0) {
-        return new Response(
-          JSON.stringify({
-            error: {
-              code: 'agent_not_running',
-              message: 'Agent "review-owner" is suspended',
-              details: {
-                agentId: 'agent-1',
-                agentSlug: 'review-owner',
-                phase: 'suspended',
-                canWake: true,
-              },
-            },
-          }),
-          { status: 409 }
-        );
-      }
+      if (idx === 0) return wakeOfferResponse();
       return new Response(
         JSON.stringify(
           agentArtifact(2, {
@@ -347,9 +363,12 @@ describe('artifact-detail review wake handling (#8946)', () => {
       );
     });
 
-    const el = await mountAndSubmitReview();
+    const el = await mountAndEnterReview();
+    clickSaveReview(el);
+    const dialog = await waitForWakeDialog();
+    clickDialogButton(dialog, 'Submit without waking');
+    await settle(el);
 
-    expect(confirmWake).toHaveBeenCalledTimes(1);
     expect(tracker.createCount()).toBe(1);
     expect(tracker.uploadCount()).toBe(1);
     expect(tracker.finalizeCalls).toHaveLength(2);
@@ -363,6 +382,69 @@ describe('artifact-detail review wake handling (#8946)', () => {
     );
   });
 
+  it('cancels without submitting on Escape and keeps the pending version for retry', async () => {
+    const tracker = setupMockFetch((idx) => {
+      if (idx <= 1) return wakeOfferResponse();
+      return new Response(
+        JSON.stringify(
+          agentArtifact(2, {
+            status: 'woken',
+            agentId: 'agent-1',
+            agentSlug: 'review-owner',
+          })
+        ),
+        { status: 200 }
+      );
+    });
+
+    const el = await mountAndEnterReview();
+    clickSaveReview(el);
+    const dialog1 = await waitForWakeDialog();
+
+    // Overlay click must not dismiss or submit (matches confirm-dialog).
+    await new Promise((r) => requestAnimationFrame(r));
+    expect((dialog1 as HTMLElement & { open?: boolean }).open).toBe(true);
+    dismissWakeDialog(dialog1, 'overlay');
+    await settle(el);
+    expect(document.body.querySelector('sl-dialog')).toBe(dialog1);
+    expect((dialog1 as HTMLElement & { open?: boolean }).open).toBe(true);
+    expect(tracker.finalizeCalls).toHaveLength(1);
+
+    // Escape cancels: nothing submitted, Review mode stays open, pending version kept.
+    dismissWakeDialog(dialog1, 'keyboard');
+    await settle(el);
+    expect(document.body.querySelector('sl-dialog')).toBeNull();
+    expect(tracker.finalizeCalls).toHaveLength(1);
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('.review-notice')).toBeNull();
+
+    // Retrying Save review reuses the kept pending version without recreating or re-uploading.
+    clickSaveReview(el);
+    const dialog2 = await waitForWakeDialog();
+    clickDialogButton(dialog2, 'Wake and submit');
+    await settle(el);
+
+    expect(tracker.createCount()).toBe(1);
+    expect(tracker.uploadCount()).toBe(1);
+    expect(tracker.finalizeCalls).toHaveLength(3);
+    expect(tracker.finalizeCalls[1].body).toEqual({ base: 1, offer_wake: true });
+    expect(tracker.finalizeCalls[2].body).toEqual({ base: 1, wake: true });
+  });
+
+  it('cancels without submitting when the close button dismisses the dialog', async () => {
+    const tracker = setupMockFetch(() => wakeOfferResponse());
+
+    const el = await mountAndEnterReview();
+    clickSaveReview(el);
+    const dialog = await waitForWakeDialog();
+    dismissWakeDialog(dialog, 'close-button');
+    await settle(el);
+
+    expect(document.body.querySelector('sl-dialog')).toBeNull();
+    expect(tracker.finalizeCalls).toHaveLength(1);
+    expect(el.shadowRoot!.querySelector('scion-code-editor.review-editor')).not.toBeNull();
+  });
+
   it('shows no dialog and no wake notice for a running agent', async () => {
     const tracker = setupMockFetch(() => {
       return new Response(JSON.stringify(agentArtifact(2)), { status: 200 });
@@ -370,7 +452,7 @@ describe('artifact-detail review wake handling (#8946)', () => {
 
     const el = await mountAndSubmitReview();
 
-    expect(confirmWake).not.toHaveBeenCalled();
+    expect(document.body.querySelector('sl-dialog')).toBeNull();
     expect(tracker.finalizeCalls).toHaveLength(1);
     expect(el.shadowRoot!.querySelector('.review-notice')).toBeNull();
   });
@@ -382,7 +464,8 @@ describe('artifact-detail review wake handling (#8946)', () => {
         agentSlug: 'review-owner',
       })
     ).toEqual({
-      message: 'Review saved. @review-owner is starting and will receive the review.',
+      message:
+        'Review saved. @review-owner is starting; the review notice will be sent when it is ready, if the start completes.',
       variant: 'primary',
     });
 
@@ -406,7 +489,19 @@ describe('artifact-detail review wake handling (#8946)', () => {
       })
     ).toEqual({
       message:
-        'Review saved, but waking @review-owner failed: broker unavailable. The agent was not notified.',
+        'Review saved, but waking or notifying @review-owner failed: broker unavailable. The agent was not notified.',
+      variant: 'warning',
+    });
+
+    expect(
+      reviewDeliveryNotice({
+        status: 'wake_failed',
+        agentSlug: 'review-owner',
+        message: 'agent was woken, but the review notice could not be delivered',
+      })
+    ).toEqual({
+      message:
+        'Review saved, but waking or notifying @review-owner failed: agent was woken, but the review notice could not be delivered. The agent was not notified.',
       variant: 'warning',
     });
   });

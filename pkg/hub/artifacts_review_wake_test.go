@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -645,4 +646,160 @@ func TestArtifactReviewWake_SystemSuspendedAdminNoOffer(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return len(f.disp.getStartCalls()) == 1 && len(f.disp.getMessageCalls()) == 1
 	}, 5*time.Second, 20*time.Millisecond)
+}
+
+// TestArtifactReviewWake_DeliveryFailureAfterWakeReportsWakeFailed covers M1:
+// when wakeAgentForDM succeeds but deliverArtifactReview fails, reviewDelivery
+// must report wake_failed (never "woken") while keeping the review saved.
+func TestArtifactReviewWake_DeliveryFailureAfterWakeReportsWakeFailed(t *testing.T) {
+	f := newArtifactReviewWakeFixture(t, true)
+	f.suspendOwner(t, state.SuspendReasonUser)
+	f.readyOnStart(t)
+	f.disp.msgReturnErr = errors.New("broker message timeout")
+
+	seq := f.stageReview(t, f.adminUser)
+	rec := f.finalizeReview(t, f.adminUser, seq, artifacts.FinalizeRequest{
+		Base: f.currentSeq,
+		Wake: true,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp artifacts.ArtifactResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, seq, resp.Artifact.CurrentSeq, "review must remain saved when post-wake delivery fails")
+	require.NotNil(t, resp.ReviewDelivery)
+	assert.Equal(t, artifacts.ReviewDeliveryWakeFailed, resp.ReviewDelivery.Status)
+	assert.Contains(t, resp.ReviewDelivery.Message, "could not be delivered")
+	assert.Len(t, f.disp.getStartCalls(), 1)
+	assert.Len(t, f.disp.getMessageCalls(), 1)
+}
+
+// TestArtifactReviewWake_NeverReadyOrShutdownDoesNotReportSuccess covers M1:
+// a start that never becomes ready or a hub that is shutting down must report
+// wake_failed (never woken, waking, or auto_waking) while keeping the review saved.
+func TestArtifactReviewWake_NeverReadyOrShutdownDoesNotReportSuccess(t *testing.T) {
+	t.Run("never-ready start reports wake_failed", func(t *testing.T) {
+		origTimeout := wakeReadyTimeout
+		wakeReadyTimeout = 150 * time.Millisecond
+		t.Cleanup(func() { wakeReadyTimeout = origTimeout })
+
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonUser)
+		// Deliberately do NOT call f.readyOnStart(t): the agent never becomes ready.
+
+		seq := f.stageReview(t, f.adminUser)
+		rec := f.finalizeReview(t, f.adminUser, seq, artifacts.FinalizeRequest{
+			Base: f.currentSeq,
+			Wake: true,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, seq, resp.Artifact.CurrentSeq, "review must remain saved when start never becomes ready")
+		require.NotNil(t, resp.ReviewDelivery)
+		assert.Equal(t, artifacts.ReviewDeliveryWakeFailed, resp.ReviewDelivery.Status)
+		assert.NotEmpty(t, resp.ReviewDelivery.Message)
+		assert.Empty(t, f.disp.getMessageCalls(), "notice must not be dispatched when agent never became ready")
+	})
+
+	t.Run("hub shutdown before deferred wake reports wake_failed", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonUser)
+		ctx := context.Background()
+
+		claim, err := f.store.ClaimAgentStart(ctx, f.owner.ID, "other-start", store.StartClaimWake, "", time.Minute)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = f.store.ReleaseAgentStart(context.Background(), f.owner.ID, claim.ID, "other-start")
+		})
+		f.srv.autoWakeWork.closeAdmission()
+
+		seq := f.stageReview(t, f.adminUser)
+		rec := f.finalizeReview(t, f.adminUser, seq, artifacts.FinalizeRequest{
+			Base: f.currentSeq,
+			Wake: true,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, seq, resp.Artifact.CurrentSeq)
+		require.NotNil(t, resp.ReviewDelivery)
+		assert.Equal(t, artifacts.ReviewDeliveryWakeFailed, resp.ReviewDelivery.Status)
+		assert.Contains(t, resp.ReviewDelivery.Message, "shutting down")
+		assert.Empty(t, f.disp.getStartCalls())
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+
+	t.Run("hub shutdown before system-suspended auto-wake reports wake_failed", func(t *testing.T) {
+		f := newArtifactReviewWakeFixture(t, true)
+		f.suspendOwner(t, state.SuspendReasonIdle)
+		f.srv.autoWakeWork.closeAdmission()
+
+		seq := f.stageReview(t, f.reviewUser)
+		rec := f.finalizeReview(t, f.reviewUser, seq, artifacts.FinalizeRequest{
+			Base:      f.currentSeq,
+			OfferWake: true,
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp artifacts.ArtifactResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, seq, resp.Artifact.CurrentSeq)
+		require.NotNil(t, resp.ReviewDelivery)
+		assert.Equal(t, artifacts.ReviewDeliveryWakeFailed, resp.ReviewDelivery.Status)
+		assert.Contains(t, resp.ReviewDelivery.Message, "shutting down")
+		assert.Empty(t, f.disp.getStartCalls())
+		assert.Empty(t, f.disp.getMessageCalls())
+	})
+}
+
+type deferredWakePanicDispatcher struct {
+	wakeTrackingDispatcher
+	called chan struct{}
+}
+
+func (d *deferredWakePanicDispatcher) DispatchAgentMessage(context.Context, *store.Agent, string, bool, *messages.StructuredMessage) error {
+	close(d.called)
+	panic("deferred review dispatch boom")
+}
+
+// TestArtifactReviewWake_DeferredWakeGoroutineRecoversPanic covers L1: a panic
+// inside the deferred-wake background goroutine must be recovered rather than
+// crashing the hub process.
+func TestArtifactReviewWake_DeferredWakeGoroutineRecoversPanic(t *testing.T) {
+	f := newArtifactReviewWakeFixture(t, true)
+	f.suspendOwner(t, state.SuspendReasonUser)
+	panicDisp := &deferredWakePanicDispatcher{called: make(chan struct{})}
+	f.srv.SetDispatcher(panicDisp)
+	ctx := context.Background()
+
+	claim, err := f.store.ClaimAgentStart(ctx, f.owner.ID, "other-start", store.StartClaimWake, "", time.Minute)
+	require.NoError(t, err)
+
+	seq := f.stageReview(t, f.adminUser)
+	rec := f.finalizeReview(t, f.adminUser, seq, artifacts.FinalizeRequest{
+		Base: f.currentSeq,
+		Wake: true,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// Bring the agent ready and release the claim so the deferred goroutine runs deliverArtifactReview.
+	require.NoError(t, f.store.UpdateAgentStatus(ctx, f.owner.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseStarting),
+	}))
+	require.NoError(t, f.store.UpdateAgentStatus(ctx, f.owner.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: "idle",
+	}))
+	_, err = f.store.ReleaseAgentStart(ctx, f.owner.ID, claim.ID, "other-start")
+	require.NoError(t, err)
+
+	select {
+	case <-panicDisp.called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("deferred wake goroutine did not attempt message delivery")
+	}
+	f.srv.autoWakeWork.wg.Wait()
 }

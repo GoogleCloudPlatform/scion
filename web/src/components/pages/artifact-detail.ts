@@ -114,6 +114,7 @@ import type {
   ReviewOpenEntry,
   ViewResponse,
 } from '../../client/artifacts.js';
+import type { WakeOffer } from '../../client/wake-offer.js';
 import { principalLabel, principalName, shortId } from '../../client/principal-names.js';
 import { getLanguageFromPath } from '../shared/code-editor.js';
 import type { ScionCodeEditor } from '../shared/code-editor.js';
@@ -185,7 +186,7 @@ export function reviewDeliveryNotice(delivery: ReviewDeliveryInfo): {
       };
     case 'waking':
       return {
-        message: `Review saved. ${name} is starting and will receive the review.`,
+        message: `Review saved. ${name} is starting; the review notice will be sent when it is ready, if the start completes.`,
         variant: 'primary',
       };
     case 'wake_refused':
@@ -195,7 +196,7 @@ export function reviewDeliveryNotice(delivery: ReviewDeliveryInfo): {
       };
     case 'wake_failed':
       return {
-        message: `Review saved, but waking ${name} failed${detail}. The agent was not notified.`,
+        message: `Review saved, but waking or notifying ${name} failed${detail}. The agent was not notified.`,
         variant: 'warning',
       };
     case 'suspended':
@@ -205,6 +206,113 @@ export function reviewDeliveryNotice(delivery: ReviewDeliveryInfo): {
         variant: 'warning',
       };
   }
+}
+
+export type ReviewWakeChoice = 'wake' | 'submit' | 'cancel';
+
+/**
+ * Prompts the user when submitting a review of a user-suspended agent's
+ * artifact (ptone/scion#8946).
+ * - "Wake and submit" (or Enter outside buttons/inputs): resolves `'wake'`.
+ * - "Submit without waking": resolves `'submit'`.
+ * - Escape, close button, or any other dismissal: resolves `'cancel'` so
+ *   dismissing the dialog never submits the review (matching chat's wake
+ *   dialog dismissal semantics).
+ */
+export function confirmReviewWake(offer: WakeOffer): Promise<ReviewWakeChoice> {
+  const name = offer.agentSlug ? `@${offer.agentSlug}` : 'This agent';
+  return new Promise<ReviewWakeChoice>((resolve) => {
+    const dialog = document.createElement('sl-dialog');
+    dialog.label = 'Agent is suspended';
+
+    let resolved = false;
+    function cleanup(result: ReviewWakeChoice): void {
+      if (resolved) return;
+      resolved = true;
+      dialog.open = false;
+      dialog.addEventListener(
+        'sl-after-hide',
+        () => {
+          dialog.remove();
+          resolve(result);
+        },
+        { once: true }
+      );
+    }
+
+    // Intercept close requests so overlay clicks stay open (matching
+    // confirm-dialog.ts) while Escape / close button cancel without submitting.
+    dialog.addEventListener('sl-request-close', (e: Event) => {
+      e.preventDefault();
+      const detail = (e as CustomEvent<{ source: string }>).detail;
+      if (detail?.source === 'overlay') {
+        return;
+      }
+      cleanup('cancel');
+    });
+
+    // Guard against any unexpected hide without a button click.
+    dialog.addEventListener(
+      'sl-after-hide',
+      () => {
+        if (resolved) return;
+        resolved = true;
+        dialog.remove();
+        resolve('cancel');
+      },
+      { once: true }
+    );
+
+    const body = document.createElement('div');
+    body.style.whiteSpace = 'pre-line';
+    body.textContent = `${name} is suspended. Wake it to deliver this review?`;
+    dialog.appendChild(body);
+
+    const submitBtn = document.createElement('sl-button');
+    submitBtn.slot = 'footer';
+    submitBtn.setAttribute('variant', 'default');
+    submitBtn.textContent = 'Submit without waking';
+    submitBtn.addEventListener('click', () => cleanup('submit'));
+    dialog.appendChild(submitBtn);
+
+    const wakeBtn = document.createElement('sl-button');
+    wakeBtn.slot = 'footer';
+    wakeBtn.setAttribute('variant', 'primary');
+    wakeBtn.textContent = 'Wake and submit';
+    wakeBtn.style.marginInlineStart = '0.5rem';
+    wakeBtn.addEventListener('click', () => cleanup('wake'));
+    dialog.appendChild(wakeBtn);
+
+    dialog.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Enter') {
+        const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+        if (
+          tag === 'textarea' ||
+          tag === 'input' ||
+          tag === 'sl-textarea' ||
+          tag === 'sl-input' ||
+          tag === 'button' ||
+          tag === 'sl-button'
+        ) {
+          return;
+        }
+        e.preventDefault();
+        cleanup('wake');
+      }
+    });
+
+    if (document.documentElement.classList.contains('sl-theme-dark')) {
+      dialog.classList.add('sl-theme-dark');
+    }
+    dialog.style.setProperty('--sl-panel-background-color', 'var(--scion-surface-raised)');
+    dialog.style.setProperty('--sl-panel-border-color', 'var(--scion-border)');
+    body.style.color = 'var(--scion-text)';
+
+    document.body.appendChild(dialog);
+    requestAnimationFrame(() => {
+      dialog.open = true;
+    });
+  });
 }
 
 /**
@@ -2082,18 +2190,18 @@ export class ScionPageArtifactDetail extends LitElement {
       } catch (err) {
         if (!(err instanceof ReviewWakeOfferError)) throw err;
         this.reviewPending = err.pending;
-        const { confirmWake } = await import('../shared/chat/chat-wake.js');
-        const name = err.offer.agentSlug ? `@${err.offer.agentSlug}` : 'This agent';
-        const confirmed = await confirmWake(err.offer, {
-          message: `${name} is suspended. Wake it to deliver this review?`,
-          confirmText: 'Wake and submit',
-          cancelText: 'Submit without waking',
-        });
+        const choice = await confirmReviewWake(err.offer);
+        if (choice === 'cancel') {
+          if (draftCtrl && this.draftController === draftCtrl) {
+            draftCtrl.resumeFromQuiesce();
+          }
+          return;
+        }
         finalized = await publishFiles({
           ...baseReq,
           resume: err.pending,
           offerWake: false,
-          wake: confirmed,
+          wake: choice === 'wake',
         });
       }
       let nextNotice: string | null = null;

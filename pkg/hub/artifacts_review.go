@@ -205,6 +205,14 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 			}
 			target := *agent
 			if !s.autoWakeWork.goTracked(func(bgCtx context.Context) {
+				// A notice is best effort: a panic while waiting or sending it
+				// must not take the hub down.
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("artifacts: panic delivering review notice after deferred wake",
+							"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", target.ID, "panic", fmt.Sprint(r))
+					}
+				}()
 				waitCtx, cancelWait := context.WithTimeout(bgCtx, chatWakeResumeBudget)
 				err := s.awaitStartInProgress(waitCtx, &target)
 				cancelWait()
@@ -230,6 +238,7 @@ func (s *Server) notifyArtifactReviewWithDelivery(ctx context.Context, w http.Re
 		if err != nil {
 			slog.WarnContext(ctx, "artifacts: review notice not delivered after wake",
 				"artifact_id", n.ArtifactID, "seq", n.Seq, "agent_id", agent.ID, "error", err)
+			return deliveryInfo(artifacts.ReviewDeliveryWakeFailed, "agent was woken, but the review notice could not be delivered")
 		}
 		return deliveryInfo(artifacts.ReviewDeliveryWoken, "")
 	}
