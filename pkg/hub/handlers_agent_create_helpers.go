@@ -36,20 +36,51 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// userIDFromIdentity returns the user's ID when identity is a non-nil
+// UserIdentity, and "" for agents, brokers, or nil identities.
+func userIDFromIdentity(identity Identity) string {
+	if isNilIdentity(identity) {
+		return ""
+	}
+	if u, ok := identity.(UserIdentity); ok {
+		return u.ID()
+	}
+	return ""
+}
+
 // resolveTemplate looks up a template by ID or name/slug.
-// It tries: 1) by ID, 2) by slug in project scope, 3) by slug in global scope.
+// It tries: 1) by ID, 2) by slug in project scope (when projectID != ""),
+// 3) by slug in user scope (when userID != ""), 4) by slug in global scope.
 // Returns nil if not found, or an error for actual failures.
-func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID string) (*store.Template, error) {
-	return resolveTemplateRef(ctx, s.store, templateRef, projectID)
+func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID, userID string) (*store.Template, error) {
+	return resolveTemplateRef(ctx, s.store, templateRef, projectID, userID)
+}
+
+// resolveTemplateForIdentity resolves templateRef for an authenticated caller
+// in the documented scope order (ID -> project -> user -> global), skipping
+// slug-resolved candidates the caller is not authorized to read (mirroring the
+// CLI's scopeNotVisible fallback in cmd/template_resolution.go). A candidate
+// matched by explicit ID is returned unfiltered so the caller's
+// authorizeResolvedTemplate gate turns an unauthorized cross-scope ID into
+// not-found rather than falling through to another template.
+func (s *Server) resolveTemplateForIdentity(ctx context.Context, identity Identity, templateRef, projectID string) (*store.Template, error) {
+	return resolveTemplateRefWithFilter(ctx, s.store, templateRef, projectID, userIDFromIdentity(identity), func(tmpl *store.Template) bool {
+		return s.authorizeResolvedTemplate(ctx, identity, tmpl)
+	})
 }
 
 // resolveTemplateRef resolves templateRef by ID, then by slug in the
-// project's scope, then by slug in the global scope. It returns nil and no
-// error when nothing matches.
-func resolveTemplateRef(ctx context.Context, st store.Store, templateRef, projectID string) (*store.Template, error) {
+// project's scope (when projectID != ""), then by slug in the user's scope
+// (when userID != ""), then by slug in the global scope. It returns nil and
+// no error when nothing matches.
+func resolveTemplateRef(ctx context.Context, st store.Store, templateRef, projectID, userID string) (*store.Template, error) {
+	return resolveTemplateRefWithFilter(ctx, st, templateRef, projectID, userID, nil)
+}
+
+func resolveTemplateRefWithFilter(ctx context.Context, st store.Store, templateRef, projectID, userID string, allowSlug func(*store.Template) bool) (*store.Template, error) {
 	// Try looking up by ID first (the CLI typically resolves names to IDs)
 	template, err := st.GetTemplate(ctx, templateRef)
-	if err != nil && err != store.ErrNotFound {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, err
 	}
 	if template != nil {
@@ -57,20 +88,36 @@ func resolveTemplateRef(ctx context.Context, st store.Store, templateRef, projec
 	}
 
 	// Try by slug/name within project scope
-	template, err = st.GetTemplateBySlug(ctx, templateRef, "project", projectID)
-	if err != nil && err != store.ErrNotFound {
-		return nil, err
+	if projectID != "" {
+		template, err = st.GetTemplateBySlug(ctx, templateRef, store.TemplateScopeProject, projectID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		if template != nil && (allowSlug == nil || allowSlug(template)) {
+			return template, nil
+		}
 	}
-	if template != nil {
-		return template, nil
+
+	// Try by slug/name within user scope
+	if userID != "" {
+		template, err = st.GetTemplateBySlug(ctx, templateRef, store.TemplateScopeUser, userID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		if template != nil && (allowSlug == nil || allowSlug(template)) {
+			return template, nil
+		}
 	}
 
 	// Try global scope
-	template, err = st.GetTemplateBySlug(ctx, templateRef, "global", "")
-	if err != nil && err != store.ErrNotFound {
+	template, err = st.GetTemplateBySlug(ctx, templateRef, store.TemplateScopeGlobal, "")
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, err
 	}
-	return template, nil
+	if template != nil && (allowSlug == nil || allowSlug(template)) {
+		return template, nil
+	}
+	return nil, nil
 }
 
 // authorizeResolvedTemplate reports whether identity may read the resolved

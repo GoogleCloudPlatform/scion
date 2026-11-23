@@ -534,7 +534,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	var tmpl *store.Template
 	if templateName != "" {
 		var tmplErr error
-		tmpl, tmplErr = s.resolveTemplate(ctx, templateName, hc.ProjectID)
+		tmpl, tmplErr = s.resolveTemplateForIdentity(ctx, creatorIdentity, templateName, hc.ProjectID)
 		// SECURITY-GATE (ptone/scion#1916): same gate as the agent-create
 		// HTTP path in handlers_agents_core.go — a resolved candidate is
 		// not known to be one the revision principal may read.

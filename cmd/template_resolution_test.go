@@ -583,3 +583,99 @@ func TestBrokerHasLocalAccess(t *testing.T) {
 		}
 	})
 }
+
+func TestFindTemplateOnHub_ResolutionOrder_ProjectUserGlobal(t *testing.T) {
+	const (
+		projectID = "proj-1"
+		tplName   = "shared-tpl"
+	)
+
+	tests := []struct {
+		name      string
+		byScope   map[string]*hubclient.Template
+		forbid    map[string]int
+		wantID    string
+		wantOrder []string
+	}{
+		{
+			name: "project wins over user and global",
+			byScope: map[string]*hubclient.Template{
+				"project": {ID: "tpl-project", Name: tplName, Slug: tplName, Scope: "project"},
+				"user":    {ID: "tpl-user", Name: tplName, Slug: tplName, Scope: "user"},
+				"global":  {ID: "tpl-global", Name: tplName, Slug: tplName, Scope: "global"},
+			},
+			wantID:    "tpl-project",
+			wantOrder: []string{"project"},
+		},
+		{
+			name: "user wins over global when no project template exists",
+			byScope: map[string]*hubclient.Template{
+				"user":   {ID: "tpl-user", Name: tplName, Slug: tplName, Scope: "user"},
+				"global": {ID: "tpl-global", Name: tplName, Slug: tplName, Scope: "global"},
+			},
+			wantID:    "tpl-user",
+			wantOrder: []string{"project", "user"},
+		},
+		{
+			name: "global used when neither project nor user template exists",
+			byScope: map[string]*hubclient.Template{
+				"global": {ID: "tpl-global", Name: tplName, Slug: tplName, Scope: "global"},
+			},
+			wantID:    "tpl-global",
+			wantOrder: []string{"project", "user", "global"},
+		},
+		{
+			name: "falls through to global when user scope is forbidden",
+			byScope: map[string]*hubclient.Template{
+				"global": {ID: "tpl-global", Name: tplName, Slug: tplName, Scope: "global"},
+			},
+			forbid:    map[string]int{"user": http.StatusForbidden},
+			wantID:    "tpl-global",
+			wantOrder: []string{"project", "user", "global"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var queriedScopes []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				scope := r.URL.Query().Get("scope")
+				queriedScopes = append(queriedScopes, scope)
+				if code, denied := tt.forbid[scope]; denied {
+					w.WriteHeader(code)
+					_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"forbidden"}}`))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				var list []hubclient.Template
+				if tpl, ok := tt.byScope[scope]; ok {
+					list = append(list, *tpl)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"templates":  list,
+					"totalCount": len(list),
+				})
+			}))
+			defer server.Close()
+
+			client, err := hubclient.New(server.URL)
+			if err != nil {
+				t.Fatalf("hubclient.New failed: %v", err)
+			}
+
+			got, err := findTemplateOnHub(context.Background(), &HubContext{Client: client}, tplName, "", projectID)
+			if err != nil {
+				t.Fatalf("findTemplateOnHub() unexpected error: %v", err)
+			}
+			if got == nil {
+				t.Fatalf("findTemplateOnHub() = nil, want template %q", tt.wantID)
+			}
+			if got.ID != tt.wantID {
+				t.Errorf("findTemplateOnHub() ID = %q, want %q", got.ID, tt.wantID)
+			}
+			if strings.Join(queriedScopes, ",") != strings.Join(tt.wantOrder, ",") {
+				t.Errorf("queried scopes = %v, want %v", queriedScopes, tt.wantOrder)
+			}
+		})
+	}
+}

@@ -269,7 +269,7 @@ func TestTemplateScope_ResolveAtCreate_CrossProjectTemplateDenied(t *testing.T) 
 	// resolveTemplate's by-ID arm resolves across every scope, exactly as it
 	// would from bob's agent-create request referencing alice's project's
 	// template by UUID.
-	resolved, err := srv.resolveTemplate(ctx, tpl.ID, otherProject.ID)
+	resolved, err := srv.resolveTemplate(ctx, tpl.ID, otherProject.ID, bob.ID)
 	require.NoError(t, err)
 	require.NotNil(t, resolved, "resolveTemplate's by-ID lookup is scope-agnostic by design")
 
@@ -323,7 +323,7 @@ func TestTemplateScope_ResolveAtCreate_OwnProjectTemplateAllowed(t *testing.T) {
 	createTestUserWithProjectRole(t, s, dave.ID, dave.Email, project.ID, store.ProjectRoleMember)
 	daveIdentity := NewAuthenticatedUser(dave.ID, dave.Email, dave.DisplayName, dave.Role, "cli")
 
-	resolved, err := srv.resolveTemplate(ctx, tpl.ID, project.ID)
+	resolved, err := srv.resolveTemplate(ctx, tpl.ID, project.ID, dave.ID)
 	require.NoError(t, err)
 	require.NotNil(t, resolved)
 
@@ -422,4 +422,169 @@ func TestTemplateScope_Clone_ForbiddenAndMissingSourceUseIdenticalMessage(t *tes
 	assert.Equal(t, "Template not found", forbidden.Error.Message)
 	assert.Equal(t, forbidden.Error.Message, missing.Error.Message,
 		"a forbidden clone source and a nonexistent one must read identically")
+}
+
+// ----------------------------------------------------------------------
+// ptone/scion#5776: Hub template slug resolution must follow the documented
+// order project -> user -> global (matching the CLI's findTemplateOnHub and
+// .design/hosted/hosted-templates.md §3.2).
+// ----------------------------------------------------------------------
+
+func createHydratableScopeTemplate(t *testing.T, s store.Store, name, scope, scopeID, ownerID, hash string) *store.Template {
+	t.Helper()
+	tpl := &store.Template{
+		ID:          tid("tplres-" + scope + "-" + scopeID + "-" + name),
+		Name:        name,
+		Slug:        name,
+		Harness:     "claude",
+		Scope:       scope,
+		ScopeID:     scopeID,
+		OwnerID:     ownerID,
+		Status:      store.TemplateStatusActive,
+		ContentHash: hash,
+		Files:       []store.TemplateFile{{Path: "scion-agent.yaml", Hash: hash, Size: 16}},
+	}
+	require.NoError(t, s.CreateTemplate(context.Background(), tpl))
+	return tpl
+}
+
+func TestTemplateResolutionOrder_HTTPCreate_ProjectUserGlobal(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateScopeTest(t)
+	ctx := context.Background()
+
+	// Create a second project that has no project-scoped "shared-tpl" so we can
+	// exercise user vs global precedence alongside project vs user vs global.
+	projectNoTpl := &store.Project{ID: tid("tplres-http-no-proj-tpl"), Name: "No Project Template", Slug: "tplres-http-no-proj-tpl"}
+	require.NoError(t, s.CreateProject(ctx, projectNoTpl))
+	broker := &store.RuntimeBroker{ID: tid("tplres-http-broker"), Name: "broker", Slug: "tplres-http-broker", Status: store.BrokerStatusOnline, AutoProvide: true}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	for _, p := range []*store.Project{project, projectNoTpl} {
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: p.ID, BrokerID: broker.ID, BrokerName: broker.Name, LocalPath: t.TempDir(), Status: store.BrokerStatusOnline}))
+		p.DefaultRuntimeBrokerID = broker.ID
+		require.NoError(t, s.UpdateProject(ctx, p))
+	}
+	srv.SetDispatcher(&createAgentDispatcher{createPhase: string(state.PhaseRunning)})
+
+	// Alice is a member of both projects; bob is a member of projectNoTpl only.
+	createTestUserWithProjectRole(t, s, alice.ID, alice.Email, projectNoTpl.ID, store.ProjectRoleMember)
+	bob := createNamedTestUser(t, s, "tplres-http-bob", store.UserRoleMember)
+	ensureHubMembership(ctx, s, bob.ID)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, projectNoTpl.ID, store.ProjectRoleMember)
+
+	projTpl := createHydratableScopeTemplate(t, s, "shared-tpl", store.TemplateScopeProject, project.ID, alice.ID, "sha256:proj")
+	userTpl := createHydratableScopeTemplate(t, s, "shared-tpl", store.TemplateScopeUser, alice.ID, alice.ID, "sha256:user")
+	globalTpl := createHydratableScopeTemplate(t, s, "shared-tpl", store.TemplateScopeGlobal, "", alice.ID, "sha256:global")
+
+	// 1. All three scopes present: project beats user and global.
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "tplres-agent-proj",
+		ProjectID: project.ID,
+		Template:  "shared-tpl",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "project-scoped create failed: %s", rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, projTpl.ID, resp.Agent.AppliedConfig.TemplateID, "project template must take precedence over user and global")
+
+	// 2. No project template, user + global present: alice gets her user template.
+	rec = doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "tplres-agent-user",
+		ProjectID: projectNoTpl.ID,
+		Template:  "shared-tpl",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "user-scoped create failed: %s", rec.Body.String())
+	resp = CreateAgentResponse{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, userTpl.ID, resp.Agent.AppliedConfig.TemplateID, "alice's user template must take precedence over global")
+
+	// 3. Another user (bob) has no user template: falls through to global, never sees alice's user template.
+	rec = doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name:      "tplres-agent-global",
+		ProjectID: projectNoTpl.ID,
+		Template:  "shared-tpl",
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "global-scoped create failed: %s", rec.Body.String())
+	resp = CreateAgentResponse{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, globalTpl.ID, resp.Agent.AppliedConfig.TemplateID, "bob must fall through to global template and not see alice's user template")
+}
+
+func TestTemplateResolutionOrder_ResolveTemplateForIdentity(t *testing.T) {
+	srv, s, alice, _, project := setupTemplateScopeTest(t)
+	ctx := context.Background()
+
+	otherProject := &store.Project{ID: tid("tplres-unit-other-proj"), Name: "Other Project", Slug: "tplres-unit-other-proj"}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+	createTestUserWithProjectRole(t, s, alice.ID, alice.Email, otherProject.ID, store.ProjectRoleMember)
+
+	bob := createNamedTestUser(t, s, "tplres-unit-bob", store.UserRoleMember)
+	ensureHubMembership(ctx, s, bob.ID)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, otherProject.ID, store.ProjectRoleMember)
+
+	aliceIdent := NewAuthenticatedUser(alice.ID, alice.Email, alice.DisplayName, alice.Role, "cli")
+	bobIdent := NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "cli")
+	agentIdent := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("tplres-unit-agent")},
+		ProjectID: otherProject.ID,
+		Scopes:    []AgentTokenScope{ScopeProjectRead},
+	}}
+	// Project-bounded UAT for alice: cannot read user-scoped templates (which
+	// require a hub boundary), so slug resolution must skip user scope and
+	// fall through to global (matching CLI scopeNotVisible).
+	aliceProjectUAT := NewScopedUserIdentity(aliceIdent, otherProject.ID, []string{"agent:create", "template:read"})
+
+	projTpl := createAuthzTestTemplate(t, s, "shared-tpl", store.TemplateScopeProject, project.ID, alice.ID)
+	userTpl := createAuthzTestTemplate(t, s, "shared-tpl", store.TemplateScopeUser, alice.ID, alice.ID)
+	globalTpl := createAuthzTestTemplate(t, s, "shared-tpl", store.TemplateScopeGlobal, "", alice.ID)
+
+	t.Run("project beats user and global", func(t *testing.T) {
+		got, err := srv.resolveTemplateForIdentity(ctx, aliceIdent, "shared-tpl", project.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, projTpl.ID, got.ID)
+	})
+
+	t.Run("user beats global when no project template exists", func(t *testing.T) {
+		got, err := srv.resolveTemplateForIdentity(ctx, aliceIdent, "shared-tpl", otherProject.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, userTpl.ID, got.ID)
+	})
+
+	t.Run("other user falls through to global", func(t *testing.T) {
+		got, err := srv.resolveTemplateForIdentity(ctx, bobIdent, "shared-tpl", otherProject.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, globalTpl.ID, got.ID)
+	})
+
+	t.Run("agent identity skips user scope and falls through to global", func(t *testing.T) {
+		got, err := srv.resolveTemplateForIdentity(ctx, agentIdent, "shared-tpl", otherProject.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, globalTpl.ID, got.ID)
+	})
+
+	t.Run("project-bounded UAT skips unreadable user scope and falls through to global", func(t *testing.T) {
+		got, err := srv.resolveTemplateForIdentity(ctx, aliceProjectUAT, "shared-tpl", otherProject.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, globalTpl.ID, got.ID)
+	})
+
+	t.Run("explicit ID does not fall back to another scope when unreadable", func(t *testing.T) {
+		got, err := srv.resolveTemplateForIdentity(ctx, bobIdent, userTpl.ID, otherProject.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, userTpl.ID, got.ID)
+		assert.False(t, srv.authorizeResolvedTemplate(ctx, bobIdent, got),
+			"caller authorization gate must reject another user's template ID")
+	})
+
+	t.Run("empty project and user scopes resolve global only", func(t *testing.T) {
+		got, err := srv.resolveTemplate(ctx, "shared-tpl", "", "")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, globalTpl.ID, got.ID)
+	})
 }

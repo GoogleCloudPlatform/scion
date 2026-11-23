@@ -254,13 +254,15 @@ func (s *Server) syncHarnessConfigFromStorageInner(ctx context.Context, id strin
 // It mirrors HarnessConfigRepairRef: ID is authoritative when set (an
 // agent's AppliedConfig.TemplateID, or the record already in hand during
 // sync-all), and a stale ID is "not found", never re-targeted by name.
-// Name/ProjectID are used only when no ID was stamped: the reference is
+// Name/ProjectID/UserID are used only when no ID was stamped: the reference is
 // resolved the same way agent create resolves it (ID, then slug in the
-// agent's project scope, then global), never "any template with that name".
+// agent's project scope, then owner's user scope, then global), never "any
+// template with that name".
 type TemplateRepairRef struct {
 	ID        string
 	Name      string
 	ProjectID string
+	UserID    string
 }
 
 func (r TemplateRepairRef) String() string {
@@ -568,8 +570,8 @@ func (s *Server) resolveHarnessConfigForRepair(ctx context.Context, ref HarnessC
 // on. When an ID is given it is authoritative: a missing record is "not
 // found", with no name fallback. Otherwise the name is resolved with
 // resolveTemplateRef (the rule agent create uses): by ID, then by slug in the
-// agent's project scope, then global. Returns (nil, nil) when nothing
-// matches.
+// agent's project scope, then owner's user scope, then global. Returns
+// (nil, nil) when nothing matches.
 func (s *Server) resolveTemplateForRepair(ctx context.Context, ref TemplateRepairRef) (*store.Template, error) {
 	if ref.ID != "" {
 		tmpl, err := s.store.GetTemplate(ctx, ref.ID)
@@ -584,7 +586,7 @@ func (s *Server) resolveTemplateForRepair(ctx context.Context, ref TemplateRepai
 	if ref.Name == "" {
 		return nil, nil
 	}
-	tmpl, err := resolveTemplateRef(ctx, s.store, ref.Name, ref.ProjectID)
+	tmpl, err := resolveTemplateRef(ctx, s.store, ref.Name, ref.ProjectID, ref.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("lookup template %q: %w", ref.Name, err)
 	}

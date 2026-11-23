@@ -47,7 +47,7 @@ func (s *Server) ValidateStartupDefaults(ctx context.Context) {
 	d := s.hubAgentDefaults()
 
 	if name := d.DefaultTemplate; name != "" {
-		tpl, err := s.resolveTemplate(ctx, name, "")
+		tpl, err := s.resolveTemplate(ctx, name, "", "")
 		switch {
 		case err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, config.ErrTemplateNotFound):
 			s.agentLifecycleLog.Warn(
