@@ -17,6 +17,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  artifactDownloadUrl,
   artifactFileUrl,
   artifactListUrl,
   artifactPagePath,
@@ -80,6 +81,15 @@ describe('artifactFileUrl', () => {
   it('escapes each path segment', () => {
     expect(artifactFileUrl('a/1', 0, 'x?y#z.md')).toBe(
       '/api/v1/artifacts/a%2F1/files/x%3Fy%23z.md'
+    );
+  });
+
+  it('builds forced-download URLs with ?download=1', () => {
+    expect(artifactDownloadUrl('a1', 0, 'design.md')).toBe(
+      '/api/v1/artifacts/a1/files/design.md?download=1'
+    );
+    expect(artifactDownloadUrl('a1', 2, 'dir/a b.md')).toBe(
+      '/api/v1/artifacts/a1/versions/2/files/dir/a%20b.md?download=1'
     );
   });
 });

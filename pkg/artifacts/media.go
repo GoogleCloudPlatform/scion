@@ -134,8 +134,14 @@ func responseContentType(mt string) string {
 // contentDisposition is the Content-Disposition served for a file: inline
 // for inlineSafe types, attachment otherwise, with the file's base name.
 func contentDisposition(mt, filePath string) string {
+	return contentDispositionFor(mt, filePath, false)
+}
+
+// contentDispositionFor is contentDisposition, forcing attachment when
+// forceAttachment is true (e.g. ?download=1, ptone/scion#8958).
+func contentDispositionFor(mt, filePath string, forceAttachment bool) string {
 	disp := "attachment"
-	if inlineSafe[mt] {
+	if !forceAttachment && inlineSafe[mt] {
 		disp = "inline"
 	}
 	if v := mime.FormatMediaType(disp, map[string]string{"filename": path.Base(filePath)}); v != "" {
