@@ -49,6 +49,11 @@ func warnRemovedMode(source string) {
 // list, delete, probe). Decision system-one-admin-cli v1 keeps Hub System One
 // provider instance and credential administration human-mode only.
 //
+// Deliberately absent: "project.system-one.*" (list, add, remove, set).
+// Per-project System One instance allowlists (ptone/scion#8045 D1) control
+// external model egress and are managed by project owners/admins and Hub
+// admins only; agents must not be able to modify the allowlist.
+//
 // Deliberately absent: "exec-container" (show, set, clear). Human-mode only
 // per ptone/scion#8812 decision D4 (the Hub endpoint is session-only too);
 // cmd/platform_gate.go keeps it off Windows in v1.

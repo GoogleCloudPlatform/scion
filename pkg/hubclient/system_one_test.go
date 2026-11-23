@@ -405,3 +405,66 @@ func TestSystemOne_ValidationAndRedaction(t *testing.T) {
 	assert.Contains(t, logged, `"has_api_key":true`)
 	assert.Contains(t, logged, `"text_bytes":`)
 }
+
+func TestSystemOne_ProjectInstancesAllowlist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/system-one/instances":
+			_ = json.NewEncoder(w).Encode(ProjectSystemOneInstancesResponse{
+				ProjectID: "proj-1",
+				Instances: []string{"inst-a"},
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/proj-1/system-one/instances":
+			var req SetProjectSystemOneInstancesRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			_ = json.NewEncoder(w).Encode(ProjectSystemOneInstancesResponse{
+				ProjectID: "proj-1",
+				Instances: req.Instances,
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/proj-1/system-one/instances/inst-b":
+			_ = json.NewEncoder(w).Encode(ProjectSystemOneInstancesResponse{
+				ProjectID: "proj-1",
+				Instances: []string{"inst-a", "inst-b"},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/system-one/instances/inst-a":
+			_ = json.NewEncoder(w).Encode(ProjectSystemOneInstancesResponse{
+				ProjectID: "proj-1",
+				Instances: []string{"inst-b"},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	got, err := c.SystemOne().GetProjectInstances(ctx, "proj-1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"inst-a"}, got.Instances)
+
+	got, err = c.SystemOne().AddProjectInstance(ctx, "proj-1", "inst-b")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"inst-a", "inst-b"}, got.Instances)
+
+	got, err = c.SystemOne().RemoveProjectInstance(ctx, "proj-1", "inst-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"inst-b"}, got.Instances)
+
+	got, err = c.SystemOne().SetProjectInstances(ctx, "proj-1", []string{"inst-c"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"inst-c"}, got.Instances)
+
+	// Input validation.
+	_, err = c.SystemOne().GetProjectInstances(ctx, "")
+	require.Error(t, err)
+	_, err = c.SystemOne().SetProjectInstances(ctx, "", nil)
+	require.Error(t, err)
+	_, err = c.SystemOne().AddProjectInstance(ctx, "proj-1", "")
+	require.Error(t, err)
+	_, err = c.SystemOne().RemoveProjectInstance(ctx, "", "inst-a")
+	require.Error(t, err)
+}

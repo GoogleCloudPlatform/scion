@@ -694,6 +694,17 @@ type ServerConfig struct {
 	// (falling back to config.SystemOneDefaultMaxEvalTime = 3s).
 	SystemOneMaxEvalTime time.Duration
 
+	// SystemOneMaxInFlightPerProject optionally overrides
+	// server.hub.system_one.max_in_flight_per_project (per Hub replica; nil
+	// falls back to StartupServerSettings and then
+	// config.SystemOneDefaultMaxInFlightPerProject = 4; 0 = unlimited).
+	SystemOneMaxInFlightPerProject *int
+
+	// SystemOneAdmissionWait optionally overrides
+	// server.hub.system_one.admission_wait when positive (falling back to
+	// StartupServerSettings and then config.SystemOneDefaultAdmissionWait = 100ms).
+	SystemOneAdmissionWait time.Duration
+
 	// ScheduleMinInterval (server.hub.schedules.min_interval) is the
 	// shortest interval a recurring schedule may fire at. Zero means no
 	// minimum; the server command resolves the setting's default (5m).

@@ -394,9 +394,17 @@ func TestSystemOneRules_DialectForwardsProjectIDForProjectScopedNamedSecret(t *t
 	require.NoError(t, err)
 
 	const (
-		projID     = "proj-dialect-secret-01"
 		projAPIKey = "AIza-project-scoped-dialect-canary-9911"
 	)
+
+	proj := &store.Project{
+		ID:      "00000000-0000-0000-0000-00000000d101",
+		Name:    "Dialect Secret Project",
+		Slug:    "dialect-secret-project",
+		OwnerID: admin.ID,
+	}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	projID := proj.ID
 
 	// Store a project-scoped GEMINI_API_KEY variable secret in the Hub secret backend.
 	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
@@ -470,7 +478,11 @@ func TestSystemOneRules_DialectForwardsProjectIDForProjectScopedNamedSecret(t *t
 	assert.Equal(t, string(systemoneprovider.FailInvalidRequest), failedErr.Reason)
 	assert.Zero(t, providerCalls.Load())
 
-	// 2. Request with authorized ProjectID resolves the project-scoped secret through the dialect.
+	// 2. Allowlist the instance for projID, then Request with authorized ProjectID
+	// resolves the project-scoped secret through the dialect.
+	_, err = s.AddProjectSystemOneInstance(ctx, projID, "gemini-proj-sec")
+	require.NoError(t, err)
+
 	elemIdx := 1
 	dec, err := re.Evaluate(ctx, compiled, ruleengine.Input{
 		Payload: systemone.Request{

@@ -186,6 +186,51 @@ func resolveSystemOneMaxEvalTime(cfg ServerConfig) time.Duration {
 	return config.SystemOneDefaultMaxEvalTime
 }
 
+// resolveSystemOneMaxInFlightPerProject resolves the per-replica per-project
+// concurrency limit for System One evaluations (server.hub.system_one.max_in_flight_per_project).
+// Returns a positive integer for a cap, or -1 for unlimited (when explicitly
+// configured as 0). Defaults to config.SystemOneDefaultMaxInFlightPerProject (4).
+func resolveSystemOneMaxInFlightPerProject(cfg ServerConfig) int {
+	if cfg.SystemOneMaxInFlightPerProject != nil {
+		if *cfg.SystemOneMaxInFlightPerProject <= 0 {
+			return -1
+		}
+		return *cfg.SystemOneMaxInFlightPerProject
+	}
+	if cfg.StartupServerSettings != nil &&
+		cfg.StartupServerSettings.Hub != nil &&
+		cfg.StartupServerSettings.Hub.SystemOne != nil &&
+		cfg.StartupServerSettings.Hub.SystemOne.MaxInFlightPerProject != nil {
+		v := *cfg.StartupServerSettings.Hub.SystemOne.MaxInFlightPerProject
+		if v <= 0 {
+			return -1
+		}
+		return v
+	}
+	return config.SystemOneDefaultMaxInFlightPerProject
+}
+
+// resolveSystemOneAdmissionWait resolves the maximum admission wait duration
+// (server.hub.system_one.admission_wait), falling back to
+// config.SystemOneDefaultAdmissionWait (100ms).
+func resolveSystemOneAdmissionWait(cfg ServerConfig) time.Duration {
+	if cfg.SystemOneAdmissionWait > 0 {
+		if cfg.SystemOneAdmissionWait > systemoneruntime.MaxAllowedEvalTime {
+			return systemoneruntime.MaxAllowedEvalTime
+		}
+		return cfg.SystemOneAdmissionWait
+	}
+	if cfg.StartupServerSettings != nil &&
+		cfg.StartupServerSettings.Hub != nil &&
+		cfg.StartupServerSettings.Hub.SystemOne != nil {
+		hs := config.HubSystemOneConfig{AdmissionWait: cfg.StartupServerSettings.Hub.SystemOne.AdmissionWait}
+		if d, err := hs.AdmissionWaitDuration(); err == nil && d > 0 {
+			return d
+		}
+	}
+	return config.SystemOneDefaultAdmissionWait
+}
+
 // SystemOneProviderRegistry returns the Hub's System One provider adapter
 // registry, defaulting to provider.DefaultRegistry().
 func (s *Server) SystemOneProviderRegistry() *systemoneprovider.Registry {
@@ -223,13 +268,16 @@ func (s *Server) rebuildSystemOneRuntimeLocked() {
 	credSrc := &hubSystemOneCredentialSource{srv: s}
 	rt := systemoneruntime.New(
 		systemoneruntime.Config{
-			Registry:           reg,
-			Instances:          &hubSystemOneInstanceSource{srv: s},
-			Credentials:        credSrc.APIKeyToken,
-			TokenSource:        credSrc.GoogleAccessToken,
-			AllowedSecretNames: s.allowedSecretNamesFor,
-			MaxEvalTime:        resolveSystemOneMaxEvalTime(s.config),
-			Logger:             logger,
+			Registry:              reg,
+			Instances:             &hubSystemOneInstanceSource{srv: s},
+			ProjectAllowlist:      &hubSystemOneAllowlistSource{srv: s},
+			Credentials:           credSrc.APIKeyToken,
+			TokenSource:           credSrc.GoogleAccessToken,
+			AllowedSecretNames:    s.allowedSecretNamesFor,
+			MaxEvalTime:           resolveSystemOneMaxEvalTime(s.config),
+			MaxInFlightPerProject: resolveSystemOneMaxInFlightPerProject(s.config),
+			AdmissionWait:         resolveSystemOneAdmissionWait(s.config),
+			Logger:                logger,
 		},
 		s.systemOneRuntimeOpts...,
 	)
@@ -315,6 +363,27 @@ func storeSystemOneInstanceToRuntime(inst *store.SystemOneInstance) systemonerun
 // systemoneruntime.InstanceSource.
 type hubSystemOneInstanceSource struct {
 	srv *Server
+}
+
+// hubSystemOneAllowlistSource adapts store.ProjectStore to
+// systemoneruntime.ProjectAllowlistSource (D1; empty by default everywhere).
+type hubSystemOneAllowlistSource struct {
+	srv *Server
+}
+
+func (src *hubSystemOneAllowlistSource) AllowedInstances(ctx context.Context, projectID string) ([]string, error) {
+	if src.srv == nil || src.srv.store == nil {
+		return nil, errors.New("system_one: project store not configured")
+	}
+	allowed, err := src.srv.store.GetProjectSystemOneInstances(ctx, projectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Unknown project fails closed with an empty allowlist.
+			return nil, nil
+		}
+		return nil, err
+	}
+	return allowed, nil
 }
 
 func (src *hubSystemOneInstanceSource) GetInstance(ctx context.Context, name string) (systemoneruntime.Instance, bool, error) {

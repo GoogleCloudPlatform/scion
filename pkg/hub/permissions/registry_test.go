@@ -146,6 +146,9 @@ var expectedSelectorRegistry = map[string][]string{
 	"project:manage_message_policies": {"project.manage_message_policies"},
 	"project:read_message_policies":   {"project.read_message_policies"},
 
+	// Project System One instance allowlist (owner/admin rule applies on top).
+	"project:manage_system_one_instances": {"project.manage_system_one_instances"},
+
 	// scheduled_event selectors (reads, cancellation, pause and authoring).
 	"scheduled_event:delete": {"scheduled_event.delete"},
 	"scheduled_event:list":   {"scheduled_event.list"},

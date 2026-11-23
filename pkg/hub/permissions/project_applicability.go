@@ -59,7 +59,8 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
 	"project.manage_message_policies": true, "project.read_message_policies": true,
-	"project.manage_visitors": true,
+	"project.manage_system_one_instances": true,
+	"project.manage_visitors":             true,
 	// project.chat_post targets an existing project's chat threads.
 	"project.chat_post": true,
 
@@ -252,6 +253,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage_message_policies": {BoundaryKindProject, BoundaryKindHub}, "project.read_message_policies": {BoundaryKindProject, BoundaryKindHub},
+	"project.manage_system_one_instances": {BoundaryKindProject, BoundaryKindHub},
 	// project.chat_post's selector targets an existing project, like
 	// project.set_messaging_policy.
 	"project.chat_post": {BoundaryKindProject, BoundaryKindHub},
@@ -449,6 +451,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
 	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
 	"project.manage_message_policies": {TargetClassKindProjectScoped}, "project.read_message_policies": {TargetClassKindProjectScoped},
+	"project.manage_system_one_instances": {TargetClassKindProjectScoped},
 	// project.chat_post targets an existing project's chat threads.
 	"project.chat_post": {TargetClassKindProjectScoped},
 	// project.list is a hub-level collection action (false in

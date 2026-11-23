@@ -2927,6 +2927,13 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-project System One hub instance allowlist (ptone/scion#8045, D1):
+	// …/system-one/instances and …/system-one/instances/{name}.
+	if rest, ok := strings.CutPrefix(subPath, "system-one/instances"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		s.handleProjectSystemOneInstances(w, r, projectID, rest)
+		return
+	}
+
 	// Project message policies (ptone/scion#8047):
 	// …/message-policies, …/message-policies/test, …/message-policies/decisions,
 	// …/message-policies/{policyId}, …/message-policies/{policyId}/test, and

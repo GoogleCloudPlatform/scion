@@ -115,8 +115,8 @@ type ProjectAllowlistSource interface {
 }
 
 type staticProjectAllowlist struct {
-	mu      sync.RWMutex
-	byProj  map[string][]string
+	mu     sync.RWMutex
+	byProj map[string][]string
 }
 
 // StaticProjectAllowlist constructs an in-memory ProjectAllowlistSource from a

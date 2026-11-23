@@ -66,6 +66,10 @@ const (
 	// ActionReadMessagePolicies covers listing and reading a project's message
 	// policies and surface coverage (project.read_message_policies).
 	ActionReadMessagePolicies Action = "read_message_policies"
+	// ActionManageSystemOneInstances covers adding, removing, and setting a
+	// project's System One hub instance allowlist
+	// (project.manage_system_one_instances; ptone/scion#8045 D1).
+	ActionManageSystemOneInstances Action = "manage_system_one_instances"
 	// ActionManageVisitors covers granting, changing and revoking project
 	// visitor access for federated accounts (project.manage_visitors).
 	ActionManageVisitors Action = "manage_visitors"
