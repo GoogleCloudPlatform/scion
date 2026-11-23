@@ -513,6 +513,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
 			return
 		}
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+				return
+			}
+		}
 	}
 
 	// Generate slug from request or name — always sanitize caller-supplied
@@ -911,6 +916,11 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	if !s.authorize(w, r, templateResource(template), catalogWriteAction(permissions.ResourceTemplate, template.Scope, ActionUpdate)) {
 		return
 	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
+	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -1045,6 +1055,10 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// SECURITY-GATE: authorize read access to this template's files. A
 	// denial reads as 404 (ptone/scion#1916), matching getTemplateV2.
 	if !s.authorizeTemplateReadRoute(w, r, template) {
+		return
+	}
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && s.agentStanding(ctx, agentIdent.ID()) != nil {
+		NotFound(w, "Template")
 		return
 	}
 

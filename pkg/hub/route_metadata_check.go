@@ -138,3 +138,55 @@ func validateVisitorRoutes(table map[string]RouteMetadata) error {
 	}
 	return nil
 }
+
+// validateAgentStandingRoutes checks AgentStanding declarations across the
+// route metadata table (ptone/scion#8104). Every RouteAgentToken route must
+// declare an explicit AgentStandingPolicy (guard, handler, or exempt); handler
+// and exempt policies must include a non-empty AgentStandingReason, while guard
+// must not. Non-RouteAgentToken routes must leave both fields empty. It returns
+// every violation sorted by pattern; New refuses to start on any.
+func validateAgentStandingRoutes(table map[string]RouteMetadata) error {
+	patterns := make([]string, 0, len(table))
+	for p := range table {
+		patterns = append(patterns, p)
+	}
+	sort.Strings(patterns)
+	var errs []error
+	for _, p := range patterns {
+		meta := table[p]
+		reason := strings.TrimSpace(meta.AgentStandingReason)
+		if meta.Classification != RouteAgentToken {
+			if meta.AgentStanding != "" {
+				errs = append(errs, fmt.Errorf("route %q (%s): agent standing: classification %q (want %q)",
+					p, meta.RouteID, meta.Classification, RouteAgentToken))
+			}
+			if reason != "" {
+				errs = append(errs, fmt.Errorf("route %q (%s): agent standing: AgentStandingReason set on non-agent-token route",
+					p, meta.RouteID))
+			}
+			continue
+		}
+		switch meta.AgentStanding {
+		case "":
+			errs = append(errs, fmt.Errorf("route %q (%s): agent standing: missing AgentStanding policy",
+				p, meta.RouteID))
+		case AgentStandingGuard:
+			if reason != "" {
+				errs = append(errs, fmt.Errorf("route %q (%s): agent standing: AgentStandingReason must be empty for policy %q",
+					p, meta.RouteID, AgentStandingGuard))
+			}
+		case AgentStandingHandler, AgentStandingExempt:
+			if reason == "" {
+				errs = append(errs, fmt.Errorf("route %q (%s): agent standing: policy %q requires a non-empty AgentStandingReason",
+					p, meta.RouteID, meta.AgentStanding))
+			}
+		default:
+			errs = append(errs, fmt.Errorf("route %q (%s): agent standing: unknown policy %q",
+				p, meta.RouteID, meta.AgentStanding))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("invalid agent standing route metadata: %w", errors.Join(errs...))
+	}
+	return nil
+}

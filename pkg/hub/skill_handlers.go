@@ -694,6 +694,11 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in this project", nil)
 			return
 		}
+		if agentIdent, ok := identity.(AgentIdentity); ok {
+			if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+				return
+			}
+		}
 	case store.SkillScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
@@ -1070,6 +1075,11 @@ func (s *Server) publishSkillVersion(w http.ResponseWriter, r *http.Request, ski
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to publish versions for this skill", nil)
 		return
 	}
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
+	}
 
 	// Dispatch based on content type: multipart uploads are handled inline,
 	// while JSON requests go through the existing two-phase upload flow.
@@ -1401,6 +1411,11 @@ func (s *Server) handleSkillUpload(w http.ResponseWriter, r *http.Request, skill
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to upload files for this skill", nil)
 		return
 	}
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
+	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -1612,6 +1627,10 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 		NotFound(w, "Skill")
 		return
 	}
+	if agentIdent, ok := identity.(AgentIdentity); ok && s.agentStanding(ctx, agentIdent.ID()) != nil {
+		NotFound(w, "Skill")
+		return
+	}
 
 	stor := s.GetStorage()
 	if stor == nil {
@@ -1700,6 +1719,12 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
+	}
 
 	var req ResolveSkillsRequest
 	if err := readJSON(r, &req); err != nil {
@@ -2000,7 +2025,10 @@ func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string)
 		return err == nil
 	}
 	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
-		return agentIdent.ProjectID() == projectID
+		if agentIdent.ProjectID() != projectID {
+			return false
+		}
+		return s.agentStanding(ctx, agentIdent.ID()) == nil
 	}
 	// Last arm, and the only one left: anything that is not a broker or an agent
 	// must be a user holding read on the project's skills. The nil test is

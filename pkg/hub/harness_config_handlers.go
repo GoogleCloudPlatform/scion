@@ -1175,6 +1175,11 @@ func (s *Server) handleHarnessConfigDownload(w http.ResponseWriter, r *http.Requ
 
 	ctx := r.Context()
 
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil && s.agentStanding(ctx, agentIdent.ID()) != nil {
+		NotFound(w, "HarnessConfig")
+		return
+	}
+
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")
