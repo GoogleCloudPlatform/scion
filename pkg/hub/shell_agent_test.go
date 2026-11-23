@@ -1540,3 +1540,129 @@ func TestShellAgentGCPIdentity_SkipsDefaultsForcesBlockAndAllowsExplicitOwnerCho
 		assert.Equal(t, sa.Email, stored.AppliedConfig.GCPIdentity.ServiceAccountEmail)
 	})
 }
+
+type shellLogsTestQuerier struct{}
+
+func (shellLogsTestQuerier) Query(_ context.Context, _ LogQueryOptions) (*LogQueryResult, error) {
+	return &LogQueryResult{Entries: []CloudLogEntry{{Message: "log-line"}}}, nil
+}
+
+func (shellLogsTestQuerier) Tail(_ context.Context, _ LogQueryOptions) (<-chan CloudLogEntry, func(), error) {
+	ch := make(chan CloudLogEntry, 1)
+	ch <- CloudLogEntry{Message: "stream-line"}
+	close(ch)
+	return ch, func() {}, nil
+}
+
+func (shellLogsTestQuerier) GCPProjectID() string { return "test-gcp-project" }
+func (shellLogsTestQuerier) Close() error         { return nil }
+
+type shellLogsTestDispatcher struct {
+	mockDispatcher
+}
+
+func (shellLogsTestDispatcher) DispatchAgentLogs(_ context.Context, agent *store.Agent, _ int) (string, error) {
+	return "logs-for-" + agent.Slug, nil
+}
+
+func TestShellAgentLogs_RequireAttach(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetDispatcher(&shellLogsTestDispatcher{})
+	srv.logQueryService = shellLogsTestQuerier{}
+
+	project, broker := seedShellTestProjectAndBroker(t, s)
+
+	owner := &store.User{ID: api.NewUUID(), Email: "shell-logs-owner@test.com", DisplayName: "Owner", Role: store.UserRoleMember, Status: "active"}
+	otherMember := &store.User{ID: api.NewUUID(), Email: "shell-logs-member@test.com", DisplayName: "Member", Role: store.UserRoleMember, Status: "active"}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	require.NoError(t, s.CreateUser(ctx, otherMember))
+	for _, u := range []*store.User{owner, otherMember} {
+		require.NoError(t, srv.EnsureProjectRoleBinding(ctx, project.ID, store.PrincipalTypeUser, u.ID, store.ProjectRoleMember))
+	}
+
+	shellAgent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "shell-logs-target",
+		Name:            "shell-logs-target",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseRunning),
+		Activity:        string(state.ActivityIdle),
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		Ancestry:        []string{owner.ID},
+		HarnessConfig:   config.ShellHarnessConfigName,
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName},
+	}
+	llmAgent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "llm-logs-target",
+		Name:            "llm-logs-target",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseRunning),
+		Activity:        string(state.ActivityIdle),
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		Ancestry:        []string{owner.ID},
+		HarnessConfig:   "claude",
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+	callerAgent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "same-project-agent",
+		Name:            "same-project-agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseRunning),
+		Activity:        string(state.ActivityIdle),
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		Ancestry:        []string{owner.ID},
+		HarnessConfig:   "claude",
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+	for _, a := range []*store.Agent{shellAgent, llmAgent, callerAgent} {
+		require.NoError(t, s.CreateAgent(ctx, a))
+	}
+	agentToken := srv.generateRecordedAgentToken(t, callerAgent.ID, project.ID,
+		[]AgentTokenScope{ScopeAgentRead, ScopeAgentLifecycle}, nil)
+
+	routesFor := func(agent *store.Agent) []struct {
+		name string
+		path string
+	} {
+		return []struct {
+			name string
+			path string
+		}{
+			{"direct logs", "/api/v1/agents/" + agent.ID + "/logs"},
+			{"project logs", "/api/v1/projects/" + project.ID + "/agents/" + agent.ID + "/logs"},
+			{"direct cloud-logs", "/api/v1/agents/" + agent.ID + "/cloud-logs"},
+			{"project cloud-logs", "/api/v1/projects/" + project.ID + "/agents/" + agent.ID + "/cloud-logs"},
+			{"direct cloud-logs stream", "/api/v1/agents/" + agent.ID + "/cloud-logs/stream"},
+			{"project cloud-logs stream", "/api/v1/projects/" + project.ID + "/agents/" + agent.ID + "/cloud-logs/stream"},
+		}
+	}
+
+	for _, rt := range routesFor(shellAgent) {
+		t.Run("shell "+rt.name, func(t *testing.T) {
+			recMember := doRequestAsUser(t, srv, otherMember, http.MethodGet, rt.path, nil)
+			assert.Equal(t, http.StatusForbidden, recMember.Code, "project member without attach must get 403 on %s: %s", rt.path, recMember.Body.String())
+
+			recAgent := doRequestWithAgentToken(t, srv, http.MethodGet, rt.path, nil, agentToken)
+			assert.Equal(t, http.StatusForbidden, recAgent.Code, "same-project agent principal must get 403 on %s: %s", rt.path, recAgent.Body.String())
+
+			recOwner := doRequestAsUser(t, srv, owner, http.MethodGet, rt.path, nil)
+			assert.Equal(t, http.StatusOK, recOwner.Code, "owner must get 200 on %s: %s", rt.path, recOwner.Body.String())
+		})
+	}
+
+	for _, rt := range routesFor(llmAgent) {
+		t.Run("llm control "+rt.name, func(t *testing.T) {
+			recMember := doRequestAsUser(t, srv, otherMember, http.MethodGet, rt.path, nil)
+			assert.Equal(t, http.StatusOK, recMember.Code, "project member must still get 200 for LLM agent on %s: %s", rt.path, recMember.Body.String())
+		})
+	}
+}
