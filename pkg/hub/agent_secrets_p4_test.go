@@ -593,3 +593,42 @@ func TestAgentSelfWrite_FileTargetRestrictedToAgentHome(t *testing.T) {
 		})
 	require.Equal(t, http.StatusCreated, rr.Code, "body: %s", rr.Body.String())
 }
+
+type nilMetaSecretBackend struct {
+	secret.SecretBackend
+	deleted []string
+}
+
+func (b *nilMetaSecretBackend) GetMeta(_ context.Context, _, _, _ string) (*secret.SecretMeta, error) {
+	return nil, nil
+}
+
+func (b *nilMetaSecretBackend) Delete(_ context.Context, name, _, _ string) error {
+	b.deleted = append(b.deleted, name)
+	return nil
+}
+
+func TestAgentSelfWrite_DeleteHandlesNilMeta(t *testing.T) {
+	srv, _, _, _, agentX, _ := setupP4AgentSecretsFixture(t, true)
+	stub := &nilMetaSecretBackend{SecretBackend: srv.GetSecretBackend()}
+	srv.SetSecretBackend(stub)
+
+	auditor := &recordingP4SecretAuditLogger{
+		LogAuditLogger: NewLogAuditLogger("[test-p4-nilmeta]", false),
+	}
+	srv.SetAuditLogger(auditor)
+
+	scopes := []AgentTokenScope{ScopeAgentStatusUpdate}
+	rr := doP4AsAgent(t, srv, agentX, scopes, http.MethodDelete,
+		"/api/v1/agents/"+agentX.ID+"/secrets/NIL_META_KEY?scope=agent", nil)
+	require.Equal(t, http.StatusNoContent, rr.Code, "body: %s", rr.Body.String())
+	assert.Equal(t, []string{"NIL_META_KEY"}, stub.deleted)
+
+	auditor.mu.Lock()
+	defer auditor.mu.Unlock()
+	require.Len(t, auditor.secretWriteEvents, 1)
+	assert.Equal(t, "delete", auditor.secretWriteEvents[0].Operation)
+	assert.Equal(t, "NIL_META_KEY", auditor.secretWriteEvents[0].SecretKey)
+	assert.Equal(t, 0, auditor.secretWriteEvents[0].Version)
+	assert.True(t, auditor.secretWriteEvents[0].Success)
+}

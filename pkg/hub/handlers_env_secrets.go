@@ -1951,13 +1951,18 @@ func (s *Server) agentDeleteSecret(w http.ResponseWriter, r *http.Request, agent
 		return
 	}
 
+	version := 0
+	if meta != nil {
+		version = meta.Version
+	}
+
 	if err := s.secretBackend.Delete(ctx, key, store.ScopeAgent, agentID); err != nil {
-		s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, meta.Version, false, false, "backend_error")
+		s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, version, false, false, "backend_error")
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, meta.Version, false, true, "")
+	s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, version, false, true, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
