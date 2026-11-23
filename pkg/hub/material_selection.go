@@ -192,6 +192,11 @@ func (s *Server) selectRuntimeMaterial(ctx context.Context, ident AgentIdentity,
 	installationOnly := facts != nil && usesInstallationGitHubToken(facts.Agent)
 	if installationOnly && isBlockedInstallationGitHubEnvKey(key) {
 		switch scope {
+		case store.ScopeAgent:
+			return ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeAgent, ScopeID: facts.Agent.ID, Grant: GrantAgentSelfRead},
+				Reason:    ReasonGitHubTokenInstallationOnly,
+			}, nil, "", ""
 		case store.ScopeProject:
 			return ItemResult{
 				Candidate: Candidate{Kind: MaterialKindSecret, Key: key, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},

@@ -37,30 +37,31 @@ import (
 //   - Push (create / provision / reprovision):
 //     HTTPAgentDispatcher.buildCreateRequestFor (httpdispatcher.go) ->
 //     deliverGitHubToken (strips blocked env, classifications, resolved
-//     secrets, and as-needed keys before minting) + defense-in-depth noAuth
-//     token guard and noAuthProjectToken reset before
-//     restrictCreateRequestTokenRemote.
+//     secrets across broker/hub/project/user/agent scopes, and as-needed keys
+//     before minting) + defense-in-depth noAuth token guard and
+//     noAuthProjectToken reset before restrictCreateRequestTokenRemote.
 //   - Push (start / restart / resume):
 //     HTTPAgentDispatcher.buildStartEnv (httpdispatcher.go) ->
-//     deliverGitHubToken + defense-in-depth noAuth token guard and
+//     deliverGitHubToken (strips blocked material across all delivery scopes
+//     including agent scope) + defense-in-depth noAuth token guard and
 //     projectToken reset before restrictPersonalTokenRemote.
 //   - Push (env-gather finalize):
 //     HTTPAgentDispatcher.DispatchFinalizeEnv (httpdispatcher.go) ->
 //     filters gathered env keys with isBlockedInstallationGitHubEnvKey.
 //   - Push (as-needed secret second pass):
 //     HTTPAgentDispatcher.resolveAsNeededForKeys (httpdispatcher.go) ->
-//     filters requested keys and resolved secrets with
+//     filters requested keys and resolved secrets (including agent scope) with
 //     isBlockedInstallationGitHubEnvKey.
 //   - Pull (runtime secret fetch: GET /api/v1/agents/{id}/secrets/{key} and
 //     POST /api/v1/agent/secrets):
 //     Server.selectRuntimeMaterial (material_selection.go) -> refuses blocked
 //     keys before backend read and again by item.Meta.Target after lookup
 //     (ReasonGitHubTokenInstallationOnly, not_found-indistinguishable across
-//     project and user scopes).
+//     agent, project, and user scopes).
 //   - Pull (runtime secret list: GET /api/v1/agents/{id}/secrets):
-//     Server.agentListSecrets (handlers_env_secrets.go) and
-//     Server.agentListUserSecrets (material_list_user.go) -> omit blocked keys
-//     by Name or Target.
+//     Server.agentListSecrets (handlers_env_secrets.go; agent and project
+//     scopes) and Server.agentListUserSecrets (material_list_user.go; user
+//     scope) -> omit blocked keys by Name or Target.
 //   - Pull (env var by key: GET /api/v1/env/{key}?scope=...,
 //     GET /api/v1/projects/{id}/env/{key},
 //     GET /api/v1/runtime-brokers/{id}/env/{key} [not agent-reachable
@@ -78,7 +79,9 @@ import (
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
 //     (fail-closed), omit blocked env keys and blocked merged environment
 //     secrets (by Name or Target).
-//   - Pull (secret metadata by key: GET /api/v1/secrets/{key}?scope=...,
+//   - Pull (secret metadata by key: GET /api/v1/secrets/{key}?scope=...
+//     [scope=agent is not agent-reachable (resolveAgentSecretAccess refuses
+//     non-user identities); defence in depth],
 //     GET /api/v1/projects/{id}/secrets/{key},
 //     GET /api/v1/runtime-brokers/{id}/secrets/{key} [not agent-reachable
 //     (authorizeBrokerMaterial refuses non-user identities); defence in depth]):
@@ -86,7 +89,9 @@ import (
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
 //     (fail-closed), return 404 for blocked key names (before lookup) or
 //     blocked Meta.Target (after lookup).
-//   - Pull (secret metadata lists: GET /api/v1/secrets?scope=...,
+//   - Pull (secret metadata lists: GET /api/v1/secrets?scope=...
+//     [scope=agent is not agent-reachable (resolveAgentSecretAccess refuses
+//     non-user identities); defence in depth],
 //     GET /api/v1/projects/{id}/secrets,
 //     GET /api/v1/runtime-brokers/{id}/secrets [not agent-reachable
 //     (authorizeBrokerMaterial refuses non-user identities); defence in depth]):

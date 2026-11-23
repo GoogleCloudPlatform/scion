@@ -1632,3 +1632,307 @@ func TestGitHubTokenInstallation_EnvAndSecretMetadataDoorsGuarded(t *testing.T) 
 		assert.Equal(t, http.StatusOK, recSec.Code, recSec.Body.String())
 	})
 }
+
+func TestGitHubTokenInstallation_AgentScopedSecretsGuarded(t *testing.T) {
+	ctx := t.Context()
+
+	enableAgentSecrets := func(t *testing.T, srv *Server, s store.Store) {
+		t.Helper()
+		raw := json.RawMessage(`{"overrides":{"hub.agent_secrets":true}}`)
+		_, err := s.UpsertHubSetting(ctx, "experiments", raw, "test", -1, "managed")
+		require.NoError(t, err)
+		ops := NewOperationalSettings(s, emptyKoanf(), emptyKoanf())
+		_, err = ops.Refresh(ctx)
+		require.NoError(t, err)
+		srv.SetOperationalSettings(ops)
+		require.True(t, srv.experimentEnabled(experiments.AgentSecrets))
+	}
+
+	const agentPAT = "ghp_agent_scope_pat_secret"
+	const agentGH = "ghp_agent_scope_gh_secret"
+	const agentAliasedPAT = "ghp_agent_scope_aliased_pat_secret"
+	const agentAllowedVal = "allowed-agent-scope-value"
+
+	seedAgentScopeSecrets := func(t *testing.T, backend secret.SecretBackend, agentID, projectID, userID string) {
+		t.Helper()
+		for _, in := range []*secret.SetSecretInput{
+			{Name: "GITHUB_TOKEN", Value: agentPAT, SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN", Scope: store.ScopeAgent, ScopeID: agentID, ProjectID: projectID, InjectionMode: store.InjectionModeAlways, CreatedBy: userID, UpdatedBy: userID},
+			{Name: "GH_TOKEN", Value: agentGH, SecretType: store.SecretTypeEnvironment, Target: "GH_TOKEN", Scope: store.ScopeAgent, ScopeID: agentID, ProjectID: projectID, InjectionMode: store.InjectionModeAlways, CreatedBy: userID, UpdatedBy: userID},
+			{Name: "MY_AGENT_PAT", Value: agentAliasedPAT, SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN", Scope: store.ScopeAgent, ScopeID: agentID, ProjectID: projectID, InjectionMode: store.InjectionModeAlways, CreatedBy: userID, UpdatedBy: userID},
+			{Name: "ALLOWED_AGENT_KEY", Value: agentAllowedVal, SecretType: store.SecretTypeEnvironment, Target: "ALLOWED_AGENT_KEY", Scope: store.ScopeAgent, ScopeID: agentID, ProjectID: projectID, InjectionMode: store.InjectionModeAlways, CreatedBy: userID, UpdatedBy: userID},
+		} {
+			_, _, err := backend.Set(ctx, in)
+			require.NoError(t, err)
+		}
+	}
+
+	t.Run("push_create_and_start_strips_agent_scope_github_secrets_for_installation", func(t *testing.T) {
+		st := createTestStore(t)
+		secBackend := secret.NewLocalBackend(st, "test-hub-id", "test-secret")
+
+		installID := int64(65432)
+		require.NoError(t, st.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+			InstallationID: installID,
+			AccountLogin:   "test-org",
+			AccountType:    "Organization",
+			AppID:          7,
+			Status:         store.GitHubInstallationStatusActive,
+		}))
+		proj := &store.Project{
+			ID:                   tid("gh-agentscope-proj"),
+			Name:                 "gh-agentscope",
+			Slug:                 "gh-agentscope",
+			GitHubInstallationID: &installID,
+		}
+		require.NoError(t, st.CreateProject(ctx, proj))
+		broker := &store.RuntimeBroker{
+			ID:       tid("gh-agentscope-broker"),
+			Name:     "gh-agentscope-broker",
+			Slug:     "gh-agentscope-broker",
+			Endpoint: "http://localhost:9800",
+			Status:   store.BrokerStatusOnline,
+		}
+		require.NoError(t, st.CreateRuntimeBroker(ctx, broker))
+		userID := tid("gh-agentscope-user")
+		require.NoError(t, st.CreateUser(ctx, &store.User{
+			ID:          userID,
+			Email:       "gh-agentscope@example.com",
+			DisplayName: "GH Agent Scope User",
+			Role:        store.UserRoleAdmin,
+			Status:      "active",
+		}))
+
+		instAgent := &store.Agent{
+			ID:              api.NewUUID(),
+			Name:            "inst-agent-scope",
+			Slug:            "inst-agent-scope",
+			OwnerID:         userID,
+			Ancestry:        []string{userID},
+			ProjectID:       proj.ID,
+			RuntimeBrokerID: broker.ID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				AgentRole:             string(AgentRoleFull),
+				GitHubTokenPreference: DispatchAgentGitHubTokenInstallation,
+			},
+		}
+		require.NoError(t, st.CreateAgent(ctx, instAgent))
+		seedAgentScopeSecrets(t, secBackend, instAgent.ID, proj.ID, userID)
+
+		minter := &mockGitHubAppMinter{token: "ghs_install_tok_agentscope", expiry: "2026-11-22T06:00:00Z"}
+		d := NewHTTPAgentDispatcherWithClient(st, &mockRuntimeBrokerClient{}, false, slog.Default())
+		d.SetSecretBackend(secBackend)
+		d.SetAuthzService(NewAuthzService(st, slog.Default()))
+		d.SetGitHubAppMinter(minter)
+		d.SetAgentSecretsEnabledProvider(func() bool { return true })
+
+		// Create push path.
+		createReq, err := d.buildCreateRequest(ctx, instAgent, "TestCreateAgentScopeInst")
+		require.NoError(t, err)
+		assert.Equal(t, "ghs_install_tok_agentscope", createReq.ResolvedEnv["GITHUB_TOKEN"])
+		assert.Equal(t, agentAllowedVal, createReq.ResolvedEnv["ALLOWED_AGENT_KEY"])
+		_, hasGH := createReq.ResolvedEnv["GH_TOKEN"]
+		assert.False(t, hasGH)
+		for _, v := range createReq.ResolvedEnv {
+			assert.NotEqual(t, agentPAT, v)
+			assert.NotEqual(t, agentGH, v)
+			assert.NotEqual(t, agentAliasedPAT, v)
+		}
+		for _, s := range createReq.ResolvedSecrets {
+			assert.False(t, isBlockedInstallationGitHubEnvKey(s.Name), "create secret name %q must be dropped", s.Name)
+			assert.False(t, isBlockedInstallationGitHubEnvKey(s.Target), "create secret target %q must be dropped", s.Target)
+		}
+
+		// Start push path.
+		startRes, err := d.buildStartEnv(ctx, instAgent, "DispatchAgentStart", mintSiteStart)
+		require.NoError(t, err)
+		assert.Equal(t, "ghs_install_tok_agentscope", startRes.env["GITHUB_TOKEN"])
+		assert.Equal(t, agentAllowedVal, startRes.env["ALLOWED_AGENT_KEY"])
+		_, hasStartGH := startRes.env["GH_TOKEN"]
+		assert.False(t, hasStartGH)
+		for _, v := range startRes.env {
+			assert.NotEqual(t, agentPAT, v)
+			assert.NotEqual(t, agentGH, v)
+			assert.NotEqual(t, agentAliasedPAT, v)
+		}
+		for _, s := range startRes.secrets {
+			assert.False(t, isBlockedInstallationGitHubEnvKey(s.Name), "start secret name %q must be dropped", s.Name)
+			assert.False(t, isBlockedInstallationGitHubEnvKey(s.Target), "start secret target %q must be dropped", s.Target)
+		}
+
+		// user_preferred control: agent-scoped GITHUB_TOKEN is delivered unchanged.
+		upAgent := &store.Agent{
+			ID:              api.NewUUID(),
+			Name:            "up-agent-scope",
+			Slug:            "up-agent-scope",
+			OwnerID:         userID,
+			Ancestry:        []string{userID},
+			ProjectID:       proj.ID,
+			RuntimeBrokerID: broker.ID,
+			AppliedConfig: &store.AgentAppliedConfig{
+				AgentRole:             string(AgentRoleFull),
+				GitHubTokenPreference: DispatchAgentGitHubTokenUserPreferred,
+			},
+		}
+		require.NoError(t, st.CreateAgent(ctx, upAgent))
+		_, _, err = secBackend.Set(ctx, &secret.SetSecretInput{
+			Name: "GITHUB_TOKEN", Value: agentPAT, SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN",
+			Scope: store.ScopeAgent, ScopeID: upAgent.ID, ProjectID: proj.ID, InjectionMode: store.InjectionModeAlways,
+			CreatedBy: userID, UpdatedBy: userID,
+		})
+		require.NoError(t, err)
+
+		upCreateReq, err := d.buildCreateRequest(ctx, upAgent, "TestCreateAgentScopeUP")
+		require.NoError(t, err)
+		assert.Equal(t, agentPAT, upCreateReq.ResolvedEnv["GITHUB_TOKEN"])
+	})
+
+	t.Run("pull_fetch_get_and_list_block_agent_scope_github_secrets_for_installation", func(t *testing.T) {
+		f := newMaterialFixture(t, "inst-agentscope-pull")
+		f.recordAgentEdge(t)
+		enableAgentSecrets(t, f.Server, f.Store)
+
+		ag, err := f.Store.GetAgent(ctx, f.AgentID)
+		require.NoError(t, err)
+		if ag.AppliedConfig == nil {
+			ag.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		ag.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenInstallation
+		require.NoError(t, f.Store.UpdateAgent(ctx, ag))
+
+		seedAgentScopeSecrets(t, f.Server.secretBackend, f.AgentID, f.ProjectID, f.UserID)
+
+		// GET /api/v1/agents/{id}/secrets/{key} with ?scope=agent and default scope="":
+		// direct blocked names and aliased Target=GITHUB_TOKEN return 404.
+		for _, query := range []string{"?scope=agent", ""} {
+			for _, tc := range []struct {
+				key string
+				val string
+			}{
+				{"GITHUB_TOKEN", agentPAT},
+				{"GH_TOKEN", agentGH},
+				{"MY_AGENT_PAT", agentAliasedPAT},
+			} {
+				rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+					fmt.Sprintf("/api/v1/agents/%s/secrets/%s%s", f.AgentID, tc.key, query), nil, f.Token)
+				assert.Equal(t, http.StatusNotFound, rec.Code, "query=%q key=%s body=%s", query, tc.key, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), tc.val)
+				assert.NotContains(t, rec.Body.String(), base64.StdEncoding.EncodeToString([]byte(tc.val)))
+			}
+			// Positive control: allowed agent-scoped secret remains readable.
+			recOK := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+				fmt.Sprintf("/api/v1/agents/%s/secrets/ALLOWED_AGENT_KEY%s", f.AgentID, query), nil, f.Token)
+			assert.Equal(t, http.StatusOK, recOK.Code, "query=%q body=%s", query, recOK.Body.String())
+		}
+
+		// POST /api/v1/agent/secrets: agent-scoped blocked keys return not_found; allowed returns ok.
+		recFetch := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+			secretFetchRequest{Keys: []string{"GITHUB_TOKEN", "GH_TOKEN", "MY_AGENT_PAT", "ALLOWED_AGENT_KEY"}}, f.Token)
+		require.Equal(t, http.StatusOK, recFetch.Code, recFetch.Body.String())
+		var fetchResp secretFetchResponse
+		require.NoError(t, json.Unmarshal(recFetch.Body.Bytes(), &fetchResp))
+		require.Len(t, fetchResp.Secrets, 4)
+		for i := 0; i < 3; i++ {
+			assert.Equal(t, "not_found", fetchResp.Secrets[i].Status, "key=%s", fetchResp.Secrets[i].Key)
+			assert.Empty(t, fetchResp.Secrets[i].Value, "key=%s", fetchResp.Secrets[i].Key)
+		}
+		assert.Equal(t, "ok", fetchResp.Secrets[3].Status)
+		assert.Equal(t, agentAllowedVal, fetchResp.Secrets[3].Value)
+		assert.NotContains(t, recFetch.Body.String(), agentAliasedPAT)
+
+		// GET /api/v1/agents/{id}/secrets (list) across ?scope=agent, ?scope=all, and default "":
+		// omits blocked direct names and aliased Target=GITHUB_TOKEN, keeps ALLOWED_AGENT_KEY.
+		for _, query := range []string{"?scope=agent", "?scope=all", ""} {
+			recList := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+				fmt.Sprintf("/api/v1/agents/%s/secrets%s", f.AgentID, query), nil, f.Token)
+			require.Equal(t, http.StatusOK, recList.Code, "query=%q body=%s", query, recList.Body.String())
+			var listResp AgentListSecretsResponse
+			require.NoError(t, json.Unmarshal(recList.Body.Bytes(), &listResp))
+			foundAllowed := false
+			for _, m := range listResp.Secrets {
+				assert.False(t, isBlockedInstallationGitHubEnvKey(m.Key), "query=%q leaked blocked key %q", query, m.Key)
+				assert.False(t, isBlockedInstallationGitHubEnvKey(m.Target), "query=%q leaked blocked target %q", query, m.Target)
+				assert.NotEqual(t, "MY_AGENT_PAT", m.Key, "query=%q leaked aliased agent secret", query)
+				if m.Key == "ALLOWED_AGENT_KEY" && m.Scope == store.ScopeAgent {
+					foundAllowed = true
+				}
+			}
+			assert.True(t, foundAllowed, "query=%q missing ALLOWED_AGENT_KEY", query)
+		}
+
+		// Verify selectRuntimeMaterial populates GrantAgentSelfRead + ReasonGitHubTokenInstallationOnly
+		// for both blocked key name and aliased Target at ScopeAgent.
+		identClaims := &AgentTokenClaims{
+			ProjectID: f.ProjectID,
+			Scopes:    []AgentTokenScope{ScopeProjectRead, ScopeProjectSecretRead},
+			Ancestry:  []string{f.UserID},
+		}
+		identClaims.Subject = f.AgentID
+		ident := &agentIdentityWrapper{identClaims}
+		proj, err := f.Store.GetProject(ctx, f.ProjectID)
+		require.NoError(t, err)
+		facts := &TargetFacts{
+			Agent:     ag,
+			ProjectID: f.ProjectID,
+			Project:   proj,
+			Root:      ProvenanceRoot{Kind: "user", ID: f.UserID},
+		}
+		var cache projectDecisionCache
+		for _, key := range []string{"GITHUB_TOKEN", "GH_TOKEN", "MY_AGENT_PAT"} {
+			item, val, _, _ := f.Server.selectRuntimeMaterial(ctx, ident, facts, store.ScopeAgent, key, &cache)
+			assert.False(t, item.Allowed, "key=%s", key)
+			assert.Nil(t, val, "key=%s", key)
+			assert.Equal(t, store.ScopeAgent, item.Scope, "key=%s", key)
+			assert.Equal(t, f.AgentID, item.ScopeID, "key=%s", key)
+			assert.Equal(t, GrantAgentSelfRead, item.Grant, "key=%s", key)
+			assert.Equal(t, ReasonGitHubTokenInstallationOnly, item.Reason, "key=%s", key)
+		}
+	})
+
+	t.Run("user_preferred_agent_scope_unchanged", func(t *testing.T) {
+		f := newMaterialFixture(t, "up-agentscope-pull")
+		f.recordAgentEdge(t)
+		enableAgentSecrets(t, f.Server, f.Store)
+
+		ag, err := f.Store.GetAgent(ctx, f.AgentID)
+		require.NoError(t, err)
+		if ag.AppliedConfig == nil {
+			ag.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		ag.AppliedConfig.GitHubTokenPreference = DispatchAgentGitHubTokenUserPreferred
+		require.NoError(t, f.Store.UpdateAgent(ctx, ag))
+
+		seedAgentScopeSecrets(t, f.Server.secretBackend, f.AgentID, f.ProjectID, f.UserID)
+
+		// GET ?scope=agent succeeds for both direct and aliased keys.
+		for _, key := range []string{"GITHUB_TOKEN", "MY_AGENT_PAT"} {
+			rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+				fmt.Sprintf("/api/v1/agents/%s/secrets/%s?scope=agent", f.AgentID, key), nil, f.Token)
+			assert.Equal(t, http.StatusOK, rec.Code, "key=%s body=%s", key, rec.Body.String())
+		}
+
+		// POST /api/v1/agent/secrets returns ok for agent-scoped GITHUB_TOKEN and MY_AGENT_PAT.
+		recFetch := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
+			secretFetchRequest{Keys: []string{"GITHUB_TOKEN", "MY_AGENT_PAT"}}, f.Token)
+		require.Equal(t, http.StatusOK, recFetch.Code, recFetch.Body.String())
+		var fetchResp secretFetchResponse
+		require.NoError(t, json.Unmarshal(recFetch.Body.Bytes(), &fetchResp))
+		require.Len(t, fetchResp.Secrets, 2)
+		assert.Equal(t, "ok", fetchResp.Secrets[0].Status)
+		assert.Equal(t, agentPAT, fetchResp.Secrets[0].Value)
+		assert.Equal(t, "ok", fetchResp.Secrets[1].Status)
+		assert.Equal(t, agentAliasedPAT, fetchResp.Secrets[1].Value)
+
+		// GET /api/v1/agents/{id}/secrets?scope=agent lists GITHUB_TOKEN and MY_AGENT_PAT.
+		recList := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+			fmt.Sprintf("/api/v1/agents/%s/secrets?scope=agent", f.AgentID), nil, f.Token)
+		require.Equal(t, http.StatusOK, recList.Code, recList.Body.String())
+		var listResp AgentListSecretsResponse
+		require.NoError(t, json.Unmarshal(recList.Body.Bytes(), &listResp))
+		keys := make(map[string]bool, len(listResp.Secrets))
+		for _, m := range listResp.Secrets {
+			keys[m.Key] = true
+		}
+		assert.True(t, keys["GITHUB_TOKEN"])
+		assert.True(t, keys["MY_AGENT_PAT"])
+	})
+}

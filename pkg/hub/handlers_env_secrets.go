@@ -2273,6 +2273,10 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 				if m.SecretType == store.SecretTypeInternal {
 					continue
 				}
+				if usesInstallationGitHubToken(facts.Agent) &&
+					(isBlockedInstallationGitHubEnvKey(m.Name) || isBlockedInstallationGitHubEnvKey(m.Target)) {
+					continue
+				}
 				secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target, Scope: store.ScopeAgent})
 				items = append(items, materialSelectionItem(ItemResult{
 					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeAgent, ScopeID: facts.Agent.ID, Grant: GrantAgentSelfRead, Meta: m},
