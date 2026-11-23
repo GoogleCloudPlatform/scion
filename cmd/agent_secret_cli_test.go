@@ -205,12 +205,12 @@ func TestResolveAgentScopeID_PaginatesAndDetectsAmbiguity(t *testing.T) {
 	require.NoError(t, err)
 
 	// Finds agent on page 2.
-	id, err := resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "page2-agent")
+	id, err := resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "page2-agent", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "22222222-2222-2222-2222-222222222222", id)
 
 	// Detects ambiguity across pages.
-	_, err = resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "dup-agent")
+	_, err = resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "dup-agent", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "matches multiple agents")
 }
@@ -479,6 +479,8 @@ func TestResolveAgentScopeID_HubWideFallbackWarning(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	const projUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const emptyIDProjUUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	const missingProjUUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -496,6 +498,9 @@ func TestResolveAgentScopeID_HubWideFallbackWarning(t *testing.T) {
 			})
 		case "/api/v1/projects/" + projUUID:
 			_ = json.NewEncoder(w).Encode(map[string]string{"id": projUUID, "slug": "proj-1", "name": "proj-1"})
+		case "/api/v1/projects/" + emptyIDProjUUID:
+			// Simulate perr == nil && proj.ID == ""
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "", "slug": "empty-id-proj"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -505,27 +510,43 @@ func TestResolveAgentScopeID_HubWideFallbackWarning(t *testing.T) {
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 
-	// No project context -> warns on stderr when falling back to hub-wide resolution.
-	var resolvedID string
-	var resolveErr error
-	stderr := captureStderr(t, func() {
-		resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "solo-agent")
-	})
+	// 1. No project context -> warns to errOut when falling back to hub-wide resolution.
+	var errBuf bytes.Buffer
+	resolvedID, resolveErr := resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "solo-agent", &errBuf)
 	require.NoError(t, resolveErr)
 	assert.Equal(t, "11111111-1111-1111-1111-111111111111", resolvedID)
-	assert.Contains(t, stderr, "Warning:")
-	assert.Contains(t, stderr, "across all accessible projects")
+	assert.Contains(t, errBuf.String(), "Warning:")
+	assert.Contains(t, errBuf.String(), "across all accessible projects")
 
-	// Valid project context -> no hub-wide fallback warning.
+	// 2. Project resolution error -> warns to errOut.
+	errBuf.Reset()
+	resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, &config.Settings{
+		Hub: &config.HubClientConfig{ProjectID: missingProjUUID},
+	}, false, "solo-agent", &errBuf)
+	require.NoError(t, resolveErr)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", resolvedID)
+	assert.Contains(t, errBuf.String(), "Warning:")
+	assert.Contains(t, errBuf.String(), "across all accessible projects")
+
+	// 3. Project lookup returns nil error but empty ID -> warns to errOut.
+	errBuf.Reset()
+	resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, &config.Settings{
+		Hub: &config.HubClientConfig{ProjectID: emptyIDProjUUID},
+	}, false, "solo-agent", &errBuf)
+	require.NoError(t, resolveErr)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", resolvedID)
+	assert.Contains(t, errBuf.String(), "Warning:")
+	assert.Contains(t, errBuf.String(), "returned no project ID")
+
+	// 4. Valid project context -> no hub-wide fallback warning.
+	errBuf.Reset()
 	settingsWithProj := &config.Settings{
 		Hub: &config.HubClientConfig{ProjectID: projUUID},
 	}
-	stderr = captureStderr(t, func() {
-		resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, settingsWithProj, false, "scoped-agent")
-	})
+	resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, settingsWithProj, false, "scoped-agent", &errBuf)
 	require.NoError(t, resolveErr)
 	assert.Equal(t, "22222222-2222-2222-2222-222222222222", resolvedID)
-	assert.NotContains(t, stderr, "across all accessible projects")
+	assert.Empty(t, errBuf.String())
 }
 
 var _ = sciontoolhub.NewClient // keep import explicit

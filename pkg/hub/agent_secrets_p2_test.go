@@ -757,29 +757,231 @@ func TestAgentSecretsP2_L1_SoftDeleteRaceAndRetryCleanup(t *testing.T) {
 			"expected Error-level log containing secret_name %q; logs:\n%s", expectedExtName, logCapture.String())
 	})
 
-	t.Run("withAgentSecretCleanup catches key written between pre-tx snapshot and commit", func(t *testing.T) {
-		srv, _, _, _, _, agentX, _ := setupAgentSecretsTestFixture(t, true)
+	t.Run("withAgentSecretCleanup captures in-tx keys for external backend whose List reads DB", func(t *testing.T) {
+		srv, s, owner, _, _, agentX, _ := setupAgentSecretsTestFixture(t, true)
 		ctx := context.Background()
 
-		// Initially no secrets exist for agentX; a secret is written inside fn()
-		// (simulating the race window before commit).
-		n, err := srv.withAgentSecretCleanup(ctx, agentX.ID, func() (int, error) {
-			_, _, serr := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+		// Simulate GCPBackend: values live outside the DB, while List reads DB
+		// metadata rows (which DeleteSecretsByScope removes inside the tx).
+		externalValues := map[string]string{}
+		var deletedKeys []string
+		extBackend := &fakeExternalSecretBackend{
+			SecretBackend: srv.GetSecretBackend(),
+			store:         s,
+			values:        externalValues,
+			onDelete: func(name string) {
+				deletedKeys = append(deletedKeys, name)
+			},
+		}
+		srv.SetSecretBackend(extBackend)
+
+		// Initially no secrets exist before withAgentSecretCleanup takes its pre-tx snapshot.
+		// Inside fn, a secret lands in the window before the hard-delete tx runs
+		// agentHardDeleteWork (which lists inside tx and runs DeleteSecretsByScope).
+		n, err := srv.withAgentSecretCleanup(ctx, agentX.ID, func(txCtx context.Context) (int, error) {
+			_, _, serr := extBackend.Set(ctx, &secret.SetSecretInput{
 				Name:       "WINDOW_KEY",
-				Value:      "val",
+				Value:      "ext-secret-val",
 				SecretType: store.SecretTypeEnvironment,
 				Target:     "WINDOW_KEY",
 				Scope:      secret.ScopeAgent,
 				ScopeID:    agentX.ID,
 				ProjectID:  agentX.ProjectID,
 			})
-			return 1, serr
+			if serr != nil {
+				return 0, serr
+			}
+			now := time.Now()
+			err := s.WithTx(txCtx, func(tx store.Store) error {
+				_, _, werr := srv.agentHardDeleteWork(txCtx, tx, agentX, AuditActor{PrincipalKind: "user", PrincipalID: owner.ID}, store.Deactivation{
+					Cause: store.EdgeDeactivationAgentHardDelete,
+					At:    &now,
+					OpID:  api.NewUUID(),
+				}, "test hard delete")
+				return werr
+			})
+			return 1, err
 		})
 		require.NoError(t, err)
 		assert.Equal(t, 1, n)
 
-		// Post-commit re-list + delete must have removed WINDOW_KEY.
-		_, err = srv.GetSecretBackend().Get(ctx, "WINDOW_KEY", secret.ScopeAgent, agentX.ID)
+		// DB rows are gone (so extBackend.List returns empty, just like GCPBackend.List),
+		// yet external Delete WAS called for WINDOW_KEY via the in-tx collector.
+		remainingDB, err := extBackend.List(ctx, secret.Filter{Scope: secret.ScopeAgent, ScopeID: agentX.ID})
+		require.NoError(t, err)
+		assert.Empty(t, remainingDB)
+		assert.Contains(t, deletedKeys, "WINDOW_KEY")
+		assert.NotContains(t, externalValues, "WINDOW_KEY")
+	})
+
+	t.Run("create-time secret write racing agent delete compensates and answers 409", func(t *testing.T) {
+		srv, s, owner, _, project, _, _ := setupAgentSecretsTestFixture(t, true)
+		attachOnlineBrokerForP2Test(t, srv, s, project)
+		ctx := context.Background()
+
+		origBackend := srv.GetSecretBackend()
+		var createdAgentID string
+		srv.SetSecretBackend(&failingSetSecretBackend{
+			SecretBackend: origBackend,
+			afterSetHook: func(hctx context.Context, input *secret.SetSecretInput) {
+				createdAgentID = input.ScopeID
+				// Simulate a concurrent delete removing the newly created agent while Set is in flight.
+				_ = s.DeleteAgent(hctx, input.ScopeID)
+			},
+		})
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+			Name:          "create-race-agent",
+			ProjectID:     project.ID,
+			ProvisionOnly: true,
+			Secrets:       []AgentSecretInput{{Key: "CREATE_RACED", Value: "secret-val"}},
+		})
+		require.Equal(t, http.StatusConflict, rec.Code, "body=%s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "delete_in_progress")
+		require.NotEmpty(t, createdAgentID)
+
+		_, err := origBackend.Get(ctx, "CREATE_RACED", secret.ScopeAgent, createdAgentID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "raced create-time secret must be compensated")
+	})
+
+	t.Run("existing-agent upsert racing agent delete compensates and answers 404", func(t *testing.T) {
+		srv, s, owner, _, project, _, _ := setupAgentSecretsTestFixture(t, true)
+		broker := attachOnlineBrokerForP2Test(t, srv, s, project)
+		ctx := context.Background()
+
+		existing := &store.Agent{
+			ID:              api.NewUUID(),
+			Slug:            "upsert-race-agent",
+			Name:            "upsert-race-agent",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: broker.ID,
+			OwnerID:         owner.ID,
+			CreatedBy:       owner.ID,
+			Ancestry:        []string{owner.ID},
+			Phase:           string(state.PhaseStopped),
+			AppliedConfig:   &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		}
+		require.NoError(t, s.CreateAgent(ctx, existing))
+
+		disp := &p2StartRecordingDispatcher{}
+		srv.SetDispatcher(disp)
+
+		origBackend := srv.GetSecretBackend()
+		srv.SetSecretBackend(&failingSetSecretBackend{
+			SecretBackend: origBackend,
+			afterSetHook: func(hctx context.Context, input *secret.SetSecretInput) {
+				_ = s.DeleteAgent(hctx, input.ScopeID)
+			},
+		})
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+			Name:    existing.Slug,
+			Resume:  true,
+			Secrets: []AgentSecretInput{{Key: "UPSERT_RACED", Value: "secret-val"}},
+		})
+		require.Equal(t, http.StatusNotFound, rec.Code, "body=%s", rec.Body.String())
+		assert.False(t, disp.wasStarted())
+
+		_, err := origBackend.Get(ctx, "UPSERT_RACED", secret.ScopeAgent, existing.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "raced upsert secret must be compensated")
+	})
+
+	t.Run("compensation cleanup runs even when agent row is already absent (n==0)", func(t *testing.T) {
+		srv, s, _, _, _, agentX, _ := setupAgentSecretsTestFixture(t, true)
+		ctx := context.Background()
+
+		_, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+			Name:       "ORPHAN_COMP_KEY",
+			Value:      "val",
+			SecretType: store.SecretTypeEnvironment,
+			Target:     "ORPHAN_COMP_KEY",
+			Scope:      secret.ScopeAgent,
+			ScopeID:    agentX.ID,
+			ProjectID:  agentX.ProjectID,
+		})
+		require.NoError(t, err)
+
+		// Delete the agent row directly so FinalizeAgentDeletion would return n == 0.
+		require.NoError(t, s.DeleteAgent(ctx, agentX.ID))
+
+		n, err := srv.withAgentSecretCleanupOnCompensation(ctx, agentX.ID, func(_ context.Context) (int, error) {
+			return 0, nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 0, n)
+
+		_, err = srv.GetSecretBackend().Get(ctx, "ORPHAN_COMP_KEY", secret.ScopeAgent, agentX.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "compensation cleanup must remove secrets even when n==0 and row is absent")
+	})
+
+	t.Run("start-gate in-flight branch returns 409 when secrets are supplied", func(t *testing.T) {
+		srv, s, owner, _, project, _, _ := setupAgentSecretsTestFixture(t, true)
+		broker := attachOnlineBrokerForP2Test(t, srv, s, project)
+		ctx := context.Background()
+
+		inflight := &store.Agent{
+			ID:              api.NewUUID(),
+			Slug:            "inflight-sec-agent",
+			Name:            "inflight-sec-agent",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: broker.ID,
+			OwnerID:         owner.ID,
+			CreatedBy:       owner.ID,
+			Ancestry:        []string{owner.ID},
+			Phase:           string(state.PhaseStarting),
+			AppliedConfig:   &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+		}
+		require.NoError(t, s.CreateAgent(ctx, inflight))
+		_, err := s.BeginLaunch(ctx, inflight.ID, store.LaunchKindCreate, 5*time.Minute)
+		require.NoError(t, err)
+
+		rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents", CreateAgentRequest{
+			Name:    inflight.Slug,
+			Resume:  true,
+			Secrets: []AgentSecretInput{{Key: "INFLIGHT_KEY", Value: "val"}},
+		})
+		require.Equal(t, http.StatusConflict, rec.Code, "body=%s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "already in flight")
+
+		_, err := srv.GetSecretBackend().Get(ctx, "INFLIGHT_KEY", secret.ScopeAgent, inflight.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
+}
+
+// fakeExternalSecretBackend simulates GCPBackend's split storage model: values
+// live in an external map outside the DB, while List queries the DB metadata
+// table (which DeleteSecretsByScope deletes inside a transaction).
+type fakeExternalSecretBackend struct {
+	secret.SecretBackend
+	store    store.Store
+	mu       sync.Mutex
+	values   map[string]string
+	onDelete func(name string)
+}
+
+func (b *fakeExternalSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
+	created, meta, err := b.SecretBackend.Set(ctx, input)
+	if err != nil {
+		return false, nil, err
+	}
+	b.mu.Lock()
+	b.values[input.Name] = input.Value
+	b.mu.Unlock()
+	return created, meta, nil
+}
+
+func (b *fakeExternalSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	return b.SecretBackend.List(ctx, filter)
+}
+
+func (b *fakeExternalSecretBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
+	b.mu.Lock()
+	delete(b.values, name)
+	cb := b.onDelete
+	b.mu.Unlock()
+	if cb != nil {
+		cb(name)
+	}
+	_ = b.SecretBackend.Delete(ctx, name, scope, scopeID)
+	return nil
 }

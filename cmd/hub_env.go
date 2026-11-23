@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -287,7 +288,7 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 		}
 		return broker.ID, nil
 	case "agent":
-		return resolveAgentScopeID(ctx, client, nil, uat, scopeID)
+		return resolveAgentScopeID(ctx, client, nil, uat, scopeID, os.Stderr)
 	}
 	return scopeID, nil
 }
@@ -295,20 +296,26 @@ func resolveScopeID(ctx context.Context, client hubclient.Client, scope, scopeID
 // resolveAgentScopeID resolves an agent name, slug, or ID to its UUID.
 // When a project can be inferred from settings/context, resolution is scoped
 // to that project (paginating through all agents in the project); otherwise
-// it paginates across all accessible agents and detects same-name ambiguity.
-func resolveAgentScopeID(ctx context.Context, client hubclient.Client, settings *config.Settings, uat bool, agentRef string) (string, error) {
+// it warns to errOut, paginates across all accessible agents, and detects
+// same-name ambiguity.
+func resolveAgentScopeID(ctx context.Context, client hubclient.Client, settings *config.Settings, uat bool, agentRef string, errOut io.Writer) (string, error) {
 	if _, err := uuid.Parse(agentRef); err == nil {
 		return agentRef, nil
+	}
+	if errOut == nil {
+		errOut = os.Stderr
 	}
 	agentSvc := client.Agents()
 	if projRef, _, err := inferScopeProject(settings); err == nil && projRef != "" {
 		if proj, perr := resolveProjectByNameOrID(ctx, client, projRef, uat); perr == nil && proj != nil && proj.ID != "" {
 			agentSvc = client.ProjectAgents(proj.ID)
 		} else if perr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not resolve inferred project %q (%v); resolving agent %q across all accessible projects\n", projRef, perr, agentRef)
+			_, _ = fmt.Fprintf(errOut, "Warning: could not resolve inferred project %q (%v); resolving agent %q across all accessible projects\n", projRef, perr, agentRef)
+		} else {
+			_, _ = fmt.Fprintf(errOut, "Warning: inferred project %q returned no project ID; resolving agent %q across all accessible projects\n", projRef, agentRef)
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "Warning: no project context found; resolving agent %q across all accessible projects\n", agentRef)
+		_, _ = fmt.Fprintf(errOut, "Warning: no project context found; resolving agent %q across all accessible projects\n", agentRef)
 	}
 	agent, err := resolveReferenceAgent(ctx, agentSvc, agentRef)
 	if err != nil {

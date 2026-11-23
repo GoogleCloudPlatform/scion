@@ -716,6 +716,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 
 	if len(validatedSecrets) > 0 {
 		if err := s.storeCreateAgentSecrets(ctx, agent, validatedSecrets, headlessSecretCreatorAttribution(hc.Authority), true); err != nil {
+			if errors.Is(err, errAgentDeletedDuringSecretWrite) {
+				return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, errScheduledChildDeletedDuringCreate)
+			}
 			slog.ErrorContext(ctx, "headless agent create: failed to store create-time agent secrets; rolling back agent",
 				"agent_id", agent.ID, "error", err)
 			if rbErr := rollback(createRollback{Stage: createStageSecrets, Cause: err}); rbErr != nil {

@@ -353,15 +353,15 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 	// edgesAndAudit runs in the compensation's transaction, after the row
 	// delete.
 	actor := auditActorFromContext(ctx)
-	edgesAndAudit := func(tx store.Store) error {
-		if _, _, err := s.agentHardDeleteWork(ctx, tx, c.Agent, actor, store.Deactivation{
+	edgesAndAudit := func(txCtx context.Context, tx store.Store) error {
+		if _, _, err := s.agentHardDeleteWork(txCtx, tx, c.Agent, actor, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
 			OpID:  opID,
 		}, "compensation"); err != nil {
 			return err
 		}
-		if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		if err := tx.CreateMutationAudit(txCtx, record); err != nil {
 			return fmt.Errorf("compensation audit: %w", err)
 		}
 		return nil
@@ -373,9 +373,11 @@ func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation
 	// bumps state_version, so the row delete misses and the attempt is
 	// retried from a fresh read, which then refuses.
 	rbCtx := lifecycleCreateRollback(ctx, c.Stage)
-	n, err := s.withAgentSecretCleanup(rbCtx, agentID, func() (int, error) {
-		return s.store.FinalizeAgentDeletion(rbCtx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
-			createRowHeldCheck(edgesAndAudit))
+	n, err := s.withAgentSecretCleanupOnCompensation(rbCtx, agentID, func(txCtx context.Context) (int, error) {
+		return s.store.FinalizeAgentDeletion(txCtx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+			createRowHeldCheck(func(tx store.Store) error {
+				return edgesAndAudit(txCtx, tx)
+			}))
 	})
 	if errors.Is(err, errCreateRowDeleteHeld) {
 		return errCreateRowDeleteHeld

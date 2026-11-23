@@ -1641,13 +1641,12 @@ var agentDeletionFinalizeSeam store.DeletionFinalizeHook = func(context.Context,
 // agentDeletionFinalizeSeam var first, then the Server's lifecycle finalize,
 // agent_lifecycle_tx.go).
 func (s *Server) finalizeAgentDeletion(ctx context.Context, agentID string, pred store.DeletionPredicate, mode store.DeletionFinalizeMode, set store.DeletionFields) (int, error) {
-	run := func() (int, error) {
-		return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, s.agentFinalizeHook)
-	}
 	if mode == store.DeletionFinalizeHard {
-		return s.withAgentSecretCleanup(ctx, agentID, run)
+		return s.withAgentSecretCleanup(ctx, agentID, func(txCtx context.Context) (int, error) {
+			return s.store.FinalizeAgentDeletion(txCtx, agentID, pred, mode, set, s.agentFinalizeHook)
+		})
 	}
-	return run()
+	return s.store.FinalizeAgentDeletion(ctx, agentID, pred, mode, set, s.agentFinalizeHook)
 }
 
 // --- Request side (design §2.4) ---

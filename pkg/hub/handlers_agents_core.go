@@ -1389,10 +1389,10 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agent *store.Agent, 
 			defer cancel()
 			now := time.Now()
 			var n int
-			n, err = s.withAgentSecretCleanup(sctx, agentID, func() (int, error) {
-				return s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+			n, err = s.withAgentSecretCleanupOnCompensation(sctx, agentID, func(txCtx context.Context) (int, error) {
+				return s.store.FinalizeAgentDeletion(txCtx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 					createRowHeldCheck(func(tx store.Store) error {
-						_, _, werr := s.agentHardDeleteWork(sctx, tx, agent, actor, store.Deactivation{
+						_, _, werr := s.agentHardDeleteWork(txCtx, tx, agent, actor, store.Deactivation{
 							Cause: store.EdgeDeactivationCreateCompensation,
 							At:    &now,
 							OpID:  opID,
@@ -2808,6 +2808,13 @@ func (s *Server) createAgentInProject(
 	// written, hard-delete the new agent via failCreate, and return 503.
 	if len(validatedSecrets) > 0 {
 		if err := s.storeCreateAgentSecrets(ctx, agent, validatedSecrets, secretCreatorAttribution(ctx, createdBy), true); err != nil {
+			if errors.Is(err, errAgentDeletedDuringSecretWrite) {
+				// Agent was deleted while create-time secrets were being written.
+				// storeCreateAgentSecrets already compensated the written secrets;
+				// answer as a lost delete race (409 delete_in_progress).
+				writeDeletedDuringCreate(w, agent.ID, nil)
+				return
+			}
 			slog.ErrorContext(ctx, "agent create: failed to store create-time agent secrets; rolling back agent",
 				"agent_id", agent.ID, "error", err)
 			failCreate(createRollback{Stage: createStageSecrets, Cause: err}, func() {

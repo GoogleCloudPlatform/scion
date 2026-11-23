@@ -219,7 +219,7 @@ func resolveHubScopeWith(
 		return client, scope, project.ID, ctx, cancel, nil
 	}
 	if scope == "agent" {
-		scopeID, err = resolveAgentScopeID(ctx, client, settings, uat, scopeID)
+		scopeID, err = resolveAgentScopeID(ctx, client, settings, uat, scopeID, cmd.ErrOrStderr())
 		if err != nil {
 			cancel()
 			return nil, "", "", nil, nil, err

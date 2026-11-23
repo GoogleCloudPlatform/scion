@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -376,6 +377,11 @@ func (s *Server) storeCreateAgentSecrets(ctx context.Context, agent *store.Agent
 		}
 		written = append(written, sec.Key)
 	}
+	// Close the write vs delete race: if the agent was deleted or soft-deleted
+	// while backend.Set was in flight, compensate by removing the written keys.
+	if s.compensateIfAgentDeleted(ctx, agent.ID, written) {
+		return errAgentDeletedDuringSecretWrite
+	}
 	return nil
 }
 
@@ -392,24 +398,26 @@ func (s *Server) upsertExistingAgentSecrets(ctx context.Context, w http.Response
 		Unauthorized(w)
 		return false
 	}
-	if s.authzService != nil {
-		decision := s.authzService.CheckAccess(ctx, identity, Resource{
-			Type:       "agent",
-			ID:         existingAgent.ID,
-			OwnerID:    existingAgent.OwnerID,
-			ParentType: "project",
-			ParentID:   existingAgent.ProjectID,
-		}, ActionUpdate)
-		if !decision.Allowed {
-			Forbidden(w)
-			return false
-		}
+	decision := s.authzService.CheckAccess(ctx, identity, Resource{
+		Type:       "agent",
+		ID:         existingAgent.ID,
+		OwnerID:    existingAgent.OwnerID,
+		ParentType: "project",
+		ParentID:   existingAgent.ProjectID,
+	}, ActionUpdate)
+	if !decision.Allowed {
+		Forbidden(w)
+		return false
 	}
 	if !existingAgent.DeletedAt.IsZero() {
 		NotFound(w, "Agent")
 		return false
 	}
 	if err := s.storeCreateAgentSecrets(ctx, existingAgent, createSecrets, secretCreatorAttribution(ctx, createdBy), false); err != nil {
+		if errors.Is(err, errAgentDeletedDuringSecretWrite) {
+			NotFound(w, "Agent")
+			return false
+		}
 		slog.ErrorContext(ctx, "agent start: failed to store agent secrets on existing agent",
 			"agent_id", existingAgent.ID, "error", err)
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, existingAgentSecretsStoreFailedMessage, nil)
