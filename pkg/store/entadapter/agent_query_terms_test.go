@@ -271,3 +271,23 @@ func TestListAgents_QueryTerms_BackslashLabelKeys(t *testing.T) {
 		})
 	}
 }
+
+func TestPostgresLabelJSONOperand_ControlCharacters(t *testing.T) {
+	cases := []struct {
+		key, val string
+	}{
+		{key: "k\x00null", val: "v\x01soh"},
+		{key: "k\nline", val: "v\t\"quote\"\\"},
+		{key: `foo\`, val: "bar"},
+	}
+	for _, tc := range cases {
+		raw := postgresLabelJSONOperand(tc.key, tc.val)
+		var decoded map[string]string
+		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+			t.Fatalf("postgresLabelJSONOperand(%q, %q) = %s is not valid JSON: %v", tc.key, tc.val, raw, err)
+		}
+		if len(decoded) != 1 || decoded[tc.key] != tc.val {
+			t.Fatalf("decoded = %#v, want map[%q:%q]", decoded, tc.key, tc.val)
+		}
+	}
+}

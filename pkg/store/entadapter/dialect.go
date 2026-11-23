@@ -15,6 +15,7 @@
 package entadapter
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -72,6 +73,14 @@ func labelContains(key, value string) predicate.Agent {
 	}
 }
 
+// postgresLabelJSONOperand encodes a single label key-value pair as valid
+// RFC 8259 JSON for Postgres `@> ...::jsonb` containment checks, safely
+// handling control characters, quotes, and backslashes.
+func postgresLabelJSONOperand(key, value string) string {
+	b, _ := json.Marshal(map[string]string{key: value})
+	return string(b)
+}
+
 // labelNotContains returns an Ent predicate restricting results to agents whose
 // `labels` JSON object does NOT contain the given key-value pair (NULL labels,
 // absent key, or different value).
@@ -86,7 +95,7 @@ func labelNotContains(key, value string) predicate.Agent {
 					WriteString(" IS NULL OR NOT (").
 					WriteString(col).
 					WriteString(" @> ").
-					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					Arg(postgresLabelJSONOperand(key, value)).
 					WriteString("::jsonb))")
 			}))
 		default: // SQLite
