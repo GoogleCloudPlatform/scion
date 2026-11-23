@@ -1617,6 +1617,12 @@ authDone:
 	}
 
 	exists, err := m.Runtime.ImageExists(ctx, resolvedImage)
+	if err != nil {
+		var lf *runtime.LaunchFailure
+		if errors.As(err, &lf) {
+			return nil, err
+		}
+	}
 	if err != nil || !exists {
 		if err := m.Runtime.PullImage(ctx, resolvedImage); err != nil {
 			return nil, fmt.Errorf("failed to pull image '%s': %w", resolvedImage, err)

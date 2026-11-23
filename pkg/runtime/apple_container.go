@@ -155,7 +155,14 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 			rollbackCancelledCreate(r.Command, config.Name, config.Labels[api.LabelRunID])
 			return "", ctx.Err()
 		}
-		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
+		runErr := fmt.Errorf("container run failed: %w (output: %s)", err, out)
+		if code, step := classifyAppleContainerRunError(out, err); code != "" {
+			if step == api.LaunchStepImagePull {
+				hooks.progress(api.LaunchStepImagePull)
+			}
+			return "", newLaunchFailure(code, step, "", runErr)
+		}
+		return "", runErr
 	}
 
 	// The output of 'container run -d' is the container ID
@@ -616,7 +623,13 @@ func (r *AppleContainerRuntime) ImageExists(ctx context.Context, image string) (
 		if isImageNotFoundOutput(out) {
 			return false, nil
 		}
+		if ctx.Err() == nil && isAppleContainerDaemonConnectError(out) {
+			return false, newLaunchFailure(api.LaunchCodeRuntimeUnavailable, api.LaunchStepLaunching, "", err)
+		}
 		return false, err
+	}
+	if ctx.Err() == nil && isRuntimeBinaryNotFound(err) {
+		return false, newLaunchFailure(api.LaunchCodeRuntimeUnavailable, api.LaunchStepLaunching, "", err)
 	}
 	return false, err
 }
@@ -632,12 +645,21 @@ func (r *AppleContainerRuntime) RemoveImage(ctx context.Context, image string) e
 }
 
 func (r *AppleContainerRuntime) PullImage(ctx context.Context, image string) error {
+	reportLaunchProgress(ctx, api.LaunchStepImagePull)
 	out, err := runSimpleCommand(ctx, r.Command, "image", "pull", image)
 	if err != nil {
+		var pullErr error
 		if trimmed := strings.TrimSpace(out); trimmed != "" {
-			return fmt.Errorf("pull %q: %w\n%s", image, err, trimmed)
+			pullErr = fmt.Errorf("pull %q: %w\n%s", image, err, trimmed)
+		} else {
+			pullErr = fmt.Errorf("pull %q: %w", image, err)
 		}
-		return fmt.Errorf("pull %q: %w", image, err)
+		if ctx.Err() == nil {
+			if code := classifyAppleContainerPullError(image, out, err); code != "" {
+				return newLaunchFailure(code, api.LaunchStepImagePull, "", pullErr)
+			}
+		}
+		return pullErr
 	}
 	return nil
 }

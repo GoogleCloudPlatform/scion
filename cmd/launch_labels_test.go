@@ -192,6 +192,12 @@ func TestWaitForAgentLaunch_FailureNamesCodeAndStepLabels(t *testing.T) {
 			want:   "agent 'a1' did not start (image_pull_failed) while preparing the container (image pull, volume mounts): container_create: the agent image could not be pulled (ImagePullBackOff)",
 		},
 		{
+			name:   "runtime unavailable: the message already carries the label",
+			launch: hubclient.AgentLaunch{Kind: "create", Error: "runtime_unavailable", Step: "launching"},
+			msg:    "launching: the container runtime is not running or could not be reached; start the container runtime and retry",
+			want:   "agent 'a1' create did not complete (runtime_unavailable) while launching: launching: the container runtime is not running or could not be reached; start the container runtime and retry",
+		},
+		{
 			name:   "NFS volume mount failure: the message already carries the label",
 			launch: hubclient.AgentLaunch{Kind: "start", Error: "volume_mount_failed", Step: "container_create"},
 			msg:    "container_create: an agent volume could not be mounted (FailedMount)",
@@ -266,6 +272,7 @@ func TestWaitForAgentLaunch_FailureNamesCodeAndStepLabels(t *testing.T) {
 func launchCodeText(code string) string {
 	return map[string]string{
 		"image_pull_failed":   "the agent image could not be pulled",
+		"runtime_unavailable": "the container runtime is not running or could not be reached; start the container runtime and retry",
 		"launch_timeout":      "the launch timed out",
 		"pod_disrupted":       "the agent pod was preempted, evicted or deleted while starting",
 		"volume_mount_failed": "an agent volume could not be mounted",

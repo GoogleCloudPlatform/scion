@@ -46,7 +46,7 @@ const (
 	// tell them apart).
 	LaunchStepContainerCreate = "container_create"
 	// LaunchStepImagePull: pulling the agent image before starting the
-	// container (e.g. on the Docker runtime).
+	// container (local container runtimes: Docker, Podman, Apple Container).
 	LaunchStepImagePull = "image_pull"
 	// LaunchStepContainerStart: the main container is running and the
 	// runtime is waiting for it to accept commands.
@@ -103,11 +103,15 @@ const (
 	LaunchCodeHostedConfigRefused = "hosted_config_refused"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
-	// (Kubernetes ImagePullBackOff or ErrImagePull, or a failed Docker pull).
+	// (Kubernetes ImagePullBackOff or ErrImagePull, or a failed local
+	// container runtime pull).
 	LaunchCodeImagePullFailed = "image_pull_failed"
 	// LaunchCodeInvalidImage: the image reference is not valid
-	// (Kubernetes InvalidImageName, or a malformed Docker image reference).
+	// (Kubernetes InvalidImageName, or a malformed container image reference).
 	LaunchCodeInvalidImage = "invalid_image"
+	// LaunchCodeRuntimeUnavailable: the local container runtime daemon or
+	// service is not running or could not be reached.
+	LaunchCodeRuntimeUnavailable = "runtime_unavailable"
 	// LaunchCodeImageLacksNetnsSetup: the agent image does not support the
 	// `sciontool netns-setup` sidecar required by the broker for
 	// runtime-managed metadata interception (broker/image version skew).
