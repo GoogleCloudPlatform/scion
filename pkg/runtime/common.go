@@ -3136,13 +3136,21 @@ func netnsSetupContainerName(containerID string) string {
 
 // effectiveInitFirewall returns the SCION_INIT_FIREWALL value the agent
 // container will observe, from the same sources buildCommonRunArgs emits:
-// cfg.Env "K=V", bare "K" (broker os.LookupEnv), and env-type ResolvedSecrets.
-// Precedence matches buildCommonRunArgs and the container engine: cfg.Env
-// entries are applied in order (later -e wins, and an unset bare entry does
-// not override an earlier value), and any key present in cfg.Env blocks
-// ResolvedSecrets with the same target; otherwise env-type ResolvedSecrets are
-// applied in order (later -e wins).
+// ResolvedAuth.EnvVars (when cfg.Harness != nil && cfg.ResolvedAuth != nil and
+// non-empty), cfg.Env "K=V", bare "K" (broker os.LookupEnv), and env-type
+// ResolvedSecrets. Precedence matches buildCommonRunArgs and the container
+// engine: ResolvedAuth is lowest precedence; cfg.Env entries are applied next
+// in order (later -e wins, and an unset bare entry does not override an
+// earlier value), and any key present in cfg.Env blocks ResolvedSecrets with
+// the same target; otherwise env-type ResolvedSecrets are applied in order
+// (later -e wins, overriding ResolvedAuth).
 func effectiveInitFirewall(cfg RunConfig) (value string, set bool) {
+	if cfg.Harness != nil && cfg.ResolvedAuth != nil {
+		if v := cfg.ResolvedAuth.EnvVars[initFirewallEnvVar]; v != "" {
+			value = v
+			set = true
+		}
+	}
 	inEnv := false
 	for _, e := range cfg.Env {
 		k, v, hasEq := strings.Cut(e, "=")
@@ -3174,6 +3182,25 @@ func effectiveInitFirewall(cfg RunConfig) (value string, set bool) {
 		set = true
 	}
 	return value, set
+}
+
+// normalizeInitFirewallArg maps a resolved SCION_INIT_FIREWALL value to a
+// fixed canonical token ("true", "false", or "invalid") for the netns-setup
+// container argv so raw values (including secret-sourced values) are never
+// placed verbatim on the command line. Empty and whitespace-only values are
+// omitted.
+func normalizeInitFirewallArg(raw string) (string, bool) {
+	if strings.TrimSpace(raw) == "" {
+		return "", false
+	}
+	on, err := CloudRunInitFirewallRequested(raw)
+	if err != nil {
+		return "invalid", true
+	}
+	if on {
+		return "true", true
+	}
+	return "false", true
 }
 
 // checkFirewallWithoutMetadataInterception refuses launches on Docker or
@@ -3294,8 +3321,10 @@ func buildNetnsSetupArgs(containerID string, cfg RunConfig) []string {
 			args = append(args, "-e", k+"="+v)
 		}
 	}
-	if v, ok := effectiveInitFirewall(cfg); ok && v != "" {
-		args = append(args, "-e", initFirewallEnvVar+"="+v)
+	if v, ok := effectiveInitFirewall(cfg); ok {
+		if norm, emit := normalizeInitFirewallArg(v); emit {
+			args = append(args, "-e", initFirewallEnvVar+"="+norm)
+		}
 	}
 	args = append(args,
 		"--label", netnsSetupLabelKey+"="+containerID,

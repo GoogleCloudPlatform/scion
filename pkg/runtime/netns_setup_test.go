@@ -842,6 +842,64 @@ func TestEffectiveInitFirewall(t *testing.T) {
 			t.Fatalf("got (%q, %v), want (\"\", false)", v, ok)
 		}
 	})
+
+	t.Run("ResolvedAuth.EnvVars only", func(t *testing.T) {
+		v, ok := effectiveInitFirewall(RunConfig{
+			Harness: &harness.Generic{},
+			ResolvedAuth: &api.ResolvedAuth{
+				EnvVars: map[string]string{"SCION_INIT_FIREWALL": "true"},
+			},
+		})
+		if !ok || v != "true" {
+			t.Fatalf("got (%q, %v), want (\"true\", true)", v, ok)
+		}
+	})
+
+	t.Run("ResolvedAuth.EnvVars ignored when Harness is nil or value is empty", func(t *testing.T) {
+		if v, ok := effectiveInitFirewall(RunConfig{
+			ResolvedAuth: &api.ResolvedAuth{
+				EnvVars: map[string]string{"SCION_INIT_FIREWALL": "true"},
+			},
+		}); ok || v != "" {
+			t.Fatalf("nil Harness: got (%q, %v), want (\"\", false)", v, ok)
+		}
+		if v, ok := effectiveInitFirewall(RunConfig{
+			Harness: &harness.Generic{},
+			ResolvedAuth: &api.ResolvedAuth{
+				EnvVars: map[string]string{"SCION_INIT_FIREWALL": ""},
+			},
+		}); ok || v != "" {
+			t.Fatalf("empty auth value: got (%q, %v), want (\"\", false)", v, ok)
+		}
+	})
+
+	t.Run("ResolvedAuth.EnvVars overridden by cfg.Env", func(t *testing.T) {
+		v, ok := effectiveInitFirewall(RunConfig{
+			Harness: &harness.Generic{},
+			ResolvedAuth: &api.ResolvedAuth{
+				EnvVars: map[string]string{"SCION_INIT_FIREWALL": "true"},
+			},
+			Env: []string{"SCION_INIT_FIREWALL=false"},
+		})
+		if !ok || v != "false" {
+			t.Fatalf("got (%q, %v), want (\"false\", true)", v, ok)
+		}
+	})
+
+	t.Run("ResolvedAuth.EnvVars overridden by ResolvedSecret", func(t *testing.T) {
+		v, ok := effectiveInitFirewall(RunConfig{
+			Harness: &harness.Generic{},
+			ResolvedAuth: &api.ResolvedAuth{
+				EnvVars: map[string]string{"SCION_INIT_FIREWALL": "true"},
+			},
+			ResolvedSecrets: []api.ResolvedSecret{
+				{Name: "fw", Type: "environment", Target: "SCION_INIT_FIREWALL", Value: "false"},
+			},
+		})
+		if !ok || v != "false" {
+			t.Fatalf("got (%q, %v), want (\"false\", true)", v, ok)
+		}
+	})
 }
 
 func TestBuildNetnsSetupArgs_InitFirewallSources(t *testing.T) {
@@ -866,6 +924,160 @@ func TestBuildNetnsSetupArgs_InitFirewallSources(t *testing.T) {
 		})
 		if !strings.Contains(strings.Join(got, " "), "-e SCION_INIT_FIREWALL=true") {
 			t.Fatalf("buildNetnsSetupArgs() missing forwarded secret SCION_INIT_FIREWALL=true: %v", got)
+		}
+	})
+
+	t.Run("normalizes secret and non-boolean values without leaking raw value", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			raw       string
+			wantFlag  string
+			wantOmit  bool
+			forbidRaw bool
+		}{
+			{name: "truthy 1", raw: " 1 ", wantFlag: "SCION_INIT_FIREWALL=true", forbidRaw: true},
+			{name: "truthy TRUE", raw: "TRUE", wantFlag: "SCION_INIT_FIREWALL=true", forbidRaw: true},
+			{name: "falsy 0", raw: "0", wantFlag: "SCION_INIT_FIREWALL=false", forbidRaw: true},
+			{name: "falsy FALSE", raw: "FALSE", wantFlag: "SCION_INIT_FIREWALL=false", forbidRaw: true},
+			{name: "invalid secret", raw: "secret-payload-do-not-leak", wantFlag: "SCION_INIT_FIREWALL=invalid", forbidRaw: true},
+			{name: "empty", raw: "", wantOmit: true},
+			{name: "whitespace", raw: "  \t ", wantOmit: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := buildNetnsSetupArgs("abcdef0123456789", RunConfig{
+					Image: "scion-agent:test",
+					Env:   []string{"SCION_METADATA_MODE=block"},
+					ResolvedSecrets: []api.ResolvedSecret{
+						{Name: "fw", Type: "environment", Target: "SCION_INIT_FIREWALL", Value: tc.raw},
+					},
+				})
+				joined := strings.Join(got, " ")
+				if tc.wantOmit {
+					if strings.Contains(joined, "SCION_INIT_FIREWALL") {
+						t.Fatalf("expected SCION_INIT_FIREWALL to be omitted for %q, got %v", tc.raw, got)
+					}
+					return
+				}
+				if !strings.Contains(joined, "-e "+tc.wantFlag) {
+					t.Fatalf("buildNetnsSetupArgs() missing %q for raw %q; got %v", tc.wantFlag, tc.raw, got)
+				}
+				if tc.forbidRaw && strings.Contains(joined, "SCION_INIT_FIREWALL="+tc.raw) {
+					t.Fatalf("setup argv must not contain raw secret value %q; got %v", tc.raw, got)
+				}
+			})
+		}
+	})
+
+	t.Run("buildCommonRunArgs and buildNetnsSetupArgs agree across auth, env, and secret sources", func(t *testing.T) {
+		extractEffectiveEnv := func(args []string, key string) (string, bool) {
+			var val string
+			var set bool
+			for i := 0; i < len(args); i++ {
+				if args[i] != "-e" || i+1 >= len(args) {
+					continue
+				}
+				i++
+				k, v, hasEq := strings.Cut(args[i], "=")
+				if k != key {
+					continue
+				}
+				if hasEq {
+					val = v
+					set = true
+				} else if ev, ok := os.LookupEnv(k); ok {
+					val = ev
+					set = true
+				}
+			}
+			return val, set
+		}
+
+		cases := []struct {
+			name     string
+			cfg      RunConfig
+			wantNorm string
+			wantEmit bool
+		}{
+			{
+				name: "auth only",
+				cfg: RunConfig{
+					ResolvedAuth: &api.ResolvedAuth{
+						EnvVars: map[string]string{"SCION_INIT_FIREWALL": "1"},
+					},
+				},
+				wantNorm: "true",
+				wantEmit: true,
+			},
+			{
+				name: "auth overridden by cfg.Env",
+				cfg: RunConfig{
+					ResolvedAuth: &api.ResolvedAuth{
+						EnvVars: map[string]string{"SCION_INIT_FIREWALL": "true"},
+					},
+					Env: []string{"SCION_INIT_FIREWALL=0"},
+				},
+				wantNorm: "false",
+				wantEmit: true,
+			},
+			{
+				name: "auth overridden by ResolvedSecret",
+				cfg: RunConfig{
+					ResolvedAuth: &api.ResolvedAuth{
+						EnvVars: map[string]string{"SCION_INIT_FIREWALL": "true"},
+					},
+					ResolvedSecrets: []api.ResolvedSecret{
+						{Name: "fw", Type: "environment", Target: "SCION_INIT_FIREWALL", Value: "FALSE"},
+					},
+				},
+				wantNorm: "false",
+				wantEmit: true,
+			},
+			{
+				name: "auth overridden by empty cfg.Env omits flag",
+				cfg: RunConfig{
+					ResolvedAuth: &api.ResolvedAuth{
+						EnvVars: map[string]string{"SCION_INIT_FIREWALL": "true"},
+					},
+					Env: []string{"SCION_INIT_FIREWALL="},
+				},
+				wantEmit: false,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := tc.cfg
+				cfg.RuntimeName = "docker"
+				cfg.Harness = &harness.Generic{}
+				cfg.Name = "agent-parity"
+				cfg.UnixUsername = "scion"
+				cfg.Image = "scion-agent:test"
+				cfg.Task = "hello"
+				cfg.MetadataInterception = true
+				cfg.Env = append([]string{"SCION_METADATA_MODE=block"}, cfg.Env...)
+
+				agentArgs, err := buildCommonRunArgs(cfg)
+				if err != nil {
+					t.Fatalf("buildCommonRunArgs() error = %v", err)
+				}
+				agentRaw, agentSet := extractEffectiveEnv(agentArgs, "SCION_INIT_FIREWALL")
+				if !agentSet {
+					t.Fatalf("expected agent argv to set SCION_INIT_FIREWALL; got %v", agentArgs)
+				}
+				agentNorm, agentEmit := normalizeInitFirewallArg(agentRaw)
+
+				setupArgs := buildNetnsSetupArgs("abcdef0123456789", cfg)
+				setupVal, setupSet := extractEffectiveEnv(setupArgs, "SCION_INIT_FIREWALL")
+
+				if agentEmit != tc.wantEmit || setupSet != tc.wantEmit {
+					t.Fatalf("emit mismatch: agent=(%q, emit=%v) setup=(%q, set=%v) wantEmit=%v",
+						agentNorm, agentEmit, setupVal, setupSet, tc.wantEmit)
+				}
+				if tc.wantEmit && (agentNorm != tc.wantNorm || setupVal != tc.wantNorm) {
+					t.Fatalf("value mismatch: agent=%q setup=%q want=%q", agentNorm, setupVal, tc.wantNorm)
+				}
+			})
 		}
 	})
 }
