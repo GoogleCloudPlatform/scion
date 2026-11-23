@@ -1977,7 +1977,22 @@ authDone:
 	// type, is suppressed for the template env fallback
 	// (RunConfig.SuppressedFallbackKeys), so a template never takes part in
 	// auth; a demoted key among them is reported, never dropped silently.
-	suppressedFallbackKeys := sortedKeys(templateFallbackSuppressedKeys(authMeta))
+	suppressedSet := templateFallbackSuppressedKeys(authMeta)
+	if opts.GitHubTokenInstallationOnly {
+		if suppressedSet == nil {
+			suppressedSet = make(map[string]struct{}, 5)
+		}
+		for _, k := range []string{
+			"GITHUB_TOKEN",
+			"GH_TOKEN",
+			"GH_ENTERPRISE_TOKEN",
+			"GITHUB_ENTERPRISE_TOKEN",
+			"SCION_USER_GITHUB_TOKEN",
+		} {
+			suppressedSet[k] = struct{}{}
+		}
+	}
+	suppressedFallbackKeys := sortedKeys(suppressedSet)
 	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
 	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
 	envCfg, _ = demoteLegacyHarnessConfigEnv(envCfg, rawHCBundleEnv, hcBundleEnv, rawSettingsHCEnv, settingsHCEnv)
@@ -2761,6 +2776,17 @@ authDone:
 	// out of auth.
 	templateFallbackEnv, templateEnvFallbackWarnings := templateEnvFallback(templateEnv, opts.BrokerMode, opts.Name)
 	warnings = append(warnings, templateEnvFallbackWarnings...)
+	if opts.GitHubTokenInstallationOnly && len(templateFallbackEnv) > 0 {
+		for _, k := range sortedKeys(templateFallbackEnv) {
+			if api.IsBlockedInstallationGitHubEnvKey(k) {
+				delete(templateFallbackEnv, k)
+				warnings = append(warnings, fmt.Sprintf("Warning: template environment variable '%s' is not passed to installation-only GitHub token agents.", k))
+			}
+		}
+		if len(templateFallbackEnv) == 0 {
+			templateFallbackEnv = nil
+		}
+	}
 
 	// When resuming without an explicit task, replace the hardcoded generic
 	// resume prompt with a status-aware notice for harnesses that declare

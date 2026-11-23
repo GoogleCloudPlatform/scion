@@ -874,15 +874,31 @@ func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore
 	return requeued, failed, nil
 }
 
-// ReapExpiredPendingDispatch fails and scrubs pending dispatches whose
-// updated_at is older than staleBefore or whose deadline_at has passed.
-// Clearing args in the same atomic conditional update guarantees that
-// HomeFiles event bodies and other serialized dispatch arguments cannot linger
-// on rows that never reach a terminal state (P1c-4a security L-1).
+// pendingReapCreateOps lists the create-family broker_dispatch ops eligible for
+// the pending-dispatch TTL sweep (P1c-4a security L-1). Lifecycle control ops
+// (stop, start, restart, delete, check_prompt) — notably offline-queued stops
+// meant to apply when a broker reconnects — are deliberately excluded.
+var pendingReapCreateOps = []string{
+	"create",
+	"create_with_gather",
+	"finalize_env",
+	"provision",
+	"reprovision",
+}
+
+// ReapExpiredPendingDispatch fails and scrubs pending create-family dispatches
+// (pendingReapCreateOps) whose updated_at is older than staleBefore or whose
+// deadline_at has passed (note: no production writer sets deadline_at today;
+// that arm is kept for parity with ReapStuckDispatch). Clearing args in the
+// same atomic conditional update guarantees that HomeFiles event bodies and
+// other serialized creation arguments cannot linger on rows that never reach a
+// terminal state, while leaving offline-queued lifecycle control ops (such as
+// stop) untouched for reconnect drain.
 func (s *BrokerDispatchStore) ReapExpiredPendingDispatch(ctx context.Context, staleBefore time.Time) (int, error) {
 	now := time.Now()
 	stalePendingPred := brokerdispatch.And(
 		brokerdispatch.StateEQ(store.DispatchStatePending),
+		brokerdispatch.OpIn(pendingReapCreateOps...),
 		brokerdispatch.Or(
 			brokerdispatch.UpdatedAtLT(staleBefore),
 			brokerdispatch.And(

@@ -23,7 +23,9 @@ import (
 	"log/slog"
 	"net/http"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -433,4 +435,110 @@ func TestShouldPersistResolvedEnvKey_AllBlockedGitHubKeysRejected(t *testing.T) 
 			"shouldPersistResolvedEnvKey(%q) must return false even when EnvKindPlain", key)
 	}
 	assert.True(t, shouldPersistResolvedEnvKey("SAFE_KEY", map[string]api.EnvKind{"SAFE_KEY": api.EnvKindPlain}))
+}
+
+// TestReapExpiredPendingDispatch_OfflineStopSurvivesPastTTLAndAppliesOnReconnect
+// verifies R3 (lifted from p1c4b-review-1 probe): an offline-queued stop (202)
+// survives past dispatchPendingTTL and is still applied when the broker
+// reconnects.
+func TestReapExpiredPendingDispatch_OfflineStopSurvivesPastTTLAndAppliesOnReconnect(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	disp := &runIntentDispatcher{}
+	srv.SetDispatcher(disp)
+	srv.commandBus = &recordingCommandBus{}
+	_, broker, agent := setupOfflineBrokerAgent(t, s, "offline-stop-ttl")
+	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	pending, err := s.ListPendingDispatch(ctx, broker.ID)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+
+	later := time.Now().Add(11 * time.Minute)
+	n, err := s.ReapExpiredPendingDispatch(ctx, later.Add(-dispatchPendingTTL))
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "offline-queued stop must not be expired by the pending-dispatch TTL sweep")
+
+	srv.reconcileBroker(ctx, broker.ID)
+	assert.Equal(t, int32(1), disp.stops.Load(), "the queued stop must still be applied on reconnect")
+}
+
+// TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateInputs
+// verifies R4 (lifted from p1c4b-review-1 probe): because all blocked GitHub
+// token keys are hidden from GET responses for every viewer, an env PATCH on a
+// non-installation agent must not record any of them as removed from
+// CreateInputs.InlineConfig.Env.
+func TestApplyAgentUpdate_BlockedGitHubTokenKeysNeverTreatedAsRemovedFromCreateInputs(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	initialEnv := map[string]string{
+		"GITHUB_TOKEN":            "ghp_secret_1",
+		"GH_TOKEN":                "ghp_secret_2",
+		"GH_ENTERPRISE_TOKEN":     "ghp_secret_3",
+		"GITHUB_ENTERPRISE_TOKEN": "ghp_secret_4",
+		"SCION_USER_GITHUB_TOKEN": "true",
+		"FOO":                     "bar",
+	}
+	copyEnv := func() map[string]string {
+		out := make(map[string]string, len(initialEnv))
+		for k, v := range initialEnv {
+			out[k] = v
+		}
+		return out
+	}
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Env = copyEnv()
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Env: copyEnv()}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+			InlineConfig: &api.ScionConfig{Env: copyEnv()},
+		}
+	})
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, secretVal := range []string{"ghp_secret_1", "ghp_secret_2", "ghp_secret_3", "ghp_secret_4"} {
+		assert.NotContains(t, rec.Body.String(), secretVal, "GET must hide all blocked GitHub token keys")
+	}
+
+	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"env": map[string]interface{}{"FOO": "bar"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.AppliedConfig.CreateInputs)
+	require.NotNil(t, updated.AppliedConfig.CreateInputs.InlineConfig)
+	ciEnv := updated.AppliedConfig.CreateInputs.InlineConfig.Env
+	for k, want := range initialEnv {
+		assert.Equal(t, want, ciEnv[k], "CreateInputs.InlineConfig.Env[%q] must not be recorded as removed", k)
+	}
+}
+
+// TestFilterInstallationEnvGatherKeys_OnlyBlockedKeysBecomesEmpty verifies O1:
+// when a broker reports only blocked GitHub keys as missing for an
+// installation-only agent, the filtered needs slice is empty so the Hub
+// decision and response agree.
+func TestFilterInstallationEnvGatherKeys_OnlyBlockedKeysBecomesEmpty(t *testing.T) {
+	instAg := &store.Agent{
+		AppliedConfig: &store.AgentAppliedConfig{
+			GitHubTokenPreference: DispatchAgentGitHubTokenInstallation,
+		},
+	}
+	assert.Empty(t, filterInstallationEnvGatherKeys(instAg, []string{"GITHUB_TOKEN", "GH_TOKEN"}))
+	assert.Equal(t, []string{"ANTHROPIC_API_KEY"}, filterInstallationEnvGatherKeys(instAg, []string{"GITHUB_TOKEN", "ANTHROPIC_API_KEY"}))
+
+	normalAg := &store.Agent{
+		AppliedConfig: &store.AgentAppliedConfig{
+			GitHubTokenPreference: DispatchAgentGitHubTokenUserPreferred,
+		},
+	}
+	assert.Equal(t, []string{"GITHUB_TOKEN", "GH_TOKEN"}, filterInstallationEnvGatherKeys(normalAg, []string{"GITHUB_TOKEN", "GH_TOKEN"}))
 }

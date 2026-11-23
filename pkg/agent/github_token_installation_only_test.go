@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -135,6 +136,38 @@ func TestResolveAuthEnvOverlayWithPolicy_GitHubTokenInstallationOnlySkipsSetting
 	}
 	if opts.Env["SAFE_SETTING"] != "ok" {
 		t.Errorf("opts.Env[SAFE_SETTING] = %q, want ok", opts.Env["SAFE_SETTING"])
+	}
+}
+
+// TestStartTemplateEnv_GitHubTokenInstallationOnlyBlocksTemplateFallbackEnv
+// verifies R2: template-declared blocked GitHub keys (RunConfig.FallbackEnv)
+// never reach an installation-only agent's container env, while unrelated
+// template env keys survive.
+func TestStartTemplateEnv_GitHubTokenInstallationOnlyBlocksTemplateFallbackEnv(t *testing.T) {
+	project := templateEnvStart{tplEnv: map[string]string{
+		"GH_TOKEN":                "ghp_template_pat",
+		"GITHUB_TOKEN":            "ghp_template_pat2",
+		"GH_ENTERPRISE_TOKEN":     "ghp_template_pat3",
+		"GITHUB_ENTERPRISE_TOKEN": "ghp_template_pat4",
+		"SCION_USER_GITHUB_TOKEN": "true",
+		"SAFE_TEMPLATE_KEY":       "template_ok",
+	}}.fixture(t)
+	env, _ := startTemplateEnv(t, context.Background(), project, "inst-tpl", func(o *api.StartOptions) {
+		o.GitHubTokenInstallationOnly = true
+	})
+	for _, k := range []string{
+		"GH_TOKEN",
+		"GITHUB_TOKEN",
+		"GH_ENTERPRISE_TOKEN",
+		"GITHUB_ENTERPRISE_TOKEN",
+		"SCION_USER_GITHUB_TOKEN",
+	} {
+		if v, ok := env[k]; ok {
+			t.Errorf("installation-only agent container env carries %s=%q from template env fallback", k, v)
+		}
+	}
+	if env["SAFE_TEMPLATE_KEY"] != "template_ok" {
+		t.Errorf("SAFE_TEMPLATE_KEY = %q, want template_ok", env["SAFE_TEMPLATE_KEY"])
 	}
 }
 

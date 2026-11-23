@@ -125,7 +125,6 @@ func (s *Server) brokerAffinityReapHandler() func(ctx context.Context) {
 		expiredPending, err := s.store.ReapExpiredPendingDispatch(ctx, now.Add(-dispatchPendingTTL))
 		if err != nil {
 			slog.Error("Scheduler: expired pending dispatch reap failed", "error", err)
-			return
 		}
 
 		requeued, failed, err := s.store.ReapStuckDispatch(ctx, now.Add(-dispatchStuckAge), dispatchMaxRetries)

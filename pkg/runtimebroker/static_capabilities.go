@@ -157,6 +157,7 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.ClearedResourceSubfields, "clearedResourceSubfields")
 	add(c.AttachmentDelivery, "attachmentDelivery")
 	add(c.HomeFiles, "homeFiles")
+	add(c.GitHubTokenInstallationOnly, "githubTokenInstallationOnly")
 	return names
 }
 

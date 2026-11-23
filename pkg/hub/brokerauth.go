@@ -378,6 +378,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.AttachmentDelivery = true
 		case "homefiles", "home_files":
 			caps.HomeFiles = true
+		case "githubtokeninstallationonly", "github_token_installation_only":
+			caps.GitHubTokenInstallationOnly = true
 		case "reprovisionemptyperagent", "reprovision_empty_per_agent":
 			caps.ReprovisionEmptyPerAgent = true
 		case "changedfields", "changed_fields":

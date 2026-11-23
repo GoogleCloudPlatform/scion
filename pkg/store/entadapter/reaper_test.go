@@ -262,6 +262,23 @@ func TestReapExpiredPendingDispatch_FailsAndScrubsStaleAndPastDeadline(t *testin
 		Save(ctx)
 	require.NoError(t, err)
 
+	// 5. Stale pending lifecycle control ops (stop, start, delete) -> NEVER expired
+	// (e.g. offline-queued stops must survive until broker reconnect).
+	staleStop := newDispatch(brokerID, "stop")
+	staleStop.Args = `{"runId":"run-1"}`
+	require.NoError(t, ds.InsertBrokerDispatch(ctx, staleStop))
+	_, err = client.BrokerDispatch.UpdateOneID(uuid.MustParse(staleStop.ID)).
+		SetUpdatedAt(time.Now().Add(-30 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	staleStart := newDispatch(brokerID, "start")
+	require.NoError(t, ds.InsertBrokerDispatch(ctx, staleStart))
+	_, err = client.BrokerDispatch.UpdateOneID(uuid.MustParse(staleStart.ID)).
+		SetUpdatedAt(time.Now().Add(-30 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
 	expired, err := ds.ReapExpiredPendingDispatch(ctx, time.Now().Add(-10*time.Minute))
 	require.NoError(t, err)
 	assert.Equal(t, 2, expired)
@@ -283,4 +300,13 @@ func TestReapExpiredPendingDispatch_FailsAndScrubsStaleAndPastDeadline(t *testin
 	require.NoError(t, err)
 	assert.Equal(t, store.DispatchStateInProgress, gotInProg.State)
 	assert.Equal(t, hfArgs, gotInProg.Args)
+
+	gotStop, err := ds.GetBrokerDispatch(ctx, staleStop.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStatePending, gotStop.State, "offline-queued stop must survive past pending TTL")
+	assert.Equal(t, `{"runId":"run-1"}`, gotStop.Args)
+
+	gotStart, err := ds.GetBrokerDispatch(ctx, staleStart.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStatePending, gotStart.State, "lifecycle op must not be expired by create-family pending sweep")
 }

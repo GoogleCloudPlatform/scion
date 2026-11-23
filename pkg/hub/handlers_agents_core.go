@@ -3407,7 +3407,7 @@ func (s *Server) createAgentInProject(
 					// provisioning; persist only the non-status fields.
 					acceptedLaunch = true
 					warnings = append(warnings, s.adoptAcceptedLaunch(ctx, agent)...)
-				} else if envReqs != nil && len(envReqs.Needs) > 0 {
+				} else if envReqs != nil && len(filterInstallationEnvGatherKeys(agent, envReqs.Needs)) > 0 {
 					// Broker reported missing required env vars — fail the dispatch.
 					// Clean up the provisioning agent and its files so orphaned
 					// local state doesn't trigger spurious sync-registration.
@@ -3768,6 +3768,23 @@ func isTerminalAgentPhase(phase string) bool {
 	}
 }
 
+// filterInstallationEnvGatherKeys omits blocked GitHub token keys from an
+// env-gather key slice when agent uses installation-only GitHub tokens so the
+// failure check and the returned EnvGatherResponse agree on the same needs set.
+func filterInstallationEnvGatherKeys(agent *store.Agent, keys []string) []string {
+	if !usesInstallationGitHubToken(agent) || len(keys) == 0 {
+		return keys
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if isBlockedInstallationGitHubEnvKey(k) {
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
+}
+
 // buildEnvGatherResponse converts a broker's env requirements into the Hub-level
 // response format, enriching it with scope information from the dispatcher.
 func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent, brokerReqs *RemoteEnvRequirementsResponse) *EnvGatherResponse {
@@ -3778,25 +3795,12 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// an older broker reported one the dispatcher did not already remove.
 	takeTZGatherNeed(brokerReqs)
 	installationOnly := usesInstallationGitHubToken(agent)
-	filterBlockedKeys := func(keys []string) []string {
-		if !installationOnly || len(keys) == 0 {
-			return keys
-		}
-		out := make([]string, 0, len(keys))
-		for _, k := range keys {
-			if isBlockedInstallationGitHubEnvKey(k) {
-				continue
-			}
-			out = append(out, k)
-		}
-		return out
-	}
 
 	resp := &EnvGatherResponse{
 		AgentID:   agent.ID,
-		Required:  filterBlockedKeys(brokerReqs.Required),
-		BrokerHas: filterBlockedKeys(brokerReqs.BrokerHas),
-		Needs:     filterBlockedKeys(brokerReqs.Needs),
+		Required:  filterInstallationEnvGatherKeys(agent, brokerReqs.Required),
+		BrokerHas: filterInstallationEnvGatherKeys(agent, brokerReqs.BrokerHas),
+		Needs:     filterInstallationEnvGatherKeys(agent, brokerReqs.Needs),
 	}
 
 	// The env var storage scopes that apply to this agent, in the order the

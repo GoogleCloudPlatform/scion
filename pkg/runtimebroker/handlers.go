@@ -7370,18 +7370,24 @@ func (s *Server) extractRequiredEnvKeysChecked(req CreateAgentRequest, hydratedT
 	// Hub-only keys (TZ) are never required: an empty value means "unset",
 	// never "ask". Only the hub supplies them for a hub-dispatched agent, so
 	// asking for one would let a laptop or parent agent fill it in.
+	// Likewise, for an installation-only GitHub token agent, blocked GitHub
+	// token keys (GITHUB_TOKEN, GH_* aliases, SCION_USER_GITHUB_TOKEN) are
+	// never gathered from the caller.
+	omitRequiredKey := func(k string) bool {
+		return agent.IsHubOnlyEnvKey(k) || (req.GitHubTokenInstallationOnly && api.IsBlockedInstallationGitHubEnvKey(k))
+	}
 	for k := range required {
-		if agent.IsHubOnlyEnvKey(k) {
+		if omitRequiredKey(k) {
 			delete(required, k)
 		}
 	}
 	for k := range secretInfo {
-		if agent.IsHubOnlyEnvKey(k) {
+		if omitRequiredKey(k) {
 			delete(secretInfo, k)
 		}
 	}
 	for k := range alternatives {
-		if agent.IsHubOnlyEnvKey(k) {
+		if omitRequiredKey(k) {
 			delete(alternatives, k)
 		}
 	}

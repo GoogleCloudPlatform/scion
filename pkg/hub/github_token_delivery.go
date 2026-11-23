@@ -64,14 +64,25 @@ import (
 //     broker lacks Capabilities.GitHubTokenInstallationOnly.
 //   - Push (broker-side host-env passthrough & non-Hub config layers):
 //     runtimebroker (handlers.go, start_context.go) threads
-//     githubTokenInstallationOnly into api.StartOptions and strips blocked
-//     GitHub env keys from Config.Env, InlineConfig.Env, and workstation
-//     altEnvKeySatisfied host-env lookups. pkg/agent/run.go
-//     (resolveAuthEnvOverlayWithPolicy, buildTrackedAgentEnv) refuses broker
-//     host-env passthrough, ${VAR} expansion, harness-config settings/bundle
-//     entries, persisted scionCfg.Env entries, and hub defaults for blocked
+//     githubTokenInstallationOnly into api.StartOptions, drops blocked GitHub
+//     keys from env-gather requirements, and strips them from Config.Env,
+//     InlineConfig.Env, and workstation altEnvKeySatisfiedWithPolicy host-env
+//     lookups. pkg/agent/run.go (resolveAuthEnvOverlayWithPolicy,
+//     buildTrackedAgentEnv, templateEnvFallback / RunConfig.FallbackEnv,
+//     suppressedFallbackKeys) refuses broker host-env passthrough, ${VAR}
+//     expansion, harness-config settings/bundle entries, persisted scionCfg.Env
+//     entries, template env fallback entries, and hub defaults for blocked
 //     GitHub keys when GitHubTokenInstallationOnly is set, so only the
 //     Hub-minted installation token in ResolvedEnv may supply GITHUB_TOKEN.
+//
+// Scope limits (documented by design):
+//   - Credential redirection via ~/.gitconfig or ~/.config/git/config
+//     credential helpers, url.<...>.insteadOf rewrites, or XDG_CONFIG_HOME /
+//     GH_CONFIG_DIR env redirection is outside the well-known-locations
+//     contract (equivalent to storing a PAT under an arbitrary name).
+//   - COPILOT_GITHUB_TOKEN is LLM harness auth (allowed under identity ruling
+//     (b)), not a gh/git credential, and is intentionally not covered by
+//     IsBlockedInstallationGitHubEnvKey.
 //   - Push (env-gather finalize):
 //     HTTPAgentDispatcher.DispatchFinalizeEnv (httpdispatcher.go) ->
 //     filters gathered env keys with isBlockedInstallationGitHubEnvKey.

@@ -110,3 +110,33 @@ func TestBuildStartContext_GitHubTokenInstallationOnlyStripsConfigAndInlineEnv(t
 		t.Errorf("caller inline.Env was mutated: %+v", inline.Env)
 	}
 }
+
+func TestExtractRequiredEnvKeys_GitHubTokenInstallationOnlyOmitsBlockedKeys(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	req := CreateAgentRequest{
+		Name:                        "inst-only-blocked",
+		ProjectPath:                 t.TempDir(),
+		GitHubTokenInstallationOnly: true,
+		RequiredSecrets: []api.RequiredSecret{
+			{Key: "GITHUB_TOKEN", Description: "GitHub PAT", Type: "environment"},
+			{Key: "GH_TOKEN", Description: "GH CLI PAT", Type: "environment"},
+		},
+	}
+	keys, secretInfo, _, _, err := srv.extractRequiredEnvKeysChecked(req, "", "")
+	if err != nil {
+		t.Fatalf("extractRequiredEnvKeysChecked: %v", err)
+	}
+	for _, k := range keys {
+		if api.IsBlockedInstallationGitHubEnvKey(k) {
+			t.Errorf("blocked key %q remained in required keys under GitHubTokenInstallationOnly", k)
+		}
+	}
+	for _, blocked := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+		if _, ok := secretInfo[blocked]; ok {
+			t.Errorf("blocked key %q remained in secretInfo under GitHubTokenInstallationOnly", blocked)
+		}
+	}
+}
