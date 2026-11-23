@@ -138,17 +138,21 @@ test.describe('Breadcrumb navigation (ptone/scion#8281)', () => {
     await page.setViewportSize({ width: 480, height: 800 });
     await page.goto(`/projects/${project.id}`, { waitUntil: 'domcontentloaded' });
 
-    const breadcrumb = page.getByRole('navigation', { name: 'Breadcrumb' });
-    await expect(breadcrumb).toBeVisible({ timeout: 15_000 });
+    // Wait for the lazy breadcrumb component to load and register on the page.
+    await expect(page.getByRole('navigation', { name: 'Breadcrumb' })).toBeVisible({
+      timeout: 15_000,
+    });
 
+    // Mount an isolated 5-crumb scion-breadcrumb in a 480px container so
+    // project-detail's own async re-renders cannot overwrite the test trail.
     await page.evaluate((projId: string) => {
-      const host = document
-        .querySelector('scion-app')
-        ?.querySelector('scion-page-project-detail')
-        ?.shadowRoot?.querySelector('scion-breadcrumb') as
-        | (HTMLElement & { crumbs: Array<Record<string, unknown>> })
-        | null;
-      if (!host) throw new Error('scion-breadcrumb not found on project page');
+      const wrapper = document.createElement('div');
+      wrapper.dataset.testid = 'e2e-collapse-fixture';
+      wrapper.style.width = '480px';
+      wrapper.style.maxWidth = '100%';
+      const host = document.createElement('scion-breadcrumb') as HTMLElement & {
+        crumbs: Array<Record<string, unknown>>;
+      };
       host.crumbs = [
         { label: 'Projects', href: '/projects' },
         { label: 'Payments', href: `/projects/${projId}`, truncate: true },
@@ -156,8 +160,12 @@ test.describe('Breadcrumb navigation (ptone/scion#8281)', () => {
         { label: 'Templates', href: `/projects/${projId}/settings?tab=templates` },
         { label: 'base-template', truncate: true },
       ];
+      wrapper.appendChild(host);
+      document.body.prepend(wrapper);
     }, project.id);
 
+    const fixture = page.getByTestId('e2e-collapse-fixture');
+    const breadcrumb = fixture.getByRole('navigation', { name: 'Breadcrumb' });
     const expandBtn = breadcrumb.getByRole('button', { name: 'Show full path' });
     await expect(expandBtn).toBeVisible();
     await expect(breadcrumb.getByRole('link', { name: 'Projects' })).toBeVisible();
