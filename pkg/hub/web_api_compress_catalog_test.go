@@ -84,6 +84,7 @@ var compressBypassedUntagged = map[string]string{
 	// responses carry metadata only, and env deletes carry no value.
 	"GET /api/v1/agents/{id}/secrets":                   "env/secrets segment",
 	"PUT /api/v1/agents/{id}/secrets/{key}":             "env/secrets segment",
+	"DELETE /api/v1/agents/{id}/secrets/{key}":          "env/secrets segment",
 	"DELETE /api/v1/projects/{id}/env/{key}":            "env/secrets segment",
 	"GET /api/v1/projects/{id}/secrets":                 "env/secrets segment",
 	"GET /api/v1/projects/{id}/secrets/{key}":           "env/secrets segment",

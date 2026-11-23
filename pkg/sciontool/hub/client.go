@@ -763,15 +763,15 @@ func (c *Client) absoluteURL(path string) string {
 }
 
 // SetSecret stores a secret via the Hub API.
-// The value should already be base64-encoded. Scope selects project (default)
-// or user; an empty scope is treated as "project".
+// The value should already be base64-encoded. Scope selects project (default),
+// user, or agent; an empty scope is treated as "project".
 func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, scope string, force bool, allowProgeny *bool) (*SetSecretResponse, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
 	}
 
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets/%s",
-		strings.TrimSuffix(c.hubURL, "/"), c.agentID, key)
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID, url.PathEscape(key))
 
 	reqBody := SetSecretRequest{
 		Value:        value,
@@ -831,8 +831,59 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 				"approve or reject them before saving more (%s)", key, ErrCodeSecretPendingCap)
 		}
 		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	case http.StatusBadRequest:
+		if scope == "agent" && isAgentScopeUnavailableResponse(scope, respBody) {
+			return nil, fmt.Errorf("%w: %s", ErrAgentScopeUnavailable, string(respBody))
+		}
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	default:
 		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+}
+
+// DeleteSecret deletes an agent-scoped secret via the Hub API.
+func (c *Client) DeleteSecret(ctx context.Context, key, scope string) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("hub client not configured (is SCION_HUB_ENDPOINT set?)")
+	}
+
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/secrets/%s",
+		strings.TrimSuffix(c.hubURL, "/"), c.agentID, url.PathEscape(key))
+	if scope != "" {
+		endpoint += "?scope=" + url.QueryEscape(scope)
+	}
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.setAgentAuth(req.Header, currentToken)
+
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusOK:
+		return nil
+	case http.StatusNotFound:
+		return fmt.Errorf("secret %q not found", key)
+	case http.StatusBadRequest:
+		if scope == "agent" && isAgentScopeUnavailableResponse(scope, respBody) {
+			return fmt.Errorf("%w: %s", ErrAgentScopeUnavailable, string(respBody))
+		}
+		return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	default:
+		return fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
 	}
 }
 

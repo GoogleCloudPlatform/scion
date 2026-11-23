@@ -230,6 +230,24 @@ type AgentSecretReadEvent struct {
 	Timestamp     time.Time `json:"timestamp"`
 }
 
+// AgentSecretWriteEvent represents an auditable agent secret write (set or delete) event.
+// It covers write attempts that reached the secret backend; pre-backend refusals
+// (validation, auth, standing, policy) are not recorded.
+// Security: this event MUST NEVER contain secret values.
+type AgentSecretWriteEvent struct {
+	Operation  string    `json:"operation"` // "set" or "delete"
+	AgentID    string    `json:"agentId"`
+	ProjectID  string    `json:"projectId"`
+	Scope      string    `json:"scope"`
+	ScopeID    string    `json:"scopeId"`
+	SecretKey  string    `json:"secretKey"`
+	Version    int       `json:"version,omitempty"`
+	Created    bool      `json:"created,omitempty"`
+	Success    bool      `json:"success"`
+	FailReason string    `json:"failReason,omitempty"`
+	Timestamp  time.Time `json:"timestamp"`
+}
+
 // GCSLinkFetchReason enumerates why a gs:// link fetch was allowed or denied.
 // Exactly one is recorded per request, alongside Decision.
 type GCSLinkFetchReason string
@@ -292,6 +310,8 @@ type AuditLogger interface {
 	LogLifecycleHookExecutionEvent(ctx context.Context, event *LifecycleHookExecutionEvent) error
 	// LogAgentSecretReadEvent logs an agent secret read event.
 	LogAgentSecretReadEvent(ctx context.Context, event *AgentSecretReadEvent) error
+	// LogAgentSecretWriteEvent logs an agent secret write (set or delete) event.
+	LogAgentSecretWriteEvent(ctx context.Context, event *AgentSecretWriteEvent) error
 	// LogPendingSecretEvent logs a pending secret event.
 	LogPendingSecretEvent(ctx context.Context, event *PendingSecretEvent) error
 	// LogMessageActionEvent logs a message-action lifecycle or refusal audit event.
@@ -716,6 +736,49 @@ func (l *LogAuditLogger) LogAgentSecretReadEvent(ctx context.Context, event *Age
 	}
 
 	l.logger().LogAttrs(ctx, level, "agent secret read event", attrs...)
+
+	return nil
+}
+
+// LogAgentSecretWriteEvent logs an agent secret write (set or delete) event to the standard logger.
+// Security: this method never logs secret values.
+func (l *LogAuditLogger) LogAgentSecretWriteEvent(ctx context.Context, event *AgentSecretWriteEvent) error {
+	if event == nil {
+		return nil
+	}
+	level := slog.LevelInfo
+	if !event.Success {
+		level = slog.LevelWarn
+	}
+
+	attrs := []slog.Attr{
+		slog.String("event_type", "agent_secret_write"),
+		slog.String("operation", event.Operation),
+		slog.String("agent_id", event.AgentID),
+		slog.String("project_id", event.ProjectID),
+		slog.String("secret_key", event.SecretKey),
+		slog.Bool("success", event.Success),
+	}
+	if event.Scope != "" {
+		attrs = append(attrs, slog.String("scope", event.Scope))
+	}
+	if event.ScopeID != "" {
+		attrs = append(attrs, slog.String("scope_id", event.ScopeID))
+	}
+	if event.Version > 0 {
+		attrs = append(attrs, slog.Int("version", event.Version))
+	}
+	if event.Operation == "set" {
+		attrs = append(attrs, slog.Bool("created", event.Created))
+	}
+	if event.FailReason != "" {
+		attrs = append(attrs, slog.String("fail_reason", event.FailReason))
+	}
+	if credAttr, ok := credentialLogAttr(ctx); ok {
+		attrs = append(attrs, credAttr)
+	}
+
+	l.logger().LogAttrs(ctx, level, "agent secret write event", attrs...)
 
 	return nil
 }

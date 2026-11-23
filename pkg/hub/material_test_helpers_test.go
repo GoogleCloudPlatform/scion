@@ -412,6 +412,9 @@ func (plainAuditLogger) LogLifecycleHookExecutionEvent(context.Context, *Lifecyc
 func (plainAuditLogger) LogAgentSecretReadEvent(context.Context, *AgentSecretReadEvent) error {
 	return nil
 }
+func (plainAuditLogger) LogAgentSecretWriteEvent(context.Context, *AgentSecretWriteEvent) error {
+	return nil
+}
 func (plainAuditLogger) RecordSAAssignment(context.Context, *store.SAAssignmentEvent) error {
 	return nil
 }
