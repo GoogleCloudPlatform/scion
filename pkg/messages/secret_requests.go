@@ -140,7 +140,7 @@ func ValidateSecretRequestFileTarget(target string) error {
 		return fmt.Errorf("target path must not contain '..'")
 	}
 	if !strings.HasPrefix(target, "~/") {
-		return fmt.Errorf("file secret request target must start with ~/")
+		return fmt.Errorf("agent-written file secrets must target a path under the agent home (~/...)")
 	}
 	return nil
 }
