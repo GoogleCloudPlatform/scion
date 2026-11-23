@@ -590,8 +590,8 @@ plugins are built for Linux on both amd64 and arm64; plugin builds are not publi
 only, as `sciontool-linux-amd64.tar.gz` and `sciontool-linux-arm64.tar.gz` (each containing
 `sciontool`). It is built the same way `image-build/scion-base/Dockerfile` builds it: without cgo,
 with `-tags no_embed_web`, stamped with the release version, and checked by
-`image-build/lib/assert-no-cgo.sh`. Image builds can install these assets instead of compiling
-from source. Releases cut before this asset was added do not have it.
+`image-build/lib/assert-no-cgo.sh`, so it can stand in for the `sciontool` that image builds
+compile. Releases cut before this asset was added do not have it.
 
 ## Release notes
 

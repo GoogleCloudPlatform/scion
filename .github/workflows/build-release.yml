@@ -188,9 +188,8 @@ jobs:
           if-no-files-found: error
 
       # sciontool runs inside agent containers only, so it ships for Linux.
-      # Image builds can install this asset instead of compiling it
-      # (image-build/scripts/build-images.sh --binaries release). It must be
-      # built without cgo: sciontool init drops capabilities on every thread
+      # It lets image builds install the release binary instead of compiling
+      # it (ptone/scion#9047). It must be built without cgo: sciontool init drops capabilities on every thread
       # with syscall.AllThreadsSyscall, which fails in a cgo binary, and
       # assert-no-cgo.sh enforces that here as it does in scion-base.
       - name: Build sciontool
@@ -430,9 +429,10 @@ jobs:
         working-directory: release
         run: |
           # Cover every published asset (scion-* binaries, sciontool-linux-*
-          # binaries and scion-plugin-* binaries) with a single checksums file so deploy tooling can
-          # verify a download before extracting/installing it. Sort for a
-          # stable, reviewable diff between releases.
+          # binaries and scion-plugin-* binaries) with a single checksums
+          # file so deploy tooling can verify a download before
+          # extracting/installing it. Sort for a stable, reviewable diff
+          # between releases.
           #
           # Write the sums outside this directory, then move them in: with
           # `> SHA256SUMS` the shell can create the empty file before the `*`
