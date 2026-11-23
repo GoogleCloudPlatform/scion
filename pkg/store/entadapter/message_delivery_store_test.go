@@ -435,3 +435,56 @@ func TestBindMessageDelivery_ReplayAggregatesRows(t *testing.T) {
 		assert.Equal(t, store.DeliveryOutcomeUnknownPartial, aggregateOutcome(nil))
 	})
 }
+
+func TestMarkMessageDelivered_CAS(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("transitions dispatched and pending to delivered", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		for _, start := range []string{store.MessageDispatchPending, store.MessageDispatchDispatched} {
+			id := f.msg(t, start)
+			won, err := f.ds.MarkMessageDelivered(ctx, id)
+			require.NoError(t, err)
+			assert.True(t, won, "from %s", start)
+			assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
+
+			// Second call is idempotent and reports won=false.
+			won, err = f.ds.MarkMessageDelivered(ctx, id)
+			require.NoError(t, err)
+			assert.False(t, won, "repeat from %s", start)
+
+			// Once delivered, FailUndeliveredMessage cannot overwrite it.
+			failedWon, err := f.ds.FailUndeliveredMessage(ctx, id, "late failure")
+			require.NoError(t, err)
+			assert.False(t, failedWon)
+			assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
+		}
+	})
+
+	t.Run("never overwrites terminal or conduit-bound states", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		nonDeliverable := []string{
+			store.MessageDispatchFailed,
+			store.MessageDispatchDelivered,
+			store.MessageDispatchDeferred,
+			store.MessageDispatchNoRecipient,
+			store.MessageDispatchDelivering,
+			store.MessageDispatchPartial,
+			store.MessageDispatchAwaitingSession,
+		}
+		for _, start := range nonDeliverable {
+			id := f.msg(t, start)
+			won, err := f.ds.MarkMessageDelivered(ctx, id)
+			require.NoError(t, err)
+			assert.False(t, won, "must not overwrite %s", start)
+			assert.Equal(t, start, f.state(t, id))
+		}
+	})
+
+	t.Run("invalid UUID returns error", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		won, err := f.ds.MarkMessageDelivered(ctx, "not-a-uuid")
+		assert.Error(t, err)
+		assert.False(t, won)
+	})
+}

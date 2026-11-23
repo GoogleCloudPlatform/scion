@@ -430,6 +430,12 @@ func (m *AgentManager) deliverSplit(ctx context.Context, agent *api.AgentInfo, h
 		text, ids := joinParts(d.parts[g[0]:g[1]])
 		sub := d
 		sub.message, sub.messageIDs, sub.parts = text, ids, nil
+		sub.onSuccess = make([]DeliverySuccessHandler, 0, g[1]-g[0])
+		for _, p := range d.parts[g[0]:g[1]] {
+			if p.onSuccess != nil {
+				sub.onSuccess = append(sub.onSuccess, p.onSuccess)
+			}
+		}
 		sub.readyWanted = d.readyWanted && i == 0
 		err := m.deliverResolved(ctx, agent, h, ds, sub)
 		switch {

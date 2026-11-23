@@ -240,6 +240,25 @@ func (s *BrokerDispatchStore) FinishMessageDelivery(ctx context.Context, deliver
 	return n, mapError(err)
 }
 
+// MarkMessageDelivered implements store.BrokerDispatchStore.
+func (s *BrokerDispatchStore) MarkMessageDelivered(ctx context.Context, id string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.Message.Update().
+		Where(
+			message.IDEQ(uid),
+			message.DispatchStateIn(store.MessageDispatchPending, store.MessageDispatchDispatched),
+		).
+		SetDispatchState(store.MessageDispatchDelivered).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
 // SweepStaleDeliveries implements store.BrokerDispatchStore.
 func (s *BrokerDispatchStore) SweepStaleDeliveries(ctx context.Context, cutoff time.Time, outcome string) (int, error) {
 	n, err := s.client.Message.Update().

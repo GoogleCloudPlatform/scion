@@ -260,7 +260,7 @@ func NewManager(rt runtime.Runtime) Manager {
 		return mgr.deliver(context.Background(), deliveryRequest{
 			agentID: f.agentID, projectID: f.projectID, message: f.text,
 			messageIDs: f.messageIDs, partialIDs: f.partialIDs, readyWanted: f.readyWanted,
-			hasAttachments: f.hasAttachments, parts: f.parts,
+			hasAttachments: f.hasAttachments, parts: f.parts, onSuccess: f.onSuccess,
 		})
 	}
 	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
@@ -648,6 +648,9 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 		if id := deliveryMessageIDFromContext(ctx); id != "" {
 			req.messageIDs = []string{id}
 		}
+		if onSuccess := DeliverySuccessHandlerFromContext(ctx); onSuccess != nil {
+			req.onSuccess = []DeliverySuccessHandler{onSuccess}
+		}
 		return m.deliver(ctx, req)
 	}
 
@@ -669,7 +672,7 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// A failure handler on ctx (set by the runtime broker) is invoked if the
 	// buffered delivery later fails, so the hub can mark the message failed
 	// rather than leave it "dispatched" (#1820).
-	m.msgBuffer.sendWithID(agentID, projectID, message, deliveryMessageIDFromContext(ctx), DeliveryFailureHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
+	m.msgBuffer.sendWithIDAndSuccess(agentID, projectID, message, deliveryMessageIDFromContext(ctx), DeliveryFailureHandlerFromContext(ctx), DeliverySuccessHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
 	return nil
 }
 
@@ -1429,6 +1432,9 @@ type deliveryRequest struct {
 	// parts are a buffered flush's messages, in order; a flush too large
 	// for one conduit delivery is split along them (deliverSplit).
 	parts []deliveryPart
+	// onSuccess holds per-message callbacks invoked when exec session
+	// injection succeeds (skipped when conduit already finalized delivery).
+	onSuccess []DeliverySuccessHandler
 }
 
 // deliver is deliverImmediate for a deliveryRequest: it chooses the
@@ -1622,6 +1628,11 @@ func (m *AgentManager) deliverResolved(ctx context.Context, agent *api.AgentInfo
 		return &finalDeliveryError{Err: fmt.Errorf("%w (conduit not used: %v)", execDeliveryError(ctx, agent.Name, ds.SubmitKeys, err), conduitReason)}
 	}
 	if err == nil {
+		for _, fn := range d.onSuccess {
+			if fn != nil {
+				fn()
+			}
+		}
 		return nil
 	}
 	return execDeliveryError(ctx, agent.Name, ds.SubmitKeys, err)

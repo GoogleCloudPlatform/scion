@@ -2361,7 +2361,8 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-text-muted, #94a3b8);
     }
 
-    .delivery-state.dispatched sl-icon {
+    .delivery-state.dispatched sl-icon,
+    .delivery-state.delivered sl-icon {
       color: var(--scion-success-500, #22c55e);
     }
 
@@ -3752,6 +3753,23 @@ export class ScionChatMessage extends LitElement {
               <div class="delivery-state dispatched">
                 <sl-icon name="check2"></sl-icon>
                 Accepted
+              </div>
+            `;
+      case 'delivered':
+        // ptone/scion#9015: the broker confirmed session injection succeeded
+        // (or conduit deliver-message finished). "Seen" still takes precedence
+        // once the read watermark passes this message.
+        return this.seen
+          ? html`
+              <div class="delivery-state seen">
+                <sl-icon name="check2-all"></sl-icon>
+                Seen
+              </div>
+            `
+          : html`
+              <div class="delivery-state delivered">
+                <sl-icon name="check2"></sl-icon>
+                Delivered
               </div>
             `;
       case 'deferred':

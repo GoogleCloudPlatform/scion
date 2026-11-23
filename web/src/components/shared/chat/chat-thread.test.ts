@@ -1648,6 +1648,49 @@ describe('scion-chat-thread dispatch state from send response', () => {
     expect(msg?.createdAt).toBe('2026-01-01T00:00:01Z');
   });
 
+  // ptone/scion#9015: delivery state is monotonic — once "delivered", an
+  // out-of-order "dispatched", "pending", or omitted dispatchState never
+  // downgrades it back to a lower state, while "failed" stays terminal.
+  it('upgrades dispatched to delivered and never downgrades delivered in mergeMessages', async () => {
+    const el = await mount();
+    const internals = el as unknown as {
+      messageMap: Map<string, Message>;
+      mergeMessages(msgs: Message[]): void;
+    };
+
+    const base: Message = {
+      id: 'server-delivered-monotonic',
+      projectId: '',
+      sender: 'me@example.com',
+      senderId: 'user-me',
+      recipient: 'agent:coder',
+      recipientId: 'coder',
+      msg: 'hello',
+      type: 'instruction',
+      agentId: '',
+      createdAt: '2026-01-01T00:00:00Z',
+      dispatchState: 'dispatched',
+    };
+
+    internals.mergeMessages([base]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('dispatched');
+
+    // Broker confirmation arrives -> upgrades to delivered.
+    internals.mergeMessages([{ ...base, dispatchState: 'delivered' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+
+    // Out-of-order dispatched, pending, or omitted dispatchState must not downgrade.
+    internals.mergeMessages([{ ...base, dispatchState: 'dispatched' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+
+    internals.mergeMessages([{ ...base, dispatchState: 'pending' }]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+
+    const { dispatchState: _omitted, ...withoutState } = base;
+    internals.mergeMessages([withoutState]);
+    expect(internals.messageMap.get(base.id)?.dispatchState).toBe('delivered');
+  });
+
   // Round 4, item 2: the sseVersion branch of handleChatSendV2 (the SSE echo
   // lands before the HTTP response) has the same never-downgrade guard as
   // mergeMessages, but no test exercised an actual downgrade attempt there —

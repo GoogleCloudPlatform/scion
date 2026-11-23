@@ -1301,3 +1301,58 @@ func TestConduitDelivery_SplitAwaitingSessionDoesNotTagUnsentTail(t *testing.T) 
 		}
 	})
 }
+
+// TestConduitVsExec_SuccessHandlerOnlyOnExec (ptone/scion#9015): conduit
+// delivery already marks the message delivered on the hub inside /deliver, so
+// the broker's DeliverySuccessHandler must fire ONLY when delivery completes
+// via runtime exec (including fallback from conduit to exec), never on a
+// conduit-finalized delivery.
+func TestConduitVsExec_SuccessHandlerOnlyOnExec(t *testing.T) {
+	t.Run("conduit_success_does_not_invoke_onSuccess", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{{status: http.StatusOK, resp: agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeDelivered}}}}
+		m.SetConduitDeliverer(d)
+
+		var calls atomic.Int32
+		err := m.deliver(context.Background(), deliveryRequest{
+			agentID:    "test-agent",
+			message:    "hello conduit",
+			messageIDs: []string{"m-conduit-1"},
+			onSuccess:  []DeliverySuccessHandler{func() { calls.Add(1) }},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := calls.Load(); got != 0 {
+			t.Fatalf("onSuccess called %d times on conduit delivery, want 0 (no double report)", got)
+		}
+		if len(execs) != 0 {
+			t.Fatalf("expected 0 exec calls, got %v", execs)
+		}
+	})
+
+	t.Run("exec_fallback_invokes_onSuccess_once", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{{err: ErrConduitUnavailable}}}
+		m.SetConduitDeliverer(d)
+
+		var calls atomic.Int32
+		err := m.deliver(context.Background(), deliveryRequest{
+			agentID:    "test-agent",
+			message:    "hello exec fallback",
+			messageIDs: []string{"m-exec-1"},
+			onSuccess:  []DeliverySuccessHandler{func() { calls.Add(1) }},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("onSuccess called %d times on exec fallback, want 1", got)
+		}
+		if len(execs) == 0 {
+			t.Fatal("expected exec calls for fallback delivery")
+		}
+	})
+}

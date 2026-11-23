@@ -1570,6 +1570,27 @@ describe('scion-chat-message delivery state', () => {
     expect(state?.textContent).not.toContain('Delivered');
   });
 
+  // ptone/scion#9015: once the broker confirms session injection succeeded,
+  // the receipt moves to "Delivered", and "Seen" still takes precedence once read.
+  it('shows "Delivered" for dispatchState=delivered and "Seen" when read', async () => {
+    const el = await mountOutbound({
+      dispatchState: 'delivered',
+    });
+
+    const state = deliveryState(el);
+    expect(state).toBeTruthy();
+    expect(state?.classList.contains('delivered')).toBe(true);
+    expect(state?.textContent).toContain('Delivered');
+    expect(state?.querySelector('sl-icon')?.getAttribute('name')).toBe('check2');
+
+    el.seen = true;
+    await el.updateComplete;
+    const seenState = deliveryState(el);
+    expect(seenState?.classList.contains('seen')).toBe(true);
+    expect(seenState?.textContent).toContain('Seen');
+    expect(seenState?.querySelector('sl-icon')?.getAttribute('name')).toBe('check2-all');
+  });
+
   // F5 (p2a-r2 review): design agent-reincarnate §3.7 — a message to a
   // migrating agent must show a receipt distinct from both "Accepted" and
   // "Failed", telling the sender it was saved for catch-up.

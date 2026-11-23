@@ -2500,6 +2500,22 @@ export class ScionChatThread extends LitElement {
           existing.dispatchFailureReason,
           existing.dispatchFailureCode
         );
+      } else if (
+        existing?.dispatchState === 'delivered' &&
+        (!msg.dispatchState ||
+          msg.dispatchState === 'pending' ||
+          msg.dispatchState === 'waking' ||
+          msg.dispatchState === 'dispatched')
+      ) {
+        // ptone/scion#9015: delivery state is monotonic — never downgrade a
+        // confirmed "delivered" message back to pending/dispatched on an
+        // out-of-order HTTP response or backfill row.
+        toStore = withDispatchFailure(msg, 'delivered', undefined, undefined);
+      } else if (
+        existing?.dispatchState === 'dispatched' &&
+        (msg.dispatchState === 'pending' || msg.dispatchState === 'waking')
+      ) {
+        toStore = withDispatchFailure(msg, 'dispatched', undefined, undefined);
       }
       this.messageMap.set(msg.id, toStore);
       if (toStore.type !== 'mention') ingested.push(toStore);
@@ -3886,7 +3902,8 @@ export class ScionChatThread extends LitElement {
               // response without dispatchState defaults to dispatched above.
               const wouldDowngrade =
                 (sseVersion.dispatchState === 'failed' ||
-                  sseVersion.dispatchState === 'no_recipient') &&
+                  sseVersion.dispatchState === 'no_recipient' ||
+                  sseVersion.dispatchState === 'delivered') &&
                 (dispatchState === 'dispatched' || dispatchState === 'pending');
               let updatedSseVersion = sseVersion;
               if (!wouldDowngrade) {
