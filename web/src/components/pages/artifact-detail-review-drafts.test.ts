@@ -1231,4 +1231,91 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(el.shadowRoot!.querySelector('.draft-chip-badge')).toBeNull();
     expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeUndefined();
   });
+
+  it('prevents deleting a newer draft from the open discard dialog after DraftConflictError', async () => {
+    const newerBody = 'We ship in {~~Q3~>Q5~~} (saved on another device).\n';
+    const state: DraftServerState = {
+      draft: {
+        rev: 2,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: '',
+        carried: null,
+        savedAt: '2026-11-21T18:05:00Z',
+        createdAt: '2026-11-21T18:00:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+      nextDeleteResponse: () => {
+        // Simulate another device having updated rev 2 -> rev 3 before DELETE arrived.
+        state.draft = {
+          rev: 3,
+          base: 1,
+          entry: 'plan.md',
+          body: newerBody,
+          note: 'From device B',
+          carried: null,
+          savedAt: '2026-11-21T18:12:00Z',
+          createdAt: '2026-11-21T18:00:00Z',
+        };
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: 'draft_conflict',
+              message: 'draft rev mismatch',
+              details: { rev: 3, savedAt: '2026-11-21T18:12:00Z', base: 1 },
+            },
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } }
+        );
+      },
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    // Open discard dialog for rev 2 from the History chip.
+    const chipMenu = el.shadowRoot!.querySelector('.draft-chip-menu sl-menu')!;
+    chipMenu.dispatchEvent(
+      new CustomEvent('sl-select', { detail: { item: { value: 'discard' } } })
+    );
+    await el.updateComplete;
+
+    // First click sends DELETE ?rev=2 and receives 409 draft_conflict.
+    const confirmBtn = el.shadowRoot!.querySelector<HTMLElement>(
+      'sl-dialog.draft-discard-dialog sl-button.draft-discard-confirm'
+    )!;
+    confirmBtn.click();
+    await settle(el);
+
+    const deletesAfterFirst = state.requests.filter(
+      (r) => r.method === 'DELETE' && r.url.includes('/review-draft')
+    );
+    expect(deletesAfterFirst).toHaveLength(1);
+    expect(deletesAfterFirst[0].url).toContain('?rev=2');
+
+    // Dialog remains open with the conflict alert and confirm button disabled.
+    const dialog = el.shadowRoot!.querySelector('sl-dialog.draft-discard-dialog')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain('updated on another device or tab');
+    expect(confirmBtn.hasAttribute('disabled')).toBe(true);
+
+    // Even if clicked again (or invoked programmatically) while open, no second DELETE is sent
+    // and the newer rev 3 draft on the hub is preserved.
+    delete state.nextDeleteResponse;
+    confirmBtn.click();
+    await settle(el);
+
+    expect(
+      state.requests.filter((r) => r.method === 'DELETE' && r.url.includes('/review-draft'))
+    ).toHaveLength(1);
+    expect(state.draft?.rev).toBe(3);
+    expect(state.draft?.body).toBe(newerBody);
+
+    // Closing the dialog leaves the page refreshed with the newer rev 3 draft.
+    dialog.querySelector<HTMLElement>('sl-button.draft-discard-cancel')!.click();
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('sl-dialog.draft-discard-dialog')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')?.textContent?.trim()).toBe('Draft');
+  });
 });

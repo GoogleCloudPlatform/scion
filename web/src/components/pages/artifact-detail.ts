@@ -448,8 +448,9 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private draftCancelOpen = false;
   @state() private draftCancelBusy = false;
   @state() private draftConflictBusy = false;
-  @state() private draftDiscardOpen = false;
+  @state() private draftDiscardTarget: { base: number; rev: number } | null = null;
   @state() private draftDiscardBusy = false;
+  @state() private draftDiscardConflict = false;
   @state() private draftDiscardError: string | null = null;
   @state() private staleDraft: { draft: ReviewDraft; currentSeq: number } | null = null;
   @state() private staleDraftBusy = false;
@@ -1608,7 +1609,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.carriedReview = null;
     this.savedDraft = null;
     this.draftCancelOpen = false;
-    this.draftDiscardOpen = false;
+    this.draftDiscardTarget = null;
+    this.draftDiscardConflict = false;
     this.staleDraft = null;
     this.staleReviewError = false;
   };
@@ -2242,22 +2244,30 @@ export class ScionPageArtifactDetail extends LitElement {
   private openDiscardDraftDialog(): void {
     if (!this.savedDraft) return;
     this.draftDiscardError = null;
-    this.draftDiscardOpen = true;
+    this.draftDiscardConflict = false;
+    this.draftDiscardTarget = { base: this.savedDraft.base, rev: this.savedDraft.rev };
+  }
+
+  private closeDiscardDraftDialog(): void {
+    this.draftDiscardTarget = null;
+    this.draftDiscardConflict = false;
+    this.draftDiscardError = null;
   }
 
   private async confirmDiscardDraft(): Promise<void> {
-    const d = this.savedDraft;
-    if (!d || this.draftDiscardBusy) return;
+    const target = this.draftDiscardTarget;
+    if (!target || this.draftDiscardBusy || this.draftDiscardConflict) return;
     this.draftDiscardBusy = true;
     this.draftDiscardError = null;
     try {
-      await deleteReviewDraft(this.artifactId, { rev: d.rev });
+      await deleteReviewDraft(this.artifactId, { rev: target.rev });
       this.savedDraft = null;
-      this.draftDiscardOpen = false;
+      this.closeDiscardDraftDialog();
     } catch (err) {
       if (err instanceof DraftConflictError) {
+        this.draftDiscardConflict = true;
         this.draftDiscardError =
-          'This draft was updated on another device or tab. Reload or review the latest draft before discarding.';
+          'This draft was updated on another device or tab. Close this dialog and review the latest draft before discarding.';
         void this.loadSavedDraft(this.loadGen);
       } else {
         this.draftDiscardError =
@@ -4151,19 +4161,19 @@ export class ScionPageArtifactDetail extends LitElement {
             >
           </sl-dialog>`
         : nothing}
-      ${this.draftDiscardOpen && this.savedDraft
+      ${this.draftDiscardTarget
         ? html`<sl-dialog
             class="draft-discard-dialog"
             label="Discard saved draft?"
             open
             @sl-request-close=${(e: Event): void => {
               if (this.draftDiscardBusy) e.preventDefault();
-              else this.draftDiscardOpen = false;
+              else this.closeDiscardDraftDialog();
             }}
           >
             <p>
-              Delete your saved review draft of version ${this.savedDraft.base}? This can't be
-              undone.
+              Delete your saved review draft of version ${this.draftDiscardTarget.base}? This can't
+              be undone.
             </p>
             ${this.draftDiscardError
               ? html`<sl-alert variant="danger" open>
@@ -4176,14 +4186,15 @@ export class ScionPageArtifactDetail extends LitElement {
               class="draft-discard-cancel"
               ?disabled=${this.draftDiscardBusy}
               @click=${(): void => {
-                this.draftDiscardOpen = false;
+                this.closeDiscardDraftDialog();
               }}
-              >Cancel</sl-button
+              >${this.draftDiscardConflict ? 'Close' : 'Cancel'}</sl-button
             >
             <sl-button
               slot="footer"
               class="draft-discard-confirm"
               variant="danger"
+              ?disabled=${this.draftDiscardConflict}
               ?loading=${this.draftDiscardBusy}
               @click=${(): void => void this.confirmDiscardDraft()}
               >Discard draft</sl-button
