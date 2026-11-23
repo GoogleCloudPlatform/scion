@@ -1256,3 +1256,56 @@ func TestSecretRequests_FulfillAbortsOnGetMetaError(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Equal(t, store.SecretRequestStatusPending, rows[0].Status)
 }
+
+// TestSecretRequests_FulfillRevalidatesWriteConstraints verifies that
+// handleSecretRequestFulfill re-runs validateAgentSecretWriteConstraints before
+// claiming or writing to the backend: if an internal secret with the same key
+// is created after the request was sent, fulfill must refuse it (403) without
+// overwriting the internal secret. Removing the validateAgentSecretWriteConstraints
+// call in handleSecretRequestFulfill makes this test fail.
+func TestSecretRequests_FulfillRevalidatesWriteConstraints(t *testing.T) {
+	f := newSecretRequestsFixture(t, true)
+	ctx := context.Background()
+
+	// 1. Send a valid request while no internal secret with this key exists.
+	rrSend := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "REVAL_INTERNAL_KEY", Description: "valid at send time"},
+	}, false)
+	require.Equal(t, http.StatusOK, rrSend.Code, rrSend.Body.String())
+	var card struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrSend.Body.Bytes(), &card))
+
+	// 2. Create an internal agent-scoped secret with the same key AFTER send.
+	_, _, err := f.backend.Set(ctx, &secret.SetSecretInput{
+		Name:          "REVAL_INTERNAL_KEY",
+		Value:         "internal-do-not-overwrite",
+		SecretType:    store.SecretTypeInternal,
+		Target:        "REVAL_INTERNAL_KEY",
+		Scope:         store.ScopeAgent,
+		ScopeID:       f.agent.ID,
+		InjectionMode: store.InjectionModeAsNeeded,
+		CreatedBy:     "system",
+		UpdatedBy:     "system",
+		ProjectID:     f.project.ID,
+	})
+	require.NoError(t, err)
+
+	// 3. Fulfill must be refused by fulfill-side re-validation (409 internal_secret)
+	// and must not overwrite the internal secret or transition the row.
+	rrFulfill := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+card.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+		Values: map[string]string{"REVAL_INTERNAL_KEY": "attempted-overwrite"},
+	})
+	require.Equal(t, http.StatusConflict, rrFulfill.Code, rrFulfill.Body.String())
+	require.Contains(t, rrFulfill.Body.String(), "internal_secret")
+
+	got, err := f.backend.Get(ctx, "REVAL_INTERNAL_KEY", store.ScopeAgent, f.agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, "internal-do-not-overwrite", got.Value, "internal secret must not be overwritten")
+
+	rows, err := f.store.GetSecretRequestsByMessageID(ctx, card.MessageID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, store.SecretRequestStatusPending, rows[0].Status)
+}
