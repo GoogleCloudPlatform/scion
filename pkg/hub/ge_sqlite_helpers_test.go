@@ -154,6 +154,9 @@ func (l *recordingAuditLogger) LogLifecycleHookExecutionEvent(context.Context, *
 func (l *recordingAuditLogger) LogAgentSecretReadEvent(context.Context, *AgentSecretReadEvent) error {
 	return nil
 }
+func (l *recordingAuditLogger) LogAgentSecretWriteEvent(context.Context, *AgentSecretWriteEvent) error {
+	return nil
+}
 func (l *recordingAuditLogger) RecordSAAssignment(context.Context, *store.SAAssignmentEvent) error {
 	return nil
 }

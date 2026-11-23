@@ -1511,11 +1511,24 @@ type AgentSetSecretRequest struct {
 	Type     string `json:"type,omitempty"`     // environment (default), variable, file
 	Target   string `json:"target,omitempty"`   // Injection target path
 	Force    bool   `json:"force,omitempty"`    // Overwrite existing secret
-	Scope    string `json:"scope,omitempty"`    // "project" (default) or "user"
+	Scope    string `json:"scope,omitempty"`    // "project" (default), "user", or "agent"
 	// AllowProgeny opts the secret in to progeny inheritance (user scope only).
 	// A pointer so an unset field is distinguishable from an explicit false;
 	// unset resolves to false (opt-in, per design doc §5.1).
 	AllowProgeny *bool `json:"allowProgeny,omitempty"`
+}
+
+// LogValue redacts the secret value so AgentSetSecretRequest can never leak
+// secret material into structured logs.
+func (r AgentSetSecretRequest) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("value", "[REDACTED]"),
+		slog.String("encoding", r.Encoding),
+		slog.String("type", r.Type),
+		slog.String("target", r.Target),
+		slog.Bool("force", r.Force),
+		slog.String("scope", r.Scope),
+	)
 }
 
 // AgentSetSecretResponse is returned on successful agent secret creation.
@@ -1549,12 +1562,12 @@ type AgentSecretMeta struct {
 
 // handleAgentSecrets handles agent secret operations:
 //
-//	GET  /api/v1/agents/{agentID}/secrets          — list secret metadata
-//	GET  /api/v1/agents/{agentID}/secrets/{key}    — retrieve a single secret value
-//	PUT  /api/v1/agents/{agentID}/secrets/{key}    — create/update a secret
+//	GET    /api/v1/agents/{agentID}/secrets          — list secret metadata
+//	GET    /api/v1/agents/{agentID}/secrets/{key}    — retrieve a single secret value
+//	PUT    /api/v1/agents/{agentID}/secrets/{key}    — create/update a secret
+//	DELETE /api/v1/agents/{agentID}/secrets/{key}    — delete an agent-scoped secret
 //
-// Only agents may call this endpoint. Secrets are always scoped to the
-// agent's project (derived from the JWT).
+// Only agents may call this endpoint.
 func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agentID, subPath string) {
 	key := strings.TrimPrefix(subPath, "/")
 
@@ -1579,8 +1592,15 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			return
 		}
 		// Fall through to existing PUT logic below.
+	case http.MethodDelete:
+		s.agentDeleteSecret(w, r, agentID, key)
+		return
 	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		if s.experimentEnabled(experiments.AgentSecrets) {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
+		} else {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		}
 		return
 	}
 
@@ -1632,6 +1652,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	// Determine scope and scopeID.
+	agentSecretsOn := s.experimentEnabled(experiments.AgentSecrets)
 	scope := req.Scope
 	if scope == "" {
 		scope = store.ScopeProject
@@ -1651,11 +1672,23 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent token lacks user context required for user-scoped secrets", nil)
 			return
 		}
+	case store.ScopeAgent:
+		if !agentSecretsOn {
+			BadRequest(w, "invalid scope: "+scope)
+			return
+		}
+		scopeID = agentID
 	default:
-		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
+		allowed := []string{"project", "user"}
+		msg := "scope must be \"project\" or \"user\""
+		if agentSecretsOn {
+			allowed = []string{"agent", "project", "user"}
+			msg = "scope must be \"agent\", \"project\", or \"user\""
+		}
+		ValidationError(w, msg, map[string]interface{}{
 			"field":   "scope",
 			"value":   scope,
-			"allowed": []string{"project", "user"},
+			"allowed": allowed,
 		})
 		return
 	}
@@ -1797,8 +1830,8 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		allowProgeny = *req.AllowProgeny
 	}
 
-	// Attribution: only project-scope writes reach this point. A user-scope
-	// write is attributed when its owner approves it (approvePendingSecret).
+	// Attribution: only project- and agent-scope writes reach this point. A
+	// user-scope write is attributed when its owner approves it (approvePendingSecret).
 	createdBy := fmt.Sprintf("agent:%s", agentID)
 
 	input := &secret.SetSecretInput{
@@ -1813,11 +1846,18 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		UpdatedBy:    fmt.Sprintf("agent:%s", agentID),
 	}
 
-	created, _, err := s.secretBackend.Set(ctx, input)
+	created, meta, err := s.secretBackend.Set(ctx, input)
 	if err != nil {
+		s.logAgentSecretWrite(ctx, "set", agentID, projectID, scope, scopeID, key, 0, false, false, "backend_error")
 		writeErrorFromErr(w, err, "")
 		return
 	}
+
+	version := 0
+	if meta != nil {
+		version = meta.Version
+	}
+	s.logAgentSecretWrite(ctx, "set", agentID, projectID, scope, scopeID, key, version, created, true, "")
 
 	if created {
 		writeJSON(w, http.StatusCreated, AgentSetSecretResponse{
@@ -1828,6 +1868,83 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	} else {
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// agentDeleteSecret handles DELETE /api/v1/agents/{agentID}/secrets/{key}.
+// Only agent-scoped secrets may be deleted by the owning agent, and only when
+// the hub.agent_secrets experiment is enabled.
+func (s *Server) agentDeleteSecret(w http.ResponseWriter, r *http.Request, agentID, key string) {
+	ctx := r.Context()
+	agentSecretsOn := s.experimentEnabled(experiments.AgentSecrets)
+	scope := r.URL.Query().Get("scope")
+
+	// When hub.agent_secrets is off, preserve pre-experiment behavior: DELETE
+	// without scope=agent returns 405 Method Not Allowed. An explicit
+	// scope=agent request is refused with 400 "invalid scope: agent" after auth.
+	if !agentSecretsOn && scope != store.ScopeAgent {
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		return
+	}
+
+	if key == "" {
+		BadRequest(w, "Secret key is required in the URL path")
+		return
+	}
+	if strings.ContainsAny(key, "= \t\n") {
+		ValidationError(w, "secret key cannot contain spaces, tabs, newlines, or '='", map[string]interface{}{
+			"field": "key",
+			"value": key,
+		})
+		return
+	}
+	if rejectSystemOneReservedSecretWrite(w, key) {
+		return
+	}
+
+	projectID, ok := s.validateAgentSecretAccess(w, r, agentID)
+	if !ok {
+		return
+	}
+	if s.agentStandingForbidden(ctx, w, agentID) {
+		return
+	}
+
+	if !agentSecretsOn {
+		BadRequest(w, "invalid scope: "+scope)
+		return
+	}
+	if scope != store.ScopeAgent {
+		ValidationError(w, "scope must be \"agent\" for agent secret deletion", map[string]interface{}{
+			"field":   "scope",
+			"value":   scope,
+			"allowed": []string{store.ScopeAgent},
+		})
+		return
+	}
+
+	if s.refuseInternalSecretMutation(w, ctx, key, store.ScopeAgent, agentID) {
+		return
+	}
+
+	meta, err := s.secretBackend.GetMeta(ctx, key, store.ScopeAgent, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, 0, false, false, "not_found")
+		} else {
+			s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, 0, false, false, "backend_error")
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if err := s.secretBackend.Delete(ctx, key, store.ScopeAgent, agentID); err != nil {
+		s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, meta.Version, false, false, "backend_error")
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	s.logAgentSecretWrite(ctx, "delete", agentID, projectID, store.ScopeAgent, agentID, key, meta.Version, false, true, "")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // validateAgentSecretAccess checks that the request is from an authenticated agent

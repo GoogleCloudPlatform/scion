@@ -239,3 +239,27 @@ func (s *Server) logAgentSecretReadCompatVersion(ctx context.Context, agentID, p
 
 	_ = s.auditLogger.LogAgentSecretReadEvent(ctx, event)
 }
+
+// logAgentSecretWrite writes an AgentSecretWriteEvent through s.auditLogger.
+// Nil-safe when no audit logger is configured. Never records secret values.
+func (s *Server) logAgentSecretWrite(ctx context.Context, op, agentID, projectID, scope, scopeID, key string, version int, created, success bool, failReason string) {
+	if s.auditLogger == nil {
+		return
+	}
+
+	event := &AgentSecretWriteEvent{
+		Operation:  op,
+		AgentID:    agentID,
+		ProjectID:  projectID,
+		Scope:      scope,
+		ScopeID:    scopeID,
+		SecretKey:  key,
+		Version:    version,
+		Created:    created,
+		Success:    success,
+		FailReason: failReason,
+		Timestamp:  time.Now(),
+	}
+
+	_ = s.auditLogger.LogAgentSecretWriteEvent(ctx, event)
+}

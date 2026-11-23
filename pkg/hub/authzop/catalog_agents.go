@@ -787,16 +787,17 @@ var agentOperations = []OperationSpec{
 	{
 		ID:          "agent.secrets.access",
 		Domain:      "agent",
-		Description: "List, read and write the secrets available to the calling agent: its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)",
+		Description: "List, read, write and delete the secrets available to the calling agent: its own agent-scoped secrets, its project's and its creating user's. A user-scope write is held as a pending secret for the owner's approval (secret.user.pending.*)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "GET", Response: ResponseCredential},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "PUT"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/secrets/{key}", Method: "DELETE"},
 		},
 		Principals:       []PrincipalKind{PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialAgentJWT},
 		ResourceResolver: "agent-self",
-		Effects:          []SecurityEffect{EffectReadSecret, EffectUpdateResource},
+		Effects:          []SecurityEffect{EffectReadSecret, EffectUpdateResource, EffectDeleteResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		AuditObligation: &AuditObligation{

@@ -1353,7 +1353,7 @@ func TestUserSecretWriters_Inventory(t *testing.T) {
 	reviewed := map[string]string{
 		"Server.setEnvVar":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
 		"Server.setSecret":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
-		"Server.handleAgentSecrets":      "project scope only: a user-scope agent write is held pending (agentWritePendingUserSecret)",
+		"Server.handleAgentSecrets":      "project or agent scope only: a user-scope agent write is held pending (agentWritePendingUserSecret)",
 		"Server.approvePendingSecret":    "user scope: scope ID and creator are both the approving owner (resolveEnvSecretAccess)",
 		"Server.handleScopedEnvVarByKey": "called with the project and runtime broker scopes only (TestUserSecretWriters_ScopedByKeyCallers)",
 		"Server.handleScopedSecretByKey": "called with the project and runtime broker scopes only (TestUserSecretWriters_ScopedByKeyCallers)",
