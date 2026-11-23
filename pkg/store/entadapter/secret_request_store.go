@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -542,6 +543,15 @@ func (c *CompositeStore) ClaimSecretRequestsForFulfill(ctx context.Context, in *
 	})
 }
 
+// errFinishFulfillConflict aborts the FinishSecretRequestFulfill transaction so
+// earlier rows updated in the same loop are rolled back when a later row's CAS
+// misses (N1).
+type errFinishFulfillConflict struct {
+	conflict *store.SecretRequest
+}
+
+func (e *errFinishFulfillConflict) Error() string { return "finish fulfill claim conflict" }
+
 // FinishSecretRequestFulfill implements store.SecretRequestStore.
 func (c *CompositeStore) FinishSecretRequestFulfill(ctx context.Context, in *store.FinishSecretRequestFulfillInput) (*store.FinishSecretRequestFulfillResult, error) {
 	if in == nil || in.MessageID == "" || in.UserID == "" || len(in.RowIDs) == 0 {
@@ -565,7 +575,7 @@ func (c *CompositeStore) FinishSecretRequestFulfill(ctx context.Context, in *sto
 	}
 	claimedAt := in.ClaimedAt.UTC().Truncate(time.Microsecond)
 
-	return withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.FinishSecretRequestFulfillResult, error) {
+	res, err := withMessageActionRetry(ctx, c, func(tx *CompositeStore) (*store.FinishSecretRequestFulfillResult, error) {
 		var respMsgID *uuid.UUID
 		var respMsgCopy *store.Message
 		if in.ResponseMessage != nil {
@@ -626,7 +636,7 @@ func (c *CompositeStore) FinishSecretRequestFulfill(ctx context.Context, in *sto
 				if len(reloaded) > 0 {
 					conflict = entSecretRequestToStore(reloaded[0])
 				}
-				return &store.FinishSecretRequestFulfillResult{Conflict: conflict}, nil
+				return nil, &errFinishFulfillConflict{conflict: conflict}
 			}
 		}
 
@@ -652,6 +662,11 @@ func (c *CompositeStore) FinishSecretRequestFulfill(ctx context.Context, in *sto
 			ResponseMessage: respMsgCopy,
 		}, nil
 	})
+	var conflictErr *errFinishFulfillConflict
+	if errors.As(err, &conflictErr) {
+		return &store.FinishSecretRequestFulfillResult{Conflict: conflictErr.conflict}, nil
+	}
+	return res, err
 }
 
 // RollbackSecretRequestClaim implements store.SecretRequestStore.
@@ -842,12 +857,6 @@ func (c *CompositeStore) DismissSecretRequests(ctx context.Context, in *store.Di
 			return nil, errMessageActionRace
 		}
 
-		if respMsgCopy != nil {
-			if err := tx.CreateMessage(ctx, respMsgCopy); err != nil {
-				return nil, err
-			}
-		}
-
 		updated, err := tx.client.SecretRequest.Query().
 			Where(secretrequest.IDIn(toDismissUIDs...)).
 			Order(ent.Asc(secretrequest.FieldPosition)).
@@ -858,6 +867,14 @@ func (c *CompositeStore) DismissSecretRequests(ctx context.Context, in *store.Di
 		dismissed := make([]*store.SecretRequest, len(updated))
 		for i, r := range updated {
 			dismissed[i] = entSecretRequestToStore(r)
+		}
+		if respMsgCopy != nil {
+			if in.FormatResponseMsg != nil {
+				respMsgCopy.Msg = in.FormatResponseMsg(dismissed)
+			}
+			if err := tx.CreateMessage(ctx, respMsgCopy); err != nil {
+				return nil, err
+			}
 		}
 		return &store.DismissSecretRequestsResult{
 			Dismissed:        dismissed,

@@ -225,16 +225,17 @@ type RollbackSecretRequestClaimInput struct {
 
 // DismissSecretRequestsInput is the input to DismissSecretRequests.
 type DismissSecretRequestsInput struct {
-	MessageID       string
-	RowIDs          []string // empty targets all pending rows on the card
-	UserID          string
-	UserName        string
-	UserEmail       string
-	Reason          string
-	Surface         string
-	IdempotencyKey  string
-	ResponseMessage *Message
-	Now             time.Time
+	MessageID         string
+	RowIDs            []string // empty targets all pending rows on the card
+	UserID            string
+	UserName          string
+	UserEmail         string
+	Reason            string
+	Surface           string
+	IdempotencyKey    string
+	ResponseMessage   *Message
+	FormatResponseMsg func(dismissed []*SecretRequest) string
+	Now               time.Time
 }
 
 // DismissSecretRequestsResult is returned by DismissSecretRequests.

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -229,7 +230,9 @@ func (s *Server) removeAgentScopedSecretsCtx(ctx context.Context, backend secret
 // also captures a pre-transaction snapshot for callers that do not invoke
 // agentHardDeleteWork (such as PurgeDeletedAgentsByID on already soft-deleted
 // agents, where new secret writes are refused). When fn commits with n > 0, it
-// runs best-effort post-commit external backend cleanup for the merged key set.
+// runs best-effort post-commit external backend cleanup for the merged key set
+// and emits post-commit withdrawn live updates and audit events for secret
+// requests withdrawn by the delete/purge.
 func (s *Server) withAgentSecretCleanup(ctx context.Context, agentID string, fn func(txCtx context.Context) (int, error)) (int, error) {
 	return s.withAgentSecretCleanupOpts(ctx, agentID, false, fn)
 }
@@ -247,12 +250,16 @@ func (s *Server) withAgentSecretCleanupOpts(ctx context.Context, agentID string,
 	if s.GetSecretBackend() != nil {
 		preKeys = s.listAgentSecretNames(ctx, agentID)
 	}
+	pendingSRIDs := s.listAgentPendingSecretRequestIDs(ctx, agentID)
 	collector := &agentSecretCleanupCollector{}
 	txCtx := withAgentSecretCleanupCollector(ctx, collector)
 	n, err := fn(txCtx)
 	if err == nil && n > 0 {
 		keys := append(preKeys, collector.snapshot()...)
 		s.removeAgentScopedSecrets(ctx, agentID, keys)
+		if len(pendingSRIDs) > 0 {
+			s.emitPostCommitDeletedAgentSecretRequests(ctx, pendingSRIDs)
+		}
 		return n, err
 	}
 	if cleanupWhenAbsent && err == nil && n == 0 && s.store != nil {
@@ -264,6 +271,81 @@ func (s *Server) withAgentSecretCleanupOpts(ctx context.Context, agentID string,
 		}
 	}
 	return n, err
+}
+
+func (s *Server) listAgentPendingSecretRequestIDs(ctx context.Context, agentID string) []string {
+	if s.store == nil || agentID == "" {
+		return nil
+	}
+	var ids []string
+	cursor := ""
+	for {
+		res, err := s.store.ListAgentSecretRequests(ctx, &store.ListAgentSecretRequestsOptions{
+			AgentID: agentID,
+			State:   store.SecretRequestListStatePending,
+			Cursor:  cursor,
+			Limit:   store.MaxSecretRequestListLimit,
+		})
+		if err != nil || res == nil || len(res.Items) == 0 {
+			break
+		}
+		for _, r := range res.Items {
+			ids = append(ids, r.ID)
+		}
+		if res.NextCursor == "" {
+			break
+		}
+		cursor = res.NextCursor
+	}
+	return ids
+}
+
+func (s *Server) emitPostCommitDeletedAgentSecretRequests(ctx context.Context, rowIDs []string) {
+	if s.store == nil || len(rowIDs) == 0 {
+		return
+	}
+	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentScopedSecretCleanupTimeout)
+	defer cancel()
+	rowsByID, err := s.store.GetSecretRequestsByIDs(postCtx, rowIDs)
+	if err != nil {
+		slog.Warn("agent delete: failed to reload withdrawn secret requests after commit", "error", err)
+		return
+	}
+	for _, id := range rowIDs {
+		sr, ok := rowsByID[id]
+		if !ok || sr == nil {
+			continue
+		}
+		if sr.Status != store.SecretRequestStatusWithdrawn ||
+			sr.WithdrawnBy != store.SecretRequestWithdrawnByHub ||
+			sr.WithdrawnReason != "agent deleted" {
+			continue
+		}
+		s.publishSecretRequestUpdated(postCtx, sr, nil)
+		details := map[string]string{"secret_type": sr.SecretType}
+		if sr.Target != "" {
+			details["target"] = sr.Target
+		}
+		ts := time.Now().UTC()
+		if sr.ResolvedAt != nil {
+			ts = *sr.ResolvedAt
+		}
+		s.emitMessageActionEvent(postCtx, &MessageActionEvent{
+			Kind:      msgaction.KindSecretRequest,
+			EventType: MessageActionEventWithdrawn,
+			RowID:     sr.ID,
+			MessageID: sr.MessageID,
+			ProjectID: sr.ProjectID,
+			AgentID:   sr.AgentID,
+			AgentName: sr.AgentName,
+			Key:       sr.Key,
+			Version:   sr.Version,
+			ActorKind: MessageActionActorHub,
+			Reason:    "agent deleted",
+			Details:   details,
+			Timestamp: ts,
+		})
+	}
 }
 
 // snapshotAgentSecrets reads the metadata and values of all agent-scoped

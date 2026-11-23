@@ -363,3 +363,64 @@ func TestSecretRequestStore_WithdrawDismissSweeperAndDeleteHooks(t *testing.T) {
 		t.Fatalf("want ErrNotFound after project delete, got %v", err)
 	}
 }
+
+// TestSecretRequestStore_FinishConflictRollsBackEarlierRows verifies N1: when a
+// multi-key card's FinishSecretRequestFulfill loses the CAS on a later row,
+// earlier rows updated in the same transaction are rolled back.
+func TestSecretRequestStore_FinishConflictRollsBackEarlierRows(t *testing.T) {
+	ctx := context.Background()
+	cs, projID, agentID := newSecretRequestTestStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	res, err := cs.CreateSecretRequestPrompt(ctx, makeSecretRequestPromptInput(projID, agentID, false, now,
+		messages.SecretRequest{Key: "M1", KeyNorm: "M1", SecretType: "environment"},
+		messages.SecretRequest{Key: "M2", KeyNorm: "M2", SecretType: "environment"},
+	))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	r1, r2 := res.Requests[0].Row, res.Requests[1].Row
+	claim, err := cs.ClaimSecretRequestsForFulfill(ctx, &store.ClaimSecretRequestsInput{
+		MessageID: r1.MessageID,
+		RowIDs:    []string{r1.ID, r2.ID},
+		UserID:    "user-1",
+		UserName:  "Alice",
+		Now:       now.Add(time.Second),
+	})
+	if err != nil || claim.Conflict != nil || len(claim.Claimed) != 2 {
+		t.Fatalf("claim: err=%v claim=%+v", err, claim)
+	}
+
+	// Simulate r2 losing its claim (rolled back to pending) while r1 stays fulfilling.
+	if _, err := cs.RollbackSecretRequestClaim(ctx, &store.RollbackSecretRequestClaimInput{
+		MessageID: r1.MessageID,
+		RowIDs:    []string{r2.ID},
+		UserID:    "user-1",
+		ClaimedAt: claim.ClaimedAt,
+	}); err != nil {
+		t.Fatalf("rollback r2: %v", err)
+	}
+
+	fin, err := cs.FinishSecretRequestFulfill(ctx, &store.FinishSecretRequestFulfillInput{
+		MessageID:      r1.MessageID,
+		RowIDs:         []string{r1.ID, r2.ID},
+		UserID:         "user-1",
+		ClaimedAt:      claim.ClaimedAt,
+		SecretVersions: map[string]int{r1.ID: 1, r2.ID: 1},
+		Now:            now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("finish err: %v", err)
+	}
+	if fin.Conflict == nil || fin.Conflict.ID != r2.ID {
+		t.Fatalf("expected conflict on r2, got %+v", fin)
+	}
+	// Critical N1 check: r1 MUST NOT have been committed as fulfilled.
+	r1After, err := cs.GetSecretRequest(ctx, r1.ID)
+	if err != nil {
+		t.Fatalf("get r1: %v", err)
+	}
+	if r1After.Status != store.SecretRequestStatusFulfilling {
+		t.Fatalf("r1 should remain fulfilling after tx rollback, got %s", r1After.Status)
+	}
+}

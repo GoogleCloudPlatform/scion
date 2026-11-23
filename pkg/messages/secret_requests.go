@@ -131,8 +131,19 @@ func ValidSecretRequestKey(key string) bool {
 	return secretRequestKeyRe.MatchString(key)
 }
 
-// isReservedSecretRequestEnvTarget reports whether target falls under a
-// control-plane reserved env prefix (SCION_* or GCE_METADATA_*).
+// ValidateSecretRequestFileTarget validates the target path of a file-type
+// secret request. Single source of truth shared by NormalizeSecretRequests and
+// hub write validation: rejects ".." and requires a "~/" prefix so agent-chosen
+// request targets stay inside the agent home rather than writing outside ~.
+func ValidateSecretRequestFileTarget(target string) error {
+	if strings.Contains(target, "..") {
+		return fmt.Errorf("target path must not contain '..'")
+	}
+	if !strings.HasPrefix(target, "~/") {
+		return fmt.Errorf("file secret request target must start with ~/")
+	}
+	return nil
+}
 func isReservedSecretRequestEnvTarget(target string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(target))
 	return strings.HasPrefix(upper, "SCION_") || strings.HasPrefix(upper, "GCE_METADATA_")
@@ -201,8 +212,12 @@ func NormalizeSecretRequests(root string, in []SecretRequestInput) ([]SecretRequ
 				add(p+".target", DecisionErrTooLong, "target is at most %d characters", MaxSecretRequestTargetLen)
 			}
 		}
-		if secretType == SecretRequestTypeFile && target == "" {
-			add(p+".target", DecisionErrRequired, "target is required when type is \"file\"")
+		if secretType == SecretRequestTypeFile {
+			if target == "" {
+				add(p+".target", DecisionErrRequired, "target is required when type is \"file\"")
+			} else if err := ValidateSecretRequestFileTarget(target); err != nil {
+				add(p+".target", DecisionErrInvalid, "%s", err.Error())
+			}
 		}
 		if secretType == SecretRequestTypeEnvironment {
 			effectiveTarget := target

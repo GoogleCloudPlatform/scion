@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -43,12 +44,54 @@ type secretRequestStoreError struct{ err error }
 func (e *secretRequestStoreError) Error() string { return e.err.Error() }
 func (e *secretRequestStoreError) Unwrap() error { return e.err }
 
+// validateAgentSecretWriteConstraints applies the shared agent-scope secret
+// write rules (reserved env targets via secret.IsReservedEnvTarget, System One
+// and webhook reserved key prefixes with _ -> - folding, file target path
+// safety, and internal secret mutation refusal). Both prepareSecretRequestSend
+// and handleSecretRequestFulfill call it so secret requests cannot bypass
+// agent-scope write guards (R3).
+func (s *Server) validateAgentSecretWriteConstraints(w http.ResponseWriter, ctx context.Context, agentID, key, secretType, target string) bool {
+	effectiveTarget := target
+	if effectiveTarget == "" {
+		effectiveTarget = key
+	}
+	if secretType == "" || secretType == store.SecretTypeEnvironment {
+		if secret.IsReservedEnvTarget(effectiveTarget) {
+			ValidationError(w, "target is reserved for scion's own control-plane environment variables", map[string]interface{}{
+				"field": "target",
+				"value": effectiveTarget,
+			})
+			return false
+		}
+	}
+	if secretType == store.SecretTypeFile {
+		if err := messages.ValidateSecretRequestFileTarget(target); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{
+				"field": "target",
+				"value": target,
+			})
+			return false
+		}
+	}
+	if rejectSystemOneReservedSecretWrite(w, key) {
+		return false
+	}
+	if rejectWebhookEndpointReservedSecretWrite(w, key) {
+		return false
+	}
+	if s.refuseInternalSecretMutation(w, ctx, key, store.ScopeAgent, agentID) {
+		return false
+	}
+	return true
+}
+
 // prepareSecretRequestSend validates a send that carries secret_requests or
 // secret_requests_update before any routing: experiment gate (400
 // experiment_disabled when off), mutual exclusion with decisions, update
-// without entries, agent/broadcast recipient, attachments, and entry validation.
+// without entries, agent/broadcast recipient, attachments, entry validation,
+// and agent-scope secret write constraints.
 // Returns (nil, true) for an ordinary send, or (nil, false) after writing the error.
-func (s *Server) prepareSecretRequestSend(w http.ResponseWriter, req *OutboundMessageRequest) (*secretRequestPromptSend, bool) {
+func (s *Server) prepareSecretRequestSend(w http.ResponseWriter, ctx context.Context, agentID string, req *OutboundMessageRequest) (*secretRequestPromptSend, bool) {
 	if req.SecretRequests == nil && !req.SecretRequestsUpdate {
 		return nil, true
 	}
@@ -83,6 +126,11 @@ func (s *Server) prepareSecretRequestSend(w http.ResponseWriter, req *OutboundMe
 	if err != nil {
 		writeSecretRequestValidationErrors(w, err)
 		return nil, false
+	}
+	for _, entry := range normalized {
+		if !s.validateAgentSecretWriteConstraints(w, ctx, agentID, entry.Key, entry.SecretType, entry.Target) {
+			return nil, false
+		}
 	}
 	return &secretRequestPromptSend{requests: normalized, update: req.SecretRequestsUpdate}, true
 }

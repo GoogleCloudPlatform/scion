@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/msgaction"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -299,31 +298,11 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	if _, err := tx.DeleteSecretsByScope(ctx, store.ScopeAgent, a.ID); err != nil {
 		return 0, 0, fmt.Errorf("%s: delete agent-scope secrets: %w", label, err)
 	}
-	if withdrawnSRs, err := tx.WithdrawAgentSecretRequestsOnDelete(ctx, a.ID, time.Now().UTC()); err != nil {
+	// Withdraw pending/fulfilling secret requests inside the transaction;
+	// live updates and audit events are published strictly after commit by
+	// withAgentSecretCleanup (R4).
+	if _, err := tx.WithdrawAgentSecretRequestsOnDelete(ctx, a.ID, time.Now().UTC()); err != nil {
 		return 0, 0, fmt.Errorf("%s: withdraw agent secret requests: %w", label, err)
-	} else {
-		for _, sr := range withdrawnSRs {
-			s.publishSecretRequestUpdated(ctx, sr, nil)
-			details := map[string]string{"secret_type": sr.SecretType}
-			if sr.Target != "" {
-				details["target"] = sr.Target
-			}
-			s.emitMessageActionEvent(ctx, &MessageActionEvent{
-				Kind:      msgaction.KindSecretRequest,
-				EventType: MessageActionEventWithdrawn,
-				RowID:     sr.ID,
-				MessageID: sr.MessageID,
-				ProjectID: sr.ProjectID,
-				AgentID:   sr.AgentID,
-				AgentName: sr.AgentName,
-				Key:       sr.Key,
-				Version:   sr.Version,
-				ActorKind: MessageActionActorHub,
-				Reason:    "agent deleted",
-				Details:   details,
-				Timestamp: time.Now().UTC(),
-			})
-		}
 	}
 	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
 		return 0, 0, err

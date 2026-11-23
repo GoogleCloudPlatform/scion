@@ -1237,7 +1237,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if decisionSend != nil {
 		req.Type = messages.TypeDecisionPrompt
 	}
-	secretRequestSend, ok := s.prepareSecretRequestSend(w, &req)
+	secretRequestSend, ok := s.prepareSecretRequestSend(w, ctx, id, &req)
 	if !ok {
 		return
 	}

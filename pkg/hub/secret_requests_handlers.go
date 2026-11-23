@@ -73,6 +73,12 @@ const (
 	agentSecretRequestsRoutePrefix = "/api/v1/agent/secret-requests/"
 
 	maxFulfillRequestBodyBytes = 256 * 1024
+	maxSecretRequestValueBytes = 64 * 1024
+	// secretRequestFulfillSetTimeout bounds each backend.Set call during fulfill
+	// well below SecretRequestClaimTTL (2m) so a slow backend cannot race the
+	// stale-claim sweeper (N3).
+	secretRequestFulfillSetTimeout   = 30 * time.Second
+	secretRequestCompensationTimeout = 15 * time.Second
 )
 
 // handleSecretRequestRoutes serves the responder secret-request endpoints,
@@ -247,8 +253,9 @@ func (s *Server) loadSecretRequestCard(w http.ResponseWriter, ctx context.Contex
 }
 
 // isSecretRequestRecipient reports whether user is a recipient of the secret
-// request card (the DM target, or a participant/reader of the thread/project).
-func (s *Server) isSecretRequestRecipient(ctx context.Context, user UserIdentity, chatKey string, promptMsg *store.Message) bool {
+// request card (the DM target, or a participant of the thread/project).
+// answering is false for GET (read access) and true for fulfill/dismiss (N5).
+func (s *Server) isSecretRequestRecipient(ctx context.Context, user UserIdentity, chatKey string, promptMsg *store.Message, answering bool) bool {
 	if user == nil {
 		return false
 	}
@@ -261,7 +268,7 @@ func (s *Server) isSecretRequestRecipient(ctx context.Context, user UserIdentity
 	if strings.HasPrefix(chatKey, "dm:") {
 		return authorizeDMKeyParticipant(ctx, user, chatKey, chatSendPath(chatKey)) == nil
 	}
-	return s.authorizeDecisionChatKey(ctx, user, chatKey, false) == nil
+	return s.authorizeDecisionChatKey(ctx, user, chatKey, answering) == nil
 }
 
 // checkSecretRequestAgentPerm checks whether user holds action (ActionRead or
@@ -429,7 +436,7 @@ func (s *Server) handleSecretRequestGet(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg)
+	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, false)
 	_, canRead := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionRead)
 	if !isRecipient || !canRead {
 		reason := "not_recipient"
@@ -516,7 +523,7 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 1: Authorize recipient + agent.attach.
-	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg)
+	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, true)
 	asker, canAttach := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionAttach)
 	if !isRecipient || !canAttach {
 		reason := "not_recipient"
@@ -628,6 +635,11 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 				map[string]interface{}{"field": "values"})
 			return
 		}
+		if len(v) > maxSecretRequestValueBytes {
+			ValidationError(w, fmt.Sprintf("secret value for key %q exceeds 64KB limit", k),
+				map[string]interface{}{"field": "values"})
+			return
+		}
 		valByNorm[norm] = v
 	}
 	claimRowIDs := make([]string, len(pendingRows))
@@ -635,6 +647,9 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		if _, exists := valByNorm[row.KeyNorm]; !exists {
 			ValidationError(w, fmt.Sprintf("missing value for pending key %q", row.Key),
 				map[string]interface{}{"field": "values"})
+			return
+		}
+		if !s.validateAgentSecretWriteConstraints(w, ctx, row.AgentID, row.Key, row.SecretType, row.Target) {
 			return
 		}
 		claimRowIDs[i] = row.ID
@@ -701,8 +716,40 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Step 4: Store each key in the secret backend at agent scope.
-	// On any failure, best-effort delete keys written in this call and roll back the claim.
+	// Publish live "submitting" state for each claimed row (N4).
+	for _, row := range claimRes.Claimed {
+		s.publishSecretRequestUpdated(ctx, row, nil)
+	}
+
+	// compensate deletes keys already written in this call and rolls back the
+	// claim using a detached context so client disconnects cannot leak partial
+	// writes or stuck claims (N2), then publishes the restored pending state (N4).
+	compensate := func(writtenKeys []string, rollbackClaim bool) {
+		compCtx, compCancel := context.WithTimeout(context.WithoutCancel(ctx), secretRequestCompensationTimeout)
+		defer compCancel()
+		for _, k := range writtenKeys {
+			_ = s.secretBackend.Delete(compCtx, k, store.ScopeAgent, rows[0].AgentID)
+		}
+		if rollbackClaim {
+			if n, rerr := s.store.RollbackSecretRequestClaim(compCtx, &store.RollbackSecretRequestClaimInput{
+				MessageID: msgID,
+				RowIDs:    claimRowIDs,
+				UserID:    user.ID(),
+				ClaimedAt: claimRes.ClaimedAt,
+			}); rerr == nil && n > 0 {
+				if restored, gerr := s.store.GetSecretRequestsByIDs(compCtx, claimRowIDs); gerr == nil {
+					for _, id := range claimRowIDs {
+						if rr, ok := restored[id]; ok {
+							s.publishSecretRequestUpdated(compCtx, rr, nil)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Step 4: Store each key in the secret backend at agent scope, bounded
+	// below SecretRequestClaimTTL (N3). On any failure, compensate and return 503.
 	var writtenKeys []string
 	secretVersions := make(map[string]int, len(claimRes.Claimed))
 	for _, row := range claimRes.Claimed {
@@ -711,7 +758,8 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		if target == "" {
 			target = row.Key
 		}
-		_, meta, setErr := s.secretBackend.Set(ctx, &secret.SetSecretInput{
+		setCtx, setCancel := context.WithTimeout(ctx, secretRequestFulfillSetTimeout)
+		_, meta, setErr := s.secretBackend.Set(setCtx, &secret.SetSecretInput{
 			Name:          row.Key,
 			Value:         val,
 			SecretType:    row.SecretType,
@@ -724,17 +772,9 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 			UpdatedBy:     user.ID(),
 			ProjectID:     row.ProjectID,
 		})
+		setCancel()
 		if setErr != nil {
-			// Best-effort compensation: delete keys written in this call.
-			for _, k := range writtenKeys {
-				_ = s.secretBackend.Delete(ctx, k, store.ScopeAgent, row.AgentID)
-			}
-			_, _ = s.store.RollbackSecretRequestClaim(ctx, &store.RollbackSecretRequestClaimInput{
-				MessageID: msgID,
-				RowIDs:    claimRowIDs,
-				UserID:    user.ID(),
-				ClaimedAt: claimRes.ClaimedAt,
-			})
+			compensate(writtenKeys, true)
 			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "failed to store secret in backend; please retry", nil)
 			return
 		}
@@ -771,26 +811,18 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		Now:             finishNow,
 	})
 	if err != nil {
-		for _, k := range writtenKeys {
-			_ = s.secretBackend.Delete(ctx, k, store.ScopeAgent, rows[0].AgentID)
-		}
-		_, _ = s.store.RollbackSecretRequestClaim(ctx, &store.RollbackSecretRequestClaimInput{
-			MessageID: msgID,
-			RowIDs:    claimRowIDs,
-			UserID:    user.ID(),
-			ClaimedAt: claimRes.ClaimedAt,
-		})
+		compensate(writtenKeys, true)
 		writeErrorFromErr(w, err, "")
 		return
 	}
 	if finRes.Conflict != nil {
-		// Claim was lost (e.g., agent hard-deleted during Set): roll back written keys.
-		for _, k := range writtenKeys {
-			_ = s.secretBackend.Delete(ctx, k, store.ScopeAgent, rows[0].AgentID)
-		}
+		// Claim was lost (e.g., agent hard-deleted or stale-claim recovered during Set):
+		// roll back written keys on a detached context (N2). A recovered pending row
+		// reports submitting, not withdrawn (N7).
+		compensate(writtenKeys, false)
 		code := msgaction.ConflictCode(msgaction.SecretRequestKindSpec, finRes.Conflict.Status)
 		if code == "" {
-			code = msgaction.ConflictWithdrawn
+			code = msgaction.ConflictSubmitting
 		}
 		s.emitSecretRequestRefused(ctx, &MessageActionEvent{
 			RowID:     finRes.Conflict.ID,
@@ -916,7 +948,7 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg)
+	isRecipient := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, true)
 	asker, canAttach := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionAttach)
 	if !isRecipient || !canAttach {
 		reason := "not_recipient"
@@ -985,21 +1017,7 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 	}
 	now := time.Now().UTC()
 
-	// Build candidate response message text from targeted pending rows.
-	var targetPreview []*store.SecretRequest
-	targetSet := make(map[string]bool, len(parsed.RowIDs))
-	for _, id := range parsed.RowIDs {
-		targetSet[id] = true
-	}
-	for _, row := range rows {
-		if len(targetSet) > 0 && !targetSet[row.ID] {
-			continue
-		}
-		if row.Status == store.SecretRequestStatusPending && row.ExpiresAt.After(now) {
-			targetPreview = append(targetPreview, row)
-		}
-	}
-	respText := formatSecretDismissedResponse(targetPreview, userName, parsed.Reason)
+	// Build response message text from the actual dismissed rows inside the tx (N6).
 	respMsg := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      rows[0].ProjectID,
@@ -1009,7 +1027,6 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 		SenderID:       user.ID(),
 		Recipient:      "agent:" + rows[0].AgentName,
 		RecipientID:    rows[0].AgentID,
-		Msg:            respText,
 		Type:           messages.TypeSecretResponse,
 	}
 
@@ -1023,7 +1040,10 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 		Surface:         parsed.Surface,
 		IdempotencyKey:  parsed.IdempotencyKey,
 		ResponseMessage: respMsg,
-		Now:             now,
+		FormatResponseMsg: func(dismissed []*store.SecretRequest) string {
+			return formatSecretDismissedResponse(dismissed, userName, parsed.Reason)
+		},
+		Now: now,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrInvalidInput) {
@@ -1154,6 +1174,9 @@ func formatSecretDismissedResponse(rows []*store.SecretRequest, userName, reason
 	suffix := ""
 	if reason != "" {
 		suffix = ": " + reason
+	}
+	if len(rows) == 0 {
+		return fmt.Sprintf("Secret request dismissed by %s%s.", userName, suffix)
 	}
 	if len(rows) == 1 {
 		r := rows[0]

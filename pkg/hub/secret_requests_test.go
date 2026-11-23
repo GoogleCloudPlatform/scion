@@ -366,6 +366,46 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	})
 	require.Equal(t, http.StatusForbidden, rrBobFulfill.Code)
 
+	// 3a2. Dave holds project-owner (agent.attach!) on proj, but is NOT a
+	// recipient of Alice's DM -> 403 + refused audit event with reason "not_recipient"
+	// on BOTH fulfill and dismiss (R5).
+	dave := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "dave@example.com",
+		DisplayName: "Dave",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+	}
+	require.NoError(t, f.store.CreateUser(ctx, dave))
+	ownerRD, err := f.store.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+		ID:               api.NewUUID(),
+		RoleDefinitionID: ownerRD.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.project.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      dave.ID,
+	})
+	require.NoError(t, err)
+
+	f.audit.reset()
+	rrDaveFulfill := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+send2.MessageID+"/fulfill", dave, FulfillSecretRequestBody{
+		Values: map[string]string{"GITHUB_TOKEN": "should-fail"},
+	})
+	require.Equal(t, http.StatusForbidden, rrDaveFulfill.Code)
+	rrDaveDismiss := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+send2.MessageID+"/dismiss", dave, DismissSecretRequestBody{
+		Reason: "nope",
+	})
+	require.Equal(t, http.StatusForbidden, rrDaveDismiss.Code)
+	daveRefused := 0
+	for _, ev := range f.audit.snapshot() {
+		if ev.EventType == MessageActionEventRefused && ev.ActorID == dave.ID && ev.Reason == "not_recipient" {
+			daveRefused++
+		}
+	}
+	require.Equal(t, 2, daveRefused, "expected 2 not_recipient refused audit events for non-DM-party with agent.attach")
+
 	// 3b. Agent caller gets 403 users_only on responder route.
 	rrAgentFulfill := f.doAgentJSON(t, http.MethodPost, "/api/v1/secret-requests/"+send2.MessageID+"/fulfill", FulfillSecretRequestBody{
 		Values: map[string]string{"GITHUB_TOKEN": "nope"},
@@ -421,19 +461,38 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	})
 	require.Equal(t, http.StatusForbidden, rrCarolFulfill.Code)
 
-	// 4. 503 rollback: backend Set failure leaves row pending and no partial keys stored.
+	// 4. 503 rollback on a two-key card failing on the SECOND key (R5):
+	// first key MUST be deleted from the backend (compensation) and both rows
+	// MUST return to pending.
+	rrRbSend := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "ROLLBACK_A", Description: "first key"},
+		{Key: "ROLLBACK_B", Description: "second key (fails)"},
+	}, false)
+	require.Equal(t, http.StatusOK, rrRbSend.Code, rrRbSend.Body.String())
+	var rbCard struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrRbSend.Body.Bytes(), &rbCard))
+
 	f.backend.mu.Lock()
-	f.backend.failOnKey = "GITHUB_TOKEN"
-	f.backend.failErr = errors.New("simulated KMS outage")
+	f.backend.failOnKey = "ROLLBACK_B"
+	f.backend.failErr = errors.New("simulated KMS outage on second key")
 	f.backend.mu.Unlock()
 
-	rrFail := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+send2.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
-		Values: map[string]string{"GITHUB_TOKEN": "should-not-stick"},
+	rrFail := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+rbCard.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+		Values: map[string]string{
+			"ROLLBACK_A": "partial-value-must-be-deleted",
+			"ROLLBACK_B": "fails-here",
+		},
 	})
 	require.Equal(t, http.StatusServiceUnavailable, rrFail.Code)
-	rowsAfterFail, err := f.store.GetSecretRequestsByMessageID(ctx, send2.MessageID)
+	rowsAfterFail, err := f.store.GetSecretRequestsByMessageID(ctx, rbCard.MessageID)
 	require.NoError(t, err)
+	require.Len(t, rowsAfterFail, 2)
 	require.Equal(t, store.SecretRequestStatusPending, rowsAfterFail[0].Status)
+	require.Equal(t, store.SecretRequestStatusPending, rowsAfterFail[1].Status)
+	_, getAErr := f.backend.Get(ctx, "ROLLBACK_A", store.ScopeAgent, f.agent.ID)
+	require.ErrorIs(t, getAErr, store.ErrNotFound, "first key written before second-key failure must be compensated/deleted")
 
 	f.backend.mu.Lock()
 	f.backend.failOnKey = ""
@@ -571,10 +630,21 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 
 	expN, recN, err = f.srv.sweepSecretRequests(ctx, claimNow.Add(msgaction.SecretRequestTTL+time.Hour))
 	require.NoError(t, err)
-	require.Equal(t, 1, expN)
+	require.Equal(t, 3, expN) // SWEEP_KEY + ROLLBACK_A + ROLLBACK_B from step 4
 	require.Equal(t, 0, recN)
 
-	// 10. Hard-delete withdraw retains rows; project delete removes them.
+	// Assert audit event counts for fulfilled, dismissed, withdrawn, claim_recovered, expired (§10.15).
+	evCounts := map[string]int{}
+	for _, ev := range f.audit.snapshot() {
+		evCounts[ev.EventType]++
+	}
+	require.Equal(t, 1, evCounts[msgaction.EventFulfilled], "expected 1 fulfilled audit event")
+	require.Equal(t, 1, evCounts[MessageActionEventDismissed], "expected 1 dismissed audit event")
+	require.Equal(t, 1, evCounts[MessageActionEventWithdrawn], "expected 1 agent-withdrawn audit event")
+	require.Equal(t, 1, evCounts[msgaction.EventClaimRecovered], "expected 1 claim_recovered audit event")
+	require.Equal(t, 3, evCounts[MessageActionEventExpired], "expected 3 expired audit events")
+
+	// 10. Hard-delete withdraw via withAgentSecretCleanup retains rows and emits withdrawn audit after commit; project delete removes them.
 	rrHD := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
 		{Key: "HD_KEY", Description: "survives delete"},
 	}, false)
@@ -584,21 +654,205 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rrHD.Body.Bytes(), &hdCard))
 
-	require.NoError(t, f.store.WithTx(ctx, func(tx store.Store) error {
-		_, _, err := f.srv.agentHardDeleteWork(ctx, tx, f.agent, AuditActor{}, store.Deactivation{
-			Cause: store.EdgeDeactivationAgentHardDelete,
-			OpID:  api.NewUUID(),
-		}, "test hard delete")
-		return err
-	}))
+	f.audit.reset()
+	_, err = f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func() (int, error) {
+		if txErr := f.store.WithTx(ctx, func(tx store.Store) error {
+			_, _, err := f.srv.agentHardDeleteWork(ctx, tx, f.agent, AuditActor{}, store.Deactivation{
+				Cause: store.EdgeDeactivationAgentHardDelete,
+				OpID:  api.NewUUID(),
+			}, "test hard delete")
+			return err
+		}); txErr != nil {
+			return 0, txErr
+		}
+		return 1, nil
+	})
+	require.NoError(t, err)
 	hdRow, err := f.store.GetSecretRequest(ctx, hdCard.SecretRequests[0].RowID)
 	require.NoError(t, err, "secret request row must survive agent hard delete")
 	require.Equal(t, store.SecretRequestStatusWithdrawn, hdRow.Status)
 	require.Equal(t, "agent deleted", hdRow.WithdrawnReason)
 	require.Equal(t, store.SecretRequestWithdrawnByHub, hdRow.WithdrawnBy)
+	hdWithdrawn := 0
+	for _, ev := range f.audit.snapshot() {
+		if ev.EventType == MessageActionEventWithdrawn && ev.ActorKind == MessageActionActorHub && ev.Reason == "agent deleted" {
+			hdWithdrawn++
+		}
+	}
+	require.GreaterOrEqual(t, hdWithdrawn, 1, "expected post-commit withdrawn audit event on hard delete")
 
 	// Project delete removes all secret request rows.
 	require.NoError(t, f.store.DeleteProject(ctx, f.project.ID))
 	_, err = f.store.GetSecretRequest(ctx, hdCard.SecretRequests[0].RowID)
 	require.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestSecretRequests_WriteValidationGuards verifies R3: send and fulfill
+// enforce all agent-scope secret write constraints (System One reserved keys
+// including _ -> - folding, file target absolute/~/ with no '..', reserved env
+// targets via secret.IsReservedEnvTarget, internal secret mutation refusal, and
+// 64 KiB value cap on fulfill).
+func TestSecretRequests_WriteValidationGuards(t *testing.T) {
+	f := newSecretRequestsFixture(t, true)
+	ctx := context.Background()
+
+	// 1. System One reserved key with _ -> - folding.
+	rrSysOne := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "SystemOne_Instance_abc123", Description: "reserved"},
+	}, false)
+	require.Equal(t, http.StatusBadRequest, rrSysOne.Code, rrSysOne.Body.String())
+
+	// 2. File target with '..'.
+	rrDotDot := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "SSH_KEY", Description: "bad path", Type: "file", Target: "~/.ssh/../id_rsa"},
+	}, false)
+	require.Equal(t, http.StatusBadRequest, rrDotDot.Code, rrDotDot.Body.String())
+
+	// 3. Relative file target and absolute target outside ~ (/etc/x) refused at send.
+	for _, badTarget := range []string{"relative/id_rsa", "/etc/x"} {
+		rrRel := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+			{Key: "SSH_KEY2", Description: "bad target", Type: "file", Target: badTarget},
+		}, false)
+		require.Equal(t, http.StatusBadRequest, rrRel.Code, "target=%s body=%s", badTarget, rrRel.Body.String())
+	}
+
+	// 4. Reserved env targets (SCION_* and GCE_METADATA_*).
+	for _, reserved := range []string{"SCION_AUTH_TOKEN", "GCE_METADATA_HOST"} {
+		rrRes := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+			{Key: reserved, Description: "reserved env"},
+		}, false)
+		require.Equal(t, http.StatusBadRequest, rrRes.Code, "key=%s body=%s", reserved, rrRes.Body.String())
+	}
+
+	// 5. Internal secret mutation refused (409 internal_secret).
+	_, _, err := f.backend.Set(ctx, &secret.SetSecretInput{
+		Name:       "INTERNAL_ONLY_KEY",
+		Value:      "internal-val",
+		SecretType: store.SecretTypeInternal,
+		Target:     "INTERNAL_ONLY_KEY",
+		Scope:      store.ScopeAgent,
+		ScopeID:    f.agent.ID,
+		CreatedBy:  f.alice.ID,
+		ProjectID:  f.project.ID,
+	})
+	require.NoError(t, err)
+	rrInternal := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "INTERNAL_ONLY_KEY", Description: "should refuse"},
+	}, false)
+	require.Equal(t, http.StatusConflict, rrInternal.Code, rrInternal.Body.String())
+	require.Contains(t, rrInternal.Body.String(), "internal_secret")
+
+	// 6. Fulfill enforces 64 KiB max value size.
+	rrValid := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "BIG_KEY", Description: "size check"},
+	}, false)
+	require.Equal(t, http.StatusOK, rrValid.Code, rrValid.Body.String())
+	var card struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrValid.Body.Bytes(), &card))
+
+	rrBig := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+card.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+		Values: map[string]string{"BIG_KEY": strings.Repeat("x", maxSecretRequestValueBytes+1)},
+	})
+	require.Equal(t, http.StatusBadRequest, rrBig.Code, rrBig.Body.String())
+	require.Contains(t, rrBig.Body.String(), "64KB")
+}
+
+// TestSecretRequests_DeletePurgeAndRollbackAudit verifies R4: withdrawn audit
+// events for agent hard delete and retention purge are emitted strictly AFTER
+// commit (exactly one per pending row), and ZERO are emitted on rollback.
+func TestSecretRequests_DeletePurgeAndRollbackAudit(t *testing.T) {
+	f := newSecretRequestsFixture(t, true)
+	ctx := context.Background()
+
+	// Create 2 pending requests on f.agent.
+	rr := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "DEL_K1", Description: "k1"},
+		{Key: "DEL_K2", Description: "k2"},
+	}, false)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// 1. Rollback: tx withdraws rows then returns error -> 0 withdrawn events emitted, rows remain pending.
+	f.audit.reset()
+	_, err := f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func() (int, error) {
+		txErr := f.store.WithTx(ctx, func(tx store.Store) error {
+			if _, werr := tx.WithdrawAgentSecretRequestsOnDelete(ctx, f.agent.ID, time.Now().UTC()); werr != nil {
+				return werr
+			}
+			return errors.New("simulated rollback")
+		})
+		return 0, txErr
+	})
+	require.Error(t, err)
+	for _, ev := range f.audit.snapshot() {
+		require.NotEqual(t, MessageActionEventWithdrawn, ev.EventType, "no withdrawn audit event may be emitted on rollback")
+	}
+
+	// 2. Hard delete commit: exactly 2 withdrawn events (one per pending row).
+	f.audit.reset()
+	_, err = f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func() (int, error) {
+		if txErr := f.store.WithTx(ctx, func(tx store.Store) error {
+			_, _, herr := f.srv.agentHardDeleteWork(ctx, tx, f.agent, AuditActor{}, store.Deactivation{
+				Cause: store.EdgeDeactivationAgentHardDelete,
+				OpID:  api.NewUUID(),
+			}, "hard delete test")
+			return herr
+		}); txErr != nil {
+			return 0, txErr
+		}
+		return 1, nil
+	})
+	require.NoError(t, err)
+	wdCount := 0
+	for _, ev := range f.audit.snapshot() {
+		if ev.EventType == MessageActionEventWithdrawn && ev.ActorKind == MessageActionActorHub && ev.Reason == "agent deleted" {
+			wdCount++
+		}
+	}
+	require.Equal(t, 2, wdCount, "expected exactly 1 withdrawn audit event per pending row on hard delete")
+
+	// 3. Retention purge commit: soft-deleted agent purged via PurgeDeletedAgentsByID -> exactly 1 withdrawn event per pending row.
+	ag2 := &store.Agent{
+		ID:        api.NewUUID(),
+		Slug:      "sr-purge-agent",
+		Name:      "sr-purge-agent",
+		ProjectID: f.project.ID,
+		OwnerID:   f.alice.ID,
+		Phase:     "stopped",
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, ag2))
+	_, err = f.store.CreateSecretRequestPrompt(ctx, &store.SecretRequestPromptInput{
+		Message: &store.Message{
+			ID:          api.NewUUID(),
+			ProjectID:   f.project.ID,
+			Sender:      "agent:" + ag2.Slug,
+			SenderID:    ag2.ID,
+			Recipient:   "user:" + f.alice.Email,
+			RecipientID: f.alice.ID,
+		},
+		AgentID:   ag2.ID,
+		AgentName: ag2.Name,
+		Requests: []messages.SecretRequest{
+			{Key: "PURGE_K1", KeyNorm: "PURGE_K1", SecretType: "environment"},
+		},
+		Now: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	ag2.DeletedAt = time.Now().UTC().Add(-48 * time.Hour)
+	require.NoError(t, f.store.UpdateAgent(ctx, ag2))
+
+	f.audit.reset()
+	n, err := f.srv.withAgentSecretCleanup(ctx, ag2.ID, func() (int, error) {
+		return f.store.PurgeDeletedAgentsByID(ctx, []string{ag2.ID}, time.Now().UTC().Add(time.Minute))
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	purgeWD := 0
+	for _, ev := range f.audit.snapshot() {
+		if ev.EventType == MessageActionEventWithdrawn && ev.AgentID == ag2.ID && ev.ActorKind == MessageActionActorHub && ev.Reason == "agent deleted" {
+			purgeWD++
+		}
+	}
+	require.Equal(t, 1, purgeWD, "expected exactly 1 withdrawn audit event per pending row on retention purge")
 }
