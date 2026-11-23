@@ -54,23 +54,27 @@ func newMessagePolicyTestCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "test [id-or-name]",
-		Short: "Dry-run a stored or inline message policy against a synthetic sample",
-		Long: `Evaluate a stored project message policy (by UUID or name) or an inline CEL
-rule against synthetic message facts without storing any policy, message, or
+		Short: "Evaluate a stored or inline message policy against a synthetic sample",
+		Long: `Evaluate a stored project message policy (by UUID or name) or an inline policy
+against synthetic message facts without storing any policy, message, or
 decision row.
 
-The sample body is evaluated in-memory on the Hub and is never persisted or
-echoed in the response. Dry-run testing evaluates surfaces enforced by this Hub
-(when --surface is omitted, defaults to the policy's first surface or
-agent_to_user).
+The sample body is never persisted or echoed in the response. When the policy
+includes a system_one_rule and synthetic judgments are not supplied, this
+command executes a real System One evaluation that sends the selected sample
+fields to the configured provider, may incur provider cost, and has no automatic
+replay or retry.
+
+Testing evaluates surfaces enforced by this Hub (when --surface is omitted,
+defaults to the policy's first surface or agent_to_user).
 
 Examples:
-  # Dry-run a stored policy against a sample message body
+  # Test a stored policy against a sample message body
   scion message-policy test no-prose-choices \
     --surface agent_to_user \
     --body "Would you like Option A or Option B?"
 
-  # Dry-run an inline CEL rule before creating a policy
+  # Test an inline CEL rule before creating a policy
   scion message-policy test \
     --rule '!message.has_choices && message.body.contains("Option A")' \
     --on-failed reject \
@@ -278,8 +282,8 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVarP(&reqFile, "file", "f", "", "YAML or JSON dry-run request file (- for stdin)")
-	cmd.Flags().StringVar(&body, "body", "", "Synthetic sample message body (evaluated in-memory only)")
+	cmd.Flags().StringVarP(&reqFile, "file", "f", "", "YAML or JSON policy test request file (- for stdin)")
+	cmd.Flags().StringVar(&body, "body", "", "Synthetic sample message body (never persisted or echoed)")
 	cmd.Flags().StringVar(&bodyFile, "body-file", "", "Read synthetic sample message body from file (- for stdin)")
 	cmd.Flags().StringVar(&surface, "surface", "", "Sample surface (default: policy's first surface, or agent_to_user)")
 	cmd.Flags().StringVar(&msgType, "type", "", "Sample message type (default: message)")

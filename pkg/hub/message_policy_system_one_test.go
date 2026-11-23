@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -27,8 +28,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
@@ -111,7 +114,7 @@ func mpgWaitForDecisionCount(t *testing.T, s store.Store, projectID string, want
 	return res.Items
 }
 
-func TestMessagePolicySystemOne_AuthoringMatrixAndDryRunTest(t *testing.T) {
+func TestMessagePolicySystemOne_AuthoringMatrixAndPolicyTest(t *testing.T) {
 	f := newMPHFixture(t, true)
 	var providerCalls atomic.Int32
 	mpgEnableSystemOne(t, f.srv, f.s, "ts-authoring", func(w http.ResponseWriter, _ *http.Request) {
@@ -207,7 +210,7 @@ func TestMessagePolicySystemOne_AuthoringMatrixAndDryRunTest(t *testing.T) {
 	assert.Equal(t, messagepolicy.ErrCodeInvalidRule, apiErr.Code)
 	assert.Equal(t, "limit", apiErr.Details["category"])
 
-	// 6. Dry-run test endpoint executes System One rule and returns content-free evaluation projection.
+	// 6. Policy test endpoint executes System One rule and returns content-free evaluation projection.
 	const sampleCanary = "DRY_RUN_SECRET_BODY_CANARY_4242"
 	testRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base+"/prose-choices-s1/test", TestMessagePolicyRequest{
 		Sample: &MessagePolicyTestSample{
@@ -674,4 +677,526 @@ func TestMessagePolicySystemOne_I3AuthorizedProjectIDAndProjectScopedSecret(t *t
 	require.NoError(t, json.Unmarshal(decisions[0].Evaluation, &proj))
 	assert.Equal(t, "success", proj.Class)
 	assert.Equal(t, "gemini-i3-mp", proj.Instance)
+}
+
+type mpCountingSecretBackend struct {
+	secret.SecretBackend
+	getCalls atomic.Int32
+}
+
+func (c *mpCountingSecretBackend) Get(ctx context.Context, key, scope, scopeID string) (*secret.SecretWithValue, error) {
+	c.getCalls.Add(1)
+	return c.SecretBackend.Get(ctx, key, scope, scopeID)
+}
+
+func TestMessagePolicySystemOne_TestEndpointAuthorityAndCredentialMatrix(t *testing.T) {
+	ctx := context.Background()
+	f := newMPHFixture(t, true)
+
+	// Enable hub.message_policies, web.decisions, and hub.system_one.
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.MessagePolicies, experiments.Decisions, experiments.SystemOne:
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.srv.experiments = reg
+
+	innerBackend := secret.NewLocalBackend(f.s, "test-hub-id", "test-secret-signing-key")
+	countingSecrets := &mpCountingSecretBackend{SecretBackend: innerBackend}
+	f.srv.SetSecretBackend(countingSecrets)
+
+	var (
+		adcMints      atomic.Int32
+		providerCalls atomic.Int32
+	)
+	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		adcMints.Add(1)
+		return &SystemOneADCCredentials{
+			TokenSource: oauth2.StaticTokenSource(&oauth2.Token{
+				AccessToken: "ya29.test-adc-token",
+				TokenType:   "Bearer",
+			}),
+			CredentialType:      "service_account",
+			ServiceAccountEmail: "test-sa@example.iam.gserviceaccount.com",
+		}, nil
+	})
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("x-goog-api-key") != "" || strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ya29.") {
+			_, _ = w.Write([]byte(`{
+				"answers": {"asks_choice": {"type": "noul", "noul": 0.93, "confidence": 0.93}},
+				"usage": {"total_input_tokens": 12, "total_output_tokens": 0, "total_tokens": 12}
+			}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{
+			"model": "jev-1.14.0",
+			"answers": {"asks_choice": {"type": "noul", "noul": 0.93}},
+			"usage": {"input_tokens": 12, "output_tokens": 1}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	f.srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(hubDialectPublicResolver{}, hubDialectTargetDialer{targetAddr: tlsSrv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+
+	// Seed hub-scoped and project-scoped GEMINI_API_KEY variable secrets.
+	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      "AIza-hub-scoped-matrix-key",
+		SecretType: store.SecretTypeVariable,
+		Scope:      store.ScopeHub,
+		ScopeID:    "test-hub-id",
+	})
+	require.NoError(t, err)
+	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      "AIza-project-scoped-matrix-key",
+		SecretType: store.SecretTypeVariable,
+		Scope:      store.ScopeProject,
+		ScopeID:    f.project,
+	})
+	require.NoError(t, err)
+
+	// Create hub super-admin (for instance setup), hub-admin (has project.read +
+	// project.manage_message_policies, NO project.secret_read), project admin,
+	// and project member callers.
+	superAdminID := hubConfigTokenUser(t, f.s, "mp-mat-super", store.SystemRoleSuperAdmin)
+	superAdmin, err := f.s.GetUser(ctx, superAdminID)
+	require.NoError(t, err)
+	hubAdminID := hubConfigTokenUser(t, f.s, "mp-mat-hubadmin", store.SystemRoleHubAdmin)
+	hubAdmin, err := f.s.GetUser(ctx, hubAdminID)
+	require.NoError(t, err)
+
+	projAdmin := projectOpsUser(t, f.s, "mp-mat-admin", false)
+	projectOpsGrant(t, f.s, projAdmin, f.project, store.ProjectRoleAdmin)
+	projMember := projectOpsUser(t, f.s, "mp-mat-member", false)
+	projectOpsGrant(t, f.s, projMember, f.project, store.ProjectRoleMember)
+
+	// Create 5 System One instances covering every credential mode.
+	createInst := func(body map[string]any) {
+		rec := doRequestAsUser(t, f.srv, superAdmin, http.MethodPost, systemOneAdminPath, body)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	createInst(map[string]any{
+		"name":    "inst-owned",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-owned-matrix-key"},
+	})
+	ownedRow, err := f.s.GetSystemOneInstanceByName(ctx, "inst-owned")
+	require.NoError(t, err)
+	ownedRow.Endpoint = "https://typesafe.example.test"
+	require.NoError(t, f.s.UpdateSystemOneInstance(ctx, ownedRow))
+
+	createInst(map[string]any{
+		"name":    "inst-adc",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth":    map[string]any{"kind": "google_access_token", "scopes": []string{"https://www.googleapis.com/auth/cloud-platform"}},
+	})
+	createInst(map[string]any{
+		"name":    "inst-ref-hub",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": systemoneprovider.DefaultGeminiAPIKeySecretName, "scope": systemoneprovider.SecretScopeHub},
+		},
+	})
+	createInst(map[string]any{
+		"name":    "inst-ref-project",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": systemoneprovider.DefaultGeminiAPIKeySecretName, "scope": systemoneprovider.SecretScopeProject},
+		},
+	})
+	createInst(map[string]any{
+		"name":    "inst-ref-proj-or-hub",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": systemoneprovider.DefaultGeminiAPIKeySecretName, "scope": systemoneprovider.SecretScopeProjectOrHub},
+		},
+	})
+
+	// Mint UATs for the project owner with varying scope sets. Note that
+	// project.secret_read is intentionally NOT a UAT-mintable scope, so no UAT
+	// can satisfy the G4/L1 boundary for project / project_or_hub named refs.
+	uatManageOnly := projectOpsMint(t, f.srv, f.owner, projectBoundary(f.project), "project:manage_message_policies")
+	uatManageAndRead := projectOpsMint(t, f.srv, f.owner, projectBoundary(f.project), "project:manage_message_policies", "project:read")
+
+	bearerDo := func(tok, method, path string, body any) *httptest.ResponseRecorder {
+		raw, mErr := json.Marshal(body)
+		require.NoError(t, mErr)
+		req := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	agentDo := func(method, path string, body any) *httptest.ResponseRecorder {
+		raw, mErr := json.Marshal(body)
+		require.NoError(t, mErr)
+		ident := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.projectAgent},
+			ProjectID: f.project,
+		}}
+		reqCtx := contextWithIdentity(context.Background(), ident)
+		reqCtx = contextWithCredentialContext(reqCtx, CredentialContext{Kind: CredentialKindAgentJWT, ID: "ag-jwt"})
+		req := httptest.NewRequest(method, path, bytes.NewReader(raw)).WithContext(reqCtx)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	makeInlineReq := func(instName string) TestMessagePolicyRequest {
+		return TestMessagePolicyRequest{
+			ViolationRule: `!message.has_choices && judgment_flags.asks_choice`,
+			SystemOneRule: `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"binding":{"instance":"` + instName + `"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Asks choice?"}]}}`,
+			OnUncertain:   store.MessagePolicyOutcomeReject,
+			OnFailed:      store.MessagePolicyOutcomeReject,
+			Sample: &MessagePolicyTestSample{
+				Surface: store.MessagePolicySurfaceAgentToUser,
+				Body:    "Pick option A or B?",
+			},
+		}
+	}
+
+	testURL := f.basePath() + "/test"
+
+	// 1. Full caller × credential-mode matrix.
+	type matrixCase struct {
+		name       string
+		inst       string
+		call       func(req TestMessagePolicyRequest) *httptest.ResponseRecorder
+		wantStatus int
+		wantZeroIO bool
+	}
+	cases := []matrixCase{
+		// Owned API key: manage-only UAT allowed; member/agent denied.
+		{"owned/owner", "inst-owned", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"owned/admin", "inst-owned", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, projAdmin, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"owned/hub_admin", "inst-owned", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return doRequestAsUser(t, f.srv, hubAdmin, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"owned/uat_manage_only", "inst-owned", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return bearerDo(uatManageOnly, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"owned/member_denied", "inst-owned", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, projMember, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+		{"owned/agent_denied", "inst-owned", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return agentDo(http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+
+		// ADC: owner, admin, hub-admin, and manage-only UAT allowed; member/agent denied.
+		{"adc/owner", "inst-adc", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"adc/hub_admin", "inst-adc", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return doRequestAsUser(t, f.srv, hubAdmin, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"adc/uat_manage_only", "inst-adc", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return bearerDo(uatManageOnly, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"adc/member_denied", "inst-adc", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, projMember, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+
+		// Hub-scoped named ref: never reads project secret -> hub-admin & manage-only UAT allowed.
+		{"ref_hub/hub_admin", "inst-ref-hub", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return doRequestAsUser(t, f.srv, hubAdmin, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"ref_hub/uat_manage_only", "inst-ref-hub", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return bearerDo(uatManageOnly, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+
+		// Project-scoped named ref: G4/L1 boundary requires project.read + project.secret_read!
+		// Owner and project-admin hold both; hub-admin and UATs do NOT hold project.secret_read.
+		{"ref_project/owner", "inst-ref-project", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"ref_project/admin", "inst-ref-project", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, projAdmin, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"ref_project/hub_admin_denied", "inst-ref-project", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return doRequestAsUser(t, f.srv, hubAdmin, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+		{"ref_project/uat_manage_only_denied", "inst-ref-project", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return bearerDo(uatManageOnly, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+		{"ref_project/uat_manage_and_read_denied", "inst-ref-project", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return bearerDo(uatManageAndRead, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+		{"ref_project/member_denied", "inst-ref-project", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, projMember, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+		{"ref_project/agent_denied", "inst-ref-project", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return agentDo(http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+
+		// project_or_hub-scoped named ref: also enforces G4/L1 boundary!
+		{"ref_proj_or_hub/owner", "inst-ref-proj-or-hub", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"ref_proj_or_hub/admin", "inst-ref-proj-or-hub", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return mphSessionDo(t, f.srv, projAdmin, http.MethodPost, testURL, r)
+		}, http.StatusOK, false},
+		{"ref_proj_or_hub/hub_admin_denied", "inst-ref-proj-or-hub", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return doRequestAsUser(t, f.srv, hubAdmin, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+		{"ref_proj_or_hub/uat_manage_only_denied", "inst-ref-proj-or-hub", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return bearerDo(uatManageOnly, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+		{"ref_proj_or_hub/uat_manage_and_read_denied", "inst-ref-proj-or-hub", func(r TestMessagePolicyRequest) *httptest.ResponseRecorder {
+			return bearerDo(uatManageAndRead, http.MethodPost, testURL, r)
+		}, http.StatusForbidden, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sBefore := countingSecrets.getCalls.Load()
+			mBefore := adcMints.Load()
+			pBefore := providerCalls.Load()
+
+			rec := tc.call(makeInlineReq(tc.inst))
+			require.Equal(t, tc.wantStatus, rec.Code, rec.Body.String())
+			if tc.wantZeroIO {
+				assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "denied request must make 0 secret lookups")
+				assert.Equal(t, mBefore, adcMints.Load(), "denied request must make 0 ADC token mints")
+				assert.Equal(t, pBefore, providerCalls.Load(), "denied request must make 0 provider calls")
+			}
+		})
+	}
+
+	// 2. Synthetic judgments: ZERO provider requests, ZERO ADC mints, ZERO secret lookups
+	// (even with manage-only UAT on a project-scoped named ref, because no secret is accessed).
+	t.Run("synthetic_judgments_zero_provider_mint_and_secret_calls", func(t *testing.T) {
+		sBefore := countingSecrets.getCalls.Load()
+		mBefore := adcMints.Load()
+		pBefore := providerCalls.Load()
+
+		req := makeInlineReq("inst-ref-project")
+		req.Sample.JudgmentFlags = map[string]bool{"asks_choice": true}
+		rec := bearerDo(uatManageOnly, http.MethodPost, testURL, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp TestMessagePolicyResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, store.MessagePolicyClassViolation, resp.Class)
+		assert.Empty(t, resp.Evaluation)
+
+		assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "synthetic judgments must make 0 secret lookups")
+		assert.Equal(t, mBefore, adcMints.Load(), "synthetic judgments must make 0 ADC mints")
+		assert.Equal(t, pBefore, providerCalls.Load(), "synthetic judgments must make 0 provider calls")
+	})
+
+	// 3. Error paths and scope non-match without synthetic values must never trigger live calls.
+	t.Run("error_and_nonmatch_paths_make_zero_live_calls", func(t *testing.T) {
+		sBefore := countingSecrets.getCalls.Load()
+		mBefore := adcMints.Load()
+		pBefore := providerCalls.Load()
+
+		// 3a. Invalid System One rule -> 400.
+		badS1 := makeInlineReq("inst-ref-project")
+		badS1.SystemOneRule = `{"dialect":"system_one","inputs":["secret.nope"],"spec":{"version":1,"questions":[{"id":"q1","type":"binary","instructions":"Check."}]}}`
+		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, badS1)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		// 3b. Uncovered sample surface -> 400.
+		badSurf := makeInlineReq("inst-ref-project")
+		badSurf.Sample.Surface = store.MessagePolicySurfaceAgentDM
+		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, badSurf)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+
+		// 3c. Scope mismatch -> 200 scope_matched=false.
+		mismatch := makeInlineReq("inst-ref-project")
+		mismatch.Scope = &store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToConversation}}
+		mismatch.Sample.Surface = store.MessagePolicySurfaceAgentToUser
+		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, testURL, mismatch)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp TestMessagePolicyResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.False(t, resp.ScopeMatched)
+
+		assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "error/non-match paths must make 0 secret lookups")
+		assert.Equal(t, mBefore, adcMints.Load(), "error/non-match paths must make 0 ADC mints")
+		assert.Equal(t, pBefore, providerCalls.Load(), "error/non-match paths must make 0 provider calls")
+	})
+}
+
+func TestMessagePolicySystemOne_FullBodyLimitsRunBeforeCredentialIO(t *testing.T) {
+	ctx := context.Background()
+	f := newMpgFixture(t, true)
+
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		switch e.Name {
+		case experiments.MessagePolicies, experiments.Decisions, experiments.SystemOne:
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	f.srv.experiments = reg
+
+	innerBackend := secret.NewLocalBackend(f.s, "test-hub-id", "test-secret-signing-key")
+	countingSecrets := &mpCountingSecretBackend{SecretBackend: innerBackend}
+	f.srv.SetSecretBackend(countingSecrets)
+
+	var (
+		adcMints      atomic.Int32
+		providerCalls atomic.Int32
+	)
+	f.srv.SetSystemOneADCForTesting(t, func(context.Context, []string) (*SystemOneADCCredentials, error) {
+		adcMints.Add(1)
+		return &SystemOneADCCredentials{
+			TokenSource: oauth2.StaticTokenSource(&oauth2.Token{
+				AccessToken: "ya29.test-adc",
+				TokenType:   "Bearer",
+			}),
+			CredentialType: "service_account",
+		}, nil
+	})
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"answers": {"asks_choice": {"type": "noul", "noul": 0.91, "confidence": 0.91}},
+			"usage": {"total_input_tokens": 20, "total_output_tokens": 0, "total_tokens": 20}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	f.srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(hubDialectPublicResolver{}, hubDialectTargetDialer{targetAddr: tlsSrv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+
+	adminID := hubConfigTokenUser(t, f.s, "mp-oversize-admin", store.SystemRoleSuperAdmin)
+	admin, err := f.s.GetUser(ctx, adminID)
+	require.NoError(t, err)
+
+	_, _, err = innerBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      "AIza-oversize-project-key",
+		SecretType: store.SecretTypeVariable,
+		Scope:      store.ScopeProject,
+		ScopeID:    f.project.ID,
+	})
+	require.NoError(t, err)
+
+	createRec := doRequestAsUser(t, f.srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gemini-oversize",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind":      "api_key",
+			"secretRef": map[string]any{"name": systemoneprovider.DefaultGeminiAPIKeySecretName, "scope": systemoneprovider.SecretScopeProject},
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	// Oversize body: 9000 'é' runes (<= 16000 rune ingress limit, 18000 bytes > 16384 byte field limit).
+	oversizeBody := strings.Repeat("é", 9000)
+
+	// 1. on_oversize: reject -> input_too_large BEFORE any secret lookup, ADC mint, or provider call.
+	rejectPol := &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "a-s1-oversize-reject",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `judgment_flags.asks_choice`,
+		SystemOneRule: `{"dialect":"system_one","inputs":["message.body"],"on_oversize":"reject","spec":{"version":1,"binding":{"instance":"gemini-oversize"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Check."}]}}`,
+		SystemOneRefs: []string{"gemini-oversize"},
+		OnUncertain:   store.MessagePolicyOutcomeReject,
+		OnFailed:      store.MessagePolicyOutcomeReject,
+		RejectReason:  "Oversize rejected.",
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, rejectPol))
+
+	// CEL-only policy on the same send keeps exact M1 body_truncated behavior.
+	celPol := &store.MessagePolicy{
+		ProjectID:     f.project.ID,
+		Name:          "b-cel-only",
+		Enabled:       true,
+		Mode:          store.MessagePolicyModeEnforce,
+		Scope:         store.MessagePolicyScope{Surfaces: []string{store.MessagePolicySurfaceAgentToUser}},
+		ViolationRule: `false`,
+		OnFailed:      store.MessagePolicyOutcomeAdmit,
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, celPol))
+
+	sBefore := countingSecrets.getCalls.Load()
+	mBefore := adcMints.Load()
+	pBefore := providerCalls.Load()
+
+	rr := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       oversizeBody,
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+	assert.Equal(t, sBefore, countingSecrets.getCalls.Load(), "on_oversize: reject must fail BEFORE secret lookup")
+	assert.Equal(t, mBefore, adcMints.Load(), "on_oversize: reject must fail BEFORE ADC token mint")
+	assert.Equal(t, pBefore, providerCalls.Load(), "on_oversize: reject must fail BEFORE provider call")
+
+	decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, decs.Items, 2)
+	reasonsByPolicy := map[string]string{}
+	for _, d := range decs.Items {
+		reasonsByPolicy[d.PolicyName] = d.CELErrorReason
+	}
+	assert.Equal(t, string(systemoneprovider.FailInputTooLarge), reasonsByPolicy["a-s1-oversize-reject"])
+	assert.Equal(t, messagepolicy.ReasonBodyTruncated, reasonsByPolicy["b-cel-only"])
+
+	// 2. on_oversize: truncate -> truncates UTF-8 cleanly and records Truncated: true in provenance.
+	rejectPol.SystemOneRule = `{"dialect":"system_one","inputs":["message.body"],"on_oversize":"truncate","spec":{"version":1,"binding":{"instance":"gemini-oversize"},"questions":[{"id":"asks_choice","type":"binary","instructions":"Check."}]}}`
+	require.NoError(t, f.s.UpdateMessagePolicy(ctx, rejectPol))
+
+	rrTrunc := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       oversizeBody,
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rrTrunc.Code, rrTrunc.Body.String())
+	assert.Equal(t, pBefore+1, providerCalls.Load())
+
+	decs2, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+		PolicyID:  rejectPol.ID,
+	}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.NotEmpty(t, decs2.Items)
+	var proj messagepolicy.EvaluationProjection
+	require.NoError(t, json.Unmarshal(decs2.Items[0].Evaluation, &proj))
+	assert.True(t, proj.Truncated, "oversize truncate must record truncated=true in EvaluationProjection")
+	require.Len(t, proj.InputFields, 1)
+	assert.True(t, proj.InputFields[0].Truncated)
 }

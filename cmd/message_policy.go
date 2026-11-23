@@ -43,7 +43,7 @@ const (
 	// maxMessagePolicySpecFileBytes bounds policy spec/rule files read by CLI commands.
 	maxMessagePolicySpecFileBytes = 64 * 1024
 
-	// maxMessagePolicyTestInputBytes bounds dry-run test sample/request files so
+	// maxMessagePolicyTestInputBytes bounds policy test sample/request files so
 	// 16 KiB+ bodies (for testing UTF-8 truncation behavior) fit comfortably.
 	maxMessagePolicyTestInputBytes = 256 * 1024
 
@@ -74,8 +74,8 @@ var messagePolicyCmd = newMessagePolicyCmd()
 func newMessagePolicyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "message-policy",
-		Short: "Manage CEL project message policies",
-		Long: `Author, inspect, dry-run test, and audit CEL message policies for a project.
+		Short: "Manage project message policies",
+		Long: `Author, inspect, test, and audit project message policies.
 
 Each Hub reports its active enforcement coverage (coverage.enforced_surfaces and
 coverage.uncovered_agent_paths) in list and get responses. Currently enforced
@@ -85,7 +85,7 @@ broadcast), scheduled deliveries, user-originated sends, and inbound external
 bridges are NOT evaluated.
 
 In agent mode, only read-only inspection ('list' and 'get') is available;
-policy authoring, deletion, dry-run testing, and decision log queries are
+policy authoring, updates, deletion, sample testing, and decision log queries are
 human-mode operations requiring project owner/admin or Hub admin permissions.`,
 		// Args/Run make this command Runnable so cobra validates subcommand
 		// names, as for "scion artifact" and "scion hub": an unrecognized

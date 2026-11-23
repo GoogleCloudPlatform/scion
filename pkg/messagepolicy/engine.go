@@ -147,9 +147,12 @@ func (e *Evaluator) EvaluatePolicy(
 	return e.evaluatePolicy(ctx, policyID, revision, violationRule, systemOneRule, projectID, facts, true, celOpts, soOpts)
 }
 
-// EvaluatePolicyDryRun evaluates a message policy without caching the compiled
-// CEL program, for dry-run / test endpoints.
-func (e *Evaluator) EvaluatePolicyDryRun(
+// EvaluatePolicyTest evaluates a message policy without caching the compiled
+// CEL program, for the policy test endpoint. When systemOneRule is non-empty,
+// this performs a live System One evaluation against the configured provider
+// (sending selected fields, potentially incurring provider cost, with no
+// automatic replay or retry).
+func (e *Evaluator) EvaluatePolicyTest(
 	ctx context.Context,
 	policyID string,
 	revision int64,
@@ -296,7 +299,7 @@ func (e *Evaluator) EvaluateViolation(
 }
 
 // EvaluateExpr compiles expr without caching and evaluates it against act.
-// Used by dry-run / test endpoints so transient authoring probes do not churn
+// Used by the policy test endpoint so transient authoring tests do not churn
 // the runtime LRU cache.
 func (e *Evaluator) EvaluateExpr(
 	ctx context.Context,

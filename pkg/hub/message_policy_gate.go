@@ -276,7 +276,7 @@ func (s *Server) initMessagePolicyGate() error {
 }
 
 // MessagePolicyEvaluator returns the Hub's shared *messagepolicy.Evaluator
-// bound to s.RuleEngine(), for policy CRUD cache invalidation and dry-run test
+// bound to s.RuleEngine(), for policy CRUD cache invalidation and policy test
 // handlers.
 func (s *Server) MessagePolicyEvaluator() *messagepolicy.Evaluator {
 	if s == nil {

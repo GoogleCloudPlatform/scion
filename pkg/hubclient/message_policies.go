@@ -28,7 +28,7 @@ import (
 )
 
 // MessagePolicyService handles project-scoped message policy authoring,
-// dry-run testing, and content-free decision inspection
+// sample evaluation testing, and content-free decision inspection
 // (/api/v1/projects/{projectID}/message-policies).
 type MessagePolicyService interface {
 	// Create creates a new project message policy (POST .../message-policies).
@@ -48,11 +48,17 @@ type MessagePolicyService interface {
 
 	// Test evaluates an inline message policy spec against a synthetic sample
 	// without persisting any policy, message, or decision row (POST .../message-policies/test).
+	// When the policy includes a system_one_rule and synthetic judgments are not
+	// supplied, selected sample fields are sent to the configured provider, which
+	// may incur provider cost, with no automatic replay or retry.
 	Test(ctx context.Context, req *TestMessagePolicyRequest) (*TestMessagePolicyResponse, error)
 
 	// TestPolicy evaluates a stored message policy (optionally overlaid with
 	// request fields) against a synthetic sample without persisting any message
-	// or decision row (POST .../message-policies/{policyRef}/test).
+	// or decision row (POST .../message-policies/{policyRef}/test). When the
+	// policy includes a system_one_rule and synthetic judgments are not supplied,
+	// selected sample fields are sent to the configured provider, which may incur
+	// provider cost, with no automatic replay or retry.
 	TestPolicy(ctx context.Context, policyRef string, req *TestMessagePolicyRequest) (*TestMessagePolicyResponse, error)
 
 	// ListDecisions lists content-free evaluation decisions across policies in
@@ -154,7 +160,7 @@ type PatchMessagePolicyRequest struct {
 	ExpectedRevision  int64                     `json:"expected_revision,omitempty"`
 }
 
-// MessagePolicyInlineSpec carries an inline policy definition for the dry-run
+// MessagePolicyInlineSpec carries an inline policy definition for the policy
 // test endpoint.
 type MessagePolicyInlineSpec struct {
 	Name              string                    `json:"name,omitempty"`
@@ -170,9 +176,11 @@ type MessagePolicyInlineSpec struct {
 	RejectRemediation string                    `json:"reject_remediation,omitempty"`
 }
 
-// MessagePolicyTestSample carries synthetic send facts for the dry-run test
-// endpoint. The sample body is evaluated in-memory only and is never persisted
-// or echoed in the response.
+// MessagePolicyTestSample carries synthetic send facts for the policy test
+// endpoint. The sample body is never persisted or echoed in the response. When
+// the tested policy has a system_one_rule and synthetic judgments are not
+// supplied, selected sample fields are sent to the configured provider, which
+// may incur provider cost, with no automatic replay or retry.
 type MessagePolicyTestSample struct {
 	Surface           string                           `json:"surface,omitempty"`
 	Body              string                           `json:"body"`
@@ -239,7 +247,7 @@ func (r TestMessagePolicyRequest) LogValue() slog.Value {
 	)
 }
 
-// TestMessagePolicyResponse is the content-free dry-run evaluation response.
+// TestMessagePolicyResponse is the content-free policy test evaluation response.
 // It never echoes the sample message body.
 type TestMessagePolicyResponse struct {
 	PolicyID       string          `json:"policy_id,omitempty"`

@@ -93,17 +93,25 @@ func TestMessagePolicyCLI_HelpCoverageAndDefaults(t *testing.T) {
 	assert.Contains(t, out, "agent_dm")
 	assert.Contains(t, out, "NOT evaluated")
 	assert.NotContains(t, out, "M1", "user-facing help must not contain internal milestone labels")
+	assert.NotContains(t, strings.ToLower(out), "dry-run", "help must not call policy test a dry-run")
+	assert.NotContains(t, strings.ToLower(out), "dry run", "help must not call policy test a dry run")
 
 	for _, sub := range []string{"create", "list", "get", "update", "delete", "test", "decisions"} {
 		subHelp, subErr := runMessagePolicyCLI(t, sub, "--help")
 		require.NoError(t, subErr)
 		assert.NotContains(t, subHelp, "M1", "subcommand %s --help must not contain internal milestone labels", sub)
+		assert.NotContains(t, strings.ToLower(subHelp), "dry-run", "subcommand %s --help must not say dry-run", sub)
+		assert.NotContains(t, strings.ToLower(subHelp), "dry run", "subcommand %s --help must not say dry run", sub)
 	}
 
 	testHelp, err := runMessagePolicyCLI(t, "test", "--help")
 	require.NoError(t, err)
 	assert.Contains(t, testHelp, "(default: message)")
 	assert.Contains(t, testHelp, "(default: inline-test)")
+	assert.Contains(t, testHelp, "provider cost")
+	assert.Contains(t, testHelp, "no automatic")
+	assert.Contains(t, testHelp, "replay or retry")
+	assert.NotContains(t, testHelp, "in-memory only")
 }
 
 func TestMessagePolicyCLI_CreateListGetDelete_TextAndJSON(t *testing.T) {
