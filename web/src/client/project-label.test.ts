@@ -14,11 +14,23 @@
  * limitations under the License.
  */
 
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 
 import { stateManager } from './state.js';
 import type { Project } from '../shared/types.js';
-import { cachedProjectLabel, findCachedProject, projectDisplayName } from './project-label.js';
+import {
+  cachedProjectLabel,
+  findCachedProject,
+  projectDisplayName,
+  projectLabelNow,
+  resetProjectLabelResolverForTests,
+  resolveProjectLabel,
+} from './project-label.js';
+
+const apiFetchMock = vi.fn<typeof fetch>();
+vi.mock('./api.js', () => ({
+  apiFetch: (...args: Parameters<typeof fetch>) => apiFetchMock(...args),
+}));
 
 function makeProject(overrides: Partial<Project> = {}): Project {
   return {
@@ -89,4 +101,97 @@ describe('cachedProjectLabel', () => {
     expect(cachedProjectLabel('   ', 'Project')).toBe('Project');
     expect(cachedProjectLabel('')).toBe('');
   });
+});
+
+describe('projectLabelNow', () => {
+  beforeEach(clearProjects);
+  afterEach(clearProjects);
+
+  it('returns cached name with pending=false and falls back to id with pending=true on miss', () => {
+    stateManager.seedProjects([makeProject({ id: 'p-1', name: 'Core Platform', slug: 'core' })]);
+
+    expect(projectLabelNow('p-1')).toEqual({
+      id: 'p-1',
+      label: 'Core Platform',
+      pending: false,
+    });
+    expect(projectLabelNow('p-miss')).toEqual({
+      id: 'p-miss',
+      label: 'p-miss',
+      pending: true,
+    });
+    expect(projectLabelNow('  ')).toEqual({ id: '', label: '', pending: false });
+  });
+});
+
+describe('resolveProjectLabel', () => {
+  beforeEach(() => {
+    clearProjects();
+    resetProjectLabelResolverForTests();
+    apiFetchMock.mockReset();
+  });
+
+  afterEach(() => {
+    clearProjects();
+    resetProjectLabelResolverForTests();
+  });
+
+  it('returns cached label without issuing a fetch', async () => {
+    stateManager.seedProjects([makeProject({ id: 'p-1', name: 'Cached Project' })]);
+    const res = await resolveProjectLabel('p-1');
+    expect(res).toEqual({ id: 'p-1', label: 'Cached Project', pending: false });
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('dedupes concurrent fetches and seeds stateManager without shrinking existing projects', async () => {
+    stateManager.seedProjects([makeProject({ id: 'existing', name: 'Existing' })]);
+    let resolveFetch!: (value: Response) => void;
+    apiFetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+
+    const p1 = resolveProjectLabel('p-remote');
+    const p2 = resolveProjectLabel('p-remote');
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/v1/projects/p-remote',
+      expect.objectContaining({ authErrors: 'caller', suppressAccessDeniedToast: true })
+    );
+
+    resolveFetch(
+      new Response(JSON.stringify(makeProject({ id: 'p-remote', name: 'Remote Project' })), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const [r1, r2] = await Promise.all([p1, p2]);
+    expect(r1).toEqual({ id: 'p-remote', label: 'Remote Project', pending: false });
+    expect(r2).toEqual({ id: 'p-remote', label: 'Remote Project', pending: false });
+    expect(stateManager.getProject('existing')?.name).toBe('Existing');
+    expect(stateManager.getProject('p-remote')?.name).toBe('Remote Project');
+
+    // Subsequent call uses the seeded cache with no extra fetch.
+    const r3 = await resolveProjectLabel('p-remote');
+    expect(r3).toEqual({ id: 'p-remote', label: 'Remote Project', pending: false });
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([403, 404])(
+    'falls back to id on HTTP %i and does not retry this session',
+    async (code) => {
+      apiFetchMock.mockResolvedValueOnce(new Response('denied', { status: code }));
+
+      const first = await resolveProjectLabel('p-denied');
+      expect(first).toEqual({ id: 'p-denied', label: 'p-denied', pending: false });
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+      const second = await resolveProjectLabel('p-denied');
+      expect(second).toEqual({ id: 'p-denied', label: 'p-denied', pending: false });
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    }
+  );
 });

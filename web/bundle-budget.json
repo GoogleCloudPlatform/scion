@@ -93,6 +93,12 @@
           "reason": "The lazy loader itself (a single-flight import of the editor chunk, no editor code); the artifact page must reach it statically."
         }
       ]
+    },
+    {
+      "$comment": "The shared breadcrumb component (ptone/scion#8281) loads lazily with detail pages, never in the entry bundle.",
+      "roots": ["src/client/main.ts"],
+      "pathPattern": "src/components/shared/breadcrumb",
+      "allow": []
     }
   ]
 }

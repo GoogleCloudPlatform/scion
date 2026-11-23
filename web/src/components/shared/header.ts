@@ -17,7 +17,7 @@
 /**
  * Header Component
  *
- * Provides the top header bar with breadcrumb, user menu, and actions.
+ * Provides the top header bar with page title, user menu, and actions.
  *
  * Three-tier responsive layout:
  *
@@ -155,7 +155,7 @@ export class ScionHeader extends LitElement {
   user: User | null = null;
 
   /**
-   * Current page path for breadcrumb
+   * Current page path
    */
   @property({ type: String })
   currentPath = '/';
