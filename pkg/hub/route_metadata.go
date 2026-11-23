@@ -1622,11 +1622,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/agent/secret-requests": {
 		Pattern: "/api/v1/agent/secret-requests", RouteID: "agent.secretRequests",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "lists and withdraws the calling agent's secret request metadata; never reads, writes, or returns secret values",
 	},
 	"/api/v1/agent/secret-requests/": {
 		Pattern: "/api/v1/agent/secret-requests/", RouteID: "agent.secretRequestsAction",
-		Classification: RouteAgentToken,
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "lists and withdraws the calling agent's secret request metadata; never reads, writes, or returns secret values",
 	},
 
 	// -------------------------------------------------------------------------
