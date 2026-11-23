@@ -151,6 +151,7 @@ const USED_ICONS = [
   'hourglass-bottom',
   'hourglass-split',
   'image',
+  'inbox',
   'info-circle',
   'info-circle-fill',
   'journal-text',

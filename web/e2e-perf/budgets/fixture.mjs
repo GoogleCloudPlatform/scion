@@ -201,6 +201,7 @@ export function buildFixture() {
           'web.chat_starred_messages': true,
           'web.decisions': false,
           'web.gcs_links': false,
+          'web.inbox_dashboard': false,
           'web.sse_hidden_tab_close': false,
         },
       },

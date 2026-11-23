@@ -65,6 +65,7 @@
         "experiments.web.chat_starred_messages:boolean",
         "experiments.web.decisions:boolean",
         "experiments.web.gcs_links:boolean",
+        "experiments.web.inbox_dashboard:boolean",
         "experiments.web.sse_hidden_tab_close:boolean",
         "experiments:object"
       ]

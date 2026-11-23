@@ -37,7 +37,12 @@ import {
   scheduleSharedProfileDecisionProbeRefresh,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
-import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
+import { INBOX_SUMMARY_CHANGED_EVENT, inboxSummaryStore } from '../../client/inbox-summary.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  decisionsEnabled,
+  isInboxDashboardEnabled,
+} from '../../utils/feature-flags.js';
 
 import type { User, Project } from '../../shared/types.js';
 import {
@@ -133,6 +138,14 @@ export class ScionProfileNav extends LitElement {
   @state()
   private decisionsEnabled = false;
 
+  /** Whether `web.inbox_dashboard` is enabled. */
+  @state()
+  private inboxEnabled = false;
+
+  /** Formatted total badge for the Inbox nav link (`N` / `N+` / null). */
+  @state()
+  private inboxBadge: string | null = null;
+
   /**
    * Visibility of the top-level Decisions nav entry (§7):
    * - `'unknown'`: initial probe has not resolved yet -> hidden (prevents flash on older 404 hubs)
@@ -152,16 +165,32 @@ export class ScionProfileNav extends LitElement {
     else void this.loadPendingSecretCount();
   };
 
+  private boundOnInboxSummaryChanged = (): void => {
+    this.inboxBadge = inboxSummaryStore.formatBadge();
+  };
+
   private boundOnFeatureFlagsChanged = (): void => {
-    const next = decisionsEnabled();
-    if (next === this.decisionsEnabled) return;
-    this.decisionsEnabled = next;
-    if (next) {
-      this.ensureProfileStateScope();
-      this.syncOrProbeDecisionsCount();
-    } else {
-      this.decisionsWaitingCount = 0;
-      this.decisionsNavVisibility = 'unknown';
+    const nextDecisions = decisionsEnabled();
+    if (nextDecisions !== this.decisionsEnabled) {
+      this.decisionsEnabled = nextDecisions;
+      if (nextDecisions) {
+        this.ensureProfileStateScope();
+        this.syncOrProbeDecisionsCount();
+      } else {
+        this.decisionsWaitingCount = 0;
+        this.decisionsNavVisibility = 'unknown';
+      }
+    }
+    const nextInbox = isInboxDashboardEnabled();
+    if (nextInbox !== this.inboxEnabled) {
+      this.inboxEnabled = nextInbox;
+      if (nextInbox) {
+        this.ensureProfileStateScope();
+        inboxSummaryStore.ensureStarted(this.user?.id || undefined);
+        this.inboxBadge = inboxSummaryStore.formatBadge();
+      } else {
+        this.inboxBadge = null;
+      }
     }
   };
 
@@ -645,6 +674,14 @@ export class ScionProfileNav extends LitElement {
       overflow: hidden;
     }
 
+    .nav-item-sub .nav-link {
+      padding-left: 1.75rem;
+    }
+
+    :host([collapsed]) .nav-item-sub .nav-link {
+      padding-left: 0.75rem;
+    }
+
     :host([collapsed]) .sidebar-attribution {
       display: none;
     }
@@ -660,12 +697,20 @@ export class ScionProfileNav extends LitElement {
     void this.checkGitHubApp();
     void this.loadPendingSecretCount();
     this.decisionsEnabled = decisionsEnabled();
-    if (this.decisionsEnabled) {
+    this.inboxEnabled = isInboxDashboardEnabled();
+    if (this.decisionsEnabled || this.inboxEnabled) {
       this.ensureProfileStateScope();
+    }
+    if (this.decisionsEnabled) {
       this.syncOrProbeDecisionsCount();
+    }
+    if (this.inboxEnabled) {
+      inboxSummaryStore.ensureStarted(this.user?.id || undefined);
+      this.inboxBadge = inboxSummaryStore.formatBadge();
     }
     window.addEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.addEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnInboxSummaryChanged);
     window.addEventListener(
       PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
       this.boundOnProfileDecisionsCountChanged
@@ -675,8 +720,11 @@ export class ScionProfileNav extends LitElement {
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
-    if (changedProperties.has('user') && this.decisionsEnabled) {
+    if (changedProperties.has('user') && (this.decisionsEnabled || this.inboxEnabled)) {
       this.ensureProfileStateScope();
+      if (this.inboxEnabled && this.user?.id) {
+        inboxSummaryStore.ensureStarted(this.user.id);
+      }
     }
   }
 
@@ -684,6 +732,7 @@ export class ScionProfileNav extends LitElement {
     super.disconnectedCallback();
     window.removeEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.removeEventListener(INBOX_SUMMARY_CHANGED_EVENT, this.boundOnInboxSummaryChanged);
     window.removeEventListener(
       PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
       this.boundOnProfileDecisionsCountChanged
@@ -858,25 +907,69 @@ export class ScionProfileNav extends LitElement {
         : ''}
 
       <nav class="nav-container">
-        ${this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
+        ${this.inboxEnabled
           ? html`
-              <div class="nav-section nav-section-decisions">
+              <div class="nav-section nav-section-inbox" data-inbox-nav-section>
+                <div class="nav-section-title">Inbox</div>
                 <ul class="nav-list">
                   <li class="nav-item">
                     <a
-                      href="/profile/decisions"
-                      data-decisions-nav-link
-                      class="nav-link ${this.isActive('/profile/decisions') ? 'active' : ''}"
+                      href="/profile/inbox"
+                      data-inbox-nav-link
+                      class="nav-link ${this.isActive('/profile/inbox') ? 'active' : ''}"
                     >
-                      <sl-icon name="signpost-split"></sl-icon>
-                      <span class="nav-link-text">Decisions</span>
-                      ${this.renderDecisionsBadge()}
+                      <sl-icon name="inbox"></sl-icon>
+                      <span class="nav-link-text">Inbox</span>
+                      ${this.inboxBadge
+                        ? html`<sl-badge
+                            variant="primary"
+                            pill
+                            class="decisions-nav-badge"
+                            data-inbox-nav-badge
+                            title=${`${this.inboxBadge} items waiting in Inbox`}
+                            aria-label=${`${this.inboxBadge} items waiting in Inbox`}
+                            >${this.inboxBadge}</sl-badge
+                          >`
+                        : nothing}
                     </a>
                   </li>
+                  ${this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
+                    ? html`
+                        <li class="nav-item nav-item-sub">
+                          <a
+                            href="/profile/decisions"
+                            data-decisions-nav-link
+                            class="nav-link ${this.isActive('/profile/decisions') ? 'active' : ''}"
+                          >
+                            <sl-icon name="signpost-split"></sl-icon>
+                            <span class="nav-link-text">Decisions</span>
+                            ${this.renderDecisionsBadge()}
+                          </a>
+                        </li>
+                      `
+                    : nothing}
                 </ul>
               </div>
             `
-          : nothing}
+          : this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
+            ? html`
+                <div class="nav-section nav-section-decisions">
+                  <ul class="nav-list">
+                    <li class="nav-item">
+                      <a
+                        href="/profile/decisions"
+                        data-decisions-nav-link
+                        class="nav-link ${this.isActive('/profile/decisions') ? 'active' : ''}"
+                      >
+                        <sl-icon name="signpost-split"></sl-icon>
+                        <span class="nav-link-text">Decisions</span>
+                        ${this.renderDecisionsBadge()}
+                      </a>
+                    </li>
+                  </ul>
+                </div>
+              `
+            : nothing}
         ${PROFILE_SECTIONS.map(
           (section) => html`
             <div class="nav-section">

@@ -39,6 +39,7 @@ import {
 
 const PROFILE_TITLES: Record<string, string> = {
   '/profile': 'Profile',
+  '/profile/inbox': 'Inbox',
   '/profile/decisions': 'Decisions',
   '/profile/env': 'Environment Variables',
   '/profile/secrets': 'Secrets',

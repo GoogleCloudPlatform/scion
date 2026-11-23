@@ -78,6 +78,7 @@ import {
   renderWaitingTabBadge,
 } from '../shared/decisions-views.js';
 import type { FacetChangeDetail, FacetComboboxOption } from '../shared/facet-combobox.js';
+import { inboxTabStripStyles, renderInboxTabStrip } from '../shared/inbox-tabs.js';
 import './not-found.js';
 
 interface PendingProjectGroup {
@@ -137,6 +138,7 @@ export class ScionPageProfileDecisions extends LitElement {
 
   static override styles = [
     decisionsPageSharedStyles,
+    inboxTabStripStyles,
     css`
       .sort-bar {
         display: flex;
@@ -392,6 +394,7 @@ export class ScionPageProfileDecisions extends LitElement {
     }
 
     return html`
+      ${renderInboxTabStrip('decisions')}
       <div class="ph">
         <h1>Decisions</h1>
       </div>
