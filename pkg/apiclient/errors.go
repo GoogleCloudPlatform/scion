@@ -179,6 +179,10 @@ const (
 	// broker was deregistered). Brokers treat this as a terminal response and
 	// stop retrying until re-registered.
 	ErrCodeBrokerDeregistered = "broker_deregistered"
+	// ErrCodeBrokerOnline is returned (HTTP 409) when a broker re-registration
+	// matches an existing broker that is currently online and force was not
+	// set. Details carry brokerId, brokerName, and status.
+	ErrCodeBrokerOnline = "broker_online"
 	// ErrCodeMissingScope is the hub's 403 code when an agent credential
 	// lacks one or more ceiling-optional scopes required for an operation.
 	// Details carry every missing scope under "scopes" (and the first under

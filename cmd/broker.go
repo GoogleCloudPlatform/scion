@@ -15,9 +15,11 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -422,7 +424,7 @@ func init() {
 	}
 
 	// Register flags
-	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered")
+	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered locally or currently online on the Hub")
 	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects (requires the broker.auto_provide permission, held by super-admins)")
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
 	brokerRegisterCmd.Flags().StringVar(&brokerRegisterName, "broker-name", "", "Name this broker registers under on the hub, saved in the global settings (server.broker.broker_nickname) for later commands and the broker server; when not set, the saved name, else the hostname")
@@ -634,6 +636,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			NameSet:       brokerNameSet,
 			KeptName:      &brokerName,
 			AutoProvide:   brokerAutoProvide,
+			Force:         brokerForceRegister,
 			Settings:      settings,
 			HubName:       hubName,
 			Endpoint:      endpoint,
@@ -771,12 +774,68 @@ type brokerHubRegistration struct {
 	// under: Name, or on a re-registration the name the hub kept.
 	KeptName    *string
 	AutoProvide bool
+	// Force bypasses the Hub's online-broker re-registration guard.
+	Force bool
 	// Settings supply the broker profiles and default profile reported at
 	// join; nil reports none and leaves the hub's default profile as it is.
 	Settings *config.Settings
 	// HubName names the hub connection the credentials are saved under.
 	HubName  string
 	Endpoint string
+}
+
+// Prompt I/O seams for registerBrokerWithHub's online-broker confirmation,
+// overridden in tests.
+var (
+	brokerRegisterPromptIn  io.Reader = os.Stdin
+	brokerRegisterPromptOut io.Writer = os.Stderr
+	brokerRegisterIsTTY               = util.IsTerminal
+)
+
+type brokerOnlineConflict struct {
+	BrokerID   string
+	BrokerName string
+}
+
+func parseBrokerOnlineConflict(err error) (brokerOnlineConflict, bool) {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || !apiErr.IsConflict() || apiErr.Code != apiclient.ErrCodeBrokerOnline {
+		return brokerOnlineConflict{}, false
+	}
+	var c brokerOnlineConflict
+	if apiErr.Details != nil {
+		c.BrokerID, _ = apiErr.Details["brokerId"].(string)
+		c.BrokerName, _ = apiErr.Details["brokerName"].(string)
+	}
+	return c, true
+}
+
+// confirmOnlineBrokerReregister warns that an existing online broker would be
+// taken over and asks for interactive confirmation (default No). Without a
+// terminal it fails closed with an actionable error naming --force so headless
+// runs (even with --yes) never silently disconnect a live broker.
+func confirmOnlineBrokerReregister(in io.Reader, out io.Writer, brokerName, brokerID string, isTTY bool) (bool, error) {
+	if !isTTY {
+		return false, fmt.Errorf(
+			"broker '%s' (ID: %s) is currently online on the Hub; re-registering will replace its credentials and disconnect it. Re-run with --force to take over its identity, or use --broker-name to register under a different name",
+			brokerName, brokerID,
+		)
+	}
+	_, _ = fmt.Fprintf(out, "\nWarning: broker '%s' (ID: %s) is currently online on the Hub.\n", brokerName, brokerID)
+	_, _ = fmt.Fprintln(out, "Re-registering will replace its credentials, take over its identity, and disconnect the running broker.")
+	_, _ = fmt.Fprintln(out, "To register a separate broker instead, cancel and re-run with --broker-name.")
+	_, _ = fmt.Fprint(out, "Re-register anyway? (y/N): ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && (line == "" || !errors.Is(err, io.EOF)) {
+		_, _ = fmt.Fprintln(out)
+		return false, fmt.Errorf("failed to read confirmation for online broker '%s' (ID: %s); re-run with --force to proceed", brokerName, brokerID)
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // registerBrokerWithHub runs the two-phase broker registration against the
@@ -794,12 +853,36 @@ func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiSt
 		Name:         reg.Name,
 		Capabilities: brokerRegistrationCapabilities(),
 		AutoProvide:  reg.AutoProvide,
+		Force:        reg.Force,
 		Labels: map[string]string{
 			"scion.io/broker-role": "remote",
 		},
 	}
 
 	createResp, err := client.RuntimeBrokers().Create(ctx, createReq)
+	if err != nil {
+		if conflict, ok := parseBrokerOnlineConflict(err); ok && !reg.Force {
+			conflictName := conflict.BrokerName
+			if conflictName == "" {
+				conflictName = reg.Name
+			}
+			confirmed, confirmErr := confirmOnlineBrokerReregister(
+				brokerRegisterPromptIn,
+				brokerRegisterPromptOut,
+				conflictName,
+				conflict.BrokerID,
+				brokerRegisterIsTTY(),
+			)
+			if confirmErr != nil {
+				return "", confirmErr
+			}
+			if !confirmed {
+				return "", fmt.Errorf("re-registration cancelled; broker '%s' (ID: %s) was not modified. Use --broker-name to register under a different name", conflictName, conflict.BrokerID)
+			}
+			createReq.Force = true
+			createResp, err = client.RuntimeBrokers().Create(ctx, createReq)
+		}
+	}
 	if err != nil {
 		if reg.AutoProvide && apiclient.IsForbiddenError(err) {
 			return "", fmt.Errorf("failed to create broker registration: %w (--auto-provide requires the broker.auto_provide permission, held by super-admins; retry without --auto-provide)", err)
