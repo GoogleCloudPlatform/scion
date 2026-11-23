@@ -160,6 +160,11 @@ type WatchOptions struct {
 	Filter       string
 	Limit        int
 	Wait         time.Duration
+	// Immediate sends wait=0 for a non-blocking poll so the server returns
+	// immediately with any available events or the current head cursor.
+	// Without Immediate, Wait == 0 omits the wait parameter and uses the
+	// server default (30s).
+	Immediate bool
 }
 
 // WatchEvent is a single event returned by GET /api/v1/conversations/{id}/watch.
@@ -337,9 +342,13 @@ func (s *conversationService) Watch(ctx context.Context, conversationID string, 
 		query.Set("limit", strconv.Itoa(opts.Limit))
 	}
 	effectiveWait := opts.Wait
-	if opts.Wait > 0 {
+	switch {
+	case opts.Immediate:
+		query.Set("wait", "0")
+		effectiveWait = 0
+	case opts.Wait > 0:
 		query.Set("wait", opts.Wait.String())
-	} else {
+	default:
 		effectiveWait = defaultWatchWaitFallback
 	}
 

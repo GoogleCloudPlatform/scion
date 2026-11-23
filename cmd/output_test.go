@@ -53,6 +53,43 @@ func TestOutputJSON(t *testing.T) {
 	assert.Equal(t, "value", parsed["key"])
 }
 
+type testFlushingBuffer struct {
+	bytes.Buffer
+	flushes int
+}
+
+func (b *testFlushingBuffer) Flush() error {
+	b.flushes++
+	return nil
+}
+
+func TestOutputNDJSON(t *testing.T) {
+	t.Run("writes single compact line without HTML escaping and flushes", func(t *testing.T) {
+		var buf testFlushingBuffer
+		err := outputNDJSON(&buf, map[string]string{"type": "cursor", "msg": "a -> b & c"})
+		require.NoError(t, err)
+		assert.Equal(t, 1, buf.flushes)
+
+		line := buf.String()
+		assert.True(t, len(line) > 0 && line[len(line)-1] == '\n')
+		assert.Equal(t, 1, bytes.Count(buf.Bytes(), []byte("\n")), "NDJSON must be a single line")
+		assert.Contains(t, line, "a -> b & c", "must not HTML-escape")
+
+		var parsed map[string]string
+		require.NoError(t, json.Unmarshal([]byte(line), &parsed))
+		assert.Equal(t, "cursor", parsed["type"])
+	})
+
+	t.Run("writes to os.Stdout", func(t *testing.T) {
+		var err error
+		out := captureStdout(t, func() {
+			err = outputNDJSON(os.Stdout, map[string]string{"k": "v"})
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "{\"k\":\"v\"}\n", out)
+	})
+}
+
 func TestOutputActionResult(t *testing.T) {
 	origFormat := outputFormat
 	defer func() { outputFormat = origFormat }()
@@ -253,6 +290,7 @@ func TestInteractiveOnlyCommands(t *testing.T) {
 		"scion look",
 		"scion message",
 		"scion msg",
+		"scion conversation watch",
 	}
 
 	for _, cmd := range nonInteractiveCmds {
