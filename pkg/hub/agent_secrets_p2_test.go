@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -1018,6 +1019,37 @@ func TestAgentSecretsP2_L1_SoftDeleteRaceAndRetryCleanup(t *testing.T) {
 		_, err = srv.GetSecretBackend().Get(ctx, "INFLIGHT_KEY", secret.ScopeAgent, inflight.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
+}
+
+func TestAgentSecretsP2_AgentSelfWriteDeleteRaceCompensates(t *testing.T) {
+	srv, s, _, _, _, agentX, _ := setupAgentSecretsTestFixture(t, true)
+	ctx := context.Background()
+
+	origBackend := srv.GetSecretBackend()
+	srv.SetSecretBackend(&failingSetSecretBackend{
+		SecretBackend: origBackend,
+		afterSetHook: func(hctx context.Context, input *secret.SetSecretInput) {
+			_ = s.DeleteAgent(hctx, input.ScopeID)
+		},
+	})
+
+	bodyBytes, err := json.Marshal(AgentSetSecretRequest{
+		Value: base64.StdEncoding.EncodeToString([]byte("raced-self-write-val")),
+		Scope: store.ScopeAgent,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/agents/"+agentX.ID+"/secrets/SELF_RACED_KEY", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	tok := srv.generateRecordedAgentToken(t, agentX.ID, agentX.ProjectID, []AgentTokenScope{ScopeAgentStatusUpdate}, agentX.Ancestry)
+	req.Header.Set("X-Scion-Agent-Token", tok)
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code, "body=%s", rec.Body.String())
+
+	_, err = origBackend.Get(ctx, "SELF_RACED_KEY", secret.ScopeAgent, agentX.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "raced agent-route self-write secret must be compensated")
 }
 
 // fakeExternalSecretBackend simulates GCPBackend's split storage model: values
