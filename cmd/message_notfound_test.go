@@ -73,7 +73,7 @@ func TestSendMessageViaHub_AgentNotFound(t *testing.T) {
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "proj-631"}
 
-	err = sendMessageViaHub(hubCtx, "ghost", "hello", false, false, false)
+	err = sendMessageViaHub(hubCtx, "ghost", "hello", false, false)
 	assertAgentNotFoundRendering(t, err)
 }
 
@@ -137,7 +137,7 @@ func TestAgentMessageSend_OtherNotFoundKeepsGenericWording(t *testing.T) {
 			hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "proj-631"}
 
 			for _, send := range []func() error{
-				func() error { return sendMessageViaHub(hubCtx, "ghost", "hello", false, false, false) },
+				func() error { return sendMessageViaHub(hubCtx, "ghost", "hello", false, false) },
 				func() error { return sendMessageViaConversation(hubCtx, ref, "hello", false, false, nil) },
 			} {
 				err := send()

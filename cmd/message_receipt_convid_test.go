@@ -101,7 +101,7 @@ func TestSendReceipt_ConfirmationsNameConversation(t *testing.T) {
 			name:   "direct agent send",
 			sender: "sender-agent",
 			send: func(h *HubContext) error {
-				return sendMessageViaHub(h, "builder", "hello", false, false, false)
+				return sendMessageViaHub(h, "builder", "hello", false, false)
 			},
 			want: "Message accepted for agent 'builder' (conversation conv-builder, message msg-builder).",
 		},
@@ -109,7 +109,7 @@ func TestSendReceipt_ConfirmationsNameConversation(t *testing.T) {
 			name:   "human direct agent send",
 			sender: "",
 			send: func(h *HubContext) error {
-				return sendMessageViaHub(h, "builder", "hello", false, false, false)
+				return sendMessageViaHub(h, "builder", "hello", false, false)
 			},
 			want: "Message accepted for agent 'builder' (conversation conv-builder, message msg-builder).",
 		},

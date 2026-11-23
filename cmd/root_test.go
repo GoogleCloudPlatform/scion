@@ -489,7 +489,6 @@ func TestUsageError(t *testing.T) {
 // SilenceUsage, and must still show usage.
 func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 	origProjectPath := projectPath
-	origMsgIn, origMsgAt := msgIn, msgAt
 	origScheduleName, origScheduleCron := scheduleName, scheduleCron
 	origSortField := sortField
 	origGlobalMode := globalMode
@@ -499,7 +498,14 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 			f.Changed = false
 		}
 		projectPath = origProjectPath
-		msgIn, msgAt = origMsgIn, origMsgAt
+		msgWake = false
+		if f := messageCmd.Flags().Lookup("wake"); f != nil {
+			f.Changed = false
+		}
+		resetDecisionFlags()
+		if f := messageCmd.Flags().Lookup("update"); f != nil {
+			f.Changed = false
+		}
 		scheduleName, scheduleCron = origScheduleName, origScheduleCron
 		sortField = origSortField
 		rootCmd.SetArgs(nil)
@@ -517,8 +523,8 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{"message: --in and --at", []string{"message", "agent1", "hello", "--in", "5m", "--at", "2030-01-01T00:00:00Z"}, "--in and --at are mutually exclusive"},
-		{"message: --thread-id without --channel", []string{"message", "agent1", "hello", "--thread-id", "t1"}, "--thread-id requires --channel to be set"},
+		{"message: --wake with user recipient", []string{"message", "user:alice", "hello", "--wake"}, "--wake cannot be used with user recipients"},
+		{"message: --update without --decisions", []string{"message", "user:alice", "hello", "--update"}, "--update is valid only with --decisions or --decisions-file"},
 		{"start: telemetry flags", []string{"start", "a1", "--enable-telemetry", "--disable-telemetry"}, "--enable-telemetry and --disable-telemetry are mutually exclusive"},
 		{"create: bad --harness-auth", []string{"create", "a1", "--harness-auth", "bogus"}, "invalid --harness-auth value"},
 		{"list: bad --sort", []string{"list", "--sort", "bogus"}, "invalid sort field"},

@@ -76,7 +76,6 @@ func TestArtifactFlagValidation(t *testing.T) {
 		args   []string
 		errMsg string
 	}{
-		{"with --in", func() { msgArtifacts = []string{ref}; msgIn = "5m" }, []string{"agent1", "hi"}, "--artifact cannot be combined with --in or --at"},
 		{"with group", func() { msgArtifacts = []string{ref} }, []string{"group[a,b]", "hi"}, "--artifact cannot be used with group[] recipients"},
 		{"malformed", func() { msgArtifacts = []string{"nope"} }, []string{"agent1", "hi"}, "--artifact \"nope\""},
 	}
@@ -108,7 +107,7 @@ func TestSendMessageViaHub_ArtifactRefs(t *testing.T) {
 
 	msgArtifactRefs = []artifacts.MessageRef{{ArtifactID: cliArtifactA, Seq: 2}}
 	body := appendArtifactRefsToBody("design ready", msgArtifactRefs)
-	require.NoError(t, sendMessageViaHub(hubCtx, "my-agent", body, false, false, false))
+	require.NoError(t, sendMessageViaHub(hubCtx, "my-agent", body, false, false))
 
 	require.Len(t, *sent, 1)
 	sm := (*sent)[0].StructuredMsg

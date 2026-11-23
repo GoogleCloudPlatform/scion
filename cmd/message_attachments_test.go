@@ -163,7 +163,7 @@ func TestAttachUpload_SendCarriesIDs(t *testing.T) {
 	useAttachUpload(t, upload)
 	hubCtx := &HubContext{Client: attachHubClient(t, srv), Endpoint: srv.URL, ProjectID: "proj-attach"}
 	_, _ = captureStdoutStderr(t, func() {
-		require.NoError(t, sendMessageViaHub(hubCtx, "builder", "see attached", false, false, false))
+		require.NoError(t, sendMessageViaHub(hubCtx, "builder", "see attached", false, false))
 	})
 	require.Equal(t, []string{"att-1", "att-2"}, h.sends["/api/v1/projects/proj-attach/agents/builder/message"])
 	require.Equal(t, []string{"a.txt", "b.log"}, h.uploaded)
@@ -183,7 +183,7 @@ func TestAttachUpload_HumanSessionSendsIDs(t *testing.T) {
 	useAttachUpload(t, upload)
 	hubCtx := &HubContext{Client: attachHubClient(t, srv), Endpoint: srv.URL, ProjectID: "proj-attach"}
 	_, _ = captureStdoutStderr(t, func() {
-		require.NoError(t, sendMessageViaHub(hubCtx, "builder", "see attached", false, false, false))
+		require.NoError(t, sendMessageViaHub(hubCtx, "builder", "see attached", false, false))
 	})
 	require.Equal(t, []string{"att-1"}, h.sends["/api/v1/projects/proj-attach/agents/builder/message"])
 }
@@ -296,7 +296,7 @@ func TestAttachUpload_PartialFailureSendsNothing(t *testing.T) {
 	hubCtx := &HubContext{Client: attachHubClient(t, srv), Endpoint: srv.URL, ProjectID: "proj-attach"}
 	var sendErr error
 	_, _ = captureStdoutStderr(t, func() {
-		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false, false)
+		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false)
 	})
 	require.Error(t, sendErr)
 	require.Contains(t, sendErr.Error(), "b.txt: refused by the hub")
@@ -344,7 +344,7 @@ func TestAttachUpload_SlowUploadKeepsSendTime(t *testing.T) {
 	hubCtx := &HubContext{Client: attachHubClient(t, srv), Endpoint: srv.URL, ProjectID: "proj-attach"}
 	var sendErr error
 	_, _ = captureStdoutStderr(t, func() {
-		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false, false)
+		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false)
 	})
 	require.NoError(t, sendErr)
 	h.mu.Lock()

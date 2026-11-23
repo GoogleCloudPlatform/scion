@@ -577,7 +577,7 @@ You are receiving a message from the orchestration system:
 ---END SCION MESSAGE---
 ```
 
-The `timestamp` is when the message was created, and `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received, for example to tell the sender which message it is answering. When the envelope names a conversation, the agent can also fetch the message with `scion conversation get-message conv:<conversation.id> <message_id>`; when `conversation` is omitted (for example on a broadcast), there is no conversation to pass and the message cannot be fetched that way. `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain (`--plain`) deliveries, which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
+The `timestamp` is when the message was created, and `message_id` is the ID of the message the Hub stored for this delivery, so an agent can name the exact message it received, for example to tell the sender which message it is answering. When the envelope names a conversation, the agent can also fetch the message with `scion conversation get-message conv:<conversation.id> <message_id>`; when `conversation` is omitted (for example on a broadcast), there is no conversation to pass and the message cannot be fetched that way. `message_id` is omitted when the Hub stored no message for the delivery: scheduled messages, status notifications, artifact review notices, and plain-text deliveries (triggers and scheduled events with `--plain`), which carry only the text. In a reply, `reply_to` still names the message being replied to; `message_id` names the reply itself.
 
 When a person sends the message and their user profile has a pinned time zone set, the envelope's `metadata` carries it as `sender_timezone`, the IANA zone name as stored (for example `Europe/Berlin`), so the agent can read times the sender mentions in the sender's own zone. Only the Hub sets this key: only a pinned time zone is shared with agents you message, so `sender_timezone` is absent when **Display timezone** is set to **Auto** (used for display only; the browser-detected zone stays in the browser and the stored profile preference is empty) or when the sender is an agent, and a value supplied by a client is dropped. Pinning a time zone in your profile shares it with any agent you message, including agents other members own, and the Hub's message log records it.
 
@@ -639,7 +639,7 @@ When using slug-based query paths or addressing agents via `agent:<name>` (e.g.,
 ### 4. Subscription Management and Agent Self-Service
 
 * **Automatic Subscription**: The `--notify` flag on `scion start` is **deprecated**. When you start a sub-agent, Scion automatically registers your subscription via creation ancestry.
-* **Explicit Messaging Subscription**: Use the `--notify` flag on `scion message` only when you need to subscribe to notifications from a peer agent that you did *not* create.
+* **Explicit Subscription**: Use `scion notifications subscribe` when you need to subscribe to notifications from a peer agent that you did *not* create (the `--notify` flag has been removed from `scion message`).
 * **Agent Self-Service Subscriptions**: Running agents in Hosted mode are empowered to programmatically manage their own notification subscriptions. Previously restricted to administrative users (returning a `403 Forbidden` for agents), agents with appropriate API credentials can now perform the following operations:
   - **CRUD Operations**: Live agents can list, create, update, and delete their own subscriptions via the Hub API or client utilities.
   - **Identity Qualification**: To prevent cross-project security leaks, every subscription request is qualified by the agent's specific `(project, slug)` coordinates.
@@ -686,8 +686,8 @@ scion message "group[tech-lead, dev-agent, qa-agent]" "Let's review the deployme
 ```
 A group send reports each recipient's outcome and exits `3` when only some recipients received the message; see [Group sends and exit codes](/scion/reference/cli/#scion-message-or-msg).
 
-:::caution[Deprecated Flag]
-The `--cc` flag on `scion message` is deprecated and will be removed in a future release. It still works but triggers a deprecation warning. Use `group[...]` addressing or body `@mentions` for multi-recipient delivery instead.
+:::caution[Removed Flag]
+The `--cc` flag has been removed from `scion message`. Use `group[...]` addressing or body `@mentions` for multi-recipient delivery instead.
 :::
 
 #### Validation & Integration Rules

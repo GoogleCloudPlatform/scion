@@ -93,14 +93,13 @@ func attachWarnHubCtx(t *testing.T, srv *httptest.Server, projectID string) *Hub
 func setAttachWarnState(t *testing.T, format string) {
 	t.Helper()
 	orig := saveMessageTestState()
-	origFormat, origAttach, origCC := outputFormat, msgAttach, msgCC
+	origFormat, origAttach := outputFormat, msgAttach
 	t.Cleanup(func() {
 		orig.restore()
-		outputFormat, msgAttach, msgCC = origFormat, origAttach, origCC
+		outputFormat, msgAttach = origFormat, origAttach
 	})
 	outputFormat = format
 	msgAttach = []string{attachWarnPath}
-	msgCC = nil
 }
 
 func TestSendMessageViaHub_AttachmentWarningPrintedToStderr(t *testing.T) {
@@ -112,7 +111,7 @@ func TestSendMessageViaHub_AttachmentWarningPrintedToStderr(t *testing.T) {
 
 	var sendErr error
 	stdout, stderr := captureStdoutStderr(t, func() {
-		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false, false)
+		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false)
 	})
 	require.NoError(t, sendErr, "a warning must not turn the send into an error (exit code unchanged)")
 	assert.Contains(t, stdout, "Message accepted for agent 'builder' (message msg-agent).")
@@ -128,7 +127,7 @@ func TestSendMessageViaHub_AttachmentWarningInJSON(t *testing.T) {
 
 	var sendErr error
 	stdout, stderr := captureStdoutStderr(t, func() {
-		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false, false)
+		sendErr = sendMessageViaHub(hubCtx, "builder", "see attached", false, false)
 	})
 	require.NoError(t, sendErr)
 	assert.NotContains(t, stderr, "Warning: attachment", "under --json the warning belongs in the JSON object")

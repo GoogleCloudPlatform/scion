@@ -638,7 +638,7 @@ func TestBackwardCompat_BareAgentName(t *testing.T) {
 	}
 
 	// Send via the legacy path — bare agent name.
-	err = sendMessageViaHub(hubCtx, "old-agent-name", "hello world", false, false, false)
+	err = sendMessageViaHub(hubCtx, "old-agent-name", "hello world", false, false)
 	require.NoError(t, err)
 
 	require.Len(t, *sent, 1)
@@ -731,10 +731,8 @@ func TestSendMessageViaConversation_EmailThreadIDWithoutChannel(t *testing.T) {
 	restoreFlags := resetMessageFlags()
 	defer restoreFlags()
 
-	// Set thread-id without channel — would fail ValidateLegacyMessage if
-	// those CLI flags leaked into the validation probe.
-	msgThreadID = "some-thread"
-	msgChannel = ""
+	// Verify @email outbound send succeeds without channel/thread_id fields
+	// in the validation probe.
 
 	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
 
