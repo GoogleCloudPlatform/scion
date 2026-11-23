@@ -564,14 +564,24 @@ function hasAnyNonEmptyString(obj: Record<string, unknown> | null | undefined): 
   return Object.values(obj).some((v) => typeof v === 'string' && v !== '');
 }
 
+/**
+ * Matches Go `BrandingScale.IsZero()` (`len(s) == 0`): any defined step key
+ * (including an empty string value) counts as a present scale entry so server
+ * validation rejects `{"500": ""}` as an invalid hex color.
+ */
+function hasScaleEntries(scale: PartialBrandingScale | null | undefined): boolean {
+  if (!scale) return false;
+  return Object.keys(scale).some((k) => scale[k] !== undefined);
+}
+
 function hasPaletteEntries(palette: RawPaletteConfig | null | undefined): boolean {
   if (!palette) return false;
   return (
-    hasAnyNonEmptyString(palette.primary) ||
-    hasAnyNonEmptyString(palette.neutral) ||
-    hasAnyNonEmptyString(palette.success) ||
-    hasAnyNonEmptyString(palette.warning) ||
-    hasAnyNonEmptyString(palette.danger) ||
+    hasScaleEntries(palette.primary) ||
+    hasScaleEntries(palette.neutral) ||
+    hasScaleEntries(palette.success) ||
+    hasScaleEntries(palette.warning) ||
+    hasScaleEntries(palette.danger) ||
     hasAnyNonEmptyString(palette.light) ||
     hasAnyNonEmptyString(palette.dark)
   );
@@ -580,7 +590,7 @@ function hasPaletteEntries(palette: RawPaletteConfig | null | undefined): boolea
 const ALLOWED_STEP_SET = new Set<string>(SCALE_STEPS);
 const STEP_ORDER = new Map<string, number>(SCALE_STEPS.map((st, idx) => [st, idx]));
 
-const SEMANTIC_KEYS: readonly (keyof BrandingSemanticTokens)[] = [
+export const SEMANTIC_KEYS = [
   'bg',
   'bg_subtle',
   'surface',
@@ -593,7 +603,9 @@ const SEMANTIC_KEYS: readonly (keyof BrandingSemanticTokens)[] = [
   'primary_hover',
   'primary_active',
   'primary_text',
-];
+] as const;
+
+export type SemanticTokenKey = (typeof SEMANTIC_KEYS)[number];
 
 function buildKeyPairs(
   light: BrandingSemanticTokens,
@@ -735,10 +747,7 @@ export function resolveBrandingPalette(input: BrandingPaletteInput): ResolvedBra
     override: PartialBrandingScale | null | undefined
   ): boolean => {
     if (!override) return false;
-    const keys = Object.keys(override).filter((k) => {
-      const v = override[k];
-      return typeof v === 'string' && v !== '';
-    });
+    const keys = Object.keys(override).filter((k) => override[k] !== undefined);
     if (keys.length === 0) return false;
     keys.sort((a, b) => {
       const oi = STEP_ORDER.get(a);

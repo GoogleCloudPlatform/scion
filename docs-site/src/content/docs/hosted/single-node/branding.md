@@ -5,9 +5,7 @@ description: Customize a Scion Hub's product name, logos, icons, color palette, 
 
 Hub administrators can white-label a Scion Hub's web interface, pre-auth pages, PWA manifest, and CLI login callback using the `server.hub.branding.*` operational settings. Branding is **hub-wide** and works in Workstation, Single-node hosted, and HA hosted deployments.
 
-:::note[No Web Admin UI editor yet]
-There is not yet a Branding form in **Admin > Server Config**. Configure and manage branding with `scion hub settings`, the [Admin Server Config API](#admin-server-config-api), `settings.yaml`, or `SCION_SEED_*` environment variables.
-:::
+Configure and manage branding in the Web Admin UI at **Admin > Branding** (`/admin/branding`), or via `scion hub settings`, the [Admin Server Config API](#admin-server-config-api), `settings.yaml`, or `SCION_SEED_*` environment variables.
 
 ## What Branding Covers
 
@@ -127,6 +125,22 @@ All color values must be 6-digit `#RRGGBB` hex strings.
 
 Writing or resetting the `branding` section requires Hub administrator privileges (`hub.config.update`) authenticated with an **interactive sign-in session** (`scion hub auth login`) or a workstation dev credential. **User Access Tokens (UATs) are refused** for `branding` because it controls unauthenticated `/login` content and external image URLs.
 
+### Using the Web Admin UI (`/admin/branding`)
+
+Navigate to **Admin > Branding** (`/admin/branding`) to configure branding interactively with instant pre-save feedback. Viewing the page requires `hub.config.read`; editing and resetting require `hub.config.update` (read-only administrators see a read-only banner with save and reset controls disabled).
+
+- **Scoped Live Preview**: The top of the page renders side-by-side **Light Mode** and **Dark Mode** previews of your unsaved draft (product name, subtitle, logo, corners, typeface, primary controls, and attribution footer) along with an advisory WCAG 2.1 AA contrast summary. Live Hub styling updates only when you click **Save Branding**.
+- **Identity & Attribution**: Edit `name`, `short_name`, `subtitle`, and `attribution` (`shown` or `hidden`).
+- **Shape & Typography**: Choose a `corners` preset (`default`, `square`, or `rounded`) and a `font_sans` preset (`default`, `system` for air-gapped deployments, curated Google Fonts presets, or a custom Google Fonts family name).
+- **Logos & Icons**: For each logo and icon slot, enter an `https://` URL or same-origin `/path`, or upload a local file (converted in the browser to a base64 `data:` URI). Uploaded assets render as compact metadata chips with **Replace file**, **Switch to URL**, and **Clear** actions, inline light/dark swatches, and a budget meter tracking total embedded `data:` bytes against the 128 KiB per-asset and 512 KiB total limits.
+- **Colors & Advanced Palette Overrides**:
+  - Pick an `accent_color` to preview the generated 11-step (`50`–`950`) OKLCH primary ramp and live Light/Dark WCAG 2.1 AA contrast badges.
+  - Expand **Advanced Palette Overrides** to edit individual `palette.light.*` and `palette.dark.*` semantic tokens (grouped by Surfaces, Text, and Borders & Primary Controls) and the five 50–950 shade scales (`primary`, `neutral`, `success`, `warning`, `danger`). Each token displays its live WCAG 2.1 AA contrast badge and a per-key reset control; each shade scale also provides a **Clear overrides** button. If the Hub returns a `422` validation error on a palette key, the relevant palette panel expands automatically with inline error messages.
+- **Dirty-Diff Saves, Resets, & Environment Overrides**:
+  - **Save Branding** sends only changed fields (deep-merged on the server, with modified shade-scale maps sent whole) with optimistic-locking revision checks (`409` prompts a reload) and applies changes live across the Hub without restarting.
+  - Every customized field has a per-key reset button. **Reset All Branding** opens a confirmation dialog and deletes the managed database row (or clears all editable keys in file-backed mode).
+  - Keys locked by environment variables render read-only with their active value and are omitted from save payloads.
+
 ### Using the CLI (`scion hub settings`)
 
 Inspect the current branding section or its schema:
@@ -203,7 +217,7 @@ Nested objects (`logo`, `icons`, `palette.light`, `palette.dark`) are deep-merge
 
 You can seed branding at startup in `settings.yaml` or via `SCION_SEED_*` environment variables (for example `SCION_SEED_SERVER_HUB_BRANDING_NAME`, `SCION_SEED_SERVER_HUB_BRANDING_ACCENTCOLOR`, `SCION_SEED_SERVER_HUB_BRANDING_CORNERS`, `SCION_SEED_SERVER_HUB_BRANDING_FONTSANS`).
 
-The five shade-scale map keys (`palette.primary`, `palette.neutral`, `palette.success`, `palette.warning`, `palette.danger`) are structured maps and must be configured via `settings.yaml`, `scion hub settings`, or the Admin API rather than environment variables.
+The five shade-scale map keys (`palette.primary`, `palette.neutral`, `palette.success`, `palette.warning`, `palette.danger`) are structured maps and must be configured via the Web Admin UI (`/admin/branding`), `settings.yaml`, `scion hub settings`, or the Admin API rather than environment variables.
 
 As with all Layer-1 settings, once an admin saves `branding` through the CLI or API, the database row takes precedence over `settings.yaml` and `SCION_SEED_*` until the section is reset.
 

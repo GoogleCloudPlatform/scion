@@ -19,6 +19,15 @@
  * Admin Branding page (/admin/branding).
  */
 
+import {
+  SCALE_NAMES,
+  SCALE_STEPS,
+  SEMANTIC_KEYS,
+  type RawPaletteConfig,
+  type ScaleStep,
+  type SemanticTokenKey,
+} from './admin-branding-contrast.js';
+
 export const BRANDING_KOANF_PREFIX = 'server.hub.branding';
 
 export const MAX_BRAND_NAME_RUNES = 64;
@@ -196,6 +205,19 @@ export interface RawBrandingConfig {
   palette?: Record<string, unknown>;
 }
 
+export type SemanticTokenFormMap = Record<SemanticTokenKey, string>;
+export type ScaleStepFormMap = Record<ScaleStep, string>;
+
+export interface PaletteFormState {
+  light: SemanticTokenFormMap;
+  dark: SemanticTokenFormMap;
+  primary: ScaleStepFormMap;
+  neutral: ScaleStepFormMap;
+  success: ScaleStepFormMap;
+  warning: ScaleStepFormMap;
+  danger: ScaleStepFormMap;
+}
+
 export interface BrandingFormState {
   name: string;
   short_name: string;
@@ -206,6 +228,157 @@ export interface BrandingFormState {
   accent_color: string;
   logo: Record<LogoSlotKey, string>;
   icons: Record<IconSlotKey, string>;
+  palette: PaletteFormState;
+}
+
+export function defaultSemanticTokenFormMap(): SemanticTokenFormMap {
+  return {
+    bg: '',
+    bg_subtle: '',
+    surface: '',
+    surface_raised: '',
+    text: '',
+    text_secondary: '',
+    text_muted: '',
+    border: '',
+    primary: '',
+    primary_hover: '',
+    primary_active: '',
+    primary_text: '',
+  };
+}
+
+export function defaultScaleStepFormMap(): ScaleStepFormMap {
+  return {
+    '50': '',
+    '100': '',
+    '200': '',
+    '300': '',
+    '400': '',
+    '500': '',
+    '600': '',
+    '700': '',
+    '800': '',
+    '900': '',
+    '950': '',
+  };
+}
+
+export function defaultPaletteFormState(): PaletteFormState {
+  return {
+    light: defaultSemanticTokenFormMap(),
+    dark: defaultSemanticTokenFormMap(),
+    primary: defaultScaleStepFormMap(),
+    neutral: defaultScaleStepFormMap(),
+    success: defaultScaleStepFormMap(),
+    warning: defaultScaleStepFormMap(),
+    danger: defaultScaleStepFormMap(),
+  };
+}
+
+export function clonePaletteFormState(p: PaletteFormState): PaletteFormState {
+  return {
+    light: { ...p.light },
+    dark: { ...p.dark },
+    primary: { ...p.primary },
+    neutral: { ...p.neutral },
+    success: { ...p.success },
+    warning: { ...p.warning },
+    danger: { ...p.danger },
+  };
+}
+
+export function paletteFromConfig(
+  raw: Record<string, unknown> | RawPaletteConfig | null | undefined
+): PaletteFormState {
+  const out = defaultPaletteFormState();
+  if (!raw || typeof raw !== 'object') return out;
+  const r = raw as RawPaletteConfig;
+
+  for (const mode of ['light', 'dark'] as const) {
+    const src = r[mode];
+    if (src && typeof src === 'object') {
+      for (const key of SEMANTIC_KEYS) {
+        const val = src[key];
+        if (typeof val === 'string') {
+          out[mode][key] = val;
+        }
+      }
+    }
+  }
+
+  for (const scale of SCALE_NAMES) {
+    const src = r[scale];
+    if (src && typeof src === 'object') {
+      for (const step of SCALE_STEPS) {
+        const val = src[step];
+        if (typeof val === 'string') {
+          out[scale][step] = val;
+        }
+      }
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Converts UI `PaletteFormState` into a `RawPaletteConfig` for `resolveBrandingPalette`.
+ * Empty strings represent cleared/unset overrides and are omitted so cleared scale steps
+ * fall back to the generated/stock ramp rather than triggering invalid-hex errors.
+ */
+export function paletteFormToRawConfig(palette: PaletteFormState): RawPaletteConfig | null {
+  const out: RawPaletteConfig = {};
+  let hasAny = false;
+
+  for (const mode of ['light', 'dark'] as const) {
+    const modeObj: Record<string, string> = {};
+    for (const key of SEMANTIC_KEYS) {
+      const val = palette[mode][key].trim();
+      if (val !== '') {
+        modeObj[key] = val;
+      }
+    }
+    if (Object.keys(modeObj).length > 0) {
+      out[mode] = modeObj;
+      hasAny = true;
+    }
+  }
+
+  for (const scale of SCALE_NAMES) {
+    const scaleObj: Record<string, string> = {};
+    for (const step of SCALE_STEPS) {
+      const val = palette[scale][step].trim();
+      if (val !== '') {
+        scaleObj[step] = val;
+      }
+    }
+    if (Object.keys(scaleObj).length > 0) {
+      out[scale] = scaleObj;
+      hasAny = true;
+    }
+  }
+
+  return hasAny ? out : null;
+}
+
+export function countPaletteOverrides(palette: PaletteFormState): number {
+  let count = 0;
+  for (const mode of ['light', 'dark'] as const) {
+    for (const key of SEMANTIC_KEYS) {
+      if (palette[mode][key].trim() !== '') count++;
+    }
+  }
+  for (const scale of SCALE_NAMES) {
+    for (const step of SCALE_STEPS) {
+      if (palette[scale][step].trim() !== '') count++;
+    }
+  }
+  return count;
+}
+
+export function hasPaletteFormOverrides(palette: PaletteFormState): boolean {
+  return countPaletteOverrides(palette) > 0;
 }
 
 export function defaultBrandingFormState(): BrandingFormState {
@@ -228,6 +401,7 @@ export function defaultBrandingFormState(): BrandingFormState {
       icon_512: '',
       icon_maskable_512: '',
     },
+    palette: defaultPaletteFormState(),
   };
 }
 
@@ -236,6 +410,7 @@ export function cloneBrandingFormState(s: BrandingFormState): BrandingFormState 
     ...s,
     logo: { ...s.logo },
     icons: { ...s.icons },
+    palette: clonePaletteFormState(s.palette),
   };
 }
 
@@ -261,17 +436,26 @@ export function brandingFromConfig(raw: RawBrandingConfig | null | undefined): B
       icon_512: raw.icons?.icon_512 ?? '',
       icon_maskable_512: raw.icons?.icon_maskable_512 ?? '',
     },
+    palette: paletteFromConfig(raw.palette),
   };
 }
 
-export function hasAdvancedPaletteOverrides(raw: RawBrandingConfig | null | undefined): boolean {
-  const palette = raw?.palette;
-  if (!palette || typeof palette !== 'object') return false;
-  for (const val of Object.values(palette)) {
-    if (val && typeof val === 'object' && !Array.isArray(val)) {
-      if (
-        Object.values(val as Record<string, unknown>).some((v) => typeof v === 'string' && v !== '')
-      ) {
+/**
+ * Reports whether a relative path under `server.hub.branding` (including
+ * `palette.*` paths) is env-locked directly or via a parent `palette` /
+ * `palette.<mode|scale>` lock.
+ */
+export function isPaletteRelPathLocked(
+  envLockedKeys: ReadonlySet<string>,
+  relPath: string
+): boolean {
+  const full = `${BRANDING_KOANF_PREFIX}.${relPath}`;
+  if (envLockedKeys.has(full)) return true;
+  if (relPath.startsWith('palette.')) {
+    if (envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.palette`)) return true;
+    const parts = relPath.split('.');
+    if (parts.length >= 3) {
+      if (envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.palette.${parts[1]}`)) {
         return true;
       }
     }
@@ -336,8 +520,7 @@ export function buildBrandingDiff(
   envLockedKeys: ReadonlySet<string>
 ): Record<string, unknown> {
   const diff: Record<string, unknown> = {};
-  const isLocked = (relPath: string): boolean =>
-    envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.${relPath}`);
+  const isLocked = (relPath: string): boolean => isPaletteRelPathLocked(envLockedKeys, relPath);
 
   const topStrings: readonly ('name' | 'short_name' | 'subtitle' | 'accent_color')[] = [
     'name',
@@ -391,6 +574,61 @@ export function buildBrandingDiff(
     diff.icons = iconsDiff;
   }
 
+  // Palette diff:
+  // - palette.light / palette.dark are deep-merged key-by-key on PUT (emit '' to clear a key).
+  // - palette.{primary,neutral,success,warning,danger} are maps replaced whole on PUT:
+  //   whenever any step in a scale changes, send the complete map of all non-empty steps
+  //   (or {} when all steps are cleared). Untouched scales are omitted.
+  if (!isLocked('palette')) {
+    const paletteDiff: Record<string, unknown> = {};
+
+    for (const mode of ['light', 'dark'] as const) {
+      if (isLocked(`palette.${mode}`)) continue;
+      const modeDiff: Record<string, string> = {};
+      for (const key of SEMANTIC_KEYS) {
+        if (isLocked(`palette.${mode}.${key}`)) continue;
+        const nextVal = draft.palette[mode][key].trim();
+        const baseVal = baseline.palette[mode][key].trim();
+        if (nextVal !== baseVal) {
+          modeDiff[key] = nextVal;
+        }
+      }
+      if (Object.keys(modeDiff).length > 0) {
+        paletteDiff[mode] = modeDiff;
+      }
+    }
+
+    for (const scale of SCALE_NAMES) {
+      if (isLocked(`palette.${scale}`)) continue;
+      let scaleChanged = false;
+      for (const step of SCALE_STEPS) {
+        if (isLocked(`palette.${scale}.${step}`)) continue;
+        const nextVal = draft.palette[scale][step].trim();
+        const baseVal = baseline.palette[scale][step].trim();
+        if (nextVal !== baseVal) {
+          scaleChanged = true;
+          break;
+        }
+      }
+      if (scaleChanged) {
+        const completeScale: Record<string, string> = {};
+        for (const step of SCALE_STEPS) {
+          const val = isLocked(`palette.${scale}.${step}`)
+            ? baseline.palette[scale][step].trim()
+            : draft.palette[scale][step].trim();
+          if (val !== '') {
+            completeScale[step] = val;
+          }
+        }
+        paletteDiff[scale] = completeScale;
+      }
+    }
+
+    if (Object.keys(paletteDiff).length > 0) {
+      diff.palette = paletteDiff;
+    }
+  }
+
   return diff;
 }
 
@@ -412,8 +650,7 @@ export function buildFileModeResetPayload(
   hasPalette: boolean
 ): Record<string, unknown> {
   const payload: Record<string, unknown> = {};
-  const isLocked = (relPath: string): boolean =>
-    envLockedKeys.has(`${BRANDING_KOANF_PREFIX}.${relPath}`);
+  const isLocked = (relPath: string): boolean => isPaletteRelPathLocked(envLockedKeys, relPath);
 
   for (const key of [
     'name',
@@ -447,11 +684,37 @@ export function buildFileModeResetPayload(
   }
   if (Object.keys(icons).length > 0) payload.icons = icons;
 
-  const anyPaletteLocked = Array.from(envLockedKeys).some((k) =>
-    k.startsWith(`${BRANDING_KOANF_PREFIX}.palette`)
+  const anyPaletteLocked = Array.from(envLockedKeys).some(
+    (k) =>
+      k === `${BRANDING_KOANF_PREFIX}.palette` || k.startsWith(`${BRANDING_KOANF_PREFIX}.palette.`)
   );
-  if (hasPalette && !anyPaletteLocked) {
-    payload.palette = null;
+  if (hasPalette) {
+    if (!anyPaletteLocked) {
+      payload.palette = null;
+    } else if (!isLocked('palette')) {
+      const paletteClear: Record<string, unknown> = {};
+      for (const mode of ['light', 'dark'] as const) {
+        if (isLocked(`palette.${mode}`)) continue;
+        const modeClear: Record<string, string> = {};
+        for (const key of SEMANTIC_KEYS) {
+          if (!isLocked(`palette.${mode}.${key}`)) {
+            modeClear[key] = '';
+          }
+        }
+        if (Object.keys(modeClear).length > 0) {
+          paletteClear[mode] = modeClear;
+        }
+      }
+      for (const scale of SCALE_NAMES) {
+        const anyStepLocked = SCALE_STEPS.some((st) => isLocked(`palette.${scale}.${st}`));
+        if (!isLocked(`palette.${scale}`) && !anyStepLocked) {
+          paletteClear[scale] = {};
+        }
+      }
+      if (Object.keys(paletteClear).length > 0) {
+        payload.palette = paletteClear;
+      }
+    }
   }
 
   return payload;

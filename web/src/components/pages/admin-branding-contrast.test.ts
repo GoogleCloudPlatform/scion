@@ -271,6 +271,17 @@ describe('admin-branding-contrast', () => {
       expect(res.keyPairs.dark.every((p) => !p.enforced)).toBe(true);
     });
 
+    it('matches Go BrandingScale semantics by rejecting empty-string scale steps as invalid hex', () => {
+      const res = resolveBrandingPalette({ palette: { primary: { '500': '' } } });
+      expect(res.hasCustomPalette).toBe(true);
+      expect(res.syntaxErrors).toEqual([
+        {
+          path: 'server.hub.branding.palette.primary.500',
+          message: 'must be a 6-digit #RRGGBB hex color',
+        },
+      ]);
+    });
+
     it('marks unenforced stock mode primary pairs as enforced=false when only the sibling mode is customized', () => {
       // Only dark.text customized -> neither light nor dark primary is recalculated or enforced
       const darkTextOnly = resolveBrandingPalette({ palette: { dark: { text: '#ffffff' } } });

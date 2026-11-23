@@ -38,6 +38,7 @@ import {
   fieldErrorMessages,
   genericSaveErrorText,
   sectionPathsFromSchema,
+  type SettingsFieldError,
   type SettingsSaveError,
 } from '../../shared/settings-save-errors.js';
 import { revisionsFromMetadata } from '../../shared/settings-dirty.js';
@@ -77,13 +78,16 @@ import {
   buildFileModeResetPayload,
   cloneBrandingFormState,
   defaultBrandingFormState,
+  defaultScaleStepFormMap,
   formatKiB,
   getSlotValue,
-  hasAdvancedPaletteOverrides,
   hasAnyConfiguredBranding,
+  hasPaletteFormOverrides,
   isBrandingDirty,
   isCuratedOrBuiltinFont,
+  isPaletteRelPathLocked,
   normalizeAssetDataUrl,
+  paletteFormToRawConfig,
   parseDataUriInfo,
   setSlotValue,
   totalDataUriBytes,
@@ -97,14 +101,25 @@ import {
   type RawBrandingConfig,
 } from './admin-branding-state.js';
 import {
+  SCALE_NAMES,
   SCALE_STEPS,
+  SEMANTIC_KEYS,
   formatContrastRatio,
   resolveBrandingPalette,
   type ContrastPairBadge,
-  type RawPaletteConfig,
   type ResolvedBrandingPalette,
+  type ScaleName,
+  type ScaleStep,
+  type SemanticTokenKey,
 } from './admin-branding-contrast.js';
 import './admin-branding-preview.js';
+import './admin-branding-palette.js';
+import type {
+  PaletteOpenChangeDetail,
+  PaletteScaleChangeDetail,
+  PaletteScaleClearDetail,
+  PaletteSemanticChangeDetail,
+} from './admin-branding-palette.js';
 
 /** Primary value of an env-locked field whose environment value GET does not report. */
 export const ENV_VALUE_NOT_REPORTED = 'Environment value not reported';
@@ -159,8 +174,8 @@ export class ScionPageAdminBranding extends LitElement {
 
   @state() private draft: BrandingFormState = defaultBrandingFormState();
   @state() private baseline: BrandingFormState = defaultBrandingFormState();
-  @state() private rawPalette: RawPaletteConfig | null = null;
-  @state() private hasPaletteOverrides = false;
+  @state() private advancedPaletteOpen = false;
+  @state() private autoOpenErrorScales: ReadonlySet<ScaleName> = new Set();
   @state() private customFontMode = false;
 
   @state() private settingsTier: 'db' | 'file' | undefined = undefined;
@@ -325,10 +340,6 @@ export class ScionPageAdminBranding extends LitElement {
 
     .readonly-banner {
       margin-bottom: 1rem;
-    }
-
-    .palette-notice {
-      margin-top: 1rem;
     }
 
     sl-input::part(base),
@@ -863,8 +874,7 @@ export class ScionPageAdminBranding extends LitElement {
       const loaded = brandingFromConfig(rawBranding);
       this.baseline = cloneBrandingFormState(loaded);
       this.draft = cloneBrandingFormState(loaded);
-      this.rawPalette = (rawBranding?.palette as RawPaletteConfig | undefined) ?? null;
-      this.hasPaletteOverrides = hasAdvancedPaletteOverrides(rawBranding);
+      this.autoOpenErrorScales = new Set();
       this.customFontMode = !isCuratedOrBuiltinFont(loaded.font_sans);
 
       this.settingsTier = data.settings_tier;
@@ -904,6 +914,13 @@ export class ScionPageAdminBranding extends LitElement {
       'font_sans',
       'accent_color',
       ...ASSET_SLOTS.map((s) => s.key),
+      'palette',
+      'palette.light',
+      'palette.dark',
+      ...SEMANTIC_KEYS.map((k) => `palette.light.${k}`),
+      ...SEMANTIC_KEYS.map((k) => `palette.dark.${k}`),
+      ...SCALE_NAMES.map((s) => `palette.${s}`),
+      ...SCALE_NAMES.flatMap((s) => SCALE_STEPS.map((st) => `palette.${s}.${st}`)),
     ];
     for (const rel of allRelPaths) {
       if (this.envLocked(rel)) {
@@ -945,20 +962,22 @@ export class ScionPageAdminBranding extends LitElement {
 
   // --- Client-Side Validation ---
 
-  private clientFieldErrors(): Record<string, string> {
+  private clientFieldErrors(lockedSet: ReadonlySet<string>): Record<string, string> {
     const errs: Record<string, string> = {};
-    if (this.customFontMode && this.draft.font_sans.trim() === '' && !this.envLocked('font_sans')) {
+    const isLocked = (relPath: string): boolean => isPaletteRelPathLocked(lockedSet, relPath);
+
+    if (this.customFontMode && this.draft.font_sans.trim() === '' && !isLocked('font_sans')) {
       errs.font_sans = 'Enter a Google Fonts family name or select a preset.';
     } else {
       const fontErr = validateFontSansInput(this.draft.font_sans);
-      if (fontErr && !this.envLocked('font_sans')) errs.font_sans = fontErr;
+      if (fontErr && !isLocked('font_sans')) errs.font_sans = fontErr;
     }
 
     const accentErr = validateAccentColorInput(this.draft.accent_color);
-    if (accentErr && !this.envLocked('accent_color')) errs.accent_color = accentErr;
+    if (accentErr && !isLocked('accent_color')) errs.accent_color = accentErr;
 
     for (const slot of ASSET_SLOTS) {
-      if (this.envLocked(slot.key)) continue;
+      if (isLocked(slot.key)) continue;
       const val = getSlotValue(this.draft, slot);
       const urlErr = validateAssetUrlInput(val);
       if (urlErr) errs[slot.key] = urlErr;
@@ -967,7 +986,44 @@ export class ScionPageAdminBranding extends LitElement {
     if (totalDataUriBytes(this.draft) > MAX_BRAND_TOTAL_BYTES) {
       errs._totalBytes = 'Total embedded asset size exceeds the 512 KiB limit.';
     }
+
+    for (const mode of ['light', 'dark'] as const) {
+      for (const key of SEMANTIC_KEYS) {
+        const relPath = `palette.${mode}.${key}`;
+        if (isLocked(relPath)) continue;
+        const val = this.draft.palette[mode][key];
+        const hexErr = validateAccentColorInput(val);
+        if (hexErr) errs[relPath] = hexErr;
+      }
+    }
+
+    for (const scale of SCALE_NAMES) {
+      for (const step of SCALE_STEPS) {
+        const relPath = `palette.${scale}.${step}`;
+        if (isLocked(relPath)) continue;
+        const val = this.draft.palette[scale][step];
+        const hexErr = validateAccentColorInput(val);
+        if (hexErr) errs[relPath] = hexErr;
+      }
+    }
+
     return errs;
+  }
+
+  private paletteServerErrors(): Record<string, string[]> {
+    const out: Record<string, string[]> = {};
+    if (this.saveError?.kind !== 'validation') return out;
+    const prefix = `${BRANDING_KOANF_PREFIX}.`;
+    for (const entry of this.saveError.fieldErrors) {
+      const rawKey = entry.key ?? entry.path;
+      if (!rawKey || !entry.message) continue;
+      const rel = rawKey.startsWith(prefix) ? rawKey.slice(prefix.length) : rawKey;
+      if (rel === 'palette' || rel.startsWith('palette.')) {
+        if (!out[rel]) out[rel] = [];
+        out[rel].push(entry.message);
+      }
+    }
+    return out;
   }
 
   // --- Save / Discard / Reset ---
@@ -989,6 +1045,7 @@ export class ScionPageAdminBranding extends LitElement {
     this.saveError = null;
     this.error = null;
     this.slotUploadErrors = {};
+    this.autoOpenErrorScales = new Set();
   }
 
   private async handleSave(): Promise<void> {
@@ -996,13 +1053,15 @@ export class ScionPageAdminBranding extends LitElement {
     this.error = null;
     this.saveError = null;
     this.successMessage = null;
+    this.autoOpenErrorScales = new Set();
 
-    const clientErrs = this.clientFieldErrors();
+    const lockedSet = this.envLockedSet();
+    const clientErrs = this.clientFieldErrors(lockedSet);
     if (Object.keys(clientErrs).length > 0) {
       return;
     }
 
-    const diff = buildBrandingDiff(this.draft, this.baseline, this.envLockedSet());
+    const diff = buildBrandingDiff(this.draft, this.baseline, lockedSet);
     if (Object.keys(diff).length === 0) {
       this.showSuccess('No changes to save');
       return;
@@ -1029,6 +1088,9 @@ export class ScionPageAdminBranding extends LitElement {
           this.error = genericSaveErrorText(err, 'Failed to save branding settings');
         } else {
           this.saveError = err;
+          if (err.kind === 'validation') {
+            this.autoExpandPaletteErrors(err.fieldErrors);
+          }
         }
         return;
       }
@@ -1044,12 +1106,34 @@ export class ScionPageAdminBranding extends LitElement {
     }
   }
 
+  private autoExpandPaletteErrors(fieldErrors: readonly SettingsFieldError[]): void {
+    const prefix = `${BRANDING_KOANF_PREFIX}.`;
+    const scaleSet = new Set<ScaleName>();
+    let hasPaletteErr = false;
+    for (const entry of fieldErrors) {
+      const rawKey = entry.key ?? entry.path;
+      if (!rawKey) continue;
+      const rel = rawKey.startsWith(prefix) ? rawKey.slice(prefix.length) : rawKey;
+      if (rel === 'palette' || rel.startsWith('palette.')) {
+        hasPaletteErr = true;
+        const parts = rel.split('.');
+        if (parts.length >= 2 && (SCALE_NAMES as readonly string[]).includes(parts[1])) {
+          scaleSet.add(parts[1] as ScaleName);
+        }
+      }
+    }
+    if (hasPaletteErr) {
+      this.advancedPaletteOpen = true;
+      this.autoOpenErrorScales = scaleSet;
+    }
+  }
+
   private canResetAll(): boolean {
     if (!this.canEdit || this.resetting || this.saving) return false;
     if (this.settingsTier === 'db') {
       return this.sectionMetadata?.origin === 'managed';
     }
-    return hasAnyConfiguredBranding(this.baseline, this.hasPaletteOverrides);
+    return hasAnyConfiguredBranding(this.baseline, hasPaletteFormOverrides(this.baseline.palette));
   }
 
   private async handleConfirmResetAll(): Promise<void> {
@@ -1065,7 +1149,7 @@ export class ScionPageAdminBranding extends LitElement {
       if (this.settingsTier === 'file') {
         const clearPayload = buildFileModeResetPayload(
           this.envLockedSet(),
-          this.hasPaletteOverrides
+          hasPaletteFormOverrides(this.baseline.palette)
         );
         res = await apiFetch('/api/v1/admin/server-config', {
           method: 'PUT',
@@ -1166,6 +1250,46 @@ export class ScionPageAdminBranding extends LitElement {
     await this.updateComplete;
     const input = this.shadowRoot?.querySelector<HTMLElement>(`sl-input[data-field="${slot.key}"]`);
     input?.focus();
+  }
+
+  private updatePaletteSemantic(
+    mode: 'light' | 'dark',
+    key: SemanticTokenKey,
+    value: string
+  ): void {
+    this.draft = {
+      ...this.draft,
+      palette: {
+        ...this.draft.palette,
+        [mode]: {
+          ...this.draft.palette[mode],
+          [key]: value,
+        },
+      },
+    };
+  }
+
+  private updatePaletteScaleStep(scale: ScaleName, step: ScaleStep, value: string): void {
+    this.draft = {
+      ...this.draft,
+      palette: {
+        ...this.draft.palette,
+        [scale]: {
+          ...this.draft.palette[scale],
+          [step]: value,
+        },
+      },
+    };
+  }
+
+  private clearPaletteScale(scale: ScaleName): void {
+    this.draft = {
+      ...this.draft,
+      palette: {
+        ...this.draft.palette,
+        [scale]: defaultScaleStepFormMap(),
+      },
+    };
   }
 
   // --- Render Helpers ---
@@ -1462,7 +1586,7 @@ export class ScionPageAdminBranding extends LitElement {
 
     const lockedSet = this.envLockedSet();
     const dirty = isBrandingDirty(this.draft, this.baseline, lockedSet);
-    const clientErrs = this.clientFieldErrors();
+    const clientErrs = this.clientFieldErrors(lockedSet);
     const hasClientErrs = Object.keys(clientErrs).length > 0;
     const totalBytes = totalDataUriBytes(this.draft);
     const budgetPct = Math.min(100, Math.round((totalBytes / MAX_BRAND_TOTAL_BYTES) * 100));
@@ -1471,7 +1595,7 @@ export class ScionPageAdminBranding extends LitElement {
 
     const resolvedPalette = resolveBrandingPalette({
       accentColor: this.draft.accent_color,
-      palette: this.rawPalette,
+      palette: paletteFormToRawConfig(this.draft.palette),
     });
 
     const fontSelectValue = this.customFontMode
@@ -1920,15 +2044,28 @@ export class ScionPageAdminBranding extends LitElement {
         </div>
 
         ${this.renderAccentContrastPanel(resolvedPalette)}
-        ${this.hasPaletteOverrides
-          ? html`
-              <sl-alert class="palette-notice" variant="primary" open data-palette-notice>
-                <sl-icon slot="icon" name="info-circle"></sl-icon>
-                Custom palette overrides configured via CLI/YAML are active and will be preserved
-                when saving other settings.
-              </sl-alert>
-            `
-          : nothing}
+        <scion-branding-palette-editor
+          .palette=${this.draft.palette}
+          .resolved=${resolvedPalette}
+          .disabled=${!this.canEdit || this.saving}
+          .open=${this.advancedPaletteOpen}
+          .errorScales=${this.autoOpenErrorScales}
+          .serverFieldErrors=${this.paletteServerErrors()}
+          .clientErrors=${clientErrs}
+          .envLockedKeys=${lockedSet}
+          .envOverrides=${this.envOverrides}
+          .envValues=${this.envValues}
+          .settingsTier=${this.settingsTier}
+          @palette-semantic-change=${(e: CustomEvent<PaletteSemanticChangeDetail>) =>
+            this.updatePaletteSemantic(e.detail.mode, e.detail.key, e.detail.value)}
+          @palette-scale-change=${(e: CustomEvent<PaletteScaleChangeDetail>) =>
+            this.updatePaletteScaleStep(e.detail.scale, e.detail.step, e.detail.value)}
+          @palette-scale-clear=${(e: CustomEvent<PaletteScaleClearDetail>) =>
+            this.clearPaletteScale(e.detail.scale)}
+          @palette-open-change=${(e: CustomEvent<PaletteOpenChangeDetail>) => {
+            this.advancedPaletteOpen = e.detail.open;
+          }}
+        ></scion-branding-palette-editor>
       </section>
 
       <!-- Sticky Save Bar -->

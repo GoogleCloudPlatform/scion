@@ -174,12 +174,16 @@ describe('scion-page-admin-branding', () => {
     vi.clearAllMocks();
   });
 
-  it('loads branding config, shows CLI palette notice, saves dirty diff with expected_revisions, and reloads public settings', async () => {
+  it('loads branding config, shows Advanced Palette editor override count, saves dirty diff with expected_revisions, and reloads public settings', async () => {
     const handler = createHandler();
     element = await mountPage(handler);
 
-    // CLI palette notice is displayed
-    expect(query(element, '[data-palette-notice]')).not.toBeNull();
+    // Advanced Palette editor renders with active override count from loaded config
+    const paletteEditor = query<HTMLElement>(element, 'scion-branding-palette-editor')!;
+    expect(paletteEditor).not.toBeNull();
+    expect(
+      paletteEditor.shadowRoot?.querySelector('[data-palette-override-count]')?.textContent
+    ).toContain('1 override');
 
     // Edit only Product Name and Accent Color
     const nameInput = query<HTMLInputElement>(element, '[data-field="name"]')!;
@@ -598,5 +602,153 @@ describe('scion-page-admin-branding', () => {
       query(element, '[data-contrast-pair="light.primary:surface"]')?.textContent
     ).not.toContain('AA Fail');
     expect(query(element, '[data-contrast-advisory]')).toBeNull();
+  });
+
+  it('edits semantic and scale overrides in Advanced Palette editor and auto-expands on 422 palette errors', async () => {
+    const handler = createHandler({
+      config: {
+        settings_tier: 'db',
+        server: {
+          hub: {
+            branding: {
+              palette: {
+                primary: { '500': '#008e82', '600': '#007268' },
+              },
+            },
+          },
+        },
+        section_metadata: { branding: { source: 'db', origin: 'managed', revision: 7 } },
+      },
+      put: {
+        status: 422,
+        body: {
+          error: {
+            code: 'validation_error',
+            message: 'branding validation failed',
+            details: {
+              errors: [
+                {
+                  section: 'branding',
+                  field: 'server.hub.branding.palette.primary.600',
+                  message: 'contrast below 4.50:1',
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+    element = await mountPage(handler);
+
+    const paletteEditor = query<HTMLElement>(element, 'scion-branding-palette-editor')!;
+    expect(
+      paletteEditor.shadowRoot
+        ?.querySelector('[data-advanced-palette-details]')
+        ?.hasAttribute('open')
+    ).toBe(false);
+
+    // Edit primary.600 via the palette editor
+    const stepInput = paletteEditor.shadowRoot!.querySelector<HTMLInputElement>(
+      '[data-palette-scale="primary.600"]'
+    )!;
+    stepInput.value = '#eab308';
+    stepInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    await element.updateComplete;
+
+    // Save sends complete primary scale map (preserving 500)
+    query<HTMLElement>(element, '[data-save-btn]')!.click();
+    await new Promise((r) => setTimeout(r, 50));
+    await element.updateComplete;
+
+    expect(handler.puts).toHaveLength(1);
+    expect(handler.puts[0]).toEqual({
+      server: {
+        hub: {
+          branding: {
+            palette: {
+              primary: { '500': '#008e82', '600': '#eab308' },
+            },
+          },
+        },
+      },
+      expected_revisions: { branding: 7 },
+    });
+
+    // 422 auto-expands both the outer Advanced Palette details and nested primary scale details
+    expect(
+      paletteEditor.shadowRoot
+        ?.querySelector('[data-advanced-palette-details]')
+        ?.hasAttribute('open')
+    ).toBe(true);
+    expect(
+      paletteEditor.shadowRoot
+        ?.querySelector('[data-scale-details="primary"]')
+        ?.hasAttribute('open')
+    ).toBe(true);
+    expect(
+      paletteEditor.shadowRoot?.querySelector('[data-field-error="palette.primary.600"]')
+        ?.textContent
+    ).toContain('4.50:1');
+  });
+
+  it('wires env-locked palette.* keys into envLockedSet and omits them from PUT', async () => {
+    const handler = createHandler({
+      config: {
+        settings_tier: 'db',
+        server: {
+          hub: {
+            branding: {
+              palette: {
+                light: { primary: '#1d4ed8', bg: '#f8fafc' },
+              },
+            },
+          },
+        },
+        section_metadata: { branding: { source: 'db', origin: 'managed', revision: 3 } },
+        env_overrides: ['server.hub.branding.palette.light.primary'],
+        env_values: {
+          'server.hub.branding.palette.light.primary': {
+            value: '#0f766e',
+            in_effect: true,
+            saved_differs: true,
+          },
+        },
+      },
+    });
+    element = await mountPage(handler);
+
+    const paletteEditor = query<HTMLElement>(element, 'scion-branding-palette-editor')!;
+    expect(
+      paletteEditor.shadowRoot?.querySelector('[data-palette-field="light.primary"]')
+    ).toBeNull();
+    expect(
+      paletteEditor.shadowRoot?.querySelector('[data-palette-token="light.primary"]')?.textContent
+    ).toContain('#0f766e');
+
+    // Edit unlocked palette.light.bg and save
+    const bgInput = paletteEditor.shadowRoot!.querySelector<HTMLInputElement>(
+      '[data-palette-field="light.bg"]'
+    )!;
+    bgInput.value = '#ffffff';
+    bgInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    await element.updateComplete;
+
+    query<HTMLElement>(element, '[data-save-btn]')!.click();
+    await new Promise((r) => setTimeout(r, 50));
+    await element.updateComplete;
+
+    expect(handler.puts).toHaveLength(1);
+    expect(handler.puts[0]).toEqual({
+      server: {
+        hub: {
+          branding: {
+            palette: {
+              light: { bg: '#ffffff' },
+            },
+          },
+        },
+      },
+      expected_revisions: { branding: 3 },
+    });
   });
 });
