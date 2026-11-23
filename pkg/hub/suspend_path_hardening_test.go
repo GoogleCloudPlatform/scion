@@ -85,6 +85,13 @@ type suspendPathHardeningStore struct {
 	returnErrRunChanged              atomic.Bool
 	armGetAgentPanicOnRunChanged     atomic.Bool
 	panicOnUpdateStatusFor           atomic.Value // string agentID; if non-empty, panics on UpdateAgentStatus for that agent
+
+	panicOnPutSuspendScreen     atomic.Bool
+	blockOnPutSuspendScreen     atomic.Bool
+	sawPutSuspendScreenDeadline atomic.Bool
+	putSuspendScreenCalled      atomic.Bool
+	panicOnDeleteSuspendScreen  atomic.Value // string agentID; "*" panics for any agent
+	deleteSuspendScreenCalled   atomic.Bool
 }
 
 func (w *suspendPathHardeningStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
@@ -227,6 +234,35 @@ func (w *suspendPathHardeningStore) UpdateAgentStatus(ctx context.Context, id st
 		w.panicOnGetAgent.Store(true)
 	}
 	return err
+}
+
+func (w *suspendPathHardeningStore) PutAgentSuspendScreen(ctx context.Context, screen *store.AgentSuspendScreen) error {
+	if !w.fault.Active() {
+		return w.Store.PutAgentSuspendScreen(ctx, screen)
+	}
+	w.putSuspendScreenCalled.Store(true)
+	if w.panicOnPutSuspendScreen.Load() {
+		panic("injected put suspend screen panic")
+	}
+	if w.blockOnPutSuspendScreen.Load() {
+		if _, ok := ctx.Deadline(); ok {
+			w.sawPutSuspendScreenDeadline.Store(true)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return w.Store.PutAgentSuspendScreen(ctx, screen)
+}
+
+func (w *suspendPathHardeningStore) DeleteAgentSuspendScreen(ctx context.Context, agentID string) error {
+	if !w.fault.Active() {
+		return w.Store.DeleteAgentSuspendScreen(ctx, agentID)
+	}
+	w.deleteSuspendScreenCalled.Store(true)
+	if target, ok := w.panicOnDeleteSuspendScreen.Load().(string); ok && (target == "*" || target == agentID) {
+		panic("injected delete suspend screen panic")
+	}
+	return w.Store.DeleteAgentSuspendScreen(ctx, agentID)
 }
 
 func (w *suspendPathHardeningStore) HasAgentDeliveryHold(ctx context.Context, agentID string) (bool, error) {
@@ -1251,5 +1287,173 @@ func TestRunBestEffortCleanupStep(t *testing.T) {
 			assert.GreaterOrEqual(t, elapsed, finalizationTimeout)
 			assertHasWarnLog(t, logs.String(), "Best-effort cleanup step failed", "ag-2", `"step":"slow_step"`)
 		})
+	})
+}
+
+func TestPersistSuspendScreen_Hardening(t *testing.T) {
+	enableExperiments := func(t *testing.T, srv *Server, names ...string) {
+		t.Helper()
+		want := make(map[string]bool, len(names))
+		for _, n := range names {
+			want[n] = true
+		}
+		var activeExps []experiments.Experiment
+		for _, e := range experiments.Default().All() {
+			if want[e.Name] {
+				e.Default = true
+			}
+			activeExps = append(activeExps, e)
+		}
+		reg, err := experiments.NewRegistry(activeExps, nil)
+		require.NoError(t, err)
+		srv.experiments = reg
+	}
+
+	t.Run("manual_suspend_panic_still_releases_quotas_and_claim", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = slog.Default()
+		enableExperiments(t, srv, experiments.SuspendScreen)
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		srv.SetDispatcher(&engineStubDispatcher{})
+		srv.quotaService = &QuotaService{store: s, logger: slog.Default()}
+
+		ctx := context.Background()
+		agent := setupBrokerAgentInPhase(t, s, "suspend-screen-panic", state.PhaseRunning)
+		_, err := s.ClaimAgentStart(ctx, agent.ID, "hub-screen-panic", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+
+		projDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerProject, store.QuotaScopeProject, agent.ProjectID, agent.ProjectID, agent.ID)
+		brokerDef := seedActiveQuotaReservation(t, s, store.LimitMaxAgentsPerBroker, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.RuntimeBrokerID, agent.ID)
+
+		wrapped.panicOnDeleteSuspendScreen.Store(agent.ID)
+		fault.Arm()
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.True(t, wrapped.deleteSuspendScreenCalled.Load())
+		after := mustGetAgent(t, s, agent.ID)
+		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+		assert.Empty(t, after.StartClaimID, "start claim must still be released after persistSuspendScreen panic")
+
+		activeBroker, err := s.CountActiveReservations(ctx, brokerDef.ID, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeBroker, "broker quota must still be released after persistSuspendScreen panic")
+		activeProj, err := s.CountActiveReservations(ctx, projDef.ID, agent.ProjectID, store.QuotaScopeProject, agent.ProjectID)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), activeProj, "project quota must still be released after persistSuspendScreen panic")
+
+		assert.Contains(t, pub.publishedPhases(agent.ID), string(state.PhaseSuspended), "PublishAgentStatus must still run after persistSuspendScreen panic")
+		assertHasWarnLog(t, logs.String(), "Recovered panic persisting pre-suspend terminal screen", agent.ID, "injected delete suspend screen panic")
+	})
+
+	t.Run("put_panic_detaches_cancelled_ctx_and_bounds_timeout", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = slog.Default()
+		enableExperiments(t, srv, experiments.SuspendScreen)
+
+		agent := setupBrokerAgentInPhase(t, s, "suspend-screen-put", state.PhaseSuspended)
+		cap := &capturedScreen{
+			Content:    "sensitive-terminal-output-do-not-log",
+			CapturedAt: time.Now().UTC().Truncate(time.Microsecond),
+		}
+
+		// Panic on PutAgentSuspendScreen recovers without logging screen content.
+		wrapped.panicOnPutSuspendScreen.Store(true)
+		fault.Arm()
+		require.NotPanics(t, func() {
+			srv.persistSuspendScreen(context.Background(), agent.ID, cap)
+		})
+		assert.True(t, wrapped.putSuspendScreenCalled.Load())
+		assertHasWarnLog(t, logs.String(), "Recovered panic persisting pre-suspend terminal screen", agent.ID, "injected put suspend screen panic")
+		assert.NotContains(t, logs.String(), cap.Content, "screen content must never be logged")
+
+		// Cancelled caller context still detaches and slow Put is bounded by suspendScreenWriteTimeout.
+		wrapped.panicOnPutSuspendScreen.Store(false)
+		synctest.Test(t, func(t *testing.T) {
+			wrapped.blockOnPutSuspendScreen.Store(true)
+			wrapped.sawPutSuspendScreenDeadline.Store(false)
+
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			start := time.Now()
+			srv.persistSuspendScreen(cancelled, agent.ID, cap)
+			elapsed := time.Since(start)
+
+			assert.True(t, wrapped.sawPutSuspendScreenDeadline.Load(), "persistSuspendScreen must set a bounded deadline")
+			assert.GreaterOrEqual(t, elapsed, suspendScreenWriteTimeout)
+		})
+	})
+
+	t.Run("auto_suspend_panic_still_clears_claim_and_continues_batch", func(t *testing.T) {
+		logs := captureSuspendHardeningLogs(t)
+		srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendPathHardeningStore {
+			return &suspendPathHardeningStore{Store: inner, fault: f}
+		})
+		srv.agentLifecycleLog = slog.Default()
+		enableExperiments(t, srv, experiments.IdleSuspend, experiments.SuspendScreen)
+		bus := NewChannelEventPublisher()
+		t.Cleanup(bus.Close)
+		pub := newStatusRecordingPublisher(bus)
+		srv.events = pub
+		srv.SetDispatcher(&engineStubDispatcher{})
+
+		srv.mu.Lock()
+		srv.config.AutoSuspendIdle = true
+		srv.config.IdleSuspendAfter = DefaultIdleSuspendAfter
+		srv.mu.Unlock()
+
+		ctx := context.Background()
+		idleSince := time.Now().UTC().Add(-(DefaultIdleSuspendAfter + 10*time.Minute))
+		freshSeen := time.Now().UTC().Add(-10 * time.Second)
+		db := s.(*entadapter.CompositeStore).DB()
+
+		agent1 := setupBrokerAgentInPhase(t, s, "idle-screen-panic-1", state.PhaseRunning)
+		_, err := db.ExecContext(ctx,
+			"UPDATE agents SET activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			string(state.ActivityIdle), idleSince, freshSeen, agent1.ID,
+		)
+		require.NoError(t, err)
+		agent1 = mustGetAgent(t, s, agent1.ID)
+
+		agent2 := setupBrokerAgentInPhase(t, s, "idle-screen-panic-2", state.PhaseRunning)
+		_, err = db.ExecContext(ctx,
+			"UPDATE agents SET activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			string(state.ActivityIdle), idleSince, freshSeen, agent2.ID,
+		)
+		require.NoError(t, err)
+		agent2 = mustGetAgent(t, s, agent2.ID)
+
+		wrapped.panicOnDeleteSuspendScreen.Store(agent1.ID)
+		fault.Arm()
+
+		require.NotPanics(t, func() {
+			srv.autoSuspendAgents(ctx, []autoSuspendItem{
+				{agent: *agent1, reason: state.SuspendReasonIdle},
+				{agent: *agent2, reason: state.SuspendReasonIdle},
+			})
+		})
+
+		assert.True(t, wrapped.deleteSuspendScreenCalled.Load())
+		after1 := mustGetAgent(t, s, agent1.ID)
+		after2 := mustGetAgent(t, s, agent2.ID)
+		assert.Equal(t, string(state.PhaseSuspended), after1.Phase)
+		assert.Nil(t, after1.IdleSuspendClaimUntil, "agent1 idle claim must still be cleared after persistSuspendScreen panic")
+		assert.Equal(t, string(state.PhaseSuspended), after2.Phase, "agent2 in batch must still be auto-suspended")
+		assert.Nil(t, after2.IdleSuspendClaimUntil, "agent2 idle claim must be cleared")
+
+		assert.Contains(t, pub.publishedPhases(agent1.ID), string(state.PhaseSuspended))
+		assert.Contains(t, pub.publishedPhases(agent2.ID), string(state.PhaseSuspended))
+		assertHasWarnLog(t, logs.String(), "Recovered panic persisting pre-suspend terminal screen", agent1.ID, "injected delete suspend screen panic")
 	})
 }
