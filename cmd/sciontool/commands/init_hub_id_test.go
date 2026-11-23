@@ -109,6 +109,32 @@ func TestNewAnalyticsHubIDResolver_FallsBackOnOlderHub404(t *testing.T) {
 	}
 }
 
+func TestNewAnalyticsHubIDResolver_FallbackReusesClientHTTPTransport(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/agent/hub":
+			http.NotFound(w, r)
+		case "/healthz":
+			assert.Empty(t, r.Header.Get("X-Scion-Agent-Token"), "/healthz fallback must not send agent credentials")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"healthy","hub_id":"tls-legacy-hub"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	resolve := newAnalyticsHubIDResolver(func() *hub.Client {
+		c := hub.NewClientWithConfig(srv.URL, "agent-tok", "agent-1")
+		c.HTTPClient().Transport = srv.Client().Transport
+		return c
+	})
+
+	id, err := resolve(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "tls-legacy-hub", id)
+}
+
 func TestNewAnalyticsHubIDResolver_NoFallbackOnAuthOrServerError(t *testing.T) {
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError} {
 		t.Run(http.StatusText(status), func(t *testing.T) {

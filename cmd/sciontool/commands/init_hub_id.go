@@ -39,6 +39,6 @@ func newAnalyticsHubIDResolver(newClient func() *hub.Client) telemetry.HubIDReso
 		if !errors.Is(err, hub.ErrHubInfoUnsupported) {
 			return "", err
 		}
-		return telemetry.NewHealthzHubIDResolver(c.HubURL(), nil)(ctx)
+		return telemetry.NewHealthzHubIDResolver(c.HubURL(), c.HTTPClient())(ctx)
 	}
 }
