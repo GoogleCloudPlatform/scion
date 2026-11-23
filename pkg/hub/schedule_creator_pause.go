@@ -112,27 +112,69 @@ func (s *Server) pauseSchedulesAuthoredByAgent(ctx context.Context, agent *store
 		s.agentLifecycleLog.With("agent_id", agent.ID, "project_id", agent.ProjectID))
 }
 
-// scheduleTargetsAgent reports whether an exec schedule's payload targets
-// agentID strictly by resolved agentId (never by agentName/slug).
-func scheduleTargetsAgent(sched store.Schedule, agentID string) bool {
-	if sched.EventType != scheduledEventTypeExec || agentID == "" {
-		return false
+// messagePayloadTarget extracts agentId and agentName from a message
+// schedule's JSON payload. Invalid JSON returns empty strings.
+func messagePayloadTarget(raw string) (agentID, agentName string) {
+	var p MessageEventPayload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return "", ""
 	}
-	targetID := execPayloadTarget(sched.Payload)
-	return targetID != "" && targetID == agentID
+	return p.AgentID, p.AgentName
 }
 
-// scheduleTargetGone reports whether an exec schedule's target agent row is
-// missing or soft-deleted.
+// scheduleTargetsAgent reports whether a schedule's payload targets agent.
+// Exec schedules match strictly by resolved agentId (never by agentName/slug).
+// Message schedules match by agentId across any project, or by same-project
+// agentName (slug) when agentId is absent.
+func scheduleTargetsAgent(sched store.Schedule, agent *store.Agent) bool {
+	if agent == nil || agent.ID == "" {
+		return false
+	}
+	switch sched.EventType {
+	case scheduledEventTypeExec:
+		targetID := execPayloadTarget(sched.Payload)
+		return targetID != "" && targetID == agent.ID
+	case "message":
+		targetID, targetName := messagePayloadTarget(sched.Payload)
+		if targetID != "" {
+			return targetID == agent.ID
+		}
+		return sched.ProjectID == agent.ProjectID &&
+			agent.Slug != "" &&
+			targetName != "" &&
+			targetName == agent.Slug
+	default:
+		return false
+	}
+}
+
+// scheduleTargetGone reports whether an exec or message schedule's target
+// agent row is missing or soft-deleted.
 func (s *Server) scheduleTargetGone(ctx context.Context, sched store.Schedule) (bool, error) {
-	if sched.EventType != scheduledEventTypeExec {
+	var (
+		target *store.Agent
+		err    error
+	)
+	switch sched.EventType {
+	case scheduledEventTypeExec:
+		targetID := execPayloadTarget(sched.Payload)
+		if targetID == "" {
+			return false, nil
+		}
+		target, err = s.store.GetAgent(ctx, targetID)
+	case "message":
+		targetID, targetName := messagePayloadTarget(sched.Payload)
+		switch {
+		case targetID != "":
+			target, err = s.store.GetAgent(ctx, targetID)
+		case targetName != "" && sched.ProjectID != "":
+			target, err = s.store.GetAgentBySlug(ctx, sched.ProjectID, targetName)
+		default:
+			return false, nil
+		}
+	default:
 		return false, nil
 	}
-	targetID := execPayloadTarget(sched.Payload)
-	if targetID == "" {
-		return false, nil
-	}
-	target, err := s.store.GetAgent(ctx, targetID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return true, nil
@@ -142,43 +184,59 @@ func (s *Server) scheduleTargetGone(ctx context.Context, sched store.Schedule) (
 	return target == nil || !target.DeletedAt.IsZero(), nil
 }
 
-// pauseExecSchedulesTargetingAgent pauses, with status reason target_deleted,
-// every active exec schedule in the agent's project whose payload targets
-// agent.ID (ptone/scion#7884, AC11). It runs before pauseSchedulesAuthoredByAgent
-// so self-targeted exec schedules record target_deleted.
-func (s *Server) pauseExecSchedulesTargetingAgent(ctx context.Context, agent *store.Agent) {
-	if agent == nil || agent.ID == "" || agent.ProjectID == "" {
+// pauseSchedulesTargetingAgent pauses, with status reason target_deleted,
+// every active exec schedule in the agent's project and every active message
+// schedule (in any project, covering cross-project message schedules) whose
+// payload targets agent (ptone/scion#7884, ptone/scion#8927). It runs before
+// pauseSchedulesAuthoredByAgent so self-targeted schedules record
+// target_deleted.
+func (s *Server) pauseSchedulesTargetingAgent(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.ID == "" {
 		return
 	}
 	log := s.agentLifecycleLog.With("agent_id", agent.ID, "project_id", agent.ProjectID)
 
-	var matches []store.Schedule
-	opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}
-	for {
-		page, err := s.store.ListSchedules(ctx, store.ScheduleFilter{
+	filters := make([]store.ScheduleFilter, 0, 2)
+	if agent.ProjectID != "" {
+		filters = append(filters, store.ScheduleFilter{
 			ProjectID: agent.ProjectID,
 			Status:    store.ScheduleStatusActive,
 			EventType: scheduledEventTypeExec,
-		}, opts)
-		if err != nil {
-			log.Warn("Failed to list exec schedules targeting deleted agent", "error", err)
-			break
-		}
-		for _, sched := range page.Items {
-			if scheduleTargetsAgent(sched, agent.ID) {
-				matches = append(matches, sched)
+		})
+	}
+	filters = append(filters, store.ScheduleFilter{
+		Status:    store.ScheduleStatusActive,
+		EventType: "message",
+	})
+
+	// Collect first, then pause: pausing removes rows from the active set
+	// being paged.
+	var matches []store.Schedule
+	for _, filter := range filters {
+		opts := store.ListOptions{Limit: scheduleCreatorPausePageSize, SkipTotalCount: true}
+		for {
+			page, err := s.store.ListSchedules(ctx, filter, opts)
+			if err != nil {
+				log.Warn("Failed to list schedules targeting deleted agent",
+					"event_type", filter.EventType, "error", err)
+				break
 			}
+			for _, sched := range page.Items {
+				if scheduleTargetsAgent(sched, agent) {
+					matches = append(matches, sched)
+				}
+			}
+			if page.NextCursor == "" || page.NextCursor == opts.Cursor {
+				break
+			}
+			opts.Cursor = page.NextCursor
 		}
-		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
-			break
-		}
-		opts.Cursor = page.NextCursor
 	}
 
 	paused := 0
 	for i, sched := range matches {
 		if err := ctx.Err(); err != nil {
-			log.Warn("Stopped pausing exec schedules targeting deleted agent: context done",
+			log.Warn("Stopped pausing schedules targeting deleted agent: context done",
 				"unpaused", len(matches)-i, "error", err)
 			break
 		}
@@ -189,18 +247,18 @@ func (s *Server) pauseExecSchedulesTargetingAgent(ctx context.Context, agent *st
 		case errors.Is(err, store.ErrRevisionConflict), errors.Is(err, store.ErrNotFound):
 			// Edited/resumed or deleted since it was listed.
 		default:
-			log.Warn("Failed to pause exec schedule targeting deleted agent",
-				"schedule_id", sched.ID, "error", err)
+			log.Warn("Failed to pause schedule targeting deleted agent",
+				"schedule_id", sched.ID, "event_type", sched.EventType, "error", err)
 		}
 	}
 	if paused > 0 {
-		log.Info("Paused exec schedules targeting deleted agent",
+		log.Info("Paused schedules targeting deleted agent",
 			"paused", paused, "status_reason", store.ScheduleStatusReasonTargetDeleted)
 	}
 }
 
-// pauseScheduleIfTargetGone is the evaluator backstop for exec schedules whose
-// target agent was deleted by a path that did not pause them.
+// pauseScheduleIfTargetGone is the evaluator backstop for exec and message
+// schedules whose target agent was deleted by a path that did not pause them.
 func (s *Server) pauseScheduleIfTargetGone(ctx context.Context, sched store.Schedule, log *slog.Logger) bool {
 	gone, err := s.scheduleTargetGone(ctx, sched)
 	if err != nil {
@@ -218,7 +276,7 @@ func (s *Server) pauseScheduleIfTargetGone(ctx context.Context, sched store.Sche
 	case errors.Is(err, store.ErrRevisionConflict), errors.Is(err, store.ErrNotFound):
 		log.Info("schedule-evaluator: schedule changed since listed; skipping this tick", "error", err)
 	default:
-		log.Error("schedule-evaluator: failed to pause exec schedule whose target agent was deleted", "error", err)
+		log.Error("schedule-evaluator: failed to pause schedule whose target agent was deleted", "error", err)
 		return false
 	}
 	return true

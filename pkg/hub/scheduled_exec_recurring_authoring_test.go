@@ -281,7 +281,7 @@ func TestScheduledExecRecurringAuthoring_ManagedStoppedAndTargetDeletedRecovery(
 
 	// Target deletion pauses with target_deleted; resume before retargeting fails 404.
 	f.srv.cancelScheduledEventsForAgent(ctx, stopped)
-	f.srv.pauseExecSchedulesTargetingAgent(ctx, stopped)
+	f.srv.pauseSchedulesTargetingAgent(ctx, stopped)
 	require.NoError(t, f.store.DeleteAgent(ctx, stopped.ID))
 	paused, err := f.store.GetSchedule(ctx, scID)
 	require.NoError(t, err)

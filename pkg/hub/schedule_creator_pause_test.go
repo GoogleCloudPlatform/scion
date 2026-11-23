@@ -518,3 +518,234 @@ func TestScheduleCreatorPause_AgentDeleteStopsOnDoneContext(t *testing.T) {
 	})
 	assert.Equal(t, int64(total-1), unpaused, "the warning counts the schedules left unpaused")
 }
+
+// targetPauseMessageSchedule returns a due message schedule with the given
+// payload and recorded user authority (DevUserID, revision 1).
+func targetPauseMessageSchedule(name, projectID, payload, status string) *store.Schedule {
+	userRev := withSessionRevision(store.ScheduledEvent{}, DevUserID)
+	due := time.Now().Add(-time.Minute).UTC()
+	return &store.Schedule{
+		ID:                   tid("target-pause-" + name),
+		ProjectID:            projectID,
+		Name:                 name,
+		CronExpr:             "0 9 * * *",
+		EventType:            "message",
+		Payload:              payload,
+		Status:               status,
+		NextRunAt:            &due,
+		CreatedBy:            DevUserID,
+		InitiatorAttribution: userRev.InitiatorAttribution,
+		AuthorityCeiling:     userRev.AuthorityCeiling,
+	}
+}
+
+// Deleting an agent, hard or soft, pauses active recurring message schedules
+// targeting that agent (by same-project agentName/slug or by agentId across
+// projects) with status reason target_deleted, even when authored by another
+// principal (ptone/scion#8927). Self-targeted schedules record target_deleted
+// rather than creator_deleted. Decoys, schedules targeting other live agents,
+// and already user-paused schedules are untouched.
+func TestScheduleTargetPause_AgentDeletePausesMessageSchedules(t *testing.T) {
+	cases := []struct {
+		name      string
+		retention time.Duration
+	}{
+		{"hard", 0},
+		{"soft", time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, _ := engineTestServer(t)
+			srv.config.SoftDeleteRetention = tc.retention
+			ctx := context.Background()
+
+			target := setupBrokerAgentInPhase(t, s, "tpause-"+tc.name, state.PhaseStopped)
+			other := &store.Agent{
+				ID: tid("tpause-other-" + tc.name), Slug: "tpause-other-" + tc.name,
+				Name: "tpause-other", ProjectID: target.ProjectID, Phase: string(state.PhaseStopped),
+			}
+			require.NoError(t, s.CreateAgent(ctx, other))
+
+			otherProj := &store.Project{
+				ID:   tid("tpause-other-proj-" + tc.name),
+				Name: "Other Target Pause Project",
+				Slug: "tpause-other-proj-" + tc.name,
+			}
+			require.NoError(t, s.CreateProject(ctx, otherProj))
+
+			bySlug := targetPauseMessageSchedule(tc.name+"-by-slug", target.ProjectID,
+				fmt.Sprintf(`{"agentName":%q,"message":"hi"}`, target.Slug), store.ScheduleStatusActive)
+			byID := targetPauseMessageSchedule(tc.name+"-by-id", target.ProjectID,
+				fmt.Sprintf(`{"agentId":%q,"message":"hi"}`, target.ID), store.ScheduleStatusActive)
+			crossProjByID := targetPauseMessageSchedule(tc.name+"-cross-id", otherProj.ID,
+				fmt.Sprintf(`{"agentId":%q,"message":"hi"}`, target.ID), store.ScheduleStatusActive)
+			selfTargeted := creatorPauseSchedule(tc.name+"-self", target.ProjectID, target.ID, store.ScheduleStatusActive)
+			selfTargeted.Payload = fmt.Sprintf(`{"agentName":%q,"message":"self"}`, target.Slug)
+
+			// Decoy: agentId points at live `other`, even though agentName matches `target.Slug`.
+			decoy := targetPauseMessageSchedule(tc.name+"-decoy", target.ProjectID,
+				fmt.Sprintf(`{"agentId":%q,"agentName":%q,"message":"decoy"}`, other.ID, target.Slug), store.ScheduleStatusActive)
+			// Cross-project slug match must not match target in another project.
+			crossProjSameSlug := targetPauseMessageSchedule(tc.name+"-cross-slug", otherProj.ID,
+				fmt.Sprintf(`{"agentName":%q,"message":"other-proj"}`, target.Slug), store.ScheduleStatusActive)
+			otherTarget := targetPauseMessageSchedule(tc.name+"-other-target", target.ProjectID,
+				fmt.Sprintf(`{"agentName":%q,"message":"other"}`, other.Slug), store.ScheduleStatusActive)
+			userPaused := targetPauseMessageSchedule(tc.name+"-user-paused", target.ProjectID,
+				fmt.Sprintf(`{"agentName":%q,"message":"paused"}`, target.Slug), store.ScheduleStatusPaused)
+
+			for _, sc := range []*store.Schedule{
+				bySlug, byID, crossProjByID, selfTargeted,
+				decoy, crossProjSameSlug, otherTarget, userPaused,
+			} {
+				require.NoError(t, s.CreateSchedule(ctx, sc))
+			}
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+target.ID, nil)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+			shouldPause := []*store.Schedule{bySlug, byID, crossProjByID, selfTargeted}
+			require.Eventually(t, func() bool {
+				for _, sc := range shouldPause {
+					if mustGetSchedule(t, s, sc.ID).Status != store.ScheduleStatusPaused {
+						return false
+					}
+				}
+				return true
+			}, 5*time.Second, 10*time.Millisecond, "all message schedules targeting the deleted agent are paused")
+
+			for _, sc := range shouldPause {
+				got := mustGetSchedule(t, s, sc.ID)
+				assert.Equal(t, store.ScheduleStatusPaused, got.Status, sc.Name)
+				assert.Equal(t, store.ScheduleStatusReasonTargetDeleted, got.StatusReason, sc.Name)
+				assert.Equal(t, 1, got.AuthorizationRevision, "%s: system pause does not re-record authority", sc.Name)
+			}
+
+			for _, sc := range []*store.Schedule{decoy, crossProjSameSlug, otherTarget} {
+				got := mustGetSchedule(t, s, sc.ID)
+				assert.Equal(t, store.ScheduleStatusActive, got.Status, sc.Name)
+				assert.Empty(t, got.StatusReason, sc.Name)
+			}
+
+			gotPaused := mustGetSchedule(t, s, userPaused.ID)
+			assert.Equal(t, store.ScheduleStatusPaused, gotPaused.Status)
+			assert.Empty(t, gotPaused.StatusReason, "already user-paused schedule keeps empty reason")
+		})
+	}
+}
+
+// Evaluator fire-time backstop for recurring message schedules whose target
+// agent is hard-deleted, soft-deleted, or never existed (ptone/scion#8927):
+// executeSchedule pauses the schedule with target_deleted without creating an
+// event, for both agentName and agentId payloads, while a live target fires
+// normally.
+func TestScheduleTargetPause_FireWithDeletedMessageTargetPauses(t *testing.T) {
+	modes := []struct {
+		name    string
+		payload func(agentID, slug string) string
+	}{
+		{"by_slug", func(_, slug string) string {
+			return fmt.Sprintf(`{"agentName":%q,"message":"hi"}`, slug)
+		}},
+		{"by_id", func(agentID, _ string) string {
+			return fmt.Sprintf(`{"agentId":%q,"message":"hi"}`, agentID)
+		}},
+	}
+	targetStates := []struct {
+		name  string
+		setup func(t *testing.T, s store.Store, projectID string) (agentID, slug string)
+	}{
+		{"hard_deleted", func(t *testing.T, s store.Store, projectID string) (string, string) {
+			id := tid("tpause-fire-hard")
+			slug := "tpause-fire-hard"
+			require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
+				ID: id, Slug: slug, Name: slug, ProjectID: projectID, Phase: string(state.PhaseStopped),
+			}))
+			require.NoError(t, s.DeleteAgent(context.Background(), id))
+			return id, slug
+		}},
+		{"soft_deleted", func(t *testing.T, s store.Store, projectID string) (string, string) {
+			id := tid("tpause-fire-soft")
+			slug := "tpause-fire-soft"
+			require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
+				ID: id, Slug: slug, Name: slug, ProjectID: projectID, Phase: string(state.PhaseStopped),
+				DeletedAt: time.Now().UTC(),
+			}))
+			return id, slug
+		}},
+		{"never_existed", func(t *testing.T, _ store.Store, _ string) (string, string) {
+			return tid("tpause-fire-missing"), "tpause-fire-missing"
+		}},
+	}
+
+	for _, mode := range modes {
+		for _, ts := range targetStates {
+			t.Run(mode.name+"/"+ts.name, func(t *testing.T) {
+				srv, s, projectID := setupScheduleTest(t)
+				ctx := context.Background()
+				agentID, slug := ts.setup(t, s, projectID)
+				sc := targetPauseMessageSchedule(mode.name+"-"+ts.name, projectID, mode.payload(agentID, slug), store.ScheduleStatusActive)
+				require.NoError(t, s.CreateSchedule(ctx, sc))
+
+				srv.executeSchedule(ctx, *mustGetSchedule(t, s, sc.ID), time.Now().UTC())
+
+				got := mustGetSchedule(t, s, sc.ID)
+				assert.Equal(t, store.ScheduleStatusPaused, got.Status)
+				assert.Equal(t, store.ScheduleStatusReasonTargetDeleted, got.StatusReason)
+				assert.Zero(t, got.RunCount, "no run is recorded")
+				assert.Zero(t, got.ErrorCount, "no refusal is recorded")
+				assert.Empty(t, got.LastRunError)
+				assert.Zero(t, scheduleEventCount(t, s, projectID, sc.ID), "no event is created")
+			})
+		}
+
+		t.Run(mode.name+"/live_target_fires", func(t *testing.T) {
+			srv, s, projectID := setupScheduleTest(t)
+			ctx := context.Background()
+			live, err := s.GetAgentBySlug(ctx, projectID, "all")
+			require.NoError(t, err)
+			sc := targetPauseMessageSchedule(mode.name+"-live", projectID, mode.payload(live.ID, live.Slug), store.ScheduleStatusActive)
+			require.NoError(t, s.CreateSchedule(ctx, sc))
+
+			srv.executeSchedule(ctx, *mustGetSchedule(t, s, sc.ID), time.Now().UTC())
+
+			got := mustGetSchedule(t, s, sc.ID)
+			assert.Equal(t, store.ScheduleStatusActive, got.Status)
+			assert.Empty(t, got.StatusReason)
+			assert.Equal(t, 1, got.RunCount)
+			assert.Equal(t, 1, scheduleEventCount(t, s, projectID, sc.ID))
+		})
+	}
+}
+
+// When the target-gone backstop fails to pause a message schedule targeting a
+// soft-deleted agent by agentId, the fallback fire is refused and recorded as
+// a failed event (error), never success.
+func TestScheduleTargetPause_BackstopPauseErrorFallsBackToRefusedFire(t *testing.T) {
+	base, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	srv, s := testServerOnMigratedStore(t, &failingUpdateScheduleStore{Store: base})
+	srv, s, projectID := initScheduleTest(t, srv, s)
+	ctx := context.Background()
+
+	softDeleted := &store.Agent{
+		ID: tid("tpause-fallback-soft"), Slug: "tpause-fallback-soft", Name: "tpause-fallback-soft",
+		ProjectID: projectID, Phase: string(state.PhaseStopped), DeletedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, softDeleted))
+	sc := targetPauseMessageSchedule("fallback-soft", projectID,
+		fmt.Sprintf(`{"agentId":%q,"message":"hi"}`, softDeleted.ID), store.ScheduleStatusActive)
+	require.NoError(t, s.CreateSchedule(ctx, sc))
+
+	srv.executeSchedule(ctx, *mustGetSchedule(t, s, sc.ID), time.Now().UTC())
+
+	got := mustGetSchedule(t, s, sc.ID)
+	assert.Equal(t, store.ScheduleStatusActive, got.Status)
+	assert.Empty(t, got.StatusReason)
+	assert.Equal(t, 1, got.RunCount)
+	assert.Equal(t, 1, got.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, got.LastRunStatus)
+	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: sc.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, res.Items, 1)
+	assert.Equal(t, store.ScheduledEventFailed, res.Items[0].Status)
+}

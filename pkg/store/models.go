@@ -4197,8 +4197,8 @@ const (
 	// supported. The expression must be edited to UTC before resuming.
 	ScheduleStatusReasonCronZoneUnsupported = "cron_zone_unsupported"
 	// ScheduleStatusReasonTargetDeleted: paused because the target agent of an
-	// exec schedule was deleted. Editing the schedule to name a live target and
-	// resuming re-records the authority and clears the reason.
+	// exec or message schedule was deleted. Editing the schedule to name a live
+	// target and resuming re-records the authority and clears the reason.
 	ScheduleStatusReasonTargetDeleted = "target_deleted"
 )
 

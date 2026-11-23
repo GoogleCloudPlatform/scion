@@ -19,10 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -134,4 +136,68 @@ func TestSchedule_ProjectQuota(t *testing.T) {
 	// An edit of an already-active schedule is not refused by the cap.
 	rec = doRequest(t, srv, http.MethodPatch, base+"/"+ids[1], UpdateScheduleRequest{CronExpr: "30 * * * *"})
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestSchedule_ProjectQuotaReleasedOnAgentDelete verifies that deleting an
+// agent (soft or hard) pauses recurring message schedules targeting it and
+// immediately releases their server.hub.schedules.max_active_per_project slot
+// (ptone/scion#8927).
+func TestSchedule_ProjectQuotaReleasedOnAgentDelete(t *testing.T) {
+	cases := []struct {
+		name      string
+		retention time.Duration
+	}{
+		{"hard", 0},
+		{"soft", time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, _ := engineTestServer(t)
+			srv.scheduler = NewScheduler(s, slog.Default())
+			srv.scheduler.srv = srv
+			srv.RegisterAction(&messageAction{srv: srv})
+			srv.config.SoftDeleteRetention = tc.retention
+			srv.config.ScheduleMaxActivePerProject = 1
+			ctx := context.Background()
+
+			target := setupBrokerAgentInPhase(t, s, "quota-del-"+tc.name, state.PhaseStopped)
+			other := &store.Agent{
+				ID: tid("quota-del-other-" + tc.name), Slug: "quota-del-other-" + tc.name,
+				Name: "quota-del-other", ProjectID: target.ProjectID, Phase: string(state.PhaseRunning),
+				MessageMode: store.MessageModeProject,
+			}
+			require.NoError(t, s.CreateAgent(ctx, other))
+
+			base := "/api/v1/projects/" + target.ProjectID + "/schedules"
+			rec := doRequest(t, srv, http.MethodPost, base, CreateScheduleRequest{
+				Name: "target-sched", CronExpr: "0 * * * *", EventType: "message",
+				AgentName: target.Slug, Message: "ping",
+			})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			var created store.Schedule
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+
+			// Project is now at cap; creating another schedule is refused.
+			rec = doRequest(t, srv, http.MethodPost, base, CreateScheduleRequest{
+				Name: "blocked-sched", CronExpr: "0 * * * *", EventType: "message",
+				AgentName: other.Slug, Message: "ping",
+			})
+			require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+
+			// Deleting the target agent pauses its schedule and frees the slot.
+			rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+target.ID, nil)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+			require.Eventually(t, func() bool {
+				sc, err := s.GetSchedule(ctx, created.ID)
+				return err == nil && sc.Status == store.ScheduleStatusPaused && sc.StatusReason == store.ScheduleStatusReasonTargetDeleted
+			}, 5*time.Second, 10*time.Millisecond, "orphaned schedule is paused with target_deleted")
+
+			rec = doRequest(t, srv, http.MethodPost, base, CreateScheduleRequest{
+				Name: "replacement-sched", CronExpr: "0 * * * *", EventType: "message",
+				AgentName: other.Slug, Message: "ping",
+			})
+			assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		})
+	}
 }

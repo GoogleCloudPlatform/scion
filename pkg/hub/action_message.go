@@ -158,6 +158,15 @@ func (a *messageAction) Authorize(
 		}
 		return nil, &FireRefusal{Reason: errScheduledMessageRefused.Error()}, nil
 	}
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		slog.Warn("Scheduler: target agent no longer exists",
+			"eventID", fireID,
+			"agentName", payload.AgentName,
+			"agent_id", payload.AgentID,
+			"projectID", req.ProjectID,
+			"cause", "target agent deleted")
+		return nil, &FireRefusal{Reason: errScheduledMessageRefused.Error()}, nil
+	}
 
 	// ---- Fire-time authorization ----
 	// Authorize the send for the revision's identity through the production
