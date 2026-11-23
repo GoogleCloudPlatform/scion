@@ -288,3 +288,148 @@ describe('space rail — mark-unread menu visibility', () => {
     });
   });
 });
+
+describe('space rail — scoped projectId lookup for mark read/unread', () => {
+  const SPACE_2 = {
+    projectId: 'proj-2',
+    projectName: 'Second Project',
+    projectSlug: 'second-project',
+    unreadCount: 1,
+    hasUnreadMention: false,
+  };
+
+  it('handleMarkRead forwards projectId to markThreadRead (both with and without lastMessageId)', async () => {
+    const el = createRail([thread({ hasUnread: true })]);
+    el.spaces = [{ ...SPACE, unreadCount: 1 }];
+    const spy = vi.spyOn(el, 'markThreadRead');
+
+    await el.handleMarkRead(thread({ hasUnread: true }), SPACE.projectId);
+    expect(spy).toHaveBeenCalledWith('topic-1', SPACE.projectId);
+
+    spy.mockClear();
+    await el.handleMarkRead(thread({ hasUnread: true, lastMessageId: undefined }), SPACE.projectId);
+    expect(spy).toHaveBeenCalledWith('topic-1', SPACE.projectId);
+  });
+
+  it('handleMarkUnread forwards projectId to markThreadUnread', async () => {
+    const el = createRail([thread()]);
+    const spy = vi.spyOn(el, 'markThreadUnread');
+
+    await el.handleMarkUnread(thread(), SPACE.projectId);
+    expect(spy).toHaveBeenCalledWith('topic-1', SPACE.projectId);
+  });
+
+  it('markThreadRead and markThreadUnread do not scan every space when projectId is provided', () => {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.spaces = [
+      { ...SPACE, unreadCount: 0 },
+      { ...SPACE_2, unreadCount: 1 },
+    ];
+    el.threadsBySpace = new Map([
+      [SPACE.projectId, [thread({ id: 'topic-1', hasUnread: false })]],
+      [SPACE_2.projectId, [thread({ id: 'topic-2', hasUnread: true })]],
+    ]);
+    el.collapsedSpaces = new Set<string>();
+    el.loading = false;
+
+    const getSpy = vi.spyOn(el.threadsBySpace, 'get');
+    const valuesSpy = vi.spyOn(el.threadsBySpace, 'values');
+
+    el.markThreadRead('topic-2', SPACE_2.projectId);
+    expect(getSpy).toHaveBeenCalledWith(SPACE_2.projectId);
+    expect(getSpy).not.toHaveBeenCalledWith(SPACE.projectId);
+    expect(valuesSpy).not.toHaveBeenCalled();
+    expect(
+      el.threadsBySpace.get(SPACE_2.projectId).find((t: any) => t.id === 'topic-2').hasUnread
+    ).toBe(false);
+    expect(el.spaces.find((s: any) => s.projectId === SPACE_2.projectId).unreadCount).toBe(0);
+
+    // Repeating on an already-read thread does not scan or clone the map.
+    const iterSpy2 = vi.spyOn(el.threadsBySpace, Symbol.iterator);
+    const valuesSpy2 = vi.spyOn(el.threadsBySpace, 'values');
+    el.markThreadRead('topic-2', SPACE_2.projectId);
+    expect(iterSpy2).not.toHaveBeenCalled();
+    expect(valuesSpy2).not.toHaveBeenCalled();
+
+    // Mark unread with known projectId also looks up only SPACE_2.
+    const getSpy2 = vi.spyOn(el.threadsBySpace, 'get');
+    el.markThreadUnread('topic-2', SPACE_2.projectId);
+    expect(getSpy2).toHaveBeenCalledWith(SPACE_2.projectId);
+    expect(getSpy2).not.toHaveBeenCalledWith(SPACE.projectId);
+    expect(valuesSpy2).not.toHaveBeenCalled();
+    expect(
+      el.threadsBySpace.get(SPACE_2.projectId).find((t: any) => t.id === 'topic-2').hasUnread
+    ).toBe(true);
+    expect(el.spaces.find((s: any) => s.projectId === SPACE_2.projectId).unreadCount).toBe(1);
+  });
+
+  it('uses the threadId -> projectId index instead of rescanning every space when projectId is omitted', () => {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.spaces = [
+      { ...SPACE, unreadCount: 0 },
+      { ...SPACE_2, unreadCount: 0 },
+    ];
+    el.threadsBySpace = new Map([
+      [SPACE.projectId, [thread({ id: 'topic-1', hasUnread: false })]],
+      [SPACE_2.projectId, [thread({ id: 'topic-2', hasUnread: false })]],
+    ]);
+    el.collapsedSpaces = new Set<string>();
+    el.loading = false;
+
+    const iterSpy = vi.spyOn(el.threadsBySpace, Symbol.iterator);
+    const valuesSpy = vi.spyOn(el.threadsBySpace, 'values');
+
+    // First call builds the index once; subsequent calls reuse it without rescanning
+    // and never fall through to refreshRollupForUnloadedThread.values().
+    el.markThreadRead('topic-2');
+    el.markThreadRead('topic-1');
+    el.markThreadRead('topic-2');
+    expect(iterSpy).toHaveBeenCalledTimes(1);
+    expect(valuesSpy).not.toHaveBeenCalled();
+  });
+
+  it('rebuilds the threadId -> projectId index when threadsBySpace is replaced', () => {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.spaces = [
+      { ...SPACE, unreadCount: 0 },
+      { ...SPACE_2, unreadCount: 1 },
+    ];
+    el.threadsBySpace = new Map([[SPACE.projectId, [thread({ id: 'topic-1', hasUnread: false })]]]);
+    el.collapsedSpaces = new Set<string>();
+    el.loading = false;
+
+    // Warm the index before SPACE_2's threads are loaded.
+    el.markThreadRead('topic-1');
+
+    // Replace threadsBySpace with an updated map that now holds an unread topic-2.
+    el.threadsBySpace = new Map([
+      [SPACE.projectId, [thread({ id: 'topic-1', hasUnread: false })]],
+      [SPACE_2.projectId, [thread({ id: 'topic-2', hasUnread: true })]],
+    ]);
+
+    el.markThreadRead('topic-2');
+    expect(
+      el.threadsBySpace.get(SPACE_2.projectId).find((t: any) => t.id === 'topic-2').hasUnread
+    ).toBe(false);
+    expect(el.spaces.find((s: any) => s.projectId === SPACE_2.projectId).unreadCount).toBe(0);
+  });
+
+  it('with a known loaded projectId, an absent thread does not trigger a rail reload even when another space is unloaded', () => {
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.spaces = [
+      { ...SPACE, unreadCount: 0 },
+      { ...SPACE_2, unreadCount: 1 },
+    ];
+    el.threadsBySpace = new Map([[SPACE.projectId, [thread({ id: 'topic-1', hasUnread: false })]]]);
+    el.collapsedSpaces = new Set<string>([SPACE_2.projectId]);
+    el.loading = false;
+    const reloadSpy = vi.spyOn(el, 'reload').mockResolvedValue(undefined);
+
+    el.markThreadRead('missing-thread', SPACE.projectId);
+    expect(reloadSpy).not.toHaveBeenCalled();
+
+    // When the known projectId is NOT loaded, it does refresh the rollup.
+    el.markThreadRead('topic-2', SPACE_2.projectId);
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+});

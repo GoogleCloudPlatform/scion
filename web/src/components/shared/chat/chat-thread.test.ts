@@ -10233,3 +10233,41 @@ describe('scion-chat-thread email mention highlighting (ptone/scion#8133)', () =
     });
   });
 });
+
+describe('scion-chat-thread stopStream listener cleanup', () => {
+  it('stopStream removes v2 SSE listeners and decision subscription even after conversationKey is cleared', async () => {
+    apiFetch.mockResolvedValue(emptyHistory());
+    const el = await mount();
+    const removeSpy = vi.spyOn(fakeStateManager, 'removeEventListener');
+    const unsubSpy = vi.fn();
+    const origUnsub = (el as unknown as { _unsubscribeDecisionUpdated: (() => void) | null })
+      ._unsubscribeDecisionUpdated;
+    expect(origUnsub).toBeTypeOf('function');
+    (
+      el as unknown as { _unsubscribeDecisionUpdated: (() => void) | null }
+    )._unsubscribeDecisionUpdated = () => {
+      unsubSpy();
+      origUnsub?.();
+    };
+
+    // Clear conversationKey before stopStream() is called so isV2 is false.
+    el.conversationKey = '';
+    el.stopStream();
+
+    const removedEvents = removeSpy.mock.calls.map((c) => c[0]);
+    expect(removedEvents).toEqual(
+      expect.arrayContaining([
+        'chat-message-received',
+        'chat-typing-received',
+        'chat-read-state-updated',
+        'chat-message-edited',
+        'chat-message-deleted',
+      ])
+    );
+    expect(unsubSpy).toHaveBeenCalledTimes(1);
+    expect(
+      (el as unknown as { _unsubscribeDecisionUpdated: (() => void) | null })
+        ._unsubscribeDecisionUpdated
+    ).toBeNull();
+  });
+});

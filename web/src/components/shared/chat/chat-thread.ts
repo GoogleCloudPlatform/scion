@@ -2375,15 +2375,14 @@ export class ScionChatThread extends LitElement {
       this.eventSource.close();
       this.eventSource = null;
     }
-    // Also clean up v2 SSE listeners
-    if (this.isV2) {
-      stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
-      stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
-      stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
-      stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
-      stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-      this.unsubscribeDecisionUpdated();
-    }
+    // Always remove v2 SSE listeners — clearing conversationKey before
+    // stopStream() must not leak listeners registered for the earlier key.
+    stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
+    stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
+    stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
+    stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
+    stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
+    this.unsubscribeDecisionUpdated();
   }
 
   // ---------------------------------------------------------------------------
