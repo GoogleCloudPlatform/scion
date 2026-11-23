@@ -1337,6 +1337,43 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     expect(session.reconnecting).toBe(true);
   });
 
+  it('a suspended agent (SSE phase suspended) marks unavailable and re-arms once running again (ptone/scion#8954)', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2-suspended-phase',
+    });
+    const { session } = await attachVisibleThenHide(registry);
+    expect(session.state.connection).toBe('connected');
+
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
+    source.onopen?.();
+
+    agentPhase = 'suspended';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'suspended', suspendReason: 'idle' },
+        }),
+      })
+    );
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-stopped');
+    expect(session.state.error).toContain('suspended');
+
+    session.setFrontmost(true);
+    expect(session.reconnecting).toBe(false);
+
+    agentPhase = 'running';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({ subject: `agent.${agentId}.status`, data: { phase: 'running' } }),
+      })
+    );
+    expect(session.reconnecting).toBe(true);
+  });
+
   it('a 4410 agent_stopped close racing stale SSE "running" snapshots does not re-arm until SSE independently confirms the agent down (ptone/scion#2096)', async () => {
     const registry = new TerminalSessionRegistry({
       hubUrl: window.location.origin,

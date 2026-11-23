@@ -853,3 +853,101 @@ describe('subscribers see reconnecting=false once an attempt settles without a s
     }
   });
 });
+
+describe('resume auto-connect for suspended agents (#8954)', () => {
+  it('armResumeConnect allows a never-connected suspended session to auto-connect once when available', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'suspended' }));
+    const session = f.registry.open(agentId, f.initialize);
+    session.setFrontmost(true);
+    await session.connect();
+
+    expect(session.state.connection).toBe('unavailable');
+    expect(session.state.disconnectReason).toBe('agent-phase');
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // Without armResumeConnect, a never-connected session ignores noteAgentAvailable.
+    session.noteAgentAvailable();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // Arming for resume lets a single noteAgentAvailable trigger one connect.
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json({ ok: true }));
+    session.armResumeConnect();
+    session.noteAgentAvailable();
+
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
+    expect(session.state.connection).toBe('connected');
+
+    // A duplicate noteAgentAvailable does not create a second socket.
+    session.noteAgentAvailable();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('armResumeConnect does not loop if the single auto-connect attempt fails', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'suspended' }));
+    const session = f.registry.open(agentId, f.initialize);
+    session.setFrontmost(true);
+    await session.connect();
+
+    // Agent returns suspended again on the armed connect attempt.
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'suspended' }));
+    session.armResumeConnect();
+    session.noteAgentAvailable();
+
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    expect(session.state.connection).toBe('unavailable');
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // A subsequent noteAgentAvailable without a fresh armResumeConnect does not dial again.
+    session.noteAgentAvailable();
+    await Promise.resolve();
+    expect(f.fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('navigating away (setFrontmost(false)) clears armResumeConnect and prevents background or stale reconnect', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'suspended' }));
+    const session = f.registry.open(agentId, f.initialize);
+    session.setFrontmost(true);
+    await session.connect();
+
+    session.armResumeConnect();
+    // User navigates away before the agent finishes starting.
+    session.setFrontmost(false);
+    session.noteAgentAvailable();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // Returning later does not dial on the cleared resume arm.
+    f.fetcher.mockResolvedValueOnce(json(agent)).mockResolvedValueOnce(json({ ok: true }));
+    session.setFrontmost(true);
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('disarmResumeConnect and markUnavailable cancel a pending resume auto-connect', async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(json({ ...agent, phase: 'suspended' }));
+    const session = f.registry.open(agentId, f.initialize);
+    session.setFrontmost(true);
+    await session.connect();
+
+    session.armResumeConnect();
+    session.disarmResumeConnect();
+    session.noteAgentAvailable();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    session.armResumeConnect();
+    session.markUnavailable('agent-stopped', 'Agent has stopped.');
+    session.noteAgentAvailable();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+});

@@ -1881,3 +1881,313 @@ describe('clipboard guard (ptone/scion#7555)', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 });
+
+describe('suspended agent resume in terminal pane (#8954)', () => {
+  function setupSuspendedAgent(overrides: Record<string, unknown> = {}) {
+    page.dispose();
+    page.remove();
+    FakeSocket.instances = [];
+    FakeEventSource.instances = [];
+    terminal.instances.length = 0;
+
+    const suspendedAgent = {
+      id: agentId,
+      name: 'test-agent',
+      phase: 'suspended',
+      suspendReason: 'user',
+      _capabilities: { actions: ['lifecycle', 'attach'] },
+      ...overrides,
+    };
+
+    fetcher.mockImplementation((url, init) => {
+      const href = requestUrl(url);
+      if (href.endsWith(`/api/v1/agents/${agentId}/start`) && init?.method === 'POST') {
+        return Promise.resolve(json({ ...suspendedAgent, phase: 'starting' }));
+      }
+      if (href.endsWith(`/api/v1/agents/${agentId}`)) {
+        return Promise.resolve(json(suspendedAgent));
+      }
+      return Promise.resolve(json({ ok: true }));
+    });
+
+    registry = new TerminalSessionRegistry(
+      { hubUrl: window.location.origin, accountId: 'account-1' },
+      zeroJitter
+    );
+    page = document.createElement('scion-terminal-pane');
+    page.open(registry, agentId);
+    document.body.append(page);
+    return suspendedAgent;
+  }
+
+  it('shows Resume button when agent is suspended and user has lifecycle capability', async () => {
+    setupSuspendedAgent();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+    expect(
+      page.shadowRoot?.querySelector('[data-testid="terminal-resume-unauthorized"]')
+    ).toBeNull();
+    expect(page.shadowRoot?.querySelector('.error-state')?.textContent).toContain(
+      'Agent phase is suspended'
+    );
+  });
+
+  it('hides Resume button and explains who can resume when user lacks lifecycle capability', async () => {
+    setupSuspendedAgent({ _capabilities: { actions: ['attach'] } });
+    await vi.waitFor(() => {
+      expect(
+        page.shadowRoot?.querySelector('[data-testid="terminal-resume-unauthorized"]')
+      ).not.toBeNull();
+    });
+    expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).toBeNull();
+    const text = page.shadowRoot!.querySelector('.error-state')!.textContent!;
+    expect(text).toContain('Agent phase is suspended');
+    expect(text).toMatch(/owner|admin/i);
+  });
+
+  it('resumes a suspended agent and auto-connects once when SSE reports running', async () => {
+    setupSuspendedAgent({ suspendReason: 'idle' });
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+
+    // Open SSE so status updates flow to metadata.
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
+
+    let isRunning = false;
+    fetcher.mockImplementation((url, init) => {
+      const href = requestUrl(url);
+      if (href.endsWith(`/api/v1/agents/${agentId}/start`) && init?.method === 'POST') {
+        return Promise.resolve(json({ id: agentId, name: 'test-agent', phase: 'starting' }));
+      }
+      if (href.endsWith(`/api/v1/agents/${agentId}`)) {
+        return Promise.resolve(
+          json({
+            id: agentId,
+            name: 'test-agent',
+            phase: isRunning ? 'running' : 'starting',
+            _capabilities: { actions: ['lifecycle', 'attach'] },
+          })
+        );
+      }
+      return Promise.resolve(json({ ok: true }));
+    });
+
+    const resumeBtn = page.shadowRoot!.querySelector<HTMLElement>(
+      '[data-testid="terminal-resume-btn"]'
+    )!;
+    resumeBtn.click();
+
+    await vi.waitFor(() => {
+      expect(fetcher).toHaveBeenCalledWith(
+        `/api/v1/agents/${agentId}/start`,
+        expect.objectContaining({ method: 'POST' })
+      );
+    });
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.error-state')?.textContent).toMatch(/starting/i);
+    });
+
+    // SSE reports agent is running -> auto-connects once.
+    isRunning = true;
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'running', activity: 'idle' },
+        }),
+      })
+    );
+
+    await vi.waitFor(() => {
+      frames.splice(0).forEach((frame) => frame(0));
+      expect(FakeSocket.instances).toHaveLength(1);
+    });
+    FakeSocket.instances[0].open();
+    FakeSocket.instances[0].data();
+    await page.updateComplete;
+    expect(page.session?.state.connection).toBe('connected');
+    expect(FakeSocket.instances).toHaveLength(1);
+  });
+
+  it('shows error and re-enables Resume when POST /start fails', async () => {
+    setupSuspendedAgent();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+
+    fetcher.mockImplementation((url, init) => {
+      const href = requestUrl(url);
+      if (href.endsWith(`/api/v1/agents/${agentId}/start`) && init?.method === 'POST') {
+        return Promise.resolve(json({ error: { message: 'Broker unavailable' } }, 503));
+      }
+      return Promise.resolve(
+        json({
+          id: agentId,
+          name: 'test-agent',
+          phase: 'suspended',
+          suspendReason: 'user',
+          _capabilities: { actions: ['lifecycle', 'attach'] },
+        })
+      );
+    });
+
+    page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
+
+    await vi.waitFor(() => {
+      expect(
+        page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]')?.textContent
+      ).toContain('Broker unavailable');
+    });
+    expect(showToast).toHaveBeenCalledWith('Broker unavailable');
+    expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('clears starting state without looping if agent stops again after resume', async () => {
+    setupSuspendedAgent();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
+
+    page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.error-state')?.textContent).toMatch(/starting/i);
+    });
+
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'error' },
+        }),
+      })
+    );
+    await vi.waitFor(() => {
+      expect(
+        page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]')
+      ).not.toBeNull();
+    });
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('shows Resume button in disconnected overlay when a connected agent is suspended', async () => {
+    await mountConnected();
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    fetcher.mockResolvedValue(
+      json({
+        id: agentId,
+        name: 'test',
+        phase: 'suspended',
+        suspendReason: 'idle',
+        _capabilities: { actions: ['lifecycle', 'attach'] },
+      })
+    );
+    await registry.metadata.refresh(agentId);
+    page.session?.markUnavailable(
+      'agent-stopped',
+      'Agent phase is suspended. Terminal is not available until the agent has started.'
+    );
+    await page.updateComplete;
+
+    expect(
+      page.shadowRoot?.querySelector('.disconnected-overlay [data-testid="terminal-resume-btn"]')
+    ).not.toBeNull();
+  });
+
+  it('does not create duplicate sockets or loop when agent flaps suspended -> running -> suspended', async () => {
+    setupSuspendedAgent({ suspendReason: 'idle' });
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
+
+    let currentPhase = 'starting';
+    fetcher.mockImplementation((url, init) => {
+      const href = requestUrl(url);
+      if (href.endsWith(`/api/v1/agents/${agentId}/start`) && init?.method === 'POST') {
+        return Promise.resolve(json({ id: agentId, name: 'test-agent', phase: 'starting' }));
+      }
+      if (href.endsWith(`/api/v1/agents/${agentId}`)) {
+        return Promise.resolve(
+          json({
+            id: agentId,
+            name: 'test-agent',
+            phase: currentPhase,
+            _capabilities: { actions: ['lifecycle', 'attach'] },
+          })
+        );
+      }
+      return Promise.resolve(json({ ok: true }));
+    });
+
+    page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.error-state')?.textContent).toMatch(/starting/i);
+    });
+
+    // Flaps: running -> suspended before socket connects, then running again.
+    currentPhase = 'suspended';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'running', activity: 'idle' },
+        }),
+      })
+    );
+    await vi.waitFor(() => expect(page.session?.state.connection).toBe('unavailable'));
+    expect(FakeSocket.instances).toHaveLength(0);
+
+    // A second running event after the flap must not loop or open a socket without a fresh Resume.
+    currentPhase = 'running';
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'running', activity: 'idle' },
+        }),
+      })
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('navigating away (setVisible(false)) clears pending resume wait and does not dial in background', async () => {
+    setupSuspendedAgent();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
+
+    page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.error-state')?.textContent).toMatch(/starting/i);
+    });
+
+    page.setVisible(false);
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'running', activity: 'idle' },
+        }),
+      })
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+});
