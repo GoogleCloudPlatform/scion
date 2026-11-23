@@ -2082,10 +2082,16 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetLastActivityEvent(now)
 		unstalled = true
 	}
-	// A halt clears the activity outright, a terminal one included: the
-	// exit reason says how the run ended.
+	// A halt clears live and terminal activities (the exit reason says how the
+	// run ended), but retains completed (including stalled-from-completed) so a
+	// subsequent resume or restart knows the prior run finished
+	// (ptone/scion#8900).
 	if halting {
-		upd.SetActivity("")
+		retained := string(state.RetainedHaltActivity(
+			state.Activity(current.Activity),
+			state.Activity(current.StalledFromActivity),
+		))
+		upd.SetActivity(retained)
 		upd.SetStalledFromActivity("")
 		upd.SetToolName("")
 	}
@@ -2108,14 +2114,15 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		}
 		upd.SetExitReason("")
 	}
-	// Leaving suspended (or stopped with a retained completed activity) for
-	// starting or running clears any retained activity before the new container
-	// runs, without disturbing exit fields
+	// Leaving suspended (or stopped/halted with a retained completed activity)
+	// for starting or running clears any retained activity before the new
+	// container runs, without disturbing exit fields
 	// (pinned by TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning)
 	// or a new container's activity posted during dispatch before
 	// ClearTerminalRemnants runs.
 	if (current.Phase == string(state.PhaseSuspended) ||
-		(current.Phase == string(state.PhaseStopped) && state.Activity(current.Activity).IsRetainedOnStop())) &&
+		((current.Phase == string(state.PhaseStopped) || current.Phase == string(state.PhaseHalted)) &&
+			state.Activity(current.Activity).IsRetainedOnStop())) &&
 		(su.Phase == string(state.PhaseStarting) || su.Phase == string(state.PhaseRunning)) {
 		if !activityProvided {
 			upd.SetActivity("")

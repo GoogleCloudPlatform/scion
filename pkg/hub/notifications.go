@@ -196,10 +196,12 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		return
 	}
 
-	// Suspended agents match on phase ("suspended"), never on a retained
-	// pre-suspend activity such as completed, idle, or harness_error.
-	// Running/stopped agents match on activity and fall back to phase when
-	// activity is empty.
+	// Suspended and halted agents match on phase ("suspended"/"halted"), never
+	// on a retained activity such as completed, idle, or harness_error. Stopped
+	// agents match on terminal activities (crashed, limits_exceeded) and
+	// otherwise on phase ("stopped"), ignoring retained non-terminal activities
+	// such as completed. Running agents match on activity and fall back to phase
+	// when activity is empty.
 	matchStatus := notificationEventStatus(statusEvt)
 
 	var watchedAgent *store.Agent
@@ -448,10 +450,16 @@ func (nd *NotificationDispatcher) formatEventMessage(evt AgentStatusEvent, agent
 }
 
 // notificationEventStatus is the status a notification for evt carries: for a
-// suspended agent it is always the phase ("suspended"), never a retained
-// activity; otherwise its activity, or its phase when the activity is empty.
+// suspended or halted agent it is always the phase ("suspended"/"halted"),
+// never a retained activity; for a stopped agent a retained non-terminal
+// activity (such as completed) is ignored so notifications match "stopped",
+// while terminal activities (crashed, limits_exceeded) and synthetic delete
+// events (DELETED) still take precedence; otherwise its activity, or its phase
+// when the activity is empty.
 func notificationEventStatus(evt AgentStatusEvent) string {
-	if evt.Phase == string(state.PhaseSuspended) {
+	if evt.Phase == string(state.PhaseSuspended) ||
+		evt.Phase == string(state.PhaseHalted) ||
+		(evt.Phase == string(state.PhaseStopped) && state.Activity(evt.Activity).IsRetainedOnStop()) {
 		return evt.Phase
 	}
 	if evt.Activity != "" {

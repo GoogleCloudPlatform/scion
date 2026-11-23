@@ -116,3 +116,97 @@ func TestUpdateAgentStatus_LeavingStoppedCompletedClearsAndRollbackRestores(t *t
 	assert.Equal(t, string(state.ActivityCompleted), restored.Activity)
 	assert.Equal(t, ts.Unix(), restored.LastActivityEvent.Unix())
 }
+
+func TestUpdateAgentStatus_HaltRetainsCompletedActivity(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	cases := []struct {
+		name        string
+		phase       string
+		activity    string
+		stalledFrom string
+		hbPhase     string
+		hbExitCode  *int
+		want        string
+	}{
+		{name: "running completed retained on halt", phase: "running", activity: "completed", hbPhase: "stopped", hbExitCode: intp(143), want: "completed"},
+		{name: "running uppercase COMPLETED normalized on halt", phase: "running", activity: "COMPLETED", hbPhase: "stopped", hbExitCode: intp(143), want: "completed"},
+		{name: "stalled from completed retained on halt", phase: "running", activity: "stalled", stalledFrom: "completed", hbPhase: "stopped", hbExitCode: intp(143), want: "completed"},
+		{name: "stopped completed upgraded to halt retains completed", phase: "stopped", activity: "completed", hbPhase: "", hbExitCode: nil, want: "completed"},
+		{name: "running working cleared on halt", phase: "running", activity: "working", hbPhase: "stopped", hbExitCode: intp(143), want: ""},
+		{name: "running crashed cleared on halt", phase: "running", activity: "crashed", hbPhase: "stopped", hbExitCode: intp(137), want: ""},
+		{name: "stopped limits_exceeded cleared on halt upgrade", phase: "stopped", activity: "limits_exceeded", hbPhase: "", hbExitCode: nil, want: ""},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := defaultHaltRow()
+			r.phase = tc.phase
+			r.activity = tc.activity
+			id := newHaltAgent(t, ctx, s, projectID, fmt.Sprintf("halt-act-%d", i), r)
+			if tc.stalledFrom != "" {
+				uid, err := parseUUID(id)
+				require.NoError(t, err)
+				_, err = s.client.Agent.UpdateOneID(uid).SetStalledFromActivity(tc.stalledFrom).Save(ctx)
+				require.NoError(t, err)
+			}
+
+			res := apply(t, ctx, s, id, heartbeat(tc.hbPhase, "preempted", tc.hbExitCode))
+			assert.True(t, res.Halted, "expected halt transition")
+
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseHalted), got.Phase)
+			assert.Equal(t, tc.want, got.Activity)
+			assert.Empty(t, got.StalledFromActivity)
+			assert.Equal(t, "preempted", got.ExitReason)
+		})
+	}
+}
+
+func TestUpdateAgentStatus_LeavingHaltedCompletedClearsAndRollbackRestores(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	ts := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	r := defaultHaltRow()
+	r.phase = string(state.PhaseHalted)
+	r.activity = string(state.ActivityCompleted)
+	r.exitReason = "preempted"
+	id := newHaltAgent(t, ctx, s, projectID, "halt-completed-cycle", r)
+	uid, err := parseUUID(id)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uid).
+		SetTaskSummary("PR #99 merged").
+		SetLastActivityEvent(ts).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// Transitioning halted (completed) -> starting clears retained activity
+	// while keeping TaskSummary and LastActivityEvent intact.
+	require.NoError(t, s.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{
+		Phase:   string(state.PhaseStarting),
+		IfPhase: string(state.PhaseHalted),
+	}))
+	starting, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStarting), starting.Phase)
+	assert.Empty(t, starting.Activity)
+	assert.Equal(t, "PR #99 merged", starting.TaskSummary)
+	assert.Equal(t, ts.Unix(), starting.LastActivityEvent.Unix())
+
+	// Failed-start rollback restores PhaseHalted + ActivityCompleted without
+	// bumping LastActivityEvent.
+	require.NoError(t, s.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseHalted),
+		Activity: string(state.ActivityCompleted),
+		IfPhase:  string(state.PhaseStarting),
+		Restore:  true,
+	}))
+	restored, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseHalted), restored.Phase)
+	assert.Equal(t, string(state.ActivityCompleted), restored.Activity)
+	assert.Equal(t, ts.Unix(), restored.LastActivityEvent.Unix())
+}

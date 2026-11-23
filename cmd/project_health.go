@@ -298,10 +298,13 @@ func summarizeAgents(agents []hubclient.Agent) ProjectHealthSummary {
 			sum.OtherPhase++
 		}
 
-		// Suspended agents carry a retained pre-suspend activity (e.g. completed,
-		// idle, or harness_error); they are counted under Suspended, not as active
-		// activities.
-		if state.Phase(a.Phase) != state.PhaseSuspended {
+		// Suspended, halted, and stopped agents may carry a retained non-terminal
+		// activity (e.g. completed, idle, or harness_error); they are counted
+		// under their phase, not as active activities. Terminal activities on
+		// stopped agents (crashed, limits_exceeded) are still counted.
+		phase := state.Phase(a.Phase)
+		if phase != state.PhaseSuspended && phase != state.PhaseHalted &&
+			(phase != state.PhaseStopped || state.Activity(a.Activity).IsTerminal()) {
 			sum.addActivity(a.Activity)
 		}
 	}

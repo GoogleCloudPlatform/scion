@@ -263,6 +263,7 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		opts.Async = args.Async
 		opts.Kind = args.Kind
 		opts.PriorPhase = args.PriorPhase
+		opts.PriorStatus = args.PriorStatus
 	}
 	// The warning for secrets the start goes without is worded for the
 	// requester, recorded on the row as its initiator (skippedSecretAudienceIsOwner).
@@ -428,6 +429,15 @@ func (s *Server) execDispatchRestart(ctx context.Context, d store.BrokerDispatch
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
+	}
+	if d.Args != "" {
+		args, err := UnmarshalRestartArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal restart args: %w", err)
+		}
+		if args.PriorStatus != nil {
+			ctx = withDispatchPriorStatus(ctx, args.PriorStatus)
+		}
 	}
 	// The warning for secrets the restart goes without is worded for the
 	// requester, recorded on the row as its initiator (skippedSecretAudienceIsOwner).

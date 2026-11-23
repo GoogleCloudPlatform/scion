@@ -422,6 +422,21 @@ func TestAgentStateValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "valid: completed retained with halted phase",
+			state:   AgentState{Phase: PhaseHalted, Activity: ActivityCompleted},
+			wantErr: false,
+		},
+		{
+			name:    "invalid: crashed activity with halted phase",
+			state:   AgentState{Phase: PhaseHalted, Activity: ActivityCrashed},
+			wantErr: true,
+		},
+		{
+			name:    "invalid: working activity with halted phase",
+			state:   AgentState{Phase: PhaseHalted, Activity: ActivityWorking},
+			wantErr: true,
+		},
+		{
 			name:    "invalid: non-terminal activity with stopped phase",
 			state:   AgentState{Phase: PhaseStopped, Activity: ActivityWorking},
 			wantErr: true,
@@ -903,6 +918,37 @@ func TestRetainedStopActivity(t *testing.T) {
 				t.Errorf("RetainedStopActivity(%q, %q) = %q, want %q", tt.activity, tt.stalledFrom, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRetainedHaltActivity(t *testing.T) {
+	tests := []struct {
+		name        string
+		activity    Activity
+		stalledFrom Activity
+		want        Activity
+	}{
+		{"completed kept", ActivityCompleted, "", ActivityCompleted},
+		{"uppercase COMPLETED normalized", "COMPLETED", "", ActivityCompleted},
+		{"crashed cleared", ActivityCrashed, "", ""},
+		{"limits_exceeded cleared", ActivityLimitsExceeded, "", ""},
+		{"idle cleared", ActivityIdle, "", ""},
+		{"working cleared", ActivityWorking, "", ""},
+		{"blocked cleared", ActivityBlocked, "", ""},
+		{"harness_error cleared", ActivityHarnessError, "", ""},
+		{"empty stays empty", "", "", ""},
+		{"stalled from completed restores completed", ActivityStalled, ActivityCompleted, ActivityCompleted},
+		{"stalled from working cleared", ActivityStalled, ActivityWorking, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RetainedHaltActivity(tt.activity, tt.stalledFrom); got != tt.want {
+				t.Errorf("RetainedHaltActivity(%q, %q) = %q, want %q", tt.activity, tt.stalledFrom, got, tt.want)
+			}
+		})
+	}
+	if got := (AgentState{Phase: PhaseHalted, Activity: ActivityCompleted}).DisplayStatus(); got != string(PhaseHalted) {
+		t.Errorf("DisplayStatus() for halted+completed = %q, want %q", got, PhaseHalted)
 	}
 }
 

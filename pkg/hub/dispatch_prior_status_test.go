@@ -121,6 +121,26 @@ func TestDispatch_StartAndRestartCarryPriorStatus(t *testing.T) {
 		assert.Nil(t, client.lastStartExtras.PriorStatus)
 	})
 
+	t.Run("halted completed agent suppresses AppliedConfig.Task fallback", func(t *testing.T) {
+		d, client, ag := autoExposeDispatchFixture(t)
+		ag.Phase = string(state.PhaseHalted)
+		ag.Activity = string(state.ActivityCompleted)
+		ag.ExitReason = string(state.ExitReasonPreempted)
+		ag.TaskSummary = "finished before preemption"
+		ag.LastActivityEvent = ts
+		ag.AppliedConfig = &store.AgentAppliedConfig{
+			Task:         "original brief task",
+			CreateInputs: &store.AgentCreateInputs{},
+		}
+
+		require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
+		assert.Empty(t, client.lastTask, "halted completed agent must not replay AppliedConfig.Task")
+		require.NotNil(t, client.lastStartExtras.PriorStatus)
+		assert.Equal(t, string(state.ActivityCompleted), client.lastStartExtras.PriorStatus.Activity)
+		assert.Equal(t, "finished before preemption", client.lastStartExtras.PriorStatus.Summary)
+		assert.Equal(t, ts, client.lastStartExtras.PriorStatus.At)
+	})
+
 	t.Run("restart carries PriorStatus", func(t *testing.T) {
 		d, client, ag := autoExposeDispatchFixture(t)
 		ag.Phase = string(state.PhaseRunning)
@@ -134,4 +154,204 @@ func TestDispatch_StartAndRestartCarryPriorStatus(t *testing.T) {
 		assert.Equal(t, "shipped fix", client.lastRestartExtras.PriorStatus.Summary)
 		assert.Equal(t, ts, client.lastRestartExtras.PriorStatus.At)
 	})
+}
+
+func TestNotificationEventStatus_StoppedAndHaltedRetainedCompleted(t *testing.T) {
+	cases := []struct {
+		name     string
+		phase    string
+		activity string
+		want     string
+	}{
+		{"stopped with retained completed matches stopped", string(state.PhaseStopped), string(state.ActivityCompleted), string(state.PhaseStopped)},
+		{"stopped with terminal crashed matches crashed", string(state.PhaseStopped), string(state.ActivityCrashed), string(state.ActivityCrashed)},
+		{"stopped with terminal limits_exceeded matches limits_exceeded", string(state.PhaseStopped), string(state.ActivityLimitsExceeded), string(state.ActivityLimitsExceeded)},
+		{"stopped with synthetic DELETED matches DELETED", string(state.PhaseStopped), "DELETED", "DELETED"},
+		{"stopped with empty activity matches stopped", string(state.PhaseStopped), "", string(state.PhaseStopped)},
+		{"halted with retained completed matches halted", string(state.PhaseHalted), string(state.ActivityCompleted), string(state.PhaseHalted)},
+		{"suspended with retained completed matches suspended", string(state.PhaseSuspended), string(state.ActivityCompleted), string(state.PhaseSuspended)},
+		{"running with completed matches completed", string(state.PhaseRunning), string(state.ActivityCompleted), string(state.ActivityCompleted)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := notificationEventStatus(AgentStatusEvent{Phase: tc.phase, Activity: tc.activity})
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestNotificationDispatcher_StoppedAfterCompletedNotifiesStopped verifies R1:
+// when a running agent reports completed and is then stopped (retaining
+// activity=completed on the stopped row), a STOPPED subscriber still receives
+// STOPPED, a COMPLETED+STOPPED subscriber receives both without deduplication,
+// and a COMPLETED-only subscriber added after completion does not receive a
+// duplicate COMPLETED on stop.
+func TestNotificationDispatcher_StoppedAfterCompletedNotifiesStopped(t *testing.T) {
+	ctx := context.Background()
+	env := setupNotificationTest(t)
+	require.NoError(t, env.store.DeleteNotificationSubscription(ctx, env.sub.ID))
+
+	addSub := func(userID string, triggers ...string) {
+		require.NoError(t, env.store.CreateNotificationSubscription(ctx, &store.NotificationSubscription{
+			ID:                api.NewUUID(),
+			Scope:             store.SubscriptionScopeAgent,
+			AgentID:           env.watched.ID,
+			SubscriberType:    store.SubscriberTypeUser,
+			SubscriberID:      userID,
+			ProjectID:         env.project.ID,
+			TriggerActivities: triggers,
+			CreatedAt:         time.Now().Add(-time.Minute),
+			CreatedBy:         "test",
+		}))
+	}
+
+	addSub("stopped-only", "STOPPED")
+	addSub("both-sub", "COMPLETED", "STOPPED")
+
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	// 1. Agent completes while running.
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityCompleted),
+	}))
+	completedRow, err := env.store.GetAgent(ctx, env.watched.ID)
+	require.NoError(t, err)
+	env.pub.PublishAgentStatus(ctx, completedRow)
+
+	require.Eventually(t, func() bool {
+		notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, "both-sub", false)
+		return err == nil && len(notifs) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	// Subscribe a COMPLETED-only observer after completion.
+	addSub("late-completed-only", "COMPLETED")
+
+	// 2. Agent is stopped; store retains activity=completed on the stopped row.
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase: string(state.PhaseStopped),
+	}))
+	stoppedRow, err := env.store.GetAgent(ctx, env.watched.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseStopped), stoppedRow.Phase)
+	require.Equal(t, string(state.ActivityCompleted), stoppedRow.Activity)
+
+	env.pub.PublishAgentStatus(ctx, stoppedRow)
+
+	require.Eventually(t, func() bool {
+		notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, "stopped-only", false)
+		return err == nil && len(notifs) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, "both-sub", false)
+		return err == nil && len(notifs) == 2
+	}, 2*time.Second, 20*time.Millisecond)
+
+	stoppedOnly, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, "stopped-only", false)
+	require.NoError(t, err)
+	require.Len(t, stoppedOnly, 1)
+	assert.Equal(t, "STOPPED", stoppedOnly[0].Status)
+
+	bothNotifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, "both-sub", false)
+	require.NoError(t, err)
+	statuses := make([]string, 0, len(bothNotifs))
+	for _, n := range bothNotifs {
+		statuses = append(statuses, n.Status)
+	}
+	assert.ElementsMatch(t, []string{"COMPLETED", "STOPPED"}, statuses)
+
+	lateCompleted, err := env.store.GetNotifications(ctx, store.SubscriberTypeUser, "late-completed-only", false)
+	require.NoError(t, err)
+	assert.Empty(t, lateCompleted, "stop after completed must not emit a duplicate COMPLETED notification")
+}
+
+func TestDispatchArgs_PriorStatusRoundTrip(t *testing.T) {
+	ts := time.Date(2026, 11, 23, 12, 30, 0, 0, time.UTC)
+	ps := &api.PriorStatus{
+		Activity: string(state.ActivityCompleted),
+		Summary:  "all tests green",
+		At:       ts,
+	}
+
+	rawStart, err := MarshalDispatchArgs(&StartDispatchArgs{
+		Task:        "",
+		Resume:      false,
+		PriorStatus: ps,
+	})
+	require.NoError(t, err)
+	gotStart, err := UnmarshalStartArgs(rawStart)
+	require.NoError(t, err)
+	assert.Equal(t, ps, gotStart.PriorStatus)
+
+	rawRestart, err := MarshalDispatchArgs(&RestartDispatchArgs{PriorStatus: ps})
+	require.NoError(t, err)
+	gotRestart, err := UnmarshalRestartArgs(rawRestart)
+	require.NoError(t, err)
+	assert.Equal(t, ps, gotRestart.PriorStatus)
+
+	rawEmptyRestart, err := MarshalDispatchArgs(&RestartDispatchArgs{})
+	require.NoError(t, err)
+	assert.Equal(t, "{}", rawEmptyRestart)
+}
+
+// TestExecDispatchStartAndRestart_PreservesPriorStatusAcrossDeferredHandoff
+// verifies R3: on a cross-node deferred start or restart, the requester has
+// already written PhaseStarting (clearing any retained activity on the row).
+// The owning node's execDispatchStart / execDispatchRestart must preserve the
+// PriorStatus carried in StartDispatchArgs / RestartDispatchArgs rather than
+// re-reading the cleared row and falling back to AppliedConfig.Task.
+func TestExecDispatchStartAndRestart_PreservesPriorStatusAcrossDeferredHandoff(t *testing.T) {
+	ctx := context.Background()
+	ts := time.Date(2026, 11, 23, 12, 45, 0, 0, time.UTC)
+	ps := &api.PriorStatus{
+		Activity: string(state.ActivityCompleted),
+		Summary:  "completed prior task",
+		At:       ts,
+	}
+
+	d, client, ag := autoExposeDispatchFixture(t)
+	ag.ID = tid("deferred-prior-status-agent")
+	ag.Phase = string(state.PhaseStarting)
+	ag.Activity = "" // cleared by requester's beginStartDispatch before deferring
+	ag.AppliedConfig = &store.AgentAppliedConfig{
+		Task:         "original brief task",
+		CreateInputs: &store.AgentCreateInputs{},
+	}
+	require.NoError(t, d.store.CreateAgent(ctx, ag))
+
+	srv, err := New(DefaultServerConfig(), d.store)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Close() })
+	srv.SetDispatcher(d)
+
+	startArgsRaw, err := MarshalDispatchArgs(&StartDispatchArgs{PriorStatus: ps})
+	require.NoError(t, err)
+	_, err = srv.execDispatchStart(ctx, store.BrokerDispatch{
+		ID:        "disp-start-prior",
+		BrokerID:  ag.RuntimeBrokerID,
+		AgentID:   ag.ID,
+		ProjectID: ag.ProjectID,
+		Op:        "start",
+		Args:      startArgsRaw,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, client.lastTask, "deferred start with completed PriorStatus must not replay AppliedConfig.Task")
+	require.NotNil(t, client.lastStartExtras.PriorStatus)
+	assert.Equal(t, ps, client.lastStartExtras.PriorStatus)
+
+	restartArgsRaw, err := MarshalDispatchArgs(&RestartDispatchArgs{PriorStatus: ps})
+	require.NoError(t, err)
+	_, err = srv.execDispatchRestart(ctx, store.BrokerDispatch{
+		ID:        "disp-restart-prior",
+		BrokerID:  ag.RuntimeBrokerID,
+		AgentID:   ag.ID,
+		ProjectID: ag.ProjectID,
+		Op:        "restart",
+		Args:      restartArgsRaw,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, client.lastRestartExtras.PriorStatus)
+	assert.Equal(t, ps, client.lastRestartExtras.PriorStatus)
 }

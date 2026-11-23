@@ -237,3 +237,22 @@ func TestSummarizeAgents_SuspendedExcludedFromActivityCounts(t *testing.T) {
 	assert.NotContains(t, out, "agent(s) are blocked")
 	assert.NotContains(t, out, "agent(s) have a harness error")
 }
+
+func TestSummarizeAgents_StoppedAndHaltedRetainedActivityExcluded(t *testing.T) {
+	agents := []hubclient.Agent{
+		{ID: "a1", Name: "run-done", Phase: "running", Activity: "completed"},
+		{ID: "a2", Name: "stop-done", Phase: "stopped", Activity: "completed"},
+		{ID: "a3", Name: "halt-done", Phase: "halted", Activity: "completed"},
+		{ID: "a4", Name: "stop-crash", Phase: "stopped", Activity: "crashed"},
+		{ID: "a5", Name: "stop-limits", Phase: "stopped", Activity: "limits_exceeded"},
+	}
+
+	s := summarizeAgents(agents)
+	assert.Equal(t, 5, s.Total)
+	assert.Equal(t, 1, s.Running)
+	assert.Equal(t, 3, s.Stopped)
+	assert.Equal(t, 1, s.Error)
+	assert.Equal(t, 1, s.Completed, "stopped+completed and halted+completed must not inflate live Completed count")
+	assert.Equal(t, 1, s.Crashed, "stopped+crashed terminal activity must still be counted")
+	assert.Equal(t, 1, s.LimitsExceeded, "stopped+limits_exceeded terminal activity must still be counted")
+}

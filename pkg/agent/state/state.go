@@ -730,6 +730,22 @@ func RetainedStopActivity(activity, stalledFrom Activity) Activity {
 	return ""
 }
 
+// RetainedHaltActivity returns ActivityCompleted when the agent's prior
+// activity (or stalledFrom when stalled) was completed, or "" otherwise.
+// Terminal activities (crashed, limits_exceeded) are cleared on halt because
+// the halt exit reason explains how the run ended; completed is retained so a
+// subsequent resume or restart knows the prior run finished (ptone/scion#8900).
+func RetainedHaltActivity(activity, stalledFrom Activity) Activity {
+	candidate := Activity(strings.ToLower(string(activity)))
+	if candidate == ActivityStalled {
+		candidate = Activity(strings.ToLower(string(stalledFrom)))
+	}
+	if candidate.IsRetainedOnStop() {
+		return candidate
+	}
+	return ""
+}
+
 // IsTerminal reports whether this activity represents a terminal outcome that
 // survives the phase transition to stopped. Terminal activities carry
 // information about HOW the agent stopped and are valid when phase is stopped.
@@ -846,7 +862,9 @@ func IsPreHookStartupMessage(msg string) bool {
 
 // Validate checks cross-field constraints on the agent state.
 // Activity is meaningful when phase is running, when phase is stopped with a
-// terminal activity, or when phase is suspended with a retained activity.
+// terminal or retained-on-stop activity, when phase is halted with a
+// retained-on-stop activity, or when phase is suspended with a retained
+// activity.
 func (s AgentState) Validate() error {
 	if err := s.Phase.Validate(); err != nil {
 		return err
@@ -856,8 +874,9 @@ func (s AgentState) Validate() error {
 	}
 	if s.Activity != "" && s.Phase != PhaseRunning {
 		validStopped := s.Phase == PhaseStopped && (s.Activity.IsTerminal() || s.Activity.IsRetainedOnStop())
+		validHalted := s.Phase == PhaseHalted && s.Activity.IsRetainedOnStop()
 		validSuspended := s.Phase == PhaseSuspended && s.Activity.IsRetainedOnSuspend()
-		if !validStopped && !validSuspended {
+		if !validStopped && !validHalted && !validSuspended {
 			return fmt.Errorf("activity %q is not valid when phase is %q (must be %q)", s.Activity, s.Phase, PhaseRunning)
 		}
 	}

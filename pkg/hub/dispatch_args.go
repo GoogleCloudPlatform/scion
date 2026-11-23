@@ -39,12 +39,21 @@ type StartDispatchArgs struct {
 	// the owner cannot read the prior phase from the row.
 	Kind       string `json:"kind,omitempty"`
 	PriorPhase string `json:"priorPhase,omitempty"`
+	// PriorStatus is the requester's pre-dispatch snapshot of the agent's
+	// last reported activity (ptone/scion#8900). The requester wrote starting
+	// before deferring, which clears any retained activity on the row, so the
+	// owner cannot re-read it from the store.
+	PriorStatus *api.PriorStatus `json:"priorStatus,omitempty"`
 }
 
-// RestartDispatchArgs is intentionally empty — the owner's
-// DispatchAgentRestart re-resolves auth tokens and identity vars from the
-// shared store on the owning node.
-type RestartDispatchArgs struct{}
+// RestartDispatchArgs carries parameters for a cross-node agent restart that
+// the owner cannot re-derive from the shared store after the requester writes
+// starting. Auth tokens and identity vars are still re-resolved on the owner.
+type RestartDispatchArgs struct {
+	// PriorStatus is the requester's pre-dispatch snapshot of the agent's
+	// last reported activity (ptone/scion#8900).
+	PriorStatus *api.PriorStatus `json:"priorStatus,omitempty"`
+}
 
 // StopDispatchArgs carries the parameters for a queued stop. A stop needs
 // nothing beyond what the dispatch row already carries (agentID, projectID),
@@ -230,6 +239,15 @@ func MarshalDispatchArgs(v interface{}) (string, error) {
 // UnmarshalStartArgs deserializes start dispatch args from the broker_dispatch row.
 func UnmarshalStartArgs(raw string) (*StartDispatchArgs, error) {
 	var a StartDispatchArgs
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// UnmarshalRestartArgs deserializes restart dispatch args from the broker_dispatch row.
+func UnmarshalRestartArgs(raw string) (*RestartDispatchArgs, error) {
+	var a RestartDispatchArgs
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return nil, err
 	}
