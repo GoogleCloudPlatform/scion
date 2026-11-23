@@ -31,8 +31,8 @@ import (
 // the agent's own Conduit session. In the non-test sources of
 // cmd/sciontool and pkg/sciontool, control.New is called exactly once, and
 // its result is used only as control.RPCHandler's argument and for its
-// Routes(); it is never served over a listener, a port forward or a
-// tunnel.
+// Routes() and Features() metadata; it is never served over a listener, a
+// port forward or a tunnel.
 func TestControlHandlerOnlyOnTheSession(t *testing.T) {
 	root := findRepoRoot(t)
 	var calls []string
@@ -66,8 +66,8 @@ func TestControlHandlerOnlyOnTheSession(t *testing.T) {
 }
 
 // checkControlUses records each control.New call in f and fails on any use
-// of the variable it is assigned to other than control.RPCHandler(v) and
-// v.Routes().
+// of the variable it is assigned to other than control.RPCHandler(v),
+// v.Routes(), and v.Features().
 func checkControlUses(t *testing.T, fset *token.FileSet, f *ast.File, calls *[]string) {
 	t.Helper()
 	isControlNew := func(e ast.Expr) bool {
@@ -137,7 +137,7 @@ func checkVarUses(t *testing.T, fset *token.FileSet, body *ast.BlockStmt, name s
 						allowed[id] = true
 					}
 				}
-				if id, ok := sel.X.(*ast.Ident); ok && id.Name == name && sel.Sel.Name == "Routes" {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == name && (sel.Sel.Name == "Routes" || sel.Sel.Name == "Features") {
 					allowed[id] = true
 				}
 			}
