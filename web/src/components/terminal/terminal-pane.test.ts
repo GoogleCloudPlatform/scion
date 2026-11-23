@@ -2014,6 +2014,7 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
   });
 
   it('shows error and re-enables Resume when POST /start fails', async () => {
+    showToast.mockClear();
     setupSuspendedAgent();
     await vi.waitFor(() => {
       expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
@@ -2038,11 +2039,12 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
     page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
 
     await vi.waitFor(() => {
-      expect(
-        page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]')?.textContent
-      ).toContain('Broker unavailable');
+      const errEl = page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]');
+      expect(errEl?.textContent).toContain('Broker unavailable');
+      expect(errEl?.getAttribute('role')).toBe('alert');
     });
-    expect(showToast).toHaveBeenCalledWith('Broker unavailable');
+    // Inline role="alert" announces the failure without a duplicate toast alert.
+    expect(showToast).not.toHaveBeenCalled();
     expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
     expect(FakeSocket.instances).toHaveLength(0);
   });
@@ -2058,7 +2060,10 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
 
     page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
     await vi.waitFor(() => {
-      expect(page.shadowRoot?.querySelector('.error-state')?.textContent).toMatch(/starting/i);
+      const statusEl = page.shadowRoot?.querySelector('.error-state [role="status"]');
+      expect(statusEl).not.toBeNull();
+      expect(statusEl?.getAttribute('aria-live')).toBe('polite');
+      expect(statusEl?.textContent).toMatch(/starting/i);
     });
 
     source.dispatchEvent(
@@ -2070,9 +2075,9 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
       })
     );
     await vi.waitFor(() => {
-      expect(
-        page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]')
-      ).not.toBeNull();
+      const errEl = page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]');
+      expect(errEl).not.toBeNull();
+      expect(errEl?.getAttribute('role')).toBe('alert');
     });
     expect(FakeSocket.instances).toHaveLength(0);
   });
@@ -2189,5 +2194,223 @@ describe('suspended agent resume in terminal pane (#8954)', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('deduplicates rapid double-click on Resume so only one POST /start is sent', async () => {
+    setupSuspendedAgent();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+
+    let resolveStart!: (res: Response) => void;
+    const pendingStart = new Promise<Response>((resolve) => {
+      resolveStart = resolve;
+    });
+    let startPosts = 0;
+    fetcher.mockImplementation((url, init) => {
+      const href = requestUrl(url);
+      if (href.endsWith(`/api/v1/agents/${agentId}/start`) && init?.method === 'POST') {
+        startPosts += 1;
+        return pendingStart;
+      }
+      return Promise.resolve(
+        json({
+          id: agentId,
+          name: 'test-agent',
+          phase: 'starting',
+          _capabilities: { actions: ['lifecycle', 'attach'] },
+        })
+      );
+    });
+
+    const btn = page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!;
+    btn.click();
+    btn.click();
+
+    expect(startPosts).toBe(1);
+    await page.updateComplete;
+    const statusEl = page.shadowRoot?.querySelector('.error-state [role="status"]');
+    expect(statusEl).not.toBeNull();
+    expect(statusEl?.getAttribute('aria-live')).toBe('polite');
+    expect(statusEl?.textContent).toMatch(/resuming/i);
+
+    resolveStart(json({ id: agentId, name: 'test-agent', phase: 'starting' }));
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.error-state [role="status"]')?.textContent).toMatch(
+        /starting/i
+      );
+    });
+    expect(startPosts).toBe(1);
+  });
+
+  it('handles 403 resume failure with inline role="alert" error and capability refresh', async () => {
+    showToast.mockClear();
+    setupSuspendedAgent();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
+
+    let metadataRefreshes = 0;
+    fetcher.mockImplementation((url, init) => {
+      const href = requestUrl(url);
+      if (href.endsWith(`/api/v1/agents/${agentId}/start`) && init?.method === 'POST') {
+        return Promise.resolve(
+          json({ error: { message: 'Forbidden: lifecycle permission required' } }, 403)
+        );
+      }
+      if (href.endsWith(`/api/v1/agents/${agentId}`)) {
+        metadataRefreshes += 1;
+        return Promise.resolve(
+          json({
+            id: agentId,
+            name: 'test-agent',
+            phase: 'suspended',
+            suspendReason: 'user',
+            _capabilities: { actions: ['attach'] },
+          })
+        );
+      }
+      return Promise.resolve(json({ ok: true }));
+    });
+
+    page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
+
+    await vi.waitFor(() => {
+      const errEl = page.shadowRoot?.querySelector('[data-testid="terminal-resume-error"]');
+      expect(errEl?.textContent).toContain('Forbidden: lifecycle permission required');
+      expect(errEl?.getAttribute('role')).toBe('alert');
+    });
+    await vi.waitFor(() => {
+      expect(metadataRefreshes).toBeGreaterThanOrEqual(1);
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).toBeNull();
+      expect(
+        page.shadowRoot?.querySelector('[data-testid="terminal-resume-unauthorized"]')
+      ).not.toBeNull();
+    });
+    expect(showToast).not.toHaveBeenCalled();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('clears resume wait on delete-mid-resume without stale suspend hint or reconnect', async () => {
+    setupSuspendedAgent({ suspendReason: 'user' });
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).not.toBeNull();
+    });
+    expect(page.shadowRoot?.querySelector('.suspend-hint')?.textContent).toContain(
+      'Suspended by a user'
+    );
+
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    await vi.waitFor(() => expect(registry.metadata.get(agentId)?.availability).toBe('ready'));
+
+    page.shadowRoot!.querySelector<HTMLElement>('[data-testid="terminal-resume-btn"]')!.click();
+    await vi.waitFor(() => {
+      expect(page.shadowRoot?.querySelector('.error-state')?.textContent).toMatch(/starting/i);
+    });
+
+    // Agent is deleted while resume is waiting for startup.
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.deleted`,
+          data: {},
+        }),
+      })
+    );
+    page.session?.markUnavailable('agent-deleted', 'Agent was deleted.');
+    await page.updateComplete;
+
+    expect(page.shadowRoot?.querySelector('.error-state')?.textContent).not.toMatch(/starting/i);
+    expect(page.shadowRoot?.querySelector('.suspend-hint')).toBeNull();
+    expect(page.shadowRoot?.querySelector('.error-state')?.textContent).not.toContain(
+      'Suspended by a user'
+    );
+    expect(page.shadowRoot?.querySelector('[data-testid="terminal-resume-btn"]')).toBeNull();
+
+    // Even if a stale running status arrives afterward, no reconnect is attempted.
+    source.dispatchEvent(
+      new MessageEvent('update', {
+        data: JSON.stringify({
+          subject: `agent.${agentId}.status`,
+          data: { phase: 'running', activity: 'idle' },
+        }),
+      })
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('gates suspendReasonHint on isSuspended and uses live regions in disconnected overlay', async () => {
+    showToast.mockClear();
+    await mountConnected();
+    const source = FakeEventSource.instances[0];
+    source.onopen?.();
+    let resolveStart!: (res: Response) => void;
+    const pendingStart = new Promise<Response>((resolve) => {
+      resolveStart = resolve;
+    });
+    fetcher.mockImplementation((url, init) => {
+      const href = requestUrl(url);
+      if (href.endsWith(`/api/v1/agents/${agentId}/start`) && init?.method === 'POST') {
+        return pendingStart;
+      }
+      return Promise.resolve(
+        json({
+          id: agentId,
+          name: 'test',
+          phase: 'suspended',
+          suspendReason: 'user',
+          _capabilities: { actions: ['lifecycle', 'attach'] },
+        })
+      );
+    });
+    await registry.metadata.refresh(agentId);
+    page.session?.markUnavailable(
+      'agent-stopped',
+      'Agent phase is suspended. Terminal is not available until the agent has started.'
+    );
+    await page.updateComplete;
+
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay')?.textContent).toContain(
+      'Suspended by a user'
+    );
+
+    // Clicking Resume renders polite status live region while in flight.
+    page
+      .shadowRoot!.querySelector<HTMLElement>(
+        '.disconnected-overlay [data-testid="terminal-resume-btn"]'
+      )!
+      .click();
+    await page.updateComplete;
+    const statusEl = page.shadowRoot?.querySelector('.disconnected-overlay [role="status"]');
+    expect(statusEl).not.toBeNull();
+    expect(statusEl?.getAttribute('aria-live')).toBe('polite');
+    expect(statusEl?.textContent).toMatch(/resuming/i);
+
+    // 503 renders inline role="alert" in overlay without duplicate toast.
+    resolveStart(json({ error: { message: 'Broker unavailable' } }, 503));
+    await vi.waitFor(() => {
+      const errEl = page.shadowRoot?.querySelector(
+        '.disconnected-overlay [data-testid="terminal-resume-error"]'
+      );
+      expect(errEl?.textContent).toContain('Broker unavailable');
+      expect(errEl?.getAttribute('role')).toBe('alert');
+    });
+    expect(showToast).not.toHaveBeenCalled();
+
+    // Deleting the suspended agent removes the stale suspend hint and Resume button from overlay.
+    page.session?.markUnavailable('agent-deleted', 'Agent was deleted.');
+    await page.updateComplete;
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay')?.textContent).not.toContain(
+      'Suspended by a user'
+    );
+    expect(
+      page.shadowRoot?.querySelector('.disconnected-overlay [data-testid="terminal-resume-btn"]')
+    ).toBeNull();
   });
 });

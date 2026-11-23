@@ -585,6 +585,13 @@ export class ScionTerminalPane extends LitElement {
       text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
     }
 
+    .disconnected-overlay .overlay-resume-status {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+
     .disconnected-overlay.unavailable .overlay-title {
       color: #f59e0b;
     }
@@ -750,6 +757,12 @@ export class ScionTerminalPane extends LitElement {
     .error-state p {
       color: var(--scion-badge-danger-text, #991b1b);
       margin: 0 0 1rem 0;
+    }
+
+    .error-state .resume-progress {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
     }
 
     .error-state p.resume-status-title {
@@ -2172,7 +2185,11 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private get isSuspended(): boolean {
-    return this.agent?.phase === 'suspended' && this.disconnectReason !== 'agent-deleted';
+    return (
+      this.agent?.phase === 'suspended' &&
+      this.disconnectReason !== 'agent-deleted' &&
+      this.registry?.metadata.get(this.agentId)?.availability !== 'deleted'
+    );
   }
 
   /**
@@ -2219,7 +2236,6 @@ export class ScionTerminalPane extends LitElement {
         this.session?.disarmResumeConnect();
         this.resumeState = 'idle';
         this.resumeError = msg;
-        showToast(msg);
         void this.refreshAgentData();
         return;
       }
@@ -2244,7 +2260,6 @@ export class ScionTerminalPane extends LitElement {
       const msg = err instanceof Error ? err.message : 'Failed to resume agent';
       this.resumeState = 'idle';
       this.resumeError = msg;
-      showToast(msg);
       void this.refreshAgentData();
     }
   }
@@ -2440,7 +2455,8 @@ export class ScionTerminalPane extends LitElement {
 
     // Metadata availability must not remove the host during independent PTY setup.
     if (this.session?.state.error && !this.terminal) {
-      const suspendHint = this.agent ? suspendReasonHint(this.agent) : undefined;
+      const suspendHint =
+        this.isSuspended && this.agent ? suspendReasonHint(this.agent) : undefined;
       return html`
         <div class="toolbar">
           ${this.renderBackLinks()}
@@ -2454,14 +2470,16 @@ export class ScionTerminalPane extends LitElement {
         <div class="error-state">
           ${this.isResumingOrStarting
             ? html`
-                <div class="spinner"></div>
-                <p class="resume-status-title">
-                  ${this.resumeState === 'resuming' ? 'Resuming Agent' : 'Starting Agent'}
-                </p>
-                <div class="error-detail">
-                  ${this.resumeState === 'resuming'
-                    ? 'Sending resume request...'
-                    : 'Waiting for agent to start. Terminal will connect automatically.'}
+                <div class="resume-progress" role="status" aria-live="polite" aria-atomic="true">
+                  <div class="spinner"></div>
+                  <p class="resume-status-title">
+                    ${this.resumeState === 'resuming' ? 'Resuming Agent' : 'Starting Agent'}
+                  </p>
+                  <div class="error-detail">
+                    ${this.resumeState === 'resuming'
+                      ? 'Sending resume request...'
+                      : 'Waiting for agent to start. Terminal will connect automatically.'}
+                  </div>
                 </div>
               `
             : html`
@@ -2469,7 +2487,7 @@ export class ScionTerminalPane extends LitElement {
                 <div class="error-detail">${this.error}</div>
                 ${suspendHint ? html`<div class="suspend-hint">${suspendHint}</div>` : nothing}
                 ${this.resumeError
-                  ? html`<div class="resume-error" data-testid="terminal-resume-error">
+                  ? html`<div class="resume-error" role="alert" data-testid="terminal-resume-error">
                       ${this.resumeError}
                     </div>`
                   : nothing}
@@ -2638,18 +2656,33 @@ export class ScionTerminalPane extends LitElement {
               ${this.attempting || this.isResumingOrStarting
                 ? html`<sl-spinner></sl-spinner>`
                 : nothing}
-              <span class="overlay-title">${this.overlayTitle}</span>
-              ${this.overlayDetail
-                ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
-                : nothing}
-              ${!this.attempting && !this.isResumingOrStarting && this.agent
+              ${this.isResumingOrStarting
+                ? html`<div
+                    class="overlay-resume-status"
+                    role="status"
+                    aria-live="polite"
+                    aria-atomic="true"
+                  >
+                    <span class="overlay-title">${this.overlayTitle}</span>
+                    ${this.overlayDetail
+                      ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
+                      : nothing}
+                  </div>`
+                : html`<span class="overlay-title">${this.overlayTitle}</span>
+                    ${this.overlayDetail
+                      ? html`<span class="overlay-detail">${this.overlayDetail}</span>`
+                      : nothing}`}
+              ${!this.attempting && !this.isResumingOrStarting && this.isSuspended && this.agent
                 ? (() => {
                     const hint = suspendReasonHint(this.agent);
                     return hint ? html`<span class="overlay-detail">${hint}</span>` : nothing;
                   })()
                 : nothing}
               ${!this.attempting && !this.isResumingOrStarting && this.resumeError
-                ? html`<span class="overlay-resume-error" data-testid="terminal-resume-error"
+                ? html`<span
+                    class="overlay-resume-error"
+                    role="alert"
+                    data-testid="terminal-resume-error"
                     >${this.resumeError}</span
                   >`
                 : nothing}
