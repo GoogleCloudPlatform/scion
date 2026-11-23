@@ -48,10 +48,11 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// permissionProjectSecretRead is the registry permission ID that governs an
-// agent reading secrets during resolution (pkg/hub/permissions/registry.go).
-// It is declared on ResourceProject, so it cannot be derived from a
-// resource type of "secret".
+// permissionProjectSecretRead is the registry permission ID declared on
+// ResourceProject (pkg/hub/permissions/registry.go). In non-test code it is
+// kept for the compatibility progeny/secret relationship row
+// (storeProgenyAdapter.ReadPermissions, TestRelationshipCharacterization_Progeny);
+// dispatcher resolution authorizes user-scope progeny secrets via secret.use.
 const permissionProjectSecretRead = "project.secret_read"
 
 // HTTPRuntimeBrokerClient is an HTTP-based implementation of RuntimeBrokerClient.
@@ -5442,17 +5443,15 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 // from the agent's stored role, scopes and ancestry:
 //
 // The progeny path (an agent created by another agent: ancestry of more
-// than one entry). Each progeny candidate must pass both:
-//   - project.secret_read with ActionRead on the secret, the generic
-//     delegation walk this path has always applied (an unrecorded hop never
-//     allows it, so a chain without recorded provenance stays denied here);
-//   - for a user-scope candidate, secret.use with ActionUse on
-//     userSecretResource, the decision the runtime read (check 8) makes.
-//     Its step 10 applies the user-scope secret parent ceiling
-//     (EvaluateUserSecretParentCeiling), including the terminal user's
-//     secret.use access constraints (S4b) and the owner binding at the head
-//     of the ancestry (S7, S8); Decide also applies the agent's own access
-//     constraints for secret.use.
+// than one entry). Each progeny candidate must be user-scope (any non-user
+// scope fails closed) and pass secret.use with ActionUse on
+// userSecretResource, the same decision the runtime read (check 8) makes.
+// Its step 10 applies the user-scope secret parent ceiling
+// (EvaluateUserSecretParentCeiling), including unrecorded-hop denial (S3a),
+// intermediate agent secret.use (S3d), terminal user project admission
+// (S4a) and secret.use access constraints (S4b), and the owner binding at
+// the head of the ancestry (S7, S8); Decide also applies the agent's own
+// scopes (project:secret:read) and access constraints for secret.use.
 //
 // The owner path (the user scope of agent.OwnerID, resolved directly; for an
 // agent created by a user, OwnerID is that user). It used to have no check.
@@ -5578,31 +5577,19 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 		}
 		opts.AgentAncestry = ancestry
 		opts.AuthzCheck = func(s secret.SecretMeta) bool {
+			if s.Scope != store.ScopeUser {
+				deny("progeny", s, "progeny secret resolution applies to user-scope secrets only")
+				return false
+			}
 			ident := identity()
-			// Name the permission explicitly. (resource="secret",
-			// action="read") has no registry entry - agent secret access is
-			// registered as project.secret_read on ResourceProject - so
-			// resolveResourcePermission cannot resolve the pair on its own.
-			decision := d.authzService.Decide(ctx, AuthzRequest{
-				Principal:  principalContextForIdentity(ident),
-				Credential: credentialContextForIdentity(ident),
-				Resource:   Resource{Type: "secret", ID: s.ID},
-				Action:     ActionRead,
-				Permission: permissionProjectSecretRead,
-			})
-			if decision.Allowed && s.Scope == store.ScopeUser {
-				decision = secretUse(ident, s)
-				if !decision.Allowed {
-					// One line per refused user row: the rate-limited
-					// withheld record, not also the deny line below.
-					withheld("progeny", s, decision)
-					return false
-				}
-			}
+			decision := secretUse(ident, s)
 			if !decision.Allowed {
-				deny("progeny", s, decision.Reason)
+				// One line per refused user row: the rate-limited
+				// withheld record, not also the deny line above.
+				withheld("progeny", s, decision)
+				return false
 			}
-			return decision.Allowed
+			return true
 		}
 	}
 	if agent.OwnerID != "" {

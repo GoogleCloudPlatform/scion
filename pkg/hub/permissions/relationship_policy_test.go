@@ -35,10 +35,11 @@ type relationshipPolicyExceptionKey struct {
 // reclassification. TestRelationshipPolicies_ReviewedExceptionsMatchRows
 // fails for any entry that no longer matches a row.
 var relationshipPolicyReviewedExceptions = map[relationshipPolicyExceptionKey]string{
-	// Progeny secret reads are decided with Resource.Type "secret" and
-	// Permission "project.secret_read" (pkg/hub/httpdispatcher.go). The row's
-	// ResourceType is that Decide resource type, and secret_read is treated
-	// as read-class for this row only.
+	// Kept for the compatibility progeny/secret relationship row
+	// (storeProgenyAdapter.ReadPermissions, TestRelationshipCharacterization_Progeny);
+	// dispatcher resolution authorizes user-scope progeny secrets via secret.use.
+	// The row's ResourceType is "secret", and secret_read is treated as
+	// read-class for this row only.
 	{"progeny", "agent", "secret", "project.secret_read"}: "Decide resource type is secret; secret_read is read-class for this row only",
 }
 
