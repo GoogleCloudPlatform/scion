@@ -309,8 +309,31 @@ func TestDeleteAgent_CancelsPendingOneShotEventsAuthoredByAgent(t *testing.T) {
 				Status:    store.ScheduledEventPending,
 				CreatedBy: DevUserID,
 			}, DevUserID)
+			recurringSched := &store.Schedule{
+				ID:                   tid("oneshot-guard-" + tc.name),
+				ProjectID:            agent.ProjectID,
+				Name:                 "oneshot-guard-" + tc.name,
+				CronExpr:             "0 9 * * *",
+				EventType:            "message",
+				Payload:              string(targetOtherPayload),
+				Status:               store.ScheduleStatusActive,
+				CreatedBy:            agent.ID,
+				InitiatorAttribution: authored.InitiatorAttribution,
+				AuthorityCeiling:     authored.AuthorityCeiling,
+			}
+			require.NoError(t, s.CreateSchedule(ctx, recurringSched))
+			fromRecurring := withMockAgentRevision(store.ScheduledEvent{
+				ID:         tid("oneshot-from-recurring-" + tc.name),
+				ProjectID:  agent.ProjectID,
+				EventType:  "message",
+				FireAt:     time.Now().Add(time.Hour),
+				Payload:    string(targetOtherPayload),
+				Status:     store.ScheduledEventPending,
+				CreatedBy:  agent.ID,
+				ScheduleID: recurringSched.ID,
+			}, agent.ID)
 
-			for _, evt := range []store.ScheduledEvent{authored, selfTargeted, alreadyFired, byOther, byUser} {
+			for _, evt := range []store.ScheduledEvent{authored, selfTargeted, alreadyFired, byOther, byUser, fromRecurring} {
 				e := evt
 				require.NoError(t, s.CreateScheduledEvent(ctx, &e))
 			}
@@ -351,7 +374,7 @@ func TestDeleteAgent_CancelsPendingOneShotEventsAuthoredByAgent(t *testing.T) {
 			assert.NotNil(t, gotFired.FiredAt)
 			assert.Empty(t, gotFired.Error)
 
-			for _, unchanged := range []store.ScheduledEvent{byOther, byUser} {
+			for _, unchanged := range []store.ScheduledEvent{byOther, byUser, fromRecurring} {
 				got, err := s.GetScheduledEvent(ctx, unchanged.ID)
 				require.NoError(t, err)
 				assert.Equal(t, store.ScheduledEventPending, got.Status, unchanged.ID)
@@ -477,4 +500,44 @@ func TestFireEvent_CancelsWhenCreatingAgentGone(t *testing.T) {
 			assert.Nil(t, got.FiredAt)
 		})
 	}
+
+	t.Run("recurring schedule event skips one-shot backstop", func(t *testing.T) {
+		srv, s, projectID := setupScheduleTest(t)
+		ctx := context.Background()
+		missingCreatorID := tid("fire-recurring-missing-creator")
+		missingCreatorRev := withMockAgentRevision(store.ScheduledEvent{}, missingCreatorID)
+		sched := &store.Schedule{
+			ID:                   tid("fire-backstop-guard"),
+			ProjectID:            projectID,
+			Name:                 "fire-backstop-guard",
+			CronExpr:             "0 9 * * *",
+			EventType:            "message",
+			Payload:              `{"agentName":"other","message":"hello"}`,
+			Status:               store.ScheduleStatusActive,
+			CreatedBy:            missingCreatorID,
+			InitiatorAttribution: missingCreatorRev.InitiatorAttribution,
+			AuthorityCeiling:     missingCreatorRev.AuthorityCeiling,
+		}
+		require.NoError(t, s.CreateSchedule(ctx, sched))
+
+		evt := withMockAgentRevision(store.ScheduledEvent{
+			ID:         tid("fire-recurring-evt"),
+			ProjectID:  projectID,
+			EventType:  "message",
+			FireAt:     time.Now().Add(-time.Minute),
+			Payload:    `{"agentName":"other","message":"hello"}`,
+			Status:     store.ScheduledEventPending,
+			CreatedBy:  missingCreatorID,
+			ScheduleID: sched.ID,
+		}, missingCreatorID)
+		require.NoError(t, s.CreateScheduledEvent(ctx, &evt))
+
+		srv.scheduler.fireEvent(ctx, evt, false)
+
+		got, err := s.GetScheduledEvent(ctx, evt.ID)
+		require.NoError(t, err)
+		assert.NotEqual(t, store.ScheduledEventCancelled, got.Status,
+			"recurring schedule events must not be cancelled by the one-shot creator-deleted backstop")
+		assert.Equal(t, store.ScheduledEventFailed, got.Status)
+	})
 }
