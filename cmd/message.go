@@ -60,7 +60,7 @@ var removedFlagErrors = []struct {
 	Flag    string
 	Message string
 }{
-	{"plain", "plain-text delivery is no longer supported on 'scion message'; use 'scion schedule create --plain' or 'scion trigger create --plain' for scheduled events and triggers"},
+	{"plain", "plain-text delivery is no longer supported on 'scion message'; plain delivery remains available for triggers ('scion trigger create --plain')"},
 	{"notify", "use 'scion notifications subscribe' instead"},
 	{"in", "use 'scion schedule create --in' instead"},
 	{"at", "use 'scion schedule create --at' instead"},
@@ -204,6 +204,7 @@ Examples:
 			}
 			return newUsageError("--all has been removed from 'scion message'; use 'scion broadcast --all' instead")
 		}
+		// Guard direct RunE invocations (Cobra runs Args first).
 		if err := checkRemovedMessageFlags(cmd); err != nil {
 			return err
 		}

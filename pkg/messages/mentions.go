@@ -26,9 +26,7 @@ const MaxMentionRecipients = 10
 // case-insensitively while preserving first-seen order (earlier lists win
 // the earlier position — callers that want explicit/caller-supplied names to
 // take precedence over body-extracted ones should pass them first). Shared
-// by the hub's fan-out (union of explicit and body mentions) and the CLI
-// (union of --cc and body mentions), which independently needed the exact
-// same logic.
+// by the hub's fan-out (union of explicit and body mentions) and the CLI.
 func DedupMentionNames(lists ...[]string) []string {
 	seen := make(map[string]bool)
 	var out []string
@@ -749,41 +747,6 @@ func IsLeadingMentionWithOptions(text, firstMentionName string, opts MentionOpti
 		return ok && strings.EqualFold(token, firstMentionName)
 	}
 	return false
-}
-
-// ParseCCFlag parses a --cc flag value into a slice of agent names.
-// Names are comma-separated and whitespace-trimmed.
-func ParseCCFlag(cc string) []string {
-	if cc == "" {
-		return nil
-	}
-	parts := strings.Split(cc, ",")
-	var names []string
-	seen := make(map[string]bool)
-	for _, p := range parts {
-		name := strings.TrimSpace(p)
-		if name == "" {
-			continue
-		}
-		lower := strings.ToLower(name)
-		if !seen[lower] {
-			seen[lower] = true
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
-// ParseCCFlags parses a repeatable --cc flag into a slice of agent names.
-// Each occurrence may itself be a comma-separated list, so the historical
-// comma-separated form and the repeatable form are both accepted and may be
-// mixed. Names are whitespace-trimmed and de-duplicated case-insensitively
-// across all occurrences, preserving first-seen order.
-func ParseCCFlags(cc []string) []string {
-	if len(cc) == 0 {
-		return nil
-	}
-	return ParseCCFlag(strings.Join(cc, ","))
 }
 
 // AgentInfo holds the minimal agent data needed for mention resolution.

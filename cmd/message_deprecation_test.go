@@ -228,7 +228,7 @@ func TestRemovedFlags_RefusedWithActionableError(t *testing.T) {
 		{
 			flag:             "plain",
 			value:            "true",
-			wantReplacements: []string{"scion schedule create --plain", "scion trigger create --plain"},
+			wantReplacements: []string{"scion trigger create --plain"},
 		},
 		{
 			flag:             "cc",
@@ -382,8 +382,10 @@ func TestBroadcastCmd_IsRegistered(t *testing.T) {
 }
 
 // findReplacementProblems scans guidance text for replacement command
-// references ("scion <subcommand>") and validates each resolves against
-// rootCmd. Returns problems found and the count of replacements examined.
+// references ("scion <subcommand> [--flag ...]") and validates each command
+// resolves against rootCmd and any trailing --flag exists on that command
+// (local or inherited). Returns problems found and the count of replacements
+// examined.
 func findReplacementProblems(text string) (problems []string, checked int) {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -404,23 +406,50 @@ func findReplacementProblems(text string) (problems []string, checked int) {
 			if len(fields) < 2 {
 				continue
 			}
-			// Collect subcommand tokens (skip "scion" itself), stop at flags, quotes, commas
+			// Collect subcommand tokens (skip "scion" itself), then any
+			// following --flag tokens belonging to the same quoted reference.
 			var subArgs []string
-			for _, f := range fields[1:] {
+			var flagNames []string
+			stoppedAtPunct := false
+			i := 1
+			for ; i < len(fields); i++ {
+				f := fields[i]
 				if strings.HasPrefix(f, "--") || strings.HasPrefix(f, "-") {
 					break
 				}
 				cleaned := strings.Trim(f, "\"'`,;)")
 				if cleaned == "" {
+					stoppedAtPunct = true
 					break
 				}
 				cleaned2 := strings.TrimRight(f, "\"'`,;)")
 				if cleaned2 == "" {
+					stoppedAtPunct = true
 					break
 				}
 				subArgs = append(subArgs, cleaned2)
 				if cleaned2 != f {
+					stoppedAtPunct = true
 					break
+				}
+			}
+			if !stoppedAtPunct {
+				for ; i < len(fields); i++ {
+					f := fields[i]
+					if !strings.HasPrefix(f, "--") {
+						break
+					}
+					trimmed := strings.TrimRight(f, "\"'`,;)")
+					flagName := strings.TrimPrefix(trimmed, "--")
+					if eq := strings.IndexByte(flagName, '='); eq >= 0 {
+						flagName = flagName[:eq]
+					}
+					if flagName != "" {
+						flagNames = append(flagNames, flagName)
+					}
+					if trimmed != f {
+						break
+					}
 				}
 			}
 			if len(subArgs) == 0 {
@@ -438,6 +467,14 @@ func findReplacementProblems(text string) (problems []string, checked int) {
 				problems = append(problems,
 					fmt.Sprintf("replacement resolves to wrong command: wanted %s, got %s (from: %s)",
 						subArgs[len(subArgs)-1], cmd.Name(), line))
+				continue
+			}
+			for _, flagName := range flagNames {
+				if cmd.Flags().Lookup(flagName) == nil && cmd.InheritedFlags().Lookup(flagName) == nil {
+					problems = append(problems,
+						fmt.Sprintf("replacement flag --%s not found on 'scion %s' (from: %s)",
+							flagName, strings.Join(subArgs, " "), line))
+				}
 			}
 		}
 	}
@@ -445,7 +482,8 @@ func findReplacementProblems(text string) (problems []string, checked int) {
 }
 
 // TestRemovedFlags_ReplacementsExist validates that every removed-flag error
-// naming a 'scion <subcommand>' replacement resolves via rootCmd.Find().
+// naming a 'scion <subcommand> [--flag]' replacement resolves via
+// rootCmd.Find() and any named --flag exists on the resolved command.
 func TestRemovedFlags_ReplacementsExist(t *testing.T) {
 	var lines []string
 	for _, r := range removedFlagErrors {
@@ -456,11 +494,11 @@ func TestRemovedFlags_ReplacementsExist(t *testing.T) {
 	for _, p := range problems {
 		t.Error(p)
 	}
-	// plain (schedule create + trigger create), notify (notifications subscribe),
-	// in (schedule create), at (schedule create), channel (conversation list),
-	// thread-id (conversation list) = 7 command references.
-	require.GreaterOrEqual(t, checked, 7,
-		"expected at least 7 replacement command references in removedFlagErrors; got %d", checked)
+	// plain (trigger create --plain), notify (notifications subscribe),
+	// in (schedule create --in), at (schedule create --at),
+	// channel (conversation list), thread-id (conversation list) = 6 references.
+	require.GreaterOrEqual(t, checked, 6,
+		"expected at least 6 replacement command references in removedFlagErrors; got %d", checked)
 
 	// The --raw removal error names 'scion keys'; check that command resolves
 	// with the same extractor.
@@ -477,6 +515,11 @@ func TestRemovedFlags_ReplacementsExist(t *testing.T) {
 			"Warning: --x is deprecated, use 'scion schedule message' instead")
 		assert.NotEmpty(t, problems, "should catch nonexistent subcommand via deepest-match blind spot")
 	})
+	t.Run("catches_unknown_flag_on_valid_command", func(t *testing.T) {
+		problems, _ := findReplacementProblems(
+			"Warning: --plain is removed, use 'scion schedule create --plain' instead")
+		assert.NotEmpty(t, problems, "should catch nonexistent --plain flag on valid command 'scion schedule create'")
+	})
 	t.Run("catches_backtick_quoted_unknown", func(t *testing.T) {
 		problems, _ := findReplacementProblems(
 			"Warning: --x is deprecated, use `scion agent poke` instead")
@@ -489,8 +532,8 @@ func TestRemovedFlags_ReplacementsExist(t *testing.T) {
 	})
 	t.Run("accepts_valid_replacement", func(t *testing.T) {
 		problems, checked := findReplacementProblems(
-			"Warning: --x is deprecated, use 'scion broadcast' instead")
-		assert.Empty(t, problems, "should accept valid replacement command")
+			"Warning: --x is deprecated, use 'scion broadcast --all' instead")
+		assert.Empty(t, problems, "should accept valid replacement command and flag")
 		assert.Equal(t, 1, checked, "should have checked exactly one reference")
 	})
 }
