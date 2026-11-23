@@ -41,25 +41,27 @@ import (
 const maxTriggerWhereFileBytes = 64 * 1024
 
 var (
-	triggerName           string
-	triggerDescription    string
-	triggerWebhookRef     string
-	triggerGitHubSource   bool
-	triggerMatchTypes     []string
-	triggerWhereRules     []string
-	triggerWhereFile      string
-	triggerAction         string
-	triggerAgent          string
-	triggerMessage        string
-	triggerInterrupt      bool
-	triggerWake           bool
-	triggerPlain          bool
-	triggerOffline        string
-	triggerQueueTTL       string
-	triggerDispatch       dispatchAgentFlagValues
-	triggerSubjectExpr    string
-	triggerOnSubject      string
-	triggerCoalesceWindow string
+	triggerName              string
+	triggerDescription       string
+	triggerWebhookRef        string
+	triggerGitHubSource      bool
+	triggerMatchTypes        []string
+	triggerWhereRules        []string
+	triggerWhereFile         string
+	triggerAction            string
+	triggerAgent             string
+	triggerMessage           string
+	triggerInterrupt         bool
+	triggerWake              bool
+	triggerPlain             bool
+	triggerOffline           string
+	triggerQueueTTL          string
+	triggerDispatch          dispatchAgentFlagValues
+	triggerSubjectExpr       string
+	triggerOnSubject         string
+	triggerCoalesceWindow    string
+	triggerMaxFiresPerMinute int
+	triggerMaxConcurrent     int
 
 	triggerListSource  string
 	triggerListWebhook string
@@ -643,6 +645,14 @@ func buildCreateTriggerRequestWithAllow(allowExplicit bool) (*hubclient.CreateTr
 			CoalesceWindow: triggerCoalesceWindow,
 		}
 	}
+	if triggerMaxFiresPerMinute < 0 {
+		return nil, nil, newUsageError("--max-per-minute must be non-negative")
+	}
+	if triggerMaxConcurrent < 0 {
+		return nil, nil, newUsageError("--max-concurrent must be non-negative")
+	}
+	req.MaxFiresPerMinute = triggerMaxFiresPerMinute
+	req.MaxConcurrentDispatches = triggerMaxConcurrent
 
 	return req, derivedUntrusted, nil
 }
@@ -1122,6 +1132,8 @@ func init() {
 	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
 	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new, skip, or reuse; default new)")
 	triggerCreateCmd.Flags().StringVar(&triggerCoalesceWindow, "coalesce", "", "Coalescing window duration (0s disables, max 10m, e.g. 30s)")
+	triggerCreateCmd.Flags().IntVar(&triggerMaxFiresPerMinute, "max-per-minute", 0, "Maximum fires per minute for this trigger (0 = unlimited; max 600)")
+	triggerCreateCmd.Flags().IntVar(&triggerMaxConcurrent, "max-concurrent", 0, "Maximum concurrent live agents for dispatch-agent triggers (0 = default 5; max 50)")
 
 	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (webhook or github)")
 	triggerListCmd.Flags().StringVar(&triggerListWebhook, "webhook", "", "Filter by webhook endpoint ID or name")

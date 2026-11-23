@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -30,23 +31,29 @@ import (
 )
 
 var (
-	triggerWebhookName              string
-	triggerWebhookDescription       string
-	triggerWebhookAgent             string
-	triggerWebhookToSelf            bool
-	triggerWebhookBind              string
-	triggerWebhookPersistent        bool
-	triggerWebhookMessage           string
-	triggerWebhookInterrupt         bool
-	triggerWebhookWake              bool
-	triggerWebhookListStatus        string
-	triggerWebhookListBound         string
-	triggerWebhookUpdateDescription string
-	triggerWebhookUpdateStatus      string
-	triggerWebhookUpdateBind        string
-	triggerWebhookUpdateUnbind      bool
-	triggerWebhookUpdatePersistent  bool
-	triggerWebhookUpdateAgentLife   bool
+	triggerWebhookName               string
+	triggerWebhookDescription        string
+	triggerWebhookAuth               string
+	triggerWebhookAllowProjectAgents bool
+	triggerWebhookReplayWindow       int
+	triggerWebhookRate               int
+	triggerWebhookBurst              int
+	triggerWebhookMaxBody            string
+	triggerWebhookAgent              string
+	triggerWebhookToSelf             bool
+	triggerWebhookBind               string
+	triggerWebhookPersistent         bool
+	triggerWebhookMessage            string
+	triggerWebhookInterrupt          bool
+	triggerWebhookWake               bool
+	triggerWebhookListStatus         string
+	triggerWebhookListBound          string
+	triggerWebhookUpdateDescription  string
+	triggerWebhookUpdateStatus       string
+	triggerWebhookUpdateBind         string
+	triggerWebhookUpdateUnbind       bool
+	triggerWebhookUpdatePersistent   bool
+	triggerWebhookUpdateAgentLife    bool
 )
 
 const defaultToSelfWebhookMessage = "Webhook event received."
@@ -106,7 +113,9 @@ Example (curl + openssl):
     --data-raw "$BODY"
 
   Note: X-Scion-Event: <name> sets event.type to webhook.<name>; match it with
-  scion trigger create --type webhook.<name> (default triggers match webhook.received).`,
+  scion trigger create --type webhook.<name> (default triggers match webhook.received).
+  Do not send an Authorization header to an HMAC endpoint — an invalid credential
+  is refused with 401 before the HMAC signature is checked.`,
 	RunE: runTriggerWebhookCreate,
 }
 
@@ -264,10 +273,56 @@ func resolveWebhookEndpointIDOrName(ctx context.Context, hubCtx *HubContext, pro
 	}
 }
 
+func parseTriggerByteSize(raw string) (int, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0, nil
+	}
+	upper := strings.ToUpper(s)
+	mult := 1
+	numStr := s
+	switch {
+	case strings.HasSuffix(upper, "KIB"):
+		mult = 1024
+		numStr = strings.TrimSpace(s[:len(s)-3])
+	case strings.HasSuffix(upper, "KB"):
+		mult = 1000
+		numStr = strings.TrimSpace(s[:len(s)-2])
+	case strings.HasSuffix(upper, "MIB"):
+		mult = 1024 * 1024
+		numStr = strings.TrimSpace(s[:len(s)-3])
+	case strings.HasSuffix(upper, "MB"):
+		mult = 1000 * 1000
+		numStr = strings.TrimSpace(s[:len(s)-2])
+	case strings.HasSuffix(upper, "B"):
+		numStr = strings.TrimSpace(s[:len(s)-1])
+	}
+	n, err := strconv.Atoi(numStr)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid byte size %q", raw)
+	}
+	return n * mult, nil
+}
+
 func buildCreateWebhookEndpointRequest() (*hubclient.CreateWebhookEndpointRequest, error) {
 	name := strings.TrimSpace(triggerWebhookName)
 	if name == "" {
 		return nil, newUsageError("--name is required")
+	}
+
+	authMode := strings.TrimSpace(triggerWebhookAuth)
+	if authMode != "" && authMode != "hmac" && authMode != "hub_token" {
+		return nil, newUsageError("--auth must be hmac or hub_token, got %q", authMode)
+	}
+	maxBodyBytes, err := parseTriggerByteSize(triggerWebhookMaxBody)
+	if err != nil {
+		return nil, newUsageError("invalid --max-body: %v", err)
+	}
+	if triggerWebhookRate < 0 || triggerWebhookBurst < 0 {
+		return nil, newUsageError("--rate and --burst must be non-negative")
+	}
+	if triggerWebhookReplayWindow < 0 {
+		return nil, newUsageError("--replay-window must be non-negative")
 	}
 
 	agentRef := strings.TrimSpace(triggerWebhookAgent)
@@ -294,8 +349,18 @@ func buildCreateWebhookEndpointRequest() (*hubclient.CreateWebhookEndpointReques
 	}
 
 	req := &hubclient.CreateWebhookEndpointRequest{
-		Name:        name,
-		Description: triggerWebhookDescription,
+		Name:                name,
+		Description:         triggerWebhookDescription,
+		AuthMode:            authMode,
+		AllowProjectAgents:  triggerWebhookAllowProjectAgents,
+		MaxBodyBytes:        maxBodyBytes,
+		ReplayWindowSeconds: triggerWebhookReplayWindow,
+	}
+	if triggerWebhookRate > 0 || triggerWebhookBurst > 0 {
+		req.RateLimit = &hubclient.WebhookEndpointRateLimitSpec{
+			PerSecond: triggerWebhookRate,
+			Burst:     triggerWebhookBurst,
+		}
 	}
 
 	if triggerWebhookToSelf {
@@ -706,6 +771,12 @@ func init() {
 
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookName, "name", "", "Webhook endpoint name (required)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookDescription, "description", "", "Optional endpoint description")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookAuth, "auth", "", "Authentication mode (hmac or hub_token; default hmac)")
+	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookAllowProjectAgents, "allow-project-agents", false, "Allow any agent in the same project to send to this hub_token endpoint")
+	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookReplayWindow, "replay-window", 0, "Timestamp replay tolerance in seconds (30-900; default 300)")
+	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookRate, "rate", 0, "Per-endpoint ingress rate limit in requests/sec (0 = hub default 10)")
+	triggerWebhookCreateCmd.Flags().IntVar(&triggerWebhookBurst, "burst", 0, "Per-endpoint ingress burst limit (0 = hub default 60)")
+	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookMaxBody, "max-body", "", "Per-endpoint max body size in bytes or KiB (e.g. 16384 or 16KiB; max 64KiB)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookAgent, "agent", "", "Create a default message trigger targeting this agent name or ID (requires --message)")
 	triggerWebhookCreateCmd.Flags().BoolVar(&triggerWebhookToSelf, "to-self", false, "Bind the endpoint to the calling agent via its Hub identity and create a default message trigger to self (deleted with the agent unless --persistent)")
 	triggerWebhookCreateCmd.Flags().StringVar(&triggerWebhookBind, "bind", "", "Bind the endpoint to an agent name or ID (user callers)")

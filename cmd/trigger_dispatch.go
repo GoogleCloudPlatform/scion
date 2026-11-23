@@ -467,16 +467,18 @@ func formatTriggerAPIError(err error) error {
 // --- scion trigger update ---
 
 var (
-	triggerUpdateName        string
-	triggerUpdateDescription string
-	triggerUpdateWebhookRef  string
-	triggerUpdateGitHub      bool
-	triggerUpdateMatchTypes  []string
-	triggerUpdateWhereRules  []string
-	triggerUpdateWhereFile   string
-	triggerUpdateSubjectExpr string
-	triggerUpdateOnSubject   string
-	triggerUpdateRevision    int
+	triggerUpdateName              string
+	triggerUpdateDescription       string
+	triggerUpdateWebhookRef        string
+	triggerUpdateGitHub            bool
+	triggerUpdateMatchTypes        []string
+	triggerUpdateWhereRules        []string
+	triggerUpdateWhereFile         string
+	triggerUpdateSubjectExpr       string
+	triggerUpdateOnSubject         string
+	triggerUpdateMaxFiresPerMinute int
+	triggerUpdateMaxConcurrent     int
+	triggerUpdateRevision          int
 
 	triggerUpdateAction    string
 	triggerUpdateAgent     string
@@ -533,6 +535,22 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 	if flags.Changed("description") {
 		desc := triggerUpdateDescription
 		req.Description = &desc
+		anyChange = true
+	}
+	if flags.Changed("max-per-minute") {
+		if triggerUpdateMaxFiresPerMinute < 0 {
+			return newUsageError("--max-per-minute must be non-negative")
+		}
+		v := triggerUpdateMaxFiresPerMinute
+		req.MaxFiresPerMinute = &v
+		anyChange = true
+	}
+	if flags.Changed("max-concurrent") {
+		if triggerUpdateMaxConcurrent < 0 {
+			return newUsageError("--max-concurrent must be non-negative")
+		}
+		v := triggerUpdateMaxConcurrent
+		req.MaxConcurrentDispatches = &v
 		anyChange = true
 	}
 	if flags.Changed("webhook") || flags.Changed("github") {
@@ -851,6 +869,8 @@ func init() {
 	f.StringVar(&triggerUpdateWhereFile, "where-file", "", "Path to JSON file containing updated ordered {dialect, expr} match rules")
 	f.StringVar(&triggerUpdateSubjectExpr, "subject", "", "Updated CEL subject expression")
 	f.StringVar(&triggerUpdateOnSubject, "on-subject", "", "Updated subject concurrency policy (new or skip)")
+	f.IntVar(&triggerUpdateMaxFiresPerMinute, "max-per-minute", 0, "Updated maximum fires per minute (0 = unlimited; max 600)")
+	f.IntVar(&triggerUpdateMaxConcurrent, "max-concurrent", 0, "Updated maximum concurrent live agents for dispatch-agent triggers (0 = default 5; max 50)")
 	f.IntVar(&triggerUpdateRevision, "revision", 0, "Expected authorization revision for optimistic concurrency")
 
 	f.StringVar(&triggerUpdateAction, "action", "", "Action kind (message or dispatch-agent)")

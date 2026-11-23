@@ -2911,3 +2911,72 @@ func TestTriggerCLI_GitHubCreateGetAndList(t *testing.T) {
 	assert.Contains(t, listOut, "gh-ping")
 	assert.NotContains(t, listOut, "github:")
 }
+
+func TestTriggerP4aCLIFlags(t *testing.T) {
+	origName := triggerWebhookName
+	origAuth := triggerWebhookAuth
+	origAllowProj := triggerWebhookAllowProjectAgents
+	origReplay := triggerWebhookReplayWindow
+	origRate := triggerWebhookRate
+	origBurst := triggerWebhookBurst
+	origMaxBody := triggerWebhookMaxBody
+	origAgent := triggerWebhookAgent
+	origToSelf := triggerWebhookToSelf
+	origMsg := triggerWebhookMessage
+	origInt := triggerWebhookInterrupt
+	origWake := triggerWebhookWake
+	t.Cleanup(func() {
+		triggerWebhookName = origName
+		triggerWebhookAuth = origAuth
+		triggerWebhookAllowProjectAgents = origAllowProj
+		triggerWebhookReplayWindow = origReplay
+		triggerWebhookRate = origRate
+		triggerWebhookBurst = origBurst
+		triggerWebhookMaxBody = origMaxBody
+		triggerWebhookAgent = origAgent
+		triggerWebhookToSelf = origToSelf
+		triggerWebhookMessage = origMsg
+		triggerWebhookInterrupt = origInt
+		triggerWebhookWake = origWake
+	})
+
+	triggerWebhookName = "p4a-ep"
+	triggerWebhookAuth = "hub_token"
+	triggerWebhookAllowProjectAgents = true
+	triggerWebhookReplayWindow = 120
+	triggerWebhookRate = 5
+	triggerWebhookBurst = 20
+	triggerWebhookMaxBody = "16KiB"
+	triggerWebhookAgent = ""
+	triggerWebhookToSelf = false
+	triggerWebhookMessage = ""
+	triggerWebhookInterrupt = false
+	triggerWebhookWake = false
+
+	req, err := buildCreateWebhookEndpointRequest()
+	require.NoError(t, err)
+	assert.Equal(t, "hub_token", req.AuthMode)
+	assert.True(t, req.AllowProjectAgents)
+	assert.Equal(t, 120, req.ReplayWindowSeconds)
+	assert.Equal(t, 16*1024, req.MaxBodyBytes)
+	require.NotNil(t, req.RateLimit)
+	assert.Equal(t, 5, req.RateLimit.PerSecond)
+	assert.Equal(t, 20, req.RateLimit.Burst)
+
+	// Invalid --auth is rejected locally.
+	triggerWebhookAuth = "bogus"
+	_, err = buildCreateWebhookEndpointRequest()
+	require.Error(t, err)
+
+	// Invalid --max-body is rejected locally.
+	triggerWebhookAuth = "hmac"
+	triggerWebhookMaxBody = "not-a-size"
+	_, err = buildCreateWebhookEndpointRequest()
+	require.Error(t, err)
+
+	// Verify trigger create flags --max-per-minute and --max-concurrent.
+	assert.NotNil(t, triggerCreateCmd.Flags().Lookup("max-per-minute"))
+	assert.NotNil(t, triggerCreateCmd.Flags().Lookup("max-concurrent"))
+	assert.NotNil(t, triggerUpdateCmd.Flags().Lookup("max-per-minute"))
+	assert.NotNil(t, triggerUpdateCmd.Flags().Lookup("max-concurrent"))
+}
