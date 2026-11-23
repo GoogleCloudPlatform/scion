@@ -47,6 +47,8 @@ interface SummaryData {
   totalApiCalls: number;
   totalTokens: number;
   uniqueAgents: number;
+  /** Actionable setup hint when cloud telemetry cannot export under current settings. */
+  telemetryHint?: string;
 }
 
 interface SessionsData {
@@ -261,6 +263,10 @@ export class ScionPageMetrics extends LitElement {
       font-size: 2.5rem;
       margin-bottom: 1rem;
       display: block;
+    }
+
+    .telemetry-hint {
+      margin-bottom: 1rem;
     }
   `;
 
@@ -614,7 +620,14 @@ export class ScionPageMetrics extends LitElement {
             </sl-alert>
           `
         : nothing}
-
+      ${this.summary?.telemetryHint
+        ? html`
+            <sl-alert variant="warning" open class="telemetry-hint">
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${this.summary.telemetryHint}
+            </sl-alert>
+          `
+        : nothing}
       <sl-tab-group @sl-tab-show=${this.handleTabChange}>
         <sl-tab slot="nav" panel="summary" ?active=${this.activeTab === 'summary'}>Summary</sl-tab>
         <sl-tab slot="nav" panel="sessions" ?active=${this.activeTab === 'sessions'}

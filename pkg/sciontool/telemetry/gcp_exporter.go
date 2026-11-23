@@ -135,6 +135,9 @@ func (e *GCPExporter) reportAsyncLogError(err error) {
 	e.asyncLogErrors.Add(1)
 	if e.onAsyncLogError != nil {
 		e.onAsyncLogError(err)
+		if isPermanentAuthError(err) {
+			return
+		}
 	}
 	log.Error("Cloud Logging asynchronous delivery failed: %v", err)
 }
@@ -254,7 +257,11 @@ func (e *GCPExporter) ExportProtoLogs(ctx context.Context, resourceLogs []*logsp
 	}
 	if e.logger != nil && e.logSink == nil {
 		if err := e.logger.Flush(); err != nil {
-			return &partialSuccessError{message: fmt.Sprintf("Cloud Logging flush failed with unknown per-record outcome: %v", err)}
+			return &partialSuccessError{
+				message:    fmt.Sprintf("Cloud Logging flush failed with unknown per-record outcome: %v", err),
+				causeClass: classifyError(err),
+				statusCode: status.Code(err).String(),
+			}
 		}
 	}
 	return nil

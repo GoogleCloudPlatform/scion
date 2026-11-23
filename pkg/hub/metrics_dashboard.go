@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -29,6 +30,7 @@ import (
 
 	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	gax "github.com/googleapis/gax-go/v2"
@@ -233,7 +235,13 @@ type DashboardSummary struct {
 	TotalAPICalls int64  `json:"totalApiCalls"`
 	TotalTokens   int64  `json:"totalTokens"`
 	UniqueAgents  int    `json:"uniqueAgents"`
+	// TelemetryHint surfaces an actionable setup hint when cloud telemetry
+	// cannot export under the current hub/project configuration (for example,
+	// GCP cloud telemetry on in metadata block mode without credentials).
+	TelemetryHint string `json:"telemetryHint,omitempty"`
 }
+
+const missingGCPTelemetryCredentialsHint = "Cloud telemetry is enabled for GCP, but the default metadata mode is block and the scion-telemetry-gcp-credentials secret is not configured. Agents without an assigned service account cannot export metrics to Cloud Monitoring, so this dashboard will stay empty. Configure the scion-telemetry-gcp-credentials Hub secret, assign a service account (--service-account), or remove provider: gcp and point telemetry.cloud.endpoint at a local OpenTelemetry Collector."
 
 // TimeSeriesPoint represents a single data point in a time series.
 type TimeSeriesPoint struct {
@@ -1172,6 +1180,11 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 			slog.Warn("Partial metrics query failure", "view", view, "error", err)
 
 		}
+		if hint := s.metricsTelemetryHint(ctx, applyQueryOptions(opts).ProjectID); hint != "" {
+			cp := *data
+			cp.TelemetryHint = hint
+			data = &cp
+		}
 		writeJSON(w, http.StatusOK, data)
 
 	case "sessions":
@@ -1217,4 +1230,101 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		writeError(w, http.StatusBadRequest, "invalid_view",
 			fmt.Sprintf("Unknown view: %s. Valid views: summary, sessions, model-calls, tokens", view), nil)
 	}
+}
+
+// metricsTelemetryHint returns an actionable dashboard hint when GCP cloud
+// telemetry is enabled, the effective default metadata mode is block, and the
+// scion-telemetry-gcp-credentials secret is not configured.
+func (s *Server) metricsTelemetryHint(ctx context.Context, projectID string) string {
+	tel := s.hubTelemetryDefault()
+	if tel == nil || tel.Cloud == nil || tel.Cloud.Provider != "gcp" {
+		return ""
+	}
+	if tel.Cloud.Enabled != nil && !*tel.Cloud.Enabled {
+		return ""
+	}
+
+	var project *store.Project
+	if projectID != "" && s.store != nil {
+		if p, err := s.store.GetProject(ctx, projectID); err == nil {
+			project = p
+		}
+	}
+	if policy := projectTelemetryPolicy(project); policy != nil {
+		if !*policy {
+			return ""
+		}
+	} else if tel.Enabled != nil && !*tel.Enabled {
+		return ""
+	}
+
+	mode := s.hubAgentDefaults().DefaultGCPIdentityMode
+	if project != nil {
+		if pm := projectSettingsFromAnnotations(project).DefaultGCPIdentityMode; pm != "" {
+			mode = pm
+		}
+	}
+	if mode != "" && mode != store.GCPMetadataModeBlock {
+		return ""
+	}
+	if mode == "" && s.allBrokersKubernetesOnly(ctx) {
+		return ""
+	}
+
+	if s.secretBackend == nil {
+		return ""
+	}
+	meta, err := s.secretBackend.GetMeta(ctx, telemetryGCPCredentialsSecretName, store.ScopeHub, s.hubID)
+	if err == nil && meta != nil && meta.SecretType == store.SecretTypeFile && secret.HubSecretDeliverable(*meta) {
+		return ""
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return ""
+	}
+	if projectID != "" {
+		pMeta, pErr := s.secretBackend.GetMeta(ctx, telemetryGCPCredentialsSecretName, store.ScopeProject, projectID)
+		if pErr == nil && pMeta != nil && pMeta.SecretType == store.SecretTypeFile {
+			return ""
+		}
+		if pErr != nil && !errors.Is(pErr, store.ErrNotFound) {
+			return ""
+		}
+	}
+	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil && userIdent.ID() != "" {
+		uMeta, uErr := s.secretBackend.GetMeta(ctx, telemetryGCPCredentialsSecretName, store.ScopeUser, userIdent.ID())
+		if uErr == nil && uMeta != nil && uMeta.SecretType == store.SecretTypeFile {
+			return ""
+		}
+		if uErr != nil && !errors.Is(uErr, store.ErrNotFound) {
+			return ""
+		}
+	}
+
+	return missingGCPTelemetryCredentialsHint
+}
+
+// allBrokersKubernetesOnly reports whether the hub has at least one registered
+// runtime broker and every registered broker profile is a Kubernetes runtime
+// (where an unset GCP identity mode defaults to passthrough rather than block).
+func (s *Server) allBrokersKubernetesOnly(ctx context.Context) bool {
+	if s.store == nil {
+		return false
+	}
+	res, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{})
+	if err != nil || res == nil || len(res.Items) == 0 {
+		return false
+	}
+	sawProfile := false
+	for _, b := range res.Items {
+		if len(b.Profiles) == 0 {
+			return false
+		}
+		for _, p := range b.Profiles {
+			sawProfile = true
+			if !isKubernetesRuntimeType(p.Type) {
+				return false
+			}
+		}
+	}
+	return sawProfile
 }

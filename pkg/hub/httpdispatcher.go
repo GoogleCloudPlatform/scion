@@ -1381,6 +1381,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// wrapper, which is the step that guarantees no later merge on any path
 	// reaches the broker.
 	sealCreateRequest(ctx, req)
+	d.warnGCPTelemetryBlockedWithoutCredentials(ctx, agent, tel, req.ResolvedEnv, req.ResolvedSecrets)
 
 	// GitHub App token minting: if the project has a GitHub App installation,
 	// always mint an installation token. GitHub App tokens take priority over
@@ -4290,6 +4291,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// the top tier (ptone/scion#4222).
 	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
+	d.warnGCPTelemetryBlockedWithoutCredentials(ctx, agent, tel, resolvedEnv, startEnv.secrets)
 
 	// Thread through updated InlineConfig so the broker can apply config
 	// changes (e.g. max_turns) made after initial provisioning.
@@ -4611,6 +4613,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// sends no inline config, so it never carries inline telemetry.
 	tel := d.dispatchTelemetry(agent, projectInfo.telemetryPolicy)
 	tel.injectRequesterEnabled(resolvedEnv, &envClassifications)
+	d.warnGCPTelemetryBlockedWithoutCredentials(ctx, agent, tel, resolvedEnv, startEnv.secrets)
 	// image_tag, resolved once for both the explicit image and the hub
 	// defaults (ptone/scion#6625).
 	imageTag := d.dispatchImageTag(agent)

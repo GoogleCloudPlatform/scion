@@ -25,7 +25,7 @@ type diagnosticLogBackend struct {
 
 func (b *diagnosticLogBackend) Export(context.Context, *colLog.ExportLogsServiceRequest) (*colLog.ExportLogsServiceResponse, error) {
 	if b.fail.Load() {
-		return nil, status.Error(codes.PermissionDenied, "local fake rejection")
+		return nil, status.Error(codes.FailedPrecondition, "local fake rejection")
 	}
 	return &colLog.ExportLogsServiceResponse{}, nil
 }
@@ -60,7 +60,7 @@ func TestRuntimeDeliverySnapshotsSurviveBrokenDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := []*logpb.ResourceLogs{{ScopeLogs: []*logpb.ScopeLogs{{LogRecords: []*logpb.LogRecord{{EventName: "safe"}}}}}}
-	if err := p.handleLogs(ctx, request); status.Code(err) != codes.PermissionDenied {
+	if err := p.handleLogs(ctx, request); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("fake failure=%v", err)
 	}
 	if p.DeliveryState() != "degraded" {

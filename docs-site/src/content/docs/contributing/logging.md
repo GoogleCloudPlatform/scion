@@ -192,13 +192,13 @@ All three backends (stdout, OTel, Cloud Logging) operate independently and can b
 
 ## OpenTelemetry Export
 
-For more advanced setups, you can export logs via OpenTelemetry to GCP:
+For more advanced setups, you can export logs via OpenTelemetry to an OTLP collector (such as a local OpenTelemetry Collector forwarding to GCP; `monitoring.googleapis.com` does not accept OTLP directly):
 
 ```bash
-# Enable OTel log bridging
+# Enable OTel log bridging to an OTLP collector
 export SCION_OTEL_LOG_ENABLED=true
-export SCION_OTEL_ENDPOINT="monitoring.googleapis.com:443"
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+export SCION_OTEL_ENDPOINT="localhost:4317"
+export SCION_OTEL_INSECURE=true
 
 scion server start --enable-hub
 ```
