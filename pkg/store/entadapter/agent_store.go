@@ -2526,9 +2526,14 @@ func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expe
 		update := ac.Update().
 			Where(agent.IDEQ(uid), agent.StateVersionEQ(expectedVersion), agent.DeletedAtIsNil(), keepNative).
 			SetStateVersion(newVersion).
-			SetUpdated(time.Now()).
-			// Always set, never NULL: see buildAgentUpdate.
-			SetHarnessConfig(harnessConfigOf(applied))
+			SetUpdated(time.Now())
+		if applied != nil {
+			// Always set, never NULL: see buildAgentUpdate. Leave
+			// harness_config untouched when applied == nil so pending-config
+			// clears on a row whose applied_config failed to parse do not
+			// erase an existing shell marker.
+			update.SetHarnessConfig(harnessConfigOf(applied))
+		}
 		if appliedRaw != "" {
 			update.SetAppliedConfig(appliedRaw)
 		} else {

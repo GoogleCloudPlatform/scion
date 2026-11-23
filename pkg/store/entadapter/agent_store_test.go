@@ -1613,6 +1613,16 @@ func TestEntAgentToStore_PopulatesHarnessConfigOnUnparsableAppliedConfig(t *test
 	reloaded, err := s.GetAgent(ctx, shell.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "shell", reloaded.HarnessConfig, "UpdateAgent must preserve the shell marker when AppliedConfig is nil")
+
+	// UpdateAgentConfig with applied == nil (e.g. pending-config discard on a
+	// row whose applied_config failed to parse) must also leave harness_config
+	// untouched.
+	_, err = s.UpdateAgentConfig(ctx, shell.ID, reloaded.StateVersion, nil, nil)
+	require.NoError(t, err)
+
+	afterConfigUpdate, err := s.GetAgent(ctx, shell.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "shell", afterConfigUpdate.HarnessConfig, "UpdateAgentConfig(applied=nil) must preserve the shell marker")
 }
 
 // TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case:
