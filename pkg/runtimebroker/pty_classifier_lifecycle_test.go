@@ -249,6 +249,12 @@ exec "$TW_CLASSIFIER_TMUX" -S "$TW_CLASSIFIER_SOCKET" "$@"
 
 		select {
 		case <-ptyReady:
+		case <-readerDone:
+			select {
+			case <-ptyReady:
+			default:
+				t.Fatal("reader goroutine exited before PTY became ready")
+			}
 		case <-time.After(10 * time.Second):
 			t.Fatal("timed out waiting for initial tmux PTY output")
 		}
