@@ -69,16 +69,31 @@ func TestBuildCommonRunArgs_RefusesVolumesReachingControlPaths(t *testing.T) {
 	if err := os.Symlink(global, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
+	dockerDir := filepath.Join(home, ".docker")
+	dockerSock := filepath.Join(dockerDir, "run", "docker.sock")
+	if err := os.MkdirAll(filepath.Dir(dockerSock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dockerSock, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dockerConfig := filepath.Join(dockerDir, "config.json")
+	if err := os.WriteFile(dockerConfig, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name, src := range map[string]string{
-		"global dir":        global,
-		"home":              home,
-		"home via tilde":    "~",
-		"credentials file":  filepath.Join(global, "broker-credentials.json"),
-		"settings file":     filepath.Join(global, "settings.yaml"),
-		"templates (floor)": filepath.Join(global, "templates"),
-		"bare project dir":  filepath.Join(global, "projects", "p"),
-		"symlink to global": link,
-		"relative path":     "./data",
+		"global dir":            global,
+		"home":                  home,
+		"home via tilde":        "~",
+		"credentials file":      filepath.Join(global, "broker-credentials.json"),
+		"settings file":         filepath.Join(global, "settings.yaml"),
+		"templates (floor)":     filepath.Join(global, "templates"),
+		"bare project dir":      filepath.Join(global, "projects", "p"),
+		"symlink to global":     link,
+		"relative path":         "./data",
+		"home docker socket":    dockerSock,
+		"home docker dir":       dockerDir,
+		"home docker via tilde": "~/.docker",
 	} {
 		for _, ro := range []bool{false, true} {
 			t.Run(name, func(t *testing.T) {
@@ -88,6 +103,10 @@ func TestBuildCommonRunArgs_RefusesVolumesReachingControlPaths(t *testing.T) {
 				}
 			})
 		}
+	}
+	// Mounting ~/.docker/config.json directly as a file remains allowed.
+	if _, err := buildCommonRunArgs(controlPathRunConfig(api.VolumeMount{Source: dockerConfig, Target: "/home/scion/.docker/config.json", ReadOnly: true})); err != nil {
+		t.Fatalf("mounting ~/.docker/config.json should be allowed, got: %v", err)
 	}
 }
 

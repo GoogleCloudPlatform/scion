@@ -31,9 +31,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// hostedSocketVolume is a member-written host bind that no Runtime Broker
+// hostedLocalVolume is a member-written host bind that no Runtime Broker
 // control path covers.
-const hostedSocketVolume = `{"source": "/var/run/docker.sock", "target": "/var/run/docker.sock"}`
+const hostedLocalVolume = `{"source": "/srv/shared-data", "target": "/mnt/shared-data"}`
 
 func decodeError(t *testing.T, w *httptest.ResponseRecorder) (code, message string) {
 	t.Helper()
@@ -46,8 +46,8 @@ func decodeError(t *testing.T, w *httptest.ResponseRecorder) (code, message stri
 
 func TestCreateAgent_HostedRefusesMemberVolumes(t *testing.T) {
 	for _, vols := range []string{
-		`"config": {"volumes": [` + hostedSocketVolume + `]}`,
-		`"inlineConfig": {"volumes": [` + hostedSocketVolume + `]}`,
+		`"config": {"volumes": [` + hostedLocalVolume + `]}`,
+		`"inlineConfig": {"volumes": [` + hostedLocalVolume + `]}`,
 		`"inlineConfig": {"volumes": [{"source": "/etc", "target": "/host-etc", "read_only": true}]}`,
 		`"inlineConfig": {"volumes": [{"type": "nfs", "server": "10.1.2.3", "source": "/export", "target": "/n"}]}`,
 		`"inlineConfig": {"volumes": [{"type": "gcs", "bucket": "b", "target": "/b"}]}`,
@@ -129,7 +129,7 @@ func TestCreateAgent_WorkstationKeepsMemberVolumes(t *testing.T) {
 	mgr := &mockManager{}
 	srv := newTestServerWithManager(t, mgr)
 	srv.config.WorkstationMode = true
-	body := `{"name": "a1", "inlineConfig": {"volumes": [` + hostedSocketVolume + `]}}`
+	body := `{"name": "a1", "inlineConfig": {"volumes": [` + hostedLocalVolume + `]}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -142,7 +142,7 @@ func TestCreateAgent_WorkstationKeepsMemberVolumes(t *testing.T) {
 func TestStartAgent_HostedRefusesInlineMemberVolumes(t *testing.T) {
 	mgr := &mockManager{agents: []api.AgentInfo{{ID: "container-1", Name: "test-agent-1", Phase: "stopped"}}}
 	srv := newTestServerWithManager(t, mgr)
-	body := `{"inlineConfig": {"volumes": [` + hostedSocketVolume + `]}}`
+	body := `{"inlineConfig": {"volumes": [` + hostedLocalVolume + `]}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -154,7 +154,7 @@ func TestStartAgent_HostedRefusesInlineMemberVolumes(t *testing.T) {
 	if code != hostedguard.ErrorCode {
 		t.Fatalf("code = %q, want %q", code, hostedguard.ErrorCode)
 	}
-	want := `volume "/var/run/docker.sock": host volumes in agent config are not allowed on a hosted server`
+	want := `volume "/mnt/shared-data": host volumes in agent config are not allowed on a hosted server`
 	if !strings.HasPrefix(msg, want) {
 		t.Errorf("message = %q, want prefix %q", msg, want)
 	}
@@ -167,7 +167,7 @@ func TestStartAgent_WorkstationKeepsInlineMemberVolumes(t *testing.T) {
 	mgr := &mockManager{agents: []api.AgentInfo{{ID: "container-1", Name: "test-agent-1", Phase: "stopped"}}}
 	srv := newTestServerWithManager(t, mgr)
 	srv.config.WorkstationMode = true
-	body := `{"inlineConfig": {"volumes": [` + hostedSocketVolume + `]}}`
+	body := `{"inlineConfig": {"volumes": [` + hostedLocalVolume + `]}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent-1/start", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
