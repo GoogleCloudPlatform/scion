@@ -928,7 +928,7 @@ func TestAgentSecretsP2_L1_SoftDeleteRaceAndRetryCleanup(t *testing.T) {
 			OwnerID:         owner.ID,
 			CreatedBy:       owner.ID,
 			Ancestry:        []string{owner.ID},
-			Phase:           string(state.PhaseStarting),
+			Phase:           string(state.PhaseCreated),
 			AppliedConfig:   &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
 		}
 		require.NoError(t, s.CreateAgent(ctx, inflight))
@@ -943,7 +943,7 @@ func TestAgentSecretsP2_L1_SoftDeleteRaceAndRetryCleanup(t *testing.T) {
 		require.Equal(t, http.StatusConflict, rec.Code, "body=%s", rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "already in flight")
 
-		_, err := srv.GetSecretBackend().Get(ctx, "INFLIGHT_KEY", secret.ScopeAgent, inflight.ID)
+		_, err = srv.GetSecretBackend().Get(ctx, "INFLIGHT_KEY", secret.ScopeAgent, inflight.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound)
 	})
 }
