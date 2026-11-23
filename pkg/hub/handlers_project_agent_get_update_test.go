@@ -36,8 +36,8 @@ func TestProjectAgentGet_AuthorizationGap(t *testing.T) {
 	t.Run("non-member user is denied", func(t *testing.T) {
 		f := projectAgentAuthzSetup(t)
 		rec := doRequestAsUser(t, f.srv, f.nonMember, http.MethodGet, f.targetPath(), nil)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"a hub user who is not a project member must not read a project agent's record; got: %s", rec.Body.String())
+		assert.Equal(t, http.StatusNotFound, rec.Code,
+			"a hub user who is not a project member must receive 404 on project agent get; got: %s", rec.Body.String())
 	})
 
 	t.Run("project member sees the agent", func(t *testing.T) {
@@ -97,6 +97,41 @@ func TestProjectAgentGet_AuthorizationGap(t *testing.T) {
 			_, hasToken := got.AppliedConfig.Env["GITHUB_TOKEN"]
 			assert.False(t, hasToken, "GITHUB_TOKEN must never be returned")
 		}
+	})
+}
+
+// TestProjectAgentGet_DeniedReadMatchesNotFound verifies that a denied
+// GET /api/v1/projects/{projectId}/agents/{agentId} returns the same 404 status
+// and JSON body as a request for a nonexistent agent in the same project, for
+// both user and scoped-PAT callers.
+func TestProjectAgentGet_DeniedReadMatchesNotFound(t *testing.T) {
+	t.Run("non-member user", func(t *testing.T) {
+		f := projectAgentAuthzSetup(t)
+		deniedRec := doRequestAsUser(t, f.srv, f.nonMember, http.MethodGet, f.targetPath(), nil)
+		missingRec := doRequestAsUser(t, f.srv, f.nonMember, http.MethodGet,
+			"/api/v1/projects/"+f.project.ID+"/agents/does-not-exist-xyz", nil)
+
+		require.Equal(t, http.StatusNotFound, deniedRec.Code,
+			"denied project agent get must return 404; got: %s", deniedRec.Body.String())
+		require.Equal(t, http.StatusNotFound, missingRec.Code,
+			"missing project agent get must return 404; got: %s", missingRec.Body.String())
+		assert.JSONEq(t, missingRec.Body.String(), deniedRec.Body.String(),
+			"denied and missing project agent get responses must have identical JSON bodies")
+	})
+
+	t.Run("scoped user access token for another project", func(t *testing.T) {
+		f := projectAgentAuthzSetup(t)
+		uat := scopedIdentityFor(f.member, f.other.ID, []string{"agent:read"})
+		deniedRec := doRequestAsIdentity(t, f.srv, uat, http.MethodGet, f.targetPath(), nil)
+		missingRec := doRequestAsIdentity(t, f.srv, uat, http.MethodGet,
+			"/api/v1/projects/"+f.project.ID+"/agents/does-not-exist-xyz", nil)
+
+		require.Equal(t, http.StatusNotFound, deniedRec.Code,
+			"denied UAT project agent get must return 404; got: %s", deniedRec.Body.String())
+		require.Equal(t, http.StatusNotFound, missingRec.Code,
+			"missing project agent get must return 404; got: %s", missingRec.Body.String())
+		assert.JSONEq(t, missingRec.Body.String(), deniedRec.Body.String(),
+			"denied UAT and missing project agent get responses must have identical JSON bodies")
 	})
 }
 

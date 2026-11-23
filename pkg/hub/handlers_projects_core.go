@@ -3168,10 +3168,10 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		// A user identity (or no identity) reached no gate at all here before
 		// this fix: any authenticated hub user, project member or not, got
 		// every agent record in the project. Require agent.list on the
-		// project, matching what listAgents (handlers_agents_core.go) already
-		// enforces for the global list.
+		// project, returning 404 ("Project not found") on deny to match a
+		// missing project (consistent with authorizeRead, ptone/scion#2084).
 		gateDone := perfPhaseStart(ctx, perfPhaseListScopeAuthz)
-		allowed := s.authorize(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList)
+		allowed := s.authorizeReadAction(w, r, Resource{Type: "agent", ParentType: "project", ParentID: projectID}, ActionList, "Project")
 		gateDone()
 		if !allowed {
 			return
@@ -3351,11 +3351,11 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // (TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): agent.read
 // has no AgentScopes mapping, so the strict check would otherwise deny even
 // an agent reading its own record. getAgent applies the same exemption.
-// Reading a *different* agent in the caller's project goes through the
-// same agent.read check as getAgent (authorizeSingleAgentRead), which
-// denies it unless the caller launched that agent, directly or through
-// its descendants (authz_launcher_read.go). An agent caller that is denied, or that names
-// an agent in another project, gets the same 404 as for a missing agent.
+// Reading a *different* agent in the caller's project goes through
+// authorizeRead with agentStatusReadResource (which still enforces the
+// launcher status-read rule for agent callers in authz_launcher_read.go).
+// Both user/PAT and agent callers that are denied receive the same 404
+// ("Resource not found") as a missing agent (ptone/scion#2084).
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	// A project visitor gets the visitor view only (routeGuard admitted it
 	// through admitVisitorSubRoute for this request).
@@ -3383,7 +3383,7 @@ func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, project
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	if !isSelf {
-		if !s.authorizeSingleAgentRead(w, r, agent) {
+		if !s.authorizeRead(w, r, agentStatusReadResource(agent), "Resource") {
 			return
 		}
 	}

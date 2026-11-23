@@ -432,11 +432,11 @@ var compactParityCells = map[string]compactParityCell{
 
 	"member global":        {http.StatusOK, true},
 	"member project":       {http.StatusOK, true},
-	"member other-project": {http.StatusForbidden, false},
+	"member other-project": {http.StatusNotFound, false},
 
 	"hub-admin-non-member global":        {http.StatusOK, false},
-	"hub-admin-non-member project":       {http.StatusForbidden, false},
-	"hub-admin-non-member other-project": {http.StatusForbidden, false},
+	"hub-admin-non-member project":       {http.StatusNotFound, false},
+	"hub-admin-non-member other-project": {http.StatusNotFound, false},
 
 	"super-admin global":        {http.StatusOK, true},
 	"super-admin project":       {http.StatusOK, true},
@@ -448,18 +448,18 @@ var compactParityCells = map[string]compactParityCell{
 
 	"scoped-uat global":        {http.StatusOK, true},
 	"scoped-uat project":       {http.StatusOK, true},
-	"scoped-uat other-project": {http.StatusForbidden, false},
+	"scoped-uat other-project": {http.StatusNotFound, false},
 
 	"project-constrained global":        {http.StatusOK, true},
 	"project-constrained project":       {http.StatusOK, true},
-	"project-constrained other-project": {http.StatusForbidden, false},
+	"project-constrained other-project": {http.StatusNotFound, false},
 
 	"relationship-grant global":        {http.StatusOK, true},
 	"relationship-grant project":       {http.StatusOK, true},
-	"relationship-grant other-project": {http.StatusForbidden, false},
+	"relationship-grant other-project": {http.StatusNotFound, false},
 
 	"other-project-member global":        {http.StatusOK, true},
-	"other-project-member project":       {http.StatusForbidden, false},
+	"other-project-member project":       {http.StatusNotFound, false},
 	"other-project-member other-project": {http.StatusOK, true},
 
 	"other-project-agent-jwt global":        {http.StatusOK, false},

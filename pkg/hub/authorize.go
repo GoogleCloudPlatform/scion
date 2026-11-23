@@ -227,6 +227,14 @@ func (s *Server) authorizeWithEvidence(w http.ResponseWriter, r *http.Request, r
 // authorizeRead always evaluates ActionRead regardless of what actually
 // happens next, so it must never guard a non-read operation.
 func (s *Server) authorizeRead(w http.ResponseWriter, r *http.Request, resource Resource, notFoundLabel string) bool {
+	return s.authorizeReadAction(w, r, resource, ActionRead, notFoundLabel)
+}
+
+// authorizeReadAction is authorizeRead for read-only operations whose
+// permission action is not ActionRead (for example ActionList on
+// listProjectAgents). Only genuinely read-only actions should use this;
+// mutations must keep using authorize/authorizeMsg.
+func (s *Server) authorizeReadAction(w http.ResponseWriter, r *http.Request, resource Resource, action Action, notFoundLabel string) bool {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -237,9 +245,9 @@ func (s *Server) authorizeRead(w http.ResponseWriter, r *http.Request, resource 
 		NotFound(w, notFoundLabel)
 		return false
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, resource, ActionRead)
+	decision := s.authzService.CheckAccess(ctx, identity, resource, action)
 	if !decision.Allowed {
-		logAuthzDenial(r, identity, resource, ActionRead, decision.Reason)
+		logAuthzDenial(r, identity, resource, action, decision.Reason)
 		NotFound(w, notFoundLabel)
 		return false
 	}

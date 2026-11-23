@@ -290,15 +290,13 @@ func TestStopAllAgents_ScopeCapabilities_ProjectOwner(t *testing.T) {
 		"project owner should have stop_all in scope capabilities")
 
 	// Bob (non-member) should not reach this endpoint at all: listProjectAgents
-	// now requires agent.list on the project (fix-1908 F1 -- this route used
-	// to have no authorization check for a user identity, so a non-member
-	// used to get 200 back with an empty scope-capabilities list; the
-	// stronger, correct outcome is that they are denied the endpoint
-	// entirely, which trivially also means they never see "stop_all").
+	// requires agent.list on the project and returns 404 on deny (consistent
+	// with authorizeRead, ptone/scion#2084), which trivially also means Bob
+	// never sees "stop_all".
 	rec = doRequestAsUser(t, srv, bob, http.MethodGet,
 		"/api/v1/projects/"+project.ID+"/agents", nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"non-member should be denied the project agent list outright; got: %s", rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"non-member should receive 404 on the project agent list; got: %s", rec.Body.String())
 }
 
 // memberRequestOption adjusts the POST /members request body built by
