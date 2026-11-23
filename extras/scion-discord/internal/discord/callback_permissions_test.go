@@ -85,6 +85,12 @@ func TestSettingsButtons_RequireAdminAndProjectMembership(t *testing.T) {
 			wantReply: notProjectMemberText("alice@example.com", "proj-one"),
 		},
 		{
+			name:      "admin but member of another project only",
+			perms:     discordgo.PermissionAdministrator,
+			projects:  "other",
+			wantReply: notProjectMemberText("alice@example.com", "proj-one"),
+		},
+		{
 			name:      "admin but membership lookup fails",
 			perms:     discordgo.PermissionManageChannels,
 			projects:  "error",
@@ -246,6 +252,11 @@ func TestDefaultAndNotifButtons_RequireProjectMembership(t *testing.T) {
 			wantReply: notProjectMemberText("alice@example.com", "proj-one"),
 		},
 		{
+			name:      "member of another project only",
+			projects:  "other",
+			wantReply: notProjectMemberText("alice@example.com", "proj-one"),
+		},
+		{
 			name:      "membership lookup fails",
 			projects:  "error",
 			wantReply: msgProjectMembershipCheckFailed,
@@ -335,6 +346,12 @@ func TestAskUserCallbacks_RequireLinkedMember(t *testing.T) {
 			wantReply: notProjectMemberText("alice@example.com", "proj-one"),
 		},
 		{
+			name:      "member of another project only",
+			user:      luDiscordUser,
+			projects:  "other",
+			wantReply: notProjectMemberText("alice@example.com", "proj-one"),
+		},
+		{
 			name:      "membership lookup fails",
 			user:      luDiscordUser,
 			projects:  "error",
@@ -408,6 +425,7 @@ func TestAskUserCallbacks_RequireLinkedMember(t *testing.T) {
 			}
 			assert.Nil(t, delivered)
 			assert.False(t, stored.Responded)
+			assert.False(t, e.discord.hasMessageEdit(), "denied press must not edit the shared ask-user prompt")
 			assert.Contains(t, e.discord.allBodies(), jsonText(t, tc.wantReply))
 		})
 
@@ -448,6 +466,7 @@ func TestAskUserCallbacks_RequireLinkedMember(t *testing.T) {
 				return
 			}
 			assert.False(t, stored.Responded)
+			assert.False(t, e.discord.hasMessageEdit(), "denied dismiss must not edit the shared ask-user prompt")
 			assert.Contains(t, e.discord.allBodies(), jsonText(t, tc.wantReply))
 			assert.NotContains(t, e.discord.allBodies(), jsonText(t, "Dismissed."))
 		})
@@ -481,7 +500,62 @@ func TestAskUserCallbacks_RequireLinkedMember(t *testing.T) {
 			}
 			assert.Nil(t, delivered)
 			assert.False(t, stored.Responded)
+			assert.False(t, e.discord.hasMessageEdit(), "denied press must not edit the shared ask-user prompt")
 			assert.Contains(t, e.discord.allBodies(), jsonText(t, tc.wantReply))
 		})
 	}
+}
+
+func TestAskUserCallbacks_DeniedPressLeavesPromptAnswerable(t *testing.T) {
+	ctx := context.Background()
+	e := newLinkedUserEnv(t)
+	e.linkChannel(t)
+
+	pending := &PendingAskUser{
+		RequestID: "req-intact-1",
+		MessageID: "msg-intact-1",
+		ChannelID: luChannel,
+		AgentSlug: "worker",
+		ProjectID: luProject,
+		Choices:   []string{"yes", "no"},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	require.NoError(t, e.store.CreatePendingAskUser(ctx, pending))
+
+	var delivered []*messages.StructuredMessage
+	e.callback.deliverInbound = func(_ string, msg *messages.StructuredMessage) *hubError {
+		delivered = append(delivered, msg)
+		return nil
+	}
+
+	// Unlinked user attempts to dismiss and choose an option.
+	dismissID := "ask:dismiss:" + pending.RequestID
+	optID := "ask:opt:" + pending.RequestID + ":0"
+	e.callback.Dispatch(e.session, asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+		CustomID: dismissID,
+	}), luOtherUser), dismissID, nil)
+	e.callback.Dispatch(e.session, asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+		CustomID: optID,
+	}), luOtherUser), optID, nil)
+
+	assert.Empty(t, delivered)
+	assert.False(t, e.discord.hasMessageEdit(), "denied presses must not edit the original ask-user message")
+	stored, err := e.store.GetPendingAskUser(ctx, pending.RequestID)
+	require.NoError(t, err)
+	assert.False(t, stored.Responded)
+
+	// Authorized project member can still answer the prompt.
+	memberClick := luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+		CustomID: optID,
+	})
+	memberClick.Member.Permissions = 0
+	e.callback.Dispatch(e.session, memberClick, optID, nil)
+
+	require.Len(t, delivered, 1)
+	assert.Equal(t, luPrincipal, delivered[0].Sender)
+	assert.Equal(t, "yes", delivered[0].Msg)
+	assert.True(t, e.discord.hasMessageEdit(), "authorized answer should update the original ask-user message")
+	stored, err = e.store.GetPendingAskUser(ctx, pending.RequestID)
+	require.NoError(t, err)
+	assert.True(t, stored.Responded)
 }

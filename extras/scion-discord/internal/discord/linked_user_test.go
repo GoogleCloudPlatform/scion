@@ -35,8 +35,9 @@ type linkedUserHub struct {
 	mu    sync.Mutex
 	calls []recordedHubCall
 
-	// projects selects the GET /projects answer: "" returns one project,
-	// "empty" returns none, and "error" returns a 500.
+	// projects selects the GET /projects answer: "" returns luProject,
+	// "other" returns a different project only, "empty" returns none,
+	// and "error" returns a 500.
 	projects string
 
 	// fail maps "METHOD path" to an error answer for that request. A key
@@ -121,6 +122,8 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "empty":
 		_ = json.NewEncoder(w).Encode(hubProjectsResponse{})
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "other":
+		_ = json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p-other", Slug: "proj-other"}}})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "error":
 		w.WriteHeader(http.StatusInternalServerError)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
@@ -171,9 +174,16 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // discordStub is an http.RoundTripper standing in for the Discord REST API.
 // It answers every request with a minimal channel/message object and records
 // request bodies so tests can read the bot's replies.
+type discordStubRequest struct {
+	method string
+	path   string
+	body   string
+}
+
 type discordStub struct {
-	mu     sync.Mutex
-	bodies []string
+	mu       sync.Mutex
+	bodies   []string
+	requests []discordStubRequest
 	// failPath, when set, makes requests to that URL path answer 403.
 	failPath string
 }
@@ -185,6 +195,11 @@ func (d *discordStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	d.mu.Lock()
 	d.bodies = append(d.bodies, string(body))
+	d.requests = append(d.requests, discordStubRequest{
+		method: req.Method,
+		path:   req.URL.Path,
+		body:   string(body),
+	})
 	failing := d.failPath != "" && req.URL.Path == d.failPath
 	d.mu.Unlock()
 	if failing {
@@ -207,6 +222,19 @@ func (d *discordStub) allBodies() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return strings.Join(d.bodies, "\n")
+}
+
+// hasMessageEdit reports whether any recorded Discord REST request edited the
+// original interaction message or a channel message.
+func (d *discordStub) hasMessageEdit() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, r := range d.requests {
+		if r.method == http.MethodPatch && strings.Contains(r.path, "/messages/") {
+			return true
+		}
+	}
+	return false
 }
 
 type linkedUserEnv struct {
