@@ -64,6 +64,103 @@ func labelContains(key, value string) predicate.Agent {
 	}
 }
 
+// labelNotContains returns an Ent predicate restricting results to agents whose
+// `labels` JSON object does NOT contain the given key-value pair (NULL labels,
+// absent key, or different value).
+func labelNotContains(key, value string) predicate.Agent {
+	return func(s *entsql.Selector) {
+		col := s.C(agent.FieldLabels)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("(").
+					WriteString(col).
+					WriteString(" IS NULL OR NOT (").
+					WriteString(col).
+					WriteString(" @> ").
+					Arg(fmt.Sprintf(`{%q:%q}`, key, value)).
+					WriteString("::jsonb))")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				b.WriteString("(json_extract(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") IS NULL OR json_extract(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") != ").
+					Arg(value).
+					WriteString(")")
+			}))
+		}
+	}
+}
+
+// labelHasKey returns an Ent predicate restricting results to agents whose
+// `labels` JSON object contains the given key (with any value).
+//
+//	SQLite:   json_type(labels, '$."key"') IS NOT NULL
+//	Postgres: labels IS NOT NULL AND jsonb_exists(labels, $n)
+func labelHasKey(key string) predicate.Agent {
+	return func(s *entsql.Selector) {
+		col := s.C(agent.FieldLabels)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("(").
+					WriteString(col).
+					WriteString(" IS NOT NULL AND jsonb_exists(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(key).
+					WriteString("))")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				b.WriteString("json_type(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") IS NOT NULL")
+			}))
+		}
+	}
+}
+
+// labelNotHasKey returns an Ent predicate restricting results to agents whose
+// `labels` JSON object does NOT contain the given key (including NULL labels).
+func labelNotHasKey(key string) predicate.Agent {
+	return func(s *entsql.Selector) {
+		col := s.C(agent.FieldLabels)
+		switch s.Dialect() {
+		case dialect.Postgres:
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				b.WriteString("(").
+					WriteString(col).
+					WriteString(" IS NULL OR NOT jsonb_exists(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(key).
+					WriteString("))")
+			}))
+		default: // SQLite
+			s.Where(entsql.P(func(b *entsql.Builder) {
+				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
+				b.WriteString("json_type(").
+					WriteString(col).
+					WriteString(", ").
+					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
+					WriteString(") IS NULL")
+			}))
+		}
+	}
+}
+
 // projectLabelContains returns an Ent predicate restricting results to
 // projects whose `labels` JSON object contains the given key-value pair.
 func projectLabelContains(key, value string) predicate.Project {

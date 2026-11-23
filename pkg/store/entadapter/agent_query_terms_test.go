@@ -1,0 +1,204 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package entadapter
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery"
+	"github.com/GoogleCloudPlatform/scion/pkg/filterquery/schemas"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+func queryToStoreTerms(q filterquery.Query) *store.QueryTerms {
+	if q.IsEmpty() {
+		return nil
+	}
+	qt := &store.QueryTerms{
+		Text:        q.Text,
+		ExcludeText: q.ExcludeText,
+	}
+	for _, t := range q.Terms {
+		op := store.QueryOpEq
+		if t.Key == "label" {
+			allHasKey := true
+			allEq := true
+			for _, v := range t.Values {
+				if strings.Contains(v, "=") {
+					allHasKey = false
+				} else {
+					allEq = false
+				}
+			}
+			if allHasKey {
+				op = store.QueryOpHasKey
+			} else if allEq {
+				op = store.QueryOpLabelEq
+			}
+		}
+		vals := make([]string, len(t.Values))
+		for i, v := range t.Values {
+			if t.Key == "phase" {
+				vals[i] = strings.ToLower(v)
+			} else {
+				vals[i] = v
+			}
+		}
+		qt.Terms = append(qt.Terms, store.QueryTerm{
+			Field:  t.Key,
+			Values: vals,
+			Negate: t.Negate,
+			Op:     op,
+		})
+	}
+	return qt
+}
+
+func TestListAgents_QueryTerms_ConformanceParity(t *testing.T) {
+	as, projID := newTestAgentStore(t)
+	ctx := context.Background()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "filterquery", "testdata", "conformance.json"))
+	if err != nil {
+		t.Fatalf("read conformance.json: %v", err)
+	}
+	var cf struct {
+		Eval struct {
+			Rows []struct {
+				ID     string            `json:"id"`
+				Name   string            `json:"name"`
+				Slug   string            `json:"slug"`
+				Phase  string            `json:"phase"`
+				Labels map[string]string `json:"labels"`
+			} `json:"rows"`
+			Cases []struct {
+				Name      string   `json:"name"`
+				Query     string   `json:"query"`
+				ExpectIDs []string `json:"expectIds"`
+			} `json:"cases"`
+		} `json:"eval"`
+	}
+	if err := json.Unmarshal(raw, &cf); err != nil {
+		t.Fatalf("unmarshal conformance.json: %v", err)
+	}
+
+	idToLogical := make(map[string]string, len(cf.Eval.Rows))
+	for _, r := range cf.Eval.Rows {
+		uid := uuid.NewString()
+		idToLogical[uid] = r.ID
+		var labels map[string]string
+		if len(r.Labels) > 0 {
+			labels = r.Labels
+		}
+		if err := as.CreateAgent(ctx, &store.Agent{
+			ID:        uid,
+			Name:      r.Name,
+			Slug:      r.Slug,
+			ProjectID: projID,
+			Phase:     r.Phase,
+			Labels:    labels,
+		}); err != nil {
+			t.Fatalf("CreateAgent(%s): %v", r.ID, err)
+		}
+	}
+
+	for _, tc := range cf.Eval.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			q, fqErr := filterquery.Parse(tc.Query, schemas.Agents.HasKey)
+			if fqErr != nil {
+				t.Fatalf("Parse(%q): %v", tc.Query, fqErr)
+			}
+			res, err := as.ListAgents(ctx, store.AgentFilter{
+				ProjectID: projID,
+				Query:     queryToStoreTerms(q),
+			}, store.ListOptions{Limit: 100})
+			if err != nil {
+				t.Fatalf("ListAgents(%q): %v", tc.Query, err)
+			}
+			got := make([]string, 0, len(res.Items))
+			for _, item := range res.Items {
+				got = append(got, idToLogical[item.ID])
+			}
+			slices.Sort(got)
+			want := append([]string(nil), tc.ExpectIDs...)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Errorf("ListAgents(%q) = %v, want %v", tc.Query, got, want)
+			}
+			if res.TotalCount != len(want) {
+				t.Errorf("TotalCount(%q) = %d, want %d", tc.Query, res.TotalCount, len(want))
+			}
+		})
+	}
+}
+
+func TestListAgents_QueryTerms_AuthzIntersectionAndUnknownField(t *testing.T) {
+	as, p1ID := newTestAgentStore(t)
+	ctx := context.Background()
+
+	p2UID := uuid.New()
+	if _, err := as.client.Project.Create().SetID(p2UID).SetName("authz-p2").SetSlug("authz-p2").Save(ctx); err != nil {
+		t.Fatalf("CreateProject p2: %v", err)
+	}
+
+	a1 := &store.Agent{ID: uuid.NewString(), Name: "alpha-1", Slug: "alpha-1", ProjectID: p1ID, Phase: "running"}
+	a2 := &store.Agent{ID: uuid.NewString(), Name: "alpha-2", Slug: "alpha-2", ProjectID: p2UID.String(), Phase: "running"}
+	if err := as.CreateAgent(ctx, a1); err != nil {
+		t.Fatalf("CreateAgent a1: %v", err)
+	}
+	if err := as.CreateAgent(ctx, a2); err != nil {
+		t.Fatalf("CreateAgent a2: %v", err)
+	}
+
+	// Query matching both agents must still be restricted to AuthorizedProjectIDs.
+	res, err := as.ListAgents(ctx, store.AgentFilter{
+		AuthorizedProjectIDs: []string{p1ID},
+		Query: &store.QueryTerms{
+			Terms: []store.QueryTerm{
+				{Field: "phase", Values: []string{"running"}, Op: store.QueryOpEq},
+			},
+			Text: "alpha",
+		},
+	}, store.ListOptions{Limit: 100})
+	if err != nil {
+		t.Fatalf("ListAgents: %v", err)
+	}
+	if len(res.Items) != 1 || res.Items[0].ID != a1.ID {
+		t.Fatalf("got %d items, want only a1 (%s)", len(res.Items), a1.ID)
+	}
+
+	// Unknown field must return ErrInvalidInput, never a no-op.
+	_, err = as.ListAgents(ctx, store.AgentFilter{
+		Query: &store.QueryTerms{
+			Terms: []store.QueryTerm{
+				{Field: "unknown_field", Values: []string{"x"}, Op: store.QueryOpEq},
+			},
+		},
+	}, store.ListOptions{Limit: 100})
+	if !errors.Is(err, store.ErrInvalidInput) {
+		t.Fatalf("unknown field err = %v, want store.ErrInvalidInput", err)
+	}
+}
