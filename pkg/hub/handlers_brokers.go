@@ -158,7 +158,11 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		Forbidden(w)
 		return
 	}
-	if req.RuntimeTarget == nil && existingBroker != nil && !existingBroker.IsFlat() && !req.Force && s.isBrokerOnlineForReregister(r.Context(), existingBroker) {
+	// Guard accidental re-registration over a live broker (ptone/scion#2563).
+	// PreserveSettings re-mints ('scion hub brokers join-token create') are
+	// exempt: they are explicit, named, owner-only operations that only mint a
+	// join token and do not disconnect the broker until the token is redeemed.
+	if req.RuntimeTarget == nil && existingBroker != nil && !existingBroker.IsFlat() && !req.PreserveSettings && !req.Force && s.isBrokerOnlineForReregister(r.Context(), existingBroker) {
 		writeBrokerOnlineConflict(w, existingBroker.ID, existingBroker.Name, existingBroker.Status)
 		return
 	}

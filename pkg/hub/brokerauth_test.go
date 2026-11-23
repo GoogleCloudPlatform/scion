@@ -1308,6 +1308,15 @@ func TestBrokerReregistration_OnlineRefusedWithoutForce(t *testing.T) {
 		t.Errorf("unexpected BrokerOnlineError identity: id=%q name=%q", onlineErr.BrokerID, onlineErr.BrokerName)
 	}
 
+	// PreserveSettings re-mint (join-token create) succeeds without Force even while online.
+	respPreserve, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "online-guard-host", PreserveSettings: true}, "admin")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration with PreserveSettings=true failed: %v", err)
+	}
+	if respPreserve.BrokerID != resp1.BrokerID || !respPreserve.Reregistered || respPreserve.JoinToken == "" {
+		t.Errorf("expected reregistered PreserveSettings match for %s, got id=%s reregistered=%v token=%q", resp1.BrokerID, respPreserve.BrokerID, respPreserve.Reregistered, respPreserve.JoinToken)
+	}
+
 	// Re-registering with Force=true succeeds and reuses the same broker ID.
 	resp2, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "online-guard-host", Force: true}, "admin")
 	if err != nil {

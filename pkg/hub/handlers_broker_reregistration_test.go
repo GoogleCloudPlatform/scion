@@ -648,3 +648,51 @@ func TestBrokerReregistration_OnlineBrokerNonOwnerStillGets403(t *testing.T) {
 		"non-owner must receive 403 Forbidden before any online-broker 409 check; got: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), broker.ID, "403 must not leak matched broker ID")
 }
+
+// TestBrokerReregistration_OnlineBrokerPreserveSettingsAllowedWithoutForce
+// confirms that explicit join-token re-mints (PreserveSettings=true, as sent
+// by 'scion hub brokers join-token create') are exempt from the online-broker
+// 409 guard so the documented HA join-token takeover workflow works without
+// --force, while non-owners are still refused with 403.
+func TestBrokerReregistration_OnlineBrokerPreserveSettingsAllowedWithoutForce(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "rereg-online-owner-preserve")
+	nonOwner := newHubMemberUser(t, s, "rereg-online-nonowner-preserve")
+	broker := createReregistrationTestBroker(t, s, "rereg-online-broker-preserve", owner.ID)
+	broker.Status = store.BrokerStatusOnline
+	broker.LastHeartbeat = time.Now()
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	// Non-owner is still denied with 403 even with PreserveSettings=true.
+	denied := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:             broker.Name,
+		PreserveSettings: true,
+	})
+	assert.Equal(t, http.StatusForbidden, denied.Code,
+		"non-owner PreserveSettings re-mint on an online broker must still return 403; got: %s", denied.Body.String())
+	assertBrokerUnchanged(t, s, broker.ID)
+
+	// Owner can re-mint a join token for an online broker without Force,
+	// leaving the broker's existing settings unchanged.
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:             broker.Name,
+		PreserveSettings: true,
+		AutoProvide:      true,
+		Labels:           map[string]string{"env": "requested"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"PreserveSettings join-token re-mint for an online broker must succeed without force; got: %s", rec.Body.String())
+
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, broker.ID, resp.BrokerID)
+	assert.True(t, resp.Reregistered)
+	assert.NotEmpty(t, resp.JoinToken)
+
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.False(t, got.AutoProvide, "PreserveSettings must not change AutoProvide")
+	assert.Equal(t, map[string]string{"env": "baseline"}, got.Labels, "PreserveSettings must not change labels")
+}

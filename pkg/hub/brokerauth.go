@@ -248,7 +248,9 @@ type CreateBrokerRegistrationRequest struct {
 	// Force allows re-registering a broker that is currently online,
 	// replacing its credentials (which disconnects the running broker).
 	// When false and the matched broker is online, registration is refused
-	// with 409 Conflict (broker_online).
+	// with 409 Conflict (broker_online). Not required for PreserveSettings
+	// join-token re-mints, which are explicit named operations that do not
+	// disconnect the broker until the token is redeemed.
 	Force bool `json:"force,omitempty"`
 }
 
@@ -632,7 +634,12 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	if existingBroker.IsFlat() {
 		return nil, runtimeTargetChangedRefusal(existingBroker.ID, existingBroker.RuntimeTarget.ID, "")
 	}
-	if existingBroker != nil && !req.Force && isBrokerRecordOnline(existingBroker, time.Now()) {
+	// Service-layer backstop for the handler's online-broker guard
+	// (isBrokerOnlineForReregister), catching TOCTOU races and direct service
+	// callers. PreserveSettings re-mints ('scion hub brokers join-token create')
+	// are exempt because they are explicit, named, owner-only token mints that
+	// do not disconnect the broker until the token is redeemed.
+	if existingBroker != nil && !req.PreserveSettings && !req.Force && isBrokerRecordOnline(existingBroker, time.Now()) {
 		return nil, &BrokerOnlineError{
 			BrokerID:   existingBroker.ID,
 			BrokerName: existingBroker.Name,
