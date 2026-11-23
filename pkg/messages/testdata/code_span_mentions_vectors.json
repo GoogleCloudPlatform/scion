@@ -1,0 +1,186 @@
+{
+  "description": "Shared cross-language test vectors for standalone inline code-span mention parsing and rendering (ptone/scion#8783, ptone/scion#7476).",
+  "roster": {
+    "agents": [
+      { "id": "ag-alice", "slug": "alice", "name": "alice" },
+      { "id": "ag-bob", "slug": "bob", "name": "bob" },
+      { "id": "ag-coord", "slug": "coordinator", "name": "coordinator" },
+      { "id": "ag-my-agent", "slug": "my-agent", "name": "my-agent" },
+      { "id": "ag-my_agent", "slug": "my_agent", "name": "my_agent" }
+    ],
+    "users": [
+      { "id": "usr-jane", "name": "Jane Doe", "email": "jane.doe@example.com" }
+    ]
+  },
+  "cases": [
+    {
+      "name": "single_backtick_known_agent",
+      "text": "Please ask `@coordinator` to check.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["coordinator"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["coordinator"]
+    },
+    {
+      "name": "single_backtick_with_padding_whitespace",
+      "text": "Ping ` @alice ` when ready.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["alice"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["alice"]
+    },
+    {
+      "name": "double_backtick_single_mention",
+      "text": "Ping ``@alice`` and `` @bob ``.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["alice", "bob"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["alice", "bob"]
+    },
+    {
+      "name": "double_backtick_literal_backtick_escape_hatch",
+      "text": "Use `` `@alice` `` to mention without notifying.",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "escaped_backticks_not_promoted",
+      "text": "Escaped \\`@alice\\` stays literal.",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "multi_token_code_span_stays_code",
+      "text": "Run `@coordinator please run x` or `foo @bar` or `@alice @bob`.",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "extra_code_punctuation_stays_code",
+      "text": "Decorators `@foo()`, `@bar:`, `@alice.`, `@alice,` stay code.",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "unknown_decorator_token_roster_gated_on_web",
+      "text": "Lit uses `@state` and `@property` and `@Override`.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["state", "property", "Override"],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "surrounding_punctuation_outside_backticks",
+      "text": "Check (`@alice`), \"`@bob`\", `@coordinator`, **`@my-agent`**, and _`@my_agent`_.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["alice", "bob", "coordinator", "my-agent", "my_agent"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["alice", "bob", "coordinator", "my-agent", "my_agent"]
+    },
+    {
+      "name": "adjacent_word_chars_rejected",
+      "text": "Not foo`@alice` or `@bob`bar or prefix_`@coordinator`.",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "fenced_code_block_never_promoted",
+      "text": "```\n`@alice`\n@bob\n```\nAfter `@coordinator`.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["coordinator"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["coordinator"]
+    },
+    {
+      "name": "blockquote_never_promoted",
+      "text": "> `@alice` said hi\n\nFresh `@bob`.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["bob"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["bob"]
+    },
+    {
+      "name": "email_known_user_promoted",
+      "text": "Ask `@jane.doe@example.com` for sign-off.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["jane.doe@example.com"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["jane-doe"]
+    },
+    {
+      "name": "email_unknown_user_stays_code_on_web",
+      "text": "Ask `@stranger@example.com` or `@a@b@c`.",
+      "codeSpanOff": [],
+      "codeSpanOn": ["stranger@example.com"],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "npm_scope_and_paths_in_code_span_rejected",
+      "text": "Install `@playwright/test`, `@typescript-eslint/parser`, `@./local`, `@/abs`.",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "recipient_syntax_in_code_span_rejected",
+      "text": "Format is `@agent:alice`.",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": []
+    },
+    {
+      "name": "leading_code_span_mention",
+      "text": "`@alice` please check this",
+      "codeSpanOff": [],
+      "codeSpanOn": ["alice"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["alice"],
+      "leadingTarget": "alice",
+      "isLeadingOff": false,
+      "isLeadingOn": true
+    },
+    {
+      "name": "leading_double_backtick_mention",
+      "text": "  ``@alice``, please check this",
+      "codeSpanOff": [],
+      "codeSpanOn": ["alice"],
+      "webRenderedOff": [],
+      "webRenderedOn": ["alice"],
+      "leadingTarget": "alice",
+      "isLeadingOff": false,
+      "isLeadingOn": true
+    },
+    {
+      "name": "leading_escaped_wrapper_not_leading",
+      "text": "`` `@alice` `` please check this",
+      "codeSpanOff": [],
+      "codeSpanOn": [],
+      "webRenderedOff": [],
+      "webRenderedOn": [],
+      "leadingTarget": "alice",
+      "isLeadingOff": false,
+      "isLeadingOn": false
+    },
+    {
+      "name": "mixed_prose_and_code_span_order_and_dedup",
+      "text": "Hey `@alice`, cc @bob and `@ALICE`.",
+      "codeSpanOff": ["bob"],
+      "codeSpanOn": ["alice", "bob"],
+      "webRenderedOff": ["bob"],
+      "webRenderedOn": ["alice", "bob", "ALICE"]
+    }
+  ]
+}

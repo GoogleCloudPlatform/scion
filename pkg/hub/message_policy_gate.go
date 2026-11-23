@@ -863,9 +863,10 @@ func (s *Server) buildH2MessagePolicyFacts(
 ) (messagepolicy.Facts, []chatMemberEntry, bool, error) {
 	var factsErr error
 
+	mentionOpts := s.mentionOptions()
 	var mentionedAgentIDs []string
 	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
-		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentions(snap.msgBody), snap.senderSlug)
+		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentionsWithOptions(snap.msgBody, mentionOpts), snap.senderSlug)
 		if len(proseAgentMentions) > 0 {
 			agents, err := listAllProjectAgents(ctx, s.store, snap.projectID)
 			if err != nil {
@@ -891,7 +892,7 @@ func (s *Server) buildH2MessagePolicyFacts(
 	var mentionedUserIDs []string
 	humans := preloadedHumans
 	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
-		if wrapped := messages.ExtractProseWrappedMentions(snap.msgBody); len(wrapped) > 0 {
+		if wrapped := messages.ExtractProseWrappedMentionsWithOptions(snap.msgBody, mentionOpts); len(wrapped) > 0 {
 			if !humansLoaded {
 				loadedHumans, err := s.projectHumanMembersStrict(ctx, snap.projectID)
 				if err != nil {

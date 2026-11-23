@@ -1948,7 +1948,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// agentContent untouched for agent dispatch — ptone/scion#8133).
 	displayContent := content
 	if len(humanMembers) > 0 {
-		displayContent = translateMentionsInbound(content, humanMembers)
+		displayContent = translateMentionsInboundWithOptions(content, humanMembers, s.mentionOptions())
 	}
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
@@ -2746,7 +2746,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	}
 	displayContent := content
 	if len(humanMembers) > 0 {
-		displayContent = translateMentionsInbound(content, humanMembers)
+		displayContent = translateMentionsInboundWithOptions(content, humanMembers, s.mentionOptions())
 	}
 
 	storeMsg := &store.Message{
@@ -3018,7 +3018,7 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 	}
 	if projectID != "" && strings.Contains(content, "@") {
 		if editHumanMembers := s.resolveProjectHumanMembers(ctx, projectID); len(editHumanMembers) > 0 {
-			content = translateMentionsInbound(content, editHumanMembers)
+			content = translateMentionsInboundWithOptions(content, editHumanMembers, s.mentionOptions())
 		}
 	}
 

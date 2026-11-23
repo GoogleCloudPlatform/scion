@@ -166,6 +166,7 @@ var dispatchExperimentNames = []string{
 	experiments.Decisions,
 	experiments.Artifacts,
 	experiments.MessagePolicies,
+	experiments.CodeSpanMentions,
 }
 
 // dispatchExperiments returns the dispatch experiments that are enabled

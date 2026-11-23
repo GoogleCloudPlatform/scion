@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -353,6 +354,38 @@ func TestResolveRoutingAgents_WrappedMentionsKeepAgentRoutingUnchanged(t *testin
 		assert.Equal(t, []string{"alpha"}, slugs(plan.Agents))
 		assert.Empty(t, plan.MentionNames)
 		assert.Equal(t, []string{"alice-smith", "bob-jones"}, plan.HumanMentionNames)
+	})
+}
+
+func TestResolveRoutingAgentsWithOptions_CodeSpanMentions(t *testing.T) {
+	alpha := makeAgent("id-alpha", "alpha")
+	foo := makeAgent("id-foo", "foo")
+	lister := &mockAgentLister{agents: []store.Agent{alpha, foo}}
+
+	t.Run("flag off ignores standalone code-span mention", func(t *testing.T) {
+		plan, err := resolveRoutingAgentsWithOptions(context.Background(), lister, "proj-1",
+			"`@foo` please check with `@jane@example.com`", agentPtr(alpha), messages.MentionOptions{CodeSpanMentions: false})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"alpha"}, slugs(plan.Agents))
+		assert.Empty(t, plan.MentionNames)
+		assert.Empty(t, plan.HumanMentionNames)
+	})
+
+	t.Run("flag on promotes leading code-span mention override and human code-span mention", func(t *testing.T) {
+		plan, err := resolveRoutingAgentsWithOptions(context.Background(), lister, "proj-1",
+			"`@foo` please check with `@jane@example.com` and ignore `` `@alpha` ``", agentPtr(alpha), messages.MentionOptions{CodeSpanMentions: true})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"foo"}, slugs(plan.Agents), "leading `@foo` should override default alpha")
+		assert.Equal(t, []string{"foo", "jane@example.com"}, plan.MentionNames)
+		assert.Equal(t, []string{"jane@example.com"}, plan.HumanMentionNames)
+	})
+
+	t.Run("flag on does not promote multi-token or slash code spans", func(t *testing.T) {
+		plan, err := resolveRoutingAgentsWithOptions(context.Background(), lister, "proj-1",
+			"`@foo please run` and `@playwright/test`", agentPtr(alpha), messages.MentionOptions{CodeSpanMentions: true})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"alpha"}, slugs(plan.Agents))
+		assert.Empty(t, plan.MentionNames)
 	})
 }
 

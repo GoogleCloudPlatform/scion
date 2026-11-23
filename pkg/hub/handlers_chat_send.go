@@ -912,14 +912,15 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// because of a planning error is not evidence the default agent is
 	// unreachable, so that case must keep the pre-existing human-to-human
 	// fallthrough instead of mislabelling the send "Agent unreachable".
+	mentionOpts := s.mentionOptions()
 	var planErr error
 	var humanMentionNames []string
 	if projectID != "" {
-		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
+		plan, planErr = resolveRoutingAgentsWithOptions(ctx, s.store, projectID, content, defaultAgent, mentionOpts)
 		if planErr != nil {
 			routingLookupFailed = true
 			slog.Error("agent routing resolution failed", "error", planErr)
-			humanMentionNames = messages.ExtractProseWrappedMentions(content)
+			humanMentionNames = messages.ExtractProseWrappedMentionsWithOptions(content, mentionOpts)
 			// Fall through: plan.Agents will be empty, triggering human-to-human.
 		} else {
 			humanMentionNames = plan.HumanMentionNames
@@ -927,8 +928,8 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	} else if defaultAgent != nil {
 		// No project context but DM default resolved: single-recipient plan.
 		plan.Agents = []*store.Agent{defaultAgent}
-		plan.MentionNames = messages.ExtractMentions(content)
-		humanMentionNames = messages.ExtractProseWrappedMentions(content)
+		plan.MentionNames = messages.ExtractMentionsWithOptions(content, mentionOpts)
+		humanMentionNames = messages.ExtractProseWrappedMentionsWithOptions(content, mentionOpts)
 	}
 
 	now := time.Now().UTC()

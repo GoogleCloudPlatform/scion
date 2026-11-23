@@ -14,7 +14,11 @@
 
 package hub
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
 
 func TestReplaceMention(t *testing.T) {
 	tests := []struct {
@@ -299,5 +303,20 @@ func TestTranslateMentionsSkipsMissingFields(t *testing.T) {
 	want := "@john-smith and @alice and @valid@example.com"
 	if got != want {
 		t.Errorf("translateMentionsOutbound with missing fields = %q, want %q", got, want)
+	}
+}
+
+func TestTranslateMentionsInboundWithOptions_CodeSpanMentions(t *testing.T) {
+	members := []chatMemberEntry{
+		{Kind: "user", DisplayName: "John Smith", Email: "john@example.com"},
+	}
+
+	content := "Ask `@john@example.com` and `` `@john@example.com` ``"
+	if got := translateMentionsInboundWithOptions(content, members, messages.MentionOptions{CodeSpanMentions: false}); got != content {
+		t.Errorf("CodeSpanMentions=false: got %q, want unchanged %q", got, content)
+	}
+	wantOn := "Ask `@john-smith` and `` `@john@example.com` ``"
+	if got := translateMentionsInboundWithOptions(content, members, messages.MentionOptions{CodeSpanMentions: true}); got != wantOn {
+		t.Errorf("CodeSpanMentions=true: got %q, want %q", got, wantOn)
 	}
 }

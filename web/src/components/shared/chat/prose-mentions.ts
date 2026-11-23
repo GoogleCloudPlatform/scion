@@ -24,6 +24,8 @@
  * for token boundaries and member matching.
  */
 
+import { codeSpanMentionsEnabled } from '../../../utils/feature-flags.js';
+
 /** Resolved participant targeted by "Reply all". */
 export interface Participant {
   kind: 'user' | 'agent';
@@ -160,17 +162,139 @@ function closesFence(trimmed: string, fenceChar: '`' | '~', fenceLen: number): b
   return trimmed.slice(n).trim() === '';
 }
 
+function isAsciiWordOrUnderscoreCode(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) || // 0-9
+    (code >= 0x41 && code <= 0x5a) || // A-Z
+    (code >= 0x61 && code <= 0x7a) || // a-z
+    code === 0x5f // _
+  );
+}
+
+function isValidCodeSpanSlug(s: string): boolean {
+  if (s.length === 0 || !isAsciiWordOrUnderscoreCode(s.charCodeAt(0)) || s.endsWith('.')) {
+    return false;
+  }
+  for (let i = 1; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (!isAsciiWordOrUnderscoreCode(c) && c !== 0x2d /* '-' */ && c !== 0x2e /* '.' */) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isValidCodeSpanEmailLocal(s: string): boolean {
+  if (s.length === 0 || !isAsciiWordOrUnderscoreCode(s.charCodeAt(0))) {
+    return false;
+  }
+  for (let i = 1; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (
+      !isAsciiWordOrUnderscoreCode(c) &&
+      c !== 0x2d /* '-' */ &&
+      c !== 0x2e /* '.' */ &&
+      c !== 0x2b /* '+' */
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Parse the inner text of an inline code span as an exact single mention token
+ * (`@<slug>` or `@<local>@<domain>`), matching Go's `parseCodeSpanMention`
+ * (`pkg/messages/mentions.go`). Optional leading/trailing ASCII spaces/tabs are
+ * trimmed; embedded newlines, `/`, trailing `.`, multi-`@`, and extra code
+ * punctuation are rejected.
+ */
+export function parseCodeSpanMention(inner: string): string | null {
+  if (/[\r\n]/.test(inner)) return null;
+  const trimmed = inner.replace(/^[ \t]+|[ \t]+$/g, '');
+  if (trimmed.length < 2 || trimmed.charAt(0) !== '@') return null;
+  const token = trimmed.slice(1);
+  const atIdx = token.indexOf('@');
+  if (atIdx >= 0) {
+    const local = token.slice(0, atIdx);
+    const domain = token.slice(atIdx + 1);
+    if (!isValidCodeSpanEmailLocal(local) || !isValidCodeSpanSlug(domain)) {
+      return null;
+    }
+    return token;
+  }
+  if (!isValidCodeSpanSlug(token)) return null;
+  return token;
+}
+
+/** Whether `chars[idx]` is preceded by an odd number of consecutive backslashes. */
+function isEscapedAt(chars: readonly string[], idx: number): boolean {
+  let bs = 0;
+  for (let j = idx - 1; j >= 0 && chars[j] === '\\'; j--) {
+    bs++;
+  }
+  return bs % 2 === 1;
+}
+
+const CODE_SPAN_ADJACENT_WORD_RE = /[\p{L}\p{N}_-]/u;
+
+function isCodeSpanWordChar(ch: string): boolean {
+  return CODE_SPAN_ADJACENT_WORD_RE.test(ch);
+}
+
+/**
+ * Whether an inline code span at `[start, end)` is not immediately adjacent to
+ * a word character or `@` (e.g. `foo`@bar`` or `` `@bar`foo ``). Emphasis
+ * underscores (`` _`@alice`_ ``) are permitted when not adjacent to word chars.
+ */
+function codeSpanHasValidBoundaries(chars: readonly string[], start: number, end: number): boolean {
+  if (start > 0) {
+    const prev = chars[start - 1];
+    if (prev === '_') {
+      let j = start - 1;
+      while (j >= 0 && chars[j] === '_') j--;
+      if (j >= 0 && (isCodeSpanWordChar(chars[j]) || chars[j] === '@')) {
+        return false;
+      }
+    } else if (isCodeSpanWordChar(prev) || prev === '@') {
+      return false;
+    }
+  }
+  if (end < chars.length) {
+    const next = chars[end];
+    if (next === '_') {
+      let j = end;
+      while (j < chars.length && chars[j] === '_') j++;
+      if (j < chars.length && (isCodeSpanWordChar(chars[j]) || chars[j] === '@')) {
+        return false;
+      }
+    } else if (isCodeSpanWordChar(next) || next === '@') {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Blank CommonMark inline code spans within a single prose line using spaces
- * so surrounding token boundaries are preserved; unmatched backtick runs stay
- * literal text.
+ * so surrounding token boundaries are preserved; unmatched or backslash-escaped
+ * backtick runs stay literal text. When `promoteCodeSpanMentions` is true,
+ * standalone single-mention inline code spans with valid boundaries are
+ * promoted to ` @<token> ` instead of blanked.
  */
-function stripInlineBackticks(line: string): string {
+function stripInlineBackticks(line: string, promoteCodeSpanMentions = false): string {
   if (!line.includes('`')) return line;
   const chars = [...line];
+  const out: string[] = [];
   let i = 0;
   while (i < chars.length) {
     if (chars[i] !== '`') {
+      out.push(chars[i]);
+      i++;
+      continue;
+    }
+    if (isEscapedAt(chars, i)) {
+      out.push(chars[i]);
       i++;
       continue;
     }
@@ -201,14 +325,26 @@ function stripInlineBackticks(line: string): string {
       }
     }
     if (closeStart === -1) {
+      for (let k = openStart; k < i; k++) {
+        out.push(chars[k]);
+      }
       continue;
     }
+    if (promoteCodeSpanMentions && codeSpanHasValidBoundaries(chars, openStart, closeEnd)) {
+      const inner = chars.slice(openStart + openLen, closeStart).join('');
+      const token = parseCodeSpanMention(inner);
+      if (token) {
+        out.push(` @${token} `);
+        i = closeEnd;
+        continue;
+      }
+    }
     for (let k = openStart; k < closeEnd; k++) {
-      chars[k] = ' ';
+      out.push(' ');
     }
     i = closeEnd;
   }
-  return chars.join('');
+  return out.join('');
 }
 
 const MENTION_TOKEN_RE =
@@ -219,9 +355,16 @@ const MENTION_TOKEN_RE =
  * leading `@`), skipping fenced code blocks, inline code spans, and `>`
  * blockquote lines. Preserves first-appearance order and deduplicates
  * identical tokens case-insensitively.
+ *
+ * When `opts.codeSpanMentions` is true, standalone single-mention inline code
+ * spans (such as `` `@coordinator` ``) are promoted to mentions.
  */
-export function extractProseMentionTokens(text: string): string[] {
+export function extractProseMentionTokens(
+  text: string,
+  opts?: { codeSpanMentions?: boolean }
+): string[] {
   if (!text) return [];
+  const promoteCodeSpans = opts?.codeSpanMentions ?? false;
   const rawLines = text.split(/\r?\n/);
   const tokens: string[] = [];
   const seen = new Set<string>();
@@ -248,13 +391,14 @@ export function extractProseMentionTokens(text: string): string[] {
       continue;
     }
 
-    const prose = stripInlineBackticks(line);
+    const prose = stripInlineBackticks(line, promoteCodeSpans);
     MENTION_TOKEN_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = MENTION_TOKEN_RE.exec(prose)) !== null) {
       const atIdx = match.index;
       const prev = atIdx > 0 ? prose.charAt(atIdx - 1) : '';
       if (prev && PRECEDING_NON_BOUNDARY_RE.test(prev)) continue;
+      if (prev === '`') continue;
 
       const afterIdx = atIdx + match[0].length;
       const next = prose.charAt(afterIdx);
@@ -325,9 +469,12 @@ function isOriginalSender(
 export function resolveReplyAllTargets(
   msg: MentionSourceMessage,
   roster: MentionRoster,
-  selfId: string
+  selfId: string,
+  opts?: { codeSpanMentions?: boolean }
 ): Participant[] {
-  const tokens = extractProseMentionTokens(msg.msg);
+  const tokens = extractProseMentionTokens(msg.msg, {
+    codeSpanMentions: opts?.codeSpanMentions ?? codeSpanMentionsEnabled(),
+  });
   if (tokens.length === 0) return [];
 
   const agentsByKey = new Map<string, IndexedAgent>();

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -55,11 +56,11 @@ func ParseQualifiedAgentRef(s string) (QualifiedAgentRef, error) {
 	if idx := strings.Index(s, "/"); idx >= 0 {
 		project := s[:idx]
 		agent := s[idx+1:]
-		if project == "" {
-			return QualifiedAgentRef{}, fmt.Errorf("empty project slug in qualified ref %q", "@"+s)
+		if project == "" || strings.HasPrefix(project, ".") {
+			return QualifiedAgentRef{}, fmt.Errorf("invalid project slug in qualified ref %q", "@"+s)
 		}
-		if agent == "" {
-			return QualifiedAgentRef{}, fmt.Errorf("empty agent slug in qualified ref %q", "@"+s)
+		if agent == "" || strings.HasPrefix(agent, ".") || strings.Contains(agent, "/") {
+			return QualifiedAgentRef{}, fmt.Errorf("invalid agent slug in qualified ref %q", "@"+s)
 		}
 		return QualifiedAgentRef{
 			ProjectSlug: project,
@@ -108,8 +109,17 @@ func (s *Server) ResolveFanOutTargets(
 			// Cross-project reference: resolve project by slug.
 			project, err := s.store.GetProjectBySlug(ctx, ref.ProjectSlug)
 			if err != nil || project == nil {
-				slog.Warn("ResolveFanOutTargets: project lookup failed",
-					"project_slug", ref.ProjectSlug, "error", err)
+				// Ordinary prose tokens such as npm scoped packages (@playwright/test)
+				// look like @project/agent until lookup confirms the project exists
+				// (ptone/scion#7476). Log not-found at Debug so they do not flood
+				// WARN logs; keep Warn for unexpected store errors.
+				if err == nil || errors.Is(err, store.ErrNotFound) {
+					slog.Debug("ResolveFanOutTargets: project not found",
+						"project_slug", ref.ProjectSlug)
+				} else {
+					slog.Warn("ResolveFanOutTargets: project lookup failed",
+						"project_slug", ref.ProjectSlug, "error", err)
+				}
 				targets = append(targets, FanOutTarget{
 					AgentSlug:  ref.AgentSlug,
 					ProjectID:  "",

@@ -205,7 +205,7 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 	}
 
 	// --- Resolve routing via shared planner ---
-	plan, planErr := resolveRoutingAgents(r.Context(), s.store, req.ProjectID, req.Message.Msg, defaultAgent)
+	plan, planErr := resolveRoutingAgentsWithOptions(r.Context(), s.store, req.ProjectID, req.Message.Msg, defaultAgent, s.mentionOptions())
 	if planErr != nil {
 		log.Error("agent routing resolution failed", "error", planErr)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
