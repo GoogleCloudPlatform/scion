@@ -85,14 +85,38 @@ func (c *srAuditLogger) reset() {
 
 type failingSecretBackend struct {
 	secret.SecretBackend
-	mu        sync.Mutex
-	failOnKey string
-	failErr   error
-	afterSet  func(ctx context.Context, input *secret.SetSecretInput)
+	mu                sync.Mutex
+	failOnKey         string
+	failErr           error
+	getMetaErrKey     string
+	getMetaErr        error
+	getMetaFailOnCall int // 0 or 1 = fail on first matching call; N = fail on Nth matching call
+	getMetaCalls      int
+	setCalls          int
+	afterSet          func(ctx context.Context, input *secret.SetSecretInput)
+}
+
+func (f *failingSecretBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
+	f.mu.Lock()
+	errKey := f.getMetaErrKey
+	metaErr := f.getMetaErr
+	failOn := f.getMetaFailOnCall
+	matched := errKey != "" && strings.EqualFold(name, errKey)
+	callNum := 0
+	if matched {
+		f.getMetaCalls++
+		callNum = f.getMetaCalls
+	}
+	f.mu.Unlock()
+	if matched && (failOn <= 1 || callNum >= failOn) {
+		return nil, metaErr
+	}
+	return f.SecretBackend.GetMeta(ctx, name, scope, scopeID)
 }
 
 func (f *failingSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
 	f.mu.Lock()
+	f.setCalls++
 	failKey := f.failOnKey
 	failErr := f.failErr
 	afterSet := f.afterSet
@@ -563,12 +587,12 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	rowsJSON, _ := json.Marshal(allRows)
 	require.NotContains(t, string(rowsJSON), canary, "canary leaked into secret_requests rows")
 
-	if fulResp.ResponseMessageID != "" {
-		respMsg, merr := f.store.GetMessage(ctx, fulResp.ResponseMessageID)
-		require.NoError(t, merr)
-		msgJSON, _ := json.Marshal(respMsg)
-		require.NotContains(t, string(msgJSON), canary, "canary leaked into secret-response message")
-	}
+	require.NotEmpty(t, fulResp.ResponseMessageID)
+	respMsg, merr := f.store.GetMessage(ctx, fulResp.ResponseMessageID)
+	require.NoError(t, merr)
+	require.Equal(t, "user:"+f.alice.Email, respMsg.Sender, "fulfill secret-response message must use userSenderAddress(user)")
+	msgJSON, _ := json.Marshal(respMsg)
+	require.NotContains(t, string(msgJSON), canary, "canary leaked into secret-response message")
 	auditJSON, _ := json.Marshal(f.audit.snapshot())
 	require.NotContains(t, string(auditJSON), canary, "canary leaked into audit events")
 	require.NotContains(t, f.logBuf.String(), canary, "canary leaked into hub logs")
@@ -618,6 +642,10 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rrDismiss.Body.Bytes(), &dsmResp))
 	require.Len(t, dsmResp.Dismissed, 1)
 	require.Equal(t, "DEPLOY_KEY", dsmResp.Dismissed[0].Key)
+	require.NotEmpty(t, dsmResp.ResponseMessageID)
+	dsmMsg, dmerr := f.store.GetMessage(ctx, dsmResp.ResponseMessageID)
+	require.NoError(t, dmerr)
+	require.Equal(t, "user:"+f.alice.Email, dsmMsg.Sender, "dismiss secret-response message must use userSenderAddress(user)")
 
 	// 8. Agent withdraw & list.
 	rrWd := f.doAgentJSON(t, http.MethodPost, "/api/v1/agent/secret-requests/withdraw", WithdrawSecretRequestsRequest{
@@ -1102,4 +1130,129 @@ func TestSecretRequests_FulfillRollbackPreservesExistingSecrets(t *testing.T) {
 	for _, r := range rows {
 		require.Equal(t, store.SecretRequestStatusPending, r.Status)
 	}
+}
+
+// TestSecretRequests_HardDeleteRacingFulfillDeletesRotatedKey verifies AC7:
+// when an agent hard-delete withdraws a fulfilling row while fulfill is in
+// backend.Set, the hub-withdrawn finish conflict deletes EVERY key written in
+// that call — including keys that already existed before the rotation — because
+// the agent is gone.
+func TestSecretRequests_HardDeleteRacingFulfillDeletesRotatedKey(t *testing.T) {
+	f := newSecretRequestsFixture(t, true)
+	ctx := context.Background()
+
+	// Pre-populate an existing secret at agent scope (rotation scenario).
+	_, _, err := f.backend.Set(ctx, &secret.SetSecretInput{
+		Name:          "HD_RACE_K1",
+		Value:         "old-value",
+		SecretType:    store.SecretTypeEnvironment,
+		Target:        "HD_RACE_K1",
+		Scope:         store.ScopeAgent,
+		ScopeID:       f.agent.ID,
+		InjectionMode: store.InjectionModeAsNeeded,
+		CreatedBy:     f.alice.ID,
+		UpdatedBy:     f.alice.ID,
+		ProjectID:     f.project.ID,
+	})
+	require.NoError(t, err)
+
+	rrSend := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "HD_RACE_K1", Description: "rotating key raced by hard delete"},
+	}, false)
+	require.Equal(t, http.StatusOK, rrSend.Code, rrSend.Body.String())
+	var card struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrSend.Body.Bytes(), &card))
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	f.backend.mu.Lock()
+	f.backend.afterSet = func(_ context.Context, input *secret.SetSecretInput) {
+		if input != nil && input.Name == "HD_RACE_K1" {
+			once.Do(func() {
+				close(entered)
+				<-release
+			})
+		}
+	}
+	f.backend.mu.Unlock()
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+card.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+			Values: map[string]string{"HD_RACE_K1": "rotated-value"},
+		})
+	}()
+
+	select {
+	case <-entered:
+	case rr := <-done:
+		t.Fatalf("fulfill returned before backend.Set: status=%d body=%s", rr.Code, rr.Body.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for backend.Set")
+	}
+
+	// Simulate agent hard-delete withdrawing the fulfilling row as hub.
+	wd, err := f.store.WithdrawAgentSecretRequestsOnDelete(ctx, f.agent.ID, time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, wd, 1)
+
+	close(release)
+	var rrFulfill *httptest.ResponseRecorder
+	select {
+	case rrFulfill = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for fulfill response")
+	}
+	require.Equal(t, http.StatusConflict, rrFulfill.Code, rrFulfill.Body.String())
+	require.Contains(t, rrFulfill.Body.String(), msgaction.ConflictWithdrawn)
+
+	// AC7: even though HD_RACE_K1 existed before the rotation, the agent is gone
+	// so hub-withdrawn conflict compensation MUST delete it from the backend.
+	_, err = f.backend.Get(ctx, "HD_RACE_K1", store.ScopeAgent, f.agent.ID)
+	require.ErrorIs(t, err, store.ErrNotFound, "hub-withdrawn finish conflict must delete every key written in the call")
+}
+
+// TestSecretRequests_FulfillAbortsOnGetMetaError verifies that a non-ErrNotFound
+// backend.GetMeta error aborts fulfill with 503 BEFORE calling backend.Set and
+// rolls back the claim to pending.
+func TestSecretRequests_FulfillAbortsOnGetMetaError(t *testing.T) {
+	f := newSecretRequestsFixture(t, true)
+	ctx := context.Background()
+
+	rrSend := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "META_ERR_KEY", Description: "getmeta failure"},
+	}, false)
+	require.Equal(t, http.StatusOK, rrSend.Code, rrSend.Body.String())
+	var card struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrSend.Body.Bytes(), &card))
+
+	f.backend.mu.Lock()
+	f.backend.getMetaErrKey = "META_ERR_KEY"
+	f.backend.getMetaErr = errors.New("backend unavailable")
+	// Call 1 is refuseInternalSecretMutation during pre-claim validation; fail on
+	// call 2 (inside Step 4 right before backend.Set) to verify 503 + claim rollback.
+	f.backend.getMetaFailOnCall = 2
+	f.backend.getMetaCalls = 0
+	f.backend.setCalls = 0
+	f.backend.mu.Unlock()
+
+	rrFulfill := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+card.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+		Values: map[string]string{"META_ERR_KEY": "must-not-be-written"},
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rrFulfill.Code, rrFulfill.Body.String())
+
+	f.backend.mu.Lock()
+	calls := f.backend.setCalls
+	f.backend.mu.Unlock()
+	require.Equal(t, 0, calls, "backend.Set must not be called when GetMeta returns a non-ErrNotFound error")
+
+	rows, err := f.store.GetSecretRequestsByMessageID(ctx, card.MessageID)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	require.Equal(t, store.SecretRequestStatusPending, rows[0].Status)
 }

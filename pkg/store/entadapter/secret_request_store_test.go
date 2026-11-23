@@ -500,3 +500,56 @@ func TestSecretRequestStore_FinishRequiresMatchingClaimedAt(t *testing.T) {
 		t.Fatalf("expected row to remain fulfilling, got %q", got.Status)
 	}
 }
+
+// TestSecretRequestStore_DismissWhileFulfillingReturnsSubmitting verifies that
+// DismissSecretRequests refuses to dismiss a card when a targeted row is
+// currently claimed (StatusFulfilling), returning Submitting so the handler
+// answers 409 submitting. Fails if the StatusFulfilling guard is removed.
+func TestSecretRequestStore_DismissWhileFulfillingReturnsSubmitting(t *testing.T) {
+	ctx := context.Background()
+	cs, projID, agentID := newSecretRequestTestStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	res, err := cs.CreateSecretRequestPrompt(ctx, makeSecretRequestPromptInput(projID, agentID, false, now,
+		messages.SecretRequest{Key: "BUSY_DISMISS_KEY", KeyNorm: "BUSY_DISMISS_KEY", SecretType: "environment"},
+	))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	row := res.Requests[0].Row
+
+	claim, err := cs.ClaimSecretRequestsForFulfill(ctx, &store.ClaimSecretRequestsInput{
+		MessageID: row.MessageID,
+		RowIDs:    []string{row.ID},
+		UserID:    "user-1",
+		UserName:  "Alice",
+		Now:       now.Add(time.Second),
+	})
+	if err != nil || claim.Conflict != nil || len(claim.Claimed) != 1 {
+		t.Fatalf("claim: err=%v claim=%+v", err, claim)
+	}
+
+	dsm, err := cs.DismissSecretRequests(ctx, &store.DismissSecretRequestsInput{
+		MessageID: row.MessageID,
+		UserID:    "user-2",
+		UserName:  "Bob",
+		Reason:    "dismiss while fulfilling",
+		Now:       now.Add(2 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("dismiss err: %v", err)
+	}
+	if dsm.Submitting == nil || dsm.Submitting.ID != row.ID {
+		t.Fatalf("expected Submitting=%s, got %+v", row.ID, dsm)
+	}
+	if len(dsm.Dismissed) != 0 {
+		t.Fatalf("expected 0 dismissed rows while fulfilling, got %d", len(dsm.Dismissed))
+	}
+	got, err := cs.GetSecretRequest(ctx, row.ID)
+	if err != nil {
+		t.Fatalf("get row: %v", err)
+	}
+	if got.Status != store.SecretRequestStatusFulfilling {
+		t.Fatalf("expected row to remain fulfilling, got %q", got.Status)
+	}
+}

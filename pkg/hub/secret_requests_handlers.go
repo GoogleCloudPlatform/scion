@@ -770,11 +770,12 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 	// Step 4: Store each key in the secret backend at agent scope, bounded
 	// as a whole by secretRequestFulfillTotalTimeout (< SecretRequestClaimTTL)
 	// with each individual Set capped at secretRequestFulfillSetTimeout.
-	// Track only keys newly created by this call (checking GetMeta before Set
-	// and Set's created flag) so 503 rollback never deletes an already-existing
-	// secret during a failed rotation.
+	// Track both all writtenKeys (for AC7 hub-withdrawn cleanup when the agent
+	// is hard-deleted mid-fulfill) and newly createdKeys (so a 503 rollback
+	// never deletes an already-existing secret during a failed rotation).
 	loopCtx, loopCancel := context.WithTimeout(ctx, secretRequestFulfillTotalTimeout)
 	defer loopCancel()
+	var writtenKeys []string
 	var createdKeys []string
 	secretVersions := make(map[string]int, len(claimRes.Claimed))
 	for _, row := range claimRes.Claimed {
@@ -785,7 +786,19 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		}
 		setCtx, setCancel := context.WithTimeout(loopCtx, secretRequestFulfillSetTimeout)
 		_, metaErr := s.secretBackend.GetMeta(setCtx, row.Key, store.ScopeAgent, row.AgentID)
-		existedBefore := !errors.Is(metaErr, store.ErrNotFound)
+		if metaErr != nil && !errors.Is(metaErr, store.ErrNotFound) {
+			setCancel()
+			slog.Warn("secret request fulfill: backend.GetMeta failed",
+				"message_id", msgID,
+				"row_id", row.ID,
+				"key", row.Key,
+				"error", metaErr,
+			)
+			compensate(createdKeys, true)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "failed to check secret in backend; please retry", nil)
+			return
+		}
+		existedBefore := metaErr == nil
 		created, meta, setErr := s.secretBackend.Set(setCtx, &secret.SetSecretInput{
 			Name:          row.Key,
 			Value:         val,
@@ -801,10 +814,17 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		})
 		setCancel()
 		if setErr != nil {
+			slog.Warn("secret request fulfill: backend.Set failed",
+				"message_id", msgID,
+				"row_id", row.ID,
+				"key", row.Key,
+				"error", setErr,
+			)
 			compensate(createdKeys, true)
 			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "failed to store secret in backend; please retry", nil)
 			return
 		}
+		writtenKeys = append(writtenKeys, row.Key)
 		if !existedBefore && created {
 			createdKeys = append(createdKeys, row.Key)
 		}
@@ -820,7 +840,7 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		ProjectID:      rows[0].ProjectID,
 		ConversationID: rows[0].ConversationID,
 		ThreadID:       chatKey,
-		Sender:         "user:" + userName,
+		Sender:         userSenderAddress(user),
 		SenderID:       user.ID(),
 		Recipient:      "agent:" + rows[0].AgentName,
 		RecipientID:    rows[0].AgentID,
@@ -846,20 +866,20 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if finRes.Conflict != nil {
-		// On finish compare-and-set conflict, delete newly-created keys ONLY when
-		// the conflict row was withdrawn by the hub (agent hard-deleted or
-		// purged). Otherwise (e.g., stale-claim recovery followed by another
-		// responder's fulfill), leave the backend alone and log per §4.6
+		// On finish compare-and-set conflict, delete EVERY key written in this
+		// call when the conflict row was withdrawn by the hub (agent hard-deleted
+		// or purged — AC7). Otherwise (e.g., stale-claim recovery followed by
+		// another responder's fulfill), leave the backend alone and log per §4.6
 		// ("a value that was already written stays in place").
 		if finRes.Conflict.Status == store.SecretRequestStatusWithdrawn &&
 			finRes.Conflict.WithdrawnBy == store.SecretRequestWithdrawnByHub {
-			compensate(createdKeys, false)
-		} else if len(createdKeys) > 0 {
+			compensate(writtenKeys, false)
+		} else if len(writtenKeys) > 0 {
 			slog.Warn("secret request fulfill finish conflict; leaving written backend keys in place",
 				"message_id", msgID,
 				"conflict_row_id", finRes.Conflict.ID,
 				"conflict_status", finRes.Conflict.Status,
-				"written_key_count", len(createdKeys),
+				"written_key_count", len(writtenKeys),
 			)
 		}
 		code := msgaction.ConflictCode(msgaction.SecretRequestKindSpec, finRes.Conflict.Status)
@@ -1065,7 +1085,7 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 		ProjectID:      rows[0].ProjectID,
 		ConversationID: rows[0].ConversationID,
 		ThreadID:       chatKey,
-		Sender:         "user:" + userName,
+		Sender:         userSenderAddress(user),
 		SenderID:       user.ID(),
 		Recipient:      "agent:" + rows[0].AgentName,
 		RecipientID:    rows[0].AgentID,
