@@ -106,7 +106,7 @@ describe('<scion-filter-box>', () => {
     expect(commits[0].serverQ).toBe('foo:bar');
   });
 
-  it('shows key suggestions on focus and accepts on Tab', async () => {
+  it('shows key suggestions on focus and accepts on Tab only after ArrowDown selection', async () => {
     const el = await mount();
     const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
     input.dispatchEvent(new Event('focus'));
@@ -115,9 +115,47 @@ describe('<scion-filter-box>', () => {
     const options = el.shadowRoot?.querySelectorAll('[role="option"]');
     expect(options?.length).toBeGreaterThanOrEqual(2);
 
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
     await el.updateComplete;
     expect(el.value).toMatch(/^(label|phase):$/);
+  });
+
+  it('does not hijack Tab on an empty focused box', async () => {
+    const el = await mount();
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.dispatchEvent(new Event('focus'));
+    await el.updateComplete;
+
+    const tabEvent = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(tabEvent);
+    await el.updateComplete;
+
+    expect(tabEvent.defaultPrevented).toBe(false);
+    expect(el.value).toBe('');
+  });
+
+  it('commits plain text on Enter even when it fuzzy-matches a key name', async () => {
+    const el = await mount();
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    for (const term of ['pe', 'lab']) {
+      input.value = term;
+      input.dispatchEvent(new Event('input'));
+      await el.updateComplete;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      await el.updateComplete;
+    }
+
+    expect(commits.map((c) => c.value)).toEqual(['pe', 'lab']);
+    expect(commits.map((c) => c.serverQ)).toEqual(['pe', 'lab']);
   });
 
   it('cancels pending debounced commit when value is updated externally', async () => {

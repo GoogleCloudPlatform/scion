@@ -417,7 +417,7 @@ export class ScionFilterBox extends LitElement {
   private refreshSuggestions(): void {
     const cursor = this.inputEl?.selectionStart ?? this.value.length;
     this.suggestions = getSuggestions(this.value, cursor, this.schema, this.valueSuggestions);
-    this.activeIndex = this.suggestions.length > 0 ? 0 : -1;
+    this.activeIndex = -1;
   }
 
   private onInput(e: Event): void {
@@ -455,22 +455,29 @@ export class ScionFilterBox extends LitElement {
     if (this.open && this.suggestions.length > 0) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
-        this.activeIndex = (this.activeIndex + 1) % this.suggestions.length;
+        this.activeIndex =
+          this.activeIndex < 0 ? 0 : (this.activeIndex + 1) % this.suggestions.length;
         return;
       }
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         this.activeIndex =
-          (this.activeIndex - 1 + this.suggestions.length) % this.suggestions.length;
+          this.activeIndex < 0
+            ? this.suggestions.length - 1
+            : (this.activeIndex - 1 + this.suggestions.length) % this.suggestions.length;
         return;
       }
-      if (e.key === 'Tab' || (e.key === 'Enter' && this.activeIndex >= 0)) {
+      if ((e.key === 'Tab' || e.key === 'Enter') && this.activeIndex >= 0) {
         const chosen = this.suggestions[this.activeIndex];
         if (chosen) {
           e.preventDefault();
           this.acceptSuggestion(chosen);
           return;
         }
+      }
+      if (e.key === 'Tab') {
+        this.open = false;
+        return;
       }
     }
 
