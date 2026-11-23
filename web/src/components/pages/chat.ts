@@ -1377,6 +1377,12 @@ export class ScionPageChat extends LitElement {
       background: var(--scion-surface, #ffffff);
     }
 
+    /* Hidden on mobile while the quick switcher is open so the switcher's
+       bottom search bar replaces it without reflowing the column behind it. */
+    .palette-footer--hidden {
+      visibility: hidden;
+    }
+
     .palette-footer-btn {
       box-sizing: border-box;
       width: 100%;
@@ -6809,8 +6815,9 @@ export class ScionPageChat extends LitElement {
     const isMac = isMacPlatform();
     const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
     const keyShortcuts = isMac ? 'Meta+K' : 'Control+K';
+    const hidden = this.isMobileLayout && this.v2PaletteOpen;
     return html`
-      <div class="palette-footer">
+      <div class=${hidden ? 'palette-footer palette-footer--hidden' : 'palette-footer'}>
         <button
           type="button"
           class="palette-footer-btn"

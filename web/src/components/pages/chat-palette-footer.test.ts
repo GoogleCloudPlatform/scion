@@ -152,6 +152,34 @@ describe('palette footer: where it renders', () => {
     expect(membersButton(page)).toBeNull();
     expect(railButton(page)).not.toBeNull();
   });
+
+  it('phone layout: hides the footer buttons while the palette is open and restores them on close', async () => {
+    stubTouchPrimary(true);
+    const page = await mountPage({ mobile: true });
+    const footers = (): Element[] =>
+      Array.from(page.shadowRoot.querySelectorAll('.palette-footer'));
+
+    expect(footers().every((f) => !f.classList.contains('palette-footer--hidden'))).toBe(true);
+
+    page.v2PaletteOpen = true;
+    await page.updateComplete;
+    expect(footers().length).toBeGreaterThan(0);
+    expect(footers().every((f) => f.classList.contains('palette-footer--hidden'))).toBe(true);
+
+    page.v2PaletteOpen = false;
+    await page.updateComplete;
+    expect(footers().every((f) => !f.classList.contains('palette-footer--hidden'))).toBe(true);
+  });
+
+  it('wide layout: keeps the footer button visible while the palette is open', async () => {
+    stubTouchPrimary(false);
+    const page = await mountPage({ mobile: false });
+    const footer = page.shadowRoot.querySelector('.v2-rail > .palette-footer') as Element;
+
+    page.v2PaletteOpen = true;
+    await page.updateComplete;
+    expect(footer.classList.contains('palette-footer--hidden')).toBe(false);
+  });
 });
 
 describe('palette footer: accessible name and shortcut attributes', () => {

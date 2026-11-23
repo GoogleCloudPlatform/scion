@@ -31,6 +31,7 @@ type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
 import type { GroupState, PaletteGroup, PaletteTarget } from '../../../client/palette-types.js';
 import { dmCandidateId } from '../../../client/palette-types.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
+import { elementStyleRules } from '../../pages/__fixtures__/css-rules.js';
 import { PALETTE_TYPEAHEAD_MAX_MS, PaletteTypeahead } from './palette-typeahead.js';
 
 function agentsGroup(
@@ -1780,5 +1781,83 @@ describe('scion-quick-palette: keys typed before the query input has focus', () 
     typeOutside('b');
     await fireInitialFocus(el);
     expect(input(el).value).toBe('b');
+  });
+});
+
+describe('scion-quick-palette: mobile bottom search bar and wide layout contract', () => {
+  const MOBILE = '@media (max-width: 768px)';
+
+  function decl(body: string | undefined, prop: string): string | undefined {
+    if (!body) return undefined;
+    let value: string | undefined;
+    for (const part of body.split(';')) {
+      const i = part.indexOf(':');
+      if (i < 0) continue;
+      if (part.slice(0, i).trim() === prop) value = part.slice(i + 1).trim();
+    }
+    return value;
+  }
+
+  it('mobile: card keeps its floating presentation and places the search bar at the bottom below results', () => {
+    const rules = elementStyleRules('scion-quick-palette');
+    const panel = rules.get(`${MOBILE} .palette-dialog::part(panel)`);
+    const body = rules.get(`${MOBILE} .palette-dialog::part(body)`);
+    const results = rules.get(`${MOBILE} .palette-results`);
+    const inputRow = rules.get(`${MOBILE} .palette-input-row`);
+
+    expect(decl(panel, 'width')).toBe('calc(100vw - 1rem)');
+    expect(decl(panel, 'max-width')).toBe('calc(100vw - 1rem)');
+    expect(decl(panel, 'margin-top')).toContain('env(safe-area-inset-top)');
+    expect(decl(panel, 'margin-bottom')).toContain('env(safe-area-inset-bottom');
+    expect(decl(panel, 'height')).toContain('var(--palette-vvh, 100dvh)');
+    expect(decl(panel, 'max-height')).toContain('var(--palette-vvh, 100dvh)');
+    expect(decl(panel, 'border-radius')).toBeUndefined();
+
+    expect(decl(body, 'display')).toBe('flex');
+    expect(decl(body, 'flex-direction')).toBe('column');
+    expect(decl(body, 'flex')).toBe('1');
+    expect(decl(body, 'min-height')).toBe('0');
+
+    expect(decl(results, 'flex')).toBe('1');
+    expect(decl(results, 'min-height')).toBe('0');
+    expect(decl(results, 'align-content')).toBe('start');
+    expect(decl(results, 'max-height')).toBe('none');
+
+    const resultsOrder = Number(decl(results, 'order'));
+    const inputOrder = Number(decl(inputRow, 'order'));
+    expect(Number.isFinite(resultsOrder)).toBe(true);
+    expect(Number.isFinite(inputOrder)).toBe(true);
+    expect(resultsOrder).toBeLessThan(inputOrder);
+
+    expect(decl(inputRow, 'flex')).toBe('0 0 auto');
+    expect(decl(inputRow, 'border-bottom')).toBe('none');
+    expect(decl(inputRow, 'border-top')).toContain('var(--scion-border');
+    expect(decl(inputRow, 'min-height')).toBe('44px');
+  });
+
+  it('wide layout rules remain unchanged (input at top with bottom border, 50vh two-column results)', () => {
+    const rules = elementStyleRules('scion-quick-palette');
+    expect(decl(rules.get('.palette-dialog::part(panel)'), 'width')).toBe('min(560px, 92vw)');
+    expect(decl(rules.get('.palette-input-row'), 'order')).toBeUndefined();
+    expect(decl(rules.get('.palette-input-row'), 'border-bottom')).toContain('var(--scion-border');
+    expect(decl(rules.get('.palette-results'), 'max-height')).toBe('50vh');
+    expect(decl(rules.get('.palette-results'), 'grid-template-columns')).toBe('1fr 1fr');
+  });
+
+  it('openAndFocusNow focuses the single stable query input synchronously without recreating it', async () => {
+    const el = document.createElement('scion-quick-palette');
+    el.groups = agentsGroup([{ peerId: 'a1', label: 'Alpha' }]);
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const beforeInput = el.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input');
+    expect(beforeInput).not.toBeNull();
+
+    el.openAndFocusNow();
+    await el.updateComplete;
+
+    const afterInput = el.shadowRoot!.querySelector<HTMLInputElement>('#palette-query-input');
+    expect(afterInput).toBe(beforeInput);
+    expect(el.shadowRoot!.activeElement).toBe(afterInput);
   });
 });
