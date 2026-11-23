@@ -135,8 +135,6 @@ if (typeof document !== 'undefined') {
           }
           candidate = nextInTree(root, candidate);
         }
-        current = null;
-        fallbacks = [];
         return null;
       };
 
@@ -158,7 +156,9 @@ if (typeof document !== 'undefined') {
         },
         nextNode,
         previousNode() {
-          return native.previousNode();
+          throw new Error(
+            'previousNode() is not supported by the vitest.setup.ts NodeIterator polyfill',
+          );
         },
         detach() {
           // No-op per WHATWG DOM spec.

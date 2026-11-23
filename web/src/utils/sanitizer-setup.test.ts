@@ -82,4 +82,18 @@ describe('vitest DOM sanitizer setup guard', () => {
     expect(link?.getAttribute('target')).toBe('_blank');
     expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
   });
+
+  it('preserves NodeIterator referenceNode at end of traversal and rejects previousNode()', () => {
+    const root = document.createElement('div');
+    const child = document.createElement('span');
+    root.appendChild(child);
+
+    const iterator = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT);
+    expect(iterator.nextNode()).toBe(root);
+    expect(iterator.nextNode()).toBe(child);
+    expect(iterator.nextNode()).toBeNull();
+    expect(iterator.referenceNode).toBe(child);
+    expect(iterator.nextNode()).toBeNull();
+    expect(() => iterator.previousNode()).toThrow(/previousNode\(\) is not supported/);
+  });
 });
