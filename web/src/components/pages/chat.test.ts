@@ -2623,6 +2623,24 @@ describe('chat page — late space lookups', () => {
     expect(el._restoredPanel).toBeNull();
     expect(el._routeOpenPending).toBe(false);
   });
+
+  it('an unknown legacy space route clears the route-open marker once the rail has loaded', () => {
+    const el = createSpacePage(true);
+    el._restoredPanel = 'right';
+    el.mobilePanel = 'right';
+    window.history.replaceState({}, '', '/chat/space/missing-id');
+
+    // Before the rail populates the slug map, the route stays pending.
+    el.parseV2Route();
+    expect(el._restoredPanel).toBe('right');
+    expect(el._routeOpenPending).toBe(true);
+
+    // Once the rail has loaded with known spaces, an unknown legacy space ID clears the marker.
+    el._projectIdToSlug.set('p1', 'alpha');
+    el.parseV2Route();
+    expect(el._restoredPanel).toBeNull();
+    expect(el._routeOpenPending).toBe(false);
+  });
 });
 
 describe('chat page — rail reload after a message', () => {
