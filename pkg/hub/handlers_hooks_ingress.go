@@ -36,10 +36,11 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 	}
 	trustedNets := parseTrustedProxies(trustedProxies)
 	return trigger.NewIngress(trigger.IngressConfig{
-		Store:      srv.store,
-		QueueStore: dqs,
-		Queue:      srv.durableQueue,
-		LoadSecret: srv.loadWebhookEndpointSecret,
+		Store:             srv.store,
+		QueueStore:        dqs,
+		Queue:             srv.durableQueue,
+		LoadSecret:        srv.loadWebhookEndpointSecret,
+		AuthorizeHubToken: srv.authorizeWebhookIngressHubToken,
 		ClientIP: func(r *http.Request) string {
 			return trustedClientIP(r, trustedNets)
 		},
@@ -52,6 +53,29 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 		Metrics: serverTriggerMetrics{srv: srv},
 		Logger:  logging.Subsystem("hub.triggers"),
 	})
+}
+
+// authorizeWebhookIngressHubToken authorizes a hub_token webhook delivery on
+// POST /api/v1/hooks/{id} (catalog operation webhookendpoint.send, §7.1).
+func (s *Server) authorizeWebhookIngressHubToken(r *http.Request, ep *store.WebhookEndpoint) trigger.HubTokenAuthResult {
+	if s == nil || r == nil || ep == nil {
+		return trigger.HubTokenAuthResult{}
+	}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return trigger.HubTokenAuthResult{Authenticated: false}
+	}
+	d := s.webhookEndpointAccessDecision(ctx, ep.ProjectID, ActionSend, ep)
+	if !d.allowed {
+		logAuthzDenial(r, identity, webhookEndpointResource(ep.ProjectID), ActionSend, d.reason)
+		return trigger.HubTokenAuthResult{Authenticated: true, Allowed: false}
+	}
+	return trigger.HubTokenAuthResult{
+		Authenticated: true,
+		Allowed:       true,
+		Sender:        principalKindForIdentity(identity) + ":" + identity.ID(),
+	}
 }
 
 // handleWebhookIngress handles unauthenticated POST /api/v1/hooks/{id}

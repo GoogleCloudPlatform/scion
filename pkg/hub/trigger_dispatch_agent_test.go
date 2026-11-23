@@ -661,6 +661,9 @@ func TestTriggerDispatchAgent_RenderRefusalAndCollisionMatrix(t *testing.T) {
 			attrs = map[string]string{}
 		}
 		attrs["endpoint_name"] = ep.Name
+		if _, ok := attrs["delivery"]; !ok {
+			attrs["delivery"] = "del-" + api.NewUUID()
+		}
 		attrs["signature_mode"] = store.WebhookSignatureModeScionV1
 		return &hubfire.FireEvent{
 			ID:         api.NewUUID(),
@@ -961,6 +964,7 @@ func TestTriggerDispatchAgent_RenderRefusalAndCollisionMatrix(t *testing.T) {
 				Attributes: map[string]string{
 					"endpoint_name":  epE.Name,
 					"signature_mode": store.WebhookSignatureModeScionV1,
+					"delivery":       "del-" + api.NewUUID(),
 				},
 				Payload: []byte(`{}`),
 				Trigger: &hubfire.FireTriggerRef{ID: api.NewUUID(), Name: "exhaust-trig"},

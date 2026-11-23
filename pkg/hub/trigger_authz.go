@@ -179,16 +179,27 @@ type webhookEndpointAccess struct {
 // perform action on webhook endpoints in projectID (ep == nil for the
 // project-level router gate, non-nil for a specific endpoint row).
 //
-// Security inventory (Stage 2 §4.1, §4.3, §4.4, §11.2):
-//   - Users are decided via webhook_endpoint.<action>.
-//   - Agents are admitted on ActionCreate (they become the endpoint owner) and
-//     on rows where ep.OwnerPrincipalKind == "agent" && ep.OwnerPrincipalID == agent.ID().
-//   - A bound agent (ep.BoundAgentID == agent.ID()) that is not the owner is
-//     admitted ONLY for ActionRead (reading the endpoint and its events via
-//     triggerEventAccessDecision); update/rotate/delete are denied (403).
-//   - Unrelated agents receive 404 (notOwnedByAgent) so endpoint IDs cannot be probed.
-//   - Binding mutation via PATCH is additionally refused for all agent callers
-//     in updateWebhookEndpoint (users only); agent create binding is self-only.
+// Security inventory (Stage 2 §4.1, §4.3, §4.4, §7.1, §11.2, §18 S18):
+//   - Users/dev/federated_user: decided via webhook_endpoint.<action> (including
+//     webhook_endpoint.send for hub_token ingress and webhook_endpoint.update
+//     for PATCH/rotate). UATs must carry the matching scope and project/hub boundary.
+//   - Agents: must be in good standing;
+//   - ActionCreate / project-level gate (ep == nil): admitted for agents in
+//     projectID (they become the endpoint owner).
+//   - ActionSend (hub_token ingress): requires same project
+//     (agent.ProjectID() == projectID — other projects' agents are ALWAYS
+//     refused even when allowProjectAgents is true), AND either endpoint
+//     ownership, bound-agent match (ep.BoundAgentID == agent.ID()), or
+//     ep.AllowProjectAgents == true.
+//   - Owner agent (ep.OwnerPrincipalKind == "agent" && ep.OwnerPrincipalID == agent.ID()):
+//     admitted on ActionRead, ActionUpdate (non-binding fields), ActionDelete.
+//     Binding mutation via PATCH is refused for all agent callers in
+//     updateWebhookEndpoint (users only, §4.1).
+//   - Bound non-owner agent (ep.BoundAgentID == agent.ID()): admitted ONLY for
+//     ActionRead (and ActionSend above); update/rotate/delete are denied (403).
+//   - Unrelated agents receive 404 (notOwnedByAgent) on read/update/delete so
+//     endpoint IDs cannot be probed.
+//   - All other identity types (broker, visitor, unknown): denied.
 func (s *Server) webhookEndpointAccessDecision(ctx context.Context, projectID string, action Action, ep *store.WebhookEndpoint) webhookEndpointAccess {
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -198,6 +209,21 @@ func (s *Server) webhookEndpointAccessDecision(ctx context.Context, projectID st
 	case "agent":
 		if s.agentStanding(ctx, identity.ID()) != nil {
 			return webhookEndpointAccess{reason: "agent not in good standing"}
+		}
+		if action == ActionSend {
+			if ep == nil {
+				return webhookEndpointAccess{reason: "webhook endpoint required for send"}
+			}
+			agentIdent, ok := identity.(AgentIdentity)
+			if !ok || agentIdent.ProjectID() != projectID {
+				return webhookEndpointAccess{reason: "agent does not belong to endpoint project"}
+			}
+			isOwner := ep.OwnerPrincipalKind == store.DelegationPrincipalAgent && ep.OwnerPrincipalID != "" && ep.OwnerPrincipalID == identity.ID()
+			isBound := ep.BoundAgentID != "" && ep.BoundAgentID == identity.ID()
+			if isOwner || isBound || ep.AllowProjectAgents {
+				return webhookEndpointAccess{allowed: true}
+			}
+			return webhookEndpointAccess{reason: "agent is not authorized to send to this webhook endpoint"}
 		}
 		if ep == nil || action == ActionCreate {
 			return webhookEndpointAccess{allowed: true}

@@ -39,9 +39,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Ingress payload, header, attribute, and queue bounds (§4.3, §6.1, §8.1, §8.2).
+// Ingress payload, header, attribute, and queue bounds (§4.3, §6.1, §8.1, §8.2; Stage 2 §7.4).
 const (
-	MaxPayloadBytes            = 64 * 1024
+	MaxPayloadBytes = 64 * 1024
+	// MaxEndpointBodyBytes is the upper bound on per-endpoint max_body_bytes.
+	// Stage 2 P4a keeps it at MaxPayloadBytes (64 KiB); P5 raises this single
+	// constant to 1 MiB alongside out-of-line object storage (§8).
+	MaxEndpointBodyBytes       = MaxPayloadBytes
 	MaxAttributesBytes         = 8 * 1024
 	MaxDeliveryBytes           = 128
 	MaxEventBytes              = 64
@@ -152,6 +156,7 @@ const (
 	IngressResultAccepted                  = "accepted"
 	IngressResultDuplicate                 = "duplicate"
 	IngressResultRejectedSignature         = "rejected_signature"
+	IngressResultRejectedAuth              = "rejected_auth"
 	IngressResultRejectedRateLimit         = "rejected_rate_limit"
 	IngressResultRejectedSize              = "rejected_size"
 	IngressResultRejectedUnknownEndpoint   = "rejected_unknown_endpoint"
@@ -189,6 +194,27 @@ type IngressCounts struct {
 // proxy configuration (trustedClientIP in package hub).
 type ClientIPFunc func(r *http.Request) string
 
+// HubTokenAuthResult describes the outcome of authorizing a hub_token webhook
+// ingress request in package hub (Stage 2 §7.1).
+type HubTokenAuthResult struct {
+	Authenticated bool   // false -> 401 content-free (no identity on request context)
+	Allowed       bool   // false (when Authenticated) -> 403 content-free
+	Sender        string // "<principal kind>:<id>" recorded in attributes.sender
+}
+
+// HubTokenAuthorizer decides whether the request context's authenticated hub
+// identity may send to ep (webhookEndpointAccessDecision(ctx, ep.ProjectID, ActionSend, ep)).
+type HubTokenAuthorizer func(r *http.Request, ep *store.WebhookEndpoint) HubTokenAuthResult
+
+// EffectiveMaxBodyBytes returns the bounded body-size limit for an endpoint's
+// configured max_body_bytes (0 -> MaxEndpointBodyBytes; clamped to <= MaxEndpointBodyBytes).
+func EffectiveMaxBodyBytes(configured int) int {
+	if configured <= 0 || configured > MaxEndpointBodyBytes {
+		return MaxEndpointBodyBytes
+	}
+	return configured
+}
+
 // IngressTxStore is the minimal transactional TriggerStore interface required
 // by Ingress (satisfied by store.Store / *entadapter.CompositeStore).
 type IngressTxStore interface {
@@ -198,39 +224,41 @@ type IngressTxStore interface {
 
 // IngressConfig configures the generic webhook ingress handler.
 type IngressConfig struct {
-	Store      IngressTxStore
-	QueueStore store.DurableQueueStore
-	Queue      durablequeue.Queue
-	LoadSecret SecretLoader
-	ClientIP   ClientIPFunc
-	Enabled    func() bool
-	Limiter    *IngressLimiter
-	Cache      *EndpointCache
-	Counters   *CounterAccumulator
-	Audit      AuditSink
-	Metrics    IngressMetrics
-	Logger     *slog.Logger
-	Now        func() time.Time
-	NewEventID func() string
+	Store             IngressTxStore
+	QueueStore        store.DurableQueueStore
+	Queue             durablequeue.Queue
+	LoadSecret        SecretLoader
+	AuthorizeHubToken HubTokenAuthorizer
+	ClientIP          ClientIPFunc
+	Enabled           func() bool
+	Limiter           *IngressLimiter
+	Cache             *EndpointCache
+	Counters          *CounterAccumulator
+	Audit             AuditSink
+	Metrics           IngressMetrics
+	Logger            *slog.Logger
+	Now               func() time.Time
+	NewEventID        func() string
 }
 
-// Ingress handles unauthenticated POST /api/v1/hooks/{id} requests per Stage 1
-// §8.1, §8.1a, §8.2, §6.1, and §6.2.
+// Ingress handles dual-posture POST /api/v1/hooks/{id} requests per Stage 1
+// §8.1, §8.1a, §8.2, §6.1, §6.2 and Stage 2 §7.1, §7.3, §7.4.
 type Ingress struct {
-	store      IngressTxStore
-	queueStore store.DurableQueueStore
-	queue      durablequeue.Queue
-	loadSecret SecretLoader
-	clientIP   ClientIPFunc
-	enabled    func() bool
-	limiter    *IngressLimiter
-	cache      *EndpointCache
-	counters   *CounterAccumulator
-	audit      AuditSink
-	metrics    IngressMetrics
-	logger     *slog.Logger
-	now        func() time.Time
-	newEventID func() string
+	store             IngressTxStore
+	queueStore        store.DurableQueueStore
+	queue             durablequeue.Queue
+	loadSecret        SecretLoader
+	authorizeHubToken HubTokenAuthorizer
+	clientIP          ClientIPFunc
+	enabled           func() bool
+	limiter           *IngressLimiter
+	cache             *EndpointCache
+	counters          *CounterAccumulator
+	audit             AuditSink
+	metrics           IngressMetrics
+	logger            *slog.Logger
+	now               func() time.Time
+	newEventID        func() string
 
 	accepted          atomic.Int64
 	duplicate         atomic.Int64
@@ -282,20 +310,21 @@ func NewIngress(cfg IngressConfig) *Ingress {
 		newEventID = uuid.NewString
 	}
 	return &Ingress{
-		store:      cfg.Store,
-		queueStore: cfg.QueueStore,
-		queue:      cfg.Queue,
-		loadSecret: cfg.LoadSecret,
-		clientIP:   clientIP,
-		enabled:    cfg.Enabled,
-		limiter:    limiter,
-		cache:      cache,
-		counters:   counters,
-		audit:      audit,
-		metrics:    cfg.Metrics,
-		logger:     logger,
-		now:        nowFn,
-		newEventID: newEventID,
+		store:             cfg.Store,
+		queueStore:        cfg.QueueStore,
+		queue:             cfg.Queue,
+		loadSecret:        cfg.LoadSecret,
+		authorizeHubToken: cfg.AuthorizeHubToken,
+		clientIP:          clientIP,
+		enabled:           cfg.Enabled,
+		limiter:           limiter,
+		cache:             cache,
+		counters:          counters,
+		audit:             audit,
+		metrics:           cfg.Metrics,
+		logger:            logger,
+		now:               nowFn,
+		newEventID:        newEventID,
 	}
 }
 
@@ -434,16 +463,22 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		apierr.WriteError(w, http.StatusNotFound, apierr.ErrCodeNotFound, "not found", nil)
 		return
 	}
-	// Known active endpoint charges ONLY its per-endpoint bucket (10/s burst 60).
-	if !h.limiter.AllowEndpoint(ep.ID) {
+	// Known active endpoint charges ONLY its per-endpoint bucket (default 10/s
+	// burst 60, or the endpoint's lower configured rate/burst, §7.4). Running
+	// this before step 6 ensures denied credentials on hub_token endpoints and
+	// bad signatures on hmac endpoints both charge the endpoint's rate bucket (R2).
+	if !h.limiter.AllowEndpointWithLimit(ep.ID, ep.RatePerSecond, ep.RateBurst) {
 		h.rejectedRateLimit.Add(1)
 		h.recordMetric(IngressResultRejectedRateLimit)
 		writeRateLimited(w, "1", "rate limit exceeded")
 		return
 	}
 
-	// Step 4: read body bounded to 64 KiB (413 above 64 KiB).
-	limitedReader := http.MaxBytesReader(w, r.Body, MaxPayloadBytes)
+	// Step 4: read body bounded to the endpoint's effective max_body_bytes
+	// (clamped to MaxEndpointBodyBytes; P5 raises MaxEndpointBodyBytes to 1 MiB
+	// and branches bodies > MaxPayloadBytes to out-of-line object storage).
+	maxBody := EffectiveMaxBodyBytes(ep.MaxBodyBytes)
+	limitedReader := http.MaxBytesReader(w, r.Body, int64(maxBody))
 	body, err := io.ReadAll(limitedReader)
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
@@ -477,71 +512,142 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 6: scion_v1 HMAC verification (§8.1a). Fail closed (503) if the
-	// endpoint's secret cannot be loaded or unsealed. Header bounds are checked
-	// for status 400 ONLY after signature verification succeeds so an unsigned
-	// caller always receives 401 (§8.1 step 7).
-	if ep.SignatureMode != store.WebhookSignatureModeScionV1 {
-		h.failedSecret.Add(1)
-		h.recordMetric(IngressResultRejectedSecretUnavailable)
-		h.logger.Error("Unsupported webhook endpoint signature mode",
-			"endpoint_id", ep.ID,
-			"project_id", ep.ProjectID,
-			"signature_mode", ep.SignatureMode,
-		)
-		apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
-		return
-	}
-	secret, err := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion)
-	if err != nil {
-		h.failedSecret.Add(1)
-		h.recordMetric(IngressResultRejectedSecretUnavailable)
-		h.logger.Error("Failed to load or unseal webhook endpoint secret",
-			"endpoint_id", ep.ID,
-			"project_id", ep.ProjectID,
-			"secret_version", ep.SecretVersion,
-			"error", err,
-		)
-		apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
-		return
-	}
-
-	sigVals := r.Header.Values(HeaderSignature)
+	// Step 6: authenticate the delivery according to ep.AuthMode (§7.1).
+	//   - hub_token: require an authenticated hub identity passing
+	//     webhookEndpointAccessDecision(send); routing headers are honoured
+	//     unsigned and bounded in step 7.
+	//   - hmac (default): verify HMAC signature using ep.SignatureMode and
+	//     ep.ReplayWindowSeconds (P4b plugs provider Verifier implementations
+	//     and routing hints into the hmac branch here).
+	// Header bounds are checked for status 400 ONLY after step 6 succeeds so an
+	// unauthenticated caller always receives 401/403 (§8.1 step 7).
 	delivery := r.Header.Get(HeaderDelivery)
 	eventHdr := r.Header.Get(HeaderEvent)
 	subjectHdr := r.Header.Get(HeaderSubject)
-	verified := len(sigVals) == 1 && VerifyScionV1Signature(secret, now, sigVals[0], delivery, eventHdr, subjectHdr, body)
-	// Stage 2 §4.4 / S22: during the 24h rotation grace window, fall back to
-	// verifying against secret version n-1 if the current version did not match.
-	if !verified && len(sigVals) == 1 && ep.SecretVersion > 1 && ep.SecretRotatedAt != nil &&
-		!now.After(ep.SecretRotatedAt.UTC().Add(store.WebhookSecretRotationGraceWindow)) {
-		prevSecret, prevErr := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion-1)
-		if prevErr != nil && !errors.Is(prevErr, store.ErrNotFound) {
+	var (
+		sigModeAttr string
+		senderAttr  string
+	)
+	authMode := ep.AuthMode
+	if authMode == "" {
+		authMode = store.WebhookAuthModeHMAC
+	}
+	switch authMode {
+	case store.WebhookAuthModeHubToken:
+		if h.authorizeHubToken == nil {
 			h.failedSecret.Add(1)
 			h.recordMetric(IngressResultRejectedSecretUnavailable)
-			h.logger.Error("Failed to load or unseal previous webhook endpoint secret during rotation grace",
+			h.logger.Error("Webhook hub_token authorizer is not configured",
 				"endpoint_id", ep.ID,
 				"project_id", ep.ProjectID,
-				"secret_version", ep.SecretVersion-1,
-				"error", prevErr,
 			)
 			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
 			return
 		}
-		if prevErr == nil && VerifyScionV1Signature(prevSecret, now, sigVals[0], delivery, eventHdr, subjectHdr, body) {
-			verified = true
+		authRes := h.authorizeHubToken(r, ep)
+		if !authRes.Authenticated {
+			h.rejectedBadSig.Add(1)
+			h.recordMetric(IngressResultRejectedAuth)
+			h.counters.RecordRejected(ep.ID)
+			h.audit.RecordSignatureFailure(ctx, SignatureFailureAuditRecord{
+				ProjectID:  ep.ProjectID,
+				EndpointID: ep.ID,
+				RemoteIP:   clientIP,
+			})
+			apierr.WriteError(w, http.StatusUnauthorized, apierr.ErrCodeUnauthorized, "authentication required", nil)
+			return
 		}
-	}
-	if !verified {
-		h.rejectedBadSig.Add(1)
-		h.recordMetric(IngressResultRejectedSignature)
-		h.counters.RecordRejected(ep.ID)
-		h.audit.RecordSignatureFailure(ctx, SignatureFailureAuditRecord{
-			ProjectID:  ep.ProjectID,
-			EndpointID: ep.ID,
-			RemoteIP:   clientIP,
-		})
-		apierr.WriteError(w, http.StatusUnauthorized, apierr.ErrCodeInvalidSignature, "invalid signature", nil)
+		if !authRes.Allowed {
+			h.rejectedBadSig.Add(1)
+			h.recordMetric(IngressResultRejectedAuth)
+			h.counters.RecordRejected(ep.ID)
+			h.audit.RecordSignatureFailure(ctx, SignatureFailureAuditRecord{
+				ProjectID:  ep.ProjectID,
+				EndpointID: ep.ID,
+				RemoteIP:   clientIP,
+			})
+			apierr.WriteError(w, http.StatusForbidden, apierr.ErrCodeForbidden, "forbidden", nil)
+			return
+		}
+		sigModeAttr = store.WebhookAuthModeHubToken
+		senderAttr = authRes.Sender
+
+	case store.WebhookAuthModeHMAC:
+		// P4b extension point: dispatch ep.SignatureMode through a Verifier
+		// interface (scion_v1, github_v1, stripe_v1) and apply routing hints
+		// after verification.
+		if ep.SignatureMode != store.WebhookSignatureModeScionV1 {
+			h.failedSecret.Add(1)
+			h.recordMetric(IngressResultRejectedSecretUnavailable)
+			h.logger.Error("Unsupported webhook endpoint signature mode",
+				"endpoint_id", ep.ID,
+				"project_id", ep.ProjectID,
+				"signature_mode", ep.SignatureMode,
+			)
+			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
+			return
+		}
+		secret, err := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion)
+		if err != nil {
+			h.failedSecret.Add(1)
+			h.recordMetric(IngressResultRejectedSecretUnavailable)
+			h.logger.Error("Failed to load or unseal webhook endpoint secret",
+				"endpoint_id", ep.ID,
+				"project_id", ep.ProjectID,
+				"secret_version", ep.SecretVersion,
+				"error", err,
+			)
+			apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
+			return
+		}
+
+		sigVals := r.Header.Values(HeaderSignature)
+		replayWindow := EffectiveReplayWindow(ep.ReplayWindowSeconds)
+		verified := len(sigVals) == 1 && VerifyScionV1SignatureWithWindow(secret, now, replayWindow, sigVals[0], delivery, eventHdr, subjectHdr, body)
+		// Stage 2 §4.4 / S22: during the 24h rotation grace window, fall back to
+		// verifying against secret version n-1 if the current version did not match.
+		if !verified && len(sigVals) == 1 && ep.SecretVersion > 1 && ep.SecretRotatedAt != nil &&
+			!now.After(ep.SecretRotatedAt.UTC().Add(store.WebhookSecretRotationGraceWindow)) {
+			prevSecret, prevErr := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion-1)
+			if prevErr != nil && !errors.Is(prevErr, store.ErrNotFound) {
+				h.failedSecret.Add(1)
+				h.recordMetric(IngressResultRejectedSecretUnavailable)
+				h.logger.Error("Failed to load or unseal previous webhook endpoint secret during rotation grace",
+					"endpoint_id", ep.ID,
+					"project_id", ep.ProjectID,
+					"secret_version", ep.SecretVersion-1,
+					"error", prevErr,
+				)
+				apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
+				return
+			}
+			if prevErr == nil && VerifyScionV1SignatureWithWindow(prevSecret, now, replayWindow, sigVals[0], delivery, eventHdr, subjectHdr, body) {
+				verified = true
+			}
+		}
+		if !verified {
+			h.rejectedBadSig.Add(1)
+			h.recordMetric(IngressResultRejectedSignature)
+			h.counters.RecordRejected(ep.ID)
+			h.audit.RecordSignatureFailure(ctx, SignatureFailureAuditRecord{
+				ProjectID:  ep.ProjectID,
+				EndpointID: ep.ID,
+				RemoteIP:   clientIP,
+			})
+			apierr.WriteError(w, http.StatusUnauthorized, apierr.ErrCodeInvalidSignature, "invalid signature", nil)
+			return
+		}
+		sigModeAttr = ep.SignatureMode
+
+	default:
+		h.failedSecret.Add(1)
+		h.recordMetric(IngressResultRejectedSecretUnavailable)
+		h.logger.Error("Unsupported webhook endpoint auth mode",
+			"endpoint_id", ep.ID,
+			"project_id", ep.ProjectID,
+			"auth_mode", ep.AuthMode,
+		)
+		apierr.WriteError(w, http.StatusServiceUnavailable, apierr.ErrCodeUnavailable, "webhook verification unavailable", nil)
 		return
 	}
 
@@ -572,7 +678,10 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Step 9: construct TriggerEvent (§8.2) and execute delivery-dedup check,
 	// pending-only cap check, and event + queue insert in one locked transaction (§6.2).
-	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, body, now, h.newEventID)
+	// P5 extension point: for bodies > MaxPayloadBytes, upload to pkg/storage
+	// inside the transaction, set ev.Payload = "", ev.PayloadRef = objectPath,
+	// and check the per-project overflow byte budget before enqueueing.
+	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr, body, now, h.newEventID)
 	if !attrOK {
 		h.rejectedBadHeader.Add(1)
 		h.recordMetric(IngressResultRejectedBadHeader)
@@ -752,7 +861,7 @@ func WebhookEventType(eventHeader string) string {
 func buildWebhookTriggerEvent(
 	ep *store.WebhookEndpoint,
 	hdr http.Header,
-	delivery, eventHdr, subjectHdr, clientIP string,
+	delivery, eventHdr, subjectHdr, clientIP, sigModeAttr, senderAttr string,
 	body []byte,
 	now time.Time,
 	newEventID func() string,
@@ -773,16 +882,22 @@ func buildWebhookTriggerEvent(
 		dedupKey = uuid.NewString()
 	}
 
+	if sigModeAttr == "" {
+		sigModeAttr = ep.SignatureMode
+	}
 	contentType := sanitizeHeaderForStorage(hdr.Get("Content-Type"), maxStoredContentTypeBytes)
 	attrs := map[string]string{
 		"endpoint_name":  ep.Name,
 		"event":          eventAttr,
 		"delivery":       delivery,
 		"subject":        subjectHdr,
-		"signature_mode": ep.SignatureMode,
+		"signature_mode": sigModeAttr,
 		"content_type":   contentType,
 		"payload_bytes":  strconv.Itoa(len(body)),
 		"remote_ip":      clientIP,
+	}
+	if senderAttr != "" {
+		attrs["sender"] = senderAttr
 	}
 	attrBytes, err := json.Marshal(attrs)
 	if err != nil || len(attrBytes) > MaxAttributesBytes {

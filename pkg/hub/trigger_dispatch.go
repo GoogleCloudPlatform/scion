@@ -54,6 +54,7 @@ type triggerRuntime struct {
 	cancel               context.CancelFunc
 	done                 chan struct{}
 	started              bool
+	projectCapNotify     map[string]time.Time // per-trigger 1h cooldown for project live-agent cap notification (§7.4)
 }
 
 // SetTriggerTemplateRefusalAuditSink overrides the audit sink used for
@@ -176,11 +177,158 @@ func (c serverTriggerCore) CheckRetryTarget(ctx context.Context, agentID string)
 }
 
 func (c serverTriggerCore) Fire(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
+	if req.BeforeFire == nil && c.srv != nil {
+		req.BeforeFire = func(bfCtx context.Context) (string, error) {
+			return c.srv.checkTriggerFireLimits(bfCtx, req)
+		}
+	}
 	out, action, rawErr := c.srv.fireActionWithError(ctx, req)
 	if out.Status == hubfire.FireStatusFailed && out.Error != "" {
 		out.Error = sanitizeTriggerFireError(ctx, action, req, out.Status, out.Error, rawErr)
 	}
 	return out
+}
+
+const triggerProjectCapNotifyCooldown = time.Hour
+
+// isLiveTriggerAgentPhase reports whether an agent phase counts as live for
+// trigger dispatch concurrency and project live-agent caps (Stage 2 §7.4:
+// phase not in {stopped, error, halted}; soft-deleted agents are excluded by
+// AgentFilter's default IncludeDeleted=false).
+func isLiveTriggerAgentPhase(phase string) bool {
+	switch phase {
+	case "stopped", "error", "halted":
+		return false
+	default:
+		return true
+	}
+}
+
+// countLiveAgentsMatching counts non-deleted agents matching filter whose phase
+// is not terminal (stopped, error, halted).
+func (s *Server) countLiveAgentsMatching(ctx context.Context, filter store.AgentFilter) (int, error) {
+	filter.IncludeDeleted = false
+	rows, err := s.store.CountAgentsByPhaseIDs(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	live := 0
+	for _, r := range rows {
+		if isLiveTriggerAgentPhase(r.Phase) {
+			live++
+		}
+	}
+	return live, nil
+}
+
+// checkTriggerFireLimits enforces Stage 2 §7.4 per-trigger and per-project fire
+// limits after action.Authorize succeeds and before claim/create/delivery:
+//  1. max_fires_per_minute (all trigger actions) -> skipped "rate limit"
+//  2. max_concurrent_dispatches (dispatch_agent; default 5, max 50) -> skipped "concurrency limit"
+//  3. MaxLiveTriggerAgentsPerProject (dispatch_agent; 25) -> skipped "project trigger-agent cap"
+//     + once-per-hour-per-trigger notification hook.
+func (s *Server) checkTriggerFireLimits(ctx context.Context, req hubfire.FireRequest) (string, error) {
+	if s == nil || s.store == nil || req.Event == nil || req.Event.Trigger == nil {
+		return "", nil
+	}
+	trig := req.Event.Trigger
+	triggerID := req.Authority.DefinitionID
+	if triggerID == "" {
+		triggerID = trig.ID
+	}
+
+	// 1. Per-trigger fire rate (max_fires_per_minute).
+	if trig.MaxFiresPerMinute > 0 && triggerID != "" {
+		maxPerMin := min(trig.MaxFiresPerMinute, store.MaxTriggerFiresPerMinute)
+		since := time.Now().UTC().Add(-time.Minute)
+		recent, err := s.store.CountRecentTriggerFires(ctx, triggerID, since, req.Authority.FireID)
+		if err != nil {
+			return "", fmt.Errorf("count recent trigger fires: %w", err)
+		}
+		if recent >= maxPerMin {
+			return trigger.ErrFireRateLimit, nil
+		}
+	}
+
+	if req.ActionType != store.TriggerActionDispatchAgent {
+		return "", nil
+	}
+
+	// 2. Per-trigger dispatch concurrency (default 5, max 50).
+	maxConc := trig.MaxConcurrentDispatches
+	if maxConc <= 0 {
+		maxConc = store.DefaultTriggerMaxConcurrentDispatches
+	}
+	if maxConc > store.MaxTriggerConcurrentDispatches {
+		maxConc = store.MaxTriggerConcurrentDispatches
+	}
+	liveForTrigger, err := s.countLiveAgentsMatching(ctx, store.AgentFilter{
+		ProjectID: req.ProjectID,
+		Labels:    map[string]string{triggerLabelKeyTrigger: triggerID},
+	})
+	if err != nil {
+		return "", fmt.Errorf("count live trigger agents: %w", err)
+	}
+	if liveForTrigger >= maxConc {
+		return trigger.ErrFireConcurrencyLimit, nil
+	}
+
+	// 3. Per-project live trigger-created agent cap (hub constant 25).
+	liveInProject, err := s.countLiveAgentsMatching(ctx, store.AgentFilter{
+		ProjectID: req.ProjectID,
+		LabelKeys: []string{triggerLabelKeyTrigger},
+	})
+	if err != nil {
+		return "", fmt.Errorf("count project live trigger agents: %w", err)
+	}
+	if liveInProject >= store.MaxLiveTriggerAgentsPerProject {
+		s.notifyTriggerProjectCapReached(ctx, req, liveInProject)
+		return trigger.ErrFireProjectTriggerAgentCap, nil
+	}
+
+	return "", nil
+}
+
+// notifyTriggerProjectCapReached emits at most one notification per hour per
+// trigger when the per-project live trigger-agent cap is reached (Stage 2 §7.4).
+// P7 hook point: once notifyFireOutcome (§10) lands, route this notification
+// through it alongside the structured warning log.
+func (s *Server) notifyTriggerProjectCapReached(ctx context.Context, req hubfire.FireRequest, liveCount int) {
+	triggerID := req.Authority.DefinitionID
+	if triggerID == "" && req.Event != nil && req.Event.Trigger != nil {
+		triggerID = req.Event.Trigger.ID
+	}
+	if triggerID == "" {
+		return
+	}
+	now := time.Now().UTC()
+	rt := &s.triggers
+	rt.mu.Lock()
+	if rt.projectCapNotify == nil {
+		rt.projectCapNotify = make(map[string]time.Time)
+	}
+	if last, ok := rt.projectCapNotify[triggerID]; ok && now.Sub(last) < triggerProjectCapNotifyCooldown {
+		rt.mu.Unlock()
+		return
+	}
+	// Bound map size by pruning expired entries when large.
+	if len(rt.projectCapNotify) >= 1000 {
+		for k, ts := range rt.projectCapNotify {
+			if now.Sub(ts) >= triggerProjectCapNotifyCooldown {
+				delete(rt.projectCapNotify, k)
+			}
+		}
+	}
+	rt.projectCapNotify[triggerID] = now
+	rt.mu.Unlock()
+
+	// P7 hook point: invoke notifyFireOutcome(ctx, req, FireOutcome{Status: skipped, Error: "project trigger-agent cap"}, ...) here.
+	slog.WarnContext(ctx, "trigger dispatch skipped: project live trigger-agent cap reached",
+		"project_id", req.ProjectID,
+		"trigger_id", triggerID,
+		"fire_id", req.Authority.FireID,
+		"live_trigger_agents", liveCount,
+		"cap", store.MaxLiveTriggerAgentsPerProject)
 }
 
 // sanitizeTriggerFireError maps failed error text persisted to
@@ -725,6 +873,8 @@ func verifiedLabelForFireEvent(ev *hubfire.FireEvent) string {
 		return messaging.ExternalVerifiedHMACSHA256Body
 	case store.WebhookSignatureModeScionV1, messaging.ExternalVerifiedScionV1:
 		return messaging.ExternalVerifiedScionV1
+	case store.WebhookAuthModeHubToken, messaging.ExternalVerifiedHubToken:
+		return messaging.ExternalVerifiedHubToken
 	default:
 		return messaging.ExternalVerifiedUnverified
 	}
@@ -893,7 +1043,9 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 	verified := verifiedLabelForFireEvent(ev)
 	if len(ev.Attributes) > 0 {
 		attrs := maps.Clone(ev.Attributes)
-		if verified != messaging.ExternalVerifiedScionV1 && verified != messaging.ExternalVerifiedGitHubHMACSHA256Projected {
+		if verified != messaging.ExternalVerifiedScionV1 &&
+			verified != messaging.ExternalVerifiedHubToken &&
+			verified != messaging.ExternalVerifiedGitHubHMACSHA256Projected {
 			// §8.1a: generic webhook modes other than scion_v1 strip header-derived
 			// attributes. Stage 3 GitHub App deliveries (§4.1, §4.3) keep "delivery"
 			// and "event" populated from X-GitHub-Delivery and X-GitHub-Event: those

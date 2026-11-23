@@ -16,9 +16,42 @@ package trigger
 
 import (
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+func TestVerifyScionV1SignatureWithWindow(t *testing.T) {
+	secret := "test-secret-123"
+	now := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	body := []byte(`{"ok":true}`)
+
+	// 60s window accepts +/-59s and rejects +/-61s.
+	sigWithin := SignScionV1(secret, now.Unix()-59, "d1", "ev", "sub", body)
+	if !VerifyScionV1SignatureWithWindow(secret, now, 60*time.Second, sigWithin, "d1", "ev", "sub", body) {
+		t.Fatalf("expected 59s-old signature to pass 60s window")
+	}
+	sigOutside := SignScionV1(secret, now.Unix()-61, "d1", "ev", "sub", body)
+	if VerifyScionV1SignatureWithWindow(secret, now, 60*time.Second, sigOutside, "d1", "ev", "sub", body) {
+		t.Fatalf("expected 61s-old signature to fail 60s window")
+	}
+
+	// 900s window accepts 899s and rejects 901s; >900s is clamped to 900s.
+	sig899 := SignScionV1(secret, now.Unix()-899, "d1", "ev", "sub", body)
+	if !VerifyScionV1SignatureWithWindow(secret, now, 900*time.Second, sig899, "d1", "ev", "sub", body) {
+		t.Fatalf("expected 899s-old signature to pass 900s window")
+	}
+	sig901 := SignScionV1(secret, now.Unix()-901, "d1", "ev", "sub", body)
+	if VerifyScionV1SignatureWithWindow(secret, now, 3600*time.Second, sig901, "d1", "ev", "sub", body) {
+		t.Fatalf("expected window > 900s to clamp to 900s and reject 901s-old signature")
+	}
+
+	// <30s is clamped to 30s.
+	sig25 := SignScionV1(secret, now.Unix()-25, "d1", "ev", "sub", body)
+	if !VerifyScionV1SignatureWithWindow(secret, now, 5*time.Second, sig25, "d1", "ev", "sub", body) {
+		t.Fatalf("expected window < 30s to clamp to 30s and accept 25s-old signature")
+	}
+}
 
 func TestSourceReplayProtected(t *testing.T) {
 	cases := []struct {
@@ -27,6 +60,18 @@ func TestSourceReplayProtected(t *testing.T) {
 		ep         *store.WebhookEndpoint
 		want       bool
 	}{
+		{
+			name:       "webhook_hub_token_with_scion_v1",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHubToken, SignatureMode: store.WebhookSignatureModeScionV1},
+			want:       true,
+		},
+		{
+			name:       "webhook_hub_token_with_body_only",
+			sourceKind: store.TriggerSourceKindWebhook,
+			ep:         &store.WebhookEndpoint{AuthMode: store.WebhookAuthModeHubToken, SignatureMode: store.WebhookSignatureModeBodyOnly},
+			want:       true,
+		},
 		{
 			name:       "webhook_scion_v1",
 			sourceKind: store.TriggerSourceKindWebhook,

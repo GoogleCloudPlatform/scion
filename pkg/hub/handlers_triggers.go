@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -40,15 +41,34 @@ const (
 )
 
 var (
-	errTriggerProjectLimitExceeded  = errors.New("project trigger limit exceeded")
-	errTriggerSourceLimitExceeded   = errors.New("source active trigger limit exceeded")
-	errTriggerWebhookSourceNotFound = errors.New("trigger webhook endpoint source not found")
+	errTriggerProjectLimitExceeded     = errors.New("project trigger limit exceeded")
+	errTriggerSourceLimitExceeded      = errors.New("source active trigger limit exceeded")
+	errTriggerWebhookSourceNotFound    = errors.New("trigger webhook endpoint source not found")
+	errTriggerSourceNotReplayProtected = errors.New("trigger source is not replay protected")
 )
 
+func actionRequiresReplayProtection(actionType string) bool {
+	return actionType == store.TriggerActionDispatchAgent || actionType == store.TriggerActionExec
+}
+
+func validateTriggerLimits(actionType string, maxFiresPerMinute, maxConcurrentDispatches int) error {
+	if maxFiresPerMinute < 0 || maxFiresPerMinute > store.MaxTriggerFiresPerMinute {
+		return fmt.Errorf("maxFiresPerMinute must be between 0 and %d", store.MaxTriggerFiresPerMinute)
+	}
+	if maxConcurrentDispatches < 0 || maxConcurrentDispatches > store.MaxTriggerConcurrentDispatches {
+		return fmt.Errorf("maxConcurrentDispatches must be between 0 and %d", store.MaxTriggerConcurrentDispatches)
+	}
+	if maxConcurrentDispatches > 0 && actionType != store.TriggerActionDispatchAgent {
+		return errors.New("maxConcurrentDispatches is only supported for dispatch_agent triggers")
+	}
+	return nil
+}
+
 // verifyActiveWebhookSourceInTx re-reads the resolved webhook endpoint inside
-// WithTx (after LockTriggerQuota) so a concurrent DELETE or status disable
-// cannot leave an active trigger pointing at a deleted/disabled endpoint.
-func verifyActiveWebhookSourceInTx(ctx context.Context, tx store.Store, projectID, endpointID string) error {
+// WithTx (after LockTriggerQuota) so a concurrent DELETE, status disable, or
+// PATCH dropping replay protection cannot leave an active trigger pointing at
+// an invalid endpoint.
+func verifyActiveWebhookSourceInTx(ctx context.Context, tx store.Store, projectID, endpointID string, requireReplayProtected bool) error {
 	ep, err := tx.GetWebhookEndpoint(ctx, endpointID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
@@ -59,17 +79,22 @@ func verifyActiveWebhookSourceInTx(ctx context.Context, tx store.Store, projectI
 	if ep == nil || ep.ProjectID != projectID || ep.Status != store.WebhookEndpointStatusActive {
 		return errTriggerWebhookSourceNotFound
 	}
+	if requireReplayProtected && !trigger.SourceReplayProtected(store.TriggerSourceKindWebhook, ep) {
+		return errTriggerSourceNotReplayProtected
+	}
 	return nil
 }
 
 // CreateTriggerRequest is the request body for POST /triggers.
 type CreateTriggerRequest struct {
-	Name        string              `json:"name"`
-	Description string              `json:"description,omitempty"`
-	Source      TriggerSourceSpec   `json:"source"`
-	Match       *TriggerMatchSpec   `json:"match,omitempty"`
-	Action      TriggerActionSpec   `json:"action"`
-	Subject     *TriggerSubjectSpec `json:"subject,omitempty"`
+	Name                    string              `json:"name"`
+	Description             string              `json:"description,omitempty"`
+	Source                  TriggerSourceSpec   `json:"source"`
+	Match                   *TriggerMatchSpec   `json:"match,omitempty"`
+	Action                  TriggerActionSpec   `json:"action"`
+	Subject                 *TriggerSubjectSpec `json:"subject,omitempty"`
+	MaxFiresPerMinute       int                 `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches int                 `json:"maxConcurrentDispatches,omitempty"`
 }
 
 // TriggerMatchFormPatch tracks explicit presence of match.form in PATCH
@@ -138,13 +163,15 @@ func authorizeTriggerReuseSubject(w http.ResponseWriter, subjectMode string, cei
 
 // UpdateTriggerRequest is the request body for PATCH /triggers/{id}.
 type UpdateTriggerRequest struct {
-	Name             *string                  `json:"name,omitempty"`
-	Description      *string                  `json:"description,omitempty"`
-	Source           *TriggerSourceSpec       `json:"source,omitempty"`
-	Match            *TriggerMatchPatchSpec   `json:"match,omitempty"`
-	Action           *TriggerActionSpec       `json:"action,omitempty"`
-	Subject          *TriggerSubjectPatchSpec `json:"subject,omitempty"`
-	ExpectedRevision *int                     `json:"expectedRevision,omitempty"`
+	Name                    *string                  `json:"name,omitempty"`
+	Description             *string                  `json:"description,omitempty"`
+	Source                  *TriggerSourceSpec       `json:"source,omitempty"`
+	Match                   *TriggerMatchPatchSpec   `json:"match,omitempty"`
+	Action                  *TriggerActionSpec       `json:"action,omitempty"`
+	Subject                 *TriggerSubjectPatchSpec `json:"subject,omitempty"`
+	MaxFiresPerMinute       *int                     `json:"maxFiresPerMinute,omitempty"`
+	MaxConcurrentDispatches *int                     `json:"maxConcurrentDispatches,omitempty"`
+	ExpectedRevision        *int                     `json:"expectedRevision,omitempty"`
 }
 
 // handleTriggers routes requests under
@@ -620,27 +647,33 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		return
 	}
+	if err := validateTriggerLimits(actionType, req.MaxFiresPerMinute, req.MaxConcurrentDispatches); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
 
-	trigger := store.Trigger{
-		ID:                    api.NewUUID(),
-		ProjectID:             projectID,
-		Name:                  name,
-		Description:           req.Description,
-		SourceKind:            sourceKind,
-		SourceID:              resolvedSourceID,
-		MatchTypes:            matchTypes,
-		MatchRules:            matchRules,
-		MatchForm:             matchForm,
-		ActionType:            actionType,
-		ActionPayload:         actionPayload,
-		SubjectDialect:        subjectDialect,
-		SubjectRule:           subjectRule,
-		SubjectMode:           subjectMode,
-		CoalesceWindowSeconds: coalesceSeconds,
-		Status:                store.TriggerStatusActive,
-		CreatedBy:             identity.ID(),
-		InitiatorAttribution:  newInitiatorAttribution(ctx),
-		AuthorityCeiling:      ceiling,
+	tr := store.Trigger{
+		ID:                      api.NewUUID(),
+		ProjectID:               projectID,
+		Name:                    name,
+		Description:             req.Description,
+		SourceKind:              sourceKind,
+		SourceID:                resolvedSourceID,
+		MatchTypes:              matchTypes,
+		MatchRules:              matchRules,
+		MatchForm:               matchForm,
+		ActionType:              actionType,
+		ActionPayload:           actionPayload,
+		SubjectDialect:          subjectDialect,
+		SubjectRule:             subjectRule,
+		SubjectMode:             subjectMode,
+		CoalesceWindowSeconds:   coalesceSeconds,
+		MaxFiresPerMinute:       req.MaxFiresPerMinute,
+		MaxConcurrentDispatches: req.MaxConcurrentDispatches,
+		Status:                  store.TriggerStatusActive,
+		CreatedBy:               identity.ID(),
+		InitiatorAttribution:    newInitiatorAttribution(ctx),
+		AuthorityCeiling:        ceiling,
 	}
 
 	fp := fixturePrincipalFromContext(ctx)
@@ -648,12 +681,12 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
 		}
-		if trigger.SourceKind == store.TriggerSourceKindWebhook {
-			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, trigger.SourceID); vErr != nil {
+		if tr.SourceKind == store.TriggerSourceKindWebhook {
+			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionRequiresReplayProtection(tr.ActionType)); vErr != nil {
 				return vErr
 			}
 		}
-		if sErr := stampTrigger(ctx, tx, &trigger, fp); sErr != nil {
+		if sErr := stampTrigger(ctx, tx, &tr, fp); sErr != nil {
 			return sErr
 		}
 		projCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{ProjectID: projectID})
@@ -665,8 +698,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		}
 		srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
 			ProjectID:  projectID,
-			SourceKind: trigger.SourceKind,
-			SourceID:   trigger.SourceID,
+			SourceKind: tr.SourceKind,
+			SourceID:   tr.SourceID,
 			Status:     store.TriggerStatusActive,
 		})
 		if cErr != nil {
@@ -675,12 +708,12 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		if srcCount >= store.MaxActiveTriggersPerSource {
 			return errTriggerSourceLimitExceeded
 		}
-		if trigger.ActionType == store.TriggerActionExec {
+		if tr.ActionType == store.TriggerActionExec {
 			if capErr := checkTriggerExecCapsInTx(ctx, tx, projectID, execTargetID, false, false); capErr != nil {
 				return capErr
 			}
 		}
-		return tx.CreateTrigger(ctx, &trigger)
+		return tx.CreateTrigger(ctx, &tr)
 	})
 	if err != nil {
 		if writeFixtureRootError(w, err) {
@@ -689,12 +722,15 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		switch {
 		case errors.Is(err, errTriggerWebhookSourceNotFound):
 			writeWebhookEndpointNotFound(w)
+		case errors.Is(err, errTriggerSourceNotReplayProtected):
+			writeError(w, http.StatusBadRequest, "source_not_replay_protected",
+				"dispatch_agent triggers require a replay-protected source", nil)
 		case errors.Is(err, errTriggerProjectLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("project has reached the maximum of %d triggers", store.MaxTriggersPerProject), nil)
 		case errors.Is(err, errTriggerSourceLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
-				triggerSourceLimitMessage(trigger.SourceKind), nil)
+				triggerSourceLimitMessage(tr.SourceKind), nil)
 		case errors.Is(err, errTriggerExecProjectCapExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("project has reached the maximum of %d active exec triggers", triggerExecMaxActivePerProject), nil)
@@ -710,8 +746,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	setTriggerETag(w, trigger.AuthorizationRevision)
-	writeJSON(w, http.StatusCreated, buildTriggerResponse(s.newExecRevealer(ctx), trigger))
+	setTriggerETag(w, tr.AuthorizationRevision)
+	writeJSON(w, http.StatusCreated, buildTriggerResponse(s.newExecRevealer(ctx), tr))
 }
 
 func (s *Server) listTriggers(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -1069,6 +1105,21 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		changesFutureDispatch = true
 	}
 
+	if req.MaxFiresPerMinute != nil {
+		tr.MaxFiresPerMinute = *req.MaxFiresPerMinute
+		fields.MaxFiresPerMinute = true
+	}
+	if req.MaxConcurrentDispatches != nil {
+		tr.MaxConcurrentDispatches = *req.MaxConcurrentDispatches
+		fields.MaxConcurrentDispatches = true
+	}
+	if fields.MaxFiresPerMinute || fields.MaxConcurrentDispatches || req.Action != nil {
+		if err := validateTriggerLimits(tr.ActionType, tr.MaxFiresPerMinute, tr.MaxConcurrentDispatches); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+	}
+
 	var newAttr *store.InitiatorAttribution
 	if changesFutureDispatch {
 		// Re-authorizing future dispatch requires the editor to hold access to
@@ -1190,7 +1241,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 				return lErr
 			}
 			if tr.SourceKind == store.TriggerSourceKindWebhook {
-				if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
+				if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionRequiresReplayProtection(tr.ActionType)); vErr != nil {
 					return vErr
 				}
 			}
@@ -1225,6 +1276,9 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		switch {
 		case errors.Is(err, errTriggerWebhookSourceNotFound):
 			writeWebhookEndpointNotFound(w)
+		case errors.Is(err, errTriggerSourceNotReplayProtected):
+			writeError(w, http.StatusBadRequest, "source_not_replay_protected",
+				"dispatch_agent triggers require a replay-protected source", nil)
 		case errors.Is(err, store.ErrRevisionConflict):
 			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
 				"trigger was concurrently modified; refresh and retry", nil)
@@ -1381,7 +1435,7 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 			return lErr
 		}
 		if tr.SourceKind == store.TriggerSourceKindWebhook {
-			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID); vErr != nil {
+			if vErr := verifyActiveWebhookSourceInTx(ctx, tx, projectID, tr.SourceID, actionRequiresReplayProtection(tr.ActionType)); vErr != nil {
 				return vErr
 			}
 		}
@@ -1408,6 +1462,9 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		switch {
 		case errors.Is(err, errTriggerWebhookSourceNotFound):
 			writeWebhookEndpointNotFound(w)
+		case errors.Is(err, errTriggerSourceNotReplayProtected):
+			writeError(w, http.StatusBadRequest, "source_not_replay_protected",
+				"dispatch_agent triggers require a replay-protected source", nil)
 		case errors.Is(err, store.ErrRevisionConflict):
 			writeError(w, http.StatusConflict, ErrCodeRevisionConflict,
 				"trigger was concurrently modified; refresh and retry", nil)

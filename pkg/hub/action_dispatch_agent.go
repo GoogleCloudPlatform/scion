@@ -782,6 +782,9 @@ func (a *dispatchAgentAction) Authorize(
 				ep = loaded
 				sourceName = ep.Name
 				signatureMode = ep.SignatureMode
+				if ep.AuthMode == store.WebhookAuthModeHubToken {
+					signatureMode = store.WebhookAuthModeHubToken
+				}
 			}
 			if !trigger.SourceReplayProtected(req.Event.SourceKind, ep) {
 				return nil, &FireRefusal{Reason: "source not replay protected"}, nil
@@ -789,6 +792,16 @@ func (a *dispatchAgentAction) Authorize(
 			// Stage 3 §4.4 defense-in-depth: refuse stale events from replay-protected sources.
 			if req.Event.Attributes["stale"] == "true" {
 				return nil, &FireRefusal{Reason: trigger.ErrFireStaleEvent}, nil
+			}
+			// P1c-1 security M1 (Stage 2 P4a): an HMAC-signed webhook delivery
+			// without X-Scion-Delivery has no dedup key (ingress generates a
+			// random UUID) and is replayable within replay_window_seconds.
+			// Require a non-empty delivery ID for agent-creating triggers on
+			// non-hub_token webhook endpoints.
+			if req.Event.SourceKind == store.TriggerSourceKindWebhook &&
+				ep != nil && ep.AuthMode != store.WebhookAuthModeHubToken &&
+				strings.TrimSpace(req.Event.Attributes["delivery"]) == "" {
+				return nil, &FireRefusal{Reason: "missing delivery id"}, nil
 			}
 		}
 	}

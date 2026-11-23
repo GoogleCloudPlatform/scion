@@ -301,6 +301,21 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 			Error:  refusal.Reason,
 		}, rawErr
 	}
+	if req.BeforeFire != nil {
+		skipReason, bfErr := req.BeforeFire(ctx)
+		if bfErr != nil {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusFailed,
+				Error:  bfErr.Error(),
+			}, bfErr
+		}
+		if skipReason != "" {
+			return hubfire.FireOutcome{
+				Status: hubfire.FireStatusSkipped,
+				Error:  skipReason,
+			}, nil
+		}
+	}
 	out, err := action.Fire(ctx, req, authorized)
 	if err != nil {
 		if reason, ok := asScheduledSkip(err); ok {

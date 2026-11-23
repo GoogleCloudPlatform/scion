@@ -74,14 +74,17 @@ const (
 	ErrFireRuleNoLongerCompiles          = "rule no longer compiles"
 	ErrFireGitHubAssociationUnauthorized = "github association not authorized"
 	ErrFireSubjectBusy                   = "subject busy"
-	ErrFireSubjectDispatchInProgress     = "subject dispatch in progress"
-	ErrFireCoalesced                     = "coalesced"
-	ErrFireCoalesceCancelled             = "coalesce cancelled"
-	ErrFireDeferCancelled                = "defer cancelled"
-	ErrFireStaleEvent                    = "stale event"
-	ErrFireReapedDuringCoalesce          = "hub restarted during coalesce"
-	ErrFireReapedDuringDefer             = "hub restarted during defer"
-	ErrFireTargetAgentStillStarting      = "target agent still starting"
+	ErrFireSubjectDispatchInProgress = "subject dispatch in progress"
+	ErrFireCoalesced                 = "coalesced"
+	ErrFireCoalesceCancelled         = "coalesce cancelled"
+	ErrFireDeferCancelled            = "defer cancelled"
+	ErrFireStaleEvent                = "stale event"
+	ErrFireReapedDuringCoalesce      = "hub restarted during coalesce"
+	ErrFireReapedDuringDefer         = "hub restarted during defer"
+	ErrFireTargetAgentStillStarting  = "target agent still starting"
+	ErrFireRateLimit                 = "rate limit"
+	ErrFireConcurrencyLimit          = "concurrency limit"
+	ErrFireProjectTriggerAgentCap    = "project trigger-agent cap"
 
 	// ReuseDeferBackoff is the bounded retry delay when a reuse target agent's
 	// create launch is still in flight (Stage 3 §6.2 rev 1.16).
@@ -90,8 +93,8 @@ const (
 	// before failing with ErrFireTargetAgentStillStarting.
 	ReuseDeferTimeout = 10 * time.Minute
 
-	// Closed-set skipped-fire metric reasons (§6.5). Free-text errors are
-	// never emitted as metric labels.
+	// Closed-set skipped-fire metric reasons (§6.5, Stage 2 §7.4). Free-text
+	// errors are never emitted as metric labels.
 	FireSkipReasonRuleBudgetExhausted        = "rule_budget_exhausted"
 	FireSkipReasonRuleCompileBudgetExhausted = "rule_compile_budget_exhausted"
 	FireSkipReasonRuleEvaluationFailed       = "rule_evaluation_failed"
@@ -109,6 +112,9 @@ const (
 	FireSkipReasonEventDeleted               = "event_deleted"
 	FireSkipReasonTargetDeleted              = "target_deleted"
 	FireSkipReasonTargetNotRunning           = "target_not_running"
+	FireSkipReasonRateLimit                  = "rate_limit"
+	FireSkipReasonConcurrency                = "concurrency"
+	FireSkipReasonProjectCap                 = "project_cap"
 	FireSkipReasonOther                      = "other"
 )
 
@@ -134,6 +140,9 @@ func FireSkipReasons() []string {
 		FireSkipReasonEventDeleted,
 		FireSkipReasonTargetDeleted,
 		FireSkipReasonTargetNotRunning,
+		FireSkipReasonRateLimit,
+		FireSkipReasonConcurrency,
+		FireSkipReasonProjectCap,
 		FireSkipReasonOther,
 	}
 }
@@ -176,6 +185,12 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonTargetDeleted
 	case ErrFireTargetNotRunning:
 		return FireSkipReasonTargetNotRunning
+	case ErrFireRateLimit:
+		return FireSkipReasonRateLimit
+	case ErrFireConcurrencyLimit:
+		return FireSkipReasonConcurrency
+	case ErrFireProjectTriggerAgentCap:
+		return FireSkipReasonProjectCap
 	default:
 		return FireSkipReasonOther
 	}
@@ -774,9 +789,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			Revision:  int64(tr.AuthorizationRevision),
 		}
 		trigRef := hubfire.FireTriggerRef{
-			ID:          tr.ID,
-			Name:        tr.Name,
-			SubjectMode: tr.SubjectMode,
+			ID:                      tr.ID,
+			Name:                    tr.Name,
+			SubjectMode:             tr.SubjectMode,
+			MaxFiresPerMinute:       tr.MaxFiresPerMinute,
+			MaxConcurrentDispatches: tr.MaxConcurrentDispatches,
 		}
 		trigAct := baseAct.WithTrigger(trigRef)
 
