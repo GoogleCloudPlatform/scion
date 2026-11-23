@@ -880,6 +880,13 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		claimStatus = store.ScheduledEventFiring
 	}
 
+	// Backstop for a pending one-shot event whose creating (authority) agent
+	// was deleted by a path that did not cancel it (ptone/scion#5408): cancel
+	// it conditionally on pending status instead of firing it to be refused.
+	if evt.ScheduleID == "" && s.cancelEventIfCreatorGone(ctx, evt) {
+		return
+	}
+
 	// Multi-replica dedup (P3-5): several replicas may each recover the same
 	// pending event from the database on startup and arm a timer for it. Claim
 	// the event atomically (pending -> claimStatus) before running its side
@@ -987,6 +994,38 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		return
 	}
 	persist()
+}
+
+// cancelEventIfCreatorGone is the fire-time backstop for a one-shot scheduled
+// event whose recorded authority agent was deleted by a path that did not
+// cancel it (ptone/scion#5408). It returns true when the event was cancelled
+// (or was already claimed/cancelled by another replica) and must not fire.
+func (s *Scheduler) cancelEventIfCreatorGone(ctx context.Context, evt store.ScheduledEvent) bool {
+	if s.srv == nil || s.store == nil {
+		return false
+	}
+	gone, err := s.srv.eventAuthorityAgentGone(ctx, evt)
+	if err != nil {
+		s.log.Warn("Scheduler: creating agent lookup failed; firing as usual",
+			"eventID", evt.ID, "type", evt.EventType, "error", err)
+		return false
+	}
+	if !gone {
+		return false
+	}
+	if err := s.store.CancelScheduledEventWithReason(ctx, evt.ID, scheduledEventReasonCreatorDeleted); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.log.Debug("Scheduler: scheduled event no longer pending; skipping creator-deleted cancel",
+				"eventID", evt.ID, "type", evt.EventType)
+			return true
+		}
+		s.log.Warn("Scheduler: failed to cancel scheduled event whose creating agent was deleted; firing as usual",
+			"eventID", evt.ID, "type", evt.EventType, "error", err)
+		return false
+	}
+	s.log.Warn("Scheduler: cancelled scheduled event because its creating agent was deleted",
+		"eventID", evt.ID, "type", evt.EventType, "reason", scheduledEventReasonCreatorDeleted)
+	return true
 }
 
 // executeEvent dispatches the event through the fire core based on its

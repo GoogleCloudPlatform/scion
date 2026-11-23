@@ -25,7 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -221,5 +223,258 @@ func TestDeleteAgent_KeepsScheduledEventFiredBeforeCancel(t *testing.T) {
 			t.Errorf("unexpected %s log for the fired event: %q (error=%v)",
 				rec.level, rec.msg, rec.attrs["error"])
 		}
+	}
+}
+
+// TestDeleteAgent_CancelsPendingOneShotEventsAuthoredByAgent verifies that
+// deleting an agent (hard or soft) cancels pending one-shot scheduled events
+// whose recorded authority is that agent with reason "creating agent deleted"
+// and stops their timers (ptone/scion#5408). Self-targeted events keep the
+// target-deleted precedence ("target agent deleted"), already-fired events
+// keep their status, and events authored by other principals stay pending.
+func TestDeleteAgent_CancelsPendingOneShotEventsAuthoredByAgent(t *testing.T) {
+	cases := []struct {
+		name      string
+		retention time.Duration
+	}{
+		{"hard", 0},
+		{"soft", time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, _ := engineTestServer(t)
+			srv.config.SoftDeleteRetention = tc.retention
+			logs := &levelLogHandler{}
+			srv.agentLifecycleLog = slog.New(logs)
+			srv.scheduler = NewScheduler(s, slog.Default())
+			srv.scheduler.srv = srv
+			ctx := context.Background()
+
+			agent := setupBrokerAgentInPhase(t, s, "oneshot-creator-"+tc.name, state.PhaseStopped)
+			other := &store.Agent{
+				ID: tid("oneshot-other-" + tc.name), Slug: "oneshot-other-" + tc.name,
+				Name: "oneshot-other", ProjectID: agent.ProjectID, Phase: string(state.PhaseStopped),
+			}
+			require.NoError(t, s.CreateAgent(ctx, other))
+
+			targetOtherPayload, err := json.Marshal(map[string]string{"agentId": other.ID, "message": "ping"})
+			require.NoError(t, err)
+			targetSelfPayload, err := json.Marshal(map[string]string{"agentId": agent.ID, "message": "self"})
+			require.NoError(t, err)
+
+			authored := withMockAgentRevision(store.ScheduledEvent{
+				ID:        tid("oneshot-authored-" + tc.name),
+				ProjectID: agent.ProjectID,
+				EventType: "message",
+				FireAt:    time.Now().Add(time.Hour),
+				Payload:   string(targetOtherPayload),
+				Status:    store.ScheduledEventPending,
+				CreatedBy: agent.ID,
+			}, agent.ID)
+			selfTargeted := withMockAgentRevision(store.ScheduledEvent{
+				ID:        tid("oneshot-self-" + tc.name),
+				ProjectID: agent.ProjectID,
+				EventType: "message",
+				FireAt:    time.Now().Add(time.Hour),
+				Payload:   string(targetSelfPayload),
+				Status:    store.ScheduledEventPending,
+				CreatedBy: agent.ID,
+			}, agent.ID)
+			firedAt := time.Now().Add(-time.Minute).UTC()
+			alreadyFired := withMockAgentRevision(store.ScheduledEvent{
+				ID:        tid("oneshot-fired-" + tc.name),
+				ProjectID: agent.ProjectID,
+				EventType: "message",
+				FireAt:    firedAt,
+				FiredAt:   &firedAt,
+				Payload:   string(targetOtherPayload),
+				Status:    store.ScheduledEventFired,
+				CreatedBy: agent.ID,
+			}, agent.ID)
+			byOther := withMockAgentRevision(store.ScheduledEvent{
+				ID:        tid("oneshot-by-other-" + tc.name),
+				ProjectID: agent.ProjectID,
+				EventType: "message",
+				FireAt:    time.Now().Add(time.Hour),
+				Payload:   string(targetOtherPayload),
+				Status:    store.ScheduledEventPending,
+				CreatedBy: other.ID,
+			}, other.ID)
+			byUser := withSessionRevision(store.ScheduledEvent{
+				ID:        tid("oneshot-by-user-" + tc.name),
+				ProjectID: agent.ProjectID,
+				EventType: "message",
+				FireAt:    time.Now().Add(time.Hour),
+				Payload:   string(targetOtherPayload),
+				Status:    store.ScheduledEventPending,
+				CreatedBy: DevUserID,
+			}, DevUserID)
+
+			for _, evt := range []store.ScheduledEvent{authored, selfTargeted, alreadyFired, byOther, byUser} {
+				e := evt
+				require.NoError(t, s.CreateScheduledEvent(ctx, &e))
+			}
+			srv.scheduler.scheduleTimer(ctx, authored)
+			srv.scheduler.scheduleTimer(ctx, selfTargeted)
+			t.Cleanup(func() {
+				srv.scheduler.StopEventTimer(authored.ID)
+				srv.scheduler.StopEventTimer(selfTargeted.ID)
+			})
+
+			timerArmed := func(id string) bool {
+				srv.scheduler.mu.Lock()
+				defer srv.scheduler.mu.Unlock()
+				_, ok := srv.scheduler.timers[id]
+				return ok
+			}
+			require.True(t, timerArmed(authored.ID))
+			require.True(t, timerArmed(selfTargeted.ID))
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+			gotAuthored, err := s.GetScheduledEvent(ctx, authored.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventCancelled, gotAuthored.Status)
+			assert.Equal(t, "creating agent deleted", gotAuthored.Error)
+			assert.False(t, timerArmed(authored.ID), "timer for authored event must be stopped")
+
+			gotSelf, err := s.GetScheduledEvent(ctx, selfTargeted.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventCancelled, gotSelf.Status)
+			assert.Equal(t, "target agent deleted", gotSelf.Error, "target-deleted takes precedence over creator-deleted")
+			assert.False(t, timerArmed(selfTargeted.ID), "timer for self-targeted event must be stopped")
+
+			gotFired, err := s.GetScheduledEvent(ctx, alreadyFired.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFired, gotFired.Status)
+			assert.NotNil(t, gotFired.FiredAt)
+			assert.Empty(t, gotFired.Error)
+
+			for _, unchanged := range []store.ScheduledEvent{byOther, byUser} {
+				got, err := s.GetScheduledEvent(ctx, unchanged.ID)
+				require.NoError(t, err)
+				assert.Equal(t, store.ScheduledEventPending, got.Status, unchanged.ID)
+				assert.Empty(t, got.Error, unchanged.ID)
+			}
+
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			for _, rec := range logs.recs {
+				if rec.level >= slog.LevelWarn && (rec.attrs["event_id"] == authored.ID || rec.attrs["event_id"] == selfTargeted.ID) {
+					t.Errorf("unexpected %s log for cancelled event %v: %q (error=%v)",
+						rec.level, rec.attrs["event_id"], rec.msg, rec.attrs["error"])
+				}
+			}
+		})
+	}
+}
+
+// TestDeleteAgent_KeepsAuthoredEventFiredBeforeCancel verifies that an event
+// authored by the deleted agent (targeting another agent) that fires between
+// ListScheduledEvents and CancelScheduledEventWithReason keeps its fired status.
+func TestDeleteAgent_KeepsAuthoredEventFiredBeforeCancel(t *testing.T) {
+	evtID := tid("delete-authored-fired-before-cancel-evt")
+	srv, s := testServer(t)
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *fireAfterListStore {
+		return &fireAfterListStore{Store: inner, fault: f, eventID: evtID}
+	})
+	f := projectAgentAuthzSetupOn(t, srv, s)
+	ctx := context.Background()
+
+	logs := &levelLogHandler{}
+	f.srv.agentLifecycleLog = slog.New(logs)
+	f.srv.scheduler = NewScheduler(f.store, slog.Default())
+	f.srv.scheduler.srv = f.srv
+
+	payload, err := json.Marshal(map[string]string{"agentId": f.caller.ID, "message": "hi"})
+	require.NoError(t, err)
+	evt := withMockAgentRevision(store.ScheduledEvent{
+		ID:        evtID,
+		ProjectID: f.project.ID,
+		EventType: "message",
+		FireAt:    time.Now().Add(time.Hour),
+		Payload:   string(payload),
+		Status:    store.ScheduledEventPending,
+		CreatedBy: f.target.ID,
+	}, f.target.ID)
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+	f.srv.scheduler.scheduleTimer(ctx, evt)
+	t.Cleanup(func() { f.srv.scheduler.StopEventTimer(evt.ID) })
+
+	fault.Arm()
+
+	delRec := doRequestAsUser(t, f.srv, f.member, http.MethodDelete, f.targetPath(), nil)
+	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, delRec.Code,
+		"DELETE body: %s", delRec.Body.String())
+
+	after, err := f.store.GetScheduledEvent(ctx, evt.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.ScheduledEventFired, after.Status)
+	require.NotNil(t, after.FiredAt)
+	require.Empty(t, after.Error)
+
+	f.srv.scheduler.mu.Lock()
+	_, armed := f.srv.scheduler.timers[evt.ID]
+	f.srv.scheduler.mu.Unlock()
+	require.True(t, armed)
+}
+
+// TestFireEvent_CancelsWhenCreatingAgentGone verifies the fire-time backstop:
+// a pending one-shot event whose creating agent was deleted via a path that did
+// not cancel it (hard-deleted, soft-deleted, or missing) is cancelled with
+// "creating agent deleted" instead of firing and failing silently with
+// "message delivery refused" (ptone/scion#5408).
+func TestFireEvent_CancelsWhenCreatingAgentGone(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, s store.Store, projectID string) string
+	}{
+		{"hard deleted", func(t *testing.T, s store.Store, projectID string) string {
+			id := tid("fire-creator-hard-del")
+			require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
+				ID: id, Slug: "fire-creator-hard-del", Name: "fire-creator-hard-del",
+				ProjectID: projectID, Phase: string(state.PhaseStopped),
+			}))
+			require.NoError(t, s.DeleteAgent(context.Background(), id))
+			return id
+		}},
+		{"soft deleted", func(t *testing.T, s store.Store, projectID string) string {
+			id := tid("fire-creator-soft-del")
+			require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{
+				ID: id, Slug: "fire-creator-soft-del", Name: "fire-creator-soft-del",
+				ProjectID: projectID, Phase: string(state.PhaseStopped), DeletedAt: time.Now(),
+			}))
+			return id
+		}},
+		{"never existed", func(t *testing.T, s store.Store, projectID string) string {
+			return tid("fire-creator-missing")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, projectID := setupScheduleTest(t)
+			ctx := context.Background()
+			creatorID := tc.setup(t, s, projectID)
+
+			evt := withMockAgentRevision(store.ScheduledEvent{
+				ID:        tid("fire-creator-gone-" + tc.name),
+				ProjectID: projectID,
+				EventType: "message",
+				FireAt:    time.Now().Add(-time.Minute),
+				Payload:   `{"agentName":"other","message":"hello"}`,
+				Status:    store.ScheduledEventPending,
+				CreatedBy: creatorID,
+			}, creatorID)
+			require.NoError(t, s.CreateScheduledEvent(ctx, &evt))
+
+			srv.scheduler.fireEvent(ctx, evt, false)
+
+			got, err := s.GetScheduledEvent(ctx, evt.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventCancelled, got.Status)
+			assert.Equal(t, "creating agent deleted", got.Error)
+			assert.Nil(t, got.FiredAt)
+		})
 	}
 }

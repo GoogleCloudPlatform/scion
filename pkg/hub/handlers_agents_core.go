@@ -5551,11 +5551,24 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 	}
 }
 
+const (
+	// scheduledEventReasonTargetDeleted is recorded on a pending scheduled
+	// event cancelled because its target agent was deleted.
+	scheduledEventReasonTargetDeleted = "target agent deleted"
+	// scheduledEventReasonCreatorDeleted is recorded on a pending one-shot
+	// scheduled event cancelled because its creating (authority) agent was
+	// deleted (ptone/scion#5408).
+	scheduledEventReasonCreatorDeleted = "creating agent deleted"
+)
+
 // cancelScheduledEventsForAgent cancels all pending scheduled events that
-// target the given agent, preventing orphaned events from firing after deletion.
+// target the given agent ("target agent deleted") or whose recorded authority
+// is that agent ("creating agent deleted", ptone/scion#5408), preventing
+// orphaned events from firing after deletion. Target match takes precedence
+// over creator match so self-targeted events record "target agent deleted".
 //
 // It pages through every pending event of the project (following
-// NextCursor), so a target's events on later pages are cancelled too
+// NextCursor), so an agent's events on later pages are cancelled too
 // (AC11, ptone/scion#7883).
 func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store.Agent) {
 	var pending []store.ScheduledEvent
@@ -5579,13 +5592,18 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 
 	var cancelled int
 	for _, evt := range pending {
-		if !eventTargetsAgent(evt, agent) {
+		var reason string
+		switch {
+		case eventTargetsAgent(evt, agent):
+			reason = scheduledEventReasonTargetDeleted
+		case evt.ScheduleID == "" && s.eventAuthoredByAgent(evt, agent.ID):
+			reason = scheduledEventReasonCreatorDeleted
+		default:
 			continue
 		}
 		// The cancel only changes an event that is still pending. An event
 		// that fired or was claimed after the list above keeps its status.
-		if err := s.store.CancelScheduledEventWithReason(ctx, evt.ID,
-			"target agent deleted"); err != nil {
+		if err := s.store.CancelScheduledEventWithReason(ctx, evt.ID, reason); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// No longer pending: it fired or was claimed between
 				// the list and this cancel. That is a normal outcome,
@@ -5642,6 +5660,36 @@ func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
 		return true
 	}
 	return false
+}
+
+// eventAuthoredByAgent reports whether a scheduled event's recorded authority
+// (InitiatorAttribution, never CreatedBy) is the given agent.
+func (s *Server) eventAuthoredByAgent(evt store.ScheduledEvent, agentID string) bool {
+	if agentID == "" {
+		return false
+	}
+	initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+	return !initiator.LegacyUnknown &&
+		initiator.PrincipalKind == store.DelegationPrincipalAgent &&
+		initiator.PrincipalID == agentID
+}
+
+// eventAuthorityAgentGone reports whether a one-shot scheduled event's recorded
+// authority is an agent whose row is gone or soft-deleted. Any other authority
+// (a live agent, a user, legacy attribution) returns false, nil.
+func (s *Server) eventAuthorityAgentGone(ctx context.Context, evt store.ScheduledEvent) (bool, error) {
+	initiator := s.scheduledInitiator(evt.InitiatorAttribution)
+	if initiator.LegacyUnknown || initiator.PrincipalKind != store.DelegationPrincipalAgent || initiator.PrincipalID == "" {
+		return false, nil
+	}
+	agent, err := s.store.GetAgent(ctx, initiator.PrincipalID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return true, nil
+		}
+		return false, err
+	}
+	return agent == nil || !agent.DeletedAt.IsZero(), nil
 }
 
 func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, action string) {
