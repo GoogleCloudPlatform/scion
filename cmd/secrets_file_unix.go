@@ -31,6 +31,6 @@ func warnIfSecretsFileOverlyPermissive(w io.Writer, path string) {
 	}
 	perm := info.Mode().Perm()
 	if perm&0o077 != 0 {
-		fmt.Fprintf(w, "Warning: secrets file %s has permissions %04o (group/world-readable); consider running chmod 600 %s\n", path, perm, path)
+		_, _ = fmt.Fprintf(w, "Warning: secrets file %s has permissions %04o (group/world-readable); consider running chmod 600 %s\n", path, perm, path)
 	}
 }
