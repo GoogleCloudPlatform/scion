@@ -885,7 +885,7 @@ export class ScionPageAdminSystemOne extends LitElement {
       };
     } else if (modeCap.mode === 'google_access_token') {
       const scopes = this.createScopesText
-        .split(/[\n,]+/)
+        .split(/[\s,]+/)
         .map((s) => s.trim())
         .filter((s) => s.length > 0);
       if (scopes.length === 0) {
@@ -968,9 +968,8 @@ export class ScionPageAdminSystemOne extends LitElement {
       }
       const data = (await res.json()) as {
         projects?: ProjectOption[];
-        groves?: ProjectOption[];
       };
-      this.testProjects = data.projects ?? data.groves ?? [];
+      this.testProjects = data.projects ?? [];
     } catch (err) {
       this.testProjectsError = err instanceof Error ? err.message : 'Failed to load projects';
     } finally {

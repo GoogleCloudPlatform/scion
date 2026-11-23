@@ -585,7 +585,7 @@ describe('scion-page-admin-system-one', () => {
     setVal(
       dlg,
       'sl-textarea[name="scopes"]',
-      'https://www.googleapis.com/auth/generative-language'
+      'https://www.googleapis.com/auth/generative-language https://www.googleapis.com/auth/cloud-platform'
     );
     setVal(dlg, 'sl-input[name="quotaProject"]', 'my-gcp-proj');
     await settle();
@@ -597,7 +597,10 @@ describe('scion-page-admin-system-one', () => {
       endpoint: 'https://generativelanguage.googleapis.com',
       auth: {
         kind: 'google_access_token',
-        scopes: ['https://www.googleapis.com/auth/generative-language'],
+        scopes: [
+          'https://www.googleapis.com/auth/generative-language',
+          'https://www.googleapis.com/auth/cloud-platform',
+        ],
       },
       options: { quota_project: 'my-gcp-proj' },
     });

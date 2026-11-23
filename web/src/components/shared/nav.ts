@@ -20,7 +20,7 @@
  * Provides the main sidebar navigation with Shoelace integration
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
@@ -473,6 +473,14 @@ export class ScionNav extends LitElement {
   override render() {
     const isSuperAdmin = this.user?.role === 'admin';
 
+    const visibleAdminItems = this.adminStatus
+      ? visibleItems(ADMIN_SCOPEABLE_ITEMS).filter(
+          (item) =>
+            NAV_PERMISSION_MAP[item.path] &&
+            hasAnyPermission(this.adminStatus, NAV_PERMISSION_MAP[item.path])
+        )
+      : [];
+
     return html`
       <div class="logo">
         ${renderSidebarBrand({
@@ -487,94 +495,19 @@ export class ScionNav extends LitElement {
             <div class="nav-section">
               <div class="nav-section-title">${section.title}</div>
               <ul class="nav-list">
-                ${visibleItems(section.items).map(
-                  (item) => html`
-                    <li class="nav-item">
-                      <sl-tooltip
-                        style="display: block;"
-                        content="${item.label}"
-                        placement="right"
-                        ?disabled=${!this.collapsed}
-                        hoist
-                      >
-                        <a
-                          href="${item.path}"
-                          class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                          @click=${(e: Event) => this.handleNavClick(e, item.path)}
-                        >
-                          <sl-icon name="${item.icon}"></sl-icon>
-                          <span class="nav-link-text">${item.label}</span>
-                        </a>
-                      </sl-tooltip>
-                    </li>
-                  `
-                )}
+                ${visibleItems(section.items).map((item) => this.renderNavItem(item))}
               </ul>
             </div>
           `
         )}
-        ${this.adminStatus &&
-        (isSuperAdmin ||
-          visibleItems(ADMIN_SCOPEABLE_ITEMS).some(
-            (item) =>
-              NAV_PERMISSION_MAP[item.path] &&
-              hasAnyPermission(this.adminStatus, NAV_PERMISSION_MAP[item.path])
-          ))
+        ${this.adminStatus && (isSuperAdmin || visibleAdminItems.length > 0)
           ? html`
               <div class="nav-section admin-section">
                 <div class="nav-section-title">Admin</div>
                 <ul class="nav-list">
-                  ${visibleItems(ADMIN_SCOPEABLE_ITEMS)
-                    .filter(
-                      (item) =>
-                        NAV_PERMISSION_MAP[item.path] &&
-                        hasAnyPermission(this.adminStatus, NAV_PERMISSION_MAP[item.path])
-                    )
-                    .map(
-                      (item) => html`
-                        <li class="nav-item">
-                          <sl-tooltip
-                            style="display: block;"
-                            content="${item.label}"
-                            placement="right"
-                            ?disabled=${!this.collapsed}
-                            hoist
-                          >
-                            <a
-                              href="${item.path}"
-                              class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                              @click=${(e: Event) => this.handleNavClick(e, item.path)}
-                            >
-                              <sl-icon name="${item.icon}"></sl-icon>
-                              <span class="nav-link-text">${item.label}</span>
-                            </a>
-                          </sl-tooltip>
-                        </li>
-                      `
-                    )}
+                  ${visibleAdminItems.map((item) => this.renderNavItem(item))}
                   ${isSuperAdmin
-                    ? ADMIN_SUPERADMIN_ITEMS.map(
-                        (item) => html`
-                          <li class="nav-item">
-                            <sl-tooltip
-                              style="display: block;"
-                              content="${item.label}"
-                              placement="right"
-                              ?disabled=${!this.collapsed}
-                              hoist
-                            >
-                              <a
-                                href="${item.path}"
-                                class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
-                                @click=${(e: Event) => this.handleNavClick(e, item.path)}
-                              >
-                                <sl-icon name="${item.icon}"></sl-icon>
-                                <span class="nav-link-text">${item.label}</span>
-                              </a>
-                            </sl-tooltip>
-                          </li>
-                        `
-                      )
+                    ? ADMIN_SUPERADMIN_ITEMS.map((item) => this.renderNavItem(item))
                     : ''}
                 </ul>
               </div>
@@ -596,6 +529,29 @@ export class ScionNav extends LitElement {
               <span class="collapse-toggle-text">Collapse</span>
             </button>
           `}
+    `;
+  }
+
+  private renderNavItem(item: NavItem): TemplateResult {
+    return html`
+      <li class="nav-item">
+        <sl-tooltip
+          style="display: block;"
+          content="${item.label}"
+          placement="right"
+          ?disabled=${!this.collapsed}
+          hoist
+        >
+          <a
+            href="${item.path}"
+            class="nav-link ${this.isActive(item.path) ? 'active' : ''}"
+            @click=${(e: Event) => this.handleNavClick(e, item.path)}
+          >
+            <sl-icon name="${item.icon}"></sl-icon>
+            <span class="nav-link-text">${item.label}</span>
+          </a>
+        </sl-tooltip>
+      </li>
     `;
   }
 
