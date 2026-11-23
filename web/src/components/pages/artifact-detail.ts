@@ -139,7 +139,6 @@ import type { AccessCapabilities } from '../shared/artifact-access-sections.js';
 import '../shared/artifact-delete-dialog.js';
 import { ownerDeletedBadge, ownerDeletedStyles } from '../shared/artifact-owner-deleted.js';
 import '../shared/code-editor.js';
-import '../shared/chat/chat-file-preview.js';
 import type { ArtifactPreviewTarget } from '../shared/chat/chat-file-preview.js';
 import './not-found.js';
 import { loadReviewEditor, preloadReviewEditor } from '../artifact-review/review-editor-loader.js';
@@ -474,6 +473,7 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private deleteOpen = false;
   /** The file currently open in the shared file viewer from the Files tab. */
   @state() private previewFile: ArtifactPreviewTarget | null = null;
+  private previewOpenGen = 0;
   /**
    * The hub's cross-project sharing setting, from the grants response (read
    * only for a caller who manages the artifact). The hub refuses every move
@@ -1063,6 +1063,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.view = null;
     this.viewError = null;
     this.viewExpired = false;
+    this.previewOpenGen++;
     this.previewFile = null;
     this.crossProjectSharing = false;
     this.savedDraft = null;
@@ -2650,6 +2651,7 @@ export class ScionPageArtifactDetail extends LitElement {
         .target=${this.previewFile}
         .currentUserId=${this.pageData?.user?.id ?? ''}
         @chat-file-preview-close=${(): void => {
+          this.previewOpenGen++;
           this.previewFile = null;
         }}
       ></scion-chat-file-preview>
@@ -3104,6 +3106,34 @@ export class ScionPageArtifactDetail extends LitElement {
     return true;
   }
 
+  /**
+   * Lazily load `<scion-chat-file-preview>` on first Files-tab eye click so
+   * `chat-file-preview` stays out of the artifact page's static closure and
+   * Rollup keeps `artifact-preview.ts` / `untrusted-view-frame.ts` separate
+   * from `chat-file-preview` (preserving `review-editor`'s `chunkImports`
+   * boundary in `bundle-budget.json`).
+   */
+  private async openFilePreview(seq: number, path: string): Promise<void> {
+    const gen = this.loadGen;
+    const openGen = ++this.previewOpenGen;
+    const artifactId = this.artifactId;
+    try {
+      await import('../shared/chat/chat-file-preview.js');
+    } catch {
+      return;
+    }
+    if (gen !== this.loadGen || openGen !== this.previewOpenGen || artifactId !== this.artifactId) {
+      return;
+    }
+    this.previewFile = {
+      kind: 'artifact',
+      id: artifactId,
+      seq,
+      name: baseName(path),
+      filePath: path,
+    };
+  }
+
   private renderFiles(): TemplateResult {
     const v = this.data?.version;
     if (!v) return html`<div class="download-state">This artifact has no published content.</div>`;
@@ -3156,13 +3186,7 @@ export class ScionPageArtifactDetail extends LitElement {
                         name="eye"
                         label=${`View ${x.path}`}
                         @click=${(): void => {
-                          this.previewFile = {
-                            kind: 'artifact',
-                            id: this.artifactId,
-                            seq: v.seq,
-                            name: baseName(x.path),
-                            filePath: x.path,
-                          };
+                          void this.openFilePreview(v.seq, x.path);
                         }}
                       ></sl-icon-button>`
                     : html`<sl-icon-button
