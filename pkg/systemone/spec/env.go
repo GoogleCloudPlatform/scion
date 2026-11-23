@@ -244,26 +244,49 @@ func (e ContentEnvironment) Validate() error {
 }
 
 // EnvironmentRegistry is a concurrency-safe registry of named, versioned
-// ContentEnvironments. The built-in "probe" environment is always pre-registered.
+// ContentEnvironments. The built-in "probe" environment is always pre-registered
+// and owned by the "probe" consumer.
 type EnvironmentRegistry struct {
-	mu   sync.RWMutex
-	envs map[string]ContentEnvironment
+	mu     sync.RWMutex
+	envs   map[string]ContentEnvironment
+	owners map[string]string
 }
 
 // NewEnvironmentRegistry constructs an EnvironmentRegistry pre-populated with
-// the built-in "probe" environment.
+// the built-in "probe" environment (owned by the "probe" consumer).
 func NewEnvironmentRegistry() *EnvironmentRegistry {
 	probe := ProbeEnvironment()
 	return &EnvironmentRegistry{
 		envs: map[string]ContentEnvironment{
 			probe.Name: probe,
 		},
+		owners: map[string]string{
+			probe.Name: ProbeEnvironmentName,
+		},
 	}
 }
 
-// Register validates and registers env. Registering an invalid environment or
-// a duplicate name (including "probe") returns an error.
+// Register validates and registers env without a consumer owner. Registering an
+// invalid environment or a duplicate name (including "probe") returns an error.
 func (r *EnvironmentRegistry) Register(env ContentEnvironment) error {
+	return r.registerWithOwner("", env)
+}
+
+// RegisterForConsumer validates and registers env owned by consumer.
+// Cross-consumer compiles against env are refused by Dialect.Compile.
+func (r *EnvironmentRegistry) RegisterForConsumer(consumer string, env ContentEnvironment) error {
+	consumer = strings.TrimSpace(consumer)
+	if consumer == "" {
+		return &CompileError{
+			Path:     "environment.consumer",
+			Category: CategoryInput,
+			Message:  "consumer name is required when registering a consumer content environment",
+		}
+	}
+	return r.registerWithOwner(consumer, env)
+}
+
+func (r *EnvironmentRegistry) registerWithOwner(owner string, env ContentEnvironment) error {
 	if err := env.Validate(); err != nil {
 		return err
 	}
@@ -277,7 +300,28 @@ func (r *EnvironmentRegistry) Register(env ContentEnvironment) error {
 		}
 	}
 	r.envs[env.Name] = env.Clone()
+	if owner != "" {
+		if r.owners == nil {
+			r.owners = make(map[string]string)
+		}
+		r.owners[env.Name] = owner
+	}
 	return nil
+}
+
+// Owner returns the consumer name that owns the registered environment named
+// name, or ("", false) if the environment has no recorded owner.
+func (r *EnvironmentRegistry) Owner(name string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	r.mu.RLock()
+	owner, ok := r.owners[name]
+	r.mu.RUnlock()
+	if !ok || owner == "" {
+		return "", false
+	}
+	return owner, true
 }
 
 // Get returns a defensive copy of the registered ContentEnvironment named name.

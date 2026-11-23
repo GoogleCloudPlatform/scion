@@ -176,13 +176,15 @@ func (b *tokenBucket) wait(ctx context.Context, ratePerSec float64, waitDeadline
 	}
 
 	deficit := 1.0 - b.tokens
-	delay := time.Duration(math.Ceil((deficit / ratePerSec) * float64(time.Second)))
-	if delay > maxWait {
+	delaySec := deficit / ratePerSec
+	if delaySec > maxWait.Seconds() {
 		// Fail fast without sleeping when the token will not arrive before
-		// the admission/attempt deadline.
+		// the admission/attempt deadline. Comparing in float seconds avoids
+		// int64 time.Duration overflow at tiny positive rates.
 		b.mu.Unlock()
 		return false
 	}
+	delay := time.Duration(math.Ceil(delaySec * float64(time.Second)))
 
 	// Reserve the token now (tokens may go negative up to burst-bounded waiters)
 	// and sleep for delay; restore it if ctx cancels before the timer fires.
@@ -198,7 +200,13 @@ func (b *tokenBucket) wait(ctx context.Context, ratePerSec float64, waitDeadline
 
 	select {
 	case <-timer.C:
-		return ctx.Err() == nil
+		if ctx.Err() != nil {
+			b.mu.Lock()
+			b.tokens = math.Min(b.burst, b.tokens+1.0)
+			b.mu.Unlock()
+			return false
+		}
+		return true
 	case <-ctx.Done():
 		b.mu.Lock()
 		b.tokens = math.Min(b.burst, b.tokens+1.0)

@@ -171,7 +171,9 @@ type Config struct {
 	AdmissionWait time.Duration
 	// ProjectAllowlist optionally enforces the per-project hub instance allowlist
 	// at authoring (ValidateCompiled) and evaluation (Evaluate, ListModels)
-	// before any credential resolution or provider I/O (D1).
+	// before any credential resolution or provider I/O (D1). When nil, no D1
+	// allowlist check is performed (library default; the Hub always wires
+	// hubSystemOneAllowlistSource).
 	ProjectAllowlist ProjectAllowlistSource
 	// DefaultInstance optionally names the fallback default instance when a
 	// portable rule omits Spec.Binding.Instance.

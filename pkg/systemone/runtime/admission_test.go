@@ -188,6 +188,118 @@ func TestAdmission_InstanceMaxInFlightCapsConcurrencyAndReturnsCapacity(t *testi
 	assert.Equal(t, int32(2), providerCalls.Load(), "only admitted calls may invoke the provider")
 }
 
+func TestAdmission_SemaphoreAdmitsWaiterWhenPermitFreedWithinAdmissionWait(t *testing.T) {
+	var providerCalls atomic.Int32
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+
+	adapter := &admissionFakeAdapter{
+		name: "adm_handoff",
+		invoke: func(ctx context.Context, _ provider.Transport, _ provider.InstanceView, req provider.ModelRequest) (provider.ModelResult, error) {
+			providerCalls.Add(1)
+			if len(req.Input) > 0 && req.Input[0].Value == "holder" {
+				started <- struct{}{}
+				select {
+				case <-release:
+					return binarySuccessResult(), nil
+				case <-ctx.Done():
+					return provider.ModelResult{}, ctx.Err()
+				}
+			}
+			return binarySuccessResult(), nil
+		},
+	}
+	reg := provider.NewRegistry()
+	require.NoError(t, reg.Register(adapter))
+
+	inst := Instance{
+		ID:      "inst-handoff",
+		Name:    "handoff-inst",
+		Adapter: "adm_handoff",
+		Model:   "test-model-1",
+		Auth:    InstanceAuth{Kind: "none"},
+		Limits:  InstanceLimits{MaxInFlight: 1},
+		Enabled: true,
+	}
+	rt := New(Config{
+		Registry:              reg,
+		Instances:             StaticInstances(inst),
+		AdmissionWait:         200 * time.Millisecond,
+		MaxInFlightPerProject: -1,
+	})
+	compiled := compileAdmissionTestRule(t, "handoff-inst")
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := rt.Evaluate(context.Background(), compiled, ProbeInput("holder"), EvalOptions{})
+		assert.NoError(t, err)
+	}()
+	<-started
+
+	// Release the holder ~25ms into the waiter's 200ms admissionWait; waiter must be admitted.
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		close(release)
+	}()
+
+	dec, err := rt.Evaluate(context.Background(), compiled, ProbeInput("waiter"), EvalOptions{})
+	require.NoError(t, err, "waiter should be admitted once holder releases permit within admissionWait")
+	assert.True(t, dec.Bool)
+	require.Len(t, dec.Eval.Attempts, 1)
+	assert.Equal(t, 1, dec.Eval.Attempts[0].Requests)
+	wg.Wait()
+	assert.Equal(t, int32(2), providerCalls.Load())
+}
+
+func TestAdmission_TokenBucketTinyRateDoesNotOverflow(t *testing.T) {
+	var providerCalls atomic.Int32
+	adapter := &admissionFakeAdapter{
+		name: "adm_tiny_rate",
+		invoke: func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			providerCalls.Add(1)
+			return binarySuccessResult(), nil
+		},
+	}
+	reg := provider.NewRegistry()
+	require.NoError(t, reg.Register(adapter))
+
+	inst := Instance{
+		ID:      "inst-tiny-rate",
+		Name:    "tiny-rate-inst",
+		Adapter: "adm_tiny_rate",
+		Model:   "test-model-1",
+		Auth:    InstanceAuth{Kind: "none"},
+		Limits:  InstanceLimits{RatePerSec: 1e-11}, // would overflow time.Duration int64 if converted before comparing
+		Enabled: true,
+	}
+	rt := New(Config{
+		Registry:              reg,
+		Instances:             StaticInstances(inst),
+		AdmissionWait:         50 * time.Millisecond,
+		MaxInFlightPerProject: -1,
+	})
+	compiled := compileAdmissionTestRule(t, "tiny-rate-inst")
+
+	// First call consumes burst=1.
+	dec, err := rt.Evaluate(context.Background(), compiled, ProbeInput("first"), EvalOptions{})
+	require.NoError(t, err)
+	assert.True(t, dec.Bool)
+	assert.Equal(t, int32(1), providerCalls.Load())
+
+	// Second call must fail fast with capacity (0 provider calls), never fail-open.
+	t0 := time.Now()
+	_, err = rt.Evaluate(context.Background(), compiled, ProbeInput("second"), EvalOptions{})
+	elapsed := time.Since(t0)
+	require.Error(t, err)
+	eval, ok := EvaluationFrom(err)
+	require.True(t, ok)
+	assert.Equal(t, string(provider.FailCapacity), eval.Reason)
+	assert.Equal(t, int32(1), providerCalls.Load())
+	assert.Less(t, elapsed, 40*time.Millisecond)
+}
+
 func TestAdmission_TokenBucketRatePerSec(t *testing.T) {
 	var providerCalls atomic.Int32
 	adapter := &admissionFakeAdapter{

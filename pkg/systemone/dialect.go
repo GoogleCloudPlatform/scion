@@ -153,7 +153,14 @@ func RegisterConsumerEnvironment(eng *ruleengine.Engine, consumer string, env sp
 	if !ok {
 		return fmt.Errorf("system_one: registered dialect %q has unexpected type %T", DialectName, d)
 	}
-	return soDialect.RegisterEnvironment(env)
+	if soDialect == nil || soDialect.environments == nil {
+		return &spec.CompileError{
+			Path:     "environment",
+			Category: spec.CategoryInput,
+			Message:  "system_one dialect environment registry is not initialized",
+		}
+	}
+	return soDialect.environments.RegisterForConsumer(consumer, env)
 }
 
 // Name returns DialectName ("system_one").
@@ -206,6 +213,14 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 			Message:  fmt.Sprintf("unknown content environment %q", envName),
 		}
 	}
+	consumer := strings.TrimSpace(env.Consumer)
+	if owner, hasOwner := d.environments.Owner(envName); hasOwner && owner != consumer {
+		return ruleengine.Compiled{}, &spec.CompileError{
+			Path:     "environment",
+			Category: spec.CategoryInput,
+			Message:  fmt.Sprintf("content environment %q is owned by consumer %q, not %q", envName, owner, consumer),
+		}
+	}
 
 	compiled, err := spec.Compile([]byte(rule), spec.CompileOptions{
 		Kind:        spec.Kind(kind),
@@ -256,19 +271,14 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	}
 
 	var (
-		soInput        Input
-		meta           evalContextMeta
-		requireProject bool
+		soInput Input
+		meta    evalContextMeta
 	)
 	switch p := input.Payload.(type) {
 	case Input:
 		soInput = p
-		// Non-probe consumer environments require a consumer-authorized ProjectID
-		// so per-project egress allowlists fail closed when ProjectID is omitted.
-		requireProject = prog.compiled.Environment.Name != spec.ProbeEnvironmentName
 	case Request:
 		soInput = p.Input
-		requireProject = true
 		meta = evalContextMeta{
 			projectID: strings.TrimSpace(p.ProjectID),
 			ruleID:    strings.TrimSpace(p.RuleID),
@@ -291,13 +301,17 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	if meta.projectID != "" {
 		evalCtx = runtime.WithEvalProjectID(ctx, meta.projectID)
 	}
+	// Every dialect evaluation is a consumer path and requires an authorized
+	// ProjectID for D1 per-project allowlist enforcement (fail-closed when
+	// ProjectID is missing or empty, regardless of Input vs Request or
+	// environment name). Admin probes invoke Runtime.Evaluate directly.
 	dec, err := rt.Evaluate(evalCtx, prog.compiled, soInput, runtime.EvalOptions{
 		Consumer:             consumer,
 		RuleID:               meta.ruleID,
 		Revision:             meta.revision,
 		ElementIndex:         meta.elementIndex,
 		ProjectID:            meta.projectID,
-		RequireProject:       requireProject,
+		RequireProject:       true,
 		EngineMaxEvalTime:    budget.MaxEvalTime,
 		EngineDeadlineMargin: ruleengine.EngineDeadlineMargin(budget.MaxEvalTime),
 	})

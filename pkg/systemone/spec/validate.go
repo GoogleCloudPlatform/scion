@@ -199,6 +199,17 @@ func Compile(raw []byte, opts CompileOptions) (*Compiled, error) {
 	if err := ValidateInputs(inputs, contentEnv); err != nil {
 		return nil, err
 	}
+	if onOversize == OversizeTruncate {
+		for _, name := range inputs {
+			if decl, ok := contentEnv.Field(name); ok && decl.Kind == FieldKindJSON {
+				return nil, &CompileError{
+					Path:     "on_oversize",
+					Category: CategoryInput,
+					Message:  fmt.Sprintf("on_oversize %q is not supported for rules referencing JSON field %q", OversizeTruncate, name),
+				}
+			}
+		}
+	}
 	if err := ValidateInputTokenBudget(inputs, contentEnv, opts.Caps); err != nil {
 		return nil, err
 	}

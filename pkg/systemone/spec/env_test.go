@@ -457,4 +457,33 @@ func TestCompile_ContentEnvironmentAndTokenBudgetMatrix(t *testing.T) {
 		assert.Equal(t, spec.CategoryLimit, ce.Category)
 		assert.Equal(t, "spec.questions[0].options", ce.Path)
 	})
+
+	t.Run("truncate_refused_for_json_fields", func(t *testing.T) {
+		jsonEnv := spec.ContentEnvironment{
+			Name:    "json_trunc_test",
+			Version: 1,
+			Fields: []spec.FieldDecl{
+				{Name: "event.type", Kind: spec.FieldKindText, MaxBytes: 128, Trust: spec.TrustTrusted},
+				{Name: "event.payload", Kind: spec.FieldKindJSON, MaxBytes: 1024, Trust: spec.TrustUntrusted},
+			},
+			MaxTotalBytes: 2048,
+		}
+		// Text-only field with truncate succeeds.
+		_, err := spec.Compile(
+			envelopeRule(`["event.type"]`, "truncate"),
+			spec.CompileOptions{Kind: spec.KindFilter, Environment: &jsonEnv},
+		)
+		require.NoError(t, err)
+
+		// Referencing a JSON field with truncate is refused at compile (O4).
+		_, err = spec.Compile(
+			envelopeRule(`["event.type", "event.payload"]`, "truncate"),
+			spec.CompileOptions{Kind: spec.KindFilter, Environment: &jsonEnv},
+		)
+		require.Error(t, err)
+		ce, ok := spec.AsCompileError(err)
+		require.True(t, ok)
+		assert.Equal(t, spec.CategoryInput, ce.Category)
+		assert.Equal(t, "on_oversize", ce.Path)
+	})
 }
