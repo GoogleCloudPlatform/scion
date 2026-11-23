@@ -1242,3 +1242,202 @@ func TestCreateScheduledExecRun_RacesUnadmittedCompletionMutuallyExclusive(t *te
 		}
 	}
 }
+
+// TestScheduledExecRun_TriggerFireOwnerLifecycle verifies P8's fire_id owner
+// extension and em-2 invariants (a), (b), (c) on scheduled_exec_runs:
+//   - single-owner validation (event_id vs fire_id, never schedule_id on trigger runs);
+//   - UNIQUE fire_id idempotency and overlap_key enforcement;
+//   - atomic trigger_fires status transition + trigger_subject_claims bind on admission;
+//   - CAS FinishScheduledExecRun updating trigger_fires, triggers counters, and
+//     releasing trigger_subject_claims in one transaction without overwriting;
+//   - ClaimScheduledExecRunsForPoll and ListExpiredScheduledExecRuns covering fire_id runs;
+//   - ReapExpiredTriggerFires skipping admitted runs and PurgeOldTriggerHistory deleting runs.
+func TestScheduledExecRun_TriggerFireOwnerLifecycle(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	s := cs.ScheduleStore
+	ts := cs.TriggerStore
+	ctx := context.Background()
+
+	projectID := uuid.NewString()
+	targetAgentID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	tr := &store.Trigger{
+		ID:            uuid.NewString(),
+		ProjectID:     projectID,
+		Name:          "exec-trig-1",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      uuid.NewString(),
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionExec,
+		ActionPayload: `{"agentId":"` + targetAgentID + `","command":["true"]}`,
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		Status:        store.TriggerStatusActive,
+	}
+	require.NoError(t, ts.CreateTrigger(ctx, tr))
+
+	newFire := func(subject string) (*store.TriggerEvent, *store.TriggerFire) {
+		ev := &store.TriggerEvent{
+			ID:         uuid.NewString(),
+			ProjectID:  projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   tr.SourceID,
+			Type:       "webhook.received",
+			Subject:    subject,
+			DedupKey:   uuid.NewString(),
+			OccurredAt: now,
+			ReceivedAt: now,
+			Status:     store.TriggerEventStatusPending,
+		}
+		require.NoError(t, ts.CreateTriggerEvent(ctx, ev))
+		tf := &store.TriggerFire{
+			ID:         uuid.NewString(),
+			ProjectID:  projectID,
+			TriggerID:  tr.ID,
+			EventID:    ev.ID,
+			Subject:    subject,
+			ActionType: store.TriggerActionExec,
+			Status:     store.TriggerFireStatusFiring,
+			LeaseUntil: now.Add(10 * time.Minute),
+			StartedAt:  now,
+			CreatedAt:  now,
+		}
+		claimed, _, err := ts.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, err)
+		require.True(t, claimed)
+		return ev, tf
+	}
+
+	ev1, f1 := newFire("sub-1")
+	claim1, existing, err := ts.ClaimTriggerSubject(ctx, tr.ID, "sub-1", ev1.ID, f1.ID, now, now.Add(-5*time.Minute))
+	require.NoError(t, err)
+	require.Nil(t, existing)
+	require.NotNil(t, claim1)
+
+	// Invalid owner combinations rejected before DB insert.
+	assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
+		ProjectID: projectID, TargetAgentID: targetAgentID, CommandSHA256: "abc",
+	}), store.ErrInvalidInput, "neither event_id nor fire_id")
+	assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
+		EventID: uuid.NewString(), FireID: f1.ID, ProjectID: projectID, TargetAgentID: targetAgentID, CommandSHA256: "abc",
+	}), store.ErrInvalidInput, "both event_id and fire_id")
+	assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
+		FireID: f1.ID, ScheduleID: uuid.NewString(), ProjectID: projectID, TargetAgentID: targetAgentID, CommandSHA256: "abc",
+	}), store.ErrInvalidInput, "fire_id with schedule_id forbidden")
+
+	run1 := &store.ScheduledExecRun{
+		FireID:         f1.ID,
+		OverlapKey:     "trigger:" + tr.ID,
+		ProjectID:      projectID,
+		TargetAgentID:  targetAgentID,
+		CommandSHA256:  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Argc:           1,
+		TimeoutSeconds: 60,
+		StartedAt:      now,
+		NotAfter:       now.Add(time.Minute),
+		LeaseUntil:     now.Add(3 * time.Minute),
+		Runtime:        "docker",
+		LaunchID:       "launch-1",
+	}
+	require.NoError(t, s.CreateScheduledExecRun(ctx, run1))
+
+	// Admission transitioned trigger_fires to fired and bound the subject claim.
+	gotF1, err := ts.GetTriggerFire(ctx, f1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFired, gotF1.Status)
+	assert.Equal(t, f1.ID, gotF1.ResultRef)
+	assert.Equal(t, targetAgentID, gotF1.TargetAgentID)
+
+	activeClaim, err := ts.GetActiveTriggerSubjectClaim(ctx, tr.ID, "sub-1")
+	require.NoError(t, err)
+	assert.Equal(t, targetAgentID, activeClaim.AgentID, "admission must bind subject claim to target agent")
+
+	// Invariant (a): duplicate fire_id is rejected.
+	assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, run1), store.ErrAlreadyExists)
+
+	// Overlap check via overlap_key (never schedule_id).
+	_, f2 := newFire("sub-2")
+	run2 := *run1
+	run2.FireID = f2.ID
+	assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, &run2), store.ErrScheduledExecOverlap)
+
+	// GetScheduledExecRun, ListScheduledExecRunsByFire, MarkScheduledExecRunRunning work by fire_id.
+	gotRun, err := s.GetScheduledExecRun(ctx, f1.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotRun.EventID)
+	assert.Equal(t, f1.ID, gotRun.FireID)
+	assert.Empty(t, gotRun.ScheduleID)
+	assert.Equal(t, "trigger:"+tr.ID, gotRun.OverlapKey)
+
+	byFire, err := s.ListScheduledExecRunsByFire(ctx, []string{f1.ID, uuid.NewString()})
+	require.NoError(t, err)
+	require.Contains(t, byFire, f1.ID)
+
+	changed, err := s.MarkScheduledExecRunRunning(ctx, f1.ID)
+	require.NoError(t, err)
+	assert.True(t, changed)
+
+	// Invariant (c): ClaimScheduledExecRunsForPoll includes fire_id runs and honors excludeEventIDs.
+	excluded, err := s.ClaimScheduledExecRunsForPoll(ctx, now.Add(time.Second), 10, []string{f1.ID})
+	require.NoError(t, err)
+	assert.Empty(t, excluded, "exclude list must exclude fire_id-owned runs")
+
+	claimedPoll, err := s.ClaimScheduledExecRunsForPoll(ctx, now.Add(2*time.Second), 10, nil)
+	require.NoError(t, err)
+	require.Len(t, claimedPoll, 1)
+	assert.Equal(t, f1.ID, claimedPoll[0].FireID)
+
+	// ReapExpiredTriggerFires must NOT reap an admitted fire even past lease_until.
+	reaped, err := ts.ReapExpiredTriggerFires(ctx, now.Add(time.Hour), 10)
+	require.NoError(t, err)
+	// f2 is unadmitted and expired, so f2 gets reaped while f1 stays intact.
+	assert.Equal(t, 1, reaped)
+
+	// Invariant (b): FinishScheduledExecRun CAS updates run, trigger_fires, triggers counters, and releases claim.
+	exitCode := 2
+	durMS := int64(450)
+	outBytes := int64(12)
+	won, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+		FireID:      f1.ID,
+		FinishedAt:  now.Add(5 * time.Second),
+		Outcome:     store.ScheduledExecOutcomeNonzero,
+		ExitCode:    &exitCode,
+		DurationMS:  &durMS,
+		OutputBytes: &outBytes,
+		FireStatus:  store.TriggerFireStatusFailed,
+		FireError:   "exit status 2",
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	// Second writer loses CAS and cannot overwrite trigger_fires.
+	won2, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+		FireID:     f1.ID,
+		FinishedAt: now.Add(6 * time.Second),
+		Outcome:    store.ScheduledExecOutcomeOK,
+		FireStatus: store.TriggerFireStatusFired,
+	})
+	require.NoError(t, err)
+	assert.False(t, won2)
+
+	gotF1, err = ts.GetTriggerFire(ctx, f1.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFailed, gotF1.Status)
+	assert.Equal(t, "exit status 2", gotF1.Error)
+	assert.NotNil(t, gotF1.FinishedAt)
+
+	gotTr, err := ts.GetTrigger(ctx, tr.ID)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, gotTr.FireCount, 1)
+	assert.GreaterOrEqual(t, gotTr.ErrorCount, 1)
+
+	_, err = ts.GetActiveTriggerSubjectClaim(ctx, tr.ID, "sub-1")
+	assert.ErrorIs(t, err, store.ErrNotFound, "FinishScheduledExecRun must release the subject claim")
+
+	// PurgeOldTriggerHistory deletes fire-owned scheduled_exec_runs first in the same tx.
+	_, firesPurged, err := ts.PurgeOldTriggerHistory(ctx, now.Add(time.Hour))
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, firesPurged, 2)
+	_, err = s.GetScheduledExecRun(ctx, f1.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}

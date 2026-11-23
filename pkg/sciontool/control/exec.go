@@ -65,9 +65,9 @@ const (
 	// dropped (outputStatus becomes expired) while the tombstone itself stays.
 	execOutputBudget = 4 * 1024 * 1024
 	execOutputTTL    = 15 * time.Minute
-	// execMaxBody bounds an exec request body: the argv bounds plus JSON
-	// escaping (up to 6 bytes per byte) and the other fields.
-	execMaxBody = 6*agentcontrol.MaxExecArgvBytes + 4096
+	// execMaxBody bounds an exec request body: the argv and trigger_context
+	// bounds plus JSON escaping (up to 6 bytes per byte) and the other fields.
+	execMaxBody = 6*agentcontrol.MaxExecArgvBytes + 6*agentcontrol.MaxExecTriggerContextBytes + 4096
 )
 
 // ExecOptions configure the exec routes.
@@ -96,11 +96,12 @@ type ExecOptions struct {
 // execBinding is what a run_id is bound to (D9-S2). A start whose run_id
 // is known with another binding is refused with mismatch.
 type execBinding struct {
-	scheduleID string
-	digest     string
-	timeoutS   int
-	launchID   string
-	capture    string
+	scheduleID           string
+	digest               string
+	triggerContextDigest string
+	timeoutS             int
+	launchID             string
+	capture              string
 }
 
 // execFinal is a finished run's outcome and, when capture was requested, its
@@ -224,11 +225,12 @@ func (e *execRoute) serveStart(w http.ResponseWriter, r *http.Request) {
 // startRun admits and spawns one run, or answers a replay or refusal.
 func (e *execRoute) startRun(ctx context.Context, req *agentcontrol.ExecStartRequest, receipt time.Time) execAnswer {
 	b := execBinding{
-		scheduleID: req.ScheduleID,
-		digest:     agentcontrol.ExecArgvDigest(req.Argv),
-		timeoutS:   req.TimeoutS,
-		launchID:   e.opts.LaunchID,
-		capture:    req.Capture,
+		scheduleID:           req.ScheduleID,
+		digest:               agentcontrol.ExecArgvDigest(req.Argv),
+		triggerContextDigest: agentcontrol.ExecTriggerContextDigest(req.TriggerContext),
+		timeoutS:             req.TimeoutS,
+		launchID:             e.opts.LaunchID,
+		capture:              req.Capture,
 	}
 	deadline := time.UnixMilli(req.NotAfterUnixMS).Add(agentcontrol.ExecClockTolerance)
 
@@ -371,6 +373,9 @@ func (e *execRoute) prepare(req *agentcontrol.ExecStartRequest) (execSpec, error
 	}
 	dir := execWorkdir(o.Workdir, o.Username, env)
 	env = setEnv(env, "PWD", dir)
+	if req.TriggerContext != "" {
+		env = setEnv(env, agentcontrol.ExecTriggerContextEnvName, req.TriggerContext)
+	}
 	path, err := lookPathEnv(req.Argv[0], envValue(env, "PATH"), dir)
 	if err != nil {
 		return execSpec{}, err

@@ -1,0 +1,774 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+type triggerExecAuditCollector struct {
+	*LogAuditLogger
+	mu     sync.Mutex
+	events []*ScheduledExecEvent
+}
+
+func (c *triggerExecAuditCollector) LogScheduledExecEvent(_ context.Context, e *ScheduledExecEvent) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cp := *e
+	if len(e.ContextAttributeKeys) > 0 {
+		cp.ContextAttributeKeys = append([]string(nil), e.ContextAttributeKeys...)
+	}
+	c.events = append(c.events, &cp)
+	return nil
+}
+
+func (c *triggerExecAuditCollector) snapshot() []*ScheduledExecEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*ScheduledExecEvent, len(c.events))
+	copy(out, c.events)
+	return out
+}
+
+func enableTriggerExecExperiments(t *testing.T, srv *Server) {
+	t.Helper()
+	setHubExperiments(t, srv, map[string]bool{
+		experiments.Triggers:      true,
+		conduitExperiment:         true,
+		experiments.ExecSchedules: true,
+	})
+}
+
+// TestTriggerExec_AuthoringRefusalsAndCaps verifies:
+//   - authoring refusals: non-replay-protected source, subject mode reuse,
+//     missing agent.attach, templating in argv (${...}), invalid contextAttributes,
+//     managed runtime, and schedule refusal of contextAttributes;
+//   - own per-trigger caps (separate from exec-schedule quotas).
+func TestTriggerExec_AuthoringRefusalsAndCaps(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+
+	// Create one scion_v1 (replay-protected) and one body_only (non-replay-protected) endpoint.
+	scionEpRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:          "exec-scion-v1",
+		SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	require.Equal(t, http.StatusCreated, scionEpRec.Code, scionEpRec.Body.String())
+	var scionEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(scionEpRec.Body.Bytes(), &scionEp))
+
+	bodyOnlyEp := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           f.projectID,
+		Name:                "exec-body-only",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    f.owner.ID,
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeBodyOnly,
+		SecretVersion:       1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(context.Background(), bodyOnlyEp))
+
+	// Refusal 1: non-replay-protected source -> 400 source_not_replay_protected.
+	rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "exec-bad-source",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: bodyOnlyEp.ID},
+		Action: TriggerActionSpec{Type: store.TriggerActionExec, AgentID: f.targetAgent.ID, Command: []string{"true"}},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "source_not_replay_protected")
+
+	// Refusal 2: subject mode reuse -> 400.
+	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "exec-bad-reuse",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+		Subject: &TriggerSubjectSpec{Mode: "reuse"},
+		Action:  TriggerActionSpec{Type: store.TriggerActionExec, AgentID: f.targetAgent.ID, Command: []string{"true"}},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// Refusal 3: templating in argv -> 400 templating_not_allowed_in_argv.
+	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "exec-bad-template-argv",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+		Action: TriggerActionSpec{
+			Type:    store.TriggerActionExec,
+			AgentID: f.targetAgent.ID,
+			Command: []string{"echo", "${event.payload.msg}"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "templating_not_allowed_in_argv")
+
+	// Refusal 4: invalid contextAttributes key -> 400.
+	rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "exec-bad-ctx-attr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+		Action: TriggerActionSpec{
+			Type:              store.TriggerActionExec,
+			AgentID:           f.targetAgent.ID,
+			Command:           []string{"true"},
+			ContextAttributes: []string{"bad key!"},
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	// Refusal 5: missing agent.attach (viewer cannot author; member without attach on owner's agent gets 403).
+	rec = f.doTrigger(t, f.viewerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "exec-viewer-denied",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+		Action: TriggerActionSpec{Type: store.TriggerActionExec, AgentID: f.targetAgent.ID, Command: []string{"true"}},
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	// Refusal 6: member without agent.attach on owner's agent cannot author exec targeting it.
+	rec = f.doTrigger(t, f.memberAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "exec-member-no-attach",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+		Action: TriggerActionSpec{Type: store.TriggerActionExec, AgentID: f.targetAgent.ID, Command: []string{"true"}},
+	})
+	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, rec.Body.String())
+
+	// Refusal 7: schedule authoring refuses contextAttributes.
+	schedReq := authoredRequest(t, f.ownerAuth, http.MethodPost, "/api/v1/projects/"+f.projectID+"/scheduled-events", CreateScheduledEventRequest{
+		EventType: scheduledEventTypeExec,
+		FireAt:    time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+		Payload:   `{"agentId":"` + f.targetAgent.ID + `","command":["true"],"contextAttributes":["env"]}`,
+	})
+	schedRec := httptest.NewRecorder()
+	f.srv.handleScheduledEvents(schedRec, schedReq, f.projectID, "")
+	assert.Equal(t, http.StatusBadRequest, schedRec.Code, schedRec.Body.String())
+	assert.Contains(t, schedRec.Body.String(), "contextAttributes")
+
+	// Own per-trigger caps: creating triggerExecMaxActivePerTarget active exec
+	// triggers succeeds (resetting authoring rate limiter bucket to test the DB cap),
+	// and the next one returns 409 limit_exceeded without touching schedule quotas.
+	f.srv.scheduledExecAuthoringLimiter = newKeysRateLimiter(1000, 1000)
+	for i := 0; i < triggerExecMaxActivePerTarget; i++ {
+		rec = f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("exec-cap-%02d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+			Action: TriggerActionSpec{
+				Type:              store.TriggerActionExec,
+				AgentID:           f.targetAgent.ID,
+				Command:           []string{"true"},
+				ContextAttributes: []string{"env"},
+			},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, "trigger %d: %s", i, rec.Body.String())
+	}
+	overRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "exec-cap-over",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: scionEp.ID},
+		Action: TriggerActionSpec{Type: store.TriggerActionExec, AgentID: f.targetAgent.ID, Command: []string{"true"}},
+	})
+	assert.Equal(t, http.StatusConflict, overRec.Code, overRec.Body.String())
+	assert.Contains(t, overRec.Body.String(), ErrCodeLimitExceeded)
+}
+
+// TestTriggerExec_ArgvRedactionAcrossRoutes verifies fail-closed argv redaction
+// on every trigger route: callers with live agent.attach see command; callers
+// without live agent.attach (viewer, member without attach) see commandRedacted,
+// argc, and commandSha256 only, never the sentinel argv.
+func TestTriggerExec_ArgvRedactionAcrossRoutes(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:          "redact-hook",
+		SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	const sentinel = "TOP_SECRET_EXEC_ARGV_SENTINEL_9876"
+	cmd := []string{"/bin/echo", sentinel}
+	wantSHA := agentcontrol.ExecArgvDigest(cmd)
+
+	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "redact-exec-trig",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Action: TriggerActionSpec{
+			Type:              store.TriggerActionExec,
+			AgentID:           f.targetAgent.ID,
+			Command:           cmd,
+			TimeoutSeconds:    45,
+			ContextAttributes: []string{"env"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created TriggerResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	// Owner holds live agent.attach -> command is revealed.
+	assert.Equal(t, cmd, created.Action.Command)
+	assert.False(t, created.Action.CommandRedacted)
+
+	// Member has trigger.read / trigger.list, NOT agent.attach on owner's agent -> redacted on GET and LIST.
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"GET /triggers/{id} (member)", created.ID},
+		{"GET /triggers (member)", ""},
+	} {
+		rec := f.doTrigger(t, f.memberAuth, tc.path, http.MethodGet, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", tc.name, rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), sentinel, "%s must redact argv", tc.name)
+		assert.Contains(t, rec.Body.String(), `"commandRedacted":true`, tc.name)
+		assert.Contains(t, rec.Body.String(), wantSHA, tc.name)
+		assert.Contains(t, rec.Body.String(), `"argc":2`, tc.name)
+	}
+
+	// Owner with live agent.attach sees command on GET.
+	ownerGet := f.doTrigger(t, f.ownerAuth, created.ID, http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, ownerGet.Code, ownerGet.Body.String())
+	assert.Contains(t, ownerGet.Body.String(), sentinel)
+	assert.NotContains(t, ownerGet.Body.String(), `"commandRedacted":true`)
+
+	// Fail-closed on malformed stored payload (nil revealer or corrupt JSON).
+	malformed := buildTriggerResponse(nil, store.Trigger{
+		ID:            "tr-bad",
+		ProjectID:     f.projectID,
+		Name:          "bad-exec",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionExec,
+		ActionPayload: `{"command":["` + sentinel + `"`,
+		Status:        store.TriggerStatusActive,
+	})
+	rawMalformed, err := json.Marshal(malformed)
+	require.NoError(t, err)
+	assert.NotContains(t, string(rawMalformed), sentinel)
+	assert.True(t, malformed.Action.CommandRedacted)
+}
+
+// TestTriggerExec_AcceptanceFixture_WebhookStartedJobEndToEnd is the P8
+// acceptance fixture: a webhook-started cron-like job on a generic scion_v1
+// endpoint (no Stage 3 dependency), exercising ingress -> durablequeue ->
+// trigger.Dispatcher -> execAction -> real in-process sciontool/control over
+// Conduit -> tracker -> FinishScheduledExecRun -> GET /triggers/{id}/history
+// with execSummary and trigger.fire.exec.* audit.
+func TestTriggerExec_AcceptanceFixture_WebhookStartedJobEndToEnd(t *testing.T) {
+	f := newExecRouteFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+	f.srv.SetHubID("test-hub-p8-e2e")
+	f.srv.SetSecretBackend(secret.NewLocalBackendWithCipher(f.store, f.srv.hubID, f.srv.cipher))
+	f.srv.config.HubEndpoint = "https://hub-public.example.com"
+
+	auditor := &triggerExecAuditCollector{}
+	f.srv.SetAuditLogger(auditor)
+	f.startAgent(t)
+
+	ctx := context.Background()
+	projectID := f.launched.ProjectID
+
+	doWebhookEp := func(method, subPath string, body any) *httptest.ResponseRecorder {
+		req := authoredRequest(t, f.owner, method, "/api/v1/projects/"+projectID+"/webhook-endpoints"+subPath, body)
+		rec := httptest.NewRecorder()
+		f.srv.handleWebhookEndpoints(rec, req, projectID, strings.TrimPrefix(subPath, "/"))
+		return rec
+	}
+	doTrig := func(method, subPath string, body any) *httptest.ResponseRecorder {
+		req := authoredRequest(t, f.owner, method, "/api/v1/projects/"+projectID+"/triggers"+subPath, body)
+		rec := httptest.NewRecorder()
+		f.srv.handleTriggers(rec, req, projectID, strings.TrimPrefix(subPath, "/"))
+		return rec
+	}
+
+	// 1. Create generic scion_v1 webhook endpoint.
+	epRec := doWebhookEp(http.MethodPost, "", CreateWebhookEndpointRequest{
+		Name:          "ci-sync-hook",
+		SignatureMode: store.WebhookSignatureModeScionV1,
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+	require.NotEmpty(t, ep.Secret)
+
+	// 2. Create exec trigger with literal command + allow-listed context attributes.
+	// The shell prints SCION_TRIGGER_CONTEXT length and exits 0; argv is fixed.
+	cmd := []string{"/bin/sh", "-c", `test -n "$SCION_TRIGGER_CONTEXT"`}
+	trRec := doTrig(http.MethodPost, "", CreateTriggerRequest{
+		Name:   "ci-sync-job",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Types: []string{"webhook.ci_done"}},
+		Action: TriggerActionSpec{
+			Type:              store.TriggerActionExec,
+			AgentID:           f.launched.ID,
+			Command:           cmd,
+			TimeoutSeconds:    30,
+			ContextAttributes: []string{"event", "endpoint_name"},
+		},
+	})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+	// 3. Sign and POST a hostile-payload webhook event to /api/v1/hooks/{id}.
+	hostileBody := []byte(`{"cmd":"$(rm -rf /); --evil=1","tmpl":"${event.id}"}`)
+	ts := time.Now().Unix()
+	delivery := api.NewUUID()
+	eventHeader := "ci_done"
+	subject := "ci/nightly"
+	sig := trigger.SignScionV1(ep.Secret, ts, delivery, eventHeader, subject, hostileBody)
+
+	hookReq := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader(hostileBody))
+	hookReq.Header.Set("Content-Type", "application/json")
+	hookReq.Header.Set(trigger.HeaderSignature, sig)
+	hookReq.Header.Set(trigger.HeaderDelivery, delivery)
+	hookReq.Header.Set(trigger.HeaderEvent, eventHeader)
+	hookReq.Header.Set(trigger.HeaderSubject, subject)
+	hookRec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(hookRec, hookReq)
+	require.Equal(t, http.StatusAccepted, hookRec.Code, hookRec.Body.String())
+
+	// 4. Drain the queued event through the real trigger.Dispatcher.
+	dqStore, ok := f.store.(store.DurableQueueStore)
+	require.True(t, ok)
+	q := f.srv.TriggerEventQueue()
+	require.NotNil(t, q)
+	drainer, err := f.srv.triggerDrainer(dqStore, q)
+	require.NoError(t, err)
+	_, err = drainer.DrainOnce(ctx)
+	require.NoError(t, err)
+
+	// Wait for the fire and its exec run to complete.
+	var fire store.TriggerFire
+	require.Eventually(t, func() bool {
+		res, lErr := f.store.ListTriggerFires(ctx, store.TriggerFireFilter{
+			ProjectID: projectID,
+			TriggerID: tr.ID,
+		}, store.ListOptions{Limit: 10})
+		if lErr != nil || len(res.Items) == 0 {
+			return false
+		}
+		fire = res.Items[0]
+		return fire.FinishedAt != nil
+	}, 5*time.Second, 25*time.Millisecond, "expected trigger exec fire to finish")
+
+	// 5. Verify exec-start wire request: v=2, literal argv, bounded allow-listed trigger_context.
+	f.capture.mu.Lock()
+	startBodies := f.capture.bodies[execRoutePath(agentcontrol.RouteExecStart)]
+	f.capture.mu.Unlock()
+	require.NotEmpty(t, startBodies, "expected exec-start RPC over Conduit")
+	var startReq agentcontrol.ExecStartRequest
+	require.NoError(t, json.Unmarshal(startBodies[0], &startReq))
+	assert.Equal(t, agentcontrol.ExecVersionTriggerContext, startReq.V)
+	assert.Equal(t, fire.ID, startReq.RunID)
+	assert.Equal(t, tr.ID, startReq.ScheduleID)
+	assert.Equal(t, cmd, startReq.Argv, "argv must stay literal and never template from hostile payload")
+
+	var gotCtx triggerExecContextPayload
+	require.NoError(t, json.Unmarshal([]byte(startReq.TriggerContext), &gotCtx))
+	assert.Equal(t, fire.EventID, gotCtx.EventID)
+	assert.Equal(t, tr.ID, gotCtx.TriggerID)
+	assert.Equal(t, fire.ID, gotCtx.FireID)
+	assert.Equal(t, "webhook:"+ep.ID+"/"+subject, gotCtx.Subject)
+	assert.Equal(t, "ci-sync-hook", gotCtx.Attributes["endpoint_name"])
+	assert.Equal(t, eventHeader, gotCtx.Attributes["event"])
+	// Non-allow-listed attributes (e.g. delivery, signature_mode) must NOT appear.
+	assert.NotContains(t, gotCtx.Attributes, "delivery")
+	assert.NotContains(t, gotCtx.Attributes, "signature_mode")
+
+	// 6. Verify scheduled_exec_runs row: event_id empty, fire_id owner, schedule_id empty, overlap_key set.
+	run := f.getRun(t, fire.ID)
+	assert.Empty(t, run.EventID)
+	assert.Equal(t, fire.ID, run.FireID)
+	assert.Empty(t, run.ScheduleID)
+	assert.Equal(t, "trigger:"+tr.ID, run.OverlapKey)
+	assert.Equal(t, store.ScheduledExecOutcomeOK, run.Outcome)
+
+	// 7. Verify GET /triggers/{id}/history carries execSummary.
+	histRec := doTrig(http.MethodGet, "/"+tr.ID+"/history", nil)
+	require.Equal(t, http.StatusOK, histRec.Code, histRec.Body.String())
+	var hist ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &hist))
+	require.Len(t, hist.Fires, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, hist.Fires[0].Status)
+	assert.Equal(t, fire.ID, hist.Fires[0].ResultRef)
+	require.NotNil(t, hist.Fires[0].ExecSummary)
+	assert.Equal(t, store.ScheduledExecOutcomeOK, hist.Fires[0].ExecSummary.Outcome)
+	require.NotNil(t, hist.Fires[0].ExecSummary.ExitCode)
+	assert.Equal(t, 0, *hist.Fires[0].ExecSummary.ExitCode)
+
+	// 8. Verify trigger.fire.exec.* audit records (admit + outcome, keys only, no secret/payload).
+	audits := auditor.snapshot()
+	var sawAdmit, sawOutcome bool
+	for _, a := range audits {
+		assert.True(t, a.IsTrigger, "audit record must be marked trigger_fire_exec")
+		assert.Equal(t, tr.ID, a.TriggerID)
+		assert.Equal(t, fire.ID, a.FireID)
+		if a.Action == ScheduledExecAuditAdmit {
+			sawAdmit = true
+			assert.Equal(t, []string{"endpoint_name", "event"}, a.ContextAttributeKeys)
+		}
+		if a.Action == ScheduledExecAuditOutcome {
+			sawOutcome = true
+			assert.Equal(t, store.ScheduledExecOutcomeOK, a.Outcome)
+		}
+	}
+	assert.True(t, sawAdmit, "expected trigger.fire.exec.admit audit")
+	assert.True(t, sawOutcome, "expected trigger.fire.exec.outcome audit")
+}
+
+// TestTriggerExec_SkipHoldsClaimUntilRunEnds verifies that subject.mode=skip
+// holds the trigger_subject_claims row until the exec run finishes, skipping
+// concurrent events for the same subject with "subject busy", and admits a
+// subsequent event once the run completes.
+func TestTriggerExec_SkipHoldsClaimUntilRunEnds(t *testing.T) {
+	f := newExecRouteFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+	f.srv.SetHubID("test-hub-p8-skip")
+	f.srv.SetSecretBackend(secret.NewLocalBackendWithCipher(f.store, f.srv.hubID, f.srv.cipher))
+	f.startAgent(t)
+
+	ctx := context.Background()
+	projectID := f.launched.ProjectID
+
+	ep := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           projectID,
+		Name:                "skip-hook",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    f.owner.ID(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		SecretVersion:       1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(ctx, ep))
+
+	payloadJSON, err := (&scheduledExecPayload{
+		AgentID:        f.launched.ID,
+		AgentName:      f.launched.Slug,
+		Command:        []string{"/bin/sh", "-c", "sleep 0.25"},
+		TimeoutSeconds: 30,
+	}).encode()
+	require.NoError(t, err)
+
+	tr := &store.Trigger{
+		ID:            api.NewUUID(),
+		ProjectID:     projectID,
+		Name:          "skip-exec-trig",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionExec,
+		ActionPayload: payloadJSON,
+		SubjectMode:   store.TriggerSubjectModeSkip,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID(),
+			InitiatorCredentialKind: "session",
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{
+			Kind: store.EffectCeilingPrincipal,
+		},
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, tr))
+
+	fireOnce := func(subject string) (string, hubfire.FireOutcome) {
+		now := time.Now().UTC()
+		ev := &store.TriggerEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			Type:       "webhook.received",
+			Subject:    subject,
+			DedupKey:   api.NewUUID(),
+			OccurredAt: now,
+			ReceivedAt: now,
+			Status:     store.TriggerEventStatusPending,
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+		tf := &store.TriggerFire{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			TriggerID:  tr.ID,
+			EventID:    ev.ID,
+			Subject:    subject,
+			ActionType: store.TriggerActionExec,
+			Status:     store.TriggerFireStatusFiring,
+			LeaseUntil: now.Add(10 * time.Minute),
+			StartedAt:  now,
+			CreatedAt:  now,
+		}
+		claimed, _, cErr := f.store.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, cErr)
+		require.True(t, claimed)
+
+		req := hubfire.FireRequest{
+			ProjectID: projectID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    tr.InitiatorAttribution,
+				Ceiling:        tr.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   tr.ID,
+				FireID:         tf.ID,
+			},
+			ActionType: store.TriggerActionExec,
+			Payload:    tr.ActionPayload,
+			Event: &hubfire.FireEvent{
+				ID:         ev.ID,
+				ProjectID:  projectID,
+				SourceKind: ev.SourceKind,
+				SourceID:   ev.SourceID,
+				Type:       ev.Type,
+				Subject:    subject,
+				Trigger: &hubfire.FireTriggerRef{
+					ID:          tr.ID,
+					Name:        tr.Name,
+					SubjectMode: store.TriggerSubjectModeSkip,
+					FireSubject: subject,
+				},
+			},
+			Executor: hubfire.ExecutorContext{Kind: "trigger_drainer", ID: "trigger_event:" + ev.ID},
+		}
+		out := f.srv.fireAction(ctx, req)
+		return tf.ID, out
+	}
+
+	// Fire 1 starts and stays running for 250ms.
+	fire1ID, out1 := fireOnce("job-alpha")
+	require.Equal(t, hubfire.FireStatusFired, out1.Status)
+	require.True(t, out1.Detached)
+	require.NotNil(t, out1.AfterRecord)
+
+	// While run 1 is still active, fire 2 for the SAME subject is skipped ("subject busy").
+	_, out2 := fireOnce("job-alpha")
+	assert.Equal(t, hubfire.FireStatusSkipped, out2.Status)
+	assert.Equal(t, execReasonSubjectBusy, out2.Error)
+
+	// Start tracker for run 1 and wait for it to finish (which releases the subject claim).
+	out1.AfterRecord(ctx)
+	run1 := f.waitFinished(t, fire1ID)
+	assert.Equal(t, store.ScheduledExecOutcomeOK, run1.Outcome)
+
+	// Once run 1 has finished, fire 3 for the same subject is admitted and succeeds.
+	fire3ID, out3 := fireOnce("job-alpha")
+	require.Equal(t, hubfire.FireStatusFired, out3.Status)
+	require.NotNil(t, out3.AfterRecord)
+	out3.AfterRecord(ctx)
+	run3 := f.waitFinished(t, fire3ID)
+	assert.Equal(t, store.ScheduledExecOutcomeOK, run3.Outcome)
+}
+
+// TestTriggerExec_OldSciontoolRejectsV2AndContextBounds verifies:
+//   - an old v1 sciontool rejecting v=2 / trigger_context with 400 invalid fails
+//     closed and records the fire as failed;
+//   - an oversize allow-listed attribute refuses the fire before exec-start;
+//   - sweeper recovery after a hub restart finishes a fire_id-owned run.
+func TestTriggerExec_OldSciontoolRejectsV2AndContextBounds(t *testing.T) {
+	f := newExecRouteFixture(t)
+	enableTriggerExecExperiments(t, f.srv)
+
+	// Simulate an old v1 sciontool that rejects trigger_context / v=2.
+	f.capture.answer = func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+		if req.GetPath() != execRoutePath(agentcontrol.RouteExecStart) {
+			return nil
+		}
+		return &conduitv1.RpcResponse{
+			Status: http.StatusBadRequest,
+			Body:   []byte(`{"outcome":"invalid","field":"body"}`),
+		}
+	}
+	f.startAgent(t)
+
+	ctx := context.Background()
+	projectID := f.launched.ProjectID
+	ep := &store.WebhookEndpoint{
+		ID:                  api.NewUUID(),
+		ProjectID:           projectID,
+		Name:                "old-tool-hook",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    f.owner.ID(),
+		OwnerCredentialKind: store.InitiatorCredentialKindSession,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		SecretVersion:       1,
+		Status:              store.WebhookEndpointStatusActive,
+	}
+	require.NoError(t, f.store.CreateWebhookEndpoint(ctx, ep))
+
+	payloadJSON, err := (&scheduledExecPayload{
+		AgentID:           f.launched.ID,
+		AgentName:         f.launched.Slug,
+		Command:           []string{"true"},
+		TimeoutSeconds:    30,
+		ContextAttributes: []string{"big"},
+	}).encode()
+	require.NoError(t, err)
+
+	tr := &store.Trigger{
+		ID:            api.NewUUID(),
+		ProjectID:     projectID,
+		Name:          "old-tool-trig",
+		SourceKind:    store.TriggerSourceKindWebhook,
+		SourceID:      ep.ID,
+		MatchTypes:    []string{"webhook.received"},
+		ActionType:    store.TriggerActionExec,
+		ActionPayload: payloadJSON,
+		SubjectMode:   store.TriggerSubjectModeNew,
+		Status:        store.TriggerStatusActive,
+		InitiatorAttribution: store.InitiatorAttribution{
+			InitiatorPrincipalKind:  "user",
+			InitiatorPrincipalID:    f.owner.ID(),
+			InitiatorCredentialKind: "session",
+			AttributionVersion:      1,
+			AuthorizationRevision:   1,
+		},
+		AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}
+	require.NoError(t, f.store.CreateTrigger(ctx, tr))
+
+	makeReq := func(attrs map[string]string) (string, hubfire.FireRequest) {
+		now := time.Now().UTC()
+		ev := &store.TriggerEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   ep.ID,
+			Type:       "webhook.received",
+			Subject:    "s1",
+			DedupKey:   api.NewUUID(),
+			OccurredAt: now,
+			ReceivedAt: now,
+			Attributes: attrs,
+			Status:     store.TriggerEventStatusPending,
+		}
+		require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
+		tf := &store.TriggerFire{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			TriggerID:  tr.ID,
+			EventID:    ev.ID,
+			Subject:    "s1",
+			ActionType: store.TriggerActionExec,
+			Status:     store.TriggerFireStatusFiring,
+			LeaseUntil: now.Add(10 * time.Minute),
+			StartedAt:  now,
+			CreatedAt:  now,
+		}
+		claimed, _, cErr := f.store.ClaimTriggerFire(ctx, tf)
+		require.NoError(t, cErr)
+		require.True(t, claimed)
+		return tf.ID, hubfire.FireRequest{
+			ProjectID: projectID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    tr.InitiatorAttribution,
+				Ceiling:        tr.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindTrigger,
+				DefinitionID:   tr.ID,
+				FireID:         tf.ID,
+			},
+			ActionType: store.TriggerActionExec,
+			Payload:    tr.ActionPayload,
+			Event: &hubfire.FireEvent{
+				ID:         ev.ID,
+				ProjectID:  projectID,
+				SourceKind: ev.SourceKind,
+				SourceID:   ev.SourceID,
+				Type:       ev.Type,
+				Subject:    ev.Subject,
+				Attributes: attrs,
+				Trigger:    &hubfire.FireTriggerRef{ID: tr.ID, Name: tr.Name, SubjectMode: store.TriggerSubjectModeNew},
+			},
+			Executor: hubfire.ExecutorContext{Kind: "trigger_drainer", ID: "trigger_event:" + ev.ID},
+		}
+	}
+
+	// 1. Old v1 sciontool rejects v=2 -> fails closed.
+	f1ID, req1 := makeReq(map[string]string{"big": "ok"})
+	out1 := f.srv.fireAction(ctx, req1)
+	assert.Equal(t, hubfire.FireStatusFailed, out1.Status)
+	assert.True(t, out1.Detached)
+	gotF1, err := f.store.GetTriggerFire(ctx, f1ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFailed, gotF1.Status)
+	assert.Equal(t, store.ScheduledExecOutcomeError, f.getRun(t, f1ID).Outcome)
+
+	// 2. Oversize allow-listed attribute (>4 KiB) -> refused before exec-start.
+	startsBefore := f.capture.count(execRoutePath(agentcontrol.RouteExecStart))
+	_, req2 := makeReq(map[string]string{"big": strings.Repeat("A", triggerExecMaxContextAttrValueBytes+1)})
+	out2 := f.srv.fireAction(ctx, req2)
+	assert.Equal(t, hubfire.FireStatusRefused, out2.Status)
+	assert.Equal(t, execReasonContextInvalid, out2.Error)
+	assert.Equal(t, startsBefore, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "oversize context must not send exec-start")
+
+	// 3. Sweeper recovery of a fire_id-owned run whose tracker was lost (restart mid-run).
+	f.capture.answer = func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+		if req.GetPath() == execRoutePath(agentcontrol.RouteExecStatus) {
+			return &conduitv1.RpcResponse{
+				Status: http.StatusOK,
+				Body:   []byte(`{"state":"finished","outcome":"ok","exit_code":0,"duration_ms":42,"output_bytes":7}`),
+			}
+		}
+		return nil
+	}
+	f3ID, _ := makeReq(nil)
+	now := time.Now().UTC()
+	require.NoError(t, f.store.CreateScheduledExecRun(ctx, &store.ScheduledExecRun{
+		FireID:         f3ID,
+		OverlapKey:     "trigger:" + tr.ID,
+		ProjectID:      projectID,
+		TargetAgentID:  f.launched.ID,
+		CommandSHA256:  agentcontrol.ExecArgvDigest([]string{"true"}),
+		Argc:           1,
+		TimeoutSeconds: 30,
+		StartedAt:      now,
+		NotAfter:       now.Add(time.Minute),
+		LeaseUntil:     now.Add(3 * time.Minute),
+		Outcome:        store.ScheduledExecOutcomeRunning,
+		Runtime:        f.launched.Runtime,
+		LaunchID:       f.launched.RunID,
+	}))
+	f.srv.sweepScheduledExecRuns(ctx)
+	recoveredRun := f.getRun(t, f3ID)
+	require.NotNil(t, recoveredRun.FinishedAt)
+	assert.Equal(t, store.ScheduledExecOutcomeOK, recoveredRun.Outcome)
+	gotF3, err := f.store.GetTriggerFire(ctx, f3ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerFireStatusFired, gotF3.Status)
+	assert.NotNil(t, gotF3.FinishedAt)
+}

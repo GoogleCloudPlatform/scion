@@ -100673,6 +100673,7 @@ type ScheduledExecRunMutation struct {
 	typ                       string
 	id                        *uuid.UUID
 	schedule_id               *uuid.UUID
+	overlap_key               *string
 	project_id                *uuid.UUID
 	target_agent_id           *uuid.UUID
 	initiator_principal_kind  *string
@@ -100709,6 +100710,8 @@ type ScheduledExecRunMutation struct {
 	clearedFields             map[string]struct{}
 	event                     *uuid.UUID
 	clearedevent              bool
+	trigger_fire              *uuid.UUID
+	clearedtrigger_fire       bool
 	done                      bool
 	oldValue                  func(context.Context) (*ScheduledExecRun, error)
 	predicates                []predicate.ScheduledExecRun
@@ -100835,7 +100838,7 @@ func (m *ScheduledExecRunMutation) EventID() (r uuid.UUID, exists bool) {
 // OldEventID returns the old "event_id" field's value of the ScheduledExecRun entity.
 // If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
 // An error is returned if the mutation operation is not UpdateOne, or the database query fails.
-func (m *ScheduledExecRunMutation) OldEventID(ctx context.Context) (v uuid.UUID, err error) {
+func (m *ScheduledExecRunMutation) OldEventID(ctx context.Context) (v *uuid.UUID, err error) {
 	if !m.op.Is(OpUpdateOne) {
 		return v, errors.New("OldEventID is only allowed on UpdateOne operations")
 	}
@@ -100849,9 +100852,71 @@ func (m *ScheduledExecRunMutation) OldEventID(ctx context.Context) (v uuid.UUID,
 	return oldValue.EventID, nil
 }
 
+// ClearEventID clears the value of the "event_id" field.
+func (m *ScheduledExecRunMutation) ClearEventID() {
+	m.event = nil
+	m.clearedFields[scheduledexecrun.FieldEventID] = struct{}{}
+}
+
+// EventIDCleared returns if the "event_id" field was cleared in this mutation.
+func (m *ScheduledExecRunMutation) EventIDCleared() bool {
+	_, ok := m.clearedFields[scheduledexecrun.FieldEventID]
+	return ok
+}
+
 // ResetEventID resets all changes to the "event_id" field.
 func (m *ScheduledExecRunMutation) ResetEventID() {
 	m.event = nil
+	delete(m.clearedFields, scheduledexecrun.FieldEventID)
+}
+
+// SetFireID sets the "fire_id" field.
+func (m *ScheduledExecRunMutation) SetFireID(u uuid.UUID) {
+	m.trigger_fire = &u
+}
+
+// FireID returns the value of the "fire_id" field in the mutation.
+func (m *ScheduledExecRunMutation) FireID() (r uuid.UUID, exists bool) {
+	v := m.trigger_fire
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFireID returns the old "fire_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldFireID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFireID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFireID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFireID: %w", err)
+	}
+	return oldValue.FireID, nil
+}
+
+// ClearFireID clears the value of the "fire_id" field.
+func (m *ScheduledExecRunMutation) ClearFireID() {
+	m.trigger_fire = nil
+	m.clearedFields[scheduledexecrun.FieldFireID] = struct{}{}
+}
+
+// FireIDCleared returns if the "fire_id" field was cleared in this mutation.
+func (m *ScheduledExecRunMutation) FireIDCleared() bool {
+	_, ok := m.clearedFields[scheduledexecrun.FieldFireID]
+	return ok
+}
+
+// ResetFireID resets all changes to the "fire_id" field.
+func (m *ScheduledExecRunMutation) ResetFireID() {
+	m.trigger_fire = nil
+	delete(m.clearedFields, scheduledexecrun.FieldFireID)
 }
 
 // SetScheduleID sets the "schedule_id" field.
@@ -100901,6 +100966,42 @@ func (m *ScheduledExecRunMutation) ScheduleIDCleared() bool {
 func (m *ScheduledExecRunMutation) ResetScheduleID() {
 	m.schedule_id = nil
 	delete(m.clearedFields, scheduledexecrun.FieldScheduleID)
+}
+
+// SetOverlapKey sets the "overlap_key" field.
+func (m *ScheduledExecRunMutation) SetOverlapKey(s string) {
+	m.overlap_key = &s
+}
+
+// OverlapKey returns the value of the "overlap_key" field in the mutation.
+func (m *ScheduledExecRunMutation) OverlapKey() (r string, exists bool) {
+	v := m.overlap_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOverlapKey returns the old "overlap_key" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldOverlapKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOverlapKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOverlapKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOverlapKey: %w", err)
+	}
+	return oldValue.OverlapKey, nil
+}
+
+// ResetOverlapKey resets all changes to the "overlap_key" field.
+func (m *ScheduledExecRunMutation) ResetOverlapKey() {
+	m.overlap_key = nil
 }
 
 // SetProjectID sets the "project_id" field.
@@ -102042,7 +102143,7 @@ func (m *ScheduledExecRunMutation) ClearEvent() {
 
 // EventCleared reports if the "event" edge to the ScheduledEvent entity was cleared.
 func (m *ScheduledExecRunMutation) EventCleared() bool {
-	return m.clearedevent
+	return m.EventIDCleared() || m.clearedevent
 }
 
 // EventIDs returns the "event" edge IDs in the mutation.
@@ -102059,6 +102160,46 @@ func (m *ScheduledExecRunMutation) EventIDs() (ids []uuid.UUID) {
 func (m *ScheduledExecRunMutation) ResetEvent() {
 	m.event = nil
 	m.clearedevent = false
+}
+
+// SetTriggerFireID sets the "trigger_fire" edge to the TriggerFire entity by id.
+func (m *ScheduledExecRunMutation) SetTriggerFireID(id uuid.UUID) {
+	m.trigger_fire = &id
+}
+
+// ClearTriggerFire clears the "trigger_fire" edge to the TriggerFire entity.
+func (m *ScheduledExecRunMutation) ClearTriggerFire() {
+	m.clearedtrigger_fire = true
+	m.clearedFields[scheduledexecrun.FieldFireID] = struct{}{}
+}
+
+// TriggerFireCleared reports if the "trigger_fire" edge to the TriggerFire entity was cleared.
+func (m *ScheduledExecRunMutation) TriggerFireCleared() bool {
+	return m.FireIDCleared() || m.clearedtrigger_fire
+}
+
+// TriggerFireID returns the "trigger_fire" edge ID in the mutation.
+func (m *ScheduledExecRunMutation) TriggerFireID() (id uuid.UUID, exists bool) {
+	if m.trigger_fire != nil {
+		return *m.trigger_fire, true
+	}
+	return
+}
+
+// TriggerFireIDs returns the "trigger_fire" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// TriggerFireID instead. It exists only for internal usage by the builders.
+func (m *ScheduledExecRunMutation) TriggerFireIDs() (ids []uuid.UUID) {
+	if id := m.trigger_fire; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetTriggerFire resets all changes to the "trigger_fire" edge.
+func (m *ScheduledExecRunMutation) ResetTriggerFire() {
+	m.trigger_fire = nil
+	m.clearedtrigger_fire = false
 }
 
 // Where appends a list predicates to the ScheduledExecRunMutation builder.
@@ -102095,12 +102236,18 @@ func (m *ScheduledExecRunMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledExecRunMutation) Fields() []string {
-	fields := make([]string, 0, 28)
+	fields := make([]string, 0, 30)
 	if m.event != nil {
 		fields = append(fields, scheduledexecrun.FieldEventID)
 	}
+	if m.trigger_fire != nil {
+		fields = append(fields, scheduledexecrun.FieldFireID)
+	}
 	if m.schedule_id != nil {
 		fields = append(fields, scheduledexecrun.FieldScheduleID)
+	}
+	if m.overlap_key != nil {
+		fields = append(fields, scheduledexecrun.FieldOverlapKey)
 	}
 	if m.project_id != nil {
 		fields = append(fields, scheduledexecrun.FieldProjectID)
@@ -102190,8 +102337,12 @@ func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
 	switch name {
 	case scheduledexecrun.FieldEventID:
 		return m.EventID()
+	case scheduledexecrun.FieldFireID:
+		return m.FireID()
 	case scheduledexecrun.FieldScheduleID:
 		return m.ScheduleID()
+	case scheduledexecrun.FieldOverlapKey:
+		return m.OverlapKey()
 	case scheduledexecrun.FieldProjectID:
 		return m.ProjectID()
 	case scheduledexecrun.FieldTargetAgentID:
@@ -102255,8 +102406,12 @@ func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (e
 	switch name {
 	case scheduledexecrun.FieldEventID:
 		return m.OldEventID(ctx)
+	case scheduledexecrun.FieldFireID:
+		return m.OldFireID(ctx)
 	case scheduledexecrun.FieldScheduleID:
 		return m.OldScheduleID(ctx)
+	case scheduledexecrun.FieldOverlapKey:
+		return m.OldOverlapKey(ctx)
 	case scheduledexecrun.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case scheduledexecrun.FieldTargetAgentID:
@@ -102325,12 +102480,26 @@ func (m *ScheduledExecRunMutation) SetField(name string, value ent.Value) error 
 		}
 		m.SetEventID(v)
 		return nil
+	case scheduledexecrun.FieldFireID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFireID(v)
+		return nil
 	case scheduledexecrun.FieldScheduleID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetScheduleID(v)
+		return nil
+	case scheduledexecrun.FieldOverlapKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOverlapKey(v)
 		return nil
 	case scheduledexecrun.FieldProjectID:
 		v, ok := value.(uuid.UUID)
@@ -102631,6 +102800,12 @@ func (m *ScheduledExecRunMutation) AddField(name string, value ent.Value) error 
 // mutation.
 func (m *ScheduledExecRunMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(scheduledexecrun.FieldEventID) {
+		fields = append(fields, scheduledexecrun.FieldEventID)
+	}
+	if m.FieldCleared(scheduledexecrun.FieldFireID) {
+		fields = append(fields, scheduledexecrun.FieldFireID)
+	}
 	if m.FieldCleared(scheduledexecrun.FieldScheduleID) {
 		fields = append(fields, scheduledexecrun.FieldScheduleID)
 	}
@@ -102660,6 +102835,12 @@ func (m *ScheduledExecRunMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *ScheduledExecRunMutation) ClearField(name string) error {
 	switch name {
+	case scheduledexecrun.FieldEventID:
+		m.ClearEventID()
+		return nil
+	case scheduledexecrun.FieldFireID:
+		m.ClearFireID()
+		return nil
 	case scheduledexecrun.FieldScheduleID:
 		m.ClearScheduleID()
 		return nil
@@ -102686,8 +102867,14 @@ func (m *ScheduledExecRunMutation) ResetField(name string) error {
 	case scheduledexecrun.FieldEventID:
 		m.ResetEventID()
 		return nil
+	case scheduledexecrun.FieldFireID:
+		m.ResetFireID()
+		return nil
 	case scheduledexecrun.FieldScheduleID:
 		m.ResetScheduleID()
+		return nil
+	case scheduledexecrun.FieldOverlapKey:
+		m.ResetOverlapKey()
 		return nil
 	case scheduledexecrun.FieldProjectID:
 		m.ResetProjectID()
@@ -102773,9 +102960,12 @@ func (m *ScheduledExecRunMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *ScheduledExecRunMutation) AddedEdges() []string {
-	edges := make([]string, 0, 1)
+	edges := make([]string, 0, 2)
 	if m.event != nil {
 		edges = append(edges, scheduledexecrun.EdgeEvent)
+	}
+	if m.trigger_fire != nil {
+		edges = append(edges, scheduledexecrun.EdgeTriggerFire)
 	}
 	return edges
 }
@@ -102788,13 +102978,17 @@ func (m *ScheduledExecRunMutation) AddedIDs(name string) []ent.Value {
 		if id := m.event; id != nil {
 			return []ent.Value{*id}
 		}
+	case scheduledexecrun.EdgeTriggerFire:
+		if id := m.trigger_fire; id != nil {
+			return []ent.Value{*id}
+		}
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *ScheduledExecRunMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 1)
+	edges := make([]string, 0, 2)
 	return edges
 }
 
@@ -102806,9 +103000,12 @@ func (m *ScheduledExecRunMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *ScheduledExecRunMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 1)
+	edges := make([]string, 0, 2)
 	if m.clearedevent {
 		edges = append(edges, scheduledexecrun.EdgeEvent)
+	}
+	if m.clearedtrigger_fire {
+		edges = append(edges, scheduledexecrun.EdgeTriggerFire)
 	}
 	return edges
 }
@@ -102819,6 +103016,8 @@ func (m *ScheduledExecRunMutation) EdgeCleared(name string) bool {
 	switch name {
 	case scheduledexecrun.EdgeEvent:
 		return m.clearedevent
+	case scheduledexecrun.EdgeTriggerFire:
+		return m.clearedtrigger_fire
 	}
 	return false
 }
@@ -102830,6 +103029,9 @@ func (m *ScheduledExecRunMutation) ClearEdge(name string) error {
 	case scheduledexecrun.EdgeEvent:
 		m.ClearEvent()
 		return nil
+	case scheduledexecrun.EdgeTriggerFire:
+		m.ClearTriggerFire()
+		return nil
 	}
 	return fmt.Errorf("unknown ScheduledExecRun unique edge %s", name)
 }
@@ -102840,6 +103042,9 @@ func (m *ScheduledExecRunMutation) ResetEdge(name string) error {
 	switch name {
 	case scheduledexecrun.EdgeEvent:
 		m.ResetEvent()
+		return nil
+	case scheduledexecrun.EdgeTriggerFire:
+		m.ResetTriggerFire()
 		return nil
 	}
 	return fmt.Errorf("unknown ScheduledExecRun edge %s", name)
@@ -122990,6 +123195,8 @@ type TriggerFireMutation struct {
 	finished_at                   *time.Time
 	created                       *time.Time
 	clearedFields                 map[string]struct{}
+	exec_run                      *uuid.UUID
+	clearedexec_run               bool
 	done                          bool
 	oldValue                      func(context.Context) (*TriggerFire, error)
 	predicates                    []predicate.TriggerFire
@@ -124321,6 +124528,45 @@ func (m *TriggerFireMutation) ResetCreated() {
 	m.created = nil
 }
 
+// SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by id.
+func (m *TriggerFireMutation) SetExecRunID(id uuid.UUID) {
+	m.exec_run = &id
+}
+
+// ClearExecRun clears the "exec_run" edge to the ScheduledExecRun entity.
+func (m *TriggerFireMutation) ClearExecRun() {
+	m.clearedexec_run = true
+}
+
+// ExecRunCleared reports if the "exec_run" edge to the ScheduledExecRun entity was cleared.
+func (m *TriggerFireMutation) ExecRunCleared() bool {
+	return m.clearedexec_run
+}
+
+// ExecRunID returns the "exec_run" edge ID in the mutation.
+func (m *TriggerFireMutation) ExecRunID() (id uuid.UUID, exists bool) {
+	if m.exec_run != nil {
+		return *m.exec_run, true
+	}
+	return
+}
+
+// ExecRunIDs returns the "exec_run" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// ExecRunID instead. It exists only for internal usage by the builders.
+func (m *TriggerFireMutation) ExecRunIDs() (ids []uuid.UUID) {
+	if id := m.exec_run; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetExecRun resets all changes to the "exec_run" edge.
+func (m *TriggerFireMutation) ResetExecRun() {
+	m.exec_run = nil
+	m.clearedexec_run = false
+}
+
 // Where appends a list predicates to the TriggerFireMutation builder.
 func (m *TriggerFireMutation) Where(ps ...predicate.TriggerFire) {
 	m.predicates = append(m.predicates, ps...)
@@ -125022,19 +125268,28 @@ func (m *TriggerFireMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *TriggerFireMutation) AddedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.exec_run != nil {
+		edges = append(edges, triggerfire.EdgeExecRun)
+	}
 	return edges
 }
 
 // AddedIDs returns all IDs (to other nodes) that were added for the given edge
 // name in this mutation.
 func (m *TriggerFireMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case triggerfire.EdgeExecRun:
+		if id := m.exec_run; id != nil {
+			return []ent.Value{*id}
+		}
+	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *TriggerFireMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
 	return edges
 }
 
@@ -125046,25 +125301,42 @@ func (m *TriggerFireMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *TriggerFireMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.clearedexec_run {
+		edges = append(edges, triggerfire.EdgeExecRun)
+	}
 	return edges
 }
 
 // EdgeCleared returns a boolean which indicates if the edge with the given name
 // was cleared in this mutation.
 func (m *TriggerFireMutation) EdgeCleared(name string) bool {
+	switch name {
+	case triggerfire.EdgeExecRun:
+		return m.clearedexec_run
+	}
 	return false
 }
 
 // ClearEdge clears the value of the edge with the given name. It returns an error
 // if that edge is not defined in the schema.
 func (m *TriggerFireMutation) ClearEdge(name string) error {
+	switch name {
+	case triggerfire.EdgeExecRun:
+		m.ClearExecRun()
+		return nil
+	}
 	return fmt.Errorf("unknown TriggerFire unique edge %s", name)
 }
 
 // ResetEdge resets all changes to the edge with the given name in this mutation.
 // It returns an error if the edge is not defined in the schema.
 func (m *TriggerFireMutation) ResetEdge(name string) error {
+	switch name {
+	case triggerfire.EdgeExecRun:
+		m.ResetExecRun()
+		return nil
+	}
 	return fmt.Errorf("unknown TriggerFire edge %s", name)
 }
 

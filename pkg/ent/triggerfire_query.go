@@ -4,6 +4,7 @@ package ent
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math"
 
@@ -13,6 +14,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/google/uuid"
 )
@@ -20,11 +22,12 @@ import (
 // TriggerFireQuery is the builder for querying TriggerFire entities.
 type TriggerFireQuery struct {
 	config
-	ctx        *QueryContext
-	order      []triggerfire.OrderOption
-	inters     []Interceptor
-	predicates []predicate.TriggerFire
-	modifiers  []func(*sql.Selector)
+	ctx         *QueryContext
+	order       []triggerfire.OrderOption
+	inters      []Interceptor
+	predicates  []predicate.TriggerFire
+	withExecRun *ScheduledExecRunQuery
+	modifiers   []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -59,6 +62,28 @@ func (_q *TriggerFireQuery) Unique(unique bool) *TriggerFireQuery {
 func (_q *TriggerFireQuery) Order(o ...triggerfire.OrderOption) *TriggerFireQuery {
 	_q.order = append(_q.order, o...)
 	return _q
+}
+
+// QueryExecRun chains the current query on the "exec_run" edge.
+func (_q *TriggerFireQuery) QueryExecRun() *ScheduledExecRunQuery {
+	query := (&ScheduledExecRunClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(triggerfire.Table, triggerfire.FieldID, selector),
+			sqlgraph.To(scheduledexecrun.Table, scheduledexecrun.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, triggerfire.ExecRunTable, triggerfire.ExecRunColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
 }
 
 // First returns the first TriggerFire entity from the query.
@@ -248,15 +273,27 @@ func (_q *TriggerFireQuery) Clone() *TriggerFireQuery {
 		return nil
 	}
 	return &TriggerFireQuery{
-		config:     _q.config,
-		ctx:        _q.ctx.Clone(),
-		order:      append([]triggerfire.OrderOption{}, _q.order...),
-		inters:     append([]Interceptor{}, _q.inters...),
-		predicates: append([]predicate.TriggerFire{}, _q.predicates...),
+		config:      _q.config,
+		ctx:         _q.ctx.Clone(),
+		order:       append([]triggerfire.OrderOption{}, _q.order...),
+		inters:      append([]Interceptor{}, _q.inters...),
+		predicates:  append([]predicate.TriggerFire{}, _q.predicates...),
+		withExecRun: _q.withExecRun.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
 	}
+}
+
+// WithExecRun tells the query-builder to eager-load the nodes that are connected to
+// the "exec_run" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *TriggerFireQuery) WithExecRun(opts ...func(*ScheduledExecRunQuery)) *TriggerFireQuery {
+	query := (&ScheduledExecRunClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withExecRun = query
+	return _q
 }
 
 // GroupBy is used to group vertices by one or more fields/columns.
@@ -335,8 +372,11 @@ func (_q *TriggerFireQuery) prepareQuery(ctx context.Context) error {
 
 func (_q *TriggerFireQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*TriggerFire, error) {
 	var (
-		nodes = []*TriggerFire{}
-		_spec = _q.querySpec()
+		nodes       = []*TriggerFire{}
+		_spec       = _q.querySpec()
+		loadedTypes = [1]bool{
+			_q.withExecRun != nil,
+		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
 		return (*TriggerFire).scanValues(nil, columns)
@@ -344,6 +384,7 @@ func (_q *TriggerFireQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*
 	_spec.Assign = func(columns []string, values []any) error {
 		node := &TriggerFire{config: _q.config}
 		nodes = append(nodes, node)
+		node.Edges.loadedTypes = loadedTypes
 		return node.assignValues(columns, values)
 	}
 	if len(_q.modifiers) > 0 {
@@ -358,7 +399,44 @@ func (_q *TriggerFireQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*
 	if len(nodes) == 0 {
 		return nodes, nil
 	}
+	if query := _q.withExecRun; query != nil {
+		if err := _q.loadExecRun(ctx, query, nodes, nil,
+			func(n *TriggerFire, e *ScheduledExecRun) { n.Edges.ExecRun = e }); err != nil {
+			return nil, err
+		}
+	}
 	return nodes, nil
+}
+
+func (_q *TriggerFireQuery) loadExecRun(ctx context.Context, query *ScheduledExecRunQuery, nodes []*TriggerFire, init func(*TriggerFire), assign func(*TriggerFire, *ScheduledExecRun)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[uuid.UUID]*TriggerFire)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(scheduledexecrun.FieldFireID)
+	}
+	query.Where(predicate.ScheduledExecRun(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(triggerfire.ExecRunColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.FireID
+		if fk == nil {
+			return fmt.Errorf(`foreign-key "fire_id" is nil for node %v`, n.ID)
+		}
+		node, ok := nodeids[*fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "fire_id" returned %v for node %v`, *fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
 }
 
 func (_q *TriggerFireQuery) sqlCount(ctx context.Context) (int, error) {

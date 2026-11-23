@@ -15,18 +15,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/google/uuid"
 )
 
 // ScheduledExecRunQuery is the builder for querying ScheduledExecRun entities.
 type ScheduledExecRunQuery struct {
 	config
-	ctx        *QueryContext
-	order      []scheduledexecrun.OrderOption
-	inters     []Interceptor
-	predicates []predicate.ScheduledExecRun
-	withEvent  *ScheduledEventQuery
-	modifiers  []func(*sql.Selector)
+	ctx             *QueryContext
+	order           []scheduledexecrun.OrderOption
+	inters          []Interceptor
+	predicates      []predicate.ScheduledExecRun
+	withEvent       *ScheduledEventQuery
+	withTriggerFire *TriggerFireQuery
+	modifiers       []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -78,6 +80,28 @@ func (_q *ScheduledExecRunQuery) QueryEvent() *ScheduledEventQuery {
 			sqlgraph.From(scheduledexecrun.Table, scheduledexecrun.FieldID, selector),
 			sqlgraph.To(scheduledevent.Table, scheduledevent.FieldID),
 			sqlgraph.Edge(sqlgraph.O2O, true, scheduledexecrun.EventTable, scheduledexecrun.EventColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
+}
+
+// QueryTriggerFire chains the current query on the "trigger_fire" edge.
+func (_q *ScheduledExecRunQuery) QueryTriggerFire() *TriggerFireQuery {
+	query := (&TriggerFireClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(scheduledexecrun.Table, scheduledexecrun.FieldID, selector),
+			sqlgraph.To(triggerfire.Table, triggerfire.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, scheduledexecrun.TriggerFireTable, scheduledexecrun.TriggerFireColumn),
 		)
 		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
 		return fromU, nil
@@ -272,12 +296,13 @@ func (_q *ScheduledExecRunQuery) Clone() *ScheduledExecRunQuery {
 		return nil
 	}
 	return &ScheduledExecRunQuery{
-		config:     _q.config,
-		ctx:        _q.ctx.Clone(),
-		order:      append([]scheduledexecrun.OrderOption{}, _q.order...),
-		inters:     append([]Interceptor{}, _q.inters...),
-		predicates: append([]predicate.ScheduledExecRun{}, _q.predicates...),
-		withEvent:  _q.withEvent.Clone(),
+		config:          _q.config,
+		ctx:             _q.ctx.Clone(),
+		order:           append([]scheduledexecrun.OrderOption{}, _q.order...),
+		inters:          append([]Interceptor{}, _q.inters...),
+		predicates:      append([]predicate.ScheduledExecRun{}, _q.predicates...),
+		withEvent:       _q.withEvent.Clone(),
+		withTriggerFire: _q.withTriggerFire.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
@@ -292,6 +317,17 @@ func (_q *ScheduledExecRunQuery) WithEvent(opts ...func(*ScheduledEventQuery)) *
 		opt(query)
 	}
 	_q.withEvent = query
+	return _q
+}
+
+// WithTriggerFire tells the query-builder to eager-load the nodes that are connected to
+// the "trigger_fire" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *ScheduledExecRunQuery) WithTriggerFire(opts ...func(*TriggerFireQuery)) *ScheduledExecRunQuery {
+	query := (&TriggerFireClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withTriggerFire = query
 	return _q
 }
 
@@ -373,8 +409,9 @@ func (_q *ScheduledExecRunQuery) sqlAll(ctx context.Context, hooks ...queryHook)
 	var (
 		nodes       = []*ScheduledExecRun{}
 		_spec       = _q.querySpec()
-		loadedTypes = [1]bool{
+		loadedTypes = [2]bool{
 			_q.withEvent != nil,
+			_q.withTriggerFire != nil,
 		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
@@ -404,6 +441,12 @@ func (_q *ScheduledExecRunQuery) sqlAll(ctx context.Context, hooks ...queryHook)
 			return nil, err
 		}
 	}
+	if query := _q.withTriggerFire; query != nil {
+		if err := _q.loadTriggerFire(ctx, query, nodes, nil,
+			func(n *ScheduledExecRun, e *TriggerFire) { n.Edges.TriggerFire = e }); err != nil {
+			return nil, err
+		}
+	}
 	return nodes, nil
 }
 
@@ -411,7 +454,10 @@ func (_q *ScheduledExecRunQuery) loadEvent(ctx context.Context, query *Scheduled
 	ids := make([]uuid.UUID, 0, len(nodes))
 	nodeids := make(map[uuid.UUID][]*ScheduledExecRun)
 	for i := range nodes {
-		fk := nodes[i].EventID
+		if nodes[i].EventID == nil {
+			continue
+		}
+		fk := *nodes[i].EventID
 		if _, ok := nodeids[fk]; !ok {
 			ids = append(ids, fk)
 		}
@@ -429,6 +475,38 @@ func (_q *ScheduledExecRunQuery) loadEvent(ctx context.Context, query *Scheduled
 		nodes, ok := nodeids[n.ID]
 		if !ok {
 			return fmt.Errorf(`unexpected foreign-key "event_id" returned %v`, n.ID)
+		}
+		for i := range nodes {
+			assign(nodes[i], n)
+		}
+	}
+	return nil
+}
+func (_q *ScheduledExecRunQuery) loadTriggerFire(ctx context.Context, query *TriggerFireQuery, nodes []*ScheduledExecRun, init func(*ScheduledExecRun), assign func(*ScheduledExecRun, *TriggerFire)) error {
+	ids := make([]uuid.UUID, 0, len(nodes))
+	nodeids := make(map[uuid.UUID][]*ScheduledExecRun)
+	for i := range nodes {
+		if nodes[i].FireID == nil {
+			continue
+		}
+		fk := *nodes[i].FireID
+		if _, ok := nodeids[fk]; !ok {
+			ids = append(ids, fk)
+		}
+		nodeids[fk] = append(nodeids[fk], nodes[i])
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	query.Where(triggerfire.IDIn(ids...))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		nodes, ok := nodeids[n.ID]
+		if !ok {
+			return fmt.Errorf(`unexpected foreign-key "fire_id" returned %v`, n.ID)
 		}
 		for i := range nodes {
 			assign(nodes[i], n)
@@ -467,6 +545,9 @@ func (_q *ScheduledExecRunQuery) querySpec() *sqlgraph.QuerySpec {
 		}
 		if _q.withEvent != nil {
 			_spec.Node.AddColumnOnce(scheduledexecrun.FieldEventID)
+		}
+		if _q.withTriggerFire != nil {
+			_spec.Node.AddColumnOnce(scheduledexecrun.FieldFireID)
 		}
 	}
 	if ps := _q.predicates; len(ps) > 0 {

@@ -385,7 +385,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		Secret:                  rawSecret,
 	}
 	if defaultTr != nil {
-		trResp := buildTriggerResponse(*defaultTr)
+		trResp := buildTriggerResponse(s.newExecRevealer(r.Context()), *defaultTr)
 		resp.TriggerID = trResp.ID
 		resp.Trigger = &trResp
 	}

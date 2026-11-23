@@ -16,10 +16,13 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
@@ -122,6 +125,16 @@ type TriggerActionSpec struct {
 	Body          string `json:"body,omitempty"`
 	Target        string `json:"target,omitempty"`
 	ReplyInThread bool   `json:"replyInThread,omitempty"`
+
+	// exec action fields (Stage 2 P8, ptone/scion#8241).
+	// Command is revealed ONLY to callers holding live agent.attach on the
+	// target agent; otherwise CommandRedacted is true with Argc and CommandSHA256.
+	Command           []string `json:"command,omitempty"`
+	TimeoutSeconds    int      `json:"timeoutSeconds,omitempty"`
+	ContextAttributes []string `json:"contextAttributes,omitempty"`
+	CommandRedacted   bool     `json:"commandRedacted,omitempty"`
+	Argc              int      `json:"argc,omitempty"`
+	CommandSHA256     string   `json:"commandSha256,omitempty"`
 }
 
 // TriggerSubjectSpec configures per-subject handling for a trigger.
@@ -199,6 +212,7 @@ type TriggerFireResponse struct {
 	DecidedDialect string            `json:"decidedDialect,omitempty"`
 	RuleTrace      *TriggerRuleTrace `json:"ruleTrace,omitempty"`
 	NotBefore      *time.Time        `json:"notBefore,omitempty"`
+	ExecSummary    *ExecSummary      `json:"execSummary,omitempty"`
 	StartedAt      time.Time         `json:"startedAt"`
 	FinishedAt     *time.Time        `json:"finishedAt,omitempty"`
 }
@@ -283,9 +297,62 @@ func (s *Server) buildWebhookEndpointResponses(endpoints []store.WebhookEndpoint
 	return out
 }
 
-func buildTriggerActionSpec(actionType, rawPayload string) TriggerActionSpec {
+// buildTriggerActionSpecRaw decodes a stored trigger action payload without
+// redacting exec argv. For internal re-authoring only (PATCH/resume); NEVER
+// write its output to an HTTP response.
+func buildTriggerActionSpecRaw(actionType, rawPayload string) TriggerActionSpec {
+	spec := buildTriggerActionSpec(nil, actionType, rawPayload)
+	if actionType == store.TriggerActionExec && rawPayload != "" {
+		var p scheduledExecPayload
+		if json.Unmarshal([]byte(rawPayload), &p) == nil {
+			spec.AgentID = p.AgentID
+			spec.AgentName = p.AgentName
+			spec.Command = append([]string(nil), p.Command...)
+			spec.TimeoutSeconds = p.TimeoutSeconds
+			spec.Wake = p.Wake
+			if len(p.ContextAttributes) > 0 {
+				spec.ContextAttributes = append([]string(nil), p.ContextAttributes...)
+			}
+			spec.CommandRedacted = false
+			spec.Argc = 0
+			spec.CommandSHA256 = ""
+		}
+	}
+	return spec
+}
+
+func buildTriggerActionSpec(rev *execRevealer, actionType, rawPayload string) TriggerActionSpec {
 	spec := TriggerActionSpec{Type: actionType}
 	if rawPayload == "" {
+		if actionType == store.TriggerActionExec {
+			spec.CommandRedacted = true
+		}
+		return spec
+	}
+	// Fail-closed exec argv redaction: any row whose actionType is exec OR
+	// whose stored payload carries exec content ("command"/"timeoutSeconds")
+	// redacts argv unless rev confirms live agent.attach on the stored target.
+	if actionType == store.TriggerActionExec || payloadHasExecContent(rawPayload) {
+		var p scheduledExecPayload
+		if err := json.Unmarshal([]byte(rawPayload), &p); err != nil {
+			spec.CommandRedacted = true
+			return spec
+		}
+		spec.AgentID = p.AgentID
+		spec.AgentName = p.AgentName
+		spec.TimeoutSeconds = p.TimeoutSeconds
+		if len(p.ContextAttributes) > 0 {
+			spec.ContextAttributes = append([]string(nil), p.ContextAttributes...)
+		}
+		if rev != nil && rev.reveals(p.AgentID) {
+			if len(p.Command) > 0 {
+				spec.Command = append([]string(nil), p.Command...)
+			}
+		} else {
+			spec.CommandRedacted = true
+			spec.Argc = len(p.Command)
+			spec.CommandSHA256 = agentcontrol.ExecArgvDigest(p.Command)
+		}
 		return spec
 	}
 	switch actionType {
@@ -331,7 +398,7 @@ func buildTriggerActionSpec(actionType, rawPayload string) TriggerActionSpec {
 	return spec
 }
 
-func buildTriggerResponse(tr store.Trigger) TriggerResponse {
+func buildTriggerResponse(rev *execRevealer, tr store.Trigger) TriggerResponse {
 	types := make([]string, len(tr.MatchTypes))
 	copy(types, tr.MatchTypes)
 	normRules, rulesErr := triggerMatchRules(tr)
@@ -368,7 +435,7 @@ func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 			ID:   tr.SourceID,
 		},
 		Match:  matchSpec,
-		Action: buildTriggerActionSpec(tr.ActionType, tr.ActionPayload),
+		Action: buildTriggerActionSpec(rev, tr.ActionType, tr.ActionPayload),
 		Subject: TriggerSubjectSpec{
 			Dialect:        tr.SubjectDialect,
 			Expr:           tr.SubjectRule,
@@ -389,10 +456,10 @@ func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 	}
 }
 
-func buildTriggerResponses(triggers []store.Trigger) []TriggerResponse {
+func buildTriggerResponses(rev *execRevealer, triggers []store.Trigger) []TriggerResponse {
 	out := make([]TriggerResponse, len(triggers))
 	for i := range triggers {
-		out[i] = buildTriggerResponse(triggers[i])
+		out[i] = buildTriggerResponse(rev, triggers[i])
 	}
 	return out
 }
@@ -415,11 +482,15 @@ func decodeTriggerFireRuleTrace(raw string) *TriggerRuleTrace {
 }
 
 func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
+	return buildTriggerFireResponseWithRun(tf, nil)
+}
+
+func buildTriggerFireResponseWithRun(tf store.TriggerFire, run *store.ScheduledExecRun) TriggerFireResponse {
 	decidedDialect := ""
 	if tf.DecidedDialect != "" {
 		decidedDialect = triggerrule.SafeDialectName(tf.DecidedDialect)
 	}
-	return TriggerFireResponse{
+	resp := TriggerFireResponse{
 		ID:             tf.ID,
 		TriggerID:      tf.TriggerID,
 		EventID:        tf.EventID,
@@ -436,12 +507,41 @@ func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
 		StartedAt:      tf.StartedAt,
 		FinishedAt:     tf.FinishedAt,
 	}
+	if run != nil && tf.ActionType == store.TriggerActionExec {
+		resp.ExecSummary = &ExecSummary{
+			Outcome:     run.Outcome,
+			ExitCode:    run.ExitCode,
+			DurationMS:  run.DurationMS,
+			OutputBytes: run.OutputBytes,
+			StartedAt:   run.StartedAt,
+			FinishedAt:  run.FinishedAt,
+		}
+	}
+	return resp
 }
 
-func buildTriggerFireResponses(fires []store.TriggerFire) []TriggerFireResponse {
+func (s *Server) buildTriggerFireResponses(ctx context.Context, fires []store.TriggerFire) []TriggerFireResponse {
+	var execFireIDs []string
+	for i := range fires {
+		if fires[i].ActionType == store.TriggerActionExec {
+			execFireIDs = append(execFireIDs, fires[i].ID)
+		}
+	}
+	var runs map[string]store.ScheduledExecRun
+	if len(execFireIDs) > 0 && s != nil && s.store != nil {
+		var err error
+		if runs, err = s.store.ListScheduledExecRunsByFire(ctx, execFireIDs); err != nil {
+			slog.WarnContext(ctx, "trigger fire response: exec run lookup failed", "error", err)
+		}
+	}
 	out := make([]TriggerFireResponse, len(fires))
 	for i := range fires {
-		out[i] = buildTriggerFireResponse(fires[i])
+		var runPtr *store.ScheduledExecRun
+		if r, ok := runs[fires[i].ID]; ok {
+			runCopy := r
+			runPtr = &runCopy
+		}
+		out[i] = buildTriggerFireResponseWithRun(fires[i], runPtr)
 	}
 	return out
 }

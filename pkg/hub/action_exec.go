@@ -25,38 +25,70 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// Security inventory for trigger-routed exec (Stage 2 P8, ptone/scion#8241):
+//
+// A. Every way event data or rule config can influence what runs:
+//  1. argv (command): literal []string fixed at authoring (1..64 elements, <=4 KiB
+//     each, <=16 KiB total, no NUL). Event data NEVER templates into argv;
+//     trigger authoring rejects any "${" in command (400 templating_not_allowed_in_argv),
+//     and Fire sends p.Command verbatim, bound by ExecArgvDigest(p.Command) in
+//     scheduled_exec_runs.command_sha256 and sciontool's execBinding.
+//  2. Environment (env): inherited from the target agent's harness tmux session
+//     plus PWD; for trigger-routed runs (v=2) ONLY the single fixed-name variable
+//     SCION_TRIGGER_CONTEXT is added. No arbitrary env var names from rule config
+//     or event data.
+//  3. Context variable (SCION_TRIGGER_CONTEXT): hub-built JSON object
+//     {event_id, trigger_id, fire_id, subject?, attributes?} sent via versioned
+//     ExecStartRequest.TriggerContext (v=2); old v1 sciontool rejects both the
+//     unknown field and v=2 (fail closed). Only keys in the rule's validated
+//     contextAttributes allow-list are copied (each value <=4 KiB, valid UTF-8,
+//     no NUL; total JSON <=16 KiB; violations refuse the fire without truncation).
+//     Bound into sciontool's execBinding sha256 digest and never logged.
+//  4. Working directory (workdir): fixed by sciontool (/workspace -> HOME -> /);
+//     neither rule config nor event data can influence it.
+//  5. Attach target (agentId / launch_id): resolved to authoritative UUID agentId
+//     at authoring (never falls back to agentName at fire) and pinned to
+//     target.RunID via callAgentControlPinned.
+//  6. Overlap & subject claim: overlap_key="trigger:<triggerID>" (never
+//     schedule_id) in DB + ExecStartRequest.ScheduleID=triggerID in sciontool;
+//     subject mode "reuse" refused at authoring; "skip" acquires a
+//     trigger_subject_claims row bound to target.ID at admission and held until
+//     FinishScheduledExecRun finishes the run in the same transaction.
+//
+// B. Every authority check:
+//  1. Authoring (POST/PATCH /triggers, POST /triggers/{id}/resume):
+//     hub.triggers + hub.exec_schedules + hub.conduit; authorizeDeferredAuthoringCredential;
+//     trigger.create/update; trigger.SourceReplayProtected (400 source_not_replay_protected);
+//     authorizeAgentTargetAction(ActionAttach) (no existence oracle 404; 422 on
+//     managed runtime); PATCH authorizeStoredExecTargetForUpdate; EffectCeilingAllows
+//     agent.attach; per-principal rate limit and per-trigger-exec authoring caps
+//     under LockTriggerQuota.
+//  2. Fire-time re-check (Preauthorize, resolveRecordedAuthority, Authorize):
+//     strict payload decode; hub.exec_schedules + hub.conduit; reload endpoint
+//     and re-check trigger.SourceReplayProtected; resolveRecordedAuthority;
+//     frozen ceiling EffectCeilingAllows(agent.attach); live authorizeAgentTargetAction
+//     (ActionAttach); fireStanding; target preflight; per-trigger exec fire rate cap.
+//  3. Read-time argv redaction (trigger_response.go):
+//     command revealed only when the caller holds live agent.attach on the stored
+//     target via execRevealer; otherwise omitted with commandRedacted=true, argc,
+//     commandSha256 (fail closed on malformed payload).
 
 // execAction implements FireAction, FirePayloadValidator, FirePreauthorizer,
 // and FireAuthorityRefusalHandler for deferred "exec" fires executed in a
 // running target agent's container over its Conduit session.
-//
-// Fire sequence through fireAction:
-//  1. ValidatePayload decodes the stored payload strictly and requires an
-//     authoritative agentId, failing closed before authority resolution.
-//  2. Preauthorize skips when hub.exec_schedules / hub.conduit is disabled or
-//     when req.FireAt is older than scheduledExecMaxWindow.
-//  3. resolveRecordedAuthority (run by fireAction) resolves the recorded
-//     authorization revision; OnAuthorityRefused emits schedule.exec.refused
-//     and returns execReasonRefused on denial.
-//  4. Authorize runs authorizeExecFire (target lookup by agentId, frozen
-//     ceiling, live agent.attach via authorizeAgentTargetAction, and
-//     fireStanding) followed by target preflight (not managed, running phase,
-//     not reincarnating). The Authorize/Fire seam sits immediately after
-//     preflight (Stage 1 design §5.2, §17).
-//  5. Fire owns admission, scheduled_exec_runs row insertion (keyed on
-//     event_id), the dispatch guard, the single exec-start call, atomic run +
-//     owner compare-and-set completion, and tracker handoff via
-//     FireOutcome.AfterRecord.
 type execAction struct {
 	srv *Server
 }
 
 type execAuthorized struct {
-	payload *scheduledExecPayload
-	target  *store.Agent
-	auth    FireAuthority
+	payload        *scheduledExecPayload
+	target         *store.Agent
+	auth           FireAuthority
+	triggerContext string
 }
 
 func (a *execAction) Type() string {
@@ -145,24 +177,35 @@ func (a *execAction) Preauthorize(ctx context.Context, req hubfire.FireRequest) 
 	if a == nil || a.srv == nil {
 		return nil, errors.New("exec action: server not configured")
 	}
-	// Stage 1 keeps event-owned exec runs (UNIQUE scheduled_exec_runs.event_id,
-	// owner+run CAS, and sweeper/unadmitted recovery via event_id); trigger
-	// runs require the Stage 2 addendum P8 fire_id owner extension and a
-	// dedicated overlap_key, never schedule_id (§15 PR 2, rev 8.23). Fail closed
-	// before any schedule.exec.* skip or refusal audit is emitted.
-	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
-		slog.Warn("exec fire refused: trigger-owned exec runs are not wired in Stage 1",
-			"definitionID", req.Authority.DefinitionID,
-			"fireID", req.Authority.FireID,
-			"projectID", req.ProjectID)
-		return &FireRefusal{Reason: execReasonRefused}, nil
-	}
 	p, err := unmarshalExecFirePayload(req.Payload)
 	if err != nil {
 		return nil, errScheduledExecPayloadInvalid
 	}
 	if !a.srv.execSchedulesEnabled() {
 		return nil, a.skipExecFire(ctx, req, p, execReasonDisabled, "experiment_off")
+	}
+	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
+		if req.Event == nil {
+			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New("missing trigger event"))
+			return &FireRefusal{Reason: execReasonRefused}, nil
+		}
+		var ep *store.WebhookEndpoint
+		if req.Event.SourceKind == store.TriggerSourceKindWebhook {
+			loaded, epErr := a.srv.store.GetWebhookEndpoint(ctx, req.Event.SourceID)
+			if epErr != nil {
+				if errors.Is(epErr, store.ErrNotFound) || errors.Is(epErr, store.ErrInvalidInput) {
+					a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReasonSourceNotReplayProtected))
+					return &FireRefusal{Reason: execReasonSourceNotReplayProtected}, nil
+				}
+				return nil, fmt.Errorf("exec trigger fire: load webhook endpoint: %w", epErr)
+			}
+			ep = loaded
+		}
+		if !trigger.SourceReplayProtected(req.Event.SourceKind, ep) {
+			a.refuseExecFire(ctx, req, FireAuthority{}, p, errors.New(execReasonSourceNotReplayProtected))
+			return &FireRefusal{Reason: execReasonSourceNotReplayProtected}, nil
+		}
+		return nil, nil
 	}
 	if !req.FireAt.IsZero() && time.Since(req.FireAt) > scheduledExecMaxWindow {
 		return nil, a.skipExecFire(ctx, req, p, execReasonMissedWindow, "missed_window")
@@ -237,13 +280,6 @@ func (a *execAction) Authorize(
 	if a == nil || a.srv == nil {
 		return nil, nil, errors.New("exec action: server not configured")
 	}
-	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
-		slog.Warn("exec fire refused: trigger-owned exec runs are not wired in Stage 1",
-			"definitionID", req.Authority.DefinitionID,
-			"fireID", req.Authority.FireID,
-			"projectID", req.ProjectID)
-		return nil, &FireRefusal{Reason: execReasonRefused}, nil
-	}
 	p, err := unmarshalExecFirePayload(req.Payload)
 	if err != nil {
 		return nil, nil, errScheduledExecPayloadInvalid
@@ -268,10 +304,38 @@ func (a *execAction) Authorize(
 		return nil, nil, a.skipExecFire(ctx, req, p, execReasonTargetNotRunning, "reincarnating")
 	}
 
+	var triggerCtx string
+	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
+		built, ctxErr := buildTriggerExecContext(req, p.ContextAttributes)
+		if ctxErr != nil {
+			a.refuseExecFire(ctx, req, auth, p, ctxErr)
+			return nil, &FireRefusal{Reason: execReasonContextInvalid}, nil
+		}
+		triggerCtx = built
+
+		// Per-trigger exec fire rate cap (own cap, separate from schedule quotas).
+		if req.Authority.DefinitionID != "" {
+			recentCount, countErr := a.srv.store.CountTriggerFiresSince(
+				ctx,
+				req.Authority.DefinitionID,
+				time.Now().Add(-time.Minute),
+				store.TriggerFireStatusSkipped,
+			)
+			if countErr != nil {
+				return nil, nil, fmt.Errorf("exec trigger fire: count recent fires: %w", countErr)
+			}
+			// The current firing row is already persisted in trigger_fires.
+			if recentCount > triggerExecMaxFiresPerMinute {
+				return nil, nil, a.skipExecFire(ctx, req, p, execReasonRateLimit, "rate_limit")
+			}
+		}
+	}
+
 	return &execAuthorized{
-		payload: p,
-		target:  target,
-		auth:    auth,
+		payload:        p,
+		target:         target,
+		auth:           auth,
+		triggerContext: triggerCtx,
 	}, nil, nil
 }
 
@@ -294,22 +358,68 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	if fireID == "" {
 		return hubfire.FireOutcome{}, errors.New("exec action: missing fire ID")
 	}
-	// Trigger-owned runs are refused in Preauthorize / Authorize; guard direct
-	// Fire calls with the same generic refusal text.
-	if req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger {
-		return hubfire.FireOutcome{}, errors.New(execReasonRefused)
-	}
+	isTrigger := req.Authority.DefinitionKind == hubfire.DefinitionKindTrigger
 	var scheduleID string
-	if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
+	var overlapKey string
+	var sciontoolScopeID string
+	if isTrigger {
+		if req.Authority.DefinitionID != "" {
+			overlapKey = "trigger:" + req.Authority.DefinitionID
+			sciontoolScopeID = req.Authority.DefinitionID
+		}
+	} else if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
 		scheduleID = req.Authority.DefinitionID
+		if scheduleID != "" {
+			overlapKey = "schedule:" + scheduleID
+			sciontoolScopeID = scheduleID
+		}
 	}
 
 	log := slog.With("subsystem", "scheduler", "eventID", fireID, "projectID", req.ProjectID)
+
+	// Subject policy "skip" for trigger-routed exec: acquire a persistent
+	// trigger_subject_claims row before run admission. CreateScheduledExecRun
+	// binds it to target.ID atomically with the run insert so it stays held
+	// until FinishScheduledExecRun completes the run (P8).
+	var heldClaim *store.TriggerSubjectClaim
+	if isTrigger && req.Event != nil && req.Event.Trigger != nil && req.Event.Trigger.SubjectMode == store.TriggerSubjectModeSkip {
+		fireSubject := req.Event.Trigger.FireSubject
+		if fireSubject == "" {
+			fireSubject = req.Event.Subject
+		}
+		claimNow := time.Now().UTC()
+		claimed, existing, claimErr := s.store.ClaimTriggerSubject(
+			ctx,
+			req.Authority.DefinitionID,
+			fireSubject,
+			req.Event.ID,
+			fireID,
+			claimNow,
+			claimNow.Add(-store.TriggerSubjectAbandonedClaimTTL),
+		)
+		if claimErr != nil {
+			log.Warn("Scheduler: exec trigger subject claim failed", "error", claimErr)
+			return hubfire.FireOutcome{}, errors.New(execReasonDispatchFailed)
+		}
+		if existing != nil {
+			return hubfire.FireOutcome{}, a.skipExecFire(ctx, req, p, execReasonSubjectBusy, "subject_busy")
+		}
+		heldClaim = claimed
+	}
+	releaseUnboundClaim := func() {
+		if heldClaim == nil {
+			return
+		}
+		relCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+		defer cancel()
+		_, _ = s.store.ReleaseTriggerSubjectClaim(relCtx, heldClaim.ID, heldClaim.FireID, time.Now().UTC())
+	}
 
 	// Admission: the replica's tracked-run bound (never waits) and the
 	// shutdown gate. The slot and ownership pass to the tracker via
 	// FireOutcome.AfterRecord, or are released when no tracker starts.
 	if !s.execRuns.acquire(fireID) {
+		releaseUnboundClaim()
 		return hubfire.FireOutcome{}, a.skipExecFire(ctx, req, p, execReasonCapacity, "tracked_run_capacity")
 	}
 	handedOff := false
@@ -320,6 +430,7 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	}()
 	workCtx, endWork, admitted := s.execRuns.work.begin()
 	if !admitted {
+		releaseUnboundClaim()
 		log.Warn("Scheduler: exec event not started: the hub is shutting down")
 		return hubfire.FireOutcome{}, errors.New(execReasonShuttingDown)
 	}
@@ -330,9 +441,9 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	now := time.Now()
 	timeout := p.timeout()
 	run := store.ScheduledExecRun{
-		EventID:                 fireID,
 		ProjectID:               req.ProjectID,
 		ScheduleID:              scheduleID,
+		OverlapKey:              overlapKey,
 		TargetAgentID:           target.ID,
 		InitiatorPrincipalKind:  attr.InitiatorPrincipalKind,
 		InitiatorPrincipalID:    attr.InitiatorPrincipalID,
@@ -352,7 +463,13 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 		Runtime:                 target.Runtime,
 		LaunchID:                target.RunID,
 	}
+	if isTrigger {
+		run.FireID = fireID
+	} else {
+		run.EventID = fireID
+	}
 	if err := s.store.CreateScheduledExecRun(ctx, &run); err != nil {
+		releaseUnboundClaim()
 		if errors.Is(err, store.ErrScheduledExecOverlap) {
 			return hubfire.FireOutcome{}, a.skipExecFire(ctx, req, p, execReasonOverlap, "db_overlap_lease")
 		}
@@ -362,9 +479,10 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 			// and do not overwrite the recorded outcome (ptone/scion#8210).
 			log.Warn("Scheduler: exec event already closed before run admission; nothing started")
 			return hubfire.FireOutcome{
-				Status:    hubfire.FireStatusFired,
-				ResultRef: fireID,
-				Detached:  true,
+				Status:        hubfire.FireStatusFired,
+				ResultRef:     fireID,
+				TargetAgentID: target.ID,
+				Detached:      true,
 			}, nil
 		}
 		// Nothing was sent. An existing run means this event was admitted
@@ -377,10 +495,10 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 
 	// From here on the run row exists, so another replica's sweeper may
 	// record the outcome at any moment. Every outcome is therefore recorded
-	// here through the run's compare-and-set, with the owning event in the same
-	// transaction (and the event only while it is still fired or expired),
-	// and Detached: true tells the caller to write nothing after Fire so a
-	// recorded outcome is never overwritten (R1, ptone/scion#7883).
+	// here through the run's compare-and-set, with the owning event/fire in
+	// the same transaction, and Detached: true tells the caller to write
+	// nothing after Fire so a recorded outcome is never overwritten
+	// (R1, ptone/scion#7883, em-2 invariant (b)).
 	terminal := func(outcome string, res *agentcontrol.ExecResult, eventStatus, reason string, fireStatus hubfire.FireStatus) (hubfire.FireOutcome, error) {
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancel()
@@ -389,10 +507,11 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 			log.Warn("Scheduler: exec run outcome not recorded at fire; left to the sweeper", "error", err)
 		}
 		return hubfire.FireOutcome{
-			Status:    fireStatus,
-			Error:     reason,
-			ResultRef: fireID,
-			Detached:  true,
+			Status:        fireStatus,
+			Error:         reason,
+			ResultRef:     fireID,
+			TargetAgentID: target.ID,
+			Detached:      true,
 		}, nil
 	}
 	skipRun := func(reason, detail string) (hubfire.FireOutcome, error) {
@@ -405,10 +524,11 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	track := func() (hubfire.FireOutcome, error) {
 		handedOff = true
 		return hubfire.FireOutcome{
-			Status:      hubfire.FireStatusFired,
-			ResultRef:   fireID,
-			AfterRecord: func(context.Context) { s.trackScheduledExecRun(run) },
-			Detached:    true,
+			Status:        hubfire.FireStatusFired,
+			ResultRef:     fireID,
+			TargetAgentID: target.ID,
+			AfterRecord:   func(context.Context) { s.trackScheduledExecRun(run) },
+			Detached:      true,
 		}, nil
 	}
 
@@ -428,9 +548,10 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	case current.FinishedAt != nil:
 		log.Warn("Scheduler: exec run already finished before dispatch; nothing sent", "outcome", current.Outcome)
 		return hubfire.FireOutcome{
-			Status:    hubfire.FireStatusFired,
-			ResultRef: fireID,
-			Detached:  true,
+			Status:        hubfire.FireStatusFired,
+			ResultRef:     fireID,
+			TargetAgentID: target.ID,
+			Detached:      true,
 		}, nil
 	case time.Now().After(run.NotAfter):
 		log.Warn("Scheduler: exec run start deadline passed before dispatch; nothing sent")
@@ -446,11 +567,12 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 	stopStart := context.AfterFunc(workCtx, cancelStart)
 	res, startErr := s.StartAgentExecRun(startCtx, target.ID, target.RunID, agentcontrol.ExecStartRequest{
 		RunID:          fireID,
-		ScheduleID:     scheduleID,
+		ScheduleID:     sciontoolScopeID,
 		Argv:           p.Command,
 		TimeoutS:       timeout,
 		NotAfterUnixMS: run.NotAfter.UnixMilli(),
 		Capture:        p.CaptureOutput,
+		TriggerContext: ea.triggerContext,
 	})
 	stopStart()
 	cancelStart()

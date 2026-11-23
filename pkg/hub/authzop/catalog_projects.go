@@ -1318,6 +1318,7 @@ var projectOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:message"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:dispatch_agent"},
+			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:exec"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:github.comment"},
 		},
 		Principals:       []PrincipalKind{PrincipalSystem},

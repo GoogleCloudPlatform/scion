@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/google/uuid"
 )
@@ -360,6 +361,25 @@ func (_c *TriggerFireCreate) SetNillableID(v *uuid.UUID) *TriggerFireCreate {
 	return _c
 }
 
+// SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID.
+func (_c *TriggerFireCreate) SetExecRunID(id uuid.UUID) *TriggerFireCreate {
+	_c.mutation.SetExecRunID(id)
+	return _c
+}
+
+// SetNillableExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableExecRunID(id *uuid.UUID) *TriggerFireCreate {
+	if id != nil {
+		_c = _c.SetExecRunID(*id)
+	}
+	return _c
+}
+
+// SetExecRun sets the "exec_run" edge to the ScheduledExecRun entity.
+func (_c *TriggerFireCreate) SetExecRun(v *ScheduledExecRun) *TriggerFireCreate {
+	return _c.SetExecRunID(v.ID)
+}
+
 // Mutation returns the TriggerFireMutation object of the builder.
 func (_c *TriggerFireCreate) Mutation() *TriggerFireMutation {
 	return _c.mutation
@@ -620,6 +640,22 @@ func (_c *TriggerFireCreate) createSpec() (*TriggerFire, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(triggerfire.FieldCreated, field.TypeTime, value)
 		_node.Created = value
+	}
+	if nodes := _c.mutation.ExecRunIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   triggerfire.ExecRunTable,
+			Columns: []string{triggerfire.ExecRunColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(scheduledexecrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
 	}
 	return _node, _spec
 }

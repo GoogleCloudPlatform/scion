@@ -427,9 +427,12 @@ func (_q *ScheduledEventQuery) loadExecRun(ctx context.Context, query *Scheduled
 	}
 	for _, n := range neighbors {
 		fk := n.EventID
-		node, ok := nodeids[fk]
+		if fk == nil {
+			return fmt.Errorf(`foreign-key "event_id" is nil for node %v`, n.ID)
+		}
+		node, ok := nodeids[*fk]
 		if !ok {
-			return fmt.Errorf(`unexpected referenced foreign-key "event_id" returned %v for node %v`, fk, n.ID)
+			return fmt.Errorf(`unexpected referenced foreign-key "event_id" returned %v for node %v`, *fk, n.ID)
 		}
 		assign(node, n)
 	}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/google/uuid"
 )
@@ -1803,6 +1804,29 @@ func CreatedLT(v time.Time) predicate.TriggerFire {
 // CreatedLTE applies the LTE predicate on the "created" field.
 func CreatedLTE(v time.Time) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldLTE(FieldCreated, v))
+}
+
+// HasExecRun applies the HasEdge predicate on the "exec_run" edge.
+func HasExecRun() predicate.TriggerFire {
+	return predicate.TriggerFire(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, ExecRunTable, ExecRunColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasExecRunWith applies the HasEdge predicate on the "exec_run" edge with a given conditions (other predicates).
+func HasExecRunWith(preds ...predicate.ScheduledExecRun) predicate.TriggerFire {
+	return predicate.TriggerFire(func(s *sql.Selector) {
+		step := newExecRunStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
 }
 
 // And groups predicates with the AND operator between them.

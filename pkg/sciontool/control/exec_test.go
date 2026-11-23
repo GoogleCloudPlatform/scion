@@ -293,7 +293,7 @@ func TestExecStartSchema400(t *testing.T) {
 		"unknown field": {`{"v":1,"run_id":"` + good.RunID + `","argv":["true"],"timeout_s":1,"not_after_unix_ms":1,"cwd":"/"}`, "body"},
 		"trailing data": {`{"v":1,"run_id":"` + good.RunID + `","argv":["true"],"timeout_s":1,"not_after_unix_ms":1} {}`, "body"},
 		"not json":      {`argv=true`, "body"},
-		"version":       {mut(func(r *agentcontrol.ExecStartRequest) { r.V = 2 }), "v"},
+		"version":       {mut(func(r *agentcontrol.ExecStartRequest) { r.V = 3 }), "v"},
 		"run id":        {mut(func(r *agentcontrol.ExecStartRequest) { r.RunID = "not-a-uuid" }), "run_id"},
 		"run id upper":  {mut(func(r *agentcontrol.ExecStartRequest) { r.RunID = "AAAAAAAA-0000-4000-8000-00000000000A" }), "run_id"},
 		"schedule id":   {mut(func(r *agentcontrol.ExecStartRequest) { r.ScheduleID = "x" }), "schedule_id"},
@@ -973,5 +973,61 @@ func TestExecWorkdirFallback(t *testing.T) {
 	}
 	if got := execWorkdir(missing, "no-such-user-"+filepath.Base(work), []string{"HOME=" + missing}); got != "/" {
 		t.Errorf("no usable home: got %q, want /", got)
+	}
+}
+
+// TestExecTriggerContextEnvAndBinding verifies that v2 exec-start delivers
+// trigger_context exclusively via SCION_TRIGGER_CONTEXT without touching argv,
+// binds trigger_context into run_id replay mismatch checks, and rejects invalid
+// v1/v2 combinations without spawning.
+func TestExecTriggerContextEnvAndBinding(t *testing.T) {
+	f := newExecFixture(t)
+	ctxJSON := `{"event_id":"evt-1","trigger_id":"trg-1","fire_id":"fire-1","attributes":{"env":"prod"}}`
+
+	req := f.startReq(50, "trig")
+	req.V = agentcontrol.ExecVersionTriggerContext
+	req.ScheduleID = uuidN(700)
+	req.TriggerContext = ctxJSON
+
+	code, resp := f.start(t, req)
+	if code != http.StatusAccepted || resp.State != agentcontrol.ExecStateRunning {
+		t.Fatalf("v2 start = %d %+v, want 202 running", code, resp)
+	}
+
+	// Verify spawned spec received SCION_TRIGGER_CONTEXT and literal argv.
+	f.fx.mu.Lock()
+	proc := f.fx.procs["trig"]
+	f.fx.mu.Unlock()
+	if proc == nil {
+		t.Fatal("no proc spawned for tag trig")
+	}
+	gotSpec := proc.specs
+	if got := envValue(gotSpec.env, agentcontrol.ExecTriggerContextEnvName); got != ctxJSON {
+		t.Fatalf("SCION_TRIGGER_CONTEXT = %q, want %q", got, ctxJSON)
+	}
+	if len(gotSpec.argv) != 2 || gotSpec.argv[0] != "true" || gotSpec.argv[1] != "trig" {
+		t.Fatalf("argv mutated: %v", gotSpec.argv)
+	}
+
+	// Same run_id with different trigger_context must return 409 mismatch.
+	altered := req
+	altered.TriggerContext = `{"event_id":"evt-1","trigger_id":"trg-1","fire_id":"fire-1","attributes":{"env":"evil"}}`
+	if code, resp := f.start(t, altered); code != http.StatusConflict || resp.Outcome != agentcontrol.ExecOutcomeMismatch {
+		t.Fatalf("altered trigger_context replay = %d %+v, want 409 mismatch", code, resp)
+	}
+
+	// v1 request with trigger_context is refused 400 invalid without spawning.
+	badV1 := f.startReq(51, "bad-v1")
+	badV1.V = agentcontrol.ExecVersion
+	badV1.TriggerContext = ctxJSON
+	if code, resp := f.start(t, badV1); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldTriggerContext {
+		t.Fatalf("v1 with trigger_context = %d %+v, want 400 invalid trigger_context", code, resp)
+	}
+
+	// v2 request without trigger_context is refused 400 invalid without spawning.
+	badV2 := f.startReq(52, "bad-v2")
+	badV2.V = agentcontrol.ExecVersionTriggerContext
+	if code, resp := f.start(t, badV2); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldTriggerContext {
+		t.Fatalf("v2 without trigger_context = %d %+v, want 400 invalid trigger_context", code, resp)
 	}
 }

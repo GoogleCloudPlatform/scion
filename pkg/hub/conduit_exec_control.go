@@ -100,7 +100,11 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 	if !s.execSchedulesEnabled() || !s.conduitRoutable() {
 		return agentcontrol.ExecResult{}, ErrExecSchedulesDisabled
 	}
-	req.V = agentcontrol.ExecVersion
+	if req.TriggerContext != "" {
+		req.V = agentcontrol.ExecVersionTriggerContext
+	} else {
+		req.V = agentcontrol.ExecVersion
+	}
 	if req.NotAfterUnixMS <= 0 {
 		req.NotAfterUnixMS = time.Now().Add(agentcontrol.ExecNotAfter).UnixMilli()
 	}

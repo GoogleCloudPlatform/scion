@@ -13268,6 +13268,22 @@ func (c *ScheduledExecRunClient) QueryEvent(_m *ScheduledExecRun) *ScheduledEven
 	return query
 }
 
+// QueryTriggerFire queries the trigger_fire edge of a ScheduledExecRun.
+func (c *ScheduledExecRunClient) QueryTriggerFire(_m *ScheduledExecRun) *TriggerFireQuery {
+	query := (&TriggerFireClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(scheduledexecrun.Table, scheduledexecrun.FieldID, id),
+			sqlgraph.To(triggerfire.Table, triggerfire.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, scheduledexecrun.TriggerFireTable, scheduledexecrun.TriggerFireColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *ScheduledExecRunClient) Hooks() []Hook {
 	return c.hooks.ScheduledExecRun
@@ -15543,6 +15559,22 @@ func (c *TriggerFireClient) GetX(ctx context.Context, id uuid.UUID) *TriggerFire
 		panic(err)
 	}
 	return obj
+}
+
+// QueryExecRun queries the exec_run edge of a TriggerFire.
+func (c *TriggerFireClient) QueryExecRun(_m *TriggerFire) *ScheduledExecRunQuery {
+	query := (&ScheduledExecRunClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(triggerfire.Table, triggerfire.FieldID, id),
+			sqlgraph.To(scheduledexecrun.Table, scheduledexecrun.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, triggerfire.ExecRunTable, triggerfire.ExecRunColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
 }
 
 // Hooks returns the client hooks.

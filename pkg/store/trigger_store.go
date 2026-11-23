@@ -380,6 +380,7 @@ type TriggerStore interface {
 	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
+	CountTriggerFiresSince(ctx context.Context, triggerID string, since time.Time, excludeStatuses ...string) (int, error)
 	HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error)
 	HasLiveTriggerFireForSubjectExcluding(ctx context.Context, triggerID, subject, excludeFireID string, includeFiring bool, now time.Time) (bool, error)
 	HasPendingTriggerFiresForEvent(ctx context.Context, eventID string) (bool, error)

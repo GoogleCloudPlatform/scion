@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/google/uuid"
 )
 
@@ -31,6 +32,28 @@ func (_c *ScheduledExecRunCreate) SetEventID(v uuid.UUID) *ScheduledExecRunCreat
 	return _c
 }
 
+// SetNillableEventID sets the "event_id" field if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillableEventID(v *uuid.UUID) *ScheduledExecRunCreate {
+	if v != nil {
+		_c.SetEventID(*v)
+	}
+	return _c
+}
+
+// SetFireID sets the "fire_id" field.
+func (_c *ScheduledExecRunCreate) SetFireID(v uuid.UUID) *ScheduledExecRunCreate {
+	_c.mutation.SetFireID(v)
+	return _c
+}
+
+// SetNillableFireID sets the "fire_id" field if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillableFireID(v *uuid.UUID) *ScheduledExecRunCreate {
+	if v != nil {
+		_c.SetFireID(*v)
+	}
+	return _c
+}
+
 // SetScheduleID sets the "schedule_id" field.
 func (_c *ScheduledExecRunCreate) SetScheduleID(v uuid.UUID) *ScheduledExecRunCreate {
 	_c.mutation.SetScheduleID(v)
@@ -41,6 +64,20 @@ func (_c *ScheduledExecRunCreate) SetScheduleID(v uuid.UUID) *ScheduledExecRunCr
 func (_c *ScheduledExecRunCreate) SetNillableScheduleID(v *uuid.UUID) *ScheduledExecRunCreate {
 	if v != nil {
 		_c.SetScheduleID(*v)
+	}
+	return _c
+}
+
+// SetOverlapKey sets the "overlap_key" field.
+func (_c *ScheduledExecRunCreate) SetOverlapKey(v string) *ScheduledExecRunCreate {
+	_c.mutation.SetOverlapKey(v)
+	return _c
+}
+
+// SetNillableOverlapKey sets the "overlap_key" field if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillableOverlapKey(v *string) *ScheduledExecRunCreate {
+	if v != nil {
+		_c.SetOverlapKey(*v)
 	}
 	return _c
 }
@@ -364,6 +401,25 @@ func (_c *ScheduledExecRunCreate) SetEvent(v *ScheduledEvent) *ScheduledExecRunC
 	return _c.SetEventID(v.ID)
 }
 
+// SetTriggerFireID sets the "trigger_fire" edge to the TriggerFire entity by ID.
+func (_c *ScheduledExecRunCreate) SetTriggerFireID(id uuid.UUID) *ScheduledExecRunCreate {
+	_c.mutation.SetTriggerFireID(id)
+	return _c
+}
+
+// SetNillableTriggerFireID sets the "trigger_fire" edge to the TriggerFire entity by ID if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillableTriggerFireID(id *uuid.UUID) *ScheduledExecRunCreate {
+	if id != nil {
+		_c = _c.SetTriggerFireID(*id)
+	}
+	return _c
+}
+
+// SetTriggerFire sets the "trigger_fire" edge to the TriggerFire entity.
+func (_c *ScheduledExecRunCreate) SetTriggerFire(v *TriggerFire) *ScheduledExecRunCreate {
+	return _c.SetTriggerFireID(v.ID)
+}
+
 // Mutation returns the ScheduledExecRunMutation object of the builder.
 func (_c *ScheduledExecRunCreate) Mutation() *ScheduledExecRunMutation {
 	return _c.mutation
@@ -399,6 +455,10 @@ func (_c *ScheduledExecRunCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *ScheduledExecRunCreate) defaults() {
+	if _, ok := _c.mutation.OverlapKey(); !ok {
+		v := scheduledexecrun.DefaultOverlapKey
+		_c.mutation.SetOverlapKey(v)
+	}
 	if _, ok := _c.mutation.InitiatorPrincipalKind(); !ok {
 		v := scheduledexecrun.DefaultInitiatorPrincipalKind
 		_c.mutation.SetInitiatorPrincipalKind(v)
@@ -463,8 +523,13 @@ func (_c *ScheduledExecRunCreate) defaults() {
 
 // check runs all checks and user-defined validators on the builder.
 func (_c *ScheduledExecRunCreate) check() error {
-	if _, ok := _c.mutation.EventID(); !ok {
-		return &ValidationError{Name: "event_id", err: errors.New(`ent: missing required field "ScheduledExecRun.event_id"`)}
+	if _, ok := _c.mutation.OverlapKey(); !ok {
+		return &ValidationError{Name: "overlap_key", err: errors.New(`ent: missing required field "ScheduledExecRun.overlap_key"`)}
+	}
+	if v, ok := _c.mutation.OverlapKey(); ok {
+		if err := scheduledexecrun.OverlapKeyValidator(v); err != nil {
+			return &ValidationError{Name: "overlap_key", err: fmt.Errorf(`ent: validator failed for field "ScheduledExecRun.overlap_key": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.ProjectID(); !ok {
 		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "ScheduledExecRun.project_id"`)}
@@ -542,9 +607,6 @@ func (_c *ScheduledExecRunCreate) check() error {
 	if _, ok := _c.mutation.PollSeq(); !ok {
 		return &ValidationError{Name: "poll_seq", err: errors.New(`ent: missing required field "ScheduledExecRun.poll_seq"`)}
 	}
-	if len(_c.mutation.EventIDs()) == 0 {
-		return &ValidationError{Name: "event", err: errors.New(`ent: missing required edge "ScheduledExecRun.event"`)}
-	}
 	return nil
 }
 
@@ -584,6 +646,10 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 	if value, ok := _c.mutation.ScheduleID(); ok {
 		_spec.SetField(scheduledexecrun.FieldScheduleID, field.TypeUUID, value)
 		_node.ScheduleID = &value
+	}
+	if value, ok := _c.mutation.OverlapKey(); ok {
+		_spec.SetField(scheduledexecrun.FieldOverlapKey, field.TypeString, value)
+		_node.OverlapKey = value
 	}
 	if value, ok := _c.mutation.ProjectID(); ok {
 		_spec.SetField(scheduledexecrun.FieldProjectID, field.TypeUUID, value)
@@ -703,7 +769,24 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 		for _, k := range nodes {
 			edge.Target.Nodes = append(edge.Target.Nodes, k)
 		}
-		_node.EventID = nodes[0]
+		_node.EventID = &nodes[0]
+		_spec.Edges = append(_spec.Edges, edge)
+	}
+	if nodes := _c.mutation.TriggerFireIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: true,
+			Table:   scheduledexecrun.TriggerFireTable,
+			Columns: []string{scheduledexecrun.TriggerFireColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(triggerfire.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_node.FireID = &nodes[0]
 		_spec.Edges = append(_spec.Edges, edge)
 	}
 	return _node, _spec
@@ -922,8 +1005,14 @@ func (u *ScheduledExecRunUpsertOne) UpdateNewValues() *ScheduledExecRunUpsertOne
 		if _, exists := u.create.mutation.EventID(); exists {
 			s.SetIgnore(scheduledexecrun.FieldEventID)
 		}
+		if _, exists := u.create.mutation.FireID(); exists {
+			s.SetIgnore(scheduledexecrun.FieldFireID)
+		}
 		if _, exists := u.create.mutation.ScheduleID(); exists {
 			s.SetIgnore(scheduledexecrun.FieldScheduleID)
+		}
+		if _, exists := u.create.mutation.OverlapKey(); exists {
+			s.SetIgnore(scheduledexecrun.FieldOverlapKey)
 		}
 		if _, exists := u.create.mutation.ProjectID(); exists {
 			s.SetIgnore(scheduledexecrun.FieldProjectID)
@@ -1364,8 +1453,14 @@ func (u *ScheduledExecRunUpsertBulk) UpdateNewValues() *ScheduledExecRunUpsertBu
 			if _, exists := b.mutation.EventID(); exists {
 				s.SetIgnore(scheduledexecrun.FieldEventID)
 			}
+			if _, exists := b.mutation.FireID(); exists {
+				s.SetIgnore(scheduledexecrun.FieldFireID)
+			}
 			if _, exists := b.mutation.ScheduleID(); exists {
 				s.SetIgnore(scheduledexecrun.FieldScheduleID)
+			}
+			if _, exists := b.mutation.OverlapKey(); exists {
+				s.SetIgnore(scheduledexecrun.FieldOverlapKey)
 			}
 			if _, exists := b.mutation.ProjectID(); exists {
 				s.SetIgnore(scheduledexecrun.FieldProjectID)

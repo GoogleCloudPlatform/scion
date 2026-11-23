@@ -201,7 +201,17 @@ func sanitizeTriggerFireError(ctx context.Context, action FireAction, req hubfir
 		execReasonOverlap,
 		execReasonCapacity,
 		execReasonStartExpired,
-		execReasonMissedWindow:
+		execReasonMissedWindow,
+		execReasonDisabled,
+		execReasonUnavailable,
+		execReasonStartFailed,
+		execReasonAgentRestarted,
+		execReasonAgentStopped,
+		execReasonOutcomeUnknown,
+		execReasonSourceNotReplayProtected,
+		execReasonRateLimit,
+		execReasonSubjectBusy,
+		execReasonContextInvalid:
 		return raw
 	}
 	if req.ActionType == "dispatch_agent" && rawErr != nil {

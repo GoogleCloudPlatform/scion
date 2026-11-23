@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 )
 
 // Exec schedules (ptone/scion#7818, Phase 1 ptone/scion#7883, Phase 2
@@ -55,6 +58,16 @@ const (
 	// found due more than this after its scheduled due time is skipped
 	// (missed window), never run.
 	scheduledExecMaxWindow = 10 * time.Minute
+
+	// Trigger-exec context and per-trigger caps (Stage 2 P8, ptone/scion#8241).
+	// Trigger exec caps are separate from exec-schedule quotas; the container's
+	// 2-live-run bound in sciontool remains the shared hard floor.
+	triggerExecMaxContextAttributes     = 32
+	triggerExecMaxContextAttrKeyLen     = 64
+	triggerExecMaxContextAttrValueBytes = 4096
+	triggerExecMaxActivePerTarget       = 20
+	triggerExecMaxActivePerProject      = 100
+	triggerExecMaxFiresPerMinute        = 30
 )
 
 // scheduledExecLeaseGrace is added to a run's timeout to form its lease
@@ -66,14 +79,14 @@ var scheduledExecLeaseGrace = 120 * time.Second
 // /scheduled-events create or update request, for every event type.
 const scheduleRequestBodyLimit = 64 * 1024
 
-// scheduledExecPayload is the JSON payload of an exec event.
+// scheduledExecPayload is the JSON payload of an exec event or trigger.
 type scheduledExecPayload struct {
 	// AgentID is the target, resolved at authoring. It is authoritative:
 	// a fire never falls back to AgentName.
 	AgentID string `json:"agentId"`
 	// AgentName is the target's slug at authoring, for display only.
 	AgentName string `json:"agentName,omitempty"`
-	// Command is the argv, run directly with no shell.
+	// Command is the argv, run directly with no shell. Never templated.
 	Command []string `json:"command"`
 	// TimeoutSeconds is 0 (the default, 60) to agentcontrol.MaxExecTimeoutSec.
 	TimeoutSeconds int `json:"timeoutSeconds,omitempty"`
@@ -82,6 +95,10 @@ type scheduledExecPayload struct {
 	CaptureOutput string `json:"captureOutput,omitempty"`
 	// Wake is reserved for waking suspended targets (F1); it must be false.
 	Wake bool `json:"wake,omitempty"`
+	// ContextAttributes is the per-rule allow-list of event attribute keys
+	// copied into SCION_TRIGGER_CONTEXT for trigger-routed exec runs (P8).
+	// Refused for schedules at authoring.
+	ContextAttributes []string `json:"contextAttributes,omitempty"`
 }
 
 // errScheduledExecPayloadInvalid is the error of a payload outside the
@@ -145,7 +162,119 @@ func (p *scheduledExecPayload) validate() error {
 	if p.Wake {
 		return &scheduledExecPayloadError{field: "wake"}
 	}
+	if len(p.ContextAttributes) > 0 {
+		normalized, err := normalizeExecContextAttributes(p.ContextAttributes)
+		if err != nil {
+			return &scheduledExecPayloadError{field: "contextAttributes"}
+		}
+		p.ContextAttributes = normalized
+	}
 	return nil
+}
+
+// isValidExecContextAttrKey reports whether k is a safe event attribute key
+// for SCION_TRIGGER_CONTEXT allow-listing ([A-Za-z0-9_.-]{1,64}).
+func isValidExecContextAttrKey(k string) bool {
+	if k == "" || len(k) > triggerExecMaxContextAttrKeyLen {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		b := k[i]
+		ok := (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') ||
+			b == '_' || b == '.' || b == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeExecContextAttributes validates, deduplicates, and sorts
+// contextAttributes keys.
+func normalizeExecContextAttributes(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if len(raw) > triggerExecMaxContextAttributes {
+		return nil, fmt.Errorf("contextAttributes exceeds maximum of %d keys", triggerExecMaxContextAttributes)
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, k := range raw {
+		if !isValidExecContextAttrKey(k) {
+			return nil, fmt.Errorf("invalid contextAttributes key")
+		}
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// validateTriggerExecCommandNoTemplates rejects any "${" sequence in a trigger
+// exec command at authoring time so event data can never be templated into argv.
+func validateTriggerExecCommandNoTemplates(argv []string) (int, bool) {
+	for i, arg := range argv {
+		if strings.Contains(arg, "${") {
+			return i, false
+		}
+	}
+	return -1, true
+}
+
+// triggerExecContextPayload is the bounded JSON object delivered via the
+// SCION_TRIGGER_CONTEXT environment variable on trigger-routed exec runs.
+type triggerExecContextPayload struct {
+	EventID    string            `json:"event_id"`
+	TriggerID  string            `json:"trigger_id"`
+	FireID     string            `json:"fire_id"`
+	Subject    string            `json:"subject,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// buildTriggerExecContext constructs the bounded SCION_TRIGGER_CONTEXT JSON
+// string for req, copying only event attributes explicitly listed in allowAttrs.
+// Any invalid UTF-8, NUL byte, or bound violation returns an error (never truncates).
+func buildTriggerExecContext(req hubfire.FireRequest, allowAttrs []string) (string, error) {
+	if req.Event == nil {
+		return "", errors.New("missing trigger event for exec context")
+	}
+	payload := triggerExecContextPayload{
+		EventID:   req.Event.ID,
+		TriggerID: req.Authority.DefinitionID,
+		FireID:    req.Authority.FireID,
+		Subject:   req.Event.Subject,
+	}
+	if len(allowAttrs) > 0 && len(req.Event.Attributes) > 0 {
+		attrs := make(map[string]string, len(allowAttrs))
+		for _, k := range allowAttrs {
+			v, ok := req.Event.Attributes[k]
+			if !ok {
+				continue
+			}
+			if len(v) > triggerExecMaxContextAttrValueBytes || !utf8.ValidString(v) || strings.IndexByte(v, 0) >= 0 {
+				return "", errors.New("trigger context attribute violates bounds")
+			}
+			attrs[k] = v
+		}
+		if len(attrs) > 0 {
+			payload.Attributes = attrs
+		}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
+		return "", err
+	}
+	out := strings.TrimSuffix(buf.String(), "\n")
+	if err := agentcontrol.ValidateExecTriggerContext(out); err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 // timeout returns the run timeout in seconds.
@@ -213,22 +342,26 @@ func scheduledExecShellForm(argv []string) bool {
 // every project schedule reader sees. They never carry argv, output or a
 // detailed refusal reason; the audit log and slog carry the reason.
 const (
-	execReasonDisabled           = "exec schedules disabled"
-	execReasonMissedWindow       = "missed window"
-	execReasonRefused            = "exec refused"
-	execReasonTargetNotRunning   = "target not running"
-	execReasonOverlap            = "previous run in progress"
-	execReasonCapacity           = "capacity"
-	execReasonUnavailable        = "agent executor unavailable"
-	execReasonCaptureUnsupported = "capture_unsupported"
-	execReasonStartFailed        = "command failed to start"
-	execReasonDispatchFailed     = "exec dispatch failed"
-	execReasonStartExpired       = "start expired (check agent clock)"
-	execReasonAgentRestarted     = "agent restarted during run"
-	execReasonAgentStopped       = "agent stopped during run"
-	execReasonOutcomeUnknown     = "run outcome unknown"
-	execReasonShuttingDown       = "hub shutting down"
-	execReasonNotDispatched      = "hub restarted before dispatch"
+	execReasonDisabled                 = "exec schedules disabled"
+	execReasonMissedWindow             = "missed window"
+	execReasonRefused                  = "exec refused"
+	execReasonTargetNotRunning         = "target not running"
+	execReasonOverlap                  = "previous run in progress"
+	execReasonCapacity                 = "capacity"
+	execReasonUnavailable              = "agent executor unavailable"
+	execReasonCaptureUnsupported       = "capture_unsupported"
+	execReasonStartFailed              = "command failed to start"
+	execReasonDispatchFailed           = "exec dispatch failed"
+	execReasonStartExpired             = "start expired (check agent clock)"
+	execReasonAgentRestarted           = "agent restarted during run"
+	execReasonAgentStopped             = "agent stopped during run"
+	execReasonOutcomeUnknown           = "run outcome unknown"
+	execReasonShuttingDown             = "hub shutting down"
+	execReasonNotDispatched            = "hub restarted before dispatch"
+	execReasonSourceNotReplayProtected = "source not replay protected"
+	execReasonRateLimit                = "rate limit"
+	execReasonSubjectBusy              = "subject busy"
+	execReasonContextInvalid           = "trigger context invalid"
 )
 
 // execReasonExitStatus is the text of a non-zero exit (D6).

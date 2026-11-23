@@ -3401,6 +3401,7 @@ var (
 	ScheduledExecRunsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "schedule_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "overlap_key", Type: field.TypeString, Size: 128, Default: ""},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "target_agent_id", Type: field.TypeUUID},
 		{Name: "initiator_principal_kind", Type: field.TypeString, Default: ""},
@@ -3427,7 +3428,8 @@ var (
 		{Name: "launch_id", Type: field.TypeString, Default: ""},
 		{Name: "last_polled_at", Type: field.TypeTime},
 		{Name: "poll_seq", Type: field.TypeInt64, Default: 0},
-		{Name: "event_id", Type: field.TypeUUID, Unique: true},
+		{Name: "event_id", Type: field.TypeUUID, Unique: true, Nullable: true},
+		{Name: "fire_id", Type: field.TypeUUID, Unique: true, Nullable: true},
 	}
 	// ScheduledExecRunsTable holds the schema information for the "scheduled_exec_runs" table.
 	ScheduledExecRunsTable = &schema.Table{
@@ -3437,8 +3439,14 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "scheduled_exec_runs_scheduled_events_exec_run",
-				Columns:    []*schema.Column{ScheduledExecRunsColumns[28]},
+				Columns:    []*schema.Column{ScheduledExecRunsColumns[29]},
 				RefColumns: []*schema.Column{ScheduledEventsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+			{
+				Symbol:     "scheduled_exec_runs_trigger_fires_exec_run",
+				Columns:    []*schema.Column{ScheduledExecRunsColumns[30]},
+				RefColumns: []*schema.Column{TriggerFiresColumns[0]},
 				OnDelete:   schema.Cascade,
 			},
 		},
@@ -3446,32 +3454,37 @@ var (
 			{
 				Name:    "scheduledexecrun_schedule_id_finished_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[1], ScheduledExecRunsColumns[17]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[1], ScheduledExecRunsColumns[18]},
+			},
+			{
+				Name:    "scheduledexecrun_overlap_key_finished_at",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecRunsColumns[2], ScheduledExecRunsColumns[18]},
 			},
 			{
 				Name:    "scheduledexecrun_target_agent_id_finished_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[17]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[4], ScheduledExecRunsColumns[18]},
 			},
 			{
 				Name:    "scheduledexecrun_target_agent_id_finished_at_poll_seq",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[27]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[4], ScheduledExecRunsColumns[18], ScheduledExecRunsColumns[28]},
 			},
 			{
 				Name:    "scheduledexecrun_project_id",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[2]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[3]},
 			},
 			{
 				Name:    "scheduledexecrun_finished_at_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[16]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[18], ScheduledExecRunsColumns[17]},
 			},
 			{
 				Name:    "scheduledexecrun_finished_at_last_polled_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[26]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[18], ScheduledExecRunsColumns[27]},
 			},
 		},
 	}
@@ -4892,8 +4905,12 @@ func init() {
 		Table: "scheduled_exec_poll_cursors",
 	}
 	ScheduledExecRunsTable.ForeignKeys[0].RefTable = ScheduledEventsTable
+	ScheduledExecRunsTable.ForeignKeys[1].RefTable = TriggerFiresTable
 	ScheduledExecRunsTable.Annotation = &entsql.Annotation{
 		Table: "scheduled_exec_runs",
+	}
+	ScheduledExecRunsTable.Annotation.Checks = map[string]string{
+		"scheduled_exec_runs_single_owner": "((event_id IS NOT NULL AND fire_id IS NULL) OR (event_id IS NULL AND fire_id IS NOT NULL))",
 	}
 	SecretsTable.Annotation = &entsql.Annotation{
 		Table: "secrets",

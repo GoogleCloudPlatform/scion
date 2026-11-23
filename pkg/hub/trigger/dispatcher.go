@@ -990,11 +990,13 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				continue
 			}
 		} else {
-			// Stage 1 PR 4 fire-level skip applies to non-dispatch_agent triggers
-			// (message); dispatch_agent triggers with subject mode "skip" use
-			// persistent subject claims (§5.6) inside dispatchAgentAction.Fire so
-			// the claim outlives the firing row for the lifetime of the agent.
-			if tr.SubjectMode == store.TriggerSubjectModeSkip && tr.ActionType != store.TriggerActionDispatchAgent {
+			// Stage 1 PR 4 fire-level skip applies to message/github.comment triggers;
+			// dispatch_agent and exec triggers with subject mode "skip" use
+			// persistent subject claims (§5.6, P8) inside their action Fire so the
+			// claim outlives the firing row for the lifetime of the agent or exec run.
+			if tr.SubjectMode == store.TriggerSubjectModeSkip &&
+				tr.ActionType != store.TriggerActionDispatchAgent &&
+				tr.ActionType != store.TriggerActionExec {
 				claimed, skippedBusy, existing, cErr = d.store.ClaimTriggerFireSubjectSkip(ctx, &fire, ErrFireSubjectBusy, claimNow)
 			} else {
 				claimed, existing, cErr = d.store.ClaimTriggerFire(ctx, &fire)
@@ -1208,6 +1210,33 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		finishedAt := d.now().UTC()
 
 		writeCtx, cancelWrite := storeWriteContext(ctx)
+		if out.Detached {
+			// Detached actions (such as admitted exec runs) own their
+			// trigger_fires outcome CAS and trigger counters in the same
+			// transaction as the run record (em-2 invariant (b)); never
+			// overwrite trigger_fires here, only start the tracker handoff.
+			d.recordFireMetric(tr.ActionType, statusStr, out.Error)
+			if statusStr == store.TriggerFireStatusFired {
+				fireCount++
+			}
+			if out.AfterRecord != nil {
+				out.AfterRecord(writeCtx)
+			}
+			if d.fireAudit != nil {
+				d.fireAudit.RecordFire(writeCtx, FireAuditRecord{
+					ProjectID:      tr.ProjectID,
+					TriggerID:      tr.ID,
+					EventID:        ev.ID,
+					FireID:         fire.ID,
+					ActionType:     tr.ActionType,
+					Status:         statusStr,
+					MatchedThrough: fire.MatchedThrough,
+					DecidedDialect: fire.DecidedDialect,
+				})
+			}
+			cancelWrite()
+			continue
+		}
 		var (
 			finished  bool
 			finishErr error

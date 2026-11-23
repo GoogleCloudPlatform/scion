@@ -560,8 +560,13 @@ func TestTriggersAuthoring_Stage1b1ValidationRefusals(t *testing.T) {
 		},
 		{
 			name:    "unsupported action.type refused",
-			mutate:  func(r *CreateTriggerRequest) { r.Action.Type = "exec" },
+			mutate:  func(r *CreateTriggerRequest) { r.Action.Type = "unknown_action" },
 			wantMsg: "unsupported action type",
+		},
+		{
+			name:    "exec action refused when exec experiments disabled",
+			mutate:  func(r *CreateTriggerRequest) { r.Action.Type = "exec" },
+			wantMsg: "exec triggers require hub.exec_schedules and hub.conduit",
 		},
 	}
 

@@ -29,10 +29,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggersubjectclaim"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -1181,6 +1183,9 @@ func (s *TriggerStore) DeleteTriggersByProject(ctx context.Context, projectID st
 			}
 		}
 		if _, dErr := client.WebhookEndpoint.Delete().Where(webhookendpoint.ProjectIDEQ(pid)).Exec(ctx); dErr != nil {
+			return mapError(dErr)
+		}
+		if _, dErr := client.ScheduledExecRun.Delete().Where(scheduledexecrun.ProjectIDEQ(pid), scheduledexecrun.FireIDNotNil()).Exec(ctx); dErr != nil {
 			return mapError(dErr)
 		}
 		if _, dErr := client.TriggerFire.Delete().Where(triggerfire.ProjectIDEQ(pid)).Exec(ctx); dErr != nil {
@@ -2499,6 +2504,25 @@ func hasLiveTriggerFireForSubjectClient(ctx context.Context, client *ent.Client,
 	return q.Exist(ctx)
 }
 
+func (s *TriggerStore) CountTriggerFiresSince(ctx context.Context, triggerID string, since time.Time, excludeStatuses ...string) (int, error) {
+	tid, err := parseUUID(triggerID)
+	if err != nil {
+		return 0, err
+	}
+	preds := []predicate.TriggerFire{
+		triggerfire.TriggerIDEQ(tid),
+		triggerfire.CreatedGTE(since.UTC()),
+	}
+	if len(excludeStatuses) > 0 {
+		preds = append(preds, triggerfire.StatusNotIn(excludeStatuses...))
+	}
+	n, err := s.client.TriggerFire.Query().Where(preds...).Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 func (s *TriggerStore) HasLiveTriggerFireForSubject(ctx context.Context, triggerID, subject string, now time.Time) (bool, error) {
 	tid, err := parseUUID(triggerID)
 	if err != nil {
@@ -2582,6 +2606,7 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 		Where(
 			triggerfire.StatusIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred),
 			triggerfire.LeaseUntilLTE(now),
+			triggerfire.Not(triggerfire.HasExecRun()),
 		).
 		Order(triggerfire.ByLeaseUntil())
 	if limit > 0 {
@@ -2601,7 +2626,11 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 			errMsg = errReapedDuringDefer
 		}
 		affected, uErr := s.client.TriggerFire.Update().
-			Where(triggerfire.IDEQ(f.ID), triggerfire.StatusEQ(f.Status)).
+			Where(
+				triggerfire.IDEQ(f.ID),
+				triggerfire.StatusEQ(f.Status),
+				triggerfire.Not(triggerfire.HasExecRun()),
+			).
 			SetStatus(store.TriggerFireStatusFailed).
 			SetError(errMsg).
 			SetFinishedAt(now).
@@ -2611,6 +2640,14 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 		}
 		if affected > 0 {
 			reaped++
+			_, _ = s.client.TriggerSubjectClaim.Update().
+				Where(
+					triggersubjectclaim.FireIDEQ(f.ID),
+					triggersubjectclaim.StateEQ(store.TriggerSubjectClaimStateActive),
+				).
+				SetState(store.TriggerSubjectClaimStateReleased).
+				SetReleasedAt(now.Truncate(time.Microsecond)).
+				Save(ctx)
 			_ = s.RecordTriggerFire(ctx, f.TriggerID.String(), now, store.TriggerFireStatusFailed, errMsg)
 		}
 	}
@@ -2619,23 +2656,44 @@ func (s *TriggerStore) ReapExpiredTriggerFires(ctx context.Context, now time.Tim
 
 func (s *TriggerStore) PurgeOldTriggerHistory(ctx context.Context, olderThan time.Time) (int, int, error) {
 	cutoff := olderThan.UTC()
-	firesDeleted, err := s.client.TriggerFire.Delete().
-		Where(
+	var firesDeleted, eventsDeleted int
+	err := s.withClientTx(ctx, func(c *ent.Client) error {
+		purgeable := []predicate.TriggerFire{
 			triggerfire.StatusNotIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred),
 			triggerfire.CreatedLT(cutoff),
-		).
-		Exec(ctx)
+		}
+		ids, err := c.TriggerFire.Query().Where(purgeable...).IDs(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		for start := 0; start < len(ids); start += scheduledExecRunsByEventChunk {
+			end := min(start+scheduledExecRunsByEventChunk, len(ids))
+			chunk := ids[start:end]
+			if _, err := c.ScheduledExecRun.Delete().Where(scheduledexecrun.FireIDIn(chunk...)).Exec(ctx); err != nil {
+				return mapError(err)
+			}
+			n, err := c.TriggerFire.Delete().
+				Where(append([]predicate.TriggerFire{triggerfire.IDIn(chunk...)}, purgeable...)...).
+				Exec(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			firesDeleted += n
+		}
+		evDel, err := c.TriggerEvent.Delete().
+			Where(
+				triggerevent.StatusNEQ(store.TriggerEventStatusPending),
+				triggerevent.CreatedLT(cutoff),
+			).
+			Exec(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		eventsDeleted = evDel
+		return nil
+	})
 	if err != nil {
-		return 0, 0, mapError(err)
-	}
-	eventsDeleted, err := s.client.TriggerEvent.Delete().
-		Where(
-			triggerevent.StatusNEQ(store.TriggerEventStatusPending),
-			triggerevent.CreatedLT(cutoff),
-		).
-		Exec(ctx)
-	if err != nil {
-		return 0, firesDeleted, mapError(err)
+		return eventsDeleted, firesDeleted, err
 	}
 	return eventsDeleted, firesDeleted, nil
 }
