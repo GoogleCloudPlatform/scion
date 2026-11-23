@@ -5754,6 +5754,11 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	if p, ok := ep.(publishMetricsSetter); ok && rec != nil {
 		p.SetPublishMetrics(rec)
 	}
+	if p, ok := ep.(inboxHintEnabledSetter); ok {
+		p.SetInboxHintEnabled(func() bool {
+			return s.experimentEnabled(experiments.InboxDashboard)
+		})
+	}
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()

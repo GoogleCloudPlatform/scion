@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -471,6 +472,31 @@ type eventBuilder struct {
 	// published counts scion.hub.events.published; the embedding
 	// publisher calls it once per event it publishes.
 	published eventstreams.PublishCounter
+	// inboxHintEnabled, when set, gates user.<ownerID>.inbox waiting hints
+	// emitted by PublishAgentStatus (design §5.2). Stored atomically so
+	// SetInboxHintEnabled is race-free with concurrent publishes.
+	inboxHintEnabled atomic.Pointer[func() bool]
+}
+
+// inboxHintEnabledSetter is implemented by event publishers backed by
+// eventBuilder so Server.SetEventPublisher can wire the inbox experiment gate.
+type inboxHintEnabledSetter interface {
+	SetInboxHintEnabled(fn func() bool)
+}
+
+// SetInboxHintEnabled sets the gate checked by PublishAgentStatus before
+// emitting a user.<ownerID>.inbox waiting hint. Passing nil disables hints.
+func (p *eventBuilder) SetInboxHintEnabled(fn func() bool) {
+	if fn == nil {
+		p.inboxHintEnabled.Store(nil)
+		return
+	}
+	p.inboxHintEnabled.Store(&fn)
+}
+
+func (p *eventBuilder) shouldEmitInboxHint() bool {
+	fn := p.inboxHintEnabled.Load()
+	return fn != nil && (*fn)()
 }
 
 // SetPublishMetrics wires the scion.hub.events.published counter
@@ -710,6 +736,13 @@ func (p *eventBuilder) PublishAgentStatus(ctx context.Context, agent *store.Agen
 	sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
 		sink("project."+agent.ProjectID+".agent.status", evt)
+	}
+	if agent.OwnerID != "" && p.shouldEmitInboxHint() {
+		p.PublishUserInboxHint(ctx, agent.OwnerID, InboxHint{
+			Category: InboxCategoryWaiting,
+			AgentID:  agent.ID,
+			Activity: agent.Activity,
+		})
 	}
 }
 

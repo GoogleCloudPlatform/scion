@@ -1391,3 +1391,80 @@ func TestPublishChatReadStateEvent_IgnoresTopics(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+func TestChannelEventPublisher_PublishAgentStatus_InboxHintGate(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ownerCh, unsubOwner := pub.Subscribe("user.owner-1.inbox")
+	defer unsubOwner()
+	otherCh, unsubOther := pub.Subscribe("user.owner-2.inbox")
+	defer unsubOther()
+
+	assertNoEvent := func(ch <-chan Event, label string) {
+		t.Helper()
+		select {
+		case evt := <-ch:
+			t.Fatalf("%s: unexpected event on %s: %s", label, evt.Subject, string(evt.Data))
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	expectHint := func(wantAgentID, wantActivity string) {
+		t.Helper()
+		select {
+		case evt := <-ownerCh:
+			if evt.Subject != "user.owner-1.inbox" {
+				t.Fatalf("subject = %q, want user.owner-1.inbox", evt.Subject)
+			}
+			var hint InboxHint
+			if err := json.Unmarshal(evt.Data, &hint); err != nil {
+				t.Fatalf("unmarshal hint: %v", err)
+			}
+			if hint.Category != InboxCategoryWaiting || hint.AgentID != wantAgentID || hint.Activity != wantActivity {
+				t.Fatalf("hint = %+v, want {Category:%q AgentID:%q Activity:%q}", hint, InboxCategoryWaiting, wantAgentID, wantActivity)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for inbox hint (%s, %s)", wantAgentID, wantActivity)
+		}
+	}
+
+	ctx := context.Background()
+	agent := &store.Agent{
+		ID:        "agent-1",
+		ProjectID: "proj-1",
+		OwnerID:   "owner-1",
+		Phase:     "running",
+		Activity:  "waiting_for_input",
+	}
+
+	// Gate unset (nil): no inbox hint.
+	pub.PublishAgentStatus(ctx, agent)
+	assertNoEvent(ownerCh, "nil gate")
+
+	// Gate returns false: no inbox hint.
+	enabled := false
+	pub.SetInboxHintEnabled(func() bool { return enabled })
+	pub.PublishAgentStatus(ctx, agent)
+	assertNoEvent(ownerCh, "gate false")
+
+	// Gate returns true: emits to owner only, for entering and leaving waiting_for_input.
+	enabled = true
+	pub.PublishAgentStatus(ctx, agent)
+	expectHint("agent-1", "waiting_for_input")
+	assertNoEvent(otherCh, "non-owner on enter")
+
+	agent.Activity = "thinking"
+	pub.PublishAgentStatus(ctx, agent)
+	expectHint("agent-1", "thinking")
+	assertNoEvent(otherCh, "non-owner on leave")
+
+	// Agent with empty OwnerID emits no inbox hint.
+	pub.PublishAgentStatus(ctx, &store.Agent{ID: "agent-unowned", ProjectID: "proj-1", Phase: "running", Activity: "waiting_for_input"})
+	assertNoEvent(ownerCh, "empty owner")
+	assertNoEvent(otherCh, "empty owner other")
+
+	// PublishAgentDeleted emits no inbox hint.
+	pub.PublishAgentDeleted(ctx, "agent-1", "proj-1")
+	assertNoEvent(ownerCh, "agent deleted")
+}
