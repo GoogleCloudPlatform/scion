@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -750,6 +751,7 @@ func TestHandleExistingAgent_ShellTaskRefused(t *testing.T) {
 	ident, cred := interactiveUser(u)
 	reqCtx := contextWithCredentialContext(contextWithIdentity(ctx, ident), cred)
 	rec := httptest.NewRecorder()
+	var carriedSecrets []*secret.SecretWithValue
 	res := srv.handleExistingAgent(
 		reqCtx,
 		rec,
@@ -758,7 +760,9 @@ func TestHandleExistingAgent_ShellTaskRefused(t *testing.T) {
 		"",
 		CreateAgentRequest{Name: shellAgent.Name, Task: "echo nope"},
 		"", "", u.ID,
+		&carriedSecrets,
 	)
+	assert.Empty(t, carriedSecrets)
 	assert.Equal(t, existingAgentErrored, res)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), ErrCodeTaskNotSupported)
