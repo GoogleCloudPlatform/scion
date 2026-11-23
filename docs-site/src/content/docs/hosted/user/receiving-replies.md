@@ -43,7 +43,7 @@ export SCION_HUB_TOKEN="scion_pat_..."
 
 Against a hosted Hub, use a user access token (`SCION_HUB_TOKEN`) or an interactive OAuth session (`scion hub auth login`). Delegated agent tokens and federation tokens are refused.
 
-Against a local workstation server (`scion server start`), an interactive/user JWT (`SCION_HUB_TOKEN`) works for both direct messages and group conversations. `SCION_DEV_TOKEN` works for group conversations (and for direct messages when dev-identity DM reads are enabled on the Hub).
+Against a local workstation server (`scion server start`), both `SCION_DEV_TOKEN` (from `~/.scion/dev-token`) and a user JWT (`SCION_HUB_TOKEN`) work for watching both direct messages and group conversations.
 
 ## 2. The one-shot send → watch → cursor loop
 

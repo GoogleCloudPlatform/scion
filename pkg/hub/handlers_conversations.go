@@ -1664,15 +1664,17 @@ func (s *Server) listAllGroupConversations(ctx context.Context, projectID string
 // For direct conversations, authorization is derived from the canonical DM key
 // (principal kind AND ID), not from the participants table. This is strictly
 // tighter than a participant-table scan: a third principal cannot read a DM by
-// adding a participant row or knowing its UUID. A matching ID with the wrong
-// principal kind is denied.
+// adding a participant row or knowing its UUID. Principal kind is normalized
+// with normalizeFeedPrincipalKind ("dev" and "federated_user" -> "user",
+// matching authenticatedSender on DM creation), while preserving user/agent
+// separation so a matching ID with the wrong principal kind is still denied.
 //
 // For group conversations, authorization uses participant rows (existing
 // behavior). Group conversations have project-level authorization enforced
 // elsewhere; participant presence authorizes listing/reading.
 func authorizeDMRead(conv *store.Conversation, principalKind, principalID string) bool {
 	if conv.Kind == "direct" {
-		return isCanonicalDMParticipant(conv.ExternalRef, principalKind, principalID)
+		return isCanonicalDMParticipant(conv.ExternalRef, normalizeFeedPrincipalKind(principalKind), principalID)
 	}
 	// For non-direct conversations, caller must check participant rows separately.
 	// Return true here to fall through to the existing participant check.

@@ -697,7 +697,7 @@ func TestConversationWatch_MembershipRevocationEarlyReturn(t *testing.T) {
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, member.ID)
 	require.NoError(t, err)
 	for _, b := range bindings {
-		if b.ScopeType == store.RoleBindingScopeProject && b.ScopeID == projID {
+		if b.ScopeType == "project" && b.ScopeID == projID {
 			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
 		}
 	}
@@ -775,4 +775,180 @@ func TestConversationWatch_ShutdownDrainEarlyReturn(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("watch poll did not return early on BeginShutdown")
 	}
+}
+
+// Phase 3 item 1 (Q-B): Pins current group filter=addressed behavior — explicit
+// recipient and message_addressees rows match, whereas a human body @-mention
+// in a group thread does not create a message_addressees row and therefore does
+// not match filter=addressed (it still matches filter=others).
+func TestConversationWatch_GroupFilterAddressed_QB(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	user := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	agent := &store.Agent{ID: uuid.NewString(), Slug: "a1", Name: "Agent 1", ProjectID: projID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	group := watchTestGroupConv(t, s, projID)
+
+	// 1. Body @-mention only (no explicit recipient, no message_addressees row).
+	bodyMentionOnly := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: group.ID,
+		Sender:         "agent:" + agent.Slug,
+		SenderID:       agent.ID,
+		Recipient:      "group:g",
+		RecipientID:    group.ID,
+		Msg:            "Hey @" + user.Email + ", check this out",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, bodyMentionOnly))
+
+	// 2. Explicit user recipient.
+	explicitRecip := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: group.ID,
+		Sender:         "agent:" + agent.Slug,
+		SenderID:       agent.ID,
+		Recipient:      "user:" + user.Email,
+		RecipientID:    user.ID,
+		Msg:            "Direct reply in group",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, explicitRecip))
+
+	// 3. Explicit message_addressees row for (user, user.ID).
+	addresseeRowMsg := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: group.ID,
+		Sender:         "agent:" + agent.Slug,
+		SenderID:       agent.ID,
+		Recipient:      "group:g",
+		RecipientID:    group.ID,
+		Msg:            "Addressed via message_addressees",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, addresseeRowMsg))
+	require.NoError(t, s.AddAddressee(ctx, &store.MessageAddressee{
+		ID:            uuid.NewString(),
+		MessageID:     addresseeRowMsg.ID,
+		PrincipalKind: "user",
+		PrincipalID:   user.ID,
+		Via:           "explicit",
+		DeliveryState: "delivered",
+	}))
+
+	// filter=addressed matches explicit recipient + message_addressees, NOT body @-mention.
+	recAddr := doRequestAsUser(t, srv, user, http.MethodGet,
+		"/api/v1/conversations/"+group.ID+"/watch?start=beginning&filter=addressed&wait=0", nil)
+	require.Equal(t, http.StatusOK, recAddr.Code, recAddr.Body.String())
+	var addrBody conversationWatchResponse
+	require.NoError(t, json.Unmarshal(recAddr.Body.Bytes(), &addrBody))
+	require.Len(t, addrBody.Events, 2)
+	assert.Equal(t, []string{"msg:" + explicitRecip.ID, "msg:" + addresseeRowMsg.ID}, []string{
+		addrBody.Events[0].EventID, addrBody.Events[1].EventID,
+	})
+
+	// filter=others (recommended for group threads) delivers all three, including the body @-mention.
+	recOthers := doRequestAsUser(t, srv, user, http.MethodGet,
+		"/api/v1/conversations/"+group.ID+"/watch?start=beginning&filter=others&wait=0", nil)
+	require.Equal(t, http.StatusOK, recOthers.Code, recOthers.Body.String())
+	var othersBody conversationWatchResponse
+	require.NoError(t, json.Unmarshal(recOthers.Body.Bytes(), &othersBody))
+	require.Len(t, othersBody.Events, 3)
+	assert.Equal(t, "msg:"+bodyMentionOnly.ID, othersBody.Events[0].EventID)
+}
+
+// Phase 3 item 7: DevUser (SCION_DEV_TOKEN, Type()=="dev") has /messages and
+// /watch parity on a DM it participates in (user:<DevUserID>), is still denied
+// on DMs it is not part of, and an agent with a colliding UUID == DevUserID is
+// still denied (user/agent separation intact).
+func TestConversationWatch_DevUserDMAuthzParity(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	otherUser := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	agentA := &store.Agent{ID: uuid.NewString(), Slug: "agent-a", Name: "Agent A", ProjectID: projID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, agentA))
+
+	// DM created by dev-auth user: authenticatedSender stores "user:<DevUserID>".
+	dmDev := watchTestDirectConv(t, s, "user", DevUserID, "agent", agentA.ID)
+	// DM belonging to another user (DevUser is NOT a participant).
+	dmOther := watchTestDirectConv(t, s, "user", otherUser.ID, "agent", agentA.ID)
+
+	// Seed one own message and one agent reply in dmDev.
+	require.NoError(t, s.CreateMessage(ctx, &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: dmDev.ID,
+		Sender:         "user:dev@localhost",
+		SenderID:       DevUserID,
+		Recipient:      "agent:" + agentA.Slug,
+		RecipientID:    agentA.ID,
+		Msg:            "dev prompt",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}))
+	reply := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: dmDev.ID,
+		Sender:         "agent:" + agentA.Slug,
+		SenderID:       agentA.ID,
+		Recipient:      "user:dev@localhost",
+		RecipientID:    DevUserID,
+		Msg:            "agent reply to dev",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, reply))
+
+	callAsDev := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		devIdent := NewDevUser(DevUserConfig{})
+		reqCtx := contextWithIdentity(req.Context(), devIdent)
+		reqCtx = contextWithCredentialContext(reqCtx, CredentialContext{Kind: CredentialKindDev, Type: "dev"})
+		req = req.WithContext(reqCtx)
+		rec := httptest.NewRecorder()
+		srv.handleConversationRoutes(rec, req)
+		return rec
+	}
+
+	// 1. DevUser on its own DM: /messages and /watch both 200 OK; watch delivers reply and filters own send.
+	msgOwn := callAsDev("/api/v1/conversations/" + dmDev.ID + "/messages")
+	watchOwn := callAsDev("/api/v1/conversations/" + dmDev.ID + "/watch?start=beginning&wait=0")
+	assert.Equal(t, http.StatusOK, msgOwn.Code, msgOwn.Body.String())
+	require.Equal(t, http.StatusOK, watchOwn.Code, watchOwn.Body.String())
+	var body conversationWatchResponse
+	require.NoError(t, json.Unmarshal(watchOwn.Body.Bytes(), &body))
+	require.Len(t, body.Events, 1)
+	assert.Equal(t, "msg:"+reply.ID, body.Events[0].EventID)
+
+	// 2. DevUser on someone else's DM: both /messages and /watch return 403 Forbidden.
+	msgOther := callAsDev("/api/v1/conversations/" + dmOther.ID + "/messages")
+	watchOther := callAsDev("/api/v1/conversations/" + dmOther.ID + "/watch?wait=0")
+	assert.Equal(t, http.StatusForbidden, msgOther.Code, msgOther.Body.String())
+	assert.Equal(t, http.StatusForbidden, watchOther.Code, watchOther.Body.String())
+
+	// 3. Agent with colliding UUID == DevUserID on user:<DevUserID> DM: still 403 Forbidden.
+	callAsCollidingAgent := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req = req.WithContext(agentContextWithScopes(DevUserID, projID, []AgentTokenScope{ScopeProjectRead}))
+		rec := httptest.NewRecorder()
+		srv.handleConversationRoutes(rec, req)
+		return rec
+	}
+	msgAgent := callAsCollidingAgent("/api/v1/conversations/" + dmDev.ID + "/messages")
+	watchAgent := callAsCollidingAgent("/api/v1/conversations/" + dmDev.ID + "/watch?wait=0")
+	assert.Equal(t, http.StatusForbidden, msgAgent.Code, msgAgent.Body.String())
+	assert.Equal(t, http.StatusForbidden, watchAgent.Code, watchAgent.Body.String())
 }
