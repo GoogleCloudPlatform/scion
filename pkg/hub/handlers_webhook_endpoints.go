@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 const (
@@ -33,14 +36,15 @@ const (
 )
 
 var (
-	errWebhookEndpointLimitExceeded = errors.New("webhook endpoint limit exceeded")
-	errWebhookEndpointNameExists    = errors.New("webhook endpoint name already exists")
-	errDefaultTriggerNameExists     = errors.New("default trigger name already exists")
+	errWebhookEndpointLimitExceeded      = errors.New("webhook endpoint limit exceeded")
+	errWebhookEndpointBoundLimitExceeded = errors.New("agent bound webhook endpoint limit exceeded")
+	errWebhookEndpointNameExists         = errors.New("webhook endpoint name already exists")
+	errDefaultTriggerNameExists          = errors.New("default trigger name already exists")
 )
 
 // WebhookEndpointDefaultTriggerSpec configures an optional default message
 // trigger created atomically in the same transaction as the webhook endpoint
-// (Stage 1 §10.3, §15 PR 5, rev 8.19).
+// (Stage 1 §10.3, §15 PR 5, rev 8.19; Stage 2 §4.3).
 type WebhookEndpointDefaultTriggerSpec struct {
 	AgentID   string `json:"agentId,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
@@ -55,11 +59,23 @@ type CreateWebhookEndpointRequest struct {
 	Name           string                             `json:"name"`
 	Description    string                             `json:"description,omitempty"`
 	SignatureMode  string                             `json:"signatureMode,omitempty"`
+	BoundAgentID   string                             `json:"boundAgentId,omitempty"`
+	BoundLifetime  string                             `json:"boundLifetime,omitempty"`
 	DefaultTrigger *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
+	// Trigger is the Stage 2 §4.3 alias for DefaultTrigger.
+	Trigger *WebhookEndpointDefaultTriggerSpec `json:"trigger,omitempty"`
+}
+
+// UpdateWebhookEndpointRequest is the request body for PATCH /webhook-endpoints/{id}.
+type UpdateWebhookEndpointRequest struct {
+	Description   *string `json:"description,omitempty"`
+	Status        *string `json:"status,omitempty"`
+	BoundAgentID  *string `json:"boundAgentId,omitempty"`
+	BoundLifetime *string `json:"boundLifetime,omitempty"`
 }
 
 // handleWebhookEndpoints routes requests under
-// /api/v1/projects/{projectId}/webhook-endpoints[/{id}].
+// /api/v1/projects/{projectId}/webhook-endpoints[/{id}[/rotate-secret]].
 func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, projectID, endpointPath string) {
 	s.requireExperiment(experiments.Triggers, func(w http.ResponseWriter, r *http.Request) {
 		identity := GetIdentityFromContext(r.Context())
@@ -77,8 +93,12 @@ func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 
-		var authzAction Action
-		authoring := false
+		var (
+			authzAction Action
+			authoring   bool
+			endpointID  string
+			subAction   string
+		)
 		if endpointPath == "" {
 			switch r.Method {
 			case http.MethodGet:
@@ -91,18 +111,31 @@ func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, 
 				return
 			}
 		} else {
-			if strings.Contains(endpointPath, "/") {
-				NotFound(w, "Webhook endpoint action")
-				return
-			}
-			switch r.Method {
-			case http.MethodGet:
-				authzAction = ActionRead
-			case http.MethodDelete:
-				authzAction = ActionDelete
-			default:
-				MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
-				return
+			if idPart, actionPart, hasSlash := strings.Cut(endpointPath, "/"); hasSlash {
+				if actionPart != "rotate-secret" || idPart == "" || strings.Contains(actionPart, "/") {
+					NotFound(w, "Webhook endpoint action")
+					return
+				}
+				if r.Method != http.MethodPost {
+					MethodNotAllowed(w, http.MethodPost)
+					return
+				}
+				endpointID = idPart
+				subAction = actionPart
+				authzAction = ActionUpdate
+			} else {
+				endpointID = endpointPath
+				switch r.Method {
+				case http.MethodGet:
+					authzAction = ActionRead
+				case http.MethodPatch:
+					authzAction = ActionUpdate
+				case http.MethodDelete:
+					authzAction = ActionDelete
+				default:
+					MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
+					return
+				}
 			}
 		}
 
@@ -122,17 +155,131 @@ func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, 
 			}
 			return
 		}
+		if subAction == "rotate-secret" {
+			s.rotateWebhookEndpointSecret(w, r, projectID, endpointID)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
-			s.getWebhookEndpoint(w, r, projectID, endpointPath)
+			s.getWebhookEndpoint(w, r, projectID, endpointID)
+		case http.MethodPatch:
+			s.updateWebhookEndpoint(w, r, projectID, endpointID)
 		case http.MethodDelete:
-			s.deleteWebhookEndpoint(w, r, projectID, endpointPath)
+			s.deleteWebhookEndpoint(w, r, projectID, endpointID)
 		}
 	})(w, r)
 }
 
 func validateWebhookEndpointName(raw string) (string, error) {
 	return validateTriggerResourceName(raw, maxWebhookEndpointNameLen)
+}
+
+// resolveWebhookEndpointBinding validates and resolves (boundAgentRef,
+// boundLifetime) for POST and PATCH webhook endpoint handlers (Stage 2 §4.1, §4.3).
+//
+// Invariants enforced:
+//   - boundLifetime must be "agent" or "persistent" when boundAgentRef is set,
+//     and empty when boundAgentRef is empty (400 invalid_binding).
+//   - Agent callers may bind only themselves via boundAgentId="self" at creation
+//     (403 bind_self_only for any other value; 403 on PATCH).
+//   - User callers may bind any live (non-deleted) agent in projectID that they
+//     hold agent.read on.
+func (s *Server) resolveWebhookEndpointBinding(w http.ResponseWriter, r *http.Request, projectID, boundAgentRef, boundLifetime string, isPatch bool) (string, string, bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return "", "", false
+	}
+
+	boundAgentRef = strings.TrimSpace(boundAgentRef)
+	boundLifetime = strings.TrimSpace(boundLifetime)
+
+	if boundAgentRef == "" && boundLifetime == "" {
+		return "", "", true
+	}
+	if boundAgentRef == "" {
+		writeError(w, http.StatusBadRequest, "invalid_binding", "boundLifetime must be empty when boundAgentId is not set", nil)
+		return "", "", false
+	}
+	if boundLifetime != store.WebhookBoundLifetimeAgent && boundLifetime != store.WebhookBoundLifetimePersistent {
+		writeError(w, http.StatusBadRequest, "invalid_binding", "boundLifetime must be 'agent' or 'persistent' when boundAgentId is set", nil)
+		return "", "", false
+	}
+
+	if identity.Type() == "agent" {
+		if isPatch {
+			writeForbidden(w, "Only user callers may modify webhook endpoint agent bindings")
+			return "", "", false
+		}
+		if boundAgentRef != "self" {
+			writeError(w, http.StatusForbidden, "bind_self_only", "agent callers may only bind webhook endpoints to themselves (boundAgentId: \"self\")", nil)
+			return "", "", false
+		}
+		agentIdentity := GetAgentIdentityFromContext(ctx)
+		if agentIdentity == nil || strings.TrimSpace(agentIdentity.ID()) == "" {
+			Unauthorized(w)
+			return "", "", false
+		}
+		return agentIdentity.ID(), boundLifetime, true
+	}
+
+	if boundAgentRef == "self" {
+		writeError(w, http.StatusBadRequest, "invalid_binding", "boundAgentId \"self\" requires an agent credential", nil)
+		return "", "", false
+	}
+
+	ag, err := s.lookupProjectAgentByRef(ctx, projectID, boundAgentRef)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			NotFound(w, "Agent")
+			return "", "", false
+		}
+		writeErrorFromErr(w, err, "")
+		return "", "", false
+	}
+	if ag == nil || ag.ProjectID != projectID || !ag.DeletedAt.IsZero() {
+		NotFound(w, "Agent")
+		return "", "", false
+	}
+
+	userIdent, ok := identity.(UserIdentity)
+	if !ok || s.authzService == nil {
+		writeForbidden(w, "You don't have permission to bind this agent")
+		return "", "", false
+	}
+	res := Resource{
+		Type:       permissions.ResourceAgent,
+		ID:         ag.ID,
+		ParentType: permissions.ResourceProject,
+		ParentID:   projectID,
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(userIdent),
+		Credential: credentialContextForIdentity(userIdent),
+		Resource:   res,
+		Action:     ActionRead,
+		Permission: "agent.read",
+	})
+	if !decision.Allowed {
+		logAuthzDenial(r, identity, res, ActionRead, "webhook endpoint bind: "+decision.Reason)
+		writeForbidden(w, "You don't have permission to bind this agent")
+		return "", "", false
+	}
+	return ag.ID, boundLifetime, true
+}
+
+func (s *Server) lookupProjectAgentByRef(ctx context.Context, projectID, ref string) (*store.Agent, error) {
+	if _, err := uuid.Parse(ref); err == nil {
+		ag, gErr := s.store.GetAgent(ctx, ref)
+		if gErr == nil && ag != nil && ag.ProjectID == projectID {
+			return ag, nil
+		}
+		if gErr != nil && !errors.Is(gErr, store.ErrNotFound) && !errors.Is(gErr, store.ErrInvalidInput) {
+			return nil, gErr
+		}
+	}
+	return s.store.GetAgentBySlug(ctx, projectID, ref)
 }
 
 func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -147,11 +294,20 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	if !readTriggerRequestJSON(w, r, &req) {
 		return
 	}
+	if req.DefaultTrigger != nil && req.Trigger != nil {
+		ValidationError(w, "cannot specify both trigger and defaultTrigger", nil)
+		return
+	}
+	defaultSpec := req.DefaultTrigger
+	if defaultSpec == nil {
+		defaultSpec = req.Trigger
+	}
 
-	// When defaultTrigger is requested, run the exact project-level authority
-	// checks that POST /triggers runs (trigger.create plus webhook_endpoint.read
-	// for source attachment) before looking up the project or target agent.
-	if req.DefaultTrigger != nil {
+	// When defaultTrigger/trigger is requested, run the exact project-level
+	// authority checks that POST /triggers runs (trigger.create plus
+	// webhook_endpoint.read for source attachment) before looking up the project
+	// or target agent.
+	if defaultSpec != nil {
 		if !s.authorizeTriggerAccess(w, r, projectID, ActionCreate) {
 			return
 		}
@@ -186,6 +342,11 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	boundAgentID, boundLifetime, ok := s.resolveWebhookEndpointBinding(w, r, projectID, req.BoundAgentID, req.BoundLifetime, false)
+	if !ok {
+		return
+	}
+
 	attr := newInitiatorAttribution(ctx)
 	ownerKind := store.DelegationPrincipalUser
 	if identity.Type() == "agent" {
@@ -202,21 +363,24 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		OwnerCredentialKind: attr.InitiatorCredentialKind,
 		SignatureMode:       sigMode,
 		SecretVersion:       1,
+		ConfigVersion:       1,
 		Status:              store.WebhookEndpointStatusActive,
+		BoundAgentID:        boundAgentID,
+		BoundLifetime:       boundLifetime,
 		CreatedBy:           identity.ID(),
 	}
 
 	var defaultTr *store.Trigger
-	if req.DefaultTrigger != nil {
-		dtAgentID := strings.TrimSpace(req.DefaultTrigger.AgentID)
-		dtAgentName := strings.TrimSpace(req.DefaultTrigger.AgentName)
+	if defaultSpec != nil {
+		dtAgentID := strings.TrimSpace(defaultSpec.AgentID)
+		dtAgentName := strings.TrimSpace(defaultSpec.AgentName)
 		actionSpec := TriggerActionSpec{
 			Type:      store.TriggerActionMessage,
-			Message:   req.DefaultTrigger.Message,
-			Interrupt: req.DefaultTrigger.Interrupt,
-			Wake:      req.DefaultTrigger.Wake,
+			Message:   defaultSpec.Message,
+			Interrupt: defaultSpec.Interrupt,
+			Wake:      defaultSpec.Wake,
 		}
-		if req.DefaultTrigger.ToSelf {
+		if defaultSpec.ToSelf {
 			if dtAgentID != "" || dtAgentName != "" {
 				ValidationError(w, "defaultTrigger.toSelf cannot be combined with agentId or agentName", nil)
 				return
@@ -229,6 +393,10 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 				return
 			}
 			actionSpec.AgentID = agentIdentity.ID()
+		} else if dtAgentID == "" && dtAgentName == "" && boundAgentID != "" {
+			// Stage 2 §4.3: when trigger/defaultTrigger omits target agent on a
+			// bound endpoint, default the target to the bound agent.
+			actionSpec.AgentID = boundAgentID
 		} else {
 			actionSpec.AgentID = dtAgentID
 			actionSpec.AgentName = dtAgentName
@@ -290,6 +458,10 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		"signature_mode": ep.SignatureMode,
 		"secret_version": ep.SecretVersion,
 	}
+	if ep.BoundAgentID != "" {
+		afterSummary["bound_agent_id"] = ep.BoundAgentID
+		afterSummary["bound_lifetime"] = ep.BoundLifetime
+	}
 	if defaultTr != nil {
 		afterSummary["trigger_id"] = defaultTr.ID
 	}
@@ -310,6 +482,15 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		}
 		if count >= store.MaxWebhookEndpointsPerProject {
 			return errWebhookEndpointLimitExceeded
+		}
+		if ep.BoundAgentID != "" {
+			boundCount, bErr := tx.CountBoundWebhookEndpoints(ctx, projectID, ep.BoundAgentID)
+			if bErr != nil {
+				return bErr
+			}
+			if boundCount >= store.MaxBoundWebhookEndpointsPerAgent {
+				return errWebhookEndpointBoundLimitExceeded
+			}
 		}
 		if defaultTr != nil {
 			if sErr := stampTrigger(ctx, tx, defaultTr, fp); sErr != nil {
@@ -362,6 +543,9 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		case errors.Is(err, errWebhookEndpointLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("project has reached the maximum of %d webhook endpoints", store.MaxWebhookEndpointsPerProject), nil)
+		case errors.Is(err, errWebhookEndpointBoundLimitExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("agent has reached the maximum of %d bound webhook endpoints", store.MaxBoundWebhookEndpointsPerAgent), nil)
 		case errors.Is(err, errTriggerProjectLimitExceeded):
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("project has reached the maximum of %d triggers", store.MaxTriggersPerProject), nil)
@@ -381,7 +565,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	}
 
 	resp := WebhookEndpointCreatedResponse{
-		WebhookEndpointResponse: s.buildWebhookEndpointResponse(ep),
+		WebhookEndpointResponse: s.buildWebhookEndpointResponse(ctx, ep),
 		Secret:                  rawSecret,
 	}
 	if defaultTr != nil {
@@ -400,6 +584,26 @@ func (s *Server) listWebhookEndpoints(w http.ResponseWriter, r *http.Request, pr
 		Name:      strings.TrimSpace(query.Get("name")),
 		Status:    strings.TrimSpace(query.Get("status")),
 	}
+	if rawBound := strings.TrimSpace(query.Get("boundAgentId")); rawBound != "" {
+		if _, err := uuid.Parse(rawBound); err == nil {
+			filter.BoundAgentID = rawBound
+		} else {
+			ag, gErr := s.lookupProjectAgentByRef(ctx, projectID, rawBound)
+			if gErr != nil && !errors.Is(gErr, store.ErrNotFound) && !errors.Is(gErr, store.ErrInvalidInput) {
+				writeErrorFromErr(w, gErr, "")
+				return
+			}
+			if ag == nil || ag.ProjectID != projectID {
+				writeJSON(w, http.StatusOK, ListWebhookEndpointsResponse{
+					Endpoints:  []WebhookEndpointResponse{},
+					TotalCount: 0,
+					ServerTime: time.Now().UTC(),
+				})
+				return
+			}
+			filter.BoundAgentID = ag.ID
+		}
+	}
 	scope := ""
 	if isAgentCaller(ctx) {
 		identity := GetIdentityFromContext(ctx)
@@ -407,8 +611,7 @@ func (s *Server) listWebhookEndpoints(w http.ResponseWriter, r *http.Request, pr
 			Unauthorized(w)
 			return
 		}
-		filter.OwnerPrincipalKind = store.DelegationPrincipalAgent
-		filter.OwnerPrincipalID = identity.ID()
+		filter.VisibleToAgentID = identity.ID()
 		scope = "caller"
 	}
 
@@ -420,7 +623,7 @@ func (s *Server) listWebhookEndpoints(w http.ResponseWriter, r *http.Request, pr
 
 	writeJSON(w, http.StatusOK, ListWebhookEndpointsResponse{
 		Scope:      scope,
-		Endpoints:  s.buildWebhookEndpointResponses(result.Items),
+		Endpoints:  s.buildWebhookEndpointResponses(ctx, result.Items),
 		NextCursor: result.NextCursor,
 		TotalCount: result.TotalCount,
 		ServerTime: time.Now().UTC(),
@@ -452,7 +655,213 @@ func (s *Server) getWebhookEndpoint(w http.ResponseWriter, r *http.Request, proj
 	if !s.authorizeWebhookEndpointRow(w, r, projectID, ActionRead, ep) {
 		return
 	}
-	writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(*ep))
+	writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(r.Context(), *ep))
+}
+
+func (s *Server) updateWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID, endpointID string) {
+	ctx := r.Context()
+	ep, ok := s.loadWebhookEndpointForProject(w, r, projectID, endpointID)
+	if !ok {
+		return
+	}
+	if !s.authorizeWebhookEndpointRow(w, r, projectID, ActionUpdate, ep) {
+		return
+	}
+
+	var req UpdateWebhookEndpointRequest
+	if !readTriggerRequestJSON(w, r, &req) {
+		return
+	}
+
+	var (
+		mask    store.WebhookEndpointFieldMask
+		updated = *ep
+	)
+	if req.Description != nil {
+		if err := validateTriggerResourceDescription(*req.Description, maxWebhookEndpointDescLen); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		updated.Description = *req.Description
+		mask.Description = true
+	}
+	if req.Status != nil {
+		status := strings.TrimSpace(*req.Status)
+		if status != store.WebhookEndpointStatusActive && status != store.WebhookEndpointStatusDisabled {
+			ValidationError(w, fmt.Sprintf("invalid status %q (supported: active, disabled)", status), nil)
+			return
+		}
+		updated.Status = status
+		mask.Status = true
+	}
+	if req.BoundAgentID != nil || req.BoundLifetime != nil {
+		if isAgentCaller(ctx) {
+			writeForbidden(w, "Only user callers may modify webhook endpoint agent bindings")
+			return
+		}
+		targetAgent := ep.BoundAgentID
+		targetLifetime := ep.BoundLifetime
+		if req.BoundAgentID != nil {
+			targetAgent = strings.TrimSpace(*req.BoundAgentID)
+			if targetAgent == "" && req.BoundLifetime == nil {
+				// Clearing boundAgentId without specifying boundLifetime unbinds cleanly.
+				targetLifetime = ""
+			}
+		}
+		if req.BoundLifetime != nil {
+			targetLifetime = strings.TrimSpace(*req.BoundLifetime)
+		}
+		resolvedAgent, resolvedLifetime, valid := s.resolveWebhookEndpointBinding(w, r, projectID, targetAgent, targetLifetime, true)
+		if !valid {
+			return
+		}
+		updated.BoundAgentID = resolvedAgent
+		updated.BoundLifetime = resolvedLifetime
+		mask.Binding = true
+	}
+
+	if !mask.Description && !mask.Status && !mask.Binding {
+		writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(ctx, *ep))
+		return
+	}
+
+	audit := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointUpdate, ep.ID)
+	beforeBytes, _ := json.Marshal(map[string]any{
+		"endpoint_id":    ep.ID,
+		"project_id":     projectID,
+		"status":         ep.Status,
+		"bound_agent_id": ep.BoundAgentID,
+		"bound_lifetime": ep.BoundLifetime,
+	})
+	audit.BeforeSummary = string(beforeBytes)
+
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
+			return lErr
+		}
+		if mask.Binding && updated.BoundAgentID != "" && updated.BoundAgentID != ep.BoundAgentID {
+			boundCount, bErr := tx.CountBoundWebhookEndpoints(ctx, projectID, updated.BoundAgentID)
+			if bErr != nil {
+				return bErr
+			}
+			if boundCount >= store.MaxBoundWebhookEndpointsPerAgent {
+				return errWebhookEndpointBoundLimitExceeded
+			}
+		}
+		if uErr := tx.UpdateWebhookEndpoint(ctx, &updated, mask); uErr != nil {
+			return uErr
+		}
+		afterBytes, _ := json.Marshal(map[string]any{
+			"endpoint_id":    updated.ID,
+			"project_id":     projectID,
+			"status":         updated.Status,
+			"bound_agent_id": updated.BoundAgentID,
+			"bound_lifetime": updated.BoundLifetime,
+			"config_version": updated.ConfigVersion,
+		})
+		audit.AfterSummary = string(afterBytes)
+		return tx.CreateMutationAudit(ctx, audit)
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeWebhookEndpointNotFound(w)
+		case errors.Is(err, errWebhookEndpointBoundLimitExceeded):
+			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
+				fmt.Sprintf("agent has reached the maximum of %d bound webhook endpoints", store.MaxBoundWebhookEndpointsPerAgent), nil)
+		default:
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
+
+	if s.webhookIngress != nil {
+		s.webhookIngress.InvalidateEndpoint(ep.ID)
+	}
+	writeJSON(w, http.StatusOK, s.buildWebhookEndpointResponse(ctx, updated))
+}
+
+func (s *Server) rotateWebhookEndpointSecret(w http.ResponseWriter, r *http.Request, projectID, endpointID string) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+	ep, ok := s.loadWebhookEndpointForProject(w, r, projectID, endpointID)
+	if !ok {
+		return
+	}
+	if !s.authorizeWebhookEndpointRow(w, r, projectID, ActionUpdate, ep) {
+		return
+	}
+
+	rawSecret, err := generateWebhookEndpointSecret()
+	if err != nil {
+		InternalError(w)
+		return
+	}
+
+	rotatedAt := time.Now().UTC().Truncate(time.Microsecond)
+	var rotated *store.WebhookEndpoint
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
+			return lErr
+		}
+		cur, gErr := tx.GetWebhookEndpoint(ctx, ep.ID)
+		if gErr != nil {
+			return gErr
+		}
+		if cur.ProjectID != projectID {
+			return store.ErrNotFound
+		}
+		nextVersion := cur.SecretVersion + 1
+		secretRow, sErr := s.newWebhookEndpointSecretRow(projectID, cur.ID, nextVersion, rawSecret, identity.ID())
+		if sErr != nil {
+			return sErr
+		}
+		// S22: write new secret version n+1 BEFORE bumping secret_version.
+		if cErr := tx.CreateSecret(ctx, secretRow); cErr != nil {
+			return cErr
+		}
+		var rErr error
+		rotated, rErr = tx.RotateWebhookEndpointSecret(ctx, projectID, cur.ID, nextVersion, rotatedAt)
+		if rErr != nil {
+			return rErr
+		}
+		audit := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointRotateSecret, cur.ID)
+		beforeBytes, _ := json.Marshal(map[string]any{
+			"endpoint_id":    cur.ID,
+			"project_id":     projectID,
+			"secret_version": cur.SecretVersion,
+		})
+		audit.BeforeSummary = string(beforeBytes)
+		afterBytes, _ := json.Marshal(map[string]any{
+			"endpoint_id":    rotated.ID,
+			"project_id":     projectID,
+			"secret_version": rotated.SecretVersion,
+		})
+		audit.AfterSummary = string(afterBytes)
+		return tx.CreateMutationAudit(ctx, audit)
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeWebhookEndpointNotFound(w)
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if s.webhookIngress != nil {
+		s.webhookIngress.InvalidateEndpoint(ep.ID)
+	}
+
+	writeJSON(w, http.StatusOK, WebhookEndpointRotatedResponse{
+		WebhookEndpointResponse: s.buildWebhookEndpointResponse(ctx, *rotated),
+		Secret:                  rawSecret,
+		GraceWindowExpires:      rotatedAt.Add(store.WebhookSecretRotationGraceWindow),
+	})
 }
 
 func (s *Server) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID, endpointID string) {

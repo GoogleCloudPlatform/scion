@@ -36,10 +36,18 @@ type WebhookEndpoint struct {
 	OwnerCredentialKind string `json:"owner_credential_kind,omitempty"`
 	// SecretVersion holds the value of the "secret_version" field.
 	SecretVersion int `json:"secret_version,omitempty"`
+	// SecretRotatedAt holds the value of the "secret_rotated_at" field.
+	SecretRotatedAt *time.Time `json:"secret_rotated_at,omitempty"`
+	// ConfigVersion holds the value of the "config_version" field.
+	ConfigVersion int `json:"config_version,omitempty"`
 	// SignatureMode holds the value of the "signature_mode" field.
 	SignatureMode string `json:"signature_mode,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
+	// BoundAgentID holds the value of the "bound_agent_id" field.
+	BoundAgentID *uuid.UUID `json:"bound_agent_id,omitempty"`
+	// BoundLifetime holds the value of the "bound_lifetime" field.
+	BoundLifetime string `json:"bound_lifetime,omitempty"`
 	// CreatedBy holds the value of the "created_by" field.
 	CreatedBy string `json:"created_by,omitempty"`
 	// LastReceivedAt holds the value of the "last_received_at" field.
@@ -60,13 +68,13 @@ func (*WebhookEndpoint) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case webhookendpoint.FieldFixtureRootID, webhookendpoint.FieldFixtureIssuerID:
+		case webhookendpoint.FieldFixtureRootID, webhookendpoint.FieldFixtureIssuerID, webhookendpoint.FieldBoundAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case webhookendpoint.FieldSecretVersion, webhookendpoint.FieldReceiveCount, webhookendpoint.FieldRejectCount:
+		case webhookendpoint.FieldSecretVersion, webhookendpoint.FieldConfigVersion, webhookendpoint.FieldReceiveCount, webhookendpoint.FieldRejectCount:
 			values[i] = new(sql.NullInt64)
-		case webhookendpoint.FieldName, webhookendpoint.FieldDescription, webhookendpoint.FieldOwnerPrincipalKind, webhookendpoint.FieldOwnerPrincipalID, webhookendpoint.FieldOwnerCredentialKind, webhookendpoint.FieldSignatureMode, webhookendpoint.FieldStatus, webhookendpoint.FieldCreatedBy:
+		case webhookendpoint.FieldName, webhookendpoint.FieldDescription, webhookendpoint.FieldOwnerPrincipalKind, webhookendpoint.FieldOwnerPrincipalID, webhookendpoint.FieldOwnerCredentialKind, webhookendpoint.FieldSignatureMode, webhookendpoint.FieldStatus, webhookendpoint.FieldBoundLifetime, webhookendpoint.FieldCreatedBy:
 			values[i] = new(sql.NullString)
-		case webhookendpoint.FieldLastReceivedAt, webhookendpoint.FieldCreated, webhookendpoint.FieldUpdated:
+		case webhookendpoint.FieldSecretRotatedAt, webhookendpoint.FieldLastReceivedAt, webhookendpoint.FieldCreated, webhookendpoint.FieldUpdated:
 			values[i] = new(sql.NullTime)
 		case webhookendpoint.FieldID, webhookendpoint.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -147,6 +155,19 @@ func (_m *WebhookEndpoint) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.SecretVersion = int(value.Int64)
 			}
+		case webhookendpoint.FieldSecretRotatedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field secret_rotated_at", values[i])
+			} else if value.Valid {
+				_m.SecretRotatedAt = new(time.Time)
+				*_m.SecretRotatedAt = value.Time
+			}
+		case webhookendpoint.FieldConfigVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field config_version", values[i])
+			} else if value.Valid {
+				_m.ConfigVersion = int(value.Int64)
+			}
 		case webhookendpoint.FieldSignatureMode:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field signature_mode", values[i])
@@ -158,6 +179,19 @@ func (_m *WebhookEndpoint) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field status", values[i])
 			} else if value.Valid {
 				_m.Status = value.String
+			}
+		case webhookendpoint.FieldBoundAgentID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field bound_agent_id", values[i])
+			} else if value.Valid {
+				_m.BoundAgentID = new(uuid.UUID)
+				*_m.BoundAgentID = *value.S.(*uuid.UUID)
+			}
+		case webhookendpoint.FieldBoundLifetime:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field bound_lifetime", values[i])
+			} else if value.Valid {
+				_m.BoundLifetime = value.String
 			}
 		case webhookendpoint.FieldCreatedBy:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -263,11 +297,27 @@ func (_m *WebhookEndpoint) String() string {
 	builder.WriteString("secret_version=")
 	builder.WriteString(fmt.Sprintf("%v", _m.SecretVersion))
 	builder.WriteString(", ")
+	if v := _m.SecretRotatedAt; v != nil {
+		builder.WriteString("secret_rotated_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("config_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ConfigVersion))
+	builder.WriteString(", ")
 	builder.WriteString("signature_mode=")
 	builder.WriteString(_m.SignatureMode)
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)
+	builder.WriteString(", ")
+	if v := _m.BoundAgentID; v != nil {
+		builder.WriteString("bound_agent_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("bound_lifetime=")
+	builder.WriteString(_m.BoundLifetime)
 	builder.WriteString(", ")
 	builder.WriteString("created_by=")
 	builder.WriteString(_m.CreatedBy)

@@ -437,6 +437,7 @@ var Registry = []Permission{
 	{ID: "webhook_endpoint.read", Resource: ResourceWebhookEndpoint, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:read", Description: "Read a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 	{ID: "webhook_endpoint.list", Resource: ResourceWebhookEndpoint, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "webhook_endpoint:list", Description: "List webhook endpoints", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 	{ID: "webhook_endpoint.create", Resource: ResourceWebhookEndpoint, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "webhook_endpoint:create", Description: "Create a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
+	{ID: "webhook_endpoint.update", Resource: ResourceWebhookEndpoint, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:update", Description: "Update, disable, enable or rotate the secret of a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 	{ID: "webhook_endpoint.delete", Resource: ResourceWebhookEndpoint, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "webhook_endpoint:delete", Description: "Delete a webhook endpoint", Enforcement: []string{"pkg/hub/handlers_webhook_endpoints.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)

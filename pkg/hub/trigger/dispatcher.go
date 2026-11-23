@@ -1800,16 +1800,17 @@ func (t *triggerFireTracker) record(write func()) bool {
 
 // MaintenanceResult reports counts from one hourly trigger maintenance pass.
 type MaintenanceResult struct {
-	FiresReaped      int
-	EventsReconciled int
-	EventsPurged     int
-	FiresPurged      int
-	ClaimsReleased   int
-	ClaimsPurged     int
+	FiresReaped          int
+	EventsReconciled     int
+	EventsPurged         int
+	FiresPurged          int
+	ClaimsReleased       int
+	ClaimsPurged         int
+	RotatedSecretsPurged int
 }
 
 // RunMaintenance executes the hourly trigger maintenance pass (§4.3, §6.4,
-// rev 7.4; Stage 2 §5.6):
+// rev 7.4; Stage 2 §4.4, §5.6):
 //  1. Reaps expired firing rows (lease_until <= now) to failed "hub restarted during fire".
 //  2. Reconciles pending trigger_events older than DefaultMaxAge (72h) with no
 //     trigger.event queue item to failed "dropped by queue limits".
@@ -1818,6 +1819,7 @@ type MaintenanceResult struct {
 //  4. Releases active trigger_subject_claims whose agent is terminal
 //     (stopped|error|halted) or deleted.
 //  5. Deletes released trigger_subject_claims older than HistoryRetention (7 days).
+//  6. Purges retired webhook endpoint signing secret rows past the 24h rotation grace window.
 func RunMaintenance(ctx context.Context, ts store.TriggerStore, now time.Time) (MaintenanceResult, error) {
 	var out MaintenanceResult
 	if ts == nil {
@@ -1862,6 +1864,12 @@ func RunMaintenance(ctx context.Context, ts store.TriggerStore, now time.Time) (
 	out.ClaimsPurged = claimsPurged
 	if err != nil {
 		errs = append(errs, fmt.Errorf("purge old trigger subject claims: %w", err))
+	}
+
+	secretsPurged, err := ts.PurgeExpiredRotatedWebhookSecrets(ctx, now, store.WebhookSecretRotationGraceWindow)
+	out.RotatedSecretsPurged = secretsPurged
+	if err != nil {
+		errs = append(errs, fmt.Errorf("purge expired rotated webhook secrets: %w", err))
 	}
 
 	return out, errors.Join(errs...)

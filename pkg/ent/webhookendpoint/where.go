@@ -100,6 +100,16 @@ func SecretVersion(v int) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldSecretVersion, v))
 }
 
+// SecretRotatedAt applies equality check predicate on the "secret_rotated_at" field. It's identical to SecretRotatedAtEQ.
+func SecretRotatedAt(v time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldSecretRotatedAt, v))
+}
+
+// ConfigVersion applies equality check predicate on the "config_version" field. It's identical to ConfigVersionEQ.
+func ConfigVersion(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldConfigVersion, v))
+}
+
 // SignatureMode applies equality check predicate on the "signature_mode" field. It's identical to SignatureModeEQ.
 func SignatureMode(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldSignatureMode, v))
@@ -108,6 +118,16 @@ func SignatureMode(v string) predicate.WebhookEndpoint {
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldStatus, v))
+}
+
+// BoundAgentID applies equality check predicate on the "bound_agent_id" field. It's identical to BoundAgentIDEQ.
+func BoundAgentID(v uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldBoundAgentID, v))
+}
+
+// BoundLifetime applies equality check predicate on the "bound_lifetime" field. It's identical to BoundLifetimeEQ.
+func BoundLifetime(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldBoundLifetime, v))
 }
 
 // CreatedBy applies equality check predicate on the "created_by" field. It's identical to CreatedByEQ.
@@ -655,6 +675,96 @@ func SecretVersionLTE(v int) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldLTE(FieldSecretVersion, v))
 }
 
+// SecretRotatedAtEQ applies the EQ predicate on the "secret_rotated_at" field.
+func SecretRotatedAtEQ(v time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldSecretRotatedAt, v))
+}
+
+// SecretRotatedAtNEQ applies the NEQ predicate on the "secret_rotated_at" field.
+func SecretRotatedAtNEQ(v time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldSecretRotatedAt, v))
+}
+
+// SecretRotatedAtIn applies the In predicate on the "secret_rotated_at" field.
+func SecretRotatedAtIn(vs ...time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldSecretRotatedAt, vs...))
+}
+
+// SecretRotatedAtNotIn applies the NotIn predicate on the "secret_rotated_at" field.
+func SecretRotatedAtNotIn(vs ...time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldSecretRotatedAt, vs...))
+}
+
+// SecretRotatedAtGT applies the GT predicate on the "secret_rotated_at" field.
+func SecretRotatedAtGT(v time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldSecretRotatedAt, v))
+}
+
+// SecretRotatedAtGTE applies the GTE predicate on the "secret_rotated_at" field.
+func SecretRotatedAtGTE(v time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldSecretRotatedAt, v))
+}
+
+// SecretRotatedAtLT applies the LT predicate on the "secret_rotated_at" field.
+func SecretRotatedAtLT(v time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldSecretRotatedAt, v))
+}
+
+// SecretRotatedAtLTE applies the LTE predicate on the "secret_rotated_at" field.
+func SecretRotatedAtLTE(v time.Time) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldSecretRotatedAt, v))
+}
+
+// SecretRotatedAtIsNil applies the IsNil predicate on the "secret_rotated_at" field.
+func SecretRotatedAtIsNil() predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIsNull(FieldSecretRotatedAt))
+}
+
+// SecretRotatedAtNotNil applies the NotNil predicate on the "secret_rotated_at" field.
+func SecretRotatedAtNotNil() predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotNull(FieldSecretRotatedAt))
+}
+
+// ConfigVersionEQ applies the EQ predicate on the "config_version" field.
+func ConfigVersionEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldConfigVersion, v))
+}
+
+// ConfigVersionNEQ applies the NEQ predicate on the "config_version" field.
+func ConfigVersionNEQ(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldConfigVersion, v))
+}
+
+// ConfigVersionIn applies the In predicate on the "config_version" field.
+func ConfigVersionIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldConfigVersion, vs...))
+}
+
+// ConfigVersionNotIn applies the NotIn predicate on the "config_version" field.
+func ConfigVersionNotIn(vs ...int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldConfigVersion, vs...))
+}
+
+// ConfigVersionGT applies the GT predicate on the "config_version" field.
+func ConfigVersionGT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldConfigVersion, v))
+}
+
+// ConfigVersionGTE applies the GTE predicate on the "config_version" field.
+func ConfigVersionGTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldConfigVersion, v))
+}
+
+// ConfigVersionLT applies the LT predicate on the "config_version" field.
+func ConfigVersionLT(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldConfigVersion, v))
+}
+
+// ConfigVersionLTE applies the LTE predicate on the "config_version" field.
+func ConfigVersionLTE(v int) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldConfigVersion, v))
+}
+
 // SignatureModeEQ applies the EQ predicate on the "signature_mode" field.
 func SignatureModeEQ(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldEQ(FieldSignatureMode, v))
@@ -783,6 +893,121 @@ func StatusEqualFold(v string) predicate.WebhookEndpoint {
 // StatusContainsFold applies the ContainsFold predicate on the "status" field.
 func StatusContainsFold(v string) predicate.WebhookEndpoint {
 	return predicate.WebhookEndpoint(sql.FieldContainsFold(FieldStatus, v))
+}
+
+// BoundAgentIDEQ applies the EQ predicate on the "bound_agent_id" field.
+func BoundAgentIDEQ(v uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldBoundAgentID, v))
+}
+
+// BoundAgentIDNEQ applies the NEQ predicate on the "bound_agent_id" field.
+func BoundAgentIDNEQ(v uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldBoundAgentID, v))
+}
+
+// BoundAgentIDIn applies the In predicate on the "bound_agent_id" field.
+func BoundAgentIDIn(vs ...uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldBoundAgentID, vs...))
+}
+
+// BoundAgentIDNotIn applies the NotIn predicate on the "bound_agent_id" field.
+func BoundAgentIDNotIn(vs ...uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldBoundAgentID, vs...))
+}
+
+// BoundAgentIDGT applies the GT predicate on the "bound_agent_id" field.
+func BoundAgentIDGT(v uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldBoundAgentID, v))
+}
+
+// BoundAgentIDGTE applies the GTE predicate on the "bound_agent_id" field.
+func BoundAgentIDGTE(v uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldBoundAgentID, v))
+}
+
+// BoundAgentIDLT applies the LT predicate on the "bound_agent_id" field.
+func BoundAgentIDLT(v uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldBoundAgentID, v))
+}
+
+// BoundAgentIDLTE applies the LTE predicate on the "bound_agent_id" field.
+func BoundAgentIDLTE(v uuid.UUID) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldBoundAgentID, v))
+}
+
+// BoundAgentIDIsNil applies the IsNil predicate on the "bound_agent_id" field.
+func BoundAgentIDIsNil() predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIsNull(FieldBoundAgentID))
+}
+
+// BoundAgentIDNotNil applies the NotNil predicate on the "bound_agent_id" field.
+func BoundAgentIDNotNil() predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotNull(FieldBoundAgentID))
+}
+
+// BoundLifetimeEQ applies the EQ predicate on the "bound_lifetime" field.
+func BoundLifetimeEQ(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEQ(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeNEQ applies the NEQ predicate on the "bound_lifetime" field.
+func BoundLifetimeNEQ(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNEQ(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeIn applies the In predicate on the "bound_lifetime" field.
+func BoundLifetimeIn(vs ...string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldIn(FieldBoundLifetime, vs...))
+}
+
+// BoundLifetimeNotIn applies the NotIn predicate on the "bound_lifetime" field.
+func BoundLifetimeNotIn(vs ...string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldNotIn(FieldBoundLifetime, vs...))
+}
+
+// BoundLifetimeGT applies the GT predicate on the "bound_lifetime" field.
+func BoundLifetimeGT(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGT(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeGTE applies the GTE predicate on the "bound_lifetime" field.
+func BoundLifetimeGTE(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldGTE(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeLT applies the LT predicate on the "bound_lifetime" field.
+func BoundLifetimeLT(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLT(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeLTE applies the LTE predicate on the "bound_lifetime" field.
+func BoundLifetimeLTE(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldLTE(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeContains applies the Contains predicate on the "bound_lifetime" field.
+func BoundLifetimeContains(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldContains(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeHasPrefix applies the HasPrefix predicate on the "bound_lifetime" field.
+func BoundLifetimeHasPrefix(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldHasPrefix(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeHasSuffix applies the HasSuffix predicate on the "bound_lifetime" field.
+func BoundLifetimeHasSuffix(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldHasSuffix(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeEqualFold applies the EqualFold predicate on the "bound_lifetime" field.
+func BoundLifetimeEqualFold(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldEqualFold(FieldBoundLifetime, v))
+}
+
+// BoundLifetimeContainsFold applies the ContainsFold predicate on the "bound_lifetime" field.
+func BoundLifetimeContainsFold(v string) predicate.WebhookEndpoint {
+	return predicate.WebhookEndpoint(sql.FieldContainsFold(FieldBoundLifetime, v))
 }
 
 // CreatedByEQ applies the EQ predicate on the "created_by" field.

@@ -830,6 +830,16 @@ func (e *deletionEngine) run() deletionOutcome {
 		defer cancel()
 		s.ClearTopicDefaultAgent(ctx, agent.ID, agent.Slug, agent.ProjectID)
 	})
+	// Release webhook endpoint bindings for this agent (Stage 2 §4.2, S23):
+	// agent-lifetime endpoints (and their secret rows and the agent's own rules)
+	// are deleted while other authors' rules pause source_deleted; persistent
+	// endpoints are unbound so subsequent pauseTriggersTargetingAgent pauses
+	// their target rules with target_deleted. Idempotent on retry.
+	e.tailStep("release trigger bindings", func() {
+		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
+		defer cancel()
+		s.releaseTriggerBindingsForAgent(ctx, agent)
+	})
 	// Pause recurring exec and message schedules and triggers targeting this
 	// agent with target_deleted (ptone/scion#7884, ptone/scion#8927,
 	// Stage 1 §5.6) before pausing definitions authored by this agent, so

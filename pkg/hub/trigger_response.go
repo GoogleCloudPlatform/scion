@@ -36,23 +36,34 @@ import (
 // stored initiator attribution, credential snapshots, frozen authority
 // ceilings, or fixture provenance stamps.
 
+// WebhookEndpointBoundAgent identifies the agent an endpoint is bound to (§4.1).
+type WebhookEndpointBoundAgent struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
 // WebhookEndpointResponse is the API representation of a webhook endpoint on
 // GET and LIST routes. It never includes the signing secret.
 type WebhookEndpointResponse struct {
-	ID             string     `json:"id"`
-	ProjectID      string     `json:"projectId"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description,omitempty"`
-	URL            string     `json:"url"`
-	SignatureMode  string     `json:"signatureMode"`
-	SecretVersion  int        `json:"secretVersion"`
-	Status         string     `json:"status"`
-	LastReceivedAt *time.Time `json:"lastReceivedAt,omitempty"`
-	ReceiveCount   int        `json:"receiveCount"`
-	RejectCount    int        `json:"rejectCount"`
-	CreatedBy      string     `json:"createdBy,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID              string                     `json:"id"`
+	ProjectID       string                     `json:"projectId"`
+	Name            string                     `json:"name"`
+	Description     string                     `json:"description,omitempty"`
+	URL             string                     `json:"url"`
+	SignatureMode   string                     `json:"signatureMode"`
+	SecretVersion   int                        `json:"secretVersion"`
+	SecretRotatedAt *time.Time                 `json:"secretRotatedAt,omitempty"`
+	ConfigVersion   int                        `json:"configVersion,omitempty"`
+	Status          string                     `json:"status"`
+	BoundAgentID    string                     `json:"boundAgentId,omitempty"`
+	BoundAgent      *WebhookEndpointBoundAgent `json:"boundAgent,omitempty"`
+	BoundLifetime   string                     `json:"boundLifetime,omitempty"`
+	LastReceivedAt  *time.Time                 `json:"lastReceivedAt,omitempty"`
+	ReceiveCount    int                        `json:"receiveCount"`
+	RejectCount     int                        `json:"rejectCount"`
+	CreatedBy       string                     `json:"createdBy,omitempty"`
+	CreatedAt       time.Time                  `json:"createdAt"`
+	UpdatedAt       time.Time                  `json:"updatedAt"`
 }
 
 // WebhookEndpointCreatedResponse is returned once on POST /webhook-endpoints.
@@ -63,6 +74,13 @@ type WebhookEndpointCreatedResponse struct {
 	Secret    string           `json:"secret"`
 	TriggerID string           `json:"triggerId,omitempty"`
 	Trigger   *TriggerResponse `json:"trigger,omitempty"`
+}
+
+// WebhookEndpointRotatedResponse is returned once on POST /webhook-endpoints/{id}/rotate-secret.
+type WebhookEndpointRotatedResponse struct {
+	WebhookEndpointResponse
+	Secret             string    `json:"secret"`
+	GraceWindowExpires time.Time `json:"graceWindowExpires"`
 }
 
 // ListWebhookEndpointsResponse is the paginated response of GET /webhook-endpoints.
@@ -271,29 +289,65 @@ func (s *Server) webhookEndpointIngressURL(endpointID string) string {
 	return base + "/api/v1/hooks/" + endpointID
 }
 
-func (s *Server) buildWebhookEndpointResponse(ep store.WebhookEndpoint) WebhookEndpointResponse {
+func (s *Server) resolveBoundAgentName(ctx context.Context, agentID string, cache map[string]string) string {
+	if agentID == "" || s == nil || s.store == nil {
+		return ""
+	}
+	if cache != nil {
+		if name, ok := cache[agentID]; ok {
+			return name
+		}
+	}
+	var name string
+	if ag, err := s.store.GetAgent(ctx, agentID); err == nil && ag != nil {
+		name = ag.Name
+	}
+	if cache != nil {
+		cache[agentID] = name
+	}
+	return name
+}
+
+func (s *Server) buildWebhookEndpointResponseWithCache(ctx context.Context, ep store.WebhookEndpoint, agentNames map[string]string) WebhookEndpointResponse {
+	var boundAgent *WebhookEndpointBoundAgent
+	if ep.BoundAgentID != "" {
+		boundAgent = &WebhookEndpointBoundAgent{
+			ID:   ep.BoundAgentID,
+			Name: s.resolveBoundAgentName(ctx, ep.BoundAgentID, agentNames),
+		}
+	}
 	return WebhookEndpointResponse{
-		ID:             ep.ID,
-		ProjectID:      ep.ProjectID,
-		Name:           ep.Name,
-		Description:    ep.Description,
-		URL:            s.webhookEndpointIngressURL(ep.ID),
-		SignatureMode:  ep.SignatureMode,
-		SecretVersion:  ep.SecretVersion,
-		Status:         ep.Status,
-		LastReceivedAt: ep.LastReceivedAt,
-		ReceiveCount:   ep.ReceiveCount,
-		RejectCount:    ep.RejectCount,
-		CreatedBy:      ep.CreatedBy,
-		CreatedAt:      ep.CreatedAt,
-		UpdatedAt:      ep.UpdatedAt,
+		ID:              ep.ID,
+		ProjectID:       ep.ProjectID,
+		Name:            ep.Name,
+		Description:     ep.Description,
+		URL:             s.webhookEndpointIngressURL(ep.ID),
+		SignatureMode:   ep.SignatureMode,
+		SecretVersion:   ep.SecretVersion,
+		SecretRotatedAt: ep.SecretRotatedAt,
+		ConfigVersion:   ep.ConfigVersion,
+		Status:          ep.Status,
+		BoundAgentID:    ep.BoundAgentID,
+		BoundAgent:      boundAgent,
+		BoundLifetime:   ep.BoundLifetime,
+		LastReceivedAt:  ep.LastReceivedAt,
+		ReceiveCount:    ep.ReceiveCount,
+		RejectCount:     ep.RejectCount,
+		CreatedBy:       ep.CreatedBy,
+		CreatedAt:       ep.CreatedAt,
+		UpdatedAt:       ep.UpdatedAt,
 	}
 }
 
-func (s *Server) buildWebhookEndpointResponses(endpoints []store.WebhookEndpoint) []WebhookEndpointResponse {
+func (s *Server) buildWebhookEndpointResponse(ctx context.Context, ep store.WebhookEndpoint) WebhookEndpointResponse {
+	return s.buildWebhookEndpointResponseWithCache(ctx, ep, nil)
+}
+
+func (s *Server) buildWebhookEndpointResponses(ctx context.Context, endpoints []store.WebhookEndpoint) []WebhookEndpointResponse {
 	out := make([]WebhookEndpointResponse, len(endpoints))
+	agentNames := make(map[string]string)
 	for i := range endpoints {
-		out[i] = s.buildWebhookEndpointResponse(endpoints[i])
+		out[i] = s.buildWebhookEndpointResponseWithCache(ctx, endpoints[i], agentNames)
 	}
 	return out
 }

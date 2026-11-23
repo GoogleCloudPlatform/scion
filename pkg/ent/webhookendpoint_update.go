@@ -98,6 +98,47 @@ func (_u *WebhookEndpointUpdate) AddSecretVersion(v int) *WebhookEndpointUpdate 
 	return _u
 }
 
+// SetSecretRotatedAt sets the "secret_rotated_at" field.
+func (_u *WebhookEndpointUpdate) SetSecretRotatedAt(v time.Time) *WebhookEndpointUpdate {
+	_u.mutation.SetSecretRotatedAt(v)
+	return _u
+}
+
+// SetNillableSecretRotatedAt sets the "secret_rotated_at" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableSecretRotatedAt(v *time.Time) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetSecretRotatedAt(*v)
+	}
+	return _u
+}
+
+// ClearSecretRotatedAt clears the value of the "secret_rotated_at" field.
+func (_u *WebhookEndpointUpdate) ClearSecretRotatedAt() *WebhookEndpointUpdate {
+	_u.mutation.ClearSecretRotatedAt()
+	return _u
+}
+
+// SetConfigVersion sets the "config_version" field.
+func (_u *WebhookEndpointUpdate) SetConfigVersion(v int) *WebhookEndpointUpdate {
+	_u.mutation.ResetConfigVersion()
+	_u.mutation.SetConfigVersion(v)
+	return _u
+}
+
+// SetNillableConfigVersion sets the "config_version" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableConfigVersion(v *int) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetConfigVersion(*v)
+	}
+	return _u
+}
+
+// AddConfigVersion adds value to the "config_version" field.
+func (_u *WebhookEndpointUpdate) AddConfigVersion(v int) *WebhookEndpointUpdate {
+	_u.mutation.AddConfigVersion(v)
+	return _u
+}
+
 // SetSignatureMode sets the "signature_mode" field.
 func (_u *WebhookEndpointUpdate) SetSignatureMode(v string) *WebhookEndpointUpdate {
 	_u.mutation.SetSignatureMode(v)
@@ -122,6 +163,40 @@ func (_u *WebhookEndpointUpdate) SetStatus(v string) *WebhookEndpointUpdate {
 func (_u *WebhookEndpointUpdate) SetNillableStatus(v *string) *WebhookEndpointUpdate {
 	if v != nil {
 		_u.SetStatus(*v)
+	}
+	return _u
+}
+
+// SetBoundAgentID sets the "bound_agent_id" field.
+func (_u *WebhookEndpointUpdate) SetBoundAgentID(v uuid.UUID) *WebhookEndpointUpdate {
+	_u.mutation.SetBoundAgentID(v)
+	return _u
+}
+
+// SetNillableBoundAgentID sets the "bound_agent_id" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableBoundAgentID(v *uuid.UUID) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetBoundAgentID(*v)
+	}
+	return _u
+}
+
+// ClearBoundAgentID clears the value of the "bound_agent_id" field.
+func (_u *WebhookEndpointUpdate) ClearBoundAgentID() *WebhookEndpointUpdate {
+	_u.mutation.ClearBoundAgentID()
+	return _u
+}
+
+// SetBoundLifetime sets the "bound_lifetime" field.
+func (_u *WebhookEndpointUpdate) SetBoundLifetime(v string) *WebhookEndpointUpdate {
+	_u.mutation.SetBoundLifetime(v)
+	return _u
+}
+
+// SetNillableBoundLifetime sets the "bound_lifetime" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableBoundLifetime(v *string) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetBoundLifetime(*v)
 	}
 	return _u
 }
@@ -301,11 +376,32 @@ func (_u *WebhookEndpointUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if value, ok := _u.mutation.AddedSecretVersion(); ok {
 		_spec.AddField(webhookendpoint.FieldSecretVersion, field.TypeInt, value)
 	}
+	if value, ok := _u.mutation.SecretRotatedAt(); ok {
+		_spec.SetField(webhookendpoint.FieldSecretRotatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.SecretRotatedAtCleared() {
+		_spec.ClearField(webhookendpoint.FieldSecretRotatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ConfigVersion(); ok {
+		_spec.SetField(webhookendpoint.FieldConfigVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedConfigVersion(); ok {
+		_spec.AddField(webhookendpoint.FieldConfigVersion, field.TypeInt, value)
+	}
 	if value, ok := _u.mutation.SignatureMode(); ok {
 		_spec.SetField(webhookendpoint.FieldSignatureMode, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(webhookendpoint.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.BoundAgentID(); ok {
+		_spec.SetField(webhookendpoint.FieldBoundAgentID, field.TypeUUID, value)
+	}
+	if _u.mutation.BoundAgentIDCleared() {
+		_spec.ClearField(webhookendpoint.FieldBoundAgentID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BoundLifetime(); ok {
+		_spec.SetField(webhookendpoint.FieldBoundLifetime, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(webhookendpoint.FieldCreatedBy, field.TypeString, value)
@@ -423,6 +519,47 @@ func (_u *WebhookEndpointUpdateOne) AddSecretVersion(v int) *WebhookEndpointUpda
 	return _u
 }
 
+// SetSecretRotatedAt sets the "secret_rotated_at" field.
+func (_u *WebhookEndpointUpdateOne) SetSecretRotatedAt(v time.Time) *WebhookEndpointUpdateOne {
+	_u.mutation.SetSecretRotatedAt(v)
+	return _u
+}
+
+// SetNillableSecretRotatedAt sets the "secret_rotated_at" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableSecretRotatedAt(v *time.Time) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetSecretRotatedAt(*v)
+	}
+	return _u
+}
+
+// ClearSecretRotatedAt clears the value of the "secret_rotated_at" field.
+func (_u *WebhookEndpointUpdateOne) ClearSecretRotatedAt() *WebhookEndpointUpdateOne {
+	_u.mutation.ClearSecretRotatedAt()
+	return _u
+}
+
+// SetConfigVersion sets the "config_version" field.
+func (_u *WebhookEndpointUpdateOne) SetConfigVersion(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.ResetConfigVersion()
+	_u.mutation.SetConfigVersion(v)
+	return _u
+}
+
+// SetNillableConfigVersion sets the "config_version" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableConfigVersion(v *int) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetConfigVersion(*v)
+	}
+	return _u
+}
+
+// AddConfigVersion adds value to the "config_version" field.
+func (_u *WebhookEndpointUpdateOne) AddConfigVersion(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.AddConfigVersion(v)
+	return _u
+}
+
 // SetSignatureMode sets the "signature_mode" field.
 func (_u *WebhookEndpointUpdateOne) SetSignatureMode(v string) *WebhookEndpointUpdateOne {
 	_u.mutation.SetSignatureMode(v)
@@ -447,6 +584,40 @@ func (_u *WebhookEndpointUpdateOne) SetStatus(v string) *WebhookEndpointUpdateOn
 func (_u *WebhookEndpointUpdateOne) SetNillableStatus(v *string) *WebhookEndpointUpdateOne {
 	if v != nil {
 		_u.SetStatus(*v)
+	}
+	return _u
+}
+
+// SetBoundAgentID sets the "bound_agent_id" field.
+func (_u *WebhookEndpointUpdateOne) SetBoundAgentID(v uuid.UUID) *WebhookEndpointUpdateOne {
+	_u.mutation.SetBoundAgentID(v)
+	return _u
+}
+
+// SetNillableBoundAgentID sets the "bound_agent_id" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableBoundAgentID(v *uuid.UUID) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetBoundAgentID(*v)
+	}
+	return _u
+}
+
+// ClearBoundAgentID clears the value of the "bound_agent_id" field.
+func (_u *WebhookEndpointUpdateOne) ClearBoundAgentID() *WebhookEndpointUpdateOne {
+	_u.mutation.ClearBoundAgentID()
+	return _u
+}
+
+// SetBoundLifetime sets the "bound_lifetime" field.
+func (_u *WebhookEndpointUpdateOne) SetBoundLifetime(v string) *WebhookEndpointUpdateOne {
+	_u.mutation.SetBoundLifetime(v)
+	return _u
+}
+
+// SetNillableBoundLifetime sets the "bound_lifetime" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableBoundLifetime(v *string) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetBoundLifetime(*v)
 	}
 	return _u
 }
@@ -656,11 +827,32 @@ func (_u *WebhookEndpointUpdateOne) sqlSave(ctx context.Context) (_node *Webhook
 	if value, ok := _u.mutation.AddedSecretVersion(); ok {
 		_spec.AddField(webhookendpoint.FieldSecretVersion, field.TypeInt, value)
 	}
+	if value, ok := _u.mutation.SecretRotatedAt(); ok {
+		_spec.SetField(webhookendpoint.FieldSecretRotatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.SecretRotatedAtCleared() {
+		_spec.ClearField(webhookendpoint.FieldSecretRotatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.ConfigVersion(); ok {
+		_spec.SetField(webhookendpoint.FieldConfigVersion, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedConfigVersion(); ok {
+		_spec.AddField(webhookendpoint.FieldConfigVersion, field.TypeInt, value)
+	}
 	if value, ok := _u.mutation.SignatureMode(); ok {
 		_spec.SetField(webhookendpoint.FieldSignatureMode, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(webhookendpoint.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.BoundAgentID(); ok {
+		_spec.SetField(webhookendpoint.FieldBoundAgentID, field.TypeUUID, value)
+	}
+	if _u.mutation.BoundAgentIDCleared() {
+		_spec.ClearField(webhookendpoint.FieldBoundAgentID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.BoundLifetime(); ok {
+		_spec.SetField(webhookendpoint.FieldBoundLifetime, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.CreatedBy(); ok {
 		_spec.SetField(webhookendpoint.FieldCreatedBy, field.TypeString, value)

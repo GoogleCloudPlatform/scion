@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,6 +115,10 @@ func cursorAdvancesTimeID(rowTime time.Time, rowID string, cursorTime time.Time,
 // ============================================================================
 
 func entWebhookEndpointToStore(e *ent.WebhookEndpoint) *store.WebhookEndpoint {
+	var boundAgentID string
+	if e.BoundAgentID != nil {
+		boundAgentID = e.BoundAgentID.String()
+	}
 	return &store.WebhookEndpoint{
 		ID:                  e.ID.String(),
 		ProjectID:           e.ProjectID.String(),
@@ -123,8 +128,12 @@ func entWebhookEndpointToStore(e *ent.WebhookEndpoint) *store.WebhookEndpoint {
 		OwnerPrincipalID:    e.OwnerPrincipalID,
 		OwnerCredentialKind: e.OwnerCredentialKind,
 		SecretVersion:       e.SecretVersion,
+		SecretRotatedAt:     e.SecretRotatedAt,
+		ConfigVersion:       e.ConfigVersion,
 		SignatureMode:       e.SignatureMode,
 		Status:              e.Status,
+		BoundAgentID:        boundAgentID,
+		BoundLifetime:       e.BoundLifetime,
 		CreatedBy:           e.CreatedBy,
 		LastReceivedAt:      e.LastReceivedAt,
 		ReceiveCount:        e.ReceiveCount,
@@ -156,6 +165,10 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 	if secretVersion <= 0 {
 		secretVersion = 1
 	}
+	configVersion := ep.ConfigVersion
+	if configVersion <= 0 {
+		configVersion = 1
+	}
 	sigMode := ep.SignatureMode
 	if sigMode == "" {
 		sigMode = store.WebhookSignatureModeScionV1
@@ -164,14 +177,22 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 	if status == "" {
 		status = store.WebhookEndpointStatusActive
 	}
-	now := time.Now().UTC()
+	var boundAgentUID *uuid.UUID
+	if ep.BoundAgentID != "" {
+		parsed, pErr := parseUUID(ep.BoundAgentID)
+		if pErr != nil {
+			return pErr
+		}
+		boundAgentUID = &parsed
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	createdAt := now
 	if !ep.CreatedAt.IsZero() {
-		createdAt = ep.CreatedAt.UTC()
+		createdAt = ep.CreatedAt.UTC().Truncate(time.Microsecond)
 	}
 	updatedAt := createdAt
 	if !ep.UpdatedAt.IsZero() {
-		updatedAt = ep.UpdatedAt.UTC()
+		updatedAt = ep.UpdatedAt.UTC().Truncate(time.Microsecond)
 	}
 
 	create := s.client.WebhookEndpoint.Create().
@@ -184,13 +205,21 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 		SetOwnerPrincipalID(ep.OwnerPrincipalID).
 		SetOwnerCredentialKind(ep.OwnerCredentialKind).
 		SetSecretVersion(secretVersion).
+		SetConfigVersion(configVersion).
 		SetSignatureMode(sigMode).
 		SetStatus(status).
+		SetBoundLifetime(ep.BoundLifetime).
 		SetReceiveCount(ep.ReceiveCount).
 		SetRejectCount(ep.RejectCount).
 		SetCreated(createdAt).
 		SetUpdated(updatedAt)
 
+	if boundAgentUID != nil {
+		create.SetBoundAgentID(*boundAgentUID)
+	}
+	if ep.SecretRotatedAt != nil {
+		create.SetSecretRotatedAt(ep.SecretRotatedAt.UTC().Truncate(time.Microsecond))
+	}
 	if ep.Description != "" {
 		create.SetDescription(ep.Description)
 	}
@@ -259,6 +288,24 @@ func (s *TriggerStore) ListWebhookEndpoints(ctx context.Context, filter store.We
 	if filter.OwnerPrincipalID != "" {
 		query.Where(webhookendpoint.OwnerPrincipalIDEQ(filter.OwnerPrincipalID))
 	}
+	if filter.BoundAgentID != "" {
+		bid, err := parseUUID(filter.BoundAgentID)
+		if err != nil {
+			return nil, err
+		}
+		query.Where(webhookendpoint.BoundAgentIDEQ(bid))
+	}
+	if filter.VisibleToAgentID != "" {
+		ownerPred := webhookendpoint.And(
+			webhookendpoint.OwnerPrincipalKindEQ(store.DelegationPrincipalAgent),
+			webhookendpoint.OwnerPrincipalIDEQ(filter.VisibleToAgentID),
+		)
+		if aid, err := uuid.Parse(filter.VisibleToAgentID); err == nil {
+			query.Where(webhookendpoint.Or(ownerPred, webhookendpoint.BoundAgentIDEQ(aid)))
+		} else {
+			query.Where(ownerPred)
+		}
+	}
 
 	var (
 		totalCount int
@@ -324,6 +371,95 @@ func (s *TriggerStore) CountWebhookEndpoints(ctx context.Context, projectID stri
 		return 0, err
 	}
 	return s.client.WebhookEndpoint.Query().Where(webhookendpoint.ProjectIDEQ(pid)).Count(ctx)
+}
+
+func (s *TriggerStore) CountBoundWebhookEndpoints(ctx context.Context, projectID, agentID string) (int, error) {
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	aid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	return s.client.WebhookEndpoint.Query().
+		Where(webhookendpoint.ProjectIDEQ(pid), webhookendpoint.BoundAgentIDEQ(aid)).
+		Count(ctx)
+}
+
+func (s *TriggerStore) UpdateWebhookEndpoint(ctx context.Context, ep *store.WebhookEndpoint, fields store.WebhookEndpointFieldMask) error {
+	if ep == nil || ep.ID == "" {
+		return store.ErrInvalidInput
+	}
+	uid, err := parseUUID(ep.ID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	u := s.client.WebhookEndpoint.UpdateOneID(uid).
+		AddConfigVersion(1).
+		SetUpdated(now)
+	if fields.Description {
+		u.SetDescription(ep.Description)
+	}
+	if fields.Status {
+		u.SetStatus(ep.Status)
+	}
+	if fields.Binding {
+		if ep.BoundAgentID == "" {
+			u.ClearBoundAgentID()
+		} else {
+			aid, pErr := parseUUID(ep.BoundAgentID)
+			if pErr != nil {
+				return pErr
+			}
+			u.SetBoundAgentID(aid)
+		}
+		u.SetBoundLifetime(ep.BoundLifetime)
+	}
+	updated, err := u.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	*ep = *entWebhookEndpointToStore(updated)
+	return nil
+}
+
+func (s *TriggerStore) RotateWebhookEndpointSecret(ctx context.Context, projectID, id string, nextVersion int, rotatedAt time.Time) (*store.WebhookEndpoint, error) {
+	pid, err := parseGetID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	if nextVersion < 2 {
+		return nil, store.ErrInvalidInput
+	}
+	ts := rotatedAt.UTC().Truncate(time.Microsecond)
+	n, err := s.client.WebhookEndpoint.Update().
+		Where(
+			webhookendpoint.IDEQ(uid),
+			webhookendpoint.ProjectIDEQ(pid),
+			webhookendpoint.SecretVersionEQ(nextVersion-1),
+		).
+		SetSecretVersion(nextVersion).
+		SetSecretRotatedAt(ts).
+		AddConfigVersion(1).
+		SetUpdated(ts).
+		Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		return nil, store.ErrNotFound
+	}
+	updated, err := s.client.WebhookEndpoint.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entWebhookEndpointToStore(updated), nil
 }
 
 func (s *TriggerStore) FlushWebhookEndpointCounters(ctx context.Context, id string, receiveDelta, rejectDelta int, lastReceivedAt *time.Time) error {
@@ -440,6 +576,249 @@ func (s *TriggerStore) DeleteWebhookEndpoint(ctx context.Context, projectID, id 
 		return nil, nil, err
 	}
 	return pausedTriggerIDs, deletedSecretKeys, nil
+}
+
+func (s *TriggerStore) DeleteWebhookEndpointForBoundAgent(ctx context.Context, projectID, id, boundAgentID string) ([]string, []string, []string, error) {
+	pid, err := parseGetID(projectID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	agentUID, err := parseGetID(boundAgentID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var (
+		deletedTriggerIDs []string
+		pausedTriggerIDs  []string
+		deletedSecretKeys []string
+	)
+	err = s.withClientTx(ctx, func(client *ent.Client) error {
+		if lErr := lockTriggerQuotaClient(ctx, client, pid.String()); lErr != nil {
+			return lErr
+		}
+		ep, getErr := client.WebhookEndpoint.Get(ctx, uid)
+		if getErr != nil {
+			return mapError(getErr)
+		}
+		if ep.ProjectID != pid || ep.BoundAgentID == nil || *ep.BoundAgentID != agentUID || ep.BoundLifetime != store.WebhookBoundLifetimeAgent {
+			return store.ErrNotFound
+		}
+
+		// 1. Partition dependent triggers on this endpoint:
+		//    - Triggers authored by the bound agent are deleted (Stage 2 §4.2).
+		//    - Triggers authored by anyone else are paused with source_deleted.
+		deps, qErr := client.Trigger.Query().
+			Where(
+				trigger.ProjectIDEQ(pid),
+				trigger.SourceKindEQ(store.TriggerSourceKindWebhook),
+				trigger.SourceIDEQ(uid.String()),
+			).
+			All(ctx)
+		if qErr != nil {
+			return qErr
+		}
+		var (
+			delIDs   []uuid.UUID
+			pauseIDs []uuid.UUID
+		)
+		for _, tr := range deps {
+			if tr.InitiatorPrincipalKind != nil && *tr.InitiatorPrincipalKind == store.DelegationPrincipalAgent &&
+				tr.InitiatorPrincipalID != nil && *tr.InitiatorPrincipalID == boundAgentID {
+				delIDs = append(delIDs, tr.ID)
+				deletedTriggerIDs = append(deletedTriggerIDs, tr.ID.String())
+			} else if tr.Status == store.TriggerStatusActive || tr.StatusReason == store.TriggerStatusReasonNone {
+				pauseIDs = append(pauseIDs, tr.ID)
+				pausedTriggerIDs = append(pausedTriggerIDs, tr.ID.String())
+			}
+		}
+		if len(delIDs) > 0 {
+			if _, dErr := client.Trigger.Delete().Where(trigger.IDIn(delIDs...)).Exec(ctx); dErr != nil {
+				return mapError(dErr)
+			}
+		}
+		if len(pauseIDs) > 0 {
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			if _, uErr := client.Trigger.Update().
+				Where(trigger.IDIn(pauseIDs...)).
+				SetStatus(store.TriggerStatusPaused).
+				SetStatusReason(store.TriggerStatusReasonSourceDeleted).
+				SetUpdated(now).
+				Save(ctx); uErr != nil {
+				return mapError(uErr)
+			}
+		}
+
+		// 2. Delete the endpoint's hub-scoped internal secret rows.
+		prefix := store.WebhookEndpointSecretKeyPrefix(pid.String(), uid.String())
+		secRows, sErr := client.Secret.Query().
+			Where(
+				secret.ScopeEQ(store.ScopeHub),
+				secret.SecretTypeEQ(secret.SecretTypeInternal),
+				secret.KeyHasPrefix(prefix),
+			).
+			Select(secret.FieldID, secret.FieldKey).
+			All(ctx)
+		if sErr != nil {
+			return sErr
+		}
+		var secIDs []uuid.UUID
+		for _, row := range secRows {
+			if strings.HasPrefix(row.Key, prefix) {
+				secIDs = append(secIDs, row.ID)
+				deletedSecretKeys = append(deletedSecretKeys, row.Key)
+			}
+		}
+		if len(secIDs) > 0 {
+			if _, dErr := client.Secret.Delete().Where(secret.IDIn(secIDs...)).Exec(ctx); dErr != nil {
+				return mapError(dErr)
+			}
+		}
+
+		// 3. Delete the endpoint row itself.
+		return mapError(client.WebhookEndpoint.DeleteOneID(uid).Exec(ctx))
+	})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return deletedTriggerIDs, pausedTriggerIDs, deletedSecretKeys, nil
+}
+
+func (s *TriggerStore) UnbindWebhookEndpointForAgent(ctx context.Context, projectID, id, boundAgentID string) (bool, error) {
+	pid, err := parseGetID(projectID)
+	if err != nil {
+		return false, err
+	}
+	uid, err := parseGetID(id)
+	if err != nil {
+		return false, err
+	}
+	agentUID, err := parseGetID(boundAgentID)
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	n, err := s.client.WebhookEndpoint.Update().
+		Where(
+			webhookendpoint.IDEQ(uid),
+			webhookendpoint.ProjectIDEQ(pid),
+			webhookendpoint.BoundAgentIDEQ(agentUID),
+			webhookendpoint.BoundLifetimeEQ(store.WebhookBoundLifetimePersistent),
+		).
+		ClearBoundAgentID().
+		SetBoundLifetime(store.WebhookBoundLifetimeNone).
+		AddConfigVersion(1).
+		SetUpdated(now).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
+// parseWebhookEndpointSecretKey parses "webhook_endpoint.<projectID>.<endpointID>.v<N>".
+func parseWebhookEndpointSecretKey(key string) (endpointID uuid.UUID, version int, ok bool) {
+	rest, found := strings.CutPrefix(key, "webhook_endpoint.")
+	if !found {
+		return uuid.Nil, 0, false
+	}
+	parts := strings.Split(rest, ".")
+	if len(parts) != 3 {
+		return uuid.Nil, 0, false
+	}
+	epUID, err := uuid.Parse(parts[1])
+	if err != nil {
+		return uuid.Nil, 0, false
+	}
+	verStr, hasV := strings.CutPrefix(parts[2], "v")
+	if !hasV || verStr == "" {
+		return uuid.Nil, 0, false
+	}
+	ver, err := strconv.Atoi(verStr)
+	if err != nil || ver < 1 {
+		return uuid.Nil, 0, false
+	}
+	return epUID, ver, true
+}
+
+func (s *TriggerStore) PurgeExpiredRotatedWebhookSecrets(ctx context.Context, now time.Time, graceWindow time.Duration) (int, error) {
+	now = now.UTC()
+	rows, err := s.client.Secret.Query().
+		Where(
+			secret.ScopeEQ(store.ScopeHub),
+			secret.SecretTypeEQ(secret.SecretTypeInternal),
+			secret.KeyHasPrefix("webhook_endpoint."),
+		).
+		Select(secret.FieldID, secret.FieldKey).
+		All(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+
+	type parsedRow struct {
+		secretID   uuid.UUID
+		endpointID uuid.UUID
+		version    int
+	}
+	parsed := make([]parsedRow, 0, len(rows))
+	epIDSet := make(map[uuid.UUID]struct{})
+	for _, r := range rows {
+		epUID, ver, ok := parseWebhookEndpointSecretKey(r.Key)
+		if !ok {
+			continue
+		}
+		parsed = append(parsed, parsedRow{secretID: r.ID, endpointID: epUID, version: ver})
+		epIDSet[epUID] = struct{}{}
+	}
+	if len(epIDSet) == 0 {
+		return 0, nil
+	}
+
+	epIDs := make([]uuid.UUID, 0, len(epIDSet))
+	for id := range epIDSet {
+		epIDs = append(epIDs, id)
+	}
+	eps, err := s.client.WebhookEndpoint.Query().
+		Where(webhookendpoint.IDIn(epIDs...)).
+		Select(webhookendpoint.FieldID, webhookendpoint.FieldSecretVersion, webhookendpoint.FieldSecretRotatedAt).
+		All(ctx)
+	if err != nil {
+		return 0, err
+	}
+	epByID := make(map[uuid.UUID]*ent.WebhookEndpoint, len(eps))
+	for _, ep := range eps {
+		epByID[ep.ID] = ep
+	}
+
+	var toDelete []uuid.UUID
+	for _, r := range parsed {
+		ep, ok := epByID[r.endpointID]
+		if !ok || r.version >= ep.SecretVersion {
+			continue
+		}
+		// Delete any version strictly older than secret_version - 1, or
+		// secret_version - 1 once the rotation grace window has elapsed.
+		if r.version < ep.SecretVersion-1 ||
+			ep.SecretRotatedAt == nil ||
+			now.After(ep.SecretRotatedAt.UTC().Add(graceWindow)) {
+			toDelete = append(toDelete, r.secretID)
+		}
+	}
+	if len(toDelete) == 0 {
+		return 0, nil
+	}
+	n, err := s.client.Secret.Delete().Where(secret.IDIn(toDelete...)).Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
 }
 
 // ============================================================================
@@ -1469,16 +1848,23 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 		query.Where(triggerevent.ReceivedAtGTE(filter.Since.UTC()))
 	}
 	if filter.VisibleToAgentID != "" {
-		epQ := s.client.WebhookEndpoint.Query().Where(
+		ownerPred := webhookendpoint.And(
 			webhookendpoint.OwnerPrincipalKindEQ(store.DelegationPrincipalAgent),
 			webhookendpoint.OwnerPrincipalIDEQ(filter.VisibleToAgentID),
 		)
+		agentUID, agentUIDErr := uuid.Parse(filter.VisibleToAgentID)
+		epQ := s.client.WebhookEndpoint.Query()
+		if agentUIDErr == nil {
+			epQ.Where(webhookendpoint.Or(ownerPred, webhookendpoint.BoundAgentIDEQ(agentUID)))
+		} else {
+			epQ.Where(ownerPred)
+		}
 		trQ := s.client.Trigger.Query().Where(triggerRecordedAuthorityIs(store.DelegationPrincipalAgent, filter.VisibleToAgentID))
 		if hasPID {
 			epQ.Where(webhookendpoint.ProjectIDEQ(pid))
 			trQ.Where(trigger.ProjectIDEQ(pid))
 		}
-		hasOwnedEPs, err := epQ.Exist(ctx)
+		hasVisibleEPs, err := epQ.Exist(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -1487,19 +1873,26 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 			return nil, err
 		}
 		var visPreds []predicate.TriggerEvent
-		if hasOwnedEPs {
+		if hasVisibleEPs {
 			agentID := filter.VisibleToAgentID
 			visPreds = append(visPreds, triggerevent.And(
 				triggerevent.SourceKindEQ(store.TriggerSourceKindWebhook),
 				predicate.TriggerEvent(func(sel *entsql.Selector) {
 					d := sel.Dialect()
 					ep := entsql.Dialect(d).Table(webhookendpoint.Table).As("ep")
+					ownerSQL := entsql.And(
+						entsql.EQ(ep.C(webhookendpoint.FieldOwnerPrincipalKind), store.DelegationPrincipalAgent),
+						entsql.EQ(ep.C(webhookendpoint.FieldOwnerPrincipalID), agentID),
+					)
+					epAccessPred := ownerSQL
+					if agentUIDErr == nil {
+						epAccessPred = entsql.Or(ownerSQL, entsql.EQ(ep.C(webhookendpoint.FieldBoundAgentID), agentUID))
+					}
 					conds := []*entsql.Predicate{
 						entsql.P(func(b *entsql.Builder) {
 							b.WriteString("CAST(").WriteString(ep.C(webhookendpoint.FieldID)).WriteString(" AS TEXT) = ").WriteString(sel.C(triggerevent.FieldSourceID))
 						}),
-						entsql.EQ(ep.C(webhookendpoint.FieldOwnerPrincipalKind), store.DelegationPrincipalAgent),
-						entsql.EQ(ep.C(webhookendpoint.FieldOwnerPrincipalID), agentID),
+						epAccessPred,
 					}
 					if hasPID {
 						conds = append(conds, entsql.EQ(ep.C(webhookendpoint.FieldProjectID), pid))

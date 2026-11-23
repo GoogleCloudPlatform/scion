@@ -40,6 +40,12 @@ type WebhookEndpointService interface {
 	// List returns webhook endpoints matching the filter criteria.
 	List(ctx context.Context, opts *ListWebhookEndpointsOptions) (*ListWebhookEndpointsResponse, error)
 
+	// Update updates a webhook endpoint's description, status, or agent binding.
+	Update(ctx context.Context, id string, req *UpdateWebhookEndpointRequest) (*WebhookEndpoint, error)
+
+	// RotateSecret rotates a webhook endpoint's signing secret, returning the new secret once.
+	RotateSecret(ctx context.Context, id string) (*WebhookEndpointRotated, error)
+
 	// Delete deletes a webhook endpoint and pauses its active dependent triggers.
 	Delete(ctx context.Context, id string) error
 }
@@ -126,25 +132,47 @@ type CreateWebhookEndpointRequest struct {
 	Name           string                             `json:"name"`
 	Description    string                             `json:"description,omitempty"`
 	SignatureMode  string                             `json:"signatureMode,omitempty"`
+	BoundAgentID   string                             `json:"boundAgentId,omitempty"`
+	BoundLifetime  string                             `json:"boundLifetime,omitempty"`
 	DefaultTrigger *WebhookEndpointDefaultTriggerSpec `json:"defaultTrigger,omitempty"`
+	Trigger        *WebhookEndpointDefaultTriggerSpec `json:"trigger,omitempty"`
+}
+
+// UpdateWebhookEndpointRequest is the client-side request for PATCH /webhook-endpoints/{id}.
+type UpdateWebhookEndpointRequest struct {
+	Description   *string `json:"description,omitempty"`
+	Status        *string `json:"status,omitempty"`
+	BoundAgentID  *string `json:"boundAgentId,omitempty"`
+	BoundLifetime *string `json:"boundLifetime,omitempty"`
+}
+
+// WebhookEndpointBoundAgent identifies the agent a webhook endpoint is bound to.
+type WebhookEndpointBoundAgent struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 // WebhookEndpoint represents a webhook endpoint returned by GET and LIST routes.
 type WebhookEndpoint struct {
-	ID             string     `json:"id"`
-	ProjectID      string     `json:"projectId"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description,omitempty"`
-	URL            string     `json:"url"`
-	SignatureMode  string     `json:"signatureMode"`
-	SecretVersion  int        `json:"secretVersion"`
-	Status         string     `json:"status"`
-	LastReceivedAt *time.Time `json:"lastReceivedAt,omitempty"`
-	ReceiveCount   int        `json:"receiveCount"`
-	RejectCount    int        `json:"rejectCount"`
-	CreatedBy      string     `json:"createdBy,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID              string                     `json:"id"`
+	ProjectID       string                     `json:"projectId"`
+	Name            string                     `json:"name"`
+	Description     string                     `json:"description,omitempty"`
+	URL             string                     `json:"url"`
+	SignatureMode   string                     `json:"signatureMode"`
+	SecretVersion   int                        `json:"secretVersion"`
+	SecretRotatedAt *time.Time                 `json:"secretRotatedAt,omitempty"`
+	ConfigVersion   int                        `json:"configVersion,omitempty"`
+	Status          string                     `json:"status"`
+	BoundAgentID    string                     `json:"boundAgentId,omitempty"`
+	BoundAgent      *WebhookEndpointBoundAgent `json:"boundAgent,omitempty"`
+	BoundLifetime   string                     `json:"boundLifetime,omitempty"`
+	LastReceivedAt  *time.Time                 `json:"lastReceivedAt,omitempty"`
+	ReceiveCount    int                        `json:"receiveCount"`
+	RejectCount     int                        `json:"rejectCount"`
+	CreatedBy       string                     `json:"createdBy,omitempty"`
+	CreatedAt       time.Time                  `json:"createdAt"`
+	UpdatedAt       time.Time                  `json:"updatedAt"`
 }
 
 // WebhookEndpointCreated is returned once when creating a webhook endpoint.
@@ -155,11 +183,19 @@ type WebhookEndpointCreated struct {
 	Trigger   *Trigger `json:"trigger,omitempty"`
 }
 
+// WebhookEndpointRotated is returned once when rotating a webhook endpoint's secret.
+type WebhookEndpointRotated struct {
+	WebhookEndpoint
+	Secret             string    `json:"secret"`
+	GraceWindowExpires time.Time `json:"graceWindowExpires"`
+}
+
 // ListWebhookEndpointsOptions configures webhook endpoint listing.
 type ListWebhookEndpointsOptions struct {
-	Name   string
-	Status string
-	Page   apiclient.PageOptions
+	Name         string
+	Status       string
+	BoundAgentID string
+	Page         apiclient.PageOptions
 }
 
 // ListWebhookEndpointsResponse is the response from listing webhook endpoints.
@@ -472,6 +508,9 @@ func (s *webhookEndpointService) List(ctx context.Context, opts *ListWebhookEndp
 		if opts.Status != "" {
 			query.Set("status", opts.Status)
 		}
+		if opts.BoundAgentID != "" {
+			query.Set("boundAgentId", opts.BoundAgentID)
+		}
 		opts.Page.ToQuery(query)
 	}
 	resp, err := s.c.getWithQuery(ctx, s.basePath(), query, nil)
@@ -479,6 +518,22 @@ func (s *webhookEndpointService) List(ctx context.Context, opts *ListWebhookEndp
 		return nil, err
 	}
 	return apiclient.DecodeRequired[ListWebhookEndpointsResponse](resp)
+}
+
+func (s *webhookEndpointService) Update(ctx context.Context, id string, req *UpdateWebhookEndpointRequest) (*WebhookEndpoint, error) {
+	resp, err := s.c.patch(ctx, s.basePath()+"/"+url.PathEscape(id), req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[WebhookEndpoint](resp)
+}
+
+func (s *webhookEndpointService) RotateSecret(ctx context.Context, id string) (*WebhookEndpointRotated, error) {
+	resp, err := s.c.post(ctx, s.basePath()+"/"+url.PathEscape(id)+"/rotate-secret", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[WebhookEndpointRotated](resp)
 }
 
 func (s *webhookEndpointService) Delete(ctx context.Context, id string) error {

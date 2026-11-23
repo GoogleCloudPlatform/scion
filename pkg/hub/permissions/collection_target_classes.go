@@ -270,7 +270,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"trigger.create": {TargetClassKindProjectScoped}, "trigger.delete": {},
 	"trigger.update":        {},
 	"webhook_endpoint.read": {}, "webhook_endpoint.list": {TargetClassKindProjectScoped},
-	"webhook_endpoint.create": {TargetClassKindProjectScoped}, "webhook_endpoint.delete": {},
+	"webhook_endpoint.create": {TargetClassKindProjectScoped}, "webhook_endpoint.update": {}, "webhook_endpoint.delete": {},
 
 	// project.secret_read — agent self-service, no CapabilityKind, always
 	// an existing project's secret.

@@ -629,6 +629,7 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/project_deletion_service.go", Function: "cascadeSecurityState", Symbol: "DeleteProjectVisitorRulesByProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/project_deletion_service.go", Function: "Delete", Symbol: "DeleteProject", OperationID: "project.lifecycle.delete"},
 	{File: "pkg/hub/handlers_webhook_endpoints.go", Function: "createWebhookEndpoint", Symbol: "CreateSecret", OperationID: "webhookendpoint.create"},
+	{File: "pkg/hub/handlers_webhook_endpoints.go", Function: "rotateWebhookEndpointSecret", Symbol: "CreateSecret", OperationID: "webhookendpoint.rotatesecret"},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 	{File: "pkg/hub/handlers_projects_core.go", Function: "migrateProjectSlug", Symbol: "UpdateGroup", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Project slug migration, updates group names", Scope: "pkg/hub/handlers_projects_core.go"}},
 

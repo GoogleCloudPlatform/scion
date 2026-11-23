@@ -63,10 +63,20 @@ func (WebhookEndpoint) Fields() []ent.Field {
 			Immutable(),
 		field.Int("secret_version").
 			Default(1),
+		field.Time("secret_rotated_at").
+			Optional().
+			Nillable(),
+		field.Int("config_version").
+			Default(1),
 		field.String("signature_mode").
 			Default("scion_v1"),
 		field.String("status").
 			Default("active"),
+		field.UUID("bound_agent_id", uuid.UUID{}).
+			Optional().
+			Nillable(),
+		field.String("bound_lifetime").
+			Default(""),
 		field.String("created_by").
 			Optional(),
 		field.Time("last_received_at").
@@ -90,6 +100,7 @@ func (WebhookEndpoint) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("project_id", "name").
 			Unique(),
+		index.Fields("project_id", "bound_agent_id"),
 	}
 }
 

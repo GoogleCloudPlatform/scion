@@ -510,7 +510,17 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	delivery := r.Header.Get(HeaderDelivery)
 	eventHdr := r.Header.Get(HeaderEvent)
 	subjectHdr := r.Header.Get(HeaderSubject)
-	if len(sigVals) != 1 || !VerifyScionV1Signature(secret, now, sigVals[0], delivery, eventHdr, subjectHdr, body) {
+	verified := len(sigVals) == 1 && VerifyScionV1Signature(secret, now, sigVals[0], delivery, eventHdr, subjectHdr, body)
+	// Stage 2 §4.4 / S22: during the 24h rotation grace window, fall back to
+	// verifying against secret version n-1 if the current version did not match.
+	if !verified && len(sigVals) == 1 && ep.SecretVersion > 1 && ep.SecretRotatedAt != nil &&
+		!now.After(ep.SecretRotatedAt.UTC().Add(store.WebhookSecretRotationGraceWindow)) {
+		prevSecret, prevErr := h.cache.LookupSecret(ctx, h.loadSecret, ep.ProjectID, ep.ID, ep.SecretVersion-1)
+		if prevErr == nil && VerifyScionV1Signature(prevSecret, now, sigVals[0], delivery, eventHdr, subjectHdr, body) {
+			verified = true
+		}
+	}
+	if !verified {
 		h.rejectedBadSig.Add(1)
 		h.recordMetric(IngressResultRejectedSignature)
 		h.counters.RecordRejected(ep.ID)

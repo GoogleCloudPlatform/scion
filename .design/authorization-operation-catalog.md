@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 435
+**Operations:** 437
 
 ## Table of Contents
 
@@ -75,6 +75,8 @@
 - [webhookendpoint.list](#webhookendpointlist) — List webhook endpoints in a project. Agent callers see only webhook endpoints they own (scope=caller)
 - [webhookendpoint.read](#webhookendpointread) — Read a webhook endpoint in a project (never returns the signing secret). An agent caller reading another principal's endpoint receives the same 404 as not-found
 - [webhookendpoint.create](#webhookendpointcreate) — Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row. When defaultTrigger is supplied, also creates a default message trigger in the same transaction under trigger.create, webhook_endpoint.read, and message-target authoring checks
+- [webhookendpoint.update](#webhookendpointupdate) — Update a webhook endpoint's description, status (active/disabled), or agent binding. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404
+- [webhookendpoint.rotatesecret](#webhookendpointrotatesecret) — Rotate a webhook endpoint's HMAC signing secret, writing version n+1 before bumping secret_version and keeping version n valid for a 24h grace window. Returns the new secret once. Agent callers may rotate only endpoints they own
 - [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
 - [trigger.list](#triggerlist) — List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)
 - [trigger.read](#triggerread) — Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found
@@ -3291,6 +3293,88 @@
 - `pkg/hub:TestTriggersAuthzMatrix`
 - `pkg/hub:TestWebhookEndpointCRUD_SecretLifecycleAndCascadePause`
 - `pkg/hub:TestWebhookEndpointCreate_DefaultTrigger`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## webhookendpoint.update
+
+**Domain:** webhookendpoint
+
+**Description:** Update a webhook endpoint's description, status (active/disabled), or agent binding. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/projects/{projectId}/webhook-endpoints/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `webhook_endpoint.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `webhook_endpoint_update`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** endpoint_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestWebhookEndpointUpdateAndDisable`
+- `pkg/hub:TestWebhookEndpointBoundAgentAccess`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## webhookendpoint.rotatesecret
+
+**Domain:** webhookendpoint
+
+**Description:** Rotate a webhook endpoint's HMAC signing secret, writing version n+1 before bumping secret_version and keeping version n valid for a 24h grace window. Returns the new secret once. Agent callers may rotate only endpoints they own
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/webhook-endpoints/{id}/rotate-secret` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `webhook_endpoint.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `webhook_endpoint_rotate_secret`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** endpoint_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestWebhookEndpointSecretRotation_GraceWindowAndMaintenance`
+- `pkg/hub:TestWebhookEndpointBoundAgentAccess`
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
