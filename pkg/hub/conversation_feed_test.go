@@ -939,6 +939,17 @@ func TestConversationWatch_DevUserDMAuthzParity(t *testing.T) {
 	}
 	require.NoError(t, s.CreateMessage(ctx, reply))
 
+	dispatchConv := func(rec *httptest.ResponseRecorder, req *http.Request) {
+		switch req.URL.Path {
+		case "/api/v1/conversations":
+			srv.handleListConversations(rec, req)
+		case "/api/v1/conversations/resolve":
+			srv.handleConversationResolve(rec, req)
+		default:
+			srv.handleConversationRoutes(rec, req)
+		}
+	}
+
 	callAsDev := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		devIdent := NewDevUser(DevUserConfig{})
@@ -946,7 +957,7 @@ func TestConversationWatch_DevUserDMAuthzParity(t *testing.T) {
 		reqCtx = contextWithCredentialContext(reqCtx, CredentialContext{Kind: CredentialKindDev, Type: "dev"})
 		req = req.WithContext(reqCtx)
 		rec := httptest.NewRecorder()
-		srv.handleConversationRoutes(rec, req)
+		dispatchConv(rec, req)
 		return rec
 	}
 
@@ -971,7 +982,7 @@ func TestConversationWatch_DevUserDMAuthzParity(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req = req.WithContext(agentContextWithScopes(DevUserID, projID, []AgentTokenScope{ScopeProjectRead}))
 		rec := httptest.NewRecorder()
-		srv.handleConversationRoutes(rec, req)
+		dispatchConv(rec, req)
 		return rec
 	}
 	msgAgent := callAsCollidingAgent("/api/v1/conversations/" + dmDev.ID + "/messages")
