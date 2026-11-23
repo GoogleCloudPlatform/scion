@@ -665,6 +665,111 @@ func (b *boundedBuffer) finalizeJSON() (string, []byte) {
 	return agentcontrol.ExecOutputCaptured, compacted.Bytes()
 }
 
+// tailRing keeps the last cap bytes written across concurrent stdout/stderr
+// pipes, allocating lazily up to cap bytes.
+type tailRing struct {
+	mu    sync.Mutex
+	cap   int
+	buf   []byte
+	head  int
+	total int64
+}
+
+func (r *tailRing) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.total += int64(len(p))
+	if len(p) == 0 || r.cap <= 0 {
+		return len(p), nil
+	}
+	if len(p) >= r.cap {
+		if len(r.buf) < r.cap {
+			r.buf = make([]byte, r.cap)
+		}
+		copy(r.buf, p[len(p)-r.cap:])
+		r.head = 0
+		return len(p), nil
+	}
+	if len(r.buf) < r.cap {
+		need := len(r.buf) + len(p)
+		if need <= r.cap {
+			if cap(r.buf) < need {
+				newCap := cap(r.buf) * 2
+				if newCap < need {
+					newCap = need
+				}
+				if newCap > r.cap {
+					newCap = r.cap
+				}
+				grown := make([]byte, len(r.buf), newCap)
+				copy(grown, r.buf)
+				r.buf = grown
+			}
+			r.buf = append(r.buf, p...)
+			return len(p), nil
+		}
+		// Transition from linear buffer to full ring.
+		full := make([]byte, r.cap)
+		keep := r.cap - len(p)
+		copy(full, r.buf[len(r.buf)-keep:])
+		copy(full[keep:], p)
+		r.buf = full
+		r.head = 0
+		return len(p), nil
+	}
+	first := min(len(p), r.cap-r.head)
+	copy(r.buf[r.head:], p[:first])
+	if first < len(p) {
+		copy(r.buf[0:], p[first:])
+	}
+	r.head = (r.head + len(p)) % r.cap
+	return len(p), nil
+}
+
+func (r *tailRing) totalBytes() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.total
+}
+
+func (r *tailRing) finalizeTail() (string, []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.total == 0 {
+		return agentcontrol.ExecOutputEmpty, nil
+	}
+	truncated := r.total > int64(r.cap)
+	var out []byte
+	if !truncated {
+		out = append([]byte(nil), r.buf...)
+	} else {
+		out = make([]byte, r.cap)
+		copy(out, r.buf[r.head:])
+		copy(out[r.cap-r.head:], r.buf[:r.head])
+		// Advance past any UTF-8 continuation bytes left from a split rune.
+		for skipped := 0; skipped < utf8.UTFMax-1 && len(out) > 0 && !utf8.RuneStart(out[0]); skipped++ {
+			out = out[1:]
+		}
+	}
+	if !utf8.Valid(out) {
+		out = bytes.ToValidUTF8(out, []byte("\uFFFD"))
+	}
+	if len(out) > r.cap {
+		truncated = true
+		out = out[len(out)-r.cap:]
+		for skipped := 0; skipped < utf8.UTFMax-1 && len(out) > 0 && !utf8.RuneStart(out[0]); skipped++ {
+			out = out[1:]
+		}
+	}
+	if len(out) == 0 {
+		return agentcontrol.ExecOutputEmpty, nil
+	}
+	if truncated {
+		return agentcontrol.ExecOutputTruncated, out
+	}
+	return agentcontrol.ExecOutputCaptured, out
+}
+
 // ExecEnabled reports whether sciontool should register the exec routes:
 // the platform runs them (Linux) and the agent was launched with
 // hub.exec_schedules in SCION_HUB_EXPERIMENTS (sent by the hub only while

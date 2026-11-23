@@ -56,6 +56,7 @@ type CreateScheduleRequest struct {
 	AgentID        string   `json:"agentId,omitempty"`
 	Command        []string `json:"command,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	CaptureOutput  string   `json:"captureOutput,omitempty"`
 }
 
 // UpdateScheduleRequest is the API request for updating a recurring schedule.
@@ -74,6 +75,7 @@ type UpdateScheduleRequest struct {
 	AgentName      string   `json:"agentName,omitempty"`
 	Command        []string `json:"command,omitempty"`
 	TimeoutSeconds *int     `json:"timeoutSeconds,omitempty"`
+	CaptureOutput  *string  `json:"captureOutput,omitempty"`
 }
 
 // ScheduleListScopeCaller indicates that a list response is filtered to rows
@@ -274,8 +276,8 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		s.createExecSchedule(w, r, projectID, &req)
 		return
 	}
-	if req.AgentID != "" || req.Command != nil || req.TimeoutSeconds != 0 {
-		ValidationError(w, "agentId, command and timeoutSeconds apply to exec schedules only", nil)
+	if req.AgentID != "" || req.Command != nil || req.TimeoutSeconds != 0 || req.CaptureOutput != "" {
+		ValidationError(w, "agentId, command, timeoutSeconds and captureOutput apply to exec schedules only", nil)
 		return
 	}
 	if req.Wake && req.EventType != "message" {
@@ -575,7 +577,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	if req.EventType != "" {
 		effectiveEventType = req.EventType
 	}
-	hasExecFields := req.AgentID != "" || req.AgentName != "" || req.Command != nil || req.TimeoutSeconds != nil
+	hasExecFields := req.AgentID != "" || req.AgentName != "" || req.Command != nil || req.TimeoutSeconds != nil || req.CaptureOutput != nil
 	isExecRow := originalEventType == scheduledEventTypeExec || effectiveEventType == scheduledEventTypeExec
 	if isExecRow && !s.execSchedulesEnabled() {
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", scheduledEventTypeExec, s.supportedScheduledEventTypes()), nil)
@@ -586,7 +588,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 	if effectiveEventType != scheduledEventTypeExec && hasExecFields {
-		ValidationError(w, "agentId, agentName, command and timeoutSeconds apply to exec schedules only", nil)
+		ValidationError(w, "agentId, agentName, command, timeoutSeconds and captureOutput apply to exec schedules only", nil)
 		return
 	}
 	// Tombstone a caller-supplied

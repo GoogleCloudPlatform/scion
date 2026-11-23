@@ -39,6 +39,7 @@ type linuxExec struct {
 	tok     *procreap.Token
 	out     *countingDiscard
 	jsonBuf *boundedBuffer
+	tailBuf *tailRing
 	spec    execSpec
 	started time.Time
 	// exited is closed when the main process has exited; it is not reaped
@@ -67,15 +68,21 @@ func startExec(spec execSpec) (execProcess, error) {
 		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
 	}
 	var jsonBuf *boundedBuffer
-	if spec.capture == agentcontrol.ExecCaptureJSON {
+	var tailBuf *tailRing
+	switch spec.capture {
+	case agentcontrol.ExecCaptureJSON:
 		jsonBuf = &boundedBuffer{cap: agentcontrol.MaxExecCaptureBytes}
 		cmd.Stdout = jsonBuf
 		cmd.Stderr = out
+	case agentcontrol.ExecCaptureTail:
+		tailBuf = &tailRing{cap: agentcontrol.MaxExecCaptureBytes}
+		cmd.Stdout = tailBuf
+		cmd.Stderr = tailBuf
 	}
 	if spec.drop {
 		cmd.SysProcAttr.Credential = suppgroups.Credential(uint32(spec.uid), uint32(spec.gid))
 	}
-	p := &linuxExec{cmd: cmd, out: out, jsonBuf: jsonBuf, spec: spec, exited: make(chan struct{})}
+	p := &linuxExec{cmd: cmd, out: out, jsonBuf: jsonBuf, tailBuf: tailBuf, spec: spec, exited: make(chan struct{})}
 	// sciontool init is PID 1 and reaps orphans; registering the main
 	// process inside the gate (as the PTY code does) leaves it to wait, so
 	// the reaper never reaps it while its group is being signalled.
@@ -145,6 +152,9 @@ func (p *linuxExec) wait() execFinal {
 	if p.jsonBuf != nil {
 		outputBytes += p.jsonBuf.n
 		f.outputStatus, f.output = p.jsonBuf.finalizeJSON()
+	} else if p.tailBuf != nil {
+		outputBytes = p.tailBuf.totalBytes()
+		f.outputStatus, f.output = p.tailBuf.finalizeTail()
 	}
 	f.outputBytes = outputBytes
 	switch {

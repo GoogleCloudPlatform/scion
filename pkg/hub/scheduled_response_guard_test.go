@@ -376,6 +376,7 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 				{"retarget-own-agent-with-command", map[string]any{"agentId": ownAgent.ID, "command": []string{"true"}}},
 				{"retarget-own-agent-via-payload", map[string]any{"payload": `{"agentId":"` + ownAgent.ID + `","command":["true"]}`}},
 				{"patch-timeout", map[string]any{"timeoutSeconds": 120}},
+				{"patch-capture-output", map[string]any{"captureOutput": "tail"}},
 			}
 			basePath := "/api/v1/projects/" + f.proj.ID + "/schedules"
 			for _, tr := range transitions {

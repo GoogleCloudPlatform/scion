@@ -326,3 +326,208 @@ func (l *captureLogWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+// TestScheduledExecCapture_RecurringScheduleAuthorityAndTail verifies A11:
+// creating a recurring exec schedule with captureOutput:"tail" and PATCHing
+// captureOutput requires live agent.attach (same authority as command changes)
+// and bumps AuthorizationRevision.
+func TestScheduledExecCapture_RecurringScheduleAuthorityAndTail(t *testing.T) {
+	f := execAuthoringFixture(t)
+	ctx := context.Background()
+	schedURL := "/api/v1/projects/" + f.proj.ID + "/schedules"
+	owner := authUser(f.owner)
+
+	// Non-exec schedule rejects captureOutput convenience field.
+	recMsg := requestAsIdentity(t, f.srv, owner, http.MethodPost, schedURL, map[string]any{
+		"name":          "msg-no-cap",
+		"cronExpr":      "0 * * * *",
+		"eventType":     "message",
+		"agentName":     f.sibling.Slug,
+		"message":       "hi",
+		"captureOutput": "tail",
+	})
+	assert.Equal(t, http.StatusBadRequest, recMsg.Code, recMsg.Body.String())
+
+	// Create recurring exec schedule with captureOutput:"tail".
+	recCreate := requestAsIdentity(t, f.srv, owner, http.MethodPost, schedURL, map[string]any{
+		"name":          "exec-tail-sched",
+		"cronExpr":      "0 * * * *",
+		"eventType":     "exec",
+		"agentId":       f.sibling.ID,
+		"command":       []string{"sh", "-c", "echo hi"},
+		"captureOutput": "tail",
+	})
+	require.Equal(t, http.StatusCreated, recCreate.Code, recCreate.Body.String())
+	var created struct {
+		ID                    string `json:"id"`
+		Payload               string `json:"payload"`
+		AuthorizationRevision int    `json:"authorizationRevision"`
+	}
+	require.NoError(t, json.Unmarshal(recCreate.Body.Bytes(), &created))
+	assert.Equal(t, 1, created.AuthorizationRevision)
+	assert.Contains(t, created.Payload, `"captureOutput":"tail"`)
+
+	// Non-attach reader sees captureOutput in redactedExecPayload, without argv.
+	reader := setupNonAdminUser(t, f.store, []string{"scheduled_event.read", "scheduled_event.list", "scheduled_event.update"})
+	recRed := requestAsIdentity(t, f.srv, reader, http.MethodGet, schedURL+"/"+created.ID, nil)
+	require.Equal(t, http.StatusOK, recRed.Code, recRed.Body.String())
+	assert.Contains(t, recRed.Body.String(), `\"captureOutput\":\"tail\"`)
+	assert.Contains(t, recRed.Body.String(), `\"commandRedacted\":true`)
+
+	// Non-attach reader cannot PATCH captureOutput.
+	recDenied := requestAsIdentity(t, f.srv, reader, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
+		"captureOutput": "json",
+	})
+	assert.GreaterOrEqual(t, recDenied.Code, http.StatusBadRequest)
+	afterDenied, err := f.store.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, afterDenied.AuthorizationRevision)
+
+	// Attach holder PATCHing captureOutput tail -> json bumps AuthorizationRevision.
+	recPatch1 := requestAsIdentity(t, f.srv, owner, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
+		"captureOutput": "json",
+	})
+	require.Equal(t, http.StatusOK, recPatch1.Code, recPatch1.Body.String())
+	after1, err := f.store.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, after1.AuthorizationRevision)
+	assert.Contains(t, after1.Payload, `"captureOutput":"json"`)
+
+	// PATCHing captureOutput to "none" clears it and bumps AuthorizationRevision again.
+	recPatch2 := requestAsIdentity(t, f.srv, owner, http.MethodPatch, schedURL+"/"+created.ID, map[string]any{
+		"captureOutput": "none",
+	})
+	require.Equal(t, http.StatusOK, recPatch2.Code, recPatch2.Body.String())
+	after2, err := f.store.GetSchedule(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, after2.AuthorizationRevision)
+	assert.NotContains(t, after2.Payload, "captureOutput")
+}
+
+// TestScheduledExecCapture_Abandon404AndSweeper verifies A12 (concurrent
+// finishers CAS winner only), A13 (abandon / 404 -> output_status=lost, no
+// output row), and sweeper recovery of tail output.
+func TestScheduledExecCapture_Abandon404AndSweeper(t *testing.T) {
+	t.Run("abandon past lease records lost with no output row", func(t *testing.T) {
+		f := newExecRouteFixture(t)
+		ctx := context.Background()
+		firedAt := time.Now().Add(-10 * time.Minute)
+		evt := withSessionRevision(store.ScheduledEvent{
+			ID: uuid.NewString(), ProjectID: f.launched.ProjectID, EventType: scheduledEventTypeExec,
+			FireAt: firedAt, Payload: `{"agentId":"` + f.launched.ID + `","command":["true"],"captureOutput":"tail"}`,
+			Status: store.ScheduledEventPending, CreatedBy: f.launched.OwnerID,
+		}, f.launched.OwnerID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		require.NoError(t, f.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFired, &firedAt, ""))
+
+		run := store.ScheduledExecRun{
+			EventID: evt.ID, ProjectID: f.launched.ProjectID, TargetAgentID: f.launched.ID,
+			CommandSHA256: agentcontrol.ExecArgvDigest([]string{"true"}), Argc: 1, TimeoutSeconds: 10,
+			StartedAt: firedAt, NotAfter: firedAt.Add(time.Minute), LeaseUntil: firedAt.Add(2 * time.Minute),
+			Outcome: store.ScheduledExecOutcomeRunning, CaptureMode: agentcontrol.ExecCaptureTail, LaunchID: f.launched.RunID,
+		}
+		require.NoError(t, f.store.CreateScheduledExecRun(ctx, &run))
+
+		f.srv.sweepScheduledExecRuns(ctx)
+
+		got := f.getRun(t, evt.ID)
+		assert.Equal(t, store.ScheduledExecOutcomeAbandoned, got.Outcome)
+		assert.Equal(t, agentcontrol.ExecOutputLost, got.OutputStatus)
+		_, err := f.store.GetScheduledExecRunOutput(ctx, evt.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		// /output returns 200 with outputStatus=lost and no output field for attach holder.
+		rec := requestAsIdentity(t, f.srv, f.owner, http.MethodGet,
+			"/api/v1/projects/"+f.launched.ProjectID+"/scheduled-events/"+evt.ID+"/output", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ScheduledExecOutputResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, agentcontrol.ExecCaptureTail, resp.CaptureMode)
+		assert.Equal(t, agentcontrol.ExecOutputLost, resp.OutputStatus)
+		assert.Nil(t, resp.Output)
+	})
+
+	t.Run("404 while running records abandoned and lost", func(t *testing.T) {
+		f := newExecRouteFixture(t)
+		f.startAgent(t) // fresh sciontool knows nothing about the run -> 404 unknown
+		ctx := context.Background()
+		firedAt := time.Now().Add(-time.Minute)
+		evt := withSessionRevision(store.ScheduledEvent{
+			ID: uuid.NewString(), ProjectID: f.launched.ProjectID, EventType: scheduledEventTypeExec,
+			FireAt: firedAt, Payload: `{"agentId":"` + f.launched.ID + `","command":["true"],"captureOutput":"json"}`,
+			Status: store.ScheduledEventPending, CreatedBy: f.launched.OwnerID,
+		}, f.launched.OwnerID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		require.NoError(t, f.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFired, &firedAt, ""))
+
+		run := store.ScheduledExecRun{
+			EventID: evt.ID, ProjectID: f.launched.ProjectID, TargetAgentID: f.launched.ID,
+			CommandSHA256: agentcontrol.ExecArgvDigest([]string{"true"}), Argc: 1, TimeoutSeconds: 60,
+			StartedAt: firedAt, NotAfter: firedAt.Add(time.Minute), LeaseUntil: time.Now().Add(5 * time.Minute),
+			Outcome: store.ScheduledExecOutcomeRunning, CaptureMode: agentcontrol.ExecCaptureJSON, LaunchID: f.launched.RunID,
+		}
+		require.NoError(t, f.store.CreateScheduledExecRun(ctx, &run))
+
+		f.srv.sweepScheduledExecRuns(ctx)
+
+		got := f.getRun(t, evt.ID)
+		assert.Equal(t, store.ScheduledExecOutcomeAbandoned, got.Outcome)
+		assert.Equal(t, agentcontrol.ExecOutputLost, got.OutputStatus)
+		_, err := f.store.GetScheduledExecRunOutput(ctx, evt.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("concurrent finishers CAS winner writes output and loser writes nothing", func(t *testing.T) {
+		f := newExecRouteFixture(t)
+		ctx := context.Background()
+		firedAt := time.Now().Add(-time.Minute)
+		evt := withSessionRevision(store.ScheduledEvent{
+			ID: uuid.NewString(), ProjectID: f.launched.ProjectID, EventType: scheduledEventTypeExec,
+			FireAt: firedAt, Payload: `{"agentId":"` + f.launched.ID + `","command":["true"],"captureOutput":"tail"}`,
+			Status: store.ScheduledEventPending, CreatedBy: f.launched.OwnerID,
+		}, f.launched.OwnerID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		require.NoError(t, f.store.UpdateScheduledEventStatus(ctx, evt.ID, store.ScheduledEventFired, &firedAt, ""))
+
+		run := store.ScheduledExecRun{
+			EventID: evt.ID, ProjectID: f.launched.ProjectID, TargetAgentID: f.launched.ID,
+			CommandSHA256: agentcontrol.ExecArgvDigest([]string{"true"}), Argc: 1, TimeoutSeconds: 60,
+			StartedAt: firedAt, NotAfter: firedAt.Add(time.Minute), LeaseUntil: time.Now().Add(5 * time.Minute),
+			Outcome: store.ScheduledExecOutcomeRunning, CaptureMode: agentcontrol.ExecCaptureTail, LaunchID: f.launched.RunID,
+		}
+		require.NoError(t, f.store.CreateScheduledExecRun(ctx, &run))
+
+		resA := &agentcontrol.ExecResult{
+			State: agentcontrol.ExecStateFinished, Outcome: agentcontrol.ExecOutcomeOK,
+			OutputStatus: agentcontrol.ExecOutputCaptured, Output: []byte("from-tracker"),
+		}
+		resB := &agentcontrol.ExecResult{
+			State: agentcontrol.ExecStateFinished, Outcome: agentcontrol.ExecOutcomeOK,
+			OutputStatus: agentcontrol.ExecOutputCaptured, Output: []byte("from-sweeper"),
+		}
+		var wg sync.WaitGroup
+		var wonA, wonB bool
+		var errA, errB error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			wonA, errA = f.srv.finishScheduledExecRun(ctx, run, store.ScheduledExecOutcomeOK, resA, "", "")
+		}()
+		go func() {
+			defer wg.Done()
+			wonB, errB = f.srv.finishScheduledExecRun(ctx, run, store.ScheduledExecOutcomeOK, resB, "", "")
+		}()
+		wg.Wait()
+		require.NoError(t, errA)
+		require.NoError(t, errB)
+		assert.True(t, wonA != wonB, "exactly one finisher must win CAS (wonA=%v, wonB=%v)", wonA, wonB)
+
+		gotOut, err := f.store.GetScheduledExecRunOutput(ctx, evt.ID)
+		require.NoError(t, err)
+		if wonA {
+			assert.Equal(t, "from-tracker", string(gotOut))
+		} else {
+			assert.Equal(t, "from-sweeper", string(gotOut))
+		}
+	})
+}

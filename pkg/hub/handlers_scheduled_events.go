@@ -381,8 +381,8 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		s.createScheduledExecEvent(w, r, projectID, &req)
 		return
 	}
-	if len(req.Command) > 0 || req.TimeoutSeconds != 0 {
-		ValidationError(w, "command and timeoutSeconds apply to exec events only", nil)
+	if len(req.Command) > 0 || req.TimeoutSeconds != 0 || req.CaptureOutput != "" {
+		ValidationError(w, "command, timeoutSeconds and captureOutput apply to exec events only", nil)
 		return
 	}
 	if req.Wake && req.EventType != "message" {

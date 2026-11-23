@@ -300,3 +300,140 @@ func TestExecLinux_JSONCapture(t *testing.T) {
 	var emptyResp agentcontrol.ExecResponse
 	_ = json.Unmarshal([]byte(`{"state":"running"}`), &emptyResp)
 }
+
+// TestTailRing_BoundsAndUTF8 verifies A5: tailRing keeps the last cap bytes,
+// trims split UTF-8 runes at the start boundary, keeps invalid UTF-8 within
+// cap, and is safe under concurrent stdout/stderr writes.
+func TestTailRing_BoundsAndUTF8(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		r := &tailRing{cap: 16}
+		st, out := r.finalizeTail()
+		if st != agentcontrol.ExecOutputEmpty || out != nil {
+			t.Fatalf("empty: got %q %v", st, out)
+		}
+	})
+
+	t.Run("under cap captured", func(t *testing.T) {
+		r := &tailRing{cap: 16}
+		_, _ = r.Write([]byte("hello "))
+		_, _ = r.Write([]byte("world"))
+		st, out := r.finalizeTail()
+		if st != agentcontrol.ExecOutputCaptured || string(out) != "hello world" {
+			t.Fatalf("got %q %q", st, out)
+		}
+	})
+
+	t.Run("utf8 rune boundary trim on truncation", func(t *testing.T) {
+		// "é" is 2 bytes (0xC3 0xA9), "€" is 3 bytes (0xE2 0x82 0xAC).
+		// Write "aa€bb" (7 bytes) into cap=4 -> last 4 bytes are [0x82, 0xAC, 'b', 'b'].
+		// Trimming leading continuation bytes yields "bb" (valid UTF-8).
+		r := &tailRing{cap: 4}
+		_, _ = r.Write([]byte("aa€bb"))
+		st, out := r.finalizeTail()
+		if st != agentcontrol.ExecOutputTruncated || string(out) != "bb" {
+			t.Fatalf("got %q %q, want truncated %q", st, out, "bb")
+		}
+	})
+
+	t.Run("invalid binary bytes stay within 64KiB and valid utf8", func(t *testing.T) {
+		r := &tailRing{cap: agentcontrol.MaxExecCaptureBytes}
+		// Alternating valid ASCII and invalid 0xFF bytes so each invalid byte
+		// expands to 3-byte U+FFFD individually.
+		bad := bytes.Repeat([]byte{'a', 0xff}, agentcontrol.MaxExecCaptureBytes)
+		_, _ = r.Write(bad)
+		st, out := r.finalizeTail()
+		if st != agentcontrol.ExecOutputTruncated {
+			t.Fatalf("status = %q, want truncated", st)
+		}
+		if len(out) == 0 || len(out) > agentcontrol.MaxExecCaptureBytes {
+			t.Fatalf("len(out) = %d, want 1..%d", len(out), agentcontrol.MaxExecCaptureBytes)
+		}
+		// Must round-trip through ParseExecStatusAnswer cleanly.
+		encoded, err := json.Marshal(string(out))
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, dur, n := 0, int64(1), r.totalBytes()
+		wire, err := json.Marshal(agentcontrol.ExecResponse{
+			State:        agentcontrol.ExecStateFinished,
+			Outcome:      agentcontrol.ExecOutcomeOK,
+			ExitCode:     &code,
+			DurationMS:   &dur,
+			OutputBytes:  &n,
+			OutputStatus: st,
+			Output:       json.RawMessage(encoded),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := agentcontrol.ParseExecStatusAnswer(http.StatusOK, wire, agentcontrol.ExecCaptureTail); err != nil {
+			t.Fatalf("tail invalid-utf8 output failed schema: %v", err)
+		}
+	})
+}
+
+// TestExecLinux_TailCapture verifies A5 on Linux: 1 MiB of mixed stdout and
+// stderr returns the last <= 64 KiB, status truncated, valid UTF-8.
+func TestExecLinux_TailCapture(t *testing.T) {
+	r := newRealExec(t)
+
+	runTail := func(t *testing.T, id string, script string) agentcontrol.ExecResult {
+		t.Helper()
+		req := agentcontrol.ExecStartRequest{
+			V:              1,
+			RunID:          id,
+			Argv:           []string{"/bin/sh", "-c", script},
+			TimeoutS:       15,
+			NotAfterUnixMS: time.Now().Add(time.Minute).UnixMilli(),
+			Capture:        agentcontrol.ExecCaptureTail,
+		}
+		code, _, raw := r.start(t, req)
+		if code != http.StatusAccepted {
+			t.Fatalf("start = %d %s", code, raw)
+		}
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			sc, resp, sraw := postExec(t, r.h, RouteExecStatus, agentcontrol.ExecStatusRequest{V: 1, RunID: id})
+			if sc == http.StatusOK && resp.State == agentcontrol.ExecStateFinished {
+				parsed, err := agentcontrol.ParseExecStatusAnswer(sc, []byte(sraw), agentcontrol.ExecCaptureTail)
+				if err != nil {
+					t.Fatalf("status schema error: %v (%s)", err, sraw)
+				}
+				return parsed
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", id)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	t.Run("short merged stdout and stderr", func(t *testing.T) {
+		res := runTail(t, "00000000-0000-4000-8000-000000000201", `echo out-line; echo err-line >&2`)
+		if res.Outcome != agentcontrol.ExecOutcomeOK || res.OutputStatus != agentcontrol.ExecOutputCaptured {
+			t.Fatalf("got %+v", res)
+		}
+		s := string(res.Output)
+		if !strings.Contains(s, "out-line") || !strings.Contains(s, "err-line") {
+			t.Fatalf("merged tail missing streams: %q", s)
+		}
+	})
+
+	t.Run("1MiB mixed stdout and stderr truncated to 64KiB", func(t *testing.T) {
+		// Emit ~512 KiB to stdout, ~512 KiB to stderr, then a final marker.
+		script := `head -c 524288 /dev/zero | tr '\0' 'o'; head -c 524288 /dev/zero | tr '\0' 'e' >&2; echo 'TAIL-END-MARKER'`
+		res := runTail(t, "00000000-0000-4000-8000-000000000202", script)
+		if res.Outcome != agentcontrol.ExecOutcomeOK || res.OutputStatus != agentcontrol.ExecOutputTruncated {
+			t.Fatalf("got %+v", res)
+		}
+		if len(res.Output) == 0 || len(res.Output) > agentcontrol.MaxExecCaptureBytes {
+			t.Fatalf("len(output) = %d, want 1..%d", len(res.Output), agentcontrol.MaxExecCaptureBytes)
+		}
+		if res.OutputBytes < 1048576 {
+			t.Fatalf("output_bytes = %d, want >= 1 MiB", res.OutputBytes)
+		}
+		if !strings.HasSuffix(string(res.Output), "TAIL-END-MARKER\n") {
+			t.Fatalf("tail missing end marker")
+		}
+	})
+}
