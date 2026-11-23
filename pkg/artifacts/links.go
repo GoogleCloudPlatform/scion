@@ -591,7 +591,7 @@ func (s *Service) handleShared(w http.ResponseWriter, r *http.Request, segs []st
 	}
 	hash := LinkTokenHash(token)
 	ctx := r.Context()
-	now := time.Now()
+	now := s.now()
 	a, g, err := b.store.ResolveLink(ctx, hash, now)
 	if errors.Is(err, ErrNotFound) {
 		writeSharedNotFound(w)

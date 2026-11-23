@@ -23,8 +23,10 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Phase A (ptone/scion#7107): the hub's content host. The
@@ -350,10 +352,20 @@ func TestContentHostCredentialsChangeNothing(t *testing.T) {
 	f, id := newLinkFixture(t)
 	f.svc.SetLimits(contentURLLimits(testContentURL))
 	token, _ := f.mustMintLink(userU, id, "")
+	// Freeze the service clock so a 1-second wall-clock rollover between the
+	// two openSharedLink calls cannot change the view capability expiry in
+	// Content-Security-Policy. Offset from wall clock to confirm the seam is
+	// used.
+	fixed := time.Now().Add(2 * time.Minute).Truncate(time.Second)
+	f.svc.nowFn = func() time.Time { return fixed }
 	bare := f.openSharedLink(testContentURL, testContentHost, token, nil)
 	withCreds := f.openSharedLink(testContentURL, testContentHost, token, map[string]string{
 		"Cookie": "scion_sess=valid-session", "Authorization": "Bearer user-token", testAgentHeader: "agent-token",
 	})
+	wantExp := "." + strconv.FormatInt(fixed.Add(ViewTTL).Unix(), 10) + "."
+	if !strings.Contains(bare.Header().Get("Content-Security-Policy"), wantExp) {
+		t.Fatalf("CSP %q did not use frozen clock expiry %s", bare.Header().Get("Content-Security-Policy"), wantExp)
+	}
 	if response(bare) != response(withCreds) {
 		t.Errorf("credentials changed the response:\n%s\nvs\n%s", response(bare), response(withCreds))
 	}
