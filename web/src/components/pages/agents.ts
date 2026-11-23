@@ -144,6 +144,22 @@ function agentToFilterRow(agent: Agent): FilterRow {
   };
 }
 
+/**
+ * Build a phase-only predicate from `fq` for off-page unknown deltas that
+ * carry only `phase` (ignoring label/text terms so they never falsely evict).
+ */
+function phasePredicateForQuery(fq: FilterQuery | null): ((phase: string) => boolean) | null {
+  if (!fq || fq.mode !== 'structured') return null;
+  const phaseTerms = fq.terms.filter((t) => t.key.toLowerCase() === 'phase');
+  if (phaseTerms.length === 0) return null;
+  const phaseOnly: FilterQuery = { mode: 'structured', terms: phaseTerms };
+  return (phase: string): boolean =>
+    matchFilterQuery(phaseOnly, {
+      values: (key: string): string[] => (key === 'phase' ? [phase] : []),
+      text: (): string[] => [],
+    });
+}
+
 const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-agents';
 
 /** The global endpoint's response: legacy fields, plus the sorted-mode fields when `sort` was sent. */
@@ -677,21 +693,21 @@ export class ScionPageAgents extends LitElement {
     if (filtersQueryDialectEnabled()) {
       const urlParams = new URLSearchParams(window.location.search);
       const urlQ = urlParams.get('q');
+      const storedPhase = localStorage.getItem('scion-filter-agents-phase');
+      if (storedPhase !== null) {
+        localStorage.removeItem('scion-filter-agents-phase');
+      }
       if (urlQ !== null) {
         this.filterQueryText = urlQ;
-      } else {
-        const storedPhase = localStorage.getItem('scion-filter-agents-phase');
-        if (
-          storedPhase === 'running' ||
-          storedPhase === 'stopping' ||
-          storedPhase === 'stopped' ||
-          storedPhase === 'suspended' ||
-          storedPhase === 'error'
-        ) {
-          this.filterQueryText = `phase:${storedPhase}`;
-          localStorage.removeItem('scion-filter-agents-phase');
-          this.syncQueryToUrl(this.filterQueryText);
-        }
+      } else if (
+        storedPhase === 'running' ||
+        storedPhase === 'stopping' ||
+        storedPhase === 'stopped' ||
+        storedPhase === 'suspended' ||
+        storedPhase === 'error'
+      ) {
+        this.filterQueryText = `phase:${storedPhase}`;
+        this.syncQueryToUrl(this.filterQueryText);
       }
       this.applyInitialFilterQuery(this.filterQueryText);
     } else {
@@ -807,6 +823,7 @@ export class ScionPageAgents extends LitElement {
         committedFilterPredicate: cfq
           ? (a: Agent) => matchFilterQuery(cfq, agentToFilterRow(a))
           : null,
+        committedPhasePredicate: phasePredicateForQuery(cfq),
         serverQuery: this.committedServerQ,
       };
     }
@@ -869,6 +886,7 @@ export class ScionPageAgents extends LitElement {
     this.agentWindow.setViewState({
       filterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
       committedFilterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
+      committedPhasePredicate: phasePredicateForQuery(fq),
       serverQuery: nextQ,
     });
     void this.loadAgents('label-commit');
@@ -891,6 +909,7 @@ export class ScionPageAgents extends LitElement {
         this.agentWindow.setViewState({
           filterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
           committedFilterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
+          committedPhasePredicate: phasePredicateForQuery(fq),
           serverQuery: nextQ,
         });
         void this.loadAgents('label-commit');
@@ -1163,7 +1182,7 @@ export class ScionPageAgents extends LitElement {
       // Seeding drops any agent already deleted live: a REST response can
       // race an SSE `deleted`.
       if (complete) {
-        const fq = useDialect ? this.filterQuery : null;
+        const fq = useDialect ? this.committedFilterQuery : null;
         this.agents = epoch.seed(data.agents || [], {
           partial: false,
           isMember: (agent) =>
@@ -1203,7 +1222,7 @@ export class ScionPageAgents extends LitElement {
     const gen = carriedGen ?? this.beginAgentsLoad().gen;
     const useDialect = filtersQueryDialectEnabled();
     const serverQ = useDialect ? this.committedServerQ : '';
-    const fq = useDialect ? this.filterQuery : null;
+    const fq = useDialect ? this.committedFilterQuery : null;
     const params = new URLSearchParams();
     if (scope !== 'all') params.set('scope', scope);
     if (useDialect) {

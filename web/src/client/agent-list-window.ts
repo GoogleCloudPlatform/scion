@@ -153,6 +153,13 @@ export interface AgentListViewState {
    */
   committedFilterPredicate?: ((agent: Agent) => boolean) | null;
   /**
+   * Phase-only projection of `committedFilterPredicate`, used for off-page
+   * `unknown` deltas that carry only `phase` (without labels or name).
+   * Returns false only when the new phase violates the committed query's
+   * phase terms, so label/text terms never cause false eviction.
+   */
+  committedPhasePredicate?: ((phase: string) => boolean) | null;
+  /**
    * Canonical server `?q=` query string when the unified filter dialect is active.
    * When defined (even empty string), `isSortedEligible` does not require `=` in
    * `committedLabel` and `serverParamsKey` tracks `serverQuery` instead of `phaseFilter`.
@@ -1339,6 +1346,22 @@ export class AgentListWindow extends EventTarget {
     rangeBefore: { first: string; last: string } | null
   ): boolean {
     if (!this.memberIndex.has(id)) return false; // neither on-page nor a member: ignored.
+    if (this.viewState.committedFilterPredicate || this.viewState.committedPhasePredicate) {
+      if (delta.phase) {
+        if (
+          this.viewState.committedPhasePredicate &&
+          !this.viewState.committedPhasePredicate(delta.phase)
+        ) {
+          // Existing member's phase now violates the committed query: remove from population.
+          this.memberIndex.delete(id);
+          return false;
+        }
+        this.memberIndex.set(id, delta.phase);
+      }
+      return delta.lastActivityEvent && this.serverSort === 'updated'
+        ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
+        : false;
+    }
     const prevPhase = this.memberIndex.getPhase(id);
     const prevPassed = !this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter;
     if (delta.phase) this.memberIndex.set(id, delta.phase);

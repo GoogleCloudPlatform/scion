@@ -1207,4 +1207,55 @@ describe('AgentListWindow — paged state with committed filter query (serverQue
     expect(win.stats.running).toBe(1);
     expect(win.updatesAvailable).toBe(true);
   });
+
+  it('removes an off-page member on unknown phase-only delta when new phase violates committed query', () => {
+    const matchesRunningUi = (a: Agent): boolean =>
+      a.phase === 'running' && a.labels?.['team'] === 'ui';
+    const { win } = createWindow({
+      viewState: makeViewState({
+        phaseFilter: '',
+        serverQuery: 'label:team=ui phase:running',
+        filterPredicate: matchesRunningUi,
+        committedFilterPredicate: matchesRunningUi,
+        committedPhasePredicate: (phase) => phase === 'running',
+      }),
+    });
+
+    win.setPaged(
+      {
+        agents: [agent('a1', { phase: 'running', labels: { team: 'ui' } })],
+        totalCount: 2,
+        stats: {
+          total: 2,
+          running: 2,
+          agents: [
+            ['a1', 'running'],
+            ['off-1', 'running'],
+          ],
+        },
+      },
+      ''
+    );
+
+    // Phase-only delta keeping phase=running must NOT falsely evict even though delta lacks labels.
+    win.applyChanges({
+      upserted: [],
+      deleted: [],
+      unknown: new Map([['off-1', { phase: 'running' }]]),
+      generation: 1,
+    });
+    expect(win.stats.total).toBe(2);
+    expect(win.stats.running).toBe(2);
+
+    // Phase-only delta changing phase to stopped violates phase:running -> evicted from memberIndex.
+    win.applyChanges({
+      upserted: [],
+      deleted: [],
+      unknown: new Map([['off-1', { phase: 'stopped' }]]),
+      generation: 2,
+    });
+    expect(win.stats.total).toBe(1);
+    expect(win.stats.running).toBe(1);
+    expect(win.updatesAvailable).toBe(false);
+  });
 });
