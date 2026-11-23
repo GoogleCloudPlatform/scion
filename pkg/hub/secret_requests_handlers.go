@@ -797,6 +797,7 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		RecipientID:    rows[0].AgentID,
 		Msg:            respText,
 		Type:           messages.TypeSecretResponse,
+		DispatchState:  store.MessageDispatchDispatched,
 	}
 	finishNow := time.Now().UTC()
 	finRes, err := s.store.FinishSecretRequestFulfill(ctx, &store.FinishSecretRequestFulfillInput{
@@ -1028,6 +1029,7 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 		Recipient:      "agent:" + rows[0].AgentName,
 		RecipientID:    rows[0].AgentID,
 		Type:           messages.TypeSecretResponse,
+		DispatchState:  store.MessageDispatchDispatched,
 	}
 
 	res, err := s.store.DismissSecretRequests(ctx, &store.DismissSecretRequestsInput{
