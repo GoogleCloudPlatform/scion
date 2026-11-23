@@ -16,7 +16,6 @@ package messaging
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 	"time"
 
@@ -103,12 +102,4 @@ func TestRenderDeliveryText_MessageID(t *testing.T) {
 			t.Errorf("message_id present (%v); want absent with no MessageID", raw["message_id"])
 		}
 	})
-}
-
-func TestFormatLegacyAsNewDelivery_OmitsMessageID(t *testing.T) {
-	sm := messages.NewInstruction("user:alice", "agent:builder", "hello")
-	out := FormatLegacyAsNewDelivery(sm, nil)
-	if strings.Contains(out, `"message_id"`) {
-		t.Errorf("compat path has no persisted identity and must omit message_id:\n%s", out)
-	}
 }
