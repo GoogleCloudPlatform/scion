@@ -525,8 +525,21 @@ func Spec() []TableFixture {
 				"started_at": baseTime.Add(-time.Hour), "not_after": baseTime.Add(-time.Hour + time.Minute),
 				"lease_until": baseTime.Add(-time.Hour + 3*time.Minute), "finished_at": baseTime.Add(-time.Hour + time.Second),
 				"last_polled_at": baseTime.Add(-time.Hour), "poll_seq": int64(1),
-				"outcome": "ok", "exit_code": 0, "duration_ms": 1000, "output_bytes": 0,
+				"outcome": "ok", "exit_code": 0, "duration_ms": 1000, "output_bytes": 11,
+				"capture_mode": "json", "output_status": "captured",
 				"runtime": "docker", "launch_id": "",
+			},
+		}},
+		// Bounded captured output for the finished exec run above
+		// (ptone/scion#8961); run_id matches scheduled_exec_runs.event_id.
+		{Table: "exec_run_outputs", Rows: []row{
+			{
+				"run_id":       "5e000000-0000-0000-0000-000000000002",
+				"owner_kind":   "scheduled_exec",
+				"project_id":   projectID,
+				"capture_mode": "json",
+				"content":      []byte(`{"ok":true}`),
+				"created_at":   baseTime.Add(-time.Hour + time.Second),
 			},
 		}},
 		// Persisted per-agent recovery-sweep turn cursor (ptone/scion#8096).

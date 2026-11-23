@@ -115,6 +115,12 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, []string{agentID}, workspace.AgentIDs)
 	assert.Equal(t, agentID, workspace.FrontmostAgentID)
 
+	// The exec_run_outputs row must be readable through the real store adapter
+	// (field.UUID run_id and project_id columns).
+	execOut, err := entadapter.NewScheduleStore(client).GetScheduledExecRunOutput(ctx, "5e000000-0000-0000-0000-000000000002")
+	require.NoError(t, err, "exec_run_outputs fixture row must be readable via ScheduleStore")
+	assert.Equal(t, `{"ok":true}`, string(execOut))
+
 	// The thread group rows must be readable through the real store adapter
 	// (field.UUID ids, the stored name_key matching the Go helper, and the
 	// member's group conversation passing the live-conversation filter).

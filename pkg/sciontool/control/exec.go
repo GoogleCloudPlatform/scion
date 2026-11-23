@@ -933,17 +933,17 @@ func (s *execTombs) put(now time.Time, t *execTomb) {
 	}
 	s.purge(now)
 	if len(t.final.output) > 0 {
-		for s.outputBudget > 0 && s.outputBytesHeld+len(t.final.output) > s.outputBudget {
-			oldest := s.outputOrder.Back()
-			if oldest == nil {
-				break
-			}
-			s.dropOutput(oldest.Value.(*execTomb))
-		}
 		if s.outputBudget > 0 && len(t.final.output) > s.outputBudget {
 			t.final.output = nil
 			t.final.outputStatus = agentcontrol.ExecOutputExpired
-		} else if len(t.final.output) > 0 {
+		} else {
+			for s.outputBudget > 0 && s.outputBytesHeld+len(t.final.output) > s.outputBudget {
+				oldest := s.outputOrder.Back()
+				if oldest == nil {
+					break
+				}
+				s.dropOutput(oldest.Value.(*execTomb))
+			}
 			t.outputElem = s.outputOrder.PushFront(t)
 			s.outputBytesHeld += len(t.final.output)
 		}
