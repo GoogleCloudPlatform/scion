@@ -307,18 +307,17 @@ func TestContainer(t *testing.T) {
 			name := createAgent(t, sciontool, mode, true)
 			waitProbe(t, name)
 
-			// AC 1: agent container OCI spec has no NET_ADMIN or NET_RAW in CapAdd,
-			// and drops NET_RAW.
+			// AC 1: agent container OCI spec has neither NET_ADMIN nor NET_RAW in CapAdd.
+			// Effective capability absence (including CAP_NET_RAW) is verified via the
+			// kernel capability sets and raw-socket EPERM checks below, since engines
+			// whose default set already omits NET_RAW (e.g. newer Podman) may record
+			// an empty HostConfig.CapDrop.
 			capAdd := mustDocker(t, "inspect", "--format", "{{.HostConfig.CapAdd}}", name)
 			if strings.Contains(capAdd, "NET_ADMIN") {
 				t.Errorf("agent container HostConfig.CapAdd = %q, must not contain NET_ADMIN", capAdd)
 			}
 			if strings.Contains(capAdd, "NET_RAW") {
 				t.Errorf("agent container HostConfig.CapAdd = %q, must not contain NET_RAW", capAdd)
-			}
-			capDrop := mustDocker(t, "inspect", "--format", "{{.HostConfig.CapDrop}}", name)
-			if !strings.Contains(capDrop, "NET_RAW") {
-				t.Errorf("agent container HostConfig.CapDrop = %q, want NET_RAW", capDrop)
 			}
 
 			// AC 1: harness, PID 1, and exec sessions (--user root and --user scion)
