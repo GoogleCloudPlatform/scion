@@ -64,39 +64,6 @@ func labelContains(key, value string) predicate.Agent {
 	}
 }
 
-// labelHasKey returns an Ent predicate restricting results to agents whose
-// `labels` JSON object contains the given key regardless of its value
-// (Stage 2 design §5.4).
-//
-//	SQLite:   json_extract(labels, '$."key"') IS NOT NULL
-//	Postgres: labels ? $n
-//
-// The Postgres path uses the GIN-indexable `?` key-existence operator with a
-// bound parameter. The SQLite path uses quoted-member syntax ($."key") so keys
-// containing dots (e.g. "scion.dev/role") match a single top-level key.
-func labelHasKey(key string) predicate.Agent {
-	return func(s *entsql.Selector) {
-		col := s.C(agent.FieldLabels)
-		switch s.Dialect() {
-		case dialect.Postgres:
-			s.Where(entsql.P(func(b *entsql.Builder) {
-				b.WriteString(col).
-					WriteString(" ? ").
-					Arg(key)
-			}))
-		default: // SQLite
-			s.Where(entsql.P(func(b *entsql.Builder) {
-				escapedKey := strings.ReplaceAll(key, `"`, `\"`)
-				b.WriteString("json_extract(").
-					WriteString(col).
-					WriteString(", ").
-					Arg(fmt.Sprintf(`$."%s"`, escapedKey)).
-					WriteString(") IS NOT NULL")
-			}))
-		}
-	}
-}
-
 // projectLabelContains returns an Ent predicate restricting results to
 // projects whose `labels` JSON object contains the given key-value pair.
 func projectLabelContains(key, value string) predicate.Project {
