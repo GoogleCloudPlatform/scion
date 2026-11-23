@@ -119,7 +119,7 @@ func TestReincarnate_AutoExposeRederivesProjectTier(t *testing.T) {
 			assert.NotContains(t, freshInlineEnv(fresh), aeKey, "a derived value must not become explicit")
 			assert.NotContains(t, freshCreateInputsEnv(fresh), aeKey, "a derived value must not enter CreateInputs")
 
-			plan := computeReincarnationPlan(old.AppliedConfig, fresh, nil, "")
+			plan := computeReincarnationPlan(old.AppliedConfig, fresh, nil, planImageContext{SameBroker: true})
 			switch {
 			case tc.want == "":
 				assert.Contains(t, plan.EnvKeys.Removed, aeKey)

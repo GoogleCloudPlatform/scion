@@ -123,6 +123,7 @@ const (
 	ErrCodeUnavailable                      = apierr.ErrCodeUnavailable
 	ErrCodeUnprocessable                    = apierr.ErrCodeUnprocessable
 	ErrCodeUnsupportedCapability            = apierr.ErrCodeUnsupportedCapability
+	ErrCodeImplicitHarnessSwitch            = apierr.ErrCodeImplicitHarnessSwitch
 	ErrCodeUserDeleteBlocked                = apierr.ErrCodeUserDeleteBlocked
 	ErrCodeUserDeleteBlockersChanged        = apierr.ErrCodeUserDeleteBlockersChanged
 	ErrCodeUserDeleteForceForbidden         = apierr.ErrCodeUserDeleteForceForbidden

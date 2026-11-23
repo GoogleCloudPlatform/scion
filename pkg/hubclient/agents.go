@@ -1492,10 +1492,12 @@ type MoveCheck struct {
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
-// reincarnation plan.
+// reincarnation plan, with an optional hub-written reason explaining why the
+// field changed (or noting broker-side resolution).
 type FieldChange struct {
-	Old string `json:"old,omitempty"`
-	New string `json:"new,omitempty"`
+	Old    string `json:"old,omitempty"`
+	New    string `json:"new,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // KeyDiff describes an old→new change to a set of map keys (e.g. env var
@@ -1528,7 +1530,9 @@ type ReincarnationPlan struct {
 
 	// HomeReset is set when the reincarnation deletes and rebuilds the
 	// agent's home (a harness switch); Warnings[0] is then the home-reset
-	// warning. Harness is the harness-config name old→new.
-	HomeReset bool         `json:"homeReset,omitempty"`
-	Harness   *FieldChange `json:"harness,omitempty"`
+	// warning. Harness is the harness-config name old→new. HarnessName is
+	// the resolved harness-config name for the new generation.
+	HomeReset   bool         `json:"homeReset,omitempty"`
+	Harness     *FieldChange `json:"harness,omitempty"`
+	HarnessName string       `json:"harnessName,omitempty"`
 }

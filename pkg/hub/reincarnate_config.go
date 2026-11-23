@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -47,12 +48,11 @@ import (
 //     that changed one of these fields' (or an Env key's) live value — see
 //     recordExplicitEdits — so "explicit inputs" here means the create
 //     request plus any explicit edit made since, not just what create itself
-//     saw. HarnessConfig and HarnessAuth are dual-purpose exactly like Model,
-//     NOT kept fields — left empty here (rather than copied from the live
-//     config) is what lets deriveAgentConfig's project/template/hub
-//     resolution below fill them fresh from the CURRENT catalog when the
-//     requester never set them, instead of freezing in whatever generation N
-//     happened to resolve;
+//     saw. HarnessConfig is pinned from the live AppliedConfig when
+//     CreateInputs.HarnessConfig is empty (ptone/scion#7918) so a changed
+//     default never implicitly switches an agent's harness; HarnessAuth is
+//     dual-purpose like Model and left empty when unset so deriveAgentConfig
+//     fills it fresh from the current catalog;
 //   - then deriveAgentConfig run on THAT fresh config: harness-config
 //     resolution, applyProjectDefaults, applyHubAgentDefaults, then
 //     populateAgentConfig/resolveDerivedConfig — so every derived slot is
@@ -124,6 +124,13 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 	if createInputs == nil {
 		createInputs, warnings = legacyCreateInputsFromAppliedConfig(old)
 	}
+	// Pin the agent's live harness config when the request did not ask for a
+	// switch and CreateInputs did not record one (ptone/scion#7918). Never
+	// mutate old.CreateInputs (aliased into PreviousAppliedConfig).
+	if createInputs.HarnessConfig == "" && (patch == nil || patch.HarnessConfig == nil) && old.HarnessConfig != "" {
+		createInputs = cloneCreateInputs(createInputs)
+		createInputs.HarnessConfig = old.HarnessConfig
+	}
 	if patch != nil {
 		// A copy: createInputs may be the outgoing generation's own record
 		// (old.CreateInputs, also saved as PreviousAppliedConfig).
@@ -176,12 +183,11 @@ func (s *Server) buildPatchedAppliedConfig(ctx context.Context, agent *store.Age
 		ExplicitTimezoneLegacy:   old.ExplicitTimezoneLegacy,
 		ExplicitTimezoneUnpinned: old.ExplicitTimezoneUnpinned,
 
-		// Explicit-only: empty here (rather than copied from `old`) is what
-		// lets deriveAgentConfig's pipeline fill these fresh from the CURRENT
-		// project/template/hub configuration when the requester never set
-		// them, instead of freezing in whatever generation N resolved.
-		// HarnessConfig and HarnessAuth are NOT kept fields (design §3.3
-		// Amendment A1) — they are explicit-only, exactly like Model.
+		// Explicit-only (except HarnessConfig, which was pinned from old
+		// above when unset so a changed default cannot implicitly switch
+		// harnesses): empty here lets deriveAgentConfig's pipeline fill
+		// HarnessAuth/Profile/ThinkingLevel fresh from the CURRENT
+		// project/template/hub configuration when the requester never set them.
 		HarnessConfig: createInputs.HarnessConfig,
 		HarnessAuth:   createInputs.HarnessAuth,
 		Profile:       createInputs.Profile,
@@ -599,27 +605,153 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig) (*store.
 	}, warnings
 }
 
+// planImageContext describes how the hub resolved the new generation's image
+// for computeReincarnationPlan (ptone/scion#7917).
+type planImageContext struct {
+	Registry   string // resolveRegistry(fresh.Profile): "" when the hub leaves the rewrite to the broker
+	Tag        string // resolveTag(fresh.Profile)
+	SameBroker bool   // in place (true) vs move (false)
+}
+
+// sameImageModuloBrokerRewrite reports whether oldImg and a short-form
+// freshImg name the same image when the broker owns the registry/tag rewrite.
+// It compares only the last path component (name[:tag]), tolerating the
+// broker's image_tag rewrite for scion-* images whose fresh tag is "latest"
+// or absent (mirroring config.retagBasename).
+func sameImageModuloBrokerRewrite(oldImg, freshImg string) bool {
+	if oldImg == "" || freshImg == "" {
+		return false
+	}
+	oldBase := config.ImageBasename(oldImg)
+	freshBase := config.ImageBasename(freshImg)
+	if oldBase == freshBase {
+		return true
+	}
+	if strings.Contains(oldBase, "@") || strings.Contains(freshBase, "@") {
+		return false
+	}
+	oldName, _, _ := strings.Cut(oldBase, ":")
+	freshName, freshTag, freshHasTag := strings.Cut(freshBase, ":")
+	return oldName == freshName &&
+		strings.HasPrefix(freshName, "scion-") &&
+		(!freshHasTag || freshTag == config.ImageTagLatest)
+}
+
 // computeReincarnationPlan diffs the outgoing generation's AppliedConfig
 // against the freshly resolved one, for the ReincarnateAgentResponse (design
 // §3.2). Env key names only are compared, never values.
 //
-// The image is compared in canonical (registry-qualified) form, so a row that
-// still holds the bare form of the same image shows as unchanged. An empty
-// old image is always shown as a change.
-func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []string, imageRegistry string) ReincarnationPlan {
+// Image comparison matches the ownership of the registry/tag rewrite
+// (ptone/scion#7917):
+//   - When the hub owns the rewrite (fresh.Image is qualified, or img.Registry
+//     is non-empty), old.Image is normalized with config.RewriteImageRef; if it
+//     equals fresh.Image, Old is set to New so the plan shows unchanged.
+//   - When the broker owns the rewrite (fresh.Image is short-form and
+//     img.Registry is empty), images are compared modulo the broker's rewrite:
+//     an in-place match collapses to Old = New = old.Image, while a move keeps
+//     old -> short fresh because the target broker can resolve a different
+//     registry.
+func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []string, img planImageContext) ReincarnationPlan {
 	plan := ReincarnationPlan{
-		Template:   FieldChange{Old: old.TemplateHash, New: fresh.TemplateHash},
-		Image:      FieldChange{Old: old.Image, New: fresh.Image},
-		HarnessCfg: FieldChange{Old: old.HarnessConfigHash, New: fresh.HarnessConfigHash},
-		Model:      FieldChange{Old: old.Model, New: fresh.Model},
-		EnvKeys:    diffEnvKeys(old.Env, fresh.Env),
-		Branch:     fresh.Branch,
-		Warnings:   warnings,
+		Template:    FieldChange{Old: old.TemplateHash, New: fresh.TemplateHash},
+		Image:       FieldChange{Old: old.Image, New: fresh.Image},
+		HarnessCfg:  FieldChange{Old: old.HarnessConfigHash, New: fresh.HarnessConfigHash},
+		HarnessName: fresh.HarnessConfig,
+		Model:       FieldChange{Old: old.Model, New: fresh.Model},
+		EnvKeys:     diffEnvKeys(old.Env, fresh.Env),
+		Branch:      fresh.Branch,
+		Warnings:    warnings,
 	}
-	if old.Image != "" && config.RewriteImageRegistry(old.Image, imageRegistry) == fresh.Image {
-		plan.Image.Old = fresh.Image
+	if !config.IsShortFormImage(fresh.Image) || img.Registry != "" {
+		if old.Image != "" && config.RewriteImageRef(old.Image, img.Registry, img.Tag) == fresh.Image {
+			plan.Image.Old = fresh.Image
+		}
+		return plan
 	}
+	if old.Image != "" && sameImageModuloBrokerRewrite(old.Image, fresh.Image) {
+		if img.SameBroker {
+			plan.Image.Old = old.Image
+			plan.Image.New = old.Image
+			plan.Image.Reason = "registry resolved by broker"
+		} else {
+			plan.Image.Reason = "same image; registry resolved by target broker"
+		}
+		return plan
+	}
+	plan.Image.Reason = "registry resolved by broker"
 	return plan
+}
+
+// addPlanReasons populates FieldChange.Reason on plan entries so clients can
+// explain why each changed field differs (ptone/scion#7918). Unchanged fields
+// leave Reason empty, except for broker-resolved image notes already set by
+// computeReincarnationPlan.
+func (s *Server) addPlanReasons(ctx context.Context, plan *ReincarnationPlan, old, fresh *store.AgentAppliedConfig, req ReincarnateAgentRequest, runAs *store.Agent) {
+	if plan == nil || old == nil || fresh == nil {
+		return
+	}
+	setRequested := func(c *FieldChange) {
+		if c != nil && c.Old != c.New {
+			c.Reason = "requested"
+		}
+	}
+	if req.Role != "" {
+		setRequested(plan.Role)
+	}
+	if req.ServiceAccount != "" {
+		setRequested(plan.ServiceAccount)
+	}
+	if req.ThinkingLevel != nil {
+		setRequested(plan.ThinkingLevel)
+	}
+	if req.HarnessAuth != "" {
+		setRequested(plan.HarnessAuth)
+	}
+	if req.HarnessConfig != "" {
+		setRequested(plan.Harness)
+	}
+
+	if plan.Template.Old != plan.Template.New {
+		plan.Template.Reason = "template content updated"
+	}
+
+	if plan.HarnessCfg.Old != plan.HarnessCfg.New {
+		if req.HarnessConfig != "" && old.HarnessConfig != fresh.HarnessConfig {
+			plan.HarnessCfg.Reason = "requested"
+		} else if fresh.HarnessConfig != "" {
+			plan.HarnessCfg.Reason = fmt.Sprintf("harness config %q content updated", fresh.HarnessConfig)
+		} else {
+			plan.HarnessCfg.Reason = "harness config content updated"
+		}
+	}
+
+	if plan.Model.Old != plan.Model.New {
+		if req.Model != "" {
+			plan.Model.Reason = "requested"
+		} else {
+			explicitModel := ""
+			if fresh.CreateInputs != nil && fresh.CreateInputs.InlineConfig != nil {
+				explicitModel = fresh.CreateInputs.InlineConfig.Model
+			}
+			if explicitModel == "" {
+				plan.Model.Reason = "not set at create; re-resolved from current project/template/hub default"
+			} else if s.resolveModelAliasForAgent(ctx, runAs, explicitModel) != explicitModel {
+				if fresh.HarnessConfig != "" {
+					plan.Model.Reason = fmt.Sprintf("alias %q re-resolved by harness config %q", explicitModel, fresh.HarnessConfig)
+				} else {
+					plan.Model.Reason = fmt.Sprintf("alias %q re-resolved", explicitModel)
+				}
+			}
+		}
+	}
+
+	if plan.Image.Old != plan.Image.New {
+		if req.Image != "" {
+			plan.Image.Reason = "requested"
+		} else if plan.Image.Reason == "" && explicitDispatchImage(fresh) == "" {
+			plan.Image.Reason = "harness config default image changed"
+		}
+	}
 }
 
 // diffEnvKeys compares two env maps by key name only (never values, per
@@ -729,3 +861,39 @@ func addHarnessSwitchToPlan(plan *ReincarnationPlan, old, fresh *store.AgentAppl
 // reincarnateSwitchNoAuthKeptWarning is the plan warning for a harness
 // switch of an agent whose create-time no-credentials request is kept.
 const reincarnateSwitchNoAuthKeptWarning = "the agent keeps running with no injected credentials on the new harness: it was created with --no-auth or role none, and reincarnate keeps that setting"
+
+// implicitHarnessSwitch reports a harness-config change the request did not
+// ask for: no explicit --harness patch was requested, the agent's live
+// harness config is non-empty, and the freshly resolved config would run a
+// different harness config (ptone/scion#7918).
+func implicitHarnessSwitch(old, fresh *store.AgentAppliedConfig, patch *reincarnatePatch) (from, to string, ok bool) {
+	if old == nil || fresh == nil {
+		return "", "", false
+	}
+	if patch != nil && patch.HarnessConfig != nil {
+		return "", "", false
+	}
+	if old.HarnessConfig == "" || fresh.HarnessConfig == old.HarnessConfig {
+		return "", "", false
+	}
+	return old.HarnessConfig, fresh.HarnessConfig, true
+}
+
+// implicitHarnessSwitchMessage builds the 412 error message for an unrequested
+// harness-config change, including any recorded-harness drop warning and the
+// experiment-gated --harness instruction.
+func implicitHarnessSwitchMessage(from, to string, dropWarnings []string) string {
+	detail := ""
+	for _, w := range dropWarnings {
+		if strings.Contains(w, "harness config") {
+			detail = fmt.Sprintf(" (the recorded harness config is no longer usable: %s)", w)
+			break
+		}
+	}
+	target := to
+	if target == "" {
+		target = "<name>"
+	}
+	return fmt.Sprintf("reincarnate would change harness config from %q to %q%s. Pass --harness %s to switch (resets the agent's home; --harness requires the %s experiment), or restore harness config %q.",
+		from, to, detail, target, experiments.ReincarnateHarnessSwitch, from)
+}

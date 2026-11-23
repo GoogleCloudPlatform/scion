@@ -150,7 +150,7 @@ func TestReincarnateAgent_PatchedGCPSAReplacesInadmissibleKeptSA(t *testing.T) {
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 				assert.Equal(t, "planned", resp.State)
 				require.NotNil(t, resp.Plan.ServiceAccount)
-				assert.Equal(t, FieldChange{Old: kept.Email, New: replacement.Email}, *resp.Plan.ServiceAccount)
+				assert.Equal(t, FieldChange{Old: kept.Email, New: replacement.Email, Reason: "requested"}, *resp.Plan.ServiceAccount)
 				return
 			}
 			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())

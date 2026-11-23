@@ -120,10 +120,12 @@ type ReincarnateAgentResponse struct {
 }
 
 // FieldChange describes an old→new change to a single scalar field on the
-// reincarnation plan.
+// reincarnation plan, with an optional hub-written reason explaining why the
+// field changed (or noting broker-side resolution).
 type FieldChange struct {
-	Old string `json:"old,omitempty"`
-	New string `json:"new,omitempty"`
+	Old    string `json:"old,omitempty"`
+	New    string `json:"new,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // KeyDiff describes an old→new change to a set of map keys (e.g. env var
@@ -159,9 +161,12 @@ type ReincarnationPlan struct {
 	// agent's home (a harness switch, ptone/scion#7757); Warnings[0] is
 	// then the home-reset warning. Harness is the harness-config name
 	// old→new, set when the request names a harness config (HarnessCfg is
-	// the content hash change).
-	HomeReset bool         `json:"homeReset,omitempty"`
-	Harness   *FieldChange `json:"harness,omitempty"`
+	// the content hash change). HarnessName is the resolved harness-config
+	// name for the new generation, always populated when known so clients
+	// can display it alongside HarnessCfg's hash.
+	HomeReset   bool         `json:"homeReset,omitempty"`
+	Harness     *FieldChange `json:"harness,omitempty"`
+	HarnessName string       `json:"harnessName,omitempty"`
 }
 
 // removedSharedDirBackendOptionError is the 400 message for a reincarnate
@@ -485,14 +490,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// it never writes. Any store writes happen only below this point, and
 	// only for a non-dry-run request.
 	resolveRegistry := reincarnateImageRegistry(dispatcher, agent.RuntimeBrokerID)
-	buildCtx := ctx
+	resolveTag := reincarnateImageTag(dispatcher, agent.RuntimeBrokerID)
+	buildCtx, buildDispatchWarnings := withDispatchWarnings(ctx)
 	if patch != nil && patch.HarnessConfig != nil {
 		// A harness switch never falls back to no credentials on its own
 		// (ptone/scion#7757 §3.3.4): `--harness-auth none` asks for that
 		// explicitly.
-		buildCtx = withNoAuthFallbackForbidden(ctx)
+		buildCtx = withNoAuthFallbackForbidden(buildCtx)
 	}
-	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, agent.RuntimeBrokerID), patch)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, resolveTag, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -503,6 +509,11 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	if from, to, ok := implicitHarnessSwitch(agent.AppliedConfig, fresh, patch); ok {
+		writeError(w, http.StatusPreconditionFailed, ErrCodeImplicitHarnessSwitch,
+			implicitHarnessSwitchMessage(from, to, buildDispatchWarnings.Warnings()), nil)
 		return
 	}
 	imageRegistry := resolveRegistry(fresh.Profile)
@@ -536,9 +547,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
+	imgCtx := planImageContext{
+		Registry:   imageRegistry,
+		Tag:        resolveTag(fresh.Profile),
+		SameBroker: true,
+	}
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imgCtx)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
 	addHarnessSwitchToPlan(&plan, agent.AppliedConfig, fresh, patch)
+	s.addPlanReasons(ctx, &plan, agent.AppliedConfig, fresh, req, &runAs)
 	addAuthorityToPlan(&plan, auth)
 	targetGeneration := agent.Generation + 1
 
@@ -814,13 +831,20 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	// The new generation runs on dst: resolve its registry there, for the
 	// new profile (ptone/scion#3916).
 	resolveRegistry := reincarnateImageRegistry(dispatcher, dst.ID)
-	fresh, warnings, err := s.buildPatchedAppliedConfig(ctx, agent, project, resolveRegistry, reincarnateImageTag(dispatcher, dst.ID), patch)
+	resolveTag := reincarnateImageTag(dispatcher, dst.ID)
+	buildCtx, buildDispatchWarnings := withDispatchWarnings(ctx)
+	fresh, warnings, err := s.buildPatchedAppliedConfig(buildCtx, agent, project, resolveRegistry, resolveTag, patch)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"failed to resolve new configuration: "+err.Error(), nil)
+		return
+	}
+	if from, to, ok := implicitHarnessSwitch(agent.AppliedConfig, fresh, patch); ok {
+		writeError(w, http.StatusPreconditionFailed, ErrCodeImplicitHarnessSwitch,
+			implicitHarnessSwitchMessage(from, to, buildDispatchWarnings.Warnings()), nil)
 		return
 	}
 	// A dry-run move reports the same GCP identity refusal as start and
@@ -831,8 +855,14 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, resolveRegistry(fresh.Profile))
+	imgCtx := planImageContext{
+		Registry:   resolveRegistry(fresh.Profile),
+		Tag:        resolveTag(fresh.Profile),
+		SameBroker: false,
+	}
+	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imgCtx)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	s.addPlanReasons(ctx, &plan, agent.AppliedConfig, fresh, req, &runAs)
 	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
 	// The access probes judge the config the next generation runs with: a

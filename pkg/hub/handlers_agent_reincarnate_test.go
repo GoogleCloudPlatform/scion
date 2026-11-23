@@ -1437,7 +1437,7 @@ func TestReincarnateAgent_RowEnvMatchesFreshConfigAfterReprovision(t *testing.T)
 	assert.Equal(t, fresh.Env, final.AppliedConfig.Env, "the row's env must equal the fresh derivation's env")
 	assert.NotContains(t, final.AppliedConfig.Env, "STORED_VAR")
 	assert.NotContains(t, final.AppliedConfig.Env, "RESOLVED_VAR")
-	assert.Equal(t, KeyDiff{}, computeReincarnationPlan(final.AppliedConfig, fresh, nil, "").EnvKeys, "the next plan must show no env change")
+	assert.Equal(t, KeyDiff{}, computeReincarnationPlan(final.AppliedConfig, fresh, nil, planImageContext{SameBroker: true}).EnvKeys, "the next plan must show no env change")
 }
 
 // imageRegistryPlan runs a dry-run reincarnate against an agent whose image
@@ -5748,9 +5748,12 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 			// does not appear anywhere else in this test, so a passing
 			// assertion below can only mean the value was re-derived, not
 			// coincidentally inherited. CreateInputs is left untouched —
-			// it's the real one create persisted. ---
+			// it's the real one create persisted.
+			// HarnessConfig is NOT staled: plain reincarnate pins the live
+			// HarnessConfig when CreateInputs.HarnessConfig is empty so a
+			// changed default cannot implicitly switch an agent's harness
+			// (ptone/scion#7918). ---
 			staleThinking := 99
-			created.AppliedConfig.HarnessConfig = "stale-hc-from-old-generation"
 			created.AppliedConfig.HarnessAuth = "stale-auth"
 			created.AppliedConfig.NoAuth = false
 			created.AppliedConfig.Model = "stale-model"
