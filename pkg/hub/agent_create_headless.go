@@ -629,9 +629,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		// Execution containers (shell harness) never inherit project default
 		// GCP service accounts or Kubernetes default passthrough
 		// (ptone/scion#8812 §14).
-		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-			MetadataMode: store.GCPMetadataModeBlock,
-		}
+		forceShellGCPBlock(agent)
 	} else {
 		var err error
 		saOrigin, err = s.applyScheduledProjectDefaultGCPIdentity(
@@ -664,9 +662,7 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	// defaulted GCP identity on an execution container and force explicit
 	// "block".
 	if isShellAgent(agent) {
-		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-			MetadataMode: store.GCPMetadataModeBlock,
-		}
+		forceShellGCPBlock(agent)
 		saOrigin = ""
 	}
 

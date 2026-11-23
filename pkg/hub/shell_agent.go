@@ -60,6 +60,20 @@ func (s *Server) willBeShellAgent(agent *store.Agent, project *store.Project) bo
 		project.Annotations[projectSettingDefaultHarnessConfig] == config.ShellHarnessConfigName
 }
 
+// forceShellGCPBlock ensures agent.AppliedConfig is non-nil and sets its
+// GCPIdentity to explicit MetadataMode "block" (ptone/scion#8812 §14).
+func forceShellGCPBlock(agent *store.Agent) {
+	if agent == nil {
+		return
+	}
+	if agent.AppliedConfig == nil {
+		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+		MetadataMode: store.GCPMetadataModeBlock,
+	}
+}
+
 // refuseReservedHarnessConfigSlug writes 400 reserved_name and returns true
 // when slug is the reserved built-in "shell" harness config name. This guard
 // is ungated and applies at every scope (global, project, user) so nothing

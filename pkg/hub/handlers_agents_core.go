@@ -2383,9 +2383,7 @@ func (s *Server) createAgentInProject(
 		// nor Kubernetes default passthrough. Force explicit "block" unless
 		// the owner explicitly requested a GCP identity in req.GCPIdentity
 		// above (ptone/scion#8812 §14).
-		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-			MetadataMode: store.GCPMetadataModeBlock,
-		}
+		forceShellGCPBlock(agent)
 	} else if brokerSAID, brokerLookupErr := s.brokerDefaultSA(ctx, agent, runtimeBrokerID, project); brokerLookupErr != nil || brokerSAID != "" {
 		if brokerLookupErr != nil {
 			writeErrorFromErr(w, brokerLookupErr, "")
@@ -2689,9 +2687,7 @@ func (s *Server) createAgentInProject(
 	// an execution container and force explicit "block" unless the owner
 	// explicitly requested req.GCPIdentity.
 	if isShellAgent(agent) && req.GCPIdentity == nil {
-		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
-			MetadataMode: store.GCPMetadataModeBlock,
-		}
+		forceShellGCPBlock(agent)
 		saOrigin = ""
 		defaultIdentityTier = nil
 		defaultIdentityMode = ""
