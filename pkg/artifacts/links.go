@@ -581,7 +581,11 @@ func (s *Service) handleShared(w http.ResponseWriter, r *http.Request, segs []st
 		return
 	}
 	b, ok := s.backend()
-	if !ok || !b.viewKeys.configured() {
+	if !ok {
+		writeBackendUnavailable(w, b, "artifact sharing is not configured")
+		return
+	}
+	if !b.viewKeys.configured() {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact sharing is not configured")
 		return
 	}

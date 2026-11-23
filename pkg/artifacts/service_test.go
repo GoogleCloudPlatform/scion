@@ -206,3 +206,108 @@ func TestWriteMethodNotAllowedSetsAllow(t *testing.T) {
 		}
 	}
 }
+
+type initTestHost struct{}
+
+func (initTestHost) Principal(context.Context) (string, string, string, bool) {
+	return "user", "user-1", "project:p1", true
+}
+func (initTestHost) Authorize(context.Context, string, string) bool { return true }
+func (initTestHost) Permits(context.Context, string, string) bool   { return true }
+func (initTestHost) MemberScopes(context.Context) ([]string, error) {
+	return []string{"project:p1"}, nil
+}
+func (initTestHost) SealCursor(context.Context, string, string) (string, error) {
+	return "", nil
+}
+func (initTestHost) OpenCursor(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
+// TestInitializingBackendReturnsRetryAfter verifies ptone/scion#5712: while
+// the artifact store is initializing at startup (Backend.Initializing=true and
+// Store==nil), artifact routes answer 503 with a starting-up message and a
+// Retry-After header rather than claiming storage is not configured.
+func TestInitializingBackendReturnsRetryAfter(t *testing.T) {
+	svc := NewService(initTestHost{})
+	initializing := true
+	svc.SetBackendProvider(func() Backend {
+		return Backend{Initializing: initializing}
+	})
+	h := svc.Handler()
+
+	// 43-char base64url token accepted by validLinkToken.
+	validToken := strings.Repeat("a", 43)
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"list", http.MethodGet, "/api/v1/artifacts?mine=1", ""},
+		{"get", http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", ""},
+		{"delete", http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", ""},
+		{"publish", http.MethodPost, "/api/v1/artifacts?name=notes.md", "hello"},
+		{"create", http.MethodPost, "/api/v1/artifacts", `{"key":"doc","entry":"notes.md","files":[{"path":"notes.md","size":5}]}`},
+		{"view", http.MethodGet, "/api/v1/artifacts/view/cap/index.html", ""},
+		{"shared", http.MethodGet, "/api/v1/artifacts/shared/" + validToken, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run("initializing/"+tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			if tc.method == http.MethodPost && tc.body != "" && strings.HasPrefix(tc.body, "{") {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status %d, want 503; body=%s", rec.Code, rec.Body.String())
+			}
+			ra := rec.Header().Get("Retry-After")
+			if n, err := strconv.Atoi(ra); err != nil || n < 1 {
+				t.Errorf("Retry-After = %q, want positive integer", ra)
+			}
+			var body errorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body not JSON: %v (%q)", err, rec.Body.String())
+			}
+			if body.Error.Code != "unavailable" {
+				t.Errorf("code = %q, want unavailable", body.Error.Code)
+			}
+			if !strings.Contains(body.Error.Message, "starting up") {
+				t.Errorf("message = %q, want starting up", body.Error.Message)
+			}
+			if strings.Contains(body.Error.Message, "not configured") {
+				t.Errorf("message = %q, must not say not configured while starting up", body.Error.Message)
+			}
+		})
+	}
+
+	// Once not initializing (genuinely unconfigured), the response reverts to
+	// "not configured" with no Retry-After header.
+	initializing = false
+	for _, tc := range cases {
+		t.Run("unconfigured/"+tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			if tc.method == http.MethodPost && tc.body != "" && strings.HasPrefix(tc.body, "{") {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status %d, want 503; body=%s", rec.Code, rec.Body.String())
+			}
+			if ra := rec.Header().Get("Retry-After"); ra != "" {
+				t.Errorf("Retry-After = %q, want empty when unconfigured", ra)
+			}
+			var body errorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body not JSON: %v (%q)", err, rec.Body.String())
+			}
+			if !strings.Contains(body.Error.Message, "not configured") {
+				t.Errorf("message = %q, want not configured", body.Error.Message)
+			}
+		})
+	}
+}

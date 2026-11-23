@@ -137,6 +137,11 @@ type Backend struct {
 	// ViewKeys sign and check view capabilities (see RouteView). Without
 	// them (the zero ViewKeys), HTML entries cannot be viewed.
 	ViewKeys ViewKeys
+	// Initializing is true while the host is still initializing the artifact
+	// store at startup. When Store is nil and Initializing is true, HTTP
+	// routes answer 503 with a starting-up message and a Retry-After header
+	// instead of reporting that storage is not configured.
+	Initializing bool
 }
 
 // Limits are the size limits the service enforces.
@@ -334,11 +339,12 @@ func (s *Service) SetLimits(fn func(context.Context) Limits) {
 
 // backend is a consistent snapshot of the service's configuration.
 type backend struct {
-	store    Store
-	blobs    storage.Storage
-	hubID    string
-	viewKeys ViewKeys
-	limits   func(context.Context) Limits
+	store        Store
+	blobs        storage.Storage
+	hubID        string
+	viewKeys     ViewKeys
+	limits       func(context.Context) Limits
+	initializing bool
 }
 
 func (s *Service) backend() (backend, bool) {
@@ -348,9 +354,26 @@ func (s *Service) backend() (backend, bool) {
 	s.mu.RUnlock()
 	if provider != nil {
 		p := provider()
-		b.store, b.blobs, b.hubID, b.viewKeys = p.Store, p.Blobs, p.HubID, p.ViewKeys
+		b.store, b.blobs, b.hubID, b.viewKeys, b.initializing = p.Store, p.Blobs, p.HubID, p.ViewKeys, p.Initializing
 	}
 	return b, b.store != nil && b.blobs != nil && b.hubID != ""
+}
+
+// startupRetryAfter is the Retry-After value (in seconds) sent with 503
+// responses while the artifact store is still initializing at startup.
+const startupRetryAfter = "2"
+
+// writeBackendUnavailable writes the 503 response when s.backend() reports no
+// ready backend. While the store is still initializing at startup it answers
+// with a starting-up message and a Retry-After header rather than claiming
+// that artifact storage is not configured.
+func writeBackendUnavailable(w http.ResponseWriter, b backend, unconfiguredMsg string) {
+	if b.initializing && b.store == nil {
+		w.Header().Set("Retry-After", startupRetryAfter)
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "artifact storage is starting up; retry shortly")
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, "unavailable", unconfiguredMsg)
 }
 
 func (b backend) maxFileBytes(ctx context.Context) int64 {

@@ -712,6 +712,16 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Check artifact store readiness when artifacts are enabled and startup
+	// expects a DB-backed artifact store (ptone/scion#5712).
+	if reason := s.artifactStoreNotReadyReason(); reason != "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": reason,
+		})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ready",
 	})
