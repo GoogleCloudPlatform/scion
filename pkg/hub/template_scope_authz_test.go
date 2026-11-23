@@ -588,3 +588,51 @@ func TestTemplateResolutionOrder_ResolveTemplateForIdentity(t *testing.T) {
 		assert.Equal(t, globalTpl.ID, got.ID)
 	})
 }
+
+func TestTemplateResolutionOrder_Reincarnate_OwnerUserBeatsGlobal(t *testing.T) {
+	srv, s, alice, _, _ := setupTemplateScopeTest(t)
+	ctx := context.Background()
+
+	projectNoTpl := &store.Project{ID: tid("tplres-reinc-proj"), Name: "Reinc Project", Slug: "tplres-reinc-proj"}
+	require.NoError(t, s.CreateProject(ctx, projectNoTpl))
+	bob := createNamedTestUser(t, s, "tplres-reinc-bob", store.UserRoleMember)
+
+	userTpl := createHydratableScopeTemplate(t, s, "shared-tpl", store.TemplateScopeUser, alice.ID, alice.ID, "sha256:reinc-user")
+	globalTpl := createHydratableScopeTemplate(t, s, "shared-tpl", store.TemplateScopeGlobal, "", alice.ID, "sha256:reinc-global")
+
+	t.Run("owner user template wins over global", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:        tid("tplres-reinc-agent-alice"),
+			Slug:      "reinc-alice",
+			ProjectID: projectNoTpl.ID,
+			OwnerID:   alice.ID,
+			Template:  "shared-tpl",
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: "claude",
+				CreateInputs:  &store.AgentCreateInputs{HarnessConfig: "claude"},
+			},
+		}
+		fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, projectNoTpl, "")
+		require.NoError(t, err)
+		assert.Equal(t, userTpl.ID, fresh.TemplateID, "reincarnate must resolve alice's user-scoped template ahead of global")
+		assert.Equal(t, userTpl.ContentHash, fresh.TemplateHash)
+	})
+
+	t.Run("other owner falls through to global", func(t *testing.T) {
+		agent := &store.Agent{
+			ID:        tid("tplres-reinc-agent-bob"),
+			Slug:      "reinc-bob",
+			ProjectID: projectNoTpl.ID,
+			OwnerID:   bob.ID,
+			Template:  "shared-tpl",
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: "claude",
+				CreateInputs:  &store.AgentCreateInputs{HarnessConfig: "claude"},
+			},
+		}
+		fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, projectNoTpl, "")
+		require.NoError(t, err)
+		assert.Equal(t, globalTpl.ID, fresh.TemplateID, "reincarnate for bob must fall through to global and not resolve alice's user template")
+		assert.Equal(t, globalTpl.ContentHash, fresh.TemplateHash)
+	})
+}
