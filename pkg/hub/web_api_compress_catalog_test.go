@@ -187,11 +187,12 @@ var compressBypassedUntagged = map[string]string{
 	// Agent auth reset: the path ends in agents/{segment} like an agent item.
 	"POST /api/v1/admin/agents/reset-auth-all": "item route",
 
-	// Agent-token decision routes: /api/v1/agent/ is bypassed as a whole for
-	// secrets and GCP tokens; decision list, show, and interpreted record
-	// carry decision state only, never a credential.
+	// Agent-token decision and hub-metadata routes: /api/v1/agent/ is bypassed
+	// as a whole for secrets and GCP tokens; these routes carry decision state
+	// or non-secret hub_id only, never a credential.
 	"exemption /api/v1/agent/decisions":  "agent prefix",
 	"exemption /api/v1/agent/decisions/": "agent prefix",
+	"exemption GET /api/v1/agent/hub":    "agent prefix",
 }
 
 // compressRequestBypassed mirrors the MountHubAPI decision: the request
