@@ -1411,6 +1411,65 @@ func TestShellAgentGCPIdentity_SkipsDefaultsForcesBlockAndAllowsExplicitOwnerCho
 		assert.Equal(t, store.GCPMetadataModeBlock, headlessStored.AppliedConfig.GCPIdentity.MetadataMode)
 		assert.Empty(t, headlessStored.AppliedConfig.GCPIdentity.ServiceAccountID)
 		assert.Empty(t, headlessStored.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+
+		// Regression guard (V1): when hub default_harness_config is "shell"
+		// but the agent uses a template whose default_harness_config is
+		// "claude", the template tier wins (producing an LLM agent) and the
+		// LLM agent must still inherit the project default GCP SA on both
+		// HTTP and headless create.
+		claudeTpl := &store.Template{
+			ID:                   api.NewUUID(),
+			Name:                 "claude-default-tpl",
+			Slug:                 "claude-default-tpl",
+			Scope:                store.TemplateScopeGlobal,
+			Status:               store.TemplateStatusActive,
+			Harness:              "claude",
+			DefaultHarnessConfig: "claude",
+			ContentHash:          "sha256:claude-tpl-hash",
+			CreatedBy:            f.creator.ID,
+		}
+		require.NoError(t, f.srv.store.CreateTemplate(ctx, claudeTpl))
+
+		httpLLM := createViaHTTP(t, map[string]any{
+			"name":          "llm-tpl-under-hub-shell-http",
+			"template":      claudeTpl.Slug,
+			"provisionOnly": true,
+		})
+		assert.Equal(t, "claude", httpLLM.HarnessConfig)
+		require.NotNil(t, httpLLM.AppliedConfig)
+		assert.Equal(t, "claude", httpLLM.AppliedConfig.HarnessConfig)
+		require.NotNil(t, httpLLM.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeAssign, httpLLM.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Equal(t, sa.ID, httpLLM.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Equal(t, sa.Email, httpLLM.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+
+		evtLLM := withSessionRevision(f.event("llm-tpl-under-hub-shell-headless"), f.creator.ID)
+		llmAuth, llmIdent, err := f.srv.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evtLLM), f.proj.ID, "agent.create")
+		require.NoError(t, err)
+		llmCeiling, llmProv, err := f.srv.fireEffectCeiling(ctx, llmAuth)
+		require.NoError(t, err)
+
+		createdLLM, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      llmAuth,
+			Identity:       llmIdent,
+			EdgeCeiling:    llmCeiling,
+			EdgeProvenance: llmProv,
+			resolvedRole:   &rr,
+			Name:           "llm-tpl-under-hub-shell-headless",
+			Template:       claudeTpl.Slug,
+			Detached:       true,
+		})
+		require.NoError(t, err)
+		headlessLLM, err := f.srv.store.GetAgent(ctx, createdLLM.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "claude", headlessLLM.HarnessConfig)
+		require.NotNil(t, headlessLLM.AppliedConfig)
+		assert.Equal(t, "claude", headlessLLM.AppliedConfig.HarnessConfig)
+		require.NotNil(t, headlessLLM.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeAssign, headlessLLM.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Equal(t, sa.ID, headlessLLM.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Equal(t, sa.Email, headlessLLM.AppliedConfig.GCPIdentity.ServiceAccountEmail)
 	})
 
 	t.Run("dispatch create and start metadata env fail closed to block when GCPIdentity is nil and preserve explicit assign", func(t *testing.T) {

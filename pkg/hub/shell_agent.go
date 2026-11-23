@@ -42,10 +42,13 @@ func isShellAgent(agent *store.Agent) bool {
 	return agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig == config.ShellHarnessConfigName
 }
 
-// willBeShellAgent reports whether agent is or will resolve to the reserved
-// built-in "shell" harness config from its own fields, the project's
-// default_harness_config annotation, or the hub's operational
-// agent_defaults.default_harness_config (before deriveAgentConfig runs).
+// willBeShellAgent reports whether agent is guaranteed to resolve to the
+// reserved built-in "shell" harness config from tiers that strictly outrank
+// templates (the agent's own fields or the project's default_harness_config
+// annotation), before deriveAgentConfig runs. The lower hub-default tier is
+// intentionally excluded here because a template's default_harness_config
+// outranks the hub default; hub-default shell agents are enforced by the
+// post-derivation GCP identity override after deriveAgentConfig.
 func (s *Server) willBeShellAgent(agent *store.Agent, project *store.Project) bool {
 	if isShellAgent(agent) {
 		return true
@@ -53,10 +56,8 @@ func (s *Server) willBeShellAgent(agent *store.Agent, project *store.Project) bo
 	if agent != nil && agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
 		return false
 	}
-	if project != nil && project.Annotations != nil && project.Annotations[projectSettingDefaultHarnessConfig] != "" {
-		return project.Annotations[projectSettingDefaultHarnessConfig] == config.ShellHarnessConfigName
-	}
-	return s.hubAgentDefaults().DefaultHarnessConfig == config.ShellHarnessConfigName
+	return project != nil && project.Annotations != nil &&
+		project.Annotations[projectSettingDefaultHarnessConfig] == config.ShellHarnessConfigName
 }
 
 // refuseReservedHarnessConfigSlug writes 400 reserved_name and returns true
