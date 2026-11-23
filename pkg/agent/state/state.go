@@ -709,6 +709,27 @@ func RetainedSuspendActivity(activity, stalledFrom Activity) Activity {
 	return ""
 }
 
+// IsRetainedOnStop reports whether this non-terminal activity survives a
+// transition to PhaseStopped so a subsequent resume or restart knows the prior
+// run completed (ptone/scion#8900). Comparison is case-insensitive.
+func (a Activity) IsRetainedOnStop() bool {
+	return Activity(strings.ToLower(string(a))) == ActivityCompleted
+}
+
+// RetainedStopActivity returns the canonical lowercase activity to preserve on
+// transition to PhaseStopped (terminal activities or completed; computed from
+// stalledFrom when stalled), or "" when the activity should be cleared.
+func RetainedStopActivity(activity, stalledFrom Activity) Activity {
+	candidate := Activity(strings.ToLower(string(activity)))
+	if candidate == ActivityStalled {
+		candidate = Activity(strings.ToLower(string(stalledFrom)))
+	}
+	if candidate.IsTerminal() || candidate.IsRetainedOnStop() {
+		return candidate
+	}
+	return ""
+}
+
 // IsTerminal reports whether this activity represents a terminal outcome that
 // survives the phase transition to stopped. Terminal activities carry
 // information about HOW the agent stopped and are valid when phase is stopped.
@@ -834,7 +855,7 @@ func (s AgentState) Validate() error {
 		return err
 	}
 	if s.Activity != "" && s.Phase != PhaseRunning {
-		validStopped := s.Phase == PhaseStopped && s.Activity.IsTerminal()
+		validStopped := s.Phase == PhaseStopped && (s.Activity.IsTerminal() || s.Activity.IsRetainedOnStop())
 		validSuspended := s.Phase == PhaseSuspended && s.Activity.IsRetainedOnSuspend()
 		if !validStopped && !validSuspended {
 			return fmt.Errorf("activity %q is not valid when phase is %q (must be %q)", s.Activity, s.Phase, PhaseRunning)

@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -4128,11 +4129,17 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	priorPhase := agent.Phase
 	priorLaunchError := agent.LaunchError
 
+	priorStatus := dispatchPriorStatus(agent)
+
 	// If no explicit task provided, fall back to the agent's applied config
 	// task. Skip this on a pure resume (no new message): the harness should
 	// just continue its prior session rather than be re-handed the original
-	// creation task. A wake-with-message still passes that message as task.
-	if task == "" && !resume && agent.AppliedConfig != nil {
+	// creation task. Also skip when the agent's prior run already completed
+	// (ptone/scion#8900): the broker will present a completion notice instead
+	// of replaying the original task prompt. A wake-with-message or explicit
+	// task still passes that task through.
+	priorCompleted := priorStatus != nil && priorStatus.Activity == string(state.ActivityCompleted)
+	if task == "" && !resume && !priorCompleted && agent.AppliedConfig != nil {
 		task = agent.AppliedConfig.Task
 	}
 
@@ -4267,6 +4274,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TemplateName:       agent.Template,
 		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 		NoAuth:             launchesWithoutCredentials(agent),
+		PriorStatus:        priorStatus,
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -4571,6 +4579,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ResolvedSecrets:    startEnv.secrets,
 		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 		NoAuth:             launchesWithoutCredentials(agent),
+		PriorStatus:        dispatchPriorStatus(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -4613,6 +4622,32 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// keep it, reporting that entry's (older) run ID.
 	d.settleLandedRun(ctx, agent, runID, recorded, resp)
 	return nil
+}
+
+// dispatchPriorStatus snapshots the agent's last known activity status for the
+// broker so a resume or restart can build a status-aware notice without
+// replaying the original task prompt when the prior run completed
+// (ptone/scion#8900). Returns nil when no prior activity is recorded.
+func dispatchPriorStatus(agent *store.Agent) *api.PriorStatus {
+	if agent == nil {
+		return nil
+	}
+	activity := strings.ToLower(strings.TrimSpace(agent.Activity))
+	if activity == "" {
+		return nil
+	}
+	summary := strings.TrimSpace(agent.TaskSummary)
+	if summary == "" && activity != string(state.ActivityCompleted) {
+		summary = strings.TrimSpace(agent.Message)
+	}
+	ps := &api.PriorStatus{
+		Activity: activity,
+		Summary:  summary,
+	}
+	if !agent.LastActivityEvent.IsZero() {
+		ps.At = agent.LastActivityEvent.UTC()
+	}
+	return ps
 }
 
 // DispatchAgentResetAuth injects a fresh auth token into a running agent without

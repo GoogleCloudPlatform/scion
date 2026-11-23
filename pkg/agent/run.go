@@ -440,9 +440,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	}
 
 	task := opts.Task
+	priorStatusNotice := false
 
 	if task == "" && !opts.Resume {
-		task = promptFileContent
+		if isPriorStatusCompleted(opts.PriorStatus) {
+			task = formatPriorCompletionNotice(opts.PriorStatus)
+			priorStatusNotice = true
+		} else {
+			task = promptFileContent
+		}
 	} else if task != "" {
 		// Explicit prompt always wins — write/overwrite prompt.md
 		if writeErr := os.WriteFile(promptFile, []byte(task), 0644); writeErr != nil {
@@ -2738,6 +2744,16 @@ authDone:
 	templateFallbackEnv, templateEnvFallbackWarnings := templateEnvFallback(templateEnv, opts.BrokerMode, opts.Name)
 	warnings = append(warnings, templateEnvFallbackWarnings...)
 
+	// When resuming without an explicit task, replace the hardcoded generic
+	// resume prompt with a status-aware notice for harnesses that declare
+	// task_flag (antigravity, gemini-cli, copilot, opencode). Non-task_flag
+	// harnesses (claude, codex, grok-build, pi, ...) stay promptless
+	// (ptone/scion#8900).
+	if opts.Resume && task == "" && opts.PriorStatus != nil && harnessUsesTaskFlag(h, finalScionCfg) {
+		task = harness.ResumePromptForPriorStatus(opts.PriorStatus)
+		priorStatusNotice = true
+	}
+
 	// Write the full task to the agent home, and pass a short pointer to
 	// it instead when the task is too large to pass inline.
 	task, err = deliverTaskFile(agentHome, task)
@@ -2746,7 +2762,8 @@ authDone:
 	}
 	// Tell sciontool init whether this start has a task, for its
 	// first-turn watchdog. An inherited value is always replaced.
-	if task != "" {
+	// A prior-status notice is not an initial task (ptone/scion#8900).
+	if task != "" && !priorStatusNotice {
 		agentEnv.Set(envInitialTask, "1", envOriginBrokerSystem)
 	} else {
 		agentEnv.Delete(envInitialTask)
@@ -4454,6 +4471,43 @@ func withLaunchIDEnv(env []string, runID string) []string {
 		}
 	}
 	return append(out, envLaunchID+"="+runID)
+}
+
+// isPriorStatusCompleted reports whether prior records a completed previous run.
+func isPriorStatusCompleted(prior *api.PriorStatus) bool {
+	return prior != nil && strings.EqualFold(strings.TrimSpace(prior.Activity), string(state.ActivityCompleted))
+}
+
+// formatPriorCompletionNotice builds the notice passed to a freshly started or
+// restarted harness when the agent's previous run completed (ptone/scion#8900).
+func formatPriorCompletionNotice(prior *api.PriorStatus) string {
+	var b strings.Builder
+	b.WriteString("Your previous run completed")
+	if prior != nil {
+		if !prior.At.IsZero() {
+			b.WriteString(" at ")
+			b.WriteString(prior.At.UTC().Format(time.RFC3339))
+		}
+		if summary := strings.TrimSpace(prior.Summary); summary != "" {
+			b.WriteString(" (")
+			b.WriteString(summary)
+			b.WriteString(")")
+		}
+	}
+	b.WriteString(". Wait for new instructions; do not restart the original task unless instructed.")
+	return b.String()
+}
+
+// harnessUsesTaskFlag reports whether h or cfg declares a task_flag (the
+// harnesses that inject a synthetic resume prompt on resume=true, task="").
+func harnessUsesTaskFlag(h api.Harness, cfg *api.ScionConfig) bool {
+	if cfg != nil && cfg.TaskFlag != "" {
+		return true
+	}
+	if tf, ok := h.(interface{ HasTaskFlag() bool }); ok {
+		return tf.HasTaskFlag()
+	}
+	return false
 }
 
 // envInitialTask is the container env variable set to "1" when the agent

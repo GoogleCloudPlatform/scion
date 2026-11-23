@@ -257,7 +257,8 @@ func (d *startDispatch) rollback(ctx context.Context) {
 			IfPhase: string(state.PhaseStarting),
 			Restore: true,
 		}
-		if d.priorPhase == string(state.PhaseSuspended) && state.Activity(d.priorActivity).IsRetainedOnSuspend() {
+		if (d.priorPhase == string(state.PhaseSuspended) && state.Activity(d.priorActivity).IsRetainedOnSuspend()) ||
+			(d.priorPhase == string(state.PhaseStopped) && state.Activity(d.priorActivity).IsRetainedOnStop()) {
 			su.Activity = d.priorActivity
 		}
 		err := d.s.store.UpdateAgentStatus(rctx, d.agent.ID, su)

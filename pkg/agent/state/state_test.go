@@ -315,6 +315,11 @@ func TestDisplayStatus(t *testing.T) {
 			want:  "limits_exceeded",
 		},
 		{
+			name:  "stopped with completed still returns stopped",
+			state: AgentState{Phase: PhaseStopped, Activity: ActivityCompleted},
+			want:  "stopped",
+		},
+		{
 			name:  "error returns phase",
 			state: AgentState{Phase: PhaseError},
 			want:  "error",
@@ -409,6 +414,11 @@ func TestAgentStateValidate(t *testing.T) {
 		{
 			name:    "valid: limits_exceeded with stopped phase",
 			state:   AgentState{Phase: PhaseStopped, Activity: ActivityLimitsExceeded},
+			wantErr: false,
+		},
+		{
+			name:    "valid: completed retained with stopped phase",
+			state:   AgentState{Phase: PhaseStopped, Activity: ActivityCompleted},
 			wantErr: false,
 		},
 		{
@@ -849,6 +859,48 @@ func TestRetainedSuspendActivity(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := RetainedSuspendActivity(tt.activity, tt.stalledFrom); got != tt.want {
 				t.Errorf("RetainedSuspendActivity(%q, %q) = %q, want %q", tt.activity, tt.stalledFrom, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestActivityIsRetainedOnStop(t *testing.T) {
+	for _, a := range append(Activities(), Activity("")) {
+		want := a == ActivityCompleted
+		if got := a.IsRetainedOnStop(); got != want {
+			t.Errorf("Activity(%q).IsRetainedOnStop() = %v, want %v", a, got, want)
+		}
+	}
+	for _, upper := range []Activity{"COMPLETED", "Completed"} {
+		if !upper.IsRetainedOnStop() {
+			t.Errorf("Activity(%q).IsRetainedOnStop() = false, want true", upper)
+		}
+	}
+}
+
+func TestRetainedStopActivity(t *testing.T) {
+	tests := []struct {
+		name        string
+		activity    Activity
+		stalledFrom Activity
+		want        Activity
+	}{
+		{"completed kept", ActivityCompleted, "", ActivityCompleted},
+		{"uppercase COMPLETED normalized", "COMPLETED", "", ActivityCompleted},
+		{"crashed kept", ActivityCrashed, "", ActivityCrashed},
+		{"limits_exceeded kept", ActivityLimitsExceeded, "", ActivityLimitsExceeded},
+		{"idle cleared", ActivityIdle, "", ""},
+		{"working cleared", ActivityWorking, "", ""},
+		{"blocked cleared", ActivityBlocked, "", ""},
+		{"harness_error cleared", ActivityHarnessError, "", ""},
+		{"empty stays empty", "", "", ""},
+		{"stalled from completed restores completed", ActivityStalled, ActivityCompleted, ActivityCompleted},
+		{"stalled from working cleared", ActivityStalled, ActivityWorking, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RetainedStopActivity(tt.activity, tt.stalledFrom); got != tt.want {
+				t.Errorf("RetainedStopActivity(%q, %q) = %q, want %q", tt.activity, tt.stalledFrom, got, tt.want)
 			}
 		})
 	}

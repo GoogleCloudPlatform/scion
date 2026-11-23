@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -147,6 +148,62 @@ func TestContainerScriptHarness_GetCommand_ResumeWithSyntheticPrompt(t *testing.
 	want = []string{"opencode-launch", "--continue", "--prompt", "new work"}
 	if strings.Join(cmd, " ") != strings.Join(want, " ") {
 		t.Errorf("resume with task: GetCommand=%v want %v", cmd, want)
+	}
+
+	if !h.HasTaskFlag() {
+		t.Error("HasTaskFlag() = false, want true")
+	}
+}
+
+func TestResumePromptForPriorStatus(t *testing.T) {
+	ts := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		prior *api.PriorStatus
+		want  string
+	}{
+		{
+			name:  "nil falls back to default",
+			prior: nil,
+			want:  DefaultResumePrompt,
+		},
+		{
+			name:  "empty activity falls back to default",
+			prior: &api.PriorStatus{Summary: "ignored"},
+			want:  DefaultResumePrompt,
+		},
+		{
+			name:  "completed with timestamp and summary",
+			prior: &api.PriorStatus{Activity: "completed", Summary: "PR #123 opened", At: ts},
+			want:  "Resumed session. Last reported status: task_completed at 2026-11-23T12:00:00Z (PR #123 opened). Check for new messages; do not repeat completed work.",
+		},
+		{
+			name:  "completed with timestamp only",
+			prior: &api.PriorStatus{Activity: "completed", At: ts},
+			want:  "Resumed session. Last reported status: task_completed at 2026-11-23T12:00:00Z. Check for new messages; do not repeat completed work.",
+		},
+		{
+			name:  "completed with summary only",
+			prior: &api.PriorStatus{Activity: "COMPLETED", Summary: "done"},
+			want:  "Resumed session. Last reported status: task_completed (done). Check for new messages; do not repeat completed work.",
+		},
+		{
+			name:  "completed with neither timestamp nor summary",
+			prior: &api.PriorStatus{Activity: "completed"},
+			want:  "Resumed session. Last reported status: task_completed. Check for new messages; do not repeat completed work.",
+		},
+		{
+			name:  "idle with timestamp and summary",
+			prior: &api.PriorStatus{Activity: "idle", Summary: "waiting for review", At: ts},
+			want:  "Resumed session. Last reported status: idle at 2026-11-23T12:00:00Z (waiting for review). Check for pending work or new messages.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResumePromptForPriorStatus(tc.prior); got != tc.want {
+				t.Errorf("ResumePromptForPriorStatus() =\n  %q\nwant:\n  %q", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -28,6 +28,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -188,6 +189,51 @@ func (c *ContainerScriptHarness) AdvancedCapabilities() api.HarnessAdvancedCapab
 	return caps
 }
 
+// DefaultResumePrompt is the fallback synthetic prompt injected for
+// task_flag harnesses when resuming without an explicit task or prior status.
+const DefaultResumePrompt = "Continue your previous task. Check for pending work or new messages."
+
+// HasTaskFlag reports whether this harness declares a task_flag in its command
+// spec (e.g. antigravity, gemini-cli, copilot, opencode).
+func (c *ContainerScriptHarness) HasTaskFlag() bool {
+	return c.entry.Command != nil && c.entry.Command.TaskFlag != ""
+}
+
+// ResumePromptForPriorStatus returns a status-aware resume prompt for a
+// task_flag harness when resuming with no explicit task (ptone/scion#8900).
+// When prior is nil or has no activity, it returns DefaultResumePrompt.
+func ResumePromptForPriorStatus(prior *api.PriorStatus) string {
+	if prior == nil {
+		return DefaultResumePrompt
+	}
+	activity := strings.ToLower(strings.TrimSpace(prior.Activity))
+	if activity == "" {
+		return DefaultResumePrompt
+	}
+	statusLabel := activity
+	if activity == "completed" {
+		statusLabel = "task_completed"
+	}
+	var b strings.Builder
+	b.WriteString("Resumed session. Last reported status: ")
+	b.WriteString(statusLabel)
+	if !prior.At.IsZero() {
+		b.WriteString(" at ")
+		b.WriteString(prior.At.UTC().Format(time.RFC3339))
+	}
+	if summary := strings.TrimSpace(prior.Summary); summary != "" {
+		b.WriteString(" (")
+		b.WriteString(summary)
+		b.WriteString(")")
+	}
+	if activity == "completed" {
+		b.WriteString(". Check for new messages; do not repeat completed work.")
+	} else {
+		b.WriteString(". Check for pending work or new messages.")
+	}
+	return b.String()
+}
+
 // GetCommand builds the harness CLI invocation from the declarative
 // command spec. Falls back to baseArgs alone if no command is declared.
 //
@@ -209,7 +255,7 @@ func (c *ContainerScriptHarness) GetCommand(task string, resume bool, baseArgs [
 	// this, TUI-based harnesses exit immediately on resume because the
 	// session is already idle and there is no new work to process.
 	if resume && task == "" && cmd.TaskFlag != "" {
-		task = "Continue your previous task. Check for pending work or new messages."
+		task = DefaultResumePrompt
 	}
 
 	resumeTokens := []string{}
