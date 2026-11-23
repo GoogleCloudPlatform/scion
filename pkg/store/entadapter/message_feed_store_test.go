@@ -251,8 +251,7 @@ func TestBackfillConversationMessageSeqs_RepairsDuplicateSeqs(t *testing.T) {
 	insertMsg(idNull, t4, nil, "null-row")
 
 	// Set conversations.last_message_seq = 2 (matching the original head).
-	_, err := cs.DB().ExecContext(ctx, "UPDATE conversations SET last_message_seq = 2 WHERE id = ?", conv.ID)
-	require.NoError(t, err)
+	require.NoError(t, client.Conversation.UpdateOneID(convUUID).SetLastMessageSeq(2).Exec(ctx))
 
 	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
 
@@ -323,8 +322,7 @@ func TestBackfillConversationMessageSeqs_RepairsDuplicateSeqs(t *testing.T) {
 			Save(ctx)
 		require.NoError(t, saveErr)
 	}
-	_, err = cs.DB().ExecContext(ctx, "UPDATE conversations SET last_message_seq = 1 WHERE id = ?", convDupOnly.ID)
-	require.NoError(t, err)
+	require.NoError(t, client.Conversation.UpdateOneID(convDupOnlyUUID).SetLastMessageSeq(1).Exec(ctx))
 
 	require.NoError(t, cs.BackfillConversationMessageSeqs(ctx))
 
