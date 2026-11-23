@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
 // Consumer and environment identifiers (consumer design §5.4, brief §§1, 1a).
@@ -36,19 +37,43 @@ const (
 
 	// KindViolation is the boolean rule projection slot for violation_rule.
 	KindViolation ruleengine.Kind = "violation"
+
+	// KindJudgments is the multi-question System One projection slot for system_one_rule.
+	KindJudgments ruleengine.Kind = ruleengine.Kind(spec.KindJudgments)
 )
 
-// Size and budget bounds (consumer design §§5.3, 5.4; brief §1).
+// Size and budget bounds (consumer design §§5.3, 5.4, 5.5; brief §1).
 const (
-	MaxViolationRuleBytes = 4096
-	MaxSystemOneRuleBytes = 16384
-	MaxBodyBytes          = 16 * 1024
-	MaxTemplateBytes      = 1024
-	MaxPolicyNameLen      = 63
+	MaxViolationRuleBytes     = 4096
+	MaxSystemOneRuleBytes     = 16384
+	MaxBodyBytes              = 16 * 1024
+	MaxSystemOneEnvTotalBytes = 24 * 1024
+	MaxTemplateBytes          = 1024
+	MaxPolicyNameLen          = 63
 
 	// DefaultSendBudget caps aggregate CEL evaluation time across matching
 	// synchronous policies on a single outbound send (250 ms; brief §1).
 	DefaultSendBudget = 250 * time.Millisecond
+
+	// DefaultSystemOneSendBudget is the default synchronous per-send budget for
+	// System One judgment evaluation (consumer design §5.5, runtime-design §7.1).
+	DefaultSystemOneSendBudget = 1500 * time.Millisecond
+
+	// MaxSystemOneSendBudget is the hard ceiling on synchronous System One
+	// evaluation per send (consumer design §5.5, runtime-design §7.1).
+	MaxSystemOneSendBudget = 3 * time.Second
+)
+
+// System One content-environment field and choice-set identifiers (consumer design §5.4).
+const (
+	FieldMessageBody                      = "message.body"
+	FieldMessageType                      = "message.type"
+	FieldSenderSlug                       = "sender.slug"
+	FieldRecipientSlug                    = "recipient.slug"
+	FieldRecipientKind                    = "recipient.kind"
+	FieldConversationUnmentionedAgentSlug = "conversation.unmentioned_agent_slugs"
+
+	ChoiceSetUnmentionedAgents = "unmentioned_agents"
 )
 
 // Policy modes (consumer design §5.3).
@@ -137,5 +162,70 @@ func ViolationEnvironmentRef() ruleengine.EnvironmentRef {
 		Name:         EnvironmentName,
 		MaxRuleBytes: MaxViolationRuleBytes,
 		ResultType:   celengine.Bool(),
+	}
+}
+
+// SystemOneContentEnv returns the message_policy v1 System One
+// ContentEnvironment declaration (consumer design §5.4).
+func SystemOneContentEnv() spec.ContentEnvironment {
+	return spec.ContentEnvironment{
+		Name:    EnvironmentName,
+		Version: EnvironmentVersion,
+		Fields: []spec.FieldDecl{
+			{
+				Name:     FieldMessageBody,
+				Kind:     spec.FieldKindText,
+				MaxBytes: MaxBodyBytes,
+				Trust:    spec.TrustUntrusted,
+			},
+			{
+				Name:     FieldMessageType,
+				Kind:     spec.FieldKindText,
+				MaxBytes: 64,
+				Trust:    spec.TrustUntrusted,
+			},
+			{
+				Name:     FieldSenderSlug,
+				Kind:     spec.FieldKindText,
+				MaxBytes: 128,
+				Trust:    spec.TrustTrusted,
+			},
+			{
+				Name:     FieldRecipientSlug,
+				Kind:     spec.FieldKindText,
+				MaxBytes: 128,
+				Trust:    spec.TrustTrusted,
+			},
+			{
+				Name:     FieldRecipientKind,
+				Kind:     spec.FieldKindText,
+				MaxBytes: 16,
+				Trust:    spec.TrustTrusted,
+			},
+			{
+				Name:     FieldConversationUnmentionedAgentSlug,
+				Kind:     spec.FieldKindText,
+				MaxBytes: 2048,
+				Trust:    spec.TrustTrusted,
+			},
+		},
+		ChoiceSets: []spec.ChoiceSetDecl{
+			{
+				Name:          ChoiceSetUnmentionedAgents,
+				MaxItems:      64,
+				MaxLabelBytes: 128,
+			},
+		},
+		MaxTotalBytes: MaxSystemOneEnvTotalBytes,
+	}
+}
+
+// SystemOneEnvironmentRef returns the ruleengine.EnvironmentRef for compiling
+// System One judgment rules against the message_policy content environment.
+func SystemOneEnvironmentRef() ruleengine.EnvironmentRef {
+	return ruleengine.EnvironmentRef{
+		Consumer:     ConsumerName,
+		Name:         EnvironmentName,
+		MaxRuleBytes: MaxSystemOneRuleBytes,
 	}
 }

@@ -386,13 +386,14 @@ func TestAuthoringValidationAndCoverage(t *testing.T) {
 	assert.Contains(t, cov.UncoveredAgentPaths, messagepolicy.SurfaceGroupSet)
 	assert.Contains(t, cov.UncoveredAgentPaths, messagepolicy.SurfaceMentionDelivery)
 
-	// Non-empty system_one_rule refused with not_yet_supported.
+	// Non-empty system_one_rule requires explicit on_uncertain (lead decision).
 	s1 := validAuthoringSpec()
-	s1.SystemOneRule = `{"version":1}`
+	s1.SystemOneRule = `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"questions":[{"id":"asks_choice","type":"binary","instructions":"Does the message ask the recipient to choose?"}]}}`
 	_, err = ev.ValidateAuthoring(ctx, s1)
 	var vErr *messagepolicy.ValidationError
 	require.ErrorAs(t, err, &vErr)
-	assert.Equal(t, messagepolicy.ErrCodeNotYetSupported, vErr.Code)
+	assert.Equal(t, messagepolicy.ErrCodeValidation, vErr.Code)
+	assert.Equal(t, "on_uncertain", vErr.Field)
 
 	// Uncovered surfaces refused with surface_not_covered.
 	for _, uncovered := range []string{

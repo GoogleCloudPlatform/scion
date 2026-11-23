@@ -133,6 +133,7 @@ var windowsAllowed = map[string]bool{
 	"message-policy.create":    true,
 	"message-policy.list":      true,
 	"message-policy.get":       true,
+	"message-policy.update":    true,
 	"message-policy.delete":    true,
 	"message-policy.test":      true,
 	"message-policy.decisions": true,

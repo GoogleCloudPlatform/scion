@@ -19,6 +19,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -206,6 +207,7 @@ type messagePolicyGateRuntime struct {
 
 	// Test seams (nil in production).
 	newSendBudget        func() *ruleengine.BudgetTracker
+	newSystemOneBudget   func() time.Duration
 	evalOverride         func(ctx context.Context, pol *store.MessagePolicy, act messagepolicy.Activation, tracker *ruleengine.BudgetTracker) (messagepolicy.Classification, bool)
 	testShadowBeforeEval func()
 
@@ -221,6 +223,8 @@ type messagePolicyGateRuntime struct {
 type messagePolicyShadowJob struct {
 	policies         []store.MessagePolicy
 	snapshot         h2FactSnapshot
+	facts            messagepolicy.Facts
+	hasFacts         bool
 	activation       messagepolicy.Activation
 	hasActivation    bool
 	factsUnavailable bool
@@ -288,6 +292,18 @@ func (g *messagePolicyGateRuntime) makeSendBudget() *ruleengine.BudgetTracker {
 	return messagepolicy.NewSendBudget()
 }
 
+func (g *messagePolicyGateRuntime) systemOneSendBudget() time.Duration {
+	if g.newSystemOneBudget != nil {
+		if d := g.newSystemOneBudget(); d > 0 {
+			if d > messagepolicy.MaxSystemOneSendBudget {
+				return messagepolicy.MaxSystemOneSendBudget
+			}
+			return d
+		}
+	}
+	return messagepolicy.DefaultSystemOneSendBudget
+}
+
 func (s *Server) enqueueMessagePolicyShadow(job messagePolicyShadowJob) {
 	rt := &s.messagePolicyGate
 	rt.mu.Lock()
@@ -331,20 +347,30 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 		return
 	}
 	bodyTruncated := len(job.snapshot.msgBody) > messagepolicy.MaxBodyBytes
+	hasSystemOne := false
+	for i := range job.policies {
+		if strings.TrimSpace(job.policies[i].SystemOneRule) != "" {
+			hasSystemOne = true
+			break
+		}
+	}
 	factsUnavailable := job.factsUnavailable
+	facts := job.facts
 	act := job.activation
-	if !bodyTruncated && !job.hasActivation && !factsUnavailable {
-		facts, _, _, factsErr := s.buildH2MessagePolicyFacts(ctx, job.snapshot, nil, false)
+	if (!bodyTruncated || hasSystemOne) && !job.hasFacts && !factsUnavailable {
+		builtFacts, _, _, factsErr := s.buildH2MessagePolicyFacts(ctx, job.snapshot, nil, false)
 		if ctx.Err() != nil {
 			return
 		}
 		if factsErr != nil {
 			factsUnavailable = true
 		} else {
+			facts = builtFacts
 			act = messagepolicy.NewActivation(facts)
 		}
 	}
 	budget := s.messagePolicyGate.makeSendBudget()
+	soBudget := s.messagePolicyGate.systemOneSendBudget()
 	tplData := messagepolicy.TemplateData{
 		Recipient: job.snapshot.recipientSlug,
 	}
@@ -353,10 +379,11 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 			return
 		}
 		pol := &job.policies[i]
+		polHasS1 := strings.TrimSpace(pol.SystemOneRule) != ""
 		var classification messagepolicy.Classification
 		var elapsed time.Duration
 		switch {
-		case bodyTruncated:
+		case !polHasS1 && bodyTruncated:
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonBodyTruncated,
@@ -368,7 +395,7 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 			}
 		default:
 			start := time.Now()
-			classification = s.evalOneMessagePolicy(ctx, pol, act, budget)
+			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, job.snapshot.projectID, facts, act, budget, soBudget)
 			elapsed = time.Since(start)
 		}
 		if ctx.Err() != nil {
@@ -381,6 +408,8 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 		}
 
 		tplData.Policy = pol.Name
+		tplData.JudgmentFlags = classification.Judgments.Flags
+		tplData.JudgmentLabels = classification.Judgments.Labels
 		outcome := messagepolicy.ResolveOutcome(
 			classification.Class,
 			classification.Reason,
@@ -529,6 +558,13 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 	}
 
 	bodyTruncated := len(snap.msgBody) > messagepolicy.MaxBodyBytes
+	hasSystemOneEnforce := false
+	for i := 0; i < len(enforcePols) && i < store.MaxActiveMatchingMessagePolicies; i++ {
+		if strings.TrimSpace(enforcePols[i].SystemOneRule) != "" {
+			hasSystemOneEnforce = true
+			break
+		}
+	}
 	var (
 		facts              messagepolicy.Facts
 		humanMembers       []chatMemberEntry
@@ -536,13 +572,14 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		factsErr           error
 		act                messagepolicy.Activation
 	)
-	if !bodyTruncated {
+	if !bodyTruncated || hasSystemOneEnforce {
 		facts, humanMembers, humanMembersLoaded, factsErr = s.buildH2MessagePolicyFacts(ctx, snap, nil, false)
 		if factsErr == nil {
 			act = messagepolicy.NewActivation(facts)
 		}
 	}
 	budget := s.messagePolicyGate.makeSendBudget()
+	soBudget := s.messagePolicyGate.systemOneSendBudget()
 
 	type enforceEvalResult struct {
 		policy         *store.MessagePolicy
@@ -551,11 +588,38 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		elapsed        time.Duration
 	}
 
-	results := make([]enforceEvalResult, 0, len(enforcePols))
+	results := make([]enforceEvalResult, len(enforcePols))
+	if hasSystemOneEnforce && factsErr == nil {
+		// Evaluate enforce policies carrying a system_one_rule concurrently under
+		// the shared synchronous System One send deadline (consumer design §5.5).
+		soCtx, soCancel := context.WithTimeout(ctx, soBudget)
+		var wg sync.WaitGroup
+		for i := 0; i < len(enforcePols) && i < store.MaxActiveMatchingMessagePolicies; i++ {
+			pol := &enforcePols[i]
+			if strings.TrimSpace(pol.SystemOneRule) == "" {
+				continue
+			}
+			wg.Add(1)
+			go func(idx int, p *store.MessagePolicy) {
+				defer wg.Done()
+				start := time.Now()
+				cls := s.evalOneMessagePolicyWithFacts(soCtx, p, snap.projectID, facts, act, budget, soBudget)
+				results[idx] = enforceEvalResult{
+					policy:         p,
+					classification: cls,
+					elapsed:        time.Since(start),
+				}
+			}(i, pol)
+		}
+		wg.Wait()
+		soCancel()
+	}
+
 	var firstReject *enforceEvalResult
 
 	for i := range enforcePols {
 		pol := &enforcePols[i]
+		polHasS1 := strings.TrimSpace(pol.SystemOneRule) != ""
 		var classification messagepolicy.Classification
 		var elapsed time.Duration
 		switch {
@@ -564,7 +628,7 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonPolicyCapExceeded,
 			}
-		case bodyTruncated:
+		case !polHasS1 && bodyTruncated:
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonBodyTruncated,
@@ -574,9 +638,12 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 				Class:  messagepolicy.ClassFailed,
 				Reason: messagepolicy.ReasonFactsUnavailable,
 			}
+		case polHasS1 && results[i].policy != nil:
+			classification = results[i].classification
+			elapsed = results[i].elapsed
 		default:
 			start := time.Now()
-			classification = s.evalOneMessagePolicy(ctx, pol, act, budget)
+			classification = s.evalOneMessagePolicyWithFacts(ctx, pol, snap.projectID, facts, act, budget, soBudget)
 			elapsed = time.Since(start)
 		}
 
@@ -592,15 +659,14 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			pol.OnFailed,
 			pol.OnFailedReasons,
 		)
-		entry := enforceEvalResult{
+		results[i] = enforceEvalResult{
 			policy:         pol,
 			classification: classification,
 			outcome:        outcome,
 			elapsed:        elapsed,
 		}
-		results = append(results, entry)
 		if outcome == messagepolicy.OutcomeReject && firstReject == nil {
-			firstReject = &results[len(results)-1]
+			firstReject = &results[i]
 		}
 	}
 
@@ -617,6 +683,8 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		for i := range results {
 			r := &results[i]
 			tplData.Policy = r.policy.Name
+			tplData.JudgmentFlags = r.classification.Judgments.Flags
+			tplData.JudgmentLabels = r.classification.Judgments.Labels
 			action := store.MessagePolicyActionAdmitted
 			if r.outcome == messagepolicy.OutcomeReject {
 				action = store.MessagePolicyActionRejected
@@ -638,8 +706,10 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 			s.enqueueMessagePolicyShadow(messagePolicyShadowJob{
 				policies:         shadowPols,
 				snapshot:         snap,
+				facts:            facts,
+				hasFacts:         (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
 				activation:       act,
-				hasActivation:    !bodyTruncated && factsErr == nil,
+				hasActivation:    (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
 				factsUnavailable: factsErr != nil,
 				messageID:        "",
 			})
@@ -647,6 +717,8 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 
 		pol := firstReject.policy
 		tplData.Policy = pol.Name
+		tplData.JudgmentFlags = firstReject.classification.Judgments.Flags
+		tplData.JudgmentLabels = firstReject.classification.Judgments.Labels
 		reason := renderPolicyRejectReason(pol, tplData)
 		remediation := messagepolicy.RenderTemplate(pol.RejectRemediation, tplData)
 
@@ -678,6 +750,8 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 	for i := range results {
 		r := &results[i]
 		tplData.Policy = r.policy.Name
+		tplData.JudgmentFlags = r.classification.Judgments.Flags
+		tplData.JudgmentLabels = r.classification.Judgments.Labels
 		admittedDecisions = append(admittedDecisions, buildMessagePolicyDecisionRecord(
 			r.policy,
 			snap,
@@ -695,8 +769,10 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		shadowJob = &messagePolicyShadowJob{
 			policies:         shadowPols,
 			snapshot:         snap,
+			facts:            facts,
+			hasFacts:         (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
 			activation:       act,
-			hasActivation:    !bodyTruncated && factsErr == nil,
+			hasActivation:    (!bodyTruncated || hasSystemOneEnforce) && factsErr == nil,
 			factsUnavailable: factsErr != nil,
 			droppedCount:     droppedShadow,
 		}
@@ -740,6 +816,18 @@ func (s *Server) evalOneMessagePolicy(
 	act messagepolicy.Activation,
 	budget *ruleengine.BudgetTracker,
 ) messagepolicy.Classification {
+	return s.evalOneMessagePolicyWithFacts(ctx, pol, "", messagepolicy.Facts{}, act, budget, s.messagePolicyGate.systemOneSendBudget())
+}
+
+func (s *Server) evalOneMessagePolicyWithFacts(
+	ctx context.Context,
+	pol *store.MessagePolicy,
+	projectID string,
+	facts messagepolicy.Facts,
+	act messagepolicy.Activation,
+	budget *ruleengine.BudgetTracker,
+	soMaxEvalTime time.Duration,
+) messagepolicy.Classification {
 	if fn := s.messagePolicyGate.evalOverride; fn != nil {
 		if c, handled := fn(ctx, pol, act, budget); handled {
 			return c
@@ -753,7 +841,20 @@ func (s *Server) evalOneMessagePolicy(
 			Reason:   ruleengine.ReasonConsumerNotRegistered,
 		})
 	}
-	return ev.EvaluateViolation(ctx, pol.ID, pol.Revision, pol.ViolationRule, act, messagepolicy.WithBudget(budget))
+	if strings.TrimSpace(pol.SystemOneRule) == "" {
+		return ev.EvaluateViolation(ctx, pol.ID, pol.Revision, pol.ViolationRule, act, messagepolicy.WithBudget(budget))
+	}
+	return ev.EvaluatePolicy(
+		ctx,
+		pol.ID,
+		pol.Revision,
+		pol.ViolationRule,
+		pol.SystemOneRule,
+		projectID,
+		facts,
+		[]messagepolicy.EvalOption{messagepolicy.WithBudget(budget)},
+		[]messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soMaxEvalTime)},
+	)
 }
 
 func deriveH2FactSnapshot(in *h2PolicyInput) h2FactSnapshot {
@@ -864,25 +965,33 @@ func (s *Server) buildH2MessagePolicyFacts(
 	var factsErr error
 
 	mentionOpts := s.mentionOptions()
-	var mentionedAgentIDs []string
+	var (
+		mentionedAgentIDs []string
+		projectAgents     []store.Agent
+		agentsLoaded      bool
+	)
 	if snap.projectID != "" && strings.Contains(snap.msgBody, "@") {
 		proseAgentMentions := dropSelfMentionName(messages.ExtractProseMentionsWithOptions(snap.msgBody, mentionOpts), snap.senderSlug)
 		if len(proseAgentMentions) > 0 {
 			agents, err := listAllProjectAgents(ctx, s.store, snap.projectID)
 			if err != nil {
 				factsErr = errors.Join(factsErr, err)
-			} else if len(agents) > 0 {
-				slugToID := make(map[string]string, len(agents))
-				for i := range agents {
-					if agents[i].Slug != "" {
-						slugToID[strings.ToLower(agents[i].Slug)] = agents[i].ID
+			} else {
+				projectAgents = agents
+				agentsLoaded = true
+				if len(agents) > 0 {
+					slugToID := make(map[string]string, len(agents))
+					for i := range agents {
+						if agents[i].Slug != "" {
+							slugToID[strings.ToLower(agents[i].Slug)] = agents[i].ID
+						}
 					}
-				}
-				seen := make(map[string]bool, len(proseAgentMentions))
-				for _, m := range proseAgentMentions {
-					if id, ok := slugToID[strings.ToLower(m)]; ok && !seen[id] {
-						seen[id] = true
-						mentionedAgentIDs = append(mentionedAgentIDs, id)
+					seen := make(map[string]bool, len(proseAgentMentions))
+					for _, m := range proseAgentMentions {
+						if id, ok := slugToID[strings.ToLower(m)]; ok && !seen[id] {
+							seen[id] = true
+							mentionedAgentIDs = append(mentionedAgentIDs, id)
+						}
 					}
 				}
 			}
@@ -910,6 +1019,7 @@ func (s *Server) buildH2MessagePolicyFacts(
 
 	var agentParticipantIDs []string
 	var userParticipantIDs []string
+	var unmentionedAgentSlugs []string
 	if snap.convKind == "group" && snap.convID != "" {
 		parts, err := s.store.ListParticipants(ctx, snap.convID)
 		if err != nil {
@@ -924,6 +1034,34 @@ func (s *Server) buildH2MessagePolicyFacts(
 					agentParticipantIDs = append(agentParticipantIDs, p.PrincipalID)
 				case "user":
 					userParticipantIDs = append(userParticipantIDs, p.PrincipalID)
+				}
+			}
+			if len(agentParticipantIDs) > 0 && snap.projectID != "" {
+				if !agentsLoaded {
+					agents, err := listAllProjectAgents(ctx, s.store, snap.projectID)
+					if err != nil {
+						factsErr = errors.Join(factsErr, err)
+					} else {
+						projectAgents = agents
+						agentsLoaded = true
+					}
+				}
+				if agentsLoaded && len(projectAgents) > 0 {
+					idToSlug := make(map[string]string, len(projectAgents))
+					for i := range projectAgents {
+						if projectAgents[i].Slug != "" {
+							idToSlug[projectAgents[i].ID] = projectAgents[i].Slug
+						}
+					}
+					for _, pid := range agentParticipantIDs {
+						if pid == snap.senderID || slices.Contains(mentionedAgentIDs, pid) {
+							continue
+						}
+						if slug := idToSlug[pid]; slug != "" && !slices.Contains(unmentionedAgentSlugs, slug) {
+							unmentionedAgentSlugs = append(unmentionedAgentSlugs, slug)
+						}
+					}
+					slices.Sort(unmentionedAgentSlugs)
 				}
 			}
 		}
@@ -960,9 +1098,10 @@ func (s *Server) buildH2MessagePolicyFacts(
 		MentionedAgentIDs: mentionedAgentIDs,
 		MentionedUserIDs:  mentionedUserIDs,
 		Conversation: messagepolicy.ConversationFacts{
-			Kind:                snap.convKind,
-			AgentParticipantIDs: agentParticipantIDs,
-			UserParticipantIDs:  userParticipantIDs,
+			Kind:                  snap.convKind,
+			AgentParticipantIDs:   agentParticipantIDs,
+			UserParticipantIDs:    userParticipantIDs,
+			UnmentionedAgentSlugs: unmentionedAgentSlugs,
 		},
 	}
 	return facts, humans, humansLoaded, factsErr
@@ -1028,6 +1167,7 @@ func buildMessagePolicyDecisionRecord(
 		Action:         action,
 		Reason:         reason,
 		CELErrorReason: celErrReason,
+		Evaluation:     messagepolicy.MarshalEvaluationProjection(classification.Evaluation),
 		ElapsedMs:      elapsedMs,
 	}
 }

@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/url"
@@ -241,21 +242,22 @@ func (r TestMessagePolicyRequest) LogValue() slog.Value {
 // TestMessagePolicyResponse is the content-free dry-run evaluation response.
 // It never echoes the sample message body.
 type TestMessagePolicyResponse struct {
-	PolicyID       string `json:"policy_id,omitempty"`
-	PolicyName     string `json:"policy_name"`
-	PolicyRevision int64  `json:"policy_revision,omitempty"`
-	Mode           string `json:"mode"`
-	Surface        string `json:"surface"`
-	ScopeMatched   bool   `json:"scope_matched"`
-	Class          string `json:"class"`
-	ReasonCode     string `json:"reason_code,omitempty"`
-	Outcome        string `json:"outcome"`
-	Action         string `json:"action"`
-	Reason         string `json:"reason,omitempty"`
-	Remediation    string `json:"remediation,omitempty"`
-	ElapsedMs      int64  `json:"elapsed_ms"`
-	BodyBytes      int    `json:"body_bytes"`
-	BodyTruncated  bool   `json:"body_truncated"`
+	PolicyID       string          `json:"policy_id,omitempty"`
+	PolicyName     string          `json:"policy_name"`
+	PolicyRevision int64           `json:"policy_revision,omitempty"`
+	Mode           string          `json:"mode"`
+	Surface        string          `json:"surface"`
+	ScopeMatched   bool            `json:"scope_matched"`
+	Class          string          `json:"class"`
+	ReasonCode     string          `json:"reason_code,omitempty"`
+	Outcome        string          `json:"outcome"`
+	Action         string          `json:"action"`
+	Reason         string          `json:"reason,omitempty"`
+	Remediation    string          `json:"remediation,omitempty"`
+	Evaluation     json.RawMessage `json:"evaluation,omitempty"`
+	ElapsedMs      int64           `json:"elapsed_ms"`
+	BodyBytes      int             `json:"body_bytes"`
+	BodyTruncated  bool            `json:"body_truncated"`
 }
 
 func (s *messagePolicyService) basePath() string {

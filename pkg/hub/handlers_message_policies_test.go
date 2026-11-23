@@ -432,14 +432,24 @@ func TestMessagePolicyHandlers_AuthoringValidation400s(t *testing.T) {
 		assert.Equal(t, "size", apiErr.Details["category"])
 	})
 
-	t.Run("non-empty system_one_rule returns 400 not_yet_supported", func(t *testing.T) {
-		body := mphValidCreateBody("m2-rule")
-		body.SystemOneRule = `judge whether the message asks a choice`
-		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, body)
+	t.Run("system_one_rule requires on_uncertain and refuses invalid or unsupported specs", func(t *testing.T) {
+		missingUnc := mphValidCreateBody("m2-missing-uncertain")
+		missingUnc.SystemOneRule = `{"dialect":"system_one","inputs":["message.body"],"spec":{"version":1,"questions":[{"id":"asks_choice","type":"binary","instructions":"Ask choice?"}]}}`
+		missingUnc.OnUncertain = ""
+		rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, missingUnc)
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		apiErr := decodeErr(t, rec)
-		assert.Equal(t, messagepolicy.ErrCodeNotYetSupported, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "not yet supported")
+		assert.Equal(t, messagepolicy.ErrCodeValidation, apiErr.Code)
+		assert.Equal(t, "on_uncertain", apiErr.Details["field"])
+
+		// With hub.system_one experiment OFF, compiling system_one_rule returns 400 unsupported_dialect.
+		withUnc := mphValidCreateBody("m2-disabled-dialect")
+		withUnc.SystemOneRule = missingUnc.SystemOneRule
+		withUnc.OnUncertain = messagepolicy.OutcomeReject
+		rec = mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, withUnc)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		apiErr = decodeErr(t, rec)
+		assert.Equal(t, messagepolicy.ErrCodeUnsupportedDialect, apiErr.Code)
 	})
 
 	t.Run("uncovered surface or agent recipient selector returns 400 surface_not_covered (target 6)", func(t *testing.T) {

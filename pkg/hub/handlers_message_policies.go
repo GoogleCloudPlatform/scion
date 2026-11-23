@@ -182,21 +182,22 @@ type TestMessagePolicyRequest struct {
 // TestMessagePolicyResponse is the content-free dry-run evaluation response.
 // It never echoes the sample message body.
 type TestMessagePolicyResponse struct {
-	PolicyID       string `json:"policy_id,omitempty"`
-	PolicyName     string `json:"policy_name"`
-	PolicyRevision int64  `json:"policy_revision,omitempty"`
-	Mode           string `json:"mode"`
-	Surface        string `json:"surface"`
-	ScopeMatched   bool   `json:"scope_matched"`
-	Class          string `json:"class"`
-	ReasonCode     string `json:"reason_code,omitempty"`
-	Outcome        string `json:"outcome"`
-	Action         string `json:"action"`
-	Reason         string `json:"reason,omitempty"`
-	Remediation    string `json:"remediation,omitempty"`
-	ElapsedMs      int64  `json:"elapsed_ms"`
-	BodyBytes      int    `json:"body_bytes"`
-	BodyTruncated  bool   `json:"body_truncated"`
+	PolicyID       string          `json:"policy_id,omitempty"`
+	PolicyName     string          `json:"policy_name"`
+	PolicyRevision int64           `json:"policy_revision,omitempty"`
+	Mode           string          `json:"mode"`
+	Surface        string          `json:"surface"`
+	ScopeMatched   bool            `json:"scope_matched"`
+	Class          string          `json:"class"`
+	ReasonCode     string          `json:"reason_code,omitempty"`
+	Outcome        string          `json:"outcome"`
+	Action         string          `json:"action"`
+	Reason         string          `json:"reason,omitempty"`
+	Remediation    string          `json:"remediation,omitempty"`
+	Evaluation     json.RawMessage `json:"evaluation,omitempty"`
+	ElapsedMs      int64           `json:"elapsed_ms"`
+	BodyBytes      int             `json:"body_bytes"`
+	BodyTruncated  bool            `json:"body_truncated"`
 }
 
 func toMessagePolicyResponse(pol store.MessagePolicy) MessagePolicyResponse {
@@ -538,10 +539,13 @@ func writeMessagePolicyValidationError(w http.ResponseWriter, err error) {
 	var valErr *messagepolicy.ValidationError
 	if errors.As(err, &valErr) {
 		var details map[string]interface{}
-		if valErr.Field != "" || valErr.Line > 0 || valErr.Column > 0 || valErr.Category != "" || valErr.Code == messagepolicy.ErrCodeSurfaceNotCovered {
+		if valErr.Field != "" || valErr.Path != "" || valErr.Line > 0 || valErr.Column > 0 || valErr.Category != "" || valErr.Code == messagepolicy.ErrCodeSurfaceNotCovered {
 			details = make(map[string]interface{})
 			if valErr.Field != "" {
 				details["field"] = valErr.Field
+			}
+			if valErr.Path != "" {
+				details["path"] = valErr.Path
 			}
 			if valErr.Line > 0 {
 				details["line"] = valErr.Line
@@ -773,6 +777,7 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		Scope:             scope,
 		ViolationRule:     req.ViolationRule,
 		SystemOneRule:     req.SystemOneRule,
+		SystemOneRefs:     messagepolicy.ExtractSystemOneRefs(req.SystemOneRule),
 		OnUncertain:       spec.OnUncertain,
 		OnFailed:          spec.OnFailed,
 		OnFailedReasons:   req.OnFailedReasons,
@@ -905,6 +910,7 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 	}
 	candidate.Mode = mode
 	candidate.Scope.Sender.AgentIDs = canonicalSenderIDs
+	candidate.SystemOneRefs = messagepolicy.ExtractSystemOneRefs(candidate.SystemOneRule)
 
 	if err := s.store.UpdateMessagePolicy(ctx, candidate); err != nil {
 		switch {
@@ -1217,14 +1223,18 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 
 	var judgments messagepolicy.Judgments
+	manualJudgments := false
 	if sample.Judgments != nil {
 		judgments = *sample.Judgments
+		manualJudgments = true
 	}
 	if len(sample.JudgmentFlags) > 0 {
 		judgments.Flags = sample.JudgmentFlags
+		manualJudgments = true
 	}
 	if len(sample.JudgmentLabels) > 0 {
 		judgments.Labels = sample.JudgmentLabels
+		manualJudgments = true
 	}
 
 	facts := messagepolicy.Facts{
@@ -1243,11 +1253,11 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		Conversation:      conv,
 		Judgments:         judgments,
 	}
-	act := messagepolicy.NewActivation(facts)
 
+	hasSystemOne := strings.TrimSpace(effective.SystemOneRule) != ""
 	var cls messagepolicy.Classification
 	var elapsedMs int64
-	if bodyTruncated {
+	if !hasSystemOne && bodyTruncated {
 		cls = messagepolicy.Classification{
 			Class:  messagepolicy.ClassFailed,
 			Reason: messagepolicy.ReasonBodyTruncated,
@@ -1255,9 +1265,26 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	} else {
 		ev := s.MessagePolicyEvaluator()
 		start := time.Now()
-		cls = ev.EvaluateExpr(ctx, effective.ViolationRule, act,
-			messagepolicy.WithBudget(messagepolicy.NewSendBudget()),
-		)
+		if hasSystemOne && !manualJudgments {
+			soBudget := s.messagePolicyGate.systemOneSendBudget()
+			cls = ev.EvaluatePolicyDryRun(
+				ctx,
+				effective.ID,
+				effective.Revision,
+				effective.ViolationRule,
+				effective.SystemOneRule,
+				project.ID,
+				facts,
+				[]messagepolicy.EvalOption{messagepolicy.WithBudget(messagepolicy.NewSendBudget())},
+				[]messagepolicy.EvalOption{messagepolicy.WithMaxEvalTime(soBudget)},
+			)
+			judgments = cls.Judgments
+		} else {
+			act := messagepolicy.NewActivation(facts)
+			cls = ev.EvaluateExpr(ctx, effective.ViolationRule, act,
+				messagepolicy.WithBudget(messagepolicy.NewSendBudget()),
+			)
+		}
 		elapsedMs = time.Since(start).Milliseconds()
 		if elapsedMs < 0 {
 			elapsedMs = 0
@@ -1311,6 +1338,7 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		Action:         action,
 		Reason:         reason,
 		Remediation:    remediation,
+		Evaluation:     messagepolicy.MarshalEvaluationProjection(cls.Evaluation),
 		ElapsedMs:      elapsedMs,
 		BodyBytes:      bodyBytes,
 		BodyTruncated:  bodyTruncated,
