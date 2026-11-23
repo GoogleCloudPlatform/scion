@@ -2220,7 +2220,14 @@ const harnessTailLines = 5
 // every path component and never blocks on a FIFO, for the same reasons
 // as readHarnessExitCode. The text is raw harness output: callers redact
 // it (handlers.FormatHarnessTailReason) before it leaves the process.
+//
+// For execution containers (SCION_HARNESS=shell), pane output is never read
+// or published so credentials displayed in the interactive shell cannot leave
+// the container via crash/status reasons (ptone/scion#8812 §3.4 I1).
 func readHarnessTail() string {
+	if strings.TrimSpace(os.Getenv("SCION_HARNESS")) == "shell" {
+		return ""
+	}
 	data, err := dirfd.ReadFileNoFollow(harnessTailPath, harnessTailMaxBytes)
 	if err != nil {
 		return ""

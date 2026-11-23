@@ -1423,6 +1423,6 @@ func buildSubstrateStartCmd(cfg RunConfig) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("substrate: no harness provided")
 	}
-	agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
+	agentWindowCmd := tmuxAgentWindowCmdForConfig("/bin/sh", cmdLine, cfg)
 	return buildTmuxStartCmd(agentWindowCmd, tmuxPollSession), nil
 }

@@ -1278,7 +1278,7 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		// harnessCmdLine covers both branches (NoAuth checked first,
 		// matching the priority order above); ok is always true here.
 		cmdLine, _ := harnessCmdLine(cfg, harnessCmdLineOptions{})
-		agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
+		agentWindowCmd := tmuxAgentWindowCmdForConfig("/bin/sh", cmdLine, cfg)
 		// Use poll loop instead of attach-session: CRI has no TTY for PID 1,
 		// so tmux attach-session would fail with "not a terminal". The poll
 		// loop tracks the tmux session's lifetime without needing a terminal,

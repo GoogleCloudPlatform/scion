@@ -267,18 +267,33 @@ func tmuxAgentWindowCmd(shellPath, cmdLine string) string {
 	return shellPath + " -c " + shellQuote(harnessWrapperLine(cmdLine, state.HarnessTailFile, state.HarnessExitCodeFile))
 }
 
+// tmuxAgentWindowCmdForConfig is tmuxAgentWindowCmd with execution-container
+// (shell harness) pane-tail suppression: for the shell harness, the wrapper
+// still records the exit code but never captures the tmux pane tail so
+// credentials printed in the interactive shell cannot leave the container on
+// exit (ptone/scion#8812 §3.4 I1).
+func tmuxAgentWindowCmdForConfig(shellPath, cmdLine string, cfg RunConfig) string {
+	if cfg.Harness != nil && cfg.Harness.Name() == config.ShellHarnessConfigName {
+		return shellPath + " -c " + shellQuote(harnessWrapperLine(cmdLine, "", state.HarnessExitCodeFile))
+	}
+	return tmuxAgentWindowCmd(shellPath, cmdLine)
+}
+
 // harnessWrapperLine is the shell line tmuxAgentWindowCmd runs: cmdLine,
-// then the pane tail saved to tailFile, then cmdLine's exit status written
-// to exitCodeFile. The status is kept in scion_hrc right after cmdLine, so
-// a failing or missing tmux never changes the recorded code, and the
-// capture runs in a subshell with umask 077 and its errors discarded, so
-// the pane text (which may hold anything the harness printed) is readable
-// only by the agent user and root. The paths are written unquoted, so they
-// must be plain words (the fixed /tmp paths are); they are parameters only
-// so a test can run the line against temporary files.
+// then the pane tail saved to tailFile (when tailFile is non-empty), then
+// cmdLine's exit status written to exitCodeFile. The status is kept in
+// scion_hrc right after cmdLine, so a failing or missing tmux never changes
+// the recorded code, and the capture runs in a subshell with umask 077 and
+// its errors discarded, so the pane text (which may hold anything the harness
+// printed) is readable only by the agent user and root. The paths are written
+// unquoted, so they must be plain words (the fixed /tmp paths are); they are
+// parameters only so a test can run the line against temporary files.
 func harnessWrapperLine(cmdLine, tailFile, exitCodeFile string) string {
 	if strings.TrimSpace(cmdLine) == "" {
 		cmdLine = emptyHarnessCmdLine()
+	}
+	if tailFile == "" {
+		return cmdLine + "; scion_hrc=$?; echo $scion_hrc > " + exitCodeFile
 	}
 	return cmdLine + "; scion_hrc=$?; " +
 		`(umask 077; tmux capture-pane -p -J -S -40 -t "$TMUX_PANE" > ` + tailFile + ") 2>/dev/null; " +
@@ -1084,7 +1099,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// running the harness, add a "shell" window, and attach (Docker/Podman
 	// provide PID 1 a TTY). See tmuxAgentWindowCmd/buildTmuxStartCmd for the
 	// shared definition across runtimes.
-	agentWindowCmd := tmuxAgentWindowCmd("sh", cmdLine)
+	agentWindowCmd := tmuxAgentWindowCmdForConfig("sh", cmdLine, config)
 	tmuxCmd := buildTmuxStartCmd(agentWindowCmd, tmuxAttachSession)
 
 	if len(fuseMounts) > 0 {
