@@ -443,7 +443,7 @@ func TestValidateAgentConfigPatch_HostedRefusesMemberVolumes(t *testing.T) {
 	patch := &api.ScionConfig{Volumes: []api.VolumeMount{{Source: "/srv/member-secret-src", Target: "/data"}}}
 
 	rec := httptest.NewRecorder()
-	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, agent, patch, false))
+	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, agent, patch, nil))
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	code, msg := decodeHostedRefusal(t, rec)
 	assert.Equal(t, hostedguard.ErrorCode, code)
@@ -451,11 +451,11 @@ func TestValidateAgentConfigPatch_HostedRefusesMemberVolumes(t *testing.T) {
 	assert.NotContains(t, msg, "member-secret-src")
 
 	rec = httptest.NewRecorder()
-	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Volumes: []api.VolumeMount{{Type: "gcs", Bucket: "b", Target: "/b"}}}, false), rec.Body.String())
+	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Volumes: []api.VolumeMount{{Type: "gcs", Bucket: "b", Target: "/b"}}}, nil), rec.Body.String())
 
 	srv.workstation = true
 	rec = httptest.NewRecorder()
-	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, agent, patch, false), rec.Body.String())
+	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, agent, patch, nil), rec.Body.String())
 }
 
 // TestAgentPendingConfig_HostedRefusesMemberVolumes: through the HTTP
@@ -593,7 +593,7 @@ func TestValidateAgentConfigPatch_HostedGCSByBrokerProfileType(t *testing.T) {
 			agent := &store.Agent{ID: tid("agent-patch-gcs"), ProjectID: tid("project-patch-gcs"), RuntimeBrokerID: tid("patch-broker"),
 				AppliedConfig: &store.AgentAppliedConfig{Profile: "p"}}
 			rec := httptest.NewRecorder()
-			ok := srv.validateAgentConfigPatch(ctx, rec, agent, gcsPatch, false)
+			ok := srv.validateAgentConfigPatch(ctx, rec, agent, gcsPatch, nil)
 			if !tc.refused {
 				assert.True(t, ok, rec.Body.String())
 				return

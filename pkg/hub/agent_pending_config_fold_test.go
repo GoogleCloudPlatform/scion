@@ -60,12 +60,12 @@ func TestClassifyHeldEdits_SaveParity(t *testing.T) {
 		reincarnate  []string
 	}{
 		{"re-rendering broker: clear and skill removal", `{"agent_instructions":"","skills":[{"uri":"hub://skills/review"}]}`, rerender, true, nil, []string{"config.agent_instructions", "config.skills"}},
-		{"clearing broker: clear and recorded env removal", `{"env":{"KEEP":"1"},"max_duration":null}`, clearing, true, []string{"config.env", "config.max_duration"}, nil},
+		{"clearing broker: clear and recorded env removal", `{"env":{"DROP":null,"KEEP":"1"},"max_duration":null}`, clearing, true, []string{"config.env", "config.max_duration"}, nil},
 		// A saver who cannot view env records no env removal: the edit is
 		// classified on its additions alone.
-		{"saver who cannot view env: removal not reported", `{"env":{"KEEP":"1","NEW":"1"}}`, brokerStartSupport{}, false, []string{"config.env"}, nil},
-		{"old broker: env addition and removal", `{"env":{"KEEP":"1","NEW":"1"}}`, brokerStartSupport{}, true, nil, []string{"config.env"}},
-		{"old broker: env addition only", `{"env":{"KEEP":"1","DROP":"2","NEW":"1"}}`, brokerStartSupport{}, true, []string{"config.env"}, nil},
+		{"saver who cannot view env: removal not reported", `{"env":{"DROP":null,"NEW":"1"}}`, brokerStartSupport{}, false, []string{"config.env"}, nil},
+		{"old broker: env addition and removal", `{"env":{"DROP":null,"NEW":"1"}}`, brokerStartSupport{}, true, nil, []string{"config.env"}},
+		{"old broker: env addition only", `{"env":{"NEW":"1"}}`, brokerStartSupport{}, true, []string{"config.env"}, nil},
 		{"resources dropping a sub-field", `{"resources":{"requests":{"cpu":"1"}}}`, clearing, true, nil, []string{"config.resources"}},
 		{"re-rendering broker: secrets", `{"secrets":[{"key":"API_TOKEN"}]}`, rerender, true, nil, []string{"config.secrets"}},
 		{"old broker: system prompt", `{"system_prompt":"new"}`, brokerStartSupport{}, true, nil, []string{"config.system_prompt"}},

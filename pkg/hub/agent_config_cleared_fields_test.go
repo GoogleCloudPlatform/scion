@@ -37,8 +37,9 @@ func clearedFieldsFor(t *testing.T, old *api.ScionConfig, body string, canViewEn
 		present[k] = true
 	}
 	dropFixedConfigKeys(req, raw, present)
-	_, cleared := reincarnateOnlyConfigEdits(raw, req, old)
-	return nextClearedFields(old, req, raw, cleared, canViewEnv)
+	effective := withMergedEnv(req, old, parseEnvPatch(raw))
+	_, cleared := reincarnateOnlyConfigEdits(raw, effective, old)
+	return nextClearedFields(old, effective, raw, cleared, canViewEnv)
 }
 
 func TestNextClearedFields(t *testing.T) {
@@ -56,7 +57,7 @@ func TestNextClearedFields(t *testing.T) {
 	}
 
 	t.Run("clears are recorded", func(t *testing.T) {
-		got := clearedFieldsFor(t, stored(), `{"max_turns":null,"thinking_level":null,"resources":null,"system_prompt":"","env":{"BAR":"2"}}`, true)
+		got := clearedFieldsFor(t, stored(), `{"max_turns":null,"thinking_level":null,"resources":null,"system_prompt":"","env":{"FOO":null,"BAR":"2"}}`, true)
 		assert.Equal(t, []string{"env.FOO", "max_turns", "resources", "system_prompt", "thinking_level"}, got)
 	})
 
@@ -97,12 +98,17 @@ func TestNextClearedFields(t *testing.T) {
 		assert.Equal(t, []string{"max_turns"}, clearedFieldsFor(t, old, `{"model":"m"}`, true))
 	})
 
-	t.Run("removing every env key clears each", func(t *testing.T) {
-		assert.Equal(t, []string{"env.BAR", "env.FOO"}, clearedFieldsFor(t, stored(), `{"env":{}}`, true))
+	t.Run("omitted env keys are preserved and record no clears", func(t *testing.T) {
+		assert.Nil(t, clearedFieldsFor(t, stored(), `{"env":{}}`, true))
+		assert.Nil(t, clearedFieldsFor(t, stored(), `{"env":{"BAR":"2"}}`, true))
+	})
+
+	t.Run("removing every env key via explicit null clears each", func(t *testing.T) {
+		assert.Equal(t, []string{"env.BAR", "env.FOO"}, clearedFieldsFor(t, stored(), `{"env":{"FOO":null,"BAR":null}}`, true))
 	})
 
 	t.Run("env removals need env access", func(t *testing.T) {
-		assert.Nil(t, clearedFieldsFor(t, stored(), `{"env":{"BAR":"2"}}`, false))
+		assert.Nil(t, clearedFieldsFor(t, stored(), `{"env":{"FOO":null,"BAR":"2"}}`, false))
 	})
 
 	t.Run("collections and telemetry are not cleared wholesale", func(t *testing.T) {

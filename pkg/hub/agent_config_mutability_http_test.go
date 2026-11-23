@@ -535,7 +535,7 @@ func TestAgentConfigPatch_RemovedEnvKeysWarning(t *testing.T) {
 	})
 
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
-		"config": map[string]interface{}{"env": map[string]string{"KEEP": "1", "NEW": "4"}},
+		"config": map[string]interface{}{"env": map[string]interface{}{"KEEP": "1", "DROP_A": nil, "DROP_B": nil, "NEW": "4"}},
 	})
 	require.Equal(t, http.StatusOK, code, body)
 	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)

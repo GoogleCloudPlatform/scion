@@ -17,6 +17,7 @@ package hub
 import (
 	"maps"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -97,7 +98,7 @@ var explicitEditExcludedFields = map[string]bool{
 // would land in CreateInputs.InlineConfig.Env here (via the per-key Env diff
 // below) and be replayed by reincarnate's create-time timezone capture as a
 // pin the request never asked for.
-func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedConfig, cfg *api.ScionConfig, present map[string]bool, imageRegistry string, canAttachEnv bool) {
+func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedConfig, cfg *api.ScionConfig, present map[string]bool, ep envPatch, imageRegistry string, canAttachEnv bool) {
 	if ci == nil {
 		return
 	}
@@ -148,17 +149,12 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 		ensureInline().AuthSelectedType = cfg.AuthSelectedType
 	}
 
-	// Env, per key: nil means the request didn't touch env at all (same
-	// guard as the live write, which skips the whole map in that case). See
-	// diffExplicitEnvKeys for which keys count as added or removed. A
-	// removed key is deleted only when canAttachEnv: the GET response
-	// withholds Env entirely from a viewer without attach-equivalent access
-	// (canViewAgentEnv, ResponseView), so that viewer's client can only load
-	// an empty env and echo it back empty, and its absent keys are a
-	// redaction artifact, not deletions. Additions are unaffected by this
-	// gate: they can only come from someone typing a new key/value.
-	if cfg.Env != nil {
-		added, removed := diffExplicitEnvKeys(old.Env, explicitEnvOf(old), cfg.Env)
+	// Env, per key (ptone/scion#5599): !ep.present means the request didn't
+	// touch env at all. Keys in ep.set are compared against their baseline,
+	// keys in ep.remove (explicit null) are deleted when canAttachEnv, and
+	// absent keys are untouched.
+	if ep.present {
+		added, removed := diffExplicitEnvKeys(old.Env, explicitEnvOf(old), ep)
 		if !canAttachEnv {
 			removed = nil
 		}
@@ -212,36 +208,26 @@ var autoExposeEnvKeys = map[string]bool{
 	"SCION_AUTO_EXPOSE_INTERVAL":   true,
 }
 
-// diffExplicitEnvKeys compares a PATCH request's env map (newEnv) against
-// the env it replaces, per key:
+// diffExplicitEnvKeys compares a PATCH request's key-level envPatch (ep)
+// against the agent's stored env:
 //
-//   - added holds every key in newEnv whose value is missing from, or
+//   - added holds every key in ep.set whose value is missing from, or
 //     differs from, its baseline. For the autoExposeEnvKeys the baseline is
 //     explicitEnv (the CreateInputs record, explicitEnvOf), not
 //     InlineConfig.Env, which can still hold a hub-stamped value on older
 //     agents. Sending the auto-expose control records it as explicit unless
 //     it already was, with that value, even when it equals a
-//     project-derived or hub-stamped value. For every
-//     other key the baseline is oldEnv (AppliedConfig.Env), the map the
-//     custom env rows load from, so an unedited row echoed back is never
+//     project-derived or hub-stamped value. For every other key the baseline
+//     is oldEnv (AppliedConfig.Env), so an unedited row echoed back is never
 //     recorded.
-//   - removed holds every key oldEnv has that newEnv lacks, except
-//     GITHUB_TOKEN and the autoExposeEnvKeys. GITHUB_TOKEN is stripped from
-//     every API response (store.AgentAppliedConfig's MarshalJSON, see
-//     ResponseView), so no client can echo it back and its absence is never
-//     evidence of a deletion. An absent auto-expose key means the control
-//     was untouched.
+//   - removed holds every key in ep.remove (explicit JSON null) that exists
+//     in oldEnv or explicitEnv (sorted). Keys absent from ep are preserved
+//     and never appear in removed.
 //
-// A key present in both maps with an unchanged baseline value appears in
+// A key present in ep.set with an unchanged baseline value appears in
 // neither return.
-//
-// Deliberately separate from reincarnate_config.go's diffEnvKeys, which
-// compares key names only (never values, since it feeds a user-facing plan
-// and env values may be secrets) and returns a different shape (KeyDiff).
-// This one needs values, to tell an unchanged echoed key apart from an
-// edited one.
-func diffExplicitEnvKeys(oldEnv, explicitEnv, newEnv map[string]string) (added map[string]string, removed []string) {
-	for k, v := range newEnv {
+func diffExplicitEnvKeys(oldEnv, explicitEnv map[string]string, ep envPatch) (added map[string]string, removed []string) {
+	for k, v := range ep.set {
 		baseline := oldEnv
 		if autoExposeEnvKeys[k] {
 			baseline = explicitEnv
@@ -254,72 +240,44 @@ func diffExplicitEnvKeys(oldEnv, explicitEnv, newEnv map[string]string) (added m
 		}
 		added[k] = v
 	}
-	for k := range oldEnv {
-		if k == "GITHUB_TOKEN" || autoExposeEnvKeys[k] {
-			continue
-		}
-		if _, ok := newEnv[k]; !ok {
+	for k := range ep.remove {
+		_, inOld := oldEnv[k]
+		_, inExplicit := explicitEnv[k]
+		if inOld || inExplicit {
 			removed = append(removed, k)
 		}
 	}
+	sort.Strings(removed)
 	return added, removed
 }
 
 // applyPatchAutoExposeEnv resolves the autoExposeEnvKeys for a PATCH that
-// carries an env map (patchEnv, the request's cfg.Env, which becomes the new
-// InlineConfig.Env). ac is the live config whose Env has just been set to a
-// copy of patchEnv; old is the pre-PATCH snapshot (a shallow copy, so its
-// CreateInputs is the record recordExplicitEdits has already updated);
-// project may be nil.
+// carries an envPatch. ac is the live config whose Env has already been
+// merged via applyEnvPatch(old.Env, ep); old is the pre-PATCH snapshot (a
+// shallow copy, so its CreateInputs is the record recordExplicitEdits has
+// already updated); project may be nil.
 //
-// A key in patchEnv is the user's explicit value (tier 1) and is left as is.
-// A key absent from patchEnv was untouched, so:
-//   - ac.Env keeps the previous AppliedConfig.Env value, if any. This is the
-//     one cross-tier read on PATCH: a project-derived value cannot be told
-//     apart from a stale one without re-reading the project, and the
-//     template tier is never in ac.Env (it rides in scion-agent.json and is
-//     re-applied by the broker), so nothing is lost by keeping it;
-//   - patchEnv keeps the previous InlineConfig.Env value, if any, so an
-//     explicit value survives into the new InlineConfig.Env.
-//
+// Keys absent from ep were already kept in ac.Env by applyEnvPatch.
 // SCION_AUTO_EXPOSE_PORTS is then resolved by resolveAutoExposeEnv. Its
-// explicit tier is the request's own env, taken before the InlineConfig.Env
-// carry, plus, when the request did not send the key, the previous explicit
-// value from explicitEnvOf(old). That is CreateInputs when the agent has it,
-// since InlineConfig.Env can still hold a hub-stamped value on older agents.
-// Reading the already-updated CreateInputs is equivalent to reading the
-// pre-PATCH one here: this read happens only when the request did not send
-// SCION_AUTO_EXPOSE_PORTS, and an unsent auto-expose key is never added to
-// or removed from CreateInputs.
-// The project tier therefore overwrites a kept or carried non-explicit value,
-// and never an explicit one. The hub default is never written; the broker
-// applies it.
-func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.Project, patchEnv map[string]string) {
-	if ac == nil || old == nil || patchEnv == nil {
+// explicit tier is ep.set plus, when the request neither set nor explicitly
+// removed the key, the previous explicit value from explicitEnvOf(old). The
+// project tier therefore overwrites a kept non-explicit value, and never an
+// explicit one. The hub default is never written; the broker applies it.
+func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.Project, ep envPatch) {
+	if ac == nil || old == nil || !ep.present {
 		return
-	}
-	var oldInlineEnv map[string]string
-	if old.InlineConfig != nil {
-		oldInlineEnv = old.InlineConfig.Env
 	}
 	if ac.Env == nil {
 		ac.Env = make(map[string]string)
 	}
-	explicit := maps.Clone(patchEnv)
-	if _, sentPorts := patchEnv[api.EnvAutoExposePorts]; !sentPorts {
+	explicit := maps.Clone(ep.set)
+	if explicit == nil {
+		explicit = make(map[string]string)
+	}
+	_, sentPorts := ep.set[api.EnvAutoExposePorts]
+	if !sentPorts && !ep.remove[api.EnvAutoExposePorts] {
 		if v, ok := explicitEnvOf(old)[api.EnvAutoExposePorts]; ok {
 			explicit[api.EnvAutoExposePorts] = v
-		}
-	}
-	for k := range autoExposeEnvKeys {
-		if _, sent := patchEnv[k]; sent {
-			continue
-		}
-		if v, ok := old.Env[k]; ok {
-			ac.Env[k] = v
-		}
-		if v, ok := oldInlineEnv[k]; ok {
-			patchEnv[k] = v
 		}
 	}
 	resolveAutoExposeEnv(ac, project, explicit)

@@ -209,7 +209,7 @@ func (s *Server) applyAgentConfigUpdateHeld(ctx context.Context, w http.Response
 		Conflict(w, "Config cannot be updated in the agent's current phase")
 		return out, false
 	}
-	if !s.validateAgentConfigPatch(ctx, w, agent, p.cfg, p.present["env"]) {
+	if !s.validateAgentConfigPatch(ctx, w, agent, p.cfg, p.raw) {
 		return out, false
 	}
 	canAttachEnv := canViewAgentEnv(ctx, s, agent)
@@ -302,29 +302,49 @@ type heldPatchResult struct {
 // against the applied config, as the fold applies the pending keys to it.
 func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p configPatch, canAttachEnv bool, sup brokerStartSupport) heldPatchResult {
 	var out heldPatchResult
-	if stripConfigEnvTZ(p.cfg) {
+	ep := envPatchFrom(p.raw, p.cfg)
+	if stripEnvPatchTZ(&ep, p.cfg) {
 		out.warnings = append(out.warnings, configEnvTZIgnoredWarning)
 	}
 	base := effectiveNextRunInline(agent)
-	// cmp is the request as it would be applied: the model alias resolved
-	// as applyAgentConfigPatch resolves it. The pending config keeps the
-	// value as sent; it is resolved again when applied.
-	cmp := *p.cfg
+	// cmp is the request as it would be applied onto base: the model alias
+	// resolved and env merged by key against base. The pending config keeps
+	// the model value as sent; it is resolved again when applied.
+	cmp := withMergedEnv(p.cfg, base, ep)
 	if cmp.Model != "" {
 		cmp.Model = s.resolveModelAliasForAgent(ctx, agent, cmp.Model)
 	}
 	// changed: the keys this save changes from the next-run value (base);
 	// only they are stored and reported.
-	changed, _ := configEditDisposition(p.raw, &cmp, base, nil, nil, nil)
+	changed, _ := configEditDisposition(p.raw, cmp, base, nil, nil, nil)
 	// Whether a start applies a changed key is decided as the fold will
 	// decide it: by applyAgentConfigPatch's rules, against the applied
 	// config (the fold applies the pending keys to it, not to base), with
 	// the clears that application would record and the broker's filters.
+	// If an earlier pending env edit exists, combine it with ep so
+	// classification and persistence reflect the merged pending env patch.
 	var applied *api.ScionConfig
 	if agent.AppliedConfig != nil {
 		applied = agent.AppliedConfig.InlineConfig
 	}
-	c := classifyHeldEdits(applied, &cmp, p.raw, p.present, canAttachEnv, sup, changed)
+	combinedEP := ep
+	if ep.present && agent.PendingConfig != nil && len(agent.PendingConfig.Config) > 0 {
+		combinedEP = mergeEnvPatches(parseEnvPatch(agent.PendingConfig.Config), ep)
+	}
+	classifyRaw := p.raw
+	if combinedEP.present {
+		if b, err := marshalEnvPatch(combinedEP); err == nil {
+			classifyRaw = make(map[string]json.RawMessage, len(p.raw))
+			for rk, rv := range p.raw {
+				if strings.EqualFold(rk, "env") {
+					classifyRaw["env"] = b
+				} else {
+					classifyRaw[rk] = rv
+				}
+			}
+		}
+	}
+	c := classifyHeldEdits(applied, cmp, classifyRaw, p.present, canAttachEnv, sup, changed)
 	out.held, out.heldForReincarnate = c.held, c.heldForReincarnate
 	out.warnings = append(out.warnings, heldEditWarnings(c.provision, c.cleared, c.removed, sup)...)
 	out.saved = sortedUnion(out.held, out.heldForReincarnate)
@@ -333,6 +353,11 @@ func (s *Server) holdAgentConfigPatch(ctx context.Context, agent *store.Agent, p
 	}
 
 	raw := canonicalConfigRaw(p)
+	if combinedEP.present {
+		if b, err := marshalEnvPatch(combinedEP); err == nil {
+			raw["env"] = b
+		}
+	}
 	saver := pendingSaverRef(ctx)
 	pending := agent.PendingConfig.Clone()
 	if pending == nil {
@@ -391,13 +416,16 @@ type heldEditClass struct {
 // apply (ptone/scion#5864).
 func classifyHeldEdits(applied, cmp *api.ScionConfig, raw map[string]json.RawMessage, present map[string]bool, canAttachEnv bool, sup brokerStartSupport, candidates []string) heldEditClass {
 	var out heldEditClass
-	provision, cleared := reincarnateOnlyConfigEdits(raw, cmp, applied)
-	removed := removedConfigEntries(applied, cmp, present, canAttachEnv)
-	recorded := nextClearedFields(applied, cmp, raw, cleared, canAttachEnv)
-	resDropped := droppedResourceSubPaths(applied, cmp, present)
-	cleared = withDroppedResourcesSubField(cleared, applied, cmp, present)
-	provision = sup.heldProvisionEdits(provision, applied, cmp, recorded)
-	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, cmp, present), resDropped)
+	// Compute post-merge env against applied so env clears, removals and
+	// dispositions reflect key-level merge semantics (ptone/scion#5599).
+	effective := withMergedEnv(cmp, applied, envPatchFrom(raw, cmp))
+	provision, cleared := reincarnateOnlyConfigEdits(raw, effective, applied)
+	removed := removedConfigEntries(applied, effective, present, canAttachEnv)
+	recorded := nextClearedFields(applied, effective, raw, cleared, canAttachEnv)
+	resDropped := droppedResourceSubPaths(applied, effective, present)
+	cleared = withDroppedResourcesSubField(cleared, applied, effective, present)
+	provision = sup.heldProvisionEdits(provision, applied, effective, recorded)
+	cleared = sup.heldClearEdits(cleared, recorded, droppedEnvKeys(applied, effective, present), resDropped)
 	removed = sup.heldRemovals(removed, recorded)
 	isCandidate := make(map[string]bool, len(candidates))
 	for _, k := range candidates {
@@ -516,6 +544,21 @@ func canonicalConfigRaw(p configPatch) map[string]json.RawMessage {
 			continue
 		}
 		k := strings.TrimPrefix(f.Key, agentConfigKeyPrefix)
+		if k == "env" {
+			ep := envPatchFrom(p.raw, p.cfg)
+			if p.cfg.Env != nil {
+				if _, hasTZ := p.cfg.Env[agentTZEnvKey]; !hasTZ {
+					delete(ep.set, agentTZEnvKey)
+					delete(ep.remove, agentTZEnvKey)
+				}
+			}
+			b, err := marshalEnvPatch(ep)
+			if err != nil {
+				continue
+			}
+			out[k] = b
+			continue
+		}
 		i, ok := scionConfigFieldByJSONKey[k]
 		if !ok {
 			continue
@@ -672,11 +715,17 @@ func (s *Server) planPendingFold(ctx context.Context, stored *store.Agent, sup b
 	for _, k := range c.heldForReincarnate {
 		skip[k] = true
 	}
+	envPatchPending := envPatchFrom(p.raw, p.cfg)
 	for _, k := range c.held {
 		ref, legacy := pendingKeySaverRef(pc, strings.TrimPrefix(k, agentConfigKeyPrefix))
 		d, err := savers.mayApply(ctx, ref, legacy)
 		if err != nil {
 			return plan, err
+		}
+		// Mirror live PATCH's ActionAttach requirement for config.env edits
+		// (ptone/scion#5599, Invariant ruling A).
+		if d.out == saverApply && k == agentConfigKeyPrefix+"env" && envPatchPending.hasEdits() && !plan.envCanView {
+			d.out, d.reason = saverUnauthorized, "agent.attach denied for config.env"
 		}
 		switch d.out {
 		case saverApply:
@@ -1108,7 +1157,7 @@ func effectiveNextRunInline(agent *store.Agent) *api.ScionConfig {
 		return deepCopyScionConfig(base)
 	}
 	p := pendingConfigPatch(agent.PendingConfig)
-	return mergePresentInlineFields(base, p.cfg, p.present)
+	return mergePresentInlineFields(base, withMergedEnv(p.cfg, base, envPatchFrom(p.raw, p.cfg)), p.present)
 }
 
 // effectiveNextRun returns the agent's applied config with every pending

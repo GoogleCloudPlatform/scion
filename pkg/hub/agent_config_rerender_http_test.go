@@ -197,7 +197,7 @@ func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
 	})
 
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
-		"config": map[string]interface{}{"max_turns": nil, "env": map[string]string{"KEEP": "1"}},
+		"config": map[string]interface{}{"max_turns": nil, "env": map[string]interface{}{"KEEP": "1", "DROP": nil}},
 	})
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Equal(t, []string{"config.env", "config.max_turns"}, resp.Disposition.Applied)
@@ -327,15 +327,16 @@ func TestAgentConfigPatch_SystemPromptClearThenSet(t *testing.T) {
 }
 
 // TestAgentConfigPatch_EnvClearByCallerWithoutEnvView: a caller who may
-// update the agent but cannot view its env records no env.KEY clears, so on
-// a broker that applies cleared_fields an env edit that drops keys is still
-// held for reincarnation, not reported applied.
+// update the agent but cannot attach to it is refused with 403 on env edits
+// (ptone/scion#5599), and sending an empty env map is a no-op that leaves all
+// stored env keys and cleared_fields untouched.
 func TestAgentConfigPatch_EnvClearByCallerWithoutEnvView(t *testing.T) {
 	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{ChangedFields: true, ClearedFields: true})
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseStopped)
+		a.AppliedConfig.Env = map[string]string{"A": "1", "B": "2"}
 		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Env: map[string]string{"A": "1", "B": "2"}}
 	})
 	user := newReincarnateAuthzUser(t, s, "edit-no-env-view")
@@ -343,18 +344,26 @@ func TestAgentConfigPatch_EnvClearByCallerWithoutEnvView(t *testing.T) {
 	grantPermissionViaRoleBinding(t, s, user.ID, "agent.update", store.RoleScopeProject, project.ID)
 	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "session")
 
+	// Empty env map is a no-op under key-level merge semantics.
 	rec := doRequestAsIdentity(t, srv, identity, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{"env": map[string]string{}},
 	})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp agentPatchResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.NotContains(t, resp.Disposition.Applied, "config.env")
-	assert.Equal(t, []string{"config.env"}, resp.Disposition.HeldForReincarnate)
-	assert.NotEmpty(t, resp.Warnings)
+	assert.Empty(t, resp.Disposition.Applied)
+	assert.Empty(t, resp.Disposition.HeldForReincarnate)
+
+	// Explicit null removal without agent.attach is refused with 403.
+	rec2 := doRequestAsIdentity(t, srv, identity, http.MethodPatch, "/api/v1/agents/"+agent.ID, map[string]interface{}{
+		"config": map[string]interface{}{"env": map[string]interface{}{"A": nil}},
+	})
+	require.Equal(t, http.StatusForbidden, rec2.Code, rec2.Body.String())
 
 	stored, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"A": "1", "B": "2"}, stored.AppliedConfig.Env)
+	assert.Equal(t, map[string]string{"A": "1", "B": "2"}, stored.AppliedConfig.InlineConfig.Env)
 	for _, p := range stored.AppliedConfig.InlineConfig.ClearedFields {
 		assert.False(t, strings.HasPrefix(p, api.ClearedEnvPathPrefix), "no env clear recorded for a caller without env view: %s", p)
 	}

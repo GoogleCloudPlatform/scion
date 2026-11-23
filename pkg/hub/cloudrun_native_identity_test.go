@@ -1259,7 +1259,7 @@ func TestValidateAgentConfigPatch_ReservedEnvEdits(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			ok := srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Env: tc.env}, false)
+			ok := srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Env: tc.env}, nil)
 			if tc.refused == "" {
 				assert.True(t, ok, rec.Body.String())
 				return
@@ -1272,13 +1272,16 @@ func TestValidateAgentConfigPatch_ReservedEnvEdits(t *testing.T) {
 	}
 
 	// Without the stored marker, a byte-identical echo of the other stored
-	// reserved key passes, and dropping it is a removal.
+	// reserved key passes, omitting it keeps it (merge semantics), and
+	// explicitly removing it with null is refused.
 	clean := &store.Agent{ID: tid("agent-patch-cr2"), ProjectID: tid("project-patch-cr"),
 		AppliedConfig: &store.AgentAppliedConfig{Env: map[string]string{"A": "1", "SCION_HUB_ENDPOINT": "https://hub"}}}
 	rec := httptest.NewRecorder()
-	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, clean, &api.ScionConfig{Env: map[string]string{"A": "2", "SCION_HUB_ENDPOINT": "https://hub"}}, false), rec.Body.String())
+	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, clean, &api.ScionConfig{Env: map[string]string{"A": "2", "SCION_HUB_ENDPOINT": "https://hub"}}, nil), rec.Body.String())
 	rec = httptest.NewRecorder()
-	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, clean, &api.ScionConfig{Env: map[string]string{"A": "2"}}, false), "a removal is refused")
+	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, clean, &api.ScionConfig{Env: map[string]string{"A": "2"}}, map[string]json.RawMessage{"env": json.RawMessage(`{"A":"2"}`)}), "omitting a reserved key leaves it untouched")
+	rec = httptest.NewRecorder()
+	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, clean, &api.ScionConfig{Env: map[string]string{"A": "2", "SCION_HUB_ENDPOINT": ""}}, map[string]json.RawMessage{"env": json.RawMessage(`{"A":"2","SCION_HUB_ENDPOINT":null}`)}), "explicit null removal of a reserved key is refused")
 	assert.Contains(t, rec.Body.String(), "SCION_HUB_ENDPOINT")
 }
 
@@ -1304,7 +1307,7 @@ func TestValidateAgentConfigPatch_ReservedEnvConcurrentChange(t *testing.T) {
 
 	cfg := &api.ScionConfig{Env: map[string]string{"SCION_HUB_ENDPOINT": "https://hub"}}
 	rec := httptest.NewRecorder()
-	require.True(t, srv.validateAgentConfigPatch(ctx, rec, read, cfg, false), "an echo of what this request read")
+	require.True(t, srv.validateAgentConfigPatch(ctx, rec, read, cfg, nil), "an echo of what this request read")
 	read.AppliedConfig.Env = cfg.Env
 	assert.ErrorIs(t, s.UpdateAgent(ctx, read), store.ErrVersionConflict, "the write is refused")
 	got, err := s.GetAgent(ctx, row.ID)
@@ -1450,6 +1453,7 @@ func TestValidateAgentConfigPatch_NativeMarkerEdits(t *testing.T) {
 		name    string
 		stored  map[string]string
 		env     map[string]string
+		raw     string
 		refused string
 	}{
 		{name: "added to an env without one is refused", stored: map[string]string{"A": "1"},
@@ -1459,16 +1463,20 @@ func TestValidateAgentConfigPatch_NativeMarkerEdits(t *testing.T) {
 		{name: "byte-identical echo is refused", stored: withMarker,
 			env: map[string]string{"A": "1", envNativeCloudRun: "marker-value-stored"}, refused: envNativeCloudRun},
 		{name: "removing a stored marker passes", stored: withMarker,
-			env: map[string]string{"A": "2"}},
+			raw: `{"A":"2","` + envNativeCloudRun + `":null}`},
 		{name: "removing another stored reserved key is refused", stored: map[string]string{"A": "1", "SCION_HUB_ENDPOINT": "marker-value-hub"},
-			env: map[string]string{"A": "1"}, refused: "SCION_HUB_ENDPOINT"},
+			raw: `{"A":"1","SCION_HUB_ENDPOINT":null}`, refused: "SCION_HUB_ENDPOINT"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := &store.Agent{ID: tid("agent-marker-edit"), ProjectID: tid("project-marker-edit"),
 				AppliedConfig: &store.AgentAppliedConfig{Env: tc.stored}}
 			rec := httptest.NewRecorder()
-			ok := srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Env: tc.env}, false)
+			var raw map[string]json.RawMessage
+			if tc.raw != "" {
+				raw = map[string]json.RawMessage{"env": json.RawMessage(tc.raw)}
+			}
+			ok := srv.validateAgentConfigPatch(ctx, rec, agent, &api.ScionConfig{Env: tc.env}, raw)
 			if tc.refused == "" {
 				assert.True(t, ok, rec.Body.String())
 				return
@@ -1547,9 +1555,9 @@ func TestDispatch_StoredMetadataEnvRemoved(t *testing.T) {
 	}
 }
 
-// A held edit that names env with a null value clears the env, so it is
-// checked as an empty env: it removes a stored reserved key (refused) but
-// may drop a stored marker; on the live path a nil env changes nothing.
+// A top-level null env is a no-op under key-level merge semantics, while an
+// explicit per-key null removes that key (refused for reserved keys, allowed
+// for the native Cloud Run marker and auto-expose keys).
 func TestValidateAgentConfigPatch_HeldNullEnv(t *testing.T) {
 	ctx := context.Background()
 	srv, _ := testServer(t)
@@ -1559,19 +1567,22 @@ func TestValidateAgentConfigPatch_HeldNullEnv(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{Env: map[string]string{"A": "1", envNativeCloudRun: "1"}}}
 
 	rec := httptest.NewRecorder()
-	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, reserved, &api.ScionConfig{}, true), "held null env removes a reserved key")
+	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, reserved, &api.ScionConfig{},
+		map[string]json.RawMessage{"env": json.RawMessage(`{"SCION_HUB_ENDPOINT":null}`)}), "explicit null removal of a reserved key is refused")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "SCION_HUB_ENDPOINT")
 	assert.NotContains(t, rec.Body.String(), "https://")
 
 	rec = httptest.NewRecorder()
-	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, markerOnly, &api.ScionConfig{}, true), rec.Body.String())
+	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, markerOnly, &api.ScionConfig{},
+		map[string]json.RawMessage{"env": json.RawMessage(`{"` + envNativeCloudRun + `":null}`)}), rec.Body.String())
 	rec = httptest.NewRecorder()
-	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, reserved, &api.ScionConfig{}, false), "live nil env changes nothing")
+	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, reserved, &api.ScionConfig{},
+		map[string]json.RawMessage{"env": json.RawMessage(`null`)}), "top-level null env changes nothing")
 }
 
-// A held edit with a null env removes the whole stored env: an allowed
-// auto-expose key may go with it, a SCION_METADATA_ key may not.
+// Explicit null removal of an auto-expose key is allowed, while explicit null
+// removal of a SCION_METADATA_ key is refused.
 func TestValidateAgentConfigPatch_HeldNullEnvAutoExposeKeys(t *testing.T) {
 	ctx := context.Background()
 	srv, _ := testServer(t)
@@ -1581,10 +1592,12 @@ func TestValidateAgentConfigPatch_HeldNullEnvAutoExposeKeys(t *testing.T) {
 		AppliedConfig: &store.AgentAppliedConfig{Env: map[string]string{"A": "1", "SCION_AUTO_EXPOSE_PORTS": "true", "SCION_METADATA_MODE": "block"}}}
 
 	rec := httptest.NewRecorder()
-	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, autoExpose, &api.ScionConfig{}, true), rec.Body.String())
+	assert.True(t, srv.validateAgentConfigPatch(ctx, rec, autoExpose, &api.ScionConfig{},
+		map[string]json.RawMessage{"env": json.RawMessage(`{"SCION_AUTO_EXPOSE_PORTS":null}`)}), rec.Body.String())
 
 	rec = httptest.NewRecorder()
-	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, withMetadata, &api.ScionConfig{}, true), "held null env removes a metadata key")
+	assert.False(t, srv.validateAgentConfigPatch(ctx, rec, withMetadata, &api.ScionConfig{},
+		map[string]json.RawMessage{"env": json.RawMessage(`{"SCION_METADATA_MODE":null}`)}), "explicit null removal of a metadata key is refused")
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "SCION_METADATA_MODE")
 }
@@ -1602,16 +1615,22 @@ func TestValidateAgentConfigPatch_AutoExposeKeysPatchable(t *testing.T) {
 		"SCION_AUTO_EXPOSE_PORTS_LIST": "80",
 		"SCION_AUTO_EXPOSE_INTERVAL":   "3s",
 	}
-	with := func(edit func(m map[string]string)) map[string]string {
-		m := maps.Clone(stored)
-		edit(m)
-		return m
+	setPatch := func(kv map[string]string) envPatch {
+		return envPatch{present: true, set: kv}
+	}
+	removePatch := func(keys ...string) envPatch {
+		rem := make(map[string]bool, len(keys))
+		for _, k := range keys {
+			rem[k] = true
+		}
+		return envPatch{present: true, remove: rem}
 	}
 	for key := range patchableReservedEnvKeys {
-		without := with(func(m map[string]string) { delete(m, key) })
-		assert.Empty(t, reservedEnvEditKey(without, stored), "adding %s", key)
-		assert.Empty(t, reservedEnvEditKey(stored, with(func(m map[string]string) { m[key] = "changed" })), "changing %s", key)
-		assert.Empty(t, reservedEnvEditKey(stored, without), "removing %s", key)
+		without := maps.Clone(stored)
+		delete(without, key)
+		assert.Empty(t, reservedEnvEditKey(without, setPatch(map[string]string{key: stored[key]})), "adding %s", key)
+		assert.Empty(t, reservedEnvEditKey(stored, setPatch(map[string]string{key: "changed"})), "changing %s", key)
+		assert.Empty(t, reservedEnvEditKey(stored, removePatch(key)), "removing %s", key)
 	}
 	for _, tc := range []struct{ key, value string }{
 		{"SCION_AUTO_EXPOSE_PORTS", "true"},
@@ -1620,16 +1639,15 @@ func TestValidateAgentConfigPatch_AutoExposeKeysPatchable(t *testing.T) {
 		{"SCION_AUTO_EXPOSE_INTERVAL", "9s"},
 		{"SCION_AUTO_EXPOSE_MODE", "denylist"},
 	} {
-		assert.Empty(t, reservedEnvEditKey(stored, with(func(m map[string]string) { m[tc.key] = tc.value })), "%s=%q", tc.key, tc.value)
+		assert.Empty(t, reservedEnvEditKey(stored, setPatch(map[string]string{tc.key: tc.value})), "%s=%q", tc.key, tc.value)
 	}
 
 	// The same auto-expose edit with a metadata key added is refused,
 	// naming the metadata key.
-	mixed := with(func(m map[string]string) {
-		m["SCION_AUTO_EXPOSE_PORTS"] = "false"
-		m["SCION_METADATA_MODE"] = "passthrough"
-	})
-	assert.Equal(t, "SCION_METADATA_MODE", reservedEnvEditKey(stored, mixed))
+	assert.Equal(t, "SCION_METADATA_MODE", reservedEnvEditKey(stored, setPatch(map[string]string{
+		"SCION_AUTO_EXPOSE_PORTS": "false",
+		"SCION_METADATA_MODE":     "passthrough",
+	})))
 
 	for _, key := range []string{
 		"SCION_METADATA_MODE",
@@ -1645,9 +1663,9 @@ func TestValidateAgentConfigPatch_AutoExposeKeysPatchable(t *testing.T) {
 		"SCION_AUTO_EXPOSE_ports",
 		"SCION_Auto_Expose_Ports",
 	} {
-		assert.Equal(t, key, reservedEnvEditKey(stored, with(func(m map[string]string) { m[key] = "v" })), "adding %s", key)
+		assert.Equal(t, key, reservedEnvEditKey(stored, setPatch(map[string]string{key: "v"})), "adding %s", key)
 	}
-	assert.Empty(t, reservedEnvEditKey(stored, with(func(m map[string]string) { m["scion_auto_expose_ports"] = "true" })),
+	assert.Empty(t, reservedEnvEditKey(stored, setPatch(map[string]string{"scion_auto_expose_ports": "true"})),
 		"a fully lower-case name is a plain user key")
 }
 
@@ -1701,9 +1719,7 @@ func TestValidateAgentConfigPatch_SealedKeysRefused(t *testing.T) {
 		keys[k] = true
 	}
 	for k := range keys {
-		requested := maps.Clone(base)
-		requested[k] = "v"
-		assert.Equal(t, k, reservedEnvEditKey(base, requested), "%s must be patch-refused", k)
+		assert.Equal(t, k, reservedEnvEditKey(base, envPatch{present: true, set: map[string]string{"A": "1", k: "v"}}), "%s must be patch-refused", k)
 	}
 }
 

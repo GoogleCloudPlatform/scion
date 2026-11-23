@@ -384,7 +384,7 @@ func TestDiffExplicitEnvKeys(t *testing.T) {
 		added, removed := diffExplicitEnvKeys(
 			map[string]string{"A": "1"},
 			map[string]string{"B": "2"},
-			map[string]string{"A": "1", "B": "2"},
+			envPatch{present: true, set: map[string]string{"A": "1", "B": "2"}},
 		)
 		assert.Equal(t, map[string]string{"B": "2"}, added)
 		assert.Empty(t, removed)
@@ -393,16 +393,20 @@ func TestDiffExplicitEnvKeys(t *testing.T) {
 		added, _ := diffExplicitEnvKeys(
 			map[string]string{aePorts: "true"},
 			map[string]string{"SCION_AUTO_EXPOSE_MODE": "denylist"},
-			map[string]string{aePorts: "true", "SCION_AUTO_EXPOSE_MODE": "denylist"},
+			envPatch{present: true, set: map[string]string{aePorts: "true", "SCION_AUTO_EXPOSE_MODE": "denylist"}},
 		)
 		assert.Equal(t, map[string]string{aePorts: "true"}, added)
 	})
-	t.Run("absent auto-expose keys and GITHUB_TOKEN are never removed", func(t *testing.T) {
-		old := map[string]string{"GITHUB_TOKEN": "t", "GONE": "x"}
+	t.Run("absent keys are never removed; explicit null removes named key", func(t *testing.T) {
+		old := map[string]string{"GITHUB_TOKEN": "t", "GONE": "x", "KEEP": "y"}
 		for k := range autoExposeEnvKeys {
 			old[k] = "v"
 		}
-		added, removed := diffExplicitEnvKeys(old, nil, map[string]string{})
+		added, removed := diffExplicitEnvKeys(old, nil, envPatch{present: true, set: map[string]string{}})
+		assert.Empty(t, added)
+		assert.Empty(t, removed)
+
+		added, removed = diffExplicitEnvKeys(old, nil, envPatch{present: true, remove: map[string]bool{"GONE": true}})
 		assert.Empty(t, added)
 		assert.Equal(t, []string{"GONE"}, removed)
 	})

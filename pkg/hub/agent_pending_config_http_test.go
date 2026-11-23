@@ -1142,7 +1142,7 @@ func TestAgentPendingConfig_HeldSaveUsesTheStartRules(t *testing.T) {
 		srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
 		resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
 			"max_duration": nil,
-			"env":          map[string]string{"KEEP": "1"},
+			"env":          map[string]interface{}{"KEEP": "1", "DROP": nil},
 		}})
 		assert.Equal(t, []string{"config.env", "config.max_duration"}, resp.Disposition.Held)
 		assert.Empty(t, resp.Disposition.HeldForReincarnate)

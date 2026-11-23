@@ -4784,6 +4784,16 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
+	// Env writes require agent.attach in addition to agent.update
+	// (ptone/scion#5599), matching the env action route (agentActionPermission).
+	// Checked before any optimistic-lock, phase, or state mutation so a caller
+	// without attach is refused and nothing changes.
+	if updates.Config != nil && parseEnvPatch(rawFields).hasEdits() {
+		if !s.authorize(w, r, agentResource(agent), ActionAttach) {
+			return
+		}
+	}
+
 	// Check version for optimistic locking
 	if updates.StateVersion != 0 && updates.StateVersion != agent.StateVersion {
 		Conflict(w, "Version conflict - resource was modified")
@@ -4894,7 +4904,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				Conflict(w, configPatchPhaseMessage)
 				return
 			}
-			if !s.validateAgentConfigPatch(ctx, w, agent, updates.Config, false) {
+			if !s.validateAgentConfigPatch(ctx, w, agent, updates.Config, rawFields) {
 				return
 			}
 			res, err := s.applyAgentConfigPatch(ctx, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys}, canViewAgentEnv(ctx, s, agent),

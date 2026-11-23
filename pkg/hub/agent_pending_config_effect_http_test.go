@@ -411,7 +411,7 @@ func TestPendingFold_ReincarnateOnlyKeyNotWrittenAfterReincarnation(t *testing.T
 func TestPendingFold_MixedEnvEditStaysPendingWhole(t *testing.T) {
 	srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true})
 	resp := patchPending(t, srv, agent.ID, map[string]interface{}{"config": map[string]interface{}{
-		"env": map[string]string{"KEEP": "1", "NEW": "1"},
+		"env": map[string]interface{}{"KEEP": "1", "DROP": nil, "NEW": "1"},
 	}})
 	assert.Equal(t, []string{"config.env"}, resp.Disposition.HeldForReincarnate)
 	assert.Contains(t, resp.Warnings, "config.env: the edit removes DROP, so the whole edit, additions included, is kept pending until a reincarnation applies pending edits; the agent keeps its current variables (a start does not remove them)")
@@ -437,7 +437,7 @@ func TestPendingFold_MixedEnvEditStaysPendingWhole(t *testing.T) {
 func TestPendingFold_MixedEditFlagOffUnchanged(t *testing.T) {
 	body := map[string]interface{}{"config": map[string]interface{}{
 		"skills": []map[string]interface{}{{"uri": "hub://skills/review"}, {"uri": "hub://skills/other"}},
-		"env":    map[string]string{"KEEP": "1", "NEW": "1"},
+		"env":    map[string]interface{}{"KEEP": "1", "DROP": nil, "NEW": "1"},
 	}}
 
 	t.Run("running: refused", func(t *testing.T) {
@@ -476,11 +476,18 @@ func TestPendingFold_MixedEditFlagOffUnchanged(t *testing.T) {
 
 // TestPendingReauth_PerKeySaver (I1-a): each key is re-checked against its
 // own saver. A's model is dropped once A loses agent.update (audited,
-// warned); B's env is applied.
+// warned); B's env is applied (B owns the agent, holding both agent.update
+// and agent.attach).
 func TestPendingReauth_PerKeySaver(t *testing.T) {
 	srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
 	a := effectUser(t, s, agent.ProjectID, "a")
 	b := effectUser(t, s, agent.ProjectID, "b")
+	// B owns the agent so B holds agent.attach in addition to agent.update,
+	// required for config.env edits (ptone/scion#5599).
+	cur := pendingReloadAgent(t, s, agent.ID)
+	cur.OwnerID = b.ID
+	require.NoError(t, s.UpdateAgent(context.Background(), cur))
+
 	effectPatchAs(t, srv, a, agent.ID, map[string]interface{}{"config": map[string]interface{}{"model": "a-model"}})
 	effectPatchAs(t, srv, b, agent.ID, map[string]interface{}{"config": map[string]interface{}{"env": map[string]string{"FROM_B": "1"}}})
 	stored := pendingReloadAgent(t, s, agent.ID)
@@ -501,14 +508,15 @@ func TestPendingReauth_PerKeySaver(t *testing.T) {
 	assert.Equal(t, []string{"config.env"}, keys)
 }
 
-// TestPendingReauth_EnvViewReevaluated (I1-b): the env-removal rules run
-// with the env saver's CURRENT env-view decision: a saver who could view
-// env when saving a removal, and can no longer, gets the removal left out
-// at the start (the edit is applied on its additions alone).
+// TestPendingReauth_EnvViewReevaluated (I1-b): config.env edits require
+// agent.attach in addition to agent.update (ptone/scion#5599). A saver who
+// held agent.attach when saving a pending env edit, and loses it before
+// fold (keeping only agent.update via project-admin), has config.env dropped
+// with saver_unauthorized rather than applied.
 func TestPendingReauth_EnvViewReevaluated(t *testing.T) {
 	srv, s, disp, agent := heldFilterFixture(t, &store.BrokerCapabilities{Reprovision: true, ClearedFields: true})
 	a := effectUser(t, s, agent.ProjectID, "a")
-	// The agent's owner may attach (view env); project-admin alone may
+	// The agent's owner may attach (view/edit env); project-admin alone may
 	// update but not attach.
 	setOwner := func(owner string) {
 		cur := pendingReloadAgent(t, s, agent.ID)
@@ -519,20 +527,21 @@ func TestPendingReauth_EnvViewReevaluated(t *testing.T) {
 	require.True(t, canViewAgentEnv(contextWithIdentity(context.Background(), NewAuthenticatedUser(a.ID, a.Email, a.DisplayName, a.Role, "")), srv, pendingReloadAgent(t, s, agent.ID)),
 		"positive control: the owner may view env")
 	resp := effectPatchAs(t, srv, a, agent.ID, map[string]interface{}{"config": map[string]interface{}{
-		"env": map[string]string{"KEEP": "1", "NEW": "1"},
+		"env": map[string]interface{}{"DROP": nil, "NEW": "1"},
 	}})
 	assert.Equal(t, []string{"config.env"}, resp.Disposition.Held, "a recorded removal applies at the next start on this broker")
 	// Another user becomes the owner: A keeps project-admin (update) but
 	// can no longer attach.
 	setOwner(effectUser(t, s, agent.ProjectID, "new-owner").ID)
 
-	effectStopStart(t, srv, agent.ID)
+	warnings := effectStopStart(t, srv, agent.ID)
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
-	assert.Equal(t, "1", starts[0].inline.Env["NEW"], "the addition is applied")
-	// The removal is not recorded, so the broker's merge keeps DROP: the
-	// saver can no longer view env.
+	assert.NotContains(t, starts[0].inline.Env, "NEW", "env edit is dropped once saver loses attach")
+	assert.Equal(t, "2", starts[0].inline.Env["DROP"], "DROP is preserved")
 	assert.NotContains(t, starts[0].inline.ClearedFields, api.ClearedEnvPathPrefix+"DROP")
+	assert.Contains(t, warnings, effectDropWarning(pendingDiscardTriggerSaverUnauthorized, "config.env"))
+	assert.Equal(t, map[string][]string{pendingDiscardTriggerSaverUnauthorized: {"config.env"}}, effectDiscards(t, s, agent.ID, 1))
 }
 
 // TestPendingReauth_UnresolvableSaverDropped (I1-d): an unknown saver kind
@@ -560,6 +569,10 @@ func TestPendingReauth_UnresolvableSaverDropped(t *testing.T) {
 func TestPendingReauth_LegacyRowFallsBackToSavedBy(t *testing.T) {
 	srv, s, disp, agent := heldEditsFixture(t, state.PhaseStopped)
 	a := effectUser(t, s, agent.ProjectID, "a")
+	// Owner holds agent.attach in addition to agent.update for config.env (ptone/scion#5599).
+	ownerRow := pendingReloadAgent(t, s, agent.ID)
+	ownerRow.OwnerID = a.ID
+	require.NoError(t, s.UpdateAgent(context.Background(), ownerRow))
 	pc, err := store.UnmarshalPendingConfigFromStorage(`{"config":{"model":"legacy-model","env":{"L":"1"}},"savedBy":"user:` + a.ID + `","envSaverCanViewEnv":true,"savedAt":"2026-10-01T00:00:00Z","limitsFormat":2}`)
 	require.NoError(t, err)
 	require.Nil(t, pc.KeySavers)
@@ -1902,6 +1915,10 @@ func TestPendingFoldFault_EnvViewIndeterminate(t *testing.T) {
 	srv, s, disp, agent := heldEditsFixture(t, state.PhaseRunning)
 	fault := gateAInstallAuthzFault(t, srv)
 	u := effectUser(t, s, agent.ProjectID, "envfault")
+	// Grant agent.attach on the project (rather than changing agent.OwnerID,
+	// which would cause the fault on u.ID to fail the agent's own standing
+	// check before planPendingFold runs).
+	grantPermissionViaRoleBinding(t, s, u.ID, "agent.attach", store.RoleScopeProject, agent.ProjectID)
 	resp := effectPatchAs(t, srv, u, agent.ID, map[string]interface{}{"config": map[string]interface{}{"env": map[string]string{"NEW": "1"}}})
 	require.Equal(t, []string{"config.env"}, resp.Disposition.Held)
 	pendingLifecycleWarnings(t, srv, agent.ID, "stop")
