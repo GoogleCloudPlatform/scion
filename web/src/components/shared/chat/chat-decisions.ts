@@ -1159,6 +1159,15 @@ export class ScionChatDecisions extends LitElement {
       clip: rect(0 0 0 0);
       white-space: nowrap;
     }
+
+    /* Recommended choice on a non-pending card: muted, so the picked state stays dominant. */
+    .rec-mark {
+      margin-inline-start: 0.35em;
+      font-size: 0.85em;
+      font-style: italic;
+      font-weight: 400;
+      opacity: 0.8;
+    }
   `;
 
   /** The view shown for a row: the newer of the thread's and this card's own. */
@@ -2357,12 +2366,17 @@ export class ScionChatDecisions extends LitElement {
     nativeDisabled: boolean;
     pressed?: boolean;
     recommended: boolean;
+    recommendedMuted: boolean;
     title: string;
     notOwnerTip?: string;
     clickable: boolean;
   } {
     const loading = this.submitting?.rowId === d.rowId && this.submitting.choiceId === c.id;
-    const recommended = d.status === 'pending' && d.defaultChoiceId === c.id;
+    const pending = d.status === 'pending';
+    const recommended = isRecommendedChoice(d, c);
+    // Off pending the recommendation stays as a muted marker, never the
+    // pending outline, so the picked state stays dominant (ptone/scion#8443).
+    const recommendedMuted = recommended && !pending;
     const reason = actionableReason(d, this.currentUserId);
     const notOwner = reason === 'not_recorded_answerer';
     const title = notOwner
@@ -2381,7 +2395,8 @@ export class ScionChatDecisions extends LitElement {
           loading: false,
           disabled: true,
           nativeDisabled: true,
-          recommended: false,
+          recommended,
+          recommendedMuted,
           title,
           ...(isInterpreted ? { notOwnerTip: title } : {}),
           clickable: false,
@@ -2403,7 +2418,8 @@ export class ScionChatDecisions extends LitElement {
             disabled,
             nativeDisabled: false,
             ...(isTarget ? { pressed: true } : {}),
-            recommended: false,
+            recommended,
+            recommendedMuted,
             title,
             clickable: !disabled && !isTarget,
           };
@@ -2415,7 +2431,8 @@ export class ScionChatDecisions extends LitElement {
           loading,
           disabled,
           nativeDisabled: false,
-          recommended: false,
+          recommended,
+          recommendedMuted,
           title,
           clickable: !disabled && !isInterpreted,
         };
@@ -2424,8 +2441,8 @@ export class ScionChatDecisions extends LitElement {
 
     const chosen = d.status === 'decided' && d.decision?.choiceId === c.id;
     const disabled = !chosen && !loading && !this.actionable(d);
-    const singleChoicePending = d.status === 'pending' && this.isSingleChoiceOnly(d);
-    const outlined = recommended && !chosen && !singleChoicePending;
+    const singleChoicePending = pending && this.isSingleChoiceOnly(d);
+    const outlined = pending && recommended && !chosen && !singleChoicePending;
     return {
       variant: chosen || outlined || singleChoicePending ? 'primary' : 'default',
       outlined,
@@ -2434,6 +2451,7 @@ export class ScionChatDecisions extends LitElement {
       disabled,
       nativeDisabled: disabled && notOwner,
       recommended,
+      recommendedMuted,
       title,
       clickable: !chosen && !disabled,
     };
@@ -2490,7 +2508,7 @@ export class ScionChatDecisions extends LitElement {
         ? html`<sl-icon slot="prefix" name=${s.icon}></sl-icon>`
         : nothing}${c.label}${s.recommended
         ? html`<span class="sr-only"> (recommended)</span>`
-        : nothing}</sl-button
+        : nothing}${renderRecommendedMark(s.recommendedMuted)}</sl-button
     >`;
     return s.notOwnerTip ? html`<sl-tooltip content=${s.notOwnerTip}>${btn}</sl-tooltip>` : btn;
   }
@@ -2526,7 +2544,7 @@ export class ScionChatDecisions extends LitElement {
       <span>
         <span class="lbl">${c.label}</span>${s.recommended
           ? html`<span class="sr-only"> (recommended)</span>`
-          : nothing}
+          : nothing}${renderRecommendedMark(s.recommendedMuted)}
         ${c.description
           ? html`<span class="desc">${this.markdown(c.description, true)}</span>`
           : nothing}
@@ -3360,6 +3378,7 @@ export class ScionChatDecisions extends LitElement {
     icon: string;
     selected: boolean;
     recommended: boolean;
+    recommendedMuted: boolean;
     disabled: boolean;
     nativeDisabled: boolean;
     actionable: boolean;
@@ -3370,7 +3389,8 @@ export class ScionChatDecisions extends LitElement {
     const actionable = reason === '';
     const notOwner = reason === 'not_recorded_answerer';
     const pending = d.status === 'pending';
-    const recommended = pending && d.defaultChoiceId === c.id;
+    const recommended = isRecommendedChoice(d, c);
+    const recommendedMuted = recommended && !pending;
     const title = notOwner
       ? this.notOwnerTooltip(d)
       : recommended
@@ -3384,7 +3404,8 @@ export class ScionChatDecisions extends LitElement {
           look: isInterpreted ? 'filled' : 'default',
           icon: isInterpreted ? 'robot' : '',
           selected: false,
-          recommended: false,
+          recommended,
+          recommendedMuted,
           disabled: true,
           nativeDisabled: notOwner,
           actionable: false,
@@ -3399,7 +3420,8 @@ export class ScionChatDecisions extends LitElement {
           look: 'filled',
           icon: 'robot',
           selected: true,
-          recommended: false,
+          recommended,
+          recommendedMuted,
           disabled,
           nativeDisabled: false,
           actionable: true,
@@ -3411,7 +3433,8 @@ export class ScionChatDecisions extends LitElement {
           look: 'filled',
           icon: 'check-lg',
           selected: true,
-          recommended: false,
+          recommended,
+          recommendedMuted,
           disabled,
           nativeDisabled: false,
           actionable: true,
@@ -3423,7 +3446,8 @@ export class ScionChatDecisions extends LitElement {
           look: 'subtle',
           icon: 'robot',
           selected: false,
-          recommended: false,
+          recommended,
+          recommendedMuted,
           disabled,
           nativeDisabled: false,
           actionable: true,
@@ -3434,7 +3458,8 @@ export class ScionChatDecisions extends LitElement {
         look: 'default',
         icon: '',
         selected: false,
-        recommended: false,
+        recommended,
+        recommendedMuted,
         disabled,
         nativeDisabled: false,
         actionable: true,
@@ -3448,12 +3473,13 @@ export class ScionChatDecisions extends LitElement {
     const selected = pending && !this.answerBlocked && this.selectionOf(d) === c.id;
     const disabled = !chosen && (!pending || this.setSubmitting || this.answerBlocked);
     const filled = chosen || selected;
-    const outlined = !filled && recommended;
+    const outlined = !filled && recommended && pending;
     return {
       look: filled ? 'filled' : outlined ? 'outline' : 'default',
       icon: chosen ? 'check-circle-fill' : selected ? 'check-lg' : '',
       selected,
       recommended,
+      recommendedMuted,
       disabled,
       nativeDisabled: disabled && notOwner,
       actionable,
@@ -3487,7 +3513,7 @@ export class ScionChatDecisions extends LitElement {
         : nothing}<span class="sb-label"
         >${c.label}${s.recommended
           ? html`<span class="sr-only"> (recommended)</span>`
-          : nothing}</span
+          : nothing}${renderRecommendedMark(s.recommendedMuted)}</span
       >
     </button>`;
     return s.notOwnerTip ? html`<sl-tooltip content=${s.notOwnerTip}>${btn}</sl-tooltip>` : btn;
@@ -3515,7 +3541,7 @@ export class ScionChatDecisions extends LitElement {
       <span>
         <span class="lbl">${c.label}</span>${s.recommended
           ? html`<span class="sr-only"> (recommended)</span>`
-          : nothing}
+          : nothing}${renderRecommendedMark(s.recommendedMuted)}
         ${c.description
           ? html`<span class="desc">${this.markdown(c.description, true)}</span>`
           : nothing}
@@ -3678,6 +3704,21 @@ export class ScionChatDecisions extends LitElement {
           </div>`
         : nothing}`;
   }
+}
+
+/** Whether c is the decision's recommended choice. */
+function isRecommendedChoice(d: DecisionView, c: ChoiceOption): boolean {
+  return !!d.defaultChoiceId && d.defaultChoiceId === c.id;
+}
+
+/**
+ * The visible muted "recommended" marker of a non-pending card. Hidden from
+ * assistive technology: the `.sr-only` "(recommended)" already names it.
+ */
+function renderRecommendedMark(show: boolean): TemplateResult | typeof nothing {
+  return show
+    ? html`<span class="rec-mark" data-rec-mark aria-hidden="true">recommended</span>`
+    : nothing;
 }
 
 /** The reason line of a blocked answerability, as plain text. */
