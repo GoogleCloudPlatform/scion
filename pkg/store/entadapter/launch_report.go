@@ -17,7 +17,6 @@ package entadapter
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -634,8 +633,10 @@ func failedAfterRunningObservedApplies(current *ent.Agent, r store.LaunchReport,
 // untouched.
 func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r store.LaunchReport) {
 	a := store.Agent{
+		ID:                    current.ID.String(),
 		Template:              current.Template,
 		Runtime:               current.Runtime,
+		HarnessConfig:         current.HarnessConfig,
 		PinnedRuntimeTargetID: derefString(current.PinnedRuntimeTargetID),
 	}
 	if current.AppliedConfig != "" {
@@ -643,14 +644,7 @@ func applySucceededAgentInfo(upd *ent.AgentUpdateOne, current *ent.Agent, r stor
 		// entAgentToStore also uses; nil means not valid JSON.
 		a.AppliedConfig, _ = parseAppliedConfig(current.AppliedConfig)
 	}
-	wasShell := isShellEntAgent(current) || (a.AppliedConfig != nil && a.AppliedConfig.HarnessConfig == state.ShellHarnessName)
 	store.ApplyBrokerAgentConfig(&a, r.AgentConfig)
-	if wasShell && a.AppliedConfig != nil && a.AppliedConfig.HarnessConfig != state.ShellHarnessName {
-		slog.Warn("agent store: broker launch report disagreed on execution container harness_config; keeping shell",
-			"agent_id", current.ID.String(),
-			"reported_harness_config", a.AppliedConfig.HarnessConfig)
-		a.AppliedConfig.HarnessConfig = state.ShellHarnessName
-	}
 	if a.Template != current.Template {
 		upd.SetTemplate(a.Template)
 	}

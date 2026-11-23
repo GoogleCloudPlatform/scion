@@ -1696,3 +1696,95 @@ func TestShellAgentDispatch_NilAppliedConfigRefused(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "execution container has unreadable applied config")
 }
+
+func TestShellAgentBrokerReports_CannotOverwriteShellMarker(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sync applyBrokerResponse keeps shell marker", func(t *testing.T) {
+		s := createTestStore(t)
+		project, broker := seedShellTestProjectAndBroker(t, s)
+		owner := seedShellTestUser(t, s, "sync-shell@test.com", "Sync Shell")
+		shellAgent := seedShellTestAgent(t, s, project.ID, broker.ID, "shell-sync", owner.ID, config.ShellHarnessConfigName, state.PhaseStarting, []string{owner.ID})
+
+		d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+		d.applyBrokerResponse(ctx, shellAgent, &RemoteAgentResponse{
+			Agent: &RemoteAgentInfo{
+				ID:            "ctr-sync-1",
+				Phase:         string(state.PhaseRunning),
+				HarnessConfig: "claude",
+				Image:         "img:sync-resolved",
+				Runtime:       "docker",
+			},
+		})
+		require.NoError(t, s.UpdateAgent(ctx, shellAgent))
+
+		got, err := s.GetAgent(ctx, shellAgent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, config.ShellHarnessConfigName, got.HarnessConfig)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Equal(t, config.ShellHarnessConfigName, got.AppliedConfig.HarnessConfig)
+		assert.True(t, isShellAgent(got))
+		assert.Equal(t, "img:sync-resolved", got.AppliedConfig.Image)
+		assert.Equal(t, "docker", got.Runtime)
+	})
+
+	t.Run("heartbeat backfill keeps shell marker", func(t *testing.T) {
+		srv, s := testServer(t)
+		project, broker := seedShellTestProjectAndBroker(t, s)
+		owner := seedShellTestUser(t, s, "hb-shell@test.com", "HB Shell")
+		shellAgent := &store.Agent{
+			ID:              api.NewUUID(),
+			Slug:            "shell-hb-backfill",
+			Name:            "shell-hb-backfill",
+			ProjectID:       project.ID,
+			RuntimeBrokerID: broker.ID,
+			OwnerID:         owner.ID,
+			CreatedBy:       owner.ID,
+			Ancestry:        []string{owner.ID},
+			Phase:           string(state.PhaseStarting),
+			RunID:           "run-shell-hb-1",
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: config.ShellHarnessConfigName,
+			},
+		}
+		require.NoError(t, s.CreateAgent(ctx, shellAgent))
+		_, err := s.SetAgentRunID(ctx, shellAgent.ID, "run-shell-hb-1", nil)
+		require.NoError(t, err)
+		claim, err := s.ClaimAgentStart(ctx, shellAgent.ID, "hub-test", store.StartClaimCreate, "", time.Minute)
+		require.NoError(t, err)
+		held, err := s.MarkStartUnconfirmed(ctx, shellAgent.ID, claim.ID, "hub-test", time.Hour)
+		require.NoError(t, err)
+		require.True(t, held)
+		beforeHB, err := s.GetAgent(ctx, shellAgent.ID)
+		require.NoError(t, err)
+		require.Equal(t, "run-shell-hb-1", beforeHB.RunID)
+		require.Equal(t, store.StartClaimCreate, beforeHB.StartClaimKind)
+		require.Equal(t, store.StartClaimUnconfirmed, beforeHB.StartClaimState)
+
+		hbReq := brokerHeartbeatRequest{
+			Status: store.BrokerStatusOnline,
+			Projects: []brokerProjectHeartbeat{{
+				ProjectID: project.ID,
+				Agents: []brokerAgentHeartbeat{{
+					Slug:          shellAgent.Slug,
+					Phase:         string(state.PhaseRunning),
+					RunID:         "run-shell-hb-1",
+					HarnessConfig: "claude",
+					Image:         "img:hb-resolved",
+					Runtime:       "docker",
+				}},
+			}},
+		}
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hbReq)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		got, err := s.GetAgent(ctx, shellAgent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, config.ShellHarnessConfigName, got.HarnessConfig)
+		require.NotNil(t, got.AppliedConfig)
+		assert.Equal(t, config.ShellHarnessConfigName, got.AppliedConfig.HarnessConfig)
+		assert.True(t, isShellAgent(got))
+		assert.Equal(t, "img:hb-resolved", got.AppliedConfig.Image, "heartbeat backfill should have applied non-shell fields")
+		assert.Equal(t, "docker", got.Runtime)
+	})
+}

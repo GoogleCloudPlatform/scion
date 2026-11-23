@@ -1001,11 +1001,11 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
-	// For execution containers (HarnessConfig == "shell"), never clear the
-	// shell marker when AppliedConfig is nil (for example after loading a row
-	// whose applied_config failed to parse) or lacks HarnessConfig.
+	// For execution containers (HarnessConfig == "shell"), never clear or
+	// overwrite the shell marker (for example after loading a row whose
+	// applied_config failed to parse, or from a disagreeing broker report).
 	hc := harnessConfigOf(a.AppliedConfig)
-	if hc == "" && a.HarnessConfig == config.ShellHarnessConfigName {
+	if a.HarnessConfig == config.ShellHarnessConfigName {
 		hc = a.HarnessConfig
 	}
 	update.SetHarnessConfig(hc)
@@ -2528,10 +2528,11 @@ func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expe
 			SetStateVersion(newVersion).
 			SetUpdated(time.Now())
 		if applied != nil {
-			// Always set, never NULL: see buildAgentUpdate. Leave
-			// harness_config untouched when applied == nil so pending-config
-			// clears on a row whose applied_config failed to parse do not
-			// erase an existing shell marker.
+			// Always set, never NULL: see buildAgentUpdate. When applied is
+			// nil, leave harness_config untouched for all agents so
+			// pending-config clears on a row whose applied_config failed to
+			// parse do not erase an existing harness_config (including the
+			// shell marker).
 			update.SetHarnessConfig(harnessConfigOf(applied))
 		}
 		if appliedRaw != "" {
