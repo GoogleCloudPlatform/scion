@@ -336,12 +336,15 @@ func TestExecuteSchedule_RecurrenceCopiesInitiatorAttribution(t *testing.T) {
 			}
 
 			sched := &store.Schedule{
-				ID:                   tid("e2b-recur-sched-" + tc.name),
-				ProjectID:            projectID,
-				Name:                 "recur-" + tc.name,
-				CronExpr:             "0 9 * * *",
-				EventType:            "message",
-				Payload:              `{"agentName":"a","message":"hi"}`,
+				ID:        tid("e2b-recur-sched-" + tc.name),
+				ProjectID: projectID,
+				Name:      "recur-" + tc.name,
+				CronExpr:  "0 9 * * *",
+				EventType: "message",
+				// Target a live seeded agent so the target-deleted backstop
+				// does not pause the schedule before materializing the event
+				// (ptone/scion#8927).
+				Payload:              `{"agentName":"worker","message":"hi"}`,
 				Status:               store.ScheduleStatusActive,
 				CreatedBy:            DevUserID,
 				InitiatorAttribution: tc.attrs,
