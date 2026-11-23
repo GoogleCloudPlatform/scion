@@ -311,6 +311,8 @@ func FuzzParse(f *testing.F) {
 	f.Add("phase:running OR phase:stopped")
 	f.Add("phase:")
 	f.Add("label:\"unterminated")
+	f.Add("phase:running \"label:tmp\"")
+	f.Add("phase:running -\"phase:x\"")
 
 	known := schemas.Agents.HasKey
 	f.Fuzz(func(t *testing.T, input string) {

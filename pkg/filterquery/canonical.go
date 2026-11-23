@@ -129,6 +129,9 @@ func needsQuotingText(t string) bool {
 	if t == "" || t == "OR" || t == "AND" || strings.HasPrefix(t, "-") {
 		return true
 	}
+	if _, _, ok := scanKeyPrefix(t, 0); ok {
+		return true
+	}
 	for i := 0; i < len(t); i++ {
 		c := t[i]
 		if isSpace(c) || c == '"' || c == '\\' || c == '(' || c == ')' {

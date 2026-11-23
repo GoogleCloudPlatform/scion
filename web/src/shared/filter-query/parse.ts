@@ -30,6 +30,23 @@ function utf8ByteLength(s: string): number {
   return utf8Encoder.encode(s).length;
 }
 
+/** Return the UTF-16 code-unit index where the UTF-8 byte length first exceeds `maxBytes`. */
+function utf16OffsetAtMaxBytes(s: string, maxBytes: number): number {
+  let bytes = 0;
+  let i = 0;
+  while (i < s.length) {
+    const cp = s.codePointAt(i) as number;
+    const cpLen = cp > 0xffff ? 2 : 1;
+    const cpBytes = cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+    if (bytes + cpBytes > maxBytes) {
+      return i;
+    }
+    bytes += cpBytes;
+    i += cpLen;
+  }
+  return s.length;
+}
+
 function runeCount(s: string): number {
   let count = 0;
   for (const _ of s) {
@@ -166,12 +183,13 @@ function parseQuoted(
 export function parse(input: string, known: (key: string) => boolean): ParseResult {
   const byteLen = utf8ByteLength(input);
   if (byteLen > MAX_INPUT_BYTES) {
+    const offset = utf16OffsetAtMaxBytes(input, MAX_INPUT_BYTES);
     return {
       error: {
         code: 'limit',
         message: `filter query exceeds maximum length of ${MAX_INPUT_BYTES} bytes`,
-        offset: MAX_INPUT_BYTES,
-        length: byteLen - MAX_INPUT_BYTES,
+        offset,
+        length: input.length - offset,
       },
     };
   }

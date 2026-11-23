@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { comparisonPrefixLen } from './parse.js';
+import { comparisonPrefixLen, scanKeyPrefix } from './parse.js';
 import type { Query, ViewSchema } from './types.js';
 
 function quoteString(s: string): string {
@@ -44,6 +44,7 @@ function needsQuotingValue(v: string): boolean {
 
 function needsQuotingText(t: string): boolean {
   if (t === '' || t === 'OR' || t === 'AND' || t.startsWith('-')) return true;
+  if (scanKeyPrefix(t, 0)) return true;
   for (let i = 0; i < t.length; i++) {
     const c = t[i];
     if (
@@ -62,7 +63,7 @@ function needsQuotingText(t: string): boolean {
   return false;
 }
 
-function formatValue(v: string): string {
+export function formatValue(v: string): string {
   return needsQuotingValue(v) ? quoteString(v) : v;
 }
 

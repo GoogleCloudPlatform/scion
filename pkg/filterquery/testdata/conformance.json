@@ -161,7 +161,7 @@
         "text": "foo:bar",
         "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }]
       },
-      "canonical": "phase:running foo:bar"
+      "canonical": "phase:running \"foo:bar\""
     },
     {
       "name": "repeated key terms both kept",
@@ -263,6 +263,40 @@
         "terms": [{ "key": "label", "values": [">5"], "negate": false, "offset": 0, "length": 10 }]
       },
       "canonical": "label:\">5\""
+    },
+    {
+      "name": "quoted text resembling known key stays quoted in canonical",
+      "input": "phase:running \"label:tmp\"",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "text": "label:tmp",
+        "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }]
+      },
+      "canonical": "phase:running \"label:tmp\""
+    },
+    {
+      "name": "negated quoted text resembling known key stays quoted in canonical",
+      "input": "phase:running -\"phase:x\"",
+      "knownKeys": ["phase", "label"],
+      "expect": {
+        "mode": "structured",
+        "terms": [{ "key": "phase", "values": ["running"], "negate": false, "offset": 0, "length": 13 }],
+        "excludeText": ["phase:x"]
+      },
+      "canonical": "phase:running -\"phase:x\""
+    },
+    {
+      "name": "non-ASCII prefix error reports byte offsets in Go and UTF-16 offsets in TS",
+      "input": "é phase:",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 3, "length": 6, "utf16Offset": 2, "utf16Length": 6 }
+    },
+    {
+      "name": "non-ASCII prefix bare OR error reports byte vs UTF-16 offsets",
+      "input": "éé phase:running OR x",
+      "knownKeys": ["phase", "label"],
+      "error": { "code": "syntax", "offset": 19, "length": 2, "utf16Offset": 17, "utf16Length": 2 }
     }
   ],
   "eval": {

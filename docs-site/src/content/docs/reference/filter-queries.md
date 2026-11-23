@@ -22,7 +22,7 @@ Scion list views share a Gmail/GitHub-style `key:value` filter query dialect (ga
 
 - Bare `OR`, `AND`, parentheses `( )`, and comparison prefixes (`>`, `<`, `>=`, `<=`) are reserved and return a syntax error in structured mode.
 - Queries are bounded to 512 bytes, 32 terms, 20 values per key, and 200 characters of search text.
-- On syntax or value errors, the web UI keeps the last valid filter applied while displaying the error inline; the Hub API returns `400 invalid_filter_query` with `details.offset` and `details.length`.
+- On syntax or value errors, the web UI keeps the last valid filter applied while displaying the error inline; the Hub API returns `400 invalid_filter_query` with `details.offset` and `details.length` measured in **UTF-8 bytes** into the raw `q` query string.
 
 ## Views
 

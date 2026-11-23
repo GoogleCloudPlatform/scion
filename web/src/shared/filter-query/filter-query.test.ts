@@ -53,7 +53,13 @@ interface ConformanceFile {
       excludeText?: string[];
     };
     canonical?: string;
-    error?: { code: string; offset: number; length: number };
+    error?: {
+      code: string;
+      offset: number;
+      length: number;
+      utf16Offset?: number;
+      utf16Length?: number;
+    };
   }>;
   eval: {
     knownKeys: string[];
@@ -87,8 +93,8 @@ describe('filter-query conformance (parse)', () => {
       if (tc.error) {
         expect(res.error).toBeDefined();
         expect(res.error?.code).toBe(tc.error.code);
-        expect(res.error?.offset).toBe(tc.error.offset);
-        expect(res.error?.length).toBe(tc.error.length);
+        expect(res.error?.offset).toBe(tc.error.utf16Offset ?? tc.error.offset);
+        expect(res.error?.length).toBe(tc.error.utf16Length ?? tc.error.length);
         return;
       }
       expect(res.error).toBeUndefined();
@@ -194,7 +200,30 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     expect(valSugs.map((s) => s.label)).toContain('running');
   });
 
-  it('edits single-valued key for quick chips while preserving other terms', () => {
+  it('quotes dynamic value suggestions containing commas, quotes, or spaces', () => {
+    const sugs = getSuggestions('label:', 6, agentsSchema, () => [
+      'team=a,b',
+      'team="x"',
+      'team=web ui',
+      'simple',
+    ]);
+    const byLabel = new Map(sugs.map((s) => [s.label, s.insertText]));
+    expect(byLabel.get('team=a,b')).toBe('"team=a,b"');
+    expect(byLabel.get('team="x"')).toBe('"team=\\"x\\""');
+    expect(byLabel.get('team=web ui')).toBe('"team=web ui"');
+    expect(byLabel.get('simple')).toBe('simple');
+  });
+
+  it('reports consistent UTF-16 offsets when non-ASCII input exceeds MAX_INPUT_BYTES', () => {
+    // 257 copies of 'é' (2 UTF-8 bytes each = 514 bytes; 256 fit in 512 bytes).
+    const input = 'é'.repeat(257);
+    const res = parse(input, knownKeysFor(agentsSchema));
+    expect(res.error?.code).toBe('limit');
+    expect(res.error?.offset).toBe(256);
+    expect(res.error?.length).toBe(1);
+  });
+
+  it('edits single-valued key for quick chips while preserving other terms and quoted whitespace', () => {
     expect(setSingleKeyInQuery('', 'phase', 'running', agentsSchema)).toBe('phase:running');
     expect(setSingleKeyInQuery('label:team=ui foo', 'phase', 'running', agentsSchema)).toBe(
       'phase:running label:team=ui foo'
@@ -204,6 +233,12 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     );
     expect(setSingleKeyInQuery('phase:running label:team=ui', 'phase', '', agentsSchema)).toBe(
       'label:team=ui'
+    );
+    expect(setSingleKeyInQuery('phase:running label:"a  b"', 'phase', 'error', agentsSchema)).toBe(
+      'phase:error label:"a  b"'
+    );
+    expect(setSingleKeyInQuery('phase:running label:"a  b"', 'phase', '', agentsSchema)).toBe(
+      'label:"a  b"'
     );
     expect(getActiveSingleKeyValue('phase:running label:a', 'phase', agentsSchema)).toBe('running');
     expect(getActiveSingleKeyValue('phase:running,error', 'phase', agentsSchema)).toBe('');
