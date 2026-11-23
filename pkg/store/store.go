@@ -1969,6 +1969,30 @@ type ProjectStore interface {
 	// ErrRevisionConflict on mismatch. This is the only path that may change
 	// the policy; generic UpdateProject must NOT update these fields.
 	UpdateProjectMessagingPolicy(ctx context.Context, projectID string, inbound string, expectedRevision int64) (*Project, error)
+
+	// GetProjectSystemOneInstances returns the sorted, deduplicated list of
+	// System One hub instance names allowed for projectID (empty by default on
+	// every hub, hosted and workstation; ptone/scion#8045 D1). Returns
+	// ErrNotFound if the project does not exist.
+	GetProjectSystemOneInstances(ctx context.Context, projectID string) ([]string, error)
+
+	// SetProjectSystemOneInstances replaces the project's System One instance
+	// allowlist with a validated, deduplicated, sorted slice of instance names.
+	// Returns the stored slice, ErrInvalidInput on invalid names, or
+	// ErrNotFound if the project does not exist.
+	SetProjectSystemOneInstances(ctx context.Context, projectID string, instances []string) ([]string, error)
+
+	// AddProjectSystemOneInstance atomically adds instanceName to the project's
+	// System One instance allowlist (idempotent). Returns the updated sorted
+	// list, ErrInvalidInput on an invalid name, or ErrNotFound if the project
+	// does not exist.
+	AddProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, error)
+
+	// RemoveProjectSystemOneInstance atomically removes instanceName from the
+	// project's System One instance allowlist (idempotent). Returns the updated
+	// sorted list, ErrInvalidInput on an invalid name, or ErrNotFound if the
+	// project does not exist.
+	RemoveProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, error)
 }
 
 // ProjectFilter defines criteria for filtering projects.

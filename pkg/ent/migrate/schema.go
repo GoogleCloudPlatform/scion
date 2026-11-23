@@ -2946,6 +2946,7 @@ var (
 		{Name: "git_identity", Type: field.TypeString, Nullable: true},
 		{Name: "cross_project_inbound", Type: field.TypeEnum, Enums: []string{"none", "members", "any"}, Default: "none"},
 		{Name: "cross_project_inbound_revision", Type: field.TypeInt64, Default: 1},
+		{Name: "system_one_allowed_instances", Type: field.TypeJSON, Nullable: true},
 	}
 	// ProjectsTable holds the schema information for the "projects" table.
 	ProjectsTable = &schema.Table{

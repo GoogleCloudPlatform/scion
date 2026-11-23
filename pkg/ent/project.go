@@ -57,6 +57,8 @@ type Project struct {
 	CrossProjectInbound project.CrossProjectInbound `json:"cross_project_inbound,omitempty"`
 	// CrossProjectInboundRevision holds the value of the "cross_project_inbound_revision" field.
 	CrossProjectInboundRevision int64 `json:"cross_project_inbound_revision,omitempty"`
+	// SystemOneAllowedInstances holds the value of the "system_one_allowed_instances" field.
+	SystemOneAllowedInstances []string `json:"system_one_allowed_instances,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the ProjectQuery when eager-loading is set.
 	Edges        ProjectEdges `json:"edges"`
@@ -88,7 +90,7 @@ func (*Project) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case project.FieldFixtureRootID, project.FieldFixtureIssuerID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case project.FieldLabels, project.FieldAnnotations:
+		case project.FieldLabels, project.FieldAnnotations, project.FieldSystemOneAllowedInstances:
 			values[i] = new([]byte)
 		case project.FieldGithubInstallationID, project.FieldCrossProjectInboundRevision:
 			values[i] = new(sql.NullInt64)
@@ -242,6 +244,14 @@ func (_m *Project) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.CrossProjectInboundRevision = value.Int64
 			}
+		case project.FieldSystemOneAllowedInstances:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field system_one_allowed_instances", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.SystemOneAllowedInstances); err != nil {
+					return fmt.Errorf("unmarshal field system_one_allowed_instances: %w", err)
+				}
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -349,6 +359,9 @@ func (_m *Project) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("cross_project_inbound_revision=")
 	builder.WriteString(fmt.Sprintf("%v", _m.CrossProjectInboundRevision))
+	builder.WriteString(", ")
+	builder.WriteString("system_one_allowed_instances=")
+	builder.WriteString(fmt.Sprintf("%v", _m.SystemOneAllowedInstances))
 	builder.WriteByte(')')
 	return builder.String()
 }

@@ -1338,3 +1338,72 @@ func TestProject_LegacyEmptyGitHubPermissionsReadAsNil(t *testing.T) {
 		assert.Equal(t, store.GitHubTokenPermissions{Contents: "read"}, *got.GitHubPermissions)
 	})
 }
+
+func TestProject_SystemOneAllowedInstances(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	p := newProject(1)
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	// Empty by default on every new project.
+	got, err := ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.NotNil(t, got)
+
+	// Add is idempotent, sorted, and deduplicated.
+	got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "typesafe-b")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"typesafe-b"}, got)
+
+	got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "gemini-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a", "typesafe-b"}, got)
+
+	got, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "gemini-a")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a", "typesafe-b"}, got)
+
+	// Remove is idempotent.
+	got, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "typesafe-b")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a"}, got)
+
+	got, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "nonexistent")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gemini-a"}, got)
+
+	// Set replaces full list with deduplication and sorting.
+	got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"zeta-1", "alpha-1", "zeta-1"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alpha-1", "zeta-1"}, got)
+
+	got, err = ps.GetProjectSystemOneInstances(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alpha-1", "zeta-1"}, got)
+
+	// Clearing via Set(nil) empties the list.
+	got, err = ps.SetProjectSystemOneInstances(ctx, p.ID, nil)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	// Invalid names fail with ErrInvalidInput.
+	_, err = ps.AddProjectSystemOneInstance(ctx, p.ID, "INVALID NAME!")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = ps.RemoveProjectSystemOneInstance(ctx, p.ID, "")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, err = ps.SetProjectSystemOneInstances(ctx, p.ID, []string{"valid-1", "Bad_Upper"})
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Missing project returns ErrNotFound.
+	missingID := uuid.NewString()
+	_, err = ps.GetProjectSystemOneInstances(ctx, missingID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = ps.SetProjectSystemOneInstances(ctx, missingID, []string{"alpha-1"})
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = ps.AddProjectSystemOneInstance(ctx, missingID, "alpha-1")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = ps.RemoveProjectSystemOneInstance(ctx, missingID, "alpha-1")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}

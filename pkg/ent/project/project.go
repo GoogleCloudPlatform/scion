@@ -54,6 +54,8 @@ const (
 	FieldCrossProjectInbound = "cross_project_inbound"
 	// FieldCrossProjectInboundRevision holds the string denoting the cross_project_inbound_revision field in the database.
 	FieldCrossProjectInboundRevision = "cross_project_inbound_revision"
+	// FieldSystemOneAllowedInstances holds the string denoting the system_one_allowed_instances field in the database.
+	FieldSystemOneAllowedInstances = "system_one_allowed_instances"
 	// EdgeAgents holds the string denoting the agents edge name in mutations.
 	EdgeAgents = "agents"
 	// Table holds the table name of the project in the database.
@@ -89,6 +91,7 @@ var Columns = []string{
 	FieldGitIdentity,
 	FieldCrossProjectInbound,
 	FieldCrossProjectInboundRevision,
+	FieldSystemOneAllowedInstances,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -517,6 +518,150 @@ func (s *ProjectStore) UpdateProjectMessagingPolicy(ctx context.Context, project
 		return nil, err
 	}
 	return sp, nil
+}
+
+func normalizeSystemOneInstanceAllowlist(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return []string{}, nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if !store.IsValidSystemOneInstanceName(name) {
+			return nil, store.ErrInvalidInput
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// GetProjectSystemOneInstances returns the sorted, deduplicated list of System
+// One hub instance names allowed for projectID (empty by default).
+func (s *ProjectStore) GetProjectSystemOneInstances(ctx context.Context, projectID string) ([]string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	p, err := s.client.Project.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(p.SystemOneAllowedInstances) == 0 {
+		return []string{}, nil
+	}
+	out := make([]string, len(p.SystemOneAllowedInstances))
+	copy(out, p.SystemOneAllowedInstances)
+	sort.Strings(out)
+	return out, nil
+}
+
+// SetProjectSystemOneInstances replaces the project's System One instance
+// allowlist with a validated, deduplicated, sorted list.
+func (s *ProjectStore) SetProjectSystemOneInstances(ctx context.Context, projectID string, instances []string) ([]string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	clean, err := normalizeSystemOneInstanceAllowlist(instances)
+	if err != nil {
+		return nil, err
+	}
+	upd := s.client.Project.UpdateOneID(uid)
+	if len(clean) == 0 {
+		upd.ClearSystemOneAllowedInstances()
+	} else {
+		upd.SetSystemOneAllowedInstances(clean)
+	}
+	if _, err := upd.Save(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	return clean, nil
+}
+
+// AddProjectSystemOneInstance atomically adds instanceName to the project's
+// System One instance allowlist (idempotent).
+func (s *ProjectStore) AddProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(instanceName)
+	if !store.IsValidSystemOneInstanceName(name) {
+		return nil, store.ErrInvalidInput
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	p, err := tx.Project.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	combined := append(append([]string(nil), p.SystemOneAllowedInstances...), name)
+	clean, err := normalizeSystemOneInstanceAllowlist(combined)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Project.UpdateOneID(uid).SetSystemOneAllowedInstances(clean).Save(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, mapError(err)
+	}
+	return clean, nil
+}
+
+// RemoveProjectSystemOneInstance atomically removes instanceName from the
+// project's System One instance allowlist (idempotent).
+func (s *ProjectStore) RemoveProjectSystemOneInstance(ctx context.Context, projectID string, instanceName string) ([]string, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(instanceName)
+	if !store.IsValidSystemOneInstanceName(name) {
+		return nil, store.ErrInvalidInput
+	}
+
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	p, err := tx.Project.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	filtered := make([]string, 0, len(p.SystemOneAllowedInstances))
+	for _, existing := range p.SystemOneAllowedInstances {
+		if existing != name {
+			filtered = append(filtered, existing)
+		}
+	}
+	sort.Strings(filtered)
+	upd := tx.Project.UpdateOneID(uid)
+	if len(filtered) == 0 {
+		upd.ClearSystemOneAllowedInstances()
+	} else {
+		upd.SetSystemOneAllowedInstances(filtered)
+	}
+	if _, err := upd.Save(ctx); err != nil {
+		return nil, mapError(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, mapError(err)
+	}
+	return filtered, nil
 }
 
 // DeleteProject removes a project by ID.

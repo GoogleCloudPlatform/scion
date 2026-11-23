@@ -83757,37 +83757,39 @@ func (m *PolicyBindingMutation) ResetEdge(name string) error {
 // ProjectMutation represents an operation that mutates the Project nodes in the graph.
 type ProjectMutation struct {
 	config
-	op                                Op
-	typ                               string
-	id                                *uuid.UUID
-	fixture_root_id                   *uuid.UUID
-	fixture_issuer_id                 *uuid.UUID
-	name                              *string
-	slug                              *string
-	git_remote                        *string
-	default_runtime_broker_id         *string
-	labels                            *map[string]string
-	annotations                       *map[string]string
-	shared_dirs                       *string
-	created                           *time.Time
-	updated                           *time.Time
-	created_by                        *string
-	owner_id                          *string
-	github_installation_id            *int64
-	addgithub_installation_id         *int64
-	github_permissions                *string
-	github_app_status                 *string
-	git_identity                      *string
-	cross_project_inbound             *project.CrossProjectInbound
-	cross_project_inbound_revision    *int64
-	addcross_project_inbound_revision *int64
-	clearedFields                     map[string]struct{}
-	agents                            map[uuid.UUID]struct{}
-	removedagents                     map[uuid.UUID]struct{}
-	clearedagents                     bool
-	done                              bool
-	oldValue                          func(context.Context) (*Project, error)
-	predicates                        []predicate.Project
+	op                                 Op
+	typ                                string
+	id                                 *uuid.UUID
+	fixture_root_id                    *uuid.UUID
+	fixture_issuer_id                  *uuid.UUID
+	name                               *string
+	slug                               *string
+	git_remote                         *string
+	default_runtime_broker_id          *string
+	labels                             *map[string]string
+	annotations                        *map[string]string
+	shared_dirs                        *string
+	created                            *time.Time
+	updated                            *time.Time
+	created_by                         *string
+	owner_id                           *string
+	github_installation_id             *int64
+	addgithub_installation_id          *int64
+	github_permissions                 *string
+	github_app_status                  *string
+	git_identity                       *string
+	cross_project_inbound              *project.CrossProjectInbound
+	cross_project_inbound_revision     *int64
+	addcross_project_inbound_revision  *int64
+	system_one_allowed_instances       *[]string
+	appendsystem_one_allowed_instances []string
+	clearedFields                      map[string]struct{}
+	agents                             map[uuid.UUID]struct{}
+	removedagents                      map[uuid.UUID]struct{}
+	clearedagents                      bool
+	done                               bool
+	oldValue                           func(context.Context) (*Project, error)
+	predicates                         []predicate.Project
 }
 
 var _ ent.Mutation = (*ProjectMutation)(nil)
@@ -84788,6 +84790,71 @@ func (m *ProjectMutation) ResetCrossProjectInboundRevision() {
 	m.addcross_project_inbound_revision = nil
 }
 
+// SetSystemOneAllowedInstances sets the "system_one_allowed_instances" field.
+func (m *ProjectMutation) SetSystemOneAllowedInstances(s []string) {
+	m.system_one_allowed_instances = &s
+	m.appendsystem_one_allowed_instances = nil
+}
+
+// SystemOneAllowedInstances returns the value of the "system_one_allowed_instances" field in the mutation.
+func (m *ProjectMutation) SystemOneAllowedInstances() (r []string, exists bool) {
+	v := m.system_one_allowed_instances
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSystemOneAllowedInstances returns the old "system_one_allowed_instances" field's value of the Project entity.
+// If the Project object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectMutation) OldSystemOneAllowedInstances(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSystemOneAllowedInstances is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSystemOneAllowedInstances requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSystemOneAllowedInstances: %w", err)
+	}
+	return oldValue.SystemOneAllowedInstances, nil
+}
+
+// AppendSystemOneAllowedInstances adds s to the "system_one_allowed_instances" field.
+func (m *ProjectMutation) AppendSystemOneAllowedInstances(s []string) {
+	m.appendsystem_one_allowed_instances = append(m.appendsystem_one_allowed_instances, s...)
+}
+
+// AppendedSystemOneAllowedInstances returns the list of values that were appended to the "system_one_allowed_instances" field in this mutation.
+func (m *ProjectMutation) AppendedSystemOneAllowedInstances() ([]string, bool) {
+	if len(m.appendsystem_one_allowed_instances) == 0 {
+		return nil, false
+	}
+	return m.appendsystem_one_allowed_instances, true
+}
+
+// ClearSystemOneAllowedInstances clears the value of the "system_one_allowed_instances" field.
+func (m *ProjectMutation) ClearSystemOneAllowedInstances() {
+	m.system_one_allowed_instances = nil
+	m.appendsystem_one_allowed_instances = nil
+	m.clearedFields[project.FieldSystemOneAllowedInstances] = struct{}{}
+}
+
+// SystemOneAllowedInstancesCleared returns if the "system_one_allowed_instances" field was cleared in this mutation.
+func (m *ProjectMutation) SystemOneAllowedInstancesCleared() bool {
+	_, ok := m.clearedFields[project.FieldSystemOneAllowedInstances]
+	return ok
+}
+
+// ResetSystemOneAllowedInstances resets all changes to the "system_one_allowed_instances" field.
+func (m *ProjectMutation) ResetSystemOneAllowedInstances() {
+	m.system_one_allowed_instances = nil
+	m.appendsystem_one_allowed_instances = nil
+	delete(m.clearedFields, project.FieldSystemOneAllowedInstances)
+}
+
 // AddAgentIDs adds the "agents" edge to the Agent entity by ids.
 func (m *ProjectMutation) AddAgentIDs(ids ...uuid.UUID) {
 	if m.agents == nil {
@@ -84876,7 +84943,7 @@ func (m *ProjectMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ProjectMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 20)
 	if m.fixture_root_id != nil {
 		fields = append(fields, project.FieldFixtureRootID)
 	}
@@ -84934,6 +85001,9 @@ func (m *ProjectMutation) Fields() []string {
 	if m.cross_project_inbound_revision != nil {
 		fields = append(fields, project.FieldCrossProjectInboundRevision)
 	}
+	if m.system_one_allowed_instances != nil {
+		fields = append(fields, project.FieldSystemOneAllowedInstances)
+	}
 	return fields
 }
 
@@ -84980,6 +85050,8 @@ func (m *ProjectMutation) Field(name string) (ent.Value, bool) {
 		return m.CrossProjectInbound()
 	case project.FieldCrossProjectInboundRevision:
 		return m.CrossProjectInboundRevision()
+	case project.FieldSystemOneAllowedInstances:
+		return m.SystemOneAllowedInstances()
 	}
 	return nil, false
 }
@@ -85027,6 +85099,8 @@ func (m *ProjectMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldCrossProjectInbound(ctx)
 	case project.FieldCrossProjectInboundRevision:
 		return m.OldCrossProjectInboundRevision(ctx)
+	case project.FieldSystemOneAllowedInstances:
+		return m.OldSystemOneAllowedInstances(ctx)
 	}
 	return nil, fmt.Errorf("unknown Project field %s", name)
 }
@@ -85169,6 +85243,13 @@ func (m *ProjectMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCrossProjectInboundRevision(v)
 		return nil
+	case project.FieldSystemOneAllowedInstances:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSystemOneAllowedInstances(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Project field %s", name)
 }
@@ -85265,6 +85346,9 @@ func (m *ProjectMutation) ClearedFields() []string {
 	if m.FieldCleared(project.FieldGitIdentity) {
 		fields = append(fields, project.FieldGitIdentity)
 	}
+	if m.FieldCleared(project.FieldSystemOneAllowedInstances) {
+		fields = append(fields, project.FieldSystemOneAllowedInstances)
+	}
 	return fields
 }
 
@@ -85317,6 +85401,9 @@ func (m *ProjectMutation) ClearField(name string) error {
 		return nil
 	case project.FieldGitIdentity:
 		m.ClearGitIdentity()
+		return nil
+	case project.FieldSystemOneAllowedInstances:
+		m.ClearSystemOneAllowedInstances()
 		return nil
 	}
 	return fmt.Errorf("unknown Project nullable field %s", name)
@@ -85382,6 +85469,9 @@ func (m *ProjectMutation) ResetField(name string) error {
 		return nil
 	case project.FieldCrossProjectInboundRevision:
 		m.ResetCrossProjectInboundRevision()
+		return nil
+	case project.FieldSystemOneAllowedInstances:
+		m.ResetSystemOneAllowedInstances()
 		return nil
 	}
 	return fmt.Errorf("unknown Project field %s", name)

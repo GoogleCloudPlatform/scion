@@ -10,6 +10,7 @@ import (
 
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/dialect/sql/sqljson"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
@@ -290,6 +291,24 @@ func (_u *ProjectUpdate) AddCrossProjectInboundRevision(v int64) *ProjectUpdate 
 	return _u
 }
 
+// SetSystemOneAllowedInstances sets the "system_one_allowed_instances" field.
+func (_u *ProjectUpdate) SetSystemOneAllowedInstances(v []string) *ProjectUpdate {
+	_u.mutation.SetSystemOneAllowedInstances(v)
+	return _u
+}
+
+// AppendSystemOneAllowedInstances appends value to the "system_one_allowed_instances" field.
+func (_u *ProjectUpdate) AppendSystemOneAllowedInstances(v []string) *ProjectUpdate {
+	_u.mutation.AppendSystemOneAllowedInstances(v)
+	return _u
+}
+
+// ClearSystemOneAllowedInstances clears the value of the "system_one_allowed_instances" field.
+func (_u *ProjectUpdate) ClearSystemOneAllowedInstances() *ProjectUpdate {
+	_u.mutation.ClearSystemOneAllowedInstances()
+	return _u
+}
+
 // AddAgentIDs adds the "agents" edge to the Agent entity by IDs.
 func (_u *ProjectUpdate) AddAgentIDs(ids ...uuid.UUID) *ProjectUpdate {
 	_u.mutation.AddAgentIDs(ids...)
@@ -488,6 +507,17 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedCrossProjectInboundRevision(); ok {
 		_spec.AddField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.SystemOneAllowedInstances(); ok {
+		_spec.SetField(project.FieldSystemOneAllowedInstances, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedSystemOneAllowedInstances(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, project.FieldSystemOneAllowedInstances, value)
+		})
+	}
+	if _u.mutation.SystemOneAllowedInstancesCleared() {
+		_spec.ClearField(project.FieldSystemOneAllowedInstances, field.TypeJSON)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -814,6 +844,24 @@ func (_u *ProjectUpdateOne) AddCrossProjectInboundRevision(v int64) *ProjectUpda
 	return _u
 }
 
+// SetSystemOneAllowedInstances sets the "system_one_allowed_instances" field.
+func (_u *ProjectUpdateOne) SetSystemOneAllowedInstances(v []string) *ProjectUpdateOne {
+	_u.mutation.SetSystemOneAllowedInstances(v)
+	return _u
+}
+
+// AppendSystemOneAllowedInstances appends value to the "system_one_allowed_instances" field.
+func (_u *ProjectUpdateOne) AppendSystemOneAllowedInstances(v []string) *ProjectUpdateOne {
+	_u.mutation.AppendSystemOneAllowedInstances(v)
+	return _u
+}
+
+// ClearSystemOneAllowedInstances clears the value of the "system_one_allowed_instances" field.
+func (_u *ProjectUpdateOne) ClearSystemOneAllowedInstances() *ProjectUpdateOne {
+	_u.mutation.ClearSystemOneAllowedInstances()
+	return _u
+}
+
 // AddAgentIDs adds the "agents" edge to the Agent entity by IDs.
 func (_u *ProjectUpdateOne) AddAgentIDs(ids ...uuid.UUID) *ProjectUpdateOne {
 	_u.mutation.AddAgentIDs(ids...)
@@ -1042,6 +1090,17 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	}
 	if value, ok := _u.mutation.AddedCrossProjectInboundRevision(); ok {
 		_spec.AddField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.SystemOneAllowedInstances(); ok {
+		_spec.SetField(project.FieldSystemOneAllowedInstances, field.TypeJSON, value)
+	}
+	if value, ok := _u.mutation.AppendedSystemOneAllowedInstances(); ok {
+		_spec.AddModifier(func(u *sql.UpdateBuilder) {
+			sqljson.Append(u, project.FieldSystemOneAllowedInstances, value)
+		})
+	}
+	if _u.mutation.SystemOneAllowedInstancesCleared() {
+		_spec.ClearField(project.FieldSystemOneAllowedInstances, field.TypeJSON)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{
