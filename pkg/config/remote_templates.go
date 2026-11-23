@@ -33,7 +33,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -593,15 +592,12 @@ func (f *remoteFetcher) fetchGitHubFolder(ctx context.Context, uri string, destP
 	}
 
 	// Fall back to sparse git checkout
-	if reflect.ValueOf(sparseGitCheckout).Pointer() == reflect.ValueOf(execSparseGitCheckout).Pointer() {
-		commit, err := execSparseGitCheckoutWithCommit(ctx, parsed, destPath, token)
-		if err != nil {
-			return err
-		}
-		f.sourceCommit = commit
-		return nil
+	commit, err := sparseGitCheckoutWithCommit(ctx, parsed, destPath, token)
+	if err != nil {
+		return err
 	}
-	return sparseGitCheckout(ctx, parsed, destPath, token)
+	f.sourceCommit = commit
+	return nil
 }
 
 // errRemoteContentRefused marks errors where fetched template content (or the
@@ -939,6 +935,11 @@ type GitSparseCheckoutFunc func(ctx context.Context, parts *GitHubURLParts, dest
 // never reassigns it.
 var sparseGitCheckout GitSparseCheckoutFunc = execSparseGitCheckout
 
+// sparseGitCheckoutWithCommit is the commit-returning counterpart invoked by
+// fetchGitHubFolder. SetGitSparseCheckoutForTest wraps custom test stubs so
+// production code never relies on reflection to compare function pointers.
+var sparseGitCheckoutWithCommit = execSparseGitCheckoutWithCommit
+
 // SetGitSparseCheckoutForTest replaces the sparse git checkout runner used as
 // the fallback when a GitHub tarball download fails, and returns a func that
 // restores the previous runner. It exists so tests in other packages (e.g.
@@ -949,8 +950,19 @@ var sparseGitCheckout GitSparseCheckoutFunc = execSparseGitCheckout
 // state and is not safe for use from parallel tests.
 func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
 	prev := sparseGitCheckout
+	prevWithCommit := sparseGitCheckoutWithCommit
 	sparseGitCheckout = fn
-	return func() { sparseGitCheckout = prev }
+	if fn == nil {
+		sparseGitCheckoutWithCommit = nil
+	} else {
+		sparseGitCheckoutWithCommit = func(ctx context.Context, parts *GitHubURLParts, destPath, token string) (string, error) {
+			return "", fn(ctx, parts, destPath, token)
+		}
+	}
+	return func() {
+		sparseGitCheckout = prev
+		sparseGitCheckoutWithCommit = prevWithCommit
+	}
 }
 
 // ProductionGitSparseCheckoutForTest returns the production sparse-checkout
