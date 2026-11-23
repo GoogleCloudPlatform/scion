@@ -85,7 +85,7 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 	// Seed a pending secret owned by f.member so we can verify session sees it
 	// and UAT marks approvals unavailable and excludes it from total.
 	now := time.Now().UTC()
-	require.NoError(t, f.s.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+	_, err = f.s.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
 		ID:          api.NewUUID(),
 		Key:         "API_TOKEN",
 		SecretType:  store.SecretTypeEnvironment,
@@ -100,7 +100,8 @@ func TestUserMeInboxSummary_AuthAndValidation(t *testing.T) {
 		Created:     now,
 		Updated:     now,
 		ExpiresAt:   now.Add(24 * time.Hour),
-	}, store.PendingSecretAgentCap, store.PendingSecretOwnerCap))
+	}, now)
+	require.NoError(t, err)
 
 	// 1. Unauthenticated -> 401.
 	unauthReq := httptest.NewRequest(http.MethodGet, userMeInboxSummaryPath, nil)
@@ -192,7 +193,9 @@ func TestUserMeInboxSummary_ApprovalsOrderingAndPrivacy(t *testing.T) {
 
 	now := time.Now().UTC()
 	seed := func(ownerID, key, valueRef string, expiresAt time.Time, replacesID string) {
-		require.NoError(t, f.Store.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
+		// CreateOrReplacePendingSecret computes ExpiresAt = writeTime + PendingSecretTTL.
+		writeTime := expiresAt.Add(-store.PendingSecretTTL)
+		_, err := f.Store.CreateOrReplacePendingSecret(ctx, &store.PendingSecret{
 			ID:               api.NewUUID(),
 			Key:              key,
 			SecretType:       store.SecretTypeEnvironment,
@@ -206,11 +209,12 @@ func TestUserMeInboxSummary_ApprovalsOrderingAndPrivacy(t *testing.T) {
 			AgentSlug:        "agent-a",
 			ProjectID:        f.ProjectID,
 			ProjectName:      f.ProjectName,
-			Created:          now.Add(-time.Hour),
-			Updated:          now.Add(-time.Hour),
+			Created:          writeTime,
+			Updated:          writeTime,
 			ExpiresAt:        expiresAt,
 			ReplacesSecretID: replacesID,
-		}, store.PendingSecretAgentCap, store.PendingSecretOwnerCap))
+		}, writeTime)
+		require.NoError(t, err)
 	}
 
 	// 4 live secrets for owner with varying expiry times.
@@ -224,7 +228,7 @@ func TestUserMeInboxSummary_ApprovalsOrderingAndPrivacy(t *testing.T) {
 	seed(tid("other-owner"), "OTHER_USER_SECRET", "ref-never-leak-other", now.Add(30*time.Minute), "")
 
 	// Default previews=3.
-	rec := ownerRequest(t, f.Server, f.User, CredentialKindSessionJWT, http.MethodGet, userMeInboxSummaryPath, nil)
+	rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodGet, userMeInboxSummaryPath, nil)
 	resp := decodeInboxSummary(t, rec)
 	assert.Equal(t, 4, resp.Total)
 	approvals := resp.Categories[InboxCategoryApprovals]
@@ -254,7 +258,7 @@ func TestUserMeInboxSummary_ApprovalsOrderingAndPrivacy(t *testing.T) {
 	assert.NotContains(t, rawBody, "EXPIRED_SECRET")
 
 	// previews=0 returns count only and empty previews array.
-	recZero := ownerRequest(t, f.Server, f.User, CredentialKindSessionJWT, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil)
+	recZero := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodGet, userMeInboxSummaryPath+"?previews=0", nil)
 	respZero := decodeInboxSummary(t, recZero)
 	assert.Equal(t, 4, respZero.Total)
 	assert.Equal(t, 4, respZero.Categories[InboxCategoryApprovals].Count)
@@ -413,11 +417,14 @@ func TestUserMeInboxSummary_SingleflightCoalescing(t *testing.T) {
 
 func TestUserMeInboxSummary_PendingSecretApproveRejectHints(t *testing.T) {
 	f := newPendingFixture(t, "inbox-hints")
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+	f.Server.SetEventPublisher(pub)
 	otherUserID := tid("inbox-hints-other")
 
-	ownerCh, unsubOwner := f.Server.events.Subscribe("user." + f.UserID + ".inbox")
+	ownerCh, unsubOwner := pub.Subscribe("user." + f.UserID + ".inbox")
 	defer unsubOwner()
-	otherCh, unsubOther := f.Server.events.Subscribe("user." + otherUserID + ".inbox")
+	otherCh, unsubOther := pub.Subscribe("user." + otherUserID + ".inbox")
 	defer unsubOther()
 
 	drainNoEvent := func(ch <-chan Event, msg string) {
@@ -442,12 +449,12 @@ func TestUserMeInboxSummary_PendingSecretApproveRejectHints(t *testing.T) {
 
 	// Flag OFF: approve and reject must NOT publish user.*.inbox hints.
 	p1 := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "KEY_OFF_1", userScopeWrite("val1", false)))
-	rec := ownerRequest(t, f.Server, f.User, CredentialKindSessionJWT, http.MethodPost, "/api/v1/pending-secrets/"+p1.PendingID+"/approve", map[string]any{})
+	rec := ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPost, "/api/v1/pending-secrets/"+p1.PendingID+"/approve", map[string]any{})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	drainNoEvent(ownerCh, "flag off approve")
 
 	p2 := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "KEY_OFF_2", userScopeWrite("val2", false)))
-	rec = ownerRequest(t, f.Server, f.User, CredentialKindSessionJWT, http.MethodPost, "/api/v1/pending-secrets/"+p2.PendingID+"/reject", map[string]any{})
+	rec = ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPost, "/api/v1/pending-secrets/"+p2.PendingID+"/reject", map[string]any{})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	drainNoEvent(ownerCh, "flag off reject")
 
@@ -455,13 +462,13 @@ func TestUserMeInboxSummary_PendingSecretApproveRejectHints(t *testing.T) {
 	setInboxDashboardExperiment(t, f.Server, true)
 
 	p3 := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "KEY_ON_1", userScopeWrite("val3", false)))
-	rec = ownerRequest(t, f.Server, f.User, CredentialKindSessionJWT, http.MethodPost, "/api/v1/pending-secrets/"+p3.PendingID+"/approve", map[string]any{})
+	rec = ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPost, "/api/v1/pending-secrets/"+p3.PendingID+"/approve", map[string]any{})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	expectApprovalsHint(ownerCh)
 	drainNoEvent(otherCh, "non-owner on approve")
 
 	p4 := decodePendingResponse(t, agentPut(t, f.Server, f.AgentID, f.Token, "KEY_ON_2", userScopeWrite("val4", false)))
-	rec = ownerRequest(t, f.Server, f.User, CredentialKindSessionJWT, http.MethodPost, "/api/v1/pending-secrets/"+p4.PendingID+"/reject", map[string]any{})
+	rec = ownerRequest(t, f.Server, f.owner(), CredentialKindInteractive, http.MethodPost, "/api/v1/pending-secrets/"+p4.PendingID+"/reject", map[string]any{})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	expectApprovalsHint(ownerCh)
 	drainNoEvent(otherCh, "non-owner on reject")
