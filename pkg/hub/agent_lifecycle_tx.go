@@ -283,6 +283,18 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate service-account assignments: %w", label, err)
 	}
+	// Capture the exact agent-scope secret key set inside the transaction from
+	// the same rows DeleteSecretsByScope removes so post-commit external
+	// cleanup (e.g. GCP Secret Manager) deletes keys written right up to commit.
+	if rows, lerr := tx.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeAgent, ScopeID: a.ID}); lerr != nil {
+		return 0, 0, fmt.Errorf("%s: list agent-scope secrets: %w", label, lerr)
+	} else if len(rows) > 0 {
+		keys := make([]string, 0, len(rows))
+		for _, r := range rows {
+			keys = append(keys, r.Key)
+		}
+		recordAgentSecretCleanupKeys(ctx, keys)
+	}
 	if _, err := tx.DeleteSecretsByScope(ctx, store.ScopeAgent, a.ID); err != nil {
 		return 0, 0, fmt.Errorf("%s: delete agent-scope secrets: %w", label, err)
 	}

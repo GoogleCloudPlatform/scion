@@ -291,6 +291,10 @@ func (s *Server) resolveAgentSecretAccess(w http.ResponseWriter, r *http.Request
 		Forbidden(w)
 		return "", nil, false
 	}
+	if isWrite && !agent.DeletedAt.IsZero() {
+		NotFound(w, "Agent")
+		return "", nil, false
+	}
 	return agent.ID, agent, true
 }
 
@@ -1358,6 +1362,14 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
+	// Close the write vs hard-delete (or soft-delete) race: if the agent was
+	// deleted while backend.Set was in flight, compensate by removing the
+	// just-written secret and answering 404.
+	if scope == store.ScopeAgent && s.compensateIfAgentDeleted(ctx, scopeID, []string{key}) {
+		NotFound(w, "Agent")
+		return
+	}
+
 	result := metaToStoreSecret(*meta)
 	writeJSON(w, http.StatusOK, SetSecretResponse{
 		Secret:  &result,
@@ -1906,6 +1918,16 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	if meta != nil {
 		version = meta.Version
 	}
+
+	// Close the write vs hard-delete (or soft-delete) race: if the agent was
+	// deleted while backend.Set was in flight, compensate by removing the
+	// just-written secret and answering 404.
+	if scope == store.ScopeAgent && s.compensateIfAgentDeleted(ctx, agentID, []string{key}) {
+		s.logAgentSecretWrite(ctx, "set", agentID, projectID, scope, scopeID, key, version, created, false, "agent_deleted")
+		NotFound(w, "Agent")
+		return
+	}
+
 	s.logAgentSecretWrite(ctx, "set", agentID, projectID, scope, scopeID, key, version, created, true, "")
 
 	if created {

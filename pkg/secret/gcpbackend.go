@@ -828,6 +828,13 @@ func SecretNamePrefixForHubID(hubID string) string {
 	return "scion-" + hex.EncodeToString(hash[:6]) + "-" // 6 bytes = 12 hex chars
 }
 
+// ExternalSecretName returns the GCP Secret Manager secret ID for the given
+// scion secret identity. Used by post-commit cleanup error logs so operators
+// can locate and remove orphaned secrets if automated deletion fails.
+func (b *GCPBackend) ExternalSecretName(name, scope, scopeID string) string {
+	return b.gcpSecretName(name, scope, scopeID)
+}
+
 // gcpSecretName builds a sanitized GCP SM secret ID from the scion secret
 // identity, using the current (hub-prefixed) naming scheme.
 // Format: {secretNamePrefix()}{scope}-{sha256(hubID:scopeID)[:12]}-{name}

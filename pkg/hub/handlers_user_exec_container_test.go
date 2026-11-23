@@ -761,6 +761,7 @@ func TestHandleExistingAgent_ShellTaskRefused(t *testing.T) {
 		CreateAgentRequest{Name: shellAgent.Name, Task: "echo nope"},
 		"", "", u.ID,
 		&carriedSecrets,
+		nil,
 	)
 	assert.Empty(t, carriedSecrets)
 	assert.Equal(t, existingAgentErrored, res)

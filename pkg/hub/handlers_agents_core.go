@@ -302,6 +302,11 @@ type CreateAgentRequest struct {
 	// checked at each send. Scheduled creates set the opt-in server-side
 	// rather than from client input.
 	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
+	// Secrets supplies agent-scoped secrets to store at creation time (behind
+	// hub.agent_secrets). Stored directly in the secret backend after commit
+	// and before dispatch; never copied into AppliedConfig, CreateInputs, logs
+	// or audit payloads.
+	Secrets []AgentSecretInput `json:"secrets,omitempty"`
 }
 
 // GCPIdentityAssignment specifies GCP identity configuration for agent creation.
@@ -1384,10 +1389,10 @@ func (s *Server) deleteFailedCreateRow(ctx context.Context, agent *store.Agent, 
 			defer cancel()
 			now := time.Now()
 			var n int
-			n, err = s.withAgentSecretCleanup(sctx, agentID, func() (int, error) {
-				return s.store.FinalizeAgentDeletion(sctx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+			n, err = s.withAgentSecretCleanupOnCompensation(sctx, agentID, func(txCtx context.Context) (int, error) {
+				return s.store.FinalizeAgentDeletion(txCtx, agentID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 					createRowHeldCheck(func(tx store.Store) error {
-						_, _, werr := s.agentHardDeleteWork(sctx, tx, agent, actor, store.Deactivation{
+						_, _, werr := s.agentHardDeleteWork(txCtx, tx, agent, actor, store.Deactivation{
 							Cause: store.EdgeDeactivationCreateCompensation,
 							At:    &now,
 							OpID:  opID,
@@ -1651,6 +1656,14 @@ func (s *Server) createAgentInProject(
 	// Field-level GCP identity validation, before any persistence or SA
 	// resolution. Both create routes reach it here.
 	if !validateGCPIdentityRequest(w, req.GCPIdentity) {
+		return
+	}
+
+	// Validate create-time agent secrets before any persistence or existing-agent
+	// mutation (design §4.5 step 1). Both create routes reach it here.
+	validatedSecrets, secErr := s.validateCreateAgentSecrets(req.Secrets)
+	if secErr != nil {
+		writeError(w, secErr.status, secErr.code, secErr.message, secErr.details)
 		return
 	}
 
@@ -1991,7 +2004,7 @@ func (s *Server) createAgentInProject(
 	}
 
 	var carriedAgentSecrets []*secret.SecretWithValue
-	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy, &carriedAgentSecrets) {
+	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy, &carriedAgentSecrets, validatedSecrets) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
 	case existingAgentConflict:
@@ -2701,6 +2714,7 @@ func (s *Server) createAgentInProject(
 		MutationType:      mutationTypeAgentDelegation,
 		CanDelegateResult: "allow",
 		CanDelegateReason: delegateDecision.Reason,
+		AfterSummary:      createAuditAfterSummaryWithSecrets(validatedSecrets),
 	}
 	if agent.AppliedConfig != nil && agent.AppliedConfig.GitHubTokenPreference != "" {
 		if summaryBytes, mErr := json.Marshal(map[string]string{
@@ -2809,6 +2823,27 @@ func (s *Server) createAgentInProject(
 		if err := s.restoreCarriedAgentSecrets(ctx, agent, carriedAgentSecrets); err != nil {
 			failCreate(createRollback{Stage: createStageStorage, Cause: err}, func() {
 				writeErrorFromErr(w, err, "")
+			})
+			return
+		}
+	}
+
+	// Store create-time agent secrets after commit and before dispatch (design
+	// §4.5 steps 3–4). On any write failure, best-effort delete what was
+	// written, hard-delete the new agent via failCreate, and return 503.
+	if len(validatedSecrets) > 0 {
+		if err := s.storeCreateAgentSecrets(ctx, agent, validatedSecrets, secretCreatorAttribution(ctx, createdBy), true); err != nil {
+			if errors.Is(err, errAgentDeletedDuringSecretWrite) {
+				// Agent was deleted while create-time secrets were being written.
+				// storeCreateAgentSecrets already compensated the written secrets;
+				// answer as a lost delete race (409 delete_in_progress).
+				writeDeletedDuringCreate(w, agent.ID, nil)
+				return
+			}
+			slog.ErrorContext(ctx, "agent create: failed to store create-time agent secrets; rolling back agent",
+				"agent_id", agent.ID, "error", err)
+			failCreate(createRollback{Stage: createStageSecrets, Cause: err}, func() {
+				writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, createAgentSecretsStoreFailedMessage, nil)
 			})
 			return
 		}

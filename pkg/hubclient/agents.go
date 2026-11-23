@@ -304,6 +304,22 @@ type CreateAgentRequest struct {
 	// on a different runtime target than the caller showed
 	// (.design/flat-runtime-brokers-contract.md section 9).
 	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+
+	// Secrets supplies agent-scoped secrets to store at creation time (behind
+	// hub.agent_secrets). Never persisted on the agent record.
+	Secrets []AgentSecretInput `json:"secrets,omitempty"`
+}
+
+// AgentSecretInput describes an agent-scoped secret supplied at agent creation
+// (or existing-agent start) time.
+type AgentSecretInput struct {
+	Key           string `json:"key"`
+	Value         string `json:"value"` // base64-encoded when Encoding == "base64"; raw UTF-8 otherwise
+	Encoding      string `json:"encoding,omitempty"`
+	Type          string `json:"type,omitempty"` // environment (default) | file | variable
+	Target        string `json:"target,omitempty"`
+	InjectionMode string `json:"injectionMode,omitempty"`
+	Description   string `json:"description,omitempty"`
 }
 
 // GCPIdentityConfig specifies GCP identity configuration for agent creation.

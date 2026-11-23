@@ -1463,6 +1463,7 @@ func (s *Server) handleExistingAgent(
 	req CreateAgentRequest,
 	notifySubscriberType, notifySubscriberID, createdBy string,
 	carriedSecrets *[]*secret.SecretWithValue,
+	createSecrets []validatedAgentSecret,
 ) existingAgentResult {
 	if existingAgent == nil {
 		return existingAgentNone
@@ -1494,6 +1495,10 @@ func (s *Server) handleExistingAgent(
 	// request.
 	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
 		if ref.InFlight {
+			if len(createSecrets) > 0 {
+				Conflict(w, "agent start is already in flight; cannot apply secrets until the agent stops")
+				return existingAgentErrored
+			}
 			s.writeExistingAgentLaunching(ctx, w, existingAgent, project, req)
 			return existingAgentStarted
 		}
@@ -1573,6 +1578,12 @@ func (s *Server) handleExistingAgent(
 		// Fail fast on a GCP identity the token-mint gate would refuse,
 		// before any quota reservation or run-intent write.
 		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+			return existingAgentErrored
+		}
+
+		// Upsert create-time secrets onto the existing agent (requires agent.update)
+		// before starting/resuming so delivery picks them up (design §4.5).
+		if !s.upsertExistingAgentSecrets(ctx, w, existingAgent, createSecrets, createdBy) {
 			return existingAgentErrored
 		}
 
@@ -1728,6 +1739,12 @@ func (s *Server) handleExistingAgent(
 			// Fail fast on a GCP identity the token-mint gate would refuse,
 			// before any quota reservation or run-intent write.
 			if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "resume") {
+				return existingAgentErrored
+			}
+
+			// Upsert create-time secrets onto the existing agent (requires agent.update)
+			// before starting/resuming so delivery picks them up (design §4.5).
+			if !s.upsertExistingAgentSecrets(ctx, w, existingAgent, createSecrets, createdBy) {
 				return existingAgentErrored
 			}
 
@@ -1952,10 +1969,10 @@ func (s *Server) handleExistingAgent(
 		// not hold the row, so it is removed as before.
 		actor := auditActorFromContext(ctx)
 		rbCtx := lifecycleCreateRollback(ctx, "env_gather_recreate")
-		n, err := s.withAgentSecretCleanup(rbCtx, existingAgent.ID, func() (int, error) {
-			return s.store.FinalizeAgentDeletion(rbCtx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
+		n, err := s.withAgentSecretCleanup(rbCtx, existingAgent.ID, func(txCtx context.Context) (int, error) {
+			return s.store.FinalizeAgentDeletion(txCtx, existingAgent.ID, createRowCompensable(), store.DeletionFinalizeHard, store.DeletionFields{},
 				createRowHeldCheck(func(tx store.Store) error {
-					return s.hardDeleteAgentTx(ctx, tx, existingAgent, actor)
+					return s.hardDeleteAgentTx(txCtx, tx, existingAgent, actor)
 				}))
 		})
 		if errors.Is(err, errCreateRowDeleteHeld) || (err == nil && n == 0) {
@@ -2004,6 +2021,12 @@ func (s *Server) handleExistingAgent(
 		// Fail fast on a GCP identity the token-mint gate would refuse,
 		// before any quota reservation or run-intent write.
 		if s.gcpIdentityStartRefusal(ctx, w, existingAgent, "start") {
+			return existingAgentErrored
+		}
+
+		// Upsert create-time secrets onto the existing agent (requires agent.update)
+		// before starting so delivery picks them up (design §4.5).
+		if !s.upsertExistingAgentSecrets(ctx, w, existingAgent, createSecrets, createdBy) {
 			return existingAgentErrored
 		}
 

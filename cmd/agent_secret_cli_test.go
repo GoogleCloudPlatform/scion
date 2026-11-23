@@ -205,12 +205,12 @@ func TestResolveAgentScopeID_PaginatesAndDetectsAmbiguity(t *testing.T) {
 	require.NoError(t, err)
 
 	// Finds agent on page 2.
-	id, err := resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "page2-agent")
+	id, err := resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "page2-agent", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "22222222-2222-2222-2222-222222222222", id)
 
 	// Detects ambiguity across pages.
-	_, err = resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "dup-agent")
+	_, err = resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "dup-agent", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "matches multiple agents")
 }
@@ -374,6 +374,192 @@ func TestAgentSecretGetMetadata_ExperimentOff(t *testing.T) {
 	_, err = runSecretGetTest(t, "MY_KEY")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, sciontoolhub.ErrAgentScopeUnavailable)
+}
+
+func TestHubSecretSet_StdinDash(t *testing.T) {
+	var gotKey string
+	var gotReq hubclient.SetSecretRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodPut && len(r.URL.Path) > len("/api/v1/secrets/"):
+			gotKey = r.URL.Path[len("/api/v1/secrets/"):]
+			gotReq = hubclient.SetSecretRequest{}
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotReq))
+			_ = json.NewEncoder(w).Encode(hubclient.SetSecretResponse{
+				Created: true,
+				Secret: &hubclient.Secret{
+					Key:        gotKey,
+					Scope:      gotReq.Scope,
+					SecretType: "environment",
+					Version:    1,
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	state := saveSecretTestState()
+	origAgent := secretAgentScope
+	t.Cleanup(func() {
+		state.restore()
+		secretAgentScope = origAgent
+	})
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectPath = setupSecretProject(t, home, srv.URL)
+
+	newTestSetCmd := func(stdin string) *cobra.Command {
+		c := &cobra.Command{}
+		c.Flags().StringVar(&secretScope, "scope", "", "")
+		c.Flags().StringVar(&secretProjectScope, "project", "", "")
+		c.Flags().StringVar(&secretBrokerScope, "broker", "", "")
+		c.Flags().StringVar(&secretAgentScope, "agent", "", "")
+		c.Flags().StringVar(&secretType, "type", "", "")
+		c.Flags().StringVar(&secretTarget, "target", "", "")
+		c.Flags().BoolVar(&secretAllowProgeny, "allow-progeny", false, "")
+		c.SetIn(bytes.NewBufferString(stdin))
+		return c
+	}
+
+	t.Run("trims trailing newline and keeps environment type", func(t *testing.T) {
+		secretType = ""
+		secretTarget = ""
+		c := newTestSetCmd("super-secret-value\r\n")
+		require.NoError(t, runSecretSet(c, []string{"MY_SECRET", "-"}))
+		assert.Equal(t, "MY_SECRET", gotKey)
+		assert.Equal(t, "super-secret-value", gotReq.Value)
+		assert.Equal(t, "raw", gotReq.Encoding)
+		assert.Equal(t, "", gotReq.Type)
+	})
+
+	t.Run("preserves trailing newline when type is file", func(t *testing.T) {
+		pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----\n"
+		c := newTestSetCmd(pem)
+		require.NoError(t, c.Flags().Set("type", "file"))
+		require.NoError(t, c.Flags().Set("target", "~/.ssh/id_ed25519"))
+		require.NoError(t, runSecretSet(c, []string{"SSH_KEY", "-"}))
+		assert.Equal(t, "SSH_KEY", gotKey)
+		assert.Equal(t, pem, gotReq.Value)
+		assert.Equal(t, "raw", gotReq.Encoding)
+		assert.Equal(t, "file", gotReq.Type)
+	})
+
+	t.Run("stdin value starting with @ is not treated as file path", func(t *testing.T) {
+		secretType = ""
+		secretTarget = ""
+		c := newTestSetCmd("@not-a-file-password\n")
+		require.NoError(t, runSecretSet(c, []string{"AT_SECRET", "-"}))
+		assert.Equal(t, "@not-a-file-password", gotReq.Value)
+		assert.Equal(t, "raw", gotReq.Encoding)
+		assert.Equal(t, "", gotReq.Type)
+	})
+
+	t.Run("works with agent scope", func(t *testing.T) {
+		secretType = ""
+		secretTarget = ""
+		c := newTestSetCmd("agent-val\n")
+		require.NoError(t, c.Flags().Set("agent", "11111111-1111-1111-1111-111111111111"))
+		require.NoError(t, runSecretSet(c, []string{"AGENT_KEY", "-"}))
+		assert.Equal(t, "agent", gotReq.Scope)
+		assert.Equal(t, "11111111-1111-1111-1111-111111111111", gotReq.ScopeID)
+		assert.Equal(t, "agent-val", gotReq.Value)
+		assert.Equal(t, "raw", gotReq.Encoding)
+	})
+
+	t.Run("rejects empty stdin", func(t *testing.T) {
+		c := newTestSetCmd("\n")
+		err := runSecretSet(c, []string{"EMPTY_KEY", "-"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "empty")
+	})
+
+	t.Run("rejects oversized stdin", func(t *testing.T) {
+		big := bytes.Repeat([]byte("x"), 64*1024+1)
+		c := newTestSetCmd(string(big))
+		err := runSecretSet(c, []string{"BIG_KEY", "-"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds 64KB limit")
+	})
+}
+
+func TestResolveAgentScopeID_HubWideFallbackWarning(t *testing.T) {
+	t.Chdir(t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	const projUUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const emptyIDProjUUID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	const missingProjUUID = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/agents":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agents": []map[string]string{
+					{"id": "11111111-1111-1111-1111-111111111111", "slug": "solo-agent", "name": "solo-agent"},
+				},
+			})
+		case "/api/v1/projects/" + projUUID + "/agents":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agents": []map[string]string{
+					{"id": "22222222-2222-2222-2222-222222222222", "slug": "scoped-agent", "name": "scoped-agent"},
+				},
+			})
+		case "/api/v1/projects/" + projUUID:
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": projUUID, "slug": "proj-1", "name": "proj-1"})
+		case "/api/v1/projects/" + emptyIDProjUUID:
+			// Simulate perr == nil && proj.ID == ""
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "", "slug": "empty-id-proj"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	// 1. No project context -> warns to errOut when falling back to hub-wide resolution.
+	var errBuf bytes.Buffer
+	resolvedID, resolveErr := resolveAgentScopeID(context.Background(), client, &config.Settings{}, false, "solo-agent", &errBuf)
+	require.NoError(t, resolveErr)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", resolvedID)
+	assert.Contains(t, errBuf.String(), "Warning:")
+	assert.Contains(t, errBuf.String(), "across all accessible projects")
+
+	// 2. Project resolution error -> warns to errOut.
+	errBuf.Reset()
+	resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, &config.Settings{
+		Hub: &config.HubClientConfig{ProjectID: missingProjUUID},
+	}, false, "solo-agent", &errBuf)
+	require.NoError(t, resolveErr)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", resolvedID)
+	assert.Contains(t, errBuf.String(), "Warning:")
+	assert.Contains(t, errBuf.String(), "across all accessible projects")
+
+	// 3. Project lookup returns nil error but empty ID -> warns to errOut.
+	errBuf.Reset()
+	resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, &config.Settings{
+		Hub: &config.HubClientConfig{ProjectID: emptyIDProjUUID},
+	}, false, "solo-agent", &errBuf)
+	require.NoError(t, resolveErr)
+	assert.Equal(t, "11111111-1111-1111-1111-111111111111", resolvedID)
+	assert.Contains(t, errBuf.String(), "Warning:")
+	assert.Contains(t, errBuf.String(), "returned no project ID")
+
+	// 4. Valid project context -> no hub-wide fallback warning.
+	errBuf.Reset()
+	settingsWithProj := &config.Settings{
+		Hub: &config.HubClientConfig{ProjectID: projUUID},
+	}
+	resolvedID, resolveErr = resolveAgentScopeID(context.Background(), client, settingsWithProj, false, "scoped-agent", &errBuf)
+	require.NoError(t, resolveErr)
+	assert.Equal(t, "22222222-2222-2222-2222-222222222222", resolvedID)
+	assert.Empty(t, errBuf.String())
 }
 
 var _ = sciontoolhub.NewClient // keep import explicit
