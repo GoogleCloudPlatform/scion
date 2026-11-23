@@ -260,6 +260,7 @@ type TriggerRenderError struct {
 type TriggerRenderResponse struct {
 	Slots  TriggerRenderSlots   `json:"slots"`
 	Errors []TriggerRenderError `json:"errors"`
+	Notes  []string             `json:"notes,omitempty"`
 }
 
 // TriggerSubjectSpec configures per-subject handling for a trigger.

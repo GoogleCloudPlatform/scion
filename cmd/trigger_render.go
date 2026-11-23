@@ -153,6 +153,17 @@ func printTriggerRenderResult(resp *hubclient.TriggerRenderResponse) {
 		}
 	}
 
+	if len(resp.Notes) > 0 {
+		if printedAny {
+			fmt.Println()
+		}
+		printedAny = true
+		fmt.Println("Notes:")
+		for _, n := range resp.Notes {
+			fmt.Printf("  - %s\n", triggerTerminalText(n, false))
+		}
+	}
+
 	if !printedAny {
 		fmt.Println("No template slots rendered.")
 	}

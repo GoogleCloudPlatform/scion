@@ -1642,6 +1642,9 @@ func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.Age
 	for k, v := range filter.Labels {
 		preds = append(preds, labelContains(k, v))
 	}
+	for _, k := range filter.LabelKeys {
+		preds = append(preds, labelHasKey(k))
+	}
 
 	// RequestedOwnerID is always ANDed, independent of the OwnerID/
 	// MemberOrOwnerProjectIDs OR-based Mine/Shared classification above

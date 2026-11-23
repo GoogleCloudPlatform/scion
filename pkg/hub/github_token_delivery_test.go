@@ -892,7 +892,39 @@ func TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver(t *testin
 	disp, ok := f.sched.srv.GetDispatcher().(*HTTPAgentDispatcher)
 	require.True(t, ok)
 
-	fireWithLabel := func(t *testing.T, eventSuffix, agentName string, minter GitHubAppTokenMinter) *store.Agent {
+	// 0. Authoring a dispatch_agent trigger with scion.dev/github-token-source-project
+	// is refused (P1c-3 sec L1: 400 reserved_label_key).
+	recReserved := f.doJSON(t, userCtx, http.MethodPost,
+		fmt.Sprintf("/api/v1/projects/%s/triggers", f.sched.proj.ID),
+		CreateTriggerRequest{
+			Name:   "reserved-src-label",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Types: []string{"webhook.reserved"}},
+			Action: TriggerActionSpec{
+				Type:        store.TriggerActionDispatchAgent,
+				AgentName:   "reserved-src-ag",
+				Task:        "Run ${event.id}",
+				GithubToken: DispatchAgentGitHubTokenInstallation,
+				Labels: map[string]string{
+					githubTokenSourceProjectLabel: sourceProj.ID,
+				},
+			},
+		})
+	require.Equal(t, http.StatusBadRequest, recReserved.Code, recReserved.Body.String())
+	assert.Contains(t, recReserved.Body.String(), "reserved_label_key")
+
+	// 1. Direct mint-project resolver check: authorized vs unauthorized token-source project label.
+	auth := FireAuthority{PrincipalKind: store.DelegationPrincipalUser, PrincipalID: f.sched.creator.ID}
+	disp.SetGitHubAppMinter(&recordingGitHubAppMinter{allowSource: true})
+	assert.True(t, f.sched.srv.hasGitHubMintProjectForHeadless(ctx, f.sched.proj, auth, map[string]string{
+		githubTokenSourceProjectLabel: sourceProj.ID,
+	}))
+	disp.SetGitHubAppMinter(&recordingGitHubAppMinter{allowSource: false})
+	assert.False(t, f.sched.srv.hasGitHubMintProjectForHeadless(ctx, f.sched.proj, auth, map[string]string{
+		githubTokenSourceProjectLabel: sourceProj.ID,
+	}))
+
+	fireTrigger := func(t *testing.T, eventSuffix, agentName string, minter GitHubAppTokenMinter) *store.Agent {
 		t.Helper()
 		disp.SetGitHubAppMinter(minter)
 		rec := f.doJSON(t, userCtx, http.MethodPost,
@@ -906,9 +938,6 @@ func TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver(t *testin
 					AgentName:   agentName,
 					Task:        "Run ${event.id}",
 					GithubToken: DispatchAgentGitHubTokenInstallation,
-					Labels: map[string]string{
-						githubTokenSourceProjectLabel: sourceProj.ID,
-					},
 				},
 			})
 		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
@@ -927,18 +956,18 @@ func TestTriggerDispatchAgent_GitHubUnavailableNoteMatchesMintResolver(t *testin
 		return ag
 	}
 
-	// 1. Authorized token-source project -> NO unavailable note.
-	agAuth := fireWithLabel(t, "src_authorized", "src-authorized-ag", &recordingGitHubAppMinter{allowSource: true})
-	assert.NotContains(t, agAuth.AppliedConfig.Task, "GitHub access is not available for this run.")
+	// 2. Project with no installation -> unavailable note IS added.
+	agNoInstall := fireTrigger(t, "no_install", "no-install-ag", &recordingGitHubAppMinter{allowSource: true})
+	assert.Contains(t, agNoInstall.AppliedConfig.Task, "GitHub access is not available for this run.")
 
-	// 2. Unauthorized token-source project -> unavailable note IS added.
-	agUnauth := fireWithLabel(t, "src_unauthorized", "src-unauthorized-ag", &recordingGitHubAppMinter{allowSource: false})
-	assert.Contains(t, agUnauth.AppliedConfig.Task, "GitHub access is not available for this run.")
-
-	// 3. No minter configured even when the project itself has an installation ID -> unavailable note IS added.
+	// 3. Project with installation + minter -> NO unavailable note.
 	f.sched.proj.GitHubInstallationID = &installID
 	require.NoError(t, f.sched.store.UpdateProject(ctx, f.sched.proj))
-	agNoMinter := fireWithLabel(t, "no_minter", "no-minter-ag", nil)
+	agWithInstall := fireTrigger(t, "with_install", "with-install-ag", &recordingGitHubAppMinter{allowSource: true})
+	assert.NotContains(t, agWithInstall.AppliedConfig.Task, "GitHub access is not available for this run.")
+
+	// 4. No minter configured even when the project itself has an installation ID -> unavailable note IS added.
+	agNoMinter := fireTrigger(t, "no_minter", "no-minter-ag", nil)
 	assert.Contains(t, agNoMinter.AppliedConfig.Task, "GitHub access is not available for this run.")
 }
 

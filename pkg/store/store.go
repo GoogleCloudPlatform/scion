@@ -1409,6 +1409,11 @@ type AgentFilter struct {
 	// contain all specified key-value pairs (AND semantics).
 	Labels map[string]string
 
+	// LabelKeys, when non-empty, restricts results to agents whose labels
+	// contain all specified keys regardless of value (AND semantics).
+	// omitempty keeps list cursor bindings unchanged when unset.
+	LabelKeys []string `json:",omitempty"`
+
 	// AuthorizedProjectIDs, when non-nil, restricts results to agents whose
 	// project_id is in this set. This is used by scope-aware list authorization
 	// to push the resolved ScopeSet into the SQL query so pagination and totals

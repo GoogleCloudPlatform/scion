@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -418,10 +417,11 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 }
 
 // authorizeTriggerDispatchAgentAuthoring validates a Stage 2 dispatch_agent
-// action spec for triggers (§5.1, §5.1a, §5.5, §7.3): enforces replay-protected
-// source, delegates payload/template/label/authority checks to
-// dispatchAgentAction.Validate, and enforces the caller's effect ceiling on
-// an explicit agentRole.
+// action spec for triggers (§5.1, §5.1a, §5.5, §7.3) through the single
+// self-sufficient dispatchAgentAction.validateForAuthoring entry point
+// (replay-protected source, github-source gate, payload/template/label checks,
+// authorizeAgentCreateDecision incl. standing, role caps, CanDelegate, and the
+// caller's UAT-hop effect ceiling).
 func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -436,12 +436,6 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		Unauthorized(w)
-		return "", false
-	}
-
-	if !trigger.SourceReplayProtected(sourceKind, ep) {
-		writeError(w, http.StatusBadRequest, "source_not_replay_protected",
-			"dispatch_agent triggers require a replay-protected source", nil)
 		return "", false
 	}
 
@@ -465,31 +459,31 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	}
 
 	action := &dispatchAgentAction{srv: s}
-	normalized, preCapRole, roleExplicit, err := action.validateWithRole(ctx, identity, projectID, sourceKind, string(raw))
+	normalized, err := action.validateForAuthoring(ctx, identity, projectID, string(raw), dispatchAgentAuthoringOpts{
+		sourceKind: sourceKind,
+		endpoint:   ep,
+		ceiling:    &ceiling,
+		provenance: &prov,
+	})
 	if err != nil {
 		var ve *dispatchAgentValidationError
 		if errors.As(err, &ve) {
+			if ve.status == http.StatusUnauthorized {
+				Unauthorized(w)
+				return "", false
+			}
+			if ve.status == http.StatusForbidden && ve.reason != "" {
+				logAuthzDenial(r, identity, agentCreateResource(projectID), ActionCreate, ve.reason)
+			}
+			if ve.deniedBy != "" {
+				writeForbiddenDenialCause(w, ve.message, ve.deniedBy, ve.cause)
+				return "", false
+			}
 			writeError(w, ve.status, ve.code, ve.message, ve.details)
 			return "", false
 		}
 		slog.ErrorContext(ctx, "trigger dispatch_agent authoring failed", "project_id", projectID, "error", err)
 		InternalError(w)
-		return "", false
-	}
-
-	// Enforce the caller's hop effect ceiling against both explicit and
-	// omitted (default-ladder) agentRole (mirrors interactive create's
-	// applyCreateEffectCeiling; §5.1).
-	if _, cause, fits := childRoleWithinCeiling(
-		uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling),
-		preCapRole,
-		roleExplicit,
-	); !fits {
-		msg := "requested agentRole exceeds caller's delegation ceiling: " + string(cause)
-		if !roleExplicit {
-			msg = "no agent role fits caller's delegation ceiling: " + string(cause)
-		}
-		writeForbiddenDenial(w, msg, DeniedByDelegationCeiling)
 		return "", false
 	}
 
@@ -601,6 +595,7 @@ type triggerEventAccess struct {
 	reason            string
 	byPolicy          bool
 	notVisibleToAgent bool
+	wrongProject      bool
 	storeErr          error
 }
 
@@ -690,6 +685,12 @@ func (s *Server) triggerEventAccessDecision(ctx context.Context, projectID strin
 		if !decision.Allowed {
 			return triggerEventAccess{reason: decision.Reason, byPolicy: true}
 		}
+		if ev != nil && ev.ProjectID != projectID {
+			return triggerEventAccess{
+				reason:       "trigger event does not belong to project",
+				wrongProject: true,
+			}
+		}
 		return triggerEventAccess{allowed: true}
 
 	default:
@@ -702,13 +703,20 @@ func (s *Server) authorizeTriggerEventAccess(w http.ResponseWriter, r *http.Requ
 }
 
 // authorizeTriggerEventRow decides action on one trigger event row (nil for the
-// project-level gate). When an agent addresses an event it neither received on
-// its own endpoint nor fired through a trigger it holds, it writes 404
+// project-level gate). It always enforces ev.ProjectID == projectID for every
+// caller kind (writing 404 on mismatch) so callers cannot accidentally leak
+// cross-project events. When an agent addresses an event it neither received on
+// its own endpoint nor fired through a trigger it holds, it also writes 404
 // identical to a missing event so event IDs cannot be probed (§10.2, §16.7).
 func (s *Server) authorizeTriggerEventRow(w http.ResponseWriter, r *http.Request, projectID string, action Action, ev *store.TriggerEvent) bool {
 	identity := GetIdentityFromContext(r.Context())
 	if identity == nil {
 		Unauthorized(w)
+		return false
+	}
+	if ev != nil && ev.ProjectID != projectID {
+		logAuthzDenial(r, identity, triggerResource(projectID), action, "trigger event does not belong to project")
+		NotFound(w, "Trigger event")
 		return false
 	}
 	if ev != nil && identity.Type() != "agent" {
@@ -725,7 +733,7 @@ func (s *Server) authorizeTriggerEventRow(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	logAuthzDenial(r, identity, triggerResource(projectID), action, d.reason)
-	if d.notVisibleToAgent {
+	if d.notVisibleToAgent || d.wrongProject {
 		NotFound(w, "Trigger event")
 	} else if d.byPolicy {
 		writeForbidden(w, "You don't have permission to access triggers in this project")
