@@ -25,6 +25,7 @@ import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { render, type CSSResult, type TemplateResult } from 'lit';
 
 import { styleRules } from './__fixtures__/css-rules.js';
+import { crumbTuples } from '../../test-utils/crumbs.js';
 import type { ScionDetailHeader } from '../shared/detail-header.js';
 
 vi.mock('../../client/main.js', () => {
@@ -99,15 +100,17 @@ describe('access constraint detail header', () => {
     }
   });
 
-  it("puts the back link in the shared header's back slot", () => {
+  it("puts the breadcrumb in the shared header's back slot", () => {
     const host = renderPageHeader();
     const back = slotted(header(host), 'back');
-    expect(back.map((n) => n.tagName.toLowerCase())).toEqual(['scion-back-link']);
-    expect(back[0].getAttribute('href')).toBe('/admin/access-boundaries');
-    expect(back[0].textContent?.trim()).toBe('Access Constraints');
+    expect(back.map((n) => n.tagName.toLowerCase())).toEqual(['scion-breadcrumb']);
+    expect(crumbTuples(host)).toEqual([
+      ['Access Constraints', '/admin/access-boundaries'],
+      ['contractors-read-only', undefined],
+    ]);
     // No back link of the page's own sits above the header any more.
     expect(host.querySelector('.header-top')).toBeNull();
-    expect(host.querySelector('a.back-link')).toBeNull();
+    expect(host.querySelector('a.back-link, scion-back-link')).toBeNull();
   });
 
   it('shows the Access Constraints nav icon in the icon slot', () => {

@@ -32,7 +32,12 @@ import {
   isTemplateSourceRefreshable,
 } from '../../shared/source-url.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { current, scopedResourceTrail, type Named } from '../../client/crumbs.js';
+import {
+  current,
+  scopedResourceTrail,
+  type Named,
+  type ResourceScope,
+} from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
 import '../shared/detail-header.js';
@@ -234,32 +239,24 @@ export class ScionPageTemplateDetail extends LitElement {
     });
   }
 
-  private projectParentCrumbs(allowPending: boolean) {
-    const id = this.projectId.trim();
-    const resolved = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
-    const project: Named = allowPending ? resolved : { id: resolved.id, label: resolved.label };
-    return scopedResourceTrail(
-      { kind: 'project', project },
-      {
-        plural: 'Templates',
-        projectTab: 'templates',
-        hubTab: 'templates',
-        profilePath: '/profile/templates',
-      }
-    );
-  }
-
-  /** Non-project back-navigation links (user/hub scopes migrate in Phase 2b). */
-  private backLinks(): Array<{
-    href: string;
-    label: string;
-    truncate?: boolean;
-    tooltip?: string;
-  }> {
-    if (this.scope === 'user') {
-      return [{ href: '/profile/templates', label: 'My Templates' }];
+  private parentCrumbs(allowPending: boolean) {
+    let resourceScope: ResourceScope;
+    if (this.projectId) {
+      const id = this.projectId.trim();
+      const resolved = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
+      const project: Named = allowPending ? resolved : { id: resolved.id, label: resolved.label };
+      resourceScope = { kind: 'project', project };
+    } else if (this.scope === 'user') {
+      resourceScope = { kind: 'user' };
+    } else {
+      resourceScope = { kind: 'hub' };
     }
-    return [{ href: '/settings?tab=templates', label: 'Hub Resources' }];
+    return scopedResourceTrail(resourceScope, {
+      plural: 'Templates',
+      projectTab: 'templates',
+      hubTab: 'templates',
+      profilePath: '/profile/templates',
+    });
   }
 
   private async loadTemplate(): Promise<void> {
@@ -328,17 +325,13 @@ export class ScionPageTemplateDetail extends LitElement {
   override render() {
     if (this.loading) {
       return html`
-        ${this.projectId
-          ? html`<scion-breadcrumb .crumbs=${this.projectParentCrumbs(true)}></scion-breadcrumb>`
-          : nothing}
+        <scion-breadcrumb .crumbs=${this.parentCrumbs(true)}></scion-breadcrumb>
         <div class="loading-state"><sl-spinner></sl-spinner></div>
       `;
     }
     if (this.error) {
       return html`
-        ${this.projectId
-          ? html`<scion-breadcrumb .crumbs=${this.projectParentCrumbs(false)}></scion-breadcrumb>`
-          : nothing}
+        <scion-breadcrumb .crumbs=${this.parentCrumbs(false)}></scion-breadcrumb>
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error}</p>
@@ -355,21 +348,13 @@ export class ScionPageTemplateDetail extends LitElement {
     const t = this.template!;
     return html`
       <scion-detail-header heading=${t.displayName || t.name}>
-        ${this.projectId
-          ? html`<scion-breadcrumb
-              slot="back"
-              .crumbs=${[...this.projectParentCrumbs(true), current(t.displayName || t.name)]}
-            ></scion-breadcrumb>`
-          : this.backLinks().map(
-              (link) =>
-                html`<scion-back-link
-                  slot="back"
-                  href=${link.href}
-                  ?truncate=${!!link.truncate}
-                  tooltip=${link.tooltip ?? ''}
-                  >${link.label}</scion-back-link
-                >`
-            )}
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[
+            ...this.parentCrumbs(true),
+            current(t.displayName || t.name || this.templateId),
+          ]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="file-earmark-code"></sl-icon>
         ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
         ${t.description

@@ -45,6 +45,7 @@ import type { ScionGroupDeleteDialog } from '../shared/group-delete-dialog.js';
 import type { GroupUpdatedDetail } from '../shared/group-form-dialog.js';
 import type { GroupDeletedDetail } from '../shared/group-delete-dialog.js';
 import { apiFetch } from '../../client/api.js';
+import { current } from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { navigateTo } from '../../client/navigation.js';
 import { getGroup, listMembers, GroupsApiError } from '../../client/groups-api.js';
@@ -376,7 +377,13 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
     return html`
       <scion-detail-header heading=${this.group.name}>
-        <scion-back-link slot="back" href="/admin/groups">Back to Groups</scion-back-link>
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[
+            { label: 'Groups', href: '/admin/groups' },
+            current(this.group.name || this.groupId),
+          ]}
+        ></scion-breadcrumb>
         <div slot="icon" class="group-icon ${this.group.groupType}" aria-hidden="true">
           <sl-icon name="${isProjectAgents ? 'cpu' : 'people'}"></sl-icon>
         </div>
@@ -561,6 +568,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
   private renderLoading() {
     return html`
+      <scion-breadcrumb .crumbs=${[{ label: 'Groups', href: '/admin/groups' }]}></scion-breadcrumb>
       <div class="loading-state">
         <sl-spinner></sl-spinner>
         <p>Loading group...</p>
@@ -570,7 +578,7 @@ export class ScionPageAdminGroupDetail extends LitElement {
 
   private renderError() {
     return html`
-      <scion-back-link href="/admin/groups">Back to Groups</scion-back-link>
+      <scion-breadcrumb .crumbs=${[{ label: 'Groups', href: '/admin/groups' }]}></scion-breadcrumb>
 
       <div class="error-state" role="alert">
         <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>

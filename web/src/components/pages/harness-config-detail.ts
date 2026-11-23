@@ -29,7 +29,12 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, HarnessConfig } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { current, scopedResourceTrail, type Named } from '../../client/crumbs.js';
+import {
+  current,
+  scopedResourceTrail,
+  type Named,
+  type ResourceScope,
+} from '../../client/crumbs.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { projectLabelNow, resolveProjectLabel } from '../../client/project-label.js';
 import '../shared/detail-header.js';
@@ -554,28 +559,21 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     });
   }
 
-  private projectParentCrumbs(allowPending: boolean) {
-    const id = this.projectId.trim();
-    const resolved = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
-    const project: Named = allowPending ? resolved : { id: resolved.id, label: resolved.label };
-    return scopedResourceTrail(
-      { kind: 'project', project },
-      {
-        plural: 'Harness Configs',
-        projectTab: 'harness-configs',
-        hubTab: 'harness-configs',
-      }
-    );
-  }
-
-  /** Non-project back-navigation links (hub scope migrates in Phase 2b). */
-  private backLinks(): Array<{
-    href: string;
-    label: string;
-    truncate?: boolean;
-    tooltip?: string;
-  }> {
-    return [{ href: '/settings?tab=harness-configs', label: 'Hub Resources' }];
+  private parentCrumbs(allowPending: boolean) {
+    let resourceScope: ResourceScope;
+    if (this.projectId) {
+      const id = this.projectId.trim();
+      const resolved = this.projectNamed?.id === id ? this.projectNamed : projectLabelNow(id);
+      const project: Named = allowPending ? resolved : { id: resolved.id, label: resolved.label };
+      resourceScope = { kind: 'project', project };
+    } else {
+      resourceScope = { kind: 'hub' };
+    }
+    return scopedResourceTrail(resourceScope, {
+      plural: 'Harness Configs',
+      projectTab: 'harness-configs',
+      hubTab: 'harness-configs',
+    });
   }
 
   private async loadHarnessConfig(): Promise<void> {
@@ -649,17 +647,13 @@ export class ScionPageHarnessConfigDetail extends LitElement {
   override render() {
     if (this.loading) {
       return html`
-        ${this.projectId
-          ? html`<scion-breadcrumb .crumbs=${this.projectParentCrumbs(true)}></scion-breadcrumb>`
-          : nothing}
+        <scion-breadcrumb .crumbs=${this.parentCrumbs(true)}></scion-breadcrumb>
         <div class="loading-state"><sl-spinner></sl-spinner></div>
       `;
     }
     if (this.error) {
       return html`
-        ${this.projectId
-          ? html`<scion-breadcrumb .crumbs=${this.projectParentCrumbs(false)}></scion-breadcrumb>`
-          : nothing}
+        <scion-breadcrumb .crumbs=${this.parentCrumbs(false)}></scion-breadcrumb>
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <p>${this.error}</p>
@@ -680,21 +674,13 @@ export class ScionPageHarnessConfigDetail extends LitElement {
     const canDelete = can(hc._capabilities, 'delete') || can(hc._capabilities, 'manage');
     return html`
       <scion-detail-header heading=${hc.displayName || hc.name}>
-        ${this.projectId
-          ? html`<scion-breadcrumb
-              slot="back"
-              .crumbs=${[...this.projectParentCrumbs(true), current(hc.displayName || hc.name)]}
-            ></scion-breadcrumb>`
-          : this.backLinks().map(
-              (link) =>
-                html`<scion-back-link
-                  slot="back"
-                  href=${link.href}
-                  ?truncate=${!!link.truncate}
-                  tooltip=${link.tooltip ?? ''}
-                  >${link.label}</scion-back-link
-                >`
-            )}
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[
+            ...this.parentCrumbs(true),
+            current(hc.displayName || hc.name || this.harnessConfigId),
+          ]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="sliders"></sl-icon>
         ${hc.harness ? html`<span class="harness-badge">${hc.harness}</span>` : ''}
         ${hc.description
@@ -1589,8 +1575,8 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       }
       this.deleteDialogOpen = false;
       // Navigate back to the list view
-      const backLink = this.backLinks()[0];
-      navigateTo(backLink.href);
+      const listHref = this.parentCrumbs(false).at(-1)?.href ?? '/settings?tab=harness-configs';
+      navigateTo(listHref);
     } catch (err) {
       this.deleteError = err instanceof Error ? err.message : 'Delete failed';
     } finally {

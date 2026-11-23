@@ -33,6 +33,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
+import { current } from '../../client/crumbs.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
 import type {
   AccessBoundaryDetail,
@@ -766,6 +767,9 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private renderPermissionDenied() {
     return html`
       <div class="detail-page">
+        <scion-breadcrumb
+          .crumbs=${[{ label: 'Access Constraints', href: '/admin/access-boundaries' }]}
+        ></scion-breadcrumb>
         <div class="permission-denied-state" role="alert">
           <sl-icon name="shield-lock"></sl-icon>
           <h1>Permission Denied</h1>
@@ -787,6 +791,9 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private renderLoading() {
     return html`
       <div class="detail-page">
+        <scion-breadcrumb
+          .crumbs=${[{ label: 'Access Constraints', href: '/admin/access-boundaries' }]}
+        ></scion-breadcrumb>
         <div class="skeleton-section">
           <div class="skeleton-header"></div>
           <div class="skeleton-body">
@@ -817,6 +824,9 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private renderError() {
     return html`
       <div class="detail-page">
+        <scion-breadcrumb
+          .crumbs=${[{ label: 'Access Constraints', href: '/admin/access-boundaries' }]}
+        ></scion-breadcrumb>
         <div class="error-state">
           <sl-icon name="exclamation-circle" style="font-size: 2rem"></sl-icon>
           <h1>Failed to Load Access Constraint</h1>
@@ -838,6 +848,9 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private renderNotFound() {
     return html`
       <div class="detail-page">
+        <scion-breadcrumb
+          .crumbs=${[{ label: 'Access Constraints', href: '/admin/access-boundaries' }]}
+        ></scion-breadcrumb>
         <div class="not-found-state">
           <sl-icon name="shield-lock" style="font-size: 2rem"></sl-icon>
           <h1>Access Constraint Not Found</h1>
@@ -895,9 +908,13 @@ export class ScionPageAdminAccessBoundaryDetail extends LitElement {
   private renderPageHeader(b: AccessBoundaryDetail) {
     return html`
       <scion-detail-header heading=${b.name}>
-        <scion-back-link slot="back" href="/admin/access-boundaries"
-          >Access Constraints</scion-back-link
-        >
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[
+            { label: 'Access Constraints', href: '/admin/access-boundaries' },
+            current(b.name || this.boundaryId),
+          ]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="shield-check"></sl-icon>
         <scion-access-boundary-status
           status=${b.status}

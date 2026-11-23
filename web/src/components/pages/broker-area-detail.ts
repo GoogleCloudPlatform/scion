@@ -39,6 +39,7 @@ import type { HealthSummaryBroker } from './health-broker-table.js';
 import { isFlatBroker } from '../../shared/runtime-target.js';
 import { hostIdentityWarning } from '../../shared/broker-host-identity.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current } from '../../client/crumbs.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
 import { hasAnyPermission } from '../../lib/admin-permissions.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
@@ -315,15 +316,18 @@ export class ScionPageBrokerAreaDetail extends LitElement {
 
   override render() {
     if (this.loading) {
-      return html`<div class="loading-state">
-        <sl-spinner></sl-spinner>
-        <p>Loading broker...</p>
-      </div>`;
+      return html`
+        <scion-breadcrumb .crumbs=${[{ label: 'Brokers', href: '/brokers' }]}></scion-breadcrumb>
+        <div class="loading-state">
+          <sl-spinner></sl-spinner>
+          <p>Loading broker...</p>
+        </div>
+      `;
     }
     const broker = this.broker;
     if (this.error || !broker) {
       return html`
-        <scion-back-link href="/brokers">Back to Brokers</scion-back-link>
+        <scion-breadcrumb .crumbs=${[{ label: 'Brokers', href: '/brokers' }]}></scion-breadcrumb>
         <div class="error-state">
           <sl-icon name="exclamation-triangle"></sl-icon>
           <h2>Failed to Load Broker</h2>
@@ -346,7 +350,10 @@ export class ScionPageBrokerAreaDetail extends LitElement {
         : this.tab;
     return html`
       <scion-detail-header heading=${broker.name}>
-        <scion-back-link slot="back" href="/brokers">Back to Brokers</scion-back-link>
+        <scion-breadcrumb
+          slot="back"
+          .crumbs=${[{ label: 'Brokers', href: '/brokers' }, current(broker.name || this.brokerId)]}
+        ></scion-breadcrumb>
         <sl-icon slot="icon" name="hdd-rack"></sl-icon>
         <span class="kind-badge ${flat ? 'flat' : ''}">${flat ? 'Flat' : 'Legacy'}</span>
         ${broker.hostedByThisServer

@@ -34,6 +34,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { current } from '../../client/crumbs.js';
 import { navigateTo } from '../../client/navigation.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import { getPrincipalIcon } from '../shared/role-binding-utils.js';
@@ -762,11 +763,11 @@ export class ScionPageAdminRoleDetail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
-    // The detail view puts the back link in the shared header; the loading,
+    // The detail view puts the breadcrumb in the shared header; the loading,
     // error and not-found states have no header, so it stands alone there.
     const inHeader = !this.loading && !this.error && !!this.roleData;
     return html`
-      ${this.renderFeedback()} ${inHeader ? nothing : this.renderBackLink()}
+      ${this.renderFeedback()} ${inHeader ? nothing : this.renderBreadcrumb()}
       ${this.loading
         ? this.renderLoading()
         : this.error === 'not_found'
@@ -779,10 +780,11 @@ export class ScionPageAdminRoleDetail extends LitElement {
     `;
   }
 
-  private renderBackLink(slot?: 'back') {
-    return html`<scion-back-link slot=${slot ?? nothing} href="/admin/roles"
-      >Roles</scion-back-link
-    >`;
+  private renderBreadcrumb(slot?: 'back', label?: string) {
+    const crumbs = label
+      ? [{ label: 'Roles', href: '/admin/roles' }, current(label)]
+      : [{ label: 'Roles', href: '/admin/roles' }];
+    return html`<scion-breadcrumb slot=${slot ?? nothing} .crumbs=${crumbs}></scion-breadcrumb>`;
   }
 
   private renderFeedback() {
@@ -856,7 +858,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
 
     return html`
       <scion-detail-header heading=${role.name}>
-        ${this.renderBackLink('back')}
+        ${this.renderBreadcrumb('back', role.name || this.roleId)}
         <sl-icon slot="icon" name="shield-lock"></sl-icon>
         <span class="type-badge ${role.system ? 'system' : 'custom'}">
           ${role.system ? 'System' : 'Custom'}

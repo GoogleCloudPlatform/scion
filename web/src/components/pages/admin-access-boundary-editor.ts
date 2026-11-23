@@ -36,8 +36,11 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
+import { current } from '../../client/crumbs.js';
 import { addLeaveGuard, navigateTo } from '../../client/navigation.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
+import type { Crumb } from '../shared/breadcrumb.js';
+import '../shared/breadcrumb.js';
 import type {
   ConstraintSubject,
   ConstraintScope,
@@ -71,6 +74,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   // --- Mode ---
   @state() private isEditMode = false;
   @state() private boundaryId = '';
+  @state() private loadedBoundaryName = '';
   @state() private loadingBoundary = false;
   @state() private loadError = '';
 
@@ -136,20 +140,6 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       font-weight: 700;
       color: var(--scion-text, #1e293b);
       margin: 0;
-    }
-
-    .editor-back-link {
-      font-size: 0.875rem;
-      color: var(--sl-color-primary-600, #2563eb);
-      text-decoration: none;
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      cursor: pointer;
-    }
-
-    .editor-back-link:hover {
-      text-decoration: underline;
     }
 
     .step-content {
@@ -319,6 +309,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   }
 
   private populateFromBoundary(boundary: AccessBoundaryDetail): void {
+    this.loadedBoundaryName = boundary.name ?? '';
     this.draftName = boundary.name ?? '';
     this.draftPurpose = boundary.purpose ?? '';
     this.baseRevision = boundary.revision ?? '';
@@ -512,44 +503,66 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
   // Render
   // ---------------------------------------------------------------------------
 
+  private editorCrumbs(): Crumb[] {
+    const root: Crumb = { label: 'Access Constraints', href: '/admin/access-boundaries' };
+    if (!this.isEditMode) {
+      return [root, current('New', false)];
+    }
+    const name = this.loadedBoundaryName || this.draftName || this.boundaryId;
+    return [
+      root,
+      {
+        label: name,
+        href: `/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}`,
+        truncate: true,
+      },
+      current('Edit', false),
+    ];
+  }
+
   override render() {
+    const rootCrumb: Crumb[] = [{ label: 'Access Constraints', href: '/admin/access-boundaries' }];
+
     if (this.loadingBoundary) {
       return html`
-        <div class="loading-state">
-          <sl-spinner style="font-size: 2rem"></sl-spinner>
-          <p>Loading access constraint...</p>
+        <div class="editor-page">
+          <scion-breadcrumb .crumbs=${rootCrumb}></scion-breadcrumb>
+          <div class="loading-state">
+            <sl-spinner style="font-size: 2rem"></sl-spinner>
+            <p>Loading access constraint...</p>
+          </div>
         </div>
       `;
     }
 
     if (this.loadError) {
       return html`
-        <div class="error-state">
-          <sl-icon name="exclamation-circle" style="font-size: 2rem"></sl-icon>
-          <p>${this.loadError}</p>
-          <sl-button
-            variant="default"
-            @click=${() => {
-              navigateTo('/admin/access-boundaries');
-            }}
-          >
-            Back to inventory
-          </sl-button>
+        <div class="editor-page">
+          <scion-breadcrumb .crumbs=${rootCrumb}></scion-breadcrumb>
+          <div class="error-state">
+            <sl-icon name="exclamation-circle" style="font-size: 2rem"></sl-icon>
+            <p>${this.loadError}</p>
+            <sl-button
+              variant="default"
+              @click=${() => {
+                navigateTo('/admin/access-boundaries');
+              }}
+            >
+              Back to inventory
+            </sl-button>
+          </div>
         </div>
       `;
     }
 
     return html`
       <div class="editor-page">
+        <!-- Leaving with unsaved changes asks through the router leave guard. -->
+        <scion-breadcrumb .crumbs=${this.editorCrumbs()}></scion-breadcrumb>
         <div class="editor-header">
           <h1 class="editor-title">
             ${this.isEditMode ? 'Edit Access Constraint' : 'New Access Constraint'}
           </h1>
-          <!-- Leaving with unsaved changes asks through the router leave guard. -->
-          <a class="editor-back-link" href="/admin/access-boundaries">
-            <sl-icon name="arrow-left"></sl-icon>
-            Back to inventory
-          </a>
         </div>
 
         <scion-access-boundary-stepper
