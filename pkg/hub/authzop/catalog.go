@@ -358,7 +358,7 @@ var EntryPointExemptions = []EntryPointExemption{
 
 	// Webhook endpoints — signature verification
 	{Pattern: "/api/v1/webhooks/github", Kind: ExemptionInternalOnly, Reason: "GitHub webhook, signature-verified", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/hooks/{id}", Kind: ExemptionInternalOnly, Reason: "signature-verified generic webhook", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/hooks/{id}", Kind: ExemptionInternalOnly, Reason: "dual-posture generic webhook ingress (anonymous HMAC or hub_token authenticated via webhook_endpoint.send)", Owner: "route_metadata.go"},
 
 	// GitHub App admin endpoints — fully converted to catalog operations
 	// (hub.githubapp.read, hub.githubapp.update) with method-aware route guard

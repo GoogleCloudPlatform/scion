@@ -1197,6 +1197,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'webhook_endpoint:send',
+    label: 'webhook_endpoint:send',
+    description: 'Send events to hub-token webhook endpoints',
+    resource: 'webhook_endpoint',
+    isAlias: false,
+  },
+  {
     value: 'webhook_endpoint:update',
     label: 'webhook_endpoint:update',
     description: 'Update webhook endpoints',

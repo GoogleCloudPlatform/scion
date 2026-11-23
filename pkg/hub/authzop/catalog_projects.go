@@ -1160,7 +1160,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "webhookendpoint.update",
 		Domain:      "webhookendpoint",
-		Description: "Update a webhook endpoint's description, status (active/disabled), or agent binding. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404",
+		Description: "Update a webhook endpoint's description, status (active/disabled), agent binding, auth mode, signature mode, allowProjectAgents, rate limits, body limit, or replay window. Agent callers may update only endpoints they own (and cannot modify agent binding via PATCH); bound non-owner agents receive 403 and unrelated agents receive 404. Refuses with 409 if the change would drop replay protection while active replay-protected triggers depend on the endpoint",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/webhook-endpoints/{id}", Method: "PATCH"},
 		},
@@ -1181,6 +1181,7 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestWebhookEndpointUpdateAndDisable"},
 			{Package: "pkg/hub", Function: "TestWebhookEndpointBoundAgentAccess"},
+			{Package: "pkg/hub", Function: "TestWebhookEndpointPatch_ReplayProtectionAndLimits"},
 			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
@@ -1210,6 +1211,26 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestWebhookEndpointSecretRotation_GraceWindowAndMaintenance"},
 			{Package: "pkg/hub", Function: "TestWebhookEndpointBoundAgentAccess"},
 			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
+		},
+		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "webhookendpoint.send",
+		Domain:      "webhookendpoint",
+		Description: "Send an authenticated webhook event to a hub_token-mode endpoint on POST /api/v1/hooks/{id}. Handler-internal entry point: the route itself stays exempt for the anonymous HMAC posture via isWebhookIngressRequest, while requests carrying a credential are validated by UnifiedAuthMiddleware and authorized here via webhookEndpointAccessDecision(send)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointInternalDispatch, Pattern: "authorizeWebhookIngressHubToken:hub_token"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		ResourceResolver: "project-from-endpoint",
+		BasePermission:   "webhook_endpoint.send",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestWebhookIngress_HubTokenAuthMatrix"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
 	},

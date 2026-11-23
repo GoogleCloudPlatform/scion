@@ -30,6 +30,7 @@ const (
 	ActionStart      Action = "start"
 	ActionStop       Action = "stop"
 	ActionMessage    Action = "message"
+	ActionSend       Action = "send"
 	ActionAttach     Action = "attach"
 	ActionLifecycle  Action = "lifecycle"
 	ActionPortAccess Action = "port_access"

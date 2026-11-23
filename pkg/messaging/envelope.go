@@ -253,6 +253,7 @@ type EventScheduleRef struct {
 // Canonical integrity-verification labels for ExternalPayload.Verified (§8.1a, §8.3; Stage 3 §4.3).
 const (
 	ExternalVerifiedScionV1                   = "scion-v1"
+	ExternalVerifiedHubToken                  = "hub-token"
 	ExternalVerifiedHMACSHA256Body            = "hmac-sha256-body"
 	ExternalVerifiedGitHubHMACSHA256Projected = "github-hmac-sha256+projected"
 	ExternalVerifiedUnverified                = "unverified"

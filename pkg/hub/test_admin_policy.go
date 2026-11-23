@@ -296,6 +296,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"webhook_endpoint.list":   testAdminPolicyAllow,
 	"webhook_endpoint.create": testAdminPolicyAllow,
 	"webhook_endpoint.update": testAdminPolicyAllow,
+	"webhook_endpoint.send":   testAdminPolicyAllow,
 	"webhook_endpoint.delete": testAdminPolicyAllow,
 
 	// GitHub App triggers (ptone/scion#8090): github_trigger.comment is held

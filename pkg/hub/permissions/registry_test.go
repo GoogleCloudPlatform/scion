@@ -168,6 +168,8 @@ var expectedSelectorRegistry = map[string][]string{
 	"webhook_endpoint:read":   {"webhook_endpoint.read"},
 	"webhook_endpoint:update": {"webhook_endpoint.update"},
 	"webhook_endpoint:create": {"webhook_endpoint.create"},
+	"webhook_endpoint:update": {"webhook_endpoint.update"},
+	"webhook_endpoint:send":   {"webhook_endpoint.send"},
 
 	// Identity governance reads and hub audit (hub boundary only).
 	"role:read":              {"role.read"},
