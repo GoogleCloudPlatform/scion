@@ -275,6 +275,20 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgesForDelegate(ctx context.C
 	)
 }
 
+// DeactivateDelegationEdge deactivates the delegate's edge edgeID when it is
+// active and records d.
+func (s *DelegationEdgeStore) DeactivateDelegationEdge(ctx context.Context, delegateType, delegateID, edgeID string, d store.Deactivation) (int, error) {
+	uid, err := parseUUID(edgeID)
+	if err != nil {
+		return 0, err
+	}
+	return s.deactivateEdges(ctx, d,
+		delegationedge.IDEQ(uid),
+		delegationedge.DelegateTypeEQ(delegationedge.DelegateType(delegateType)),
+		delegationedge.DelegateIDEQ(delegateID),
+	)
+}
+
 // DeactivateDelegationEdgesForDelegator deactivates every active edge of the
 // delegator and records d on each.
 func (s *DelegationEdgeStore) DeactivateDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string, d store.Deactivation) (int, error) {
@@ -331,6 +345,43 @@ func (s *DelegationEdgeStore) ReactivateDelegationEdgesForDelegate(ctx context.C
 		ClearDeactivatedAt().
 		SetDeactivationOpID("").
 		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// RemarkDeactivatedDelegationEdgesForDelegate replaces the deactivation record
+// of the delegate's inactive edges deactivated with cause under opID (only the
+// edge with ID edgeID when edgeID is set) by to. Active edges are never
+// selected.
+func (s *DelegationEdgeStore) RemarkDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID, edgeID string, cause store.EdgeDeactivationCause, opID string, to store.Deactivation) (int, error) {
+	if err := validateEdgeDeactivation(cause, opID); err != nil {
+		return 0, err
+	}
+	if err := validateEdgeDeactivation(to.Cause, to.OpID); err != nil {
+		return 0, err
+	}
+	where := deactivatedEdgesOf(delegateType, delegateID, cause, opID)
+	if edgeID != "" {
+		uid, err := parseUUID(edgeID)
+		if err != nil {
+			return 0, err
+		}
+		where = append(where, delegationedge.IDEQ(uid))
+	}
+	now := time.Now()
+	at := now
+	if to.At != nil && !to.At.IsZero() {
+		at = *to.At
+	}
+	n, err := s.client.DelegationEdge.Update().
+		Where(where...).
+		SetDeactivationCause(string(to.Cause)).
+		SetDeactivatedAt(at).
+		SetDeactivationOpID(to.OpID).
+		SetUpdated(now).
 		Save(ctx)
 	if err != nil {
 		return 0, mapError(err)

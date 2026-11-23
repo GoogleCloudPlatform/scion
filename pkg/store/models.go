@@ -4967,24 +4967,29 @@ func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationDelegatorDeleted,
 		EdgeDeactivationCreateCompensation,
 		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationReincarnateFailed,
+		EdgeDeactivationReincarnatePendingSwept,
+		EdgeDeactivationReincarnateStaleSwept,
 		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
 }
 
-// Deactivation causes recorded only on service-account assignments. The edge
-// store rejects them.
+// Deactivation causes recorded on reincarnation failure rollback (both
+// delegation edges and service-account assignments), plus assignment-only
+// causes (sa_replaced, sa_cleared) which the edge store rejects.
 const (
 	// EdgeDeactivationSAReplaced marks an assignment replaced by a later
-	// write that set a service account on the same agent.
+	// write that set a service account on the same agent. Assignment-only.
 	EdgeDeactivationSAReplaced EdgeDeactivationCause = "sa_replaced"
 	// EdgeDeactivationSACleared marks an assignment ended by a write that
-	// removed the agent's assign-mode GCP identity.
+	// removed the agent's assign-mode GCP identity. Assignment-only.
 	EdgeDeactivationSACleared EdgeDeactivationCause = "sa_cleared"
-	// EdgeDeactivationReincarnateFailed marks the assignment a reincarnation
-	// claim recorded for a new account, ended when the reincarnation failed
-	// and the previous configuration was restored by the worker.
+	// EdgeDeactivationReincarnateFailed marks the delegation edge or
+	// service-account assignment a reincarnation claim recorded for a
+	// patched role or account, ended when the reincarnation failed and
+	// the previous configuration was restored by the worker.
 	EdgeDeactivationReincarnateFailed EdgeDeactivationCause = "reincarnate_failed"
 	// EdgeDeactivationReincarnatePendingSwept is EdgeDeactivationReincarnateFailed
 	// for a reincarnation the sweep failed because its worker never started.

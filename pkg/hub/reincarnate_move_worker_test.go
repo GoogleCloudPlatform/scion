@@ -963,19 +963,19 @@ func TestReincarnateMove_SessionUserReRecordsEdge(t *testing.T) {
 	assertEdgeReRecordedTo(t, f, user, old)
 }
 
-// A rolled-back move that changed the role keeps the authority re-recorded
-// at the claim: the edge stays the requesting user's (the re-record is not
-// part of the rollback).
-func TestReincarnateMove_SessionUserRollbackKeepsUserEdge(t *testing.T) {
+// A rolled-back move that changed the role restores the agent's prior
+// delegation edge atomically with the reverted configuration
+// (ptone/scion#3502).
+func TestReincarnateMove_SessionUserRollbackRestoresPriorEdge(t *testing.T) {
 	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
 	prepareMoveWorkerFixture(t, f)
 	f.disp.moveProvisionErr = errors.New("broker returned 409")
 
-	user, old, r := moveBySessionUser(t, f, AgentRoleReadOnly)
+	_, old, r := moveBySessionUser(t, f, AgentRoleReadOnly)
 	a, err := f.s.GetAgent(context.Background(), f.agent.ID)
 	require.NoError(t, err)
 	assertRolledBackToSource(t, f, r, a)
-	assertEdgeReRecordedTo(t, f, user, old)
+	assertEdgeRestoredToPrior(t, f.s, f.agent.ID, r.ID, old, store.EdgeDeactivationReincarnateFailed)
 }
 
 // A move by another principal that keeps the role keeps the agent's edge,

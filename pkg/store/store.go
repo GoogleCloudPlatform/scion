@@ -4819,6 +4819,11 @@ type DelegationEdgeStore interface {
 	// time. Returns the number of edges deactivated.
 	DeactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, d Deactivation) (int, error)
 
+	// DeactivateDelegationEdge deactivates the delegate's edge edgeID when
+	// it is active and records d. Returns 0 when the edge does not exist,
+	// belongs to another delegate, or is already inactive.
+	DeactivateDelegationEdge(ctx context.Context, delegateType, delegateID, edgeID string, d Deactivation) (int, error)
+
 	// DeactivateDelegationEdgesForDelegator deactivates every active edge
 	// whose delegator is (delegatorType, delegatorID) and records d on each,
 	// with the same rules as DeactivateDelegationEdgesForDelegate.
@@ -4831,6 +4836,12 @@ type DelegationEdgeStore interface {
 	// edge in the same scope returns ErrAlreadyExists. Returns the number of
 	// edges reactivated.
 	ReactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) (int, error)
+
+	// RemarkDeactivatedDelegationEdgesForDelegate replaces the deactivation
+	// record of the delegate's inactive edges deactivated with cause under
+	// opID (only the edge with ID edgeID when edgeID is set) by to. Active
+	// edges are never selected. Returns the number of edges updated.
+	RemarkDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID, edgeID string, cause EdgeDeactivationCause, opID string, to Deactivation) (int, error)
 
 	// GetDeactivatedDelegationEdgesForDelegate returns exactly the inactive
 	// edges of the delegate whose recorded deactivation cause equals cause

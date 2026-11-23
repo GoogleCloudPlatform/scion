@@ -294,3 +294,53 @@ func TestEdgeDeactivationRejectsInvalidRecord(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, active, 1, "a rejected record writes nothing")
 }
+
+func TestDeactivateDelegationEdgeByID(t *testing.T) {
+	ctx := context.Background()
+	s := NewDelegationEdgeStore(enttest.NewClient(t))
+	e1 := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-id", "proj-a")
+	e2 := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-id", "proj-b")
+
+	d := store.Deactivation{Cause: store.EdgeDeactivationReincarnateFailed, OpID: "rec-1"}
+	n, err := s.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, "agent-other", e1.ID, d)
+	require.NoError(t, err)
+	assert.Zero(t, n, "wrong delegate matches nothing")
+
+	n, err = s.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, "agent-id", e1.ID, d)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	n, err = s.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, "agent-id", e1.ID, d)
+	require.NoError(t, err)
+	assert.Zero(t, n, "already inactive edge matches nothing")
+
+	all := allEdgesFor(t, s, "agent-id")
+	assert.False(t, all[e1.ID].Active)
+	assert.Equal(t, store.EdgeDeactivationReincarnateFailed, all[e1.ID].Cause)
+	assert.Equal(t, "rec-1", all[e1.ID].OpID)
+	assert.True(t, all[e2.ID].Active, "sibling edge untouched")
+}
+
+func TestRemarkDeactivatedDelegationEdgesForDelegate(t *testing.T) {
+	ctx := context.Background()
+	s := NewDelegationEdgeStore(enttest.NewClient(t))
+	e1 := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-rm", "proj-a")
+	e2 := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-rm", "proj-b")
+
+	n, err := s.DeactivateDelegationEdge(ctx, store.DelegationPrincipalAgent, "agent-rm", e1.ID,
+		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "soft-1"})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	to := store.Deactivation{Cause: store.EdgeDeactivationReincarnateFailed, OpID: "rec-1"}
+	n, err = s.RemarkDeactivatedDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-rm", e1.ID,
+		store.EdgeDeactivationAgentSoftDelete, "soft-1", to)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	all := allEdgesFor(t, s, "agent-rm")
+	assert.False(t, all[e1.ID].Active)
+	assert.Equal(t, store.EdgeDeactivationReincarnateFailed, all[e1.ID].Cause)
+	assert.Equal(t, "rec-1", all[e1.ID].OpID)
+	assert.True(t, all[e2.ID].Active, "active edge never selected")
+}
