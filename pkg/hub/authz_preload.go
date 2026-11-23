@@ -35,9 +35,7 @@ const (
 // preloadedUserInputs holds one user's preloaded, per-user-clamped
 // authorization inputs produced by preloadUserAuthzInputs.
 type preloadedUserInputs struct {
-	refs        []store.PrincipalRef
 	bindings    []*store.RoleBinding
-	roleDefs    map[string]*RolePermissions
 	rawRoleDefs map[string]*store.RoleDefinition
 	err         error // per-user fail-closed error (e.g. unrecognized User.Kind)
 }
@@ -46,6 +44,11 @@ type preloadedUserInputs struct {
 // rows, typically <=500) in a fixed number of batched queries and seeds the
 // request-local authzInputMemo (when present in ctx) so subsequent CheckAccess
 // calls for these users issue no per-user store queries.
+//
+// Callers are expected to pass a freshly installed authzInputMemo (via
+// withAuthzInputMemo). If a principal's memo entry is already partially or
+// fully populated, preloadUserAuthzInputs leaves that entry untouched so it
+// never pairs preloaded bindings or role definitions with a different closure.
 //
 // Security invariant: raw role bindings are fetched through the unwrapped
 // store and partitioned by principal in memory, then clamped strictly ONE USER
@@ -219,16 +222,7 @@ func (a *AuthzService) preloadUserAuthzInputs(ctx context.Context, users map[str
 		}
 	}
 
-	rolePerms := make(map[string]*RolePermissions, len(rawDefs))
-	for _, rd := range rawDefs {
-		if rd == nil {
-			continue
-		}
-		rp := NewRolePermissions(rd.ID, rd.Name, rd.ScopeType, rd.Permissions)
-		rp.ConfersMembership = rd.ConfersProjectMembership()
-		rp.System = rd.System
-		rolePerms[rd.ID] = rp
-	}
+	rolePerms := roleDefinitionsToPermissions(rawDefs)
 
 	// 5. Build per-user outputs and seed the request-local authzInputMemo.
 	memo := authzInputMemoFromContext(ctx)
@@ -254,9 +248,7 @@ func (a *AuthzService) preloadUserAuthzInputs(ctx context.Context, users map[str
 		}
 
 		out[uid] = &preloadedUserInputs{
-			refs:        refs,
 			bindings:    clamped,
-			roleDefs:    userRoleDefs,
 			rawRoleDefs: userRawDefs,
 		}
 
@@ -266,15 +258,14 @@ func (a *AuthzService) preloadUserAuthzInputs(ctx context.Context, users map[str
 			if _, ok := memo.users[uid]; !ok {
 				memo.users[uid] = memoUser{user: users[uid]}
 			}
-			if !entry.refsOK {
+			// Seed refs, bindings, and roleDefs atomically only when the entry
+			// is completely empty, so preloaded bindings/roleDefs can never be
+			// paired with a pre-existing closure from another load.
+			if !entry.refsOK && !entry.bindingsOK && !entry.roleDefsOK {
 				entry.refs = refs
 				entry.refsOK = true
-			}
-			if !entry.bindingsOK {
 				entry.bindings = clamped
 				entry.bindingsOK = true
-			}
-			if !entry.roleDefsOK {
 				entry.roleDefs = userRoleDefs
 				entry.roleDefsOK = true
 			}

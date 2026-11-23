@@ -748,6 +748,46 @@ func TestExpandDecisionBellTopic_AuthzParityMatrix(t *testing.T) {
 	t.Run("admin_tier_disabled", func(t *testing.T) { runMatrix(t, false) })
 }
 
+// TestPreloadUserAuthzInputs_SkipsPartiallyPopulatedMemoEntry verifies that
+// preloadUserAuthzInputs seeds refs+bindings+roleDefs atomically only when a
+// principal's memo entry is completely empty, leaving a pre-populated entry
+// untouched rather than mixing a pre-existing closure with preloaded bindings.
+func TestPreloadUserAuthzInputs_SkipsPartiallyPopulatedMemoEntry(t *testing.T) {
+	ctx := context.Background()
+	srv, rawStore, _, _ := newBellCountingSQLiteServer(t)
+
+	u := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "partial-memo@example.com",
+		DisplayName: "Partial Memo",
+		Role:        store.UserRoleMember,
+		Status:      store.UserStatusActive,
+		Kind:        store.UserKindHuman,
+		Created:     time.Now().UTC(),
+	}
+	require.NoError(t, rawStore.CreateUser(ctx, u))
+
+	memoCtx := withAuthzInputMemo(ctx)
+	memo := authzInputMemoFromContext(memoCtx)
+	require.NotNil(t, memo)
+
+	sentinelRefs := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: u.ID}}
+	entry := memo.entryFor(principalKey{normType: store.RoleBindingPrincipalUser, id: u.ID})
+	memo.mu.Lock()
+	entry.refs = sentinelRefs
+	entry.refsOK = true
+	memo.mu.Unlock()
+
+	_, err := srv.authzService.preloadUserAuthzInputs(memoCtx, map[string]*store.User{u.ID: u})
+	require.NoError(t, err)
+
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	assert.True(t, entry.refsOK)
+	assert.False(t, entry.bindingsOK, "partially populated memo entry must not have bindings seeded")
+	assert.False(t, entry.roleDefsOK, "partially populated memo entry must not have roleDefs seeded")
+}
+
 // TestExpandDecisionBellTopic_QueryCountConstantInMembers implements design §7
 // item 4: asserts that SQL query count for topic expansion at 50 members equals
 // that at 300 members (for both direct and group-bound topologies), stays
