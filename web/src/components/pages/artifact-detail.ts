@@ -1208,13 +1208,14 @@ export class ScionPageArtifactDetail extends LitElement {
   /** Loads the caller's private review draft for this artifact (Phase 3). */
   private async loadSavedDraft(gen: number): Promise<void> {
     if (!this.reviewDraftsEnabled || !this.artifactId) return;
+    const draftGen = this.draftLoadGen;
     try {
       const res = await getReviewDraft(this.artifactId);
-      if (gen !== this.loadGen) return;
+      if (gen !== this.loadGen || draftGen !== this.draftLoadGen) return;
       this.noteSeq(res.currentSeq);
       this.savedDraft = res.draft;
     } catch {
-      if (gen === this.loadGen) this.savedDraft = null;
+      if (gen === this.loadGen && draftGen === this.draftLoadGen) this.savedDraft = null;
     }
   }
 
@@ -2318,6 +2319,8 @@ export class ScionPageArtifactDetail extends LitElement {
   /**
    * Moves an active review whose submit was refused with `stale_review` onto
    * the current version while keeping the reviewer's earlier text read-only.
+   * Persists any pending edits on the old base first so abandoning the moved
+   * session cannot silently drop unsaved work.
    */
   private async moveCurrentReviewToLatest(): Promise<void> {
     const v = this.data?.version;
@@ -2326,13 +2329,26 @@ export class ScionPageArtifactDetail extends LitElement {
       return;
     const oldBase = v.seq;
     const oldEntry = v.entryPath;
-    const oldBody = this.reviewText;
-    const oldNote = this.reviewNote;
-    const oldRev = this.draftController?.currentRev ?? this.savedDraft?.rev ?? 0;
+    const draftCtrl = this.draftController;
     this.reviewBusy = true;
     try {
+      if (draftCtrl) {
+        draftCtrl.notifyChange();
+        const saved = await draftCtrl.saveNow();
+        if (!this.reviewing || this.draftController !== draftCtrl) return;
+        if (!saved || draftCtrl.isDirty) {
+          this.reviewError =
+            'Could not save your pending edits to your draft before moving. Save or download your review before moving to the current version.';
+          return;
+        }
+      }
+      const oldBody = this.reviewText;
+      const oldNote = this.reviewNote;
+      const oldRev = draftCtrl?.currentRev ?? this.savedDraft?.rev ?? 0;
+      const draftGen = this.draftLoadGen;
       this.seq = 0;
       await this.load();
+      if (!this.reviewing || draftGen !== this.draftLoadGen) return;
       if (!this.canReview || !this.data?.version) {
         this.closeReviewMode();
         this.reviewNotice = this.staleReviewNotice();
@@ -2348,6 +2364,9 @@ export class ScionPageArtifactDetail extends LitElement {
         carriedEntry: oldEntry,
         carriedPersisted: false,
       });
+    } catch (err) {
+      if (!this.reviewing) return;
+      this.reviewError = err instanceof Error ? err.message : 'Could not load the current version';
     } finally {
       this.reviewBusy = false;
     }

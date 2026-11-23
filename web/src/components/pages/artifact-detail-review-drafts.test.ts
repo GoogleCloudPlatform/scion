@@ -1083,4 +1083,152 @@ describe('ScionPageArtifactDetail review drafts (Phase 3)', () => {
     expect(state.draft?.rev).toBe(4);
     expect(state.draft?.carried).toBeNull();
   });
+
+  it('persists pending edits before moving after a stale_review refusal, and aborts the move if saving fails (R1)', async () => {
+    const V2_TEXT = 'We ship in Q3 with updated milestones.\n';
+    const unsavedEdit = 'We ship in {~~Q3~>Q4~~}{>>move out a quarter<<}{>>unsaved edit<<}.\n';
+    const state: DraftServerState = {
+      draft: {
+        rev: 1,
+        base: 1,
+        entry: 'plan.md',
+        body: MARKED_TEXT,
+        note: 'Initial note',
+        carried: null,
+        savedAt: '2026-11-21T18:00:00Z',
+        createdAt: '2026-11-21T17:55:00Z',
+      },
+      currentSeq: 1,
+      requests: [],
+      finalizeResponse: () =>
+        new Response(
+          JSON.stringify({
+            error: { code: 'stale_review', message: 'a newer version was published' },
+          }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } }
+        ),
+    };
+    mockHub(state);
+    const el = await mountPage();
+
+    findButton(el, '.header-actions sl-button', 'Resume draft')!.click();
+    await settle(el);
+
+    // Make an unsaved edit, then attempt Submit Review which gets refused with stale_review.
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: unsavedEdit } })
+    );
+    await el.updateComplete;
+
+    findButton(el, '.edit-footer sl-button', 'Submit Review')!.click();
+    await settle(el);
+
+    const moveBtn = el.shadowRoot!.querySelector<HTMLElement>('sl-button.move-review-btn')!;
+    expect(moveBtn).not.toBeNull();
+
+    // Case 1: saveNow() fails (500) -> abort move, stay in v1 session with edits & beforeunload armed.
+    state.nextPutResponse = () =>
+      new Response(JSON.stringify({ error: { code: 'internal', message: 'db down' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    moveBtn.click();
+    await settle(el);
+
+    expect(state.draft?.rev).toBe(1);
+    expect(state.draft?.body).toBe(MARKED_TEXT);
+    const editorAfterFail = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & { content: string };
+    expect(editorAfterFail.content).toBe(unsavedEdit);
+    expect(el.shadowRoot!.querySelector('sl-details.carried-review')).toBeNull();
+    const unload = new Event('beforeunload', { cancelable: true }) as BeforeUnloadEvent;
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+
+    // Case 2: hub is healthy and v2 is published -> Move saves pending edits on v1 first,
+    // then loads v2 with the saved v1 text in carried-review; Cancel after move keeps v1 intact.
+    delete state.nextPutResponse;
+    state.currentSeq = 2;
+    state.fileText = V2_TEXT;
+    el.shadowRoot!.querySelector<HTMLElement>('sl-button.move-review-btn')!.click();
+    await settle(el);
+
+    // Pending edits reached the hub on base 1 (rev 1 -> 2).
+    expect(state.draft?.rev).toBe(2);
+    expect(state.draft?.base).toBe(1);
+    expect(state.draft?.body).toBe(unsavedEdit);
+
+    // Editor now shows v2 text; carried panel shows the saved v1 text including the pending edit.
+    const carried = el.shadowRoot!.querySelector('sl-details.carried-review');
+    expect(carried).not.toBeNull();
+    expect(carried?.querySelector('pre')?.textContent).toBe(unsavedEdit);
+
+    // Cancelling the unwritten v2 move leaves the persisted v1 draft (with unsavedEdit) intact.
+    findButton(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await settle(el);
+    expect(state.draft?.rev).toBe(2);
+    expect(state.draft?.base).toBe(1);
+    expect(state.draft?.body).toBe(unsavedEdit);
+  });
+
+  it('ignores an in-flight GET /review-draft that resolves after ACCOUNT_TEARDOWN_EVENT (O1)', async () => {
+    let releaseGet!: (res: Response) => void;
+    const base = artifact(1);
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes('/review-draft')) {
+        return new Promise<Response>((resolve) => {
+          releaseGet = resolve;
+        });
+      }
+      if (url.includes('/files/plan.md')) {
+        return Promise.resolve(new Response(BASE_TEXT, { status: 200 }));
+      }
+      if (url.includes('/versions')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ versions: [base.version], discarded: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify(base), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    });
+
+    const el = await mountPage();
+    // Sign-out happens while GET /review-draft is still in flight.
+    window.dispatchEvent(new CustomEvent(ACCOUNT_TEARDOWN_EVENT));
+    await el.updateComplete;
+
+    releaseGet(
+      new Response(
+        JSON.stringify({
+          draft: {
+            rev: 1,
+            base: 1,
+            entry: 'plan.md',
+            body: MARKED_TEXT,
+            note: '',
+            carried: null,
+            savedAt: '2026-11-21T18:05:00Z',
+            createdAt: '2026-11-21T18:00:00Z',
+          },
+          currentSeq: 1,
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await settle(el);
+
+    expect(el.shadowRoot!.querySelector('.review-draft-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.draft-chip-badge')).toBeNull();
+    expect(findButton(el, '.header-actions sl-button', 'Resume draft')).toBeUndefined();
+  });
 });
