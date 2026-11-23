@@ -129,9 +129,6 @@ export function serverSubset(q: Query, schema: ViewSchema): string {
     schema.keys.filter((k) => k.exec === 'server').map((k) => k.name.toLowerCase())
   );
   const filteredTerms = q.terms.filter((t) => serverKeys.has(t.key.toLowerCase()));
-  if (filteredTerms.length === 0 && !q.excludeText?.length) {
-    return (q.text ?? '').trim();
-  }
   const next: Query = {
     mode: 'structured',
     terms: filteredTerms,

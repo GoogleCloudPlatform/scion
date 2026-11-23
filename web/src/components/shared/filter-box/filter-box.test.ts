@@ -119,4 +119,23 @@ describe('<scion-filter-box>', () => {
     await el.updateComplete;
     expect(el.value).toMatch(/^(label|phase):$/);
   });
+
+  it('cancels pending debounced commit when value is updated externally', async () => {
+    vi.useFakeTimers();
+    const el = await mount();
+    const commits: FilterCommitDetail[] = [];
+    el.addEventListener('filter-commit', (e) => commits.push((e as CustomEvent).detail));
+
+    const input = el.shadowRoot?.querySelector('input') as HTMLInputElement;
+    input.value = 'foo';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+
+    // Simulate a chip click updating `.value` before the 300 ms debounce fires.
+    el.value = 'phase:running foo';
+    await el.updateComplete;
+
+    vi.advanceTimersByTime(500);
+    expect(commits).toHaveLength(0);
+  });
 });

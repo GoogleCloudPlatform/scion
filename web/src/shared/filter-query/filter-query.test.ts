@@ -190,6 +190,12 @@ describe('validate, warnings, serverSubset, suggest, and query-edit', () => {
     const res = parse('phase:running mode:lineage api', knownKeysFor(schemaWithClient));
     expect(res.error).toBeUndefined();
     expect(serverSubset(res.query as Query, schemaWithClient)).toBe('phase:running api');
+
+    // When all key terms are stripped, key-shaped text stays quoted so the hub
+    // does not re-parse it as a structured key term.
+    const quotedTextOnly = parse('mode:lineage "phase:error"', knownKeysFor(schemaWithClient));
+    expect(quotedTextOnly.error).toBeUndefined();
+    expect(serverSubset(quotedTextOnly.query as Query, schemaWithClient)).toBe('"phase:error"');
   });
 
   it('suggests keys at boundary and enum values after key:', () => {

@@ -83,6 +83,7 @@ export class ScionFilterBox extends LitElement {
   private inputEl?: HTMLInputElement;
 
   private lastValidQuery: Query = EMPTY_QUERY;
+  private lastEmittedValue = '';
   private commitTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly listboxId = `filter-listbox-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -318,6 +319,13 @@ export class ScionFilterBox extends LitElement {
   }
 
   override willUpdate(changed: Map<string, unknown>): void {
+    if (changed.has('value') && this.value !== this.lastEmittedValue) {
+      if (this.commitTimer !== null) {
+        clearTimeout(this.commitTimer);
+        this.commitTimer = null;
+      }
+      this.lastEmittedValue = this.value;
+    }
     if (changed.has('value') || changed.has('view')) {
       this.syncExternalValue();
     }
@@ -346,6 +354,7 @@ export class ScionFilterBox extends LitElement {
   }
 
   private evaluateAndEmit(raw: string, immediateCommit: boolean): void {
+    this.lastEmittedValue = raw;
     const schema = this.schema;
     const parsed = parse(raw, knownKeysFor(schema));
 
