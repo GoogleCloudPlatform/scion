@@ -51,7 +51,7 @@ function formatRelativeExpiry(iso: string): string {
   const ms = Date.parse(iso) - Date.now();
   if (Number.isNaN(ms)) return '';
   if (ms <= 0) return 'expired';
-  const mins = Math.round(ms / 60_000);
+  const mins = Math.ceil(ms / 60_000);
   if (mins < 60) return `expires in ${mins}m`;
   const hours = Math.round(mins / 60);
   if (hours < 48) return `expires in ${hours}h`;
@@ -533,8 +533,12 @@ export class ScionPageProfileInbox extends LitElement {
         label="Approve pending secret"
         ?open=${item !== null}
         data-approve-confirm-dialog
-        @sl-request-close=${(): void => {
-          if (!busy) this.confirmApproval = null;
+        @sl-request-close=${(e: Event): void => {
+          if (busy) {
+            e.preventDefault();
+            return;
+          }
+          this.confirmApproval = null;
         }}
       >
         ${item

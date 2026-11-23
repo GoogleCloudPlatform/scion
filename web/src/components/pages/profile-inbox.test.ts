@@ -275,4 +275,104 @@ describe('ScionPageProfileInbox & ProfileNav Inbox section', () => {
     const badge = navOn.shadowRoot?.querySelector('[data-inbox-nav-badge]');
     expect(badge?.textContent?.trim()).toBe('4');
   });
+
+  it('rounds sub-minute expiry up to 1m and prevents closing confirm dialog while busy', async () => {
+    setFeatureFlag(INBOX_DASHBOARD_FLAG, true);
+    const preview = {
+      id: 'ps-202',
+      kind: 'pending_secret',
+      projectId: 'proj-1',
+      projectName: 'Alpha',
+      createdAt: '2026-11-23T17:00:00Z',
+      href: '/profile/secrets',
+      key: 'SHORT_LIVED_KEY',
+      agentSlug: 'deploy-bot',
+      injectionMode: 'as_needed',
+      replacesExisting: false,
+      allowProgeny: false,
+      expiresAt: new Date(Date.now() + 15_000).toISOString(),
+    };
+
+    let resolveApprove: ((res: Response) => void) | null = null;
+    const summaryWithOne = makeSummaryResponse({
+      state: 'ok',
+      count: 1,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/profile/secrets',
+      previews: [preview],
+    });
+    const summaryEmpty = makeSummaryResponse({
+      state: 'ok',
+      count: 0,
+      capped: false,
+      countsTowardTotal: true,
+      href: '/profile/secrets',
+      previews: [],
+    });
+
+    let approved = false;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.includes('/api/v1/users/me/inbox/summary')) {
+        return Promise.resolve(
+          new Response(JSON.stringify(approved ? summaryEmpty : summaryWithOne), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      if (url.endsWith('/api/v1/pending-secrets/ps-202/approve') && init?.method === 'POST') {
+        return new Promise<Response>((resolve) => {
+          resolveApprove = resolve;
+        });
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    const page = document.createElement('scion-page-profile-inbox') as ScionPageProfileInbox;
+    page.pageData = {
+      path: '/profile/inbox',
+      title: 'Inbox',
+      user: { id: 'user-1', email: 'u@example.com', name: 'User', role: 'member' },
+    };
+    document.body.appendChild(page);
+    await flush();
+    await page.updateComplete;
+
+    // 15 seconds remaining should render "expires in 1m", not "expires in 0m".
+    const row = page.shadowRoot?.querySelector('[data-approval-row="ps-202"]');
+    expect(row?.textContent).toContain('expires in 1m');
+    expect(row?.textContent).not.toContain('expires in 0m');
+
+    // Open confirm dialog -> shows "No" for allowProgeny=false.
+    page.shadowRoot?.querySelector<HTMLElement>('[data-approve-btn="ps-202"]')?.click();
+    await page.updateComplete;
+    expect(
+      page.shadowRoot?.querySelector('[data-confirm-allow-progeny]')?.textContent?.trim()
+    ).toBe('No');
+
+    // Start approval so dialog is busy; sl-request-close must be prevented.
+    page.shadowRoot?.querySelector<HTMLElement>('[data-confirm-approve-btn]')?.click();
+    await page.updateComplete;
+
+    const dialog = page.shadowRoot?.querySelector<HTMLElement>('[data-approve-confirm-dialog]');
+    expect(dialog).not.toBeNull();
+    const busyClose = new Event('sl-request-close', { cancelable: true });
+    dialog!.dispatchEvent(busyClose);
+    expect(busyClose.defaultPrevented).toBe(true);
+    expect(dialog!.hasAttribute('open')).toBe(true);
+
+    // Resolve the in-flight approval so the test cleans up cleanly.
+    approved = true;
+    resolveApprove!(
+      new Response(
+        JSON.stringify({ id: 'ps-202', key: 'SHORT_LIVED_KEY', scope: 'user', state: 'approved' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await flush();
+    await page.updateComplete;
+    expect(dialog!.hasAttribute('open')).toBe(false);
+  });
 });
