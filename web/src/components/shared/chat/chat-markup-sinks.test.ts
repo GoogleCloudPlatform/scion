@@ -28,7 +28,6 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { vi } from 'vitest';
-import '../../../utils/__fixtures__/sanitizer-node-name.js';
 
 interface SinkCall {
   sink: string;

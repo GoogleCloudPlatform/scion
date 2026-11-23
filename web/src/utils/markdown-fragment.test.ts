@@ -19,7 +19,6 @@
  * the same rules as the string renderer.
  */
 
-import './__fixtures__/sanitizer-node-name.js';
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
 const sanitizeCalls = vi.hoisted(() => [] as unknown[][]);

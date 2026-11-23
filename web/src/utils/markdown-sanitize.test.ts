@@ -20,13 +20,11 @@
  * marked shows raw HTML in markdown as text, so disallowed tags normally never reach
  * the sanitizer. Here marked is replaced by a pass-through, so each case goes
  * through the real renderFragment path (the real DOMPurify instance, its
- * configuration and the link hook) exactly as written. The nodeName fixture
- * is what lets DOMPurify work in the test DOM; markdown-sanitize-control
- * shows the same cases are NOT cleaned without it, so these results come
- * from the sanitizer and not from the test DOM.
+ * configuration and the link hook) exactly as written. Suite-wide DOMPurify
+ * sanitization in the test DOM is enabled by web/vitest.setup.ts and guarded
+ * by sanitizer-setup.test.ts.
  */
 
-import './__fixtures__/sanitizer-node-name.js';
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { DISALLOWED_CASES, disallowedLeft, roundTrip } from './__fixtures__/disallowed-markup.js';
 
