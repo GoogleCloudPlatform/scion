@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1140,44 +1141,56 @@ func TestRedirectProbeDeadline_ExceedsNetnsSetupTimeout(t *testing.T) {
 }
 
 func TestVerifyIPv6MetadataBlocked(t *testing.T) {
-	origHasIPv6, origAddrs, origTimeout, origDial := runNetnsHasIPv6, ipv6ProbeAddrs, ipv6ProbeTimeout, ipv6ProbeDial
+	origAddrs, origTimeout, origDial := ipv6ProbeAddrs, ipv6ProbeTimeout, ipv6ProbeDial
 	t.Cleanup(func() {
-		runNetnsHasIPv6, ipv6ProbeAddrs, ipv6ProbeTimeout, ipv6ProbeDial = origHasIPv6, origAddrs, origTimeout, origDial
+		ipv6ProbeAddrs, ipv6ProbeTimeout, ipv6ProbeDial = origAddrs, origTimeout, origDial
 	})
 	ipv6ProbeTimeout = 2 * time.Second
 
-	t.Run("skips when netns has no IPv6", func(t *testing.T) {
-		runNetnsHasIPv6 = func() bool { return false }
-		ipv6ProbeDial = func(context.Context, string, string) (net.Conn, error) {
-			t.Error("dial must not be called when IPv6 is disabled")
-			return nil, errors.New("unexpected dial")
-		}
-		if err := verifyIPv6MetadataBlocked(context.Background()); err != nil {
-			t.Fatalf("verifyIPv6MetadataBlocked() = %v, want nil", err)
-		}
-	})
-
-	t.Run("passes when both addresses are refused or unreachable", func(t *testing.T) {
-		runNetnsHasIPv6 = func() bool { return true }
+	t.Run("attempts dials and passes when IPv6 is unavailable (ENETUNREACH/EAFNOSUPPORT)", func(t *testing.T) {
 		var mu sync.Mutex
 		dialed := make(map[string]bool)
 		ipv6ProbeDial = func(_ context.Context, _ string, addr string) (net.Conn, error) {
 			mu.Lock()
 			dialed[addr] = true
 			mu.Unlock()
-			return nil, errors.New("connection refused")
+			if strings.Contains(addr, "fd20:ce::254") {
+				return nil, syscall.EAFNOSUPPORT
+			}
+			return nil, syscall.ENETUNREACH
 		}
 		if err := verifyIPv6MetadataBlocked(context.Background()); err != nil {
 			t.Fatalf("verifyIPv6MetadataBlocked() = %v, want nil", err)
 		}
 		for _, want := range []string{"[fd20:ce::254]:80", "[fd00:ec2::254]:80"} {
 			if !dialed[want] {
-				t.Errorf("expected dial attempt to %s, dialed=%v", want, dialed)
+				t.Errorf("expected dial attempt to %s even without IPv6, dialed=%v", want, dialed)
 			}
 		}
 	})
 
-	t.Run("fails closed when an endpoint accepts a TCP connection", func(t *testing.T) {
+	t.Run("passes when endpoints return refused, reset, or timeout", func(t *testing.T) {
+		for _, dialErr := range []error{syscall.ECONNREFUSED, syscall.ECONNRESET, context.DeadlineExceeded} {
+			var mu sync.Mutex
+			dialed := make(map[string]bool)
+			ipv6ProbeDial = func(_ context.Context, _ string, addr string) (net.Conn, error) {
+				mu.Lock()
+				dialed[addr] = true
+				mu.Unlock()
+				return nil, dialErr
+			}
+			if err := verifyIPv6MetadataBlocked(context.Background()); err != nil {
+				t.Fatalf("verifyIPv6MetadataBlocked() with %v = %v, want nil", dialErr, err)
+			}
+			for _, want := range []string{"[fd20:ce::254]:80", "[fd00:ec2::254]:80"} {
+				if !dialed[want] {
+					t.Errorf("expected dial attempt to %s, dialed=%v", want, dialed)
+				}
+			}
+		}
+	})
+
+	t.Run("fails closed when an endpoint accepts a TCP connection regardless of NetnsHasIPv6", func(t *testing.T) {
 		ln, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -1193,18 +1206,19 @@ func TestVerifyIPv6MetadataBlocked(t *testing.T) {
 			}
 		}()
 
-		runNetnsHasIPv6 = func() bool { return true }
 		ipv6ProbeAddrs = []string{ln.Addr().String(), "127.0.0.1:1"}
 		ipv6ProbeDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if addr == "127.0.0.1:1" {
-				return nil, errors.New("connection refused")
+				return nil, syscall.ECONNREFUSED
 			}
 			var d net.Dialer
 			return d.DialContext(ctx, network, addr)
 		}
+		// Even when NetnsHasIPv6() is false (as in IPv4-only containers),
+		// a reachable endpoint must still fail closed.
 		err = verifyIPv6MetadataBlocked(context.Background())
 		if !errors.Is(err, errMetadataProtectionUnavailable) {
-			t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable", err)
+			t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable (NetnsHasIPv6=%v)", err, metadata.NetnsHasIPv6())
 		}
 	})
 }

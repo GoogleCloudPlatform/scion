@@ -258,7 +258,6 @@ var (
 		var d net.Dialer
 		return d.DialContext(ctx, network, addr)
 	}
-	runNetnsHasIPv6      = metadata.NetnsHasIPv6
 	runVerifyIPv6Blocked = verifyIPv6MetadataBlocked
 )
 
@@ -340,13 +339,13 @@ func waitForRedirect(ctx context.Context, probePath, probeToken string) error {
 }
 
 // verifyIPv6MetadataBlocked performs a negative TCP connect probe against the
-// IPv6 cloud metadata endpoints when IPv6 is enabled in the network namespace.
-// Connection refusal, network/host unreachability, and timeout all pass; a
-// successful TCP connection fails closed with errMetadataProtectionUnavailable.
+// IPv6 cloud metadata endpoints unconditionally on both runtime and legacy
+// interception paths. When IPv6 is disabled in the network namespace, the dial
+// fails immediately (e.g., ENETUNREACH or EAFNOSUPPORT) and counts as a pass.
+// Connection refusal, reset, unreachability, unsupported address family, and
+// timeout all pass; only a successful TCP connection fails closed with
+// errMetadataProtectionUnavailable.
 func verifyIPv6MetadataBlocked(ctx context.Context) error {
-	if !runNetnsHasIPv6() {
-		return nil
-	}
 	var (
 		wg        sync.WaitGroup
 		mu        sync.Mutex
