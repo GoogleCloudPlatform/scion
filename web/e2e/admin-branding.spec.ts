@@ -65,6 +65,25 @@ test.describe('Admin Branding (/admin/branding)', () => {
       const accentInput = page.getByRole('textbox', { name: 'Accent Color', exact: true });
       await accentInput.fill('#0d9488');
 
+      // Verify scoped Light & Dark live preview and WCAG AA contrast badges update BEFORE saving,
+      // without mutating live Hub branding tokens on document.documentElement.
+      await expect(page.locator('[data-preview-pane="light"]')).toContainText('Acme Cloud');
+      await expect(page.locator('[data-preview-pane="dark"]')).toContainText('Acme Cloud');
+      await expect(page.locator('[data-preview-pane="light"]')).toContainText('Powered by Scion');
+      await expect(page.locator('[data-preview-contrast-summary="pass"]')).toContainText(
+        'WCAG AA Pass'
+      );
+      await expect(page.locator('[data-ramp-step]')).toHaveCount(11);
+      await expect(page.locator('[data-contrast-pair="light.primary:surface"]')).toContainText(
+        'AA Pass'
+      );
+      await expect(page.locator('[data-contrast-pair="dark.primary:surface"]')).toContainText(
+        'AA Pass'
+      );
+      expect(
+        await page.evaluate(() => document.getElementById('scion-branding-tokens'))
+      ).toBeNull();
+
       // Upload a small valid PNG logo into logo.light
       await page.locator('input[type="file"][data-slot="logo.light"]').setInputFiles({
         name: 'acme-logo.png',

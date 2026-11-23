@@ -96,6 +96,15 @@ import {
   type BrandingFormState,
   type RawBrandingConfig,
 } from './admin-branding-state.js';
+import {
+  SCALE_STEPS,
+  formatContrastRatio,
+  resolveBrandingPalette,
+  type ContrastPairBadge,
+  type RawPaletteConfig,
+  type ResolvedBrandingPalette,
+} from './admin-branding-contrast.js';
+import './admin-branding-preview.js';
 
 /** Primary value of an env-locked field whose environment value GET does not report. */
 export const ENV_VALUE_NOT_REPORTED = 'Environment value not reported';
@@ -150,6 +159,7 @@ export class ScionPageAdminBranding extends LitElement {
 
   @state() private draft: BrandingFormState = defaultBrandingFormState();
   @state() private baseline: BrandingFormState = defaultBrandingFormState();
+  @state() private rawPalette: RawPaletteConfig | null = null;
   @state() private hasPaletteOverrides = false;
   @state() private customFontMode = false;
 
@@ -582,6 +592,157 @@ export class ScionPageAdminBranding extends LitElement {
       flex: 1;
     }
 
+    /* Generated 11-step OKLCH primary swatch strip */
+    .ramp-container {
+      margin-top: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.375rem;
+    }
+
+    .ramp-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--scion-text-secondary, #475569);
+    }
+
+    .ramp-strip {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(0, 1fr));
+      gap: 0.25rem;
+    }
+
+    @media (max-width: 640px) {
+      .ramp-strip {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+      }
+    }
+
+    .ramp-swatch {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+
+    .ramp-swatch-chip {
+      width: 100%;
+      height: 1.75rem;
+      border-radius: var(--scion-radius-sm, 0.25rem);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--swatch-color, var(--scion-primary, #3b82f6));
+    }
+
+    .ramp-swatch-step {
+      font-size: 0.6875rem;
+      font-family: var(--scion-font-mono, monospace);
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    /* WCAG 2.1 AA live contrast badges */
+    .contrast-section {
+      margin-top: 1rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.875rem;
+    }
+
+    @media (max-width: 768px) {
+      .contrast-section {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .contrast-group {
+      padding: 0.75rem;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      background: var(--scion-bg, #f8fafc);
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .contrast-group-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--scion-text-secondary, #475569);
+    }
+
+    .contrast-badge-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.375rem;
+    }
+
+    .contrast-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.75rem;
+      color: var(--scion-text, #1e293b);
+      flex-wrap: wrap;
+    }
+
+    .contrast-pair-meta {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      min-width: 0;
+    }
+
+    .contrast-swatch-dot {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.25rem;
+      height: 1.25rem;
+      border-radius: var(--scion-radius-sm, 0.25rem);
+      border: 1px solid var(--scion-border, #e2e8f0);
+      background: var(--pair-bg, var(--scion-surface, #ffffff));
+      color: var(--pair-fg, var(--scion-text, #1e293b));
+      font-size: 0.625rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .contrast-badge-text {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .contrast-advisory {
+      margin-top: 1rem;
+      padding: 0.75rem 1rem;
+      border-radius: var(--scion-radius, 0.5rem);
+      border: 1px solid var(--scion-warning-border, #fcd34d);
+      background: var(--scion-warning-bg, #fffbeb);
+      color: var(--scion-warning-text, #92400e);
+      font-size: 0.8125rem;
+    }
+
+    .contrast-advisory-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .contrast-advisory ul {
+      margin: 0.375rem 0 0 1.25rem;
+      padding: 0;
+      font-size: 0.8125rem;
+    }
+
     /* Sticky save bar */
     .sticky-save-bar {
       position: sticky;
@@ -702,6 +863,7 @@ export class ScionPageAdminBranding extends LitElement {
       const loaded = brandingFromConfig(rawBranding);
       this.baseline = cloneBrandingFormState(loaded);
       this.draft = cloneBrandingFormState(loaded);
+      this.rawPalette = (rawBranding?.palette as RawPaletteConfig | undefined) ?? null;
       this.hasPaletteOverrides = hasAdvancedPaletteOverrides(rawBranding);
       this.customFontMode = !isCuratedOrBuiltinFont(loaded.font_sans);
 
@@ -1183,6 +1345,110 @@ export class ScionPageAdminBranding extends LitElement {
     `;
   }
 
+  private renderContrastPairRow(pair: ContrastPairBadge): TemplateResult {
+    const badgeVariant = !pair.enforced ? 'neutral' : pair.pass ? 'success' : 'danger';
+    const statusText = !pair.enforced ? 'Stock' : pair.pass ? 'AA Pass' : 'AA Fail';
+    const iconName = !pair.enforced
+      ? 'info-circle'
+      : pair.pass
+        ? 'check-circle'
+        : 'exclamation-triangle';
+    return html`
+      <div class="contrast-row" data-contrast-pair=${pair.id}>
+        <span class="contrast-pair-meta">
+          <span
+            class="contrast-swatch-dot"
+            style="--pair-fg: ${pair.fgHex}; --pair-bg: ${pair.bgHex}"
+            aria-hidden="true"
+            >Aa</span
+          >
+          <span>${pair.label}</span>
+        </span>
+        <sl-badge variant=${badgeVariant} pill data-contrast-status=${statusText.toLowerCase()}>
+          <span class="contrast-badge-text">
+            <sl-icon name=${iconName} aria-hidden="true"></sl-icon>
+            ${statusText} · ${formatContrastRatio(pair.ratio)}
+          </span>
+        </sl-badge>
+      </div>
+    `;
+  }
+
+  private renderAccentContrastPanel(resolved: ResolvedBrandingPalette): TemplateResult {
+    const primaryScale = resolved.scales.primary;
+    const failedChecks = resolved.checks.filter((c) => !c.pass);
+
+    return html`
+      <div class="ramp-container" data-primary-ramp>
+        <div class="ramp-header">
+          <span>
+            ${resolved.hasCustomPalette
+              ? 'Generated Primary Scale (OKLCH 50–950)'
+              : 'Stock Primary Scale (50–950)'}
+          </span>
+          <span>
+            Light primary: <code>${resolved.light.primary}</code> · Dark primary:
+            <code>${resolved.dark.primary}</code>
+          </span>
+        </div>
+        <div class="ramp-strip">
+          ${SCALE_STEPS.map((step) => {
+            const hexVal = primaryScale[step];
+            return html`
+              <div class="ramp-swatch" data-ramp-step=${step} title="primary-${step}: ${hexVal}">
+                <span class="ramp-swatch-chip" style="--swatch-color: ${hexVal}"></span>
+                <span class="ramp-swatch-step">${step}</span>
+                <span class="sr-only">${hexVal}</span>
+              </div>
+            `;
+          })}
+        </div>
+      </div>
+
+      <div class="contrast-section" data-accent-contrast-badges>
+        <div class="contrast-group" data-contrast-group="light">
+          <span class="contrast-group-title">
+            <sl-icon name="sun" aria-hidden="true"></sl-icon>
+            Light Mode Contrast (min 4.50:1)
+          </span>
+          <div class="contrast-badge-list">
+            ${resolved.keyPairs.light.map((pair) => this.renderContrastPairRow(pair))}
+          </div>
+        </div>
+        <div class="contrast-group" data-contrast-group="dark">
+          <span class="contrast-group-title">
+            <sl-icon name="moon" aria-hidden="true"></sl-icon>
+            Dark Mode Contrast (min 4.50:1)
+          </span>
+          <div class="contrast-badge-list">
+            ${resolved.keyPairs.dark.map((pair) => this.renderContrastPairRow(pair))}
+          </div>
+        </div>
+      </div>
+
+      ${resolved.hasCustomPalette && failedChecks.length > 0
+        ? html`
+            <div class="contrast-advisory" data-contrast-advisory>
+              <div class="contrast-advisory-header">
+                <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+                <span>
+                  <strong>WCAG 2.1 AA contrast warning (advisory):</strong>
+                  ${failedChecks.length} ${failedChecks.length === 1 ? 'pair is' : 'pairs are'}
+                  below the minimum contrast threshold. Server validation enforces WCAG 2.1 AA on
+                  save.
+                </span>
+              </div>
+              <ul>
+                ${failedChecks
+                  .slice(0, 5)
+                  .map((c) => html`<li><code>${c.path}</code>: ${c.message}</li>`)}
+              </ul>
+            </div>
+          `
+        : nothing}
+    `;
+  }
+
   // --- Main Render ---
 
   override render() {
@@ -1202,6 +1468,11 @@ export class ScionPageAdminBranding extends LitElement {
     const budgetPct = Math.min(100, Math.round((totalBytes / MAX_BRAND_TOTAL_BYTES) * 100));
     const budgetClass =
       totalBytes > MAX_BRAND_TOTAL_BYTES ? 'over-limit' : budgetPct >= 80 ? 'near-limit' : '';
+
+    const resolvedPalette = resolveBrandingPalette({
+      accentColor: this.draft.accent_color,
+      palette: this.rawPalette,
+    });
 
     const fontSelectValue = this.customFontMode
       ? CUSTOM_FONT_SENTINEL
@@ -1287,6 +1558,12 @@ export class ScionPageAdminBranding extends LitElement {
       ${this.successMessage
         ? html`<div class="status-message success" role="status">${this.successMessage}</div>`
         : nothing}
+
+      <!-- Scoped Light & Dark Live Preview -->
+      <scion-branding-preview
+        .draft=${this.draft}
+        .resolved=${resolvedPalette}
+      ></scion-branding-preview>
 
       <!-- Group 1: Identity & Attribution -->
       <section class="section" aria-labelledby="branding-identity-heading">
@@ -1642,6 +1919,7 @@ export class ScionPageAdminBranding extends LitElement {
           ${renderFieldErrorMessages(this.fieldErrors('accent_color'), 'accent_color')}
         </div>
 
+        ${this.renderAccentContrastPanel(resolvedPalette)}
         ${this.hasPaletteOverrides
           ? html`
               <sl-alert class="palette-notice" variant="primary" open data-palette-notice>

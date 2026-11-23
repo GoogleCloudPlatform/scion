@@ -231,6 +231,10 @@ describe('admin-branding-state', () => {
       const info = parseDataUriInfo(uri);
       expect(info).toEqual({ mediaType: 'image/png', decodedBytes: 1024 });
       expect(parseDataUriInfo('https://cdn.example.com/logo.png')).toBeNull();
+
+      // Handles whitespace in base64 payload including trailing newline
+      const withWs = `data:image/png;base64,AAAA\nBB==\n`;
+      expect(parseDataUriInfo(withWs)).toEqual({ mediaType: 'image/png', decodedBytes: 4 });
     });
 
     it('sums decoded data: bytes across logo and icon slots only', () => {
