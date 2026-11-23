@@ -267,34 +267,55 @@ func TestTemplatesSyncAndPush_ScopeValidationAndConflicts(t *testing.T) {
 
 // TestTemplatesSyncAll_SourceVsTargetScope covers the residual from
 // ptone/scion#2903: 'templates sync --all --scope global' (without --global)
-// must read project-local templates and publish them to Hub global scope,
-// whereas '--global templates sync --all' reads global templates.
+// reads project-local templates inside a project and publishes them to Hub
+// global scope, falls back to global templates when run outside a project, and
+// '--global templates sync --all' always reads global templates.
 func TestTemplatesSyncAll_SourceVsTargetScope(t *testing.T) {
 	cases := []struct {
 		name            string
 		args            []string
+		inProject       bool
 		wantName        string
 		wantScope       string
 		wantProjectID   string
 		wantProjectHits bool
 	}{
 		{
-			name:          "sync --all --scope global reads project-local templates",
+			name:          "sync --all --scope global inside project reads project-local templates",
 			args:          []string{"templates", "sync", "--all", "--scope", "global"},
+			inProject:     true,
 			wantName:      "proj-only",
 			wantScope:     "global",
 			wantProjectID: "",
 		},
 		{
-			name:          "push --all --scope global reads project-local templates",
+			name:          "push --all --scope global inside project reads project-local templates",
 			args:          []string{"templates", "push", "--all", "--scope", "global"},
+			inProject:     true,
 			wantName:      "proj-only",
 			wantScope:     "global",
 			wantProjectID: "",
 		},
 		{
-			name:          "--global sync --all reads global templates",
+			name:          "sync --all --scope global outside project reads global templates",
+			args:          []string{"templates", "sync", "--all", "--scope", "global"},
+			inProject:     false,
+			wantName:      "glob-only",
+			wantScope:     "global",
+			wantProjectID: "",
+		},
+		{
+			name:          "push --all --scope global outside project reads global templates",
+			args:          []string{"templates", "push", "--all", "--scope", "global"},
+			inProject:     false,
+			wantName:      "glob-only",
+			wantScope:     "global",
+			wantProjectID: "",
+		},
+		{
+			name:          "--global sync --all inside project reads global templates",
 			args:          []string{"--global", "templates", "sync", "--all"},
+			inProject:     true,
 			wantName:      "glob-only",
 			wantScope:     "global",
 			wantProjectID: "",
@@ -302,6 +323,7 @@ func TestTemplatesSyncAll_SourceVsTargetScope(t *testing.T) {
 		{
 			name:            "default sync --all reads project-local templates to project scope",
 			args:            []string{"templates", "sync", "--all"},
+			inProject:       true,
 			wantName:        "proj-only",
 			wantScope:       "project",
 			wantProjectID:   tuProjectID,
@@ -313,12 +335,14 @@ func TestTemplatesSyncAll_SourceVsTargetScope(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			hub, srv := newUserScopeHub(t, nil)
 			cwd := tuSetup(t)
-			writeTUProjectSettings(t, cwd, tuProjectID)
 			tuHubSettings(t, srv.URL)
 			home, err := os.UserHomeDir()
 			require.NoError(t, err)
 
-			createProjectTestTemplate(t, cwd, "proj-only")
+			if tc.inProject {
+				writeTUProjectSettings(t, cwd, tuProjectID)
+				createProjectTestTemplate(t, cwd, "proj-only")
+			}
 			createTestTemplate(t, home, "glob-only")
 
 			require.NoError(t, runTemplatesRoot(t, tc.args...))

@@ -202,7 +202,7 @@ func TestSyncLocalHarnessConfigToHub_ScopeSelection(t *testing.T) {
 			rec := &hcScopeRecorder{}
 			hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-			require.NoError(t, syncLocalHarnessConfigToHub(hubCtx, "codex", dir, "codex"))
+			require.NoError(t, syncLocalHarnessConfigToHubScope(hubCtx, "codex", dir, "codex", ""))
 
 			require.Equal(t, []string{tt.wantScope + "|" + tt.wantScopeID}, rec.listScopes)
 			require.Len(t, rec.createReqs, 1)
@@ -221,7 +221,7 @@ func TestSyncLocalHarnessConfigToHub_UpdatesExistingWithoutForce(t *testing.T) {
 	rec.existingIDs = map[string]string{rec.key("project", "proj-1913", "codex"): "hc-existing"}
 	hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-	require.NoError(t, syncLocalHarnessConfigToHub(hubCtx, "codex", dir, "codex"))
+	require.NoError(t, syncLocalHarnessConfigToHubScope(hubCtx, "codex", dir, "codex", ""))
 	assert.Empty(t, rec.createReqs)
 	assert.Equal(t, 1, rec.finalized)
 }

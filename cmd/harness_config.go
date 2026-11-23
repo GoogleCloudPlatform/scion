@@ -604,12 +604,6 @@ var harnessConfigDeleteCmd = &cobra.Command{
 	},
 }
 
-// syncLocalHarnessConfigToHub implements 'harness-config sync/push' using the
-// default scope derived from root --global.
-func syncLocalHarnessConfigToHub(hubCtx *HubContext, name, localPath, harnessType string) error {
-	return syncLocalHarnessConfigToHubScope(hubCtx, name, localPath, harnessType, templateScopeFromGlobalFlag())
-}
-
 // syncLocalHarnessConfigToHubScope implements 'harness-config sync/push' for an
 // explicit target Hub scope ("project" or "global", defaulting via --global
 // when empty) and creates or updates the named config there.
