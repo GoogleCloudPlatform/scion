@@ -104,7 +104,7 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	principalKind := identity.Type()
+	principalKind := normalizeFeedPrincipalKind(identity.Type())
 	principalID := identity.ID()
 
 	// Get all conversations for the caller.

@@ -951,4 +951,63 @@ func TestConversationWatch_DevUserDMAuthzParity(t *testing.T) {
 	watchAgent := callAsCollidingAgent("/api/v1/conversations/" + dmDev.ID + "/watch?wait=0")
 	assert.Equal(t, http.StatusForbidden, msgAgent.Code, msgAgent.Body.String())
 	assert.Equal(t, http.StatusForbidden, watchAgent.Code, watchAgent.Body.String())
+
+	// Add participant rows matching what DM creation writes (principal_kind="user" / "agent")
+	// to test list and resolve consistency (R1).
+	now := time.Now().UTC()
+	for _, p := range []*store.ConversationParticipant{
+		{ID: uuid.NewString(), ConversationID: dmDev.ID, PrincipalKind: "user", PrincipalID: DevUserID, Role: "member", JoinedAt: now},
+		{ID: uuid.NewString(), ConversationID: dmDev.ID, PrincipalKind: "agent", PrincipalID: agentA.ID, Role: "member", JoinedAt: now},
+		{ID: uuid.NewString(), ConversationID: dmOther.ID, PrincipalKind: "user", PrincipalID: otherUser.ID, Role: "member", JoinedAt: now},
+		{ID: uuid.NewString(), ConversationID: dmOther.ID, PrincipalKind: "agent", PrincipalID: agentA.ID, Role: "member", JoinedAt: now},
+	} {
+		require.NoError(t, s.AddParticipant(ctx, p))
+	}
+
+	// 4. List conversations: DevUser sees own DM (with DMPeer labeled) and NOT dmOther.
+	listDev := callAsDev("/api/v1/conversations")
+	require.Equal(t, http.StatusOK, listDev.Code, listDev.Body.String())
+	var listDevBody struct {
+		Conversations []conversationResponse `json:"conversations"`
+	}
+	require.NoError(t, json.Unmarshal(listDev.Body.Bytes(), &listDevBody))
+	require.Len(t, listDevBody.Conversations, 1)
+	assert.Equal(t, dmDev.ID, listDevBody.Conversations[0].ID)
+	require.NotNil(t, listDevBody.Conversations[0].DMPeer)
+	assert.Equal(t, "agent", listDevBody.Conversations[0].DMPeer.Kind)
+	assert.Equal(t, agentA.ID, listDevBody.Conversations[0].DMPeer.ID)
+
+	// 5. List conversations: colliding-UUID agent does NOT see dmDev.
+	listAgent := callAsCollidingAgent("/api/v1/conversations")
+	require.Equal(t, http.StatusOK, listAgent.Code, listAgent.Body.String())
+	var listAgentBody struct {
+		Conversations []conversationResponse `json:"conversations"`
+	}
+	require.NoError(t, json.Unmarshal(listAgent.Body.Bytes(), &listAgentBody))
+	assert.Empty(t, listAgentBody.Conversations)
+
+	// 6. Resolve conv:<uuid>: DevUser resolves own DM (200), gets 404 on dmOther.
+	resDevOwn := callAsDev("/api/v1/conversations/resolve?reference=conv:" + dmDev.ID)
+	require.Equal(t, http.StatusOK, resDevOwn.Code, resDevOwn.Body.String())
+	var resDevOwnBody conversationResolveResponse
+	require.NoError(t, json.Unmarshal(resDevOwn.Body.Bytes(), &resDevOwnBody))
+	assert.True(t, resDevOwnBody.Exists)
+	require.NotNil(t, resDevOwnBody.Conversation)
+	assert.Equal(t, dmDev.ID, resDevOwnBody.Conversation.ID)
+
+	resDevOther := callAsDev("/api/v1/conversations/resolve?reference=conv:" + dmOther.ID)
+	assert.Equal(t, http.StatusNotFound, resDevOther.Code, resDevOther.Body.String())
+
+	// 7. Resolve @agent: DevUser resolves @agentA to dmDev.
+	resDevAgent := callAsDev("/api/v1/conversations/resolve?reference=@" + agentA.Slug + "&project_id=" + projID)
+	require.Equal(t, http.StatusOK, resDevAgent.Code, resDevAgent.Body.String())
+	var resDevAgentBody conversationResolveResponse
+	require.NoError(t, json.Unmarshal(resDevAgent.Body.Bytes(), &resDevAgentBody))
+	assert.True(t, resDevAgentBody.Exists)
+	require.NotNil(t, resDevAgentBody.Conversation)
+	assert.Equal(t, dmDev.ID, resDevAgentBody.Conversation.ID)
+
+	// 8. Resolve conv:<uuid>: colliding-UUID agent gets 404 on dmDev.
+	resAgentOwn := callAsCollidingAgent("/api/v1/conversations/resolve?reference=conv:" + dmDev.ID)
+	assert.Equal(t, http.StatusNotFound, resAgentOwn.Code, resAgentOwn.Body.String())
 }
