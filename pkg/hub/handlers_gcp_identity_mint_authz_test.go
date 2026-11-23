@@ -31,6 +31,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -472,21 +473,31 @@ func (f *gcpMintFailingStore) GetGCPServiceAccount(ctx context.Context, id strin
 	return f.Store.GetGCPServiceAccount(ctx, id)
 }
 
-type failingIDTokenGenerator struct {
+type recordingIDTokenGenerator struct {
 	mockGCPTokenGenerator
-	idErr error
+	idErr        error
+	lastAudience string
 }
 
-func (g *failingIDTokenGenerator) GenerateIDToken(_ context.Context, _ string, _ string) (*GCPIDToken, error) {
-	return nil, g.idErr
+func (g *recordingIDTokenGenerator) GenerateIDToken(_ context.Context, _ string, audience string) (*GCPIDToken, error) {
+	g.lastAudience = audience
+	if g.idErr != nil {
+		return nil, g.idErr
+	}
+	return &GCPIDToken{Token: "test-id-token"}, nil
 }
 
 // TestHandleAgentGCPIdentityToken_AuditRecordsAudience verifies that issuing
 // (or failing to issue) a GCP OIDC identity credential records the requested
-// audience in the emitted GCP token audit event without logging any token
-// material, and that arbitrary audiences continue to be served.
+// audience (capped at maxLoggedAudienceLen) in the emitted GCP token audit
+// event without logging any token material, and that arbitrary audiences
+// continue to be served in full.
 func TestHandleAgentGCPIdentityToken_AuditRecordsAudience(t *testing.T) {
 	f := newGCPMintFixture(t, "id-audit-audience")
+	gen := &recordingIDTokenGenerator{
+		mockGCPTokenGenerator: mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"},
+	}
+	f.Server.SetGCPTokenGenerator(gen)
 
 	for _, audience := range []string{
 		"https://service-a.example.com/api",
@@ -499,6 +510,7 @@ func TestHandleAgentGCPIdentityToken_AuditRecordsAudience(t *testing.T) {
 			rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/gcp-identity-token",
 				map[string]string{"audience": audience}, f.Token)
 			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			require.Equal(t, audience, gen.lastAudience)
 
 			auditRec := auditRecordWithMsg(t, buf, "GCP token audit event")
 			require.NotNil(t, auditRec, "expected GCP token audit event to be emitted")
@@ -513,11 +525,25 @@ func TestHandleAgentGCPIdentityToken_AuditRecordsAudience(t *testing.T) {
 		})
 	}
 
+	overlong := "https://overlong.example.com/" + strings.Repeat("a", maxLoggedAudienceLen+100)
+
+	t.Run("success/overlong-truncated", func(t *testing.T) {
+		buf := captureAuditLogs(t)
+		f.Server.auditLogger = NewLogAuditLogger("[Test]", false)
+
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/gcp-identity-token",
+			map[string]string{"audience": overlong}, f.Token)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		require.Equal(t, overlong, gen.lastAudience, "full audience must still be passed to GenerateIDToken")
+
+		auditRec := auditRecordWithMsg(t, buf, "GCP token audit event")
+		require.NotNil(t, auditRec, "expected GCP token audit event to be emitted")
+		require.Equal(t, overlong[:maxLoggedAudienceLen], auditRec["audience"])
+		require.NotContains(t, buf.String(), "test-id-token", "audit log must not contain token material")
+	})
+
 	t.Run("failure", func(t *testing.T) {
-		f.Server.SetGCPTokenGenerator(&failingIDTokenGenerator{
-			mockGCPTokenGenerator: mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"},
-			idErr:                 errors.New("iam credentials unavailable"),
-		})
+		gen.idErr = errors.New("iam credentials unavailable")
 		buf := captureAuditLogs(t)
 		f.Server.auditLogger = NewLogAuditLogger("[Test]", false)
 		const audience = "https://failing.example.com"
@@ -532,5 +558,21 @@ func TestHandleAgentGCPIdentityToken_AuditRecordsAudience(t *testing.T) {
 		require.Equal(t, string(GCPTokenEventIdentityToken), auditRec["event_type"])
 		require.Equal(t, false, auditRec["success"])
 		require.Equal(t, audience, auditRec["audience"])
+	})
+
+	t.Run("failure/overlong-truncated", func(t *testing.T) {
+		gen.idErr = errors.New("iam credentials unavailable")
+		buf := captureAuditLogs(t)
+		f.Server.auditLogger = NewLogAuditLogger("[Test]", false)
+
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/gcp-identity-token",
+			map[string]string{"audience": overlong}, f.Token)
+		require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+		require.Equal(t, overlong, gen.lastAudience, "full audience must still be passed to GenerateIDToken")
+
+		auditRec := auditRecordWithMsg(t, buf, "GCP token audit event")
+		require.NotNil(t, auditRec, "expected GCP token audit event to be emitted on failure")
+		require.Equal(t, "WARN", auditRec["level"])
+		require.Equal(t, overlong[:maxLoggedAudienceLen], auditRec["audience"])
 	})
 }

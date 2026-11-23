@@ -1687,7 +1687,7 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 			s.gcpTokenMetrics.RecordIDTokenRequest(false, time.Since(start))
 		}
 		LogGCPIdentityTokenGeneration(r.Context(), s.auditLogger,
-			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, req.Audience, false, err.Error())
+			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, truncateLoggedAudience(req.Audience), false, err.Error())
 		writeError(w, http.StatusBadGateway, "gcp_token_failed",
 			"identity token generation failed: "+err.Error(), nil)
 		return
@@ -1697,7 +1697,7 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		s.gcpTokenMetrics.RecordIDTokenRequest(true, time.Since(start))
 	}
 	LogGCPIdentityTokenGeneration(r.Context(), s.auditLogger,
-		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, req.Audience, true, "")
+		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, truncateLoggedAudience(req.Audience), true, "")
 	writeJSON(w, http.StatusOK, token)
 }
 
@@ -1717,6 +1717,16 @@ const (
 	maxLoggedAudienceLen   = 512
 )
 
+// truncateLoggedAudience bounds an audience string before writing it to
+// warning or audit logs so oversized caller-supplied audiences cannot bloat
+// log records. The full audience is still passed to GCP.
+func truncateLoggedAudience(audience string) string {
+	if len(audience) > maxLoggedAudienceLen {
+		return audience[:maxLoggedAudienceLen]
+	}
+	return audience
+}
+
 // extractRateLimitedAudience performs a strictly bounded best-effort read of
 // the audience field from a rate-limited /gcp-identity-token request body so
 // the 429 warning log can attribute the target audience.
@@ -1732,10 +1742,7 @@ func extractRateLimitedAudience(r *http.Request) string {
 	if err := json.Unmarshal(data, &req); err != nil {
 		return ""
 	}
-	if len(req.Audience) > maxLoggedAudienceLen {
-		return req.Audience[:maxLoggedAudienceLen]
-	}
-	return req.Audience
+	return truncateLoggedAudience(req.Audience)
 }
 
 // mintCreateErrorMessage renders the error body for a failed
