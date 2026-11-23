@@ -1057,8 +1057,6 @@ func (s *Server) mintGitHubAppTokenInternal(
 	s.githubAssociationRefusalLog.clear(project.ID)
 
 	var perms githubapp.TokenPermissions
-	var usedDefaults bool
-	var appPermissions map[string]string
 	if requested != nil {
 		var reqAppPerms map[string]string
 		if !hasUsableStoredGitHubPermissions(project.GitHubPermissions) {
@@ -1104,7 +1102,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 			}
 		}
 		var ok bool
-		perms, usedDefaults, ok = githubTokenPermissionsForGrant(project.GitHubPermissions, grant, id.Permissions)
+		perms, _, ok = githubTokenPermissionsForGrant(project.GitHubPermissions, grant, id.Permissions)
 		if !ok {
 			const msg = "GitHub App does not have any of the default permissions required for this project. Update the GitHub App's permissions or configure project token permissions."
 			slog.WarnContext(ctx, "GitHub App token refused: default permissions intersection with app grant is empty",
@@ -1116,7 +1114,6 @@ func (s *Server) mintGitHubAppTokenInternal(
 				Message:   msg,
 			}
 		}
-		appPermissions = id.Permissions
 	}
 
 	installationID := *project.GitHubInstallationID
@@ -1204,34 +1201,15 @@ func (s *Server) mintGitHubAppTokenInternal(
 		s.mu.Unlock()
 	}
 
-	// Success — update project status. If default permissions were narrowed
-	// because the App lacks part of DefaultTokenPermissions, mark the project
-	// degraded rather than silently dropping permissions.
+	// Success — update project status. When no per-project permissions are
+	// stored, minting already intersected defaults with the App's grant (and
+	// failed closed above if the intersection was empty), so a successful
+	// mint is healthy.
 	now := timeNow()
-	if usedDefaults {
-		defaults := store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions())
-		if missingPerms := comparePermissions(&defaults, appPermissions); len(missingPerms) > 0 {
-			project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-				State:         store.GitHubAppStateDegraded,
-				ErrorCode:     githubapp.ErrCodePermissionDenied,
-				ErrorMessage:  formatMissingPermissionsMessage(missingPerms),
-				LastTokenMint: &now,
-				LastChecked:   now,
-				LastError:     &now,
-			}
-		} else {
-			project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-				State:         store.GitHubAppStateOK,
-				LastTokenMint: &now,
-				LastChecked:   now,
-			}
-		}
-	} else {
-		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-			State:         store.GitHubAppStateOK,
-			LastTokenMint: &now,
-			LastChecked:   now,
-		}
+	project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+		State:         store.GitHubAppStateOK,
+		LastTokenMint: &now,
+		LastChecked:   now,
 	}
 	if err := s.store.UpdateProjectGitHubAppStatus(ctx, project.ID, project.GitHubAppStatus); err != nil {
 		slog.WarnContext(ctx, "Failed to update project status after successful token mint", "error", err)

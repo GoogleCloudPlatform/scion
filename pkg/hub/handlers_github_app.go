@@ -844,9 +844,14 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 	switch r.Method {
 	case http.MethodGet:
 		perms := project.GitHubPermissions
-		if perms == nil || *perms == (store.GitHubTokenPermissions{}) {
-			// Return the same defaults token minting falls back to.
-			defaults := store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions())
+		if !hasUsableStoredGitHubPermissions(perms) {
+			// Return the same defaults token minting falls back to, capped at
+			// the App's granted permissions when App identity is available.
+			effective := githubapp.DefaultTokenPermissions()
+			if id, ok := s.GitHubAppIdentity(r.Context()); ok && id != nil {
+				effective = githubapp.IntersectTokenPermissions(effective, id.Permissions)
+			}
+			defaults := store.GitHubTokenPermissions(effective)
 			perms = &defaults
 		}
 		writeJSON(w, http.StatusOK, perms)
@@ -996,21 +1001,24 @@ func (s *Server) syncAppPermissions(ctx context.Context) (map[string]string, []m
 	// Page through all projects and check their requested permissions against the app's permissions
 	var affectedProjects []map[string]interface{}
 	now := timeNow()
-	defaults := store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions())
+	defaults := githubapp.DefaultTokenPermissions()
+	defaultsStore := store.GitHubTokenPermissions(defaults)
+	defaultIntersectionEmpty := githubapp.IntersectTokenPermissions(defaults, appPermissions) == (githubapp.TokenPermissions{})
 
 	if err := s.forEachGitHubAppProject(ctx, func(project *store.Project) {
 		if project.GitHubInstallationID == nil {
 			return
 		}
 
-		effectivePerms := project.GitHubPermissions
-		if !hasUsableStoredGitHubPermissions(effectivePerms) {
-			effectivePerms = &defaults
+		var missingPerms []string
+		if hasUsableStoredGitHubPermissions(project.GitHubPermissions) {
+			missingPerms = comparePermissions(project.GitHubPermissions, appPermissions)
+		} else if defaultIntersectionEmpty {
+			// No stored permissions: minting intersects defaults with the App's
+			// grant, so a non-empty intersection is healthy. Only mark degraded
+			// when the App grants none of the defaults and minting fails closed.
+			missingPerms = comparePermissions(&defaultsStore, appPermissions)
 		}
-
-		// Compare each project's effective requested permissions (defaults when
-		// no stored permissions are set) against the app's granted permissions.
-		missingPerms := comparePermissions(effectivePerms, appPermissions)
 		if len(missingPerms) == 0 {
 			return
 		}
