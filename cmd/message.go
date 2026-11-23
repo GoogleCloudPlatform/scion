@@ -2186,7 +2186,7 @@ func init() {
 	messageCmd.Flags().StringArrayVar(&msgSecretRequests, "secret-request", nil, "Request an agent-scoped secret key from a user or conversation (repeatable; agents only; needs the hub.agent_secrets experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgSecretDescription, "secret-description", "", "With a single --secret-request: description explaining what the secret is for")
 	messageCmd.Flags().StringVar(&msgSecretRequestFile, "secret-request-file", "", "Read secret request entries (JSON array of {key, description, type, target}) from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions/--decisions-file or --secret-request/--secret-request-file: replace pending items whose keys already exist (a new version each); without it, reusing a pending key is refused")
+	messageCmd.Flags().BoolVar(&msgDecisionsUpdate, "update", false, "With --decisions/--decisions-file or --secret-request/--secret-request-file: replace items whose keys already exist (a new version each); without it, reusing an id or pending key is refused. To revise an unanswered set on one card, resend all still-pending keys of that set. To retire without a replacement, use 'scion decisions withdraw' or 'scion secret request withdraw'")
 
 	// legacy choices fallback: remove in ptone/scion#8249
 	messageCmd.Flags().StringVar(&msgLegacyChoices, "choices", "", "Deprecated alias of --decisions")
