@@ -129,22 +129,16 @@ func TestBuildCommonRunArgs_AgentCapabilities(t *testing.T) {
 // AppleContainerRuntime across metadata modes and network modes.
 func TestRuntimeAdapters_AgentCapDropNetRaw(t *testing.T) {
 	dir := t.TempDir()
-	mock := filepath.Join(dir, "mock-cli")
-	argvLog := filepath.Join(dir, "argv")
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"run\" ]; then printf '%%s\\n' \"$@\" > %q; echo %s; fi\n", argvLog, mockPodmanID)
-	if err := os.WriteFile(mock, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	adapters := []struct {
 		name        string
-		rt          Runtime
+		newRT       func(cmd string) Runtime
 		wantDropRaw bool
 	}{
-		{name: "docker", rt: &DockerRuntime{Command: mock}, wantDropRaw: true},
-		{name: "podman-rootful", rt: &PodmanRuntime{Command: mock, Rootless: false}, wantDropRaw: true},
-		{name: "podman-rootless", rt: &PodmanRuntime{Command: mock, Rootless: true}, wantDropRaw: true},
-		{name: "apple", rt: &AppleContainerRuntime{Command: mock}, wantDropRaw: false},
+		{name: "docker", newRT: func(cmd string) Runtime { return &DockerRuntime{Command: cmd} }, wantDropRaw: true},
+		{name: "podman-rootful", newRT: func(cmd string) Runtime { return &PodmanRuntime{Command: cmd, Rootless: false} }, wantDropRaw: true},
+		{name: "podman-rootless", newRT: func(cmd string) Runtime { return &PodmanRuntime{Command: cmd, Rootless: true} }, wantDropRaw: true},
+		{name: "apple", newRT: func(cmd string) Runtime { return &AppleContainerRuntime{Command: cmd} }, wantDropRaw: false},
 	}
 
 	modes := []struct {
@@ -176,23 +170,15 @@ func TestRuntimeAdapters_AgentCapDropNetRaw(t *testing.T) {
 				if tc.metaMode != "" {
 					cfg.Env = []string{"SCION_METADATA_MODE=" + tc.metaMode}
 				}
-				// Use a mock that ignores netns-setup sub-invocations after agent run.
-				// For interception=true, the first "run" is the agent container; record only the first.
+				// For interception=true, the first "run" is the agent container and
+				// subsequent "run" invocations are netns-setup; record only the first.
 				firstArgvLog := filepath.Join(dir, fmt.Sprintf("argv-%s-%s", ad.name, strings.ReplaceAll(tc.name, "/", "-")))
 				firstMock := filepath.Join(dir, fmt.Sprintf("mock-%s-%s", ad.name, strings.ReplaceAll(tc.name, "/", "-")))
 				firstScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"run\" ] && [ ! -f %q ]; then printf '%%s\\n' \"$@\" > %q; fi\nif [ \"$1\" = \"run\" ]; then echo %s; fi\n", firstArgvLog, firstArgvLog, mockPodmanID)
 				if err := os.WriteFile(firstMock, []byte(firstScript), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				var rt Runtime
-				switch a := ad.rt.(type) {
-				case *DockerRuntime:
-					rt = &DockerRuntime{Command: firstMock}
-				case *PodmanRuntime:
-					rt = &PodmanRuntime{Command: firstMock, Rootless: a.Rootless}
-				case *AppleContainerRuntime:
-					rt = &AppleContainerRuntime{Command: firstMock}
-				}
+				rt := ad.newRT(firstMock)
 
 				if _, err := rt.Run(context.Background(), cfg); err != nil {
 					t.Fatalf("Run: %v", err)

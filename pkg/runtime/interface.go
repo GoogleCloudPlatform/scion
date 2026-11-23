@@ -135,11 +135,11 @@ type RunConfig struct {
 	// RuntimeName is set by the calling runtime adapter (docker/podman/apple)
 	// before invoking buildCommonRunArgs, e.g. via runtime.Name(). It gates
 	// runtime-specific choices in buildCommonRunArgs that cannot yet be
-	// applied uniformly across adapters, such as Docker/Podman capability
-	// drops and the form and condition of the shared workspace .scion/agents
-	// mask for Apple ("container"). Docker, Podman and Apple set it. Code
-	// gating on this field must fail closed for any value it does not
-	// explicitly recognize.
+	// applied uniformly across adapters, such as the --cap-drop NET_RAW drop
+	// and the form and condition of the shared workspace .scion/agents mask
+	// for Apple ("container"). Because the NET_RAW drop applies only when
+	// RuntimeName is "docker" or "podman", every adapter that calls
+	// buildCommonRunArgs must set it.
 	RuntimeName string
 
 	// WorkspaceBackendName is the name of the backend chosen by the workspace
