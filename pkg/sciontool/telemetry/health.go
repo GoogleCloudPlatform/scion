@@ -581,7 +581,11 @@ func (p *Pipeline) startHealth(ctx context.Context, gcp *GCPExporter, handles an
 		// No outbox or no drainer (analytics disabled): resolve the hub
 		// ID the same way the drainer does, cached in memory (also this
 		// process's own resolution: the first success is kept).
-		h.hubID = cachedHubID(NewHealthzHubIDResolver(analyticsHubEndpoint(), nil))
+		resolver := p.analytics.resolver
+		if resolver == nil {
+			resolver = NewHealthzHubIDResolver(analyticsHubEndpoint(), nil)
+		}
+		h.hubID = cachedHubID(resolver)
 	}
 	if h.hubIDOverride != nil {
 		h.hubID = h.hubIDOverride

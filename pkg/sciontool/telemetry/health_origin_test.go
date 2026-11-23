@@ -587,3 +587,53 @@ func TestHealthOriginOutboxWithNilDrainerUsesCachedMode(t *testing.T) {
 			ev.HubID, ev.OutboxPinnedHubID, ev.OutboxRelocated, ev.OutboxHubMismatchTotal, ev.OutboxRelocatedRefusedTotal)
 	}
 }
+
+// When SetHubIDResolver is configured on the Pipeline, cached health mode
+// (no drainer) uses that resolver instead of falling back to /healthz.
+func TestHealthOriginConfiguredResolverUsedInCachedMode(t *testing.T) {
+	setAnalyticsEnv(t, "claude")
+	clearUsageSourceEnv(t)
+	setTestVersion(t)
+	healthzHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		healthzHits++
+		_, _ = w.Write([]byte(`{"hub_id":"hub-from-healthz"}`))
+	}))
+	defer srv.Close()
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+
+	var mu sync.Mutex
+	var sent [][]byte
+	p := NewWithConfig(&Config{Enabled: true})
+	p.SetHubIDResolver(trustedHub("hub-from-configured-resolver"))
+	p.health.sendOverride = func(_ context.Context, line []byte) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, append([]byte(nil), line...))
+		return nil
+	}
+	p.health.periodic, p.health.retry = 1<<62, 1<<62
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { p.stopHealthLoop(); cancel() })
+	p.startHealth(ctx, &GCPExporter{}, analyticsHandles{disabledReason: AnalyticsDisabledNoGCPExporter})
+	p.stopHealthLoop()
+	p.emitHealth(telemetrycontract.HealthTriggerPeriodic)
+	p.flushHealth(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d events, want 1", len(sent))
+	}
+	var ev telemetrycontract.HealthEvent
+	if err := telemetrycontract.Unmarshal(sent[0], &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.HubID != "hub-from-configured-resolver" {
+		t.Fatalf("hub_id = %q, want %q", ev.HubID, "hub-from-configured-resolver")
+	}
+	if healthzHits != 0 {
+		t.Fatalf("healthzHits = %d, want 0 when configured resolver is set", healthzHits)
+	}
+}

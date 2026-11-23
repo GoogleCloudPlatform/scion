@@ -257,6 +257,7 @@ var routePermissionClassifications = map[string]string{
 	"GET /.well-known/jwks.json":                            "public:oidc",
 	"POST /api/v1/agent/identity-token":                     "agent-token:identity-token",
 	"POST /api/v1/agent/secrets":                            "agent-token:agent-secrets",
+	"GET /api/v1/agent/hub":                                 "agent-token:agent-hub-info",
 	"/api/v1/agent/decisions":                               "agent-token:agent-decisions",
 	"/api/v1/agent/decisions/":                              "agent-token:agent-decisions",
 	"/api/v1/conduit":                                       "agent-token:conduit",

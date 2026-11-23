@@ -8365,6 +8365,9 @@ func (s *Server) registerRoutes() {
 	// Agent self-service secret fetch (agent token auth)
 	s.mux.HandleFunc("POST /api/v1/agent/secrets", s.guarded("POST /api/v1/agent/secrets", s.handleAgentSecretFetch))
 
+	// Agent self-service hub metadata (agent token auth)
+	s.mux.HandleFunc("GET /api/v1/agent/hub", s.guarded("GET /api/v1/agent/hub", s.handleAgentHubInfo))
+
 	// Agent self-service decision list, show, interpreted answers, and withdraw (agent token auth; 404 when web.decisions is off)
 	s.mux.HandleFunc("/api/v1/agent/decisions", s.guarded("/api/v1/agent/decisions", s.handleAgentDecisionRoutes))
 	s.mux.HandleFunc("/api/v1/agent/decisions/", s.guarded("/api/v1/agent/decisions/", s.handleAgentDecisionRoutes))
