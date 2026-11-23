@@ -2245,6 +2245,13 @@ type Server struct {
 	// decisionClock replaces time.Now on decision dismiss age checks (tests only).
 	decisionClock func() time.Time
 
+	// inboxSummaryFlight coalesces concurrent GET /api/v1/users/me/inbox/summary
+	// requests for the same caller and query parameters (inbox_summary.go).
+	inboxSummaryFlight singleflight.Group
+	// inboxSourcesForTest, when set (tests only), replaces the default
+	// inbox summary source list so tests can inject failing or timed-out sources.
+	inboxSourcesForTest []inboxSourceEntry
+
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
 	conduitGrantsOnce sync.Once
@@ -8284,6 +8291,9 @@ func (s *Server) registerRoutes() {
 
 	// Profile decisions roll-up across member projects (/users/me/decisions)
 	s.mux.HandleFunc("/api/v1/users/me/decisions", s.guarded("/api/v1/users/me/decisions", s.withDecisionsBellReconcile(s.handleUserMeDecisions)))
+
+	// Profile inbox summary across categories (/users/me/inbox/summary)
+	s.mux.HandleFunc("/api/v1/users/me/inbox/summary", s.guarded("/api/v1/users/me/inbox/summary", s.handleUserMeInboxSummary))
 
 	// User-scoped template endpoints (/users/me/templates)
 	s.mux.HandleFunc("/api/v1/users/me/templates", s.guarded("/api/v1/users/me/templates", s.handleUserMeTemplates))

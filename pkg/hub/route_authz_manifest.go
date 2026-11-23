@@ -167,6 +167,9 @@ var routeAuthzManifest = map[string]string{
 	// ── Profile decisions roll-up ──────────────────────────────────────
 	"/api/v1/users/me/decisions": "authenticated", // GET: caller's decisions across member projects; session or scoped UAT (project:read + inbox:read for DMs)
 
+	// ── Profile inbox summary ──────────────────────────────────────────
+	"/api/v1/users/me/inbox/summary": "authenticated", // GET: caller's inbox summary across categories; session or UAT with inbox:read
+
 	// ── Hub-scoped injected skills ─────────────────────────────────────
 	"/api/v1/hub/settings/injected-skills": "authenticated", // GET: authenticated (any user), PUT: admin (role check in handler)
 

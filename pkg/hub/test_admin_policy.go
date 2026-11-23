@@ -671,6 +671,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
 	experiments.ChatStarredMessages:          testAdminPolicyDeny,
 	experiments.Decisions:                    testAdminPolicyDeny,
+	experiments.InboxDashboard:               testAdminPolicyDeny,
 	experiments.ChatRetention:                testAdminPolicyDeny,
 	experiments.ConversationWatch:            testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,

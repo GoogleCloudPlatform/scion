@@ -114,6 +114,7 @@ func TestSSEHandler_LegacyAndUnknownSubjectsDenied(t *testing.T) {
 		"notification.created",
 		"foo.>",
 		"project." + victimProject + ".>", // control: still denied for a non-member
+		"user.other-user.inbox",           // another user's inbox hint stream must be denied
 	}
 
 	for _, sub := range subjects {

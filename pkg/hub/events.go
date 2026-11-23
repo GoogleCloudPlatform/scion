@@ -122,6 +122,10 @@ type EventPublisher interface {
 	// payload is a content-free invalidation ({"action":"changed"}):
 	// clients refetch current state. Only the owner is ever told.
 	PublishChatStarsChanged(ctx context.Context, userID string)
+	// PublishUserInboxHint publishes a content-free invalidation hint on
+	// user.<userID>.inbox when an inbox category changes. Only the owner is
+	// ever told.
+	PublishUserInboxHint(ctx context.Context, userID string, hint InboxHint)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -172,7 +176,8 @@ func (noopEventPublisher) Close()                                               
 
 func (noopEventPublisher) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
 }
-func (noopEventPublisher) PublishChatStarsChanged(_ context.Context, _ string) {}
+func (noopEventPublisher) PublishChatStarsChanged(_ context.Context, _ string)           {}
+func (noopEventPublisher) PublishUserInboxHint(_ context.Context, _ string, _ InboxHint) {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -1214,6 +1219,23 @@ func (p *eventBuilder) PublishChatStarsChanged(_ context.Context, userID string)
 		return
 	}
 	p.sink("user."+userID+".chat.stars", ChatStarsEvent{Action: "changed"})
+}
+
+// InboxHint is a content-free invalidation hint published on
+// user.<userID>.inbox when an inbox category changes.
+type InboxHint struct {
+	Category string `json:"category"`
+	AgentID  string `json:"agentId,omitempty"`
+	Activity string `json:"activity,omitempty"`
+}
+
+// PublishUserInboxHint publishes an inbox invalidation hint to its owner only,
+// on user.<userID>.inbox.
+func (p *eventBuilder) PublishUserInboxHint(_ context.Context, userID string, hint InboxHint) {
+	if userID == "" {
+		return
+	}
+	p.sink("user."+userID+".inbox", hint)
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

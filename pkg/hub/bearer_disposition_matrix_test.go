@@ -375,6 +375,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the web.decisions experiment is off, and when on it filters candidate member projects by project:read rather than refusing a UAT without project:read; the dedicated test enables the experiment and drives the route across session, project-bounded and hub-bounded UATs (with and without inbox:read and project:read), agent tokens, federated users and visitors",
 		Pin:    "TestUserMeDecisions_TokenAndCallerAuthz",
 	},
+	{OperationID: "inbox.summary.read", Method: "GET", Pattern: "/api/v1/users/me/inbox/summary"}: {
+		Reason: "the route answers 404 while the web.inbox_dashboard experiment is off, as in this fixture; the dedicated test enables the experiment and drives the route across session, hub-bounded and project-bounded UATs (with and without inbox:read), agent tokens, federated users and visitors",
+		Pin:    "TestUserMeInboxSummary_AuthAndValidation",
+	},
 	{OperationID: "agent.screen.read", Method: "GET", Pattern: "/api/v1/agents/{id}/screen"}: {
 		Reason: "the route answers 404 while the hub.suspend_screen experiment is off, as in this fixture, so the admitting token gets 404 before authz; the dedicated test enables the experiment and drives RBAC on GET",
 		Pin:    "TestSuspendScreen_ManualSuspendAndRBACAndLook",

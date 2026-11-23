@@ -229,6 +229,12 @@ const ChatScheduledSend = "web.chat_scheduled_send"
 // readable.
 const Decisions = "web.decisions"
 
+// InboxDashboard gates the top-level Inbox dashboard (ptone/scion#8962):
+// GET /api/v1/users/me/inbox/summary (404 while off) and user.*.inbox SSE
+// invalidation hints (LayerServer), plus the Profile Inbox page, nav badges,
+// and bell discovery link in the web UI (LayerWeb).
+const InboxDashboard = "web.inbox_dashboard"
+
 // ChatStarredMessages gates starred messages in native web chat: the
 // message Star/Unstar action, the private starred indicator, the
 // conversation header's starred-message list, the starred-only center and
@@ -940,6 +946,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7514",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-02-13",
+	},
+	{
+		Name:        InboxDashboard,
+		Title:       "Inbox dashboard",
+		Description: "Aggregates pending attention items across decisions, waiting agents, approvals, artifact reviews, and unread chat into GET /api/v1/users/me/inbox/summary and the Inbox dashboard view. Gates the summary endpoint (404 while off) and user.*.inbox invalidation hints (LayerServer), and the Profile Inbox page, badges, and navigation entries (LayerWeb).",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8962",
+		Owner:       "notifications",
+		ReviewBy:    "2027-02-21",
 	},
 	{
 		Name:        ChatStarredMessages,
