@@ -3018,6 +3018,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		ConduitTCPAllowedPorts:       append([]int(nil), cfg.Hub.Conduit.TCPAllowedPorts...),
 		ConduitPolicy:                conduitPolicySetting(cfg),
+		TrustedProxies:               append([]string(nil), cfg.TrustedProxies...),
 		TransportTrustedProxies:      append([]string(nil), cfg.TrustedProxies...),
 		TransportTrustedProxiesSet:   cfg.TrustedProxiesSet,
 		ConduitGrantKeyActivation:    conduitGrantKeyActivationSetting(cfg),
@@ -3412,8 +3413,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 			hubCfg.ProxyAuth = jwtAuth
 			log.Printf("Proxy auth configured: provider=jwt, algorithm=%s", cfg.Auth.Proxy.JWT.Algorithm)
 		case "header":
-			// TODO: HeaderProxyAuthenticator (refactor of extractProxyUser)
-			log.Printf("Proxy auth configured: provider=header (legacy IP-trust mode)")
+			return nil, fmt.Errorf(`auth.proxy.provider "header" is not supported; use "iap" or "jwt"`)
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}
@@ -4271,6 +4271,8 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 				return nil, err
 			}
 			webProxyAuth = jwtAuth
+		case "header":
+			return nil, fmt.Errorf(`auth.proxy.provider "header" is not supported; use "iap" or "jwt"`)
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}

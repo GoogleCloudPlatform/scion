@@ -841,29 +841,6 @@ func TestTestIdentity_ReservedDomainRefusedEverywhere(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 	})
 
-	t.Run("legacy trusted proxy headers", func(t *testing.T) {
-		reached := false
-		handler := UnifiedAuthMiddleware(AuthConfig{Mode: "production", TrustedProxies: []string{"192.0.2.1"}})(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true; w.WriteHeader(http.StatusOK) }))
-		for _, email := range []string{existing.Email, reserved} {
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
-			req.RemoteAddr = "192.0.2.1:1234"
-			req.Header.Set("X-Forwarded-User-Id", existing.ID)
-			req.Header.Set("X-Forwarded-User-Email", email)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-			assert.Equal(t, http.StatusForbidden, rec.Code, email)
-		}
-		assert.False(t, reached)
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
-		req.RemoteAddr = "192.0.2.1:1234"
-		req.Header.Set("X-Forwarded-User-Id", "u1")
-		req.Header.Set("X-Forwarded-User-Email", "person@scion-test.invalid")
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code, "an ordinary email still passes")
-	})
-
 	t.Run("GSA resolver", func(t *testing.T) {
 		resolver := NewGoogleIdentityResolver(newFakeUserStore(), newMemExtIDStore(), alwaysAuthorized, nil, nil)
 		user, err := resolver.Resolve(ctx, &ValidatedGoogleIdentity{

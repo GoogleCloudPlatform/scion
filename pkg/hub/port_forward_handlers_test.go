@@ -888,16 +888,6 @@ func TestAgentPortProxyOtherCredentialsNotPlainText(t *testing.T) {
 		w := serve(t, map[string]string{FederationTokenHeader: "x"})
 		notPlainText(t, w)
 	})
-	t.Run("trusted_proxy_user_headers", func(t *testing.T) {
-		prev := srv.authConfig.TrustedProxies
-		srv.authConfig.TrustedProxies = []string{"192.0.2.0/24"} // httptest.NewRequest's RemoteAddr
-		t.Cleanup(func() { srv.authConfig.TrustedProxies = prev })
-		w := serve(t, map[string]string{
-			"X-Forwarded-User-Id":    "proxy-user-1",
-			"X-Forwarded-User-Email": "proxy-user@example.com",
-		})
-		notPlainText(t, w)
-	})
 	t.Run("front_proxy_assertion_refused", func(t *testing.T) {
 		prev := srv.authConfig.ProxyAuthenticator
 		srv.authConfig.ProxyAuthenticator = portProxyStubAuthenticator{err: errors.New("bad assertion")}

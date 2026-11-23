@@ -16,9 +16,7 @@ package hub
 
 import (
 	"log/slog"
-	"net"
 	"net/http"
-	"strings"
 )
 
 type chatLinkProvider struct {
@@ -99,7 +97,7 @@ func (p chatLinkProvider) handleVerification(s *Server, w http.ResponseWriter, r
 		providerName:      p.name,
 		userIDResponseKey: p.userIDField,
 		userIDLogKey:      p.userIDLogKey,
-		clientIP:          chatLinkRateLimitIP(r, parseTrustedProxies(s.config.TrustedProxies)),
+		clientIP:          s.clientIP(r),
 		allowVerify:       allowVerify,
 		verify:            verify,
 	})
@@ -318,32 +316,6 @@ func handleChatLinkVerification(w http.ResponseWriter, r *http.Request, opts cha
 			"email": user.Email(),
 		},
 	})
-}
-
-func remoteIP(remoteAddr string) string {
-	ip, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		return remoteAddr
-	}
-	return ip
-}
-
-func chatLinkRateLimitIP(r *http.Request, trustedNets []*net.IPNet) string {
-	fallback := remoteIP(r.RemoteAddr)
-	if len(trustedNets) == 0 || !isTrustedProxy(r, trustedNets) {
-		return fallback
-	}
-
-	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
-		candidate := strings.TrimSpace(strings.SplitN(forwardedFor, ",", 2)[0])
-		if net.ParseIP(candidate) != nil {
-			return candidate
-		}
-	}
-	if candidate := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(candidate) != nil {
-		return candidate
-	}
-	return fallback
 }
 
 type chatLinkStatusOptions struct {

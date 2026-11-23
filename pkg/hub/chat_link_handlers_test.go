@@ -282,33 +282,82 @@ func TestChatLinkVerificationPreservesCommonGuards(t *testing.T) {
 	}
 }
 
-func TestChatLinkRateLimitIP(t *testing.T) {
-	tests := []struct {
-		name           string
-		remoteAddr     string
-		trustedProxies []string
-		forwardedFor   string
-		realIP         string
-		want           string
-	}{
-		{name: "direct client", remoteAddr: "192.0.2.1:1234", want: "192.0.2.1"},
-		{name: "untrusted proxy headers ignored", remoteAddr: "192.0.2.1:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "203.0.113.7", realIP: "203.0.113.8", want: "192.0.2.1"},
-		{name: "trusted proxy uses first forwarded address", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "203.0.113.7, 10.0.0.1", want: "203.0.113.7"},
-		{name: "trusted proxy falls back to real ip", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.2"}, forwardedFor: "invalid", realIP: "203.0.113.8", want: "203.0.113.8"},
-		{name: "trusted proxy rejects invalid headers", remoteAddr: "10.0.0.2:1234", trustedProxies: []string{"10.0.0.0/8"}, forwardedFor: "invalid", realIP: "also-invalid", want: "10.0.0.2"},
+func TestChatLinkVerificationRateLimit_TrustedProxies(t *testing.T) {
+	newVerifyReq := func(remoteAddr string, xffLines []string, realIP string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"code":"MISSING"}`))
+		req.RemoteAddr = remoteAddr
+		for _, line := range xffLines {
+			req.Header.Add("X-Forwarded-For", line)
+		}
+		if realIP != "" {
+			req.Header.Set("X-Real-IP", realIP)
+		}
+		return req.WithContext(contextWithIdentity(req.Context(), NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "web")))
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/", nil)
-			req.RemoteAddr = tt.remoteAddr
-			req.Header.Set("X-Forwarded-For", tt.forwardedFor)
-			req.Header.Set("X-Real-IP", tt.realIP)
+	t.Run("untrusted peer ignores XFF and X-Real-IP", func(t *testing.T) {
+		svc := NewTelegramLinkService()
+		defer svc.Close()
+		srv := &Server{
+			telegramLinkService: svc,
+			clientIPTrustedNets: parseTrustedProxies([]string{"10.0.0.0/8"}),
+		}
 
-			got := chatLinkRateLimitIP(req, parseTrustedProxies(tt.trustedProxies))
-			assert.Equal(t, tt.want, got)
-		})
-	}
+		// Exhaust the burst for the untrusted peer using distinct XFF values;
+		// all requests must share the peer bucket.
+		for i := 0; i < verifyBurst; i++ {
+			rec := httptest.NewRecorder()
+			srv.handleTelegramLinkVerify(rec, newVerifyReq("198.51.100.5:1234", []string{"203.0.113." + string(rune('1'+i))}, "203.0.113.99"))
+			assert.Equal(t, http.StatusNotFound, rec.Code)
+		}
+		rec := httptest.NewRecorder()
+		srv.handleTelegramLinkVerify(rec, newVerifyReq("198.51.100.5:1234", []string{"203.0.113.200"}, "203.0.113.201"))
+		assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	})
+
+	t.Run("trusted peer uses rightmost untrusted XFF hop", func(t *testing.T) {
+		svc := NewTelegramLinkService()
+		defer svc.Close()
+		srv := &Server{
+			telegramLinkService: svc,
+			clientIPTrustedNets: parseTrustedProxies([]string{"10.0.0.0/8"}),
+		}
+
+		// Varying the leftmost XFF entry while keeping the rightmost untrusted
+		// hop constant must hit the same rate-limit bucket.
+		leftValues := []string{"198.51.100.1", "198.51.100.2", "198.51.100.3", "198.51.100.4", "198.51.100.5"}
+		for i := 0; i < verifyBurst; i++ {
+			rec := httptest.NewRecorder()
+			srv.handleTelegramLinkVerify(rec, newVerifyReq("10.0.0.2:1234", []string{leftValues[i%len(leftValues)] + ", 203.0.113.7, 10.0.0.1"}, ""))
+			assert.Equal(t, http.StatusNotFound, rec.Code)
+		}
+		rec := httptest.NewRecorder()
+		srv.handleTelegramLinkVerify(rec, newVerifyReq("10.0.0.2:1234", []string{"198.51.100.99", "203.0.113.7"}, ""))
+		assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+
+		// A different rightmost untrusted client behind the same proxy gets its own bucket.
+		recOther := httptest.NewRecorder()
+		srv.handleTelegramLinkVerify(recOther, newVerifyReq("10.0.0.2:1234", []string{"203.0.113.8"}, ""))
+		assert.Equal(t, http.StatusNotFound, recOther.Code)
+	})
+
+	t.Run("trusted peer ignores X-Real-IP alone", func(t *testing.T) {
+		svc := NewTelegramLinkService()
+		defer svc.Close()
+		srv := &Server{
+			telegramLinkService: svc,
+			clientIPTrustedNets: parseTrustedProxies([]string{"10.0.0.0/8"}),
+		}
+
+		for i := 0; i < verifyBurst; i++ {
+			rec := httptest.NewRecorder()
+			srv.handleTelegramLinkVerify(rec, newVerifyReq("10.0.0.2:1234", nil, "203.0.113."+string(rune('1'+i))))
+			assert.Equal(t, http.StatusNotFound, rec.Code)
+		}
+		rec := httptest.NewRecorder()
+		srv.handleTelegramLinkVerify(rec, newVerifyReq("10.0.0.2:1234", nil, "203.0.113.200"))
+		assert.Equal(t, http.StatusTooManyRequests, rec.Code)
+	})
 }
 
 func TestChatLinkStatusReturnsConfirmationOnce(t *testing.T) {

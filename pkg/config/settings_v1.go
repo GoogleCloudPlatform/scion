@@ -2495,7 +2495,7 @@ type V1TransportConfig struct {
 
 // V1ProxyConfig holds proxy authentication settings (consulted when auth.mode == "proxy").
 type V1ProxyConfig struct {
-	// Provider selects the proxy auth provider: "iap", "jwt", or "header".
+	// Provider selects the proxy auth provider: "iap" or "jwt".
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
 	// IAP holds Google IAP-specific settings.
 	IAP *V1IAPConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`

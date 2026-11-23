@@ -2475,7 +2475,7 @@
           "type": "object",
           "description": "Proxy auth settings, consulted when mode is 'proxy'.",
           "properties": {
-            "provider": { "type": "string", "description": "Proxy auth provider: 'iap', 'jwt' or 'header'. Any other value is a startup error when mode is 'proxy'." },
+            "provider": { "type": "string", "description": "Proxy auth provider: 'iap' or 'jwt'. Any other value is a startup error when mode is 'proxy'." },
             "iap": {
               "type": "object",
               "description": "Google IAP settings.",
