@@ -101,7 +101,13 @@ import type { ScionAgentMessageViewer } from '../shared/agent-message-viewer.js'
 import '../shared/agent-suspend-screen.js';
 import '../shared/chat/chat-thread.js';
 import type { ScionChatThread } from '../shared/chat/chat-thread.js';
-import { idleSuspendEnabled, isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  AGENT_SECRETS_FLAG,
+  FEATURE_FLAGS_CHANGED_EVENT,
+  idleSuspendEnabled,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
+import '../shared/secret-list.js';
 import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
 import '../shared/hash-display.js';
 import '../shared/quick-message-dialog.js';
@@ -311,6 +317,15 @@ export class ScionPageAgentDetail extends LitElement {
   private get nativeChatEnabled(): boolean {
     return isFeatureEnabled('web.native_chat');
   }
+
+  /** Whether the agent-scoped secrets experiment is enabled. */
+  private get agentSecretsEnabled(): boolean {
+    return isFeatureEnabled(AGENT_SECRETS_FLAG);
+  }
+
+  private readonly boundOnFeatureFlagsChanged = (): void => {
+    this.requestUpdate();
+  };
 
   @state()
   private metricsSummary: AgentMetricsSummary | null = null;
@@ -890,6 +905,9 @@ export class ScionPageAgentDetail extends LitElement {
     stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
+    if (typeof window !== 'undefined') {
+      window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    }
 
     this.stopRelativeTimeTick = visibleInterval(() => this.requestUpdate(), 15000);
   }
@@ -902,6 +920,9 @@ export class ScionPageAgentDetail extends LitElement {
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    }
     this.stopRelativeTimeTick?.();
     this.stopRelativeTimeTick = null;
     if (this.deleteRedirectTimer) {
@@ -1808,6 +1829,11 @@ export class ScionPageAgentDetail extends LitElement {
         <sl-tab slot="nav" panel="logs">Logs</sl-tab>
         <sl-tab slot="nav" panel="messages">Messages</sl-tab>
         <sl-tab slot="nav" panel="configuration">Configuration</sl-tab>
+        ${this.agentSecretsEnabled
+          ? html`<sl-tab slot="nav" panel="secrets" data-testid="agent-secrets-tab"
+              >Secrets</sl-tab
+            >`
+          : nothing}
 
         <sl-tab-panel name="status">${this.renderStatusTab()}</sl-tab-panel>
         <sl-tab-panel name="metrics">${this.renderMetricsTab()}</sl-tab-panel>
@@ -1825,6 +1851,16 @@ export class ScionPageAgentDetail extends LitElement {
         </sl-tab-panel>
         <sl-tab-panel name="messages"> ${this.renderMessagesPanel()} </sl-tab-panel>
         <sl-tab-panel name="configuration">${this.renderConfigurationTab()}</sl-tab-panel>
+        ${this.agentSecretsEnabled
+          ? html`<sl-tab-panel name="secrets" data-testid="agent-secrets-panel">
+              <scion-secret-list
+                scope="agent"
+                scopeId=${this.agent.id}
+                compact
+                ?readonly=${!!this.agent._capabilities && !can(this.agent._capabilities, 'update')}
+              ></scion-secret-list>
+            </sl-tab-panel>`
+          : nothing}
       </sl-tab-group>
 
       <scion-quick-message-dialog

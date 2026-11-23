@@ -73,6 +73,8 @@ export class ScionSecretList extends LitElement {
   @property() scopeId = '';
   @property() apiBasePath = '/api/v1';
   @property({ type: Boolean }) compact = false;
+  /** When true, hides create/update/edit/delete affordances (e.g. read-only viewer). */
+  @property({ type: Boolean }) readonly = false;
 
   @state() private loading = true;
   @state() private entries: SecretEntry[] = [];
@@ -196,7 +198,26 @@ export class ScionSecretList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    void this.loadSecrets();
+    // Initial load runs in updated() when scope/scopeId are applied; only
+    // reload here if the element is re-connected after a prior update.
+    if (this.hasUpdated && (this.scope !== 'agent' || this.scopeId !== '')) {
+      void this.loadSecrets();
+    }
+  }
+
+  override updated(changed: Map<string, unknown>): void {
+    super.updated(changed);
+    if (changed.has('scope') || changed.has('scopeId')) {
+      if (this.scope === 'agent' && !this.scopeId) return;
+      void this.loadSecrets();
+    }
+  }
+
+  private scopeQueryParams(): string {
+    if (this.scope === 'agent') {
+      return `scope=agent&scopeId=${encodeURIComponent(this.scopeId)}`;
+    }
+    return `scope=${this.scope}`;
   }
 
   private async loadSecrets(): Promise<void> {
@@ -208,7 +229,7 @@ export class ScionSecretList extends LitElement {
         this.scope === 'user'
           ? `${this.apiBasePath}/secrets?scope=user&includePending=true`
           : this.scope !== 'project'
-            ? `${this.apiBasePath}/secrets?scope=${this.scope}`
+            ? `${this.apiBasePath}/secrets?${this.scopeQueryParams()}`
             : `${this.apiBasePath}/secrets`;
       const response = await apiFetch(url);
 
@@ -230,6 +251,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private openCreateDialog(): void {
+    if (this.readonly) return;
     this.dialogMode = 'create';
     this.dialogKey = '';
     this.dialogValue = '';
@@ -243,6 +265,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private openUpdateDialog(secret: Secret): void {
+    if (this.readonly) return;
     this.dialogMode = 'update';
     this.dialogKey = secret.key;
     this.dialogValue = '';
@@ -256,6 +279,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private openEditSettingsDialog(secret: Secret): void {
+    if (this.readonly) return;
     this.dialogMode = 'edit-settings';
     this.dialogKey = secret.key;
     this.dialogValue = '';
@@ -270,6 +294,7 @@ export class ScionSecretList extends LitElement {
 
   private closeDialog(): void {
     this.dialogOpen = false;
+    this.dialogValue = '';
   }
 
   private async handleSave(e: Event): Promise<void> {
@@ -323,14 +348,16 @@ export class ScionSecretList extends LitElement {
         method = 'PUT';
       }
 
-      if (this.scope === 'project') {
+      if (this.scope === 'project' || this.scope === 'agent') {
         body.scopeId = this.scopeId;
       }
 
       const url =
-        isEditSettings && this.scope !== 'project'
-          ? `${this.apiBasePath}/secrets/${encodeURIComponent(key)}?scope=${this.scope}`
-          : `${this.apiBasePath}/secrets/${encodeURIComponent(key)}`;
+        this.scope === 'agent'
+          ? `${this.apiBasePath}/secrets/${encodeURIComponent(key)}?${this.scopeQueryParams()}`
+          : isEditSettings && this.scope !== 'project'
+            ? `${this.apiBasePath}/secrets/${encodeURIComponent(key)}?scope=${this.scope}`
+            : `${this.apiBasePath}/secrets/${encodeURIComponent(key)}`;
 
       const response = await apiFetch(url, {
         method,
@@ -355,6 +382,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private async handleDelete(secret: Secret, event?: MouseEvent): Promise<void> {
+    if (this.readonly) return;
     if (
       !event?.altKey &&
       !(await showConfirm(`Delete secret "${secret.key}"? This cannot be undone.`))
@@ -367,7 +395,7 @@ export class ScionSecretList extends LitElement {
     try {
       const deleteUrl =
         this.scope !== 'project'
-          ? `${this.apiBasePath}/secrets/${encodeURIComponent(secret.key)}?scope=${this.scope}`
+          ? `${this.apiBasePath}/secrets/${encodeURIComponent(secret.key)}?${this.scopeQueryParams()}`
           : `${this.apiBasePath}/secrets/${encodeURIComponent(secret.key)}`;
       const response = await apiFetch(deleteUrl, { method: 'DELETE' });
 
@@ -411,7 +439,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private openApproveDialog(entry: SecretEntry): void {
-    if (!entry.pending) return;
+    if (this.readonly || !entry.pending) return;
     this.approveEntry = entry;
     this.approveAllowProgeny = entry.pending.allowProgeny;
     this.approveError = null;
@@ -460,6 +488,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private async handleReject(pending: PendingSecret, event?: MouseEvent): Promise<void> {
+    if (this.readonly) return;
     if (
       !event?.altKey &&
       !(await showConfirm(
@@ -493,6 +522,7 @@ export class ScionSecretList extends LitElement {
    * logged or stored.
    */
   private async handleReveal(pending: PendingSecret): Promise<void> {
+    if (this.readonly) return;
     this.clearReveal();
     this.revealPending = pending;
     this.pendingBusyId = pending.id;
@@ -568,33 +598,39 @@ export class ScionSecretList extends LitElement {
     }
 
     return html`
-      <div class="list-header">
-        <sl-button variant="primary" @click=${this.openCreateDialog}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Add Secret
-        </sl-button>
-      </div>
+      ${this.readonly
+        ? nothing
+        : html`<div class="list-header">
+            <sl-button variant="primary" @click=${this.openCreateDialog}>
+              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+              Add Secret
+            </sl-button>
+          </div>`}
       ${this.entries.length === 0 ? this.renderEmpty() : this.renderTable()} ${this.renderDialog()}
       ${this.renderApproveDialog()} ${this.renderRevealDialog()}
     `;
   }
 
   private renderCompact() {
+    const scopeDescription =
+      this.scope === 'agent'
+        ? 'Manage encrypted secrets readable only by this agent.'
+        : this.scope === 'hub'
+          ? 'Manage encrypted secrets for all agents on this hub.'
+          : 'Manage encrypted secrets for agents in this project.';
     return html`
       <div class="section compact">
         <div class="section-header">
           <div class="section-header-info">
             <h2>Secrets</h2>
-            <p>
-              Manage encrypted secrets for
-              ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'}. Values
-              are write-only and cannot be retrieved after saving.
-            </p>
+            <p>${scopeDescription} Values are write-only and cannot be retrieved after saving.</p>
           </div>
-          <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
-            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-            Add Secret
-          </sl-button>
+          ${this.readonly
+            ? nothing
+            : html`<sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                Add Secret
+              </sl-button>`}
         </div>
 
         ${this.loading
@@ -695,8 +731,8 @@ export class ScionSecretList extends LitElement {
           >
         </td>
         <td class="actions-cell">
-          ${pending ? this.renderPendingActions(pending) : nothing}
-          ${secret
+          ${pending && !this.readonly ? this.renderPendingActions(pending) : nothing}
+          ${secret && !this.readonly
             ? html`
                 <sl-icon-button
                   name="pencil"
@@ -906,22 +942,29 @@ export class ScionSecretList extends LitElement {
   }
 
   private renderEmpty() {
+    const emptyText =
+      this.scope === 'agent'
+        ? this.readonly
+          ? 'This agent has no agent-scoped secrets.'
+          : 'Add encrypted secrets readable only by this agent.'
+        : `Add encrypted secrets that will be securely injected into ${
+            this.compact
+              ? this.scope === 'hub'
+                ? 'all agents on this hub'
+                : 'agents in this project'
+              : 'your agents'
+          }.`;
     return html`
       <div class="empty-state">
         <sl-icon name="shield-lock"></sl-icon>
         <h3>No Secrets</h3>
-        <p>
-          Add encrypted secrets that will be securely injected into
-          ${this.compact
-            ? this.scope === 'hub'
-              ? 'all agents on this hub'
-              : 'agents in this project'
-            : 'your agents'}.
-        </p>
-        <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Add Secret
-        </sl-button>
+        <p>${emptyText}</p>
+        ${this.readonly
+          ? nothing
+          : html`<sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+              Add Secret
+            </sl-button>`}
       </div>
     `;
   }
