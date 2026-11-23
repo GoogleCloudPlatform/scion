@@ -115,13 +115,32 @@ user-facing format. Agent-only messages do not require it.
 
 - **Lead with the outcome.** Use a conversational tone and plain language. Explain
   abbreviations or internal labels that the user needs to understand.
-- **Make decisions easy to read.** Put options in a list with their trade-offs and
-  your recommendation. Put the actual question on its own line.
+- **Make decisions easy to read.** Present trade-offs and your recommendation
+  concisely; when asking in prose, list options clearly and put the question on
+  its own line.
 <!-- scion:experiment web.decisions -->
-- **Ask with a decision prompt.** For a decision the user should answer by picking
-  an option, send it with `scion message --decisions-file <file>` instead of prose,
-  so the user can answer with a click (including when a `message_policy_rejected`
-  remediation asks for structured options). See `references/decisions.md`.
+- **Ask with a decision prompt (default for concrete choices).** When the user
+  should pick between concrete options — or confirm a single action — send a
+  decision prompt with `scion message --decisions-file <file>` instead of a
+  prose option list (including when a `message_policy_rejected` remediation asks
+  for structured options). Keep prose lists for open-ended questions or
+  discussion, or resend as ordinary Markdown if a send is refused with
+  `experiment_disabled`. Put context, trade-offs, and your recommendation in the
+  message body; keep `question` short and choice labels to a few words:
+
+  ```json
+  [{"id": "deploy-target", "question": "Where should the release go first?", "choices": ["Staging", "Canary"], "default": "Staging"}]
+  ```
+
+  ```bash
+  scion message "conv:<conversation-id>" --decisions-file <file> - <<'EOF_MESSAGE'
+  CI passed. **Staging** runs the full suite; **Canary** takes 5% traffic. I recommend **Staging**.
+  EOF_MESSAGE
+  ```
+
+  See `references/decisions.md` for choice descriptions, multi-decision sets,
+  `allow_other`, `--update`, `scion decisions withdraw`, and recording prose
+  replies.
 <!-- scion:end-experiment -->
 - **Keep details useful.** Avoid dense UUIDs, code line numbers and internal status
   codes unless the user needs them to act. Prefer descriptive Markdown links to
@@ -142,8 +161,7 @@ Example:
 - **Changed:** replies stay in the issue conversation.
 - **Review:** [Messaging proposal](https://example.com/proposal).
 
-**Decision:** should agent-only updates use the same layout, or stay plain text?
-My recommendation is plain text for agent-only updates.
+**Question:** what other edge cases should the proposal cover before we finalize it?
 ```
 
 ### Automatic links in the web chat
