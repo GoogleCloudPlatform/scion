@@ -568,11 +568,13 @@ func TestPoll_StopChEarlyReturn(t *testing.T) {
 		Start:          StartHead,
 		Wait:           5 * time.Second,
 		StopCh:         stopCh,
+		StopRetryAfter: time.Second,
 	})
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), time.Second)
 	assert.Empty(t, res.Events)
 	assert.False(t, res.TimedOut)
+	assert.Equal(t, time.Second, res.RetryAfter)
 	assert.Equal(t, EncodeCursor(convID, 1), res.NextCursor)
 
 	// 2. Pre-closed StopCh returns immediately without waiting.
@@ -584,11 +586,13 @@ func TestPoll_StopChEarlyReturn(t *testing.T) {
 		Start:          StartHead,
 		Wait:           5 * time.Second,
 		StopCh:         preClosed,
+		StopRetryAfter: time.Second,
 	})
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), 200*time.Millisecond)
 	assert.Empty(t, res2.Events)
 	assert.False(t, res2.TimedOut)
+	assert.Equal(t, time.Second, res2.RetryAfter)
 	assert.Equal(t, EncodeCursor(convID, 1), res2.NextCursor)
 
 	// 3. When ctx is also canceled, ctx.Err() takes precedence over StopCh.

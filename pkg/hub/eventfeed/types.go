@@ -122,6 +122,9 @@ type PollRequest struct {
 	// NextCursor. Used by HTTP handlers for graceful shutdown drain and
 	// membership-revocation revalidation (design §3.5, §3.6).
 	StopCh <-chan struct{}
+	// StopRetryAfter, when non-zero, is copied to PollResult.RetryAfter when
+	// StopCh ends a poll early, so streaming clients pace their follow-up poll.
+	StopRetryAfter time.Duration
 }
 
 // PollResult is the outcome of one Poll call.

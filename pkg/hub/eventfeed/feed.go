@@ -141,6 +141,7 @@ func (f *Feed) Poll(ctx context.Context, p Principal, authz Authorizer, req Poll
 				Events:     []Event{},
 				NextCursor: EncodeCursor(req.ConversationID, after),
 				Truncated:  truncated,
+				RetryAfter: req.StopRetryAfter,
 			}, nil
 		default:
 		}
@@ -163,6 +164,7 @@ func (f *Feed) Poll(ctx context.Context, p Principal, authz Authorizer, req Poll
 				Events:     []Event{},
 				NextCursor: EncodeCursor(req.ConversationID, after),
 				Truncated:  truncated,
+				RetryAfter: req.StopRetryAfter,
 			}, nil
 		case <-deadline.C:
 			return PollResult{

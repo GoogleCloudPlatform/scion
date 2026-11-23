@@ -712,6 +712,7 @@ func TestConversationWatch_MembershipRevocationEarlyReturn(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &firstBody))
 		assert.Empty(t, firstBody.Events)
 		assert.False(t, firstBody.TimedOut)
+		assert.Equal(t, int64(1000), firstBody.RetryAfterMs)
 		assert.Equal(t, eventfeed.EncodeCursor(group.ID, 1), firstBody.NextCursor)
 	case <-time.After(3 * time.Second):
 		t.Fatal("watch poll did not return early after membership revocation")
@@ -771,6 +772,7 @@ func TestConversationWatch_ShutdownDrainEarlyReturn(t *testing.T) {
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 		assert.Empty(t, body.Events)
 		assert.False(t, body.TimedOut)
+		assert.Equal(t, int64(1000), body.RetryAfterMs)
 		assert.Equal(t, eventfeed.EncodeCursor(group.ID, 1), body.NextCursor)
 	case <-time.After(3 * time.Second):
 		t.Fatal("watch poll did not return early on BeginShutdown")
