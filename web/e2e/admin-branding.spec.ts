@@ -120,6 +120,57 @@ test.describe('Admin Branding (/admin/branding)', () => {
       await expect(page.locator('[data-client-error="logo.dark"]')).toContainText('http://');
       await darkLogoInput.fill('');
 
+      // Expand Advanced Palette Overrides and test WCAG AA 422 auto-expand + semantic & scale overrides
+      const paletteDetails = page.locator('[data-advanced-palette-details]');
+      const paletteToggle = page.getByRole('button', { name: /Advanced Palette Overrides/ });
+      await paletteToggle.click();
+      await expect(paletteDetails).toHaveAttribute('open', '');
+
+      const lightPrimaryInput = page.getByRole('textbox', { name: 'Light Primary', exact: true });
+      await expect(lightPrimaryInput).toBeVisible();
+
+      // Failing contrast override (#eab308 on white) shows live AA Fail badge and triggers server 422
+      await lightPrimaryInput.fill('#eab308');
+      await expect(page.locator('[data-token-contrast="light.primary"]')).toContainText('AA Fail');
+
+      // Collapse panel, click Save, verify 422 auto-expands the Advanced Palette panel with inline error
+      await paletteToggle.click();
+      await expect(paletteDetails).not.toHaveAttribute('open', '');
+      await page.getByRole('button', { name: 'Save Branding' }).click();
+      await expect(paletteDetails).toHaveAttribute('open', '', { timeout: 15_000 });
+      await expect(
+        page.locator('[data-field-error="palette.light.primary"]').first()
+      ).toContainText('4.50:1');
+
+      // Fix Light Primary to a WCAG AA passing color and save
+      await lightPrimaryInput.fill('#0f766e');
+      await expect(page.locator('[data-token-contrast="light.primary"]')).toContainText('AA Pass');
+      await page.getByRole('button', { name: 'Save Branding' }).click();
+      await expect(page.getByText('Branding settings saved and applied live')).toBeVisible({
+        timeout: 15_000,
+      });
+
+      // Verify per-key reset on Light Primary and Primary Scale override + Clear overrides
+      await page.getByRole('button', { name: 'Reset Light Primary to default' }).click();
+      await expect(lightPrimaryInput).toHaveValue('');
+
+      const primaryScaleDetails = page.locator('[data-scale-details="primary"]');
+      await page.getByRole('button', { name: /Primary Scale/ }).click();
+      await expect(primaryScaleDetails).toHaveAttribute('open', '');
+      const primary600Input = page.getByRole('textbox', { name: 'Primary 600', exact: true });
+      await primary600Input.fill('#007268');
+      await page.getByRole('button', { name: 'Save Branding' }).click();
+      await expect(page.getByText('Branding settings saved and applied live')).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await page.getByRole('button', { name: 'Clear Primary overrides' }).click();
+      await expect(primary600Input).toHaveValue('');
+      await page.getByRole('button', { name: 'Save Branding' }).click();
+      await expect(page.getByText('Branding settings saved and applied live')).toBeVisible({
+        timeout: 15_000,
+      });
+
       // Reset All Branding via Shoelace <sl-dialog>
       await page.getByRole('button', { name: 'Reset All Branding' }).click();
       await expect(page.getByRole('dialog', { name: 'Reset All Branding' })).toBeVisible();

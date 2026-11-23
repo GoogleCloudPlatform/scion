@@ -23,11 +23,15 @@ import {
   brandingFromConfig,
   buildBrandingDiff,
   buildFileModeResetPayload,
+  cloneBrandingFormState,
+  countPaletteOverrides,
+  defaultPaletteFormState,
   formatKiB,
   hasAdvancedPaletteOverrides,
   isBrandingDirty,
   isCuratedOrBuiltinFont,
   normalizeAssetDataUrl,
+  paletteFormToRawConfig,
   parseDataUriInfo,
   totalDataUriBytes,
   validateAccentColorInput,
@@ -64,6 +68,7 @@ describe('admin-branding-state', () => {
           icon_512: '',
           icon_maskable_512: '',
         },
+        palette: defaultPaletteFormState(),
       });
     });
 
@@ -194,6 +199,86 @@ describe('admin-branding-state', () => {
         icons: { ...base.icons },
       };
       expect(buildBrandingDiff(draft, base, new Set())).toEqual({ accent_color: '#0d9488' });
+    });
+
+    it('diffs semantic palette tokens key-by-key and emits empty string on reset', () => {
+      const base = brandingFromConfig({
+        palette: {
+          light: { primary: '#0f766e', bg: '#fafaf9' },
+          dark: { primary: '#2dd4bf' },
+        },
+      });
+      const draft = cloneBrandingFormState(base);
+      draft.palette.light.primary = '#115e59';
+      draft.palette.light.bg = '';
+
+      const diff = buildBrandingDiff(draft, base, new Set());
+      expect(diff).toEqual({
+        palette: {
+          light: { primary: '#115e59', bg: '' },
+        },
+      });
+      expect(countPaletteOverrides(draft.palette)).toBe(2);
+      expect(paletteFormToRawConfig(draft.palette)).toEqual({
+        light: { primary: '#115e59' },
+        dark: { primary: '#2dd4bf' },
+      });
+    });
+
+    it('sends complete scale maps on PUT (omitting cleared steps) and {} when a ramp is cleared', () => {
+      const base = brandingFromConfig({
+        palette: {
+          primary: { '500': '#008e82', '600': '#007268' },
+          neutral: { '50': '#fafaf9' },
+        },
+      });
+      const draft = cloneBrandingFormState(base);
+      // Modify 600, clear 500, add 700; leave neutral untouched
+      draft.palette.primary['500'] = '';
+      draft.palette.primary['600'] = '#0f766e';
+      draft.palette.primary['700'] = '#115e59';
+
+      const diff = buildBrandingDiff(draft, base, new Set());
+      expect(diff).toEqual({
+        palette: {
+          primary: { '600': '#0f766e', '700': '#115e59' },
+        },
+      });
+
+      // Clearing all steps of neutral emits {}
+      const draftClear = cloneBrandingFormState(base);
+      draftClear.palette.neutral['50'] = '';
+      expect(buildBrandingDiff(draftClear, base, new Set())).toEqual({
+        palette: { neutral: {} },
+      });
+    });
+
+    it('omits env-locked palette keys from dirty diff and preserves them in file-mode reset', () => {
+      const base = brandingFromConfig({
+        palette: {
+          light: { primary: '#0f766e', bg: '#fafaf9' },
+        },
+      });
+      const draft = cloneBrandingFormState(base);
+      draft.palette.light.primary = '#115e59';
+      draft.palette.light.bg = '#ffffff';
+
+      const locked = new Set([`${BRANDING_KOANF_PREFIX}.palette.light.primary`]);
+      expect(buildBrandingDiff(draft, base, locked)).toEqual({
+        palette: { light: { bg: '#ffffff' } },
+      });
+
+      const resetPayload = buildFileModeResetPayload(locked, true);
+      expect(resetPayload.palette).toBeTruthy();
+      const p = resetPayload.palette as {
+        light: Record<string, string>;
+        dark: Record<string, string>;
+        primary: Record<string, string>;
+      };
+      expect('primary' in p.light).toBe(false);
+      expect(p.light.bg).toBe('');
+      expect(p.dark.primary).toBe('');
+      expect(p.primary).toEqual({});
     });
   });
 
