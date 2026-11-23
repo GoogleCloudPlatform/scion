@@ -158,6 +158,18 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		Forbidden(w)
 		return
 	}
+	// Enforce broker_policy.admin_managed_only and explicit adminManaged
+	// registration (ptone/scion#7829). Runs after authorizeBrokerCreate and
+	// existing-broker lookup/remint check, and before the online-broker 409
+	// guard so policy refusals are never masked by a '--force' prompt and
+	// cannot be bypassed with --force; covers both legacy and flat paths.
+	priorAdminManaged := existingBroker != nil && existingBroker.AdminManaged
+	stampAdminManaged, ok := s.authorizeBrokerRegistrationPolicy(w, r, existingBroker, req.AdminManaged)
+	if !ok {
+		return
+	}
+	req.AdminManaged = stampAdminManaged
+
 	// Guard accidental re-registration over a live broker (ptone/scion#2563).
 	// PreserveSettings re-mints ('scion hub brokers join-token create') are
 	// exempt: they are explicit, named, owner-only operations that only mint a
@@ -166,16 +178,6 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		writeBrokerOnlineConflict(w, existingBroker.ID, existingBroker.Name, existingBroker.Status)
 		return
 	}
-
-	// Enforce broker_policy.admin_managed_only and explicit adminManaged
-	// registration (ptone/scion#7829). Runs after authorizeBrokerCreate and
-	// existing-broker lookup/remint check, covering both legacy and flat paths.
-	priorAdminManaged := existingBroker != nil && existingBroker.AdminManaged
-	stampAdminManaged, ok := s.authorizeBrokerRegistrationPolicy(w, r, existingBroker, req.AdminManaged)
-	if !ok {
-		return
-	}
-	req.AdminManaged = stampAdminManaged
 
 	// Turning auto-provide on offers the broker to every project on the
 	// hub, so it needs broker.auto_provide in addition to registration.
