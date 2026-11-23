@@ -579,6 +579,25 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(window.location.search).toBe('?tab=pending&sort=project');
   });
 
+  it('opens the Made detail panel on a By project item (ptone/scion#8477)', async () => {
+    setFeatureFlag(DECISIONS_FLAG, true);
+
+    const el = await mount('/profile/decisions?tab=made&sort=project');
+    const root = el.shadowRoot!;
+    const item = root.querySelector('[data-made-group="proj-1"] [data-mobile-answer="ans-2"]')!;
+    const toggle = item.querySelector<HTMLButtonElement>('button[data-made-toggle="ans-2"]')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-label')).toBe('Show choices for 17 v1');
+
+    toggle.click();
+    await el.updateComplete;
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const panel = item.querySelector<HTMLElement>('[data-made-detail="ans-2"]')!;
+    expect(panel.id).toBe('made-detail-m-ans-2');
+    expect(toggle.getAttribute('aria-controls')).toBe(panel.id);
+    expect(root.querySelectorAll('[data-made-detail]').length).toBe(1);
+  });
+
   it('renders Made By project overview groups and drills down via "See all in <project>" to sort=recent&project=<id> (R5, R-3)', async () => {
     setFeatureFlag(DECISIONS_FLAG, true);
 

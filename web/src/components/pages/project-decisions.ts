@@ -362,6 +362,7 @@ export class ScionPageProjectDecisions extends LitElement {
                     currentUserId: this.ctrl.currentUserId,
                     showProjectColumn: false,
                     defaultProjectId: this.projectId,
+                    disclosure: this.ctrl.madeDisclosure,
                   })}
                   ${renderLoadMoreFooter({
                     tab: 'made',

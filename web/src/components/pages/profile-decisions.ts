@@ -599,6 +599,7 @@ export class ScionPageProfileDecisions extends LitElement {
                       currentUserId: this.ctrl.currentUserId,
                       showProjectColumn: true,
                       resolveProjectName: this.resolveProjectName,
+                      disclosure: this.ctrl.madeDisclosure,
                     })}
                     ${renderLoadMoreFooter({
                       tab: 'made',
@@ -654,6 +655,7 @@ export class ScionPageProfileDecisions extends LitElement {
                 includeProjectInMeta: false,
                 fallbackProject: g.project,
                 resolveProjectName: this.resolveProjectName,
+                disclosure: this.ctrl.madeDisclosure,
               })
           )}
         </div>

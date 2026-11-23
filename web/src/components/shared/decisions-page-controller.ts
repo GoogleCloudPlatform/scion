@@ -168,6 +168,8 @@ export class DecisionsPageController implements ReactiveController {
   madeEntries: ProjectDecisionLogEntryView[] = [];
   madeGroups: ProfileDecisionMadeGroupView[] = [];
   madeNextCursor = '';
+  /** Answer IDs of Made entries whose detail panel is open (ptone/scion#8443). */
+  madeExpanded: ReadonlySet<string> = new Set<string>();
 
   facetsAgents: ProfileDecisionActorView[] = [];
   facetsAnswerers: ProfileDecisionActorView[] = [];
@@ -230,6 +232,22 @@ export class DecisionsPageController implements ReactiveController {
 
   private notify(): void {
     this.host.requestUpdate();
+  }
+
+  /** Opens or closes one Made entry's detail panel. */
+  readonly toggleMadeExpanded = (answerId: string): void => {
+    const next = new Set(this.madeExpanded);
+    if (!next.delete(answerId)) next.add(answerId);
+    this.madeExpanded = next;
+    this.notify();
+  };
+
+  /** Expand state and toggle handed to the Made renderers. */
+  get madeDisclosure(): {
+    expanded: ReadonlySet<string>;
+    onToggle: (answerId: string) => void;
+  } {
+    return { expanded: this.madeExpanded, onToggle: this.toggleMadeExpanded };
   }
 
   setError(message: string): void {
