@@ -177,6 +177,12 @@ func releaseFirstLast(names []string) func(h *multiDeleteHub, name string) bool 
 				return false
 			}
 		}
+		// Let every agent observe at least one "deleting" read before 404,
+		// since WaitForAgentDeletion requires a prior successful read to
+		// distinguish 404-gone from 404-denied on project-scoped GET.
+		if h.polls[name] < 2 {
+			return false
+		}
 		if name != names[0] {
 			return true
 		}

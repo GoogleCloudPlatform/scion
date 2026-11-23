@@ -144,8 +144,9 @@ func DeleteWithResult(ctx context.Context, svc AgentService, agentID string, opt
 type DeletionWaitOutcome int
 
 const (
-	// DeletionConfirmed: the agent is gone (404) or soft-deleted (deletedAt
-	// set). Local cleanup may proceed.
+	// DeletionConfirmed: the agent is gone (404 after at least one successful
+	// read in this wait) or soft-deleted (deletedAt set). Local cleanup may
+	// proceed.
 	DeletionConfirmed DeletionWaitOutcome = iota
 	// DeletionFailed: the hub reports deletion.state == failed. Result.Deletion
 	// carries the code and message.
@@ -153,10 +154,11 @@ const (
 	// DeletionNotTaken: after the 202 the agent is live with no deletion
 	// marker, so no delete is running. The delete did not take effect.
 	DeletionNotTaken
-	// DeletionUnobservable: the caller may not read the agent (401/403), or
-	// the hub rejected the read with another non-retryable 4xx (anything but
-	// 404, 408 and 429), so completion cannot be observed. Err says which.
-	// The delete was still accepted.
+	// DeletionUnobservable: the caller may not read the agent (401/403, or 404
+	// before any read succeeded in this wait — the project-scoped GET returns
+	// 404 on read denial), or the hub rejected the read with another
+	// non-retryable 4xx (anything but 404, 408 and 429), so completion cannot
+	// be observed. Err says which. The delete was still accepted.
 	DeletionUnobservable
 	// DeletionTimedOut: the wait ended before an outcome was seen: the delete
 	// was still running, or every poll since the last good read failed (Err
@@ -243,6 +245,7 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 	start := opts.Now()
 	var res DeletionWaitResult
 	liveWithoutMarker := 0
+	seenAgent := false
 	for {
 		res.Polls++
 		// Cap this GET at the remaining budget, measured on opts.Now (so a
@@ -270,8 +273,18 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 			var apiErr *apiclient.APIError
 			switch {
 			case errors.As(err, &apiErr) && apiErr.IsNotFound():
-				res.Outcome = DeletionConfirmed
-				res.Err = nil
+				// The project-scoped GET returns 404 both for a missing agent
+				// and for a denied read. Confirm deletion only if this wait
+				// has already read the agent; otherwise fail closed so local
+				// cleanup does not run while the hub delete may still be
+				// active.
+				if seenAgent {
+					res.Outcome = DeletionConfirmed
+					res.Err = nil
+					return res
+				}
+				res.Outcome = DeletionUnobservable
+				res.Err = err
 				return res
 			case errors.As(err, &apiErr) && (apiErr.IsForbidden() || apiErr.IsUnauthorized() || nonRetryable4xx(apiErr.StatusCode)):
 				res.Outcome = DeletionUnobservable
@@ -287,6 +300,7 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 			res.Err = nil
 			return res
 		case ag.Deletion == nil:
+			seenAgent = true
 			res.Err = nil
 			res.Deletion = nil
 			liveWithoutMarker++
@@ -300,6 +314,7 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 			res.Err = nil
 			return res
 		default: // deleting (or a state this client does not know): keep polling
+			seenAgent = true
 			res.Err = nil
 			res.Deletion = ag.Deletion
 			liveWithoutMarker = 0
@@ -322,7 +337,8 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 }
 
 // nonRetryable4xx reports whether a poll status means retrying cannot help.
-// 404 is handled as "gone" before this is asked; 408 and 429 are retried.
+// 404 is handled before this is asked (confirmed after a read, unobservable
+// before); 408 and 429 are retried.
 func nonRetryable4xx(status int) bool {
 	return status >= 400 && status < 500 &&
 		status != http.StatusNotFound &&

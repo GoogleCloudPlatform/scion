@@ -237,8 +237,7 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 	t.Run("project agent list", func(t *testing.T) {
 		t.Run("request without the linked user is denied", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, agentsPath, noUser, nil)
-			resp := assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
-			assertStructuredDenial(t, resp, "agent", "list")
+			assertChatMatrixError(t, w, http.StatusNotFound, ErrCodeNotFound, "Project not found")
 		})
 		t.Run("request with the linked owner lists agents", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, agentsPath, env.ownerEmail, nil)
@@ -247,8 +246,7 @@ func TestChatPluginAuthzMatrix(t *testing.T) {
 		})
 		t.Run("request with a linked outsider is denied", func(t *testing.T) {
 			w := env.do(t, http.MethodGet, agentsPath, env.outsiderEmail, nil)
-			resp := assertChatMatrixError(t, w, http.StatusForbidden, ErrCodeForbidden, "")
-			assertStructuredDenial(t, resp, "agent", "list")
+			assertChatMatrixError(t, w, http.StatusNotFound, ErrCodeNotFound, "Project not found")
 		})
 	})
 

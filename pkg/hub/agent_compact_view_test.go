@@ -99,7 +99,7 @@ func TestAgentCompactView_ParityWithFullViewForEveryIdentityClassAndMode(t *test
 	require.Contains(t, rec.Body.String(), `"appliedConfig"`)
 	require.Contains(t, rec.Body.String(), `"creatorName"`)
 
-	wantProjectStatus := map[string]int{"hub-admin-non-member": http.StatusForbidden}
+	wantProjectStatus := map[string]int{"hub-admin-non-member": http.StatusNotFound}
 	require.Len(t, wantParityItems, 2*len(f.callers)-len(positiveParityItems), "one expected item total per identity class and endpoint")
 	for cell := range positiveParityItems {
 		_, dup := wantParityItems[cell]
@@ -155,7 +155,7 @@ var deletionParityModes = []string{
 // and the explicit null both views emit when no delete is active or failed.
 // Every other cell, a runtime broker identity on both endpoints among them,
 // is checked to read nothing: both views answer the cell's exact status, a
-// 403 or a 200 with an empty list.
+// 404 or a 200 with an empty list.
 func TestAgentCompactView_DeletionViewParityForEveryIdentityClass(t *testing.T) {
 	f := compactSetup(t)
 	deletingID, failedID := f.agentIDAt(1), f.agentIDAt(4)
@@ -186,14 +186,14 @@ func TestAgentCompactView_DeletionViewParityForEveryIdentityClass(t *testing.T) 
 	)
 
 	// Identity classes that read no agent of the project on an endpoint,
-	// each with the status both views answer: a 403, or a 200 with an
+	// each with the status both views answer: a 404, or a 200 with an
 	// empty list.
 	blind := map[string]int{
 		"hub-admin-non-member global":  http.StatusOK,
-		"hub-admin-non-member project": http.StatusForbidden,
+		"hub-admin-non-member project": http.StatusNotFound,
 		"agent-jwt global":             http.StatusOK,
 		"runtime-broker global":        http.StatusOK,
-		"runtime-broker project":       http.StatusForbidden,
+		"runtime-broker project":       http.StatusNotFound,
 	}
 	for _, c := range callers {
 		for _, ep := range []struct{ name, base string }{{"global", f.globalBase()}, {"project", f.projectBase()}} {
@@ -467,7 +467,7 @@ func TestAgentCompactView_CursorBindingPerIdentityAndEndpointMatchesFullView(t *
 							case replayer.name == "hub-admin-non-member" && replayEP.name == "project":
 								// Refused at the project agent.list gate before
 								// the cursor is read.
-								assert.Equal(t, http.StatusForbidden, full.Code, label)
+								assert.Equal(t, http.StatusNotFound, full.Code, label)
 							default:
 								assert.Equal(t, http.StatusBadRequest, full.Code, "%s: foreign replay must be refused", label)
 							}

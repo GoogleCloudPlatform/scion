@@ -1167,7 +1167,7 @@ func TestWaitForAgentLaunch_BrieflyUnreadableThenProgress(t *testing.T) {
 }
 
 func TestWaitForAgentLaunch_ReadableLauncherSeesDeletion(t *testing.T) {
-	// A user caller is refused with 403, so its lasting 404 after a read
+	// Once a user caller has read the agent in this wait, a lasting 404
 	// means the agent is gone.
 	shortenLaunchWaitTimings(t)
 	t.Setenv("SCION_AGENT_ID", "")
@@ -1218,31 +1218,37 @@ func TestWaitForAgentLaunch_AgentCallerNotFoundAfterReadIsNotADeletion(t *testin
 }
 
 func TestWaitForAgentLaunch_UserCallerAcceptedLaunch(t *testing.T) {
-	// A user caller is refused with 403, so its 404 is a definite
-	// not-found once it outlasts the grace, and its 403 keeps the login hint.
+	// The project-scoped GET returns 404 on read denial for all callers, so
+	// a user caller's 404 before any read is reported as unreadable once it
+	// outlasts the grace; a 403 still keeps the login hint.
 	shortenLaunchWaitTimings(t)
 	t.Setenv("SCION_AGENT_ID", "")
-	cases := []struct {
-		status int
-		want   string
-	}{
-		{http.StatusNotFound, "agent 'a1' no longer exists; it was deleted while launching"},
-		{http.StatusForbidden, "scion hub auth login"},
-	}
-	for _, tc := range cases {
-		t.Run(http.StatusText(tc.status), func(t *testing.T) {
-			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
-				errResult(&apiclient.APIError{StatusCode: tc.status, Code: "x", Message: "no"}),
-			}}
-			_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
-				AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
-			})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.want)
-			assert.NotContains(t, err.Error(), "status not readable")
-			assert.Greater(t, seq.calls, 1, "a brief failure after accept is retried")
+	t.Run(http.StatusText(http.StatusNotFound), func(t *testing.T) {
+		seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+			errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "Resource not found"}),
+		}}
+		_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+			AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
 		})
-	}
+		var unreadable *launchStatusUnreadableError
+		require.ErrorAs(t, err, &unreadable)
+		assert.False(t, unreadable.AfterRead)
+		assert.Equal(t, unreadableMessage, err.Error())
+		assert.NotContains(t, err.Error(), "no longer exists")
+		assert.Greater(t, seq.calls, 1, "a brief failure after accept is retried")
+	})
+	t.Run(http.StatusText(http.StatusForbidden), func(t *testing.T) {
+		seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+			errResult(&apiclient.APIError{StatusCode: http.StatusForbidden, Code: "x", Message: "no"}),
+		}}
+		_, err := waitForAgentLaunch(context.Background(), launchWaitOptions{
+			AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 3 * time.Second,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "scion hub auth login")
+		assert.NotContains(t, err.Error(), "status not readable")
+		assert.Greater(t, seq.calls, 1, "a brief failure after accept is retried")
+	})
 }
 
 func TestStartAgentViaHub_AgentLauncherCannotReadStatus(t *testing.T) {
@@ -1260,6 +1266,25 @@ func TestStartAgentViaHub_AgentLauncherCannotReadStatus(t *testing.T) {
 	assert.Contains(t, stderr, "Check its status with: scion list")
 	assert.Contains(t, stderr, "Agent Slug: a1")
 	assert.NotContains(t, stderr, "Phase:", "the create answer's phase predates the launch")
+	assert.NotContains(t, stderr, "no longer exists")
+}
+
+func TestStartAgentViaHub_UserCallerCannotReadStatus(t *testing.T) {
+	// The project-scoped GET returns 404 on read denial for all callers, so
+	// a user caller (e.g. a scoped UAT allowed agent.create but not
+	// agent.read) gets an accepted-launch unreadable notice, not a false
+	// deletion error.
+	t.Setenv("SCION_AGENT_ID", "")
+	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: asyncCreateResponse(),
+		afterCreate: []interface{}{http.StatusNotFound}}
+	hubCtx := setupLaunchStartTest(t, hub)
+	var err error
+	stderr := captureStderr(t, func() {
+		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
+	})
+	require.NoError(t, err, "an accepted launch whose status cannot be read exits 0")
+	assert.Contains(t, stderr, "Agent 'a1' accepted by Hub and launching.")
+	assert.Contains(t, stderr, "Its status is not readable with this credential's scope (launch launch-1); the launch continues on the Hub.")
 	assert.NotContains(t, stderr, "no longer exists")
 }
 
@@ -1627,9 +1652,10 @@ func TestStartAgentViaHub_AttachEndedLaunchIsNotAnAcceptedLaunch(t *testing.T) {
 	}
 }
 
-func TestStartAgentViaHub_AttachUserCallerNotFoundIsDeleted(t *testing.T) {
-	// A user caller is refused with 403, so its 404 on the --attach wait is
-	// a definite not-found, reported at once.
+func TestStartAgentViaHub_AttachUserCallerNotFoundBeforeReadIsUnreadable(t *testing.T) {
+	// The project-scoped GET returns 404 on read denial for all callers, so
+	// a user caller's 404 before any read on the --attach wait is reported as
+	// unreadable (not retried without an active launch, still failing --attach).
 	t.Setenv("SCION_AGENT_ID", "")
 	hub := &launchMockHub{t: t, createStatus: http.StatusCreated, createBody: hubclient.CreateAgentResponse{
 		Agent: &hubclient.Agent{ID: "id-1", Slug: "a1", Phase: "running"},
@@ -1640,8 +1666,11 @@ func TestStartAgentViaHub_AttachUserCallerNotFoundIsDeleted(t *testing.T) {
 	_ = captureStderr(t, func() {
 		_ = captureStdout(t, func() { err = startAgentViaHub(nil, hubCtx, "a1", "", false, nil) })
 	})
-	require.Error(t, err)
-	assert.Equal(t, "agent 'a1' no longer exists; it was deleted while launching", err.Error())
+	var unreadable *launchStatusUnreadableError
+	require.ErrorAs(t, err, &unreadable)
+	assert.False(t, unreadable.AfterRead)
+	assert.Equal(t, "agent 'a1': launch accepted; status not readable with this credential's scope; the launch continues on the Hub", err.Error())
+	assert.Equal(t, 1, exitCodeFor(err))
 	assert.Equal(t, 1, hub.getsAfterCR, "not retried")
 }
 
@@ -1730,34 +1759,43 @@ func TestWaitForAgentLaunch_InterruptDuringDeletionConfirmation(t *testing.T) {
 }
 
 func TestWaitForAgentLaunch_UserCallerBudgetEndsDuringRetry(t *testing.T) {
-	// A user caller's 404 or 403 before any read is a definite answer;
-	// a wait budget that runs out while it is retried does not turn it
-	// into a launch still in progress.
-	cases := []struct {
-		status int
-		want   string
-	}{
-		{http.StatusNotFound, "agent 'a1' no longer exists; it was deleted while launching"},
-		{http.StatusForbidden, "the Hub refused the status request"},
-	}
-	for _, tc := range cases {
-		t.Run(http.StatusText(tc.status), func(t *testing.T) {
-			clock := shortenLaunchWaitTimings(t)
-			t.Setenv("SCION_AGENT_ID", "")
-			clock.blocked = true
-			launchUnreadableGrace = time.Hour
-			seq := &agentSequence{results: []func() (*hubclient.Agent, error){
-				errResult(&apiclient.APIError{StatusCode: tc.status, Code: "x", Message: "no"}),
-			}}
-			_, err := runLaunchWaitGuarded(t, context.Background(), launchWaitOptions{
-				AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 50 * time.Millisecond,
-			})
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tc.want)
-			_, notFollowed := acceptedLaunchNotFollowed(err)
-			assert.False(t, notFollowed)
+	// A user caller's 403 before any read is a definite refusal, so a wait
+	// budget that runs out while it is retried still reports the refusal. A
+	// 404 before any read is ambiguous (project-scoped GET returns 404 on
+	// deny), so when the wait budget cuts the retry short the wait reports
+	// timeout, matching an agent caller.
+	t.Run(http.StatusText(http.StatusForbidden), func(t *testing.T) {
+		clock := shortenLaunchWaitTimings(t)
+		t.Setenv("SCION_AGENT_ID", "")
+		clock.blocked = true
+		launchUnreadableGrace = time.Hour
+		seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+			errResult(&apiclient.APIError{StatusCode: http.StatusForbidden, Code: "x", Message: "no"}),
+		}}
+		_, err := runLaunchWaitGuarded(t, context.Background(), launchWaitOptions{
+			AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 50 * time.Millisecond,
 		})
-	}
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "the Hub refused the status request")
+		_, notFollowed := acceptedLaunchNotFollowed(err)
+		assert.False(t, notFollowed)
+	})
+	t.Run(http.StatusText(http.StatusNotFound), func(t *testing.T) {
+		clock := shortenLaunchWaitTimings(t)
+		t.Setenv("SCION_AGENT_ID", "")
+		clock.blocked = true
+		launchUnreadableGrace = time.Hour
+		seq := &agentSequence{results: []func() (*hubclient.Agent, error){
+			errResult(&apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "Resource not found"}),
+		}}
+		_, err := runLaunchWaitGuarded(t, context.Background(), launchWaitOptions{
+			AgentName: "a1", Accepted: true, LaunchID: "launch-1", Get: seq.get, PollInterval: time.Millisecond, Timeout: 50 * time.Millisecond,
+		})
+		var timeout *launchWaitTimeoutError
+		require.ErrorAs(t, err, &timeout)
+		_, notFollowed := acceptedLaunchNotFollowed(err)
+		assert.True(t, notFollowed)
+	})
 }
 
 func TestStartAgentViaHub_DeletedBeforeShortWaitTimeoutFails(t *testing.T) {

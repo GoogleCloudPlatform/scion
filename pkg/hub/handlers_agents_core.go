@@ -4418,11 +4418,12 @@ func writeAgentNotFound(w http.ResponseWriter) {
 	writeErrorFromErr(w, store.ErrNotFound, "")
 }
 
-// authorizeSingleAgentRead is the agent.read gate shared by the
-// single-agent GET routes (getAgent, getProjectAgent). The resource
-// carries the agent record read from the store above, which the launcher
-// status-read rule decides from (authz_launcher_read.go). A user caller's
-// denial is the usual 403; an agent caller's denial is writeAgentNotFound.
+// authorizeSingleAgentRead is the agent.read gate for the global single-agent
+// GET route (getAgent). The resource carries the agent record read from the
+// store above, which the launcher status-read rule decides from
+// (authz_launcher_read.go). A user caller's denial is the usual 403; an agent
+// caller's denial is writeAgentNotFound. (Project-scoped getProjectAgent uses
+// authorizeRead directly so all callers receive 404 on deny.)
 func (s *Server) authorizeSingleAgentRead(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
 	ctx := r.Context()
 	resource := agentStatusReadResource(agent)

@@ -205,14 +205,15 @@ func TestDeleteAgentsViaHub_202KeepsWorktreeUntilConfirmed(t *testing.T) {
 	}
 }
 
-// Acceptance (i): a 403 poll or a timeout keeps the worktree. Neither is a
-// failure, so the command exits 0.
+// Acceptance (i): a 403 poll, a 404 before any read, or a timeout keeps the
+// worktree. None is a failure, so the command exits 0.
 func TestDeleteAgentsViaHub_202UnobservableKeepsWorktree(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		replies []getReply
 	}{
 		{"403", []getReply{{body: replyDeleting}, {status: http.StatusForbidden}}},
+		{"404 before read", []getReply{{status: http.StatusNotFound}}},
 		{"timeout", []getReply{{body: replyDeleting}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,6 +326,7 @@ func TestStopAgentViaHub_RmWaitsOn202(t *testing.T) {
 		replies []getReply
 	}{
 		{"403", []getReply{{status: http.StatusForbidden}}},
+		{"404 before read", []getReply{{status: http.StatusNotFound}}},
 		{"timeout", []getReply{{body: replyDeleting}}},
 	} {
 		t.Run(tc.name+" is not a failure", func(t *testing.T) {
@@ -345,7 +347,7 @@ func TestStopAllAgentsViaHub_RmWaitsOn202(t *testing.T) {
 		wantSynced bool
 		wantText   string
 	}{
-		{name: "confirmed", replies: []getReply{{status: http.StatusNotFound}}, wantSynced: false, wantText: "Agent 'all-agent' stopped and removed via Hub."},
+		{name: "confirmed", replies: []getReply{{body: replyDeleting}, {status: http.StatusNotFound}}, wantSynced: false, wantText: "Agent 'all-agent' stopped and removed via Hub."},
 		{name: "failed", replies: []getReply{{body: replyInDoubt}}, wantErr: "(in_doubt)", wantSynced: true},
 		{name: "timeout", replies: []getReply{{body: replyDeleting}}, wantSynced: true,
 			wantText: "Agent 'all-agent' stopped via Hub; removal accepted; cannot observe completion (still running when the wait ended)."},
@@ -439,6 +441,7 @@ func TestDeleteAgentsViaHub_202PendingNotice(t *testing.T) {
 		wantReason string
 	}{
 		{"403", []getReply{{body: replyDeleting}, {status: http.StatusForbidden}}, "(the Hub did not allow reading the agent)"},
+		{"404 before read", []getReply{{status: http.StatusNotFound}}, "(the Hub did not allow reading the agent)"},
 		{"timeout", []getReply{{body: replyDeleting}}, "(still running when the wait ended)"},
 		{"timeout after poll errors", []getReply{{status: http.StatusBadGateway}}, "(could not read the agent when the wait ended: "},
 		{"other 4xx", []getReply{{status: http.StatusGone}}, "(the Hub rejected reading the agent: "},

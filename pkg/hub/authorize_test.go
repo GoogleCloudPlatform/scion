@@ -885,3 +885,50 @@ func TestAuthorizeRead_NilAuthzServiceFailsClosed(t *testing.T) {
 		t.Errorf("status = %d, want %d (body: %s)", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
+
+// TestAuthorizeReadAction_IdentityKinds verifies authorizeReadAction with
+// ActionList: nil identity is 401, allowed passes, and denial returns 404
+// carrying the requested notFoundLabel.
+func TestAuthorizeReadAction_IdentityKinds(t *testing.T) {
+	srv, s := testServer(t)
+	authzHelperSeedAdmin(t, s)
+
+	listResource := Resource{
+		Type:       "agent",
+		ParentType: "project",
+		ParentID:   authzHelperProjectA,
+	}
+
+	tests := []struct {
+		name       string
+		identity   Identity
+		wantAllow  bool
+		wantStatus int
+	}{
+		{"nil identity is unauthenticated", nil, false, http.StatusUnauthorized},
+		{"user allowed by policy", authzHelperAdmin(), true, 0},
+		{"user denied by policy reads as 404", authzHelperMember(), false, http.StatusNotFound},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			got := srv.authorizeReadAction(rec, authzHelperRequest(tc.identity), listResource, ActionList, "Project")
+
+			if got != tc.wantAllow {
+				t.Fatalf("authorizeReadAction() = %v, want %v (body: %s)", got, tc.wantAllow, rec.Body.String())
+			}
+			if tc.wantAllow {
+				return
+			}
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusNotFound {
+				if !strings.Contains(rec.Body.String(), "Project not found") {
+					t.Errorf("body = %s, want Project not found", rec.Body.String())
+				}
+			}
+		})
+	}
+}
