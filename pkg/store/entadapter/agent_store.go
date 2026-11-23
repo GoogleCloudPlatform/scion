@@ -104,6 +104,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		Slug:                a.Slug,
 		Name:                a.Name,
 		Template:            a.Template,
+		HarnessConfig:       a.HarnessConfig,
 		ProjectID:           a.ProjectID.String(),
 		Labels:              a.Labels,
 		Annotations:         a.Annotations,

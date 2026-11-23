@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -977,4 +978,271 @@ func TestShellAgentEnvAndSecretIsolation_H2(t *testing.T) {
 	assert.Equal(t, "proj-sec-val", llmSecMap["PROJECT_SECRET"], "LLM control agent must still receive project secret")
 	assert.Equal(t, "owner-sec-val", llmSecMap["OWNER_SECRET"], "LLM control agent must still receive owner secret")
 	assert.Equal(t, "llm-agent-sec-val", llmSecMap["LLM_AGENT_SECRET"], "LLM control agent must still receive agent-scoped secret when hub.agent_secrets is enabled")
+}
+
+func TestIsShellAgent_FailClosed(t *testing.T) {
+	cases := []struct {
+		name  string
+		agent *store.Agent
+		want  bool
+	}{
+		{name: "nil agent", agent: nil, want: false},
+		{name: "empty agent", agent: &store.Agent{}, want: false},
+		{
+			name:  "column shell with nil applied_config (unparsable JSON)",
+			agent: &store.Agent{HarnessConfig: config.ShellHarnessConfigName, AppliedConfig: nil},
+			want:  true,
+		},
+		{
+			name: "column shell disagrees with non-shell applied_config",
+			agent: &store.Agent{
+				HarnessConfig: config.ShellHarnessConfigName,
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+			},
+			want: true,
+		},
+		{
+			name: "applied_config shell with empty column",
+			agent: &store.Agent{
+				HarnessConfig: "",
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName},
+			},
+			want: true,
+		},
+		{
+			name: "applied_config shell disagrees with non-shell column",
+			agent: &store.Agent{
+				HarnessConfig: "claude",
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName},
+			},
+			want: true,
+		},
+		{
+			name: "both non-shell",
+			agent: &store.Agent{
+				HarnessConfig: "claude",
+				AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isShellAgent(tc.agent))
+		})
+	}
+}
+
+func TestShellAgentAssembledRequests_NoGitHubAppAndUserScopeOnly(t *testing.T) {
+	ctx := context.Background()
+	s := createTestStore(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+
+	// Attach an active GitHub App installation to the project.
+	installID := int64(54321)
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installID,
+		AccountLogin:   "test-org",
+		AccountType:    "Organization",
+		AppID:          42,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	project.GitHubInstallationID = &installID
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	ownerID := api.NewUUID()
+	ancestorID := api.NewUUID()
+	hubID := api.NewUUID()
+	shellAgentID := api.NewUUID()
+	llmAgentID := api.NewUUID()
+
+	// Seed env vars across every scope + progeny + agent scope.
+	for _, ev := range []*store.EnvVar{
+		{ID: api.NewUUID(), Key: "PROMPT_COMMAND", Value: "evil-project-cmd", Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "HUB_ENV", Value: "evil-hub-val", Scope: store.ScopeHub, ScopeID: hubID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "BROKER_ENV", Value: "evil-broker-val", Scope: store.ScopeRuntimeBroker, ScopeID: broker.ID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "OWNER_ENV", Value: "good-owner-val", Scope: store.ScopeUser, ScopeID: ownerID, InjectionMode: store.InjectionModeAlways},
+		{ID: api.NewUUID(), Key: "PROGENY_ENV", Value: "evil-progeny-val", Scope: store.ScopeUser, ScopeID: ancestorID, InjectionMode: store.InjectionModeAlways, AllowProgeny: true},
+		{ID: api.NewUUID(), Key: "AGENT_ENV", Value: "evil-agent-val", Scope: store.ScopeAgent, ScopeID: shellAgentID, InjectionMode: store.InjectionModeAlways},
+	} {
+		require.NoError(t, s.CreateEnvVar(ctx, ev))
+	}
+
+	// Seed secrets across every scope + progeny + agent scope.
+	backend := secret.NewLocalBackend(s, hubID, "")
+	for _, inp := range []*secret.SetSecretInput{
+		{Name: "PROJECT_SECRET", Value: "proj-sec-val", SecretType: store.SecretTypeEnvironment, Target: "PROJECT_SECRET", Scope: store.ScopeProject, ScopeID: project.ID, InjectionMode: store.InjectionModeAlways},
+		{Name: "HUB_SECRET", Value: "hub-sec-val", SecretType: store.SecretTypeEnvironment, Target: "HUB_SECRET", Scope: store.ScopeHub, ScopeID: hubID, InjectionMode: store.InjectionModeAlways},
+		{Name: "BROKER_SECRET", Value: "broker-sec-val", SecretType: store.SecretTypeEnvironment, Target: "BROKER_SECRET", Scope: store.ScopeRuntimeBroker, ScopeID: broker.ID, InjectionMode: store.InjectionModeAlways},
+		{Name: "OWNER_SECRET", Value: "owner-sec-val", SecretType: store.SecretTypeEnvironment, Target: "OWNER_SECRET", Scope: store.ScopeUser, ScopeID: ownerID, InjectionMode: store.InjectionModeAlways},
+		{Name: "PROGENY_SECRET", Value: "progeny-sec-val", SecretType: store.SecretTypeEnvironment, Target: "PROGENY_SECRET", Scope: store.ScopeUser, ScopeID: ancestorID, InjectionMode: store.InjectionModeAlways, AllowProgeny: true},
+		{Name: "AGENT_SECRET", Value: "agent-sec-val", SecretType: store.SecretTypeEnvironment, Target: "AGENT_SECRET", Scope: store.ScopeAgent, ScopeID: shellAgentID, InjectionMode: store.InjectionModeAlways},
+	} {
+		_, _, err := backend.Set(ctx, inp)
+		require.NoError(t, err)
+	}
+
+	minter := &recordingGitHubAppMinter{}
+	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetHubID(hubID)
+	d.SetSecretBackend(backend)
+	d.SetGitHubAppMinter(minter)
+	d.SetAgentSecretsEnabledProvider(func() bool { return true })
+
+	shellAgent := &store.Agent{
+		ID:              shellAgentID,
+		Slug:            "shell-assembled",
+		Name:            "shell-assembled",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		OwnerID:         ownerID,
+		Ancestry:        []string{ancestorID, api.NewUUID()},
+		HarnessConfig:   config.ShellHarnessConfigName,
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName},
+	}
+	llmAgent := &store.Agent{
+		ID:              llmAgentID,
+		Slug:            "llm-assembled",
+		Name:            "llm-assembled",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		OwnerID:         ownerID,
+		HarnessConfig:   "claude",
+		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+	}
+
+	assertShellEnvAndSecrets := func(t *testing.T, label string, env map[string]string, secrets []ResolvedSecret, allowedOwnerKeys map[string]string) {
+		t.Helper()
+		for k, v := range env {
+			assert.False(t, strings.HasPrefix(k, "SCION_GITHUB_"), "%s: unexpected GitHub App key %q", label, k)
+			assert.NotEqual(t, "SCION_USER_GITHUB_TOKEN", k, "%s: unexpected SCION_USER_GITHUB_TOKEN", label)
+			if strings.HasPrefix(k, "SCION_") {
+				continue
+			}
+			want, ok := allowedOwnerKeys[k]
+			assert.True(t, ok, "%s: non-SCION_* key %q=%q did not come from owner user scope", label, k, v)
+			if ok {
+				assert.Equal(t, want, v, "%s: key %q value mismatch", label, k)
+			}
+		}
+		for wantKey, wantVal := range allowedOwnerKeys {
+			assert.Equal(t, wantVal, env[wantKey], "%s: missing expected owner key %q", label, wantKey)
+		}
+		for _, rs := range secrets {
+			_, ok := allowedOwnerKeys[rs.Name]
+			assert.True(t, ok, "%s: resolved secret %q did not come from owner user scope", label, rs.Name)
+		}
+	}
+
+	t.Run("no owner GITHUB_TOKEN: skips GitHub App minting on create and start", func(t *testing.T) {
+		minter.called = false
+		allowedOwnerKeys := map[string]string{
+			"OWNER_ENV":    "good-owner-val",
+			"OWNER_SECRET": "owner-sec-val",
+		}
+
+		createReq, err := d.buildCreateRequestFor(ctx, shellAgent, "DispatchAgentCreate", failOnSecretResolutionError)
+		require.NoError(t, err)
+		assert.False(t, minter.called, "create must not mint a project GitHub App token for an execution container")
+		assertShellEnvAndSecrets(t, "create", createReq.ResolvedEnv, createReq.ResolvedSecrets, allowedOwnerKeys)
+
+		startRes, err := d.buildStartEnv(ctx, shellAgent, "DispatchAgentStart", mintSiteStart)
+		require.NoError(t, err)
+		assert.False(t, minter.called, "start must not mint a project GitHub App token for an execution container")
+		assertShellEnvAndSecrets(t, "start", startRes.env, startRes.secrets, allowedOwnerKeys)
+	})
+
+	t.Run("owner has user-scope GITHUB_TOKEN: preserves owner token without stamping SCION_GITHUB_*", func(t *testing.T) {
+		_, _, err := backend.Set(ctx, &secret.SetSecretInput{
+			Name:          "GITHUB_TOKEN",
+			Value:         "owner-gh-pat",
+			SecretType:    store.SecretTypeEnvironment,
+			Target:        "GITHUB_TOKEN",
+			Scope:         store.ScopeUser,
+			ScopeID:       ownerID,
+			InjectionMode: store.InjectionModeAlways,
+		})
+		require.NoError(t, err)
+
+		minter.called = false
+		allowedOwnerKeys := map[string]string{
+			"OWNER_ENV":    "good-owner-val",
+			"OWNER_SECRET": "owner-sec-val",
+			"GITHUB_TOKEN": "owner-gh-pat",
+		}
+
+		createReq, err := d.buildCreateRequestFor(ctx, shellAgent, "DispatchAgentCreate", failOnSecretResolutionError)
+		require.NoError(t, err)
+		assert.False(t, minter.called)
+		assertShellEnvAndSecrets(t, "create-with-user-gh", createReq.ResolvedEnv, createReq.ResolvedSecrets, allowedOwnerKeys)
+
+		startRes, err := d.buildStartEnv(ctx, shellAgent, "DispatchAgentStart", mintSiteStart)
+		require.NoError(t, err)
+		assert.False(t, minter.called)
+		assertShellEnvAndSecrets(t, "start-with-user-gh", startRes.env, startRes.secrets, allowedOwnerKeys)
+	})
+
+	t.Run("control: LLM agent in same project still gets GitHub App integration", func(t *testing.T) {
+		// Use an LLM agent owned by a user without a personal GITHUB_TOKEN so the App token is minted.
+		llmNoOwnerToken := *llmAgent
+		llmNoOwnerToken.OwnerID = api.NewUUID()
+
+		minter.called = false
+		createReq, err := d.buildCreateRequestFor(ctx, &llmNoOwnerToken, "DispatchAgentCreate", failOnSecretResolutionError)
+		require.NoError(t, err)
+		assert.True(t, minter.called, "LLM control agent must mint GitHub App token on create")
+		assert.Equal(t, "github-app-token", createReq.ResolvedEnv["GITHUB_TOKEN"])
+		assert.Equal(t, "true", createReq.ResolvedEnv["SCION_GITHUB_APP_ENABLED"])
+
+		minter.called = false
+		llmStartEnv := make(map[string]string)
+		var llmStartCls map[string]api.EnvKind
+		d.deliverGitHubToken(ctx, &llmNoOwnerToken, llmStartEnv, &llmStartCls, nil, nil, "DispatchAgentStart")
+		assert.True(t, minter.called, "LLM control agent must mint GitHub App token on start")
+		assert.Equal(t, "github-app-token", llmStartEnv["GITHUB_TOKEN"])
+		assert.Equal(t, "true", llmStartEnv["SCION_GITHUB_APP_ENABLED"])
+	})
+}
+
+func TestHandleAgentGitHubTokenRefresh_ShellAgentRefused(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	installID := int64(77777)
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: installID,
+		AccountLogin:   "test-org",
+		AccountType:    "Organization",
+		AppID:          7,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	project := &store.Project{
+		ID:                   api.NewUUID(),
+		Name:                 "Shell Refresh Project",
+		Slug:                 "shell-refresh-proj",
+		GitHubInstallationID: &installID,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	shellAgent := &store.Agent{
+		ID:            api.NewUUID(),
+		Slug:          "shell-refresh",
+		Name:          "shell-refresh",
+		ProjectID:     project.ID,
+		HarnessConfig: config.ShellHarnessConfigName,
+		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName},
+	}
+	require.NoError(t, s.CreateAgent(ctx, shellAgent))
+
+	token := srv.generateRecordedAgentToken(t,
+		shellAgent.ID, project.ID, []AgentTokenScope{ScopeAgentTokenRefresh}, nil)
+
+	rec := doRequestWithAgentToken(t, srv, http.MethodPost,
+		"/api/v1/agents/"+shellAgent.ID+"/refresh-token", nil, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeForbidden, errResp.Error.Code)
+	assert.Equal(t, "execution containers cannot refresh project GitHub App tokens", errResp.Error.Message)
 }

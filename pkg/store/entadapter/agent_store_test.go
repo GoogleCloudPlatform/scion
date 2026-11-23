@@ -1587,6 +1587,25 @@ func TestAgentStore_HarnessConfigFilter(t *testing.T) {
 	assert.Equal(t, 3, all.TotalCount)
 }
 
+func TestEntAgentToStore_PopulatesHarnessConfigOnUnparsableAppliedConfig(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	shell := makeAgent(projectID, "shell-corrupt-applied")
+	shell.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "shell"}
+	require.NoError(t, s.CreateAgent(ctx, shell))
+
+	// Corrupt the JSON blob directly while keeping the indexed harness_config column intact.
+	uid := uuid.MustParse(shell.ID)
+	_, err := s.client.Agent.UpdateOneID(uid).SetAppliedConfig("{not json").Save(ctx)
+	require.NoError(t, err)
+
+	loaded, err := s.GetAgent(ctx, shell.ID)
+	require.NoError(t, err)
+	assert.Nil(t, loaded.AppliedConfig, "unparsable applied_config must decode to nil")
+	assert.Equal(t, "shell", loaded.HarnessConfig, "HarnessConfig must be populated from the indexed harness_config column")
+}
+
 // TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case:
 // with no Env map at all, filtering by HarnessConfig must still match
 // exactly the top-level value and nothing else.

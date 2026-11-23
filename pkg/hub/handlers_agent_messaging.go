@@ -1903,6 +1903,14 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Execution containers (shell harness) never receive project GitHub App
+	// tokens (ptone/scion#8812 §14).
+	if isShellAgent(agent) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"execution containers cannot refresh project GitHub App tokens", nil)
+		return
+	}
+
 	if agent.ProjectID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"agent has no project associated", nil)
