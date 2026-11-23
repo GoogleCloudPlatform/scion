@@ -782,7 +782,7 @@ func (e *deletionEngine) run() deletionOutcome {
 		})
 	}()
 
-	// Cancel scheduled events targeting the agent.
+	// Cancel pending scheduled events targeting or created by the agent.
 	func() {
 		ctx, cancel := e.step(deleteStepTimeout)
 		defer cancel()

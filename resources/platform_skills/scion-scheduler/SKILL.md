@@ -78,7 +78,11 @@ if it holds lifecycle permission (the `full` agent role); with the
 ### One-shot events
 
 Fire once, then done. Specify timing with `--in` (relative delay: `30m`,
-`2h`) or `--at` (absolute ISO 8601 timestamp, UTC).
+`2h`) or `--at` (absolute ISO 8601 timestamp, UTC). Pending one-shot events are
+automatically cancelled if their target agent (`target agent deleted`) or the
+agent whose recorded creating authority they run under (`creating agent deleted`)
+is deleted; already-fired events keep their status, and restoring a soft-deleted
+agent does not revive cancelled one-shot events (recreate them instead).
 
 ### Recurring schedules
 
