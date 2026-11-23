@@ -1243,10 +1243,9 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// With decisions the body is the optional intro above the decisions.
-	// Attachment-only sends (inline paths or uploaded attachment_ids) may
-	// omit text; attachment_ids are resolved and authorized after routing
-	// (ptone/scion#6154).
-	if req.Msg == "" && decisionSend == nil && len(req.Attachments) == 0 && len(req.AttachmentIDs) == 0 {
+	// Attachment-id-only sends may omit text; attachment_ids are resolved
+	// and authorized after routing (ptone/scion#6154).
+	if req.Msg == "" && decisionSend == nil && len(req.AttachmentIDs) == 0 {
 		ValidationError(w, "msg is required", nil)
 		return
 	}

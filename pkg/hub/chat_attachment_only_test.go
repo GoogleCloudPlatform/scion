@@ -525,6 +525,7 @@ func TestAgentOutbound_AttachmentIDOnly(t *testing.T) {
 		for _, req := range []OutboundMessageRequest{
 			{Recipient: "user:" + f.ua.Email},
 			{Recipient: "user:" + f.ua.Email, AttachmentIDs: []string{}},
+			{Recipient: "user:" + f.ua.Email, Attachments: []string{"/scion-volumes/scratchpad/notes.txt"}},
 			{ConversationRef: "@" + f.target.Slug},
 		} {
 			rec := f.outbound(t, f.sender, req)
