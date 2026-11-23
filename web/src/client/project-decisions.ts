@@ -21,7 +21,13 @@
  */
 
 import { apiFetch, parseApiError } from './api.js';
-import type { DecisionAnswerMode, DecisionView } from '../shared/types.js';
+import type {
+  AnswerView,
+  ChoiceOption,
+  DecisionAnswerMode,
+  DecisionView,
+  OtherOption,
+} from '../shared/types.js';
 
 /** Error code returned by the Hub when bounded decisions search times out (D9). */
 export const DECISIONS_SEARCH_TIMEOUT_CODE = 'SEARCH_TIMEOUT';
@@ -103,12 +109,27 @@ export interface ProjectDecisionSummaryView {
   key: string;
   ref: string;
   version: number;
+  /** decisions.status: "pending", "decided", "replaced", "withdrawn", or "dismissed". */
+  status?: string;
   question: string;
+  /** Every offered choice, in canonical order (ptone/scion#8443). */
+  choices?: ChoiceOption[];
+  /** The recommended choice; absent when the agent recommended none. */
+  defaultChoiceId?: string;
+  other?: OtherOption;
+  /** The version that replaced this one (`--update`). */
+  replacedBy?: ProjectDecisionRef;
   askerAgentId: string;
   askerAgentName: string;
 }
 
-/** One append-only answer log line on `tab=made`. */
+/** A decision version named by row ID and version number (DecisionRef). */
+export interface ProjectDecisionRef {
+  rowId: string;
+  version: number;
+}
+
+/** One Made entry: a decision version's final answer (D2 in ptone/scion#8443). */
 export interface ProjectDecisionLogEntryView {
   answerId: string;
   decision: ProjectDecisionSummaryView;
@@ -118,6 +139,10 @@ export interface ProjectDecisionLogEntryView {
   matchedDefault: boolean;
   previousChoiceLabel?: string;
   previousOtherText?: string;
+  /** The superseded agent-interpreted answer folded into this direct entry. */
+  interpretedAnswer?: AnswerView;
+  /** An interpreted entry with no direct answer yet, on a non-terminal decision. */
+  awaitingConfirmation?: boolean;
   answeredByUserId?: string;
   answeredByName: string;
   provenance: string;

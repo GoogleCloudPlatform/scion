@@ -3159,6 +3159,79 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
   });
 
+  it('opens and closes the Made detail panel on desktop and mobile from one toggle state (ptone/scion#8477)', async () => {
+    enableDecisionsFlag();
+    madeResponses = [
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        entries: [
+          makeLogEntry({
+            answerId: 'ans-rec',
+            choiceId: 'no',
+            label: 'No',
+            outcome: 'answer',
+            matchedDefault: false,
+            decision: {
+              rowId: 'r-1',
+              promptMessageId: 'm-1',
+              promptAvailable: true,
+              key: 'D9',
+              ref: 'D9',
+              version: 1,
+              status: 'decided',
+              question: 'Cut the RC from main?',
+              choices: [
+                { id: 'yes', label: 'Yes', description: 'Cut today' },
+                { id: 'no', label: 'No' },
+              ],
+              defaultChoiceId: 'yes',
+              askerAgentId: 'a-rel',
+              askerAgentName: 'release-bot',
+            },
+          }),
+        ],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+    const row = root.querySelector('[data-answer-row="ans-rec"]')!;
+    expect(row.querySelector('[data-rec-marker]')?.textContent?.trim()).toBe('recommended: Yes');
+    const toggle = row.querySelector<HTMLButtonElement>('button[data-made-toggle="ans-rec"]')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector('[data-made-detail]')).toBeNull();
+
+    toggle.click();
+    await el.updateComplete;
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    const panels = Array.from(root.querySelectorAll<HTMLElement>('[data-made-detail="ans-rec"]'));
+    expect(panels.map((p) => p.id)).toEqual(['made-detail-ans-rec', 'made-detail-m-ans-rec']);
+    const desktop = panels[0]!;
+    expect(
+      Array.from(desktop.querySelectorAll('[data-detail-choice]')).map((li) =>
+        li.getAttribute('data-detail-choice')
+      )
+    ).toEqual(['yes', 'no']);
+    expect(desktop.querySelector('[data-detail-choice="no"]')?.hasAttribute('data-picked')).toBe(
+      true
+    );
+    expect(
+      desktop.querySelector<HTMLAnchorElement>('[data-detail-open-in-chat]')?.getAttribute('href')
+    ).toMatch(/#msg-m-1$/);
+    const mobileToggle = root.querySelector<HTMLButtonElement>(
+      '[data-mobile-answer="ans-rec"] button[data-made-toggle]'
+    )!;
+    expect(mobileToggle.getAttribute('aria-expanded')).toBe('true');
+
+    mobileToggle.click();
+    await el.updateComplete;
+    expect(root.querySelector('[data-made-detail]')).toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
   it('renders Other answers with bold label, quoted plain text, two-line clamp + title, and previousOtherText on Made tab', async () => {
     enableDecisionsFlag();
     const literalText = '<b>europe-west4</b>, only after 6 PM freeze lifts @bystander';

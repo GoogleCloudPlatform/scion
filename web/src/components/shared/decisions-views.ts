@@ -572,6 +572,112 @@ export const decisionsPageSharedStyles: CSSResult = css`
     display: inline-flex;
   }
 
+  /* ---- Made detail panel: offered choices (ptone/scion#8443) ---- */
+  .made-disc {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    margin-inline-end: 0.25rem;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: var(--scion-radius-sm);
+    background: none;
+    color: var(--scion-text-secondary, #475569);
+    cursor: pointer;
+    vertical-align: middle;
+  }
+
+  .made-disc:hover {
+    background: var(--scion-bg-subtle, #f1f5f9);
+  }
+
+  .made-disc:focus-visible {
+    outline: 2px solid var(--scion-primary, #3b82f6);
+    outline-offset: 1px;
+  }
+
+  .rec-marker {
+    font-size: 0.78rem;
+    overflow-wrap: anywhere;
+  }
+
+  .badge.await {
+    background: var(--scion-badge-warning-bg, #fef3c7);
+    color: var(--scion-badge-warning-text, #92400e);
+  }
+
+  table.log tr.detail-row td {
+    background: var(--scion-bg, #f8fafc);
+    padding-top: 0.25rem;
+  }
+
+  .made-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--scion-text, #1e293b);
+  }
+
+  .mlist .item .made-detail {
+    margin-top: 0.45rem;
+    padding-top: 0.45rem;
+    border-top: 1px solid var(--scion-border, #e2e8f0);
+  }
+
+  .made-choices {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+
+  .made-choice {
+    display: grid;
+    grid-template-columns: 1.1rem 1fr;
+    gap: 0.4rem;
+    align-items: start;
+    overflow-wrap: anywhere;
+  }
+
+  .made-choice .pick {
+    color: var(--scion-primary, #3b82f6);
+    padding-top: 0.1rem;
+  }
+
+  .made-choice .desc {
+    display: block;
+    color: var(--scion-text-secondary, #475569);
+    font-size: 0.8rem;
+  }
+
+  .made-choice .other-text {
+    display: block;
+    overflow-wrap: anywhere;
+  }
+
+  .badge.rec {
+    margin-inline-start: 0.35rem;
+    vertical-align: middle;
+  }
+
+  .made-detail-notes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.9rem;
+    align-items: center;
+    color: var(--scion-text-secondary, #475569);
+    font-size: 0.8rem;
+  }
+
+  .made-detail-notes .dismiss-reason {
+    margin-top: 0;
+  }
+
   @media (max-width: 640px) {
     .ph h1 {
       font-size: 1.2rem;
@@ -1109,6 +1215,186 @@ export function renderProvenanceBadge(e: ProjectDecisionLogEntryView): TemplateR
   return html`<span class="badge">direct</span>`;
 }
 
+/** Expand state and toggle for the Made detail panels, owned by the page. */
+export interface MadeDisclosure {
+  expanded: ReadonlySet<string>;
+  onToggle: (answerId: string) => void;
+}
+
+/** Label of the decision's recommended choice, or '' when none is known. */
+function recommendedLabel(e: ProjectDecisionLogEntryView): string {
+  const id = e.decision.defaultChoiceId;
+  if (!id) return '';
+  return e.decision.choices?.find((c) => c.id === id)?.label || id;
+}
+
+/**
+ * Collapsed-row recommendation marker (design 4.3): `recommended` when the
+ * answer matched the recommendation, `recommended: X` when one existed and
+ * was not picked, nothing for dismissals or without a recommendation.
+ */
+export function renderRecommendationMarker(
+  e: ProjectDecisionLogEntryView
+): TemplateResult | typeof nothing {
+  if (isDismissLogEntry(e)) return nothing;
+  if (e.matchedDefault) {
+    return html`<span class="muted rec-marker" data-rec-marker="matched">recommended</span>`;
+  }
+  const label = recommendedLabel(e);
+  if (!label) return nothing;
+  return html`<span class="muted rec-marker" data-rec-marker="unpicked"
+    >recommended: ${label}</span
+  >`;
+}
+
+function renderAwaitingBadge(e: ProjectDecisionLogEntryView): TemplateResult | typeof nothing {
+  return e.awaitingConfirmation
+    ? html`<span class="badge await" data-awaiting-confirmation
+        ><sl-icon name="hourglass-split" aria-hidden="true"></sl-icon>awaiting confirmation</span
+      >`
+    : nothing;
+}
+
+function answerText(a: {
+  choiceId: string;
+  label: string;
+  otherText?: string | undefined;
+}): string {
+  const label = a.label || a.choiceId;
+  return isOtherAnswer(a) && a.otherText ? `${label}: “${a.otherText}”` : label;
+}
+
+function renderDisclosureButton(
+  e: ProjectDecisionLogEntryView,
+  panelId: string,
+  d: MadeDisclosure
+): TemplateResult {
+  const open = d.expanded.has(e.answerId);
+  const name = `${e.decision.key || e.decision.ref} v${e.decision.version}`;
+  return html`<button
+    type="button"
+    class="made-disc"
+    data-made-toggle=${e.answerId}
+    aria-expanded=${open ? 'true' : 'false'}
+    aria-controls=${panelId}
+    aria-label=${`${open ? 'Hide' : 'Show'} choices for ${name}`}
+    @click=${(): void => d.onToggle(e.answerId)}
+  >
+    <sl-icon name=${open ? 'chevron-down' : 'chevron-right'} aria-hidden="true"></sl-icon>
+  </button>`;
+}
+
+/**
+ * The Made detail panel (design 4.3): every offered choice in order with its
+ * description, the recommended tag and the pick; the Other row; the dismissal;
+ * the folded interpreted answer; "superseded by vN"; and "Open in chat" when
+ * the prompt message still exists. Every agent-supplied string renders as
+ * plain text.
+ */
+export function renderMadeDetailPanel(
+  e: ProjectDecisionLogEntryView,
+  opts: { id: string; projectId: string }
+): TemplateResult {
+  const isDismiss = isDismissLogEntry(e);
+  const pickedId = isDismiss ? '' : e.choiceId;
+  const choices = e.decision.choices ?? [];
+  const defaultId = e.decision.defaultChoiceId ?? '';
+  const other = e.decision.other;
+  const otherPicked = !isDismiss && isOtherAnswer(e);
+  const convHref = conversationHref(e.chatKey, e.conversationAvailable, opts.projectId);
+  const permalink =
+    e.decision.promptAvailable && convHref && e.decision.promptMessageId
+      ? `${convHref}#msg-${encodeURIComponent(e.decision.promptMessageId)}`
+      : null;
+  const interp = e.interpretedAnswer;
+  const replacedBy = e.decision.replacedBy;
+
+  const pickMark = (picked: boolean): TemplateResult =>
+    html`<span class="pick"
+      >${picked
+        ? html`<sl-icon name="check-circle-fill" aria-hidden="true"></sl-icon
+            ><span class="sr-only">Picked: </span>`
+        : nothing}</span
+    >`;
+
+  return html`
+    <div class="made-detail" id=${opts.id} data-made-detail=${e.answerId}>
+      ${choices.length > 0 || other
+        ? html`<ul class="made-choices" aria-label="Offered choices">
+            ${choices.map((c) => {
+              const picked = c.id === pickedId;
+              return html`<li
+                class="made-choice"
+                data-detail-choice=${c.id}
+                ?data-picked=${picked}
+                ?data-recommended=${c.id === defaultId}
+              >
+                ${pickMark(picked)}
+                <span>
+                  <span class=${picked ? 'lbl picked' : 'lbl'}
+                    >${picked ? html`<b>${c.label}</b>` : c.label}</span
+                  >${c.id === defaultId
+                    ? html`<span class="badge rec" data-detail-recommended>recommended</span>`
+                    : nothing}
+                  ${c.description
+                    ? html`<span class="desc" data-detail-desc>${c.description}</span>`
+                    : nothing}
+                </span>
+              </li>`;
+            })}
+            ${other
+              ? html`<li
+                  class="made-choice"
+                  data-detail-choice="$other"
+                  ?data-picked=${otherPicked}
+                >
+                  ${pickMark(otherPicked)}
+                  <span>
+                    <span class="lbl"
+                      >${otherPicked ? html`<b>${other.label}</b>` : other.label}</span
+                    >
+                    ${otherPicked && e.otherText
+                      ? html`<span class="other-text" data-detail-other-text
+                          >“${e.otherText}”</span
+                        >`
+                      : nothing}
+                    ${other.description
+                      ? html`<span class="desc" data-detail-desc>${other.description}</span>`
+                      : nothing}
+                  </span>
+                </li>`
+              : nothing}
+          </ul>`
+        : html`<span class="muted" data-detail-no-choices
+            >Offered choices are not available.</span
+          >`}
+      <div class="made-detail-notes">
+        ${isDismiss
+          ? html`<span data-detail-dismissed
+              ><b>Dismissed</b>${e.dismissReason
+                ? html`:
+                    <span class="dismiss-reason" data-detail-dismiss-reason
+                      >${e.dismissReason}</span
+                    >`
+                : nothing}</span
+            >`
+          : nothing}
+        ${interp
+          ? html`<span data-detail-interpreted>Was interpreted as ${answerText(interp)}</span>`
+          : nothing}
+        ${replacedBy
+          ? html`<span data-detail-superseded>Superseded by v${replacedBy.version}</span>`
+          : nothing}
+        ${permalink
+          ? html`<a class="linkish" data-detail-open-in-chat href=${permalink}
+              ><sl-icon name="chat-left-text" aria-hidden="true"></sl-icon> Open in chat</a
+            >`
+          : nothing}
+      </div>
+    </div>
+  `;
+}
+
 export function renderMadeRow(
   e: ProjectDecisionLogEntryView,
   opts: {
@@ -1116,10 +1402,14 @@ export function renderMadeRow(
     showProjectColumn: boolean;
     defaultProjectId?: string | undefined;
     resolveProjectName?: ((ref: ProjectDecisionProjectRef | undefined) => string) | undefined;
+    disclosure?: MadeDisclosure | undefined;
   }
 ): TemplateResult {
   const isDismiss = isDismissLogEntry(e);
   const isFollow = e.outcome === 'confirm' || e.outcome === 'override';
+  const panelId = `made-detail-${e.answerId}`;
+  const expanded = Boolean(opts.disclosure?.expanded.has(e.answerId));
+  const columnCount = opts.showProjectColumn ? 9 : 8;
   const surf = surfaceDisplay(e.surface);
   const projectId = opts.defaultProjectId || e.project?.id || '';
   const projectName = opts.resolveProjectName ? opts.resolveProjectName(e.project) : '';
@@ -1157,7 +1447,13 @@ export function renderMadeRow(
             </td>
           `
         : nothing}
-      <td><span class="key">${e.decision.key || e.decision.ref}</span> v${e.decision.version}</td>
+      <td data-decision-cell>
+        ${opts.disclosure ? renderDisclosureButton(e, panelId, opts.disclosure) : nothing}<span
+          class="key"
+          >${e.decision.key || e.decision.ref}</span
+        >
+        v${e.decision.version}
+      </td>
       <td class="q">
         <span class="q-text" title=${e.decision.question}>${e.decision.question}</span>
       </td>
@@ -1172,14 +1468,13 @@ export function renderMadeRow(
       </td>
       <td data-answered-by>${renderAnsweredBy(e, opts.currentUserId)}</td>
       <td data-provenance>
-        ${renderProvenanceBadge(e)}
+        ${renderProvenanceBadge(e)} ${renderAwaitingBadge(e)}
         ${!isDismiss && e.provenance === 'agent_interpreted' && replyHref
           ? html` <a class="linkish" data-reply-link href=${replyHref}>reply</a>`
           : prevText
             ? html` <span class="muted">${prevText}</span>`
-            : !isDismiss && e.provenance === 'direct' && e.outcome === 'answer' && e.matchedDefault
-              ? html` <span class="muted">recommended</span>`
-              : nothing}
+            : nothing}
+        ${renderRecommendationMarker(e)}
       </td>
       <td data-surface>
         <span class="surf"
@@ -1195,6 +1490,11 @@ export function renderMadeRow(
           : html`<span class="muted" data-conv-unavailable>${whereLabel}</span>`}
       </td>
     </tr>
+    ${expanded
+      ? html`<tr class="detail-row" data-detail-row=${e.answerId}>
+          <td colspan=${columnCount}>${renderMadeDetailPanel(e, { id: panelId, projectId })}</td>
+        </tr>`
+      : nothing}
   `;
 }
 
@@ -1206,11 +1506,14 @@ export function renderMadeItem(
     defaultProjectId?: string | undefined;
     fallbackProject?: ProjectDecisionProjectRef | undefined;
     resolveProjectName?: ((ref: ProjectDecisionProjectRef | undefined) => string) | undefined;
+    disclosure?: MadeDisclosure | undefined;
   }
 ): TemplateResult {
   const isDismiss = isDismissLogEntry(e);
   const surf = surfaceDisplay(e.surface);
   const proj = e.project?.id ? e.project : opts.fallbackProject;
+  const panelId = `made-detail-m-${e.answerId}`;
+  const expanded = Boolean(opts.disclosure?.expanded.has(e.answerId));
   const projectId = opts.defaultProjectId || proj?.id || '';
   const projectName = opts.resolveProjectName ? opts.resolveProjectName(proj) : '';
   const whereLabel = conversationDisplayLabel(e.chatKey, e.conversationLabel);
@@ -1226,13 +1529,16 @@ export function renderMadeItem(
   return html`
     <div class="item" data-mobile-answer=${e.answerId}>
       <div class="top">
-        <span class="key">${e.decision.key || e.decision.ref}</span>
+        ${opts.disclosure ? renderDisclosureButton(e, panelId, opts.disclosure) : nothing}<span
+          class="key"
+          >${e.decision.key || e.decision.ref}</span
+        >
         ${isDismiss
           ? html`<b>Dismissed</b>`
           : otherText
             ? html`<b>${answerLabel}:</b> <span class="ans-other">“${otherText}”</span>`
             : html`<b>${answerLabel}</b>`}
-        ${renderProvenanceBadge(e)}
+        ${renderProvenanceBadge(e)} ${renderAwaitingBadge(e)} ${renderRecommendationMarker(e)}
       </div>
       <div>${e.decision.question}</div>
       ${isDismiss && e.dismissReason
@@ -1253,6 +1559,7 @@ export function renderMadeItem(
         >
         ${replyHref ? html` · <a class="linkish" href=${replyHref}>reply</a>` : nothing}
       </div>
+      ${expanded ? renderMadeDetailPanel(e, { id: panelId, projectId }) : nothing}
     </div>
   `;
 }
@@ -1264,6 +1571,7 @@ export function renderMadeTableAndMobileList(
     showProjectColumn: boolean;
     defaultProjectId?: string | undefined;
     resolveProjectName?: ((ref: ProjectDecisionProjectRef | undefined) => string) | undefined;
+    disclosure?: MadeDisclosure | undefined;
   }
 ): TemplateResult {
   return html`
@@ -1291,6 +1599,7 @@ export function renderMadeTableAndMobileList(
               showProjectColumn: opts.showProjectColumn,
               defaultProjectId: opts.defaultProjectId,
               resolveProjectName: opts.resolveProjectName,
+              disclosure: opts.disclosure,
             })
         )}
       </tbody>
@@ -1306,6 +1615,7 @@ export function renderMadeTableAndMobileList(
             includeProjectInMeta: opts.showProjectColumn,
             defaultProjectId: opts.defaultProjectId,
             resolveProjectName: opts.resolveProjectName,
+            disclosure: opts.disclosure,
           })
       )}
     </div>
