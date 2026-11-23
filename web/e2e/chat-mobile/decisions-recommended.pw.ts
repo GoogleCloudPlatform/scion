@@ -682,6 +682,57 @@ for (const theme of ['light', 'dark'] as const) {
       await shotViewport(page, testInfo, theme, 'r2-project-made-panels');
     });
 
+    test('R4: a 32-character key wraps vN instead of widening the Decision column', async ({
+      page,
+    }, testInfo) => {
+      test.skip(
+        theme !== 'light' || testInfo.project.name !== 'desktop-1440',
+        'desktop 1440 light only'
+      );
+      const longKey = 'release-train-2026-11-cutover-ok';
+      expect(longKey).toHaveLength(32);
+      const entries = madeEntries().map((e) =>
+        e.answerId === 'ans-region'
+          ? { ...e, decision: { ...(e.decision as Json), key: longKey, ref: longKey } }
+          : e
+      );
+      await setupPageShellRoutes(page, theme);
+      await page.route(new RegExp(`/api/v1/projects/${PROJECT_A.id}/decisions(\\?|$)`), (route) =>
+        route.fulfill({
+          json: { counts: { waitingOnYou: 0, waitingOnOthers: 0 }, entries, ...MADE_FACETS },
+        })
+      );
+      await page.goto(`/projects/${PROJECT_A.id}/decisions?tab=made`, {
+        waitUntil: 'domcontentloaded',
+      });
+      const pageEl = page.locator('scion-page-project-decisions');
+      const row = pageEl.locator('tr[data-answer-row="ans-region"]');
+      await expect(row.locator('.key')).toHaveText(longKey, { timeout: 15_000 });
+      await row.locator('[data-made-toggle]').click();
+
+      const table = pageEl.locator('table.log[data-made-table]');
+      const tableBox = (await table.boundingBox())!;
+      const rowBox = (await row.boundingBox())!;
+      expect(rowBox.x + rowBox.width).toBeLessThanOrEqual(tableBox.x + tableBox.width + 1);
+      const tableOverflow = await table.evaluate((t) => t.scrollWidth - t.clientWidth);
+      expect(tableOverflow).toBeLessThanOrEqual(1);
+      // The toggle and key stay on one line; " v1" wraps below them.
+      const cell = row.locator('[data-decision-cell]');
+      const toggleBox = (await cell.locator('[data-made-toggle]').boundingBox())!;
+      const keyBox = (await cell.locator('.key').boundingBox())!;
+      expect(
+        Math.abs(toggleBox.y + toggleBox.height / 2 - (keyBox.y + keyBox.height / 2))
+      ).toBeLessThan(4);
+      // The cell may wrap " vN" under the key; only the toggle + key group is unbreakable.
+      const wrapping = await cell.evaluate((td) => ({
+        cell: getComputedStyle(td).whiteSpace,
+        group: getComputedStyle(td.querySelector('.made-keygroup')!).whiteSpace,
+      }));
+      expect(wrapping).toEqual({ cell: 'normal', group: 'nowrap' });
+      await assertNoHorizontalOverflow(page);
+      await shotViewport(page, testInfo, theme, 'r4-project-made-long-key');
+    });
+
     test('R3: profile Made detail panels', async ({ page }, testInfo) => {
       await setupPageShellRoutes(page, theme);
       await page.route('**/api/v1/users/me/decisions**', (route) => {

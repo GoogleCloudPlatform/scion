@@ -598,7 +598,10 @@ export const decisionsPageSharedStyles: CSSResult = css`
     outline-offset: 1px;
   }
 
-  table.log td[data-decision-cell] {
+  /* Toggle and key stay together; " vN" may wrap under a long key. */
+  .made-keygroup {
+    display: inline-flex;
+    align-items: center;
     white-space: nowrap;
   }
 
@@ -1452,9 +1455,11 @@ export function renderMadeRow(
           `
         : nothing}
       <td data-decision-cell>
-        ${opts.disclosure ? renderDisclosureButton(e, panelId, opts.disclosure) : nothing}<span
-          class="key"
-          >${e.decision.key || e.decision.ref}</span
+        <span class="made-keygroup"
+          >${opts.disclosure ? renderDisclosureButton(e, panelId, opts.disclosure) : nothing}<span
+            class="key"
+            >${e.decision.key || e.decision.ref}</span
+          ></span
         >
         v${e.decision.version}
       </td>
