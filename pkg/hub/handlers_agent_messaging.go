@@ -479,7 +479,7 @@ func (s *Server) resolveOutboundRouting(
 		Metadata:       stripClientAttachmentRefs(req.Metadata),
 		ConversationID: req.ConversationID,
 	}
-	if err := messaging.ValidateLegacyMessage(validationMsg); err != nil {
+	if err := messaging.ValidateLegacyMessage(validationEnvelopeWithAttachmentIDs(validationMsg, req.AttachmentIDs)); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return nil, err
 	}
@@ -1243,7 +1243,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 
 	// With decisions the body is the optional intro above the decisions.
-	if req.Msg == "" && decisionSend == nil {
+	// Attachment-only sends (inline paths or uploaded attachment_ids) may
+	// omit text; attachment_ids are resolved and authorized after routing
+	// (ptone/scion#6154).
+	if req.Msg == "" && decisionSend == nil && len(req.Attachments) == 0 && len(req.AttachmentIDs) == 0 {
 		ValidationError(w, "msg is required", nil)
 		return
 	}
@@ -2232,7 +2235,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 		messaging.RecordStep(ctx, "sender_identity_extracted")
-	} else if req.Message != "" {
+	} else if req.Message != "" || len(req.AttachmentIDs) > 0 {
 		plainMessage = req.Message
 		// Build a structured message from the plain text so that downstream
 		// logging and the broker receive a fully-populated payload.
@@ -2273,7 +2276,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// The structuredMsg is still the primary type during the transition;
 	// ValidateLegacyMessage converts internally and validates both old and
 	// new invariants (Phase 7, AC-8).
-	if err := messaging.ValidateLegacyMessage(structuredMsg); err != nil {
+	if err := messaging.ValidateLegacyMessage(validationEnvelopeWithAttachmentIDs(structuredMsg, req.AttachmentIDs)); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return
 	}

@@ -196,6 +196,32 @@ func TestChatSendValidationEnvelope(t *testing.T) {
 	require.Same(t, msg, chatSendValidationEnvelope(msg, refs), "a message with text is validated as is")
 }
 
+// TestValidationEnvelopeWithAttachmentIDs: an attachment-id-only agent send
+// passes envelope validation through a shallow copy that lists its attachment
+// ids; the message itself is unchanged, and an empty send without attachments
+// is still refused (ptone/scion#6154).
+func TestValidationEnvelopeWithAttachmentIDs(t *testing.T) {
+	msg := &messages.StructuredMessage{
+		Version: messages.Version, Sender: "agent:a", Recipient: "agent:b",
+		Type: messages.TypeInstruction, Channel: "web", ThreadID: "t",
+	}
+	require.Error(t, messaging.ValidateLegacyMessage(validationEnvelopeWithAttachmentIDs(msg, nil)))
+	require.Error(t, messaging.ValidateLegacyMessage(validationEnvelopeWithAttachmentIDs(msg, []string{})))
+
+	ids := []string{"att-1", "att-2"}
+	v := validationEnvelopeWithAttachmentIDs(msg, ids)
+	require.NoError(t, messaging.ValidateLegacyMessage(v))
+	require.Equal(t, ids, v.Attachments)
+	require.Empty(t, msg.Attachments, "the message itself is not changed")
+
+	withPath := *msg
+	withPath.Attachments = []string{"/scratch/a.txt"}
+	require.Same(t, &withPath, validationEnvelopeWithAttachmentIDs(&withPath, ids), "a message with inline attachments is validated as is")
+
+	msg.Msg = "text"
+	require.Same(t, msg, validationEnvelopeWithAttachmentIDs(msg, ids), "a message with text is validated as is")
+}
+
 // TestChatHistory_DeletedAttachmentOnlyMessage: once an attachment-only
 // message is deleted, history marks it deleted and a reply previews it as
 // "[deleted]", not as an attachment.
@@ -353,4 +379,173 @@ func TestAgentSend_AttachmentOnlyWithMention(t *testing.T) {
 	require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
 	require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
 	require.Equal(t, primary, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
+}
+
+// TestAgentMessage_AttachmentIDOnly: an attachment-id-only send (no text, no
+// inline attachment path) through POST /api/v1/agents/{id}/message succeeds
+// for structured and plain bodies and for agent and user senders; empty sends
+// without attachments and sends with unauthorized attachment IDs are refused
+// with 400 and store/dispatch nothing (ptone/scion#6154).
+func TestAgentMessage_AttachmentIDOnly(t *testing.T) {
+	t.Run("agent_structured", func(t *testing.T) {
+		f := newSendFixture(t)
+		id := f.upload(t, f.sender, "shot.txt", "agent bytes")
+		rec := f.message(t, f.sender, f.target, "", id)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		msgID := messageIDOf(t, rec)
+		stored, err := f.st.GetMessage(context.Background(), msgID)
+		require.NoError(t, err)
+		require.Equal(t, "", stored.Msg)
+		f.requireBound(t, id, msgID)
+		call := f.lastDispatch(t, f.target)
+		require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
+		require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
+		require.Equal(t, msgID, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
+	})
+
+	t.Run("agent_plain_body", func(t *testing.T) {
+		f := newSendFixture(t)
+		id := f.upload(t, f.sender, "plain.txt", "plain bytes")
+		body := MessageRequest{AttachmentIDs: []string{id}}
+		rec := f.agentRequest(t, f.sender, jsonRequest(t, "/api/v1/agents/"+f.target.ID+"/message", body))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		msgID := messageIDOf(t, rec)
+		stored, err := f.st.GetMessage(context.Background(), msgID)
+		require.NoError(t, err)
+		require.Equal(t, "", stored.Msg)
+		f.requireBound(t, id, msgID)
+		call := f.lastDispatch(t, f.target)
+		require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
+		require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
+		require.Equal(t, msgID, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
+	})
+
+	t.Run("user_structured", func(t *testing.T) {
+		f := newSendFixture(t)
+		id := f.uploadAs(t, f.ua, f.projA.ID, "user.txt", "user bytes")
+		body := f.messageBody(f.target, "", []string{id})
+		rec := doRequestAsUser(t, f.srv, f.ua, http.MethodPost, "/api/v1/agents/"+f.target.ID+"/message", body)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		msgID := messageIDOf(t, rec)
+		stored, err := f.st.GetMessage(context.Background(), msgID)
+		require.NoError(t, err)
+		require.Equal(t, "", stored.Msg)
+		f.requireBound(t, id, msgID)
+		call := f.lastDispatch(t, f.target)
+		require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
+		require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
+		require.Equal(t, msgID, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
+	})
+
+	t.Run("empty_without_attachments_refused", func(t *testing.T) {
+		f := newSendFixture(t)
+		for _, body := range []MessageRequest{
+			f.messageBody(f.target, "", nil),
+			f.messageBody(f.target, "", []string{}),
+			{},
+			{AttachmentIDs: []string{}},
+		} {
+			rec := f.agentRequest(t, f.sender, jsonRequest(t, "/api/v1/agents/"+f.target.ID+"/message", body))
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		}
+		require.Empty(t, f.disp.getCalls())
+		require.Equal(t, 0, f.countStored(t, ""))
+	})
+
+	t.Run("foreign_attachment_id_refused", func(t *testing.T) {
+		f := newSendFixture(t)
+		foreign := f.uploadAs(t, f.ub, f.projB.ID, "bob.txt", "bob bytes")
+		rec := f.message(t, f.sender, f.target, "", foreign)
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "is not available in this conversation")
+		f.requireUnbound(t, foreign)
+		require.Empty(t, f.disp.getCalls())
+		require.Equal(t, 0, f.countStored(t, ""))
+	})
+}
+
+// TestAgentOutbound_AttachmentIDOnly: an attachment-id-only send (no text, no
+// inline attachment path) through POST /api/v1/agents/{id}/outbound-message
+// succeeds to a user (direct and broker paths) and to another agent (DM path);
+// empty sends without attachments and sends with unauthorized attachment IDs
+// are refused with 400 and store/dispatch nothing (ptone/scion#6154).
+func TestAgentOutbound_AttachmentIDOnly(t *testing.T) {
+	t.Run("to_user_direct", func(t *testing.T) {
+		f := newSendFixture(t)
+		id := f.upload(t, f.sender, "report.txt", "direct bytes")
+		rec := f.outbound(t, f.sender, OutboundMessageRequest{
+			Recipient:     "user:" + f.ua.Email,
+			AttachmentIDs: []string{id},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		msgID := messageIDOf(t, rec)
+		stored, err := f.st.GetMessage(context.Background(), msgID)
+		require.NoError(t, err)
+		require.Equal(t, "", stored.Msg)
+		f.requireBound(t, id, msgID)
+	})
+
+	t.Run("to_user_broker", func(t *testing.T) {
+		f := newSendFixture(t)
+		f.withBrokerProxy(t)
+		id := f.upload(t, f.sender, "broker.txt", "broker bytes")
+		rec := f.outbound(t, f.sender, OutboundMessageRequest{
+			Recipient:     "user:" + f.ua.Email,
+			AttachmentIDs: []string{id},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		msgID := messageIDOf(t, rec)
+		stored, err := f.st.GetMessage(context.Background(), msgID)
+		require.NoError(t, err)
+		require.Equal(t, "", stored.Msg)
+		f.requireBound(t, id, msgID)
+	})
+
+	t.Run("to_agent_dm", func(t *testing.T) {
+		f := newSendFixture(t)
+		id := f.upload(t, f.sender, "dm.txt", "dm bytes")
+		rec := f.outbound(t, f.sender, OutboundMessageRequest{
+			ConversationRef: "@" + f.target.Slug,
+			AttachmentIDs:   []string{id},
+		})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		msgID := messageIDOf(t, rec)
+		stored, err := f.st.GetMessage(context.Background(), msgID)
+		require.NoError(t, err)
+		require.Equal(t, "", stored.Msg)
+		f.requireBound(t, id, msgID)
+		call := f.lastDispatch(t, f.target)
+		require.Len(t, call.StructuredMessage.AttachmentDeliveries, 1)
+		require.Equal(t, id, call.StructuredMessage.AttachmentDeliveries[0].ArtifactID)
+		require.Equal(t, msgID, call.StructuredMessage.AttachmentDeliveries[0].MessageID)
+	})
+
+	t.Run("empty_without_attachments_refused", func(t *testing.T) {
+		f := newSendFixture(t)
+		for _, req := range []OutboundMessageRequest{
+			{Recipient: "user:" + f.ua.Email},
+			{Recipient: "user:" + f.ua.Email, AttachmentIDs: []string{}},
+			{ConversationRef: "@" + f.target.Slug},
+		} {
+			rec := f.outbound(t, f.sender, req)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), "msg is required")
+		}
+		require.Empty(t, f.disp.getCalls())
+		require.Equal(t, 0, f.countStored(t, ""))
+	})
+
+	t.Run("foreign_attachment_id_refused", func(t *testing.T) {
+		f := newSendFixture(t)
+		foreign := f.uploadAs(t, f.ub, f.projB.ID, "bob.txt", "bob bytes")
+		rec := f.outbound(t, f.sender, OutboundMessageRequest{
+			Recipient:     "user:" + f.ua.Email,
+			AttachmentIDs: []string{foreign},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		require.Contains(t, rec.Body.String(), "is not available in this conversation")
+		f.requireUnbound(t, foreign)
+		require.Empty(t, f.disp.getCalls())
+		require.Equal(t, 0, f.countStored(t, ""))
+	})
 }
