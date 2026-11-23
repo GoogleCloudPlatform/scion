@@ -512,3 +512,28 @@ func TestScheduledMessageAuthoringAdmitsScopedToken(t *testing.T) {
 	assert.Equal(t, store.EffectCeilingBounded, ceiling.Kind)
 	assert.Contains(t, ceiling.PermissionIDs, scheduledMessagePermission)
 }
+
+// A scheduled message targeting a same-project soft-deleted agent by agentId
+// is refused in both authorizeMessageFire and messageAction.Authorize without
+// delivering or waking the agent (ptone/scion#8927).
+func TestScheduledMessageAuthority_SoftDeletedSameProjectAgentIDRefused(t *testing.T) {
+	ctx := context.Background()
+	f := newSchedMsg(t, "smsg-soft-del-target")
+	softDeleted := &store.Agent{
+		ID: tid("smsg-soft-del-target-agent"), Slug: "smsg-soft-del-target-agent",
+		Name: "smsg-soft-del-target-agent", ProjectID: f.proj.ID,
+		Phase: "running", MessageMode: store.MessageModeProject,
+		DeletedAt: time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, softDeleted))
+
+	evt := f.msgEvent()
+	evt.Payload = `{"agentId":"` + softDeleted.ID + `","message":"hello"}`
+	evt = withSessionRevision(evt, f.creator.ID)
+
+	err := authorizeScheduledMessageFireFor(f.srv, evt, softDeleted)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), string(MessageDenialScheduledTargetDeleted))
+
+	f.assertRefused(t, f.fireMsg(t, evt))
+}

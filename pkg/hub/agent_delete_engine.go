@@ -830,14 +830,14 @@ func (e *deletionEngine) run() deletionOutcome {
 		defer cancel()
 		s.ClearTopicDefaultAgent(ctx, agent.ID, agent.Slug, agent.ProjectID)
 	})
-	// Pause recurring exec schedules and triggers targeting this agent with
-	// target_deleted (ptone/scion#7884, Stage 1 §5.6) before pausing
-	// definitions authored by this agent, so self-targeted schedules and
-	// triggers record target_deleted.
-	e.tailStep("pause targeted exec schedules", func() {
+	// Pause recurring exec and message schedules and triggers targeting this
+	// agent with target_deleted (ptone/scion#7884, ptone/scion#8927,
+	// Stage 1 §5.6) before pausing definitions authored by this agent, so
+	// self-targeted schedules and triggers record target_deleted.
+	e.tailStep("pause targeted schedules", func() {
 		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 		defer cancel()
-		s.pauseExecSchedulesTargetingAgent(ctx, agent)
+		s.pauseSchedulesTargetingAgent(ctx, agent)
 	})
 	e.tailStep("pause targeted triggers", func() {
 		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)

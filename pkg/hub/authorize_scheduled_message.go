@@ -431,6 +431,10 @@ func (s *Server) authorizeMessageFire(
 		return fmt.Errorf("%s: target agent is nil; may have been deleted since scheduling",
 			MessageDenialScheduledTargetDeleted)
 	}
+	if !agent.DeletedAt.IsZero() {
+		return fmt.Errorf("%s: target agent %q has been deleted since scheduling",
+			MessageDenialScheduledTargetDeleted, agent.ID)
+	}
 
 	// Phase 5 D3: Cross-project scheduled messages are allowed when the
 	// Hub feature is enabled. projectID is the sender's project;
@@ -440,11 +444,6 @@ func (s *Server) authorizeMessageFire(
 		if ops == nil || !ops.CrossProjectMessagingEnabled() {
 			return fmt.Errorf("%s: cross-project messaging is disabled; target agent %q is in project %q, event is in project %q",
 				MessageDenialCrossProjectScheduledDisabled, agent.ID, agent.ProjectID, projectID)
-		}
-		// Check if target has been deleted since scheduling.
-		if !agent.DeletedAt.IsZero() {
-			return fmt.Errorf("%s: target agent %q has been deleted since scheduling",
-				MessageDenialScheduledTargetDeleted, agent.ID)
 		}
 	}
 

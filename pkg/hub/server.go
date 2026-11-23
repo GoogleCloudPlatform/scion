@@ -7053,11 +7053,11 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		return
 	}
 
-	// Backstop for an exec schedule whose target agent was deleted by a path
-	// that did not pause it (ptone/scion#7884): pause with target_deleted
-	// before the authority backstop so self-targeted exec schedules record
-	// target_deleted rather than creator_deleted.
-	if sched.EventType == scheduledEventTypeExec && s.pauseScheduleIfTargetGone(ctx, sched, log) {
+	// Backstop for an exec or message schedule whose target agent was deleted
+	// by a path that did not pause it (ptone/scion#7884, ptone/scion#8927):
+	// pause with target_deleted before the authority backstop so self-targeted
+	// schedules record target_deleted rather than creator_deleted.
+	if (sched.EventType == scheduledEventTypeExec || sched.EventType == "message") && s.pauseScheduleIfTargetGone(ctx, sched, log) {
 		return
 	}
 

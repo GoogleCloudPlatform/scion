@@ -401,7 +401,7 @@ func TestScheduledExecRecurring_TargetDeletedPauseAndStrictIDMatch(t *testing.T)
 	require.NoError(t, f.store.CreateSchedule(ctx, &selfSched))
 
 	// Same-slug decoy: agentId is f.child.ID, but agentName is f.sibling.Slug!
-	// Neither pauseExecSchedulesTargetingAgent nor cancelScheduledEventsForAgent
+	// Neither pauseSchedulesTargetingAgent nor cancelScheduledEventsForAgent
 	// may touch it!
 	decoyPayload, err := (&scheduledExecPayload{AgentID: f.child.ID, AgentName: f.sibling.Slug, Command: []string{"true"}}).encode()
 	require.NoError(t, err)
@@ -431,7 +431,7 @@ func TestScheduledExecRecurring_TargetDeletedPauseAndStrictIDMatch(t *testing.T)
 
 	// Run target-deletion steps in the order agent_delete_engine runs them.
 	f.srv.cancelScheduledEventsForAgent(ctx, f.sibling)
-	f.srv.pauseExecSchedulesTargetingAgent(ctx, f.sibling)
+	f.srv.pauseSchedulesTargetingAgent(ctx, f.sibling)
 	f.srv.pauseSchedulesAuthoredByAgent(ctx, f.sibling)
 
 	for _, id := range targetSchedIDs {
@@ -453,7 +453,7 @@ func TestScheduledExecRecurring_TargetDeletedPauseAndStrictIDMatch(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduledEventPending, gotDecoyEvt.Status, "exec event must match strictly by agentId, never agentName")
 
-	// Evaluator backstop: soft-delete f.child without calling pauseExecSchedulesTargetingAgent,
+	// Evaluator backstop: soft-delete f.child without calling pauseSchedulesTargetingAgent,
 	// then call executeSchedule on decoySched -> pauses with target_deleted without firing!
 	delAt := time.Now().UTC()
 	f.child.DeletedAt = delAt
