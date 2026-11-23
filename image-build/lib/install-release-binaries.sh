@@ -117,7 +117,7 @@ trap 'rm -rf -- "${TMPDIR_WORK}"' EXIT
 SUMS_URL="${BASE_URL}/${TAG}/SHA256SUMS"
 SUMS_FILE="${TMPDIR_WORK}/SHA256SUMS"
 echo "Downloading ${SUMS_URL}..."
-if ! curl -fsSL "${SUMS_URL}" -o "${SUMS_FILE}"; then
+if ! curl -fsSL --retry 3 "${SUMS_URL}" -o "${SUMS_FILE}"; then
   echo "Error: failed to download SHA256SUMS for release ${TAG} from ${SUMS_URL}." >&2
   echo "  Verify that release ${TAG} exists and has published assets, or build with --binaries source." >&2
   exit 1
@@ -176,7 +176,7 @@ for bin in "${BINARIES[@]}"; do
   asset_url="${BASE_URL}/${TAG}/${asset}"
   asset_path="${TMPDIR_WORK}/${asset}"
   echo "Downloading ${asset_url}..."
-  if ! curl -fsSL "${asset_url}" -o "${asset_path}"; then
+  if ! curl -fsSL --retry 3 "${asset_url}" -o "${asset_path}"; then
     if [[ "${bin}" == "sciontool" ]]; then
       echo "Error: failed to download ${asset_url}." >&2
       echo "  Release ${TAG} predates sciontool assets or the asset is missing; re-run with --binaries source." >&2
