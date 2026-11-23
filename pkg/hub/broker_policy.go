@@ -384,7 +384,16 @@ func (s *Server) authorizeBrokerRegistrationPolicy(w http.ResponseWriter, r *htt
 
 	if existing != nil {
 		if s.brokerPolicyRefuses(existing) {
-			writeBrokerPolicyDenial(w, r, brokerPolicyOpReregister, existing)
+			if requestedManaged {
+				brokerRef := existing.Name
+				if brokerRef == "" {
+					brokerRef = existing.ID
+				}
+				remedy := fmt.Sprintf("Approve the existing broker first with 'scion runtime-broker update %s --admin-managed=true', then retry re-registration.", brokerRef)
+				writeBrokerPolicyDenialWithRemedy(w, r, brokerPolicyOpReregister, existing, remedy)
+			} else {
+				writeBrokerPolicyDenial(w, r, brokerPolicyOpReregister, existing)
+			}
 			return false, false
 		}
 		return requestedManaged, true

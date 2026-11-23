@@ -297,6 +297,9 @@ func TestBrokerPolicy_RegistrationMatrix(t *testing.T) {
 								assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
 								assert.Equal(t, "reregister", details["operation"])
 								assert.Equal(t, existingID, details["brokerId"])
+								if reqManaged {
+									assert.Contains(t, rec.Body.String(), "scion runtime-broker update "+brokerName+" --admin-managed=true")
+								}
 							case effectiveOn && target == "new" && !reqManaged:
 								assert.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
 								code, details := decodeBrokerPolicyErrorCode(t, rec)

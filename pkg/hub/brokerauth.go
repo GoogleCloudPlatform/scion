@@ -658,7 +658,8 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	if existingBroker != nil && req.PreserveSettings {
 		// Reuse existing broker and leave its metadata as it is, except when
 		// an authorized adminManaged stamp upgrades an existing row (e.g.
-		// 'scion hub brokers join-token create --admin-managed').
+		// 'scion hub brokers join-token create --admin-managed', only while
+		// broker_policy.admin_managed_only is off).
 		brokerID = existingBroker.ID
 		reregistered = true
 		if req.AdminManaged && !existingBroker.AdminManaged {
