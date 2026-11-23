@@ -191,7 +191,7 @@ func TestCheckDoctorContainerImages_CapabilityAndVersionSkew(t *testing.T) {
 	assert.Equal(t, "container-image-capabilities[scion-claude:latest]", res[1].Name)
 	assert.Equal(t, "warn", res[1].Status)
 	assert.Contains(t, res[1].Message, "missing the scion.sciontool.capabilities label")
-	assert.Contains(t, res[1].Message, "unlabeled-image fallback")
+	assert.Contains(t, res[1].Message, "will not verify support before start and refuses to start if sciontool lacks netns-setup")
 	assert.NotEmpty(t, res[1].Remediation)
 
 	assert.Equal(t, "container-image-version[scion-codex:latest]", res[2].Name)
@@ -342,6 +342,74 @@ func TestDoctorConfiguredHarnessImages_OnDiskBaseDirAndInspection(t *testing.T) 
 	assert.Equal(t, "info", res[2].Status)
 	require.Len(t, fake.calls, 2)
 	assert.Equal(t, []string{"docker", "image", "inspect", "--format", "{{json .Config.Labels}}", "scion-claude:latest"}, fake.calls[1])
+}
+
+func TestCheckDoctorContainerImages_BasenameMatchingWithoutSettingsRegistry(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("SCION_IMAGE_REGISTRY", "")
+	t.Setenv("SCION_IMAGE_TAG", "")
+
+	claudeDir := filepath.Join(tmpHome, ".scion", "harness-configs", "claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(claudeDir, "config.yaml"),
+		[]byte("harness: claude\nimage: scion-claude:latest\n"),
+		0o644,
+	))
+
+	// No image_registry in settings (simulates Hub DB OperationalSettings registry).
+	vs := &config.VersionedSettings{ActiveProfile: "local"}
+	configured := doctorConfiguredHarnessImages("", vs, "", "v0.5.0")
+
+	fake := &fakeContainerCmd{
+		available: map[string]bool{"docker": true},
+		listOut: strings.Join([]string{
+			"ghcr.io/homebrew-scion/scion-claude:v0.4.0",
+			"localhost/scion/scion-claude:latest",
+			"ghcr.io/homebrew-scion/scion-claude:<none>",
+			"alpine:latest",
+		}, "\n"),
+		inspect: map[string]struct {
+			out string
+			err error
+		}{
+			"ghcr.io/homebrew-scion/scion-claude:v0.4.0": {
+				out: `{"org.opencontainers.image.version":"v0.4.0","org.opencontainers.image.revision":"111111111111"}`,
+			},
+			"localhost/scion/scion-claude:latest": {
+				out: `{"scion.sciontool.capabilities":"netns-setup","org.opencontainers.image.version":"v0.4.0"}`,
+			},
+		},
+	}
+
+	res := checkDoctorContainerImages("docker", configured, fake.deps("v0.5.0", "222222222222"))
+	// Expected:
+	// 0: container-images (pass)
+	// 1: container-image-capabilities[ghcr.io/homebrew-scion/scion-claude:v0.4.0] (warn)
+	// 2: container-image-version[ghcr.io/homebrew-scion/scion-claude:v0.4.0] (info)
+	// 3: container-image-version[localhost/scion/scion-claude:latest] (info)
+	require.Len(t, res, 4)
+	assert.Equal(t, "container-images", res[0].Name)
+	assert.Equal(t, "pass", res[0].Status)
+
+	assert.Equal(t, "container-image-capabilities[ghcr.io/homebrew-scion/scion-claude:v0.4.0]", res[1].Name)
+	assert.Equal(t, "warn", res[1].Status)
+	assert.Contains(t, res[1].Message, "will not verify support before start and refuses to start if sciontool lacks netns-setup")
+
+	assert.Equal(t, "container-image-version[ghcr.io/homebrew-scion/scion-claude:v0.4.0]", res[2].Name)
+	assert.Equal(t, "info", res[2].Status)
+	assert.Contains(t, res[2].Message, "version v0.4.0 != local v0.5.0")
+	assert.Contains(t, res[2].Message, "revision 111111111111 != local 222222222222")
+
+	assert.Equal(t, "container-image-version[localhost/scion/scion-claude:latest]", res[3].Name)
+	assert.Equal(t, "info", res[3].Status)
+	assert.Contains(t, res[3].Message, "version v0.4.0 != local v0.5.0")
+
+	// Confirm both images were inspected and the dangling :<none> image was skipped.
+	require.Len(t, fake.calls, 3)
+	assert.Equal(t, "ghcr.io/homebrew-scion/scion-claude:v0.4.0", fake.calls[1][len(fake.calls[1])-1])
+	assert.Equal(t, "localhost/scion/scion-claude:latest", fake.calls[2][len(fake.calls[2])-1])
 }
 
 func TestCheckDoctorContainerImages_NonLocalRuntimesSkipSkewChecks(t *testing.T) {

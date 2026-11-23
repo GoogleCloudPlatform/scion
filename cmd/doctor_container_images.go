@@ -286,7 +286,7 @@ func checkDoctorContainerImages(activeRuntime string, configuredImages []string,
 		return results
 	}
 
-	matched := matchLocalHarnessImages(images, configuredImages, containerCLI)
+	matched := matchLocalHarnessImages(images, configuredImages)
 	for _, img := range matched {
 		inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		inspectOut, inspectErr := runCmd(inspectCtx, containerCLI, "image", "inspect", "--format", "{{json .Config.Labels}}", img)
@@ -331,12 +331,12 @@ func checkDoctorImageCapabilities(img string, labels map[string]string) (scionru
 	var msg string
 	if rawCap == "" {
 		msg = fmt.Sprintf(
-			"Image %s is missing the %s label (no %q capability); with metadata mode block or assign on Docker/rootful Podman, the broker will rely on the unlabeled-image fallback and refuse to start if sciontool lacks netns-setup",
+			"Image %s is missing the %s label (no %q capability); with metadata mode block or assign on Docker/rootful Podman, the broker will not verify support before start and refuses to start if sciontool lacks netns-setup",
 			img, scionruntime.ImageSciontoolCapabilitiesLabel, scionruntime.SciontoolCapNetnsSetup,
 		)
 	} else {
 		msg = fmt.Sprintf(
-			"Image %s label %s=%q lacks %q; with metadata mode block or assign on Docker/rootful Podman, the broker will rely on the unlabeled-image fallback and refuse to start if sciontool lacks netns-setup",
+			"Image %s label %s=%q lacks %q; with metadata mode block or assign on Docker/rootful Podman, the broker will not verify support before start and refuses to start if sciontool lacks netns-setup",
 			img, scionruntime.ImageSciontoolCapabilitiesLabel, rawCap, scionruntime.SciontoolCapNetnsSetup,
 		)
 	}
@@ -413,37 +413,32 @@ func shortDoctorCommit(c string) string {
 	return c
 }
 
-func matchLocalHarnessImages(localImages, configuredImages []string, cli string) []string {
+// matchLocalHarnessImages returns the sorted, deduplicated local images whose
+// repository basename matches any configured harness image (covering exact
+// matches, Hub-DB or custom registry prefixes, Podman localhost/ prefixes, and
+// older pulled tags). Untagged/dangling images (<none>) are ignored.
+func matchLocalHarnessImages(localImages, configuredImages []string) []string {
 	if len(localImages) == 0 || len(configuredImages) == 0 {
 		return nil
 	}
 
-	candidates := make(map[string]struct{}, len(configuredImages)*2)
+	repoBasenames := make(map[string]struct{}, len(configuredImages))
 	for _, ref := range configuredImages {
-		ref = strings.TrimSpace(ref)
-		if ref == "" {
-			continue
+		if repo := imageRepoBasename(ref); repo != "" {
+			repoBasenames[repo] = struct{}{}
 		}
-		candidates[ref] = struct{}{}
-		hasTag := hasExplicitTagOrDigest(ref)
-		if !hasTag {
-			candidates[ref+":latest"] = struct{}{}
-		}
-		if cli == "podman" && config.IsShortFormImage(ref) {
-			candidates["localhost/"+ref] = struct{}{}
-			if !hasTag {
-				candidates["localhost/"+ref+":latest"] = struct{}{}
-			}
-		}
+	}
+	if len(repoBasenames) == 0 {
+		return nil
 	}
 
 	matchedSet := make(map[string]struct{})
 	for _, local := range localImages {
 		local = strings.TrimSpace(local)
-		if local == "" || local == "<none>:<none>" {
+		if local == "" || local == "<none>:<none>" || strings.HasSuffix(local, ":<none>") {
 			continue
 		}
-		if _, ok := candidates[local]; ok {
+		if _, ok := repoBasenames[imageRepoBasename(local)]; ok {
 			matchedSet[local] = struct{}{}
 		}
 	}
@@ -456,10 +451,10 @@ func matchLocalHarnessImages(localImages, configuredImages []string, cli string)
 	return matched
 }
 
-func hasExplicitTagOrDigest(ref string) bool {
-	if strings.Contains(ref, "@") {
-		return true
+func imageRepoBasename(ref string) string {
+	base := config.ImageBasename(strings.TrimSpace(ref))
+	if i := strings.IndexAny(base, ":@"); i >= 0 {
+		base = base[:i]
 	}
-	lastSlash := strings.LastIndex(ref, "/")
-	return strings.Contains(ref[lastSlash+1:], ":")
+	return base
 }
