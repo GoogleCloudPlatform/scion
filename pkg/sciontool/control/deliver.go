@@ -32,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -470,7 +469,7 @@ func IsShellHarness(getenv func(string) string) bool {
 	if getenv == nil {
 		return false
 	}
-	return strings.TrimSpace(getenv("SCION_HARNESS")) == config.ShellHarnessConfigName
+	return strings.TrimSpace(getenv("SCION_HARNESS")) == state.ShellHarnessName
 }
 
 // DeliverEnabled reports whether sciontool should register deliver-message:

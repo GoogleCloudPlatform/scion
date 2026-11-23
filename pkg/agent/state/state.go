@@ -27,6 +27,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
+// ShellHarnessName is the reserved name of the built-in shell execution
+// container harness (ptone/scion#8812). Defined in pkg/agent/state so
+// sciontool PID-1 paths can share it without importing pkg/config.
+const ShellHarnessName = "shell"
+
 // HarnessExitCodeFile is the container-local path where the tmux agent-window
 // wrapper records the harness's real exit code, read by `sciontool init`.
 // There is one agent per container, so a fixed path is safe. It is a shared
