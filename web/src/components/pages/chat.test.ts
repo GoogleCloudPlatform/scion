@@ -2220,6 +2220,130 @@ describe('chat page — late route lookups', () => {
     expect(el.mobilePanel).toBe('center');
   });
 
+  it('falling through to /chat clears route-open state on both connect and layout-change paths', () => {
+    // Connect path (mobile with restored panel): /chat clears the pending state
+    // so a later route open falls back to 'center' instead of the stale panel.
+    const mobile = mountedPage();
+    mobile.isMobileLayout = true;
+    mobile._restoredPanel = 'right';
+    mobile.mobilePanel = 'right';
+    window.history.replaceState(
+      { scionInPage: { panel: 'right', below: ['left', 'center'], run: 1 } },
+      '',
+      '/chat'
+    );
+    mobile.parseV2Route();
+    expect(mobile._restoredPanel).toBeNull();
+    expect(mobile._routeOpenPending).toBe(false);
+
+    mobile._slugToProjectId.set('alpha', 'p1');
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    mobile.parseV2Route();
+    expect(mobile.mobilePanel).toBe('center');
+
+    // Layout-change path (created wide on /chat, then narrowed): nothing stays armed.
+    const wide = mountedPage();
+    window.history.replaceState(
+      { scionInPage: { panel: 'right', below: ['left', 'center'], run: 1 } },
+      '',
+      '/chat'
+    );
+    wide.parseV2Route();
+    expect(wide._routeOpenPending).toBe(false);
+    narrowed(wide);
+    expect(wide._restoredPanel).toBeNull();
+  });
+
+  it('a failed thread slug lookup clears route-open state on connect and layout-change paths', async () => {
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      if (path.startsWith('/api/v1/projects?slug=')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+
+    // Connect path: restored panel is cleared when the routed thread cannot be found.
+    const mobile = mountedPage();
+    mobile.isMobileLayout = true;
+    mobile._restoredPanel = 'right';
+    mobile.mobilePanel = 'right';
+    const mobileLookups = trackAsyncCalls(mobile, 'resolveSlugAndOpenThread');
+    window.history.replaceState({}, '', '/chat/missing/topic-1');
+    mobile.parseV2Route();
+    await mobileLookups.settled();
+
+    expect(mobile.v2Conversation).toBeNull();
+    expect(mobile._restoredPanel).toBeNull();
+    expect(mobile._routeOpenPending).toBe(false);
+
+    // A later route open falls back to 'center', not the stale 'right'.
+    mobile._slugToProjectId.set('alpha', 'p1');
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    mobile.parseV2Route();
+    expect(mobile.mobilePanel).toBe('center');
+
+    // Layout-change path: narrowing while the failing lookup is in flight also clears on failure.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/v1/projects?slug=')) {
+        await held;
+        return new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    });
+
+    const wide = mountedPage();
+    const wideLookups = trackAsyncCalls(wide, 'resolveSlugAndOpenThread');
+    window.history.replaceState(
+      { scionInPage: { panel: 'left', below: [], run: 1 } },
+      '',
+      '/chat/missing/topic-1'
+    );
+    wide.parseV2Route();
+    narrowed(wide);
+    expect(wide._restoredPanel).toBe('left');
+
+    release();
+    await wideLookups.settled();
+
+    expect(wide._restoredPanel).toBeNull();
+    expect(wide._routeOpenPending).toBe(false);
+
+    wide._slugToProjectId.set('alpha', 'p1');
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    wide.parseV2Route();
+    expect(wide.mobilePanel).toBe('center');
+  });
+
+  it('a failed DM peer lookup from route clears route-open state', async () => {
+    vi.mocked(apiFetch).mockImplementation(() =>
+      Promise.resolve(new Response('{}', { status: 404 }))
+    );
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const el = mountedPage();
+      el.isMobileLayout = true;
+      el.pageData = { user: null };
+      el._restoredPanel = 'right';
+      el.mobilePanel = 'right';
+      const lookups = trackAsyncCalls(el, 'resolveDMByPeerId');
+      window.history.replaceState({}, '', '/chat/dm/peer-missing');
+      el.parseV2Route();
+      await lookups.settled();
+
+      expect(el.v2Conversation).toBeNull();
+      expect(el._restoredPanel).toBeNull();
+      expect(el._routeOpenPending).toBe(false);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it('a late slug lookup on a page that is no longer mounted does nothing', async () => {
     const release = holdSlugLookup();
     const el = mountedPage();
@@ -2428,6 +2552,76 @@ describe('chat page — late space lookups', () => {
     releases.slug();
     await vi.waitFor(() => expect(navigateTo).toHaveBeenCalledWith('/chat/alpha/general-1'));
     expect(el.v2Conversation).toMatchObject({ conversationKey: 'general-1', projectSlug: 'alpha' });
+  });
+
+  it('on desktop, opening a space consumes the route-open marker', async () => {
+    const releases = holdSpaceLookups();
+    releases.threads();
+    const el = createSpacePage(false);
+    const lookups = trackAsyncCalls(el, 'selectSpaceBySlug');
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    window.history.replaceState(
+      { scionInPage: { panel: 'left', below: [], run: 1 } },
+      '',
+      '/chat/alpha'
+    );
+
+    el.parseV2Route();
+    await lookups.settled();
+
+    expect(el.v2Conversation).toMatchObject({ conversationKey: 'general-1', projectSlug: 'alpha' });
+    expect(el.mobilePanel).toBe('center');
+    expect(el._routeOpenPending).toBe(false);
+    expect(el._restoredPanel).toBeNull();
+
+    // Narrowing afterwards does not arm a restored panel for a later route open.
+    el._handleMobileLayoutChange({ matches: true } as MediaQueryListEvent);
+    expect(el._restoredPanel).toBeNull();
+  });
+
+  it('on desktop, a space with no threads clears the route-open marker', async () => {
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/spaces/p1/threads') {
+        return Promise.resolve(new Response(JSON.stringify({ threads: [] }), { status: 200 }));
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const el = createSpacePage(false);
+    const lookups = trackAsyncCalls(el, 'selectSpaceBySlug');
+    el._slugToProjectId.set('alpha', 'p1');
+    el._projectIdToSlug.set('p1', 'alpha');
+    window.history.replaceState({}, '', '/chat/alpha');
+
+    el.parseV2Route();
+    await lookups.settled();
+
+    expect(el.v2Conversation).toBeNull();
+    expect(el._routeOpenPending).toBe(false);
+    expect(el._restoredPanel).toBeNull();
+  });
+
+  it('a failed space slug lookup clears the route-open marker', async () => {
+    vi.mocked(apiFetch).mockImplementation((path: string) => {
+      if (path.startsWith('/api/v1/projects?slug=')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+    const el = createSpacePage(true);
+    el._restoredPanel = 'right';
+    el.mobilePanel = 'right';
+    const lookups = trackAsyncCalls(el, 'resolveSlugAndOpenSpace');
+    window.history.replaceState({}, '', '/chat/missing-space');
+
+    el.parseV2Route();
+    await lookups.settled();
+
+    expect(el.v2Conversation).toBeNull();
+    expect(el._restoredPanel).toBeNull();
+    expect(el._routeOpenPending).toBe(false);
   });
 });
 
