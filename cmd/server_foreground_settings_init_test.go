@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -406,5 +407,56 @@ func TestInitHubServer_CallsInitOperationalSettingsUnconditionally(t *testing.T)
 	})
 	if !found {
 		t.Fatal("initHubServer no longer calls initOperationalSettingsWithRetry")
+	}
+}
+
+// TestInitOperationalSettings_TelemetryGCPProjectIDFromDB verifies that a
+// DB-saved telemetry.cloud.gcp_project_id is loaded at startup by
+// initOperationalSettings (which runs after hub.New and applies the snapshot
+// to the hub server, updating the metrics dashboard target; ptone/scion#5693).
+func TestInitOperationalSettings_TelemetryGCPProjectIDFromDB(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(globalDir, "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte("schema_version: \"1\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := newTestStore(t)
+	hss, ok := st.(store.HubSettingStore)
+	if !ok {
+		t.Fatal("test store does not implement HubSettingStore")
+	}
+	if _, err := hss.UpsertHubSetting(ctx, "telemetry", json.RawMessage(`{"cloud":{"gcp_project_id":"proj-db-startup"}}`), "admin", -1, "managed"); err != nil {
+		t.Fatalf("UpsertHubSetting: %v", err)
+	}
+
+	cfg := &config.GlobalConfig{}
+	cfg.Database.Driver = "sqlite3"
+	srv, err := hub.New(hub.ServerConfig{}, st)
+	if err != nil {
+		t.Fatalf("hub.New: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	if err := initOperationalSettings(ctx, cfg, srv, st, globalDir); err != nil {
+		t.Fatalf("initOperationalSettings: %v", err)
+	}
+
+	ops := srv.GetOperationalSettings()
+	if ops == nil {
+		t.Fatal("OperationalSettings is nil after init")
+	}
+	snap := ops.Snapshot()
+	if snap.TelemetryConfig == nil || snap.TelemetryConfig.Cloud == nil || snap.TelemetryConfig.Cloud.GCPProjectID == nil {
+		t.Fatalf("expected DB telemetry.cloud.gcp_project_id in snapshot, got %+v", snap.TelemetryConfig)
+	}
+	if got := *snap.TelemetryConfig.Cloud.GCPProjectID; got != "proj-db-startup" {
+		t.Fatalf("snapshot telemetry.cloud.gcp_project_id = %q, want %q", got, "proj-db-startup")
 	}
 }

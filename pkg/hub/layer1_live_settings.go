@@ -17,6 +17,7 @@ package hub
 import (
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,9 @@ type startupLayer1Values struct {
 	TelemetryDefault       *bool
 	AutoExposePortsDefault *bool
 	TelemetryConfig        *api.TelemetryConfig
+	// TelemetryProjectID is the startup metrics dashboard GCP project ID
+	// (from settings.yaml or the scion-telemetry-gcp-credentials secret).
+	TelemetryProjectID string
 	// GitHubApp holds the non-secret GitHub App fields only. The private
 	// key and webhook secret are never part of a snapshot.
 	GitHubApp githubAppPublicConfig
@@ -112,10 +116,37 @@ func (s *Server) recordStartupLayer1Values() {
 		TelemetryDefault:       copyBoolPtr(s.config.TelemetryDefault),
 		AutoExposePortsDefault: copyBoolPtr(s.config.AutoExposePortsDefault),
 		TelemetryConfig:        s.config.TelemetryConfig,
+		TelemetryProjectID:     s.config.TelemetryProjectID,
 		GitHubApp:              githubAppPublicFrom(s.config.GitHubAppConfig),
 		AuthorizedDomains:      slices.Clone(s.config.AuthorizedDomains),
 		Branding:               s.config.Branding.Clone(),
 	}
+}
+
+// telemetryGCPProjectFromAPI returns the explicit telemetry.cloud.gcp_project_id
+// value from cfg, trimmed of surrounding whitespace, or "" if unset.
+func telemetryGCPProjectFromAPI(cfg *api.TelemetryConfig) string {
+	if cfg == nil || cfg.Cloud == nil || cfg.Cloud.GCPProjectID == nil {
+		return ""
+	}
+	return strings.TrimSpace(*cfg.Cloud.GCPProjectID)
+}
+
+// effectiveMetricsProjectLocked returns the GCP project ID the metrics
+// dashboard should query for telemetryConfig, following the priority chain:
+//  1. Explicit telemetry.cloud.gcp_project_id in telemetryConfig
+//  2. Startup TelemetryProjectID (settings.yaml or SA credentials secret)
+//  3. Hub GCPProjectID fallback
+//
+// Callers hold s.mu (or run during single-goroutine Server init).
+func (s *Server) effectiveMetricsProjectLocked(telemetryConfig *api.TelemetryConfig) string {
+	if pid := telemetryGCPProjectFromAPI(telemetryConfig); pid != "" {
+		return pid
+	}
+	if pid := strings.TrimSpace(s.startupLayer1.TelemetryProjectID); pid != "" {
+		return pid
+	}
+	return strings.TrimSpace(s.config.GCPProjectID)
 }
 
 // ResolvedBranding returns the running Hub's validated UI branding snapshot.
