@@ -1604,6 +1604,15 @@ func TestEntAgentToStore_PopulatesHarnessConfigOnUnparsableAppliedConfig(t *test
 	require.NoError(t, err)
 	assert.Nil(t, loaded.AppliedConfig, "unparsable applied_config must decode to nil")
 	assert.Equal(t, "shell", loaded.HarnessConfig, "HarnessConfig must be populated from the indexed harness_config column")
+
+	// A subsequent whole-row UpdateAgent on the loaded struct (AppliedConfig=nil)
+	// must not erase the indexed harness_config shell marker.
+	loaded.Message = "routine status update"
+	require.NoError(t, s.UpdateAgent(ctx, loaded))
+
+	reloaded, err := s.GetAgent(ctx, shell.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "shell", reloaded.HarnessConfig, "UpdateAgent must preserve the shell marker when AppliedConfig is nil")
 }
 
 // TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case:

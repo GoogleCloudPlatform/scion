@@ -1001,9 +1001,14 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 	}
 	// Always set, never clear to NULL — see CreateAgent's identical comment
 	// and ReconcileHarnessConfigColumn's doc (ptone/scion#2146).
-	// AppliedConfig=nil (cleared above) still yields "" here, which is
-	// exactly the sentinel this row should carry, not NULL.
-	update.SetHarnessConfig(harnessConfigOf(a.AppliedConfig))
+	// For execution containers (HarnessConfig == "shell"), never clear the
+	// shell marker when AppliedConfig is nil (for example after loading a row
+	// whose applied_config failed to parse) or lacks HarnessConfig.
+	hc := harnessConfigOf(a.AppliedConfig)
+	if hc == "" && a.HarnessConfig == config.ShellHarnessConfigName {
+		hc = a.HarnessConfig
+	}
+	update.SetHarnessConfig(hc)
 	if a.LastSeen.IsZero() {
 		update.ClearLastSeen()
 	} else {
