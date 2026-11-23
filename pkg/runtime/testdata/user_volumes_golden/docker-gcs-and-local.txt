@@ -14,6 +14,8 @@ SCION_HOST_GID=HOST_ID
 /host/data:/data
 -e
 SCION_METADATA_INTERCEPTION=off
+--cap-drop
+NET_RAW
 --cap-add
 SYS_ADMIN
 --device
