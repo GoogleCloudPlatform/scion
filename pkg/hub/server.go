@@ -8604,7 +8604,7 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// This runs after unified auth but before the handler, allowing hosts to authenticate
 	if s.brokerAuthService != nil {
 		if s.auditLogger != nil {
-			h = AuditableBrokerAuthMiddleware(s.brokerAuthService, s.auditLogger)(h)
+			h = AuditableBrokerAuthMiddleware(s.brokerAuthService, s.auditLogger, s.clientIP)(h)
 		} else {
 			h = BrokerAuthMiddleware(s.brokerAuthService)(h)
 		}

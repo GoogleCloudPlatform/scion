@@ -17,9 +17,6 @@ package hub
 import (
 	"context"
 	"math"
-	"net"
-	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
@@ -188,77 +185,4 @@ func (l *geExchangeRateLimiter) StartCleanup(ctx context.Context) {
 			}
 		}
 	}()
-}
-
-// ---------------------------------------------------------------------------
-// Client IP extraction — safe trusted-proxy semantics.
-//
-// Reuses the Hub-wide parseTrustedProxies/isTrustedProxy from auth.go.
-// When the immediate peer is in TrustedProxies, parses X-Forwarded-For
-// right-to-left to find the first untrusted hop (the real client). This is
-// the only safe approach: the leftmost entry is attacker-controlled if the
-// proxy chain is not fully trusted.
-// ---------------------------------------------------------------------------
-
-// geExchangeClientIP extracts the rate-limit key IP from the request.
-// When the immediate peer is a trusted proxy, walks X-Forwarded-For
-// right-to-left past trusted hops to find the first untrusted client IP.
-// Falls back to RemoteAddr. Never trusts forwarding headers from untrusted
-// peers.
-func geExchangeClientIP(r *http.Request, trustedNets []*net.IPNet) string {
-	peerIP := remoteIP(r.RemoteAddr)
-
-	// If no trusted proxies configured or peer is not trusted, use RemoteAddr.
-	if len(trustedNets) == 0 || !isTrustedProxy(r, trustedNets) {
-		return normalizeIPForRateLimit(peerIP)
-	}
-
-	// Peer is trusted — walk X-Forwarded-For right-to-left past trusted hops.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			candidate := strings.TrimSpace(parts[i])
-			ip := net.ParseIP(candidate)
-			if ip == nil {
-				// Malformed entry — stop and use the peer IP (fail closed).
-				break
-			}
-			// Check if this hop is also trusted.
-			trusted := false
-			for _, n := range trustedNets {
-				if n.Contains(ip) {
-					trusted = true
-					break
-				}
-			}
-			if !trusted {
-				// First untrusted hop = the real client.
-				return normalizeIPForRateLimit(candidate)
-			}
-		}
-	}
-
-	// All XFF hops were trusted (or XFF absent) — try X-Real-IP.
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		if net.ParseIP(realIP) != nil {
-			return normalizeIPForRateLimit(realIP)
-		}
-	}
-
-	// Fallback to peer.
-	return normalizeIPForRateLimit(peerIP)
-}
-
-// normalizeIPForRateLimit normalizes IPv4/IPv6 to a canonical string form.
-// IPv4-mapped IPv6 (::ffff:1.2.3.4) is normalized to the IPv4 form so that
-// dual-stack clients cannot evade the limiter.
-func normalizeIPForRateLimit(raw string) string {
-	ip := net.ParseIP(raw)
-	if ip == nil {
-		return raw // unparseable — use as-is
-	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.String()
-	}
-	return ip.String()
 }

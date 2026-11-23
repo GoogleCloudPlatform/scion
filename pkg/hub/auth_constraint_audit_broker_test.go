@@ -44,7 +44,7 @@ func constraintAuditBrokerMiddlewareVariants() []constraintAuditBrokerMiddleware
 			name:      "auditable",
 			auditable: true,
 			wrap: func(svc *BrokerAuthService, logger AuditLogger, next http.Handler) http.Handler {
-				return AuditableBrokerAuthMiddleware(svc, logger)(next)
+				return AuditableBrokerAuthMiddleware(svc, logger, nil)(next)
 			},
 		},
 	}

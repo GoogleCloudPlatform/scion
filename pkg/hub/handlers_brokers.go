@@ -279,7 +279,7 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	if existingBroker != nil {
 		kv = append(kv, "prior_admin_managed", strconv.FormatBool(priorAdminManaged))
 	}
-	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), getClientIP(r),
+	LogRegistrationEvent(r.Context(), s.auditLogger, resp.BrokerID, req.Name, user.ID(), s.clientIP(r),
 		operation, mergeBrokerAuditDetails(details, kv...))
 
 	writeJSON(w, http.StatusCreated, resp)
@@ -778,7 +778,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 		if revokeErr != nil {
 			slog.Error("Failed to revoke a join token sent without TLS", "brokerID", req.BrokerID, "error", revokeErr)
 		}
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false,
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, s.clientIP(r), false,
 			fmt.Sprintf("refused: not over TLS or from this host (join token revoked: %t)", revoked), auditevent.BrokerFailureRefused)
 		s.requireConfidentialArrival(w, r)
 		return
@@ -786,7 +786,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 
 	// Test admin tier: only the co-located broker may complete a join.
 	if s.refuseTestAdminBrokerRegistration(w, req.BrokerID) {
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, s.clientIP(r), false, ErrTestAdminRemoteBrokerRefused.Error(), auditevent.BrokerFailureRefused)
 		return
 	}
 
@@ -805,7 +805,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.brokerAuthService.CompleteBrokerJoin(r.Context(), req, hubEndpoint)
 	if err != nil {
 		// Log failed join attempt
-		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), false, err.Error(), brokerJoinFailureCode(err))
+		LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, s.clientIP(r), false, err.Error(), brokerJoinFailureCode(err))
 
 		if writeRuntimeTargetRefusal(w, err) {
 			return
@@ -826,7 +826,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log successful join
-	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, getClientIP(r), true, "", "")
+	LogJoinEvent(r.Context(), s.auditLogger, req.BrokerID, s.clientIP(r), true, "", "")
 	s.conduitBrokerCredentialChanged(req.BrokerID)
 	// Record the reservations of the agents the broker still runs (a broker
 	// registered again under the same ID), now that its row is written and
@@ -947,7 +947,7 @@ func (s *Server) handleBrokerRotateSecret(w http.ResponseWriter, r *http.Request
 		actorID = brokerIdent.BrokerID()
 		actorType = "broker"
 	}
-	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, getClientIP(r), brokerAuditCredentialDetails(r.Context()))
+	LogRotateEvent(r.Context(), s.auditLogger, brokerID, actorID, actorType, s.clientIP(r), brokerAuditCredentialDetails(r.Context()))
 
 	writeJSON(w, http.StatusOK, resp)
 }

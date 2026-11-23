@@ -250,12 +250,12 @@ func TestGEExchange_RateLimit_TrustedProxyChain(t *testing.T) {
 			wantIP:     "198.51.100.5",
 		},
 		{
-			name:       "trusted proxy — all hops trusted, fallback to X-Real-IP",
+			name:       "trusted proxy — all hops trusted, ignores X-Real-IP and falls back to peer",
 			remoteAddr: "10.0.0.2:1234",
 			trusted:    []string{"10.0.0.0/8"},
 			xff:        "10.0.0.1",
 			realIP:     "203.0.113.8",
-			wantIP:     "203.0.113.8",
+			wantIP:     "10.0.0.2",
 		},
 		{
 			name:       "trusted proxy — malformed XFF entry, fallback to peer",
@@ -296,9 +296,9 @@ func TestGEExchange_RateLimit_TrustedProxyChain(t *testing.T) {
 				req.Header.Set("X-Real-IP", tt.realIP)
 			}
 			nets := parseTrustedProxies(tt.trusted)
-			got := geExchangeClientIP(req, nets)
+			got := trustedClientIP(req, nets)
 			if got != tt.wantIP {
-				t.Errorf("geExchangeClientIP() = %q, want %q", got, tt.wantIP)
+				t.Errorf("trustedClientIP() = %q, want %q", got, tt.wantIP)
 			}
 		})
 	}
@@ -500,9 +500,9 @@ func TestNormalizeIPForRateLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := normalizeIPForRateLimit(tt.input)
+			got := normalizeIP(tt.input)
 			if got != tt.want {
-				t.Errorf("normalizeIPForRateLimit(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("normalizeIP(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -541,7 +541,7 @@ func TestGEExchange_WithRateLimitAndBodyLimit_NormalFlow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// geExchangeClientIP unit tests (IPv4/IPv6/malformed).
+// trustedClientIP unit tests (IPv4/IPv6/malformed).
 // ---------------------------------------------------------------------------
 
 func TestGEExchangeClientIP_IPv6MappedIPv4(t *testing.T) {
@@ -553,8 +553,8 @@ func TestGEExchangeClientIP_IPv6MappedIPv4(t *testing.T) {
 	req6 := httptest.NewRequest("GET", "/", nil)
 	req6.RemoteAddr = "[::ffff:192.0.2.1]:1234"
 
-	ip4 := geExchangeClientIP(req4, nil)
-	ip6 := geExchangeClientIP(req6, nil)
+	ip4 := trustedClientIP(req4, nil)
+	ip6 := trustedClientIP(req6, nil)
 
 	if ip4 != ip6 {
 		t.Errorf("IPv4 %q and IPv4-mapped IPv6 %q should normalize to same key", ip4, ip6)

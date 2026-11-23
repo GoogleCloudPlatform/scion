@@ -140,7 +140,7 @@ func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T)
 			wantPrefix: "timestamp outside acceptable range (skew: ", wantCode: auditevent.BrokerFailureClockSkew},
 		{name: "replay", before: func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			AuditableBrokerAuthMiddleware(svc, &mockAuditLogger{})(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rec, replayFirst)
+			AuditableBrokerAuthMiddleware(svc, &mockAuditLogger{}, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).ServeHTTP(rec, replayFirst)
 			require.Equal(t, http.StatusOK, rec.Code, "the first use of the nonce must pass: %s", rec.Body.String())
 		}, req: replayed,
 			wantMessage: "nonce already used (possible replay attack)", wantCode: auditevent.BrokerFailureReplay},
@@ -172,7 +172,7 @@ func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T)
 			logger := &mockAuditLogger{}
 			called := false
 			rec := httptest.NewRecorder()
-			AuditableBrokerAuthMiddleware(use, logger)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, c.req)
+			AuditableBrokerAuthMiddleware(use, logger, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(rec, c.req)
 
 			require.False(t, called)
 			require.Equal(t, http.StatusUnauthorized, rec.Code)

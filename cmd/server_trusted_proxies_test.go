@@ -193,3 +193,90 @@ func TestInitProxyAuth_HeaderProviderRejected(t *testing.T) {
 		assert.EqualError(t, err, wantErr)
 	})
 }
+
+func TestLogProxyTrustedProxiesHints(t *testing.T) {
+	const (
+		wantProxyHint      = "auth.mode is proxy and server.trusted_proxies is not set"
+		wantDeprecatedWarn = "server.auth.proxy.require_trusted_proxy_ip is deprecated and has no effect"
+	)
+
+	t.Run("proxy mode with unset trusted_proxies logs info hint", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{}
+		cfg.Auth.Mode = "proxy"
+		logProxyTrustedProxiesHints(cfg)
+		out := buf.String()
+		assert.Contains(t, out, "level=INFO")
+		assert.Contains(t, out, wantProxyHint)
+		assert.NotContains(t, out, wantDeprecatedWarn)
+	})
+
+	t.Run("oauth mode with unset trusted_proxies logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{}
+		cfg.Auth.Mode = "oauth"
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("proxy mode with set trusted_proxies logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{"10.0.0.0/8"},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("proxy mode with explicit empty trusted_proxies logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
+
+	t.Run("require_trusted_proxy_ip true logs deprecation WARN", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{"10.0.0.0/8"},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		cfg.Auth.Proxy = &config.ProxyAuthConfig{
+			Provider:              "iap",
+			RequireTrustedProxyIP: true,
+		}
+		logProxyTrustedProxiesHints(cfg)
+		out := buf.String()
+		assert.Contains(t, out, "level=WARN")
+		assert.Contains(t, out, wantDeprecatedWarn)
+		assert.NotContains(t, out, wantProxyHint)
+	})
+
+	t.Run("require_trusted_proxy_ip false logs nothing", func(t *testing.T) {
+		buf, restore := captureSlog(t)
+		defer restore()
+		cfg := &config.GlobalConfig{
+			TrustedProxies:    []string{"10.0.0.0/8"},
+			TrustedProxiesSet: true,
+		}
+		cfg.Auth.Mode = "proxy"
+		cfg.Auth.Proxy = &config.ProxyAuthConfig{
+			Provider:              "iap",
+			RequireTrustedProxyIP: false,
+		}
+		logProxyTrustedProxiesHints(cfg)
+		assert.Empty(t, buf.String())
+	})
+}

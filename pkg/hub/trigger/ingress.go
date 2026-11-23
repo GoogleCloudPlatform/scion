@@ -186,7 +186,7 @@ type IngressCounts struct {
 }
 
 // ClientIPFunc resolves the client IP address of r using the hub's trusted
-// proxy configuration (geExchangeClientIP in package hub).
+// proxy configuration (trustedClientIP in package hub).
 type ClientIPFunc func(r *http.Request) string
 
 // IngressTxStore is the minimal transactional TriggerStore interface required

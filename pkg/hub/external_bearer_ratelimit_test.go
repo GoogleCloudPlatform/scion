@@ -162,7 +162,7 @@ func TestExternalBearerRateLimiter_DefaultBurstExhaustion(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // The limiter's X-Forwarded-For spoof resistance depends on its own wiring:
-// it reuses geExchangeClientIP, and server.go passes the same
+// it reuses trustedClientIP, and server.go passes the same
 // cfg.TrustedProxies the middleware itself uses. If the constructor were
 // changed to trust every proxy
 // (parseTrustedProxies([]string{"0.0.0.0/0", "::/0"})), any untrusted peer

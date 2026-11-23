@@ -42,7 +42,7 @@ import (
 // A per-client read ceiling, checked before a request is read, bounds the
 // work one client can cause; a request past it is answered 204 unread.
 // Two token buckets bound the log volume, reusing geExchangeRateLimiter and
-// geExchangeClientIP (ge_exchange_ratelimit.go) as externalBearerRateLimiter
+// trustedClientIP (client_ip.go) as externalBearerRateLimiter
 // does: one per client, charged once per request that holds a report to
 // log (a request of repeats only is not charged) or that cannot be read,
 // and one for the whole hub, charged per record written. A refused report
@@ -115,13 +115,13 @@ func newCSPReportLimiter(trustedProxies []string) *cspReportLimiter {
 
 // AllowRead reports whether r's client is within its read ceiling.
 func (l *cspReportLimiter) AllowRead(r *http.Request) bool {
-	ok, _ := l.read.Allow(cspReportClientKey(geExchangeClientIP(r, l.trustedNets)))
+	ok, _ := l.read.Allow(cspReportClientKey(trustedClientIP(r, l.trustedNets)))
 	return ok
 }
 
 // Allow reports whether r's client is within its per-request budget.
 func (l *cspReportLimiter) Allow(r *http.Request) bool {
-	ok, _ := l.perIP.Allow(cspReportClientKey(geExchangeClientIP(r, l.trustedNets)))
+	ok, _ := l.perIP.Allow(cspReportClientKey(trustedClientIP(r, l.trustedNets)))
 	return ok
 }
 

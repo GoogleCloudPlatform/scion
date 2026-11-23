@@ -376,7 +376,7 @@ func TestWebhookIngress_SplitBucketsIsolationAndIPv6Slash64(t *testing.T) {
 		Queue:      f.srv.durableQueue,
 		LoadSecret: f.srv.loadWebhookEndpointSecret,
 		ClientIP: func(r *http.Request) string {
-			return geExchangeClientIP(r, trustedNets)
+			return trustedClientIP(r, trustedNets)
 		},
 		Enabled: func() bool {
 			return f.srv.experimentEnabled(experiments.Triggers)

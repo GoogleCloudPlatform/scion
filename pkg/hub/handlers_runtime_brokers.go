@@ -687,7 +687,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 			old.GCPHostServiceAccountEmail, old.GCPHostProjectID, old.GCPHostSource = after.GCPHostServiceAccountEmail, after.GCPHostProjectID, after.GCPHostSource
 		}
 		if details := brokerSettingsChangeDetails(&old, after); details != nil {
-			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), getClientIP(r),
+			LogBrokerSettingsEvent(ctx, s.auditLogger, after.ID, after.Name, actor.ID(), s.clientIP(r),
 				mergeBrokerAuditDetails(brokerAuditCredentialDetails(ctx), details...))
 		}
 	}
@@ -764,7 +764,7 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	// While the DB schema has ON DELETE CASCADE, we do this at the
 	// application level to ensure cleanup regardless of DB behavior
 	// and to clear default_runtime_broker_id on affected projects.
-	clientIP := getClientIP(r)
+	clientIP := s.clientIP(r)
 	credentialDetails := brokerAuditCredentialDetails(ctx)
 	if projects, err := s.store.GetBrokerProjects(ctx, id); err == nil {
 		for _, gp := range projects {

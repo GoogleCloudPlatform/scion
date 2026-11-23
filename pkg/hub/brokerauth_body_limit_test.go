@@ -114,7 +114,7 @@ func TestBrokerAuthBodyLimit_HubMiddlewaresRefuseOverCapBeforeRead(t *testing.T)
 			logger := &mockAuditLogger{}
 			mw := BrokerAuthMiddleware(svc)
 			if tc.audited {
-				mw = AuditableBrokerAuthMiddleware(svc, logger)
+				mw = AuditableBrokerAuthMiddleware(svc, logger, nil)
 			}
 			nextCalled := false
 			h := mw(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true }))
@@ -147,7 +147,7 @@ func TestBrokerAuthBodyLimit_HubSignedBodyAtCapVerifies(t *testing.T) {
 		svc, _, sign := setupBodyLimitBroker(t)
 		mw := BrokerAuthMiddleware(svc)
 		if audited {
-			mw = AuditableBrokerAuthMiddleware(svc, &mockAuditLogger{})
+			mw = AuditableBrokerAuthMiddleware(svc, &mockAuditLogger{}, nil)
 		}
 		var got []byte
 		var readErr error
