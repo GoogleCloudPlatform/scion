@@ -33,6 +33,7 @@ type runtimeCandidate struct {
 	Binary     string
 	DarwinOnly bool
 	CheckArgs  []string
+	DaemonArgs []string
 }
 
 // localRuntimeCandidates lists container runtimes in preference order.
@@ -40,8 +41,8 @@ type runtimeCandidate struct {
 // platforms the darwin-only container entry is skipped. An explicitly
 // configured runtime always takes precedence over auto-detection.
 var localRuntimeCandidates = []runtimeCandidate{
-	{Name: "podman", Binary: "podman", CheckArgs: []string{"--version"}},
-	{Name: "docker", Binary: "docker", CheckArgs: []string{"--version"}},
+	{Name: "podman", Binary: "podman", CheckArgs: []string{"--version"}, DaemonArgs: []string{"info"}},
+	{Name: "docker", Binary: "docker", CheckArgs: []string{"--version"}, DaemonArgs: []string{"info"}},
 	{Name: "container", Binary: "container", DarwinOnly: true, CheckArgs: []string{"--version"}},
 }
 
@@ -53,13 +54,27 @@ var hostGOOS = func() string { return runtime.GOOS }
 // Override in tests to simulate different environments.
 var lookPathFunc = exec.LookPath
 
+// defaultRunCheck verifies a runtime binary is functional by executing it
+// under a 5-second timeout derived from ctx so caller cancellation terminates
+// the child process promptly.
+func defaultRunCheck(ctx context.Context, binary string, args []string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return exec.CommandContext(tctx, binary, args...).Run()
+}
+
 // runCheckFunc verifies a runtime binary is functional by executing it.
 // Override in tests to simulate different environments.
 var runCheckFunc = func(binary string, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return exec.CommandContext(ctx, binary, args...).Run()
+	return defaultRunCheck(context.Background(), binary, args)
 }
+
+// runCheckCtxFunc is the context-aware runtime probe used by CheckRuntimeDaemon.
+// OverrideRuntimeDetection replaces both runCheckFunc and runCheckCtxFunc.
+var runCheckCtxFunc = defaultRunCheck
 
 // DetectLocalRuntime probes the system for an available container runtime.
 // It checks OS compatibility and verifies each candidate is both on PATH
@@ -106,21 +121,55 @@ func DetectAllLocalRuntimes() []string {
 	return available
 }
 
+// CheckRuntimeDaemon verifies that the daemon or backend for the named
+// container runtime is reachable (for example, by running `docker info` or
+// `podman info` with a short timeout derived from ctx). Runtimes without a
+// separate daemon probe (such as the macOS `container` CLI) return nil.
+// Results are never cached so callers always observe the live daemon state.
+func CheckRuntimeDaemon(ctx context.Context, runtimeName string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	for _, c := range localRuntimeCandidates {
+		if c.Name != runtimeName {
+			continue
+		}
+		if len(c.DaemonArgs) == 0 {
+			return nil
+		}
+		return runCheckCtxFunc(ctx, c.Binary, c.DaemonArgs)
+	}
+	return fmt.Errorf("unknown container runtime %q", runtimeName)
+}
+
 // OverrideRuntimeDetection replaces the functions used by DetectLocalRuntime
-// to look up and verify container runtimes. This is intended for use in tests
-// across packages. Returns a restore function that should be deferred.
+// and CheckRuntimeDaemon to look up and verify container runtimes. This is
+// intended for use in tests across packages. Returns a restore function that
+// should be deferred.
 func OverrideRuntimeDetection(
 	lookPath func(string) (string, error),
 	runCheck func(string, []string) error,
 ) func() {
 	origLP := lookPathFunc
 	origRC := runCheckFunc
+	origRCCtx := runCheckCtxFunc
 	lookPathFunc = lookPath
 	runCheckFunc = runCheck
+	runCheckCtxFunc = func(ctx context.Context, binary string, args []string) error {
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		return runCheck(binary, args)
+	}
 	resetDetectLocalRuntimeCache()
 	return func() {
 		lookPathFunc = origLP
 		runCheckFunc = origRC
+		runCheckCtxFunc = origRCCtx
 		resetDetectLocalRuntimeCache()
 	}
 }

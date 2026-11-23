@@ -131,8 +131,7 @@ func detectColocatedHost(globalDir string) (colocatedHost, error) {
 	if err != nil || cfg == nil {
 		return colocatedHost{}, errColocatedUndetermined
 	}
-	noRegistryCheck := func() error { return nil }
-	l := serverListenersFromArgs(args, cfg, config.LoadServerMode(), noRegistryCheck)
+	l := serverListenersFromArgs(args, cfg, config.LoadServerMode())
 	cfg.Hub.Port = l.HubPort
 	return colocatedHost{
 		Colocated:    l.Hub && l.Broker && !argsSimulateRemoteBroker(args),

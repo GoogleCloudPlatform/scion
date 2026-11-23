@@ -101,63 +101,21 @@ func quickstartWebPath(status onboardingStatusResult, statusErr error, settingsM
 	return ""
 }
 
-// brokerSkippedForRegistry reports whether a workstation server that was
-// asked to run its co-located broker started without it because no
-// image_registry is configured (see workstationBrokerRegistryDegrade). It
-// uses the server's own registry predicate (localCheck: the check as the
-// daemon child runs it, daemonRegistryCheck), which covers every source the
-// server checks. When the hub answered and reports an embedded broker, the
-// broker is running and there is nothing to report.
-func brokerSkippedForRegistry(brokerEnabled bool, status onboardingStatusResult, statusErr error, localCheck func() error) bool {
-	if !brokerEnabled {
-		return false
+// workstationBrokerRegistryCheck decides whether a workstation server may
+// start without an image_registry configured. The caller runs it in
+// workstation mode only; hosted mode keeps its fail-fast at broker start.
+//   - broker disabled: no-op.
+//   - hub or web enabled (co-located workstation server): allow startup even
+//     without image_registry so the onboarding wizard can save it via
+//     PUT /api/v1/system/registry and live-update the running broker through the
+//     co-located settings overlay without requiring a server restart.
+//   - broker-only (nothing else is running and no wizard is reachable):
+//     require image_registry and fail fast.
+func workstationBrokerRegistryCheck(brokerEnabled, hubOrWebEnabled bool, registryCheck func() error) error {
+	if !brokerEnabled || hubOrWebEnabled {
+		return nil
 	}
-	if statusErr == nil && status.EmbeddedBrokerID != "" {
-		return false
-	}
-	// The hub resolves a registry (for example one saved through the
-	// wizard, which the local check cannot read): the broker was not
-	// skipped for lack of one.
-	if statusErr == nil && status.ImageRegistry != "" {
-		return false
-	}
-	return localCheck() != nil
-}
-
-// brokerSkippedNotice is what `scion server start` prints next to the web URL
-// when the workstation broker was not started for lack of an image registry.
-// The broker cannot be started in place once the registry is set (the
-// runtime reload hook only swaps the engine of a broker that is already
-// running), so the fix ends with a restart.
-const brokerSkippedNotice = "Runtime broker not started: image_registry is not configured.\n" +
-	"  Set it in the setup wizard, or run one of:\n" +
-	"    scion config set --global image_registry <your-registry>\n" +
-	"    export SCION_IMAGE_REGISTRY=<your-registry>\n" +
-	"  then run 'scion server restart' to start the broker."
-
-// workstationBrokerRegistryDegrade decides what a workstation server does
-// when its co-located broker is enabled but registryCheck
-// (requireImageRegistryForBroker) fails. The caller runs it in workstation
-// mode only; hosted mode keeps its fail-fast at broker start.
-//   - hub or web enabled: return disableBroker=true and no error; the hub and
-//     web still start so the onboarding wizard can set the registry, and the
-//     broker is not started.
-//   - broker-only (nothing else would be left running): return the error;
-//     the server fails fast as before.
-//
-// It is a no-op when the broker is not enabled or the check passes.
-func workstationBrokerRegistryDegrade(brokerEnabled, hubOrWebEnabled bool, registryCheck func() error) (disableBroker bool, err error) {
-	if !brokerEnabled {
-		return false, nil
-	}
-	checkErr := registryCheck()
-	if checkErr == nil {
-		return false, nil
-	}
-	if !hubOrWebEnabled {
-		return false, checkErr
-	}
-	return true, nil
+	return registryCheck()
 }
 
 // browserAutoOpenAllowed is the rule for opening the browser from

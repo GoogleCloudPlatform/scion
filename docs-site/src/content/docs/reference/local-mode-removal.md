@@ -148,19 +148,12 @@ prompt.
 
 ## Missing image registry
 
-The workstation server needs an `image_registry` for its Runtime Broker. Without one, the server
-still starts the hub and the web UI, so the onboarding wizard can set it, but the broker does not
-start, and `scion server start` prints:
-
-```
-Runtime broker not started: image_registry is not configured.
-  Set it in the setup wizard, or run one of:
-    scion config set --global image_registry <your-registry>
-    export SCION_IMAGE_REGISTRY=<your-registry>
-  then run 'scion server restart' to start the broker.
-```
-
-Run `scion server restart` after setting the registry; the broker does not start in place.
+The Runtime Broker needs an `image_registry` to pull agent images. A co-located workstation server
+(with the Hub or Web Dashboard enabled) still starts its Runtime Broker without one so you can
+configure the registry in the onboarding wizard; saving it in the wizard applies to the running
+Runtime Broker immediately without requiring a `scion server restart`. You can also set it with
+`scion config set --global image_registry <your-registry>` or `SCION_IMAGE_REGISTRY`. A broker-only
+workstation server and a hosted server still refuse to start without an `image_registry`.
 
 ## macOS with Apple container
 

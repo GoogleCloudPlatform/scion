@@ -113,23 +113,10 @@ EOF
     case "$sub" in
       start)
         mkdir -p "$HOME/.scion"
-        has_reg=0
-        if [ -n "${SCION_IMAGE_REGISTRY:-}" ]; then
-          has_reg=1
-        elif [ -f "$HOME/.scion/settings.yaml" ] && grep -q '^image_registry:' "$HOME/.scion/settings.yaml"; then
-          has_reg=1
-        fi
         sleep 120 >/dev/null 2>&1 </dev/null &
         printf '%s\n' "$!" >"$HOME/.scion/server.pid"
         printf 'stub server started\n' >"$HOME/.scion/server.log"
         : >"$HOME/.scion/hub-registered"
-        if [ "$has_reg" = 0 ]; then
-          cat <<'EOF'
-Runtime broker not started: image_registry is not configured.
-  scion config set --global image_registry <your-registry>
-  scion server restart
-EOF
-        fi
         cat <<'EOF'
 Registered hub 'local' (http://127.0.0.1:8080); rename with 'scion hub rename'.
 Web UI:  http://127.0.0.1:8080/onboarding

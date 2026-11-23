@@ -157,61 +157,30 @@ func TestQuickstartWebPath(t *testing.T) {
 	}
 }
 
-func TestBrokerSkippedForRegistry(t *testing.T) {
-	missing := func() error { return errors.New("image_registry is not configured") }
-	present := func() error { return nil }
-	statusErr := errors.New("boom")
-	tests := []struct {
-		name          string
-		brokerEnabled bool
-		status        onboardingStatusResult
-		err           error
-		check         func() error
-		want          bool
-	}{
-		{"broker disabled", false, onboardingStatusResult{}, nil, missing, false},
-		{"hub: no broker, registry check fails", true, onboardingStatusResult{}, nil, missing, true},
-		// e.g. the registry comes from project settings, which the hub's
-		// status does not report, and the
-		// broker had not registered by the readiness deadline.
-		{"hub: no broker yet, registry check passes", true, onboardingStatusResult{}, nil, present, false},
-		{"hub: broker running", true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil, missing, false},
-		// A registry saved in the hub database, which the local check
-		// cannot read (ptone/scion#3916).
-		{"hub: registry resolved by the hub, local check fails", true, onboardingStatusResult{ImageRegistry: "db.example/r"}, nil, missing, false},
-		{"no hub answer: local check fails", true, onboardingStatusResult{}, statusErr, missing, true},
-		{"no hub answer: local check passes", true, onboardingStatusResult{}, statusErr, present, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, brokerSkippedForRegistry(tt.brokerEnabled, tt.status, tt.err, tt.check))
-		})
-	}
-}
-
-func TestWorkstationBrokerRegistryDegrade(t *testing.T) {
+func TestWorkstationBrokerRegistryCheck(t *testing.T) {
 	regErr := errors.New("image_registry is not configured")
 	missing := func() error { return regErr }
 	present := func() error { return nil }
-	notCalled := func() error { t.Fatal("registry check must not run when the broker is disabled"); return nil }
+	notCalled := func() error {
+		t.Fatal("registry check must not run when broker is disabled or co-located with hub/web")
+		return nil
+	}
 	tests := []struct {
-		name        string
-		broker      bool
-		hubOrWeb    bool
-		check       func() error
-		wantDisable bool
-		wantErr     bool
+		name     string
+		broker   bool
+		hubOrWeb bool
+		check    func() error
+		wantErr  bool
 	}{
-		{"broker disabled", false, true, notCalled, false, false},
-		{"registry set", true, true, present, false, false},
-		{"registry missing: degrade", true, true, missing, true, false},
-		{"broker-only, registry missing: fail fast", true, false, missing, false, true},
-		{"broker-only, registry set", true, false, present, false, false},
+		{"broker disabled", false, true, notCalled, false},
+		{"co-located workstation, registry set", true, true, notCalled, false},
+		{"co-located workstation, registry missing: broker still starts", true, true, notCalled, false},
+		{"broker-only, registry missing: fail fast", true, false, missing, true},
+		{"broker-only, registry set", true, false, present, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			disable, err := workstationBrokerRegistryDegrade(tt.broker, tt.hubOrWeb, tt.check)
-			assert.Equal(t, tt.wantDisable, disable)
+			err := workstationBrokerRegistryCheck(tt.broker, tt.hubOrWeb, tt.check)
 			if tt.wantErr {
 				assert.ErrorIs(t, err, regErr)
 			} else {
@@ -314,66 +283,13 @@ func unsetImageRegistry(t *testing.T) {
 	t.Chdir(tmpHome)
 }
 
-func TestPrintWorkstationQuickstart_BrokerSkippedNotice(t *testing.T) {
-	t.Run("no broker and no registry: notice printed", func(t *testing.T) {
-		unsetImageRegistry(t)
-		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
-		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
-		})
-		assert.Contains(t, out, "/onboarding")
-		assert.Contains(t, out, "Runtime broker not started: image_registry is not configured")
-		assert.Contains(t, out, "scion config set --global image_registry")
-		assert.Contains(t, out, "scion server restart")
-	})
-
-	t.Run("no broker yet but a registry is configured: no notice", func(t *testing.T) {
-		t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
-		t.Setenv("SCION_IMAGE_REGISTRY", "ghcr.io/node")
-		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
-		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
-		})
-		assert.NotContains(t, out, "Runtime broker not started")
-	})
-
-	t.Run("broker running: no notice", func(t *testing.T) {
-		unsetImageRegistry(t)
-		stubQuickstartProbes(t, true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil)
-		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
-		})
-		assert.NotContains(t, out, "Runtime broker not started")
-	})
-
-	t.Run("broker disabled by flag: no notice", func(t *testing.T) {
-		unsetImageRegistry(t)
-		stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
-		out := captureStdout(t, func() {
-			printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, false)
-		})
-		assert.NotContains(t, out, "Runtime broker not started")
-	})
-}
-
-// TestPrintWorkstationQuickstart_ProjectOnlyRegistryStillNotices: the server
-// runs in the global directory, so an image_registry set only in the project
-// 'server start' was run from does not keep its broker on, and the notice
-// must still be printed.
-func TestPrintWorkstationQuickstart_ProjectOnlyRegistryStillNotices(t *testing.T) {
-	_, globalDir := brokerTestHome(t)
-	t.Setenv("SCION_IMAGE_REGISTRY", "")
-	t.Setenv("SCION_MAINTENANCE_IMAGE_REGISTRY", "")
-	project := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(project, ".scion"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(project, ".scion", "settings.yaml"),
-		[]byte("schema_version: \"1\"\nimage_registry: registry.example.com/project-only\n"), 0o644))
-	t.Chdir(project)
-	require.NoError(t, requireImageRegistryForBroker(), "the working-directory check sees the project registry")
-
-	stubQuickstartProbes(t, true, onboardingStatusResult{}, nil)
+func TestPrintWorkstationQuickstart_NoBrokerSkippedNoticeWithoutRegistry(t *testing.T) {
+	unsetImageRegistry(t)
+	stubQuickstartProbes(t, true, onboardingStatusResult{EmbeddedBrokerID: "b1"}, nil)
 	out := captureStdout(t, func() {
-		printWorkstationQuickstart(false, globalDir, nil, "127.0.0.1", 8080, true, false, true, true)
+		printWorkstationQuickstart(false, t.TempDir(), nil, "127.0.0.1", 8080, true, false, true, true)
 	})
-	assert.Contains(t, out, "Runtime broker not started: image_registry is not configured")
+	assert.Contains(t, out, "/onboarding")
+	assert.NotContains(t, out, "Runtime broker not started")
+	assert.NotContains(t, out, "scion server restart")
 }

@@ -63,12 +63,32 @@ func GatherDiagnostics(ctx context.Context, cfg *config.VersionedSettings) []Dia
 		results = append(results, DiagnosticResult{Name: "git", Status: "pass", Message: trimOutput(string(out))})
 	}
 
-	// Check runtime detection
-	detected, err := config.DetectLocalRuntime()
-	if err != nil {
-		results = append(results, DiagnosticResult{Name: "runtime", Status: "fail", Message: err.Error()})
+	// Check runtime detection and daemon reachability
+	availableRuntimes := config.DetectAllLocalRuntimes()
+	if len(availableRuntimes) == 0 {
+		if _, err := config.DetectLocalRuntime(); err != nil {
+			results = append(results, DiagnosticResult{Name: "runtime", Status: "fail", Message: err.Error()})
+		} else {
+			results = append(results, DiagnosticResult{Name: "runtime", Status: "fail", Message: config.ErrNoLocalRuntime.Error()})
+		}
 	} else {
-		results = append(results, DiagnosticResult{Name: "runtime", Status: "pass", Message: fmt.Sprintf("detected runtime: %s", detected)})
+		var reachable string
+		for _, rt := range availableRuntimes {
+			if err := config.CheckRuntimeDaemon(ctx, rt); err == nil {
+				reachable = rt
+				break
+			}
+		}
+		if reachable != "" {
+			results = append(results, DiagnosticResult{Name: "runtime", Status: "pass", Message: fmt.Sprintf("detected runtime: %s", reachable)})
+		} else {
+			first := availableRuntimes[0]
+			results = append(results, DiagnosticResult{
+				Name:    "runtime",
+				Status:  "fail",
+				Message: fmt.Sprintf("%s daemon is not running or not accessible — start the %s daemon and click Re-check", first, first),
+			})
+		}
 	}
 
 	// Check global dir exists

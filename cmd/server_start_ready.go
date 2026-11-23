@@ -104,12 +104,8 @@ func (e *serverNotReadyError) Error() string {
 //     there, so that one listener serves both.
 //   - hub enabled without web: the hub port.
 //   - runtime broker enabled: the broker port, which is its own listener.
-//
-// registryCheck must answer as the child would (requireImageRegistryForBroker
-// run in the child's working directory); it is only called in workstation
-// mode with the broker enabled.
-func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) []serverReadyTarget {
-	l := serverListenersFromArgs(args, cfg, fallbackMode, registryCheck)
+func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string) []serverReadyTarget {
+	l := serverListenersFromArgs(args, cfg, fallbackMode)
 	var targets []serverReadyTarget
 	switch {
 	case l.Web && l.Hub:
@@ -167,7 +163,7 @@ func (l serverListeners) resolveHubEndpoint(cfg *config.GlobalConfig, settings *
 
 // serverListenersFromArgs resolves the components, hosts and ports of the
 // server started with args, as described on serverReadyTargetsFromArgs.
-func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) serverListeners {
+func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string) serverListeners {
 	fs := pflag.NewFlagSet("server-start-ready", pflag.ContinueOnError)
 	fs.ParseErrorsAllowlist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
@@ -210,13 +206,6 @@ func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMo
 		}
 		if !fs.Changed("enable-web") {
 			*web = true
-		}
-		// Without an image registry the child starts without the broker
-		// so the setup wizard is reachable (workstationBrokerRegistryDegrade).
-		// When it fails instead (broker only), the child exits and the
-		// wait reports that.
-		if skip, err := workstationBrokerRegistryDegrade(*broker, *hub || *web, registryCheck); err == nil && skip {
-			*broker = false
 		}
 	}
 
@@ -335,7 +324,7 @@ func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
 	if err != nil {
 		cfg = nil
 	}
-	targets := serverReadyTargetsFromArgs(daemonArgs, cfg, config.LoadServerMode(), daemonRegistryCheck(globalDir))
+	targets := serverReadyTargetsFromArgs(daemonArgs, cfg, config.LoadServerMode())
 	if len(targets) == 0 {
 		return nil
 	}
@@ -353,18 +342,6 @@ func waitForDaemonServerReady(globalDir string, daemonArgs []string) error {
 	logPath := daemon.GetLogPathComponent(serverDaemonComponent, globalDir)
 	err = waitForServerListening(client, targets, serverStartReadyTimeout, serverStartReadyPollInterval, serverStartReadySettle, alive)
 	return daemonReadyError(err, logPath, alive)
-}
-
-// daemonRegistryCheck returns the image registry check as the daemon child
-// runs it. The child's working directory is the global directory
-// (daemon.StartComponent), so it resolves settings from there, not from the
-// project of the directory 'server start' was run in: a registry set only in
-// that project does not keep the child's broker on. It reads the node env and
-// the settings file only; the child also counts a registry saved in the hub
-// database (ptone/scion#3916). So it can only under-report, which is benign:
-// the wait then skips a broker listener that does come up.
-func daemonRegistryCheck(globalDir string) func() error {
-	return func() error { return requireImageRegistryForBrokerAt(globalDir) }
 }
 
 // daemonReadyError turns a waitForServerListening result into the error

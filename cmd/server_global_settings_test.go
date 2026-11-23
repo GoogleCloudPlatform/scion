@@ -38,7 +38,6 @@ type serverStartupSettingsView struct {
 	effectiveActiveProfile string
 	effectiveRegistry      string
 	effectiveBrokerID      string
-	colocatedActiveProfile string
 	registryCheckErr       bool
 	defaultRuntimePath     string
 	runtimeProjectDir      string
@@ -84,7 +83,6 @@ func TestServerStartupSettings_GlobalOnlyFromProjectDir(t *testing.T) {
 		if es.Server != nil && es.Server.Broker != nil {
 			v.effectiveBrokerID = es.Server.Broker.BrokerID
 		}
-		v.colocatedActiveProfile = colocatedActiveProfile()
 		v.registryCheckErr = requireImageRegistryForBrokerAt(globalDir) != nil
 		_, _, err = resolveBrokerDefaultRuntime(func(projectPath, _ string) (scionruntime.Runtime, config.RuntimeBuildRecord) {
 			v.defaultRuntimePath = projectPath
@@ -110,7 +108,6 @@ func TestServerStartupSettings_GlobalOnlyFromProjectDir(t *testing.T) {
 		versionedBrokerID:      "global-broker",
 		effectiveActiveProfile: "global-profile",
 		effectiveBrokerID:      "global-broker",
-		colocatedActiveProfile: "global-profile",
 		registryCheckErr:       true,
 		defaultRuntimePath:     serverRuntimeProjectPath,
 		runtimeProjectDir:      globalDir,
@@ -146,7 +143,7 @@ func TestServerStartup_NoWorkingDirectorySettingsLoads(t *testing.T) {
 		return 0
 	}
 	files := []string{
-		"server_foreground.go", "server_flat_host.go", "server_global_settings.go", "image_registry_presence.go",
+		"server_foreground.go", "server_flat_host.go", "server_global_settings.go",
 		filepath.Join("..", "pkg", "hub", "system_handlers.go"),
 	}
 	for _, file := range files {
@@ -155,12 +152,7 @@ func TestServerStartup_NoWorkingDirectorySettingsLoads(t *testing.T) {
 		require.NoError(t, err)
 		ast.Inspect(f, func(n ast.Node) bool {
 			if fn, ok := n.(*ast.FuncDecl); ok {
-				switch {
-				case file == "image_registry_presence.go" && fn.Name.Name != "colocatedActiveProfile":
-					// Only colocatedActiveProfile in this file runs at server
-					// startup; the rest serves the standalone broker too.
-					return false
-				case fn.Name.Name == "requireImageRegistryForBroker":
+				if fn.Name.Name == "requireImageRegistryForBroker" {
 					// The standalone broker's working-directory check.
 					return false
 				}

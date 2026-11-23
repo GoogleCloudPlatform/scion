@@ -307,41 +307,20 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 4b. Workstation mode only: without an image registry the co-located
-	// broker cannot pull agent images. Rather than exiting, start the hub
-	// and web without the broker so the onboarding wizard (which sets the
-	// registry) is reachable. This runs before the hub is created so the
-	// broker is never marked as expected (ExpectEmbeddedBroker), which
-	// would leave /healthz degraded. Hosted mode keeps failing fast at
-	// broker start (step 13). The broker cannot be started in place later,
-	// so the fix is a restart.
+	// 4b. Workstation mode: a co-located broker (hub or web enabled) starts
+	// even when image_registry is not yet configured so the onboarding wizard
+	// can save it via PUT /api/v1/system/registry and live-update the running
+	// broker via the co-located settings overlay without requiring a restart.
+	// A broker-only workstation server has no wizard to set the registry
+	// later, so it fails fast here; hosted mode keeps failing fast at broker
+	// start (step 13).
 	//
-	// A registry saved through the wizard lives in the hub database, which
-	// is not open yet. When the env and file check fails and the hub is
-	// enabled, the decision is deferred until the store is open (step 8)
-	// and completes there, before the hub is created (step 11)
-	// (ptone/scion#3916).
-	registryDecisionDeferred := false
-	registryFromHubDB := false
-	// The env and file check reads the global settings only, like the
-	// readiness check before a daemon start (server_start_ready.go), never
-	// a project found from the working directory (ptone/scion#5362).
+	// The env and file check reads the global settings only, never a project
+	// found from the working directory (ptone/scion#5362).
 	requireServerImageRegistry := func() error { return requireImageRegistryForBrokerAt(globalDir) }
 	if !hostedMode {
-		disableBroker, err := workstationBrokerRegistryDegrade(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireServerImageRegistry)
-		if err != nil {
+		if err := workstationBrokerRegistryCheck(cfg.RuntimeBroker.Enabled, enableHub || enableWeb, requireServerImageRegistry); err != nil {
 			return err
-		}
-		switch {
-		case disableBroker && enableHub:
-			// Off until step 8b decides, so the checks before it (the
-			// port check included) treat the broker as not started, as
-			// they did before the deferral; 8b re-checks its port if it
-			// turns the broker back on.
-			registryDecisionDeferred = true
-			cfg.RuntimeBroker.Enabled = false
-		case disableBroker:
-			disableWorkstationBrokerForRegistry(cfg)
 		}
 	}
 
@@ -369,7 +348,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// then releases it, so a convert that starts later finds the running
 	// server. On a failed start the deferred release frees it.
 	var convertLock *brokerconvert.HostLock
-	if cfg.RuntimeBroker.Enabled || registryDecisionDeferred {
+	if cfg.RuntimeBroker.Enabled {
 		if convertLock, err = acquireConvertStartLock(globalDir); err != nil {
 			return err
 		}
@@ -495,23 +474,6 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 		if closer, ok := s.(io.Closer); ok {
 			defer func() { _ = closer.Close() }()
-		}
-	}
-
-	// 8b. Complete the deferred workstation registry decision (step 4b):
-	// a saved hub value, or a hub file-tier value (SCION_SERVER_* /
-	// SCION_SEED_*), keeps the broker; otherwise it is not started.
-	if registryDecisionDeferred {
-		settingStore, _ := s.(store.HubSettingStore)
-		active := colocatedActiveProfile()
-		if managedImageRegistryConfigured(ctx, settingStore, active) || bootstrapImageRegistryConfigured(serverConfigPath, active) {
-			registryFromHubDB = true
-			cfg.RuntimeBroker.Enabled = true
-			if err := checkBrokerPort(cfg); err != nil {
-				return err
-			}
-		} else {
-			disableWorkstationBrokerForRegistry(cfg)
 		}
 	}
 
@@ -801,7 +763,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// allocated outside requests (ptone/scion#4763). No-op elsewhere.
 	cloudrunruntime.WarnCPUAllocationIfNeeded(slog.Default(), os.Getenv, cfg.RuntimeBroker.Enabled)
 	if cfg.RuntimeBroker.Enabled {
-		if !registryFromHubDB {
+		if hostedMode || (!enableHub && !enableWeb) {
 			if err := requireServerImageRegistry(); err != nil {
 				return err
 			}
