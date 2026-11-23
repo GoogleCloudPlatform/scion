@@ -35,8 +35,9 @@ type linkedUserHub struct {
 	mu    sync.Mutex
 	calls []recordedHubCall
 
-	// projects selects the GET /projects answer: "" returns one project,
-	// "empty" returns none, and "error" returns a 500.
+	// projects selects the GET /projects answer: "" returns luProject,
+	// "other" returns a different project only, "empty" returns none,
+	// and "error" returns a 500.
 	projects string
 
 	// fail maps "METHOD path" to an error answer for that request. A key
@@ -121,6 +122,8 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "empty":
 		_ = json.NewEncoder(w).Encode(hubProjectsResponse{})
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "other":
+		_ = json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "p-other", Slug: "proj-other"}}})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects" && projectsMode == "error":
 		w.WriteHeader(http.StatusInternalServerError)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
@@ -171,9 +174,16 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // discordStub is an http.RoundTripper standing in for the Discord REST API.
 // It answers every request with a minimal channel/message object and records
 // request bodies so tests can read the bot's replies.
+type discordStubRequest struct {
+	method string
+	path   string
+	body   string
+}
+
 type discordStub struct {
-	mu     sync.Mutex
-	bodies []string
+	mu       sync.Mutex
+	bodies   []string
+	requests []discordStubRequest
 	// failPath, when set, makes requests to that URL path answer 403.
 	failPath string
 }
@@ -185,6 +195,11 @@ func (d *discordStub) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	d.mu.Lock()
 	d.bodies = append(d.bodies, string(body))
+	d.requests = append(d.requests, discordStubRequest{
+		method: req.Method,
+		path:   req.URL.Path,
+		body:   string(body),
+	})
 	failing := d.failPath != "" && req.URL.Path == d.failPath
 	d.mu.Unlock()
 	if failing {
@@ -207,6 +222,19 @@ func (d *discordStub) allBodies() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return strings.Join(d.bodies, "\n")
+}
+
+// hasMessageEdit reports whether any recorded Discord REST request edited the
+// original interaction message or a channel message.
+func (d *discordStub) hasMessageEdit() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, r := range d.requests {
+		if r.method == http.MethodPatch && strings.Contains(r.path, "/messages/") {
+			return true
+		}
+	}
+	return false
 }
 
 type linkedUserEnv struct {
@@ -1235,13 +1263,13 @@ func TestAskUserReplies_SenderIsLinkedUser(t *testing.T) {
 		name    string
 		user    string
 		mapping *DiscordUserMapping
-		want    string
+		reply   string
 	}{
-		{name: "linked", user: luDiscordUser, want: luPrincipal},
-		{name: "no link", user: luOtherUser, want: "discord:" + luOtherUser},
+		{name: "linked", user: luDiscordUser},
+		{name: "no link", user: luOtherUser, reply: msgLinkAccountFirst},
 		{name: "link without email", user: luOtherUser, mapping: &DiscordUserMapping{
 			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
-		}, want: "discord:" + luOtherUser},
+		}, reply: staleLinkText},
 	}
 
 	pending := &PendingAskUser{
@@ -1249,29 +1277,45 @@ func TestAskUserReplies_SenderIsLinkedUser(t *testing.T) {
 		ChannelID: luChannel,
 		AgentSlug: "worker",
 		ProjectID: luProject,
+		Choices:   []string{"yes", "no"},
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 
 	for _, u := range users {
 		t.Run("button/"+u.name, func(t *testing.T) {
 			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
 			if u.mapping != nil {
 				require.NoError(t, e.store.CreateUserMapping(ctx, u.mapping))
 			}
+			req := *pending
+			require.NoError(t, e.store.CreatePendingAskUser(ctx, &req))
 			var got *messages.StructuredMessage
 			e.callback.deliverInbound = func(_ string, msg *messages.StructuredMessage) *hubError {
 				got = msg
 				return nil
 			}
-			i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{}), u.user)
+			customID := "ask:opt:" + pending.RequestID + ":0"
+			i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
+				CustomID: customID,
+			}), u.user)
 
-			require.Nil(t, e.callback.deliverAskUserResponse(ctx, i, pending, "yes"))
+			e.callback.Dispatch(e.session, i, customID, nil)
 
-			require.NotNil(t, got)
-			assert.Equal(t, u.want, got.Sender)
+			if u.reply == "" {
+				require.NotNil(t, got)
+				assert.Equal(t, luPrincipal, got.Sender)
+				return
+			}
+			assert.Nil(t, got, "unlinked user response must not be delivered")
+			assert.Contains(t, e.discord.allBodies(), jsonText(t, u.reply))
+			stored, err := e.store.GetPendingAskUser(ctx, pending.RequestID)
+			require.NoError(t, err)
+			assert.False(t, stored.Responded)
 		})
 		t.Run("modal/"+u.name, func(t *testing.T) {
 			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
 			if u.mapping != nil {
 				require.NoError(t, e.store.CreateUserMapping(ctx, u.mapping))
 			}
@@ -1291,10 +1335,18 @@ func TestAskUserReplies_SenderIsLinkedUser(t *testing.T) {
 				},
 			}), u.user)
 
-			HandleModalSubmit(e.session, i, e.store, deliver, nil)
+			HandleModalSubmit(e.session, i, e.store, e.callback.hubClient, deliver, nil)
 
-			require.NotNil(t, got)
-			assert.Equal(t, u.want, got.Sender)
+			if u.reply == "" {
+				require.NotNil(t, got)
+				assert.Equal(t, luPrincipal, got.Sender)
+				return
+			}
+			assert.Nil(t, got, "unlinked user modal response must not be delivered")
+			assert.Contains(t, e.discord.allBodies(), jsonText(t, u.reply))
+			stored, err := e.store.GetPendingAskUser(ctx, pending.RequestID)
+			require.NoError(t, err)
+			assert.False(t, stored.Responded)
 		})
 	}
 }

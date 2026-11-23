@@ -163,6 +163,18 @@ func permissionDeniedText(email, action, project string) string {
 	return fmt.Sprintf("%s doesn't have permission to %s in %s. Ask a project owner.", account, action, projectLabel(project))
 }
 
+// notProjectMemberText tells the user their account is not a member of project.
+func notProjectMemberText(email, project string) string {
+	account := "Your Scion account"
+	if email != "" {
+		account += " (" + email + ")"
+	}
+	if project == "" {
+		return fmt.Sprintf("%s is not a member of this project. Ask a project owner.", account)
+	}
+	return fmt.Sprintf("%s is not a member of **%s**. Ask a project owner.", account, project)
+}
+
 // projectLabel formats a project slug for a reply, or "this hub" when empty.
 func projectLabel(project string) string {
 	if project == "" {

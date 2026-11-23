@@ -166,15 +166,22 @@ func (h *CallbackHandler) handleSetupDefaultAgent(s *discordgo.Session, i *disco
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
 		h.respondUpdate(s, i, msg, nil)
-	}); !ok {
+	})
+	if !ok {
 		return
 	}
 
 	link, _ := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if link == nil {
 		h.respondUpdate(s, i, "Setup session expired. Please use `/scion setup` again.", nil)
+		return
+	}
+
+	if !requireProjectMembership(ctx, h.hubClient, h.log, onBehalfOf, link.ProjectID, link.ProjectSlug, func(msg string) {
+		respondEphemeral(s, i, msg)
+	}) {
 		return
 	}
 
@@ -316,6 +323,13 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		respondEphemeral(s, i, msg)
+	})
+	if !ok {
+		return
+	}
+
 	pending, err := h.store.GetPendingAskUser(ctx, requestID)
 	if err != nil {
 		h.log.Error("Failed to get pending ask-user", "request_id", requestID, "error", err)
@@ -340,10 +354,17 @@ func (h *CallbackHandler) handleAskOption(s *discordgo.Session, i *discordgo.Int
 		return
 	}
 
+	projectSlug := projectSlugForChannel(ctx, s, h.store, pending.ChannelID, pending.ProjectID)
+	if !requireProjectMembership(ctx, h.hubClient, h.log, onBehalfOf, pending.ProjectID, projectSlug, func(msg string) {
+		respondEphemeral(s, i, msg)
+	}) {
+		return
+	}
+
 	choice := pending.Choices[index]
 
 	// Deliver the response to the hub.
-	if he := h.deliverAskUserResponse(ctx, i, pending, choice); he != nil {
+	if he := h.deliverAskUserResponse(ctx, i, pending, onBehalfOf, choice); he != nil {
 		respondEphemeral(s, i, deliveryErrorText(ctx, s, h.store, h.log, he, interactionUserID(i), pending.ChannelID, pending.ProjectID))
 		return
 	}
@@ -368,37 +389,33 @@ func (h *CallbackHandler) handleAskReply(s *discordgo.Session, i *discordgo.Inte
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Since this interaction was NOT pre-acknowledged, error replies use an
+	// immediate ephemeral response.
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		respondImmediateEphemeral(s, i, msg)
+	})
+	if !ok {
+		return
+	}
+
 	pending, err := h.store.GetPendingAskUser(ctx, requestID)
 	if err != nil || pending == nil {
-		// Can't open a modal after a deferred update. Since this interaction
-		// was NOT pre-acknowledged, respond with a simple message.
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "This request has expired or was not found.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		respondImmediateEphemeral(s, i, "This request has expired or was not found.")
 		return
 	}
 	if pending.Responded {
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "This request has already been answered.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		respondImmediateEphemeral(s, i, "This request has already been answered.")
 		return
 	}
 	if time.Now().After(pending.ExpiresAt) {
-		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "This request has expired.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		respondImmediateEphemeral(s, i, "This request has expired.")
+		return
+	}
+
+	projectSlug := projectSlugForChannel(ctx, s, h.store, pending.ChannelID, pending.ProjectID)
+	if !requireProjectMembership(ctx, h.hubClient, h.log, onBehalfOf, pending.ProjectID, projectSlug, func(msg string) {
+		respondImmediateEphemeral(s, i, msg)
+	}) {
 		return
 	}
 
@@ -411,10 +428,17 @@ func (h *CallbackHandler) handleAskDismiss(s *discordgo.Session, i *discordgo.In
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		respondEphemeral(s, i, msg)
+	})
+	if !ok {
+		return
+	}
+
 	pending, err := h.store.GetPendingAskUser(ctx, requestID)
 	if err != nil {
 		h.log.Error("Failed to get pending ask-user for dismiss", "request_id", requestID, "error", err)
-		h.respondUpdate(s, i, "Error looking up request.", nil)
+		respondEphemeral(s, i, "Error looking up request. Please try again.")
 		return
 	}
 	if pending == nil {
@@ -423,6 +447,13 @@ func (h *CallbackHandler) handleAskDismiss(s *discordgo.Session, i *discordgo.In
 	}
 	if pending.Responded {
 		h.respondUpdate(s, i, "This request has already been answered.", nil)
+		return
+	}
+
+	projectSlug := projectSlugForChannel(ctx, s, h.store, pending.ChannelID, pending.ProjectID)
+	if !requireProjectMembership(ctx, h.hubClient, h.log, onBehalfOf, pending.ProjectID, projectSlug, func(msg string) {
+		respondEphemeral(s, i, msg)
+	}) {
 		return
 	}
 
@@ -442,21 +473,16 @@ func (h *CallbackHandler) handleAskDismiss(s *discordgo.Session, i *discordgo.In
 
 // deliverAskUserResponse builds a StructuredMessage from the user's response
 // and delivers it to the hub, targeting the agent that asked.
-func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discordgo.InteractionCreate, pending *PendingAskUser, responseText string) *hubError {
+func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discordgo.InteractionCreate, pending *PendingAskUser, sender, responseText string) *hubError {
 	if h.deliverInbound == nil {
 		h.log.Error("deliverInbound not configured, cannot deliver ask-user response")
 		return &hubError{StatusCode: 500, Message: "Internal error: delivery not configured"}
 	}
-
-	// Resolve the sender identity from Discord user → Scion identity.
-	discordUserID := interactionUserID(i)
-	sender := "discord:" + discordUserID
-	if mapping, err := h.store.GetUserMapping(ctx, discordUserID); err == nil {
-		if principal := principalForMapping(mapping); principal != "" {
-			sender = principal
-		}
+	if sender == "" {
+		return &hubError{StatusCode: 403, Code: "forbidden", Message: "linked user required"}
 	}
 
+	discordUserID := interactionUserID(i)
 	topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 	recipient := "agent:" + pending.AgentSlug
 
@@ -491,8 +517,69 @@ func (h *CallbackHandler) deliverAskUserResponse(ctx context.Context, i *discord
 // channel other than the one its panel was built for.
 const msgSettingsOtherChannel = "These settings buttons belong to another channel. Use `/scion settings` in this channel."
 
+const (
+	msgSettingsAdminRequired        = "You need **Manage Channels** or **Administrator** permission to change channel settings."
+	msgProjectMembershipCheckFailed = "Could not verify your project membership. Please try again."
+)
+
+// requireProjectMembership verifies that onBehalfOf is a member of projectID
+// via hubClient.ListProjectsForUser. On error, missing client/project, or
+// non-membership, it calls reply and returns false.
+func requireProjectMembership(
+	ctx context.Context,
+	hubClient HubClient,
+	log *slog.Logger,
+	onBehalfOf, projectID, projectSlug string,
+	reply func(string),
+) bool {
+	if hubClient == nil || projectID == "" {
+		if log != nil {
+			log.Error("Cannot verify project membership", "project_id", projectID, "hub_client_configured", hubClient != nil)
+		}
+		reply(msgProjectMembershipCheckFailed)
+		return false
+	}
+	projects, err := hubClient.ListProjectsForUser(ctx, onBehalfOf)
+	if err != nil {
+		if log != nil {
+			log.Warn("Failed to verify project membership", "project_id", projectID, "error", err)
+		}
+		reply(hubErrorText(err, emailFromPrincipal(onBehalfOf), projectSlug, msgProjectMembershipCheckFailed))
+		return false
+	}
+	for _, p := range projects {
+		if p.ID == projectID {
+			return true
+		}
+	}
+	reply(notProjectMemberText(emailFromPrincipal(onBehalfOf), projectSlug))
+	return false
+}
+
+// respondImmediateEphemeral sends an immediate ephemeral response for an
+// interaction that was not pre-acknowledged (such as ask:reply).
+func respondImmediateEphemeral(s *discordgo.Session, i *discordgo.InteractionCreate, content string) {
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: content,
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+}
+
+// projectSlugForChannel returns the linked project's slug when channelID is
+// linked to projectID, or "" otherwise.
+func projectSlugForChannel(ctx context.Context, s *discordgo.Session, store Store, channelID, projectID string) string {
+	if link, err := resolveChannelLink(ctx, s, store, channelID); err == nil && link != nil && link.ProjectID == projectID {
+		return link.ProjectSlug
+	}
+	return ""
+}
+
 // handleSettingsCallback toggles channel settings for the channel the button
-// was pressed in. Only linked users can toggle settings.
+// was pressed in. Requires channel admin permission, a linked account, and
+// project membership.
 // custom_id formats:
 //   - settings:observe:<channelID>      — toggle observe mode
 //   - settings:statechange:<channelID>  — toggle state change notifications
@@ -508,12 +595,18 @@ func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discor
 	action := parts[1]
 	panelChannelID := parts[2]
 
+	if !hasChannelAdminPermission(i) {
+		respondEphemeral(s, i, msgSettingsAdminRequired)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
-		h.respondUpdate(s, i, msg, nil)
-	}); !ok {
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+		respondEphemeral(s, i, msg)
+	})
+	if !ok {
 		return
 	}
 
@@ -526,6 +619,12 @@ func (h *CallbackHandler) handleSettingsCallback(s *discordgo.Session, i *discor
 		h.log.Warn("Settings button pressed outside its channel",
 			"channel_id", i.ChannelID, "panel_channel_id", panelChannelID)
 		h.respondUpdate(s, i, msgSettingsOtherChannel, nil)
+		return
+	}
+
+	if !requireProjectMembership(ctx, h.hubClient, h.log, onBehalfOf, link.ProjectID, link.ProjectSlug, func(msg string) {
+		respondEphemeral(s, i, msg)
+	}) {
 		return
 	}
 	channelID := link.ChannelID
@@ -576,15 +675,22 @@ func (h *CallbackHandler) handleDefaultCallback(s *discordgo.Session, i *discord
 	defer cancel()
 
 	// Every arm below writes a channel or thread default.
-	if _, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, interactionUserID(i), func(msg string) {
 		h.respondUpdate(s, i, msg, nil)
-	}); !ok {
+	})
+	if !ok {
 		return
 	}
 
 	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if err != nil || link == nil {
 		h.respondUpdate(s, i, "This channel is not linked to a project.", nil)
+		return
+	}
+
+	if !requireProjectMembership(ctx, h.hubClient, h.log, onBehalfOf, link.ProjectID, link.ProjectSlug, func(msg string) {
+		respondEphemeral(s, i, msg)
+	}) {
 		return
 	}
 
@@ -694,9 +800,10 @@ func (h *CallbackHandler) handleNotifCallback(s *discordgo.Session, i *discordgo
 
 	discordUserID := interactionUserID(i)
 
-	if _, ok := requirePrincipal(ctx, h.store, h.log, discordUserID, func(msg string) {
+	onBehalfOf, ok := requirePrincipal(ctx, h.store, h.log, discordUserID, func(msg string) {
 		h.respondUpdate(s, i, msg, nil)
-	}); !ok {
+	})
+	if !ok {
 		return
 	}
 
@@ -704,6 +811,12 @@ func (h *CallbackHandler) handleNotifCallback(s *discordgo.Session, i *discordgo
 	link, err := resolveChannelLink(ctx, s, h.store, i.ChannelID)
 	if err != nil || link == nil {
 		h.respondUpdate(s, i, "This channel is not linked to a project.", nil)
+		return
+	}
+
+	if !requireProjectMembership(ctx, h.hubClient, h.log, onBehalfOf, link.ProjectID, link.ProjectSlug, func(msg string) {
+		respondEphemeral(s, i, msg)
+	}) {
 		return
 	}
 

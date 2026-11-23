@@ -1304,6 +1304,8 @@ func (b *DiscordBroker) handleInteractionCreate(s *discordgo.Session, i *discord
 	commands := b.commands
 	callbacks := b.callbacks
 	registration := b.registration
+	store := b.store
+	hubClient := b.hubClient
 	b.mu.RUnlock()
 
 	switch i.Type {
@@ -1385,9 +1387,8 @@ func (b *DiscordBroker) handleInteractionCreate(s *discordgo.Session, i *discord
 				},
 			})
 
-			store := b.store
 			go func() {
-				HandleModalSubmit(s, i, store, b.deliverInbound, b.log)
+				HandleModalSubmit(s, i, store, hubClient, b.deliverInbound, b.log)
 			}()
 		} else if strings.HasPrefix(data.CustomID, "secret:") {
 			if commands == nil {
