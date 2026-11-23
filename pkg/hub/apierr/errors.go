@@ -82,7 +82,11 @@ const (
 	// request without Resume targets an existing agent in a resumable
 	// resting phase (suspended, stopped, halted, or an active idle-suspend
 	// claim).
-	ErrCodeAgentExistsResumable  = "agent_exists_resumable"
+	ErrCodeAgentExistsResumable = "agent_exists_resumable"
+	// ErrCodeBrokerOnline is returned (409) when a broker re-registration
+	// matches an existing broker that is currently online and force was not
+	// set. Details carry brokerId, brokerName, and status.
+	ErrCodeBrokerOnline          = "broker_online"
 	ErrCodeVersionConflict       = "version_conflict"
 	ErrCodeTemplateConflict      = "template_conflict"       // 409: a template commit lost its compare-and-swap (ptone/scion#4221)
 	ErrCodeHarnessConfigConflict = "harness_config_conflict" // 409: a harness-config commit lost its compare-and-swap (ptone/scion#4219)

@@ -516,6 +516,8 @@ type CreateBrokerRequest struct {
 	// PreserveSettings asks the hub to only issue a join token when the
 	// name matches an existing broker, leaving its settings unchanged.
 	PreserveSettings bool `json:"preserveSettings,omitempty"`
+	// Force allows re-registering a broker that is currently online on the Hub.
+	Force bool `json:"force,omitempty"`
 }
 
 // CreateBrokerResponse is returned when creating a new broker.

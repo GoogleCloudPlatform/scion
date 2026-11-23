@@ -287,9 +287,11 @@ func TestCompleteBrokerJoin_NoCapabilitiesLeavesExisting(t *testing.T) {
 
 	// Re-registration flow: create + join again, this time with no
 	// capabilities in the request (simulating an older client).
+	// Force is required because the first join marked the broker online.
 	resp2, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{
 		Name:     "cap-test-host-2",
 		BrokerID: resp.BrokerID,
+		Force:    true,
 	}, "admin-user-id")
 	if err != nil {
 		t.Fatalf("second CreateBrokerRegistration failed: %v", err)
@@ -1120,9 +1122,11 @@ func TestBrokerReregistrationByName(t *testing.T) {
 		t.Error("First join should return a secret key")
 	}
 
-	// Second registration with same name (simulates lost credentials)
+	// Second registration with same name (simulates lost credentials;
+	// Force is required because the first join marked the broker online).
 	req2 := CreateBrokerRegistrationRequest{
-		Name: "test-host",
+		Name:  "test-host",
+		Force: true,
 		Labels: map[string]string{
 			"env": "production",
 		},
@@ -1194,8 +1198,10 @@ func TestBrokerReregistrationNewSecret(t *testing.T) {
 
 	oldSecretB64 := joinResp1.SecretKey
 
-	// Re-register with same name
-	resp2, err := svc.CreateBrokerRegistration(ctx, req, "admin")
+	// Re-register with same name (Force required because the first join marked it online).
+	reregReq := req
+	reregReq.Force = true
+	resp2, err := svc.CreateBrokerRegistration(ctx, reregReq, "admin")
 	if err != nil {
 		t.Fatalf("Second CreateBrokerRegistration failed: %v", err)
 	}
@@ -1271,6 +1277,56 @@ func TestBrokerReregistrationNewSecret(t *testing.T) {
 	}
 }
 
+func TestBrokerReregistration_OnlineRefusedWithoutForce(t *testing.T) {
+	svc, _ := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	// First registration + join marks the broker online with a fresh heartbeat.
+	resp1, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "online-guard-host"}, "admin")
+	if err != nil {
+		t.Fatalf("First CreateBrokerRegistration failed: %v", err)
+	}
+	if _, err := svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:  resp1.BrokerID,
+		JoinToken: resp1.JoinToken,
+		Hostname:  "online-guard-host",
+		Version:   "1.0.0",
+	}, "http://localhost:9810"); err != nil {
+		t.Fatalf("CompleteBrokerJoin failed: %v", err)
+	}
+
+	// Re-registering without Force must fail with *BrokerOnlineError naming the matched broker.
+	_, err = svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "online-guard-host"}, "admin")
+	if !errors.Is(err, ErrBrokerOnline) {
+		t.Fatalf("expected ErrBrokerOnline, got %v", err)
+	}
+	var onlineErr *BrokerOnlineError
+	if !errors.As(err, &onlineErr) {
+		t.Fatalf("expected *BrokerOnlineError, got %T", err)
+	}
+	if onlineErr.BrokerID != resp1.BrokerID || onlineErr.BrokerName != "online-guard-host" {
+		t.Errorf("unexpected BrokerOnlineError identity: id=%q name=%q", onlineErr.BrokerID, onlineErr.BrokerName)
+	}
+
+	// PreserveSettings re-mint (join-token create) succeeds without Force even while online.
+	respPreserve, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "online-guard-host", PreserveSettings: true}, "admin")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration with PreserveSettings=true failed: %v", err)
+	}
+	if respPreserve.BrokerID != resp1.BrokerID || !respPreserve.Reregistered || respPreserve.JoinToken == "" {
+		t.Errorf("expected reregistered PreserveSettings match for %s, got id=%s reregistered=%v token=%q", resp1.BrokerID, respPreserve.BrokerID, respPreserve.Reregistered, respPreserve.JoinToken)
+	}
+
+	// Re-registering with Force=true succeeds and reuses the same broker ID.
+	resp2, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "online-guard-host", Force: true}, "admin")
+	if err != nil {
+		t.Fatalf("CreateBrokerRegistration with Force=true failed: %v", err)
+	}
+	if resp2.BrokerID != resp1.BrokerID || !resp2.Reregistered {
+		t.Errorf("expected reregistered match for %s, got id=%s reregistered=%v", resp1.BrokerID, resp2.BrokerID, resp2.Reregistered)
+	}
+}
+
 func TestBrokerRegistration_SetsLabels(t *testing.T) {
 	svc, s := setupTestBrokerAuthService(t)
 	ctx := context.Background()
@@ -1337,9 +1393,11 @@ func TestBrokerReregistration_AddsAbsentLabelsKeepsExisting(t *testing.T) {
 		t.Fatalf("failed to update broker: %v", err)
 	}
 
-	// Re-register with same name, different labels
+	// Re-register with same name, different labels (Force required because
+	// the first join marked the broker online).
 	req2 := CreateBrokerRegistrationRequest{
-		Name: "merge-host",
+		Name:  "merge-host",
+		Force: true,
 		Labels: map[string]string{
 			"scion.io/broker-role": "remote",
 			"custom":               "value2",
@@ -1667,6 +1725,7 @@ func TestBrokerReregistration_HostSAEmail_NormalizedToLowercase(t *testing.T) {
 	for _, email := range []string{"MixedCase@Proj.iam.gserviceaccount.com", "Other@Proj.iam.gserviceaccount.com"} {
 		resp, err := createBrokerRegistrationWithHostSA(ctx, svc, CreateBrokerRegistrationRequest{
 			Name:                       "rereg-host",
+			Force:                      true,
 			GCPHostServiceAccountEmail: email,
 			GCPHostProjectID:           "proj",
 		}, "admin")

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -533,4 +534,165 @@ func TestBrokerRotateSecret_NonOwnerNoGrantDenied(t *testing.T) {
 	stored, err := s.GetBrokerSecret(ctx, broker.ID)
 	require.NoError(t, err)
 	assert.True(t, bytes.Equal(originalKey, stored.SecretKey), "the stored secret must not change on a denied rotation")
+}
+
+// ----------------------------------------------------------------------------
+// Online broker re-registration guard (ptone/scion#2563)
+// ----------------------------------------------------------------------------
+
+func TestBrokerReregistration_OnlineBrokerRefusedWithoutForce(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "rereg-online-owner-a")
+	broker := createReregistrationTestBroker(t, s, "rereg-online-broker-a", owner.ID)
+	broker.Status = store.BrokerStatusOnline
+	broker.LastHeartbeat = time.Now()
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	t.Run("by name", func(t *testing.T) {
+		rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+			Name:   broker.Name,
+			Labels: map[string]string{"zone": "requested"},
+		})
+
+		require.Equal(t, http.StatusConflict, rec.Code,
+			"re-registering an online broker without force must return 409 Conflict; got: %s", rec.Body.String())
+		assert.NotContains(t, rec.Body.String(), "joinToken", "refused response must not carry a join token")
+
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, ErrCodeBrokerOnline, errResp.Error.Code)
+		assert.Contains(t, errResp.Error.Message, broker.Name)
+		assert.Contains(t, errResp.Error.Message, broker.ID)
+		assert.Equal(t, broker.ID, errResp.Error.Details["brokerId"])
+		assert.Equal(t, broker.Name, errResp.Error.Details["brokerName"])
+		assert.Equal(t, store.BrokerStatusOnline, errResp.Error.Details["status"])
+		assertBrokerUnchanged(t, s, broker.ID)
+	})
+
+	t.Run("by ID", func(t *testing.T) {
+		rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+			BrokerID: broker.ID,
+			Name:     "different-requested-name",
+		})
+
+		require.Equal(t, http.StatusConflict, rec.Code,
+			"re-registering an online broker by ID without force must return 409 Conflict; got: %s", rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+		assert.Equal(t, ErrCodeBrokerOnline, errResp.Error.Code)
+		assert.Equal(t, broker.ID, errResp.Error.Details["brokerId"])
+		assert.Equal(t, broker.Name, errResp.Error.Details["brokerName"])
+	})
+}
+
+func TestBrokerReregistration_OnlineBrokerAllowedWithForce(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "rereg-online-owner-force")
+	broker := createReregistrationTestBroker(t, s, "rereg-online-broker-force", owner.ID)
+	broker.Status = store.BrokerStatusOnline
+	broker.LastHeartbeat = time.Now()
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:  broker.Name,
+		Force: true,
+	})
+
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"re-registering an online broker with force=true must succeed; got: %s", rec.Body.String())
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, broker.ID, resp.BrokerID)
+	assert.True(t, resp.Reregistered)
+	assert.NotEmpty(t, resp.JoinToken)
+}
+
+func TestBrokerReregistration_StaleHeartbeatBrokerAllowedWithoutForce(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "rereg-stale-owner")
+	broker := createReregistrationTestBroker(t, s, "rereg-stale-broker", owner.ID)
+	broker.Status = store.BrokerStatusOnline
+	broker.LastHeartbeat = time.Now().Add(-10 * time.Minute)
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name: broker.Name,
+	})
+
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"a broker whose last heartbeat is stale should allow re-registration without force; got: %s", rec.Body.String())
+}
+
+func TestBrokerReregistration_OnlineBrokerNonOwnerStillGets403(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newPlainUser(t, s, "rereg-online-owner-sec")
+	nonOwner := newHubMemberUser(t, s, "rereg-online-nonowner-sec")
+	broker := createReregistrationTestBroker(t, s, "rereg-online-broker-sec", owner.ID)
+	broker.Status = store.BrokerStatusOnline
+	broker.LastHeartbeat = time.Now()
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	rec := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name: broker.Name,
+	})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"non-owner must receive 403 Forbidden before any online-broker 409 check; got: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), broker.ID, "403 must not leak matched broker ID")
+}
+
+// TestBrokerReregistration_OnlineBrokerPreserveSettingsAllowedWithoutForce
+// confirms that explicit join-token re-mints (PreserveSettings=true, as sent
+// by 'scion hub brokers join-token create') are exempt from the online-broker
+// 409 guard so the documented HA join-token takeover workflow works without
+// --force, while non-owners are still refused with 403.
+func TestBrokerReregistration_OnlineBrokerPreserveSettingsAllowedWithoutForce(t *testing.T) {
+	t.Parallel()
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "rereg-online-owner-preserve")
+	nonOwner := newHubMemberUser(t, s, "rereg-online-nonowner-preserve")
+	broker := createReregistrationTestBroker(t, s, "rereg-online-broker-preserve", owner.ID)
+	broker.Status = store.BrokerStatusOnline
+	broker.LastHeartbeat = time.Now()
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	// Non-owner is still denied with 403 even with PreserveSettings=true.
+	denied := doRequestAsUserLoopback(t, srv, nonOwner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:             broker.Name,
+		PreserveSettings: true,
+	})
+	assert.Equal(t, http.StatusForbidden, denied.Code,
+		"non-owner PreserveSettings re-mint on an online broker must still return 403; got: %s", denied.Body.String())
+	assertBrokerUnchanged(t, s, broker.ID)
+
+	// Owner can re-mint a join token for an online broker without Force,
+	// leaving the broker's existing settings unchanged.
+	rec := doRequestAsUserLoopback(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:             broker.Name,
+		PreserveSettings: true,
+		AutoProvide:      true,
+		Labels:           map[string]string{"env": "requested"},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code,
+		"PreserveSettings join-token re-mint for an online broker must succeed without force; got: %s", rec.Body.String())
+
+	var resp CreateBrokerRegistrationResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, broker.ID, resp.BrokerID)
+	assert.True(t, resp.Reregistered)
+	assert.NotEmpty(t, resp.JoinToken)
+
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	assert.False(t, got.AutoProvide, "PreserveSettings must not change AutoProvide")
+	assert.Equal(t, map[string]string{"env": "baseline"}, got.Labels, "PreserveSettings must not change labels")
 }

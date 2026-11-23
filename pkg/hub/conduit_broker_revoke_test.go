@@ -236,7 +236,7 @@ func brokerChanges() []brokerChange {
 			name: "re-join",
 			viaHub: func(t *testing.T, f *brokerConduitFixture, srv *Server) {
 				reg, err := srv.brokerAuthService.CreateBrokerRegistration(context.Background(),
-					CreateBrokerRegistrationRequest{Name: "conduit-broker"}, "test")
+					CreateBrokerRegistrationRequest{Name: "conduit-broker", Force: true}, "test")
 				require.NoError(t, err)
 				require.Equal(t, f.brokerID, reg.BrokerID, "the registration matched the existing broker")
 				rec := joinWithToken(t, srv, f.brokerID, reg.JoinToken)

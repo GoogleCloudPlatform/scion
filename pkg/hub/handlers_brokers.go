@@ -158,6 +158,14 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 		Forbidden(w)
 		return
 	}
+	// Guard accidental re-registration over a live broker (ptone/scion#2563).
+	// PreserveSettings re-mints ('scion hub brokers join-token create') are
+	// exempt: they are explicit, named, owner-only operations that only mint a
+	// join token and do not disconnect the broker until the token is redeemed.
+	if req.RuntimeTarget == nil && existingBroker != nil && !existingBroker.IsFlat() && !req.PreserveSettings && !req.Force && s.isBrokerOnlineForReregister(r.Context(), existingBroker) {
+		writeBrokerOnlineConflict(w, existingBroker.ID, existingBroker.Name, existingBroker.Status)
+		return
+	}
 
 	// Turning auto-provide on offers the broker to every project on the
 	// hub, so it needs broker.auto_provide in addition to registration.
@@ -364,6 +372,11 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 		writeTestAdminBrokerRefusal(w)
 		return
 	}
+	var onlineErr *BrokerOnlineError
+	if errors.As(err, &onlineErr) {
+		writeBrokerOnlineConflict(w, onlineErr.BrokerID, onlineErr.BrokerName, onlineErr.Status)
+		return
+	}
 	if errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		Conflict(w, err.Error())
 		return
@@ -381,6 +394,43 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 	}
 	writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 		"failed to create broker registration: "+err.Error(), nil)
+}
+
+// isBrokerOnlineForReregister reports whether an existing broker is currently
+// online — either via a live conduit session, an active control channel, or a
+// fresh online status/heartbeat record.
+func (s *Server) isBrokerOnlineForReregister(ctx context.Context, b *store.RuntimeBroker) bool {
+	if b == nil {
+		return false
+	}
+	if s.experimentEnabled(conduitExperiment) {
+		if live, err := s.brokerRegistryLive(ctx, b.ID); err == nil && live {
+			return true
+		}
+	}
+	if s.controlChannel != nil && s.controlChannel.IsConnected(b.ID) {
+		return true
+	}
+	return isBrokerRecordOnline(b, time.Now())
+}
+
+// writeBrokerOnlineConflict writes a 409 Conflict response naming the matched
+// online broker's name and ID so operators can confirm or choose a different
+// broker name before replacing a live broker's credentials.
+func writeBrokerOnlineConflict(w http.ResponseWriter, brokerID, brokerName, status string) {
+	if status == "" || status == store.BrokerStatusOffline {
+		status = store.BrokerStatusOnline
+	}
+	msg := (&BrokerOnlineError{
+		BrokerID:   brokerID,
+		BrokerName: brokerName,
+		Status:     status,
+	}).Error()
+	writeError(w, http.StatusConflict, ErrCodeBrokerOnline, msg, map[string]interface{}{
+		"brokerId":   brokerID,
+		"brokerName": brokerName,
+		"status":     status,
+	})
 }
 
 // authorizeBrokerCreate is the single broker.create gate for every

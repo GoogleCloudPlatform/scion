@@ -244,6 +244,14 @@ type CreateBrokerRegistrationRequest struct {
 	// its creator or a super-admin presenting an interactive session or dev
 	// credential.
 	PreserveSettings bool `json:"preserveSettings,omitempty"`
+
+	// Force allows re-registering a broker that is currently online,
+	// replacing its credentials (which disconnects the running broker).
+	// When false and the matched broker is online, registration is refused
+	// with 409 Conflict (broker_online). Not required for PreserveSettings
+	// join-token re-mints, which are explicit named operations that do not
+	// disconnect the broker until the token is redeemed.
+	Force bool `json:"force,omitempty"`
 }
 
 // Join token lifetime bounds for CreateBrokerRegistrationRequest.JoinTokenTTLSeconds.
@@ -451,6 +459,50 @@ var ErrBrokerRegistrationAuthorizationStale = errors.New("broker registration au
 // accepted range.
 var ErrJoinTokenTTLOutOfRange = fmt.Errorf("joinTokenTtlSeconds must be between %d and %d", MinJoinTokenTTLSeconds, MaxJoinTokenTTLSeconds)
 
+// ErrBrokerOnline is returned when a broker re-registration matches an existing
+// broker that is currently online and CreateBrokerRegistrationRequest.Force is
+// false.
+var ErrBrokerOnline = errors.New("matched broker is currently online")
+
+// BrokerOnlineError wraps ErrBrokerOnline with the matched broker's identity
+// and status so callers can report which online broker would be replaced.
+type BrokerOnlineError struct {
+	BrokerID   string
+	BrokerName string
+	Status     string
+}
+
+func (e *BrokerOnlineError) Error() string {
+	return fmt.Sprintf("broker %q (ID: %s) is currently online; re-registering will replace its credentials and disconnect it. Pass force=true (CLI: --force) to proceed, or use a different broker name",
+		e.BrokerName, e.BrokerID)
+}
+
+func (e *BrokerOnlineError) Unwrap() error {
+	return ErrBrokerOnline
+}
+
+// brokerOnlineHeartbeatWindow matches the stale-broker reaper threshold
+// (reaper.go): a broker marked online whose last heartbeat is older than this
+// window is treated as stale rather than actively online.
+const brokerOnlineHeartbeatWindow = 5 * time.Minute
+
+// isBrokerRecordOnline reports whether a stored broker record indicates the
+// broker is currently online based on its affinity/heartbeat freshness and
+// stored status.
+func isBrokerRecordOnline(b *store.RuntimeBroker, now time.Time) bool {
+	if b == nil {
+		return false
+	}
+	if b.ConnectedHubID != nil && *b.ConnectedHubID != "" &&
+		!b.LastHeartbeat.IsZero() && now.Sub(b.LastHeartbeat) < defaultAffinityFreshness {
+		return true
+	}
+	if b.Status == store.BrokerStatusOnline {
+		return b.LastHeartbeat.IsZero() || now.Sub(b.LastHeartbeat) < brokerOnlineHeartbeatWindow
+	}
+	return false
+}
+
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 //
@@ -581,6 +633,18 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	// creates a row next to a flat row with the same name or slug.
 	if existingBroker.IsFlat() {
 		return nil, runtimeTargetChangedRefusal(existingBroker.ID, existingBroker.RuntimeTarget.ID, "")
+	}
+	// Service-layer backstop for the handler's online-broker guard
+	// (isBrokerOnlineForReregister), catching TOCTOU races and direct service
+	// callers. PreserveSettings re-mints ('scion hub brokers join-token create')
+	// are exempt because they are explicit, named, owner-only token mints that
+	// do not disconnect the broker until the token is redeemed.
+	if existingBroker != nil && !req.PreserveSettings && !req.Force && isBrokerRecordOnline(existingBroker, time.Now()) {
+		return nil, &BrokerOnlineError{
+			BrokerID:   existingBroker.ID,
+			BrokerName: existingBroker.Name,
+			Status:     existingBroker.Status,
+		}
 	}
 	if existingBroker == nil {
 		if err := legacyRegistrationNameConflict(ctx, s.store, req.Name, slugify(req.Name), req.BrokerID); err != nil {

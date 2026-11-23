@@ -24,9 +24,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/daemon"
 	"github.com/stretchr/testify/assert"
@@ -38,9 +40,10 @@ import (
 // records the name each broker creation and join asked for.
 type brokerNameHub struct {
 	*httptest.Server
-	mu          sync.Mutex
-	createNames []string
-	joinNames   []string
+	mu           sync.Mutex
+	createNames  []string
+	createForces []bool
+	joinNames    []string
 	// hubName is the name GET /api/v1/runtime-brokers/<id> reports; empty
 	// means the name of the last creation.
 	hubName      string
@@ -48,6 +51,10 @@ type brokerNameHub struct {
 	// matchedID, when set, is the broker ID creation returns instead of
 	// the requested one (the hub matched another broker by name).
 	matchedID string
+	// onlineConflictID/Name, when onlineConflictID is set, cause
+	// POST /api/v1/brokers without force=true to return 409 broker_online.
+	onlineConflictID   string
+	onlineConflictName string
 }
 
 func newBrokerNameHub(t *testing.T) *brokerNameHub {
@@ -64,7 +71,28 @@ func newBrokerNameHub(t *testing.T) *brokerNameHub {
 			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
 		case r.URL.Path == "/api/v1/brokers" && r.Method == http.MethodPost:
 			name, _ := body["name"].(string)
+			force, _ := body["force"].(bool)
 			h.createNames = append(h.createNames, name)
+			h.createForces = append(h.createForces, force)
+			if h.onlineConflictID != "" && !force {
+				conflictName := h.onlineConflictName
+				if conflictName == "" {
+					conflictName = name
+				}
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"code":    apiclient.ErrCodeBrokerOnline,
+						"message": fmt.Sprintf("broker %q (ID: %s) is currently online", conflictName, h.onlineConflictID),
+						"details": map[string]any{
+							"brokerId":   h.onlineConflictID,
+							"brokerName": conflictName,
+							"status":     "online",
+						},
+					},
+				})
+				return
+			}
 			id := body["brokerId"]
 			if h.matchedID != "" {
 				id = h.matchedID
@@ -102,6 +130,12 @@ func (h *brokerNameHub) names() (create, join []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return append([]string(nil), h.createNames...), append([]string(nil), h.joinNames...)
+}
+
+func (h *brokerNameHub) forces() []bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]bool(nil), h.createForces...)
 }
 
 // setupRegisterTest points HOME at a temp dir with a hub-enabled project
@@ -440,4 +474,110 @@ func TestBrokerRegister_BrokerNameRefusedWithInstance(t *testing.T) {
 	err := runBrokerRegister(brokerRegisterCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--broker-name cannot be used with --instance")
+}
+
+// ---------------------------------------------------------------------------
+// Online broker re-registration guard (ptone/scion#2563)
+// ---------------------------------------------------------------------------
+
+func TestBrokerRegister_ForceFlagPlumbedToHub(t *testing.T) {
+	hub := newBrokerNameHub(t)
+	hub.onlineConflictID = "online-broker-uuid-1"
+	hub.onlineConflictName = "shared-host"
+	hub.matchedID = "online-broker-uuid-1"
+	hub.reregistered = true
+	setupRegisterTest(t, hub)
+
+	brokerForceRegister = true
+	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "shared-host")
+	out := runRegisterForTest(t)
+
+	assert.Equal(t, []bool{true}, hub.forces(), "--force must be plumbed on the initial registration request")
+	assert.Contains(t, out, "registered successfully (ID: online-broker-uuid-1)")
+}
+
+func TestBrokerRegister_OnlineConflict_InteractiveConfirmed(t *testing.T) {
+	hub := newBrokerNameHub(t)
+	hub.onlineConflictID = "online-broker-uuid-2"
+	hub.onlineConflictName = "live-host"
+	hub.matchedID = "online-broker-uuid-2"
+	hub.reregistered = true
+	setupRegisterTest(t, hub)
+
+	savedIn, savedOut, savedTTY := brokerRegisterPromptIn, brokerRegisterPromptOut, brokerRegisterIsTTY
+	t.Cleanup(func() {
+		brokerRegisterPromptIn, brokerRegisterPromptOut, brokerRegisterIsTTY = savedIn, savedOut, savedTTY
+	})
+	var promptBuf bytes.Buffer
+	brokerRegisterPromptIn = strings.NewReader("y\n")
+	brokerRegisterPromptOut = &promptBuf
+	brokerRegisterIsTTY = func() bool { return true }
+
+	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "live-host")
+	out := runRegisterForTest(t)
+
+	assert.Equal(t, []bool{false, true}, hub.forces(), "first attempt without force, retry with force=true after confirmation")
+	assert.Contains(t, promptBuf.String(), "live-host")
+	assert.Contains(t, promptBuf.String(), "online-broker-uuid-2")
+	assert.Contains(t, out, "registered successfully (ID: online-broker-uuid-2)")
+}
+
+func TestBrokerRegister_OnlineConflict_InteractiveDeclined(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{name: "explicit no", input: "n\n"},
+		{name: "empty defaults to no", input: "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := newBrokerNameHub(t)
+			hub.onlineConflictID = "online-broker-uuid-3"
+			hub.onlineConflictName = "live-host"
+			setupRegisterTest(t, hub)
+
+			savedIn, savedOut, savedTTY := brokerRegisterPromptIn, brokerRegisterPromptOut, brokerRegisterIsTTY
+			t.Cleanup(func() {
+				brokerRegisterPromptIn, brokerRegisterPromptOut, brokerRegisterIsTTY = savedIn, savedOut, savedTTY
+			})
+			var promptBuf bytes.Buffer
+			brokerRegisterPromptIn = strings.NewReader(tc.input)
+			brokerRegisterPromptOut = &promptBuf
+			brokerRegisterIsTTY = func() bool { return true }
+
+			setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "live-host")
+			var err error
+			captureStdout(t, func() { err = runBrokerRegister(brokerRegisterCmd, nil) })
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cancelled")
+			assert.Contains(t, promptBuf.String(), "live-host")
+			assert.Contains(t, promptBuf.String(), "online-broker-uuid-3")
+			assert.Equal(t, []bool{false}, hub.forces(), "declined confirmation must not retry with force=true")
+		})
+	}
+}
+
+func TestBrokerRegister_OnlineConflict_NonInteractiveErrorsWithForce(t *testing.T) {
+	hub := newBrokerNameHub(t)
+	hub.onlineConflictID = "online-broker-uuid-4"
+	hub.onlineConflictName = "live-host"
+	setupRegisterTest(t, hub)
+
+	savedIn, savedOut, savedTTY := brokerRegisterPromptIn, brokerRegisterPromptOut, brokerRegisterIsTTY
+	t.Cleanup(func() {
+		brokerRegisterPromptIn, brokerRegisterPromptOut, brokerRegisterIsTTY = savedIn, savedOut, savedTTY
+	})
+	var promptBuf bytes.Buffer
+	brokerRegisterPromptIn = strings.NewReader("")
+	brokerRegisterPromptOut = &promptBuf
+	brokerRegisterIsTTY = func() bool { return false }
+
+	setBrokerFlagForTest(t, brokerRegisterCmd, "broker-name", "live-host")
+	var err error
+	captureStdout(t, func() { err = runBrokerRegister(brokerRegisterCmd, nil) })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "live-host")
+	assert.Contains(t, err.Error(), "online-broker-uuid-4")
+	assert.Contains(t, err.Error(), "--force")
+	assert.Equal(t, []bool{false}, hub.forces(), "non-interactive refusal must not retry with force=true")
 }

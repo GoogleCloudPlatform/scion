@@ -605,7 +605,7 @@ func TestBrokerVersion_RollbackKeepsUntilRejoin(t *testing.T) {
 	sendAsBroker(t, f.srv, f.id, map[string]interface{}{"status": "online"})
 	assert.Equal(t, "v1.3.0", f.row(t).Version, "an older heartbeat keeps the token")
 
-	resp := f.reregister(t, nil)
+	resp := f.reregister(t, func(r *CreateBrokerRegistrationRequest) { r.Force = true })
 	rec := doRequestNoAuthLoopback(t, f.srv, http.MethodPost, "/api/v1/brokers/join",
 		BrokerJoinRequest{BrokerID: f.id, JoinToken: resp.JoinToken, Hostname: "ver-rollback", Version: ""})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -621,7 +621,10 @@ func TestBrokerJoin_AlwaysStoresVersion(t *testing.T) {
 		setHubFleet(t, f.s, "v1.2.0")
 		join := func(ver string) {
 			t.Helper()
-			resp := f.reregister(t, func(r *CreateBrokerRegistrationRequest) { r.PreserveSettings = true })
+			resp := f.reregister(t, func(r *CreateBrokerRegistrationRequest) {
+				r.PreserveSettings = true
+				r.Force = true
+			})
 			req := BrokerJoinRequest{BrokerID: f.id, JoinToken: resp.JoinToken, Hostname: "ver-join", Version: ver}
 			if flat {
 				req.RuntimeTarget = f.base.RuntimeTarget
