@@ -363,7 +363,7 @@ func TestStartDelivery_OwnerRowDeniedFallsBackToLowerScope(t *testing.T) {
 // (the read's step 10) for a recorded chain; where the read is narrower
 // than the ceiling (the agent's own access constraint, which only Decide
 // applies) the case says so. A chain without recorded provenance: progeny
-// start refuses it (project.secret_read needs recorded provenance), owner
+// start refuses it (secret.use requires recorded provenance at S3a), owner
 // start withholds the shared row (chain_unrecorded), and the read refuses
 // it (chain_unrecorded).
 func TestStartDelivery_ParityWithRuntimeRead(t *testing.T) {
@@ -933,4 +933,229 @@ func TestStartDelivery_UATHopBoundedByCeiling(t *testing.T) {
 			assert.Equal(t, d.Allowed, sdStartDelivery(t, f.disp, f.Store, id).always, "case %d: start equals the verdict", i)
 		}
 	})
+}
+
+// newSDFixtureWithRole builds an sdFixture whose fixture user holds only
+// projectRole on the fixture project (instead of the default project-owner).
+func newSDFixtureWithRole(t *testing.T, name string, projectRole string) *sdFixture {
+	t.Helper()
+	f := newSDFixture(t, name)
+	removeUserProjectBindings(t, f.Store, f.UserID, f.ProjectID)
+	grantProjectRole(t, f.Store, f.UserID, f.ProjectID, projectRole)
+	return f
+}
+
+// listUserSecretKeys calls GET /api/v1/agents/{agentID}/secrets?scope=user
+// with token and returns the listed secret key names (empty when the request
+// is denied or lists nothing).
+func (f *sdFixture) listUserSecretKeys(t *testing.T, agentID, token string) []string {
+	t.Helper()
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet,
+		"/api/v1/agents/"+agentID+"/secrets?scope=user", nil, token)
+	if rec.Code != http.StatusOK {
+		return nil
+	}
+	var resp AgentListSecretsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	keys := make([]string, 0, len(resp.Secrets))
+	for _, s := range resp.Secrets {
+		keys = append(keys, s.Key)
+	}
+	return keys
+}
+
+// TestStartDelivery_MemberProgenyParity verifies start, restart, runtime read
+// and agent secret list parity for a project-member (who does not hold
+// project.secret_read) alongside project-owner and project-admin, across
+// parent(full) and child(full) agents and negative authorization cases
+// (ptone/scion#2536).
+func TestStartDelivery_MemberProgenyParity(t *testing.T) {
+	// Positive parity across built-in project roles: member, admin, owner.
+	for _, role := range []string{store.ProjectRoleMember, store.ProjectRoleAdmin, store.ProjectRoleOwner} {
+		t.Run("role="+role, func(t *testing.T) {
+			f := newSDFixtureWithRole(t, "sd-mp-"+role, role)
+
+			// Confirm project-member truly lacks project.secret_read so the
+			// test proves user-scope progeny does not depend on it.
+			if role == store.ProjectRoleMember {
+				u, err := f.Store.GetUser(context.Background(), f.UserID)
+				require.NoError(t, err)
+				userIdent := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")
+				dec := f.Server.authzService.Decide(context.Background(), AuthzRequest{
+					Principal:  principalContextForIdentity(userIdent),
+					Credential: credentialContextForIdentity(userIdent),
+					Resource:   Resource{Type: permissions.ResourceProject, ID: f.ProjectID},
+					Action:     ActionRead,
+					Permission: permissionProjectSecretRead,
+				})
+				require.False(t, dec.Allowed, "project-member must not hold project.secret_read")
+			}
+
+			// Direct parent(full) agent (owner path): start, restart, runtime
+			// read and list all admit shared secrets; start/restart also
+			// deliver the unshared owner secret.
+			parent, parentTok := f.direct(t, "mp-parent-"+role, true)
+			assert.Equal(t, sdDelivery{always: true, asNeeded: true, private: true},
+				sdStartDelivery(t, f.disp, f.Store, parent), "parent(full) start/restart delivery")
+			assert.True(t, f.read(t, parent, parentTok, sdAlwaysKey), "parent(full) runtime read always")
+			assert.True(t, f.read(t, parent, parentTok, sdAsNeededKey), "parent(full) runtime read as_needed")
+			assert.False(t, f.read(t, parent, parentTok, sdPrivateKey), "parent(full) runtime read private")
+			assert.ElementsMatch(t, []string{sdAlwaysKey, sdAsNeededKey},
+				f.listUserSecretKeys(t, parent, parentTok), "parent(full) agent secret list")
+
+			// Progeny child(full) agent (member/admin/owner -> parent(full) ->
+			// child(full)): start, restart, runtime read and list all admit
+			// shared user-scope secrets and withhold unshared ones.
+			child, childTok, _ := f.progeny(t, "mp-child-"+role, true)
+			assert.Equal(t, sdDelivery{always: true, asNeeded: true, private: false},
+				sdStartDelivery(t, f.disp, f.Store, child), "child(full) start/restart delivery")
+			assert.True(t, f.read(t, child, childTok, sdAlwaysKey), "child(full) runtime read always")
+			assert.True(t, f.read(t, child, childTok, sdAsNeededKey), "child(full) runtime read as_needed")
+			assert.False(t, f.read(t, child, childTok, sdPrivateKey), "child(full) runtime read private")
+			assert.ElementsMatch(t, []string{sdAlwaysKey, sdAsNeededKey},
+				f.listUserSecretKeys(t, child, childTok), "child(full) agent secret list")
+		})
+	}
+
+	// Negative parity cases under project-member (and explicit
+	// project.secret_read-without-secret.use controls).
+	type negBuilt struct{ agentID, token string }
+	negCases := []struct {
+		name  string
+		role  string
+		build func(t *testing.T, f *sdFixture) negBuilt
+	}{
+		{
+			name: "child without secret.use scope (non-full role)",
+			role: store.ProjectRoleMember,
+			build: func(t *testing.T, f *sdFixture) negBuilt {
+				child, _, _ := f.progeny(t, "mp-neg-nofull", true)
+				setAgentRole(t, f.Store, child, AgentRoleReadOnly)
+				agent, err := f.Store.GetAgent(context.Background(), child)
+				require.NoError(t, err)
+				tok := mintRecordedMaterialToken(t, f.Server, f.Store, child, f.ProjectID,
+					ScopesForRole(AgentRoleReadOnly), agent.Ancestry)
+				return negBuilt{child, tok}
+			},
+		},
+		{
+			name: "child bounded edge with project.secret_read but without secret.use (member)",
+			role: store.ProjectRoleMember,
+			build: func(t *testing.T, f *sdFixture) negBuilt {
+				child, tok, parent := f.progeny(t, "mp-neg-bounded-mem", false)
+				f.recordEdge(t, store.DelegationPrincipalAgent, parent, child,
+					boundedCeiling("project.read", permissionProjectSecretRead), nil)
+				return negBuilt{child, tok}
+			},
+		},
+		{
+			name: "child bounded edge with project.secret_read but without secret.use (owner)",
+			role: store.ProjectRoleOwner,
+			build: func(t *testing.T, f *sdFixture) negBuilt {
+				child, tok, parent := f.progeny(t, "mp-neg-bounded-own", false)
+				f.recordEdge(t, store.DelegationPrincipalAgent, parent, child,
+					boundedCeiling("project.read", permissionProjectSecretRead), nil)
+				return negBuilt{child, tok}
+			},
+		},
+		{
+			name: "terminal user with project.secret_read but constrained from secret.use",
+			role: store.ProjectRoleOwner,
+			build: func(t *testing.T, f *sdFixture) negBuilt {
+				child, tok, _ := f.progeny(t, "mp-neg-s4b", true)
+				constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+				return negBuilt{child, tok}
+			},
+		},
+		{
+			name: "member removed from project (no project admission)",
+			role: store.ProjectRoleMember,
+			build: func(t *testing.T, f *sdFixture) negBuilt {
+				child, tok, _ := f.progeny(t, "mp-neg-removed", true)
+				removeUserProjectBindings(t, f.Store, f.UserID, f.ProjectID)
+				return negBuilt{child, tok}
+			},
+		},
+		{
+			name: "unrecorded provenance hop under member",
+			role: store.ProjectRoleMember,
+			build: func(t *testing.T, f *sdFixture) negBuilt {
+				child, tok, parent := f.progeny(t, "mp-neg-unrec", false)
+				createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parent,
+					store.DelegationPrincipalAgent, child,
+					store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
+				return negBuilt{child, tok}
+			},
+		},
+		{
+			name: "intermediate parent without secret.use (read-only role)",
+			role: store.ProjectRoleMember,
+			build: func(t *testing.T, f *sdFixture) negBuilt {
+				child, tok, parent := f.progeny(t, "mp-neg-parent-ro", true)
+				setAgentRole(t, f.Store, parent, AgentRoleReadOnly)
+				return negBuilt{child, tok}
+			},
+		},
+	}
+
+	for i, tc := range negCases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSDFixtureWithRole(t, "sd-mpn-"+string(rune('a'+i)), tc.role)
+			b := tc.build(t, f)
+
+			assert.Equal(t, sdDelivery{}, sdStartDelivery(t, f.disp, f.Store, b.agentID),
+				"start/restart delivery must refuse")
+			assert.False(t, f.read(t, b.agentID, b.token, sdAlwaysKey),
+				"runtime read of %s must refuse", sdAlwaysKey)
+			assert.False(t, f.read(t, b.agentID, b.token, sdAsNeededKey),
+				"runtime read of %s must refuse", sdAsNeededKey)
+			assert.Empty(t, f.listUserSecretKeys(t, b.agentID, b.token),
+				"agent secret list must be empty")
+		})
+	}
+}
+
+// TestStartDelivery_ProgenyAuthzCheckNonUserScopeFailClosed verifies that
+// startSecretResolveOpts' progeny AuthzCheck only routes ScopeUser directly to
+// secret.use and remains fail-closed for non-user scopes (project, hub, empty).
+func TestStartDelivery_ProgenyAuthzCheckNonUserScopeFailClosed(t *testing.T) {
+	for _, role := range []string{store.ProjectRoleMember, store.ProjectRoleOwner} {
+		t.Run("role="+role, func(t *testing.T) {
+			f := newSDFixtureWithRole(t, "sd-nonuser-"+role, role)
+			ctx := context.Background()
+
+			// Create a project-scope secret and a hub-scope secret.
+			_, _, err := f.Server.secretBackend.Set(ctx, &secret.SetSecretInput{
+				Name: "PROJ_NONUSER_KEY", Value: "proj-val",
+				SecretType: store.SecretTypeEnvironment, Target: "PROJ_NONUSER_KEY",
+				Scope: store.ScopeProject, ScopeID: f.ProjectID,
+				InjectionMode: store.InjectionModeAlways,
+				CreatedBy:     f.UserID, UpdatedBy: f.UserID,
+			})
+			require.NoError(t, err)
+			projMeta, err := f.Server.secretBackend.GetMeta(ctx, "PROJ_NONUSER_KEY", store.ScopeProject, f.ProjectID)
+			require.NoError(t, err)
+
+			child, _, _ := f.progeny(t, "nu-child-"+role, true)
+			agent, err := f.Store.GetAgent(ctx, child)
+			require.NoError(t, err)
+			opts, _ := f.disp.startSecretResolveOpts(ctx, agent, nil)
+			require.NotNil(t, opts)
+			require.NotNil(t, opts.AuthzCheck)
+
+			// Sanity control: user-scope shared secret is allowed.
+			userMeta, err := f.Server.secretBackend.GetMeta(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+			require.NoError(t, err)
+			assert.True(t, opts.AuthzCheck(*userMeta), "user-scope shared secret should be allowed")
+
+			// Non-user scopes must fail closed.
+			assert.False(t, opts.AuthzCheck(*projMeta), "project-scope secret must fail closed on progeny AuthzCheck")
+			assert.False(t, opts.AuthzCheck(secret.SecretMeta{
+				ID: tid("hub-secret"), Name: "HUB_KEY", Scope: store.ScopeHub, ScopeID: "hub",
+			}), "hub-scope secret must fail closed on progeny AuthzCheck")
+			assert.False(t, opts.AuthzCheck(secret.SecretMeta{
+				ID: userMeta.ID, Name: userMeta.Name, Scope: "", ScopeID: f.UserID,
+			}), "empty-scope secret must fail closed on progeny AuthzCheck")
+		})
+	}
 }
