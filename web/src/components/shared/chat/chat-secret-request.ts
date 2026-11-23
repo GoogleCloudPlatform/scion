@@ -158,8 +158,11 @@ export class ScionChatSecretRequest extends LitElement {
   /** Per-attempt idempotency key for fulfill (cleared on edit or completion). */
   private pendingFulfillIdempotencyKey = '';
 
-  /** Per-attempt idempotency key for dismiss. */
+  /** Per-attempt idempotency key for dismiss (reused on retry of the same rows + reason). */
   private pendingDismissIdempotencyKey = '';
+
+  /** Signature of the dismiss attempt (`rowIds` + `reason`) bound to `pendingDismissIdempotencyKey`. */
+  private pendingDismissAttemptSignature = '';
 
   private readonly onFlagsChanged = (): void => {
     this.requestUpdate();
@@ -494,6 +497,7 @@ export class ScionChatSecretRequest extends LitElement {
       this.submitting = false;
       this.pendingFulfillIdempotencyKey = '';
       this.pendingDismissIdempotencyKey = '';
+      this.pendingDismissAttemptSignature = '';
       this.actionState.closeDismissDialogState();
     }
     if (changed.has('rows')) {
@@ -773,7 +777,6 @@ export class ScionChatSecretRequest extends LitElement {
   private openDismissDialog(): void {
     if (!this.canRespondNow || this.submitting || this.actionState.dismissSubmitting) return;
     this.errorMessage = '';
-    this.pendingDismissIdempotencyKey = '';
     this.actionState.openDismissDialog();
   }
 
@@ -785,9 +788,15 @@ export class ScionChatSecretRequest extends LitElement {
 
     const isWholeCard = checked.length === pending.length;
     const reason = this.actionState.dismissReasonDraft.trim();
+    const targetRowIds = isWholeCard ? null : checked.map((r) => r.rowId).sort();
+    const attemptSignature = JSON.stringify({ rowIds: targetRowIds, reason });
 
-    if (!this.pendingDismissIdempotencyKey) {
+    if (
+      !this.pendingDismissIdempotencyKey ||
+      this.pendingDismissAttemptSignature !== attemptSignature
+    ) {
       this.pendingDismissIdempotencyKey = generateSecretRequestIdempotencyKey();
+      this.pendingDismissAttemptSignature = attemptSignature;
     }
 
     this.actionState.setDismissSubmitting(true);
@@ -804,6 +813,7 @@ export class ScionChatSecretRequest extends LitElement {
 
     if (result.ok) {
       this.pendingDismissIdempotencyKey = '';
+      this.pendingDismissAttemptSignature = '';
       this.actionState.closeDismissDialogState();
       this.applyRowUpdates([...result.dismissed, ...result.alreadyDismissed]);
       this.dispatchEvent(
@@ -822,6 +832,8 @@ export class ScionChatSecretRequest extends LitElement {
     }
 
     if (result.status === 403) {
+      this.pendingDismissIdempotencyKey = '';
+      this.pendingDismissAttemptSignature = '';
       this.actionState.closeDismissDialogState();
       this.deniedReason = result.message;
       this.clearFormValues();
@@ -830,6 +842,7 @@ export class ScionChatSecretRequest extends LitElement {
 
     if (result.status === 409) {
       this.pendingDismissIdempotencyKey = '';
+      this.pendingDismissAttemptSignature = '';
       this.actionState.closeDismissDialogState();
       this.applyConflictDetails(result.code, result.details);
       this.errorMessage = mapSecretRequestConflictMessage(

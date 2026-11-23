@@ -330,17 +330,141 @@ describe('scion-chat-secret-request', () => {
     expect(sent.surface).toBe('standalone_page');
     expect(sent.idempotencyKey.length).toBeGreaterThan(0);
 
-    // Rows updated and form values cleared
+    // Rows updated and form values cleared with messageId unchanged
     expect(el.shadowRoot!.textContent).toContain('Fulfilled by you');
     expect(el.shadowRoot!.querySelector('textarea')).toBeNull();
-    // Internal map cleared (re-mounting/resetting rows to pending would show empty inputs)
-    el.rows = [makeRow({ rowId: 'r-1', key: 'KEY_A', position: 0, status: 'pending' })];
-    el.messageId = 'msg-fresh';
+    expect((el as unknown as { formValues: Map<string, string> }).formValues.size).toBe(0);
+  });
+
+  it('clears rendered textarea values after submit with messageId unchanged', async () => {
+    // Return empty rows array on 200 so the same messageId keeps its pending
+    // textarea mounted; this directly asserts handleSubmit clears values
+    // without relying on a messageId change or row transition.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        rows: [],
+        responseMessageId: 'resp-empty',
+        replayed: false,
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({
+      messageId: 'msg-stay',
+      rows: [makeRow({ rowId: 'r-1', messageId: 'msg-stay', key: 'KEY_A', status: 'pending' })],
+    });
+
+    const input = el.shadowRoot!.querySelector('textarea[data-key="KEY_A"]') as HTMLTextAreaElement;
+    input.value = 'top-secret-value';
+    input.dispatchEvent(new Event('input'));
     await el.updateComplete;
-    const freshInput = el.shadowRoot!.querySelector(
+
+    let fulfilledFired = false;
+    el.addEventListener('secret-request-fulfilled', () => {
+      fulfilledFired = true;
+    });
+
+    (el.shadowRoot!.querySelector('.submit-btn') as HTMLElement).click();
+    await vi.waitFor(() => expect(fulfilledFired).toBe(true));
+    await el.updateComplete;
+
+    expect(el.messageId).toBe('msg-stay');
+    const afterInput = el.shadowRoot!.querySelector(
       'textarea[data-key="KEY_A"]'
     ) as HTMLTextAreaElement;
-    expect(freshInput.value).toBe('');
+    expect(afterInput.value).toBe('');
+    const submitBtn = el.shadowRoot!.querySelector('.submit-btn') as HTMLElement;
+    expect(submitBtn.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('reuses dismiss idempotency key on retry of the same attempt and mints a new one for a different attempt', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: 'service_unavailable', message: 'try again' } }, 503)
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: 'service_unavailable', message: 'try again' } }, 503)
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: 'service_unavailable', message: 'try again' } }, 503)
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          dismissed: [
+            makeRow({
+              rowId: 'r-1',
+              key: 'KEY_A',
+              position: 0,
+              status: 'dismissed',
+              dismissed: {
+                at: '2026-11-22T23:59:00Z',
+                byUserId: 'user-1',
+                byName: 'Me',
+                reason: 'different reason',
+                surface: 'native',
+              },
+            }),
+          ],
+          alreadyDismissed: [],
+          responseMessageId: 'resp-d3',
+          replayed: false,
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const el = await mountCard({
+      rows: [
+        makeRow({ rowId: 'r-1', key: 'KEY_A', position: 0 }),
+        makeRow({ rowId: 'r-2', key: 'KEY_B', position: 1 }),
+      ],
+    });
+
+    const runDismiss = async (opts: { uncheckR2?: boolean; reason: string }): Promise<string> => {
+      const priorCalls = fetchMock.mock.calls.length;
+      (el.shadowRoot!.querySelector('.dismiss-btn') as HTMLElement).click();
+      await el.updateComplete;
+
+      if (opts.uncheckR2) {
+        const cb2 = el.shadowRoot!.querySelector(
+          'sl-checkbox[data-dismiss-row="r-2"]'
+        ) as HTMLElement & { checked: boolean };
+        cb2.checked = false;
+        cb2.dispatchEvent(new CustomEvent('sl-change', { bubbles: true }));
+        await el.updateComplete;
+      }
+
+      const reasonInput = el.shadowRoot!.querySelector('.dismiss-reason-input') as HTMLElement & {
+        value: string;
+      };
+      reasonInput.value = opts.reason;
+      reasonInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+      await el.updateComplete;
+
+      (el.shadowRoot!.querySelector('.dismiss-confirm-btn') as HTMLElement).click();
+      await vi.waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledTimes(priorCalls + 1);
+        const dialog = el.shadowRoot!.querySelector('sl-dialog.dismiss-dialog');
+        expect(dialog?.hasAttribute('open')).toBe(false);
+      });
+      await el.updateComplete;
+
+      const [, init] = fetchMock.mock.calls[priorCalls] as [string, RequestInit];
+      const sent = JSON.parse(init.body as string) as { idempotencyKey: string };
+      return sent.idempotencyKey;
+    };
+
+    // 1. Initial attempt (whole card, reason "first reason") fails with 503
+    const key1 = await runDismiss({ reason: 'first reason' });
+    // 2. Retry exact same attempt (whole card, reason "first reason") -> reuses key1
+    const key2 = await runDismiss({ reason: 'first reason' });
+    expect(key2).toBe(key1);
+    // 3. New attempt with different reason -> mints a new key
+    const key3 = await runDismiss({ reason: 'different reason' });
+    expect(key3).not.toBe(key1);
+    // 4. New attempt with different row selection (subset) -> mints a new key
+    const key4 = await runDismiss({ uncheckR2: true, reason: 'different reason' });
+    expect(key4).not.toBe(key3);
   });
 
   it('clears form values on disconnect/navigation', async () => {
