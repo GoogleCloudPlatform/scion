@@ -184,6 +184,21 @@ func TestHarnessConfigHubScope(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "global", scope)
 	assert.Empty(t, scopeID)
+
+	t.Run("project resolution error hint matches caller flags", func(t *testing.T) {
+		tuSetup(t)
+		setGlobalMode(t, false)
+		emptyCtx := &HubContext{}
+
+		_, _, err := harnessConfigHubScope(emptyCtx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "use --global for the global scope")
+		assert.NotContains(t, err.Error(), "--scope")
+
+		err = syncLocalHarnessConfigToHubScope(emptyCtx, "codex", t.TempDir(), "codex", "project")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "use --scope global or --global for the global scope")
+	})
 }
 
 func TestSyncLocalHarnessConfigToHub_ScopeSelection(t *testing.T) {

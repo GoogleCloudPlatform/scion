@@ -610,16 +610,20 @@ var harnessConfigDeleteCmd = &cobra.Command{
 func syncLocalHarnessConfigToHubScope(hubCtx *HubContext, name, localPath, harnessType, targetScope string) error {
 	scope, scopeID, err := harnessConfigHubScopeFor(hubCtx, targetScope)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve project for Hub harness-config (use --scope global or --global for the global scope): %w", err)
 	}
 	return syncHarnessConfigToHub(hubCtx, name, localPath, scope, scopeID, harnessType, "")
 }
 
-// harnessConfigHubScope picks the Hub scope for harness-config sync, push and
-// install, the same way templates do: the current project by default, or
-// global with --global. For project scope it resolves the project ID.
+// harnessConfigHubScope picks the Hub scope for harness-config install, the
+// same way templates do: the current project by default, or global with
+// --global. For project scope it resolves the project ID.
 func harnessConfigHubScope(hubCtx *HubContext) (scope, scopeID string, err error) {
-	return harnessConfigHubScopeFor(hubCtx, templateScopeFromGlobalFlag())
+	scope, scopeID, err = harnessConfigHubScopeFor(hubCtx, templateScopeFromGlobalFlag())
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve project for Hub harness-config (use --global for the global scope): %w", err)
+	}
+	return scope, scopeID, nil
 }
 
 // harnessConfigHubScopeFor resolves the (scope, scopeID) pair for targetScope
@@ -633,7 +637,7 @@ func harnessConfigHubScopeFor(hubCtx *HubContext, targetScope string) (scope, sc
 	}
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to resolve project for Hub harness-config (use --scope global or --global for the global scope): %w", err)
+		return "", "", err
 	}
 	return targetScope, projectID, nil
 }
