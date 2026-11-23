@@ -37,9 +37,10 @@ var suspendCmd = &cobra.Command{
 	Long: `Suspend a running agent, preserving its state for later resume.
 
 Unlike 'stop', which signals termination, 'suspend' signals that the agent
-will be resumed later with its harness session intact. When you 'start' a
-suspended agent, the harness picks up where it left off (implicit resume).
-When you 'start' a stopped agent, it starts a fresh session.
+will be resumed later with its harness session intact. When you 'resume' a
+suspended agent ('scion resume'), the harness picks up where it left off.
+When you 'resume' a stopped agent, it starts a fresh session. 'scion start'
+refuses an existing suspended or stopped agent (409 agent_exists_resumable).
 
 Suspend requires the agent's harness to support session resume. Harnesses
 that do not (e.g. generic) will return an error — use 'stop' instead.`,

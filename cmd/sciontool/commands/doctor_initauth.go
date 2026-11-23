@@ -406,7 +406,7 @@ func checkInitCredential(diag *doctorDiag) initAuthResult {
 func printInitReloadHint() {
 	fmt.Println("[!] Init reloads the credential file by itself once the hub accepts the file's credential.")
 	fmt.Println("[!] If this persists, run from the host:  scion reset-auth <agent-name>  (writes a new credential and tells init to reload it)")
-	fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion start <agent-name>")
+	fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion resume <agent-name>")
 }
 
 // printInitRemediation prints the remediation for the init credential

@@ -79,7 +79,7 @@ func TestRunIntentSites_CreateExistingAgent(t *testing.T) {
 		intent store.RunIntent
 		prior  store.RunIntent
 	}{
-		{name: "suspended-resume", phase: state.PhaseSuspended, op: "start", intent: store.RunIntentRunning, prior: store.RunIntentStopped},
+		{name: "suspended-resume", phase: state.PhaseSuspended, req: CreateAgentRequest{Resume: true}, op: "start", intent: store.RunIntentRunning, prior: store.RunIntentStopped},
 		{name: "stopped-resume", phase: state.PhaseStopped, req: CreateAgentRequest{Resume: true}, op: "start", intent: store.RunIntentRunning, prior: store.RunIntentStopped},
 		{name: "env-gather-recreate", phase: state.PhaseProvisioning, req: CreateAgentRequest{GatherEnv: true}, op: "delete", intent: store.RunIntentStopped, prior: store.RunIntentRunning},
 		{name: "provisioning-start", phase: state.PhaseProvisioning, op: "start", intent: store.RunIntentRunning, prior: store.RunIntentStopped},

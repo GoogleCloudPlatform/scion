@@ -793,11 +793,11 @@ func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid boo
 	if expired && !tokenValid {
 		fmt.Println("[!] Token is expired and cannot be refreshed.")
 		fmt.Println("[!] Run from the host:  scion reset-auth <agent-name>")
-		fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion start <agent-name>")
+		fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion resume <agent-name>")
 	} else if !tokenValid {
 		fmt.Println("[!] Token is rejected by the hub (signing key may have changed).")
 		fmt.Println("[!] Run from the host:  scion reset-auth <agent-name>")
-		fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion start <agent-name>")
+		fmt.Println("[!] Or restart the agent from the host:  scion stop <agent-name>  then  scion resume <agent-name>")
 	}
 }
 

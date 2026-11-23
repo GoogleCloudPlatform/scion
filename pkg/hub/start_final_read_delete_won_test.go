@@ -335,7 +335,7 @@ func TestCreateExisting_DeleteWonAtFinalRead(t *testing.T) {
 		phase state.Phase
 		body  map[string]interface{}
 	}{
-		{"resume-suspended", state.PhaseSuspended, nil},
+		{"resume-suspended", state.PhaseSuspended, map[string]interface{}{"resume": true}},
 		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
 		{"start-created", state.PhaseCreated, nil},
 	}
@@ -414,7 +414,7 @@ func TestCreateExisting_DeleteAfterPostStartWrite(t *testing.T) {
 		phase state.Phase
 		body  map[string]interface{}
 	}{
-		{"resume-suspended", state.PhaseSuspended, nil},
+		{"resume-suspended", state.PhaseSuspended, map[string]interface{}{"resume": true}},
 		{"resume-stopped", state.PhaseStopped, map[string]interface{}{"resume": true}},
 		{"start-created", state.PhaseCreated, nil},
 	}

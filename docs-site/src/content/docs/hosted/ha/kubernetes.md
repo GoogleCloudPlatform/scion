@@ -349,11 +349,11 @@ Scion also distinguishes a Kubernetes-initiated disruption from a plain stop or 
 
 This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period. Docker and other non-Kubernetes runtimes are unaffected.
 
-When either signal is observed, the agent leaves `running` at once, and its status message reads `Agent pod was preempted` or `Agent pod was evicted`. The phase depends on whether a later `scion start` can resume the work:
+When either signal is observed, the agent leaves `running` at once, and its status message reads `Agent pod was preempted` or `Agent pod was evicted`. The phase depends on whether a later `scion resume` can resume the work:
 
 | Agent workspace volume | Phase |
 |---|---|
-| Persistent (NFS workspace storage, a PersistentVolumeClaim) | `stopped` — the work survives; start the agent again to resume it |
+| Persistent (NFS workspace storage, a PersistentVolumeClaim) | `stopped` — the work survives; resume the agent (`scion resume`) to continue |
 | `emptyDir` (the default local workspace) | `error` — the workspace was lost with the pod |
 
 The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
@@ -1067,7 +1067,7 @@ A git clone-per-agent workspace on EmptyDir is cloned again from the remote when
   ```
 
   If the check cannot run (for example the container has already exited, or it times out), there is no warning and the stop goes ahead as usual. The Hub's stop-all action (for example **Stop All** in the Web Dashboard) does not run the check, to keep it fast; `scion stop --all` stops each agent on its own and does run it.
-- **When the agent next starts** (`scion start`, `scion resume`, or a restart), the response repeats the result recorded at the stop, for example `Workspace is ephemeral and was re-cloned; 2 unpushed commits and 3 changed files from the previous run were lost.` When there is no record (the Pod went away without a single-agent stop, or the check did not complete), it says `Workspace is ephemeral and is re-cloned on start; local changes from the previous run are not kept.` A clean workspace gives no warning.
+- **When the agent next starts** (`scion resume`, a restart, or the web Start button), the response repeats the result recorded at the stop, for example `Workspace is ephemeral and was re-cloned; 2 unpushed commits and 3 changed files from the previous run were lost.` When there is no record (the Pod went away without a single-agent stop, or the check did not complete), it says `Workspace is ephemeral and is re-cloned on start; local changes from the previous run are not kept.` A clean workspace gives no warning.
 
 To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning.
 

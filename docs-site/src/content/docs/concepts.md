@@ -152,7 +152,7 @@ Only the agent runtime's own observations (its reports of the container, and the
 
 `halted` is terminal, like `stopped`: the agent has no container and does not count toward the agent quota. It stays `halted` until you act on it. Status reports from the old run do not move it.
 
-To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
+To continue, run `scion resume <agent>`. It restarts the agent in place with a fresh session, the way resuming from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
 
 `scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. The agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
 
