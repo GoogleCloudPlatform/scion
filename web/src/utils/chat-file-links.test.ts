@@ -1777,7 +1777,7 @@ describe('buildGcsLinkElement', () => {
 /**
  * A hostile object name producing no extra attributes or elements is a
  * property of GCS_URI_PATTERN's object character class, which excludes
- * `& < > " '` and whitespace — never of buildGcsLinkHtml, which only ever
+ * `& < > " '` and whitespace — never of buildGcsLinkElement, which only ever
  * receives what the regex already captured. A hostile name is proven safe by
  * showing the regex stops the object capture before the dangerous
  * character, not by feeding the dangerous string to the builder directly
