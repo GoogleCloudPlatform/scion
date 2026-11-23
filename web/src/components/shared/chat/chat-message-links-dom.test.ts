@@ -147,6 +147,16 @@ describe('scion-chat-message links inside markup', () => {
     expect(mentionSlugs(content)).toEqual(['alice']);
   });
 
+  it('does not link entity tails inside a rejected gs:// URI', async () => {
+    const body = 'see gs://bkt/workspace/x.md?v=1 and gs://bkt/sess_abcd1234#x now';
+    const content = await mount(body);
+
+    expect(content.querySelectorAll('.gcs-link')).toHaveLength(0);
+    expect(content.querySelectorAll('.path-link')).toHaveLength(0);
+    expect(content.querySelector('a[href="/sessions/sess_abcd1234"]')).toBeNull();
+    expect(content.textContent?.trim()).toBe(body);
+  });
+
   it('preserves original casing and whitespace before session and commit links', async () => {
     const content = await mount(`Session   ${UUID} and Commit  abc1234`);
 

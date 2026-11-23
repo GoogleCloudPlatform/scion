@@ -568,14 +568,27 @@ const ENTITY_PATTERNS: EntityPattern[] = [
 ];
 
 /**
+ * Raw-text blocker for `styleEntityLinksInText` when `gs://` linking is on.
+ * Accepted `gs://` URIs are already wrapped in `<a>` by `styleGcsLinksInText`
+ * and stepped over by the entity pass; only rejected `gs://` URIs (e.g. a
+ * `?`/`#`/`&` continuation or trailing `/`) reach `styleEntityLinksInText`,
+ * where leftmost-wins claims their span as plain text so an inner
+ * `/workspace/...` or `sess_...` tail cannot be linked as a separate entity.
+ */
+const GCS_ENTITY_BLOCKER: EntityPattern = {
+  regex: GCS_URI_PATTERN,
+  linkBuilder: (m) => [m[0]],
+};
+
+/**
  * Turn `gs://` object references in one text node into links. Only run for a
  * message that is eligible per the gate (the `web.gcs_links` experiment and
  * agent-sent) — never for a user-sent message. Runs before `@mentions` and
  * other entity links so `@` inside an object name (e.g. `gs://bkt/a:@b`)
- * stays part of the link instead of being split off as a mention, and a
- * `/workspace/...` tail (e.g. `gs://bkt/workspace/x.md`) is already inside
- * an `<a>` and stepped over by `styleEntityLinksInText`. Each link built is
- * added to `built`, so the `@mention` pass that follows steps over it.
+ * stays part of the link instead of being split off as a mention. Accepted
+ * matches are wrapped in `<a>` (and added to `built` so `@mentions` step over
+ * them); rejected matches stay plain text and are shielded from entity tail
+ * linking by {@link GCS_ENTITY_BLOCKER}.
  */
 function styleGcsLinksInText(text: string, built: WeakSet<Element>): LinkPiece[] | null {
   return replaceMatches(text, GCS_URI_PATTERN, (m) => {
@@ -617,12 +630,17 @@ function styleArtifactLinksInText(text: string, built: WeakSet<Element>): LinkPi
  * left-to-right through the string; the first match at each position wins.
  * This is intentionally simple: it scans linearly and does not try to
  * handle overlapping matches from different patterns.
+ *
+ * When `includeGcs` is true, appends {@link GCS_ENTITY_BLOCKER} so any
+ * `gs://` URI rejected by `styleGcsLinksInText` still claims its span as
+ * plain text instead of letting a later entity pattern link its tail.
  */
-function styleEntityLinksInText(text: string): LinkPiece[] | null {
+function styleEntityLinksInText(text: string, includeGcs: boolean): LinkPiece[] | null {
   // Collect all matches from all patterns, then sort by position.
   const replacements: { start: number; end: number; pieces: LinkPiece[] }[] = [];
 
-  for (const pattern of ENTITY_PATTERNS) {
+  const patterns = includeGcs ? [...ENTITY_PATTERNS, GCS_ENTITY_BLOCKER] : ENTITY_PATTERNS;
+  for (const pattern of patterns) {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
     // and cannot loop infinitely on a zero-width or non-advancing match.
@@ -1209,7 +1227,9 @@ function linkifyRenderedFragment(
       el.setAttribute('role', 'button');
     }
   }
-  linkifyTextNodes(root, elementsNamed('pre', 'a'), styleEntityLinksInText);
+  linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
+    styleEntityLinksInText(text, opts.gcs)
+  );
   linkifyTextNodes(root, elementsNamed('pre', 'a', 'code'), styleGithubRefsInText);
 }
 
