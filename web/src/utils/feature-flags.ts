@@ -381,3 +381,17 @@ export function codeSpanMentionsEnabled(): boolean {
  * save and at runtime. Default OFF.
  */
 export const ADMIN_MANAGED_BROKERS_FLAG = 'hub.admin_managed_brokers';
+
+/**
+ * Agent-scoped secrets (hub.agent_secrets, ptone/scion#8742): shows the
+ * Secrets management tab on the agent detail and edit pages, and the Secrets
+ * tab inside Additional Options on the create-agent page. Presentation only:
+ * the hub enforces the experiment on every agent-scope secret route and
+ * create-time secrets field. Default OFF.
+ */
+export const AGENT_SECRETS_FLAG = 'hub.agent_secrets';
+
+/** Whether agent-scoped secrets UI surfaces are enabled in this session. */
+export function agentSecretsEnabled(): boolean {
+  return isFeatureEnabled(AGENT_SECRETS_FLAG);
+}

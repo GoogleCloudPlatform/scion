@@ -1308,7 +1308,7 @@ export interface HarnessConfig {
 /**
  * Scope for environment variables and secrets
  */
-export type ResourceScope = 'user' | 'project' | 'runtime_broker' | 'hub';
+export type ResourceScope = 'user' | 'project' | 'runtime_broker' | 'hub' | 'agent';
 
 /**
  * Injection mode for environment variables
@@ -1359,6 +1359,20 @@ export interface Secret {
   updated: string;
   createdBy?: string;
   updatedBy?: string;
+}
+
+/**
+ * Agent-scoped secret supplied at agent creation time (behind hub.agent_secrets).
+ * Mirrors hub.AgentSecretInput in pkg/hub/agent_create_secrets.go.
+ */
+export interface AgentSecretInput {
+  key: string;
+  value: string;
+  encoding?: 'raw' | 'base64';
+  type?: SecretType;
+  target?: string;
+  injectionMode?: InjectionMode;
+  description?: string;
 }
 
 /**
