@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentserviceaccountassignment"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsuspendscreen"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
@@ -154,6 +155,7 @@ const (
 	TypeAgentReincarnation            = "AgentReincarnation"
 	TypeAgentServiceAccountAssignment = "AgentServiceAccountAssignment"
 	TypeAgentSessionMetrics           = "AgentSessionMetrics"
+	TypeAgentSuspendScreen            = "AgentSuspendScreen"
 	TypeAllowListEntry                = "AllowListEntry"
 	TypeApiKey                        = "ApiKey"
 	TypeBrokerDispatch                = "BrokerDispatch"
@@ -4726,6 +4728,8 @@ type AgentMutation struct {
 	reported_runs              map[uuid.UUID]struct{}
 	removedreported_runs       map[uuid.UUID]struct{}
 	clearedreported_runs       bool
+	suspend_screen             *uuid.UUID
+	clearedsuspend_screen      bool
 	done                       bool
 	oldValue                   func(context.Context) (*Agent, error)
 	predicates                 []predicate.Agent
@@ -9982,6 +9986,45 @@ func (m *AgentMutation) ResetReportedRuns() {
 	m.removedreported_runs = nil
 }
 
+// SetSuspendScreenID sets the "suspend_screen" edge to the AgentSuspendScreen entity by id.
+func (m *AgentMutation) SetSuspendScreenID(id uuid.UUID) {
+	m.suspend_screen = &id
+}
+
+// ClearSuspendScreen clears the "suspend_screen" edge to the AgentSuspendScreen entity.
+func (m *AgentMutation) ClearSuspendScreen() {
+	m.clearedsuspend_screen = true
+}
+
+// SuspendScreenCleared reports if the "suspend_screen" edge to the AgentSuspendScreen entity was cleared.
+func (m *AgentMutation) SuspendScreenCleared() bool {
+	return m.clearedsuspend_screen
+}
+
+// SuspendScreenID returns the "suspend_screen" edge ID in the mutation.
+func (m *AgentMutation) SuspendScreenID() (id uuid.UUID, exists bool) {
+	if m.suspend_screen != nil {
+		return *m.suspend_screen, true
+	}
+	return
+}
+
+// SuspendScreenIDs returns the "suspend_screen" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// SuspendScreenID instead. It exists only for internal usage by the builders.
+func (m *AgentMutation) SuspendScreenIDs() (ids []uuid.UUID) {
+	if id := m.suspend_screen; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetSuspendScreen resets all changes to the "suspend_screen" edge.
+func (m *AgentMutation) ResetSuspendScreen() {
+	m.suspend_screen = nil
+	m.clearedsuspend_screen = false
+}
+
 // Where appends a list predicates to the AgentMutation builder.
 func (m *AgentMutation) Where(ps ...predicate.Agent) {
 	m.predicates = append(m.predicates, ps...)
@@ -12403,7 +12446,7 @@ func (m *AgentMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *AgentMutation) AddedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.project != nil {
 		edges = append(edges, agent.EdgeProject)
 	}
@@ -12418,6 +12461,9 @@ func (m *AgentMutation) AddedEdges() []string {
 	}
 	if m.reported_runs != nil {
 		edges = append(edges, agent.EdgeReportedRuns)
+	}
+	if m.suspend_screen != nil {
+		edges = append(edges, agent.EdgeSuspendScreen)
 	}
 	return edges
 }
@@ -12454,13 +12500,17 @@ func (m *AgentMutation) AddedIDs(name string) []ent.Value {
 			ids = append(ids, id)
 		}
 		return ids
+	case agent.EdgeSuspendScreen:
+		if id := m.suspend_screen; id != nil {
+			return []ent.Value{*id}
+		}
 	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *AgentMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.removedmemberships != nil {
 		edges = append(edges, agent.EdgeMemberships)
 	}
@@ -12510,7 +12560,7 @@ func (m *AgentMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *AgentMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 5)
+	edges := make([]string, 0, 6)
 	if m.clearedproject {
 		edges = append(edges, agent.EdgeProject)
 	}
@@ -12525,6 +12575,9 @@ func (m *AgentMutation) ClearedEdges() []string {
 	}
 	if m.clearedreported_runs {
 		edges = append(edges, agent.EdgeReportedRuns)
+	}
+	if m.clearedsuspend_screen {
+		edges = append(edges, agent.EdgeSuspendScreen)
 	}
 	return edges
 }
@@ -12543,6 +12596,8 @@ func (m *AgentMutation) EdgeCleared(name string) bool {
 		return m.clearedholds
 	case agent.EdgeReportedRuns:
 		return m.clearedreported_runs
+	case agent.EdgeSuspendScreen:
+		return m.clearedsuspend_screen
 	}
 	return false
 }
@@ -12553,6 +12608,9 @@ func (m *AgentMutation) ClearEdge(name string) error {
 	switch name {
 	case agent.EdgeProject:
 		m.ClearProject()
+		return nil
+	case agent.EdgeSuspendScreen:
+		m.ClearSuspendScreen()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent unique edge %s", name)
@@ -12576,6 +12634,9 @@ func (m *AgentMutation) ResetEdge(name string) error {
 		return nil
 	case agent.EdgeReportedRuns:
 		m.ResetReportedRuns()
+		return nil
+	case agent.EdgeSuspendScreen:
+		m.ResetSuspendScreen()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent edge %s", name)
@@ -27534,6 +27595,554 @@ func (m *AgentSessionMetricsMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *AgentSessionMetricsMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown AgentSessionMetrics edge %s", name)
+}
+
+// AgentSuspendScreenMutation represents an operation that mutates the AgentSuspendScreen nodes in the graph.
+type AgentSuspendScreenMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	content       *string
+	truncated     *bool
+	captured_at   *time.Time
+	clearedFields map[string]struct{}
+	agent         *uuid.UUID
+	clearedagent  bool
+	done          bool
+	oldValue      func(context.Context) (*AgentSuspendScreen, error)
+	predicates    []predicate.AgentSuspendScreen
+}
+
+var _ ent.Mutation = (*AgentSuspendScreenMutation)(nil)
+
+// agentsuspendscreenOption allows management of the mutation configuration using functional options.
+type agentsuspendscreenOption func(*AgentSuspendScreenMutation)
+
+// newAgentSuspendScreenMutation creates new mutation for the AgentSuspendScreen entity.
+func newAgentSuspendScreenMutation(c config, op Op, opts ...agentsuspendscreenOption) *AgentSuspendScreenMutation {
+	m := &AgentSuspendScreenMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAgentSuspendScreen,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAgentSuspendScreenID sets the ID field of the mutation.
+func withAgentSuspendScreenID(id uuid.UUID) agentsuspendscreenOption {
+	return func(m *AgentSuspendScreenMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AgentSuspendScreen
+		)
+		m.oldValue = func(ctx context.Context) (*AgentSuspendScreen, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AgentSuspendScreen.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAgentSuspendScreen sets the old AgentSuspendScreen of the mutation.
+func withAgentSuspendScreen(node *AgentSuspendScreen) agentsuspendscreenOption {
+	return func(m *AgentSuspendScreenMutation) {
+		m.oldValue = func(context.Context) (*AgentSuspendScreen, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AgentSuspendScreenMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AgentSuspendScreenMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AgentSuspendScreen entities.
+func (m *AgentSuspendScreenMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AgentSuspendScreenMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AgentSuspendScreenMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AgentSuspendScreen.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *AgentSuspendScreenMutation) SetAgentID(u uuid.UUID) {
+	m.agent = &u
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *AgentSuspendScreenMutation) AgentID() (r uuid.UUID, exists bool) {
+	v := m.agent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the AgentSuspendScreen entity.
+// If the AgentSuspendScreen object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentSuspendScreenMutation) OldAgentID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *AgentSuspendScreenMutation) ResetAgentID() {
+	m.agent = nil
+}
+
+// SetContent sets the "content" field.
+func (m *AgentSuspendScreenMutation) SetContent(s string) {
+	m.content = &s
+}
+
+// Content returns the value of the "content" field in the mutation.
+func (m *AgentSuspendScreenMutation) Content() (r string, exists bool) {
+	v := m.content
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldContent returns the old "content" field's value of the AgentSuspendScreen entity.
+// If the AgentSuspendScreen object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentSuspendScreenMutation) OldContent(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldContent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldContent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldContent: %w", err)
+	}
+	return oldValue.Content, nil
+}
+
+// ResetContent resets all changes to the "content" field.
+func (m *AgentSuspendScreenMutation) ResetContent() {
+	m.content = nil
+}
+
+// SetTruncated sets the "truncated" field.
+func (m *AgentSuspendScreenMutation) SetTruncated(b bool) {
+	m.truncated = &b
+}
+
+// Truncated returns the value of the "truncated" field in the mutation.
+func (m *AgentSuspendScreenMutation) Truncated() (r bool, exists bool) {
+	v := m.truncated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTruncated returns the old "truncated" field's value of the AgentSuspendScreen entity.
+// If the AgentSuspendScreen object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentSuspendScreenMutation) OldTruncated(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTruncated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTruncated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTruncated: %w", err)
+	}
+	return oldValue.Truncated, nil
+}
+
+// ResetTruncated resets all changes to the "truncated" field.
+func (m *AgentSuspendScreenMutation) ResetTruncated() {
+	m.truncated = nil
+}
+
+// SetCapturedAt sets the "captured_at" field.
+func (m *AgentSuspendScreenMutation) SetCapturedAt(t time.Time) {
+	m.captured_at = &t
+}
+
+// CapturedAt returns the value of the "captured_at" field in the mutation.
+func (m *AgentSuspendScreenMutation) CapturedAt() (r time.Time, exists bool) {
+	v := m.captured_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCapturedAt returns the old "captured_at" field's value of the AgentSuspendScreen entity.
+// If the AgentSuspendScreen object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentSuspendScreenMutation) OldCapturedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCapturedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCapturedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCapturedAt: %w", err)
+	}
+	return oldValue.CapturedAt, nil
+}
+
+// ResetCapturedAt resets all changes to the "captured_at" field.
+func (m *AgentSuspendScreenMutation) ResetCapturedAt() {
+	m.captured_at = nil
+}
+
+// ClearAgent clears the "agent" edge to the Agent entity.
+func (m *AgentSuspendScreenMutation) ClearAgent() {
+	m.clearedagent = true
+	m.clearedFields[agentsuspendscreen.FieldAgentID] = struct{}{}
+}
+
+// AgentCleared reports if the "agent" edge to the Agent entity was cleared.
+func (m *AgentSuspendScreenMutation) AgentCleared() bool {
+	return m.clearedagent
+}
+
+// AgentIDs returns the "agent" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// AgentID instead. It exists only for internal usage by the builders.
+func (m *AgentSuspendScreenMutation) AgentIDs() (ids []uuid.UUID) {
+	if id := m.agent; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetAgent resets all changes to the "agent" edge.
+func (m *AgentSuspendScreenMutation) ResetAgent() {
+	m.agent = nil
+	m.clearedagent = false
+}
+
+// Where appends a list predicates to the AgentSuspendScreenMutation builder.
+func (m *AgentSuspendScreenMutation) Where(ps ...predicate.AgentSuspendScreen) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AgentSuspendScreenMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AgentSuspendScreenMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AgentSuspendScreen, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AgentSuspendScreenMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AgentSuspendScreenMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AgentSuspendScreen).
+func (m *AgentSuspendScreenMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AgentSuspendScreenMutation) Fields() []string {
+	fields := make([]string, 0, 4)
+	if m.agent != nil {
+		fields = append(fields, agentsuspendscreen.FieldAgentID)
+	}
+	if m.content != nil {
+		fields = append(fields, agentsuspendscreen.FieldContent)
+	}
+	if m.truncated != nil {
+		fields = append(fields, agentsuspendscreen.FieldTruncated)
+	}
+	if m.captured_at != nil {
+		fields = append(fields, agentsuspendscreen.FieldCapturedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AgentSuspendScreenMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case agentsuspendscreen.FieldAgentID:
+		return m.AgentID()
+	case agentsuspendscreen.FieldContent:
+		return m.Content()
+	case agentsuspendscreen.FieldTruncated:
+		return m.Truncated()
+	case agentsuspendscreen.FieldCapturedAt:
+		return m.CapturedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AgentSuspendScreenMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case agentsuspendscreen.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case agentsuspendscreen.FieldContent:
+		return m.OldContent(ctx)
+	case agentsuspendscreen.FieldTruncated:
+		return m.OldTruncated(ctx)
+	case agentsuspendscreen.FieldCapturedAt:
+		return m.OldCapturedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown AgentSuspendScreen field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentSuspendScreenMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case agentsuspendscreen.FieldAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case agentsuspendscreen.FieldContent:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetContent(v)
+		return nil
+	case agentsuspendscreen.FieldTruncated:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTruncated(v)
+		return nil
+	case agentsuspendscreen.FieldCapturedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCapturedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentSuspendScreen field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AgentSuspendScreenMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AgentSuspendScreenMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentSuspendScreenMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown AgentSuspendScreen numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AgentSuspendScreenMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AgentSuspendScreenMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AgentSuspendScreenMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown AgentSuspendScreen nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AgentSuspendScreenMutation) ResetField(name string) error {
+	switch name {
+	case agentsuspendscreen.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case agentsuspendscreen.FieldContent:
+		m.ResetContent()
+		return nil
+	case agentsuspendscreen.FieldTruncated:
+		m.ResetTruncated()
+		return nil
+	case agentsuspendscreen.FieldCapturedAt:
+		m.ResetCapturedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentSuspendScreen field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AgentSuspendScreenMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.agent != nil {
+		edges = append(edges, agentsuspendscreen.EdgeAgent)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AgentSuspendScreenMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case agentsuspendscreen.EdgeAgent:
+		if id := m.agent; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AgentSuspendScreenMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AgentSuspendScreenMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AgentSuspendScreenMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedagent {
+		edges = append(edges, agentsuspendscreen.EdgeAgent)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AgentSuspendScreenMutation) EdgeCleared(name string) bool {
+	switch name {
+	case agentsuspendscreen.EdgeAgent:
+		return m.clearedagent
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AgentSuspendScreenMutation) ClearEdge(name string) error {
+	switch name {
+	case agentsuspendscreen.EdgeAgent:
+		m.ClearAgent()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentSuspendScreen unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AgentSuspendScreenMutation) ResetEdge(name string) error {
+	switch name {
+	case agentsuspendscreen.EdgeAgent:
+		m.ResetAgent()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentSuspendScreen edge %s", name)
 }
 
 // AllowListEntryMutation represents an operation that mutates the AllowListEntry nodes in the graph.

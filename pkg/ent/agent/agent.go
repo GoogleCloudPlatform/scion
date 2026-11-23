@@ -228,6 +228,8 @@ const (
 	EdgeHolds = "holds"
 	// EdgeReportedRuns holds the string denoting the reported_runs edge name in mutations.
 	EdgeReportedRuns = "reported_runs"
+	// EdgeSuspendScreen holds the string denoting the suspend_screen edge name in mutations.
+	EdgeSuspendScreen = "suspend_screen"
 	// Table holds the table name of the agent in the database.
 	Table = "agents"
 	// ProjectTable is the table that holds the project relation/edge.
@@ -265,6 +267,13 @@ const (
 	ReportedRunsInverseTable = "broker_reported_runs"
 	// ReportedRunsColumn is the table column denoting the reported_runs relation/edge.
 	ReportedRunsColumn = "agent_id"
+	// SuspendScreenTable is the table that holds the suspend_screen relation/edge.
+	SuspendScreenTable = "agent_suspend_screens"
+	// SuspendScreenInverseTable is the table name for the AgentSuspendScreen entity.
+	// It exists in this package in order to avoid circular dependency with the "agentsuspendscreen" package.
+	SuspendScreenInverseTable = "agent_suspend_screens"
+	// SuspendScreenColumn is the table column denoting the suspend_screen relation/edge.
+	SuspendScreenColumn = "agent_id"
 )
 
 // Columns holds all SQL columns for agent fields.
@@ -1082,6 +1091,13 @@ func ByReportedRuns(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newReportedRunsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// BySuspendScreenField orders the results by suspend_screen field.
+func BySuspendScreenField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newSuspendScreenStep(), sql.OrderByField(field, opts...))
+	}
+}
 func newProjectStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -1115,5 +1131,12 @@ func newReportedRunsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(ReportedRunsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, ReportedRunsTable, ReportedRunsColumn),
+	)
+}
+func newSuspendScreenStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(SuspendScreenInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, SuspendScreenTable, SuspendScreenColumn),
 	)
 }

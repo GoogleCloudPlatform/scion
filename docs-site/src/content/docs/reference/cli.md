@@ -723,6 +723,8 @@ Shows an agent's current terminal output.
 
 **Authority notice and capture errors.** In human CLI mode, when the Hub reports the agent's authority state as `orphaned` or `revoked` (see [Orphaned and revoked agents](/scion/hosted/single-node/auth/#orphaned-and-revoked-agents)), `scion look` prints a notice naming the cause on stderr. If `tmux capture-pane` exits non-zero inside the container, `scion look` exits non-zero with the error on stderr instead of writing error text to stdout.
 
+**Suspended agents (saved screen).** When the agent is not running (`409 agent_not_running`) and the [`hub.suspend_screen`](/scion/reference/experiments/#server-experiments-with-notes) experiment is enabled, `scion look` falls back to `GET /api/v1/agents/{id}/screen` (gated on `agent.attach`, identical to live `scion look`). If a screen was captured before the agent's most recent suspend, `scion look` prints a "saved at" banner to stderr and the saved visible pane to stdout (with `--plain` stripping ANSI sequences client-side, and `--full` / `-n` printing the saved visible screen plus a stderr note that scrollback is not available). If no saved screen exists, `scion look` returns the original not-running error with a hint.
+
 ### `scion list` (or `ps`)
 
 Lists all agents and their status.

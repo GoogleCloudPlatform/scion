@@ -44,6 +44,7 @@
     "pages/agent-placement.test.ts",
     "pages/agent-detail-placement.test.ts",
     "pages/agent-detail-reincarnate.test.ts",
+    "pages/agent-detail-suspend-screen.test.ts",
     "pages/project-detail-agent-window.test.ts",
     "pages/project-detail-decisions.test.ts",
     "pages/project-decisions.test.ts",

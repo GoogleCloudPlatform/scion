@@ -2610,3 +2610,16 @@ export interface ProjectSessionMetricsSummary {
   mostUsedTools: ToolUsageSummary[];
   mostUsedModels: ModelUsageSummary[];
 }
+
+/**
+ * Last terminal screen captured just before an agent was suspended (ptone/scion#8530).
+ * Response from GET /api/v1/agents/{id}/screen and
+ * GET /api/v1/projects/{projectId}/agents/{id}/screen.
+ */
+export interface AgentSuspendScreen {
+  agentId: string;
+  content: string;
+  capturedAt: string;
+  truncated: boolean;
+  phase: string;
+}

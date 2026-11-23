@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 430
+**Operations:** 431
 
 ## Table of Contents
 
@@ -11,6 +11,7 @@
 - [agent.lifecycle.control](#agentlifecyclecontrol) — Start, stop, suspend or restart an agent
 - [agent.lifecycle.restore](#agentlifecyclerestore) — Restore a soft-deleted agent
 - [agent.lifecycle.exec](#agentlifecycleexec) — Run a command in an agent's container
+- [agent.screen.read](#agentscreenread) — Read the terminal screen saved before an agent's most recent suspend
 - [agent.lifecycle.env](#agentlifecycleenv) — Submit environment values to an agent
 - [agent.lifecycle.resetauth](#agentlifecycleresetauth) — Reset an agent's harness authentication
 - [agent.hold.lift](#agentholdlift) — Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)
@@ -623,6 +624,39 @@
 **Resource Resolver:** agent-from-url
 
 **Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.screen.read
+
+**Domain:** agent
+
+**Description:** Read the terminal screen saved before an agent's most recent suspend
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/screen` |
+| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/screen` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
 
 **Denial Codes:** `forbidden`
 

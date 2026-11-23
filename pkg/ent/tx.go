@@ -44,6 +44,8 @@ type Tx struct {
 	AgentServiceAccountAssignment *AgentServiceAccountAssignmentClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
+	// AgentSuspendScreen is the client for interacting with the AgentSuspendScreen builders.
+	AgentSuspendScreen *AgentSuspendScreenClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
 	AllowListEntry *AllowListEntryClient
 	// ApiKey is the client for interacting with the ApiKey builders.
@@ -379,6 +381,7 @@ func (tx *Tx) init() {
 	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
 	tx.AgentServiceAccountAssignment = NewAgentServiceAccountAssignmentClient(tx.config)
 	tx.AgentSessionMetrics = NewAgentSessionMetricsClient(tx.config)
+	tx.AgentSuspendScreen = NewAgentSuspendScreenClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)
 	tx.ApiKey = NewApiKeyClient(tx.config)
 	tx.BrokerDispatch = NewBrokerDispatchClient(tx.config)

@@ -15,10 +15,12 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
@@ -190,4 +192,122 @@ func TestLookViaHub_NonZeroExitCodeNoOutput(t *testing.T) {
 	require.Error(t, err)
 	assert.Empty(t, stdout)
 	assert.Equal(t, "capturing terminal for agent 'worker' failed (exit 255)", err.Error())
+}
+
+func TestStripANSI(t *testing.T) {
+	in := "\x1b[32mgreen\x1b[0m plain \x1b]0;title\x07\x1b[1;31mbold-red\x1b[m\n"
+	assert.Equal(t, "green plain bold-red\n", stripANSI(in))
+}
+
+func TestLookViaHub_SuspendedScreenFallback(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 21, 10, 16, 5, 0, time.UTC)
+	capturedAt := fixedNow.Add(-12 * time.Minute)
+	origNow := lookNow
+	lookNow = func() time.Time { return fixedNow }
+	defer func() { lookNow = origNow }()
+
+	newServer := func(screenStatus int, screenBody any) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/p1/agents/worker/exec":
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"error":{"code":"agent_not_running","message":"Agent has no running container"}}`))
+			case "/api/v1/projects/p1/agents/worker/screen":
+				w.WriteHeader(screenStatus)
+				if screenBody != nil {
+					_ = json.NewEncoder(w).Encode(screenBody)
+				}
+			case "/api/v1/projects/p1/agents/worker":
+				_, _ = w.Write([]byte(`{"id": "a1", "slug": "worker"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+	}
+
+	run := func(t *testing.T, srv *httptest.Server, plain, full bool, numLines int) (string, string, error) {
+		t.Helper()
+		client, err := hubclient.New(srv.URL)
+		require.NoError(t, err)
+		origNI, origPlain, origFull, origNum := nonInteractive, lookPlain, lookFull, lookNumLines
+		nonInteractive, lookPlain, lookFull, lookNumLines = true, plain, full, numLines
+		defer func() {
+			nonInteractive, lookPlain, lookFull, lookNumLines = origNI, origPlain, origFull, origNum
+		}()
+		var runErr error
+		stdout, stderr := captureStdoutStderr(t, func() {
+			runErr = lookViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: "p1"}, "worker", []string{"tmux"})
+		})
+		return stdout, stderr, runErr
+	}
+
+	t.Run("shows saved screen with banner on stderr and raw ANSI on stdout", func(t *testing.T) {
+		srv := newServer(http.StatusOK, map[string]any{
+			"agentId":    "a1",
+			"content":    "\x1b[32mhello\x1b[0m\n",
+			"capturedAt": capturedAt,
+			"truncated":  false,
+			"phase":      "suspended",
+		})
+		defer srv.Close()
+
+		stdout, stderr, err := run(t, srv, false, false, 0)
+		require.NoError(t, err)
+		assert.Equal(t, "\x1b[32mhello\x1b[0m\n", stdout)
+		assert.Contains(t, stderr, "Agent 'worker' is suspended. Showing its screen saved at")
+		assert.Contains(t, stderr, "(12m ago), before it was suspended.")
+		assert.NotContains(t, stderr, "truncated")
+		assert.NotContains(t, stderr, "scrollback")
+	})
+
+	t.Run("plain strips ANSI and truncated appends note", func(t *testing.T) {
+		srv := newServer(http.StatusOK, map[string]any{
+			"agentId":    "a1",
+			"content":    "\x1b[31merror\x1b[0m\n",
+			"capturedAt": capturedAt,
+			"truncated":  true,
+			"phase":      "stopped",
+		})
+		defer srv.Close()
+
+		stdout, stderr, err := run(t, srv, true, false, 0)
+		require.NoError(t, err)
+		assert.Equal(t, "error\n", stdout)
+		assert.Contains(t, stderr, "Agent 'worker' is stopped.")
+		assert.Contains(t, stderr, "(truncated to the last 64 KiB)")
+	})
+
+	t.Run("full and num-lines emit scrollback note on stderr and exit 0", func(t *testing.T) {
+		srv := newServer(http.StatusOK, map[string]any{
+			"agentId":    "a1",
+			"content":    "pane\n",
+			"capturedAt": capturedAt,
+			"truncated":  false,
+			"phase":      "suspended",
+		})
+		defer srv.Close()
+
+		stdout, stderr, err := run(t, srv, false, true, 0)
+		require.NoError(t, err)
+		assert.Equal(t, "pane\n", stdout)
+		assert.Contains(t, stderr, "scrollback is not available for a saved screen; showing the saved visible screen")
+
+		stdout, stderr, err = run(t, srv, false, false, 50)
+		require.NoError(t, err)
+		assert.Equal(t, "pane\n", stdout)
+		assert.Contains(t, stderr, "scrollback is not available for a saved screen; showing the saved visible screen")
+	})
+
+	t.Run("404 returns original not-running error with hint", func(t *testing.T) {
+		srv := newServer(http.StatusNotFound, map[string]any{
+			"error": map[string]any{"code": "not_found", "message": "No saved screen for this agent"},
+		})
+		defer srv.Close()
+
+		stdout, _, err := run(t, srv, false, false, 0)
+		require.Error(t, err)
+		assert.Empty(t, stdout)
+		assert.Contains(t, err.Error(), "no saved screen for agent 'worker' (it was not captured at suspend)")
+	})
 }

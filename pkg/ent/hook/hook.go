@@ -201,6 +201,18 @@ func (f AgentSessionMetricsFunc) Mutate(ctx context.Context, m ent.Mutation) (en
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentSessionMetricsMutation", m)
 }
 
+// The AgentSuspendScreenFunc type is an adapter to allow the use of ordinary
+// function as AgentSuspendScreen mutator.
+type AgentSuspendScreenFunc func(context.Context, *ent.AgentSuspendScreenMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentSuspendScreenFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentSuspendScreenMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentSuspendScreenMutation", m)
+}
+
 // The AllowListEntryFunc type is an adapter to allow the use of ordinary
 // function as AllowListEntry mutator.
 type AllowListEntryFunc func(context.Context, *ent.AllowListEntryMutation) (ent.Value, error)

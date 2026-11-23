@@ -6354,16 +6354,17 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	// which runAutoSuspendBatch recovers), or earlier, right after the
 	// status write below. endLifecycleOp is idempotent.
 	defer endLifecycleOp()
+	var captured *capturedScreen
 	if agent.RuntimeBrokerID != "" {
 		if dispatcher == nil {
 			slog.Error("Scheduler: cannot auto-suspend agent because dispatcher is nil",
 				"agent_id", agent.ID, "agent_name", agent.Name)
 			return false
 		}
-		// As for suspend, record work in an ephemeral workspace that
-		// the suspend discards, so the next start reports it. Run before
-		// claiming so the broker round-trip is outside the claim window.
-		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, false)
+		// Run the ephemeral workspace check (ptone/scion#3819) and pre-suspend
+		// terminal screen capture (ptone/scion#8530) concurrently before
+		// claiming so the broker round-trips stay outside the claim window.
+		captured = s.preSuspendProbes(ctx, dispatcher, agent, false)
 	}
 	supersedes := agent.StartClaimID
 	preStopRetained := string(state.RetainedSuspendActivity(
@@ -6441,6 +6442,10 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			if claimedIdle && !stopDefinitelyRefused(err) {
 				// Any stop error other than a provable refusal leaves the
 				// outcome unknown: the broker may have stopped the container.
+				// Persist the captured screen (or clear any older row) now:
+				// sweep recovery has no capture of its own and must not leave
+				// an older screen labelled as this suspension's.
+				s.persistSuspendScreen(ctx, agent.ID, captured)
 				// Keep the stopped intent and the claim; if the container
 				// still runs the intent-stop backstop stops it, and the idle
 				// sweep records suspended(idle) once the row reports
@@ -6525,6 +6530,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	}
 
 	s.completeAutoSuspendRecord(ctx, agent, stopRunID, reason)
+	s.persistSuspendScreen(ctx, agent.ID, captured)
 	releaseClaim()
 	if claimedIdle {
 		cctx, ccancel := finalizationContext(ctx)

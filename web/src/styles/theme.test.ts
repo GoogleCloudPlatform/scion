@@ -664,6 +664,10 @@ const BARE_COLOR_ALLOWLIST: Record<string, { max: number; reason: string }> = {
     max: 3,
     reason: 'QR code dark/light quiet zone required for scanner readability',
   },
+  'components/shared/agent-suspend-screen.ts': {
+    max: 23,
+    reason: 'xterm.js ANSI color palette and read-only dark terminal viewport chrome',
+  },
   'components/shared/chat/chat-avatar.ts': {
     max: 27,
     reason:

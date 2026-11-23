@@ -3090,6 +3090,7 @@ func (s *Server) handleProjectAgents(w http.ResponseWriter, r *http.Request, pro
 // action name handleProjectAgentAction dispatches on.
 var projectAgentRouteActions = map[AgentSubRouteID]string{
 	ProjectAgentRouteLogs:              api.AgentActionLogs,
+	ProjectAgentRouteScreen:            api.AgentActionScreen,
 	ProjectAgentRouteCloudLogs:         "cloud-logs",
 	ProjectAgentRouteCloudLogsStream:   "cloud-logs/stream",
 	ProjectAgentRouteMessageLogs:       api.AgentActionMessageLogs,
@@ -3447,6 +3448,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 			return
 		}
 		s.handleAgentLogs(w, r, resolvedAgent.ID)
+		return
+	}
+
+	// Saved suspend screen (GET); handle before the POST-only gate.
+	if action == api.AgentActionScreen {
+		s.handleProjectAgentScreen(w, r, projectID, agentID)
 		return
 	}
 

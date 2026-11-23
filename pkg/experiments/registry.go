@@ -594,6 +594,12 @@ const AgentSecrets = "hub.agent_secrets"
 // project agent or human member. Default off.
 const CodeSpanMentions = "hub.code_span_mentions"
 
+// SuspendScreen gates capturing and serving the last terminal screen of a
+// suspended agent (ptone/scion#8530). It is on by default; turning it off
+// skips pre-suspend screen capture, leaves existing rows alone, and makes
+// GET /api/v1/agents/{id}/screen and its project-scoped alias answer 404.
+const SuspendScreen = "hub.suspend_screen"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -618,6 +624,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#8783",
 		Owner:       "native-chat",
+		ReviewBy:    "2027-05-21",
+	},
+	{
+		Name:        SuspendScreen,
+		Title:       "Suspend last terminal screen",
+		Description: "Captures a running agent's visible terminal pane just before a hub-initiated suspend (manual, stalled, or idle auto-suspend) and serves it via GET /api/v1/agents/{id}/screen (agent.attach) for scion look and the web agent page. On by default; turning it off skips capture and answers 404 on the screen endpoint.",
+		Default:     true,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8530",
+		Owner:       "hub",
 		ReviewBy:    "2027-05-21",
 	},
 	{

@@ -26,6 +26,7 @@ const (
 	AgentActionMessages          = "messages"
 	AgentActionMessagesStream    = "messages/stream"
 	AgentActionExec              = "exec"
+	AgentActionScreen            = "screen"
 	AgentActionRestore           = "restore"
 	AgentActionEnv               = "env"
 	AgentActionTokenRefresh      = "token/refresh"

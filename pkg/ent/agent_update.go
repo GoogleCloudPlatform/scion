@@ -14,6 +14,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsuspendscreen"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerreportedrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/policybinding"
@@ -1940,6 +1941,25 @@ func (_u *AgentUpdate) AddReportedRuns(v ...*BrokerReportedRun) *AgentUpdate {
 	return _u.AddReportedRunIDs(ids...)
 }
 
+// SetSuspendScreenID sets the "suspend_screen" edge to the AgentSuspendScreen entity by ID.
+func (_u *AgentUpdate) SetSuspendScreenID(id uuid.UUID) *AgentUpdate {
+	_u.mutation.SetSuspendScreenID(id)
+	return _u
+}
+
+// SetNillableSuspendScreenID sets the "suspend_screen" edge to the AgentSuspendScreen entity by ID if the given value is not nil.
+func (_u *AgentUpdate) SetNillableSuspendScreenID(id *uuid.UUID) *AgentUpdate {
+	if id != nil {
+		_u = _u.SetSuspendScreenID(*id)
+	}
+	return _u
+}
+
+// SetSuspendScreen sets the "suspend_screen" edge to the AgentSuspendScreen entity.
+func (_u *AgentUpdate) SetSuspendScreen(v *AgentSuspendScreen) *AgentUpdate {
+	return _u.SetSuspendScreenID(v.ID)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_u *AgentUpdate) Mutation() *AgentMutation {
 	return _u.mutation
@@ -2033,6 +2053,12 @@ func (_u *AgentUpdate) RemoveReportedRuns(v ...*BrokerReportedRun) *AgentUpdate 
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveReportedRunIDs(ids...)
+}
+
+// ClearSuspendScreen clears the "suspend_screen" edge to the AgentSuspendScreen entity.
+func (_u *AgentUpdate) ClearSuspendScreen() *AgentUpdate {
+	_u.mutation.ClearSuspendScreen()
+	return _u
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -2878,6 +2904,35 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.SuspendScreenCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   agent.SuspendScreenTable,
+			Columns: []string{agent.SuspendScreenColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agentsuspendscreen.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.SuspendScreenIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   agent.SuspendScreenTable,
+			Columns: []string{agent.SuspendScreenColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agentsuspendscreen.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {
@@ -4809,6 +4864,25 @@ func (_u *AgentUpdateOne) AddReportedRuns(v ...*BrokerReportedRun) *AgentUpdateO
 	return _u.AddReportedRunIDs(ids...)
 }
 
+// SetSuspendScreenID sets the "suspend_screen" edge to the AgentSuspendScreen entity by ID.
+func (_u *AgentUpdateOne) SetSuspendScreenID(id uuid.UUID) *AgentUpdateOne {
+	_u.mutation.SetSuspendScreenID(id)
+	return _u
+}
+
+// SetNillableSuspendScreenID sets the "suspend_screen" edge to the AgentSuspendScreen entity by ID if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableSuspendScreenID(id *uuid.UUID) *AgentUpdateOne {
+	if id != nil {
+		_u = _u.SetSuspendScreenID(*id)
+	}
+	return _u
+}
+
+// SetSuspendScreen sets the "suspend_screen" edge to the AgentSuspendScreen entity.
+func (_u *AgentUpdateOne) SetSuspendScreen(v *AgentSuspendScreen) *AgentUpdateOne {
+	return _u.SetSuspendScreenID(v.ID)
+}
+
 // Mutation returns the AgentMutation object of the builder.
 func (_u *AgentUpdateOne) Mutation() *AgentMutation {
 	return _u.mutation
@@ -4902,6 +4976,12 @@ func (_u *AgentUpdateOne) RemoveReportedRuns(v ...*BrokerReportedRun) *AgentUpda
 		ids[i] = v[i].ID
 	}
 	return _u.RemoveReportedRunIDs(ids...)
+}
+
+// ClearSuspendScreen clears the "suspend_screen" edge to the AgentSuspendScreen entity.
+func (_u *AgentUpdateOne) ClearSuspendScreen() *AgentUpdateOne {
+	_u.mutation.ClearSuspendScreen()
+	return _u
 }
 
 // Where appends a list predicates to the AgentUpdate builder.
@@ -5777,6 +5857,35 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 			Bidi:    false,
 			Target: &sqlgraph.EdgeTarget{
 				IDSpec: sqlgraph.NewFieldSpec(brokerreportedrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
+	}
+	if _u.mutation.SuspendScreenCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   agent.SuspendScreenTable,
+			Columns: []string{agent.SuspendScreenColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agentsuspendscreen.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.SuspendScreenIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   agent.SuspendScreenTable,
+			Columns: []string{agent.SuspendScreenColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(agentsuspendscreen.FieldID, field.TypeUUID),
 			},
 		}
 		for _, k := range nodes {

@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 111
+const expectedTableCount = 112
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -212,6 +212,12 @@ func TestFixtureLoadable(t *testing.T) {
 	hasDeliveryHold, err := composite.HasAgentDeliveryHold(ctx, agentID)
 	require.NoError(t, err, "agent_delivery_holds fixture row must be readable via MessageHoldStore")
 	assert.True(t, hasDeliveryHold)
+
+	savedScreen, err := composite.GetAgentSuspendScreen(ctx, agentID)
+	require.NoError(t, err, "agent_suspend_screens fixture row must be readable via AgentSuspendScreenStore")
+	assert.Equal(t, agentID, savedScreen.AgentID)
+	assert.Equal(t, "\x1b[32mready>\x1b[0m last pane\n", savedScreen.Content)
+	assert.False(t, savedScreen.Truncated)
 	heldMsg, err := composite.GetMessage(ctx, "88888888-8888-8888-8888-888888888889")
 	require.NoError(t, err)
 	assert.Equal(t, store.MessageDispatchAwaitingSession, heldMsg.DispatchState)
