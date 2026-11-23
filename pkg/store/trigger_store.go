@@ -82,15 +82,17 @@ const (
 	TriggerEventStatusFailed    = "failed"
 )
 
-// TriggerFire statuses (§4.4, §5.5, Stage 3 §6.2, §6.3).
+// TriggerFire statuses (§4.4, §5.5; Stage 2 §6.2; Stage 3 §6.2, §6.3).
 const (
 	TriggerFireStatusCoalescing = "coalescing"
 	TriggerFireStatusDeferred   = "deferred"
 	TriggerFireStatusFiring     = "firing"
+	TriggerFireStatusWaiting    = "waiting"
 	TriggerFireStatusFired      = "fired"
 	TriggerFireStatusFailed     = "failed"
 	TriggerFireStatusRefused    = "refused"
 	TriggerFireStatusSkipped    = "skipped"
+	TriggerFireStatusExpired    = "expired"
 )
 
 // TriggerSubjectClaim states (Stage 2 §5.6).
@@ -308,6 +310,8 @@ type TriggerFire struct {
 	Error          string     `json:"error,omitempty"`
 	ResultRef      string     `json:"resultRef,omitempty"`
 	TargetAgentID  string     `json:"targetAgentId,omitempty"`
+	WaitUntil      *time.Time `json:"waitUntil,omitempty"`
+	Attempts       int        `json:"attempts,omitempty"`
 	MatchedThrough string     `json:"matchedThrough,omitempty"`
 	DecidedDialect string     `json:"decidedDialect,omitempty"`
 	RuleTrace      string     `json:"ruleTrace,omitempty"`
@@ -433,6 +437,10 @@ type TriggerStore interface {
 	DeferTriggerFire(ctx context.Context, id string, deferredAt, notBefore, leaseUntil time.Time) (bool, error)
 	FinishPendingTriggerFire(ctx context.Context, id, status, errMsg, matchedThrough, decidedDialect, ruleTrace string, finishedAt time.Time) (bool, error)
 	FinishTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time) (bool, error)
+	ParkTriggerFireWaiting(ctx context.Context, id, projectID, targetAgentID, errMsg string, waitUntil time.Time, maxPerTarget, maxPerProject int) (parked bool, capExceeded bool, err error)
+	FinishWaitingTriggerFire(ctx context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time, attempts int) (bool, error)
+	RecordWaitingTriggerFireAttempt(ctx context.Context, id string, attempts int, errMsg string) (bool, error)
+	ListWaitingFiresForTarget(ctx context.Context, targetAgentID string, limit int) ([]string, error)
 	GetTriggerFire(ctx context.Context, id string) (*TriggerFire, error)
 	ListTriggerFires(ctx context.Context, filter TriggerFireFilter, opts ListOptions) (*ListResult[TriggerFire], error)
 	CountTriggerFiresSince(ctx context.Context, triggerID string, since time.Time, excludeStatuses ...string) (int, error)

@@ -442,12 +442,15 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	}
 
 	raw, err := json.Marshal(MessageEventPayload{
-		AgentID:   spec.AgentID,
-		AgentName: spec.AgentName,
-		Message:   spec.Message,
-		Interrupt: spec.Interrupt,
-		Plain:     spec.Plain,
-		Wake:      spec.Wake,
+		AgentID:         spec.AgentID,
+		AgentName:       spec.AgentName,
+		Message:         spec.Message,
+		Interrupt:       spec.Interrupt,
+		Plain:           spec.Plain,
+		Wake:            spec.Wake,
+		Offline:         spec.Offline,
+		QueueTTLSeconds: spec.QueueTTLSeconds,
+		UntrustedVars:   spec.UntrustedVars,
 	})
 	if err != nil {
 		InternalError(w)
@@ -479,6 +482,9 @@ func (s *Server) authorizeTriggerMessageAuthoring(w http.ResponseWriter, r *http
 	}
 	spec.AgentID = resolved.AgentID
 	spec.AgentName = resolved.AgentName
+	spec.Offline = resolved.Offline
+	spec.QueueTTLSeconds = resolved.QueueTTLSeconds
+	spec.UntrustedVars = resolved.UntrustedVars
 	return normalized, true
 }
 

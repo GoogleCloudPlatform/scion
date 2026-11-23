@@ -318,6 +318,47 @@ func (_u *TriggerFireUpdate) ClearTargetAgentID() *TriggerFireUpdate {
 	return _u
 }
 
+// SetWaitUntil sets the "wait_until" field.
+func (_u *TriggerFireUpdate) SetWaitUntil(v time.Time) *TriggerFireUpdate {
+	_u.mutation.SetWaitUntil(v)
+	return _u
+}
+
+// SetNillableWaitUntil sets the "wait_until" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableWaitUntil(v *time.Time) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetWaitUntil(*v)
+	}
+	return _u
+}
+
+// ClearWaitUntil clears the value of the "wait_until" field.
+func (_u *TriggerFireUpdate) ClearWaitUntil() *TriggerFireUpdate {
+	_u.mutation.ClearWaitUntil()
+	return _u
+}
+
+// SetAttempts sets the "attempts" field.
+func (_u *TriggerFireUpdate) SetAttempts(v int) *TriggerFireUpdate {
+	_u.mutation.ResetAttempts()
+	_u.mutation.SetAttempts(v)
+	return _u
+}
+
+// SetNillableAttempts sets the "attempts" field if the given value is not nil.
+func (_u *TriggerFireUpdate) SetNillableAttempts(v *int) *TriggerFireUpdate {
+	if v != nil {
+		_u.SetAttempts(*v)
+	}
+	return _u
+}
+
+// AddAttempts adds value to the "attempts" field.
+func (_u *TriggerFireUpdate) AddAttempts(v int) *TriggerFireUpdate {
+	_u.mutation.AddAttempts(v)
+	return _u
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_u *TriggerFireUpdate) SetExecutorKind(v string) *TriggerFireUpdate {
 	_u.mutation.SetExecutorKind(v)
@@ -595,6 +636,18 @@ func (_u *TriggerFireUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	}
 	if _u.mutation.TargetAgentIDCleared() {
 		_spec.ClearField(triggerfire.FieldTargetAgentID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.WaitUntil(); ok {
+		_spec.SetField(triggerfire.FieldWaitUntil, field.TypeTime, value)
+	}
+	if _u.mutation.WaitUntilCleared() {
+		_spec.ClearField(triggerfire.FieldWaitUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Attempts(); ok {
+		_spec.SetField(triggerfire.FieldAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttempts(); ok {
+		_spec.AddField(triggerfire.FieldAttempts, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)
@@ -960,6 +1013,47 @@ func (_u *TriggerFireUpdateOne) ClearTargetAgentID() *TriggerFireUpdateOne {
 	return _u
 }
 
+// SetWaitUntil sets the "wait_until" field.
+func (_u *TriggerFireUpdateOne) SetWaitUntil(v time.Time) *TriggerFireUpdateOne {
+	_u.mutation.SetWaitUntil(v)
+	return _u
+}
+
+// SetNillableWaitUntil sets the "wait_until" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableWaitUntil(v *time.Time) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetWaitUntil(*v)
+	}
+	return _u
+}
+
+// ClearWaitUntil clears the value of the "wait_until" field.
+func (_u *TriggerFireUpdateOne) ClearWaitUntil() *TriggerFireUpdateOne {
+	_u.mutation.ClearWaitUntil()
+	return _u
+}
+
+// SetAttempts sets the "attempts" field.
+func (_u *TriggerFireUpdateOne) SetAttempts(v int) *TriggerFireUpdateOne {
+	_u.mutation.ResetAttempts()
+	_u.mutation.SetAttempts(v)
+	return _u
+}
+
+// SetNillableAttempts sets the "attempts" field if the given value is not nil.
+func (_u *TriggerFireUpdateOne) SetNillableAttempts(v *int) *TriggerFireUpdateOne {
+	if v != nil {
+		_u.SetAttempts(*v)
+	}
+	return _u
+}
+
+// AddAttempts adds value to the "attempts" field.
+func (_u *TriggerFireUpdateOne) AddAttempts(v int) *TriggerFireUpdateOne {
+	_u.mutation.AddAttempts(v)
+	return _u
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_u *TriggerFireUpdateOne) SetExecutorKind(v string) *TriggerFireUpdateOne {
 	_u.mutation.SetExecutorKind(v)
@@ -1267,6 +1361,18 @@ func (_u *TriggerFireUpdateOne) sqlSave(ctx context.Context) (_node *TriggerFire
 	}
 	if _u.mutation.TargetAgentIDCleared() {
 		_spec.ClearField(triggerfire.FieldTargetAgentID, field.TypeUUID)
+	}
+	if value, ok := _u.mutation.WaitUntil(); ok {
+		_spec.SetField(triggerfire.FieldWaitUntil, field.TypeTime, value)
+	}
+	if _u.mutation.WaitUntilCleared() {
+		_spec.ClearField(triggerfire.FieldWaitUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.Attempts(); ok {
+		_spec.SetField(triggerfire.FieldAttempts, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedAttempts(); ok {
+		_spec.AddField(triggerfire.FieldAttempts, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)

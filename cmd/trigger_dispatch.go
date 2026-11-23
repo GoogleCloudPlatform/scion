@@ -21,6 +21,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -233,7 +234,7 @@ func validateUpdateCrossActionFlags(flags *pflag.FlagSet, targetType string) err
 			"agent-role", "allow",
 		}
 	case "dispatch_agent":
-		disallowed = []string{"agent", "message", "interrupt", "wake", "plain"}
+		disallowed = []string{"agent", "message", "interrupt", "wake", "plain", "offline", "queue-ttl"}
 	default:
 		return nil
 	}
@@ -243,6 +244,57 @@ func validateUpdateCrossActionFlags(flags *pflag.FlagSet, targetType string) err
 		}
 	}
 	return nil
+}
+
+// deriveMessageUntrustedVars parses a message-action template using
+// triggertemplate.SlotMessage and returns the deduplicated untrusted
+// placeholder paths in first-appearance order (Stage 2 §5.7, D-S2-5).
+func deriveMessageUntrustedVars(raw string) ([]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	tmpl, err := triggertemplate.Parse(raw, triggertemplate.SlotMessage)
+	if err != nil {
+		var pe *triggertemplate.ParseError
+		if errors.As(err, &pe) {
+			return nil, newUsageError("invalid template in slot %q at byte offset %d: %s",
+				triggerTerminalText(pe.Slot, false), pe.Offset, triggerTerminalText(pe.Message, false))
+		}
+		return nil, newUsageError("invalid template in slot %q: %v", triggertemplate.SlotMessage, err)
+	}
+	untrusted := tmpl.Untrusted()
+	if len(untrusted) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(untrusted))
+	derived := make([]string, 0, len(untrusted))
+	for _, p := range untrusted {
+		if !seen[p] {
+			seen[p] = true
+			derived = append(derived, p)
+		}
+	}
+	return derived, nil
+}
+
+const (
+	minTriggerQueueTTLSeconds = 60
+	maxTriggerQueueTTLSeconds = 172_800
+)
+
+func parseTriggerQueueTTL(raw string) (int, error) {
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, newUsageError("invalid --queue-ttl %q: %v", triggerTerminalText(raw, false), err)
+	}
+	if d%time.Second != 0 {
+		return 0, newUsageError("invalid --queue-ttl %q: must be a whole number of seconds", triggerTerminalText(raw, false))
+	}
+	secs := int(d / time.Second)
+	if secs < minTriggerQueueTTLSeconds || secs > maxTriggerQueueTTLSeconds {
+		return 0, newUsageError("--queue-ttl must be between 60s and 48h (got %s)", d)
+	}
+	return secs, nil
 }
 
 func buildDispatchAgentActionSpec(v *dispatchAgentFlagValues, allowExplicit bool) (hubclient.TriggerActionSpec, []string, error) {
@@ -372,6 +424,10 @@ func formatTriggerAPIError(err error) error {
 			return &cp
 		}
 
+	case "plain_with_untrusted":
+		cp.Message = "cannot combine --plain with untrusted event placeholders (remove --plain or avoid untrusted placeholders)"
+		return &cp
+
 	case "reserved_label_key":
 		if key := triggerTerminalText(triggerDetailString(apiErr.Details, "key"), false); key != "" {
 			cp.Message = fmt.Sprintf("label key %q is reserved for hub trigger provenance (cannot be set via --label)", key)
@@ -434,6 +490,8 @@ var (
 	triggerUpdateInterrupt bool
 	triggerUpdateWake      bool
 	triggerUpdatePlain     bool
+	triggerUpdateOffline   string
+	triggerUpdateQueueTTL  string
 	triggerUpdateDispatch  dispatchAgentFlagValues
 )
 
@@ -542,6 +600,7 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 
 	actionFlagsChanged := flags.Changed("action") ||
 		flags.Changed("agent") || flags.Changed("message") || flags.Changed("interrupt") || flags.Changed("wake") || flags.Changed("plain") ||
+		flags.Changed("offline") || flags.Changed("queue-ttl") ||
 		flags.Changed("template") || flags.Changed("task") || flags.Changed("task-file") || flags.Changed("agent-name") ||
 		flags.Changed("on-name-conflict") || flags.Changed("branch") || flags.Changed("label") || flags.Changed("ephemeral") ||
 		flags.Changed("reuse-message") || flags.Changed("github-token") || flags.Changed("agent-role") || flags.Changed("allow")
@@ -604,6 +663,41 @@ func runTriggerUpdate(cmd *cobra.Command, args []string) error {
 			}
 			if flags.Changed("plain") {
 				spec.Plain = triggerUpdatePlain
+			}
+			if flags.Changed("offline") {
+				offline := strings.TrimSpace(triggerUpdateOffline)
+				if offline != "" && offline != "skip" && offline != "queue" {
+					return newUsageError("invalid --offline %q (supported: skip, queue)", triggerTerminalText(offline, false))
+				}
+				spec.Offline = offline
+				if offline != "queue" {
+					spec.QueueTTLSeconds = 0
+				}
+			}
+			if flags.Changed("queue-ttl") {
+				rawTTL := strings.TrimSpace(triggerUpdateQueueTTL)
+				if rawTTL == "" {
+					spec.QueueTTLSeconds = 0
+				} else {
+					if spec.Offline != "queue" {
+						return newUsageError("--queue-ttl requires --offline queue")
+					}
+					secs, tErr := parseTriggerQueueTTL(rawTTL)
+					if tErr != nil {
+						return tErr
+					}
+					spec.QueueTTLSeconds = secs
+				}
+			}
+			if flags.Changed("allow") {
+				spec.UntrustedVars = append([]string(nil), triggerUpdateDispatch.allow...)
+			} else if flags.Changed("message") || flags.Changed("action") {
+				derived, dErr := deriveMessageUntrustedVars(spec.Message)
+				if dErr != nil {
+					return dErr
+				}
+				spec.UntrustedVars = derived
+				derivedUntrusted = derived
 			}
 			req.Action = &spec
 
@@ -766,5 +860,7 @@ func init() {
 	f.BoolVar(&triggerUpdateInterrupt, "interrupt", false, "Interrupt target agent (message action)")
 	f.BoolVar(&triggerUpdateWake, "wake", false, "Resume target agent if suspended (message action)")
 	f.BoolVar(&triggerUpdatePlain, "plain", false, "Deliver message text without sender prefix (message action)")
+	f.StringVar(&triggerUpdateOffline, "offline", "", "Updated offline target policy for message actions (skip or queue)")
+	f.StringVar(&triggerUpdateQueueTTL, "queue-ttl", "", "Updated wait duration when --offline queue is set (e.g. 30m, 24h; 60s..48h)")
 	bindDispatchAgentFlags(f, &triggerUpdateDispatch)
 }

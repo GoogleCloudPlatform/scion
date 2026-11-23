@@ -1562,7 +1562,7 @@ func (s *TriggerStore) RecordTriggerFire(ctx context.Context, id string, firedAt
 	firedAt = firedAt.UTC()
 	now := time.Now().UTC()
 	counters := s.client.Trigger.UpdateOneID(uid).AddFireCount(1).SetUpdated(now)
-	if status == store.TriggerFireStatusFailed || status == store.TriggerFireStatusRefused {
+	if status == store.TriggerFireStatusFailed || status == store.TriggerFireStatusRefused || status == store.TriggerFireStatusExpired {
 		counters.AddErrorCount(1)
 	}
 	if err := counters.Exec(ctx); err != nil {
@@ -2282,6 +2282,8 @@ func entTriggerFireToStore(e *ent.TriggerFire) *store.TriggerFire {
 		Status:         e.Status,
 		Error:          e.Error,
 		ResultRef:      e.ResultRef,
+		WaitUntil:      e.WaitUntil,
+		Attempts:       e.Attempts,
 		MatchedThrough: e.MatchedThrough,
 		DecidedDialect: e.DecidedDialect,
 		RuleTrace:      e.RuleTrace,
@@ -2407,6 +2409,12 @@ func buildTriggerFireCreate(client *ent.Client, uid, pid, tid, eid uuid.UUID, fi
 	}
 	if fire.DeferredAt != nil {
 		create.SetDeferredAt(fire.DeferredAt.UTC())
+	}
+	if fire.WaitUntil != nil {
+		create.SetWaitUntil(fire.WaitUntil.UTC().Truncate(time.Microsecond))
+	}
+	if fire.Attempts > 0 {
+		create.SetAttempts(fire.Attempts)
 	}
 	if fire.FinishedAt != nil {
 		create.SetFinishedAt(fire.FinishedAt.UTC())
@@ -2841,6 +2849,188 @@ func (s *TriggerStore) FinishTriggerFire(ctx context.Context, id, status, result
 	return affected > 0, nil
 }
 
+func (s *TriggerStore) ParkTriggerFireWaiting(
+	ctx context.Context,
+	id, projectID, targetAgentID, errMsg string,
+	waitUntil time.Time,
+	maxPerTarget, maxPerProject int,
+) (bool, bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, false, err
+	}
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return false, false, err
+	}
+	taid, err := parseUUID(targetAgentID)
+	if err != nil {
+		return false, false, err
+	}
+	if waitUntil.IsZero() {
+		return false, false, store.ErrInvalidInput
+	}
+	waitUntil = waitUntil.UTC().Truncate(time.Microsecond)
+
+	var (
+		parked      bool
+		capExceeded bool
+	)
+	txErr := s.withClientTx(ctx, func(client *ent.Client) error {
+		if isPostgres(client) {
+			var res sql.Result
+			if lErr := client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+				[]any{int32(store.LockTriggerOfflineQueue), store.StableProjectHash(projectID)}, &res); lErr != nil {
+				return fmt.Errorf("lock trigger offline queue: %w", lErr)
+			}
+		}
+
+		if maxPerTarget > 0 {
+			targetCount, cErr := client.TriggerFire.Query().
+				Where(
+					triggerfire.TargetAgentIDEQ(taid),
+					triggerfire.StatusEQ(store.TriggerFireStatusWaiting),
+				).
+				Count(ctx)
+			if cErr != nil {
+				return mapError(cErr)
+			}
+			if targetCount >= maxPerTarget {
+				capExceeded = true
+				return nil
+			}
+		}
+		if maxPerProject > 0 {
+			projCount, cErr := client.TriggerFire.Query().
+				Where(
+					triggerfire.ProjectIDEQ(pid),
+					triggerfire.StatusEQ(store.TriggerFireStatusWaiting),
+				).
+				Count(ctx)
+			if cErr != nil {
+				return mapError(cErr)
+			}
+			if projCount >= maxPerProject {
+				capExceeded = true
+				return nil
+			}
+		}
+
+		u := client.TriggerFire.Update().
+			Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusFiring)).
+			SetStatus(store.TriggerFireStatusWaiting).
+			SetTargetAgentID(taid).
+			SetWaitUntil(waitUntil).
+			SetAttempts(1).
+			ClearFinishedAt()
+		if errMsg != "" {
+			u.SetError(errMsg)
+		} else {
+			u.ClearError()
+		}
+		affected, uErr := u.Save(ctx)
+		if uErr != nil {
+			return mapError(uErr)
+		}
+		parked = affected > 0
+		return nil
+	})
+	if txErr != nil {
+		return false, false, txErr
+	}
+	return parked, capExceeded, nil
+}
+
+func (s *TriggerStore) FinishWaitingTriggerFire(
+	ctx context.Context,
+	id, status, resultRef, targetAgentID, errMsg string,
+	finishedAt time.Time,
+	attempts int,
+) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	u := s.client.TriggerFire.Update().
+		Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusWaiting)).
+		SetStatus(status).
+		SetFinishedAt(finishedAt.UTC())
+	if attempts > 0 {
+		u.SetAttempts(attempts)
+	}
+	if resultRef != "" {
+		u.SetResultRef(resultRef)
+	} else {
+		u.ClearResultRef()
+	}
+	if targetAgentID != "" {
+		taid, err := parseUUID(targetAgentID)
+		if err != nil {
+			return false, err
+		}
+		u.SetTargetAgentID(taid)
+	}
+	if errMsg != "" {
+		u.SetError(errMsg)
+	} else {
+		u.ClearError()
+	}
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}
+
+func (s *TriggerStore) RecordWaitingTriggerFireAttempt(ctx context.Context, id string, attempts int, errMsg string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	u := s.client.TriggerFire.Update().
+		Where(triggerfire.IDEQ(uid), triggerfire.StatusEQ(store.TriggerFireStatusWaiting)).
+		SetAttempts(attempts)
+	if errMsg != "" {
+		u.SetError(errMsg)
+	}
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
+}
+
+func (s *TriggerStore) ListWaitingFiresForTarget(ctx context.Context, targetAgentID string, limit int) ([]string, error) {
+	taid, err := parseGetID(targetAgentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.client.TriggerFire.Query().
+		Where(
+			triggerfire.TargetAgentIDEQ(taid),
+			triggerfire.StatusEQ(store.TriggerFireStatusWaiting),
+		).
+		Order(triggerfire.ByCreated()).
+		Order(triggerfire.ByID()).
+		Limit(limit).
+		Select(triggerfire.FieldID).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.ID.String()
+	}
+	return out, nil
+}
+
 func (s *TriggerStore) GetTriggerFire(ctx context.Context, id string) (*store.TriggerFire, error) {
 	uid, err := parseGetID(id)
 	if err != nil {
@@ -3111,7 +3301,7 @@ func (s *TriggerStore) PurgeOldTriggerHistory(ctx context.Context, olderThan tim
 	var firesDeleted, eventsDeleted int
 	err := s.withClientTx(ctx, func(c *ent.Client) error {
 		purgeable := []predicate.TriggerFire{
-			triggerfire.StatusNotIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred),
+			triggerfire.StatusNotIn(store.TriggerFireStatusFiring, store.TriggerFireStatusCoalescing, store.TriggerFireStatusDeferred, store.TriggerFireStatusWaiting),
 			triggerfire.CreatedLT(cutoff),
 		}
 		ids, err := c.TriggerFire.Query().Where(purgeable...).IDs(ctx)

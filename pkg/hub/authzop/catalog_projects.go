@@ -1373,6 +1373,7 @@ var projectOperations = []OperationSpec{
 		Description: "Fire a matched event trigger's message, dispatch_agent, or github.comment action through the shared fire core under the authority recorded by the trigger's current revision; a dispatch_agent fire re-checks agent.create, CanDelegate, the frozen ceiling and standing, and creates the agent under the recorded principal",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:message"},
+			{Kind: EntryPointSchedulerJob, Pattern: "triggerRetryDrainer:message"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:dispatch_agent"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:exec"},
 			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:github.comment"},

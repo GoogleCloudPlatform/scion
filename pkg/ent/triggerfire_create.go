@@ -251,6 +251,34 @@ func (_c *TriggerFireCreate) SetNillableTargetAgentID(v *uuid.UUID) *TriggerFire
 	return _c
 }
 
+// SetWaitUntil sets the "wait_until" field.
+func (_c *TriggerFireCreate) SetWaitUntil(v time.Time) *TriggerFireCreate {
+	_c.mutation.SetWaitUntil(v)
+	return _c
+}
+
+// SetNillableWaitUntil sets the "wait_until" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableWaitUntil(v *time.Time) *TriggerFireCreate {
+	if v != nil {
+		_c.SetWaitUntil(*v)
+	}
+	return _c
+}
+
+// SetAttempts sets the "attempts" field.
+func (_c *TriggerFireCreate) SetAttempts(v int) *TriggerFireCreate {
+	_c.mutation.SetAttempts(v)
+	return _c
+}
+
+// SetNillableAttempts sets the "attempts" field if the given value is not nil.
+func (_c *TriggerFireCreate) SetNillableAttempts(v *int) *TriggerFireCreate {
+	if v != nil {
+		_c.SetAttempts(*v)
+	}
+	return _c
+}
+
 // SetExecutorKind sets the "executor_kind" field.
 func (_c *TriggerFireCreate) SetExecutorKind(v string) *TriggerFireCreate {
 	_c.mutation.SetExecutorKind(v)
@@ -419,6 +447,10 @@ func (_c *TriggerFireCreate) defaults() {
 		v := triggerfire.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
+	if _, ok := _c.mutation.Attempts(); !ok {
+		v := triggerfire.DefaultAttempts
+		_c.mutation.SetAttempts(v)
+	}
 	if _, ok := _c.mutation.ExecutorKind(); !ok {
 		v := triggerfire.DefaultExecutorKind
 		_c.mutation.SetExecutorKind(v)
@@ -481,6 +513,9 @@ func (_c *TriggerFireCreate) check() error {
 		if err := triggerfire.RuleTraceValidator(v); err != nil {
 			return &ValidationError{Name: "rule_trace", err: fmt.Errorf(`ent: validator failed for field "TriggerFire.rule_trace": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.Attempts(); !ok {
+		return &ValidationError{Name: "attempts", err: errors.New(`ent: missing required field "TriggerFire.attempts"`)}
 	}
 	if _, ok := _c.mutation.ExecutorKind(); !ok {
 		return &ValidationError{Name: "executor_kind", err: errors.New(`ent: missing required field "TriggerFire.executor_kind"`)}
@@ -608,6 +643,14 @@ func (_c *TriggerFireCreate) createSpec() (*TriggerFire, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.TargetAgentID(); ok {
 		_spec.SetField(triggerfire.FieldTargetAgentID, field.TypeUUID, value)
 		_node.TargetAgentID = &value
+	}
+	if value, ok := _c.mutation.WaitUntil(); ok {
+		_spec.SetField(triggerfire.FieldWaitUntil, field.TypeTime, value)
+		_node.WaitUntil = &value
+	}
+	if value, ok := _c.mutation.Attempts(); ok {
+		_spec.SetField(triggerfire.FieldAttempts, field.TypeInt, value)
+		_node.Attempts = value
 	}
 	if value, ok := _c.mutation.ExecutorKind(); ok {
 		_spec.SetField(triggerfire.FieldExecutorKind, field.TypeString, value)
@@ -964,6 +1007,42 @@ func (u *TriggerFireUpsert) UpdateTargetAgentID() *TriggerFireUpsert {
 // ClearTargetAgentID clears the value of the "target_agent_id" field.
 func (u *TriggerFireUpsert) ClearTargetAgentID() *TriggerFireUpsert {
 	u.SetNull(triggerfire.FieldTargetAgentID)
+	return u
+}
+
+// SetWaitUntil sets the "wait_until" field.
+func (u *TriggerFireUpsert) SetWaitUntil(v time.Time) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldWaitUntil, v)
+	return u
+}
+
+// UpdateWaitUntil sets the "wait_until" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateWaitUntil() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldWaitUntil)
+	return u
+}
+
+// ClearWaitUntil clears the value of the "wait_until" field.
+func (u *TriggerFireUpsert) ClearWaitUntil() *TriggerFireUpsert {
+	u.SetNull(triggerfire.FieldWaitUntil)
+	return u
+}
+
+// SetAttempts sets the "attempts" field.
+func (u *TriggerFireUpsert) SetAttempts(v int) *TriggerFireUpsert {
+	u.Set(triggerfire.FieldAttempts, v)
+	return u
+}
+
+// UpdateAttempts sets the "attempts" field to the value that was provided on create.
+func (u *TriggerFireUpsert) UpdateAttempts() *TriggerFireUpsert {
+	u.SetExcluded(triggerfire.FieldAttempts)
+	return u
+}
+
+// AddAttempts adds v to the "attempts" field.
+func (u *TriggerFireUpsert) AddAttempts(v int) *TriggerFireUpsert {
+	u.Add(triggerfire.FieldAttempts, v)
 	return u
 }
 
@@ -1424,6 +1503,48 @@ func (u *TriggerFireUpsertOne) UpdateTargetAgentID() *TriggerFireUpsertOne {
 func (u *TriggerFireUpsertOne) ClearTargetAgentID() *TriggerFireUpsertOne {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.ClearTargetAgentID()
+	})
+}
+
+// SetWaitUntil sets the "wait_until" field.
+func (u *TriggerFireUpsertOne) SetWaitUntil(v time.Time) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetWaitUntil(v)
+	})
+}
+
+// UpdateWaitUntil sets the "wait_until" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateWaitUntil() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateWaitUntil()
+	})
+}
+
+// ClearWaitUntil clears the value of the "wait_until" field.
+func (u *TriggerFireUpsertOne) ClearWaitUntil() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearWaitUntil()
+	})
+}
+
+// SetAttempts sets the "attempts" field.
+func (u *TriggerFireUpsertOne) SetAttempts(v int) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetAttempts(v)
+	})
+}
+
+// AddAttempts adds v to the "attempts" field.
+func (u *TriggerFireUpsertOne) AddAttempts(v int) *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.AddAttempts(v)
+	})
+}
+
+// UpdateAttempts sets the "attempts" field to the value that was provided on create.
+func (u *TriggerFireUpsertOne) UpdateAttempts() *TriggerFireUpsertOne {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateAttempts()
 	})
 }
 
@@ -2066,6 +2187,48 @@ func (u *TriggerFireUpsertBulk) UpdateTargetAgentID() *TriggerFireUpsertBulk {
 func (u *TriggerFireUpsertBulk) ClearTargetAgentID() *TriggerFireUpsertBulk {
 	return u.Update(func(s *TriggerFireUpsert) {
 		s.ClearTargetAgentID()
+	})
+}
+
+// SetWaitUntil sets the "wait_until" field.
+func (u *TriggerFireUpsertBulk) SetWaitUntil(v time.Time) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetWaitUntil(v)
+	})
+}
+
+// UpdateWaitUntil sets the "wait_until" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateWaitUntil() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateWaitUntil()
+	})
+}
+
+// ClearWaitUntil clears the value of the "wait_until" field.
+func (u *TriggerFireUpsertBulk) ClearWaitUntil() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.ClearWaitUntil()
+	})
+}
+
+// SetAttempts sets the "attempts" field.
+func (u *TriggerFireUpsertBulk) SetAttempts(v int) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.SetAttempts(v)
+	})
+}
+
+// AddAttempts adds v to the "attempts" field.
+func (u *TriggerFireUpsertBulk) AddAttempts(v int) *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.AddAttempts(v)
+	})
+}
+
+// UpdateAttempts sets the "attempts" field to the value that was provided on create.
+func (u *TriggerFireUpsertBulk) UpdateAttempts() *TriggerFireUpsertBulk {
+	return u.Update(func(s *TriggerFireUpsert) {
+		s.UpdateAttempts()
 	})
 }
 

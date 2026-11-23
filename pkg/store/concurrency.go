@@ -368,6 +368,15 @@ const (
 	// nor mutually skip one subject. In the per-object range; not taken
 	// through AdvisoryLocker.
 	LockTriggerSubjectOverlap AdvisoryLockKey = 0x5C101008
+
+	// LockTriggerOfflineQueue is the CLASS ID for per-project offline message
+	// queue cap serialization (Stage 2 §6.2, ptone/scion#8059): a
+	// transaction-scoped pg_advisory_xact_lock(classid, objid) with objid
+	// StableProjectHash(projectID), taken by ParkTriggerFireWaiting so
+	// concurrent drainers cannot exceed the per-target (100) or per-project
+	// (1000) waiting-fire caps. In the per-object range; not taken through
+	// AdvisoryLocker.
+	LockTriggerOfflineQueue AdvisoryLockKey = 0x5C101009
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

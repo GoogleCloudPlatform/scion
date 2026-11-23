@@ -239,24 +239,26 @@ type TriggerMatchPatchSpec struct {
 
 // TriggerActionSpec holds the action executed when a trigger matches.
 type TriggerActionSpec struct {
-	Type          string            `json:"type"`
-	AgentID       string            `json:"agentId,omitempty"`
-	AgentName     string            `json:"agentName,omitempty"`
-	Message       string            `json:"message,omitempty"`
-	Interrupt     bool              `json:"interrupt,omitempty"`
-	Plain         bool              `json:"plain,omitempty"`
-	Wake          bool              `json:"wake,omitempty"`
-	NameConflict  string            `json:"nameConflict,omitempty"`
-	Template      string            `json:"template,omitempty"`
-	Task          string            `json:"task,omitempty"`
-	Branch        string            `json:"branch,omitempty"`
-	Labels        map[string]string `json:"labels,omitempty"`
-	Ephemeral     bool              `json:"ephemeral,omitempty"`
-	GithubToken   string            `json:"githubToken,omitempty"`
-	AgentRole     string            `json:"agentRole,omitempty"`
-	ReuseMessage  string            `json:"reuseMessage,omitempty"`
-	UntrustedVars []string          `json:"untrustedVars,omitempty"`
-	NoAuth        bool              `json:"noAuth,omitempty"`
+	Type            string            `json:"type"`
+	AgentID         string            `json:"agentId,omitempty"`
+	AgentName       string            `json:"agentName,omitempty"`
+	Message         string            `json:"message,omitempty"`
+	Interrupt       bool              `json:"interrupt,omitempty"`
+	Plain           bool              `json:"plain,omitempty"`
+	Wake            bool              `json:"wake,omitempty"`
+	Offline         string            `json:"offline,omitempty"`
+	QueueTTLSeconds int               `json:"queueTtlSeconds,omitempty"`
+	NameConflict    string            `json:"nameConflict,omitempty"`
+	Template        string            `json:"template,omitempty"`
+	Task            string            `json:"task,omitempty"`
+	Branch          string            `json:"branch,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Ephemeral       bool              `json:"ephemeral,omitempty"`
+	GithubToken     string            `json:"githubToken,omitempty"`
+	AgentRole       string            `json:"agentRole,omitempty"`
+	ReuseMessage    string            `json:"reuseMessage,omitempty"`
+	UntrustedVars   []string          `json:"untrustedVars,omitempty"`
+	NoAuth          bool              `json:"noAuth,omitempty"`
 
 	// exec action fields (Stage 2 P8, ptone/scion#8241).
 	Command           []string `json:"command,omitempty"`
@@ -275,9 +277,8 @@ type TriggerRenderUsedVar struct {
 
 // TriggerRenderSlotResult holds the rendered text and used variables for one slot.
 type TriggerRenderSlotResult struct {
-	Rendered   string                 `json:"rendered"`
-	Used       []TriggerRenderUsedVar `json:"used"`
-	Templating string                 `json:"templating,omitempty"`
+	Rendered string                 `json:"rendered"`
+	Used     []TriggerRenderUsedVar `json:"used"`
 }
 
 // TriggerRenderSlots holds rendered slot outputs keyed by slot name.
@@ -413,6 +414,9 @@ type TriggerFire struct {
 	Subject        string            `json:"subject,omitempty"`
 	Status         string            `json:"status"`
 	ResultRef      string            `json:"resultRef,omitempty"`
+	TargetAgentID  string            `json:"targetAgentId,omitempty"`
+	WaitUntil      *time.Time        `json:"waitUntil,omitempty"`
+	Attempts       int               `json:"attempts,omitempty"`
 	Error          string            `json:"error,omitempty"`
 	MatchedThrough string            `json:"matchedThrough,omitempty"`
 	DecidedDialect string            `json:"decidedDialect,omitempty"`

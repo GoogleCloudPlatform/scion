@@ -494,6 +494,86 @@ func (m *memTriggerStore) FinishTriggerFire(_ context.Context, id, status, resul
 	f.FinishedAt = &t
 	return true, nil
 }
+func (m *memTriggerStore) ParkTriggerFireWaiting(_ context.Context, id, projectID, targetAgentID, errMsg string, waitUntil time.Time, maxPerTarget, maxPerProject int) (bool, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if maxPerTarget > 0 || maxPerProject > 0 {
+		var targetCount, projCount int
+		for _, f := range m.byFireID {
+			if f.Status != store.TriggerFireStatusWaiting {
+				continue
+			}
+			if f.TargetAgentID == targetAgentID {
+				targetCount++
+			}
+			if f.ProjectID == projectID {
+				projCount++
+			}
+		}
+		if (maxPerTarget > 0 && targetCount >= maxPerTarget) || (maxPerProject > 0 && projCount >= maxPerProject) {
+			return false, true, nil
+		}
+	}
+	f, ok := m.byFireID[id]
+	if !ok || f.Status != store.TriggerFireStatusFiring {
+		return false, false, nil
+	}
+	f.Status = store.TriggerFireStatusWaiting
+	f.TargetAgentID = targetAgentID
+	wu := waitUntil.UTC()
+	f.WaitUntil = &wu
+	f.Attempts = 1
+	f.Error = errMsg
+	f.FinishedAt = nil
+	return true, false, nil
+}
+func (m *memTriggerStore) FinishWaitingTriggerFire(_ context.Context, id, status, resultRef, targetAgentID, errMsg string, finishedAt time.Time, attempts int) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.byFireID[id]
+	if !ok || f.Status != store.TriggerFireStatusWaiting {
+		return false, nil
+	}
+	f.Status = status
+	f.ResultRef = resultRef
+	if targetAgentID != "" {
+		f.TargetAgentID = targetAgentID
+	}
+	f.Error = errMsg
+	if attempts > 0 {
+		f.Attempts = attempts
+	}
+	t := finishedAt
+	f.FinishedAt = &t
+	return true, nil
+}
+func (m *memTriggerStore) RecordWaitingTriggerFireAttempt(_ context.Context, id string, attempts int, errMsg string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	f, ok := m.byFireID[id]
+	if !ok || f.Status != store.TriggerFireStatusWaiting {
+		return false, nil
+	}
+	f.Attempts = attempts
+	if errMsg != "" {
+		f.Error = errMsg
+	}
+	return true, nil
+}
+func (m *memTriggerStore) ListWaitingFiresForTarget(_ context.Context, targetAgentID string, limit int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for _, f := range m.byFireID {
+		if f.Status == store.TriggerFireStatusWaiting && f.TargetAgentID == targetAgentID {
+			ids = append(ids, f.ID)
+			if limit > 0 && len(ids) >= limit {
+				break
+			}
+		}
+	}
+	return ids, nil
+}
 func (m *memTriggerStore) GetTriggerFire(_ context.Context, id string) (*store.TriggerFire, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

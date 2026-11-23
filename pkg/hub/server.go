@@ -6834,7 +6834,10 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 	}
 }
 
-// MessageEventPayload is the JSON payload for "message" type scheduled events.
+// MessageEventPayload is the JSON payload for "message" type scheduled events
+// and event triggers (Stage 2 §5.7, §6.1).
+// Offline, QueueTTLSeconds, and UntrustedVars are trigger-only and refused for
+// schedules at authoring.
 type MessageEventPayload struct {
 	AgentID   string `json:"agentId,omitempty"`
 	AgentName string `json:"agentName,omitempty"`
@@ -6846,6 +6849,15 @@ type MessageEventPayload struct {
 	// permission a direct-message wake needs, under the event's
 	// authorization revision (authorizeScheduledWake).
 	Wake bool `json:"wake,omitempty"`
+	// Offline configures behavior when a trigger's target agent is offline:
+	// "skip" (default; Stage 1 behavior) or "queue" (Stage 2 §6.1).
+	Offline string `json:"offline,omitempty"`
+	// QueueTTLSeconds bounds how long an offline-queued trigger message waits
+	// for its target agent before expiring (60..172800, default 86400; §6.1).
+	QueueTTLSeconds int `json:"queueTtlSeconds,omitempty"`
+	// UntrustedVars lists untrusted event variable paths (or trailing ".*"
+	// prefixes) explicitly opted in for message-slot template rendering (§5.7).
+	UntrustedVars []string `json:"untrustedVars,omitempty"`
 }
 
 // errScheduledMessageRefused is the public refusal a deferred message fire

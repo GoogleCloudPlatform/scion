@@ -151,6 +151,16 @@ func TargetAgentID(v uuid.UUID) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldTargetAgentID, v))
 }
 
+// WaitUntil applies equality check predicate on the "wait_until" field. It's identical to WaitUntilEQ.
+func WaitUntil(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldWaitUntil, v))
+}
+
+// Attempts applies equality check predicate on the "attempts" field. It's identical to AttemptsEQ.
+func Attempts(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldAttempts, v))
+}
+
 // ExecutorKind applies equality check predicate on the "executor_kind" field. It's identical to ExecutorKindEQ.
 func ExecutorKind(v string) predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldEQ(FieldExecutorKind, v))
@@ -1404,6 +1414,96 @@ func TargetAgentIDIsNil() predicate.TriggerFire {
 // TargetAgentIDNotNil applies the NotNil predicate on the "target_agent_id" field.
 func TargetAgentIDNotNil() predicate.TriggerFire {
 	return predicate.TriggerFire(sql.FieldNotNull(FieldTargetAgentID))
+}
+
+// WaitUntilEQ applies the EQ predicate on the "wait_until" field.
+func WaitUntilEQ(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldWaitUntil, v))
+}
+
+// WaitUntilNEQ applies the NEQ predicate on the "wait_until" field.
+func WaitUntilNEQ(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldWaitUntil, v))
+}
+
+// WaitUntilIn applies the In predicate on the "wait_until" field.
+func WaitUntilIn(vs ...time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldWaitUntil, vs...))
+}
+
+// WaitUntilNotIn applies the NotIn predicate on the "wait_until" field.
+func WaitUntilNotIn(vs ...time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldWaitUntil, vs...))
+}
+
+// WaitUntilGT applies the GT predicate on the "wait_until" field.
+func WaitUntilGT(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldWaitUntil, v))
+}
+
+// WaitUntilGTE applies the GTE predicate on the "wait_until" field.
+func WaitUntilGTE(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldWaitUntil, v))
+}
+
+// WaitUntilLT applies the LT predicate on the "wait_until" field.
+func WaitUntilLT(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldWaitUntil, v))
+}
+
+// WaitUntilLTE applies the LTE predicate on the "wait_until" field.
+func WaitUntilLTE(v time.Time) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldWaitUntil, v))
+}
+
+// WaitUntilIsNil applies the IsNil predicate on the "wait_until" field.
+func WaitUntilIsNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIsNull(FieldWaitUntil))
+}
+
+// WaitUntilNotNil applies the NotNil predicate on the "wait_until" field.
+func WaitUntilNotNil() predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotNull(FieldWaitUntil))
+}
+
+// AttemptsEQ applies the EQ predicate on the "attempts" field.
+func AttemptsEQ(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldEQ(FieldAttempts, v))
+}
+
+// AttemptsNEQ applies the NEQ predicate on the "attempts" field.
+func AttemptsNEQ(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNEQ(FieldAttempts, v))
+}
+
+// AttemptsIn applies the In predicate on the "attempts" field.
+func AttemptsIn(vs ...int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldIn(FieldAttempts, vs...))
+}
+
+// AttemptsNotIn applies the NotIn predicate on the "attempts" field.
+func AttemptsNotIn(vs ...int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldNotIn(FieldAttempts, vs...))
+}
+
+// AttemptsGT applies the GT predicate on the "attempts" field.
+func AttemptsGT(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGT(FieldAttempts, v))
+}
+
+// AttemptsGTE applies the GTE predicate on the "attempts" field.
+func AttemptsGTE(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldGTE(FieldAttempts, v))
+}
+
+// AttemptsLT applies the LT predicate on the "attempts" field.
+func AttemptsLT(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLT(FieldAttempts, v))
+}
+
+// AttemptsLTE applies the LTE predicate on the "attempts" field.
+func AttemptsLTE(v int) predicate.TriggerFire {
+	return predicate.TriggerFire(sql.FieldLTE(FieldAttempts, v))
 }
 
 // ExecutorKindEQ applies the EQ predicate on the "executor_kind" field.

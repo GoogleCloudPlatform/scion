@@ -104,6 +104,10 @@ const (
 	FireSkipReasonDeferCancelled             = "defer_cancelled"
 	FireSkipReasonAgentNameInUse             = "agent_name_in_use"
 	FireSkipReasonCommentRateLimited         = "comment_rate_limited"
+	FireSkipReasonOfflineQueueFull           = "offline_queue_full"
+	FireSkipReasonTriggerChanged             = "trigger_changed"
+	FireSkipReasonTargetDeleted              = "target_deleted"
+	FireSkipReasonTargetNotRunning           = "target_not_running"
 	FireSkipReasonOther                      = "other"
 )
 
@@ -124,6 +128,10 @@ func FireSkipReasons() []string {
 		FireSkipReasonDeferCancelled,
 		FireSkipReasonAgentNameInUse,
 		FireSkipReasonCommentRateLimited,
+		FireSkipReasonOfflineQueueFull,
+		FireSkipReasonTriggerChanged,
+		FireSkipReasonTargetDeleted,
+		FireSkipReasonTargetNotRunning,
 		FireSkipReasonOther,
 	}
 }
@@ -156,6 +164,14 @@ func NormalizeFireSkipReason(errMsg string) string {
 		return FireSkipReasonAgentNameInUse
 	case "comment rate limited":
 		return FireSkipReasonCommentRateLimited
+	case ErrFireOfflineQueueFull:
+		return FireSkipReasonOfflineQueueFull
+	case ErrFireTriggerChanged:
+		return FireSkipReasonTriggerChanged
+	case ErrFireTargetDeleted:
+		return FireSkipReasonTargetDeleted
+	case ErrFireTargetNotRunning:
+		return FireSkipReasonTargetNotRunning
 	default:
 		return FireSkipReasonOther
 	}
@@ -244,6 +260,8 @@ type DispatcherConfig struct {
 	Core           Core
 	Store          store.TriggerStore
 	SubjectClaims  SubjectClaims
+	Queue          durablequeue.Queue
+	TxRunner       func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
 	Rules          *triggerrule.Rules
 	RuleMetrics    RuleEvalMetrics
 	FireAudit      FireAuditSink
@@ -286,6 +304,8 @@ type Dispatcher struct {
 	core           Core
 	store          store.TriggerStore
 	claims         SubjectClaims
+	queue          durablequeue.Queue
+	txRunner       func(ctx context.Context, fn func(ctx context.Context, tx store.Tx, ts store.TriggerStore) error) error
 	rules          *triggerrule.Rules
 	ruleMetrics    RuleEvalMetrics
 	fireAudit      FireAuditSink
@@ -337,6 +357,8 @@ func NewDispatcher(cfg DispatcherConfig) (*Dispatcher, error) {
 		core:           cfg.Core,
 		store:          cfg.Store,
 		claims:         cfg.SubjectClaims,
+		queue:          cfg.Queue,
+		txRunner:       cfg.TxRunner,
 		rules:          cfg.Rules,
 		ruleMetrics:    cfg.RuleMetrics,
 		fireAudit:      fireAudit,
@@ -1235,6 +1257,18 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 		statusStr := normalizeFireStatus(out.Status, out.Error)
 		finishedAt := d.now().UTC()
 
+		if out.Status == hubfire.FireStatusWaiting {
+			writeCtx, cancelWrite := storeWriteContext(ctx)
+			parkErr := d.parkWaitingFire(writeCtx, tracker, tr, ev, &fire, out, finishedAt)
+			cancelWrite()
+			if parkErr != nil {
+				d.logger.Warn("trigger: failed to park waiting trigger fire",
+					"fireID", fire.ID, "eventID", ev.ID, "triggerID", tr.ID, "error", parkErr)
+				return durablequeue.Result{Err: errors.New("trigger: park waiting fire failed")}
+			}
+			continue
+		}
+
 		writeCtx, cancelWrite := storeWriteContext(ctx)
 		if out.Detached {
 			// Detached actions (such as admitted exec runs) own their
@@ -1669,12 +1703,16 @@ func normalizeFireStatus(st hubfire.FireStatus, errMsg string) string {
 	switch st {
 	case hubfire.FireStatusFired:
 		return store.TriggerFireStatusFired
+	case hubfire.FireStatusWaiting:
+		return store.TriggerFireStatusWaiting
 	case hubfire.FireStatusFailed:
 		return store.TriggerFireStatusFailed
 	case hubfire.FireStatusRefused:
 		return store.TriggerFireStatusRefused
 	case hubfire.FireStatusSkipped:
 		return store.TriggerFireStatusSkipped
+	case hubfire.FireStatusExpired:
+		return store.TriggerFireStatusExpired
 	default:
 		if errMsg != "" {
 			return store.TriggerFireStatusFailed

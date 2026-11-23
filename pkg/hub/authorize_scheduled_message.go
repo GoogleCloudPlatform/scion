@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 )
 
 // messageAuthoringCaller identifies which hub authoring surface is invoking
@@ -213,6 +214,81 @@ func (s *Server) validateMessageAuthoringTarget(
 				message:    "action.message exceeds maximum length of 16384 bytes",
 			}
 		}
+		// Validate offline queue policy (Stage 2 §6.1).
+		switch parsed.Offline {
+		case "", MessageOfflineSkip:
+			if parsed.QueueTTLSeconds != 0 {
+				return "", &messageAuthoringError{
+					httpStatus: http.StatusBadRequest,
+					code:       "invalid_value",
+					message:    "queueTtlSeconds is only valid when offline is \"queue\"",
+					details:    map[string]interface{}{"field": "queueTtlSeconds"},
+				}
+			}
+		case MessageOfflineQueue:
+			if parsed.QueueTTLSeconds == 0 {
+				parsed.QueueTTLSeconds = DefaultMessageQueueTTLSeconds
+			} else if parsed.QueueTTLSeconds < MinMessageQueueTTLSeconds || parsed.QueueTTLSeconds > MaxMessageQueueTTLSeconds {
+				return "", &messageAuthoringError{
+					httpStatus: http.StatusBadRequest,
+					code:       "invalid_value",
+					message:    fmt.Sprintf("queueTtlSeconds must be between %d and %d", MinMessageQueueTTLSeconds, MaxMessageQueueTTLSeconds),
+					details:    map[string]interface{}{"field": "queueTtlSeconds"},
+				}
+			}
+		default:
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusBadRequest,
+				code:       "invalid_value",
+				message:    fmt.Sprintf("unsupported offline policy %q (supported: %s, %s)", parsed.Offline, MessageOfflineSkip, MessageOfflineQueue),
+				details:    map[string]interface{}{"field": "offline"},
+			}
+		}
+
+		// Validate untrustedVars and message-slot template (Stage 2 §5.7).
+		if len(parsed.UntrustedVars) > 0 {
+			deduped, uErr := validateUntrustedVars(parsed.UntrustedVars)
+			if uErr != nil {
+				return "", dispatchToMessageAuthoringError(uErr)
+			}
+			parsed.UntrustedVars = deduped
+		}
+		msgTmpl, pErr := triggertemplate.Parse(parsed.Message, triggertemplate.SlotMessage)
+		if pErr != nil {
+			var pe *triggertemplate.ParseError
+			if errors.As(pErr, &pe) {
+				return "", &messageAuthoringError{
+					httpStatus: http.StatusBadRequest,
+					code:       "invalid_template",
+					message:    pe.Error(),
+					details: map[string]interface{}{
+						"slot":    pe.Slot,
+						"offset":  pe.Offset,
+						"message": pe.Message,
+					},
+				}
+			}
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusBadRequest,
+				code:       ErrCodeValidationError,
+				message:    pErr.Error(),
+			}
+		}
+		if parsed.Plain && len(msgTmpl.Untrusted()) > 0 {
+			return "", &messageAuthoringError{
+				httpStatus: http.StatusBadRequest,
+				code:       "plain_with_untrusted",
+				message:    "plain message delivery cannot be combined with untrusted event placeholders",
+				details: map[string]interface{}{
+					"slot":  triggertemplate.SlotMessage,
+					"paths": msgTmpl.Untrusted(),
+				},
+			}
+		}
+		if _, vErr := validateTemplateSlot(parsed.Message, triggertemplate.SlotMessage, parsed.UntrustedVars); vErr != nil {
+			return "", dispatchToMessageAuthoringError(vErr)
+		}
+
 		targetAgentID = strings.TrimSpace(parsed.AgentID)
 		targetAgentName = strings.TrimSpace(parsed.AgentName)
 		if targetAgentID == "" && targetAgentName == "" {
@@ -374,12 +450,15 @@ func (s *Server) validateMessageAuthoringTarget(
 
 	if isTrigger {
 		encoded, err := json.Marshal(MessageEventPayload{
-			AgentID:   agent.ID,
-			AgentName: agent.Slug,
-			Message:   parsed.Message,
-			Interrupt: parsed.Interrupt,
-			Plain:     parsed.Plain,
-			Wake:      parsed.Wake,
+			AgentID:         agent.ID,
+			AgentName:       agent.Slug,
+			Message:         parsed.Message,
+			Interrupt:       parsed.Interrupt,
+			Plain:           parsed.Plain,
+			Wake:            parsed.Wake,
+			Offline:         parsed.Offline,
+			QueueTTLSeconds: parsed.QueueTTLSeconds,
+			UntrustedVars:   parsed.UntrustedVars,
 		})
 		if err != nil {
 			return "", &messageAuthoringError{httpStatus: http.StatusInternalServerError}
@@ -387,6 +466,30 @@ func (s *Server) validateMessageAuthoringTarget(
 		return string(encoded), nil
 	}
 	return rawPayload, nil
+}
+
+func dispatchToMessageAuthoringError(err error) *messageAuthoringError {
+	var ve *dispatchAgentValidationError
+	if errors.As(err, &ve) {
+		var details map[string]interface{}
+		if len(ve.details) > 0 {
+			details = make(map[string]interface{}, len(ve.details))
+			for k, v := range ve.details {
+				details[k] = v
+			}
+		}
+		return &messageAuthoringError{
+			httpStatus: ve.status,
+			code:       ve.code,
+			message:    ve.message,
+			details:    details,
+		}
+	}
+	return &messageAuthoringError{
+		httpStatus: http.StatusBadRequest,
+		code:       ErrCodeValidationError,
+		message:    err.Error(),
+	}
 }
 
 // scheduledTargetReadable reports whether identity may read the target

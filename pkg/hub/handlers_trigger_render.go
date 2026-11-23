@@ -38,9 +38,8 @@ type TriggerRenderUsedVar struct {
 
 // TriggerRenderSlotResult holds the rendered text and used variables for one slot.
 type TriggerRenderSlotResult struct {
-	Rendered   string                 `json:"rendered"`
-	Used       []TriggerRenderUsedVar `json:"used"`
-	Templating string                 `json:"templating,omitempty"`
+	Rendered string                 `json:"rendered"`
+	Used     []TriggerRenderUsedVar `json:"used"`
 }
 
 // TriggerRenderSlots holds rendered slot outputs keyed by slot name.
@@ -296,12 +295,27 @@ func (s *Server) renderTrigger(w http.ResponseWriter, r *http.Request, projectID
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
-		// Message action fires deliver Message literally until Stage 2 §5.7 (P2b)
-		// lands message templating; mirror fire-path delivery verbatim here.
-		resp.Slots.Message = &TriggerRenderSlotResult{
-			Rendered:   p.Message,
-			Used:       []TriggerRenderUsedVar{},
-			Templating: "not_supported_until_P2b",
+		if res, rErr := renderSlotPreview(p.Message, triggertemplate.SlotMessage, vars, p.UntrustedVars); rErr != nil {
+			resp.Errors = append(resp.Errors, toTriggerRenderError(triggertemplate.SlotMessage, rErr))
+		} else {
+			if p.Plain {
+				hasUntrusted := false
+				for _, u := range res.Used {
+					if u.Class == string(triggertemplate.ClassUntrusted) {
+						hasUntrusted = true
+						break
+					}
+				}
+				if hasUntrusted {
+					resp.Errors = append(resp.Errors, TriggerRenderError{
+						Slot:    triggertemplate.SlotMessage,
+						Kind:    "plain_with_untrusted",
+						Message: "plain message delivery cannot be combined with untrusted event placeholders",
+					})
+					break
+				}
+			}
+			resp.Slots.Message = &res
 		}
 
 	case store.TriggerActionGitHubComment:

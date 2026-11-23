@@ -187,6 +187,19 @@ func printTriggerDetail(tr *hubclient.Trigger) {
 	} else {
 		fmt.Printf("  Agent:       %s\n", triggerTerminalText(agentLabel, false))
 		fmt.Printf("  Message:     %s\n", triggerTerminalText(tr.Action.Message, true))
+		if tr.Action.Offline != "" {
+			fmt.Printf("  Offline:     %s\n", triggerTerminalText(tr.Action.Offline, false))
+		}
+		if tr.Action.QueueTTLSeconds > 0 {
+			fmt.Printf("  Queue TTL:   %ds\n", tr.Action.QueueTTLSeconds)
+		}
+		if len(tr.Action.UntrustedVars) > 0 {
+			safeVars := make([]string, len(tr.Action.UntrustedVars))
+			for i, v := range tr.Action.UntrustedVars {
+				safeVars[i] = triggerTerminalText(v, false)
+			}
+			fmt.Printf("  Allowed:     %s\n", strings.Join(safeVars, ", "))
+		}
 	}
 	fmt.Printf("  Fires:       %d (errors: %d)\n", tr.FireCount, tr.ErrorCount)
 	if tr.LastFireAt != nil {

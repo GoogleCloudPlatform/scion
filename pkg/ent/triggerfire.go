@@ -57,6 +57,10 @@ type TriggerFire struct {
 	RuleTrace string `json:"rule_trace,omitempty"`
 	// TargetAgentID holds the value of the "target_agent_id" field.
 	TargetAgentID *uuid.UUID `json:"target_agent_id,omitempty"`
+	// WaitUntil holds the value of the "wait_until" field.
+	WaitUntil *time.Time `json:"wait_until,omitempty"`
+	// Attempts holds the value of the "attempts" field.
+	Attempts int `json:"attempts,omitempty"`
 	// ExecutorKind holds the value of the "executor_kind" field.
 	ExecutorKind string `json:"executor_kind,omitempty"`
 	// ExecutorID holds the value of the "executor_id" field.
@@ -106,11 +110,11 @@ func (*TriggerFire) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case triggerfire.FieldTargetAgentID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision:
+		case triggerfire.FieldAttributionVersion, triggerfire.FieldAuthorizationRevision, triggerfire.FieldAttempts:
 			values[i] = new(sql.NullInt64)
 		case triggerfire.FieldInitiatorPrincipalKind, triggerfire.FieldInitiatorPrincipalID, triggerfire.FieldInitiatorCredentialKind, triggerfire.FieldInitiatorCredentialID, triggerfire.FieldInitiatorCredentialSnapshot, triggerfire.FieldSubject, triggerfire.FieldActionType, triggerfire.FieldStatus, triggerfire.FieldError, triggerfire.FieldResultRef, triggerfire.FieldMatchedThrough, triggerfire.FieldDecidedDialect, triggerfire.FieldRuleTrace, triggerfire.FieldExecutorKind, triggerfire.FieldExecutorID:
 			values[i] = new(sql.NullString)
-		case triggerfire.FieldLeaseUntil, triggerfire.FieldNotBefore, triggerfire.FieldDeferredAt, triggerfire.FieldStartedAt, triggerfire.FieldFinishedAt, triggerfire.FieldCreated:
+		case triggerfire.FieldWaitUntil, triggerfire.FieldLeaseUntil, triggerfire.FieldNotBefore, triggerfire.FieldDeferredAt, triggerfire.FieldStartedAt, triggerfire.FieldFinishedAt, triggerfire.FieldCreated:
 			values[i] = new(sql.NullTime)
 		case triggerfire.FieldID, triggerfire.FieldProjectID, triggerfire.FieldTriggerID, triggerfire.FieldEventID:
 			values[i] = new(uuid.UUID)
@@ -256,6 +260,19 @@ func (_m *TriggerFire) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.TargetAgentID = new(uuid.UUID)
 				*_m.TargetAgentID = *value.S.(*uuid.UUID)
+			}
+		case triggerfire.FieldWaitUntil:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field wait_until", values[i])
+			} else if value.Valid {
+				_m.WaitUntil = new(time.Time)
+				*_m.WaitUntil = value.Time
+			}
+		case triggerfire.FieldAttempts:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field attempts", values[i])
+			} else if value.Valid {
+				_m.Attempts = int(value.Int64)
 			}
 		case triggerfire.FieldExecutorKind:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -421,6 +438,14 @@ func (_m *TriggerFire) String() string {
 		builder.WriteString("target_agent_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
 	}
+	builder.WriteString(", ")
+	if v := _m.WaitUntil; v != nil {
+		builder.WriteString("wait_until=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("attempts=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Attempts))
 	builder.WriteString(", ")
 	builder.WriteString("executor_kind=")
 	builder.WriteString(_m.ExecutorKind)

@@ -114,9 +114,11 @@ type FireStatus string
 
 const (
 	FireStatusFired   FireStatus = "fired"
+	FireStatusWaiting FireStatus = "waiting"
 	FireStatusFailed  FireStatus = "failed"
 	FireStatusRefused FireStatus = "refused"
 	FireStatusSkipped FireStatus = "skipped"
+	FireStatusExpired FireStatus = "expired"
 )
 
 // String returns the string form of s.

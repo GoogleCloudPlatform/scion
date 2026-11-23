@@ -4221,6 +4221,8 @@ var (
 		{Name: "decided_dialect", Type: field.TypeString, Nullable: true, Size: 32},
 		{Name: "rule_trace", Type: field.TypeString, Nullable: true, Size: 4096},
 		{Name: "target_agent_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "wait_until", Type: field.TypeTime, Nullable: true},
+		{Name: "attempts", Type: field.TypeInt, Default: 0},
 		{Name: "executor_kind", Type: field.TypeString, Default: ""},
 		{Name: "executor_id", Type: field.TypeString, Default: ""},
 		{Name: "lease_until", Type: field.TypeTime},
@@ -4239,7 +4241,7 @@ var (
 			{
 				Name:    "triggerfire_trigger_id_created",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[27]},
+				Columns: []*schema.Column{TriggerFiresColumns[9], TriggerFiresColumns[29]},
 			},
 			{
 				Name:    "triggerfire_event_id_trigger_id",
@@ -4254,12 +4256,17 @@ var (
 			{
 				Name:    "triggerfire_status_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{TriggerFiresColumns[13], TriggerFiresColumns[22]},
+				Columns: []*schema.Column{TriggerFiresColumns[13], TriggerFiresColumns[24]},
 			},
 			{
 				Name:    "triggerfire_target_agent_id_status",
 				Unique:  false,
 				Columns: []*schema.Column{TriggerFiresColumns[19], TriggerFiresColumns[13]},
+			},
+			{
+				Name:    "triggerfire_project_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{TriggerFiresColumns[8], TriggerFiresColumns[13]},
 			},
 			{
 				Name:    "triggerfire_result_ref",

@@ -22,10 +22,20 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Message action offline policy constants (Stage 2 §6.1).
+const (
+	MessageOfflineSkip            = "skip"
+	MessageOfflineQueue           = "queue"
+	DefaultMessageQueueTTLSeconds = 86_400
+	MinMessageQueueTTLSeconds     = 60
+	MaxMessageQueueTTLSeconds     = 172_800
 )
 
 // messageAction implements FireAction and FirePayloadValidator for deferred
@@ -316,18 +326,84 @@ func (a *messageAction) Fire(ctx context.Context, req hubfire.FireRequest, autho
 	return a.srv.deliverMessageAction(ctx, req, ma)
 }
 
-func buildMessageActionMessage(agent *store.Agent, payload MessageEventPayload, req hubfire.FireRequest) (*messages.StructuredMessage, error) {
+func buildMessageActionMessage(agent *store.Agent, payload MessageEventPayload, req hubfire.FireRequest, templatedVars ...string) (*messages.StructuredMessage, error) {
 	structuredMsg := messages.NewSystemMessage("scheduler", "agent:"+agent.Slug, payload.Message, messages.SystemCategoryScheduler)
 	structuredMsg.SenderID = "SCHEDULER"
 	structuredMsg.RecipientID = agent.ID
 	structuredMsg.Plain = payload.Plain
 	structuredMsg.Urgent = payload.Interrupt
 	if req.Event != nil {
-		if err := ApplyDispatchedEventEnvelope(structuredMsg, req); err != nil {
+		if err := ApplyDispatchedEventEnvelope(structuredMsg, req, templatedVars...); err != nil {
 			return nil, err
 		}
 	}
 	return structuredMsg, nil
+}
+
+// classifyOfflineTargetPhase categorizes a non-deliverable agent's phase for
+// offline: queue message fires (Stage 2 §6.2 item 1):
+//   - wait=true: suspended, stopped, provisioning, starting, created, stopping,
+//     or an active idle-suspend claim.
+//   - skip=true: error or halted (requires user intervention).
+func classifyOfflineTargetPhase(agent *store.Agent) (wait bool, skip bool) {
+	if agent == nil {
+		return false, false
+	}
+	if agent.IdleSuspendClaimActive {
+		return true, false
+	}
+	switch state.Phase(store.EffectiveRestingPhase(agent)) {
+	case state.PhaseSuspended, state.PhaseStopped, state.PhaseProvisioning, state.PhaseStarting, state.PhaseCreated, state.PhaseStopping:
+		return true, false
+	case state.PhaseError, state.PhaseHalted:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func (s *Server) offlineQueueOutcomeForAgent(ctx context.Context, agent *store.Agent, reload bool) (hubfire.FireOutcome, bool) {
+	if agent == nil {
+		return hubfire.FireOutcome{}, false
+	}
+	target := agent
+	if reload {
+		fresh, err := s.store.GetAgent(ctx, agent.ID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return hubfire.FireOutcome{
+					Status:        hubfire.FireStatusSkipped,
+					Error:         "target deleted",
+					TargetAgentID: agent.ID,
+				}, true
+			}
+			return hubfire.FireOutcome{}, false
+		}
+		if fresh == nil || !fresh.DeletedAt.IsZero() {
+			return hubfire.FireOutcome{
+				Status:        hubfire.FireStatusSkipped,
+				Error:         "target deleted",
+				TargetAgentID: agent.ID,
+			}, true
+		}
+		target = fresh
+	}
+	wait, skip := classifyOfflineTargetPhase(target)
+	if wait {
+		return hubfire.FireOutcome{
+			Status:        hubfire.FireStatusWaiting,
+			Error:         "target not running",
+			TargetAgentID: target.ID,
+		}, true
+	}
+	if skip {
+		return hubfire.FireOutcome{
+			Status:        hubfire.FireStatusSkipped,
+			Error:         "target not running",
+			TargetAgentID: target.ID,
+		}, true
+	}
+	return hubfire.FireOutcome{}, false
 }
 
 func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireRequest, ma *messageAuthorized) (hubfire.FireOutcome, error) {
@@ -338,6 +414,22 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	var scheduleID string
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
 		scheduleID = req.Authority.DefinitionID
+	}
+	isEventFire := DispatchedEventUsesPhaseANoRow(req)
+	isOfflineQueue := isEventFire && payload.Offline == MessageOfflineQueue
+
+	// Render message-slot template for event fires before waking or queueing so
+	// template errors refuse the fire immediately without waking an offline
+	// target or parking a doomed fire (Stage 2 §5.7).
+	var templatedVars []string
+	if isEventFire && req.Event != nil {
+		rendered, vars, refusal := renderDispatchedMessageTemplate(ctx, s, req, payload)
+		if refusal != nil {
+			refusal.TargetAgentID = agent.ID
+			return *refusal, nil
+		}
+		payload.Message = rendered
+		templatedVars = vars
 	}
 
 	// Authorize checks reincarnationInFlight before wake authorization; re-check
@@ -365,9 +457,19 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 			if scheduledFireAborted(ctx) {
 				return hubfire.FireOutcome{}, errScheduledWakeShutdown
 			}
+			if isOfflineQueue {
+				if out, ok := s.offlineQueueOutcomeForAgent(ctx, agent, true); ok {
+					return out, nil
+				}
+			}
 			return hubfire.FireOutcome{}, err
 		}
 	} else if phaseErr := s.validateAgentDeliverable(agent); phaseErr != nil {
+		if isOfflineQueue {
+			if out, ok := s.offlineQueueOutcomeForAgent(ctx, agent, false); ok {
+				return out, nil
+			}
+		}
 		slog.Warn("Scheduler: scheduled message target is not running",
 			"eventID", fireID,
 			"scheduleID", scheduleID,
@@ -384,7 +486,7 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 	}
 
 	// Reconstruct structured message from payload to preserve traits like Plain.
-	structuredMsg, err := buildMessageActionMessage(agent, payload, req)
+	structuredMsg, err := buildMessageActionMessage(agent, payload, req, templatedVars...)
 	if err != nil {
 		return hubfire.FireOutcome{}, err
 	}
@@ -500,6 +602,11 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 			if storeMsg != nil {
 				_ = s.markFailed(retryCtx, storeMsg.ID, wakeRefused.dmErr.Message)
 			}
+			if isOfflineQueue {
+				if out, ok := s.offlineQueueOutcomeForAgent(retryCtx, agent, true); ok {
+					return out, nil
+				}
+			}
 			return hubfire.FireOutcome{}, errors.New(wakeRefused.dmErr.Message)
 		}
 		if storeMsg != nil {
@@ -529,6 +636,11 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 				)
 			}
 			slog.Warn("Scheduler: broker reported agent not found on message dispatch", logArgs...)
+			if isOfflineQueue {
+				if out, ok := s.offlineQueueOutcomeForAgent(retryCtx, agent, true); ok {
+					return out, nil
+				}
+			}
 			if !woke {
 				if fresh, gerr := s.store.GetAgent(retryCtx, agent.ID); gerr == nil && fresh != nil {
 					if phaseErr := s.validateAgentDeliverable(fresh); phaseErr != nil {
@@ -554,7 +666,8 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 		"executor_kind", executor.Kind,
 		"executor_id", executor.ID)
 	return hubfire.FireOutcome{
-		Status:    hubfire.FireStatusFired,
-		ResultRef: holdMsgID,
+		Status:        hubfire.FireStatusFired,
+		ResultRef:     holdMsgID,
+		TargetAgentID: agent.ID,
 	}, nil
 }
