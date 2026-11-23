@@ -320,7 +320,7 @@ func waitForRedirect(ctx context.Context, probePath, probeToken string) error {
 			lastErr = err
 		}
 		if ctx.Err() != nil {
-			log.Error("Metadata redirect verification cancelled: %v", ctx.Err())
+			log.Error("Metadata redirect verification cancelled: %v (last error: %v)", ctx.Err(), lastErr)
 			return errMetadataProtectionUnavailable
 		}
 		if time.Now().After(deadline) {
@@ -331,7 +331,7 @@ func waitForRedirect(ctx context.Context, probePath, probeToken string) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			log.Error("Metadata redirect verification cancelled: %v", ctx.Err())
+			log.Error("Metadata redirect verification cancelled: %v (last error: %v)", ctx.Err(), lastErr)
 			return errMetadataProtectionUnavailable
 		case <-timer.C:
 		}

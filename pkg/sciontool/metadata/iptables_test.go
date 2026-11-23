@@ -504,6 +504,20 @@ func TestIP6TablesCmd_NeverConsultsPATH(t *testing.T) {
 	}
 }
 
+func TestIP6TablesCmd_RealBinaryDispatchesCorrectly(t *testing.T) {
+	cmd, err := ip6tablesCmd("-V")
+	if err != nil {
+		t.Skipf("ip6tables not resolvable as a trusted binary in this environment: %v", err)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("running the real, resolved ip6tables -V: %v, output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "ip6tables") {
+		t.Errorf("ip6tables -V output = %q, want it to mention \"ip6tables\"", out)
+	}
+}
+
 func TestIP6TablesCmd_EnvIsFromScratch(t *testing.T) {
 	t.Setenv("LD_PRELOAD", "/should/not/leak.so")
 	cmd, err := ip6tablesCmd("-V")
