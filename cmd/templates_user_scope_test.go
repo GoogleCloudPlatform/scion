@@ -358,6 +358,24 @@ func TestTemplatesSyncAll_SourceVsTargetScope(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("--project outside cwd does not publish global templates into project scope", func(t *testing.T) {
+		hub, srv := newUserScopeHub(t, nil)
+		tuSetup(t)
+		tuHubSettings(t, srv.URL)
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+
+		extProject := t.TempDir()
+		writeTUProjectSettings(t, extProject, tuProjectID)
+		createTestTemplate(t, home, "glob-only")
+
+		require.NoError(t, runTemplatesRoot(t, "--project", extProject, "templates", "sync", "--all"))
+
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Empty(t, hub.created, "global templates must not be published into --project scope")
+	})
 }
 
 func TestTemplatesDelete_ScopeUser(t *testing.T) {

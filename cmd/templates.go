@@ -758,8 +758,8 @@ Use --scope <project|global|user> (or the root --global flag as shorthand for
 --scope global) to choose the target scope on the Hub.
 
 Use --all to sync all local templates to the Hub at once (reads project-local
-templates inside a project, or global templates with --global or outside a
-project, independent of --scope).
+templates inside a project, or global templates with --global or with --scope
+global outside a project).
 
 The template may also be given as a directory path: . or .., an absolute
 path, or one containing a path separator (such as ./name). The directory is
@@ -1034,7 +1034,7 @@ func syncAllTemplatesToHub(hubCtx *HubContext, scope string) error {
 	}
 
 	sourceScope := templateScopeFromGlobalFlag()
-	if sourceScope != "global" {
+	if sourceScope != "global" && scope == "global" {
 		if _, inProject := config.FindProjectRoot(); !inProject {
 			sourceScope = "global"
 		}
