@@ -74,6 +74,16 @@ var AgentDelegationSharedKeyExemptions = []AgentDelegationSharedKeyExemption{
 		Operation:  "project.broadcast",
 		Reason:     "broadcast sends a message to every agent of a project; it shares project.read but is not a delegable use of it",
 	},
+	{
+		Permission: "agent.attach",
+		Operation:  "chat.secretrequest.fulfill",
+		Reason:     "fulfilling a secret request is session-only (human user supply of secret values); it shares agent.attach but is never admitted for an agent delegated credential",
+	},
+	{
+		Permission: "agent.attach",
+		Operation:  "chat.secretrequest.dismiss",
+		Reason:     "dismissing a secret request is session-only (human user dismissal); it shares agent.attach but is never admitted for an agent delegated credential",
+	},
 }
 
 // AgentDelegable reports whether permissionID may be delegated to an agent
