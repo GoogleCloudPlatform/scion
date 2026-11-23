@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -380,5 +381,391 @@ func TestSyncTemplateToHub_InvalidAgentConfigWarnsAndSurfacesHub422(t *testing.T
 		require.Error(t, syncErr)
 		require.Contains(t, syncErr.Error(), "max_duration")
 		require.Empty(t, deletedIDs, "existing active template must never be deleted on finalize failure")
+	})
+}
+
+func TestSyncTemplateToHub_PendingCleanup(t *testing.T) {
+	t.Run("ambiguous_finalize_transport_error_leaves_active_template", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+
+		var getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"template": map[string]interface{}{"id": "new-tpl-id", "name": "base", "status": "pending"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/upload" && r.Method == http.MethodPost:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/finalize" && r.Method == http.MethodPost:
+				// Simulate the Hub committing the template, then the connection dropping
+				// before the response reaches the CLI.
+				hj, ok := w.(http.Hijacker)
+				require.True(t, ok)
+				conn, _, err := hj.Hijack()
+				require.NoError(t, err)
+				_ = conn.Close()
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "active",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		var syncErr error
+		_ = captureStdout(t, func() {
+			syncErr = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude")
+		})
+		require.Error(t, syncErr)
+		require.Equal(t, 1, getCalls, "ambiguous finalize error must check template status via Get")
+		require.Equal(t, 0, deleteCalls, "active template must not be deleted after ambiguous finalize error")
+	})
+
+	t.Run("ambiguous_finalize_5xx_leaves_active_template", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+
+		var getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"template": map[string]interface{}{"id": "new-tpl-id", "name": "base", "status": "pending"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/upload" && r.Method == http.MethodPost:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/finalize" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "unavailable", "message": "gateway timeout"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "active",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		var syncErr error
+		_ = captureStdout(t, func() {
+			syncErr = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude")
+		})
+		require.Error(t, syncErr)
+		require.Equal(t, 1, getCalls, "5xx finalize error must check template status via Get")
+		require.Equal(t, 0, deleteCalls, "active template must not be deleted after 5xx finalize error")
+	})
+
+	t.Run("ambiguous_finalize_error_with_get_failure_leaves_template", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+
+		var getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"template": map[string]interface{}{"id": "new-tpl-id", "name": "base", "status": "pending"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/upload" && r.Method == http.MethodPost:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/finalize" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "internal_error", "message": "bad gateway"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "unavailable", "message": "hub unavailable"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		var syncErr error
+		_ = captureStdout(t, func() {
+			syncErr = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude")
+		})
+		require.Error(t, syncErr)
+		require.Equal(t, 1, getCalls)
+		require.Equal(t, 0, deleteCalls, "must not delete when Get cannot confirm pending status")
+	})
+
+	t.Run("ambiguous_finalize_error_deletes_when_get_confirms_pending", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+
+		var getCalls int
+		var deletedIDs []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"template": map[string]interface{}{"id": "new-tpl-id", "name": "base", "status": "pending"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/upload" && r.Method == http.MethodPost:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/finalize" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "internal_error", "message": "internal error"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "pending",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deletedIDs = append(deletedIDs, "new-tpl-id")
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		var syncErr error
+		_ = captureStdout(t, func() {
+			syncErr = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude")
+		})
+		require.Error(t, syncErr)
+		require.Equal(t, 1, getCalls, "ambiguous finalize error must check template status via Get")
+		require.Equal(t, []string{"new-tpl-id"}, deletedIDs, "pending template confirmed by Get must be deleted")
+	})
+
+	t.Run("definitive_4xx_upload_failure_deletes_pending_without_get", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+
+		var getCalls int
+		var deletedIDs []string
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"template": map[string]interface{}{"id": "new-tpl-id", "name": "base", "status": "pending"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/upload" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "validation_error", "message": "invalid file path"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "pending",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deletedIDs = append(deletedIDs, "new-tpl-id")
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		var syncErr error
+		_ = captureStdout(t, func() {
+			syncErr = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude")
+		})
+		require.Error(t, syncErr)
+		require.Equal(t, 0, getCalls, "definitive 4xx upload error does not need an extra Get")
+		require.Equal(t, []string{"new-tpl-id"}, deletedIDs, "definitive 4xx upload error must delete the pending row")
+	})
+
+	t.Run("resync_after_conflict_4xx_leaves_active_template", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+
+		var finalizeCalls, getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"templates": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodPost:
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"template": map[string]interface{}{"id": "new-tpl-id", "name": "base", "status": "pending"},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/upload" && r.Method == http.MethodPost:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []interface{}{}})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/download" && r.Method == http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"files": []map[string]interface{}{{
+						"path": "scion-agent.yaml",
+						"hash": transfer.HashBytes([]byte("harness: claude\n")),
+						"url":  "file:///x/scion-agent.yaml",
+					}},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id/finalize" && r.Method == http.MethodPost:
+				finalizeCalls++
+				if finalizeCalls == 1 {
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{
+						"error": map[string]interface{}{
+							"code":    hubclient.TemplateConflictErrorCode,
+							"message": "template was changed by another commit",
+						},
+					})
+					return
+				}
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    "invalid_agent_config",
+						"message": "invalid config on retry",
+					},
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":          "new-tpl-id",
+					"name":        "base",
+					"status":      "active",
+					"contentHash": "sha256:winner",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		var syncErr error
+		_ = captureStdout(t, func() {
+			syncErr = syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude")
+		})
+		require.Error(t, syncErr)
+		require.GreaterOrEqual(t, getCalls, 2, "resync and cleanup must both inspect template status via Get")
+		require.Equal(t, 0, deleteCalls, "resync failure must not delete a template activated by a competing commit")
+	})
+}
+
+func TestIsDefinitivePendingSyncError(t *testing.T) {
+	require.False(t, isDefinitivePendingSyncError(nil))
+	require.False(t, isDefinitivePendingSyncError(errors.New("connection reset by peer")))
+	require.True(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusBadRequest}))
+	require.True(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusForbidden}))
+	require.True(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusUnprocessableEntity}))
+	require.True(t, isDefinitivePendingSyncError(fmt.Errorf("wrapped: %w", &apiclient.APIError{StatusCode: http.StatusUnprocessableEntity})))
+	require.False(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusRequestTimeout}))
+	require.False(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusConflict}))
+	require.False(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusInternalServerError}))
+	require.False(t, isDefinitivePendingSyncError(&apiclient.APIError{StatusCode: http.StatusServiceUnavailable}))
+}
+
+func TestCleanupPendingTemplate_DecouplesCanceledContext(t *testing.T) {
+	t.Run("deletes_pending_template_when_parent_context_canceled", func(t *testing.T) {
+		var getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "pending",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		hubCtx := newTemplateSyncHubCtx(t, server)
+		cleanupPendingTemplate(ctx, hubCtx.Client.Templates(), "new-tpl-id", context.DeadlineExceeded, false)
+
+		require.Equal(t, 1, getCalls, "cleanup must query template status even when parent context is canceled")
+		require.Equal(t, 1, deleteCalls, "cleanup must delete confirmed pending template even when parent context is canceled")
+	})
+
+	t.Run("preserves_active_template_when_parent_context_canceled", func(t *testing.T) {
+		var getCalls, deleteCalls int
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodGet:
+				getCalls++
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "new-tpl-id",
+					"name":   "base",
+					"status": "active",
+				})
+			case r.URL.Path == "/api/v1/templates/new-tpl-id" && r.Method == http.MethodDelete:
+				deleteCalls++
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer server.Close()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		hubCtx := newTemplateSyncHubCtx(t, server)
+		cleanupPendingTemplate(ctx, hubCtx.Client.Templates(), "new-tpl-id", context.DeadlineExceeded, false)
+
+		require.Equal(t, 1, getCalls, "cleanup must query template status even when parent context is canceled")
+		require.Equal(t, 0, deleteCalls, "cleanup must not delete an active template")
 	})
 }

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1324,9 +1325,47 @@ func warnInvalidLocalTemplateAgentConfig(root *os.Root, templateName string, fil
 	}
 }
 
+// isDefinitivePendingSyncError reports whether err is a definitive Hub 4xx
+// refusal from upload or finalize that guarantees the Hub did not commit the
+// template. Ambiguous statuses (408 Request Timeout, 409 Conflict where
+// another push may have committed, 5xx, and transport errors) return false so
+// cleanup must verify status == "pending" via Get before deleting.
+func isDefinitivePendingSyncError(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	if apiErr.StatusCode < 400 || apiErr.StatusCode >= 500 {
+		return false
+	}
+	return apiErr.StatusCode != http.StatusRequestTimeout && apiErr.StatusCode != http.StatusConflict
+}
+
+// cleanupPendingTemplate deletes a newly created pending template after a
+// failed sync only when it is known to still be pending: either after a
+// definitive 4xx refusal from upload or finalize (when no conflict resync took
+// place), or after a Get confirms status == "pending". Ambiguous failures
+// (transport errors, 5xx, conflicts, or a failed Get) leave an active template
+// untouched.
+func cleanupPendingTemplate(ctx context.Context, templates hubclient.TemplateService, templateID string, syncErr error, afterConflict bool) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+
+	shouldDelete := !afterConflict && isDefinitivePendingSyncError(syncErr)
+	if !shouldDelete {
+		tpl, getErr := templates.Get(cleanupCtx, templateID)
+		if getErr != nil || tpl == nil || tpl.Status != "pending" {
+			return
+		}
+	}
+	if delErr := templates.Delete(cleanupCtx, templateID); delErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to clean up pending template %s: %v\n", templateID, delErr)
+	}
+}
+
 // syncTemplateToHub creates or updates a template in the Hub.
 // If a template with the same name already exists, only changed files are uploaded.
-func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType string) error {
+func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType string) (retErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -1413,12 +1452,13 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	// Track a newly created pending template so that if upload or finalize
 	// fails (for example, Hub 422 invalid_agent_config), we clean it up and
 	// retries do not collide with the unique (slug, scope, scope_id) index.
+	// Delete only when known to still be pending so an ambiguous finalize
+	// error cannot remove a template the Hub already activated.
 	var createdPendingID string
+	var resyncedAfterConflict bool
 	defer func() {
 		if createdPendingID != "" {
-			if delErr := hubCtx.Client.Templates().Delete(ctx, createdPendingID); delErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to clean up pending template %s: %v\n", createdPendingID, delErr)
-			}
+			cleanupPendingTemplate(ctx, hubCtx.Client.Templates(), createdPendingID, retErr, resyncedAfterConflict)
 		}
 	}()
 
@@ -1558,6 +1598,7 @@ func syncTemplateToHub(hubCtx *HubContext, name, localPath, scope, harnessType s
 	fmt.Println("Finalizing template...")
 	template, err := hubCtx.Client.Templates().Finalize(ctx, templateID, manifest, expectedHash, uploadID)
 	if hubclient.IsTemplateConflictError(err) {
+		resyncedAfterConflict = true
 		template, err = resyncTemplateAfterConflict(ctx, hubCtx, name, templateID, root, files, manifest)
 		if err != nil {
 			return err
