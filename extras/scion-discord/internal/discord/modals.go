@@ -53,13 +53,14 @@ func OpenAskUserModal(s *discordgo.Session, i *discordgo.InteractionCreate, requ
 }
 
 // HandleModalSubmit processes a modal submission routed from the broker's
-// InteractionModalSubmit handler. It extracts the text value, looks up the
-// pending request, delivers the response to the hub, and sends an ephemeral
-// confirmation.
+// InteractionModalSubmit handler. It verifies the acting user's linked
+// principal and project membership, looks up the pending request, delivers
+// the response to the hub, and sends an ephemeral confirmation.
 func HandleModalSubmit(
 	s *discordgo.Session,
 	i *discordgo.InteractionCreate,
 	store Store,
+	hubClient HubClient,
 	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError,
 	log *slog.Logger,
 ) {
@@ -89,6 +90,14 @@ func HandleModalSubmit(
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	discordUserID := interactionUserID(i)
+	onBehalfOf, ok := requirePrincipal(ctx, store, log, discordUserID, func(msg string) {
+		respondEphemeral(s, i, msg)
+	})
+	if !ok {
+		return
+	}
+
 	pending, err := store.GetPendingAskUser(ctx, requestID)
 	if err != nil {
 		log.Error("Failed to get pending ask-user for modal", "request_id", requestID, "error", err)
@@ -108,16 +117,15 @@ func HandleModalSubmit(
 		return
 	}
 
+	projectSlug := projectSlugForChannel(ctx, s, store, pending.ChannelID, pending.ProjectID)
+	if !requireProjectMembership(ctx, hubClient, log, onBehalfOf, pending.ProjectID, projectSlug, func(msg string) {
+		respondEphemeral(s, i, msg)
+	}) {
+		return
+	}
+
 	// Deliver the response to the hub.
 	if deliverInbound != nil {
-		discordUserID := interactionUserID(i)
-		sender := "discord:" + discordUserID
-		if mapping, mapErr := store.GetUserMapping(ctx, discordUserID); mapErr == nil {
-			if principal := principalForMapping(mapping); principal != "" {
-				sender = principal
-			}
-		}
-
 		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		recipient := "agent:" + pending.AgentSlug
 
@@ -126,7 +134,7 @@ func HandleModalSubmit(
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Channel:   "discord",
 			ThreadID:  pending.ChannelID,
-			Sender:    sender,
+			Sender:    onBehalfOf,
 			SenderID:  discordUserID,
 			Recipient: recipient,
 			Msg:       responseText,

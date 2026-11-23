@@ -90,6 +90,25 @@ type deliveredAnswer struct {
 	msg   *messages.StructuredMessage
 }
 
+// askUserHubClient is a minimal HubClient stub for ask-user tests.
+type askUserHubClient struct {
+	HubClient
+	projects []ProjectOption
+}
+
+func (c *askUserHubClient) ListProjectsForUser(_ context.Context, _ string) ([]ProjectOption, error) {
+	return c.projects, nil
+}
+
+// failingAskLookupStore wraps a Store and fails GetPendingAskUser calls.
+type failingAskLookupStore struct {
+	Store
+}
+
+func (s *failingAskLookupStore) GetPendingAskUser(_ context.Context, _ string) (*PendingAskUser, error) {
+	return nil, fmt.Errorf("store unavailable")
+}
+
 // newAskUserFixture returns a broker wired to a recording session and a
 // SQLite store, plus a deliver function that records hub deliveries.
 func newAskUserFixture(t *testing.T, channelID string) (*DiscordBroker, *askUserTransport, *[]deliveredAnswer, func(string, *messages.StructuredMessage) *hubError) {
@@ -106,6 +125,16 @@ func newAskUserFixture(t *testing.T, channelID string) (*DiscordBroker, *askUser
 	b := testBroker(session)
 	b.log = discardLogger()
 	b.store = newTestBrokerStore(t)
+	b.hubClient = &askUserHubClient{
+		projects: []ProjectOption{{ID: "proj-1", Slug: "proj-1"}},
+	}
+	require.NoError(t, b.store.CreateUserMapping(context.Background(), &DiscordUserMapping{
+		DiscordUserID:   "u-1",
+		DiscordUsername: "alice",
+		ScionUserID:     "scion-user-1",
+		ScionEmail:      "alice@example.com",
+		LinkedAt:        time.Now(),
+	}))
 
 	var mu sync.Mutex
 	delivered := &[]deliveredAnswer{}
@@ -162,7 +191,7 @@ func TestAskUser_ButtonAnswerDelivered(t *testing.T) {
 	assert.Equal(t, "proj-1", pending.ProjectID)
 	assert.Equal(t, []string{"yes", "no"}, pending.Choices)
 
-	h := NewCallbackHandler(b.store, b.session, nil, deliver, discardLogger())
+	h := NewCallbackHandler(b.store, b.session, b.hubClient, deliver, discardLogger())
 	i := &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{
 		Type:      discordgo.InteractionMessageComponent,
 		ChannelID: channelID,
@@ -220,7 +249,7 @@ func TestAskUser_ModalAnswerDelivered(t *testing.T) {
 			},
 		},
 	}}
-	HandleModalSubmit(b.session, i, b.store, deliver, discardLogger())
+	HandleModalSubmit(b.session, i, b.store, b.hubClient, deliver, discardLogger())
 
 	require.Len(t, *delivered, 1, "the modal answer should be delivered to the hub")
 	got := (*delivered)[0]
@@ -332,11 +361,11 @@ func TestAskUser_FailedDeliveryKeepsQuestion(t *testing.T) {
 		attempts = append(attempts, msg)
 		return &hubError{StatusCode: http.StatusServiceUnavailable, Code: "unavailable", Message: "try later"}
 	}
-	h := NewCallbackHandler(b.store, b.session, nil, deliver, discardLogger())
+	h := NewCallbackHandler(b.store, b.session, b.hubClient, deliver, discardLogger())
 	h.Dispatch(b.session, askUserClick(channelID, ids[0]), ids[0], nil)
 
 	require.Len(t, attempts, 1, "the answer should be sent to the hub once")
-	assert.Equal(t, "discord:u-1", attempts[0].Sender, "the answer should carry the clicking user")
+	assert.Equal(t, "user:alice@example.com", attempts[0].Sender, "the answer should carry the clicking user")
 	assert.Equal(t, "u-1", attempts[0].SenderID)
 
 	pending, err := b.store.GetPendingAskUser(ctx, requestID)
@@ -363,8 +392,7 @@ func TestAskUser_LookupErrorKeepsQuestion(t *testing.T) {
 	ids := rt.postedCustomIDs(t, channelID)
 	require.Len(t, ids, 2)
 
-	require.NoError(t, b.store.Close())
-	h := NewCallbackHandler(b.store, b.session, nil, deliver, discardLogger())
+	h := NewCallbackHandler(&failingAskLookupStore{Store: b.store}, b.session, b.hubClient, deliver, discardLogger())
 	h.Dispatch(b.session, askUserClick(channelID, ids[0]), ids[0], nil)
 
 	assert.Empty(t, *delivered)
@@ -466,7 +494,7 @@ func TestAskUser_ChoiceButtonLimits(t *testing.T) {
 					got = append(got, msg)
 					return nil
 				}
-				h := NewCallbackHandler(b.store, b.session, nil, deliver, discardLogger())
+				h := NewCallbackHandler(b.store, b.session, b.hubClient, deliver, discardLogger())
 				id := buttons[idx].customID
 				h.Dispatch(b.session, askUserClick(channelID, id), id, nil)
 				require.Len(t, got, 1)
@@ -491,7 +519,7 @@ func TestAskUser_LongChoiceEditFits(t *testing.T) {
 	ids := rt.postedCustomIDs(t, channelID)
 	require.Len(t, ids, 2)
 
-	h := NewCallbackHandler(b.store, b.session, nil, deliver, discardLogger())
+	h := NewCallbackHandler(b.store, b.session, b.hubClient, deliver, discardLogger())
 	h.Dispatch(b.session, askUserClick(channelID, ids[1]), ids[1], nil)
 
 	require.Len(t, *delivered, 1)

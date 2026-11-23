@@ -438,7 +438,7 @@ func TestAskUserModal_DeliveryErrorGetsActionableText(t *testing.T) {
 				},
 			})
 
-			HandleModalSubmit(e.session, i, e.store, b.deliverInbound, discardLogger())
+			HandleModalSubmit(e.session, i, e.store, e.callback.hubClient, b.deliverInbound, discardLogger())
 
 			require.NotEmpty(t, e.hub.callsTo(http.MethodPost, "/api/v1/broker/inbound"), "the reply reached the hub")
 			assert.Contains(t, e.discord.allBodies(), jsonText(t, tc.want))
