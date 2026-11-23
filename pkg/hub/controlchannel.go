@@ -141,6 +141,11 @@ type BrokerConnection struct {
 	// Active streams (for PTY, events, etc.)
 	streams   map[string]*StreamProxy
 	streamsMu sync.RWMutex
+	closed    bool // guarded by streamsMu; once true OpenStream refuses new streams
+
+	// Test hook, nil in production (ptone/scion#5873). Close calls it once
+	// after draining streams and releasing streamsMu, right before closing conn.
+	beforeConnClose func()
 
 	// Connection state
 	connectedAt time.Time
@@ -411,10 +416,7 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 		brokerConn.Close()
 		return "", errControlChannelClosed
 	}
-	if existing, ok := m.connections[brokerID]; ok {
-		// Close existing connection
-		existing.Close()
-	}
+	existing := m.connections[brokerID]
 	m.connections[brokerID] = brokerConn
 	m.mu.Unlock()
 	if m.afterPublish != nil {
@@ -425,6 +427,13 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 
 	// Start message handler
 	go m.handleConnection(brokerConn)
+
+	if existing != nil {
+		// Close the replaced session outside m.mu and after starting the new
+		// connection's handler so a slow or blocked close on the old socket
+		// cannot hold the manager lock or stall the new session.
+		existing.Close()
+	}
 
 	return sessionID, nil
 }
@@ -866,6 +875,10 @@ func (hc *BrokerConnection) OpenStream(ctx context.Context, streamType, agentID,
 	stream.owner = hc
 
 	hc.streamsMu.Lock()
+	if hc.closed {
+		hc.streamsMu.Unlock()
+		return nil, fmt.Errorf("failed to open stream: %w", errBrokerConnectionLost)
+	}
 	hc.streams[streamID] = stream
 	hc.streamsMu.Unlock()
 
@@ -919,6 +932,8 @@ func (hc *BrokerConnection) Close() {
 	// Close all streams. The control channel is gone, so every stream ends
 	// with 4503: the broker may come back, and a reconnect may succeed.
 	hc.streamsMu.Lock()
+	wasClosed := hc.closed
+	hc.closed = true
 	for _, stream := range hc.streams {
 		stream.CloseWith(wsprotocol.ClosePTYUpstreamUnavailable, wsprotocol.CloseReasonBrokerDisconnected)
 	}
@@ -936,6 +951,9 @@ func (hc *BrokerConnection) Close() {
 	hc.pendingMu.Unlock()
 
 	// Close WebSocket connection
+	if !wasClosed && hc.beforeConnClose != nil {
+		hc.beforeConnClose()
+	}
 	if hc.conn != nil {
 		_ = hc.conn.Close()
 	}

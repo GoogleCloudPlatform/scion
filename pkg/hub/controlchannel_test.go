@@ -525,3 +525,178 @@ func TestBrokerPTYUpstream_NoOwner(t *testing.T) {
 	require.ErrorIs(t, up.Resize(80, 24), errPTYStreamNoOwner)
 	require.NotPanics(t, up.Close)
 }
+
+// --- Replacement lock release and concurrent stream open (ptone/scion#5873) ---
+
+// A replacement whose old-session close blocks must not hold the manager lock:
+// other manager operations complete immediately and the new session is already
+// published while the old session's socket close is still in flight.
+func TestHandleUpgrade_ReplacementDoesNotHoldLockDuringClose(t *testing.T) {
+	const brokerID = "slow-close-broker"
+	m := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	t.Cleanup(m.Shutdown)
+	url, results := upgradeServer(t, m, brokerID)
+
+	_, sessA := connectBroker(t, url, results)
+	a := m.GetConnection(brokerID)
+	require.NotNil(t, a)
+	require.Equal(t, sessA, a.GetSessionID())
+
+	inClose := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var closeOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	a.beforeConnClose = func() {
+		closeOnce.Do(func() {
+			close(inClose)
+			<-releaseClose
+		})
+	}
+	defer release()
+
+	// Reconnect broker B; its HandleUpgrade will replace A and block in A.Close().
+	b := dialBroker(t, url)
+
+	select {
+	case <-inClose:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for replacement to enter old session Close")
+	}
+
+	// While A.Close() is blocked, manager lock operations must not stall and
+	// the new session must already be published.
+	checkDone := make(chan *BrokerConnection, 1)
+	go func() {
+		_ = m.IsConnected("other-broker")
+		_ = m.ListConnectedBrokers()
+		checkDone <- m.GetConnection(brokerID)
+	}()
+
+	select {
+	case cur := <-checkDone:
+		require.NotNil(t, cur, "new session should be published while old session closes")
+		require.NotSame(t, a, cur, "published connection should be the replacement, not the closing session")
+		require.NotEqual(t, sessA, cur.GetSessionID())
+	case <-time.After(2 * time.Second):
+		t.Fatal("ControlChannelManager lock was held while closing replaced session")
+	}
+
+	// Unblock A.Close() and verify B finishes its handshake cleanly.
+	release()
+
+	var res upgradeResult
+	select {
+	case res = <-results:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for replacement HandleUpgrade to return")
+	}
+	require.NoError(t, res.err)
+	require.NotEqual(t, sessA, res.sessionID)
+	requireConnectedFirst(t, b, res.sessionID)
+}
+
+// A stream opened on an old session concurrently with Close() — specifically
+// after Close() has drained streams and released streamsMu, before conn.Close()
+// completes — must be refused rather than registered and left unclosed.
+func TestBrokerConnection_OpenStreamConcurrentWithClose(t *testing.T) {
+	hubSide, _ := lifecycleWebSocketPair(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	hc := &BrokerConnection{
+		brokerID:        "race-stream-broker",
+		sessionID:       "sess-a",
+		conn:            wsprotocol.NewConnection(hubSide, wsprotocol.ConnectionConfig{WriteWait: 5 * time.Second}),
+		log:             slog.Default(),
+		pendingRequests: make(map[string]chan *wsprotocol.ResponseEnvelope),
+		streams:         make(map[string]*StreamProxy),
+		ctx:             ctx,
+		cancel:          cancel,
+	}
+
+	afterDrain := make(chan struct{})
+	releaseConnClose := make(chan struct{})
+	hc.beforeConnClose = func() {
+		close(afterDrain)
+		<-releaseConnClose
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		hc.Close()
+	}()
+
+	select {
+	case <-afterDrain:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Close to drain streams")
+	}
+
+	// Attempt to open a stream on the closing session inside the race window.
+	stream, err := hc.OpenStream(context.Background(), wsprotocol.StreamTypePTY, "agent", "project", 80, 24)
+	close(releaseConnClose)
+
+	select {
+	case <-closeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Close to finish")
+	}
+
+	require.ErrorIs(t, err, errBrokerConnectionLost, "OpenStream after Close began must fail")
+	require.Nil(t, stream)
+}
+
+// Stress concurrent OpenStream and Close calls (intended for -race): every
+// stream open either fails or produces a StreamProxy that receives 4503.
+func TestBrokerConnection_OpenStreamCloseRace(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		hubSide, _ := lifecycleWebSocketPair(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		hc := &BrokerConnection{
+			brokerID:        "race-broker",
+			sessionID:       "sess",
+			conn:            wsprotocol.NewConnection(hubSide, wsprotocol.ConnectionConfig{WriteWait: 5 * time.Second}),
+			log:             slog.Default(),
+			pendingRequests: make(map[string]chan *wsprotocol.ResponseEnvelope),
+			streams:         make(map[string]*StreamProxy),
+			ctx:             ctx,
+			cancel:          cancel,
+		}
+
+		const openers = 4
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		streams := make(chan *StreamProxy, openers)
+
+		for j := 0; j < openers; j++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				st, err := hc.OpenStream(context.Background(), wsprotocol.StreamTypePTY, "agent", "project", 80, 24)
+				if err == nil && st != nil {
+					streams <- st
+				}
+			}()
+		}
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			hc.Close()
+		}()
+
+		close(start)
+		wg.Wait()
+		close(streams)
+
+		for st := range streams {
+			readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, readErr := st.Read(readCtx)
+			readCancel()
+			var sce *StreamClosedError
+			require.ErrorAs(t, readErr, &sce, "stream opened concurrently with Close must receive 4503")
+			require.Equal(t, wsprotocol.ClosePTYUpstreamUnavailable, sce.Code)
+		}
+	}
+}
