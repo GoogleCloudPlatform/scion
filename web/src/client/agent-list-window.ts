@@ -139,6 +139,18 @@ export interface AgentListViewState {
    * state complete-needing.
    */
   modeFilter?: string;
+  /**
+   * Optional client-side filter predicate from the unified filter query dialect
+   * (ptone/scion#9018). When set, replaces legacy `phaseFilter` and `label`
+   * local filtering while still applying `modeFilter`.
+   */
+  filterPredicate?: ((agent: Agent) => boolean) | null;
+  /**
+   * Canonical server `?q=` query string when the unified filter dialect is active.
+   * When defined (even empty string), `isSortedEligible` does not require `=` in
+   * `committedLabel` and `serverParamsKey` tracks `serverQuery` instead of `phaseFilter`.
+   */
+  serverQuery?: string;
 }
 
 /** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
@@ -360,10 +372,11 @@ export class AgentListWindow extends EventTarget {
    * complete set.
    */
   isSortedEligible(committedLabel: string): boolean {
-    const { view, sortField, modeFilter } = this.viewState;
+    const { view, sortField, modeFilter, serverQuery } = this.viewState;
     if (view !== 'grid' && view !== 'list') return false;
     if (modeFilter) return false;
     if (sortField !== 'updated' && sortField !== 'created') return false;
+    if (serverQuery !== undefined) return true;
     const label = committedLabel.trim();
     return label === '' || label.includes('=');
   }
@@ -430,7 +443,10 @@ export class AgentListWindow extends EventTarget {
 
   /** The view-state fields a sorted request depends on. The view (grid or list) is not one of them. */
   private serverParamsKey(): string {
-    const { sortField, sortDir, phaseFilter, pageSize } = this.viewState;
+    const { sortField, sortDir, phaseFilter, pageSize, serverQuery } = this.viewState;
+    if (serverQuery !== undefined) {
+      return `${sortField}|${sortDir}|q:${serverQuery}|${pageSize}`;
+    }
     return `${sortField}|${sortDir}|${phaseFilter}|${pageSize}`;
   }
 
@@ -759,11 +775,15 @@ export class AgentListWindow extends EventTarget {
 
   private filteredAndSorted(list: Agent[]): Agent[] {
     let out = list;
-    if (this.viewState.phaseFilter) {
-      out = out.filter((a) => a.phase === this.viewState.phaseFilter);
+    if (this.viewState.filterPredicate) {
+      out = out.filter(this.viewState.filterPredicate);
+    } else {
+      if (this.viewState.phaseFilter) {
+        out = out.filter((a) => a.phase === this.viewState.phaseFilter);
+      }
+      out = this.filterByLabel(out);
     }
     out = filterByMode(out, this.viewState.modeFilter ?? '');
-    out = this.filterByLabel(out);
     return sortAgents(out, this.viewState.sortField, this.viewState.sortDir);
   }
 
@@ -777,7 +797,12 @@ export class AgentListWindow extends EventTarget {
    * match the filtered row count until the label is committed.
    */
   get items(): Agent[] {
-    if (this._state === 'paged') return this.filterByLabel(this.pageItems);
+    if (this._state === 'paged') {
+      if (this.viewState.filterPredicate) {
+        return this.pageItems.filter(this.viewState.filterPredicate);
+      }
+      return this.filterByLabel(this.pageItems);
+    }
     const display = this.display;
     const start = this._pageIndex * this.viewState.pageSize;
     return display.slice(start, start + this.viewState.pageSize);
