@@ -347,11 +347,15 @@ var agentV1PropTree = sync.OnceValue(func() *jsonSchemaPropNode {
 	return buildJSONSchemaPropNode(root, root, 0)
 })
 
+// maxJSONNestingDepth matches encoding/json's maxNestingDepth so
+// decodeJSONValue cannot recurse unboundedly on deeply nested JSON inputs.
+const maxJSONNestingDepth = 10000
+
 // decodeJSONValue recursively streams a JSON value using UseNumber,
 // canonicalizing object keys in document order against node's declared schema
 // properties so later colliding keys overwrite earlier ones — matching Go's
 // encoding/json unmarshaling into api.ScionConfig.
-func decodeJSONValue(dec *json.Decoder, node *jsonSchemaPropNode) (interface{}, error) {
+func decodeJSONValue(dec *json.Decoder, node *jsonSchemaPropNode, depth int) (interface{}, error) {
 	tok, err := dec.Token()
 	if err != nil {
 		return nil, err
@@ -359,6 +363,9 @@ func decodeJSONValue(dec *json.Decoder, node *jsonSchemaPropNode) (interface{}, 
 	delim, ok := tok.(json.Delim)
 	if !ok {
 		return tok, nil
+	}
+	if depth >= maxJSONNestingDepth {
+		return nil, errors.New("exceeded max depth")
 	}
 	switch delim {
 	case '{':
@@ -373,7 +380,7 @@ func decodeJSONValue(dec *json.Decoder, node *jsonSchemaPropNode) (interface{}, 
 				return nil, fmt.Errorf("expected object key string, got %T", kTok)
 			}
 			canon, child := node.canonicalKey(key)
-			val, err := decodeJSONValue(dec, child)
+			val, err := decodeJSONValue(dec, child, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -390,7 +397,7 @@ func decodeJSONValue(dec *json.Decoder, node *jsonSchemaPropNode) (interface{}, 
 			elemNode = node.items
 		}
 		for dec.More() {
-			elem, err := decodeJSONValue(dec, elemNode)
+			elem, err := decodeJSONValue(dec, elemNode, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -411,7 +418,7 @@ func decodeJSONCanonical(data []byte) (interface{}, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 
-	doc, err := decodeJSONValue(dec, agentV1PropTree())
+	doc, err := decodeJSONValue(dec, agentV1PropTree(), 0)
 	if err != nil {
 		return nil, err
 	}

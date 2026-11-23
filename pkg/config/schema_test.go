@@ -970,6 +970,32 @@ func TestValidateTemplateAgentConfig_InvalidAndNormalization(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to parse agent config scion-agent.json")
 	})
+
+	t.Run("json exceeding max nesting depth refused", func(t *testing.T) {
+		// Depth 10001 (1 outer object + 10000 nested arrays) exceeds encoding/json's
+		// maxNestingDepth (10000) and must be rejected as a parse error rather than
+		// recursing unboundedly.
+		deepArr := []byte(`{"kubernetes":` + strings.Repeat("[", maxJSONNestingDepth) + strings.Repeat("]", maxJSONNestingDepth) + `}`)
+		_, parseErr := ParseScionAgentConfig("scion-agent.json", deepArr)
+		require.Error(t, parseErr)
+
+		_, valErr := ValidateTemplateAgentConfig("scion-agent.json", deepArr)
+		require.Error(t, valErr)
+		assert.Contains(t, valErr.Error(), "failed to parse agent config scion-agent.json")
+		assert.Contains(t, valErr.Error(), "exceeded max depth")
+
+		// Nested objects exceeding maxJSONNestingDepth are also rejected.
+		deepObj := []byte(strings.Repeat(`{"a":`, maxJSONNestingDepth+1) + `1` + strings.Repeat(`}`, maxJSONNestingDepth+1))
+		_, valErr = ValidateTemplateAgentConfig("scion-agent.json", deepObj)
+		require.Error(t, valErr)
+		assert.Contains(t, valErr.Error(), "exceeded max depth")
+
+		// Exactly maxJSONNestingDepth levels (1 outer object + 9999 nested arrays)
+		// parses without hitting the depth cap (matches encoding/json).
+		atLimit := []byte(`{"kubernetes":` + strings.Repeat("[", maxJSONNestingDepth-1) + strings.Repeat("]", maxJSONNestingDepth-1) + `}`)
+		_, err := decodeJSONCanonical(atLimit)
+		require.NoError(t, err)
+	})
 }
 
 func TestFormatAgentConfigValidationError(t *testing.T) {
