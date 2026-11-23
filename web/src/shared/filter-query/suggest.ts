@@ -16,6 +16,7 @@
 
 import { classifyMatch } from '../../utils/palette-match.js';
 import { formatValue } from './canonical.js';
+import { trimASCIISpace } from './parse.js';
 import type { ViewSchema } from './types.js';
 
 export interface Suggestion {
@@ -80,7 +81,7 @@ export function getSuggestions(
       }
     }
 
-    const q = valPrefix.trim().toLowerCase();
+    const q = trimASCIISpace(valPrefix).toLowerCase();
     const scored = candidates
       .map((val) => {
         if (!q) return { val, tier: 0 };
@@ -99,7 +100,7 @@ export function getSuggestions(
   }
 
   // At term boundary or typing a key name -> key suggestions.
-  const q = body.trim().toLowerCase();
+  const q = trimASCIISpace(body).toLowerCase();
   const scoredKeys = schema.keys
     .map((k) => {
       if (!q) return { key: k, tier: 0 };

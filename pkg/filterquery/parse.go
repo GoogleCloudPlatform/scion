@@ -20,6 +20,12 @@ import (
 	"unicode/utf8"
 )
 
+const asciiWhitespace = " \t\r\n"
+
+func trimASCIISpace(s string) string {
+	return strings.Trim(s, asciiWhitespace)
+}
+
 // Parse parses input according to the unified filter query dialect.
 // known reports whether a lowercased key name is recognised by the target view.
 // If no recognised key term appears in input, Parse returns pure-text mode with
@@ -42,7 +48,7 @@ func Parse(input string, known func(key string) bool) (Query, *Error) {
 		}
 	}
 
-	trimmed := strings.TrimSpace(input)
+	trimmed := trimASCIISpace(input)
 	if trimmed == "" {
 		return Query{Mode: ModeText, Text: ""}, nil
 	}

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { comparisonPrefixLen, scanKeyPrefix } from './parse.js';
+import { comparisonPrefixLen, scanKeyPrefix, trimASCIISpace } from './parse.js';
 import type { Query, ViewSchema } from './types.js';
 
 function quoteString(s: string): string {
@@ -81,7 +81,7 @@ function compareStrings(a: string, b: string): number {
  */
 export function canonical(q: Query): string {
   if (q.mode === 'text') {
-    return q.text.trim();
+    return trimASCIISpace(q.text);
   }
 
   const normTerms = q.terms.map((t) => {
@@ -123,7 +123,7 @@ export function canonical(q: Query): string {
  */
 export function serverSubset(q: Query, schema: ViewSchema): string {
   if (q.mode === 'text') {
-    return q.text.trim();
+    return trimASCIISpace(q.text);
   }
   const serverKeys = new Set(
     schema.keys.filter((k) => k.exec === 'server').map((k) => k.name.toLowerCase())

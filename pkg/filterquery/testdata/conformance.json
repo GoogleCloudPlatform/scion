@@ -297,6 +297,27 @@
       "input": "éé phase:running OR x",
       "knownKeys": ["phase", "label"],
       "error": { "code": "syntax", "offset": 19, "length": 2, "utf16Offset": 17, "utf16Length": 2 }
+    },
+    {
+      "name": "leading NBSP keeps input in pure text mode and preserves NBSP in canonical",
+      "input": "\u00a0phase:running",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\u00a0phase:running" },
+      "canonical": "\u00a0phase:running"
+    },
+    {
+      "name": "U+0085 at both edges is preserved in both Go and TS",
+      "input": "\u0085hello\u0085",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\u0085hello\u0085" },
+      "canonical": "\u0085hello\u0085"
+    },
+    {
+      "name": "U+FEFF at both edges is preserved in both Go and TS",
+      "input": "\ufeffhello\ufeff",
+      "knownKeys": ["phase", "label"],
+      "expect": { "mode": "text", "text": "\ufeffhello\ufeff" },
+      "canonical": "\ufeffhello\ufeff"
     }
   ],
   "eval": {

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { parse } from './parse.js';
+import { parse, trimASCIISpace } from './parse.js';
 import type { ViewSchema } from './types.js';
 
 /**
@@ -50,7 +50,7 @@ export function setSingleKeyInQuery(
 ): string {
   const known = (k: string) => schema.keys.some((sk) => sk.name.toLowerCase() === k);
   const target = key.toLowerCase();
-  const trimmed = input.trim();
+  const trimmed = trimASCIISpace(input);
 
   if (!trimmed) {
     return value ? `${target}:${value}` : '';
@@ -89,5 +89,5 @@ export function setSingleKeyInQuery(
       }
     }
   }
-  return out.trim();
+  return trimASCIISpace(out);
 }

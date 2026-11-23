@@ -25,7 +25,7 @@ import (
 // deduplicates each term's values. Cursor binding and URL normalization use it.
 func Canonical(q Query) string {
 	if q.Mode == ModeText {
-		return strings.TrimSpace(q.Text)
+		return trimASCIISpace(q.Text)
 	}
 
 	type normTerm struct {

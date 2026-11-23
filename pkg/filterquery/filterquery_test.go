@@ -313,6 +313,9 @@ func FuzzParse(f *testing.F) {
 	f.Add("label:\"unterminated")
 	f.Add("phase:running \"label:tmp\"")
 	f.Add("phase:running -\"phase:x\"")
+	f.Add("\u00a0phase:running")
+	f.Add("\u0085hello\u0085")
+	f.Add("\ufeffhello\ufeff")
 
 	known := schemas.Agents.HasKey
 	f.Fuzz(func(t *testing.T, input string) {
@@ -321,14 +324,18 @@ func FuzzParse(f *testing.F) {
 			return
 		}
 		canon := filterquery.Canonical(q)
-		if q.Mode == filterquery.ModeStructured {
-			q2, err2 := filterquery.Parse(canon, known)
-			if err2 != nil {
-				t.Fatalf("Parse(Canonical(%q) = %q) failed: %v", input, canon, err2)
-			}
-			if canon2 := filterquery.Canonical(q2); canon2 != canon {
-				t.Fatalf("Canonical not idempotent for %q: %q != %q", input, canon, canon2)
-			}
+		q2, err2 := filterquery.Parse(canon, known)
+		if err2 != nil {
+			t.Fatalf("Parse(Canonical(%q) = %q) failed: %v", input, canon, err2)
+		}
+		if q2.Mode != q.Mode {
+			t.Fatalf("Mode changed on round-trip for %q: %v -> %v (canon=%q)", input, q.Mode, q2.Mode, canon)
+		}
+		if q.Mode == filterquery.ModeText && q2.Text != q.Text {
+			t.Fatalf("Text changed on round-trip for %q: %q -> %q", input, q.Text, q2.Text)
+		}
+		if canon2 := filterquery.Canonical(q2); canon2 != canon {
+			t.Fatalf("Canonical not idempotent for %q: %q != %q", input, canon, canon2)
 		}
 	})
 }

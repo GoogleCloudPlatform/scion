@@ -60,6 +60,11 @@ function isSpace(ch: string): boolean {
   return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
 }
 
+/** Trim only ASCII tokenizer whitespace (space, tab, CR, LF) to match Go. */
+export function trimASCIISpace(s: string): string {
+  return s.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '');
+}
+
 function isASCIILetter(code: number): boolean {
   return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
 }
@@ -194,7 +199,7 @@ export function parse(input: string, known: (key: string) => boolean): ParseResu
     };
   }
 
-  const trimmed = input.trim();
+  const trimmed = trimASCIISpace(input);
   if (trimmed === '') {
     return { query: { mode: 'text', text: '' } };
   }
