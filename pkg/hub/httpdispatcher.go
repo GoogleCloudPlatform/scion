@@ -917,6 +917,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 // a stored environment settings read error, fails the request.
 func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *store.Agent, callerName string, secrets secretResolutionPolicy) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
+	if isShellAgent(agent) && agent.AppliedConfig == nil {
+		return nil, fmt.Errorf("%s: execution container has unreadable applied config", callerName)
+	}
 	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
 	if err != nil {
 		return nil, err
@@ -3679,6 +3682,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		purpose = PurposeRestart
 	default:
 		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
+	}
+	if isShellAgent(agent) && agent.AppliedConfig == nil {
+		return startEnvResult{}, fmt.Errorf("%s: execution container has unreadable applied config", caller)
 	}
 	// Launch material is selected under the delivery credential: every
 	// project-, hub- and broker-scope env var and secret is authorized

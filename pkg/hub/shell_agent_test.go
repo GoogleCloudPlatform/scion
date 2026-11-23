@@ -1666,3 +1666,33 @@ func TestShellAgentLogs_RequireAttach(t *testing.T) {
 		})
 	}
 }
+
+func TestShellAgentDispatch_NilAppliedConfigRefused(t *testing.T) {
+	ctx := context.Background()
+	s := createTestStore(t)
+	project, broker := seedShellTestProjectAndBroker(t, s)
+	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+
+	corruptShell := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "shell-nil-applied",
+		Name:            "shell-nil-applied",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		OwnerID:         api.NewUUID(),
+		HarnessConfig:   config.ShellHarnessConfigName,
+		AppliedConfig:   nil,
+	}
+
+	_, err := d.buildCreateRequestFor(ctx, corruptShell, "DispatchAgentCreate", failOnSecretResolutionError)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "execution container has unreadable applied config")
+
+	_, err = d.buildStartEnv(ctx, corruptShell, "DispatchAgentStart", mintSiteStart)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "execution container has unreadable applied config")
+
+	_, err = d.buildStartEnv(ctx, corruptShell, "DispatchAgentRestart", mintSiteRestart)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "execution container has unreadable applied config")
+}
