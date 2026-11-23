@@ -913,3 +913,449 @@ func TestRefusedUnmarkedChangesLeavesReviewDraftUnchanged(t *testing.T) {
 		t.Errorf("refused reviews emitted %d notifications, want 0", notices)
 	}
 }
+
+type draftFaultStore struct {
+	Store
+	getArtifactErr error
+	listGrantsErr  error
+	listKeysErr    error
+	deleteErr      error
+}
+
+type authorizeErrRecipientHost struct {
+	inner RecipientAuthority
+	err   error
+}
+
+func (h authorizeErrRecipientHost) ResolveRecipient(ctx context.Context, kind, ref string) (RecipientSubject, error) {
+	sub, err := h.inner.ResolveRecipient(ctx, kind, ref)
+	if err != nil || sub == nil {
+		return sub, err
+	}
+	return authorizeErrSubject{inner: sub, err: h.err}, nil
+}
+
+type authorizeErrSubject struct {
+	inner RecipientSubject
+	err   error
+}
+
+func (s authorizeErrSubject) Permits(ctx context.Context, scopeRef, permission string) (bool, error) {
+	return s.inner.Permits(ctx, scopeRef, permission)
+}
+
+func (s authorizeErrSubject) Authorize(context.Context, string, string) (bool, error) {
+	return false, s.err
+}
+
+func (s draftFaultStore) GetArtifact(ctx context.Context, id string) (*Artifact, error) {
+	if s.getArtifactErr != nil {
+		return nil, s.getArtifactErr
+	}
+	return s.Store.GetArtifact(ctx, id)
+}
+
+func (s draftFaultStore) ListGrants(ctx context.Context, artifactID string) ([]Grant, error) {
+	if s.listGrantsErr != nil {
+		return nil, s.listGrantsErr
+	}
+	return s.Store.ListGrants(ctx, artifactID)
+}
+
+func (s draftFaultStore) ListReviewDraftKeys(ctx context.Context, after *ReviewDraftKey, limit int) ([]ReviewDraftKey, error) {
+	if s.listKeysErr != nil {
+		return nil, s.listKeysErr
+	}
+	return s.Store.ListReviewDraftKeys(ctx, after, limit)
+}
+
+func (s draftFaultStore) DeleteReviewDraft(ctx context.Context, artifactID, kind, ref string, expectRev int) (bool, error) {
+	if s.deleteErr != nil {
+		return false, s.deleteErr
+	}
+	return s.Store.DeleteReviewDraft(ctx, artifactID, kind, ref, expectRev)
+}
+
+// TestReapLostAccessReviewDrafts verifies ptone/scion#8475 at the service
+// layer:
+//   - a revoked review grant deletes the draft within one pass even when the
+//     user still has project read access;
+//   - an expired review grant deletes the draft within one pass;
+//   - a deleted/inactive principal (ResolveRecipient -> nil, nil) has its
+//     drafts removed across multiple artifacts within one pass;
+//   - drafts of principals who still have review access (owner, active review
+//     grantee, active write grantee) are untouched;
+//   - the decision log writes a count-only review_draft_access_reap entry
+//     without leaking draft bodies or notes.
+func TestReapLostAccessReviewDrafts(t *testing.T) {
+	f, _, id1 := newReviewDraftFixture(t)
+	id2 := f.publish(agentA, "other.md", []byte(reviewParent), "").Artifact.ID
+
+	// Additional principals:
+	//   revokedU: project-1 member whose review grant on id1 will be revoked
+	//   expiredU: project-1 member whose review grant on id1 has expired
+	//   deletedU: user with review grants on id1 and id2 who will be deleted
+	revokedU := principal{kind: PrincipalKindUser, ref: "user-revoked"}
+	expiredU := principal{kind: PrincipalKindUser, ref: "user-expired"}
+	deletedU := principal{kind: PrincipalKindUser, ref: "user-deleted"}
+	for _, p := range []principal{revokedU, expiredU, deletedU} {
+		f.host.allow(p, "project-1", PermissionRead, PermissionCreate)
+	}
+	f.addGrant(id1, revokedU, GrantReview)
+	f.addGrant(id1, expiredU, GrantReview)
+	f.addGrant(id1, deletedU, GrantReview)
+	f.addGrant(id2, deletedU, GrantReview)
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const secretBody = "PRIVATE-DRAFT-BODY-SENTINEL-8475"
+	const secretNote = "PRIVATE-DRAFT-NOTE-SENTINEL-8475"
+
+	save := func(artID string, p principal, entry string) {
+		t.Helper()
+		if _, err := f.store.PutReviewDraft(ctx, ReviewDraft{
+			ArtifactID: artID, PrincipalKind: p.kind, PrincipalRef: p.ref,
+			BaseSeq: 1, EntryPath: entry, Body: secretBody, Note: secretNote,
+		}, 0, now.Add(-time.Hour), MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("PutReviewDraft(%s, %s:%s): %v", artID, p.kind, p.ref, err)
+		}
+	}
+	save(id1, agentA, "doc.md")   // owner: must survive
+	save(id1, userU, "doc.md")    // active review grantee: must survive
+	save(id1, agentB, "doc.md")   // active write grantee: must survive
+	save(id1, revokedU, "doc.md") // review grant revoked (still reads project-1): must be reaped
+	save(id1, expiredU, "doc.md") // review grant expired: must be reaped
+	save(id1, deletedU, "doc.md") // principal deleted: must be reaped
+	save(id2, deletedU, "other.md")
+
+	// Revoke revokedU's grant; expire expiredU's grant; mark deletedU unknown.
+	f.execSQL(`DELETE FROM artifact_grant WHERE artifact_id = ? AND subject_ref = ?`,
+		id1, PrincipalRef(revokedU.kind, revokedU.ref))
+	f.execSQL(`UPDATE artifact_grant SET expires_at = ? WHERE artifact_id = ? AND subject_ref = ?`,
+		now.Add(-time.Minute).Format(time.RFC3339Nano), id1, PrincipalRef(expiredU.kind, expiredU.ref))
+
+	auth := &fakeRecipientHost{
+		fakeHost: f.host,
+		unknown:  map[string]bool{deletedU.ref: true},
+	}
+	decisionCap := &logCapture{}
+	reapLogger := slog.New(slog.NewJSONHandler(decisionCap, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Use a small pageSize (2) to exercise multi-page cursor pagination.
+	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 2, reapLogger)
+	if err != nil {
+		t.Fatalf("ReapLostAccessReviewDrafts: %v", err)
+	}
+	if res.Checked != 7 || res.Deleted != 4 || res.Errors != 0 {
+		t.Fatalf("result = %+v, want Checked=7 Deleted=4 Errors=0", res)
+	}
+
+	// Lost-access and deleted-principal drafts are gone.
+	for _, tc := range []struct {
+		artID string
+		p     principal
+	}{
+		{id1, revokedU},
+		{id1, expiredU},
+		{id1, deletedU},
+		{id2, deletedU},
+	} {
+		if _, err := f.store.GetReviewDraft(ctx, tc.artID, tc.p.kind, tc.p.ref); !errors.Is(err, ErrNotFound) {
+			t.Errorf("draft (%s, %s:%s) survived reap: err=%v", tc.artID, tc.p.kind, tc.p.ref, err)
+		}
+	}
+
+	// Active drafts survive byte-exact.
+	for _, p := range []principal{agentA, userU, agentB} {
+		d, err := f.store.GetReviewDraft(ctx, id1, p.kind, p.ref)
+		if err != nil || d.Body != secretBody || d.Note != secretNote {
+			t.Errorf("active draft (%s:%s) = %+v, %v", p.kind, p.ref, d, err)
+		}
+	}
+
+	// Decision log records count only, never draft content.
+	entries, raw := decisionCap.take(t)
+	checkEntry(t, "lost-access reap summary", one(t, "lost-access reap summary", entries), "INFO", map[string]any{
+		logKeyAction:        logActionDraftAccessReapPass,
+		logKeyOutcome:       logOutcomeAllowed,
+		logKeyPrincipalKind: ActorKindSystem,
+		logKeyPrincipalID:   AuthorityReconciler,
+		logKeyAuthority:     AuthorityReconciler,
+		logKeyCount:         4.0,
+	})
+	if strings.Contains(raw, secretBody) || strings.Contains(raw, secretNote) {
+		t.Errorf("decision log leaked draft content: %s", raw)
+	}
+
+	// Second pass with no lost-access drafts left deletes 0 and writes no log.
+	res2, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 2, reapLogger)
+	if err != nil || res2.Checked != 3 || res2.Deleted != 0 || res2.Errors != 0 {
+		t.Fatalf("second pass = %+v, %v; want Checked=3 Deleted=0 Errors=0", res2, err)
+	}
+	if entries2, _ := decisionCap.take(t); len(entries2) != 0 {
+		t.Errorf("second pass wrote unexpected log entries: %v", entries2)
+	}
+}
+
+// TestReapLostAccessReviewDraftsTransientErrorsFailSafe proves that transient
+// store, principal-resolution, grant-load, and policy errors never delete
+// drafts and are surfaced in the result and decision log.
+func TestReapLostAccessReviewDraftsTransientErrorsFailSafe(t *testing.T) {
+	f, _, id := newReviewDraftFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Nil store / nil authority are safe no-ops.
+	if res, err := ReapLostAccessReviewDrafts(ctx, nil, &fakeRecipientHost{fakeHost: f.host}, now, 10, nil); err != nil || res != (DraftAccessReapResult{}) {
+		t.Fatalf("nil store = %+v, %v", res, err)
+	}
+	if res, err := ReapLostAccessReviewDrafts(ctx, f.store, nil, now, 10, nil); err != nil || res != (DraftAccessReapResult{}) {
+		t.Fatalf("nil auth = %+v, %v", res, err)
+	}
+
+	// Save a draft for userU (who still has review access via GrantReview).
+	if _, err := f.store.PutReviewDraft(ctx, ReviewDraft{
+		ArtifactID: id, PrincipalKind: userU.kind, PrincipalRef: userU.ref,
+		BaseSeq: 1, EntryPath: "doc.md", Body: "keep-me", Note: "keep-note",
+	}, 0, now.Add(-time.Hour), MaxDraftsPerPrincipal); err != nil {
+		t.Fatal(err)
+	}
+
+	assertDraftSurvives := func(t *testing.T, label string) {
+		t.Helper()
+		d, err := f.store.GetReviewDraft(ctx, id, userU.kind, userU.ref)
+		if err != nil || d.Body != "keep-me" {
+			t.Fatalf("%s: draft did not survive: %+v, %v", label, d, err)
+		}
+	}
+
+	t.Run("ResolveRecipient error", func(t *testing.T) {
+		decisionCap := &logCapture{}
+		logger := slog.New(slog.NewJSONHandler(decisionCap, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		auth := &fakeRecipientHost{fakeHost: f.host, resolveErr: errStoreDown}
+		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, logger)
+		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		assertDraftSurvives(t, "ResolveRecipient error")
+		entries, _ := decisionCap.take(t)
+		checkEntry(t, "error summary", one(t, "error summary", entries), "WARN", map[string]any{
+			logKeyAction:  logActionDraftAccessReapPass,
+			logKeyOutcome: logOutcomeError,
+			logKeyReason:  logReasonStoreError,
+			logKeyCount:   0.0,
+		})
+	})
+
+	t.Run("Permits error", func(t *testing.T) {
+		auth := &fakeRecipientHost{fakeHost: f.host, err: errStoreDown}
+		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		assertDraftSurvives(t, "Permits error")
+	})
+
+	t.Run("Authorize error", func(t *testing.T) {
+		auth := authorizeErrRecipientHost{inner: &fakeRecipientHost{fakeHost: f.host}, err: errStoreDown}
+		res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		assertDraftSurvives(t, "Authorize error")
+	})
+
+	t.Run("GetArtifact error", func(t *testing.T) {
+		auth := &fakeRecipientHost{fakeHost: f.host}
+		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, getArtifactErr: errStoreDown}, auth, now, 10, nil)
+		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		assertDraftSurvives(t, "GetArtifact error")
+	})
+
+	t.Run("ListGrants error", func(t *testing.T) {
+		auth := &fakeRecipientHost{fakeHost: f.host}
+		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, listGrantsErr: errStoreDown}, auth, now, 10, nil)
+		if !errors.Is(err, errStoreDown) || res.Checked != 1 || res.Deleted != 0 || res.Errors != 1 {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		assertDraftSurvives(t, "ListGrants error")
+	})
+
+	t.Run("ListReviewDraftKeys error", func(t *testing.T) {
+		auth := &fakeRecipientHost{fakeHost: f.host}
+		res, err := ReapLostAccessReviewDrafts(ctx, draftFaultStore{Store: f.store, listKeysErr: errStoreDown}, auth, now, 10, nil)
+		if !errors.Is(err, errStoreDown) || res.Checked != 0 || res.Deleted != 0 {
+			t.Fatalf("res=%+v err=%v", res, err)
+		}
+		assertDraftSurvives(t, "ListReviewDraftKeys error")
+	})
+}
+
+// TestReapLostAccessReviewDraftsAccessDecisionAccuracy explicitly tests every
+// review-access boundary (ptone/scion#8475):
+//   - read-only grantee (GrantRead, no review/write grant) -> reaped;
+//   - active GrantReview, GrantWrite, GrantAdmin, and owner -> kept;
+//   - scope GrantReview kept while principal is authorized for PermissionCreate
+//     in the granted scope, reaped once that scope authorization is lost;
+//   - principal whose Permits(PermissionCreate) is denied despite holding a
+//     write grant -> reaped;
+//   - expired artifact -> reaped.
+func TestReapLostAccessReviewDraftsAccessDecisionAccuracy(t *testing.T) {
+	f, _, id := newReviewDraftFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	readOnlyU := principal{kind: PrincipalKindUser, ref: "acc-readonly"}
+	adminGrantU := principal{kind: PrincipalKindUser, ref: "acc-admin-grant"}
+	scopeRevU := principal{kind: PrincipalKindUser, ref: "acc-scope-rev"}
+	noCreateA := principal{kind: PrincipalKindAgent, ref: "acc-no-create"}
+	for _, p := range []principal{readOnlyU, adminGrantU, scopeRevU, noCreateA} {
+		f.host.allow(p, "project-1", PermissionRead, PermissionCreate)
+	}
+	f.host.allow(scopeRevU, "project-2", PermissionCreate)
+
+	f.addGrant(id, readOnlyU, GrantRead)
+	f.addGrant(id, adminGrantU, GrantAdmin)
+	f.addGrant(id, noCreateA, GrantWrite)
+	if _, err := f.store.PutGrant(ctx, &Grant{
+		ArtifactID: id, SubjectKind: SubjectScope, SubjectRef: "project-2", Permission: GrantWrite,
+	}, 100, true, &Actor{Kind: agentA.kind, Ref: agentA.ref, Authority: AuthorityOwner}); err != nil {
+		t.Fatal(err)
+	}
+
+	save := func(artID string, p principal) {
+		t.Helper()
+		if _, err := f.store.PutReviewDraft(ctx, ReviewDraft{
+			ArtifactID: artID, PrincipalKind: p.kind, PrincipalRef: p.ref,
+			BaseSeq: 1, EntryPath: "doc.md", Body: "draft-" + p.ref, Note: "",
+		}, 0, now.Add(-time.Hour), MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("PutReviewDraft(%s): %v", p.ref, err)
+		}
+	}
+	save(id, agentA)      // owner -> keep
+	save(id, userU)       // GrantReview -> keep
+	save(id, agentB)      // GrantWrite -> keep
+	save(id, adminGrantU) // GrantAdmin -> keep
+	save(id, scopeRevU)   // scope GrantReview (authorized in project-2) -> keep initially
+	save(id, readOnlyU)   // GrantRead only -> reap
+	save(id, noCreateA)   // GrantWrite but Permits(PermissionCreate) denied -> reap
+
+	// Deny PermissionCreate on noCreateA's credential.
+	f.host.deny(noCreateA, "project-1", PermissionCreate)
+
+	auth := &fakeRecipientHost{fakeHost: f.host, unknown: map[string]bool{}}
+	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	if err != nil {
+		t.Fatalf("pass 1: %v", err)
+	}
+	if res.Checked != 7 || res.Deleted != 2 || res.Errors != 0 {
+		t.Fatalf("pass 1 = %+v, want Checked=7 Deleted=2 Errors=0", res)
+	}
+	for _, gone := range []principal{readOnlyU, noCreateA} {
+		if _, err := f.store.GetReviewDraft(ctx, id, gone.kind, gone.ref); !errors.Is(err, ErrNotFound) {
+			t.Errorf("expected %s to be reaped, err=%v", gone.ref, err)
+		}
+	}
+	for _, kept := range []principal{agentA, userU, agentB, adminGrantU, scopeRevU} {
+		if _, err := f.store.GetReviewDraft(ctx, id, kept.kind, kept.ref); err != nil {
+			t.Errorf("expected %s to survive pass 1, err=%v", kept.ref, err)
+		}
+	}
+
+	// Revoke scopeRevU's PermissionCreate in project-2: scope GrantReview no longer grants review access.
+	f.host.mu.Lock()
+	delete(f.host.perms[PrincipalRef(scopeRevU.kind, scopeRevU.ref)], "project-2")
+	f.host.mu.Unlock()
+	res, err = ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	if err != nil || res.Deleted != 1 {
+		t.Fatalf("pass 2 (scope review revoked) = %+v, %v; want Deleted=1", res, err)
+	}
+	if _, err := f.store.GetReviewDraft(ctx, id, scopeRevU.kind, scopeRevU.ref); !errors.Is(err, ErrNotFound) {
+		t.Errorf("scopeRevU draft survived after losing project-2 role: %v", err)
+	}
+
+	// An expired artifact has no review access -> all remaining drafts on it are reaped.
+	past := now.Add(-time.Minute)
+	if _, err := f.store.SetExpiry(ctx, id, &past, &Actor{Kind: agentA.kind, Ref: agentA.ref, Authority: AuthorityOwner}); err != nil {
+		t.Fatal(err)
+	}
+	res, err = ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	if err != nil || res.Deleted != 4 {
+		t.Fatalf("pass 3 (expired artifact) = %+v, %v; want Deleted=4", res, err)
+	}
+}
+
+// TestReapLostAccessReviewDraftsNoCrossPrincipalDeletion proves that reaping
+// one principal's lost-access or deleted-principal draft never deletes any
+// other principal's draft on the same artifact, nor deletes the same
+// principal's draft on another artifact where they still have review access.
+func TestReapLostAccessReviewDraftsNoCrossPrincipalDeletion(t *testing.T) {
+	f, _, id1 := newReviewDraftFixture(t)
+	id2 := f.publish(agentA, "doc2.md", []byte(reviewParent), "").Artifact.ID
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// userU has review grants on both id1 and id2; agentB has write on id1.
+	f.addGrant(id2, userU, GrantReview)
+	otherU := principal{kind: PrincipalKindUser, ref: "user-other-active"}
+	f.host.allow(otherU, "project-1", PermissionRead, PermissionCreate)
+	f.addGrant(id1, otherU, GrantReview)
+	f.addGrant(id2, otherU, GrantReview)
+
+	save := func(artID string, p principal, entry, body string) {
+		t.Helper()
+		if _, err := f.store.PutReviewDraft(ctx, ReviewDraft{
+			ArtifactID: artID, PrincipalKind: p.kind, PrincipalRef: p.ref,
+			BaseSeq: 1, EntryPath: entry, Body: body, Note: "",
+		}, 0, now.Add(-time.Hour), MaxDraftsPerPrincipal); err != nil {
+			t.Fatalf("PutReviewDraft(%s, %s): %v", artID, p.ref, err)
+		}
+	}
+	save(id1, userU, "doc.md", "u-on-id1")
+	save(id2, userU, "doc2.md", "u-on-id2")
+	save(id1, otherU, "doc.md", "other-on-id1")
+	save(id2, otherU, "doc2.md", "other-on-id2")
+	save(id1, agentB, "doc.md", "agentB-on-id1")
+
+	// Revoke userU's grant on id1 ONLY, and mark agentB deleted.
+	f.execSQL(`DELETE FROM artifact_grant WHERE artifact_id = ? AND subject_ref = ?`,
+		id1, PrincipalRef(userU.kind, userU.ref))
+	auth := &fakeRecipientHost{
+		fakeHost: f.host,
+		unknown:  map[string]bool{agentB.ref: true},
+	}
+
+	res, err := ReapLostAccessReviewDrafts(ctx, f.store, auth, now, 10, nil)
+	if err != nil {
+		t.Fatalf("ReapLostAccessReviewDrafts: %v", err)
+	}
+	if res.Checked != 5 || res.Deleted != 2 || res.Errors != 0 {
+		t.Fatalf("result = %+v, want Checked=5 Deleted=2 Errors=0", res)
+	}
+
+	// Deleted: userU on id1, agentB on id1.
+	if _, err := f.store.GetReviewDraft(ctx, id1, userU.kind, userU.ref); !errors.Is(err, ErrNotFound) {
+		t.Errorf("userU draft on id1 survived: %v", err)
+	}
+	if _, err := f.store.GetReviewDraft(ctx, id1, agentB.kind, agentB.ref); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleted agentB draft on id1 survived: %v", err)
+	}
+
+	// Untouched: userU on id2, otherU on both id1 and id2.
+	for _, tc := range []struct {
+		artID string
+		p     principal
+		want  string
+	}{
+		{id2, userU, "u-on-id2"},
+		{id1, otherU, "other-on-id1"},
+		{id2, otherU, "other-on-id2"},
+	} {
+		d, err := f.store.GetReviewDraft(ctx, tc.artID, tc.p.kind, tc.p.ref)
+		if err != nil || d.Body != tc.want {
+			t.Errorf("untouched draft (%s, %s) = %+v, %v; want body %q", tc.artID, tc.p.ref, d, err, tc.want)
+		}
+	}
+}

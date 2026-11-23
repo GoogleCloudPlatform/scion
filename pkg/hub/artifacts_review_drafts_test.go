@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -361,6 +362,167 @@ func TestReapArtifactVersionsReapsReviewDraftsWhenExperimentOff(t *testing.T) {
 	kept, err := st.GetReviewDraft(ctx, freshArtID, artifacts.PrincipalKindUser, u.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "active", kept.Body)
+}
+
+// TestReapArtifactVersionsReapsLostAccessAndDeletedPrincipalDrafts verifies
+// ptone/scion#8475 end-to-end through reapArtifactVersions:
+//   - revoking a reviewer's grant deletes their draft within one pass, even
+//     when they still hold read access to the artifact's home project;
+//   - deleting or deactivating a user or soft-deleting an agent deletes their
+//     drafts within one pass;
+//   - other users' drafts (who still hold review access) and the
+//     private-to-reviewer rule remain completely untouched;
+//   - no review notifications are emitted, and reaping runs even while
+//     hub.artifacts_review_drafts is off.
+func TestReapArtifactVersionsReapsLostAccessAndDeletedPrincipalDrafts(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	setReviewDraftsForTest(t, srv, true)
+	dispatcher := &recordingDispatcher{}
+	srv.SetDispatcher(dispatcher)
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "reap-access-p1")
+	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "reap-access-owner", AgentRoleBaseline)
+
+	createTestUserWithProjectRole(t, s, tid("reap-revoked"), "reap-revoked@test.com", p1.ID, store.ProjectRoleMember)
+	revokedUser, err := s.GetUser(ctx, tid("reap-revoked"))
+	require.NoError(t, err)
+	createTestUserWithProjectRole(t, s, tid("reap-active"), "reap-active@test.com", p1.ID, store.ProjectRoleMember)
+	activeUser, err := s.GetUser(ctx, tid("reap-active"))
+	require.NoError(t, err)
+	createTestUserWithProjectRole(t, s, tid("reap-deleted"), "reap-deleted@test.com", p1.ID, store.ProjectRoleMember)
+	deletedUser, err := s.GetUser(ctx, tid("reap-deleted"))
+	require.NoError(t, err)
+	deletedAgent, deletedAgentTok := artifactAgent(t, srv, s, p1.ID, "reap-deleted-agent", AgentRoleBaseline)
+
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=plan.md&scope="+p1.ID, []byte("# Plan\n"), ownerTok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	artID := decodeArtifactID(t, rec)
+
+	st := srv.ArtifactStore()
+	ownerActor := &artifacts.Actor{Kind: artifacts.PrincipalKindAgent, Ref: "owner", Authority: artifacts.AuthorityOwner}
+	grantID := func(prefix, kind, ref, perm string) string {
+		g := &artifacts.Grant{
+			ID:          "g-reap-" + prefix,
+			ArtifactID:  artID,
+			SubjectKind: artifacts.SubjectPrincipal,
+			SubjectRef:  artifacts.PrincipalRef(kind, ref),
+			Permission:  perm,
+		}
+		_, gerr := st.PutGrant(ctx, g, 100, true, ownerActor)
+		require.NoError(t, gerr, prefix)
+		return g.ID
+	}
+	revokedGrantID := grantID("revoked", artifacts.PrincipalKindUser, revokedUser.ID, artifacts.GrantReview)
+	grantID("active", artifacts.PrincipalKindUser, activeUser.ID, artifacts.GrantReview)
+	grantID("deleted-user", artifacts.PrincipalKindUser, deletedUser.ID, artifacts.GrantReview)
+	grantID("deleted-agent", artifacts.PrincipalKindAgent, deletedAgent.ID, artifacts.GrantWrite)
+
+	draftURL := "/api/v1/artifacts/" + artID + "/review-draft"
+	putBody := func(tag string) []byte {
+		return []byte(`{"rev":0,"base":1,"entry":"plan.md","body":"# Plan\n{>>` + tag + `<<}\n","note":"note-` + tag + `"}`)
+	}
+
+	require.Equal(t, http.StatusOK, userArtifactRequest(t, srv, revokedUser, http.MethodPut, draftURL, putBody("revoked")).Code)
+	require.Equal(t, http.StatusOK, userArtifactRequest(t, srv, activeUser, http.MethodPut, draftURL, putBody("active")).Code)
+	require.Equal(t, http.StatusOK, userArtifactRequest(t, srv, deletedUser, http.MethodPut, draftURL, putBody("deleted-user")).Code)
+	require.Equal(t, http.StatusOK, doRawAgentRequest(t, srv, http.MethodPut, draftURL, putBody("deleted-agent"), deletedAgentTok).Code)
+
+	// Revoke revokedUser's review grant (they still belong to p1 with read access).
+	require.NoError(t, st.DeleteGrant(ctx, artID, revokedGrantID, ownerActor))
+	// Delete deletedUser and soft-delete deletedAgent.
+	require.NoError(t, s.DeleteUser(ctx, deletedUser.ID))
+	require.NoError(t, s.DeleteAgent(ctx, deletedAgent.ID))
+
+	// Turn the experiment off to prove the lost-access reaper still runs.
+	setReviewDraftsForTest(t, srv, false)
+	srv.reapArtifactVersions(ctx)
+
+	// Revoked reviewer, deleted user, and deleted agent drafts are all gone.
+	_, err = st.GetReviewDraft(ctx, artID, artifacts.PrincipalKindUser, revokedUser.ID)
+	assert.ErrorIs(t, err, artifacts.ErrNotFound, "revoked reviewer's draft must be reaped in one pass")
+	_, err = st.GetReviewDraft(ctx, artID, artifacts.PrincipalKindUser, deletedUser.ID)
+	assert.ErrorIs(t, err, artifacts.ErrNotFound, "deleted user's draft must be reaped in one pass")
+	_, err = st.GetReviewDraft(ctx, artID, artifacts.PrincipalKindAgent, deletedAgent.ID)
+	assert.ErrorIs(t, err, artifacts.ErrNotFound, "deleted agent's draft must be reaped in one pass")
+
+	// Active reviewer's draft survives intact and remains private to activeUser.
+	setReviewDraftsForTest(t, srv, true)
+	rec = userArtifactRequest(t, srv, activeUser, http.MethodGet, draftURL, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got artifacts.ReviewDraftResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.NotNil(t, got.Draft)
+	assert.Contains(t, got.Draft.Body, "active")
+
+	// Owner still cannot see activeUser's draft (private-to-reviewer rule).
+	rec = doRawAgentRequest(t, srv, http.MethodGet, draftURL, nil, ownerTok)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"draft":null,"currentSeq":1}`, rec.Body.String())
+
+	// Reaping emitted zero review notifications.
+	time.Sleep(50 * time.Millisecond)
+	assert.Empty(t, dispatcher.getCalls(), "lost-access draft reaping must emit no review notice")
+}
+
+// TestReapLostAccessReviewDraftsIndeterminateAuthzFailSafe verifies that a
+// transient hub store error during CheckAccess (producing an indeterminate
+// Decision) surfaces as an error from recipientSubject.Authorize and does NOT
+// delete a valid reviewer's draft.
+func TestReapLostAccessReviewDraftsIndeterminateAuthzFailSafe(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	ctx := context.Background()
+
+	p1 := artifactProject(t, s, "reap-indet-p1")
+	p2 := artifactProject(t, s, "reap-indet-p2")
+	createTestUserWithProjectRole(t, s, tid("reap-indet-u"), "reap-indet@test.com", p1.ID, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, s, tid("reap-indet-u"), "reap-indet@test.com", p2.ID, store.ProjectRoleMember)
+	u, err := s.GetUser(ctx, tid("reap-indet-u"))
+	require.NoError(t, err)
+	_, ownerTok := artifactAgent(t, srv, s, p1.ID, "reap-indet-owner", AgentRoleBaseline)
+
+	rec := doRawAgentRequest(t, srv, http.MethodPost, "/api/v1/artifacts?name=plan.md&scope="+p1.ID, []byte("# Plan\n"), ownerTok)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	artID := decodeArtifactID(t, rec)
+
+	st := srv.ArtifactStore()
+	// Scope write grant to p2 forces Authorize(ctx, p2.ID, PermissionCreate)
+	// through authzService.CheckAccess.
+	_, err = st.PutGrant(ctx, &artifacts.Grant{
+		ID:          "g-reap-indet-scope",
+		ArtifactID:  artID,
+		SubjectKind: artifacts.SubjectScope,
+		SubjectRef:  p2.ID,
+		Permission:  artifacts.GrantWrite,
+	}, 100, true, &artifacts.Actor{Kind: artifacts.PrincipalKindAgent, Ref: "owner", Authority: artifacts.AuthorityOwner})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	_, err = st.PutReviewDraft(ctx, artifacts.ReviewDraft{
+		ArtifactID: artID, PrincipalKind: artifacts.PrincipalKindUser, PrincipalRef: u.ID,
+		BaseSeq: 1, EntryPath: "plan.md", Body: "keep-on-transient-authz-error", Note: "",
+	}, 0, now.Add(-time.Hour), artifacts.MaxDraftsPerPrincipal)
+	require.NoError(t, err)
+
+	// Use a dedicated Server view whose AuthzService sees a transient failure
+	// during effective-group resolution, making CheckAccess return an
+	// indeterminate Decision without mutating srv.store.
+	faultySrv := &Server{
+		store:        s,
+		authzService: NewAuthzService(&failEffectiveGroupsStore{Store: s, failErr: fmt.Errorf("injected authz store failure")}, slog.Default()),
+	}
+
+	res, err := artifacts.ReapLostAccessReviewDrafts(ctx, st, newArtifactHost(faultySrv), now, 100, nil)
+	require.Error(t, err)
+	assert.Equal(t, 1, res.Checked)
+	assert.Equal(t, 0, res.Deleted)
+	assert.Equal(t, 1, res.Errors)
+
+	kept, err := st.GetReviewDraft(ctx, artID, artifacts.PrincipalKindUser, u.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "keep-on-transient-authz-error", kept.Body)
 }
 
 func mustJSONString(t *testing.T, s string) string {

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -24,8 +25,9 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// Send-time recipient warning (ptone/scion#4575) and open-review access
-// filter (ptone/scion#7650): the hub side of artifacts.RecipientAuthority.
+// Send-time recipient warning (ptone/scion#4575), open-review access filter
+// (ptone/scion#7650), and lost-access review-draft reaper (ptone/scion#8475):
+// the hub side of artifacts.RecipientAuthority.
 //
 // These methods answer for a NAMED principal (the direct recipient of a
 // message, or a reviewer with a recorded review session), not for the caller
@@ -106,9 +108,9 @@ func (r *recipientSubject) Permits(ctx context.Context, scopeRef, permission str
 // AuthzService.CheckAccess with the principal as the subject, the same
 // question Authorize asks for a caller (without the credential step, which
 // Permits answers), under maskAllAuthzMemo so nothing memoized for the
-// caller's request is observed. CheckAccess reports no lookup error: a policy
-// evaluation that cannot complete is a deny, so it may count toward the
-// warning and drops an unverified open review.
+// caller's request is observed. An indeterminate decision (a store or
+// resolution fault) is returned as an error so callers can distinguish a
+// transient lookup failure from a policy deny and fail safe.
 func (r *recipientSubject) Authorize(ctx context.Context, scopeRef, permission string) (bool, error) {
 	perm, ok := artifactPermission(permission)
 	h := r.host
@@ -120,6 +122,9 @@ func (r *recipientSubject) Authorize(ctx context.Context, scopeRef, permission s
 		ParentType: permissions.ResourceProject,
 		ParentID:   scopeRef,
 	}, Action(perm.Action))
+	if decision.IsIndeterminate() {
+		return false, fmt.Errorf("artifacts: authorization check indeterminate: %s", decision.Reason)
+	}
 	return decision.Allowed, nil
 }
 
