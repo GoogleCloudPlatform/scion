@@ -565,3 +565,214 @@ func TestNormalizeFeedPrincipalKind(t *testing.T) {
 	assert.Equal(t, "user", normalizeFeedPrincipalKind("federated_user"))
 	assert.Equal(t, "agent", normalizeFeedPrincipalKind("agent"))
 }
+
+// Phase 3 item 2: start=beginning replays retained history from seq 1, respects
+// filter and limit pagination, and cursor/after_message take precedence.
+func TestConversationWatch_StartBeginning(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	user := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	otherUser := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	agent := &store.Agent{ID: uuid.NewString(), Slug: "a1", Name: "Agent 1", ProjectID: projID, Phase: string(state.PhaseRunning)}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	group := watchTestGroupConv(t, s, projID)
+
+	createMsg := func(sender, senderID, recipient, recipientID, body string) *store.Message {
+		m := &store.Message{
+			ID:             uuid.NewString(),
+			ProjectID:      projID,
+			ConversationID: group.ID,
+			Sender:         sender,
+			SenderID:       senderID,
+			Recipient:      recipient,
+			RecipientID:    recipientID,
+			Msg:            body,
+			Type:           "chat",
+			DispatchState:  store.MessageDispatchDispatched,
+		}
+		require.NoError(t, s.CreateMessage(ctx, m))
+		return m
+	}
+
+	// seq 1: caller's own message
+	m1 := createMsg("user:"+user.Email, user.ID, "group:g", group.ID, "from-self")
+	// seq 2: agent reply to group (not explicitly addressed to user)
+	m2 := createMsg("agent:"+agent.Slug, agent.ID, "group:g", group.ID, "from-agent-group")
+	// seq 3: agent reply explicitly addressed to user
+	m3 := createMsg("agent:"+agent.Slug, agent.ID, "user:"+user.Email, user.ID, "from-agent-to-user")
+	// seq 4: other user message
+	m4 := createMsg("user:"+otherUser.Email, otherUser.ID, "group:g", group.ID, "from-other-user")
+
+	watchJSON := func(query string) conversationWatchResponse {
+		t.Helper()
+		rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/conversations/"+group.ID+"/watch?"+query, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body conversationWatchResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		return body
+	}
+
+	// start=beginning with default filter (others): replays seq 2, 3, 4 (excludes caller's own m1).
+	others := watchJSON("start=beginning&wait=0")
+	require.Len(t, others.Events, 3)
+	assert.Equal(t, []string{"msg:" + m2.ID, "msg:" + m3.ID, "msg:" + m4.ID}, []string{
+		others.Events[0].EventID, others.Events[1].EventID, others.Events[2].EventID,
+	})
+	assert.False(t, others.HasMore)
+	assert.False(t, others.TimedOut)
+	assert.Equal(t, eventfeed.EncodeCursor(group.ID, 4), others.NextCursor)
+
+	// start=beginning with filter=all: replays all 4 messages from seq 1.
+	all := watchJSON("start=beginning&filter=all&wait=0")
+	require.Len(t, all.Events, 4)
+	assert.Equal(t, "msg:"+m1.ID, all.Events[0].EventID)
+	assert.Equal(t, "msg:"+m4.ID, all.Events[3].EventID)
+
+	// start=beginning with filter=addressed: replays only m3.
+	addr := watchJSON("start=beginning&filter=addressed&wait=0")
+	require.Len(t, addr.Events, 1)
+	assert.Equal(t, "msg:"+m3.ID, addr.Events[0].EventID)
+	assert.Equal(t, eventfeed.EncodeCursor(group.ID, 4), addr.NextCursor)
+
+	// Pagination with start=beginning&limit=2, then resume with returned cursor.
+	page1 := watchJSON("start=beginning&filter=all&limit=2&wait=0")
+	require.Len(t, page1.Events, 2)
+	assert.True(t, page1.HasMore)
+	assert.Equal(t, []string{"msg:" + m1.ID, "msg:" + m2.ID}, []string{page1.Events[0].EventID, page1.Events[1].EventID})
+
+	// Cursor wins over start=beginning.
+	page2 := watchJSON("start=beginning&filter=all&cursor=" + string(page1.NextCursor) + "&wait=0")
+	require.Len(t, page2.Events, 2)
+	assert.False(t, page2.HasMore)
+	assert.Equal(t, []string{"msg:" + m3.ID, "msg:" + m4.ID}, []string{page2.Events[0].EventID, page2.Events[1].EventID})
+
+	// after_message wins over start=beginning.
+	afterM2 := watchJSON("start=beginning&filter=all&after_message=" + m2.ID + "&wait=0")
+	require.Len(t, afterM2.Events, 2)
+	assert.Equal(t, []string{"msg:" + m3.ID, "msg:" + m4.ID}, []string{afterM2.Events[0].EventID, afterM2.Events[1].EventID})
+}
+
+// Phase 3 item 3: Membership revocation ends an in-flight watch poll early with
+// 200 OK (empty events, current cursor), and the next poll gets 403 Forbidden
+// (design §3.5 "Revalidation").
+func TestConversationWatch_MembershipRevocationEarlyReturn(t *testing.T) {
+	srv, s := testServer(t)
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	srv.SetEventPublisher(ep)
+
+	ctx := context.Background()
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	member := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	group := watchTestGroupConv(t, s, projID)
+
+	// Seed one message so current cursor is non-zero (seq 1).
+	seed := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: group.ID,
+		Sender:         "agent:a1",
+		SenderID:       "a1",
+		Recipient:      "group:g",
+		RecipientID:    group.ID,
+		Msg:            "seed",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, seed))
+
+	resCh := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		resCh <- doRequestAsUser(t, srv, member, http.MethodGet,
+			"/api/v1/conversations/"+group.ID+"/watch?start=head&wait=5s", nil)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Revoke project membership and publish membership-changed event.
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, member.ID)
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleBindingScopeProject && b.ScopeID == projID {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+	start := time.Now()
+	srv.publishMembershipChanged(member.ID, projID)
+
+	var firstBody conversationWatchResponse
+	select {
+	case rec := <-resCh:
+		assert.Less(t, time.Since(start), time.Second, "membership revocation must end poll early")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &firstBody))
+		assert.Empty(t, firstBody.Events)
+		assert.False(t, firstBody.TimedOut)
+		assert.Equal(t, eventfeed.EncodeCursor(group.ID, 1), firstBody.NextCursor)
+	case <-time.After(3 * time.Second):
+		t.Fatal("watch poll did not return early after membership revocation")
+	}
+
+	// Next poll with the returned cursor is re-authorized and gets 403.
+	nextRec := doRequestAsUser(t, srv, member, http.MethodGet,
+		"/api/v1/conversations/"+group.ID+"/watch?cursor="+string(firstBody.NextCursor)+"&wait=0", nil)
+	assert.Equal(t, http.StatusForbidden, nextRec.Code, nextRec.Body.String())
+}
+
+// Phase 3 item 4: Server shutdown (BeginShutdown) ends an in-flight watch poll
+// early with 200 OK (empty events, current cursor) instead of an empty body
+// (design §3.6 "Shutdown").
+func TestConversationWatch_ShutdownDrainEarlyReturn(t *testing.T) {
+	srv, s := testServer(t)
+	ep := NewChannelEventPublisher()
+	t.Cleanup(ep.Close)
+	srv.SetEventPublisher(ep)
+
+	ctx := context.Background()
+	projID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
+	user := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	group := watchTestGroupConv(t, s, projID)
+
+	seed := &store.Message{
+		ID:             uuid.NewString(),
+		ProjectID:      projID,
+		ConversationID: group.ID,
+		Sender:         "agent:a1",
+		SenderID:       "a1",
+		Recipient:      "group:g",
+		RecipientID:    group.ID,
+		Msg:            "seed",
+		Type:           "chat",
+		DispatchState:  store.MessageDispatchDispatched,
+	}
+	require.NoError(t, s.CreateMessage(ctx, seed))
+
+	resCh := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		resCh <- doRequestAsUser(t, srv, user, http.MethodGet,
+			"/api/v1/conversations/"+group.ID+"/watch?start=head&wait=5s", nil)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	start := time.Now()
+	srv.BeginShutdown()
+
+	select {
+	case rec := <-resCh:
+		assert.Less(t, time.Since(start), time.Second, "BeginShutdown must end poll early")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var body conversationWatchResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Empty(t, body.Events)
+		assert.False(t, body.TimedOut)
+		assert.Equal(t, eventfeed.EncodeCursor(group.ID, 1), body.NextCursor)
+	case <-time.After(3 * time.Second):
+		t.Fatal("watch poll did not return early on BeginShutdown")
+	}
+}

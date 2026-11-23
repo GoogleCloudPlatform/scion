@@ -36,6 +36,7 @@ const hostedUserGuide = {
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
 		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
+		{ label: 'Receiving Replies (Third-Party Agents)', slug: 'hosted/user/receiving-replies' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
 		{ label: 'Agent Plugins (Experimental)', slug: 'local/agent-plugins' },

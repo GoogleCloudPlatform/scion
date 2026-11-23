@@ -417,6 +417,50 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 		principal = eventfeed.Principal{Kind: normalizeFeedPrincipalKind(identity.Type()), ID: identity.ID()}
 	}
 
+	// Subscribe to membership changes BEFORE authorizing so a revocation
+	// published during setup is queued and immediately ends the poll early
+	// with an empty result + current cursor; the next poll gets 403
+	// (design §3.5 "Revalidation").
+	var (
+		membershipCh          <-chan Event
+		unsubscribeMembership = func() {}
+		membershipUserID      string
+	)
+	if user := GetUserIdentityFromContext(ctx); user != nil {
+		membershipUserID = user.ID()
+		membershipCh, unsubscribeMembership = subscribeMembershipChanged(s.getEventPublisher(), membershipUserID)
+		defer unsubscribeMembership()
+	}
+
+	// End blocking polls early with a normal 200 (empty events, current cursor)
+	// when the server begins shutting down (design §3.6 "Shutdown"), so
+	// in-flight long-polls do not hold the HTTP drain.
+	streamCtx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
+
+	stopCh := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(stopCh)
+		for {
+			select {
+			case <-watchDone:
+				return
+			case <-streamCtx.Done():
+				return
+			case evt, ok := <-membershipCh:
+				if !ok {
+					membershipCh = nil
+					continue
+				}
+				if membershipChangedNames(evt, membershipUserID) {
+					return
+				}
+			}
+		}
+	}()
+	defer close(watchDone)
+
 	var authorizedConv *store.Conversation
 	authorizer := func(authCtx context.Context, convID string) (*store.Conversation, error) {
 		conv, authErr := s.authorizeConversationReadByID(authCtx, r, convID)
@@ -435,6 +479,7 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 		Filter:         filter,
 		Limit:          limit,
 		Wait:           wait,
+		StopCh:         stopCh,
 	})
 	if err != nil {
 		switch {

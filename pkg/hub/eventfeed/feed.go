@@ -130,7 +130,22 @@ func (f *Feed) Poll(ctx context.Context, p Principal, authz Authorizer, req Poll
 	}
 	after = scannedTo
 
-	// Step 5: wait for wakeup, recheck tick, deadline, or context cancellation.
+	// Step 5: wait for wakeup, recheck tick, deadline, early stop, or context cancellation.
+	if req.StopCh != nil {
+		select {
+		case <-req.StopCh:
+			if ctx.Err() != nil {
+				return PollResult{}, ctx.Err()
+			}
+			return PollResult{
+				Events:     []Event{},
+				NextCursor: EncodeCursor(req.ConversationID, after),
+				Truncated:  truncated,
+			}, nil
+		default:
+		}
+	}
+
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	recheck := time.NewTicker(f.recheckInterval())
@@ -140,6 +155,15 @@ func (f *Feed) Poll(ctx context.Context, p Principal, authz Authorizer, req Poll
 		select {
 		case <-ctx.Done():
 			return PollResult{}, ctx.Err()
+		case <-req.StopCh:
+			if ctx.Err() != nil {
+				return PollResult{}, ctx.Err()
+			}
+			return PollResult{
+				Events:     []Event{},
+				NextCursor: EncodeCursor(req.ConversationID, after),
+				Truncated:  truncated,
+			}, nil
 		case <-deadline.C:
 			return PollResult{
 				Events:     []Event{},
