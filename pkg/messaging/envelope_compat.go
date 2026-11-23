@@ -105,6 +105,17 @@ func MapLegacyType(oldType, systemCategory string, hasAddressee bool) (MessageKi
 		intent := IntentInform
 		return KindText, &intent, nil
 
+	case messages.TypeSecretRequest:
+		// An agent asks a human to supply one or more secrets; the requests
+		// travel as rows, the body is the markdown fallback.
+		intent := IntentQuestion
+		return KindText, &intent, nil
+
+	case messages.TypeSecretResponse:
+		// The hub-formatted record of a secret fulfillment or dismissal.
+		intent := IntentInform
+		return KindText, &intent, nil
+
 	default:
 		// Unknown type — treat as text/inform and log a warning.
 		slog.Warn("unknown legacy message type, defaulting to text/inform",

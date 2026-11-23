@@ -226,13 +226,15 @@ func (s *Server) removeAgentScopedSecretsCtx(ctx context.Context, backend secret
 // withAgentSecretCleanup runs fn (a hard-delete, purge, env-gather recreate,
 // or create compensation transaction) with an in-transaction key collector
 // attached to txCtx so agentHardDeleteWork captures the exact agent-scope key
-// set from the rows it deletes before DeleteSecretsByScope removes them. It
-// also captures a pre-transaction snapshot for callers that do not invoke
-// agentHardDeleteWork (such as PurgeDeletedAgentsByID on already soft-deleted
-// agents, where new secret writes are refused). When fn commits with n > 0, it
-// runs best-effort post-commit external backend cleanup for the merged key set
-// and emits post-commit withdrawn live updates and audit events for secret
-// requests withdrawn by the delete/purge.
+// set from the rows it deletes before DeleteSecretsByScope removes them, and
+// a withdrawn secret-request collector so WithdrawAgentSecretRequestsOnDelete
+// records the exact secret-request rows withdrawn inside the transaction. It
+// also captures a pre-transaction secret-key snapshot for callers that do not
+// invoke agentHardDeleteWork (such as PurgeDeletedAgentsByID on already
+// soft-deleted agents, where new secret writes are refused). When fn commits
+// with n > 0, it runs best-effort post-commit external backend cleanup for the
+// merged key set and emits post-commit withdrawn live updates and audit events
+// for every secret request withdrawn by the delete/purge.
 func (s *Server) withAgentSecretCleanup(ctx context.Context, agentID string, fn func(txCtx context.Context) (int, error)) (int, error) {
 	return s.withAgentSecretCleanupOpts(ctx, agentID, false, fn)
 }
@@ -250,15 +252,16 @@ func (s *Server) withAgentSecretCleanupOpts(ctx context.Context, agentID string,
 	if s.GetSecretBackend() != nil {
 		preKeys = s.listAgentSecretNames(ctx, agentID)
 	}
-	pendingSRIDs := s.listAgentPendingSecretRequestIDs(ctx, agentID)
 	collector := &agentSecretCleanupCollector{}
+	var withdrawn []*store.SecretRequest
 	txCtx := withAgentSecretCleanupCollector(ctx, collector)
+	txCtx = store.WithWithdrawnSecretRequestsCollector(txCtx, &withdrawn)
 	n, err := fn(txCtx)
 	if err == nil && n > 0 {
 		keys := append(preKeys, collector.snapshot()...)
 		s.removeAgentScopedSecrets(ctx, agentID, keys)
-		if len(pendingSRIDs) > 0 {
-			s.emitPostCommitDeletedAgentSecretRequests(ctx, pendingSRIDs)
+		if len(withdrawn) > 0 {
+			s.emitPostCommitDeletedAgentSecretRequests(ctx, withdrawn)
 		}
 		return n, err
 	}
@@ -273,49 +276,27 @@ func (s *Server) withAgentSecretCleanupOpts(ctx context.Context, agentID string,
 	return n, err
 }
 
-func (s *Server) listAgentPendingSecretRequestIDs(ctx context.Context, agentID string) []string {
-	if s.store == nil || agentID == "" {
-		return nil
-	}
-	var ids []string
-	cursor := ""
-	for {
-		res, err := s.store.ListAgentSecretRequests(ctx, &store.ListAgentSecretRequestsOptions{
-			AgentID: agentID,
-			State:   store.SecretRequestListStatePending,
-			Cursor:  cursor,
-			Limit:   store.MaxSecretRequestListLimit,
-		})
-		if err != nil || res == nil || len(res.Items) == 0 {
-			break
-		}
-		for _, r := range res.Items {
-			ids = append(ids, r.ID)
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
-	}
-	return ids
-}
-
-func (s *Server) emitPostCommitDeletedAgentSecretRequests(ctx context.Context, rowIDs []string) {
-	if s.store == nil || len(rowIDs) == 0 {
+func (s *Server) emitPostCommitDeletedAgentSecretRequests(ctx context.Context, rows []*store.SecretRequest) {
+	if len(rows) == 0 {
 		return
+	}
+	// Deduplicate by row ID (keeping the latest copy in case a retried tx
+	// recorded the same row on an earlier attempt).
+	order := make([]string, 0, len(rows))
+	byID := make(map[string]*store.SecretRequest, len(rows))
+	for _, sr := range rows {
+		if sr == nil || sr.ID == "" {
+			continue
+		}
+		if _, seen := byID[sr.ID]; !seen {
+			order = append(order, sr.ID)
+		}
+		byID[sr.ID] = sr
 	}
 	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentScopedSecretCleanupTimeout)
 	defer cancel()
-	rowsByID, err := s.store.GetSecretRequestsByIDs(postCtx, rowIDs)
-	if err != nil {
-		slog.Warn("agent delete: failed to reload withdrawn secret requests after commit", "error", err)
-		return
-	}
-	for _, id := range rowIDs {
-		sr, ok := rowsByID[id]
-		if !ok || sr == nil {
-			continue
-		}
+	for _, id := range order {
+		sr := byID[id]
 		if sr.Status != store.SecretRequestStatusWithdrawn ||
 			sr.WithdrawnBy != store.SecretRequestWithdrawnByHub ||
 			sr.WithdrawnReason != "agent deleted" {

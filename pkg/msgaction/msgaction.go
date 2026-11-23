@@ -129,6 +129,8 @@ type KindSpec struct {
 	// (or zero value) never re-arms a stale claim.
 	ClaimRecovery ClaimRecovery
 	// ClaimTTL is the staleness threshold used only when ClaimRecovery == ClaimRecoveryToPending.
+	// The entire resolve step (all backend writes plus finish) must complete within
+	// ClaimTTL, because the stale-claim sweeper re-arms claimed rows once ClaimTTL elapses.
 	ClaimTTL time.Duration
 	// Expires is the default TTL of a pending action (0 means never expires).
 	Expires time.Duration

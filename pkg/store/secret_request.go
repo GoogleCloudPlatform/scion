@@ -246,6 +246,29 @@ type DismissSecretRequestsResult struct {
 	Replayed         bool
 	// Submitting is non-nil when a targeted row is currently in "fulfilling".
 	Submitting *SecretRequest
+	// Replaced is non-nil when every targeted row is in "replaced" status.
+	Replaced *SecretRequest
+}
+
+type withdrawnSecretRequestsCollectorKey struct{}
+
+// WithWithdrawnSecretRequestsCollector attaches a slice pointer to ctx so
+// WithdrawAgentSecretRequestsOnDelete records every row it transitions inside
+// a hard-delete or retention-purge transaction. Callers inspect the slice
+// strictly after commit to publish live updates and emit audit events without
+// a pre-transaction listing race.
+func WithWithdrawnSecretRequestsCollector(ctx context.Context, out *[]*SecretRequest) context.Context {
+	return context.WithValue(ctx, withdrawnSecretRequestsCollectorKey{}, out)
+}
+
+// RecordWithdrawnSecretRequests appends rows to any collector attached to ctx.
+func RecordWithdrawnSecretRequests(ctx context.Context, rows []*SecretRequest) {
+	if len(rows) == 0 {
+		return
+	}
+	if out, ok := ctx.Value(withdrawnSecretRequestsCollectorKey{}).(*[]*SecretRequest); ok && out != nil {
+		*out = append(*out, rows...)
+	}
 }
 
 // WithdrawSecretRequestsInput is the input to WithdrawSecretRequests.

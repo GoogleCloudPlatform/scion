@@ -798,8 +798,20 @@ func (c *CompositeStore) DismissSecretRequests(ctx context.Context, in *store.Di
 		}
 
 		if len(toDismissUIDs) == 0 {
+			allReplaced := len(targeted) > 0
+			for _, r := range targeted {
+				if r.Status != secretrequest.StatusReplaced {
+					allReplaced = false
+					break
+				}
+			}
+			var replacedRow *store.SecretRequest
+			if allReplaced {
+				replacedRow = entSecretRequestToStore(targeted[0])
+			}
 			return &store.DismissSecretRequestsResult{
 				AlreadyDismissed: alreadyDismissed,
+				Replaced:         replacedRow,
 			}, nil
 		}
 
@@ -1352,6 +1364,7 @@ func (c *CompositeStore) WithdrawAgentSecretRequestsOnDelete(ctx context.Context
 	for i, r := range updated {
 		out[i] = entSecretRequestToStore(r)
 	}
+	store.RecordWithdrawnSecretRequests(ctx, out)
 	return out, nil
 }
 

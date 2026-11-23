@@ -140,6 +140,18 @@ func TestMapLegacyType_AllOldTypes(t *testing.T) {
 			wantKind:   KindText,
 			wantIntent: ptrIntent(IntentInform),
 		},
+		{
+			name:       "secret-request → text/question",
+			oldType:    messages.TypeSecretRequest,
+			wantKind:   KindText,
+			wantIntent: ptrIntent(IntentQuestion),
+		},
+		{
+			name:       "secret-response → text/inform",
+			oldType:    messages.TypeSecretResponse,
+			wantKind:   KindText,
+			wantIntent: ptrIntent(IntentInform),
+		},
 	}
 
 	for _, tc := range tests {

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -74,9 +75,12 @@ const (
 
 	maxFulfillRequestBodyBytes = 256 * 1024
 	maxSecretRequestValueBytes = 64 * 1024
-	// secretRequestFulfillSetTimeout bounds each backend.Set call during fulfill
-	// well below SecretRequestClaimTTL (2m) so a slow backend cannot race the
-	// stale-claim sweeper (N3).
+	// secretRequestFulfillTotalTimeout bounds the entire backend.Set loop well
+	// below SecretRequestClaimTTL (2m) so a multi-key fulfill cannot outrun the
+	// stale-claim sweeper.
+	secretRequestFulfillTotalTimeout = 90 * time.Second
+	// secretRequestFulfillSetTimeout caps each individual backend.Set call within
+	// secretRequestFulfillTotalTimeout.
 	secretRequestFulfillSetTimeout   = 30 * time.Second
 	secretRequestCompensationTimeout = 15 * time.Second
 )
@@ -260,8 +264,19 @@ func (s *Server) isSecretRequestRecipient(ctx context.Context, user UserIdentity
 		return false
 	}
 	if chatKey == "" {
-		if promptMsg != nil && promptMsg.RecipientID != "" && promptMsg.RecipientID == user.ID() {
-			return true
+		if promptMsg != nil {
+			if promptMsg.RecipientID != "" && promptMsg.RecipientID == user.ID() {
+				return true
+			}
+			if promptMsg.ConversationID != "" && s.store != nil {
+				if parts, err := s.store.ListParticipants(ctx, promptMsg.ConversationID); err == nil {
+					for _, p := range parts {
+						if p.PrincipalKind == "user" && p.PrincipalID == user.ID() {
+							return true
+						}
+					}
+				}
+			}
 		}
 		return false
 	}
@@ -459,6 +474,7 @@ func (s *Server) handleSecretRequestGet(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	canAnswer := s.isSecretRequestRecipient(ctx, user, chatKey, promptMsg, true)
 	_, canAttach := s.checkSecretRequestAgentPerm(ctx, user, rows[0], ActionAttach)
 	now := time.Now().UTC()
 	hasPending := false
@@ -472,6 +488,9 @@ func (s *Server) handleSecretRequestGet(w http.ResponseWriter, r *http.Request, 
 	canRespond := true
 	reason := ""
 	switch {
+	case !canAnswer:
+		canRespond = false
+		reason = "you are not an eligible responder for this secret request"
 	case !canAttach:
 		canRespond = false
 		reason = "you need agent.attach permission on this agent to supply or dismiss secrets"
@@ -749,8 +768,14 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Step 4: Store each key in the secret backend at agent scope, bounded
-	// below SecretRequestClaimTTL (N3). On any failure, compensate and return 503.
-	var writtenKeys []string
+	// as a whole by secretRequestFulfillTotalTimeout (< SecretRequestClaimTTL)
+	// with each individual Set capped at secretRequestFulfillSetTimeout.
+	// Track only keys newly created by this call (checking GetMeta before Set
+	// and Set's created flag) so 503 rollback never deletes an already-existing
+	// secret during a failed rotation.
+	loopCtx, loopCancel := context.WithTimeout(ctx, secretRequestFulfillTotalTimeout)
+	defer loopCancel()
+	var createdKeys []string
 	secretVersions := make(map[string]int, len(claimRes.Claimed))
 	for _, row := range claimRes.Claimed {
 		val := valByNorm[row.KeyNorm]
@@ -758,8 +783,10 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		if target == "" {
 			target = row.Key
 		}
-		setCtx, setCancel := context.WithTimeout(ctx, secretRequestFulfillSetTimeout)
-		_, meta, setErr := s.secretBackend.Set(setCtx, &secret.SetSecretInput{
+		setCtx, setCancel := context.WithTimeout(loopCtx, secretRequestFulfillSetTimeout)
+		_, metaErr := s.secretBackend.GetMeta(setCtx, row.Key, store.ScopeAgent, row.AgentID)
+		existedBefore := !errors.Is(metaErr, store.ErrNotFound)
+		created, meta, setErr := s.secretBackend.Set(setCtx, &secret.SetSecretInput{
 			Name:          row.Key,
 			Value:         val,
 			SecretType:    row.SecretType,
@@ -774,11 +801,13 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		})
 		setCancel()
 		if setErr != nil {
-			compensate(writtenKeys, true)
+			compensate(createdKeys, true)
 			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "failed to store secret in backend; please retry", nil)
 			return
 		}
-		writtenKeys = append(writtenKeys, row.Key)
+		if !existedBefore && created {
+			createdKeys = append(createdKeys, row.Key)
+		}
 		if meta != nil {
 			secretVersions[row.ID] = meta.Version
 		}
@@ -812,15 +841,27 @@ func (s *Server) handleSecretRequestFulfill(w http.ResponseWriter, r *http.Reque
 		Now:             finishNow,
 	})
 	if err != nil {
-		compensate(writtenKeys, true)
+		compensate(createdKeys, true)
 		writeErrorFromErr(w, err, "")
 		return
 	}
 	if finRes.Conflict != nil {
-		// Claim was lost (e.g., agent hard-deleted or stale-claim recovered during Set):
-		// roll back written keys on a detached context (N2). A recovered pending row
-		// reports submitting, not withdrawn (N7).
-		compensate(writtenKeys, false)
+		// On finish compare-and-set conflict, delete newly-created keys ONLY when
+		// the conflict row was withdrawn by the hub (agent hard-deleted or
+		// purged). Otherwise (e.g., stale-claim recovery followed by another
+		// responder's fulfill), leave the backend alone and log per §4.6
+		// ("a value that was already written stays in place").
+		if finRes.Conflict.Status == store.SecretRequestStatusWithdrawn &&
+			finRes.Conflict.WithdrawnBy == store.SecretRequestWithdrawnByHub {
+			compensate(createdKeys, false)
+		} else if len(createdKeys) > 0 {
+			slog.Warn("secret request fulfill finish conflict; leaving written backend keys in place",
+				"message_id", msgID,
+				"conflict_row_id", finRes.Conflict.ID,
+				"conflict_status", finRes.Conflict.Status,
+				"written_key_count", len(createdKeys),
+			)
+		}
 		code := msgaction.ConflictCode(msgaction.SecretRequestKindSpec, finRes.Conflict.Status)
 		if code == "" {
 			code = msgaction.ConflictSubmitting
@@ -1087,6 +1128,23 @@ func (s *Server) handleSecretRequestDismiss(w http.ResponseWriter, r *http.Reque
 			ResponseMessageID: respMsgID,
 			Replayed:          true,
 		})
+		return
+	}
+	if res.Replaced != nil {
+		s.emitSecretRequestRefused(ctx, &MessageActionEvent{
+			RowID:     res.Replaced.ID,
+			MessageID: msgID,
+			ProjectID: res.Replaced.ProjectID,
+			AgentID:   res.Replaced.AgentID,
+			AgentName: res.Replaced.AgentName,
+			Key:       res.Replaced.Key,
+			Version:   res.Replaced.Version,
+			ActorKind: MessageActionActorUser,
+			ActorID:   user.ID(),
+			Surface:   parsed.Surface,
+			Reason:    msgaction.ConflictReplaced,
+		})
+		s.writeSecretRequestConflict(w, ctx, msgaction.ConflictReplaced, res.Replaced)
 		return
 	}
 	if len(res.Dismissed) == 0 {

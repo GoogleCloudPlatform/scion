@@ -88,17 +88,23 @@ type failingSecretBackend struct {
 	mu        sync.Mutex
 	failOnKey string
 	failErr   error
+	afterSet  func(ctx context.Context, input *secret.SetSecretInput)
 }
 
 func (f *failingSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
 	f.mu.Lock()
 	failKey := f.failOnKey
 	failErr := f.failErr
+	afterSet := f.afterSet
 	f.mu.Unlock()
 	if failKey != "" && input != nil && strings.EqualFold(input.Name, failKey) {
 		return false, nil, failErr
 	}
-	return f.SecretBackend.Set(ctx, input)
+	created, meta, err := f.SecretBackend.Set(ctx, input)
+	if err == nil && afterSet != nil {
+		afterSet(ctx, input)
+	}
+	return created, meta, err
 }
 
 func newSecretRequestsFixture(t *testing.T, enableExp bool) *secretRequestsFixture {
@@ -347,6 +353,40 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	require.NotNil(t, send2.SecretRequests[0].Replaced)
 	require.Equal(t, 1, send2.SecretRequests[0].Replaced.Version)
 
+	// AC13: Send a 1-key card v1, replace it with --update v2, and assert both
+	// fulfill and dismiss on the replaced v1 card return 409 replaced.
+	rrAC13v1 := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "AC13_KEY", Description: "v1 to be replaced"},
+	}, false)
+	require.Equal(t, http.StatusOK, rrAC13v1.Code, rrAC13v1.Body.String())
+	var ac13v1 struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrAC13v1.Body.Bytes(), &ac13v1))
+	rrAC13v2 := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "AC13_KEY", Description: "v2 replacement"},
+	}, true)
+	require.Equal(t, http.StatusOK, rrAC13v2.Code, rrAC13v2.Body.String())
+
+	rrReplFulfill := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+ac13v1.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+		Values: map[string]string{"AC13_KEY": "stale-v1-val"},
+	})
+	require.Equal(t, http.StatusConflict, rrReplFulfill.Code, rrReplFulfill.Body.String())
+	require.Contains(t, rrReplFulfill.Body.String(), msgaction.ConflictReplaced)
+
+	rrReplDismiss := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+ac13v1.MessageID+"/dismiss", f.alice, DismissSecretRequestBody{
+		Reason: "stale v1 dismiss",
+	})
+	require.Equal(t, http.StatusConflict, rrReplDismiss.Code, rrReplDismiss.Body.String())
+	require.Contains(t, rrReplDismiss.Body.String(), msgaction.ConflictReplaced)
+
+	// Clean up AC13_KEY v2 by withdrawing it so step 9's expiry/audit counts stay exact.
+	rrAC13WD := f.doAgentJSON(t, http.MethodPost, "/api/v1/agent/secret-requests/withdraw", WithdrawSecretRequestsRequest{
+		Keys:   []string{"AC13_KEY"},
+		Reason: "cleanup ac13 test",
+	})
+	require.Equal(t, http.StatusOK, rrAC13WD.Code, rrAC13WD.Body.String())
+
 	// 2. GET card as recipient Alice (has agent.attach -> canRespond=true).
 	rrCard := f.doUserJSON(t, http.MethodGet, "/api/v1/secret-requests/"+send2.MessageID, f.alice, nil)
 	require.Equal(t, http.StatusOK, rrCard.Code, "body=%s audit=%+v", rrCard.Body.String(), f.audit.snapshot())
@@ -366,28 +406,19 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	})
 	require.Equal(t, http.StatusForbidden, rrBobFulfill.Code)
 
-	// 3a2. Dave holds project-owner (agent.attach!) on proj, but is NOT a
+	// 3a2. Dave holds agent.attach (admin) on proj, but is NOT a
 	// recipient of Alice's DM -> 403 + refused audit event with reason "not_recipient"
 	// on BOTH fulfill and dismiss (R5).
 	dave := &store.User{
 		ID:          api.NewUUID(),
 		Email:       "dave@example.com",
 		DisplayName: "Dave",
-		Role:        store.UserRoleMember,
+		Role:        store.UserRoleAdmin,
 		Status:      "active",
 	}
-	require.NoError(t, f.store.CreateUser(ctx, dave))
-	ownerRD, err := f.store.GetRoleDefinitionByName(ctx, "project-owner", store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
-		ID:               api.NewUUID(),
-		RoleDefinitionID: ownerRD.ID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          f.project.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      dave.ID,
-	})
-	require.NoError(t, err)
+	createTestUserWithRole(t, f.store, dave.ID, dave.Email, store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	require.True(t, f.srv.authzService.CheckAccess(ctx, NewAuthenticatedUser(dave.ID, dave.Email, dave.DisplayName, dave.Role, string(ClientTypeWeb)), agentResource(f.agent), ActionAttach).Allowed,
+		"test invariant: Dave must hold agent.attach so the 403 proves the recipient guard")
 
 	f.audit.reset()
 	rrDaveFulfill := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+send2.MessageID+"/fulfill", dave, FulfillSecretRequestBody{
@@ -542,6 +573,16 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	require.NotContains(t, string(auditJSON), canary, "canary leaked into audit events")
 	require.NotContains(t, f.logBuf.String(), canary, "canary leaked into hub logs")
 
+	// Canary MUST NOT appear in any notifications for the user or asking agent.
+	userNotifs, nerr := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.alice.ID, false)
+	require.NoError(t, nerr)
+	userNotifsJSON, _ := json.Marshal(userNotifs)
+	require.NotContains(t, string(userNotifsJSON), canary, "canary leaked into user notifications")
+	agentNotifs, nerr := f.store.GetNotifications(ctx, store.SubscriberTypeAgent, f.agent.ID, false)
+	require.NoError(t, nerr)
+	agentNotifsJSON, _ := json.Marshal(agentNotifs)
+	require.NotContains(t, string(agentNotifsJSON), canary, "canary leaked into agent notifications")
+
 	// Also verify FulfillSecretRequestBody.LogValue() redacts Values.
 	var lvBuf bytes.Buffer
 	slog.New(slog.NewJSONHandler(&lvBuf, nil)).Info("probe", "body", FulfillSecretRequestBody{
@@ -655,9 +696,9 @@ func TestSecretRequests_EndToEnd(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rrHD.Body.Bytes(), &hdCard))
 
 	f.audit.reset()
-	_, err = f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func() (int, error) {
-		if txErr := f.store.WithTx(ctx, func(tx store.Store) error {
-			_, _, err := f.srv.agentHardDeleteWork(ctx, tx, f.agent, AuditActor{}, store.Deactivation{
+	_, err = f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func(txCtx context.Context) (int, error) {
+		if txErr := f.store.WithTx(txCtx, func(tx store.Store) error {
+			_, _, err := f.srv.agentHardDeleteWork(txCtx, tx, f.agent, AuditActor{}, store.Deactivation{
 				Cause: store.EdgeDeactivationAgentHardDelete,
 				OpID:  api.NewUUID(),
 			}, "test hard delete")
@@ -775,9 +816,9 @@ func TestSecretRequests_DeletePurgeAndRollbackAudit(t *testing.T) {
 
 	// 1. Rollback: tx withdraws rows then returns error -> 0 withdrawn events emitted, rows remain pending.
 	f.audit.reset()
-	_, err := f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func() (int, error) {
-		txErr := f.store.WithTx(ctx, func(tx store.Store) error {
-			if _, werr := tx.WithdrawAgentSecretRequestsOnDelete(ctx, f.agent.ID, time.Now().UTC()); werr != nil {
+	_, err := f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func(txCtx context.Context) (int, error) {
+		txErr := f.store.WithTx(txCtx, func(tx store.Store) error {
+			if _, werr := tx.WithdrawAgentSecretRequestsOnDelete(txCtx, f.agent.ID, time.Now().UTC()); werr != nil {
 				return werr
 			}
 			return errors.New("simulated rollback")
@@ -791,9 +832,9 @@ func TestSecretRequests_DeletePurgeAndRollbackAudit(t *testing.T) {
 
 	// 2. Hard delete commit: exactly 2 withdrawn events (one per pending row).
 	f.audit.reset()
-	_, err = f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func() (int, error) {
-		if txErr := f.store.WithTx(ctx, func(tx store.Store) error {
-			_, _, herr := f.srv.agentHardDeleteWork(ctx, tx, f.agent, AuditActor{}, store.Deactivation{
+	_, err = f.srv.withAgentSecretCleanup(ctx, f.agent.ID, func(txCtx context.Context) (int, error) {
+		if txErr := f.store.WithTx(txCtx, func(tx store.Store) error {
+			_, _, herr := f.srv.agentHardDeleteWork(txCtx, tx, f.agent, AuditActor{}, store.Deactivation{
 				Cause: store.EdgeDeactivationAgentHardDelete,
 				OpID:  api.NewUUID(),
 			}, "hard delete test")
@@ -843,8 +884,8 @@ func TestSecretRequests_DeletePurgeAndRollbackAudit(t *testing.T) {
 	require.NoError(t, f.store.UpdateAgent(ctx, ag2))
 
 	f.audit.reset()
-	n, err := f.srv.withAgentSecretCleanup(ctx, ag2.ID, func() (int, error) {
-		return f.store.PurgeDeletedAgentsByID(ctx, []string{ag2.ID}, time.Now().UTC().Add(time.Minute))
+	n, err := f.srv.withAgentSecretCleanup(ctx, ag2.ID, func(txCtx context.Context) (int, error) {
+		return f.store.PurgeDeletedAgentsByID(txCtx, []string{ag2.ID}, time.Now().UTC().Add(time.Minute))
 	})
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
@@ -855,4 +896,210 @@ func TestSecretRequests_DeletePurgeAndRollbackAudit(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, purgeWD, "expected exactly 1 withdrawn audit event per pending row on retention purge")
+}
+
+// TestSecretRequests_StaleClaimRecoveryDoesNotClobberSecondFulfill verifies R1:
+// when a first responder's backend.Set blocks past SecretRequestClaimTTL, the
+// sweeper recovers the claim, a second responder claims and finishes, and the
+// first responder's Set then returns and hits a finish CAS conflict, the first
+// responder MUST NOT delete the second responder's stored secret.
+func TestSecretRequests_StaleClaimRecoveryDoesNotClobberSecondFulfill(t *testing.T) {
+	f := newSecretRequestsFixture(t, true)
+	ctx := context.Background()
+
+	// Create a second user (dave) with agent.attach and a shared group
+	// conversation with alice, dave, and the asking agent so both users are
+	// eligible responders.
+	dave := &store.User{
+		ID:          api.NewUUID(),
+		Email:       "dave-race@example.com",
+		DisplayName: "Dave Race",
+		Role:        store.UserRoleAdmin,
+		Status:      "active",
+	}
+	createTestUserWithRole(t, f.store, dave.ID, dave.Email, store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+	require.True(t, f.srv.authzService.CheckAccess(ctx, NewAuthenticatedUser(dave.ID, dave.Email, dave.DisplayName, dave.Role, string(ClientTypeWeb)), agentResource(f.agent), ActionAttach).Allowed,
+		"test invariant: Dave must hold agent.attach")
+
+	projID := f.project.ID
+	conv := &store.Conversation{
+		ID:         api.NewUUID(),
+		ProjectID:  &projID,
+		Kind:       "group",
+		Surface:    "native",
+		DriftState: "active",
+	}
+	require.NoError(t, f.store.CreateConversation(ctx, conv))
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    f.alice.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: conv.ID,
+		PrincipalKind:  "user",
+		PrincipalID:    dave.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+	require.NoError(t, f.store.AddParticipant(ctx, &store.ConversationParticipant{
+		ID:             api.NewUUID(),
+		ConversationID: conv.ID,
+		PrincipalKind:  "agent",
+		PrincipalID:    f.agent.ID,
+		Role:           "member",
+		JoinedAt:       time.Now().UTC(),
+	}))
+
+	// Send a 1-key secret request into the shared group conversation.
+	body, err := json.Marshal(OutboundMessageRequest{
+		ConversationRef: "conv:" + conv.ID,
+		Msg:             "Need RACE_KEY",
+		SecretRequests: []messages.SecretRequestInput{
+			{Key: "RACE_KEY", Description: "shared race test"},
+		},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/outbound-message", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentCtx(req.Context(), f.agent))
+	rrSend := httptest.NewRecorder()
+	f.srv.mux.ServeHTTP(rrSend, req)
+	require.Equal(t, http.StatusOK, rrSend.Code, rrSend.Body.String())
+
+	var card struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrSend.Body.Bytes(), &card))
+	require.NotEmpty(t, card.MessageID)
+
+	// Block Alice's first backend.Set right after it stores, before FinishSecretRequestFulfill.
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var firstOnce sync.Once
+	f.backend.mu.Lock()
+	f.backend.afterSet = func(_ context.Context, input *secret.SetSecretInput) {
+		if input != nil && input.Value == "alice-stale-value" {
+			firstOnce.Do(func() {
+				close(firstEntered)
+				<-releaseFirst
+			})
+		}
+	}
+	f.backend.mu.Unlock()
+
+	aliceDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		aliceDone <- f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+card.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+			Values: map[string]string{"RACE_KEY": "alice-stale-value"},
+		})
+	}()
+
+	// Wait until Alice has claimed and completed backend.Set (and is now blocked before Finish).
+	select {
+	case <-firstEntered:
+	case rr := <-aliceDone:
+		t.Fatalf("Alice returned before backend.Set: status=%d body=%s", rr.Code, rr.Body.String())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Alice's backend.Set")
+	}
+
+	// Run sweeper past SecretRequestClaimTTL to recover Alice's stale claim.
+	expN, recN, err := f.srv.sweepSecretRequests(ctx, time.Now().UTC().Add(msgaction.SecretRequestClaimTTL+time.Second))
+	require.NoError(t, err)
+	require.Equal(t, 0, expN)
+	require.Equal(t, 1, recN)
+
+	// Second responder (Dave) claims and finishes with his value.
+	rrDave := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+card.MessageID+"/fulfill", dave, FulfillSecretRequestBody{
+		Values: map[string]string{"RACE_KEY": "dave-winning-value"},
+	})
+	require.Equal(t, http.StatusOK, rrDave.Code, rrDave.Body.String())
+
+	// Release Alice's blocked Set so Alice hits FinishSecretRequestFulfill and conflicts.
+	close(releaseFirst)
+	var rrAlice *httptest.ResponseRecorder
+	select {
+	case rrAlice = <-aliceDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Alice's fulfill response")
+	}
+	require.Equal(t, http.StatusConflict, rrAlice.Code, rrAlice.Body.String())
+	require.Contains(t, rrAlice.Body.String(), msgaction.ConflictAlreadyFulfilled)
+
+	// Critical R1 assertion: Dave's stored secret MUST still be present in the backend.
+	got, err := f.backend.Get(ctx, "RACE_KEY", store.ScopeAgent, f.agent.ID)
+	require.NoError(t, err, "first responder's finish-conflict handler must not delete second responder's stored secret")
+	require.Equal(t, "dave-winning-value", got.Value)
+}
+
+// TestSecretRequests_FulfillRollbackPreservesExistingSecrets verifies design
+// item 3: when a multi-key fulfill fails on a later key (503), rollback deletes
+// only keys newly created by that call and NEVER deletes a secret that already
+// existed in the backend before the call (protecting working secrets on rotation).
+func TestSecretRequests_FulfillRollbackPreservesExistingSecrets(t *testing.T) {
+	f := newSecretRequestsFixture(t, true)
+	ctx := context.Background()
+
+	// Pre-populate existing secret K1 at agent scope.
+	_, _, err := f.backend.Set(ctx, &secret.SetSecretInput{
+		Name:          "ROT_K1",
+		Value:         "existing-working-secret",
+		SecretType:    store.SecretTypeEnvironment,
+		Target:        "ROT_K1",
+		Scope:         store.ScopeAgent,
+		ScopeID:       f.agent.ID,
+		InjectionMode: store.InjectionModeAsNeeded,
+		CreatedBy:     f.alice.ID,
+		UpdatedBy:     f.alice.ID,
+		ProjectID:     f.project.ID,
+	})
+	require.NoError(t, err)
+
+	// Send a 3-key card: ROT_K1 (existing), ROT_K2 (new), ROT_K3 (will fail).
+	rrSend := f.sendSecretRequest(t, "user:"+f.alice.Email, []messages.SecretRequestInput{
+		{Key: "ROT_K1", Description: "existing key being rotated"},
+		{Key: "ROT_K2", Description: "brand new key"},
+		{Key: "ROT_K3", Description: "key that fails backend write"},
+	}, false)
+	require.Equal(t, http.StatusOK, rrSend.Code, rrSend.Body.String())
+	var card struct {
+		MessageID string `json:"message_id"`
+	}
+	require.NoError(t, json.Unmarshal(rrSend.Body.Bytes(), &card))
+
+	f.backend.mu.Lock()
+	f.backend.failOnKey = "ROT_K3"
+	f.backend.failErr = errors.New("simulated third-key failure")
+	f.backend.mu.Unlock()
+
+	rrFulfill := f.doUserJSON(t, http.MethodPost, "/api/v1/secret-requests/"+card.MessageID+"/fulfill", f.alice, FulfillSecretRequestBody{
+		Values: map[string]string{
+			"ROT_K1": "rotated-value",
+			"ROT_K2": "new-value-must-be-deleted",
+			"ROT_K3": "fails-here",
+		},
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rrFulfill.Code, rrFulfill.Body.String())
+
+	// Pre-existing ROT_K1 MUST still exist in the backend (never wiped on rollback).
+	k1, err := f.backend.Get(ctx, "ROT_K1", store.ScopeAgent, f.agent.ID)
+	require.NoError(t, err, "pre-existing secret ROT_K1 must not be deleted by 503 rollback")
+	require.NotEmpty(t, k1.Value)
+
+	// Newly created ROT_K2 MUST be gone (deleted by 503 rollback).
+	_, err = f.backend.Get(ctx, "ROT_K2", store.ScopeAgent, f.agent.ID)
+	require.ErrorIs(t, err, store.ErrNotFound, "newly created secret ROT_K2 must be deleted by 503 rollback")
+
+	// All 3 rows must be rolled back to pending.
+	rows, err := f.store.GetSecretRequestsByMessageID(ctx, card.MessageID)
+	require.NoError(t, err)
+	require.Len(t, rows, 3)
+	for _, r := range rows {
+		require.Equal(t, store.SecretRequestStatusPending, r.Status)
+	}
 }

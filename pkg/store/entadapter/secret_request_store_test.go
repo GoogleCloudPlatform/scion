@@ -424,3 +424,79 @@ func TestSecretRequestStore_FinishConflictRollsBackEarlierRows(t *testing.T) {
 		t.Fatalf("r1 should remain fulfilling after tx rollback, got %s", r1After.Status)
 	}
 }
+
+// TestSecretRequestStore_FinishRequiresMatchingClaimedAt verifies that
+// FinishSecretRequestFulfill checks ClaimedAtEQ in its compare-and-set: after
+// a stale claim is recovered and the SAME user claims again at a later
+// ClaimedAt, finishing with the first ClaimedAt must conflict.
+func TestSecretRequestStore_FinishRequiresMatchingClaimedAt(t *testing.T) {
+	ctx := context.Background()
+	cs, projID, agentID := newSecretRequestTestStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	res, err := cs.CreateSecretRequestPrompt(ctx, makeSecretRequestPromptInput(projID, agentID, false, now,
+		messages.SecretRequest{Key: "CLAIM_TS_KEY", KeyNorm: "CLAIM_TS_KEY", SecretType: "environment"},
+	))
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	row := res.Requests[0].Row
+
+	// 1. First claim by user-1 at t1.
+	t1 := now.Add(time.Second)
+	claim1, err := cs.ClaimSecretRequestsForFulfill(ctx, &store.ClaimSecretRequestsInput{
+		MessageID: row.MessageID,
+		RowIDs:    []string{row.ID},
+		UserID:    "user-1",
+		UserName:  "Alice",
+		Now:       t1,
+	})
+	if err != nil || claim1.Conflict != nil || len(claim1.Claimed) != 1 {
+		t.Fatalf("claim1: err=%v claim=%+v", err, claim1)
+	}
+
+	// 2. Recover stale claim past ClaimTTL.
+	rec, err := cs.RecoverStaleSecretRequestClaims(ctx, t1.Add(msgaction.SecretRequestClaimTTL+time.Second), 10)
+	if err != nil || len(rec) != 1 {
+		t.Fatalf("recover: err=%v rec=%+v", err, rec)
+	}
+
+	// 3. Second claim by the SAME user-1 at t2 > t1.
+	t2 := t1.Add(msgaction.SecretRequestClaimTTL + 2*time.Second)
+	claim2, err := cs.ClaimSecretRequestsForFulfill(ctx, &store.ClaimSecretRequestsInput{
+		MessageID: row.MessageID,
+		RowIDs:    []string{row.ID},
+		UserID:    "user-1",
+		UserName:  "Alice",
+		Now:       t2,
+	})
+	if err != nil || claim2.Conflict != nil || len(claim2.Claimed) != 1 {
+		t.Fatalf("claim2: err=%v claim=%+v", err, claim2)
+	}
+	if claim2.ClaimedAt.Equal(claim1.ClaimedAt) {
+		t.Fatalf("expected distinct ClaimedAt timestamps, both %v", claim1.ClaimedAt)
+	}
+
+	// 4. Finish using the stale first ClaimedAt MUST conflict (fails if ClaimedAtEQ is removed).
+	fin, err := cs.FinishSecretRequestFulfill(ctx, &store.FinishSecretRequestFulfillInput{
+		MessageID:      row.MessageID,
+		RowIDs:         []string{row.ID},
+		UserID:         "user-1",
+		ClaimedAt:      claim1.ClaimedAt,
+		SecretVersions: map[string]int{row.ID: 1},
+		Now:            t2.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("finish with stale ClaimedAt err: %v", err)
+	}
+	if fin.Conflict == nil {
+		t.Fatalf("expected conflict when finishing with stale ClaimedAt, got success: %+v", fin)
+	}
+	got, err := cs.GetSecretRequest(ctx, row.ID)
+	if err != nil {
+		t.Fatalf("get row: %v", err)
+	}
+	if got.Status != store.SecretRequestStatusFulfilling {
+		t.Fatalf("expected row to remain fulfilling, got %q", got.Status)
+	}
+}
