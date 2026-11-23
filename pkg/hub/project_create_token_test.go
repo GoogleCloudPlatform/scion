@@ -485,7 +485,7 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 // revision 8 drops project.register, a reserved row.
 func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleSuperAdmin)
-	assert.Equal(t, 17, admin.Revision)
+	assert.Equal(t, 18, admin.Revision)
 	assert.Contains(t, admin.Permissions, "broker.manage")
 	assert.Contains(t, admin.Permissions, "project.manage_message_policies")
 	assert.Contains(t, admin.Permissions, "project.read_message_policies")
@@ -499,6 +499,7 @@ func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.read")
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.list")
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.create")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.update")
 	assert.Contains(t, admin.Permissions, "webhook_endpoint.delete")
 	assert.Contains(t, admin.Permissions, "system_one_instance.read")
 	assert.Contains(t, admin.Permissions, "system_one_instance.create")

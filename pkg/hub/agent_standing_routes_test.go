@@ -496,6 +496,14 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			wantDen: assertForbidden,
 		},
 		{
+			key:    "POST /api/v1/projects/{projectId}/webhook-endpoints/{id}/rotate-secret",
+			method: http.MethodPost,
+			path: func(f *standingCoverageFixture, _ *store.Agent) string {
+				return "/api/v1/projects/" + f.projectID + "/webhook-endpoints/00000000-0000-4000-8000-000000000001/rotate-secret"
+			},
+			wantDen: assertForbidden,
+		},
+		{
 			key:    "POST /api/v1/templates",
 			method: http.MethodPost,
 			path:   func(*standingCoverageFixture, *store.Agent) string { return "/api/v1/templates" },
