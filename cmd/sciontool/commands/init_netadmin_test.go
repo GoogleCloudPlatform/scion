@@ -1221,6 +1221,37 @@ func TestVerifyIPv6MetadataBlocked(t *testing.T) {
 			t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable (NetnsHasIPv6=%v)", err, metadata.NetnsHasIPv6())
 		}
 	})
+
+	t.Run("fails closed when parent context is cancelled", func(t *testing.T) {
+		t.Run("cancelled before probe", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			ipv6ProbeDial = func(dialCtx context.Context, _ string, _ string) (net.Conn, error) {
+				return nil, dialCtx.Err()
+			}
+			err := verifyIPv6MetadataBlocked(ctx)
+			if !errors.Is(err, errMetadataProtectionUnavailable) {
+				t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable", err)
+			}
+		})
+
+		t.Run("cancelled during probe", func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var entered atomic.Int32
+			ipv6ProbeDial = func(dialCtx context.Context, _ string, _ string) (net.Conn, error) {
+				if entered.Add(1) == 1 {
+					cancel()
+				}
+				<-dialCtx.Done()
+				return nil, dialCtx.Err()
+			}
+			err := verifyIPv6MetadataBlocked(ctx)
+			if !errors.Is(err, errMetadataProtectionUnavailable) {
+				t.Fatalf("verifyIPv6MetadataBlocked() = %v, want errMetadataProtectionUnavailable", err)
+			}
+		})
+	})
 }
 
 // TestRunInit_MetadataProtectionLegacyFallback verifies the old-broker +

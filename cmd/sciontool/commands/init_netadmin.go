@@ -343,8 +343,8 @@ func waitForRedirect(ctx context.Context, probePath, probeToken string) error {
 // interception paths. When IPv6 is disabled in the network namespace, the dial
 // fails immediately (e.g., ENETUNREACH or EAFNOSUPPORT) and counts as a pass.
 // Connection refusal, reset, unreachability, unsupported address family, and
-// timeout all pass; only a successful TCP connection fails closed with
-// errMetadataProtectionUnavailable.
+// per-dial timeout all pass; a successful TCP connection or cancellation of
+// the parent context fails closed with errMetadataProtectionUnavailable.
 func verifyIPv6MetadataBlocked(ctx context.Context) error {
 	var (
 		wg        sync.WaitGroup
@@ -371,6 +371,10 @@ func verifyIPv6MetadataBlocked(ctx context.Context) error {
 	wg.Wait()
 	if reachable != "" {
 		log.Error("IPv6 metadata endpoint %s is reachable; refusing to start the harness", reachable)
+		return errMetadataProtectionUnavailable
+	}
+	if ctx.Err() != nil {
+		log.Error("IPv6 metadata verification cancelled: %v", ctx.Err())
 		return errMetadataProtectionUnavailable
 	}
 	log.Info("IPv6 metadata endpoints verified unreachable")
