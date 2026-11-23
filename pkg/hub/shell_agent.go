@@ -43,17 +43,20 @@ func isShellAgent(agent *store.Agent) bool {
 }
 
 // willBeShellAgent reports whether agent is or will resolve to the reserved
-// built-in "shell" harness config from either its own fields or the
-// project's default_harness_config annotation (before deriveAgentConfig runs).
-func willBeShellAgent(agent *store.Agent, project *store.Project) bool {
+// built-in "shell" harness config from its own fields, the project's
+// default_harness_config annotation, or the hub's operational
+// agent_defaults.default_harness_config (before deriveAgentConfig runs).
+func (s *Server) willBeShellAgent(agent *store.Agent, project *store.Project) bool {
 	if isShellAgent(agent) {
 		return true
 	}
 	if agent != nil && agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
 		return false
 	}
-	return project != nil && project.Annotations != nil &&
-		project.Annotations[projectSettingDefaultHarnessConfig] == config.ShellHarnessConfigName
+	if project != nil && project.Annotations != nil && project.Annotations[projectSettingDefaultHarnessConfig] != "" {
+		return project.Annotations[projectSettingDefaultHarnessConfig] == config.ShellHarnessConfigName
+	}
+	return s.hubAgentDefaults().DefaultHarnessConfig == config.ShellHarnessConfigName
 }
 
 // refuseReservedHarnessConfigSlug writes 400 reserved_name and returns true

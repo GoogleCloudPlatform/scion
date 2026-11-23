@@ -1361,6 +1361,58 @@ func TestShellAgentGCPIdentity_SkipsDefaultsForcesBlockAndAllowsExplicitOwnerCho
 		assert.Empty(t, stored.AppliedConfig.GCPIdentity.ServiceAccountID)
 	})
 
+	t.Run("hub default_harness_config=shell skips project default GCP SA and forces block on HTTP and headless create", func(t *testing.T) {
+		origDefaults := f.srv.config.AgentDefaults
+		f.srv.mu.Lock()
+		f.srv.config.AgentDefaults.DefaultHarnessConfig = config.ShellHarnessConfigName
+		f.srv.mu.Unlock()
+		t.Cleanup(func() {
+			f.srv.mu.Lock()
+			f.srv.config.AgentDefaults = origDefaults
+			f.srv.mu.Unlock()
+		})
+
+		httpStored := createViaHTTP(t, map[string]any{
+			"name":          "shell-hub-default-http",
+			"provisionOnly": true,
+		})
+		assert.Equal(t, config.ShellHarnessConfigName, httpStored.HarnessConfig)
+		require.NotNil(t, httpStored.AppliedConfig)
+		assert.Equal(t, config.ShellHarnessConfigName, httpStored.AppliedConfig.HarnessConfig)
+		require.NotNil(t, httpStored.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeBlock, httpStored.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Empty(t, httpStored.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Empty(t, httpStored.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+
+		evt := withSessionRevision(f.event("shell-hub-default-headless"), f.creator.ID)
+		humanAuth, humanIdent, err := f.srv.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), f.proj.ID, "agent.create")
+		require.NoError(t, err)
+		humanCeiling, humanProv, err := f.srv.fireEffectCeiling(ctx, humanAuth)
+		require.NoError(t, err)
+		rr := headlessResolvedRole{preCapRole: AgentRoleFull}
+
+		created, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      humanAuth,
+			Identity:       humanIdent,
+			EdgeCeiling:    humanCeiling,
+			EdgeProvenance: humanProv,
+			resolvedRole:   &rr,
+			Name:           "shell-hub-default-headless",
+			Detached:       true,
+		})
+		require.NoError(t, err)
+		headlessStored, err := f.srv.store.GetAgent(ctx, created.ID)
+		require.NoError(t, err)
+		assert.Equal(t, config.ShellHarnessConfigName, headlessStored.HarnessConfig)
+		require.NotNil(t, headlessStored.AppliedConfig)
+		assert.Equal(t, config.ShellHarnessConfigName, headlessStored.AppliedConfig.HarnessConfig)
+		require.NotNil(t, headlessStored.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeBlock, headlessStored.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Empty(t, headlessStored.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Empty(t, headlessStored.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+	})
+
 	t.Run("dispatch create and start metadata env fail closed to block when GCPIdentity is nil and preserve explicit assign", func(t *testing.T) {
 		d := NewHTTPAgentDispatcherWithClient(f.srv.store, &mockRuntimeBrokerClient{}, false, slog.Default())
 		d.SetAuthzService(f.srv.authzService)
