@@ -203,11 +203,32 @@ function isValidCodeSpanEmailLocal(s: string): boolean {
 }
 
 /**
+ * Minimum length of a bare hexadecimal token (such as a 7-char git short SHA,
+ * 8-char short ID like 5aaf533a, or 40-char commit SHA) ignored as a
+ * non-mention literal. Matches `minHexIDLength` in `pkg/messages/mentions.go`.
+ */
+const MIN_HEX_ID_LENGTH = 7;
+const ALL_DIGITS_RE = /^[0-9]+$/;
+const ALL_HEX_RE = /^[0-9a-fA-F]+$/;
+
+/**
+ * Whether `s` is a bare numeric token (all ASCII digits, e.g. `10`) or a bare
+ * hexadecimal ID/SHA token (at least `MIN_HEX_ID_LENGTH` ASCII hex digits, e.g.
+ * `5aaf533a` or a 40-char commit SHA). Mirrors `isNumericOrHexToken` in
+ * `pkg/messages/mentions.go`.
+ */
+function isNumericOrHexToken(s: string): boolean {
+  if (s.length === 0) return false;
+  if (ALL_DIGITS_RE.test(s)) return true;
+  return s.length >= MIN_HEX_ID_LENGTH && ALL_HEX_RE.test(s);
+}
+
+/**
  * Parse the inner text of an inline code span as an exact single mention token
  * (`@<slug>` or `@<local>@<domain>`), matching Go's `parseCodeSpanMention`
  * (`pkg/messages/mentions.go`). Optional leading/trailing ASCII spaces/tabs are
- * trimmed; embedded newlines, `/`, trailing `.`, multi-`@`, and extra code
- * punctuation are rejected.
+ * trimmed; embedded newlines, `/`, trailing `.`, multi-`@`, bare numeric/hex
+ * tokens, and extra code punctuation are rejected.
  */
 export function parseCodeSpanMention(inner: string): string | null {
   if (/[\r\n]/.test(inner)) return null;
@@ -223,7 +244,7 @@ export function parseCodeSpanMention(inner: string): string | null {
     }
     return token;
   }
-  if (!isValidCodeSpanSlug(token)) return null;
+  if (!isValidCodeSpanSlug(token) || isNumericOrHexToken(token)) return null;
   return token;
 }
 
@@ -405,6 +426,7 @@ export function extractProseMentionTokens(
       if (next === '@') continue;
 
       const lower = match[1].toLowerCase();
+      if (isNumericOrHexToken(lower)) continue;
       if (!seen.has(lower)) {
         seen.add(lower);
         tokens.push(lower);

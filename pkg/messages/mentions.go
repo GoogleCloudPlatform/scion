@@ -91,8 +91,9 @@ type MentionOptions struct {
 //
 // An @ preceded by a non-whitespace character (e.g. inside an email address like
 // user@example.com) is not treated as a mention trigger. Tokens starting with
-// "@." or "@/" (relative or absolute paths such as @./foo or @/etc/hosts) are
-// ignored.
+// "@." or "@/" (relative or absolute paths such as @./foo or @/etc/hosts) and
+// bare numeric or hexadecimal ID tokens (such as @10, @5aaf533a, or a 40-char
+// commit SHA) are ignored.
 func ExtractMentions(text string) []string {
 	var mentions []string
 	seen := make(map[string]bool)
@@ -105,7 +106,7 @@ func ExtractMentions(text string) []string {
 			continue
 		}
 		name := trimMentionPunct(raw)
-		if name == "" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "/") {
+		if name == "" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "/") || isNumericOrHexToken(name) {
 			continue
 		}
 		lower := strings.ToLower(name)
@@ -115,6 +116,36 @@ func ExtractMentions(text string) []string {
 		}
 	}
 	return mentions
+}
+
+// minHexIDLength is the minimum length of a bare hexadecimal token (such as a
+// 7-char git short SHA, 8-char short ID like 5aaf533a, or 40-char commit SHA)
+// that is ignored as a non-mention literal. Shorter tokens containing letters
+// (such as "abe", "ada", "e2e", "be1", "cafe") remain valid mention candidates.
+const minHexIDLength = 7
+
+// isNumericOrHexToken reports whether s is a bare numeric token (all ASCII
+// digits, e.g. "10") or a bare hexadecimal ID/SHA token (at least
+// minHexIDLength ASCII hex digits, e.g. "5aaf533a" or a 40-character commit
+// SHA). Such tokens appear routinely in prose as counts, indices, or commit/ID
+// citations and should not be treated as @mention candidates.
+func isNumericOrHexToken(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	allDigits := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		allDigits = false
+		isHexLetter := (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !isHexLetter {
+			return false
+		}
+	}
+	return allDigits || len(s) >= minHexIDLength
 }
 
 // ExtractMentionsWithOptions is ExtractMentions with configurable options.
@@ -178,7 +209,7 @@ func ExtractWrappedMentions(text string) []string {
 			name = strings.TrimSuffix(name, "_")
 		}
 		name = trimMentionPunct(name)
-		if name != "" {
+		if name != "" && !isNumericOrHexToken(name) {
 			lower := strings.ToLower(name)
 			if !seen[lower] {
 				seen[lower] = true
@@ -506,7 +537,7 @@ func parseCodeSpanMention(inner string) (string, bool) {
 		}
 		return token, true
 	}
-	if !isValidCodeSpanSlug(token) {
+	if !isValidCodeSpanSlug(token) || isNumericOrHexToken(token) {
 		return "", false
 	}
 	return token, true
@@ -689,7 +720,7 @@ func IsLeadingMentionWithOptions(text, firstMentionName string, opts MentionOpti
 			return false
 		}
 		name := trimMentionPunct(raw)
-		return name != "" && strings.EqualFold(name, firstMentionName)
+		return name != "" && !isNumericOrHexToken(name) && strings.EqualFold(name, firstMentionName)
 	}
 	if !opts.CodeSpanMentions {
 		return false

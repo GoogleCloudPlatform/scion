@@ -1724,6 +1724,41 @@ func TestSendMessageViaHub_PossessiveMentionNotifiesIntendedAgent(t *testing.T) 
 	require.Equal(t, []string{"instance-investigator"}, (*sent)[0].Mentions)
 }
 
+// TestSendMessageViaHub_NumericAndHexTokensNotReportedAsMissingAgents reproduces
+// ptone/scion#8833: bare numeric/hex tokens such as @10, @5aaf533a, and full
+// 40-char commit SHAs must not trigger "is not an agent in this project" notes,
+// while valid agent mentions in the same message still resolve.
+func TestSendMessageViaHub_NumericAndHexTokensNotReportedAsMissingAgents(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-numeric-hex-mentions"
+	agents := []hubclient.Agent{
+		{Name: "primary-agent", Slug: "primary-agent", Status: "running"},
+		{Name: "alice", Slug: "alice", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	origCC := msgCC
+	msgCC = nil
+	defer func() { msgCC = origCC }()
+
+	body := "checked @10 items from @5aaf533a and @847772c4cf1e6e1a692cb12ebd06c718ebcb7d4e with @alice."
+	stderr := captureStderr(t, func() {
+		err = sendMessageViaHub(hubCtx, "primary-agent", body, false, false, false)
+	})
+	require.NoError(t, err)
+	require.Contains(t, stderr, "Mention notification sent to @alice.")
+	require.NotContains(t, stderr, "is not an agent in this project; no agent was notified.")
+	require.Len(t, *sent, 1)
+	require.Equal(t, []string{"alice"}, (*sent)[0].Mentions)
+}
+
 // TestSendMessageViaConversation_OutboundConvRef_PrintsMentionWarning covers
 // the outbound-endpoint branch of sendMessageViaConversation (conv:/#thread/
 // @email): the server resolves mentions itself on this path, and whatever it

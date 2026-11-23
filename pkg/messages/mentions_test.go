@@ -511,3 +511,73 @@ func TestReplaceProseMentionWithOptions_CodeSpanMentions(t *testing.T) {
 	wantOn := "Ask `@john-smith`, ` @john-smith `, ``@john-smith``, `` `@john@example.com` ``, `@john@example.com please`, and \\`@john@example.com\\`.\n```\n`@john@example.com`\n```\n> `@john@example.com`"
 	assert.Equal(t, wantOn, ReplaceProseMentionWithOptions(in, "john@example.com", "john-smith", on))
 }
+
+func TestExtractMentions_IgnoreNumericAndHexTokens(t *testing.T) {
+	const fullSHA = "847772c4cf1e6e1a692cb12ebd06c718ebcb7d4e"
+	const fullSHA256 = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+
+	tests := []struct {
+		name string
+		text string
+		want []string
+	}{
+		{
+			name: "bare numeric tokens ignored",
+			text: "count @0, @10, @8833, @123456, @10, @10. @10: @10's",
+			want: nil,
+		},
+		{
+			name: "short hex IDs and commit prefixes ignored",
+			text: "see @847772c, @5aaf533a, @0fb0e904, @5AAF533A, @deadbeef.",
+			want: nil,
+		},
+		{
+			name: "full 40-char SHA-1 and 64-char SHA-256 ignored",
+			text: "commit @" + fullSHA + " and @" + fullSHA256 + " landed",
+			want: nil,
+		},
+		{
+			name: "mixed valid mentions with numeric and hex tokens",
+			text: "reviewed @5aaf533a and @10 with @alice and @dev-8833 at @" + fullSHA,
+			want: []string{"alice", "dev-8833"},
+		},
+		{
+			name: "short hex-letter names and short alphanumeric slugs preserved",
+			text: "ping @abe @ada @ed @cafe @facade @a1 @b2 @e2e @be1 @fe2 @db01",
+			want: []string{"abe", "ada", "ed", "cafe", "facade", "a1", "b2", "e2e", "be1", "fe2", "db01"},
+		},
+		{
+			name: "hyphenated underscored non-hex and email mentions preserved",
+			text: "cc @agent-10 @10-agent @dev-5aaf533a @5aaf533a-dev @my_10 @v10 @5aaf533g @10@example.com @5aaf533a@example.com @proj/agent",
+			want: []string{"agent-10", "10-agent", "dev-5aaf533a", "5aaf533a-dev", "my_10", "v10", "5aaf533g", "10@example.com", "5aaf533a@example.com", "proj/agent"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ExtractMentions(tc.text), "ExtractMentions")
+			assert.Equal(t, tc.want, ExtractProseMentions(tc.text), "ExtractProseMentions")
+		})
+	}
+
+	t.Run("ExtractWrappedMentions ignores wrapped numeric and hex tokens", func(t *testing.T) {
+		text := "see (@10) and (**@5aaf533a**) and (@" + fullSHA + ") cc (@alice) and **@e2e** and (@10@example.com)"
+		assert.Equal(t, []string{"alice", "e2e", "10@example.com"}, ExtractWrappedMentions(text))
+	})
+
+	t.Run("CodeSpanMentions does not promote numeric or hex code spans", func(t *testing.T) {
+		opts := MentionOptions{CodeSpanMentions: true}
+		text := "see `@10` and `@5aaf533a` and `@" + fullSHA + "` cc `@alice` and `@e2e`"
+		assert.Equal(t, []string{"alice", "e2e"}, ExtractProseMentionsWithOptions(text, opts))
+		assert.Equal(t, []string{"alice", "e2e"}, ExtractMentionsWithOptions(text, opts))
+		assert.False(t, IsLeadingMentionWithOptions("`@10` hello", "10", opts))
+		assert.False(t, IsLeadingMentionWithOptions("`@5aaf533a` hello", "5aaf533a", opts))
+	})
+
+	t.Run("IsLeadingMention ignores numeric and hex tokens", func(t *testing.T) {
+		assert.False(t, IsLeadingMention("@10 hello", "10"))
+		assert.False(t, IsLeadingMention("@5aaf533a hello", "5aaf533a"))
+		assert.False(t, IsLeadingMention("@"+fullSHA+" hello", fullSHA))
+		assert.True(t, IsLeadingMention("@e2e hello", "e2e"))
+	})
+}
