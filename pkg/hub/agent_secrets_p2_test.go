@@ -434,6 +434,94 @@ func TestAgentSecretsP2_CreateAgent_BackendFailureCompensates(t *testing.T) {
 		assert.NotEqual(t, "FIRST_SECRET", r.Key, "partially written secret must be cleaned up")
 		assert.NotEqual(t, "SECOND_SECRET", r.Key)
 	}
+
+	// Simulate GCPBackend.Set writing the secret to external storage and then
+	// failing (e.g. DB metadata upsert error or deadline): the failing key
+	// itself must also be deleted by rollback, leaving no orphaned value.
+	t.Run("failing key written before error is also cleaned up", func(t *testing.T) {
+		srv2, s2, owner2, _, project2, _, _ := setupAgentSecretsTestFixture(t, true)
+		attachOnlineBrokerForP2Test(t, srv2, s2, project2)
+
+		innerBackend := srv2.GetSecretBackend()
+		extValues := map[string]string{}
+		writeThenFail := &writeThenFailExternalBackend{
+			SecretBackend: innerBackend,
+			values:        extValues,
+			failKey:       "PARTIAL_FAIL_KEY",
+		}
+		srv2.SetSecretBackend(writeThenFail)
+
+		rec2 := doRequestAsUser(t, srv2, owner2, http.MethodPost, "/api/v1/projects/"+project2.ID+"/agents", CreateAgentRequest{
+			Name:          "fail-after-write-agent",
+			ProjectID:     project2.ID,
+			ProvisionOnly: true,
+			Secrets: []AgentSecretInput{
+				{Key: "OK_FIRST_KEY", Value: "val-1"},
+				{Key: "PARTIAL_FAIL_KEY", Value: "val-2"},
+			},
+		})
+		require.Equal(t, http.StatusServiceUnavailable, rec2.Code, "body=%s", rec2.Body.String())
+		assert.Contains(t, rec2.Body.String(), createAgentSecretsStoreFailedMessage)
+
+		_, err := s2.GetAgentBySlug(ctx, project2.ID, "fail-after-write-agent")
+		assert.ErrorIs(t, err, store.ErrNotFound)
+
+		assert.NotContains(t, extValues, "OK_FIRST_KEY", "earlier written key must be deleted")
+		assert.NotContains(t, extValues, "PARTIAL_FAIL_KEY", "failing key written before Set error must also be deleted")
+		require.NotEmpty(t, writeThenFail.lastScopeID)
+		_, err = innerBackend.Get(ctx, "PARTIAL_FAIL_KEY", secret.ScopeAgent, writeThenFail.lastScopeID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "inner backend must hold no value for failing key after 503")
+	})
+}
+
+// writeThenFailExternalBackend delegates Set to the inner backend (and records
+// the value in an external map) and THEN returns an error for failKey, while
+// omitting failKey from List to model GCPBackend.Set writing to Secret Manager
+// before failing on the DB metadata upsert.
+type writeThenFailExternalBackend struct {
+	secret.SecretBackend
+	mu          sync.Mutex
+	values      map[string]string
+	failKey     string
+	lastScopeID string
+}
+
+func (b *writeThenFailExternalBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
+	created, meta, err := b.SecretBackend.Set(ctx, input)
+	if err != nil {
+		return false, nil, err
+	}
+	b.mu.Lock()
+	b.values[input.Name] = input.Value
+	b.lastScopeID = input.ScopeID
+	shouldFail := input.Name == b.failKey
+	b.mu.Unlock()
+	if shouldFail {
+		return false, nil, errors.New("simulated post-write metadata upsert failure")
+	}
+	return created, meta, nil
+}
+
+func (b *writeThenFailExternalBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	metas, err := b.SecretBackend.List(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]secret.SecretMeta, 0, len(metas))
+	for _, m := range metas {
+		if m.Name == b.failKey {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+func (b *writeThenFailExternalBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
+	b.mu.Lock()
+	delete(b.values, name)
+	b.mu.Unlock()
+	return b.SecretBackend.Delete(ctx, name, scope, scopeID)
 }
 
 func TestAgentSecretsP2_CreateAgent_CanaryNoLeak(t *testing.T) {

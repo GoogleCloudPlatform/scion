@@ -345,7 +345,10 @@ func runSecretSet(cmd *cobra.Command, args []string) error {
 		if len(b) > maxStdinSecretBytes {
 			return newUsageError("secret value from stdin exceeds 64KB limit")
 		}
-		value = strings.TrimRight(string(b), "\r\n")
+		value = string(b)
+		if secretType != "file" {
+			value = strings.TrimRight(value, "\r\n")
+		}
 		if value == "" {
 			return newUsageError("secret value from stdin is empty")
 		}

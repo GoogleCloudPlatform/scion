@@ -437,6 +437,18 @@ func TestHubSecretSet_StdinDash(t *testing.T) {
 		assert.Equal(t, "", gotReq.Type)
 	})
 
+	t.Run("preserves trailing newline when type is file", func(t *testing.T) {
+		secretType = "file"
+		secretTarget = "~/.ssh/id_ed25519"
+		pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----\n"
+		c := newTestSetCmd(pem)
+		require.NoError(t, runSecretSet(c, []string{"SSH_KEY", "-"}))
+		assert.Equal(t, "SSH_KEY", gotKey)
+		assert.Equal(t, pem, gotReq.Value)
+		assert.Equal(t, "raw", gotReq.Encoding)
+		assert.Equal(t, "file", gotReq.Type)
+	})
+
 	t.Run("stdin value starting with @ is not treated as file path", func(t *testing.T) {
 		secretType = ""
 		secretTarget = ""

@@ -320,9 +320,10 @@ func (s *Server) restoreCarriedAgentSecrets(ctx context.Context, agent *store.Ag
 			UpdatedBy:     sv.UpdatedBy,
 		})
 		if err != nil {
-			if len(written) > 0 {
-				s.removeAgentScopedSecrets(ctx, agent.ID, written)
-			}
+			// Include sv.Name in rollback: an external backend such as
+			// GCPBackend.Set may write the secret version before failing on the
+			// DB metadata upsert or a deadline.
+			s.removeAgentScopedSecrets(ctx, agent.ID, append(written, sv.Name))
 			return err
 		}
 		written = append(written, sv.Name)

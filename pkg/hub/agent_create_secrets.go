@@ -370,8 +370,11 @@ func (s *Server) storeCreateAgentSecrets(ctx context.Context, agent *store.Agent
 			UpdatedBy:     createdBy,
 		})
 		if err != nil {
-			if rollbackOnFailure && len(written) > 0 {
-				s.removeAgentScopedSecrets(ctx, agent.ID, written)
+			if rollbackOnFailure {
+				// Include sec.Key in rollback: an external backend such as
+				// GCPBackend.Set may write the secret version to Secret Manager
+				// before failing on the DB metadata upsert or a deadline.
+				s.removeAgentScopedSecrets(ctx, agent.ID, append(written, sec.Key))
 			}
 			return err
 		}

@@ -149,6 +149,7 @@ type HeadlessCreate struct {
 
 	// Secrets supplies optional create-time agent-scoped secrets (behind
 	// hub.agent_secrets), stored after commit and before dispatch.
+	// Future producers must not persist secret values in schedule or trigger payloads.
 	Secrets []AgentSecretInput
 
 	Detached      bool
