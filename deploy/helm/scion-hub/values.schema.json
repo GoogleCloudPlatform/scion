@@ -177,6 +177,14 @@
           "default": "",
           "description": "Deploy-time class of this hub, rendered as server.hub.class. Empty (the default) means not a test hub. Required, as \"test\", by testIdentities.enabled."
         },
+        "trustedProxies": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Trusted proxy IP addresses or CIDR ranges rendered as server.trusted_proxies in the Hub settings Secret. Omitted when empty."
+        },
         "testIdentities": {
           "type": "object",
           "additionalProperties": false,

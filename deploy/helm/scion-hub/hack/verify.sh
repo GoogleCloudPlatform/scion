@@ -2154,6 +2154,7 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  [hub.trustedProxies]='--set|hub.trustedProxies={10.0.0.0/8}'
   # Above one replica conduit.internalTls "auto" needs a relay Secret; the
   # companion turns the relay off so this leaf moves only the Deployment.
   [replicaCount]='--set|conduit.internalTls.enabled=false|--set|replicaCount=2'

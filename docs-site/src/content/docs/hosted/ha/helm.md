@@ -287,6 +287,15 @@ Secret Manager roles your deployment uses. Granting them is the operator's job.
 `hub.adminEmails` lists email addresses that are given the admin role when they
 sign in.
 
+### Trusted proxies
+
+`hub.trustedProxies` lists the IP addresses or CIDR ranges your load balancer or
+ingress connects to the Hub from, rendered as `server.trusted_proxies` in the
+Hub settings Secret. When empty (the default), the key is omitted: the Hub
+honours no forwarded client address for per-IP rate limits or audit records,
+and its Runtime Broker transport check trusts only loopback. See
+[Runtime Broker transport and trusted proxies](/scion/reference/server-config/#runtime-broker-transport-and-trusted-proxies).
+
 ### Example: HA hosted values
 
 ```yaml
