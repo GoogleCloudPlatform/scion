@@ -177,6 +177,15 @@ While a review is the current version, the artifact shows a *Review pending* bad
 
 **Review** is shown to people who may publish versions of the artifact and to people given review access (see [Share an artifact](#share-an-artifact)). Use **Edit** for a plain edit instead of a review.
 
+#### Review drafts (experimental)
+
+When the `hub.artifacts_review_drafts` [experiment](/scion/reference/experiments/#server-experiments-with-notes) is on (alpha, off by default; requires `hub.artifacts`), the web review editor saves your in-progress review privately on the Hub so you can close the tab or switch devices and resume later before submitting.
+
+- **Saving and submitting:** The review footer shows **Cancel**, **Save Draft**, and **Submit Review** (replacing **Save review**). **Save Draft** saves immediately and resets the autosave timer; it works even before you add any marks or while text outside marks has changed. **Submit Review** publishes your review version as usual (requiring at least one mark and no unmarked edits) and deletes your saved draft on success. **Cancel** leaves Review mode immediately when there are no unsaved changes (keeping your saved draft); when you have unsaved changes, it asks whether to **Save draft and close**, **Discard changes** (reverts to the last saved draft without deleting it), or go **Back to review**.
+- **Autosave and status line:** A status line at the top of the review editor shows `Unsaved changes`, `Saving…`, `Draft saved HH:MM` (in your local time), or a warning if a save could not complete (`Not saved: retrying`, `Changed on another device or tab`, size or count limits, or lost review access, with a **Download** button when a draft cannot be saved). Nothing is saved until you make a change. Your first change starts a 30-second autosave timer (typing does not reset it), and switching away from the tab also triggers a save (for drafts up to 60 KiB). Leaving the page while changes are unsaved triggers a browser warning. If the same draft was saved in another tab or device, autosave pauses and asks whether to **Load the newer draft**, **Keep this one**, or **Download this one**.
+- **Resuming, discarding, and newer versions:** While you have a saved draft, a private **Draft** badge appears beside the header action button (which changes from **Review** to **Resume draft**), in the header **Version** menu, and on the drafted version's row in the **History** tab. Entering Review mode resumes your saved draft directly; in the graphical view, resumed suggestions are read-only and can still be edited in **Source** view. To start over instead, choose **Discard draft** from the **Draft** badge menu or the **Version** menu. If a newer version was published while you had a draft, resuming opens a dialog offering **Move my review to vN** (opens Review mode on the current version with your earlier text kept read-only alongside it; nothing is overwritten until you edit), **Download draft**, or **Discard draft**.
+- **Privacy and retention:** Review drafts are strictly private to you — the artifact owner, project admins, and other reviewers cannot see them, and saving or discarding a draft sends no notifications. Drafts are stored on the Hub (never in browser storage), expire 30 days after your last save, and are deleted if the artifact is deleted. See [Artifacts — Review drafts](/scion/reference/artifacts/#review-drafts).
+
 ### Review from the CLI
 
 ```bash
@@ -348,8 +357,8 @@ If the experiment is on but artifacts are disabled in the Hub's settings, the we
 
 ### A review is refused
 
-- **Text outside the marks changed** (`unmarked_changes`). The page, or the CLI, names the lines that changed outside marks. Undo those changes, or mark them, and save again. Use **Edit** or `--version-of` for a plain edit.
-- **A newer version was published, or is being published** (`stale_review`). Review the current version again, once any version being published has finished.
+- **Text outside the marks changed** (`unmarked_changes`). The page, or the CLI, names the lines that changed outside marks. Undo those changes, or mark them, and save again. Use **Edit** or `--version-of` for a plain edit. When `hub.artifacts_review_drafts` is on, your saved draft and editor buffer stay intact so no work is lost.
+- **A newer version was published, or is being published** (`stale_review`). Review the current version again, once any version being published has finished. When `hub.artifacts_review_drafts` is on, your draft and edits stay intact and you can move your review to the current version with your earlier text kept read-only alongside it.
 
 ### An HTML artifact looks broken
 
