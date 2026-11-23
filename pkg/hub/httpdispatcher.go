@@ -4141,7 +4141,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// (ptone/scion#8900): the broker will present a completion notice instead
 	// of replaying the original task prompt. A wake-with-message or explicit
 	// task still passes that task through.
-	priorCompleted := priorStatus != nil && priorStatus.Activity == string(state.ActivityCompleted)
+	priorCompleted := priorStatus != nil && strings.EqualFold(strings.TrimSpace(priorStatus.Activity), string(state.ActivityCompleted))
 	if task == "" && !resume && !priorCompleted && agent.AppliedConfig != nil {
 		task = agent.AppliedConfig.Task
 	}

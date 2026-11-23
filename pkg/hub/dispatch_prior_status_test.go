@@ -343,6 +343,27 @@ func TestExecDispatchStartAndRestart_PreservesPriorStatusAcrossDeferredHandoff(t
 	require.NotNil(t, client.lastStartExtras.PriorStatus)
 	assert.Equal(t, ps, client.lastStartExtras.PriorStatus)
 
+	// Unnormalized activity casing in JSON-decoded StartDispatchArgs must also
+	// be recognized as completed (matching broker isPriorStatusCompleted).
+	upperPS := &api.PriorStatus{
+		Activity: " COMPLETED ",
+		Summary:  "completed prior task",
+		At:       ts,
+	}
+	upperStartArgsRaw, err := MarshalDispatchArgs(&StartDispatchArgs{PriorStatus: upperPS})
+	require.NoError(t, err)
+	client.lastTask = "sentinel"
+	_, err = srv.execDispatchStart(ctx, store.BrokerDispatch{
+		ID:        "disp-start-prior-upper",
+		BrokerID:  ag.RuntimeBrokerID,
+		AgentID:   ag.ID,
+		ProjectID: ag.ProjectID,
+		Op:        "start",
+		Args:      upperStartArgsRaw,
+	})
+	require.NoError(t, err)
+	assert.Empty(t, client.lastTask, "deferred start with unnormalized COMPLETED PriorStatus must not replay AppliedConfig.Task")
+
 	restartArgsRaw, err := MarshalDispatchArgs(&RestartDispatchArgs{PriorStatus: ps})
 	require.NoError(t, err)
 	_, err = srv.execDispatchRestart(ctx, store.BrokerDispatch{
