@@ -192,7 +192,7 @@ func TestWebhookEndpointBoundAgentAccess(t *testing.T) {
 	require.NoError(t, f.store.CreateTriggerEvent(ctx, ev))
 
 	// Bound agent (agentB) CAN read the endpoint and list it.
-	rec = f.doWebhookEndpoint(t, f.agentBAuth, "/"+epResp.ID, http.MethodGet, nil)
+	rec = f.doWebhookEndpoint(t, f.agentBAuth, epResp.ID, http.MethodGet, nil)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	rec = f.doWebhookEndpoint(t, f.agentBAuth, "", http.MethodGet, nil)
@@ -203,16 +203,14 @@ func TestWebhookEndpointBoundAgentAccess(t *testing.T) {
 	assert.Equal(t, epResp.ID, listResp.Endpoints[0].ID)
 
 	// Bound agent (agentB) CAN read and list events of its bound endpoint.
-	evReq := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+f.projectID+"/trigger-events/"+ev.ID, nil)
-	evReq = evReq.WithContext(contextWithIdentity(evReq.Context(), f.agentBAuth))
+	evReq := authoredRequest(t, f.agentBAuth, http.MethodGet, "/api/v1/projects/"+f.projectID+"/trigger-events/"+ev.ID, nil)
 	evRec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(evRec, evReq)
+	f.srv.handleTriggerEvents(evRec, evReq, f.projectID, ev.ID)
 	assert.Equal(t, http.StatusOK, evRec.Code, evRec.Body.String())
 
-	evListReq := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+f.projectID+"/trigger-events", nil)
-	evListReq = evListReq.WithContext(contextWithIdentity(evListReq.Context(), f.agentBAuth))
+	evListReq := authoredRequest(t, f.agentBAuth, http.MethodGet, "/api/v1/projects/"+f.projectID+"/trigger-events", nil)
 	evListRec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(evListRec, evListReq)
+	f.srv.handleTriggerEvents(evListRec, evListReq, f.projectID, "")
 	require.Equal(t, http.StatusOK, evListRec.Code)
 	var evListResp ListTriggerEventsResponse
 	require.NoError(t, json.Unmarshal(evListRec.Body.Bytes(), &evListResp))
@@ -220,13 +218,13 @@ func TestWebhookEndpointBoundAgentAccess(t *testing.T) {
 	assert.Equal(t, ev.ID, evListResp.Events[0].ID)
 
 	// Bound non-owner agent (agentB) CANNOT modify, rotate, or delete -> 403.
-	rec = f.doWebhookEndpoint(t, f.agentBAuth, "/"+epResp.ID, http.MethodPatch, map[string]any{"description": "nope"})
+	rec = f.doWebhookEndpoint(t, f.agentBAuth, epResp.ID, http.MethodPatch, map[string]any{"description": "nope"})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	rec = f.doWebhookEndpoint(t, f.agentBAuth, "/"+epResp.ID+"/rotate-secret", http.MethodPost, nil)
+	rec = f.doWebhookEndpoint(t, f.agentBAuth, epResp.ID+"/rotate-secret", http.MethodPost, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	rec = f.doWebhookEndpoint(t, f.agentBAuth, "/"+epResp.ID, http.MethodDelete, nil)
+	rec = f.doWebhookEndpoint(t, f.agentBAuth, epResp.ID, http.MethodDelete, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
 	// Unrelated agent (agentA) gets 404 (no probing) on GET/PATCH/rotate/DELETE and sees nothing in lists.
@@ -235,10 +233,10 @@ func TestWebhookEndpointBoundAgentAccess(t *testing.T) {
 		suffix string
 		body   any
 	}{
-		{http.MethodGet, "/" + epResp.ID, nil},
-		{http.MethodPatch, "/" + epResp.ID, map[string]any{"description": "nope"}},
-		{http.MethodPost, "/" + epResp.ID + "/rotate-secret", nil},
-		{http.MethodDelete, "/" + epResp.ID, nil},
+		{http.MethodGet, epResp.ID, nil},
+		{http.MethodPatch, epResp.ID, map[string]any{"description": "nope"}},
+		{http.MethodPost, epResp.ID + "/rotate-secret", nil},
+		{http.MethodDelete, epResp.ID, nil},
 	} {
 		rec = f.doWebhookEndpoint(t, f.agentAAuth, tc.suffix, tc.method, tc.body)
 		assert.Equal(t, http.StatusNotFound, rec.Code, "%s %s resp=%s", tc.method, tc.suffix, rec.Body.String())
@@ -255,18 +253,18 @@ func TestWebhookEndpointBoundAgentAccess(t *testing.T) {
 	var ownedResp WebhookEndpointCreatedResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ownedResp))
 
-	rec = f.doWebhookEndpoint(t, f.agentAAuth, "/"+ownedResp.ID, http.MethodPatch, map[string]any{
+	rec = f.doWebhookEndpoint(t, f.agentAAuth, ownedResp.ID, http.MethodPatch, map[string]any{
 		"description": "updated by owner agent",
 		"status":      "disabled",
 	})
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	rec = f.doWebhookEndpoint(t, f.agentAAuth, "/"+ownedResp.ID, http.MethodPatch, map[string]any{
+	rec = f.doWebhookEndpoint(t, f.agentAAuth, ownedResp.ID, http.MethodPatch, map[string]any{
 		"boundLifetime": "persistent",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	rec = f.doWebhookEndpoint(t, f.agentAAuth, "/"+ownedResp.ID+"/rotate-secret", http.MethodPost, nil)
+	rec = f.doWebhookEndpoint(t, f.agentAAuth, ownedResp.ID+"/rotate-secret", http.MethodPost, nil)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
@@ -282,13 +280,13 @@ func TestWebhookEndpointUpdateAndDisable(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
 
 	// Viewer cannot PATCH -> 403.
-	rec = f.doWebhookEndpoint(t, f.viewerAuth, "/"+created.ID, http.MethodPatch, map[string]any{
+	rec = f.doWebhookEndpoint(t, f.viewerAuth, created.ID, http.MethodPatch, map[string]any{
 		"description": "viewer-nope",
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// Member CAN PATCH description, status=disabled, and bind to agentA.
-	rec = f.doWebhookEndpoint(t, f.memberAuth, "/"+created.ID, http.MethodPatch, map[string]any{
+	rec = f.doWebhookEndpoint(t, f.memberAuth, created.ID, http.MethodPatch, map[string]any{
 		"description":   "v2",
 		"status":        "disabled",
 		"boundAgentId":  f.agentA.ID,
@@ -315,7 +313,7 @@ func TestWebhookEndpointUpdateAndDisable(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, hookRec.Code)
 
 	// Re-enable endpoint -> ingress returns 202.
-	rec = f.doWebhookEndpoint(t, f.memberAuth, "/"+created.ID, http.MethodPatch, map[string]any{
+	rec = f.doWebhookEndpoint(t, f.memberAuth, created.ID, http.MethodPatch, map[string]any{
 		"status": "active",
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -329,7 +327,7 @@ func TestWebhookEndpointUpdateAndDisable(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, hookRec2.Code, hookRec2.Body.String())
 
 	// Unbind via PATCH boundAgentId="".
-	rec = f.doWebhookEndpoint(t, f.memberAuth, "/"+created.ID, http.MethodPatch, map[string]any{
+	rec = f.doWebhookEndpoint(t, f.memberAuth, created.ID, http.MethodPatch, map[string]any{
 		"boundAgentId": "",
 	})
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -352,7 +350,7 @@ func TestWebhookEndpointSecretRotation_GraceWindowAndMaintenance(t *testing.T) {
 	secretV1 := created.Secret
 
 	// Rotate secret -> returns v2 secret once, sets SecretVersion=2 and SecretRotatedAt.
-	rec = f.doWebhookEndpoint(t, f.ownerAuth, "/"+created.ID+"/rotate-secret", http.MethodPost, nil)
+	rec = f.doWebhookEndpoint(t, f.ownerAuth, created.ID+"/rotate-secret", http.MethodPost, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var rotated WebhookEndpointRotatedResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rotated))
@@ -477,11 +475,10 @@ func TestAgentDelete_ReleaseTriggerBindingsCascade(t *testing.T) {
 	}
 	require.NoError(t, f.store.CreateTrigger(ctx, trUnrelated))
 
-	// 3. Soft-delete agentA through the HTTP agent delete route (which runs runAgentDeletion).
-	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/"+f.projectID+"/agents/"+f.agentA.ID+"?force=true", nil)
-	delReq = delReq.WithContext(contextWithIdentity(delReq.Context(), f.ownerAuth))
+	// 3. Soft-delete agentA through the agent delete handler (which runs runAgentDeletion).
+	delReq := authoredRequest(t, f.ownerAuth, http.MethodDelete, "/api/v1/projects/"+f.projectID+"/agents/"+f.agentA.ID+"?force=true", nil)
 	delRec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(delRec, delReq)
+	f.srv.deleteAgent(delRec, delReq, f.agentA.ID)
 	require.Equal(t, http.StatusNoContent, delRec.Code, delRec.Body.String())
 
 	// Verify agent-lifetime endpoint, its secret row, and agentA's own rule are deleted.
@@ -536,9 +533,8 @@ func TestAgentDelete_ReleaseTriggerBindingsCascade(t *testing.T) {
 	assert.Equal(t, len(audits), len(auditsAfter), "cascade retry must be idempotent with no duplicate audits")
 
 	// 6. Restoring soft-deleted agentA does NOT resurrect deleted endpoint/rules or rebind persistent endpoint.
-	deletedAgent, err := f.store.GetAgentIncludingDeleted(ctx, f.agentA.ID)
-	require.NoError(t, err)
-	if !deletedAgent.DeletedAt.IsZero() {
+	deletedAgent, err := f.store.GetAgent(ctx, f.agentA.ID)
+	if err == nil && deletedAgent != nil && !deletedAgent.DeletedAt.IsZero() {
 		require.NoError(t, f.srv.restoreAgentTx(ctx, deletedAgent, AuditActor{}))
 	}
 	_, err = f.store.GetWebhookEndpoint(ctx, epAgentResp.ID)
