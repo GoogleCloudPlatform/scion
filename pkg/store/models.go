@@ -5732,6 +5732,7 @@ const (
 const (
 	QuotaScopeSystem  = "system"
 	QuotaScopeProject = "project"
+	QuotaScopeGroup   = "group"
 	// QuotaScopeBroker scopes a limit to a single runtime broker rather than a
 	// user, project, or the whole Hub. See LimitMaxAgentsPerBroker: a broker is
 	// where the resource-exhaustion risk actually lives (it is the process

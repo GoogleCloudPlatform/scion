@@ -727,15 +727,29 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 		// ReconcileStaleBrokerQuotaReservations do (ptone/scion#2061 P2.2).
 		var count int
 		var listErr error
-		if def.Name == store.LimitMaxAgentsPerBroker {
+		switch def.Name {
+		case store.LimitMaxAgentsPerBroker:
 			count, listErr = s.countBrokerScopedActiveReservations(ctx, def.ID)
-		} else if def.Name == store.LimitMaxAgentsPerProject {
+		case store.LimitMaxAgentsPerProject:
 			// Project reservations are stored at store.QuotaScopeProject,
 			// one scope per project, never at store.QuotaScopeSystem: sum
 			// every project's with one aggregate query, never one per
 			// project (ptone/scion#6033).
-			count, listErr = s.countProjectScopedActiveReservations(ctx, def.ID)
-		} else {
+			count, listErr = s.countScopedActiveReservations(ctx, def.ID, store.QuotaScopeProject)
+		case store.LimitMaxMembersPerGroup:
+			// Group member reservations are stored at store.QuotaScopeGroup,
+			// one scope per group (handlers_groups.go), never at
+			// store.QuotaScopeSystem (ptone/scion#6036).
+			count, listErr = s.countScopedActiveReservations(ctx, def.ID, store.QuotaScopeGroup)
+		case store.LimitMaxProjectsPerUser:
+			// Project-per-user reservations are stored at
+			// (store.QuotaScopeSystem, store.QuotaScopeSystem)
+			// (handlers_projects_core.go), not empty scope_id
+			// (ptone/scion#6036).
+			var reservations []*store.UsageReservation
+			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, store.QuotaScopeSystem)
+			count = len(reservations)
+		default:
 			var reservations []*store.UsageReservation
 			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, "")
 			count = len(reservations)
@@ -775,13 +789,22 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	// always return none for it. List across every broker instead, the same
 	// way ReconcileStaleBrokerQuotaReservations does.
 	var reservations, unlisted []*store.UsageReservation
-	if def.Name == store.LimitMaxAgentsPerBroker {
+	switch def.Name {
+	case store.LimitMaxAgentsPerBroker:
 		reservations, unlisted, err = s.brokerScopedActiveReservations(ctx, def.ID)
-	} else if def.Name == store.LimitMaxAgentsPerProject {
+	case store.LimitMaxAgentsPerProject:
 		// Every project's reservations, as getUsageSummary counts them
 		// (ptone/scion#6033).
 		reservations, err = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)
-	} else {
+	case store.LimitMaxMembersPerGroup:
+		// Every group's reservations, as getUsageSummary counts them
+		// (ptone/scion#6036).
+		reservations, err = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeGroup)
+	case store.LimitMaxProjectsPerUser:
+		// Project-per-user reservations are stored at ("system", "system")
+		// (handlers_projects_core.go; ptone/scion#6036).
+		reservations, err = s.store.ListActiveReservations(ctx, limitID, store.QuotaScopeSystem, store.QuotaScopeSystem)
+	default:
 		reservations, err = s.store.ListActiveReservations(ctx, limitID, store.QuotaScopeSystem, "")
 	}
 	if err != nil {
@@ -919,14 +942,13 @@ func (s *Server) countBrokerScopedActiveReservations(ctx context.Context, limitD
 	return total, nil
 }
 
-// countProjectScopedActiveReservations returns the number of active
-// project-scoped reservations for limitDefinitionID summed across every
-// project, in one aggregate query. Like getUsageByLimit, it counts every
-// project's rows.
-func (s *Server) countProjectScopedActiveReservations(ctx context.Context, limitDefinitionID string) (int, error) {
-	counts, err := s.store.CountActiveReservationsByScope(ctx, limitDefinitionID, store.QuotaScopeProject)
+// countScopedActiveReservations returns the number of active reservations for
+// limitDefinitionID summed across every scope ID of scopeType, in one
+// aggregate query. Like getUsageByLimit, it counts every scope's rows.
+func (s *Server) countScopedActiveReservations(ctx context.Context, limitDefinitionID, scopeType string) (int, error) {
+	counts, err := s.store.CountActiveReservationsByScope(ctx, limitDefinitionID, scopeType)
 	if err != nil {
-		return 0, fmt.Errorf("count active project-scoped reservations: %w", err)
+		return 0, fmt.Errorf("count active %s-scoped reservations: %w", scopeType, err)
 	}
 	total := 0
 	for _, n := range counts {
@@ -986,18 +1008,27 @@ func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Resolve effective limit for this user at system scope.
+		scopeType := store.QuotaScopeSystem
+		scopeID := ""
+		if def.Name == store.LimitMaxProjectsPerUser {
+			// max_projects_per_user reservations are stored at
+			// ("system", "system") (handlers_projects_core.go), not empty
+			// scope_id (ptone/scion#6036).
+			scopeID = store.QuotaScopeSystem
+		}
+
+		// Resolve effective limit for this user at the limit's scope.
 		effectiveLimit, err := s.quotaService.ResolveEffectiveLimit(
-			r.Context(), def.ID, userID, store.QuotaScopeSystem, "")
+			r.Context(), def.ID, userID, scopeType, scopeID)
 		if err != nil {
 			slog.Warn("failed to resolve effective limit for user",
 				"limit_id", def.ID, "user_id", userID, "error", err)
 			effectiveLimit = def.DefaultValue
 		}
 
-		// Count active reservations for this user at system scope.
+		// Count active reservations for this user at the limit's scope.
 		current, err := s.store.CountActiveReservations(
-			r.Context(), def.ID, userID, store.QuotaScopeSystem, "")
+			r.Context(), def.ID, userID, scopeType, scopeID)
 		if err != nil {
 			slog.Warn("failed to count active reservations for user",
 				"limit_id", def.ID, "user_id", userID, "error", err)
