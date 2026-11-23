@@ -175,7 +175,7 @@ func TestStartNFSWorktree_OtherModesUnchanged(t *testing.T) {
 // worktree-per-agent on shared (NFS) workspace storage instead of silently
 // mounting the project's shared NFS workspace root (ptone/scion#8646).
 func TestStartNFSWorktree_LocalContainerRuntimesRefused(t *testing.T) {
-	for _, rt := range []string{"docker", "podman", "container"} {
+	for _, rt := range []string{"docker", "podman", "container", "apple-container"} {
 		t.Run("refused/"+rt, func(t *testing.T) {
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			ws := nfsTestWorkspaceDir(mountRoot)

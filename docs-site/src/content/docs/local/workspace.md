@@ -498,10 +498,11 @@ init` lists `.scion/agents/` in `.gitignore`) and start the agent again.
 
 On Kubernetes, git projects that share one repository across agents (worktree-per-agent or
 shared-workspace on NFS) are not supported: use a clone-per-agent workspace, where each agent gets
-its own clone of the repository, or run the project on a Docker, Podman, or Apple Runtime Broker
-using local `project_storage` (not `nfs`). On shared (`nfs`) project storage, Docker, Podman, and
-Apple `container` also refuse `worktree-per-agent` at create, start, and restart (`412
-unsupported_capability`); use `clone-per-agent` on NFS instead.
+its own clone of the repository, or run the project on a local or Docker, Podman, or Apple Runtime
+Broker. On shared (`nfs`) project storage, Docker, Podman, and Apple `container` also refuse
+`worktree-per-agent` at create, start, and restart (`412 unsupported_capability`); use
+`clone-per-agent` on NFS, or run `worktree-per-agent` on a Runtime Broker using local
+`project_storage`.
 
 ---
 

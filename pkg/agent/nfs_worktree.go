@@ -46,7 +46,7 @@ var ErrLocalContainerNFSWorktreeUnsupported = errors.New(
 // cannot silently mount the shared NFS project workspace root when dispatched
 // in worktree-per-agent mode.
 func checkLocalContainerNFSWorktree(runtimeName string, emptyPerAgent bool, env map[string]string, agentName string) error {
-	if emptyPerAgent || !isLocalContainerRuntime(runtimeName) {
+	if emptyPerAgent || (!isLocalContainerRuntime(runtimeName) && runtimeName != "apple-container") {
 		return nil
 	}
 	if store.ResolveWorkspaceSharingMode(env["SCION_WORKSPACE_MODE"]) != store.SharingModeWorktreePerAgent {

@@ -1820,14 +1820,11 @@ func isLocalContainerRuntimeName(name string) bool {
 	return localContainerRuntime(name) || name == "apple-container"
 }
 
-const localContainerNFSWorktreePerAgentRefusalText = `"Worktree per agent" (worktree-per-agent) workspaces are not supported on shared (nfs) project storage for Docker, Podman, or Apple container runtimes: ` +
-	`use "Clone per agent" (clone-per-agent) on NFS, or run the project on a Runtime Broker using local project_storage`
-
 func localContainerNFSWorktreePerAgentRefusalError(agentName string) *startContextError {
 	return &startContextError{
 		Status:  http.StatusPreconditionFailed,
 		Code:    ErrCodeUnsupportedCapability,
-		Message: fmt.Sprintf("agent %q: %s", agentName, localContainerNFSWorktreePerAgentRefusalText),
+		Message: fmt.Sprintf("agent %q: %s", agentName, agent.ErrLocalContainerNFSWorktreeUnsupported.Error()),
 	}
 }
 

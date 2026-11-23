@@ -19,20 +19,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestBuildStartContext_LocalContainerNFSRefusesWorktreePerAgent_NoSideEffects(t *testing.T) {
-	for _, rt := range []string{"docker", "podman", "container"} {
+	for _, rt := range []string{"docker", "podman", "container", "apple-container"} {
 		for _, op := range []startOperation{opCreate, opHTTPStart, opHTTPRestart} {
 			t.Run(rt+"/"+string(op), func(t *testing.T) {
 				srv := newTestServerForStartContextRuntime(t, ServerConfig{
@@ -266,5 +271,175 @@ func TestBuildStartContext_MultiProfile_NFSLocalContainerRefused(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(projectDir, "workspace")); !os.IsNotExist(statErr) {
 		t.Errorf("host workspace/worktree must not be created for Podman NFS profile, stat err = %v", statErr)
+	}
+}
+
+func newFlatDockerNFSStartServer(t *testing.T) (*Server, *int, string) {
+	t.Helper()
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.ContainerHubEndpoint = "https://hub.example.com"
+	hostBase := filepath.Join(t.TempDir(), "nfs")
+	projScionDir := filepath.Join(hostBase, "projects", e10ProjectID, ".scion")
+	if err := os.MkdirAll(projScionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projScionDir, "project-id"), []byte(e10ProjectID+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projScionDir, "project-slug"), []byte(e10ProjectSlug+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg.StorageLayout = projectfs.Layout{
+		Backend:     projectfs.BackendNFS,
+		HostBase:    hostBase,
+		SubPathRoot: "projects",
+	}
+	cfg.WorkspaceStorageBackend = "nfs"
+	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
+	target := config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeDocker}
+	srv.config.FlatInstance = &FlatInstanceConfig{
+		Identity: &brokeridentity.Identity{
+			InstanceKey:     "docker-a",
+			RuntimeBrokerID: "flat-docker-broker",
+			RuntimeTarget:   api.RuntimeTargetDescriptor{ID: "flat-docker-target", Type: brokeridentity.TargetTypeDocker},
+			ExecutionScope:  brokeridentity.ExecutionScope{Type: brokeridentity.TargetTypeDocker},
+		},
+		Instance: config.V1RuntimeBrokerInstanceConfig{Key: "docker-a", Name: "docker-a", RuntimeTarget: &target},
+	}
+	srv.ownership = NewOwnershipStore(t.TempDir(), "flat-docker-broker")
+	mr, ok := srv.runtime.(*runtime.MockRuntime)
+	if !ok {
+		t.Fatalf("runtime is %T, want *runtime.MockRuntime", srv.runtime)
+	}
+	runs := 0
+	mr.RunFunc = func(context.Context, runtime.RunConfig) (string, error) {
+		runs++
+		return "", nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv, &runs, home
+}
+
+func TestFlatDocker_RefusesWorktreePerAgent_NoSideEffects(t *testing.T) {
+	for _, op := range e10Ops {
+		t.Run("buildStartContext/"+string(op), func(t *testing.T) {
+			srv, runs, home := newFlatDockerNFSStartServer(t)
+			if op != opCreate {
+				if err := srv.ownership.BeginRun(e10ProjectID, e10AgentID, e10Agent, e10SeedRun); err != nil {
+					t.Fatal(err)
+				}
+				if err := srv.ownership.SetRunState(e10ProjectID, e10AgentID, e10SeedRun, OwnershipStateCreated); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recordsBefore, err := srv.ownership.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			homeBefore := e10TreeSnapshot(t, home)
+
+			in := startContextInputs{
+				Name:        e10Agent,
+				Slug:        e10Agent,
+				AgentID:     e10AgentID,
+				ProjectID:   e10ProjectID,
+				ProjectSlug: e10ProjectSlug,
+				Operation:   op,
+				Config: &CreateAgentConfig{
+					GitClone: &api.GitCloneConfig{URL: "https://github.com/org/repo.git"},
+				},
+				ResolvedEnv: map[string]string{
+					"SCION_WORKSPACE_MODE": string(store.SharingModeWorktreePerAgent),
+					"SCION_WORKSPACE_GIT":  "true",
+				},
+			}
+			if op != opHTTPRestart {
+				in.WorkspaceMode = store.WorkspaceModeWorktreePerAgent
+			}
+
+			sc, err := srv.buildStartContext(context.Background(), in)
+			if sc != nil {
+				t.Fatal("expected refusal, got startContext")
+			}
+			sce := requireStartContextError(t, err)
+			if sce.Status != http.StatusPreconditionFailed || sce.Code != api.BrokerErrCodeUnsupportedCapability {
+				t.Fatalf("got status=%d code=%q, want 412 %q (%v)", sce.Status, sce.Code, api.BrokerErrCodeUnsupportedCapability, err)
+			}
+			recordsAfter, err := srv.ownership.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(recordsAfter, recordsBefore) {
+				t.Errorf("ownership records changed:\nbefore %+v\nafter  %+v", recordsBefore, recordsAfter)
+			}
+			if got := e10TreeSnapshot(t, home); !maps.Equal(got, homeBefore) {
+				t.Errorf("HOME tree modified (%d paths before, %d after)", len(homeBefore), len(got))
+			}
+			if *runs != 0 {
+				t.Errorf("runtime Run calls = %d, want 0", *runs)
+			}
+		})
+	}
+
+	for _, gatherEnv := range []bool{false, true} {
+		t.Run(fmt.Sprintf("http-create/gatherEnv=%t", gatherEnv), func(t *testing.T) {
+			srv, runs, _ := newFlatDockerNFSStartServer(t)
+			recordsBefore, err := srv.ownership.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			body, err := json.Marshal(CreateAgentRequest{
+				ID:                      e10AgentID,
+				Name:                    e10Agent,
+				Slug:                    e10Agent,
+				ProjectID:               e10ProjectID,
+				ProjectSlug:             e10ProjectSlug,
+				ExpectedRuntimeTargetID: "flat-docker-target",
+				WorkspaceMode:           store.WorkspaceModeWorktreePerAgent,
+				GatherEnv:               gatherEnv,
+				Config: &CreateAgentConfig{
+					GitClone: &api.GitCloneConfig{URL: "https://github.com/org/repo.git"},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+
+			srv.createAgent(rec, req)
+
+			if rec.Code != http.StatusPreconditionFailed {
+				t.Fatalf("HTTP status = %d, want 412: %s", rec.Code, rec.Body.String())
+			}
+			var errResp ErrorResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("unmarshal ErrorResponse: %v (%s)", err, rec.Body.String())
+			}
+			if errResp.Error.Code != api.BrokerErrCodeUnsupportedCapability {
+				t.Errorf("error.code = %q, want %q", errResp.Error.Code, api.BrokerErrCodeUnsupportedCapability)
+			}
+			for _, want := range []string{"worktree-per-agent", "nfs", "clone-per-agent", "project_storage"} {
+				if !strings.Contains(errResp.Error.Message, want) {
+					t.Errorf("error.message %q must mention %q", errResp.Error.Message, want)
+				}
+			}
+			recordsAfter, err := srv.ownership.List()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(recordsAfter, recordsBefore) {
+				t.Errorf("ownership records changed:\nbefore %+v\nafter  %+v", recordsBefore, recordsAfter)
+			}
+			if *runs != 0 {
+				t.Errorf("runtime Run calls = %d, want 0", *runs)
+			}
+		})
 	}
 }
