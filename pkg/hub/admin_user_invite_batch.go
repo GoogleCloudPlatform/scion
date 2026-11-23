@@ -697,13 +697,21 @@ func (s *Server) inviteBatchUserStep(ctx context.Context, actor UserIdentity, em
 		return nil, 0, errInviteBatchTransportIdentity
 	}
 	spec := PendingUserSpec{Email: email, Note: note, InvitedBy: actor.ID()}
+	auditActor := s.buildAuditActorFromContext(ctx)
+	if auditActor.PrincipalID == "" && actor != nil {
+		auditActor.PrincipalKind = actor.Type()
+		auditActor.PrincipalID = actor.ID()
+	}
 	var u *store.User
 	var outcome PendingOutcome
 	attempt := func() error {
 		return s.store.WithTx(ctx, func(tx store.Store) error {
 			var err error
 			u, outcome, err = createPendingUserTx(ctx, tx, spec)
-			return err
+			if err != nil || outcome != PendingCreated {
+				return err
+			}
+			return recordUserInviteMutationAudit(ctx, tx, auditActor, u)
 		})
 	}
 	err := attempt()

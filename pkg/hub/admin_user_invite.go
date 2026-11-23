@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -96,10 +97,22 @@ func (s *Server) handleAdminUserInvite(w http.ResponseWriter, r *http.Request) {
 		note = &req.Note
 	}
 
-	newUser, outcome, err := createPendingUserTx(r.Context(), s.store, PendingUserSpec{
-		Email:     email,
-		Note:      note,
-		InvitedBy: invitedBy,
+	ctx := r.Context()
+	auditActor := s.buildAuditActorFromContext(ctx)
+
+	var newUser *store.User
+	var outcome PendingOutcome
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		var err error
+		newUser, outcome, err = createPendingUserTx(ctx, tx, PendingUserSpec{
+			Email:     email,
+			Note:      note,
+			InvitedBy: invitedBy,
+		})
+		if err != nil || outcome != PendingCreated {
+			return err
+		}
+		return recordUserInviteMutationAudit(ctx, tx, auditActor, newUser)
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
@@ -260,6 +273,39 @@ func (s *Server) handleAdminUserInviteBulk(w http.ResponseWriter, r *http.Reques
 }
 
 // --- Shared pending-user creation core ---
+
+// inviteMutationType is the mutation_audits.mutation_type recorded inside the
+// user-creation transaction for each invited user created by single or bulk
+// invite.
+const inviteMutationType = "user_invite"
+
+// inviteAuditSummary is the AfterSummary of the user_invite mutation audit
+// record. It records only email and status (no notes, tokens, or secrets).
+func inviteAuditSummary(u *store.User) string {
+	b, _ := json.Marshal(struct {
+		Email  string `json:"email"`
+		Status string `json:"status"`
+	}{u.Email, u.Status})
+	return string(b)
+}
+
+// recordUserInviteMutationAudit writes the user_invite mutation audit record
+// inside the user-creation transaction tx, so the audit row and the user
+// commit or roll back together.
+func recordUserInviteMutationAudit(ctx context.Context, tx store.Store, auditActor AuditActor, u *store.User) error {
+	record := &store.MutationAuditRecord{
+		MutationType: inviteMutationType,
+		TargetType:   "user",
+		TargetID:     u.ID,
+		AfterSummary: inviteAuditSummary(u),
+		Timestamp:    time.Now().UTC(),
+	}
+	auditActor.ApplyActor(record)
+	if err := tx.CreateMutationAudit(ctx, record); err != nil {
+		return fmt.Errorf("audit user invite: %w", err)
+	}
+	return nil
+}
 
 // errInvalidInviteEmail is returned by NormalizeInviteEmail for an email
 // the invite rule rejects.
