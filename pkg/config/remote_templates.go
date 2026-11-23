@@ -33,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -371,17 +372,49 @@ func (l *limitedStream) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// RemoteFetchResult holds the local cache directory and optional GitHub commit
+// SHA (40-char lowercase hex) captured during a remote template fetch.
+type RemoteFetchResult struct {
+	Path   string
+	Commit string
+}
+
+var gitCommitSHARe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+func validateGitCommitSHA(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if !gitCommitSHARe.MatchString(trimmed) {
+		slog.Debug("ignoring invalid remote template commit", "raw", trimmed)
+		return ""
+	}
+	return trimmed
+}
+
 // FetchRemoteTemplateWithOptions is FetchRemoteTemplate with the download
 // hook, limits and cache directory choice of opts. When a limit is set (or
 // PrivateCacheDir) and the fetch fails, the partially filled cache
 // directory is removed. With a limit set, a GitHub folder whose tarball
 // cannot be downloaded is not retried with a git checkout.
 func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchOptions) (string, error) {
+	res, err := FetchRemoteTemplateWithResult(ctx, uri, opts)
+	if err != nil {
+		return "", err
+	}
+	return res.Path, nil
+}
+
+// FetchRemoteTemplateWithResult is FetchRemoteTemplateWithOptions returning
+// both the local cache directory and the resolved GitHub commit SHA (when
+// fetched from a GitHub folder).
+func FetchRemoteTemplateWithResult(ctx context.Context, uri string, opts FetchOptions) (*RemoteFetchResult, error) {
 	token := opts.AuthToken
 	budget := newFetchBudget(opts)
 	cacheDir, err := remoteCacheDir()
 	if err != nil {
-		return "", fmt.Errorf("failed to get cache directory: %w", err)
+		return nil, fmt.Errorf("failed to get cache directory: %w", err)
 	}
 
 	// Create a unique cache key based on the URI
@@ -392,10 +425,10 @@ func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchO
 		// A directory of this fetch's own, so concurrent fetches of the
 		// same URI cannot remove or mix each other's trees.
 		if err := os.MkdirAll(cacheDir, 0755); err != nil {
-			return "", fmt.Errorf("failed to create cache directory: %w", err)
+			return nil, fmt.Errorf("failed to create cache directory: %w", err)
 		}
 		if templateCachePath, err = os.MkdirTemp(cacheDir, cacheKey+"-*"); err != nil {
-			return "", fmt.Errorf("failed to create cache directory: %w", err)
+			return nil, fmt.Errorf("failed to create cache directory: %w", err)
 		}
 	} else {
 		// For now, always fetch fresh (could add caching logic later)
@@ -403,11 +436,11 @@ func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchO
 		// be removed, the fetch fails: populating it anyway would mix the new
 		// content with whatever is left of the old.
 		if err := removeAllCache(templateCachePath); err != nil {
-			return "", fmt.Errorf("failed to remove the old cache directory %s: %w", templateCachePath, err)
+			return nil, fmt.Errorf("failed to remove the old cache directory %s: %w", templateCachePath, err)
 		}
 
 		if err := os.MkdirAll(templateCachePath, 0755); err != nil {
-			return "", fmt.Errorf("failed to create cache directory: %w", err)
+			return nil, fmt.Errorf("failed to create cache directory: %w", err)
 		}
 	}
 
@@ -416,24 +449,28 @@ func FetchRemoteTemplateWithOptions(ctx context.Context, uri string, opts FetchO
 		if budget != nil || opts.PrivateCacheDir {
 			_ = os.RemoveAll(templateCachePath)
 		}
-		return "", err
+		return nil, err
 	}
 
 	// Whatever the fetch path, a fetched template holds regular files and
 	// directories only; refuse it (and drop the cache) otherwise.
 	if err := checkRegularTree(templateCachePath); err != nil {
 		_ = os.RemoveAll(templateCachePath)
-		return "", err
+		return nil, err
 	}
 
-	return templateCachePath, nil
+	return &RemoteFetchResult{
+		Path:   templateCachePath,
+		Commit: f.sourceCommit,
+	}, nil
 }
 
 // remoteFetcher carries the download hook and budget of one fetch. The
 // zero value is the unlimited http.DefaultClient fetch.
 type remoteFetcher struct {
-	download RemoteDownloadFunc
-	budget   *fetchBudget
+	download     RemoteDownloadFunc
+	budget       *fetchBudget
+	sourceCommit string
 }
 
 // fetchInto fetches uri into the existing directory destPath.
@@ -556,6 +593,14 @@ func (f *remoteFetcher) fetchGitHubFolder(ctx context.Context, uri string, destP
 	}
 
 	// Fall back to sparse git checkout
+	if reflect.ValueOf(sparseGitCheckout).Pointer() == reflect.ValueOf(execSparseGitCheckout).Pointer() {
+		commit, err := execSparseGitCheckoutWithCommit(ctx, parsed, destPath, token)
+		if err != nil {
+			return err
+		}
+		f.sourceCommit = commit
+		return nil
+	}
 	return sparseGitCheckout(ctx, parsed, destPath, token)
 }
 
@@ -926,10 +971,15 @@ func ProductionGitSparseCheckoutForTest() GitSparseCheckoutFunc {
 // anonymously. When token is non-empty, git authenticates through the
 // credential helper scoped to the remote URL's host only.
 func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
+	_, err := execSparseGitCheckoutWithCommit(ctx, parts, destPath, token)
+	return err
+}
+
+func execSparseGitCheckoutWithCommit(ctx context.Context, parts *GitHubURLParts, destPath string, token string) (string, error) {
 	// Create a temporary directory for the git clone
 	tmpDir, err := os.MkdirTemp("", "scion-git-sparse-*")
 	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
@@ -957,14 +1007,14 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 		cmd.Dir = tmpDir
 		cmd.Env = gitEnv
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("git command %v failed: %w", args, err)
+			return "", fmt.Errorf("git command %v failed: %w", args, err)
 		}
 	}
 
 	// Write sparse-checkout config
 	sparseCheckoutPath := filepath.Join(tmpDir, ".git", "info", "sparse-checkout")
 	if err := os.MkdirAll(filepath.Dir(sparseCheckoutPath), 0755); err != nil {
-		return err
+		return "", err
 	}
 
 	// If there's a path, only check out that path; otherwise, check out everything
@@ -973,7 +1023,7 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 		sparsePattern = parts.Path + "/**"
 	}
 	if err := os.WriteFile(sparseCheckoutPath, []byte(sparsePattern+"\n"), 0644); err != nil {
-		return fmt.Errorf("failed to write sparse-checkout config: %w", err)
+		return "", fmt.Errorf("failed to write sparse-checkout config: %w", err)
 	}
 
 	// Fetch and checkout the branch
@@ -985,9 +1035,9 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 	if err := fetchCmd.Run(); err != nil {
 		detail := strings.TrimSpace(stderrBuf.String())
 		if detail != "" {
-			return fmt.Errorf("git fetch failed: %s", detail)
+			return "", fmt.Errorf("git fetch failed: %s", detail)
 		}
-		return fmt.Errorf("git fetch failed: %w", err)
+		return "", fmt.Errorf("git fetch failed: %w", err)
 	}
 
 	stderrBuf.Reset()
@@ -998,16 +1048,28 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 	if err := checkoutCmd.Run(); err != nil {
 		detail := strings.TrimSpace(stderrBuf.String())
 		if detail != "" {
-			return fmt.Errorf("git checkout failed: %s", detail)
+			return "", fmt.Errorf("git checkout failed: %s", detail)
 		}
-		return fmt.Errorf("git checkout failed: %w", err)
+		return "", fmt.Errorf("git checkout failed: %w", err)
+	}
+
+	// Capture checked-out commit SHA (best-effort; empty if unavailable).
+	var commit string
+	revCmd := exec.CommandContext(ctx, "git", append(util.HostGitArgs(), "rev-parse", "HEAD")...)
+	revCmd.Dir = tmpDir
+	revCmd.Env = gitEnv
+	if out, err := revCmd.Output(); err == nil {
+		commit = validateGitCommitSHA(string(out))
 	}
 
 	// Copy the desired folder to the destination, excluding .git. The
 	// checkout may contain symbolic links (git materialises them as links);
 	// copyDirExcludingGit never follows or copies them, so the template holds
 	// regular files and directories only.
-	return copyDirExcludingGit(tmpDir, parts.Path, destPath)
+	if err := copyDirExcludingGit(tmpDir, parts.Path, destPath); err != nil {
+		return "", err
+	}
+	return commit, nil
 }
 
 // copyDirExcludingGit copies the directory subPath of baseDir into dst,
@@ -1204,7 +1266,9 @@ func (f *remoteFetcher) fetchArchive(ctx context.Context, uri string, destPath s
 	if strings.HasSuffix(lower, ".zip") {
 		return f.extractZip(tmpPath, destPath)
 	} else if strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.gz") {
-		return f.extractTarGz(tmpPath, destPath)
+		err := f.extractTarGz(tmpPath, destPath)
+		f.sourceCommit = ""
+		return err
 	}
 
 	if f.budget != nil {
@@ -1445,6 +1509,12 @@ func (rf *remoteFetcher) extractTarGz(tarGzPath, destPath string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
+		}
+		if header.Typeflag == tar.TypeXGlobalHeader {
+			if rf.sourceCommit == "" {
+				rf.sourceCommit = validateGitCommitSHA(header.PAXRecords["comment"])
+			}
+			continue
 		}
 		if header.Typeflag == tar.TypeDir || header.Typeflag == tar.TypeReg || header.Typeflag == tar.TypeSymlink {
 			if rf.budget != nil {

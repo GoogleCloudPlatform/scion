@@ -64,7 +64,7 @@ type ResourceRecord struct {
 	StoragePath   string
 	// Layout is the storage layout (store.Template.Layout,
 	// store.HarnessConfig.Layout).
-	Layout    string
+	Layout       string
 	Files        []store.TemplateFile
 	Status       string
 	SourceURL    string
@@ -656,12 +656,19 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 	if err != nil {
 		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}
-	if templateIndexMatches(t, idx) {
+	indexMatches := templateIndexMatches(t, idx)
+	commitMatches := t.SourceCommit == rec.SourceCommit
+	if indexMatches && commitMatches {
 		return false, nil
 	}
 	prevStoragePath := t.StoragePath
 	p.ensureStoragePath(t)
-	err = p.s.commitTemplateFiles(ctx, t, t.Files, commitOpts{collected: cd})
+	opts := commitOpts{
+		collected:       cd,
+		sourceCommit:    rec.SourceCommit,
+		setSourceCommit: true,
+	}
+	err = p.s.commitTemplateFiles(ctx, t, t.Files, opts)
 	if errors.Is(err, store.ErrTemplateConflict) {
 		var fresh *store.Template
 		fresh, err = p.rereadAfterConflict(ctx, t)
@@ -673,7 +680,7 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 				return false, nil
 			}
 			p.ensureStoragePath(fresh)
-			if err = p.s.commitTemplateFiles(ctx, fresh, fresh.Files, commitOpts{collected: cd}); err == nil {
+			if err = p.s.commitTemplateFiles(ctx, fresh, fresh.Files, opts); err == nil {
 				p.model = fresh
 				t = fresh
 			}
@@ -683,10 +690,12 @@ func (p *templatePersistence) OnHashMatch(ctx context.Context, rec *ResourceReco
 		t.StoragePath = prevStoragePath
 		return false, fmt.Errorf("%s: failed to re-derive template %q: %w", p.Label(), t.Name, err)
 	}
-	p.s.importTemplateHarnessConfigs(ctx, cd, t.Scope, t.ScopeID)
-	p.s.templateLog.Info(p.Label()+": re-derived template index",
-		"template", t.Name, "harness", t.Harness, "defaultHarnessConfig", t.DefaultHarnessConfig)
-	return false, nil
+	if !indexMatches {
+		p.s.importTemplateHarnessConfigs(ctx, cd, t.Scope, t.ScopeID)
+		p.s.templateLog.Info(p.Label()+": re-derived template index",
+			"template", t.Name, "harness", t.Harness, "defaultHarnessConfig", t.DefaultHarnessConfig)
+	}
+	return !commitMatches, nil
 }
 
 // UploadFiles writes the directory's files as blobs under the template's

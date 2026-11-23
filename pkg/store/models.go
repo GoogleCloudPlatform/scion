@@ -476,9 +476,11 @@ type AgentAppliedConfig struct {
 	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
-	// Template info for Runtime Broker hydration
-	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
-	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
+	// Template info for Runtime Broker hydration and provenance
+	TemplateID           string `json:"templateId,omitempty"`           // Hub template ID for fetching
+	TemplateHash         string `json:"templateHash,omitempty"`         // Content hash for cache validation
+	TemplateSourceURL    string `json:"templateSourceUrl,omitempty"`    // Template source URL at agent create time
+	TemplateSourceCommit string `json:"templateSourceCommit,omitempty"` // Template source commit SHA at agent create time
 
 	// RuntimeTargetCandidate is a target reported by one heartbeat that
 	// differs from RuntimeTarget. It becomes RuntimeTarget only when the next
@@ -1767,9 +1769,9 @@ type Template struct {
 	Status string `json:"status"` // pending, active, archived
 
 	// Ownership
-	OwnerID   string `json:"ownerId,omitempty"`
-	CreatedBy string `json:"createdBy,omitempty"`
-	UpdatedBy string `json:"updatedBy,omitempty"`
+	OwnerID      string `json:"ownerId,omitempty"`
+	CreatedBy    string `json:"createdBy,omitempty"`
+	UpdatedBy    string `json:"updatedBy,omitempty"`
 	SourceURL    string `json:"sourceUrl,omitempty"`
 	SourceCommit string `json:"sourceCommit,omitempty"`
 

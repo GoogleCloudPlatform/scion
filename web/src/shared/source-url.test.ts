@@ -88,21 +88,9 @@ describe('githubCommitTreeUrl', () => {
       sha,
       `https://github.com/acme/repo/tree/${sha}/.scion/templates/my-tpl`,
     ],
-    [
-      'https://github.com/acme/repo/tree/dev',
-      sha,
-      `https://github.com/acme/repo/tree/${sha}`,
-    ],
-    [
-      'https://github.com/acme/repo',
-      sha,
-      `https://github.com/acme/repo/tree/${sha}`,
-    ],
-    [
-      'https://github.com/acme/repo.git',
-      sha,
-      `https://github.com/acme/repo/tree/${sha}`,
-    ],
+    ['https://github.com/acme/repo/tree/dev', sha, `https://github.com/acme/repo/tree/${sha}`],
+    ['https://github.com/acme/repo', sha, `https://github.com/acme/repo/tree/${sha}`],
+    ['https://github.com/acme/repo.git', sha, `https://github.com/acme/repo/tree/${sha}`],
     [
       'git+https://github.com/acme/repo/tree/main/templates/a',
       sha,

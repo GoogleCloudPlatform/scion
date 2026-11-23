@@ -130,10 +130,12 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 
 	if isJSONOutput() {
 		type templateEntry struct {
-			Name        string `json:"name"`
-			Path        string `json:"path,omitempty"`
-			ID          string `json:"id,omitempty"`
-			ContentHash string `json:"contentHash,omitempty"`
+			Name         string `json:"name"`
+			Path         string `json:"path,omitempty"`
+			ID           string `json:"id,omitempty"`
+			ContentHash  string `json:"contentHash,omitempty"`
+			SourceURL    string `json:"sourceUrl,omitempty"`
+			SourceCommit string `json:"sourceCommit,omitempty"`
 		}
 		output := map[string]interface{}{}
 
@@ -157,25 +159,37 @@ func runTemplateList(cmd *cobra.Command, args []string) error {
 		}
 
 		if !localOnly {
+			toHubEntry := func(t hubclient.Template) templateEntry {
+				e := templateEntry{
+					Name:         t.Name,
+					ID:           t.ID,
+					ContentHash:  t.ContentHash,
+					SourceCommit: t.SourceCommit,
+				}
+				if t.SourceURL != "" {
+					e.SourceURL = displaySourceURL(t.SourceURL)
+				}
+				return e
+			}
 			hubSection := map[string][]templateEntry{}
 			if len(hubGlobal) > 0 {
 				entries := make([]templateEntry, len(hubGlobal))
 				for i, t := range hubGlobal {
-					entries[i] = templateEntry{Name: t.Name, ID: t.ID, ContentHash: t.ContentHash}
+					entries[i] = toHubEntry(t)
 				}
 				hubSection["global"] = entries
 			}
 			if len(hubProject) > 0 {
 				entries := make([]templateEntry, len(hubProject))
 				for i, t := range hubProject {
-					entries[i] = templateEntry{Name: t.Name, ID: t.ID, ContentHash: t.ContentHash}
+					entries[i] = toHubEntry(t)
 				}
 				hubSection["project"] = entries
 			}
 			if len(hubUser) > 0 {
 				entries := make([]templateEntry, len(hubUser))
 				for i, t := range hubUser {
-					entries[i] = templateEntry{Name: t.Name, ID: t.ID, ContentHash: t.ContentHash}
+					entries[i] = toHubEntry(t)
 				}
 				hubSection["user"] = entries
 			}
@@ -284,9 +298,9 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*
 		_, _ = fmt.Fprintln(w, "Hub Templates:")
 		if hasHubGlobal {
 			_, _ = fmt.Fprintln(w, "  Global:")
-			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH")
+			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH\tCOMMIT")
 			for _, t := range hubGlobal {
-				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
+				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash), shortCommit(t.SourceCommit))
 			}
 		}
 		if hasHubProject {
@@ -294,9 +308,9 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*
 				_, _ = fmt.Fprintln(w)
 			}
 			_, _ = fmt.Fprintln(w, "  Project:")
-			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH")
+			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH\tCOMMIT")
 			for _, t := range hubProject {
-				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
+				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash), shortCommit(t.SourceCommit))
 			}
 		}
 		if hasHubUser {
@@ -304,9 +318,9 @@ func printTemplateListHubMode(w *tabwriter.Writer, localGlobal, localProject []*
 				_, _ = fmt.Fprintln(w)
 			}
 			_, _ = fmt.Fprintln(w, "  User:")
-			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH")
+			_, _ = fmt.Fprintln(w, "    NAME\tID\tHASH\tCOMMIT")
 			for _, t := range hubUser {
-				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash))
+				_, _ = fmt.Fprintf(w, "    %s\t%s\t%s\t%s\n", t.Name, t.ID, truncateHash(t.ContentHash), shortCommit(t.SourceCommit))
 			}
 		}
 	}

@@ -922,6 +922,8 @@ export interface AgentAppliedConfig {
   gitClone?: Record<string, unknown>;
   templateId?: string;
   templateHash?: string;
+  templateSourceUrl?: string;
+  templateSourceCommit?: string;
   harnessConfigId?: string;
   harnessConfigHash?: string;
   harnessConfigSource?: string;

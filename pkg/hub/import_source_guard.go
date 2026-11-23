@@ -106,19 +106,27 @@ func (s *Server) refuseImportSource(w http.ResponseWriter, sourceURL string) boo
 // pinned to templateSourceHosts on GitHub fetches), and the fetch is bounded
 // by the import* limits above with no sparse-checkout fallback.
 func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourceURL string) (string, error) {
+	res, err := s.fetchRemoteForImportWithResult(ctx, scope, scopeID, sourceURL)
+	if err != nil {
+		return "", err
+	}
+	return res.Path, nil
+}
+
+func (s *Server) fetchRemoteForImportWithResult(ctx context.Context, scope, scopeID, sourceURL string) (*config.RemoteFetchResult, error) {
 	if s.workstation {
-		return config.FetchRemoteTemplateWithOptions(ctx, sourceURL, config.FetchOptions{
+		return config.FetchRemoteTemplateWithResult(ctx, sourceURL, config.FetchOptions{
 			AuthToken:       s.importCredential(ctx, scope, scopeID, sourceURL),
 			PrivateCacheDir: true,
 		})
 	}
 	fetchURI, err := s.checkImportSource(sourceURL)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, importFetchTimeout)
 	defer cancel()
-	path, err := config.FetchRemoteTemplateWithOptions(ctx, fetchURI, config.FetchOptions{
+	res, err := config.FetchRemoteTemplateWithResult(ctx, fetchURI, config.FetchOptions{
 		AuthToken:        s.importCredential(ctx, scope, scopeID, fetchURI),
 		Download:         s.importDownloader(),
 		MaxBytes:         importMaxTreeBytes,
@@ -132,9 +140,9 @@ func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourc
 		if s.resourceLog != nil {
 			s.resourceLog.Warn("import fetch from cloud storage failed", "source", fetchURI, "error", err)
 		}
-		return "", errImportGCSFetchFailed
+		return nil, errImportGCSFetchFailed
 	}
-	return path, err
+	return res, err
 }
 
 // errImportGCSFetchFailed is the caller-facing error for a failed Cloud
