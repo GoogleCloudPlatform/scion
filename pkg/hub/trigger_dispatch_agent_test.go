@@ -1821,20 +1821,38 @@ func TestTriggerDispatchAgent_AuthoringAuthorityAndSelfSufficientValidate(t *tes
 		heldEP, err := f.sched.store.GetWebhookEndpoint(ctx, heldEPResp.ID)
 		require.NoError(t, err)
 
-		// Suspend the root user -> authoring agent is out of standing.
-		rootUser.Status = "suspended"
-		require.NoError(t, f.sched.store.UpdateUser(ctx, rootUser))
+		// Place an active hold on the authoring agent while keeping its root
+		// user and delegation chain live: agentCreateDecision still allows, so
+		// refusal must come from agentStanding (ptone/scion#3433).
+		heldIdent := GetIdentityFromContext(heldCtx)
+		require.True(t, f.sched.srv.agentCreateDecision(ctx, heldIdent, f.sched.proj.ID).Allowed,
+			"precondition: delegation chain must admit before placing hold")
+		_, err = f.sched.store.CreateAgentHolds(ctx, []*store.AgentHold{{
+			AgentID:           heldAg.ID,
+			ProjectID:         f.sched.proj.ID,
+			Cause:             store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: store.AgentHoldRootUser,
+			RootPrincipalID:   rootUser.ID,
+			Trigger:           store.MembershipLossTriggerMemberRemove,
+			ActorKind:         "system",
+			ActorID:           "hub",
+			CorrelationID:     "test-standing-author",
+		}})
+		require.NoError(t, err)
+		require.True(t, f.sched.srv.agentCreateDecision(ctx, heldIdent, f.sched.proj.ID).Allowed,
+			"precondition: agentCreateDecision must still allow with live chain so agentStanding is exercised")
 
-		// Direct Validate fails with DeniedByDelegationCeiling.
+		// Direct Validate fails in agentStanding with DeniedByDelegationCeiling.
 		heldValidateCtx := withDispatchAgentAuthoringOpts(ctx, dispatchAgentAuthoringOpts{
 			sourceKind: store.TriggerSourceKindWebhook,
 			endpoint:   heldEP,
 		})
-		_, err = action.Validate(heldValidateCtx, GetIdentityFromContext(heldCtx), f.sched.proj.ID, string(validPayload))
+		_, err = action.Validate(heldValidateCtx, heldIdent, f.sched.proj.ID, string(validPayload))
 		var ve *dispatchAgentValidationError
 		require.ErrorAs(t, err, &ve)
 		assert.Equal(t, http.StatusForbidden, ve.status)
 		assert.Equal(t, DeniedByDelegationCeiling, ve.deniedBy)
+		assert.Contains(t, ve.reason, "not in good standing")
 
 		// HTTP POST /triggers also refuses the out-of-standing agent (404 from
 		// resolveTriggerWebhookSource's standing/endpoint-probing mask, or 403).

@@ -441,11 +441,7 @@ func (s *Server) authorizeAgentCreate(w http.ResponseWriter, r *http.Request, pr
 		return false
 	}
 	logAuthzDenial(r, identity, agentCreateResource(projectID), ActionCreate, d.reason)
-	if d.deniedBy != "" {
-		writeForbiddenDenialCause(w, d.message, d.deniedBy, d.cause)
-	} else {
-		writeForbidden(w, d.message)
-	}
+	writeForbiddenDenialCause(w, d.message, d.deniedBy, d.cause)
 	return false
 }
 
