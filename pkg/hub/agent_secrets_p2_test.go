@@ -1052,6 +1052,86 @@ func TestAgentSecretsP2_AgentSelfWriteDeleteRaceCompensates(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "raced agent-route self-write secret must be compensated")
 }
 
+func TestAgentSecretsP2_CleanupSurvivesCancelledRequestContext(t *testing.T) {
+	t.Run("compensateIfAgentDeleted removes secret when request ctx is cancelled", func(t *testing.T) {
+		srv, s, _, _, _, agentX, _ := setupAgentSecretsTestFixture(t, true)
+		ctx := context.Background()
+
+		_, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+			Name:       "CANCELLED_COMP_KEY",
+			Value:      "val",
+			SecretType: store.SecretTypeEnvironment,
+			Target:     "CANCELLED_COMP_KEY",
+			Scope:      secret.ScopeAgent,
+			ScopeID:    agentX.ID,
+			ProjectID:  agentX.ProjectID,
+		})
+		require.NoError(t, err)
+		require.NoError(t, s.DeleteAgent(ctx, agentX.ID))
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		assert.True(t, srv.compensateIfAgentDeleted(canceledCtx, agentX.ID, []string{"CANCELLED_COMP_KEY"}))
+
+		_, err = srv.GetSecretBackend().Get(ctx, "CANCELLED_COMP_KEY", secret.ScopeAgent, agentX.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("removeAgentScopedSecretsCtx removes secret when caller ctx is cancelled", func(t *testing.T) {
+		srv, _, _, _, _, agentX, _ := setupAgentSecretsTestFixture(t, true)
+		ctx := context.Background()
+
+		_, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+			Name:       "CANCELLED_RM_KEY",
+			Value:      "val",
+			SecretType: store.SecretTypeEnvironment,
+			Target:     "CANCELLED_RM_KEY",
+			Scope:      secret.ScopeAgent,
+			ScopeID:    agentX.ID,
+			ProjectID:  agentX.ProjectID,
+		})
+		require.NoError(t, err)
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		assert.True(t, srv.removeAgentScopedSecretsCtx(canceledCtx, srv.GetSecretBackend(), agentX.ID, []string{"CANCELLED_RM_KEY"}))
+
+		_, err = srv.GetSecretBackend().Get(ctx, "CANCELLED_RM_KEY", secret.ScopeAgent, agentX.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("withAgentSecretCleanupOnCompensation removes secret when row absent and ctx cancelled", func(t *testing.T) {
+		srv, s, _, _, _, agentX, _ := setupAgentSecretsTestFixture(t, true)
+		ctx := context.Background()
+
+		_, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+			Name:       "CANCELLED_ABSENT_KEY",
+			Value:      "val",
+			SecretType: store.SecretTypeEnvironment,
+			Target:     "CANCELLED_ABSENT_KEY",
+			Scope:      secret.ScopeAgent,
+			ScopeID:    agentX.ID,
+			ProjectID:  agentX.ProjectID,
+		})
+		require.NoError(t, err)
+		require.NoError(t, s.DeleteAgent(ctx, agentX.ID))
+
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+
+		n, err := srv.withAgentSecretCleanupOnCompensation(canceledCtx, agentX.ID, func(_ context.Context) (int, error) {
+			return 0, nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 0, n)
+
+		_, err = srv.GetSecretBackend().Get(ctx, "CANCELLED_ABSENT_KEY", secret.ScopeAgent, agentX.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+}
+
 // fakeExternalSecretBackend simulates GCPBackend's split storage model: values
 // live in an external map outside the DB, while List queries the DB metadata
 // table (which DeleteSecretsByScope deletes inside a transaction).
