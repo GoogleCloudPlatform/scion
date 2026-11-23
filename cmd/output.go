@@ -59,6 +59,26 @@ func writeJSONTo(out io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
+// outputNDJSON writes v to stdout as a single compact JSON line (NDJSON)
+// and flushes if stdout supports flushing.
+func outputNDJSON(v any) error {
+	return writeNDJSONTo(os.Stdout, v)
+}
+
+// writeNDJSONTo writes v to out as a single compact JSON line (NDJSON)
+// without HTML escaping, and flushes out if it implements Flush() error.
+func writeNDJSONTo(out io.Writer, v any) error {
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	if flusher, ok := out.(interface{ Flush() error }); ok {
+		return flusher.Flush()
+	}
+	return nil
+}
+
 // jsonReportedError is returned by a command that has already written its
 // result, failures included, as JSON on stdout. The process still exits 1,
 // but Execute prints no "Error:" banner, so a JSON consumer reading stdout,

@@ -91,6 +91,43 @@ func TestConversationService_Watch_SuccessAndQueryParams(t *testing.T) {
 	assert.Equal(t, 250*time.Millisecond, res.RetryAfter)
 }
 
+func TestConversationService_Watch_ImmediateWaitZero(t *testing.T) {
+	var seenWaits []string
+	var hasWait []bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		_, present := q["wait"]
+		hasWait = append(hasWait, present)
+		seenWaits = append(seenWaits, q.Get("wait"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"events":     []any{},
+			"nextCursor": "cur-head",
+			"timedOut":   true,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	require.NoError(t, err)
+
+	// Immediate: true sends explicit wait=0.
+	res, err := c.Conversations().Watch(context.Background(), "conv-1", WatchOptions{
+		Immediate: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "cur-head", res.NextCursor)
+	require.Len(t, seenWaits, 1)
+	assert.True(t, hasWait[0])
+	assert.Equal(t, "0", seenWaits[0])
+
+	// Default (Immediate: false, Wait: 0) omits wait so the server applies its default.
+	_, err = c.Conversations().Watch(context.Background(), "conv-1", WatchOptions{})
+	require.NoError(t, err)
+	require.Len(t, seenWaits, 2)
+	assert.False(t, hasWait[1])
+}
+
 func TestConversationService_Watch_ErrorMapping(t *testing.T) {
 	t.Run("410 maps to ErrCursorExpired", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
