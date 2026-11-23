@@ -116,6 +116,10 @@ const (
 	// `sciontool netns-setup` sidecar required by the broker for
 	// runtime-managed metadata interception (broker/image version skew).
 	LaunchCodeImageLacksNetnsSetup = "image_lacks_netns_setup"
+	// LaunchCodeFirewallRequiresMetadataInterception: SCION_INIT_FIREWALL was
+	// requested on Docker or Podman without runtime-managed metadata
+	// interception (block or assign mode).
+	LaunchCodeFirewallRequiresMetadataInterception = "firewall_requires_metadata_interception"
 	// LaunchCodeContainerConfig: the runtime refused the agent container's
 	// configuration, e.g. a missing secret or volume (Kubernetes
 	// CreateContainerConfigError), or CPU and memory limits outside what

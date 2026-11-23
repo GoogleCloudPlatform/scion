@@ -947,18 +947,19 @@ const (
 // appends only the runtime's reason enum, never the error's own text, which
 // names the image reference, pod and namespace (ptone/scion#3113).
 var launchFailureText = map[string]string{
-	api.LaunchCodeImagePullFailed:      "the agent image could not be pulled",
-	api.LaunchCodeInvalidImage:         "the agent image reference is not valid",
-	api.LaunchCodeRuntimeUnavailable:   "the container runtime is not running or could not be reached; start the container runtime and retry",
-	api.LaunchCodeImageLacksNetnsSetup: "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough",
-	api.LaunchCodeContainerConfig:      "the agent container could not be configured",
-	api.LaunchCodeCrashLoop:            "the agent container keeps crashing on start",
-	api.LaunchCodeInitContainerFailed:  "an init container of the agent pod failed",
-	api.LaunchCodeVolumeMountFailed:    "an agent volume could not be mounted",
-	api.LaunchCodeVolumeUnhealthy:      "an agent volume is mounted but not usable",
-	api.LaunchCodeUnschedulable:        "the agent pod cannot be scheduled",
-	api.LaunchCodePodDisrupted:         "the agent pod was preempted, evicted or deleted while starting",
-	api.LaunchCodeLaunchTimeout:        "launch timed out waiting for the agent pod to be ready",
+	api.LaunchCodeImagePullFailed:                      "the agent image could not be pulled",
+	api.LaunchCodeInvalidImage:                         "the agent image reference is not valid",
+	api.LaunchCodeRuntimeUnavailable:                   "the container runtime is not running or could not be reached; start the container runtime and retry",
+	api.LaunchCodeImageLacksNetnsSetup:                 "the agent image does not support runtime-managed metadata interception required by this broker; update the agent image to match the broker, or set the metadata mode to passthrough",
+	api.LaunchCodeFirewallRequiresMetadataInterception: "the init firewall (SCION_INIT_FIREWALL) requires metadata mode block or assign on Docker/Podman (firewall-only mode is not supported)",
+	api.LaunchCodeContainerConfig:                      "the agent container could not be configured",
+	api.LaunchCodeCrashLoop:                            "the agent container keeps crashing on start",
+	api.LaunchCodeInitContainerFailed:                  "an init container of the agent pod failed",
+	api.LaunchCodeVolumeMountFailed:                    "an agent volume could not be mounted",
+	api.LaunchCodeVolumeUnhealthy:                      "an agent volume is mounted but not usable",
+	api.LaunchCodeUnschedulable:                        "the agent pod cannot be scheduled",
+	api.LaunchCodePodDisrupted:                         "the agent pod was preempted, evicted or deleted while starting",
+	api.LaunchCodeLaunchTimeout:                        "launch timed out waiting for the agent pod to be ready",
 }
 
 // maxLaunchReasonLen bounds the runtime reason a failure message carries.

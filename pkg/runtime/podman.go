@@ -147,6 +147,9 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 	if r.Rootless {
 		config.MetadataInterception = false
 	}
+	if err := checkFirewallWithoutMetadataInterception(config); err != nil {
+		return "", err
+	}
 
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
@@ -299,9 +302,11 @@ func (r *PodmanRuntime) Stop(ctx context.Context, ref RunRef) error {
 	return err
 }
 
-// Delete removes the container ref.ID. The engine container ID is already
+// Delete removes the container ref.ID and best-effort removes any leftover
+// netns-setup containers labelled for it. The engine container ID is already
 // unique per run, so ref.RunID needs no further check here.
 func (r *PodmanRuntime) Delete(ctx context.Context, ref RunRef) error {
+	removeNetnsSetupContainers(ctx, r.Command, ref.ID)
 	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
