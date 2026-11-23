@@ -4,22 +4,26 @@
 Copyright 2026 The Scion Authors.
 */
 
-package netcap
+package runtime
 
-// Container-level check that Docker agent containers launched with
+// Container-level check that Docker/Podman agent containers launched with
 // runtime-managed metadata interception (netns-setup sidecar) have no
-// CAP_NET_ADMIN in their OCI spec, in PID 1, in the harness, or in any
-// `docker exec` session (--user root or --user scion), while the metadata
+// CAP_NET_ADMIN or CAP_NET_RAW in PID 1, in the harness, or in any
+// `exec` session (--user root or --user scion), while the metadata
 // REDIRECT rule installed by the sidecar remains intact and reachable and
 // `sudo` still works for non-network commands.
 //
-// Needs a docker daemon that can grant NET_ADMIN to the setup sidecar, and
+// Both the agent container's capability flags and the netns-setup sidecar's
+// argv are derived from Scion's own argv builders (buildCommonRunArgs and
+// buildNetnsSetupArgs) so the container test stays coupled to production code.
+//
+// Needs a container daemon that can grant NET_ADMIN to the setup sidecar, and
 // the sciontool that ships: build it through image-build/scion-base's
 // builder stage (its settings, including CGO_ENABLED=0 and the guard that
 // enforces it) and copy /usr/local/bin/sciontool out of that stage, then:
 //
 //	SCION_NETCAP_TEST_SCIONTOOL=<that binary> \
-//	  go test -tags netcapcontainer -run TestContainer -v ./pkg/sciontool/netcap/
+//	  go test -tags netcapcontainer -run TestContainer -v ./pkg/runtime/
 //
 // Optional: SCION_NETCAP_TEST_BASE overrides the test image's base image
 // (the Dockerfile's default is pinned by digest).
@@ -35,6 +39,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 )
 
@@ -43,10 +48,14 @@ const (
 	metadataPort = "18380"
 	probeDir     = "/tmp/netcap-probe"
 
+	// Kernel capability bit numbers (linux/capability.h).
+	netcapBitNetAdmin = 12
+	netcapBitNetRaw   = 13
+
 	// interceptionRequired and interceptionSourceRuntime are the markers the
 	// Docker/Podman runtime sets when runtime-managed interception is active.
-	interceptionRequired      = "SCION_METADATA_INTERCEPTION=required"
-	interceptionSourceRuntime = "SCION_METADATA_INTERCEPTION_SOURCE=runtime"
+	interceptionRequired      = MetadataInterceptionEnvVar + "=" + MetadataInterceptionRequired
+	interceptionSourceRuntime = MetadataInterceptionSourceEnvVar + "=" + MetadataInterceptionSourceRuntime
 
 	// dummyTransportToken stands in for the bootstrap transport credential:
 	// it is not a credential, only something init would stage to a file.
@@ -101,7 +110,7 @@ func buildTestImage(t *testing.T) {
 	if base := os.Getenv("SCION_NETCAP_TEST_BASE"); base != "" {
 		args = append(args, "--build-arg", "BASE="+base)
 	}
-	mustDocker(t, append(args, filepath.Join("testdata", "container"))...)
+	mustDocker(t, append(args, filepath.Join("testdata", "netcap_container"))...)
 }
 
 func capHasBit(t *testing.T, hex string, bit uint) bool {
@@ -115,22 +124,63 @@ func capHasBit(t *testing.T, hex string, bit uint) bool {
 
 func capHasNetAdmin(t *testing.T, hex string) bool {
 	t.Helper()
-	return capHasBit(t, hex, capNetAdmin)
+	return capHasBit(t, hex, netcapBitNetAdmin)
 }
 
 func capHasNetRaw(t *testing.T, hex string) bool {
 	t.Helper()
-	return capHasBit(t, hex, capNetRaw)
+	return capHasBit(t, hex, netcapBitNetRaw)
 }
 
-// createAgent creates and starts an agent container WITHOUT --cap-add NET_ADMIN
-// and WITH --cap-drop NET_RAW, matching pkg/runtime/common.go's agent argv.
-// When runSidecar is true (normal assign/block launch), it also runs the
-// short-lived netns-setup container sharing the agent's network namespace.
+// agentCapFlagsFromRuntime extracts the capability flags (--cap-drop, --cap-add,
+// --privileged) emitted by buildCommonRunArgs for a Docker agent container in
+// the given metadata mode.
+func agentCapFlagsFromRuntime(t *testing.T, mode string) []string {
+	t.Helper()
+	cfg := RunConfig{
+		RuntimeName:          "docker",
+		Harness:              &harness.Generic{},
+		Name:                 "netcap-agent",
+		UnixUsername:         "scion",
+		Image:                testImage,
+		Task:                 "probe",
+		Env:                  []string{"SCION_METADATA_MODE=" + mode, "SCION_METADATA_PORT=" + metadataPort},
+		MetadataInterception: mode == "assign" || mode == "block",
+	}
+	commonArgs, err := buildCommonRunArgs(cfg)
+	if err != nil {
+		t.Fatalf("buildCommonRunArgs(%q): %v", mode, err)
+	}
+	var flags []string
+	for i := 0; i < len(commonArgs); i++ {
+		switch commonArgs[i] {
+		case "--cap-drop", "--cap-add":
+			if i+1 < len(commonArgs) {
+				flags = append(flags, commonArgs[i], commonArgs[i+1])
+				i++
+			}
+		case "--privileged":
+			flags = append(flags, commonArgs[i])
+		default:
+			if strings.HasPrefix(commonArgs[i], "--cap-drop=") ||
+				strings.HasPrefix(commonArgs[i], "--cap-add=") ||
+				strings.HasPrefix(commonArgs[i], "--privileged=") {
+				flags = append(flags, commonArgs[i])
+			}
+		}
+	}
+	return flags
+}
+
+// createAgent creates and starts an agent container using the capability flags
+// emitted by buildCommonRunArgs. When runSidecar is true (normal assign/block
+// launch), it also runs the short-lived netns-setup container built from
+// buildNetnsSetupArgs sharing the agent's network namespace.
 func createAgent(t *testing.T, sciontool, mode string, runSidecar bool, extra ...string) string {
 	t.Helper()
 	name := fmt.Sprintf("scion-netcap-%s-%d", mode, time.Now().UnixNano())
-	args := []string{"create", "--name", name, "--cap-drop", "NET_RAW"}
+	args := []string{"create", "--name", name}
+	args = append(args, agentCapFlagsFromRuntime(t, mode)...)
 	if mode == "assign" || mode == "block" {
 		args = append(args, "-e", interceptionRequired, "-e", interceptionSourceRuntime)
 	}
@@ -143,44 +193,48 @@ func createAgent(t *testing.T, sciontool, mode string, runSidecar bool, extra ..
 		"-e", "SCION_TELEMETRY_ENABLED=false",
 		"--entrypoint", "/usr/local/bin/sciontool",
 		testImage, "init", "--", "/usr/local/bin/netcap-harness.sh")
-	mustDocker(t, args...)
+	cid := mustDocker(t, args...)
 	t.Cleanup(func() {
 		if t.Failed() {
-			logs, _ := docker(t, "logs", name)
+			logs, _ := docker(t, "logs", cid)
 			t.Logf("container logs:\n%s", logs)
 		}
-		_, _ = docker(t, "rm", "-f", name)
+		_, _ = docker(t, "rm", "-f", cid)
 	})
-	mustDocker(t, "cp", sciontool, name+":/usr/local/bin/sciontool")
-	mustDocker(t, "start", name)
+	mustDocker(t, "cp", sciontool, cid+":/usr/local/bin/sciontool")
+	mustDocker(t, "start", cid)
 
 	if runSidecar {
-		runNetnsSetupSidecar(t, sciontool, name, mode)
+		runNetnsSetupSidecar(t, sciontool, cid, mode)
 	}
-	return name
+	return cid
 }
 
 // runNetnsSetupSidecar runs the short-lived netns-setup container sharing
-// agentName's network namespace, mirroring pkg/runtime/common.go's
-// runNetnsSetup.
-func runNetnsSetupSidecar(t *testing.T, sciontool, agentName, mode string, extraEnv ...string) {
+// agentContainerID's network namespace, deriving its full CLI argv from
+// buildNetnsSetupArgs.
+func runNetnsSetupSidecar(t *testing.T, sciontool, agentContainerID, mode string, extraEnv ...string) {
 	t.Helper()
-	sidecarName := agentName + "-netns-setup"
-	args := []string{
-		"create", "--name", sidecarName,
-		"--network", "container:" + agentName,
-		"--cap-add", "NET_ADMIN",
-		"--user", "0",
-		"--entrypoint", "/usr/local/bin/sciontool",
-		"-e", "SCION_METADATA_MODE=" + mode,
-		"-e", "SCION_METADATA_PORT=" + metadataPort,
-		"--label", "scion.netns-setup=" + agentName,
+	env := []string{
+		"SCION_METADATA_MODE=" + mode,
+		"SCION_METADATA_PORT=" + metadataPort,
 	}
-	for _, e := range extraEnv {
-		args = append(args, "-e", e)
+	env = append(env, extraEnv...)
+	cfg := RunConfig{
+		Image: testImage,
+		Env:   env,
 	}
-	args = append(args, testImage, "netns-setup")
-	mustDocker(t, args...)
+	runArgs := buildNetnsSetupArgs(agentContainerID, cfg)
+	if len(runArgs) < 2 || runArgs[0] != "run" || runArgs[1] != "--rm" {
+		t.Fatalf("buildNetnsSetupArgs() unexpected prefix: %v", runArgs)
+	}
+	// Replace "run --rm" with "create" so we can docker cp the test sciontool
+	// binary before starting, while keeping every capability, security-opt,
+	// name, network, user, entrypoint, env, and label flag verbatim.
+	createArgs := append([]string{"create"}, runArgs[2:]...)
+	sidecarName := netnsSetupContainerName(agentContainerID)
+	_, _ = docker(t, "rm", "-f", sidecarName)
+	mustDocker(t, createArgs...)
 	defer func() { _, _ = docker(t, "rm", "-f", sidecarName) }()
 	mustDocker(t, "cp", sciontool, sidecarName+":/usr/local/bin/sciontool")
 	mustDocker(t, "start", "-a", sidecarName)
@@ -322,11 +376,11 @@ func TestContainer(t *testing.T) {
 			name := createAgent(t, sciontool, mode, true)
 			waitProbe(t, name)
 
-			// AC 1: agent container OCI spec has neither NET_ADMIN nor NET_RAW in CapAdd.
-			// Effective capability absence (including CAP_NET_RAW) is verified via the
-			// kernel capability sets and raw-socket EPERM checks below, since engines
-			// whose default set already omits NET_RAW (e.g. newer Podman) may record
-			// an empty HostConfig.CapDrop.
+			// Agent container OCI spec has neither NET_ADMIN nor NET_RAW in CapAdd.
+			// Effective capability absence (including CAP_NET_RAW) is verified via
+			// the kernel capability sets and raw-socket EPERM checks below, since
+			// engines whose default set already omits NET_RAW (e.g. Podman 5) may
+			// record an empty HostConfig.CapDrop.
 			capAdd := mustDocker(t, "inspect", "--format", "{{.HostConfig.CapAdd}}", name)
 			if strings.Contains(capAdd, "NET_ADMIN") {
 				t.Errorf("agent container HostConfig.CapAdd = %q, must not contain NET_ADMIN", capAdd)
@@ -335,7 +389,7 @@ func TestContainer(t *testing.T) {
 				t.Errorf("agent container HostConfig.CapAdd = %q, must not contain NET_RAW", capAdd)
 			}
 
-			// AC 1: harness, PID 1, and exec sessions (--user root and --user scion)
+			// Harness, PID 1, and exec sessions (--user root and --user scion)
 			// have neither CAP_NET_ADMIN nor CAP_NET_RAW.
 			if uid := probe(t, name, "uid"); uid != "1000" {
 				t.Errorf("harness uid = %s, want 1000 (the scion user)", uid)
@@ -370,7 +424,7 @@ func TestContainer(t *testing.T) {
 			// with EPERM even as root.
 			assertRawSocketsEPERM(t, name)
 
-			// AC 2: sudo iptables flush fails from both harness and exec session, and redirect survives.
+			// sudo iptables flush fails from both harness and exec session, and redirect survives.
 			if rc := probe(t, name, "sudo-flush-rc"); rc == "0" {
 				t.Errorf("sudo iptables -t nat -F succeeded from the harness; log:\n%s", probe(t, name, "sudo-flush.log"))
 			}
@@ -381,7 +435,7 @@ func TestContainer(t *testing.T) {
 				t.Error("metadata REDIRECT rule is gone")
 			}
 
-			// AC 2: curl 169.254.169.254 from an exec session reaches the emulator.
+			// curl 169.254.169.254 from an exec session reaches the emulator.
 			httpCode := mustDocker(t, "exec", "--user", "scion", name,
 				"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
 				"-H", "Metadata-Flavor: Google", "http://169.254.169.254/")
@@ -389,7 +443,7 @@ func TestContainer(t *testing.T) {
 				t.Errorf("curl http://169.254.169.254/ returned HTTP %s, want 200", httpCode)
 			}
 
-			// AC 4: sudo still works for a non-network command in an exec session.
+			// sudo still works for a non-network command in an exec session.
 			sudoUID := mustDocker(t, "exec", "--user", "scion", name, "sudo", "-n", "id", "-u")
 			if sudoUID != "0" {
 				t.Errorf("docker exec --user scion sudo -n id -u = %q, want 0", sudoUID)
@@ -412,11 +466,12 @@ func TestContainer(t *testing.T) {
 		assertRawSocketsEPERM(t, name)
 	})
 
-	// AC 5: with SCION_INIT_FIREWALL=true plus block/assign, the sidecar runs
-	// init-firewall.sh before installing the metadata redirect, so both the
-	// firewall chain and the metadata redirect are present, the redirect probe
-	// passes despite the firewall's catch-all OUTPUT REJECT, and non-allowlisted
-	// egress stays rejected.
+	// With SCION_INIT_FIREWALL=true plus block/assign, the least-privilege
+	// sidecar (--cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW
+	// --security-opt no-new-privileges) runs init-firewall.sh before installing
+	// the metadata redirect, so both the firewall chain and the metadata
+	// redirect are present, the redirect probe passes despite the firewall's
+	// catch-all OUTPUT REJECT, and non-allowlisted egress stays rejected.
 	t.Run("firewall in sidecar preserves redirect", func(t *testing.T) {
 		for _, mode := range []string{"block", "assign"} {
 			t.Run(mode, func(t *testing.T) {
@@ -454,10 +509,10 @@ func TestContainer(t *testing.T) {
 		}
 	})
 
-	// AC 5 (hardened init-firewall.sh): run the real harnesses/claude/init-firewall.sh
-	// in a reduced-capability netns-setup sidecar on an IPv6-enabled Docker network,
-	// asserting IPv6 DROP policies + REJECT, gateway /32 (no /24), no tcp/22, and
-	// metadata redirect preservation.
+	// Run the real harnesses/claude/init-firewall.sh in the least-privilege
+	// netns-setup sidecar (argv derived from buildNetnsSetupArgs) on an
+	// IPv6-enabled network, asserting IPv6 DROP policies + REJECT, gateway /32
+	// (no /24), no tcp/22, and metadata redirect preservation.
 	t.Run("hardened init-firewall.sh in sidecar on IPv6 network", func(t *testing.T) {
 		fwBaseImage := "scion-netcap-fw-base:local"
 		fwImage := "scion-netcap-fw-test:local"
@@ -468,9 +523,9 @@ func TestContainer(t *testing.T) {
 		if base := os.Getenv("SCION_NETCAP_TEST_BASE"); base != "" {
 			fwArgs = append(fwArgs, "--build-arg", "BASE="+base)
 		}
-		mustDocker(t, append(fwArgs, filepath.Join("testdata", "container"))...)
+		mustDocker(t, append(fwArgs, filepath.Join("testdata", "netcap_container"))...)
 
-		scriptBytes, err := os.ReadFile(filepath.Join("..", "..", "..", "harnesses", "claude", "init-firewall.sh"))
+		scriptBytes, err := os.ReadFile(filepath.Join("..", "..", "harnesses", "claude", "init-firewall.sh"))
 		if err != nil {
 			t.Fatalf("read harnesses/claude/init-firewall.sh: %v", err)
 		}
@@ -491,8 +546,9 @@ func TestContainer(t *testing.T) {
 		t.Cleanup(func() { _, _ = docker(t, "network", "rm", netName) })
 
 		name := fmt.Sprintf("scion-netcap-fw-%d", time.Now().UnixNano())
-		mustDocker(t, "create", "--name", name,
-			"--network", netName,
+		agentArgs := []string{"create", "--name", name, "--network", netName}
+		agentArgs = append(agentArgs, agentCapFlagsFromRuntime(t, "block")...)
+		agentArgs = append(agentArgs,
 			"-e", interceptionRequired,
 			"-e", interceptionSourceRuntime,
 			"-e", "SCION_INIT_FIREWALL=true",
@@ -503,38 +559,40 @@ func TestContainer(t *testing.T) {
 			"-e", "SCION_TELEMETRY_ENABLED=false",
 			"--entrypoint", "/usr/local/bin/sciontool",
 			fwImage, "init", "--", "/usr/local/bin/netcap-harness.sh")
+		cid := mustDocker(t, agentArgs...)
 		t.Cleanup(func() {
 			if t.Failed() {
-				logs, _ := docker(t, "logs", name)
+				logs, _ := docker(t, "logs", cid)
 				t.Logf("container logs:\n%s", logs)
 			}
-			_, _ = docker(t, "rm", "-f", name)
+			_, _ = docker(t, "rm", "-f", cid)
 		})
-		mustDocker(t, "cp", sciontool, name+":/usr/local/bin/sciontool")
-		mustDocker(t, "start", name)
+		mustDocker(t, "cp", sciontool, cid+":/usr/local/bin/sciontool")
+		mustDocker(t, "start", cid)
 
-		sidecarName := name + "-netns-setup"
-		mustDocker(t, "create", "--name", sidecarName,
-			"--network", "container:"+name,
-			"--cap-drop", "ALL",
-			"--cap-add", "NET_ADMIN",
-			"--cap-add", "NET_RAW",
-			"--security-opt", "no-new-privileges",
-			"--user", "0",
-			"--entrypoint", "/usr/local/bin/sciontool",
-			"-e", "SCION_METADATA_MODE=block",
-			"-e", "SCION_METADATA_PORT="+metadataPort,
-			"-e", "SCION_INIT_FIREWALL=true",
-			"--label", "scion.netns-setup="+name,
-			fwImage, "netns-setup")
+		runArgs := buildNetnsSetupArgs(cid, RunConfig{
+			Image: fwImage,
+			Env: []string{
+				"SCION_METADATA_MODE=block",
+				"SCION_METADATA_PORT=" + metadataPort,
+				"SCION_INIT_FIREWALL=true",
+			},
+		})
+		if len(runArgs) < 2 || runArgs[0] != "run" || runArgs[1] != "--rm" {
+			t.Fatalf("buildNetnsSetupArgs() unexpected prefix: %v", runArgs)
+		}
+		createArgs := append([]string{"create"}, runArgs[2:]...)
+		sidecarName := netnsSetupContainerName(cid)
+		_, _ = docker(t, "rm", "-f", sidecarName)
+		mustDocker(t, createArgs...)
 		defer func() { _, _ = docker(t, "rm", "-f", sidecarName) }()
 		mustDocker(t, "cp", sciontool, sidecarName+":/usr/local/bin/sciontool")
 		mustDocker(t, "start", "-a", sidecarName)
 
-		waitProbe(t, name)
+		waitProbe(t, cid)
 
 		ip6Rules := mustDocker(t, "run", "--rm",
-			"--network", "container:"+name,
+			"--network", "container:"+cid,
 			"--cap-add", "NET_ADMIN",
 			"--user", "0",
 			fwImage, "ip6tables", "-S")
@@ -550,7 +608,7 @@ func TestContainer(t *testing.T) {
 		}
 
 		ip4Rules := mustDocker(t, "run", "--rm",
-			"--network", "container:"+name,
+			"--network", "container:"+cid,
 			"--cap-add", "NET_ADMIN",
 			"--user", "0",
 			fwImage, "iptables", "-S")
@@ -564,22 +622,22 @@ func TestContainer(t *testing.T) {
 			t.Errorf("iptables -S missing gateway /32 ACCEPT rule:\n%s", ip4Rules)
 		}
 
-		if !redirectPresent(t, name) {
+		if !redirectPresent(t, cid) {
 			t.Error("metadata REDIRECT rule is missing after hardened init-firewall.sh ran in sidecar")
 		}
-		httpCode := mustDocker(t, "exec", "--user", "scion", name,
+		httpCode := mustDocker(t, "exec", "--user", "scion", cid,
 			"curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
 			"-H", "Metadata-Flavor: Google", "http://169.254.169.254/")
 		if httpCode != "200" {
 			t.Errorf("curl http://169.254.169.254/ returned HTTP %s, want 200", httpCode)
 		}
-		if out, err := docker(t, "exec", "--user", "scion", name,
+		if out, err := docker(t, "exec", "--user", "scion", cid,
 			"curl", "-6", "--connect-timeout", "5", "https://example.com"); err == nil {
 			t.Errorf("expected curl -6 https://example.com to fail under IPv6 DROP, succeeded: %s", out)
 		}
 	})
 
-	// AC 3: missing runtime source marker refuses before writing credentials.
+	// Missing runtime source marker refuses before writing credentials.
 	t.Run("missing source marker refused before credentials", func(t *testing.T) {
 		name := fmt.Sprintf("scion-netcap-nosrc-%d", time.Now().UnixNano())
 		mustDocker(t, "create", "--name", name,
@@ -620,9 +678,9 @@ func TestContainer(t *testing.T) {
 		}
 	})
 
-	// AC 3: when the netns-setup sidecar is skipped, init waits for the
-	// redirect probe, times out, cleans up the transport token, writes the
-	// fixed refusal text, and exits non-zero without starting the harness.
+	// When the netns-setup sidecar is skipped, init waits for the redirect
+	// probe, times out, cleans up the transport token, writes the fixed refusal
+	// text, and exits non-zero without starting the harness.
 	t.Run("skipped sidecar refuses after probe timeout", func(t *testing.T) {
 		name := createAgent(t, sciontool, "block", false,
 			"-e", "SCION_TRANSPORT_TOKEN="+dummyTransportToken)
