@@ -84,7 +84,9 @@ while i < len(lines):
             while i < len(lines) and (not lines[i].strip() or lines[i].strip().startswith("#") or re.match(r"^\s+-\s+", lines[i])):
                 bm = re.match(r"^\s+-\s+(.*)$", lines[i])
                 if bm:
-                    base.append(shlex.split(bm.group(1), comments=True)[0])
+                    parts = shlex.split(bm.group(1), comments=True)
+                    if parts:
+                        base.append(parts[0])
                 i += 1
     elif key == "resume_flag" and val:
         extra.extend(shlex.split(val, comments=True))
