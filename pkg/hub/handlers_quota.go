@@ -745,10 +745,12 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 			// Project-per-user reservations are stored at
 			// (store.QuotaScopeSystem, store.QuotaScopeSystem)
 			// (handlers_projects_core.go), not empty scope_id
-			// (ptone/scion#6036).
-			var reservations []*store.UsageReservation
-			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, store.QuotaScopeSystem)
-			count = len(reservations)
+			// (ptone/scion#6036). Count via the aggregate query and read the
+			// "system" scope bucket so we match getUsageByLimit without
+			// loading every reservation row into memory.
+			var counts map[string]int64
+			counts, listErr = s.store.CountActiveReservationsByScope(ctx, def.ID, store.QuotaScopeSystem)
+			count = int(counts[store.QuotaScopeSystem])
 		default:
 			var reservations []*store.UsageReservation
 			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, "")
