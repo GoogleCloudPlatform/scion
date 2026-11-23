@@ -32,8 +32,10 @@
 #   Scion Hub or internal HTTP proxies). If NodeLocal DNSCache is enabled,
 #   also allow egress to its address and port (typically 169.254.20.10/32
 #   UDP/TCP 53).
-# - Pods created by older Runtime Brokers carry no `scion.metadata-mode` label,
-#   so this policy does not select them until they are recreated.
+# - NetworkPolicy is namespaced: apply this policy in EVERY namespace that
+#   runs Scion agent pods. Pods without a `scion.metadata-mode` label (for
+#   example, pods created by older Runtime Brokers) are not selected until
+#   they are recreated.
 # - Replace `scion-agents` with your agent namespace before applying.
 # - On dual-stack clusters, add an IPv6 egress rule (`::/0` except
 #   `fd20:ce::254/128` and `fd00:ec2::254/128`) if pods require IPv6 egress.

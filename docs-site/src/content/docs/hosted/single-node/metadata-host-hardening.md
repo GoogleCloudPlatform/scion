@@ -112,12 +112,22 @@ ExecStop=/usr/sbin/nft delete table inet scion_metadata_block
 WantedBy=multi-user.target
 ```
 
-Enable it:
+Enable it and verify that the unit is active and the table is loaded:
 
 ```bash
 sudo install -D -m 0644 deploy/host-hardening/scion-metadata-block.service /etc/systemd/system/scion-metadata-block.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now scion-metadata-block.service
+systemctl is-active scion-metadata-block.service
+sudo nft list table inet scion_metadata_block
+```
+
+For fail-closed boot ordering (so `docker.service` does not start if loading the ruleset fails), add a drop-in at `/etc/systemd/system/docker.service.d/scion-metadata-block.conf` (and similarly for `podman.service` if used):
+
+```ini
+[Unit]
+Requires=scion-metadata-block.service
+After=scion-metadata-block.service
 ```
 
 Note that running `systemctl restart nftables` on a host whose `/etc/nftables.conf` starts with `flush ruleset` removes the `scion_metadata_block` table until `scion-metadata-block.service` is restarted (or `/etc/nftables.d/scion-metadata-block.nft` is included from `/etc/nftables.conf`).
@@ -235,7 +245,7 @@ spec:
 - **Enforcing CNI required:** Kubernetes `NetworkPolicy` objects are enforced only when the cluster runs an enforcing CNI such as **GKE Dataplane V2** or **Calico**. Without an enforcing CNI, `kubectl apply` succeeds silently without blocking traffic.
 - **Keep scoped to `block` pods:** Do not widen the `podSelector` to match `passthrough` pods (which include Workload Identity `assign` pods). Those pods legitimately reach the GKE metadata server for Workload Identity tokens.
 - **In-cluster peers on Cilium / GKE Dataplane V2:** `ipBlock: 0.0.0.0/0` does not match in-cluster pod IPs on Cilium / GKE Dataplane V2. The example includes an explicit `kube-dns` egress rule so DNS continues to work; add matching `namespaceSelector` / `podSelector` egress rules for any other in-cluster peers your agents must reach (such as an in-cluster Scion Hub or internal HTTP proxies). If NodeLocal DNSCache is enabled, also allow egress to its address and port (typically `169.254.20.10/32` UDP/TCP 53).
-- **Existing pods after upgrade:** Pods created by older Runtime Brokers carry no `scion.metadata-mode` label, so this policy does not select them until they are recreated.
+- **Namespaced scope & unlabelled pods:** A Kubernetes `NetworkPolicy` is namespaced, so this policy must be applied in **every** namespace that runs Scion agent pods. Pods without a `scion.metadata-mode` label (for example, pods created by older Runtime Brokers) are not selected until they are recreated. In a dedicated agent namespace that runs **no** `passthrough` (or Workload Identity `assign`) pods, you can fail closed by replacing `matchLabels` with `matchExpressions: [{ key: scion.metadata-mode, operator: NotIn, values: ["passthrough"] }]` (or `podSelector: {}`) so unlabelled pods are covered as well.
 - **Dual-stack clusters:** On clusters where pods require IPv6 egress, add an IPv6 `ipBlock` rule (`::/0` except `fd20:ce::254/128` and `fd00:ec2::254/128`).
 :::
 
@@ -249,6 +259,7 @@ The host `forward`-hook recipes above do **not** cover:
 - **Remote container daemons**: when a Runtime Broker connects to a remote Docker or Podman daemon, apply the host firewall rules on the **daemon host**, not on the Runtime Broker host.
 - **Host-network containers (`--network=host`)**: containers sharing the host network namespace do not traverse the kernel `forward` hook. Use Scion's host-network refusal policy (`SCION_HOST_NETWORK_BLOCK_POLICY`; see [Host networking on Docker and Podman](/scion/hosted/single-node/auth/#host-networking-on-docker-and-podman)) instead.
 - **Rootless Podman**: `pasta` / `slirp4netns` user-mode networking originates egress from a host user process rather than a container bridge, so `forward`-hook bridge rules do not match it. If rootless Podman runs on a cloud VM and needs host-level enforcement, add a host `output` rule scoped to the rootless user's UID (keeping DNS on port 53 allowed).
+- **Custom bridge names and `macvlan`/`ipvlan` networks**: bridges with custom interface names outside `docker0`, `br-*`, `podman*`, and `cni-*` are not matched unless you add corresponding `iifname` rules. Containers attached via `macvlan` or `ipvlan` bypass container bridges altogether and are not matched by bridge-scoped `forward` rules.
 
 ## Related documentation
 
