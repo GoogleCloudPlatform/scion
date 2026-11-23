@@ -46,14 +46,25 @@ valid_ipv4_cidr() {
 
 valid_ipv6() {
     local ip="$1"
-    local without_double
+    local without_double trimmed
+    local -a groups=()
     [[ ${#ip} -le 39 ]] || return 1
     [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]] || return 1
+    [[ "$ip" =~ [0-9a-fA-F]{5,} ]] && return 1
+    [[ "$ip" =~ ^:[^:] ]] && return 1
+    [[ "$ip" =~ [^:]:$ ]] && return 1
     [[ "$ip" == *:*:* ]] || return 1
     [[ "$ip" != *:::* ]] || return 1
     [[ "$ip" =~ [0-9a-fA-F] ]] || return 1
     without_double="${ip/::/}"
     [[ "$without_double" != *::* ]] || return 1
+    trimmed="${ip//:/ }"
+    IFS=' ' read -r -a groups <<< "$trimmed"
+    if [[ "$ip" == *::* ]]; then
+        (( ${#groups[@]} >= 1 && ${#groups[@]} <= 7 )) || return 1
+    else
+        (( ${#groups[@]} == 8 )) || return 1
+    fi
     return 0
 }
 
@@ -77,7 +88,7 @@ resolv_conf_ipv6_nameservers() {
     local resolv_conf="${SCION_FW_RESOLV_CONF:-/etc/resolv.conf}"
     [ -r "$resolv_conf" ] || return 0
     local line kw addr
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
         line="${line%%#*}"
         line="${line%%;*}"
         IFS=$' \t' read -r kw addr _ <<< "$line" || continue

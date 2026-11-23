@@ -473,28 +473,53 @@ func TestInitFirewall_IPv6MissingIP6Tables(t *testing.T) {
 }
 
 func TestInitFirewall_IPv6ResolvConfNameservers(t *testing.T) {
+	// Intentionally omit trailing newline to verify the last line is still processed.
 	res := runInitFirewall(t, stubConfig{
 		ipv6Ifaces: map[string]string{"eth0": "0"},
 		resolvConf: strings.Join([]string{
 			"# comment",
 			"nameserver 127.0.0.11",
 			"nameserver 2001:4860:4860::8888",
-			"nameserver fd00::10 # inline comment",
+			"nameserver 2001:0db8:0000:0000:0000:0000:0000:0001",
+			"nameserver ::1:2:3:4:5:6:7",
 			"nameserver ::",
+			"nameserver 1:2:3:4:5:6:7:8:9",
+			"nameserver 1:2:3:4:5:6:7::8",
+			"nameserver 12345::1",
+			"nameserver :1:2:3:4:5:6:7",
+			"nameserver 1:2:3:4:5:6:7:",
+			"nameserver 1:2:3:4:5:6:7",
 			"nameserver bad;inject",
-		}, "\n") + "\n",
+			"nameserver fd00::10 # inline comment without trailing newline",
+		}, "\n"),
 	})
 	if res.exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d\noutput:\n%s", res.exitCode, res.output)
 	}
-	if !hasCall(res.calls, "ip6tables -w -A OUTPUT -p udp -d 2001:4860:4860::8888 --dport 53 -j ACCEPT") {
-		t.Errorf("missing IPv6 nameserver rule for 2001:4860:4860::8888")
+	for _, valid := range []string{
+		"2001:4860:4860::8888",
+		"2001:0db8:0000:0000:0000:0000:0000:0001",
+		"::1:2:3:4:5:6:7",
+		"fd00::10",
+	} {
+		want := "ip6tables -w -A OUTPUT -p udp -d " + valid + " --dport 53 -j ACCEPT"
+		if !hasCall(res.calls, want) {
+			t.Errorf("missing IPv6 nameserver rule for %s", valid)
+		}
 	}
-	if !hasCall(res.calls, "ip6tables -w -A OUTPUT -p udp -d fd00::10 --dport 53 -j ACCEPT") {
-		t.Errorf("missing IPv6 nameserver rule for fd00::10")
-	}
-	if hasCallContaining(res.calls, "bad;inject") || hasCallContaining(res.calls, " -d :: ") {
-		t.Errorf("invalid IPv6 nameserver leaked into ip6tables calls:\n%s", strings.Join(res.calls, "\n"))
+	for _, invalid := range []string{
+		"::",
+		"1:2:3:4:5:6:7:8:9",
+		"1:2:3:4:5:6:7::8",
+		"12345::1",
+		":1:2:3:4:5:6:7",
+		"1:2:3:4:5:6:7:",
+		"1:2:3:4:5:6:7",
+		"bad;inject",
+	} {
+		if hasCallContaining(res.calls, " -d "+invalid+" ") {
+			t.Errorf("invalid IPv6 nameserver %q leaked into ip6tables calls:\n%s", invalid, strings.Join(res.calls, "\n"))
+		}
 	}
 }
 
