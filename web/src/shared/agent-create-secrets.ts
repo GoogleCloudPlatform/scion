@@ -76,9 +76,10 @@ export function isReservedEnvTarget(target: string): boolean {
  */
 export function reservedSecretKeyError(key: string): string | null {
   const sanitized = key.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const systemOneSanitized = sanitized.replace(/_/g, '-');
   if (
     key.toLowerCase().startsWith(SYSTEMONE_RESERVED_PREFIX) ||
-    sanitized.startsWith('systemone-instance-')
+    systemOneSanitized.startsWith('systemone-instance-')
   ) {
     return `Secret key "${key}" uses reserved prefix "${SYSTEMONE_RESERVED_PREFIX}".`;
   }

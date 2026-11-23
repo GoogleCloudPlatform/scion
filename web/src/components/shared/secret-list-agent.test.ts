@@ -293,4 +293,27 @@ describe('scion-secret-list — agent scope and existing scopes', () => {
     expect(hubEl.shadowRoot!.textContent).toContain('all agents on this hub');
     hubEl.remove();
   });
+
+  it('reloads secrets when scopeId changes on an agent-scoped list', async () => {
+    const calls = installFetch([]);
+    const el = await mountList({
+      scope: 'agent',
+      scopeId: 'agent-A',
+      compact: true,
+    });
+
+    expect(calls.filter((c) => c.method === 'GET').map((c) => c.url)).toEqual([
+      '/api/v1/secrets?scope=agent&scopeId=agent-A',
+    ]);
+
+    el.scopeId = 'agent-B';
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 30));
+    await el.updateComplete;
+
+    expect(calls.filter((c) => c.method === 'GET').map((c) => c.url)).toEqual([
+      '/api/v1/secrets?scope=agent&scopeId=agent-A',
+      '/api/v1/secrets?scope=agent&scopeId=agent-B',
+    ]);
+  });
 });

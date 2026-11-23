@@ -87,9 +87,14 @@ describe('agent-create-secrets validation and serialization', () => {
     expect(validateAgentSecretRows([row({ key: 'systemone.instance.foo', value: 'x' })])).toEqual([
       expect.stringContaining('systemone.instance.'),
     ]);
+    expect(validateAgentSecretRows([row({ key: 'SystemOne_Instance_x', value: 'x' })])).toEqual([
+      expect.stringContaining('systemone.instance.'),
+    ]);
     expect(validateAgentSecretRows([row({ key: 'webhook_endpoint.hook1', value: 'x' })])).toEqual([
       expect.stringContaining('webhook_endpoint.'),
     ]);
+    // Ordinary env/secret names with underscores after webhook_endpoint are not reserved.
+    expect(validateAgentSecretRows([row({ key: 'WEBHOOK_ENDPOINT_URL', value: 'x' })])).toEqual([]);
   });
 
   it('rejects invalid key characters and missing keys/values', () => {

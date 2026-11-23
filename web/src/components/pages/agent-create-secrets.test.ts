@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import { createInternals } from './__fixtures__/agent-create-internals.js';
 import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
-import { AGENT_SECRETS_FLAG } from '../../utils/feature-flags.js';
+import { AGENT_SECRETS_FLAG, setFeatureFlag } from '../../utils/feature-flags.js';
 import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 
 interface CreatePrivate extends HTMLElement {
@@ -216,6 +216,22 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
 
   it('omits secrets from POST body when none are entered', async () => {
     const { page } = await mountCreate(true);
+    await page.handleSubmit(new Event('submit'));
+
+    expect(postBodies).toHaveLength(1);
+    expect(postBodies[0]).not.toHaveProperty('secrets');
+  });
+
+  it('omits secrets from POST body when hub.agent_secrets turns off after rows were entered', async () => {
+    const { page, form } = await mountCreate(true);
+    await addAndFillRow(form, { key: 'LATE_FLAG_OFF', value: 'should-not-send' });
+    expect(form.collectSecrets()).toHaveLength(1);
+
+    setFeatureFlag(AGENT_SECRETS_FLAG, false);
+    await form.updateComplete;
+    await page.updateComplete;
+
+    expect(form.collectSecrets()).toEqual([]);
     await page.handleSubmit(new Event('submit'));
 
     expect(postBodies).toHaveLength(1);
