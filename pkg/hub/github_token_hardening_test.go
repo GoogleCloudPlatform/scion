@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -40,7 +41,7 @@ import (
 //   - Non-installation agents are unaffected on brokers lacking the capability.
 func TestGitHubTokenInstallationOnly_BrokerCapabilityGateAndWireFlag(t *testing.T) {
 	ctx := context.Background()
-	st := newTestStore(t)
+	st := createTestStore(t)
 
 	proj := &store.Project{ID: tid("gh-cap-proj"), Name: "gh-cap", Slug: "gh-cap"}
 	require.NoError(t, st.CreateProject(ctx, proj))
@@ -103,7 +104,7 @@ func TestGitHubTokenInstallationOnly_BrokerCapabilityGateAndWireFlag(t *testing.
 		assert.False(t, mockClient.createCalled)
 
 		mockClient.startCalled = false
-		err = disp.DispatchAgentStart(ctx, ag, "")
+		err = disp.DispatchAgentStart(ctx, ag, "", false)
 		require.ErrorIs(t, err, ErrBrokerLacksGitHubTokenInstallationOnly)
 		assert.False(t, mockClient.startCalled)
 
@@ -133,12 +134,12 @@ func TestGitHubTokenInstallationOnly_BrokerCapabilityGateAndWireFlag(t *testing.
 		assert.True(t, mockClient.lastCreateReq.GitHubTokenInstallationOnly)
 
 		mockClient.lastStartExtras = StartExtras{}
-		require.NoError(t, disp.DispatchAgentStart(ctx, ag, ""))
+		require.NoError(t, disp.DispatchAgentStart(ctx, ag, "", false))
 		assert.True(t, mockClient.lastStartExtras.GitHubTokenInstallationOnly)
 
-		mockClient.lastStartExtras = StartExtras{}
+		mockClient.lastRestartExtras = StartExtras{}
 		require.NoError(t, disp.DispatchAgentRestart(ctx, ag))
-		assert.True(t, mockClient.lastStartExtras.GitHubTokenInstallationOnly)
+		assert.True(t, mockClient.lastRestartExtras.GitHubTokenInstallationOnly)
 	})
 
 	t.Run("applyStartExtras_wire_key", func(t *testing.T) {
@@ -162,8 +163,8 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 	ctx := context.Background()
 
 	t.Run("push_strips_credential_file_secrets_on_create_and_start", func(t *testing.T) {
-		st := newTestStore(t)
-		secBackend := secret.NewLocalBackend(st, "test-hub")
+		st := createTestStore(t)
+		secBackend := secret.NewLocalBackend(st, "test-hub-id", "test-secret")
 
 		proj := &store.Project{ID: tid("gh-file-push-proj"), Name: "gh-file-push", Slug: "gh-file-push"}
 		require.NoError(t, st.CreateProject(ctx, proj))
@@ -201,7 +202,7 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 		seedFile("SAFE_FILE_SECRET", "~/.config/app/config.json", `{"ok":true}`)
 
 		mockClient := &mockRuntimeBrokerClient{}
-		disp := NewHTTPAgentDispatcherWithClient(st, mockClient, false, nil)
+		disp := NewHTTPAgentDispatcherWithClient(st, mockClient, false, slog.Default())
 		disp.SetSecretBackend(secBackend)
 
 		instAg := &store.Agent{
@@ -211,21 +212,20 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 		}
 		require.NoError(t, st.CreateAgent(ctx, instAg))
 
-		_, err := disp.DispatchAgentCreate(ctx, instAg)
+		createReq, err := disp.buildCreateRequest(ctx, instAg, "TestFileSecretCreate")
 		require.NoError(t, err)
-		require.NotNil(t, mockClient.lastCreateReq)
 		var createNames []string
-		for _, s := range mockClient.lastCreateReq.ResolvedSecrets {
+		for _, s := range createReq.ResolvedSecrets {
 			createNames = append(createNames, s.Name)
 			assert.False(t, api.IsBlockedInstallationGitHubCredentialFileTarget(s.Target),
 				"create leaked credential file secret %q target=%q", s.Name, s.Target)
 		}
 		assert.Contains(t, createNames, "SAFE_FILE_SECRET")
 
-		mockClient.lastResolvedSecrets = nil
-		require.NoError(t, disp.DispatchAgentStart(ctx, instAg, ""))
+		startRes, err := disp.buildStartEnv(ctx, instAg, "DispatchAgentStart", mintSiteStart)
+		require.NoError(t, err)
 		var startNames []string
-		for _, s := range mockClient.lastResolvedSecrets {
+		for _, s := range startRes.secrets {
 			startNames = append(startNames, s.Name)
 			assert.False(t, api.IsBlockedInstallationGitHubCredentialFileTarget(s.Target),
 				"start leaked credential file secret %q target=%q", s.Name, s.Target)
@@ -239,11 +239,10 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 			AppliedConfig: &store.AgentAppliedConfig{GitHubTokenPreference: DispatchAgentGitHubTokenUserPreferred},
 		}
 		require.NoError(t, st.CreateAgent(ctx, userPrefAg))
-		mockClient.lastCreateReq = nil
-		_, err = disp.DispatchAgentCreate(ctx, userPrefAg)
+		upReq, err := disp.buildCreateRequest(ctx, userPrefAg, "TestFileSecretCreateUserPref")
 		require.NoError(t, err)
 		var upNames []string
-		for _, s := range mockClient.lastCreateReq.ResolvedSecrets {
+		for _, s := range upReq.ResolvedSecrets {
 			upNames = append(upNames, s.Name)
 		}
 		assert.Contains(t, upNames, "MY_GH_HOSTS")
@@ -252,7 +251,9 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 	})
 
 	t.Run("pull_and_list_hide_credential_file_secrets", func(t *testing.T) {
-		f := newMaterialSelectionFixture(t, "gh-file-pull")
+		f := newMaterialFixture(t, "gh-file-pull")
+		f.recordAgentEdge(t)
+		enableAgentSecrets(t, f.Server, f.Store)
 		ag, err := f.Store.GetAgent(ctx, f.AgentID)
 		require.NoError(t, err)
 		if ag.AppliedConfig == nil {
@@ -344,6 +345,7 @@ func TestGitHubTokenInstallation_CredentialFileSecretsBlockedAllDoors(t *testing
 func TestBuildEnvGatherResponse_InstallationAgentOmitsBlockedKeys(t *testing.T) {
 	ctx := context.Background()
 	srv, st := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(st, srv.HubID(), "test-secret"))
 
 	proj := &store.Project{ID: tid("envgather-inst-proj"), Name: "envgather-inst", Slug: "envgather-inst"}
 	require.NoError(t, st.CreateProject(ctx, proj))
