@@ -1625,6 +1625,36 @@ func TestEntAgentToStore_PopulatesHarnessConfigOnUnparsableAppliedConfig(t *test
 	assert.Equal(t, "shell", afterConfigUpdate.HarnessConfig, "UpdateAgentConfig(applied=nil) must preserve the shell marker")
 }
 
+func TestApplySucceededAgentInfo_PreservesShellHarnessConfig(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	shell := makeAgent(projectID, "shell-launch-report")
+	shell.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "shell"}
+	require.NoError(t, s.CreateAgent(ctx, shell))
+
+	uid := uuid.MustParse(shell.ID)
+	current, err := s.client.Agent.Get(ctx, uid)
+	require.NoError(t, err)
+
+	upd := s.client.Agent.UpdateOneID(uid)
+	applySucceededAgentInfo(upd, current, store.LaunchReport{
+		AgentConfig: store.BrokerAgentConfig{
+			HarnessConfig: "claude",
+			Image:         "scion-base:latest",
+		},
+	})
+	_, err = upd.Save(ctx)
+	require.NoError(t, err)
+
+	loaded, err := s.GetAgent(ctx, shell.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "shell", loaded.HarnessConfig, "broker launch report must not overwrite indexed shell harness_config")
+	require.NotNil(t, loaded.AppliedConfig)
+	assert.Equal(t, "shell", loaded.AppliedConfig.HarnessConfig, "broker launch report must not overwrite AppliedConfig.HarnessConfig on a shell agent")
+	assert.Equal(t, "scion-base:latest", loaded.AppliedConfig.Image, "non-harness fields from broker launch report must still apply")
+}
+
 // TestAgentStore_HarnessConfigFilter_NoEnv is an explicit no-env-field case:
 // with no Env map at all, filtering by HarnessConfig must still match
 // exactly the top-level value and nothing else.
