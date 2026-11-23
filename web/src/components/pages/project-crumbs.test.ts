@@ -22,13 +22,24 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, type TemplateResult } from 'lit';
+import { render, type LitElement, type TemplateResult } from 'lit';
 
 import { stateManager } from '../../client/state.js';
 import { resetProjectLabelResolverForTests } from '../../client/project-label.js';
+import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
+import { resetServerFlagStateForTests, setFeatureFlag } from '../../utils/feature-flags.js';
 import type { Project } from '../../shared/types.js';
 import type { Crumb, ScionBreadcrumb } from '../shared/breadcrumb.js';
 import { crumbTuples } from '../../test-utils/crumbs.js';
+
+const apiFetchMock = vi.fn<typeof fetch>();
+vi.mock('../../client/api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/api.js')>();
+  return {
+    ...actual,
+    apiFetch: (...args: Parameters<typeof fetch>) => apiFetchMock(...args),
+  };
+});
 
 vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
 
@@ -73,12 +84,17 @@ describe('project-family breadcrumbs (ptone/scion#8281, #8731)', () => {
   beforeEach(() => {
     clearProjects();
     resetProjectLabelResolverForTests();
+    resetServerFlagStateForTests();
+    apiFetchMock.mockReset();
+    apiFetchMock.mockImplementation(() => new Promise<Response>(() => {}));
   });
 
   afterEach(() => {
     clearProjects();
     resetProjectLabelResolverForTests();
+    resetServerFlagStateForTests();
     document.body.innerHTML = '';
+    window.history.replaceState({}, '', '/');
   });
 
   describe('project-settings', () => {
@@ -555,6 +571,256 @@ describe('project-family breadcrumbs (ptone/scion#8281, #8731)', () => {
         ['Harness Configs', `/projects/${encodedId}/settings?tab=harness-configs`],
         ['claude', undefined],
       ]);
+    });
+  });
+
+  describe('mounted cold-load project-name resolution (AC4)', () => {
+    const origEventSource = globalThis.EventSource;
+
+    beforeEach(() => {
+      if (typeof globalThis.EventSource === 'undefined') {
+        class StubEventSource {
+          addEventListener(): void {}
+          removeEventListener(): void {}
+          close(): void {}
+        }
+        (globalThis as unknown as { EventSource: unknown }).EventSource = StubEventSource;
+      }
+    });
+
+    afterEach(() => {
+      (globalThis as unknown as { EventSource: unknown }).EventSource = origEventSource;
+    });
+
+    const RESOLVER_PAGES: ReadonlyArray<{
+      name: string;
+      tag: string;
+      url: string;
+    }> = [
+      { name: 'project-metrics', tag: 'scion-page-project-metrics', url: '/projects/p-1/metrics' },
+      { name: 'agent-graph', tag: 'scion-page-agent-graph', url: '/agents/graph?project=p-1' },
+      {
+        name: 'artifact-detail',
+        tag: 'scion-page-artifact-detail',
+        url: '/projects/p-1/artifacts/a-1',
+      },
+      {
+        name: 'gcp-service-account-detail',
+        tag: 'scion-page-gcp-service-account-detail',
+        url: '/settings/service-accounts/sa-1?project=p-1',
+      },
+      {
+        name: 'template-detail',
+        tag: 'scion-page-template-detail',
+        url: '/projects/p-1/templates/t-1',
+      },
+      {
+        name: 'harness-config-detail',
+        tag: 'scion-page-harness-config-detail',
+        url: '/projects/p-1/harness-configs/h-1',
+      },
+    ];
+
+    function urlOf(input: RequestInfo | URL): string {
+      if (typeof input === 'string') return input;
+      if (input instanceof URL) return input.toString();
+      return input.url;
+    }
+
+    function projectFetchUrls(): string[] {
+      return apiFetchMock.mock.calls
+        .map((call) => urlOf(call[0]))
+        .filter((url) => url === '/api/v1/projects/p-1');
+    }
+
+    async function flushMicrotasks(): Promise<void> {
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    it.each(RESOLVER_PAGES)(
+      '$name shows pending ID on cold load, fetches /api/v1/projects/p-1 once, then re-renders resolved name',
+      async ({ tag, url }) => {
+        setFeatureFlag(ARTIFACTS_FLAG, true);
+        let resolveProjectFetch!: (res: Response) => void;
+        apiFetchMock.mockImplementation((input) => {
+          if (urlOf(input) === '/api/v1/projects/p-1') {
+            return new Promise<Response>((resolve) => {
+              resolveProjectFetch = resolve;
+            });
+          }
+          // Leave the page's own data fetch pending so only syncProjectLabel's
+          // state update can trigger the breadcrumb re-render.
+          return new Promise<Response>(() => {});
+        });
+
+        window.history.replaceState({}, '', url);
+        const el = document.createElement(tag) as LitElement;
+        document.body.appendChild(el);
+        await el.updateComplete;
+
+        const initialCrumbs = crumbsOf(el.shadowRoot!);
+        expect(initialCrumbs[0]).toEqual({ label: 'Projects', href: '/projects' });
+        expect(initialCrumbs[1]).toMatchObject({
+          label: 'p-1',
+          href: '/projects/p-1',
+          truncate: true,
+          pending: true,
+        });
+        expect(projectFetchUrls()).toEqual(['/api/v1/projects/p-1']);
+
+        resolveProjectFetch(
+          new Response(JSON.stringify(makeProject({ id: 'p-1', name: 'Payments' })), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+        await flushMicrotasks();
+        await el.updateComplete;
+
+        const resolvedCrumbs = crumbsOf(el.shadowRoot!);
+        expect(resolvedCrumbs[1]).toMatchObject({
+          label: 'Payments',
+          href: '/projects/p-1',
+          truncate: true,
+        });
+        expect(resolvedCrumbs[1].pending).toBeFalsy();
+        expect(projectFetchUrls()).toEqual(['/api/v1/projects/p-1']);
+      }
+    );
+
+    it.each(RESOLVER_PAGES)(
+      '$name uses cached project name on warm navigation with zero /api/v1/projects/:id fetches',
+      async ({ tag, url }) => {
+        setFeatureFlag(ARTIFACTS_FLAG, true);
+        stateManager.seedProjects([makeProject({ id: 'p-1', name: 'Warm Payments' })]);
+
+        window.history.replaceState({}, '', url);
+        const el = document.createElement(tag) as LitElement;
+        document.body.appendChild(el);
+        await el.updateComplete;
+
+        const crumbs = crumbsOf(el.shadowRoot!);
+        expect(crumbs[1]).toMatchObject({
+          label: 'Warm Payments',
+          href: '/projects/p-1',
+          truncate: true,
+        });
+        expect(crumbs[1].pending).toBeFalsy();
+        expect(projectFetchUrls()).toEqual([]);
+      }
+    );
+
+    it.each([403, 404])(
+      'keeps raw ID and clears pending when /api/v1/projects/p-1 returns HTTP %i',
+      async (status) => {
+        let resolveProjectFetch!: (res: Response) => void;
+        apiFetchMock.mockImplementation((input) => {
+          if (urlOf(input) === '/api/v1/projects/p-1') {
+            return new Promise<Response>((resolve) => {
+              resolveProjectFetch = resolve;
+            });
+          }
+          return new Promise<Response>(() => {});
+        });
+
+        window.history.replaceState({}, '', '/projects/p-1/metrics');
+        const el = document.createElement('scion-page-project-metrics') as LitElement;
+        document.body.appendChild(el);
+        await el.updateComplete;
+
+        expect(crumbsOf(el.shadowRoot!)[1]).toMatchObject({
+          label: 'p-1',
+          href: '/projects/p-1',
+          pending: true,
+        });
+
+        resolveProjectFetch(new Response('denied', { status }));
+        await flushMicrotasks();
+        await el.updateComplete;
+
+        const afterError = crumbsOf(el.shadowRoot!)[1];
+        expect(afterError).toMatchObject({
+          label: 'p-1',
+          href: '/projects/p-1',
+          truncate: true,
+        });
+        expect(afterError.pending).toBeFalsy();
+        expect(projectFetchUrls()).toEqual(['/api/v1/projects/p-1']);
+      }
+    );
+
+    it('artifact-detail resolves homeProject when loaded artifact scopeRef differs from URL projectId', async () => {
+      setFeatureFlag(ARTIFACTS_FLAG, true);
+      stateManager.seedProjects([makeProject({ id: 'p-url', name: 'URL Project' })]);
+      let resolveHomeProject!: (res: Response) => void;
+      apiFetchMock.mockImplementation((input) => {
+        if (urlOf(input) === '/api/v1/projects/p-home') {
+          return new Promise<Response>((resolve) => {
+            resolveHomeProject = resolve;
+          });
+        }
+        return new Promise<Response>(() => {});
+      });
+
+      window.history.replaceState({}, '', '/projects/p-url/artifacts/a-1');
+      const el = document.createElement('scion-page-artifact-detail') as LitElement;
+      document.body.appendChild(el);
+      await el.updateComplete;
+
+      // Simulate loaded data whose home scopeRef is p-home rather than p-url.
+      Object.assign(el, {
+        loading: false,
+        data: {
+          artifact: {
+            id: 'a-1',
+            ref: 'scion://artifact/a-1',
+            scopeKind: 'project',
+            scopeRef: 'p-home',
+            ownerKind: 'user',
+            ownerRef: 'u-1',
+            title: 'Shared RFC',
+            currentSeq: 1,
+            createdAt: '2026-01-01T00:00:00Z',
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+          version: {
+            seq: 1,
+            ref: 'scion://artifact/a-1@1',
+            kind: 'publish',
+            entryPath: 'a.md',
+            totalBytes: 5,
+            fileCount: 1,
+            createdAt: '2026-01-01T00:00:00Z',
+            state: 'ready',
+            files: [{ path: 'a.md', size: 5, sha256: 'ab', mediaType: 'text/markdown' }],
+          },
+        },
+      });
+      await el.updateComplete;
+
+      expect(crumbsOf(el.shadowRoot!)[1]).toMatchObject({
+        label: 'p-home',
+        href: '/projects/p-home',
+        pending: true,
+      });
+
+      resolveHomeProject(
+        new Response(JSON.stringify(makeProject({ id: 'p-home', name: 'Home Project' })), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+      await flushMicrotasks();
+      await el.updateComplete;
+
+      expect(crumbTuples(el.shadowRoot)).toEqual([
+        ['Projects', '/projects'],
+        ['Home Project', '/projects/p-home'],
+        ['Shared RFC', undefined],
+      ]);
+      expect(crumbsOf(el.shadowRoot!)[1].pending).toBeFalsy();
     });
   });
 });
