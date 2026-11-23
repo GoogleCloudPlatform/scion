@@ -408,6 +408,16 @@ func (p *Pipeline) SetAnalyticsOutbox(agentHome string, uid, gid int) {
 	p.analytics.owner = &OutboxOwner{UID: uid, GID: gid}
 }
 
+// SetHubIDResolver configures the hub ID resolver used by the analytics
+// drainer and health reporter. When unset, both fall back to
+// NewHealthzHubIDResolver.
+func (p *Pipeline) SetHubIDResolver(resolve HubIDResolver) {
+	if p == nil {
+		return
+	}
+	p.analytics.resolver = resolve
+}
+
 // AnalyticsOutboxDir returns the outbox directory the pipeline uses (for
 // WP3 diagnostics), or "".
 func (p *Pipeline) AnalyticsOutboxDir() string {

@@ -3120,3 +3120,60 @@ func (c *Client) FetchSecrets(ctx context.Context, keys []string) (*SecretFetchR
 
 	return &result, nil
 }
+
+// ErrHubInfoUnsupported is returned by GetHubID when the Hub responds with
+// HTTP 404 to GET /api/v1/agent/hub, indicating an older Hub that does not
+// serve hub metadata on the agent-scoped API yet.
+var ErrHubInfoUnsupported = errors.New("hub does not support GET /api/v1/agent/hub")
+
+// GetHubID fetches the Hub's identifier (hub_id) from the agent-scoped
+// GET /api/v1/agent/hub endpoint using the agent's credential.
+// Returns an error wrapping ErrHubInfoUnsupported only when the Hub responds
+// with HTTP 404.
+func (c *Client) GetHubID(ctx context.Context) (string, error) {
+	if !c.IsConfigured() {
+		return "", fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := strings.TrimSuffix(c.hubURL, "/") + "/api/v1/agent/hub"
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	c.setAgentAuth(req.Header, currentToken)
+
+	resp, err := c.do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("hub returned 404: %w", ErrHubInfoUnsupported)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		HubID string `json:"hub_id"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+	id := strings.TrimSpace(result.HubID)
+	if id == "" {
+		return "", fmt.Errorf("hub /api/v1/agent/hub response does not report hub_id")
+	}
+	return id, nil
+}

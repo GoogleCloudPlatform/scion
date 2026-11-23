@@ -1591,6 +1591,12 @@ var routeMetadataTable = map[string]RouteMetadata{
 		AgentStanding:       AgentStandingHandler,
 		AgentStandingReason: "handler enforces agentStandingFor(secret.use) in materialRuntimePrecheck with per-item chain delegation checks",
 	},
+	"GET /api/v1/agent/hub": {
+		Pattern: "GET /api/v1/agent/hub", RouteID: "agent.hubInfo",
+		Classification:      RouteAgentToken,
+		AgentStanding:       AgentStandingExempt,
+		AgentStandingReason: "returns only the hub's non-secret hub_id identifier; issues no credentials, tokens, or secrets",
+	},
 	"/api/v1/agent/decisions": {
 		Pattern: "/api/v1/agent/decisions", RouteID: "agent.decisions",
 		Classification:      RouteAgentToken,
