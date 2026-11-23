@@ -1050,6 +1050,14 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 				// never a stored or client value.
 				NativeCloudRun: cloudRunNativeFrom(ctx),
 			}
+		} else if isShellAgent(agent) {
+			// Execution containers without an explicit GCP identity fail
+			// closed to "block" so runtimes like Kubernetes never fall back
+			// to node-identity passthrough (ptone/scion#8812 §14).
+			remoteGCPIdentity = &RemoteGCPIdentityConfig{
+				MetadataMode:   store.GCPMetadataModeBlock,
+				NativeCloudRun: cloudRunNativeFrom(ctx),
+			}
 		}
 		// Only the user's explicit image travels as Config.Image (the
 		// broker's top tier); a template-derived AppliedConfig.Image does

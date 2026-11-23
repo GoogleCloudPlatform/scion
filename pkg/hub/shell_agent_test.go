@@ -1246,3 +1246,186 @@ func TestHandleAgentGitHubTokenRefresh_ShellAgentRefused(t *testing.T) {
 	assert.Equal(t, ErrCodeForbidden, errResp.Error.Code)
 	assert.Equal(t, "execution containers cannot refresh project GitHub App tokens", errResp.Error.Message)
 }
+
+func TestShellAgentGCPIdentity_SkipsDefaultsForcesBlockAndAllowsExplicitOwnerChoice(t *testing.T) {
+	ctx := context.Background()
+	f := newSchedFire(t, "shell-gcp-id")
+	_ = installHeadlessGatherDispatcher(t, f)
+	setExperimentOverrides(t, f.srv, map[string]bool{experiments.ExecContainers: true})
+
+	// Seed a verified project GCP service account and configure it as the
+	// project's default GCP identity (assign mode).
+	sa := &store.GCPServiceAccount{
+		ID:                 api.NewUUID(),
+		Scope:              store.ScopeProject,
+		ScopeID:            f.proj.ID,
+		Email:              "proj-default@gcp-test-proj.iam.gserviceaccount.com",
+		ProjectID:          "gcp-test-proj",
+		DisplayName:        "Project Default SA",
+		Verified:           true,
+		VerifiedAt:         time.Now(),
+		VerificationStatus: store.GCPVerificationVerified,
+		CreatedBy:          f.creator.ID,
+		CreatedAt:          time.Now(),
+	}
+	require.NoError(t, f.srv.store.CreateGCPServiceAccount(ctx, sa))
+	if f.proj.Annotations == nil {
+		f.proj.Annotations = map[string]string{}
+	}
+	f.proj.Annotations[projectSettingDefaultGCPIdentityMode] = store.GCPMetadataModeAssign
+	f.proj.Annotations[projectSettingDefaultGCPIdentitySAID] = sa.ID
+	require.NoError(t, f.srv.store.UpdateProject(ctx, f.proj))
+
+	createViaHTTP := func(t *testing.T, body map[string]any) *store.Agent {
+		t.Helper()
+		rec := doRequestAsUser(t, f.srv, f.creator, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents", body)
+		require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+		var resp struct {
+			Agent *store.Agent `json:"agent"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotNil(t, resp.Agent)
+		stored, err := f.srv.store.GetAgent(ctx, resp.Agent.ID)
+		require.NoError(t, err)
+		return stored
+	}
+
+	t.Run("HTTP create without explicit gcp_identity skips project default and forces block", func(t *testing.T) {
+		stored := createViaHTTP(t, map[string]any{
+			"name":          "shell-no-gcp",
+			"harnessConfig": config.ShellHarnessConfigName,
+			"provisionOnly": true,
+		})
+		require.NotNil(t, stored.AppliedConfig)
+		require.NotNil(t, stored.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeBlock, stored.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Empty(t, stored.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Empty(t, stored.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+	})
+
+	t.Run("HTTP create with explicit owner gcp_identity preserves owner choice", func(t *testing.T) {
+		stored := createViaHTTP(t, map[string]any{
+			"name":          "shell-explicit-gcp",
+			"harnessConfig": config.ShellHarnessConfigName,
+			"provisionOnly": true,
+			"gcp_identity": map[string]any{
+				"metadata_mode":      store.GCPMetadataModeAssign,
+				"service_account_id": sa.ID,
+			},
+		})
+		require.NotNil(t, stored.AppliedConfig)
+		require.NotNil(t, stored.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeAssign, stored.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Equal(t, sa.ID, stored.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Equal(t, sa.Email, stored.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+	})
+
+	t.Run("headless create for shell agent skips project default and forces block", func(t *testing.T) {
+		// Set project default_harness_config to shell so headless create
+		// produces a shell agent without an explicit template (which S6/H1 refuses).
+		projWithShellDefault, err := f.srv.store.GetProject(ctx, f.proj.ID)
+		require.NoError(t, err)
+		projWithShellDefault.Annotations[projectSettingDefaultHarnessConfig] = config.ShellHarnessConfigName
+		require.NoError(t, f.srv.store.UpdateProject(ctx, projWithShellDefault))
+		t.Cleanup(func() {
+			p, err := f.srv.store.GetProject(ctx, f.proj.ID)
+			if err == nil && p.Annotations != nil {
+				delete(p.Annotations, projectSettingDefaultHarnessConfig)
+				_ = f.srv.store.UpdateProject(ctx, p)
+			}
+		})
+
+		evt := withSessionRevision(f.event("shell-headless-gcp"), f.creator.ID)
+		humanAuth, humanIdent, err := f.srv.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), f.proj.ID, "agent.create")
+		require.NoError(t, err)
+		humanCeiling, humanProv, err := f.srv.fireEffectCeiling(ctx, humanAuth)
+		require.NoError(t, err)
+		rr := headlessResolvedRole{preCapRole: AgentRoleFull}
+
+		created, err := f.srv.createAgentHeadless(ctx, HeadlessCreate{
+			ProjectID:      f.proj.ID,
+			Authority:      humanAuth,
+			Identity:       humanIdent,
+			EdgeCeiling:    humanCeiling,
+			EdgeProvenance: humanProv,
+			resolvedRole:   &rr,
+			Name:           "shell-headless-gcp",
+			Detached:       true,
+		})
+		require.NoError(t, err)
+		stored, err := f.srv.store.GetAgent(ctx, created.ID)
+		require.NoError(t, err)
+		require.NotNil(t, stored.AppliedConfig)
+		require.NotNil(t, stored.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeBlock, stored.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Empty(t, stored.AppliedConfig.GCPIdentity.ServiceAccountID)
+	})
+
+	t.Run("dispatch create and start metadata env fail closed to block when GCPIdentity is nil and preserve explicit assign", func(t *testing.T) {
+		d := NewHTTPAgentDispatcherWithClient(f.srv.store, &mockRuntimeBrokerClient{}, false, slog.Default())
+		d.SetAuthzService(f.srv.authzService)
+
+		nilGCPShell := &store.Agent{
+			ID:              api.NewUUID(),
+			Slug:            "shell-nil-gcp",
+			Name:            "shell-nil-gcp",
+			ProjectID:       f.proj.ID,
+			RuntimeBrokerID: f.broker.ID,
+			OwnerID:         f.creator.ID,
+			HarnessConfig:   config.ShellHarnessConfigName,
+			AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: config.ShellHarnessConfigName, GCPIdentity: nil},
+		}
+		createReq, err := d.buildCreateRequestFor(ctx, nilGCPShell, "DispatchAgentCreate", failOnSecretResolutionError)
+		require.NoError(t, err)
+		require.NotNil(t, createReq.Config.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeBlock, createReq.Config.GCPIdentity.MetadataMode)
+		assert.Equal(t, store.GCPMetadataModeBlock, createReq.ResolvedEnv["SCION_METADATA_MODE"])
+
+		startRes, err := d.buildStartEnv(ctx, nilGCPShell, "DispatchAgentStart", mintSiteStart)
+		require.NoError(t, err)
+		assert.Equal(t, store.GCPMetadataModeBlock, startRes.env["SCION_METADATA_MODE"])
+
+		explicitGCPShell := &store.Agent{
+			ID:              api.NewUUID(),
+			Slug:            "shell-assign-gcp",
+			Name:            "shell-assign-gcp",
+			ProjectID:       f.proj.ID,
+			RuntimeBrokerID: f.broker.ID,
+			OwnerID:         f.creator.ID,
+			HarnessConfig:   config.ShellHarnessConfigName,
+			AppliedConfig: &store.AgentAppliedConfig{
+				HarnessConfig: config.ShellHarnessConfigName,
+				GCPIdentity: &store.GCPIdentityConfig{
+					MetadataMode:        store.GCPMetadataModeAssign,
+					ServiceAccountID:    sa.ID,
+					ServiceAccountEmail: sa.Email,
+					ProjectID:           sa.ProjectID,
+				},
+			},
+		}
+		createExplicitReq, err := d.buildCreateRequestFor(ctx, explicitGCPShell, "DispatchAgentCreate", failOnSecretResolutionError)
+		require.NoError(t, err)
+		require.NotNil(t, createExplicitReq.Config.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeAssign, createExplicitReq.Config.GCPIdentity.MetadataMode)
+		assert.Equal(t, sa.Email, createExplicitReq.Config.GCPIdentity.SAEmail)
+		assert.Equal(t, store.GCPMetadataModeAssign, createExplicitReq.ResolvedEnv["SCION_METADATA_MODE"])
+
+		startExplicitRes, err := d.buildStartEnv(ctx, explicitGCPShell, "DispatchAgentStart", mintSiteStart)
+		require.NoError(t, err)
+		assert.Equal(t, store.GCPMetadataModeAssign, startExplicitRes.env["SCION_METADATA_MODE"])
+		assert.Equal(t, sa.Email, startExplicitRes.env["SCION_METADATA_SA_EMAIL"])
+	})
+
+	t.Run("control: LLM agent in same project still inherits project default GCP SA", func(t *testing.T) {
+		stored := createViaHTTP(t, map[string]any{
+			"name":          "llm-default-gcp",
+			"harnessConfig": "claude",
+			"provisionOnly": true,
+		})
+		require.NotNil(t, stored.AppliedConfig)
+		require.NotNil(t, stored.AppliedConfig.GCPIdentity)
+		assert.Equal(t, store.GCPMetadataModeAssign, stored.AppliedConfig.GCPIdentity.MetadataMode)
+		assert.Equal(t, sa.ID, stored.AppliedConfig.GCPIdentity.ServiceAccountID)
+		assert.Equal(t, sa.Email, stored.AppliedConfig.GCPIdentity.ServiceAccountEmail)
+	})
+}

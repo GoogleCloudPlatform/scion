@@ -2377,6 +2377,15 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
+	} else if willBeShellAgent(agent, project) {
+		// Execution containers (shell harness) never inherit project-broker,
+		// project-profile, project-wide, or hub default GCP service accounts,
+		// nor Kubernetes default passthrough. Force explicit "block" unless
+		// the owner explicitly requested a GCP identity in req.GCPIdentity
+		// above (ptone/scion#8812 §14).
+		agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
+			MetadataMode: store.GCPMetadataModeBlock,
+		}
 	} else if brokerSAID, brokerLookupErr := s.brokerDefaultSA(ctx, agent, runtimeBrokerID, project); brokerLookupErr != nil || brokerSAID != "" {
 		if brokerLookupErr != nil {
 			writeErrorFromErr(w, brokerLookupErr, "")
