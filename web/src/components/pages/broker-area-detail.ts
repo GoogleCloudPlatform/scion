@@ -46,6 +46,14 @@ import { replaceSearch } from '../../client/navigation.js';
 import { stateManager } from '../../client/state.js';
 import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { brokerAreaStyles } from '../shared/broker-area-styles.js';
+import {
+  brokerPolicyStyles,
+  canManageBrokerApproval,
+  renderAdminManagedBadge,
+  renderPolicyBlockedTag,
+  updateBrokerAdminManaged,
+} from '../shared/broker-policy-badges.js';
+import { showToast } from '../../utils/toast.js';
 import { HEALTH_READ_PERMISSION } from '../../shared/broker-area-filters.js';
 import type { BrokerAreaProject } from './broker-area-agents.js';
 import '../shared/status-badge.js';
@@ -82,6 +90,7 @@ export class ScionPageBrokerAreaDetail extends LitElement {
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private broker: RuntimeBroker | null = null;
+  @state() private approvalLoading = false;
   @state() private projects: BrokerAreaProject[] = [];
   @state() private agents: Agent[] = [];
   @state() private settings: BrokerSettingsResponse | null = null;
@@ -95,7 +104,7 @@ export class ScionPageBrokerAreaDetail extends LitElement {
 
   private boundOnBrokersUpdated = this.onBrokersUpdated.bind(this);
 
-  static override styles = [brokerTypeBadgeStyles, brokerAreaStyles];
+  static override styles = [brokerTypeBadgeStyles, brokerAreaStyles, brokerPolicyStyles];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -260,6 +269,22 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     }
   }
 
+  private async handleToggleApproval(): Promise<void> {
+    if (!this.broker || this.approvalLoading) return;
+    const next = !this.broker.adminManaged;
+    this.approvalLoading = true;
+    try {
+      const updated = await updateBrokerAdminManaged(this.broker.id, next);
+      this.broker = { ...this.broker, ...updated };
+      stateManager.seedBrokers([this.broker]);
+    } catch (err) {
+      console.error('Failed to update broker approval:', err);
+      showToast(err instanceof Error ? err.message : 'Failed to update broker approval', 'danger');
+    } finally {
+      this.approvalLoading = false;
+    }
+  }
+
   private renderBrokerTypeBadge(broker: RuntimeBroker) {
     const brokerType = broker.labels?.['scion.io/broker-type'];
     if (!brokerType) return nothing;
@@ -332,13 +357,34 @@ export class ScionPageBrokerAreaDetail extends LitElement {
               title="Runs in this server's process"
             ></sl-icon>`
           : nothing}
-        ${this.renderBrokerTypeBadge(broker)}
+        ${this.renderBrokerTypeBadge(broker)} ${renderAdminManagedBadge(broker)}
+        ${renderPolicyBlockedTag(broker)}
         <scion-status-badge
           status=${this.getStatusVariant(broker.status)}
           label="Connection: ${broker.status}"
           size="small"
         ></scion-status-badge>
         ${subtitle ? html`<div slot="meta" class="header-subtitle">${subtitle}</div>` : nothing}
+        ${canManageBrokerApproval(broker)
+          ? html`
+              <div slot="actions" class="header-actions">
+                <sl-button
+                  size="small"
+                  variant=${broker.adminManaged ? 'default' : 'primary'}
+                  data-testid="broker-approval-action"
+                  ?loading=${this.approvalLoading}
+                  ?disabled=${this.approvalLoading}
+                  @click=${() => this.handleToggleApproval()}
+                >
+                  <sl-icon
+                    slot="prefix"
+                    name=${broker.adminManaged ? 'shield-x' : 'shield-check'}
+                  ></sl-icon>
+                  ${broker.adminManaged ? 'Revoke' : 'Approve'}
+                </sl-button>
+              </div>
+            `
+          : nothing}
       </scion-detail-header>
 
       ${this.renderHostIdentityAlert(broker)}

@@ -96,6 +96,7 @@ func TestServerConfigUpdate_AuthorityKeysRefuseTokens(t *testing.T) {
 		{"profiles", `{"profiles":null}`, []string{"profiles"}},
 		{"harness configs", `{"harness_configs":{}}`, []string{"harness_configs"}},
 		{"agent secrets policy", `{"agent_secrets":{"user_scope_only":false}}`, []string{"agent_secrets.user_scope_only"}},
+		{"broker policy", `{"broker_policy":{"admin_managed_only":true}}`, []string{"broker_policy.admin_managed_only"}},
 		{"auto expose ports", `{"auto_expose_ports":{"enabled":true}}`, []string{"auto_expose_ports.enabled"}},
 		{"branding name", `{"server":{"hub":{"branding":{"name":"Acme"}}}}`, []string{"server.hub.branding.name"}},
 		{"branding logo", `{"server":{"hub":{"branding":{"logo":{"light":"https://cdn.example.com/a.svg"}}}}}`, []string{"server.hub.branding.logo.light"}},

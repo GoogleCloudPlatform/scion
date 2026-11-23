@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
 import { getPublicSettings, invalidatePublicSettings } from '../../client/server-feature-flags.js';
 import {
+  ADMIN_MANAGED_BROKERS_FLAG,
   CUSTOM_DEFAULT_USER_ROLE_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
@@ -125,6 +126,9 @@ const SCHEMA_RESPONSE = {
     },
     agent_secrets: {
       koanf_paths: ['agent_secrets.user_scope_only'],
+    },
+    broker_policy: {
+      koanf_paths: ['broker_policy.admin_managed_only'],
     },
     gcp_iam: {
       koanf_paths: ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'],
@@ -2862,6 +2866,101 @@ describe('scion-page-admin-server-config', () => {
 
       // The switch itself must not render while the field is env-pinned.
       expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
+
+  // ── Runtime Broker Policy (hub.admin_managed_brokers, ptone/scion#7829) ──
+
+  describe('Runtime Broker Policy (broker_policy.admin_managed_only)', () => {
+    function brokerPolicySwitch(el: HTMLElement): Element | undefined {
+      const switches = queryAll(el, 'sl-switch');
+      return switches.find((s) =>
+        s.textContent?.includes('Require admin-managed Runtime Brokers only')
+      );
+    }
+
+    afterEach(() => {
+      resetServerFlagStateForTests();
+    });
+
+    it('hides section when experiment is off and setting is absent or false', async () => {
+      setFeatureFlag(ADMIN_MANAGED_BROKERS_FLAG, false);
+      element = await createComponent(createFetchHandler(makeBaseConfig()));
+
+      expect(brokerPolicySwitch(element)).toBeUndefined();
+      expect(query(element, '[data-broker-policy-mismatch]')).toBeNull();
+    });
+
+    it('shows mismatch banner when experiment is off and stored value is true', async () => {
+      setFeatureFlag(ADMIN_MANAGED_BROKERS_FLAG, false);
+      const config = makeBaseConfig({ broker_policy: { admin_managed_only: true } });
+      element = await createComponent(createFetchHandler(config));
+
+      expect(brokerPolicySwitch(element)).toBeUndefined();
+      const banner = query(element, '[data-broker-policy-mismatch]');
+      expect(banner).not.toBeNull();
+      expect(banner!.textContent).toContain('broker_policy.admin_managed_only');
+      expect(banner!.textContent).toContain(ADMIN_MANAGED_BROKERS_FLAG);
+    });
+
+    it('renders switch when experiment is on and sends diff-only payload (file and db)', async () => {
+      setFeatureFlag(ADMIN_MANAGED_BROKERS_FLAG, true);
+      for (const settingsTier of ['file', 'db'] as const) {
+        let capturedPayload: Record<string, unknown> | null = null;
+        const config = makeBaseConfig({
+          settings_tier: settingsTier,
+          broker_policy: { admin_managed_only: true },
+        });
+        element = await createComponent(
+          createFetchHandler(config, {
+            putHandler: (body) => {
+              capturedPayload = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+
+        const sw = brokerPolicySwitch(element);
+        expect(sw).not.toBeUndefined();
+        expect(sw!.hasAttribute('checked')).toBe(true);
+
+        const clickSave = async () => {
+          capturedPayload = null;
+          const buttons = queryAll(element!, 'sl-button[variant="primary"]');
+          withoutSectionFilter(element!);
+          const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+          (saveBtn as HTMLElement).click();
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          expect(capturedPayload).not.toBeNull();
+        };
+
+        // Untouched: omitted from diff payload.
+        await clickSave();
+        expect(capturedPayload!).not.toHaveProperty('broker_policy');
+
+        // Changed: included in diff payload.
+        (element as any).brokerPolicyAdminManagedOnly = false;
+        await clickSave();
+        expect(capturedPayload!.broker_policy).toEqual({ admin_managed_only: false });
+
+        element.remove();
+        element = null;
+      }
+    });
+
+    it('env-overridden broker_policy.admin_managed_only renders read-only with env badge', async () => {
+      setFeatureFlag(ADMIN_MANAGED_BROKERS_FLAG, true);
+      const config = makeBaseConfig({
+        settings_tier: 'file',
+        broker_policy: { admin_managed_only: true },
+        env_overrides: ['broker_policy.admin_managed_only'],
+      });
+      element = await createComponent(createFetchHandler(config));
+
+      const badges = queryAll(element, '.read-only-badge');
+      const badgeTexts = badges.map((b) => b.textContent ?? '');
+      expect(badgeTexts.some((t) => t.includes('environment variable'))).toBe(true);
+      expect(brokerPolicySwitch(element)).toBeUndefined();
     });
   });
 
@@ -5796,6 +5895,7 @@ describe('scion-page-admin-server-config', () => {
         auto_expose_ports: { enabled: true },
         quotas: { enforce_broker_quotas: true },
         agent_secrets: { user_scope_only: true },
+        broker_policy: { admin_managed_only: true },
         runtimes: { docker: { type: 'docker' } },
         profiles: { default: { runtime: 'docker' } },
         harness_configs: { gemini: { harness: 'gemini' } },
@@ -5933,6 +6033,10 @@ describe('scion-page-admin-server-config', () => {
       },
       'agent_secrets.user_scope_only': {
         clear: (el) => (el.agentSecretsUserScopeOnly = false),
+        expected: false,
+      },
+      'broker_policy.admin_managed_only': {
+        clear: (el) => (el.brokerPolicyAdminManagedOnly = false),
         expected: false,
       },
       // hub_observability: "cleared" is unset (Use default), sent as null.

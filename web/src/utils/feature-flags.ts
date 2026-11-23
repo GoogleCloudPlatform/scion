@@ -373,3 +373,11 @@ export const CODE_SPAN_MENTIONS_FLAG = 'hub.code_span_mentions';
 export function codeSpanMentionsEnabled(): boolean {
   return isFeatureEnabled(CODE_SPAN_MENTIONS_FLAG);
 }
+
+/**
+ * Admin-managed Runtime Brokers only (hub.admin_managed_brokers): shows the
+ * Runtime Broker Policy section in Admin > Server Config. Presentation only:
+ * the hub enforces broker_policy.admin_managed_only and experiment gating on
+ * save and at runtime. Default OFF.
+ */
+export const ADMIN_MANAGED_BROKERS_FLAG = 'hub.admin_managed_brokers';

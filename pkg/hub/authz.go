@@ -264,6 +264,10 @@ const (
 	// DeniedByTestAdminPolicy: the test-admin policy refuses the
 	// permission to an admin-kind test identity (decide step 0c).
 	DeniedByTestAdminPolicy DeniedBy = "test_admin_policy"
+
+	// DeniedByBrokerPolicy: the hub's admin-managed-only Runtime Broker
+	// policy (broker_policy.admin_managed_only) refuses the operation.
+	DeniedByBrokerPolicy DeniedBy = "broker_policy"
 )
 
 // Deny reasons of decide step 0c.

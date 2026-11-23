@@ -241,6 +241,13 @@ func init() {
 			New: func() any { return &AgentSecretsSettings{} },
 		},
 		{
+			Name: "broker_policy",
+			KoanfPaths: []string{
+				"broker_policy.admin_managed_only",
+			},
+			New: func() any { return &BrokerPolicySettings{} },
+		},
+		{
 			Name: "agent_defaults",
 			KoanfPaths: []string{
 				"default_template", "default_harness_config",
@@ -585,6 +592,7 @@ func compileSchemas() {
 		BrandingSectionName: schemaObject(getSchemaProperty(root, "server", "hub", "branding")),
 		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
+		"broker_policy":     schemaObject(getSchemaProperty(root, "broker_policy")),
 		// gcp_iam schema is hand-written -- the keys have no definition in
 		// settings-v1.schema.json. An empty string is not a valid value:
 		// clearing a key is done by resetting the section.

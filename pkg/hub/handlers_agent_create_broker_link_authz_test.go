@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -104,4 +105,124 @@ func TestCreateAgent_MemberNamingExistingProviderUnaffected(t *testing.T) {
 		CreateAgentRequest{Name: "member-named-existing-provider-agent", RuntimeBrokerID: f.broker.ID})
 
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+}
+
+func TestCreateAgent_BrokerPolicyAdminManagedOnlyAutoLink(t *testing.T) {
+	t.Run("unmanaged refused for owner and super-admin", func(t *testing.T) {
+		f := brokerLinkAuthzSetup(t)
+		ctx := context.Background()
+		f.proj.GitRemote = "github.com/test/link-authz-policy"
+		require.NoError(t, f.store.UpdateProject(ctx, f.proj))
+		f.unlinked.AutoProvide = false
+		f.unlinked.AdminManaged = false
+		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, f.unlinked))
+		setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+		logs := captureBrokerPolicyWarnLogs(t)
+
+		rec := createAgentAsOwner(t, f.bypassAgentsFixture, CreateAgentRequest{
+			Name:            "policy-unmanaged-owner",
+			RuntimeBrokerID: f.unlinked.ID,
+		})
+		assertAttachBrokerPolicyDenial(t, rec, f.unlinked)
+		assert.Empty(t, f.providerIDs(t, f.proj.ID))
+		assert.Empty(t, f.defaultBroker(t, f.proj.ID))
+		_, err := f.store.GetAgentBySlug(ctx, f.proj.ID, "policy-unmanaged-owner")
+		assert.Equal(t, store.ErrNotFound, err)
+		assert.Contains(t, logs.String(), "reason="+brokerPolicyDenialReason)
+		assert.Contains(t, logs.String(), "action="+brokerPolicyOpAttach)
+
+		admin := newSuperAdminUser(t, f.store, "link-policy-super")
+		rec = doRequestAsUser(t, f.srv, admin, http.MethodPost,
+			"/api/v1/projects/"+f.proj.ID+"/agents",
+			CreateAgentRequest{Name: "policy-unmanaged-super", RuntimeBrokerID: f.unlinked.ID})
+		assertAttachBrokerPolicyDenial(t, rec, f.unlinked)
+		assert.Empty(t, f.providerIDs(t, f.proj.ID))
+		_, err = f.store.GetAgentBySlug(ctx, f.proj.ID, "policy-unmanaged-super")
+		assert.Equal(t, store.ErrNotFound, err)
+	})
+
+	t.Run("managed embedded and auto-provide brokers allowed", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			asAdmin bool
+			setup   func(t *testing.T, f *brokerLinkAuthzFixture)
+		}{
+			{
+				name: "admin_managed",
+				setup: func(t *testing.T, f *brokerLinkAuthzFixture) {
+					f.unlinked.AutoProvide = false
+					f.unlinked.AdminManaged = true
+					require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), f.unlinked))
+				},
+			},
+			{
+				name:    "embedded",
+				asAdmin: true,
+				setup: func(t *testing.T, f *brokerLinkAuthzFixture) {
+					embedded := createReregistrationTestBroker(t, f.store, "link-authz-embedded", "")
+					embedded.Status = store.BrokerStatusOnline
+					require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), embedded))
+					f.unlinked = embedded
+				},
+			},
+			{
+				name: "auto_provide",
+				setup: func(t *testing.T, f *brokerLinkAuthzFixture) {
+					f.unlinked.AutoProvide = true
+					f.unlinked.AdminManaged = false
+					require.NoError(t, f.store.UpdateRuntimeBroker(context.Background(), f.unlinked))
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := brokerLinkAuthzSetup(t)
+				ctx := context.Background()
+				f.proj.GitRemote = "github.com/test/link-authz-" + tc.name
+				require.NoError(t, f.store.UpdateProject(ctx, f.proj))
+				tc.setup(t, f)
+				setAttachBrokerPolicyState(t, f.srv, f.store, true, true)
+
+				req := CreateAgentRequest{Name: "policy-ok-" + tc.name, RuntimeBrokerID: f.unlinked.ID}
+				var rec *httptest.ResponseRecorder
+				if tc.asAdmin {
+					admin := newSuperAdminUser(t, f.store, "link-policy-ok-super-"+tc.name)
+					rec = doRequestAsUser(t, f.srv, admin, http.MethodPost,
+						"/api/v1/projects/"+f.proj.ID+"/agents", req)
+				} else {
+					rec = createAgentAsOwner(t, f.bypassAgentsFixture, req)
+				}
+				require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+				assert.ElementsMatch(t, []string{f.unlinked.ID}, f.providerIDs(t, f.proj.ID))
+			})
+		}
+	})
+
+	t.Run("policy off or experiment off keeps existing auto-link behavior", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			expOn    bool
+			policyOn bool
+		}{
+			{"experiment on policy off", true, false},
+			{"experiment off policy on", false, true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := brokerLinkAuthzSetup(t)
+				ctx := context.Background()
+				f.proj.GitRemote = "github.com/test/link-authz-off"
+				require.NoError(t, f.store.UpdateProject(ctx, f.proj))
+				f.unlinked.AutoProvide = false
+				f.unlinked.AdminManaged = false
+				require.NoError(t, f.store.UpdateRuntimeBroker(ctx, f.unlinked))
+				setAttachBrokerPolicyState(t, f.srv, f.store, tc.expOn, tc.policyOn)
+
+				rec := createAgentAsOwner(t, f.bypassAgentsFixture, CreateAgentRequest{
+					Name:            "policy-off-auto-link",
+					RuntimeBrokerID: f.unlinked.ID,
+				})
+				require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+				assert.ElementsMatch(t, []string{f.unlinked.ID}, f.providerIDs(t, f.proj.ID))
+			})
+		}
+	})
 }

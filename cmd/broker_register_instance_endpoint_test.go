@@ -73,6 +73,28 @@ func TestBrokerRegisterInstance_LabelsTheRowAsARemoteBroker(t *testing.T) {
 	assert.Equal(t, map[string]string{"scion.io/broker-role": "remote"}, got.Labels)
 	assert.Empty(t, got.GCPHostServiceAccountEmail, "non-cloudrun targets do not populate GCPHostServiceAccountEmail")
 	assert.Empty(t, got.GCPHostProjectID, "non-cloudrun targets do not populate GCPHostProjectID")
+	assert.False(t, got.AdminManaged)
+}
+
+func TestBrokerRegisterInstance_AdminManagedFlagForwarded(t *testing.T) {
+	setupRegisterInstanceTest(t, "https://hub.example:8080")
+	brokerRegisterInstance = "remote-docker"
+	origAdminManaged := brokerAdminManaged
+	brokerAdminManaged = true
+	t.Cleanup(func() { brokerAdminManaged = origAdminManaged })
+
+	orig := registerFlatInstance
+	t.Cleanup(func() { registerFlatInstance = orig })
+	var got *brokerregistration.Options
+	registerFlatInstance = func(_ context.Context, _ hubclient.Client, _ config.V1RuntimeBrokerInstanceConfig, id *brokeridentity.Identity,
+		_, _ string, o brokerregistration.Options) (*brokercredentials.BrokerCredentials, error) {
+		got = &o
+		return &brokercredentials.BrokerCredentials{BrokerID: id.RuntimeBrokerID, HubEndpoint: o.HubEndpoint}, nil
+	}
+
+	require.NoError(t, runBrokerRegister(brokerRegisterCmd, nil))
+	require.NotNil(t, got, "registration was not called")
+	assert.True(t, got.AdminManaged, "--admin-managed must be forwarded to flat instance registration options")
 }
 
 // TestFlatInstanceRegistrationOptions_CloudRunPopulatesGCPHostPair verifies

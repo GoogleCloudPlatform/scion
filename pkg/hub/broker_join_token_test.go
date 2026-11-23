@@ -169,6 +169,7 @@ func TestBrokerJoinToken_MintThenJoinWithoutUserAuth(t *testing.T) {
 		"join_token_expires_at": minted.ExpiresAt.UTC().Format(time.RFC3339),
 		"join_token_ttl":        "10m0s",
 		"reissued":              "false",
+		"admin_managed":         "false",
 	}, registerEvent.Details)
 
 	// The token is single use.

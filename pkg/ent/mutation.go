@@ -90597,6 +90597,7 @@ type RuntimeBrokerMutation struct {
 	endpoint                          *string
 	created_by                        *string
 	auto_provide                      *bool
+	admin_managed                     *bool
 	gcp_host_service_account_email    *string
 	gcp_host_project_id               *string
 	gcp_host_source                   *string
@@ -91688,6 +91689,42 @@ func (m *RuntimeBrokerMutation) OldAutoProvide(ctx context.Context) (v bool, err
 // ResetAutoProvide resets all changes to the "auto_provide" field.
 func (m *RuntimeBrokerMutation) ResetAutoProvide() {
 	m.auto_provide = nil
+}
+
+// SetAdminManaged sets the "admin_managed" field.
+func (m *RuntimeBrokerMutation) SetAdminManaged(b bool) {
+	m.admin_managed = &b
+}
+
+// AdminManaged returns the value of the "admin_managed" field in the mutation.
+func (m *RuntimeBrokerMutation) AdminManaged() (r bool, exists bool) {
+	v := m.admin_managed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAdminManaged returns the old "admin_managed" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldAdminManaged(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAdminManaged is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAdminManaged requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAdminManaged: %w", err)
+	}
+	return oldValue.AdminManaged, nil
+}
+
+// ResetAdminManaged resets all changes to the "admin_managed" field.
+func (m *RuntimeBrokerMutation) ResetAdminManaged() {
+	m.admin_managed = nil
 }
 
 // SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
@@ -92867,7 +92904,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 44)
+	fields := make([]string, 0, 45)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -92930,6 +92967,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.auto_provide != nil {
 		fields = append(fields, runtimebroker.FieldAutoProvide)
+	}
+	if m.admin_managed != nil {
+		fields = append(fields, runtimebroker.FieldAdminManaged)
 	}
 	if m.gcp_host_service_account_email != nil {
 		fields = append(fields, runtimebroker.FieldGcpHostServiceAccountEmail)
@@ -93050,6 +93090,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.CreatedBy()
 	case runtimebroker.FieldAutoProvide:
 		return m.AutoProvide()
+	case runtimebroker.FieldAdminManaged:
+		return m.AdminManaged()
 	case runtimebroker.FieldGcpHostServiceAccountEmail:
 		return m.GcpHostServiceAccountEmail()
 	case runtimebroker.FieldGcpHostProjectID:
@@ -93147,6 +93189,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldCreatedBy(ctx)
 	case runtimebroker.FieldAutoProvide:
 		return m.OldAutoProvide(ctx)
+	case runtimebroker.FieldAdminManaged:
+		return m.OldAdminManaged(ctx)
 	case runtimebroker.FieldGcpHostServiceAccountEmail:
 		return m.OldGcpHostServiceAccountEmail(ctx)
 	case runtimebroker.FieldGcpHostProjectID:
@@ -93348,6 +93392,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAutoProvide(v)
+		return nil
+	case runtimebroker.FieldAdminManaged:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAdminManaged(v)
 		return nil
 	case runtimebroker.FieldGcpHostServiceAccountEmail:
 		v, ok := value.(string)
@@ -93873,6 +93924,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldAutoProvide:
 		m.ResetAutoProvide()
+		return nil
+	case runtimebroker.FieldAdminManaged:
+		m.ResetAdminManaged()
 		return nil
 	case runtimebroker.FieldGcpHostServiceAccountEmail:
 		m.ResetGcpHostServiceAccountEmail()

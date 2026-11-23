@@ -79,6 +79,7 @@ User-credentialed Runtime Broker operations admit a fixed set of credential kind
 | Use an associated broker | Agent creation | As for agent creation | Allowed for auto-provide brokers, for brokers associated with the project with the owner's consent, and for holders of `broker.dispatch` on the broker. |
 | Read env vars and secret metadata | Runtime Broker env and secret routes (read) | Runtime Broker HMAC for its own ID; interactive session, dev credential, hub-boundary UAT with `broker:read` | `broker.read` on the Runtime Broker, plus the owner relationship or `broker.update`. Sensitive values are masked. |
 | Write env vars or secrets, update, deregister | Runtime Broker env and secret routes (write), Runtime Broker update and deregistration | Runtime Broker HMAC for its own env vars and secrets (not update or deregistration); interactive session or dev credential | `broker.update` on the Runtime Broker (`broker.delete` to deregister). No UAT is admitted. |
+| Approve or revoke admin-managed status | `PATCH /api/v1/runtime-brokers/{id}` (`{"adminManaged": true\|false}`) | Interactive session or dev credential | `broker.manage` (held by `hub-admin` and `super-admin`, not granted to Runtime Broker owners; test-admin identities refused). No UAT is admitted. Requires experiment `hub.admin_managed_brokers` (`412` when off). See [Admin-Managed Runtime Brokers](#7-admin-managed-runtime-brokers). |
 | Send a heartbeat as a user | Runtime Broker heartbeat | Runtime Broker HMAC for its own ID; interactive session or dev credential | `broker.update` on the Runtime Broker from a role binding; the owner relationship does not apply. |
 | Pull or remove an image on a named Runtime Broker | Harness-config image operations | As for the operation | A user holding `broker.dispatch` on that Runtime Broker is admitted on a session or dev credential. A user access token is always refused, even on an auto-provide Runtime Broker, because no token scope carries `broker.dispatch`. Without `broker.dispatch`, a session or dev credential is admitted only on an auto-provide Runtime Broker; association with the project does not help. |
 
@@ -339,3 +340,63 @@ The Hub does not refuse share links on its own origin when `content_url` is set:
 **Changing the content host.** A change applies without a restart. When `content_url` changes from one host to another, or is cleared, the previous host is no longer confined: the Hub serves it like any other host name that reaches it. Remove the previous host's DNS record or proxy route when you change the setting. The Hub's cookies stay host-only, so no credential reaches that host.
 
 **Who can set it.** `content_url` decides where users open shared content, so only a Hub administrator can set it, through the [server-config API](/scion/reference/admin-settings/#serverhubcontent_url-the-content-host); user access tokens cannot write it or reset its section. Every change is recorded in the mutation audit with its old and new value. A value on the Hub's own host name or on the host name of `server.hub.agent_endpoint` (at any scheme or port), or one with a path, query, fragment or user info, is refused: on the agent endpoint's host, the confinement would answer `404` to every agent. A stored value that is invalid, on either host name, or on the Hub's registrable domain while `server.hub.content_url_allow_same_site` is not set, is ignored at runtime the same way, with a logged warning or error, and links stay on the Hub origin. On a database-backed Hub, the server config response (`GET /api/v1/admin/server-config`) and the **Admin > Server Config > Hub** page report `content_url_status` (`state`: `unset`, `in_effect`, `ignored_invalid`, `refused_same_host`, `ignored_same_site`, or `ignored_agent_endpoint_host`).
+
+## 7. Admin-Managed Runtime Brokers
+
+By default, every Hub member holds `broker.create` and can register a Runtime Broker, attach it to projects they can update, and run agents on it. Deployments that need to restrict workloads to approved infrastructure can enable the hub-level **`broker_policy.admin_managed_only`** setting (`SCION_SERVER_BROKERPOLICY_ADMINMANAGEDONLY`, default `false`), gated by the `hub.admin_managed_brokers` [experiment](/scion/reference/experiments/).
+
+Enforcement is active only when **both** `hub.admin_managed_brokers` and `broker_policy.admin_managed_only` are enabled. When either is off, Runtime Broker behavior is unchanged; if `broker_policy.admin_managed_only` is stored as `true` while the experiment is off, the Hub logs a startup warning and **Admin > Server Config** displays a warning banner. Changing the `broker_policy` section requires an interactive session or dev credential — user access tokens are refused.
+
+### 7.1 What qualifies as admin-managed
+
+A Runtime Broker is **admin-managed** (eligible under the policy) if any of the following holds:
+
+- **Operator-provisioned / co-located:** created in-process with no user owner (`CreatedBy == ""`), such as embedded legacy or flat Runtime Brokers.
+- **Auto-provide:** `autoProvide` is enabled (set only by holders of `broker.auto_provide`, or at co-located startup).
+- **Explicitly approved:** `adminManaged` is `true`, set either at registration (`adminManaged: true`, CLI `--admin-managed`) or afterwards via `PATCH /api/v1/runtime-brokers/{id}` (`{"adminManaged": true|false}`, CLI `scion runtime-broker update <broker> --admin-managed=true|false`) by a signed-in (or dev-credential) holder of `broker.manage` (`hub-admin` or `super-admin`).
+
+Runtime Broker owners cannot self-approve (`broker.manage` is not granted by the owner relationship), user access tokens carry no `broker.manage` selector, and Runtime Broker HMAC requests, heartbeats, and labels can never set `adminManaged`. Approval and revocation changes are audited with old and new values, credential kind, and credential ID.
+
+### 7.2 What is refused when active
+
+When `broker_policy.admin_managed_only` is active, the Hub refuses every operation below on non-managed Runtime Brokers — with **no super-admin exemption** on attachment, placement, moves, or starts (an administrator who wants to use a Runtime Broker approves it first):
+
+- **Registration and re-registration:**
+  - New `POST /api/v1/brokers` registrations (legacy and flat) are refused unless the request sets `adminManaged: true` and the caller holds `broker.manage` with an interactive session or dev credential. Every user access token — including an admin's — is refused while the policy is on; for headless hosts, mint a join token with `scion hub brokers join-token create <broker-name> --admin-managed` from a signed-in admin machine and redeem it on the host with `scion runtime-broker join`.
+  - Re-registration (`POST /api/v1/brokers` matching an existing row) is refused if the existing Runtime Broker is not admin-managed.
+  - The deprecated `POST /api/v1/projects/register` embedded-broker path is refused for new rows (directing the caller to `scion runtime-broker register --admin-managed`) and for non-managed existing rows.
+- **Project attachment:** Every path that attaches a Runtime Broker to a project (`POST /api/v1/projects/{id}/providers`, `brokerId` on `POST /api/v1/projects/register`, agent-create auto-link, and move target linking) refuses non-managed Runtime Brokers. Unlinking (`DELETE /api/v1/projects/{id}/providers/{brokerId}`) remains allowed.
+- **Placement, dispatch, moves, and image operations:** Interactive creates, scheduled creates, agent-created agents, agent moves (`scion reincarnate --broker`), and harness-config image operations never select or dispatch to a non-managed Runtime Broker, even if it is already linked as a project provider.
+- **Start, resume, restart, and wake of existing agents:** Existing stopped or suspended agents on a non-managed Runtime Broker cannot be started, resumed, restarted, or woken (`operation: "start"`). A refused restart checks the policy **before** stopping the agent, so a running agent stays running. A refused message wake leaves the agent suspended, keeps the message, and delivers the wake-failure notice to the sender without retrying.
+
+### 7.3 What is untouched
+
+Heartbeats, control-channel WebSockets, HMAC secret rotation (`POST /api/v1/brokers/{id}/rotate-secret`), Conduit sessions, and stop, delete, attach, message delivery, logs, and `exec` on agents **already running** on a non-managed Runtime Broker continue to work. Once such an agent stops or suspends, it cannot start again on that Runtime Broker until an administrator approves the Runtime Broker or moves the agent to an admin-managed Runtime Broker (`scion reincarnate --broker`).
+
+### 7.4 Refusal contract
+
+Every policy refusal returns HTTP `403` with code `broker_policy_admin_managed_only` and is logged as an authorization denial with reason `broker_policy`:
+
+```json
+{
+  "error": {
+    "code": "broker_policy_admin_managed_only",
+    "message": "<operation> refused: this hub only allows admin-managed Runtime Brokers (setting broker_policy.admin_managed_only). <remedy>",
+    "details": {
+      "setting": "broker_policy.admin_managed_only",
+      "operation": "register|reregister|attach|dispatch|move|start",
+      "brokerId": "<broker-id>"
+    }
+  }
+}
+```
+
+`details.operation` is one of `register`, `reregister`, `attach`, `dispatch`, `move`, or `start`. `details.brokerId` is omitted on new registration refusals. When project broker selection rejects every online candidate solely because of the policy, `details` also includes `"eligibleBrokers": 0`.
+
+### 7.5 Rollout order
+
+1. Enable the `hub.admin_managed_brokers` experiment (**Admin → Server Config → Experiments** or `scion hub experiments enable hub.admin_managed_brokers`).
+2. Review existing Runtime Brokers in the web UI or via `scion hub brokers` and approve the ones that should remain usable (`scion runtime-broker update <broker> --admin-managed=true` or the **Approve** action in the Brokers view). Embedded and auto-provide Runtime Brokers are already eligible.
+3. Enable `broker_policy.admin_managed_only` (**Admin → Server Config → Runtime Broker Policy**, `PUT /api/v1/admin/server-config`, `settings.yaml`, or `SCION_SERVER_BROKERPOLICY_ADMINMANAGEDONLY=true`). Changes apply live on all replicas.
+
+Approve or migrate Runtime Brokers in step 2 **before** turning the policy on in step 3: once the policy is active, suspended agents on unapproved Runtime Brokers will not wake. To roll back, turn `broker_policy.admin_managed_only` (or `hub.admin_managed_brokers`) off; stored `adminManaged` approvals are preserved.

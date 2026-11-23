@@ -3151,6 +3151,7 @@ var (
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
 		{Name: "created_by", Type: field.TypeString, Nullable: true},
 		{Name: "auto_provide", Type: field.TypeBool, Default: false},
+		{Name: "admin_managed", Type: field.TypeBool, Default: false},
 		{Name: "gcp_host_service_account_email", Type: field.TypeString, Nullable: true},
 		{Name: "gcp_host_project_id", Type: field.TypeString, Nullable: true},
 		{Name: "gcp_host_source", Type: field.TypeString, Nullable: true, Default: ""},
@@ -3194,7 +3195,7 @@ var (
 			{
 				Name:    "runtimebroker_runtime_target_id",
 				Unique:  true,
-				Columns: []*schema.Column{RuntimeBrokersColumns[31]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[32]},
 			},
 		},
 	}

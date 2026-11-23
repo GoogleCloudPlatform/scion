@@ -38,6 +38,7 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { brokerPolicyStyles, renderPolicyBlockedTag } from '../shared/broker-policy-badges.js';
 import { cachedProjectLabel, projectDisplayName } from '../../client/project-label.js';
 import { projectVisitorsVisible } from '../../shared/project-visitors.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
@@ -497,600 +498,603 @@ export class ScionPageProjectSettings extends LitElement {
 
   private stopBrokerRelativeTimeTick: (() => void) | null = null;
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
-
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: var(--scion-text-muted, #64748b);
-      text-decoration: none;
-      font-size: 0.875rem;
-      margin-bottom: 1rem;
-    }
-
-    .back-link:hover {
-      color: var(--scion-primary, #3b82f6);
-    }
-
-    .header {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 2rem;
-    }
-
-    .header sl-icon {
-      color: var(--scion-primary, #3b82f6);
-      font-size: 1.5rem;
-    }
-
-    .header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: var(--scion-text, #1e293b);
-      margin: 0;
-    }
-
-    .section {
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .section h2 {
-      font-size: 1.125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.25rem 0;
-    }
-
-    .section p {
-      font-size: 0.875rem;
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 1rem 0;
-    }
-
-    .section-header {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1rem;
-    }
-
-    .section-header-text {
-      flex: 1;
-    }
-
-    .template-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    .template-item {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem 1rem;
-      background: var(--scion-bg-subtle, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-    }
-
-    .template-item sl-icon {
-      color: var(--scion-primary, #3b82f6);
-      font-size: 1.125rem;
-      flex-shrink: 0;
-    }
-
-    .template-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .template-name {
-      font-weight: 600;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .template-meta {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.125rem;
-    }
-
-    .template-badge {
-      font-size: 0.6875rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      white-space: nowrap;
-    }
-
-    .empty-templates {
-      text-align: center;
-      padding: 2rem 1rem;
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
-    }
-
-    .empty-templates sl-icon {
-      font-size: 2rem;
-      margin-bottom: 0.5rem;
-      display: block;
-    }
-
-    .sync-status {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.75rem 1rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      font-size: 0.8125rem;
-      margin-bottom: 1rem;
-    }
-
-    .sync-status.error {
-      background: var(--sl-color-danger-50, #fef2f2);
-      color: var(--sl-color-danger-700, #b91c1c);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-    }
-
-    .sync-status.success {
-      background: var(--sl-color-success-50, #f0fdf4);
-      color: var(--sl-color-success-700, #15803d);
-      border: 1px solid var(--sl-color-success-200, #bbf7d0);
-    }
-
-    .sync-status.syncing {
-      background: var(--sl-color-primary-50, #eff6ff);
-      color: var(--sl-color-primary-700, #1d4ed8);
-      border: 1px solid var(--sl-color-primary-200, #bfdbfe);
-    }
-
-    .danger-section {
-      border-color: var(--sl-color-danger-200, #fecaca);
-    }
-
-    .danger-section h2 {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .leave-blocked-reason {
-      color: var(--sl-color-warning-700, #b45309);
-    }
-
-    .delete-area + .delete-area {
-      margin-top: 1rem;
-    }
-
-    .delete-area {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 1.5rem;
-      padding-top: 1rem;
-      border-top: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .delete-info {
-      flex: 1;
-    }
-
-    .delete-info h3 {
-      font-size: 0.9375rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.25rem 0;
-    }
-
-    .delete-info p {
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-      margin: 0;
-    }
-
-    .delete-actions {
-      flex-shrink: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: flex-end;
-      gap: 0.75rem;
-    }
-
-    .loading-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 4rem 2rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .loading-state sl-spinner {
-      font-size: 2rem;
-      margin-bottom: 1rem;
-    }
-
-    .error-state {
-      text-align: center;
-      padding: 3rem 2rem;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--sl-color-danger-200, #fecaca);
-      border-radius: var(--scion-radius-lg, 0.75rem);
-    }
-
-    .error-state sl-icon {
-      font-size: 3rem;
-      color: var(--sl-color-danger-500, #ef4444);
-      margin-bottom: 1rem;
-    }
-
-    .error-state h2 {
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-      margin: 0 0 0.5rem 0;
-    }
-
-    .error-state p {
-      color: var(--scion-text-muted, #64748b);
-      margin: 0 0 1rem 0;
-    }
-
-    .error-details {
-      font-family: var(--scion-font-mono, monospace);
-      font-size: 0.875rem;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      padding: 0.75rem 1rem;
-      border-radius: var(--scion-radius, 0.5rem);
-      color: var(--sl-color-danger-700, #b91c1c);
-      margin-bottom: 1rem;
-    }
-
-    sl-tab-group {
-      --indicator-color: var(--scion-primary, #3b82f6);
-    }
-
-    sl-tab-group::part(base) {
-      background: transparent;
-    }
-
-    sl-tab-panel::part(base) {
-      padding: 1.5rem 0 0 0;
-    }
-
-    .config-form {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-    }
-
-    .config-field {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-    }
-
-    .config-field label {
-      font-size: 0.8125rem;
-      font-weight: 600;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .config-field .field-help {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .config-field .field-help-error {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .config-actions {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      justify-content: flex-end;
-      padding-top: 0.5rem;
-    }
-
-    .config-status {
-      font-size: 0.8125rem;
-    }
-
-    .config-status.error {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-
-    .config-status.success {
-      color: var(--sl-color-success-600, #16a34a);
-    }
-
-    /* Hub-default indicator: shown next to labels when a setting inherits from hub */
-    .hub-indicator-icon {
-      font-size: 0.75rem;
-      color: var(--sl-color-neutral-500, #64748b);
-      vertical-align: middle;
-      margin-left: 0.25rem;
-      cursor: help;
-    }
-
-    .profile-default-rows,
-    .broker-default-rows {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-    }
-
-    .profile-default-row,
-    .broker-default-row {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-    }
-
-    .profile-default-inputs,
-    .broker-default-inputs {
-      display: grid;
-      grid-template-columns: minmax(8rem, 1fr) minmax(12rem, 2fr) auto;
-      gap: 0.5rem;
-      align-items: end;
-    }
-
-    .profile-effective,
-    .broker-effective {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-      margin-top: 0.5rem;
-    }
-
-    .profile-effective-title,
-    .broker-effective-title {
-      font-size: 0.8125rem;
-      font-weight: 600;
-    }
-
-    .profile-effective-table,
-    .broker-effective-table {
-      border-collapse: collapse;
-      font-size: 0.8125rem;
-    }
-
-    .profile-effective-table th,
-    .profile-effective-table td,
-    .broker-effective-table th,
-    .broker-effective-table td {
-      text-align: left;
-      padding: 0.25rem 0.5rem;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
-
-    .config-field.hub-inherited {
-      border-left: 2px solid var(--sl-color-primary-300, #93c5fd);
-      padding-left: 0.5rem;
-    }
-
-    .config-field.hub-inherited > label {
-      color: var(--sl-color-neutral-600, #475569);
-    }
-
-    .done-footer {
-      display: flex;
-      justify-content: flex-start;
-      margin-top: 1rem;
-    }
-
-    /* GitHub App section styles */
-    .github-no-install {
-      text-align: center;
-      padding: 1.5rem;
-    }
-
-    .github-no-install p {
-      margin: 0.5rem 0;
-    }
-
-    .github-status-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1.5rem;
-      margin-bottom: 1rem;
-    }
-
-    .github-status-item {
-      display: flex;
-      flex-direction: column;
-      gap: 0.25rem;
-    }
-
-    .github-status-value {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .github-status-dot {
-      display: inline-block;
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-    }
-
-    .github-status-dot.ok {
-      background: var(--sl-color-success-600, #16a34a);
-    }
-    .github-status-dot.degraded {
-      background: var(--sl-color-yellow-500, #eab308);
-    }
-    .github-status-dot.error {
-      background: var(--sl-color-danger-600, #dc2626);
-    }
-    .github-status-dot.unchecked {
-      background: var(--scion-text-disabled, #94a3b8);
-    }
-
-    .github-permissions {
-      margin-top: 1rem;
-    }
-
-    .github-perm-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.375rem;
-      margin-top: 0.375rem;
-    }
-
-    .github-perm-badge {
-      font-size: 0.75rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
-
-    .github-perm-badge.write {
-      background: var(--scion-badge-primary-bg, #dbeafe);
-      border-color: var(--sl-color-primary-300, #93c5fd);
-      color: var(--scion-badge-primary-text, #1e40af);
-    }
-
-    .github-perm-badge.read {
-      background: var(--sl-color-success-50, #f0fdf4);
-      border-color: var(--scion-success-border, #86efac);
-      color: var(--scion-success-text, #166534);
-    }
-
-    .status-message.warning {
-      background: var(--scion-badge-warning-bg, #fef3c7);
-      color: var(--scion-warning-text, #92400e);
-      border: 1px solid var(--scion-warning-border, #fcd34d);
-    }
-
-    /* Runtime Brokers tab */
-    .broker-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    .broker-item {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem 1rem;
-      background: var(--scion-bg-subtle, #f8fafc);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-    }
-
-    .broker-status-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-
-    .broker-status-dot.online {
-      background: var(--sl-color-success-600, #16a34a);
-    }
-    .broker-status-dot.offline {
-      background: var(--scion-text-disabled, #94a3b8);
-    }
-    .broker-status-dot.degraded {
-      background: var(--sl-color-yellow-500, #eab308);
-    }
-
-    .broker-info {
-      flex: 1;
-      min-width: 0;
-    }
-
-    .broker-name-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-
-    .broker-name {
-      font-weight: 600;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
-
-    .broker-default-badge {
-      font-size: 0.6875rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      background: var(--scion-primary, #3b82f6);
-      color: var(--scion-primary-text, #ffffff);
-      white-space: nowrap;
-    }
-
-    .broker-meta-row {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-      margin-top: 0.25rem;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.25rem 0.75rem;
-    }
-
-    .broker-profiles {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.25rem;
-      margin-top: 0.375rem;
-    }
-
-    .broker-profile-badge {
-      font-size: 0.6875rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      white-space: nowrap;
-    }
-
-    .broker-profile-badge.available {
-      background: var(--sl-color-success-50, #f0fdf4);
-      border-color: var(--sl-color-success-200, #86efac);
-      color: var(--sl-color-success-700, #166534);
-    }
-
-    .broker-actions {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      flex-shrink: 0;
-    }
-
-    .empty-brokers {
-      text-align: center;
-      padding: 2rem 1rem;
-      color: var(--scion-text-muted, #64748b);
-      font-size: 0.875rem;
-    }
-
-    .empty-brokers sl-icon {
-      font-size: 2rem;
-      margin-bottom: 0.5rem;
-      display: block;
-    }
-  `;
+  static override styles = [
+    brokerPolicyStyles,
+    css`
+      :host {
+        display: block;
+      }
+
+      .back-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: var(--scion-text-muted, #64748b);
+        text-decoration: none;
+        font-size: 0.875rem;
+        margin-bottom: 1rem;
+      }
+
+      .back-link:hover {
+        color: var(--scion-primary, #3b82f6);
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 2rem;
+      }
+
+      .header sl-icon {
+        color: var(--scion-primary, #3b82f6);
+        font-size: 1.5rem;
+      }
+
+      .header h1 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--scion-text, #1e293b);
+        margin: 0;
+      }
+
+      .section {
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+      }
+
+      .section h2 {
+        font-size: 1.125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.25rem 0;
+      }
+
+      .section p {
+        font-size: 0.875rem;
+        color: var(--scion-text-muted, #64748b);
+        margin: 0 0 1rem 0;
+      }
+
+      .section-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+      }
+
+      .section-header-text {
+        flex: 1;
+      }
+
+      .template-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .template-item {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem 1rem;
+        background: var(--scion-bg-subtle, #f8fafc);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+      }
+
+      .template-item sl-icon {
+        color: var(--scion-primary, #3b82f6);
+        font-size: 1.125rem;
+        flex-shrink: 0;
+      }
+
+      .template-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .template-name {
+        font-weight: 600;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .template-meta {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.125rem;
+      }
+
+      .template-badge {
+        font-size: 0.6875rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        white-space: nowrap;
+      }
+
+      .empty-templates {
+        text-align: center;
+        padding: 2rem 1rem;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+      }
+
+      .empty-templates sl-icon {
+        font-size: 2rem;
+        margin-bottom: 0.5rem;
+        display: block;
+      }
+
+      .sync-status {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem 1rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        font-size: 0.8125rem;
+        margin-bottom: 1rem;
+      }
+
+      .sync-status.error {
+        background: var(--sl-color-danger-50, #fef2f2);
+        color: var(--sl-color-danger-700, #b91c1c);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+      }
+
+      .sync-status.success {
+        background: var(--sl-color-success-50, #f0fdf4);
+        color: var(--sl-color-success-700, #15803d);
+        border: 1px solid var(--sl-color-success-200, #bbf7d0);
+      }
+
+      .sync-status.syncing {
+        background: var(--sl-color-primary-50, #eff6ff);
+        color: var(--sl-color-primary-700, #1d4ed8);
+        border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+      }
+
+      .danger-section {
+        border-color: var(--sl-color-danger-200, #fecaca);
+      }
+
+      .danger-section h2 {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      .leave-blocked-reason {
+        color: var(--sl-color-warning-700, #b45309);
+      }
+
+      .delete-area + .delete-area {
+        margin-top: 1rem;
+      }
+
+      .delete-area {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .delete-info {
+        flex: 1;
+      }
+
+      .delete-info h3 {
+        font-size: 0.9375rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.25rem 0;
+      }
+
+      .delete-info p {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+        margin: 0;
+      }
+
+      .delete-actions {
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.75rem;
+      }
+
+      .loading-state {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 4rem 2rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .loading-state sl-spinner {
+        font-size: 2rem;
+        margin-bottom: 1rem;
+      }
+
+      .error-state {
+        text-align: center;
+        padding: 3rem 2rem;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--sl-color-danger-200, #fecaca);
+        border-radius: var(--scion-radius-lg, 0.75rem);
+      }
+
+      .error-state sl-icon {
+        font-size: 3rem;
+        color: var(--sl-color-danger-500, #ef4444);
+        margin-bottom: 1rem;
+      }
+
+      .error-state h2 {
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+        margin: 0 0 0.5rem 0;
+      }
+
+      .error-state p {
+        color: var(--scion-text-muted, #64748b);
+        margin: 0 0 1rem 0;
+      }
+
+      .error-details {
+        font-family: var(--scion-font-mono, monospace);
+        font-size: 0.875rem;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        padding: 0.75rem 1rem;
+        border-radius: var(--scion-radius, 0.5rem);
+        color: var(--sl-color-danger-700, #b91c1c);
+        margin-bottom: 1rem;
+      }
+
+      sl-tab-group {
+        --indicator-color: var(--scion-primary, #3b82f6);
+      }
+
+      sl-tab-group::part(base) {
+        background: transparent;
+      }
+
+      sl-tab-panel::part(base) {
+        padding: 1.5rem 0 0 0;
+      }
+
+      .config-form {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .config-field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .config-field label {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .config-field .field-help {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .config-field .field-help-error {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      .config-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        justify-content: flex-end;
+        padding-top: 0.5rem;
+      }
+
+      .config-status {
+        font-size: 0.8125rem;
+      }
+
+      .config-status.error {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+
+      .config-status.success {
+        color: var(--sl-color-success-600, #16a34a);
+      }
+
+      /* Hub-default indicator: shown next to labels when a setting inherits from hub */
+      .hub-indicator-icon {
+        font-size: 0.75rem;
+        color: var(--sl-color-neutral-500, #64748b);
+        vertical-align: middle;
+        margin-left: 0.25rem;
+        cursor: help;
+      }
+
+      .profile-default-rows,
+      .broker-default-rows {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .profile-default-row,
+      .broker-default-row {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .profile-default-inputs,
+      .broker-default-inputs {
+        display: grid;
+        grid-template-columns: minmax(8rem, 1fr) minmax(12rem, 2fr) auto;
+        gap: 0.5rem;
+        align-items: end;
+      }
+
+      .profile-effective,
+      .broker-effective {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        margin-top: 0.5rem;
+      }
+
+      .profile-effective-title,
+      .broker-effective-title {
+        font-size: 0.8125rem;
+        font-weight: 600;
+      }
+
+      .profile-effective-table,
+      .broker-effective-table {
+        border-collapse: collapse;
+        font-size: 0.8125rem;
+      }
+
+      .profile-effective-table th,
+      .profile-effective-table td,
+      .broker-effective-table th,
+      .broker-effective-table td {
+        text-align: left;
+        padding: 0.25rem 0.5rem;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
+
+      .config-field.hub-inherited {
+        border-left: 2px solid var(--sl-color-primary-300, #93c5fd);
+        padding-left: 0.5rem;
+      }
+
+      .config-field.hub-inherited > label {
+        color: var(--sl-color-neutral-600, #475569);
+      }
+
+      .done-footer {
+        display: flex;
+        justify-content: flex-start;
+        margin-top: 1rem;
+      }
+
+      /* GitHub App section styles */
+      .github-no-install {
+        text-align: center;
+        padding: 1.5rem;
+      }
+
+      .github-no-install p {
+        margin: 0.5rem 0;
+      }
+
+      .github-status-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.5rem;
+        margin-bottom: 1rem;
+      }
+
+      .github-status-item {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .github-status-value {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .github-status-dot {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+
+      .github-status-dot.ok {
+        background: var(--sl-color-success-600, #16a34a);
+      }
+      .github-status-dot.degraded {
+        background: var(--sl-color-yellow-500, #eab308);
+      }
+      .github-status-dot.error {
+        background: var(--sl-color-danger-600, #dc2626);
+      }
+      .github-status-dot.unchecked {
+        background: var(--scion-text-disabled, #94a3b8);
+      }
+
+      .github-permissions {
+        margin-top: 1rem;
+      }
+
+      .github-perm-grid {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.375rem;
+        margin-top: 0.375rem;
+      }
+
+      .github-perm-badge {
+        font-size: 0.75rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .github-perm-badge.write {
+        background: var(--scion-badge-primary-bg, #dbeafe);
+        border-color: var(--sl-color-primary-300, #93c5fd);
+        color: var(--scion-badge-primary-text, #1e40af);
+      }
+
+      .github-perm-badge.read {
+        background: var(--sl-color-success-50, #f0fdf4);
+        border-color: var(--scion-success-border, #86efac);
+        color: var(--scion-success-text, #166534);
+      }
+
+      .status-message.warning {
+        background: var(--scion-badge-warning-bg, #fef3c7);
+        color: var(--scion-warning-text, #92400e);
+        border: 1px solid var(--scion-warning-border, #fcd34d);
+      }
+
+      /* Runtime Brokers tab */
+      .broker-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+
+      .broker-item {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem 1rem;
+        background: var(--scion-bg-subtle, #f8fafc);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+      }
+
+      .broker-status-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .broker-status-dot.online {
+        background: var(--sl-color-success-600, #16a34a);
+      }
+      .broker-status-dot.offline {
+        background: var(--scion-text-disabled, #94a3b8);
+      }
+      .broker-status-dot.degraded {
+        background: var(--sl-color-yellow-500, #eab308);
+      }
+
+      .broker-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .broker-name-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+
+      .broker-name {
+        font-weight: 600;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+      }
+
+      .broker-default-badge {
+        font-size: 0.6875rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        background: var(--scion-primary, #3b82f6);
+        color: var(--scion-primary-text, #ffffff);
+        white-space: nowrap;
+      }
+
+      .broker-meta-row {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+        margin-top: 0.25rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.25rem 0.75rem;
+      }
+
+      .broker-profiles {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.25rem;
+        margin-top: 0.375rem;
+      }
+
+      .broker-profile-badge {
+        font-size: 0.6875rem;
+        padding: 0.125rem 0.5rem;
+        border-radius: 9999px;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #64748b);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        white-space: nowrap;
+      }
+
+      .broker-profile-badge.available {
+        background: var(--sl-color-success-50, #f0fdf4);
+        border-color: var(--sl-color-success-200, #86efac);
+        color: var(--sl-color-success-700, #166534);
+      }
+
+      .broker-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        flex-shrink: 0;
+      }
+
+      .empty-brokers {
+        text-align: center;
+        padding: 2rem 1rem;
+        color: var(--scion-text-muted, #64748b);
+        font-size: 0.875rem;
+      }
+
+      .empty-brokers sl-icon {
+        font-size: 2rem;
+        margin-bottom: 0.5rem;
+        display: block;
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -4176,6 +4180,7 @@ export class ScionPageProjectSettings extends LitElement {
           <div class="broker-name-row">
             <span class="broker-name">${broker.name}</span>
             ${isDefault ? html`<span class="broker-default-badge">Default</span>` : ''}
+            ${renderPolicyBlockedTag(broker)}
           </div>
           <div class="broker-meta-row">
             <span>${broker.status}</span>

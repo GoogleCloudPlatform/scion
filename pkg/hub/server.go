@@ -408,6 +408,12 @@ type ServerConfig struct {
 	// permissive default (agents may write project scope) applies. See
 	// agentSecretsUserScopeOnly.
 	AgentSecretsUserScopeOnly *bool
+	// BrokerPolicyAdminManagedOnly controls whether Runtime Broker
+	// registration, attachment, placement, and agent starts are restricted to
+	// admin-managed brokers (gated by experiment hub.admin_managed_brokers;
+	// ptone/scion#7829). nil means unset (default false). See
+	// adminManagedBrokersOnly.
+	BrokerPolicyAdminManagedOnly *bool
 	// DefaultScratchpad controls whether new projects automatically get a
 	// "scratchpad" shared directory. When nil, the compiled default (true) applies.
 	DefaultScratchpad *bool
@@ -6966,7 +6972,11 @@ func (s *Server) resolveScheduledRuntimeBroker(ctx context.Context, project *sto
 	if err != nil {
 		return "", fmt.Errorf("failed to list available runtime brokers for project %q: %w", project.ID, err)
 	}
-	brokerID, refusal := s.selectProjectRuntimeBroker(ctx, project, allProviders, availableBrokers)
+	brokerID, refusal, policyErr := s.selectProjectRuntimeBrokerInternal(ctx, project, allProviders, availableBrokers)
+	if policyErr != nil {
+		logBrokerPolicyDenial(ctx, policyErr.Operation, policyErr.Broker)
+		return "", errors.New(policyErr.Error())
+	}
 	if refusal != "" {
 		return "", fmt.Errorf("%s; %s", refusal, scheduledBrokerRemedy(project, len(allProviders)))
 	}

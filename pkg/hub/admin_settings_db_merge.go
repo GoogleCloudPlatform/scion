@@ -838,7 +838,7 @@ func (fp *fieldPresence) sentFold(name string) (json.RawMessage, bool) {
 // or {} clears it. An omitted map section is not written.
 var bodyMergedSections = []string{
 	"access", "endpoints", "lifecycle", "notifications", "federation",
-	"auto_expose_ports", "quotas", "agent_secrets", hubObservabilitySection,
+	"auto_expose_ports", "quotas", "agent_secrets", "broker_policy", hubObservabilitySection,
 	opsettings.BrandingSectionName,
 }
 

@@ -388,6 +388,19 @@
       },
       "additionalProperties": false
     },
+    "broker_policy": {
+      "type": "object",
+      "description": "Hub-level policy for Runtime Brokers. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "admin_managed_only": {
+          "type": "boolean",
+          "description": "When true (and experiment hub.admin_managed_brokers is enabled), restricts Runtime Broker registration, attachment, placement, and agent starts to admin-managed brokers. Default false."
+        }
+      },
+      "additionalProperties": false
+    },
     "auto_expose_ports": {
       "type": "object",
       "description": "Hub-level default for automatically exposing agent container ports. Global-only.",

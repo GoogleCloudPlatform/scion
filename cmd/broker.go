@@ -55,6 +55,7 @@ var (
 	// broker register flags
 	brokerForceRegister bool
 	brokerAutoProvide   bool
+	brokerAdminManaged  bool
 	brokerHubName       string // --name flag for hub connection name
 	brokerRegisterName  string // --broker-name flag: the broker's name on the hub
 
@@ -426,6 +427,7 @@ func init() {
 	// Register flags
 	brokerRegisterCmd.Flags().BoolVar(&brokerForceRegister, "force", false, "Force re-registration even if already registered locally or currently online on the Hub")
 	brokerRegisterCmd.Flags().BoolVar(&brokerAutoProvide, "auto-provide", false, "Automatically add as provider for new projects (requires the broker.auto_provide permission, held by super-admins)")
+	brokerRegisterCmd.Flags().BoolVar(&brokerAdminManaged, "admin-managed", false, "Register this broker as admin-managed (requires the broker.manage permission and experiment hub.admin_managed_brokers)")
 	brokerRegisterCmd.Flags().StringVar(&brokerHubName, "name", "", "Name for this hub connection (derived from endpoint if not specified)")
 	brokerRegisterCmd.Flags().StringVar(&brokerRegisterName, "broker-name", "", "Name this broker registers under on the hub, saved in the global settings (server.broker.broker_nickname) for later commands and the broker server; when not set, the saved name, else the hostname")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
@@ -636,6 +638,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 			NameSet:       brokerNameSet,
 			KeptName:      &brokerName,
 			AutoProvide:   brokerAutoProvide,
+			AdminManaged:  brokerAdminManaged,
 			Force:         brokerForceRegister,
 			Settings:      settings,
 			HubName:       hubName,
@@ -772,8 +775,9 @@ type brokerHubRegistration struct {
 	NameSet bool
 	// KeptName, when non-nil, is set to the name the broker is registered
 	// under: Name, or on a re-registration the name the hub kept.
-	KeptName    *string
-	AutoProvide bool
+	KeptName     *string
+	AutoProvide  bool
+	AdminManaged bool
 	// Force bypasses the Hub's online-broker re-registration guard.
 	Force bool
 	// Settings supply the broker profiles and default profile reported at
@@ -853,6 +857,7 @@ func registerBrokerWithHub(ctx context.Context, client hubclient.Client, multiSt
 		Name:         reg.Name,
 		Capabilities: brokerRegistrationCapabilities(),
 		AutoProvide:  reg.AutoProvide,
+		AdminManaged: reg.AdminManaged,
 		Force:        reg.Force,
 		Labels: map[string]string{
 			"scion.io/broker-role": "remote",

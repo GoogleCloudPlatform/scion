@@ -1506,6 +1506,9 @@ type VersionedSettings struct {
 	// AgentSecrets controls hub-level policy for secrets written by agents.
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
 
+	// BrokerPolicy controls hub-level policy for Runtime Brokers.
+	BrokerPolicy *BrokerPolicySettings `json:"broker_policy,omitempty" yaml:"broker_policy,omitempty" koanf:"broker_policy"`
+
 	// ProjectID is the top-level project ID of a migrated legacy settings
 	// file, kept verbatim. hub.project_id is the canonical v1 key and takes
 	// precedence when set.
@@ -1539,6 +1542,15 @@ type AgentSecretsSettings struct {
 	// scope secrets only. Default false (nil is false): agents may write
 	// project scope as they do today.
 	UserScopeOnly *bool `json:"user_scope_only,omitempty" yaml:"user_scope_only,omitempty" koanf:"user_scope_only"`
+}
+
+// BrokerPolicySettings holds the hub-level policy for Runtime Brokers in
+// settings.yaml (ptone/scion#7829).
+type BrokerPolicySettings struct {
+	// AdminManagedOnly, when true (and experiment hub.admin_managed_brokers is
+	// enabled), restricts Runtime Broker registration, attachment, placement,
+	// and agent starts to admin-managed brokers. Default false (nil is false).
+	AdminManagedOnly *bool `json:"admin_managed_only,omitempty" yaml:"admin_managed_only,omitempty" koanf:"admin_managed_only"`
 }
 
 // ProjectDefaultsSettings holds project creation defaults in settings.yaml.

@@ -280,6 +280,9 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// Checked in the broker registration handler when a request turns
 		// auto-provide on; no route declares it.
 		"broker.auto_provide": "Broker registration handler check, no route declaration",
+		// Checked in the broker registration handler (and PATCH approval) when
+		// marking a broker admin-managed; no route declares it.
+		"broker.manage": "Broker registration handler check, no route declaration",
 
 		// Hub admin permissions — NonRouteUse only or Reserved (no route declaration)
 		"hub.settings.read":         "NonRouteUse only, no route declaration",

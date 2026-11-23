@@ -297,6 +297,8 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: observeLocked(func(s *Server) any { return s.config.EnforceBrokerQuotas })},
 		"agent_secrets.user_scope_only": {section: "agent_secrets", doc: `{"user_scope_only":true}`,
 			observe: observeLocked(func(s *Server) any { return s.config.AgentSecretsUserScopeOnly })},
+		"broker_policy.admin_managed_only": {section: "broker_policy", doc: `{"admin_managed_only":true}`,
+			observe: observeLocked(func(s *Server) any { return s.config.BrokerPolicyAdminManagedOnly })},
 		"project_defaults.default_scratchpad": {section: "project_defaults", doc: `{"default_scratchpad":false}`,
 			observe: func(_ *Server, o *OperationalSettings) any { return o.ProjectDefaultScratchpad() }},
 

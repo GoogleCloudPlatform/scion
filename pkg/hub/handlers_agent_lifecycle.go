@@ -1028,6 +1028,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				}
 				return
 			}
+			if err := s.checkBrokerPolicyForStart(ctx, agent); err != nil {
+				if !writeBrokerPolicyError(w, r, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
 			// From here the start no longer follows the client
 			// (ptone/scion#1961): a client that gives up must not cancel the
 			// broker launch, the rollback or the final status write. The
@@ -1180,6 +1186,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// restart never stops the agent.
 			if err := s.checkPinnedPlacement(agent); err != nil {
 				if !writeRuntimeTargetRefusal(w, err) {
+					writeErrorFromErr(w, err, "")
+				}
+				return
+			}
+			if err := s.checkBrokerPolicyForStart(ctx, agent); err != nil {
+				if !writeBrokerPolicyError(w, r, err) {
 					writeErrorFromErr(w, err, "")
 				}
 				return
@@ -1365,6 +1377,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If dispatch failed, return error. A required-skill resolution failure
 	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
+		if writeBrokerPolicyError(w, r, dispatchErr) {
+			return
+		}
 		if writeAgentTokenRecordError(w, dispatchErr) {
 			return
 		}

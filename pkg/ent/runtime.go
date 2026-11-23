@@ -2896,24 +2896,28 @@ func init() {
 	runtimebrokerDescAutoProvide := runtimebrokerFields[21].Descriptor()
 	// runtimebroker.DefaultAutoProvide holds the default value on creation for the auto_provide field.
 	runtimebroker.DefaultAutoProvide = runtimebrokerDescAutoProvide.Default.(bool)
+	// runtimebrokerDescAdminManaged is the schema descriptor for admin_managed field.
+	runtimebrokerDescAdminManaged := runtimebrokerFields[22].Descriptor()
+	// runtimebroker.DefaultAdminManaged holds the default value on creation for the admin_managed field.
+	runtimebroker.DefaultAdminManaged = runtimebrokerDescAdminManaged.Default.(bool)
 	// runtimebrokerDescGcpHostSource is the schema descriptor for gcp_host_source field.
-	runtimebrokerDescGcpHostSource := runtimebrokerFields[24].Descriptor()
+	runtimebrokerDescGcpHostSource := runtimebrokerFields[25].Descriptor()
 	// runtimebroker.DefaultGcpHostSource holds the default value on creation for the gcp_host_source field.
 	runtimebroker.DefaultGcpHostSource = runtimebrokerDescGcpHostSource.Default.(string)
 	// runtimebrokerDescRuntimeTargetType is the schema descriptor for runtime_target_type field.
-	runtimebrokerDescRuntimeTargetType := runtimebrokerFields[32].Descriptor()
+	runtimebrokerDescRuntimeTargetType := runtimebrokerFields[33].Descriptor()
 	// runtimebroker.DefaultRuntimeTargetType holds the default value on creation for the runtime_target_type field.
 	runtimebroker.DefaultRuntimeTargetType = runtimebrokerDescRuntimeTargetType.Default.(string)
 	// runtimebrokerDescRuntimeTargetDisplayName is the schema descriptor for runtime_target_display_name field.
-	runtimebrokerDescRuntimeTargetDisplayName := runtimebrokerFields[33].Descriptor()
+	runtimebrokerDescRuntimeTargetDisplayName := runtimebrokerFields[34].Descriptor()
 	// runtimebroker.DefaultRuntimeTargetDisplayName holds the default value on creation for the runtime_target_display_name field.
 	runtimebroker.DefaultRuntimeTargetDisplayName = runtimebrokerDescRuntimeTargetDisplayName.Default.(string)
 	// runtimebrokerDescCreated is the schema descriptor for created field.
-	runtimebrokerDescCreated := runtimebrokerFields[43].Descriptor()
+	runtimebrokerDescCreated := runtimebrokerFields[44].Descriptor()
 	// runtimebroker.DefaultCreated holds the default value on creation for the created field.
 	runtimebroker.DefaultCreated = runtimebrokerDescCreated.Default.(func() time.Time)
 	// runtimebrokerDescUpdated is the schema descriptor for updated field.
-	runtimebrokerDescUpdated := runtimebrokerFields[44].Descriptor()
+	runtimebrokerDescUpdated := runtimebrokerFields[45].Descriptor()
 	// runtimebroker.DefaultUpdated holds the default value on creation for the updated field.
 	runtimebroker.DefaultUpdated = runtimebrokerDescUpdated.Default.(func() time.Time)
 	// runtimebroker.UpdateDefaultUpdated holds the default value on update for the updated field.

@@ -100,6 +100,7 @@ scion hub brokers join-token create build-host-3 --ttl 30m
 The token is printed on stdout and the instructions, including the broker ID, on stderr. `--json` prints `brokerId`, `brokerName`, `joinToken`, `expiresAt`, `hubEndpoint` and `reissued` as one JSON object.
 
 - You need the `broker.create` permission (see [Broker Registration Permission](/scion/hosted/ha/runtime-broker/#broker-registration-permission)), and you become the broker's owner. Sign in with `scion hub auth login`, or use a hub-boundary [user access token](/scion/hosted/user/personal-access-tokens/) that carries `broker:create`; the broker then belongs to the token's user.
+- `--admin-managed` registers the new Runtime Broker as admin-managed (requires `broker.manage` with an interactive sign-in or dev credential — not a user access token — and the `hub.admin_managed_brokers` experiment). When [`broker_policy.admin_managed_only`](/scion/reference/security/#7-admin-managed-runtime-brokers) is active, new registrations require `--admin-managed`, and user access tokens are refused: mint the join token with `--admin-managed` from a signed-in admin machine, then redeem it with `scion runtime-broker join` on the host as usual.
 - `--ttl` sets how long the token is valid, from `5m` to `24h`. The default is `1h`.
 - The token is single use.
 - Running the command again for the same broker issues a new token, and the previous unused one stops working. Only the broker's owner, or a super-admin with a sign-in, can do this; a token does this only for a broker its user created.
@@ -176,16 +177,19 @@ Registering a Runtime Broker, or re-minting its join token, requires the `broker
 Viewer-role users could previously register brokers; they now receive a 403. The `hub-member` role is reconciled to revision 3 on Hub start to add `broker.create`, so no manual migration is needed for members.
 :::
 
+When [`broker_policy.admin_managed_only`](/scion/reference/security/#7-admin-managed-runtime-brokers) is active (behind the `hub.admin_managed_brokers` [experiment](/scion/reference/experiments/)), `broker.create` alone is not enough to register a new Runtime Broker: the caller must pass `--admin-managed` (`adminManaged: true`), hold `broker.manage` (`hub-admin` or `super-admin`), and authenticate with an interactive sign-in or dev credential (all user access tokens are refused while the policy is on; for headless hosts, mint a join token with `scion hub brokers join-token create <broker-name> --admin-managed` from a signed-in admin machine). Re-registering an existing Runtime Broker that is not admin-managed is also refused (`403 broker_policy_admin_managed_only`).
+
 ## Broker Ownership
 
 The user who registers a Runtime Broker becomes its owner. Registration admits a CLI or Web UI sign-in, or a hub-boundary [user access token](/scion/hosted/user/personal-access-tokens/) that carries `broker:create`; a Runtime Broker request acting on behalf of a user is not admitted. A broker registered with a token belongs to the token's user.
 
 | Operation | Who may perform it |
 |---|---|
-| Register a new broker | A user who holds `broker.create` (sign-in, or hub token with `broker:create`). |
-| Re-register a broker (new join token) | The same credentials, and the user must be the broker's owner, or a super-admin with a sign-in. This includes the embedded broker's registration path. |
+| Register a new broker | A user who holds `broker.create` (sign-in, or hub token with `broker:create`). When `broker_policy.admin_managed_only` is active, requires `--admin-managed`, `broker.manage`, and a sign-in or dev credential (no UAT). |
+| Re-register a broker (new join token) | The same credentials, and the user must be the broker's owner, or a super-admin with a sign-in. This includes the embedded broker's registration path. When `broker_policy.admin_managed_only` is active, refused if the existing Runtime Broker is not admin-managed, and UATs are refused. |
 | Rotate the broker's HMAC secret | The broker itself (HMAC, and only for its own secret), or its owner or a super-admin with a sign-in. No user access token can rotate a secret. |
 | Turn on auto-provide | Additionally requires `broker.auto_provide`, held by super-admins. |
+| Approve or revoke admin-managed status | A user who holds `broker.manage` (`hub-admin` or `super-admin`) with a sign-in or dev credential (`PATCH /api/v1/runtime-brokers/{id}` `{"adminManaged": true\|false}`, or `scion runtime-broker update <broker> --admin-managed=true\|false`). No user access token is admitted, and Runtime Broker owners cannot self-approve. Requires experiment `hub.admin_managed_brokers` (`412` when off). |
 
 Registering a broker never associates it with a project. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
 
@@ -208,6 +212,7 @@ Fields set through the update API (`PATCH /api/v1/runtime-brokers/{id}`) persist
 - **GCP host service account and project.** They are written together (`gcpHostServiceAccountEmail` and `gcpHostProjectId`). Registration fills them only while they are unset; a value set or cleared through the update API stays until the next update. Send `gcpHostPinned: false` in an update to hand them back to registration. Setting or changing the host service account or project in an update needs a user principal; an agent or Runtime Broker credential is refused. When [`gcp_iam_check_mode`](/scion/reference/server-config/#gcp-iam-check-mode) is `enforce`, the user must also hold `iam.serviceAccounts.actAs` on the requested service account, and a Hub with no GCP token generator refuses the change. Leaving the pair unchanged or clearing the email needs neither. Registration applies the same rules when it will write the pair (a new Runtime Broker, or an existing one whose host service account and project are unset and not pinned). A refusal returns `403 Forbidden` before any write. Updates write the pair with a compare-and-set against the stored pair the `actAs` decision was evaluated against (`409 Conflict` if a concurrent registration or update changed it).
 - **Name.** Registration keeps the stored name.
 - **Labels.** Labels a registration sends are added when the key is absent; an existing key keeps its value.
+- **Admin-managed status (`adminManaged`).** Writable only by a signed-in (or dev-credential) holder of `broker.manage` when `hub.admin_managed_brokers` is enabled (via `PATCH /api/v1/runtime-brokers/{id}` or `scion runtime-broker update --admin-managed=true|false`, or at registration with `--admin-managed`). Never set by Runtime Broker HMAC requests, heartbeats, or labels, and changes are audited with old and new values.
 
 A registration response lists any requested value that was kept (`keptSettings`), and `scion runtime-broker register` prints one line per kept value. The register audit event records them, and changes made through the update API are audited too.
 
@@ -218,6 +223,10 @@ The Hub sets the `scion.io/plugin` and `scion.io/broker-role` labels itself; val
 ## Headless registration with a hub token
 
 To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.
+
+:::note
+While [`broker_policy.admin_managed_only`](/scion/reference/security/#7-admin-managed-runtime-brokers) is active, user access tokens cannot register or re-register Runtime Brokers (even an admin's token). Use [Headless Registration with a Join Token](#headless-registration-with-a-join-token) with `--admin-managed` from a signed-in admin machine instead.
+:::
 
 1. **Mint a hub token.** You must be a hub member, which grants `broker.create`. Include `broker:read` as well, so that `register` can check its existing registration:
 
@@ -264,6 +273,7 @@ Related rules:
 - **Default broker:** a project's default runtime broker must already be a provider of the project. Provide the broker first, then set it as the default (`scion runtime-broker provide --make-default`).
 - **Withdrawing:** a provider can be removed by anyone with `project.update`, or by the broker's owner (or a super-admin) for that broker without update permission on the project: `scion runtime-broker withdraw --project <project>`, or `DELETE /api/v1/projects/{id}/providers/{brokerId}`. Removal admits a sign-in or a user access token; a Runtime Broker request acting on behalf of a user is not admitted. A withdrawn standalone Runtime Broker keeps its project directory when the project is later deleted (see [What remains after a project delete](/scion/hosted/ha/kubernetes/#what-remains-after-a-project-delete)).
 - **Auto-provide:** an auto-provide broker is linked to every new project and is usable by every user. Turning it on requires `broker.auto_provide`.
+- **Admin-managed policy:** when [`broker_policy.admin_managed_only`](/scion/reference/security/#7-admin-managed-runtime-brokers) is active, attaching a non-managed Runtime Broker to a project is refused across every attach path with `403 broker_policy_admin_managed_only` (`operation: "attach"`), including for the Runtime Broker's owner and for super-admins. Approve the Runtime Broker first (`scion runtime-broker update <broker> --admin-managed=true`). Withdrawing (`DELETE`) remains allowed.
 
 ## Scaling a Broker Host: inotify Limits
 

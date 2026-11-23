@@ -380,6 +380,11 @@ const (
 	// reliably and show a specific message (design ptone/scion#2291 §6).
 	ErrCodeSecretScopeRestricted = "secret_scope_restricted"
 
+	// ErrCodeBrokerPolicyAdminManagedOnly is returned (403) when a Runtime
+	// Broker registration, attachment, placement, or agent start is refused
+	// because broker_policy.admin_managed_only is on (ptone/scion#7829).
+	ErrCodeBrokerPolicyAdminManagedOnly = "broker_policy_admin_managed_only"
+
 	// ErrCodeSecretPendingHeldByOtherAgent is returned when an agent writes
 	// a user-scope secret whose name already has a pending secret, written
 	// by another agent, awaiting the owner's decision. Nothing overrides it,

@@ -735,6 +735,7 @@ func TestApplyTopLevelSettingsSections_ReadsListedKeys(t *testing.T) {
 		"project_defaults":          map[string]interface{}{"default_scratchpad": false},
 		"quotas":                    map[string]interface{}{"enforce_broker_quotas": false},
 		"agent_secrets":             map[string]interface{}{"user_scope_only": true},
+		"broker_policy":             map[string]interface{}{"admin_managed_only": true},
 		"default_harness_config":    "hc",
 		"default_timezone":          "Europe/Paris",
 		"default_gcp_identity_mode": "block",
@@ -746,7 +747,7 @@ func TestApplyTopLevelSettingsSections_ReadsListedKeys(t *testing.T) {
 	gc := &GlobalConfig{}
 	applyTopLevelSettingsSections(gc, raw)
 	if gc.TelemetryEnabled == nil || gc.DefaultScratchpad == nil || gc.EnforceBrokerQuotas == nil ||
-		gc.AgentSecretsUserScopeOnly == nil || gc.DefaultHarnessConfig != "hc" || gc.DefaultTimezone != "Europe/Paris" ||
+		gc.AgentSecretsUserScopeOnly == nil || gc.BrokerPolicyAdminManagedOnly == nil || gc.DefaultHarnessConfig != "hc" || gc.DefaultTimezone != "Europe/Paris" ||
 		gc.DefaultGCPIdentityMode != "block" || gc.DefaultGCPIdentityServiceAccountID != "sa-1" {
 		t.Errorf("applyTopLevelSettingsSections dropped a listed key: %+v", gc)
 	}

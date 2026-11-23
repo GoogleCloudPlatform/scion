@@ -1365,7 +1365,7 @@ When it starts, the server checks every `SCION_SERVER_*` and `SCION_SEED_*` vari
 :::caution[Upgrade note]
 Many alias spellings, for example `SCION_SERVER_HUB_ADMIN_EMAILS`, `SCION_SERVER_BROKER_PORT`, `SCION_SERVER_HUB_CORS_ENABLED` and `SCION_SERVER_LOG_LEVEL`, used to be ignored by the Hub and reported at startup as matching no setting. They now take effect. Before upgrading, remove any such variable that you do not want applied.
 
-The env also now overrides the settings that live at the top level of `settings.yaml` (`telemetry`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id`, `default_harness_config`, `quotas`, `agent_secrets`, `project_defaults`) and `server.project_storage` (and the deprecated `server.workspace_storage`) and `server.native_chat`, for example `SCION_SERVER_DEFAULTTIMEZONE`. A value that does not parse for one of these keys (for example `SCION_SERVER_QUOTAS_ENFORCEBROKERQUOTAS=maybe`) makes the server fail to load its configuration at startup, as it already did for the other `SCION_SERVER_*` keys.
+The env also now overrides the settings that live at the top level of `settings.yaml` (`telemetry`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id`, `default_harness_config`, `quotas`, `agent_secrets`, `broker_policy`, `project_defaults`) and `server.project_storage` (and the deprecated `server.workspace_storage`) and `server.native_chat`, for example `SCION_SERVER_DEFAULTTIMEZONE`. A value that does not parse for one of these keys (for example `SCION_SERVER_QUOTAS_ENFORCEBROKERQUOTAS=maybe`) makes the server fail to load its configuration at startup, as it already did for the other `SCION_SERVER_*` keys.
 :::
 
 `server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. `server.log_level` (or `SCION_SERVER_LOGLEVEL`) is applied when the server starts, and again when a file-mode admin server-config save or reload re-reads the config; clearing it reverts to `info`. `--debug` and `SCION_LOG_LEVEL` take precedence over it (see [Precedence](/scion/hosted/single-node/observability/#precedence)). Upgrade note: a Hub whose settings still contain `server.log_level: debug` from an earlier change now starts at `debug`, because earlier releases ignored the setting at startup.
@@ -1411,6 +1411,7 @@ File permissions: mount the keyring file with mode 0400 (0440 when a group must 
 - `server.database.allow_shadowed_schema` -> `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`
 - `server.database.relay_role` -> `SCION_SERVER_DATABASE_RELAYROLE`
 - `server.auth.dev_mode` -> `SCION_SERVER_AUTH_DEVMODE`
+- `broker_policy.admin_managed_only` -> `SCION_SERVER_BROKERPOLICY_ADMINMANAGEDONLY` (deprecated alias: `SCION_SERVER_BROKER_POLICY_ADMIN_MANAGED_ONLY`)
 - `server.secrets.backend` -> `SCION_SERVER_SECRETS_BACKEND`
 - `server.secrets.gcp_project_id` -> `SCION_SERVER_SECRETS_GCPPROJECTID`
 - `server.secrets.gcp_credentials` -> `SCION_SERVER_SECRETS_GCPCREDENTIALS`
@@ -1883,6 +1884,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `auto_expose_ports` | `enabled` |
 | `quotas` | `enforce_broker_quotas` |
 | `agent_secrets` | `user_scope_only` |
+| `broker_policy` | `admin_managed_only` (gated by experiment `hub.admin_managed_brokers`; live-applied; refused to user access tokens; env: `SCION_SERVER_BROKERPOLICY_ADMINMANAGEDONLY`; see [Admin-Managed Runtime Brokers](/scion/reference/security/#7-admin-managed-runtime-brokers)) |
 | `agent_delegation_policy` | `remove` map per boundary kind (`project`, `hub`) listing permissions removed from what may be delegated to agents; it can only narrow (`hub.agent_delegation` experiment; runtime/DB-only; refused to user access tokens) |
 | `messaging` | `conversation_envelope_switch`, `cross_project_messaging_enabled`, `offload_threshold_runes`, `attachment_delivery_max_bytes`, `attachment_inbox_retention_days`, `failed_message_retention_days` (managed via `/api/v1/admin/messaging`) |
 | `runtimes` | The whole `runtimes` map |

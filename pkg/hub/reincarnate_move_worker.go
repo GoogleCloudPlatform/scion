@@ -131,6 +131,7 @@ func (s *Server) recheckMoveEligibility(ctx context.Context, agentID string, mv 
 		GitRemote:          project.GitRemote,
 		Probes: moveProbes{
 			Reachable:        func(b *store.RuntimeBroker) bool { return s.brokerRecordReachable(ctx, b) },
+			PolicyRefused:    func(b *store.RuntimeBroker) bool { return s.brokerPolicyRefuses(b) },
 			CanDispatch:      allowed,
 			CanUseAsProvider: allowed,
 			ServesProject: func(b *store.RuntimeBroker) bool {
@@ -218,6 +219,10 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 	dst, err := s.store.GetRuntimeBroker(ctx, mv.TargetBrokerID)
 	if err != nil {
 		return err
+	}
+	if s.brokerPolicyRefuses(dst) {
+		logAuthzDenial(nil, GetIdentityFromContext(ctx), brokerResource(dst), Action(brokerPolicyOpMove), brokerPolicyDenialReason)
+		return errors.New(brokerPolicyMessage(brokerPolicyOpMove, dst, ""))
 	}
 	if err := s.linkProjectProvider(ctx, &store.ProjectProvider{
 		ProjectID:  mv.ProjectID,

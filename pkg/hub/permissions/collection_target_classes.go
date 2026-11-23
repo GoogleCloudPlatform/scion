@@ -159,6 +159,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"broker.update": {}, "broker.delete": {},
 	"broker.list": {TargetClassKindHubResource}, "broker.dispatch": {},
 	"broker.auto_provide": {TargetClassKindHubResource},
+	"broker.manage":       {TargetClassKindHubResource},
 
 	// gcp_service_account.* — create/list/mint are CapabilityScope, hub-wide.
 	// assign is CapabilityResource, confirmed against its actual

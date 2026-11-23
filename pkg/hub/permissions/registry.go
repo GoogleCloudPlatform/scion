@@ -332,6 +332,11 @@ var Registry = []Permission{
 	// which offers the broker to every project on the hub. It has no UAT
 	// selector, so a user access token never carries it.
 	{ID: "broker.auto_provide", Resource: ResourceBroker, Action: ActionAutoProvide, CapabilityKind: CapabilityScope, Description: "Offer a broker to every project (auto-provide)", Enforcement: []string{"pkg/hub/handlers_brokers.go:authorizeBrokerAutoProvide"}},
+	// broker.manage gates registering a broker as admin-managed and approving
+	// or revoking a broker's admin-managed status (ptone/scion#7829). It has
+	// no UAT selector, so a user access token never carries it, and it is not
+	// granted by the owner relationship policy.
+	{ID: "broker.manage", Resource: ResourceBroker, Action: ActionManage, CapabilityKind: CapabilityScope, Description: "Register and approve admin-managed brokers", Enforcement: []string{"pkg/hub/broker_policy.go:authorizeBrokerRegistrationPolicy", "pkg/hub/broker_policy.go:authorizeBrokerManage"}},
 	{ID: "broker.dispatch", Resource: ResourceBroker, Action: ActionDispatch, CapabilityKind: CapabilityResource, Description: "Dispatch through brokers", Enforcement: []string{"pkg/hub/handlers_brokers.go"}},
 
 	{ID: "gcp_service_account.create", Resource: ResourceGCPServiceAccount, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create GCP service accounts", Enforcement: []string{"pkg/hub/handlers_gcp_identity.go"}},

@@ -162,6 +162,9 @@ type Layer1Snapshot struct {
 	// Agent secrets
 	AgentSecretsUserScopeOnly *bool
 
+	// Broker policy (ptone/scion#7829)
+	BrokerPolicyAdminManagedOnly *bool
+
 	// Project defaults
 	DefaultScratchpad *bool
 
@@ -1371,6 +1374,12 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 		snap.AgentSecretsUserScopeOnly = &v
 	}
 
+	// Broker policy
+	if k.Exists("broker_policy.admin_managed_only") {
+		v := k.Bool("broker_policy.admin_managed_only")
+		snap.BrokerPolicyAdminManagedOnly = &v
+	}
+
 	// Project defaults
 	if k.Exists("project_defaults.default_scratchpad") {
 		v := k.Bool("project_defaults.default_scratchpad")
@@ -1569,6 +1578,10 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Agent secrets — read from settings.yaml top-level agent_secrets
 	// section, so a file-mode admin save takes effect without a restart.
 	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
+	// Broker policy — read from settings.yaml top-level broker_policy
+	// section, so a file-mode admin save takes effect without a restart.
+	snap.BrokerPolicyAdminManagedOnly = gc.BrokerPolicyAdminManagedOnly
 
 	// Hub observability export switches — read at startup only.
 	snap.HubMetricsEnabled = gc.Hub.Observability.MetricsEnabled
@@ -1813,6 +1826,14 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.config.AgentSecretsUserScopeOnly = snap.AgentSecretsUserScopeOnly
 	if !boolPtrEqual(oldAgentSecretsUserScopeOnly, snap.AgentSecretsUserScopeOnly) {
 		applied = append(applied, "agent_secrets_user_scope_only")
+	}
+
+	// Broker policy. Like agent_secrets above, nil is a meaningful value
+	// (default false/permissive), so assign unconditionally.
+	oldBrokerPolicyAdminManagedOnly := s.config.BrokerPolicyAdminManagedOnly
+	s.config.BrokerPolicyAdminManagedOnly = snap.BrokerPolicyAdminManagedOnly
+	if !boolPtrEqual(oldBrokerPolicyAdminManagedOnly, snap.BrokerPolicyAdminManagedOnly) {
+		applied = append(applied, "broker_policy_admin_managed_only")
 	}
 
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match

@@ -237,6 +237,26 @@ func TestHubBrokersJoinTokenCreate_TextOutput(t *testing.T) {
 	assert.Equal(t, true, reqs[0].Body["preserveSettings"])
 	assert.NotContains(t, reqs[0].Body, "brokerId", "the hub generates the broker ID")
 	assert.NotContains(t, reqs[0].Body, "autoProvide")
+	assert.NotContains(t, reqs[0].Body, "adminManaged")
+}
+
+func TestHubBrokersJoinTokenCreate_AdminManagedFlagForwarded(t *testing.T) {
+	isolateJoinEnv(t)
+	home, _ := brokerTestHome(t)
+	fake := newRecordingHub(t)
+	projectPath = setupSecretProject(t, home, fake.URL)
+	t.Setenv("SCION_HUB_ENDPOINT", fake.URL)
+	hubBrokersJoinTokenAdminManaged = true
+
+	_, _, err := runJoinTokenCreateForTest(t, "managed-build-host")
+	require.NoError(t, err)
+
+	reqs := fake.recorded()
+	require.Len(t, reqs, 1)
+	assert.Equal(t, "/api/v1/brokers", reqs[0].Path)
+	assert.Equal(t, "managed-build-host", reqs[0].Body["name"])
+	assert.Equal(t, true, reqs[0].Body["preserveSettings"])
+	assert.Equal(t, true, reqs[0].Body["adminManaged"], "--admin-managed must be forwarded on POST /api/v1/brokers")
 }
 
 func TestHubBrokersJoinTokenCreate_JSON(t *testing.T) {

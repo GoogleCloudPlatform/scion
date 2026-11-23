@@ -1362,6 +1362,10 @@ type RuntimeBroker struct {
 	// When true, this broker is automatically added as a provider for new projects
 	AutoProvide bool `json:"autoProvide,omitempty"`
 
+	// AdminManaged records whether a hub administrator explicitly registered or
+	// approved this broker as admin-managed (ptone/scion#7829).
+	AdminManaged bool `json:"adminManaged,omitempty"`
+
 	// Timestamps
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`

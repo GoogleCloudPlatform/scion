@@ -34,7 +34,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments", "artifacts", "profiling",
+		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "broker_policy", "federation", "experiments", "artifacts", "profiling",
 		"agent_delegation_policy", "chat_retention"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
@@ -244,6 +244,9 @@ func TestValidateValidDoc(t *testing.T) {
 		{"agent_secrets", `{"user_scope_only":true}`},
 		{"agent_secrets", `{"user_scope_only":false}`},
 		{"agent_secrets", `{}`},
+		{"broker_policy", `{"admin_managed_only":true}`},
+		{"broker_policy", `{"admin_managed_only":false}`},
+		{"broker_policy", `{}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://hub.example.com","issuer_type":"hub"}],"algorithms":["RS256"]}`},
 		{"federation", `{"enabled":false}`},
 		{"federation", `{}`},
@@ -282,6 +285,8 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"quotas", `{"unknown_field":true}`, "additional property"},
 		{"agent_secrets", `{"user_scope_only":"yes"}`, "wrong type for boolean"},
 		{"agent_secrets", `{"unknown_field":true}`, "additional property"},
+		{"broker_policy", `{"admin_managed_only":"yes"}`, "wrong type for boolean"},
+		{"broker_policy", `{"unknown_field":true}`, "additional property"},
 		{"federation", `{"trusted_issuers":[{"issuer_url":""}]}`, "empty issuer_url (minLength)"},
 		{"federation", `{"algorithms":["INVALID"]}`, "invalid algorithm enum"},
 		{"federation", `{"trusted_issuers":[{"issuer_type":"unknown"}]}`, "invalid issuer_type enum"},

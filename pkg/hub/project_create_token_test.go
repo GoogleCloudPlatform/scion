@@ -471,8 +471,9 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 }
 
 // TestBuiltInRoles_SuperAdminRevision pins the super-admin revision and its
-// latest changes: revision 16 adds project.manage_message_policies and
-// project.read_message_policies (ptone/scion#8047), revision 15 adds trigger.*
+// latest changes: revision 17 adds broker.manage (ptone/scion#7829), revision
+// 16 adds project.manage_message_policies and project.read_message_policies
+// (ptone/scion#8047), revision 15 adds trigger.*
 // and webhook_endpoint.* (ptone/scion#8028), revision 14 adds
 // github_trigger.{comment,configure} (ptone/scion#8090), revision 13 adds
 // system_one_instance.{read,create,delete,execute}
@@ -484,7 +485,8 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 // revision 8 drops project.register, a reserved row.
 func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleSuperAdmin)
-	assert.Equal(t, 16, admin.Revision)
+	assert.Equal(t, 17, admin.Revision)
+	assert.Contains(t, admin.Permissions, "broker.manage")
 	assert.Contains(t, admin.Permissions, "project.manage_message_policies")
 	assert.Contains(t, admin.Permissions, "project.read_message_policies")
 	assert.Contains(t, admin.Permissions, "github_trigger.comment")

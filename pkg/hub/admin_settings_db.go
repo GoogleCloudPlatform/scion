@@ -418,6 +418,13 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
+	// Broker policy
+	if snap.BrokerPolicyAdminManagedOnly != nil {
+		resp.BrokerPolicy = &config.BrokerPolicySettings{
+			AdminManagedOnly: snap.BrokerPolicyAdminManagedOnly,
+		}
+	}
+
 	// Federation — populate from snapshot's FederationConfig, which is set
 	// whenever the stored (or bootstrap) federation settings have enabled or
 	// trusted_issuers. It is reported in full, also when it is disabled and
@@ -1534,6 +1541,30 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// broker_policy.admin_managed_only=true is refused while experiment
+	// hub.admin_managed_brokers is off (412 experiment_disabled; ptone/scion#7829).
+	// Echoing an already-stored true value or clearing it passes.
+	if doc, ok := sectionDocs["broker_policy"]; ok && !s.experimentEnabled(experiments.AdminManagedBrokers) {
+		var candidate opsettings.BrokerPolicySettings
+		if json.Unmarshal(doc, &candidate) == nil && candidate.AdminManagedOnly != nil && *candidate.AdminManagedOnly {
+			storedEnabled := ops.Snapshot().BrokerPolicyAdminManagedOnly != nil && *ops.Snapshot().BrokerPolicyAdminManagedOnly
+			if row, err := ops.store.GetHubSetting(r.Context(), "broker_policy"); err == nil && len(bytes.TrimSpace(row.Value)) > 0 {
+				var existing opsettings.BrokerPolicySettings
+				if json.Unmarshal(row.Value, &existing) == nil {
+					storedEnabled = existing.AdminManagedOnly != nil && *existing.AdminManagedOnly
+				}
+			} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+				slog.Error("PUT server-config: failed to read broker_policy section", "error", err)
+				writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+				return
+			}
+			if !storedEnabled {
+				writeBrokerPolicyExperimentDisabled(w)
+				return
+			}
+		}
+	}
+
 	// runtimes: the body's map decides which entries exist, and each sent
 	// entry is merged key by key on the stored one, so a stored key the
 	// body leaves out, including one V1RuntimeConfig does not model, is
@@ -2489,6 +2520,10 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		keys = append(keys, "agent_secrets.user_scope_only")
 	}
 
+	if req.BrokerPolicy != nil {
+		keys = append(keys, "broker_policy.admin_managed_only")
+	}
+
 	if req.Telemetry != nil {
 		keys = append(keys, "telemetry.enabled")
 	}
@@ -3095,6 +3130,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			return nil, nil
 		}
 
+	case "broker_policy":
+		if req.BrokerPolicy != nil {
+			doc = req.BrokerPolicy
+		} else {
+			return nil, nil
+		}
+
 	case "notifications":
 		d := &opsettings.NotificationsSettings{}
 		if req.Server != nil {
@@ -3569,6 +3611,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"federation":        settingsTokenRefused,       // trusted external issuers
 	"github_app":        settingsTokenRefused,       // the hub's GitHub App credential
 	"agent_secrets":     settingsTokenRefused,       // which secret scopes agents may write
+	"broker_policy":     settingsTokenRefused,       // which Runtime Brokers may register and run agents
 	"auto_expose_ports": settingsTokenRefused,       // whether agent ports are reachable
 	"runtimes":          settingsTokenRefused,       // where and how agents run
 	"profiles":          settingsTokenRefused,       // runtime, image and environment agents run with

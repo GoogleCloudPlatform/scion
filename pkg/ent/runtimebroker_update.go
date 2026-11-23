@@ -397,6 +397,20 @@ func (_u *RuntimeBrokerUpdate) SetNillableAutoProvide(v *bool) *RuntimeBrokerUpd
 	return _u
 }
 
+// SetAdminManaged sets the "admin_managed" field.
+func (_u *RuntimeBrokerUpdate) SetAdminManaged(v bool) *RuntimeBrokerUpdate {
+	_u.mutation.SetAdminManaged(v)
+	return _u
+}
+
+// SetNillableAdminManaged sets the "admin_managed" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdate) SetNillableAdminManaged(v *bool) *RuntimeBrokerUpdate {
+	if v != nil {
+		_u.SetAdminManaged(*v)
+	}
+	return _u
+}
+
 // SetGcpHostServiceAccountEmail sets the "gcp_host_service_account_email" field.
 func (_u *RuntimeBrokerUpdate) SetGcpHostServiceAccountEmail(v string) *RuntimeBrokerUpdate {
 	_u.mutation.SetGcpHostServiceAccountEmail(v)
@@ -1013,6 +1027,9 @@ func (_u *RuntimeBrokerUpdate) sqlSave(ctx context.Context) (_node int, err erro
 	if value, ok := _u.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
 	}
+	if value, ok := _u.mutation.AdminManaged(); ok {
+		_spec.SetField(runtimebroker.FieldAdminManaged, field.TypeBool, value)
+	}
 	if value, ok := _u.mutation.GcpHostServiceAccountEmail(); ok {
 		_spec.SetField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString, value)
 	}
@@ -1533,6 +1550,20 @@ func (_u *RuntimeBrokerUpdateOne) SetAutoProvide(v bool) *RuntimeBrokerUpdateOne
 func (_u *RuntimeBrokerUpdateOne) SetNillableAutoProvide(v *bool) *RuntimeBrokerUpdateOne {
 	if v != nil {
 		_u.SetAutoProvide(*v)
+	}
+	return _u
+}
+
+// SetAdminManaged sets the "admin_managed" field.
+func (_u *RuntimeBrokerUpdateOne) SetAdminManaged(v bool) *RuntimeBrokerUpdateOne {
+	_u.mutation.SetAdminManaged(v)
+	return _u
+}
+
+// SetNillableAdminManaged sets the "admin_managed" field if the given value is not nil.
+func (_u *RuntimeBrokerUpdateOne) SetNillableAdminManaged(v *bool) *RuntimeBrokerUpdateOne {
+	if v != nil {
+		_u.SetAdminManaged(*v)
 	}
 	return _u
 }
@@ -2182,6 +2213,9 @@ func (_u *RuntimeBrokerUpdateOne) sqlSave(ctx context.Context) (_node *RuntimeBr
 	}
 	if value, ok := _u.mutation.AutoProvide(); ok {
 		_spec.SetField(runtimebroker.FieldAutoProvide, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.AdminManaged(); ok {
+		_spec.SetField(runtimebroker.FieldAdminManaged, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.GcpHostServiceAccountEmail(); ok {
 		_spec.SetField(runtimebroker.FieldGcpHostServiceAccountEmail, field.TypeString, value)

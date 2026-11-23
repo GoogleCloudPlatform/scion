@@ -216,6 +216,7 @@ type CreateBrokerRegistrationRequest struct {
 	BrokerID     string            `json:"brokerId,omitempty"` // Optional stable broker UUID supplied by the client
 	Name         string            `json:"name"`
 	AutoProvide  bool              `json:"autoProvide,omitempty"`
+	AdminManaged bool              `json:"adminManaged,omitempty"`
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 
@@ -655,10 +656,19 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 	var kept []KeptSetting
 	var gcp registrationGCPHostResult
 	if existingBroker != nil && req.PreserveSettings {
-		// Reuse existing broker and leave its record as it is: only a new
-		// join token is issued below.
+		// Reuse existing broker and leave its metadata as it is, except when
+		// an authorized adminManaged stamp upgrades an existing row (e.g.
+		// 'scion hub brokers join-token create --admin-managed', only while
+		// broker_policy.admin_managed_only is off).
 		brokerID = existingBroker.ID
 		reregistered = true
+		if req.AdminManaged && !existingBroker.AdminManaged {
+			existingBroker.AdminManaged = true
+			existingBroker.Updated = time.Now()
+			if err := s.store.UpdateRuntimeBroker(ctx, existingBroker); err != nil {
+				return nil, fmt.Errorf("failed to update existing broker: %w", err)
+			}
+		}
 	} else if existingBroker != nil {
 		// Reuse existing broker - update its metadata. Labels are added
 		// when the key is absent; the GCP host pair is filled below only
@@ -672,6 +682,9 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 		}
 		priorHostSA := hostSAClaimOf(existingBroker)
 		existingBroker.AutoProvide = req.AutoProvide
+		if req.AdminManaged {
+			existingBroker.AdminManaged = true
+		}
 		existingBroker.Labels, kept = mergeRegistrationLabels(existingBroker.Labels, req.Labels)
 		existingBroker.Updated = time.Now()
 		if err := hostSAClaimWriteAllowed(priorHostSA, hostSAClaimOf(existingBroker), hostSA); err != nil {
@@ -699,6 +712,7 @@ func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req Cr
 			Slug:                       slugify(req.Name),
 			Status:                     store.BrokerStatusOffline,
 			AutoProvide:                req.AutoProvide,
+			AdminManaged:               req.AdminManaged,
 			Labels:                     labels,
 			GCPHostServiceAccountEmail: req.GCPHostServiceAccountEmail,
 			GCPHostProjectID:           req.GCPHostProjectID,

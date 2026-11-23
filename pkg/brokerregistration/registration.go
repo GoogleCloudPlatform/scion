@@ -63,6 +63,9 @@ type Options struct {
 	Capabilities []string
 	// AutoProvide is stored as sent (contract R8).
 	AutoProvide bool
+	// AdminManaged marks the broker as admin-managed at registration
+	// (requires broker.manage and experiment hub.admin_managed_brokers).
+	AdminManaged bool
 	// Labels are sent on the registration.
 	Labels map[string]string
 	// WorkspaceStorage is the instance's workspace storage descriptor.
@@ -174,6 +177,7 @@ func RegisterInstance(ctx context.Context, client hubclient.Client, inst config.
 		Capabilities:               o.Capabilities,
 		Labels:                     o.Labels,
 		AutoProvide:                o.AutoProvide,
+		AdminManaged:               o.AdminManaged,
 		RuntimeTarget:              descriptor,
 		GCPHostServiceAccountEmail: gcpEmail,
 		GCPHostProjectID:           gcpProject,

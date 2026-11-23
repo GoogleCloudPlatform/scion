@@ -425,6 +425,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		}
 		return
 	}
+	if err := s.checkBrokerPolicyForStart(ctx, agent); err != nil {
+		if !writeBrokerPolicyError(w, r, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
@@ -876,6 +882,9 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 	}
 	v, ref := evaluateMoveEligibility(in)
 	if ref != nil {
+		if ref.Code == ErrCodeBrokerPolicyAdminManagedOnly {
+			logAuthzDenial(r, GetIdentityFromContext(ctx), brokerResource(dst), Action(brokerPolicyOpMove), brokerPolicyDenialReason)
+		}
 		writeMoveRefusal(w, ref, v)
 		return
 	}

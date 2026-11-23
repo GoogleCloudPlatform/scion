@@ -811,6 +811,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 		ConnectionState: b.ConnectionState,
 		Endpoint:        b.Endpoint,
 		AutoProvide:     b.AutoProvide,
+		AdminManaged:    b.AdminManaged,
 		Created:         b.Created,
 		Updated:         b.Updated,
 		CreatedBy:       b.CreatedBy,
@@ -936,6 +937,7 @@ func createRuntimeBroker(ctx context.Context, client *ent.Client, uid uuid.UUID,
 		SetSlug(b.Slug).
 		SetEndpoint(b.Endpoint).
 		SetAutoProvide(b.AutoProvide).
+		SetAdminManaged(b.AdminManaged).
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(profiles)).
 		SetDefaultProfile(defaultProfile).
@@ -1080,6 +1082,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
 			SetAutoProvide(b.AutoProvide).
+			SetAdminManaged(b.AdminManaged).
 			SetUpdated(now).
 			AddLockVersion(1)
 		if b.ConnectedHubID != nil {
