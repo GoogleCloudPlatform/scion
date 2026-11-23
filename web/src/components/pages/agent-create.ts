@@ -449,6 +449,7 @@ export class ScionPageAgentCreate extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.form?.clearSecrets();
     this.unsubscribeGcp?.();
     this.unsubscribeGcp = null;
     if (typeof window !== 'undefined') {
@@ -920,6 +921,8 @@ export class ScionPageAgentCreate extends LitElement {
         Object.assign(body, form.collectTopLevel());
         const config = form.collectConfigPatch();
         if (Object.keys(config).length > 0) body.config = config;
+        const secrets = form.collectSecrets();
+        if (secrets.length > 0) body.secrets = secrets;
       } else {
         const gcpIdentity = this.gcp.toRequest();
         if (gcpIdentity) body.gcp_identity = gcpIdentity;
@@ -961,6 +964,9 @@ export class ScionPageAgentCreate extends LitElement {
       if (!agentId) {
         throw new Error('No agent ID in response');
       }
+
+      // Clear create-time secrets from memory as soon as the create succeeds.
+      form?.clearSecrets();
 
       // Start the agent unless the create response shows it already started.
       // An async launch the hub accepted is the hub's to finish: while it
