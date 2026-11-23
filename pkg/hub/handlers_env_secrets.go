@@ -915,7 +915,7 @@ func (s *Server) isStoredSecretInternal(ctx context.Context, key, scope, scopeID
 		meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 		switch {
 		case err == nil:
-			if meta.SecretType == store.SecretTypeInternal {
+			if meta != nil && meta.SecretType == store.SecretTypeInternal {
 				return true, nil
 			}
 		case errors.Is(err, store.ErrNotFound):
