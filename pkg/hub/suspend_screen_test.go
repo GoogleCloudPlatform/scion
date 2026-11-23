@@ -558,24 +558,37 @@ func TestSuspendScreen_ShellAgentNeverCapturedOrServed(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "manual suspend should clear any stale screen row")
 
 	// Idle auto-suspend must also skip capture for execution containers.
+	srv.mu.Lock()
+	srv.config.AutoSuspendIdle = true
+	srv.config.IdleSuspendAfter = MinIdleSuspendAfter
+	srv.mu.Unlock()
+
 	idleShell := &store.Agent{
-		ID:                tid("agent-screen-shell-2"),
-		Slug:              "screen-shell-2",
-		Name:              "screen-shell-2",
-		ProjectID:         project.ID,
-		OwnerID:           owner.ID,
-		CreatedBy:         owner.ID,
-		RuntimeBrokerID:   broker.ID,
-		Runtime:           "docker",
-		Phase:             string(state.PhaseRunning),
-		Activity:          string(state.ActivityIdle),
-		LastActivityEvent: time.Now().UTC().Add(-2 * time.Hour),
-		HarnessConfig:     config.ShellHarnessConfigName,
+		ID:              tid("agent-screen-shell-2"),
+		Slug:            "screen-shell-2",
+		Name:            "screen-shell-2",
+		ProjectID:       project.ID,
+		OwnerID:         owner.ID,
+		CreatedBy:       owner.ID,
+		RuntimeBrokerID: broker.ID,
+		Runtime:         "docker",
+		Phase:           string(state.PhaseRunning),
+		HarnessConfig:   config.ShellHarnessConfigName,
 		AppliedConfig: &store.AgentAppliedConfig{
 			HarnessConfig: config.ShellHarnessConfigName,
 		},
 	}
 	require.NoError(t, s.CreateAgent(ctx, idleShell))
+	_, err = s.SetRunIntent(ctx, idleShell.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err = db.ExecContext(ctx,
+		"UPDATE agents SET run_id = ?, activity = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+		"run-screen-shell-2", string(state.ActivityIdle), time.Now().Add(-2*DefaultIdleSuspendAfter).UTC(), time.Now().UTC(), idleShell.ID,
+	)
+	require.NoError(t, err)
+	idleShell, err = s.GetAgent(ctx, idleShell.ID)
+	require.NoError(t, err)
 
 	ok := srv.autoSuspendAgent(ctx, disp, idleShell, state.SuspendReasonIdle)
 	require.True(t, ok)
