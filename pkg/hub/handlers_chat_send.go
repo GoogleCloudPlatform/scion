@@ -766,6 +766,22 @@ func chatSendValidationEnvelope(msg *messages.StructuredMessage, refs []Attachme
 	return &v
 }
 
+// validationEnvelopeWithAttachmentIDs returns the message that an agent
+// message or outbound send passes to messaging.ValidateLegacyMessage.
+// Uploaded attachment IDs are resolved and authorized after envelope
+// validation and sender/routing checks, so an attachment-id-only send (empty
+// body, no inline attachment paths, ptone/scion#6154) is validated on a
+// shallow copy that lists its attachment ids in place of msg.Attachments.
+// msg itself is never changed.
+func validationEnvelopeWithAttachmentIDs(msg *messages.StructuredMessage, attachmentIDs []string) *messages.StructuredMessage {
+	if msg == nil || msg.Msg != "" || len(msg.Attachments) > 0 || len(attachmentIDs) == 0 {
+		return msg
+	}
+	v := *msg
+	v.Attachments = append([]string(nil), attachmentIDs...)
+	return &v
+}
+
 // sendChatMessage is the single chat v2 send path: conversation access
 // check, validation, routing, persistence, publish and dispatch, for a
 // message sent by user to the conversation key. It is used by the HTTP
