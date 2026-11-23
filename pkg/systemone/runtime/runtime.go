@@ -153,11 +153,13 @@ type EvalOptions struct {
 	// the Hub admin probe endpoint). If compiled.Spec.Binding.Instance is also
 	// non-empty, the names must match or Evaluate fails with FailNoEligibleInstance.
 	Instance *Instance
-	// Consumer, RuleID, and Revision populate Evaluation.Rule.
-	Consumer string
-	RuleID   string
-	Revision int64
-	// ProjectID populates Evaluation.ProjectID.
+	// Consumer, RuleID, Revision, and optional ElementIndex populate Evaluation.Rule.
+	Consumer     string
+	RuleID       string
+	Revision     int64
+	ElementIndex *int
+	// ProjectID populates Evaluation.ProjectID. It MUST come from the
+	// consumer's authorized context, never untrusted caller input.
 	ProjectID string
 	// MaxEvalTime optionally lowers MaxEvalTime for this evaluation (clamped to
 	// MaxAllowedEvalTime = 30s; effective ceiling is min(r.MaxEvalTime(),
@@ -569,10 +571,16 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		ctx = context.Background()
 	}
 
+	var elemIdx *int
+	if opts.ElementIndex != nil {
+		v := *opts.ElementIndex
+		elemIdx = &v
+	}
+
 	if compiled == nil {
 		eval := &Evaluation{
 			EvalID:    evalID,
-			Rule:      RuleRef{Consumer: opts.Consumer, RuleID: opts.RuleID, Revision: opts.Revision, Dialect: DialectName},
+			Rule:      RuleRef{Consumer: opts.Consumer, RuleID: opts.RuleID, Revision: opts.Revision, ElementIndex: elemIdx, Dialect: DialectName},
 			ProjectID: opts.ProjectID,
 			Class:     ClassFailed,
 			Reason:    string(provider.FailInternal),
@@ -585,12 +593,13 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	eval := &Evaluation{
 		EvalID: evalID,
 		Rule: RuleRef{
-			Consumer:    opts.Consumer,
-			RuleID:      opts.RuleID,
-			Revision:    opts.Revision,
-			ContentHash: compiled.ContentHash,
-			Dialect:     DialectName,
-			Native:      compiled.Spec.Form == spec.FormNative,
+			Consumer:     opts.Consumer,
+			RuleID:       opts.RuleID,
+			Revision:     opts.Revision,
+			ElementIndex: elemIdx,
+			ContentHash:  compiled.ContentHash,
+			Dialect:      DialectName,
+			Native:       compiled.Spec.Form == spec.FormNative,
 		},
 		ProjectID: opts.ProjectID,
 		Requested: compiled.Spec.Binding,
@@ -638,8 +647,8 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(ctx.Err(), latchCause()))
 	}
 
-	// Step 1: Select and validate bounded probe environment fields (AC-2, AC-3).
-	selectedFields, fp, totalBytes, fieldReason := selectProbeFields(compiled, input)
+	// Step 1: Select and validate bounded content-environment fields and dynamic choice sets (AC-2, AC-3).
+	selectedFields, selectedChoiceSets, fp, totalBytes, fieldReason := selectInputFields(compiled, input)
 	eval.Input = fp
 	if fieldReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, fieldReason)
@@ -656,6 +665,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	_ = latchCause()
 
 	eval.ConfiguredModel = inst.Model
+
+	// Step 2b: Check dynamic choice set item counts against the bound instance's
+	// choice primitive MaxOptions (runtime-design §4.4).
+	if csReason := checkChoiceSetInstanceLimits(selectedChoiceSets, caps); csReason != "" {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, csReason)
+	}
 
 	// Step 3: Conservative bytes-to-tokens pre-check against MaxInputTokens (AC-3).
 	if precheckReason := checkMaxInputTokensBytes(totalBytes, caps, inst.Limits); precheckReason != "" {
@@ -695,7 +710,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	}
 
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
-	req := buildModelRequest(evalID, compiled, selectedFields)
+	req := buildModelRequest(evalID, compiled, selectedFields, selectedChoiceSets)
 	instView := inst.View()
 	transport := r.transportForInstance(inst, selectedScheme)
 	callTracker := &evalCallTracker{}
@@ -1245,68 +1260,193 @@ func (r *Runtime) logEvaluation(ctx context.Context, eval *Evaluation) {
 	)
 }
 
-func selectProbeFields(compiled *spec.Compiled, input Input) ([]provider.InputField, InputFingerprint, int, provider.FailReason) {
+func selectInputFields(
+	compiled *spec.Compiled,
+	input Input,
+) ([]provider.InputField, map[string][]string, InputFingerprint, int, provider.FailReason) {
 	if err := spec.ValidateInputs(compiled.Inputs, compiled.Environment); err != nil {
-		return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+		return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 	}
 
 	byName := make(map[string]provider.InputField, len(input.Fields))
 	for _, f := range input.Fields {
 		if _, dup := byName[f.Name]; dup {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 		byName[f.Name] = f
 	}
 
+	// Validate dynamic choice sets declared in compiled.Environment (runtime-design §4.4).
+	var selectedChoiceSets map[string][]string
+	choiceSetBytes := 0
+	choiceSetOversize := false
+	if len(input.ChoiceSets) > 0 {
+		setNames := make([]string, 0, len(input.ChoiceSets))
+		for k := range input.ChoiceSets {
+			setNames = append(setNames, k)
+		}
+		slices.Sort(setNames)
+		selectedChoiceSets = make(map[string][]string, len(setNames))
+		for _, setName := range setNames {
+			decl, ok := compiled.Environment.ChoiceSet(setName)
+			if !ok {
+				return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			}
+			labels := input.ChoiceSets[setName]
+			if len(labels) > decl.MaxItems {
+				choiceSetOversize = true
+			}
+			seenLabels := make(map[string]struct{}, len(labels))
+			for _, lbl := range labels {
+				if lbl == "" || !utf8.ValidString(lbl) {
+					return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+				}
+				if _, dup := seenLabels[lbl]; dup {
+					return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+				}
+				seenLabels[lbl] = struct{}{}
+				if len(lbl) > decl.MaxLabelBytes {
+					choiceSetOversize = true
+				}
+				choiceSetBytes += len(lbl)
+			}
+			selectedChoiceSets[setName] = slices.Clone(labels)
+		}
+	}
+
+	truncate := compiled.OnOversize == spec.OversizeTruncate
 	selected := make([]provider.InputField, 0, len(compiled.Inputs))
-	fps := make([]FieldFingerprint, 0, len(compiled.Inputs))
-	totalBytes := 0
-	oversize := false
+	fieldOversize := false
 
 	for _, name := range compiled.Inputs {
 		decl, ok := compiled.Environment.Field(name)
 		if !ok {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 		supplied, present := byName[name]
 		if !present {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+		}
+		if supplied.Kind != "" && supplied.Kind != decl.Kind {
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 		if !utf8.ValidString(supplied.Value) {
-			return nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
+		}
+		if decl.Kind == spec.FieldKindJSON && !json.Valid([]byte(supplied.Value)) {
+			return nil, nil, InputFingerprint{}, 0, provider.FailInvalidRequest
 		}
 
-		sz := len(supplied.Value)
-		totalBytes += sz
-		fps = append(fps, FieldFingerprint{
-			Name:      name,
-			Bytes:     sz,
-			Truncated: false,
-		})
-		if decl.MaxBytes > 0 && sz > decl.MaxBytes {
-			oversize = true
+		val := supplied.Value
+		truncated := false
+		if decl.MaxBytes > 0 && len(val) > decl.MaxBytes {
+			if truncate {
+				val, truncated = truncateUTF8(val, decl.MaxBytes)
+			} else {
+				fieldOversize = true
+			}
 		}
 		selected = append(selected, provider.InputField{
 			Name:      name,
 			Kind:      decl.Kind,
-			Value:     supplied.Value,
-			Truncated: false,
+			Value:     val,
+			Truncated: truncated,
 			Trust:     decl.Trust,
 		})
 	}
 
-	if compiled.Environment.MaxTotalBytes > 0 && totalBytes > compiled.Environment.MaxTotalBytes {
-		oversize = true
+	// Choice set labels are identifiers and are never truncated.
+	if choiceSetOversize {
+		fp := buildInputFingerprint(selected, input.Params, selectedChoiceSets)
+		return nil, nil, fp, sumFieldBytes(selected) + choiceSetBytes, provider.FailInputTooLarge
 	}
 
-	fp := InputFingerprint{
+	totalBytes := sumFieldBytes(selected) + choiceSetBytes
+	if compiled.Environment.MaxTotalBytes > 0 && totalBytes > compiled.Environment.MaxTotalBytes {
+		if truncate {
+			if choiceSetBytes > compiled.Environment.MaxTotalBytes {
+				fp := buildInputFingerprint(selected, input.Params, selectedChoiceSets)
+				return nil, nil, fp, totalBytes, provider.FailInputTooLarge
+			}
+			remaining := compiled.Environment.MaxTotalBytes - choiceSetBytes
+			for i := range selected {
+				if len(selected[i].Value) <= remaining {
+					remaining -= len(selected[i].Value)
+					continue
+				}
+				cutVal, didCut := truncateUTF8(selected[i].Value, remaining)
+				selected[i].Value = cutVal
+				if didCut {
+					selected[i].Truncated = true
+				}
+				remaining -= len(cutVal)
+			}
+			totalBytes = sumFieldBytes(selected) + choiceSetBytes
+		} else {
+			fieldOversize = true
+		}
+	}
+
+	fp := buildInputFingerprint(selected, input.Params, selectedChoiceSets)
+	if fieldOversize {
+		return nil, nil, fp, totalBytes, provider.FailInputTooLarge
+	}
+	return selected, selectedChoiceSets, fp, totalBytes, ""
+}
+
+func checkChoiceSetInstanceLimits(choiceSets map[string][]string, caps provider.Capabilities) provider.FailReason {
+	if len(choiceSets) == 0 {
+		return ""
+	}
+	lim, ok := caps.Primitives[spec.PrimitiveChoice]
+	if !ok || !lim.Supported {
+		return provider.FailUnsupported
+	}
+	for _, labels := range choiceSets {
+		if lim.MaxOptions > 0 && len(labels) > lim.MaxOptions {
+			return provider.FailUnsupported
+		}
+	}
+	return ""
+}
+
+// truncateUTF8 cuts s to at most maxBytes bytes without splitting a multi-byte
+// UTF-8 rune. Returns the truncated string and whether any bytes were removed.
+func truncateUTF8(s string, maxBytes int) (string, bool) {
+	if maxBytes <= 0 {
+		return "", len(s) > 0
+	}
+	if len(s) <= maxBytes {
+		return s, false
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
+}
+
+func sumFieldBytes(fields []provider.InputField) int {
+	total := 0
+	for _, f := range fields {
+		total += len(f.Value)
+	}
+	return total
+}
+
+func buildInputFingerprint(fields []provider.InputField, params map[string]string, choiceSets map[string][]string) InputFingerprint {
+	fps := make([]FieldFingerprint, len(fields))
+	for i, f := range fields {
+		fps[i] = FieldFingerprint{
+			Name:      f.Name,
+			Bytes:     len(f.Value),
+			Truncated: f.Truncated,
+		}
+	}
+	return InputFingerprint{
 		Fields: fps,
-		SHA256: computeSelectedInputSHA256(selected, input.Params, input.ChoiceSets),
+		SHA256: computeSelectedInputSHA256(fields, params, choiceSets),
 	}
-	if oversize {
-		return nil, fp, totalBytes, provider.FailInputTooLarge
-	}
-	return selected, fp, totalBytes, ""
 }
 
 func checkMaxInputTokensBytes(totalBytes int, caps provider.Capabilities, limits InstanceLimits) provider.FailReason {
@@ -1522,7 +1662,12 @@ func hasValidGoogleOAuthScopes(scopes []string) bool {
 	return true
 }
 
-func buildModelRequest(evalID string, compiled *spec.Compiled, selectedFields []provider.InputField) provider.ModelRequest {
+func buildModelRequest(
+	evalID string,
+	compiled *spec.Compiled,
+	selectedFields []provider.InputField,
+	selectedChoiceSets map[string][]string,
+) provider.ModelRequest {
 	spCopy := cloneSpec(compiled.Spec)
 	qIDs := make([]string, len(spCopy.Questions))
 	for i, q := range spCopy.Questions {
@@ -1530,11 +1675,19 @@ func buildModelRequest(evalID string, compiled *spec.Compiled, selectedFields []
 	}
 	inCopy := make([]provider.InputField, len(selectedFields))
 	copy(inCopy, selectedFields)
+	var csCopy map[string][]string
+	if len(selectedChoiceSets) > 0 {
+		csCopy = make(map[string][]string, len(selectedChoiceSets))
+		for k, v := range selectedChoiceSets {
+			csCopy[k] = slices.Clone(v)
+		}
+	}
 	return provider.ModelRequest{
-		Rule:      spCopy,
-		Questions: qIDs,
-		Input:     inCopy,
-		RequestID: evalID,
+		Rule:       spCopy,
+		Questions:  qIDs,
+		Input:      inCopy,
+		ChoiceSets: csCopy,
+		RequestID:  evalID,
 	}
 }
 

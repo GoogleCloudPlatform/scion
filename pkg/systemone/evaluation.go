@@ -49,6 +49,32 @@ type (
 	Decision            = runtime.Decision
 )
 
+// Request wraps a System One Input with consumer-authorized evaluation context
+// for ruleengine.Input.Payload (t2-p2-trigger-binding-amendment §2.2, I3).
+//
+// Consumers evaluating rules on behalf of a project pass Request in
+// ruleengine.Input.Payload so the dialect forwards ProjectID, RuleID,
+// Revision, and optional ElementIndex into runtime.EvalOptions and evaluation
+// provenance. Probes may continue passing a bare Input.
+//
+// Security contract: ProjectID MUST come from the consumer's authorized
+// context (for example a Hub-owned trigger or message-policy record), never
+// from untrusted caller input. The runtime trusts the ProjectID supplied here
+// when resolving project-scoped named secrets and recording provenance.
+type Request struct {
+	Input Input
+	// ProjectID is the consumer-authorized project ID for this evaluation.
+	// Must come from the consumer's authorized context, never caller input.
+	ProjectID string
+	// RuleID identifies the consumer rule (for example a trigger or policy ID).
+	RuleID string
+	// Revision is the consumer rule's revision (for example authorization_revision).
+	Revision int64
+	// ElementIndex optionally records the 0-based element position inside an
+	// ordered mixed-rule list for provenance only (never part of cache keys).
+	ElementIndex *int
+}
+
 // ProbeInput constructs a single-field Input for the built-in P1 synthetic
 // probe environment ("probe.text").
 func ProbeInput(text string) Input {

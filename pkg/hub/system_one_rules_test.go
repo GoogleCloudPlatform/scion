@@ -18,8 +18,10 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -30,9 +32,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
@@ -366,4 +370,130 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsupIO.Reason)
 
 	assert.Zero(t, providerCalls.Load(), "denied default admission must never make a provider call")
+}
+
+type hubDialectPublicResolver struct{}
+
+func (hubDialectPublicResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
+type hubDialectTargetDialer struct {
+	targetAddr string
+}
+
+func (d hubDialectTargetDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, d.targetAddr)
+}
+
+func TestSystemOneRules_DialectForwardsProjectIDForProjectScopedNamedSecret(t *testing.T) {
+	ctx := context.Background()
+
+	srv, s, _ := newSystemOneTestServer(t, true)
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-projsec-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	const (
+		projID     = "proj-dialect-secret-01"
+		projAPIKey = "AIza-project-scoped-dialect-canary-9911"
+	)
+
+	// Store a project-scoped GEMINI_API_KEY variable secret in the Hub secret backend.
+	_, _, err = srv.secretBackend.Set(ctx, &secret.SetSecretInput{
+		Name:       systemoneprovider.DefaultGeminiAPIKeySecretName,
+		Value:      projAPIKey,
+		SecretType: store.SecretTypeVariable,
+		Scope:      store.ScopeProject,
+		ScopeID:    projID,
+	})
+	require.NoError(t, err)
+
+	var (
+		providerCalls atomic.Int32
+		seenKeyHeader string
+	)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		seenKeyHeader = r.Header.Get("x-goog-api-key")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+		  "answers": {"q1": {"type": "noul", "noul": 0.95, "confidence": 0.95}},
+		  "usage": {"total_input_tokens": 14, "total_output_tokens": 0, "total_tokens": 14}
+		}`))
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(hubDialectPublicResolver{}, hubDialectTargetDialer{targetAddr: tlsSrv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+
+	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "gemini-proj-sec",
+		"adapter": "gemini_decisions",
+		"model":   "gemini-2.5-flash",
+		"auth": map[string]any{
+			"kind": "api_key",
+			"secretRef": map[string]any{
+				"name":  systemoneprovider.DefaultGeminiAPIKeySecretName,
+				"scope": systemoneprovider.SecretScopeProject,
+			},
+		},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	re := srv.RuleEngine()
+	require.NotNil(t, re)
+	require.NoError(t, re.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+
+	const rawRule = `{
+	  "version": 1,
+	  "binding": {"instance": "gemini-proj-sec"},
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Does the text report an outage?"}],
+	  "output": {"question": "q1"}
+	}`
+	compiled, err := re.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: testSystemOneConsumer,
+		Name:     spec.ProbeEnvironmentName,
+	})
+	require.NoError(t, err)
+
+	// 1. Bare Input (no ProjectID) fails closed with invalid_request (0 provider calls).
+	_, err = re.Evaluate(ctx, compiled, ruleengine.Input{
+		Payload: systemone.ProbeInput("no project id"),
+	}, ruleengine.Budget{})
+	require.Error(t, err)
+	var failedErr *ruleengine.FailedError
+	require.ErrorAs(t, err, &failedErr)
+	assert.Equal(t, string(systemoneprovider.FailInvalidRequest), failedErr.Reason)
+	assert.Zero(t, providerCalls.Load())
+
+	// 2. Request with authorized ProjectID resolves the project-scoped secret through the dialect.
+	elemIdx := 1
+	dec, err := re.Evaluate(ctx, compiled, ruleengine.Input{
+		Payload: systemone.Request{
+			Input:        systemone.ProbeInput("synthetic outage"),
+			ProjectID:    projID,
+			RuleID:       "rule-hub-proj-sec",
+			Revision:     3,
+			ElementIndex: &elemIdx,
+		},
+	}, ruleengine.Budget{})
+	require.NoError(t, err)
+	assert.True(t, dec.Bool)
+	assert.Equal(t, int32(1), providerCalls.Load())
+	assert.Equal(t, projAPIKey, seenKeyHeader)
+
+	eval, ok := dec.Detail.(*systemone.Evaluation)
+	require.True(t, ok)
+	assert.Equal(t, projID, eval.ProjectID)
+	assert.Equal(t, "rule-hub-proj-sec", eval.Rule.RuleID)
+	assert.Equal(t, int64(3), eval.Rule.Revision)
+	require.NotNil(t, eval.Rule.ElementIndex)
+	assert.Equal(t, 1, *eval.Rule.ElementIndex)
+	require.NotNil(t, eval.Auth)
+	require.NotNil(t, eval.Auth.SecretRef)
+	assert.Equal(t, systemoneprovider.SecretScopeProject, eval.Auth.SecretRef.ScopeUsed)
 }

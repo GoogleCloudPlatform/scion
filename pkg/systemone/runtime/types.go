@@ -161,12 +161,13 @@ func ProbeInput(text string) Input {
 // RuleRef identifies the evaluated rule in content-free provenance
 // (runtime-design §8.1).
 type RuleRef struct {
-	Consumer    string `json:"consumer,omitempty"`
-	RuleID      string `json:"rule_id,omitempty"`
-	Revision    int64  `json:"revision,omitempty"`
-	ContentHash string `json:"content_hash"`
-	Dialect     string `json:"dialect"`
-	Native      bool   `json:"native,omitempty"`
+	Consumer     string `json:"consumer,omitempty"`
+	RuleID       string `json:"rule_id,omitempty"`
+	Revision     int64  `json:"revision,omitempty"`
+	ElementIndex *int   `json:"element_index,omitempty"`
+	ContentHash  string `json:"content_hash"`
+	Dialect      string `json:"dialect"`
+	Native       bool   `json:"native,omitempty"`
 }
 
 // AnswerRecord is the content-free per-question result recorded in

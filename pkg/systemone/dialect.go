@@ -227,8 +227,15 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 }
 
 // Evaluate executes a compiled System One rule against a typed systemone.Input
-// read from ruleengine.Input.Payload. Budget.CostLimit is ignored;
-// Budget.MaxEvalTime is forwarded to Runtime alongside ruleengine.EngineDeadlineMargin.
+// or systemone.Request read from ruleengine.Input.Payload. Budget.CostLimit is
+// ignored; Budget.MaxEvalTime is forwarded to Runtime alongside
+// ruleengine.EngineDeadlineMargin.
+//
+// When Payload is a systemone.Request, its consumer-authorized ProjectID,
+// RuleID, Revision, and optional ElementIndex are forwarded into
+// runtime.EvalOptions (and ProjectID is attached to the request context via
+// runtime.WithEvalProjectID) so Evaluation.ProjectID, Evaluation.Rule, and
+// project-scoped named secrets resolve cleanly on the dialect path.
 func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input ruleengine.Input, budget ruleengine.Budget) (ruleengine.Decision, error) {
 	if !d.isEnabled() {
 		return ruleengine.Decision{}, &ruleengine.FailedError{
@@ -245,21 +252,46 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	consumer := c.Consumer()
 	prog, ok := c.Rep().(*compiledRule)
 	if !ok || prog == nil || prog.compiled == nil {
-		return failedInternalDecision(nil, consumer, c.Kind(), start)
+		return failedInternalDecision(nil, consumer, c.Kind(), start, evalContextMeta{})
 	}
 
-	soInput, ok := input.Payload.(Input)
-	if !ok {
-		return failedInternalDecision(prog, consumer, c.Kind(), start)
+	var (
+		soInput Input
+		meta    evalContextMeta
+	)
+	switch p := input.Payload.(type) {
+	case Input:
+		soInput = p
+	case Request:
+		soInput = p.Input
+		meta = evalContextMeta{
+			projectID: strings.TrimSpace(p.ProjectID),
+			ruleID:    strings.TrimSpace(p.RuleID),
+			revision:  p.Revision,
+		}
+		if p.ElementIndex != nil {
+			idx := *p.ElementIndex
+			meta.elementIndex = &idx
+		}
+	default:
+		return failedInternalDecision(prog, consumer, c.Kind(), start, evalContextMeta{})
 	}
 
 	rt := d.resolveRuntime()
 	if rt == nil {
-		return failedInternalDecision(prog, consumer, c.Kind(), start)
+		return failedInternalDecision(prog, consumer, c.Kind(), start, meta)
 	}
 
-	dec, err := rt.Evaluate(ctx, prog.compiled, soInput, runtime.EvalOptions{
+	evalCtx := ctx
+	if meta.projectID != "" {
+		evalCtx = runtime.WithEvalProjectID(ctx, meta.projectID)
+	}
+	dec, err := rt.Evaluate(evalCtx, prog.compiled, soInput, runtime.EvalOptions{
 		Consumer:             consumer,
+		RuleID:               meta.ruleID,
+		Revision:             meta.revision,
+		ElementIndex:         meta.elementIndex,
+		ProjectID:            meta.projectID,
 		EngineMaxEvalTime:    budget.MaxEvalTime,
 		EngineDeadlineMargin: ruleengine.EngineDeadlineMargin(budget.MaxEvalTime),
 	})
@@ -274,7 +306,7 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 
 	eval, hasEval := EvaluationFrom(err)
 	if !hasEval || eval == nil {
-		return failedInternalDecision(prog, consumer, c.Kind(), start)
+		return failedInternalDecision(prog, consumer, c.Kind(), start, meta)
 	}
 	evalErr := &EvaluationError{Eval: eval}
 
@@ -314,13 +346,32 @@ func (d *Dialect) resolveRuntime() *runtime.Runtime {
 	return d.runtime
 }
 
-func failedInternalDecision(prog *compiledRule, consumer string, kind ruleengine.Kind, start time.Time) (ruleengine.Decision, error) {
+type evalContextMeta struct {
+	projectID    string
+	ruleID       string
+	revision     int64
+	elementIndex *int
+}
+
+func failedInternalDecision(prog *compiledRule, consumer string, kind ruleengine.Kind, start time.Time, meta evalContextMeta) (ruleengine.Decision, error) {
+	var elemIdx *int
+	if meta.elementIndex != nil {
+		v := *meta.elementIndex
+		elemIdx = &v
+	}
 	eval := &Evaluation{
-		EvalID:  newDialectEvalID(),
-		Rule:    RuleRef{Dialect: DialectName, Consumer: consumer},
-		Class:   ClassFailed,
-		Reason:  string(provider.FailInternal),
-		Elapsed: time.Since(start),
+		EvalID: newDialectEvalID(),
+		Rule: RuleRef{
+			Dialect:      DialectName,
+			Consumer:     consumer,
+			RuleID:       meta.ruleID,
+			Revision:     meta.revision,
+			ElementIndex: elemIdx,
+		},
+		ProjectID: meta.projectID,
+		Class:     ClassFailed,
+		Reason:    string(provider.FailInternal),
+		Elapsed:   time.Since(start),
 	}
 	if prog != nil && prog.compiled != nil {
 		eval.Rule.ContentHash = prog.compiled.ContentHash

@@ -16,8 +16,10 @@ package systemone_test
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -1065,4 +1067,205 @@ func TestDialect_ConsumerEnvironmentRegistrationAndCompileMatrix(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, spec.CategoryBinding, ce.Category)
 	})
+}
+
+type secretPolicyTestAdapter struct {
+	dialectFuncAdapter
+	allowedSecrets []string
+	defaultEP      string
+}
+
+func (a *secretPolicyTestAdapter) AllowedSecretNames() []string { return a.allowedSecrets }
+func (a *secretPolicyTestAdapter) DefaultEndpoint() string      { return a.defaultEP }
+
+type staticPublicTestResolver struct{}
+
+func (staticPublicTestResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
+type targetRoutingTestDialer struct {
+	targetAddr string
+}
+
+func (d targetRoutingTestDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, d.targetAddr)
+}
+
+func TestDialect_RequestForwardsEvaluationContextAndResolvesProjectSecret(t *testing.T) {
+	ctx := context.Background()
+	const pinnedOrigin = "https://secret-policy.example.test"
+
+	var (
+		capturedAuthHeader string
+		providerCalls      atomic.Int32
+	)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalls.Add(1)
+		capturedAuthHeader = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"model": "jev-1.14.0",
+			"answers": {"q1": {"type": "noul", "noul": 0.93}},
+			"usage": {"input_tokens": 11, "output_tokens": 1}
+		}`))
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	reg.MustRegister(&secretPolicyTestAdapter{
+		dialectFuncAdapter: dialectFuncAdapter{
+			name: "secret-policy-adapter",
+			invokeFn: func(callCtx context.Context, tr provider.Transport, inst provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				req, err := http.NewRequestWithContext(callCtx, http.MethodPost, inst.Endpoint+"/eval", nil)
+				if err != nil {
+					return provider.ModelResult{}, err
+				}
+				resp, err := tr.Do(req)
+				if err != nil {
+					return provider.ModelResult{}, err
+				}
+				defer func() { _ = resp.Body.Close() }()
+				dist, val, _, _ := provider.BinaryDistribution(0.93)
+				return provider.ModelResult{
+					ResolvedModel: "jev-1.14.0",
+					HTTPStatus:    resp.StatusCode,
+					Answers: map[string]provider.Answer{
+						"q1": {QuestionID: "q1", Primitive: spec.PrimitiveBinary, Status: provider.AnswerStatusAnswered, Bool: val, Distribution: dist},
+					},
+				}, nil
+			},
+		},
+		allowedSecrets: []string{"GEMINI_API_KEY"},
+		defaultEP:      pinnedOrigin,
+	})
+
+	projectInst := runtime.Instance{
+		ID:       "inst-proj-sec",
+		Name:     "proj-secret-inst",
+		Adapter:  "secret-policy-adapter",
+		Model:    "jev-1.14.0",
+		Endpoint: pinnedOrigin,
+		Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "GEMINI_API_KEY"},
+		Options:  map[string]string{provider.OptionSecretScope: provider.SecretScopeProject},
+		Enabled:  true,
+		Revision: 2,
+	}
+	hubInst := runtime.Instance{
+		ID:       "inst-hub-sec",
+		Name:     "hub-secret-inst",
+		Adapter:  "secret-policy-adapter",
+		Model:    "jev-1.14.0",
+		Endpoint: pinnedOrigin,
+		Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "GEMINI_API_KEY"},
+		Options:  map[string]string{provider.OptionSecretScope: provider.SecretScopeHub},
+		Enabled:  true,
+		Revision: 1,
+	}
+
+	credSource := func(reqCtx context.Context, inst runtime.Instance) (string, error) {
+		scope, isNamed := provider.SecretRefModeFromOptions(inst.Options)
+		if isNamed && scope == provider.SecretScopeProject {
+			pid := runtime.EvalProjectIDFromContext(reqCtx)
+			if pid == "proj-alpha" {
+				runtime.RecordSecretRefProvenance(reqCtx, inst.Auth.SecretName, provider.SecretScopeProject, 4)
+				return "sk-project-alpha-secret", nil
+			}
+			return "", egress.ErrAuth
+		}
+		if isNamed && scope == provider.SecretScopeHub {
+			runtime.RecordSecretRefProvenance(reqCtx, inst.Auth.SecretName, provider.SecretScopeHub, 1)
+			return "sk-hub-shared-secret", nil
+		}
+		return "sk-owned-secret", nil
+	}
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry:    reg,
+			Instances:   runtime.StaticInstances(projectInst, hubInst),
+			Credentials: credSource,
+		},
+		runtime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(staticPublicTestResolver{}, targetRoutingTestDialer{targetAddr: srv.Listener.Addr().String()}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+	t.Cleanup(rt.CloseIdleConnections)
+
+	eng := ruleengine.NewEngine()
+	require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{Runtime: rt})))
+	require.NoError(t, eng.AllowConsumerDialects("trigger", ruleengine.GrantIO(systemone.DialectName)))
+
+	projRule := `{
+		"version": 1,
+		"binding": {"instance": "proj-secret-inst"},
+		"questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+		"output": {"question": "q1"}
+	}`
+	compiledProj, err := eng.Compile(ctx, systemone.DialectName, projRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "trigger",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	require.NoError(t, err)
+
+	// 1. Bare Input (no ProjectID) fails closed with invalid_request (0 provider calls).
+	_, err = eng.Evaluate(ctx, compiledProj, ruleengine.Input{
+		Payload: systemone.ProbeInput("hello"),
+	}, ruleengine.Budget{})
+	require.Error(t, err)
+	var failedErr *ruleengine.FailedError
+	require.ErrorAs(t, err, &failedErr)
+	assert.Equal(t, string(provider.FailInvalidRequest), failedErr.Reason)
+	assert.Zero(t, providerCalls.Load())
+
+	// 2. Request carrying authorized ProjectID, RuleID, Revision, and ElementIndex=0 succeeds
+	//    and resolves the project-scoped named secret.
+	elemZero := 0
+	dec, err := eng.Evaluate(ctx, compiledProj, ruleengine.Input{
+		Payload: systemone.Request{
+			Input:        systemone.ProbeInput("hello project"),
+			ProjectID:    "proj-alpha",
+			RuleID:       "trig-99",
+			Revision:     7,
+			ElementIndex: &elemZero,
+		},
+	}, ruleengine.Budget{})
+	require.NoError(t, err)
+	assert.True(t, dec.Bool)
+	assert.Equal(t, int32(1), providerCalls.Load())
+	assert.Equal(t, "Bearer sk-project-alpha-secret", capturedAuthHeader)
+
+	eval, ok := dec.Detail.(*systemone.Evaluation)
+	require.True(t, ok)
+	assert.Equal(t, "proj-alpha", eval.ProjectID)
+	assert.Equal(t, "trigger", eval.Rule.Consumer)
+	assert.Equal(t, "trig-99", eval.Rule.RuleID)
+	assert.Equal(t, int64(7), eval.Rule.Revision)
+	require.NotNil(t, eval.Rule.ElementIndex)
+	assert.Equal(t, 0, *eval.Rule.ElementIndex)
+	require.NotNil(t, eval.Auth)
+	require.NotNil(t, eval.Auth.SecretRef)
+	assert.Equal(t, provider.SecretScopeProject, eval.Auth.SecretRef.ScopeUsed)
+	assert.Equal(t, 4, eval.Auth.SecretVersion)
+
+	// 3. Hub-only named secret still works with bare Input (no ProjectID).
+	hubRule := `{
+		"version": 1,
+		"binding": {"instance": "hub-secret-inst"},
+		"questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+		"output": {"question": "q1"}
+	}`
+	compiledHub, err := eng.Compile(ctx, systemone.DialectName, hubRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "trigger",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	require.NoError(t, err)
+	decHub, err := eng.Evaluate(ctx, compiledHub, ruleengine.Input{
+		Payload: systemone.ProbeInput("hello hub"),
+	}, ruleengine.Budget{})
+	require.NoError(t, err)
+	assert.True(t, decHub.Bool)
+	assert.Equal(t, int32(2), providerCalls.Load())
+	assert.Equal(t, "Bearer sk-hub-shared-secret", capturedAuthHeader)
 }
