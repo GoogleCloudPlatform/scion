@@ -217,6 +217,25 @@ func NewMetricsDashboardService(ctx context.Context, projectID string) (*Metrics
 	}, nil
 }
 
+// ProjectID returns the GCP project ID currently targeted by this service.
+func (s *MetricsDashboardService) ProjectID() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.projectID
+}
+
+// SetProjectID retargets this service to query Cloud Monitoring in projectID
+// and clears any cached responses from the previous project.
+func (s *MetricsDashboardService) SetProjectID(projectID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.projectID == projectID {
+		return
+	}
+	s.projectID = projectID
+	s.cache = make(map[string]*cacheEntry)
+}
+
 // Close releases resources.
 func (s *MetricsDashboardService) Close() error {
 	if s.rawClient == nil {
@@ -299,14 +318,28 @@ func (s *MetricsDashboardService) setCache(key string, data interface{}) {
 	s.setZonedCache(key, "", data)
 }
 
+func (s *MetricsDashboardService) setCacheForProject(projectID, key string, data interface{}) {
+	s.setZonedCacheForProject(projectID, key, "", data)
+}
+
 // setZonedCache stores a view computed for the resolved zone name zone. It
 // first drops expired entries, so the map does not grow without bound. A
 // zone other than UTC is cached only while fewer than maxCachedZones
 // distinct non-UTC zones have live entries (or this zone already has one);
 // otherwise the view is returned uncached. It reports whether it cached.
 func (s *MetricsDashboardService) setZonedCache(key, zone string, data interface{}) bool {
+	return s.setZonedCacheForProject(s.ProjectID(), key, zone, data)
+}
+
+// setZonedCacheForProject stores a view only if the service is still targeting
+// expectedProjectID, preventing an in-flight query started before a
+// SetProjectID retarget from populating the new project's cache.
+func (s *MetricsDashboardService) setZonedCacheForProject(expectedProjectID, key, zone string, data interface{}) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.projectID != expectedProjectID {
+		return false
+	}
 	now := time.Now()
 	for k, e := range s.cache {
 		if now.Sub(e.fetchedAt) > cacheTTL {
@@ -449,6 +482,7 @@ func queryGroupedMetricsView[T any](
 	build func([][]LabeledTimeSeries) *T,
 ) (*T, error) {
 	cfg := applyQueryOptions(opts)
+	gcpProject := s.ProjectID()
 	cacheKey := cfg.cacheKey(cachePrefix, periodDays)
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*T), nil
@@ -469,7 +503,7 @@ func queryGroupedMetricsView[T any](
 		return view, err
 	}
 
-	s.setZonedCache(cacheKey, cfg.zoneName(), view)
+	s.setZonedCacheForProject(gcpProject, cacheKey, cfg.zoneName(), view)
 	return view, nil
 }
 
@@ -496,6 +530,7 @@ func tokenTypeFilter(tokenType string) string {
 // QuerySummary returns aggregate metric counts for the given period.
 func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays int, opts ...QueryOption) (*DashboardSummary, error) {
 	cfg := applyQueryOptions(opts)
+	gcpProject := s.ProjectID()
 	cacheKey := cfg.cacheKey("summary", periodDays)
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*DashboardSummary), nil
@@ -539,13 +574,14 @@ func (s *MetricsDashboardService) QuerySummary(ctx context.Context, periodDays i
 		return summary, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
-	s.setZonedCache(cacheKey, cfg.zoneName(), summary)
+	s.setZonedCacheForProject(gcpProject, cacheKey, cfg.zoneName(), summary)
 	return summary, nil
 }
 
 // QuerySessions returns daily session counts and active agent counts.
 func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays int, opts ...QueryOption) (*SessionsView, error) {
 	cfg := applyQueryOptions(opts)
+	gcpProject := s.ProjectID()
 	cacheKey := cfg.cacheKey("sessions", periodDays)
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*SessionsView), nil
@@ -579,7 +615,7 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 		return view, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
-	s.setZonedCache(cacheKey, cfg.zoneName(), view)
+	s.setZonedCacheForProject(gcpProject, cacheKey, cfg.zoneName(), view)
 	return view, nil
 }
 
@@ -626,7 +662,7 @@ func (s *MetricsDashboardService) fetchTimeSeries(ctx context.Context, metricNam
 	}
 
 	req := &monitoringpb.ListTimeSeriesRequest{
-		Name:   fmt.Sprintf("projects/%s", s.projectID),
+		Name:   fmt.Sprintf("projects/%s", s.ProjectID()),
 		Filter: filter,
 		Interval: &monitoringpb.TimeInterval{
 			StartTime: timestamppb.New(fetchStart),
@@ -945,6 +981,7 @@ type ProjectMetricsSummary struct {
 
 // QueryProjectSummary returns lightweight scalar metrics for a project over the last 24 hours.
 func (s *MetricsDashboardService) QueryProjectSummary(ctx context.Context, projectID string) (*ProjectMetricsSummary, error) {
+	gcpProject := s.ProjectID()
 	cacheKey := fmt.Sprintf("project-summary:%s", projectID)
 	if cached, ok := s.getCached(cacheKey); ok {
 		return cached.(*ProjectMetricsSummary), nil
@@ -991,8 +1028,68 @@ func (s *MetricsDashboardService) QueryProjectSummary(ctx context.Context, proje
 		return summary, fmt.Errorf("partial query failures: %s", strings.Join(queryErrors, "; "))
 	}
 
-	s.setCache(cacheKey, summary)
+	s.setCacheForProject(gcpProject, cacheKey, summary)
 	return summary, nil
+}
+
+// currentMetricsDashboard returns the active MetricsDashboardService, or nil.
+func (s *Server) currentMetricsDashboard() *MetricsDashboardService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.metricsDashboard
+}
+
+// newMetricsDashboardService constructs a MetricsDashboardService using the
+// configured factory (or NewMetricsDashboardService in production).
+func (s *Server) newMetricsDashboardService(ctx context.Context, projectID string) (*MetricsDashboardService, error) {
+	if s.metricsDashboardFactory != nil {
+		return s.metricsDashboardFactory(ctx, projectID)
+	}
+	return NewMetricsDashboardService(ctx, projectID)
+}
+
+// applyMetricsDashboardProject updates s.metricsDashboard to target projectID:
+// retargeting an existing service in place (clearing its cache), creating a
+// new service when previously unconfigured, or closing and clearing it when
+// projectID is empty. Callers hold s.settingsApply.mu and must NOT hold s.mu.
+func (s *Server) applyMetricsDashboardProject(projectID string) bool {
+	cur := s.currentMetricsDashboard()
+	curProject := ""
+	if cur != nil {
+		curProject = cur.ProjectID()
+	}
+	if curProject == projectID {
+		return false
+	}
+	if projectID == "" {
+		s.mu.Lock()
+		old := s.metricsDashboard
+		s.metricsDashboard = nil
+		s.mu.Unlock()
+		if old != nil {
+			if err := old.Close(); err != nil {
+				slog.Warn("Failed to close metrics dashboard", "error", err)
+			}
+			slog.Info("Metrics dashboard service disabled (no telemetry project ID)")
+			return true
+		}
+		return false
+	}
+	if cur != nil {
+		cur.SetProjectID(projectID)
+		slog.Info("Metrics dashboard service retargeted", "previous_project", curProject, "project", projectID)
+		return true
+	}
+	metricsSvc, err := s.newMetricsDashboardService(context.Background(), projectID)
+	if err != nil {
+		slog.Warn("Failed to initialize metrics dashboard service", "project", projectID, "error", err)
+		return false
+	}
+	s.mu.Lock()
+	s.metricsDashboard = metricsSvc
+	s.mu.Unlock()
+	slog.Info("Metrics dashboard service initialized", "project", projectID)
+	return true
 }
 
 // handleProjectMetricsSummary returns lightweight metrics summary for a project.
@@ -1043,12 +1140,13 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 	}
 
 	// If metrics service is not configured, return unavailable indicator
-	if s.metricsDashboard == nil {
+	dashboard := s.currentMetricsDashboard()
+	if dashboard == nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"available": false})
 		return
 	}
 
-	data, err := s.metricsDashboard.QueryProjectSummary(ctx, projectID)
+	data, err := dashboard.QueryProjectSummary(ctx, projectID)
 	if err != nil {
 		if data == nil {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -1140,7 +1238,8 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		return
 	}
 
-	if s.metricsDashboard == nil {
+	dashboard := s.currentMetricsDashboard()
+	if dashboard == nil {
 		writeError(w, http.StatusServiceUnavailable, "metrics_unavailable",
 			"Metrics dashboard is not configured (no telemetry project ID)", nil)
 		return
@@ -1170,7 +1269,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 
 	switch view {
 	case "summary":
-		data, err := s.metricsDashboard.QuerySummary(ctx, periodDays, opts...)
+		data, err := dashboard.QuerySummary(ctx, periodDays, opts...)
 		if err != nil {
 			if data == nil {
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -1188,7 +1287,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		writeJSON(w, http.StatusOK, data)
 
 	case "sessions":
-		data, err := s.metricsDashboard.QuerySessions(ctx, periodDays, opts...)
+		data, err := dashboard.QuerySessions(ctx, periodDays, opts...)
 		if err != nil {
 			if data == nil {
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -1201,7 +1300,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		writeJSON(w, http.StatusOK, data)
 
 	case "model-calls":
-		data, err := s.metricsDashboard.QueryModelCalls(ctx, periodDays, opts...)
+		data, err := dashboard.QueryModelCalls(ctx, periodDays, opts...)
 		if err != nil {
 			if data == nil {
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -1214,7 +1313,7 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		writeJSON(w, http.StatusOK, data)
 
 	case "tokens":
-		data, err := s.metricsDashboard.QueryTokens(ctx, periodDays, opts...)
+		data, err := dashboard.QueryTokens(ctx, periodDays, opts...)
 		if err != nil {
 			if data == nil {
 				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

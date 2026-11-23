@@ -2452,8 +2452,9 @@ type Server struct {
 	githubAppKeyOverrideWarned    atomic.Bool
 	githubAppScheduleMu           sync.Mutex
 
-	logQueryService  logQuerier               // Cloud Logging query service (nil = disabled)
-	metricsDashboard *MetricsDashboardService // Cloud Monitoring metrics dashboard (nil = disabled)
+	logQueryService         logQuerier                                                      // Cloud Logging query service (nil = disabled)
+	metricsDashboard        *MetricsDashboardService                                        // Cloud Monitoring metrics dashboard (nil = disabled); guarded by mu
+	metricsDashboardFactory func(context.Context, string) (*MetricsDashboardService, error) // nil = NewMetricsDashboardService; overridden in tests
 
 	// Telegram link service for code-based account linking (nil = disabled)
 	telegramLinkService *TelegramLinkService
@@ -4076,21 +4077,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 
 	// Initialize metrics dashboard service (optional, gated on telemetry project ID)
-	if telemetryProject := cfg.TelemetryProjectID; telemetryProject != "" {
-		metricsSvc, err := NewMetricsDashboardService(ctx, telemetryProject)
+	if projectID := srv.effectiveMetricsProjectLocked(cfg.TelemetryConfig); projectID != "" {
+		metricsSvc, err := srv.newMetricsDashboardService(ctx, projectID)
 		if err != nil {
 			slog.Warn("Failed to initialize metrics dashboard service", "error", err)
 		} else {
 			srv.metricsDashboard = metricsSvc
-			slog.Info("Metrics dashboard service initialized", "project", telemetryProject)
-		}
-	} else if projectID := cfg.GCPProjectID; projectID != "" {
-		metricsSvc, err := NewMetricsDashboardService(ctx, projectID)
-		if err != nil {
-			slog.Warn("Failed to initialize metrics dashboard service", "error", err)
-		} else {
-			srv.metricsDashboard = metricsSvc
-			slog.Info("Metrics dashboard service initialized (from GCPProjectID)", "project", projectID)
+			slog.Info("Metrics dashboard service initialized", "project", projectID)
 		}
 	}
 
@@ -7896,8 +7889,12 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.logQueryService != nil {
 			_ = s.logQueryService.Close()
 		}
-		if s.metricsDashboard != nil {
-			if err := s.metricsDashboard.Close(); err != nil {
+		s.mu.Lock()
+		metricsDashboard := s.metricsDashboard
+		s.metricsDashboard = nil
+		s.mu.Unlock()
+		if metricsDashboard != nil {
+			if err := metricsDashboard.Close(); err != nil {
 				slog.Warn("Failed to close metrics dashboard", "error", err)
 			}
 		}

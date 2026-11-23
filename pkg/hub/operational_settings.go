@@ -1763,6 +1763,8 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "telemetry_config")
 	}
 	s.config.TelemetryConfig = telemetryConfig
+	nextMetricsProject := s.effectiveMetricsProjectLocked(telemetryConfig)
+	s.config.TelemetryProjectID = nextMetricsProject
 
 	// Auto-expose ports. In a DB-backed snapshot an unset value (cleared,
 	// or the section removed) returns to the startup value
@@ -2125,6 +2127,13 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// (ptone/scion#3904).
 	if snap.FromOperationalSettings && s.applyNotificationChannels(snap.NotificationChannels) {
 		applied = append(applied, "notification_channels")
+	}
+
+	// Metrics dashboard: retarget or rebuild outside s.mu (creating a
+	// Cloud Monitoring client may perform credential discovery / I/O).
+	// Serialized by s.settingsApply.mu.
+	if s.applyMetricsDashboardProject(nextMetricsProject) {
+		applied = append(applied, "metrics_dashboard")
 	}
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
