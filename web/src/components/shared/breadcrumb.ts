@@ -55,9 +55,9 @@ export class ScionBreadcrumb extends LitElement {
   @state()
   private expanded = false;
 
-  /** Indices of truncated crumbs whose `<sl-tooltip>` has been lazily mounted. */
+  /** Stable keys of truncated crumbs whose `<sl-tooltip>` has been lazily mounted. */
   @state()
-  private mountedTooltips: ReadonlySet<number> = new Set();
+  private mountedTooltips: ReadonlySet<string> = new Set();
 
   static override styles = css`
     :host {
@@ -178,13 +178,35 @@ export class ScionBreadcrumb extends LitElement {
     }
   `;
 
+  private tooltipKey(crumb: Crumb, index: number): string {
+    return crumb.href !== undefined ? `href:${crumb.href}` : `current:${index}`;
+  }
+
   protected override willUpdate(changed: PropertyValues<this>): void {
     if (changed.has('crumbs')) {
       if (this.crumbs.length < 4 && this.expanded) {
         this.expanded = false;
       }
       if (this.mountedTooltips.size > 0) {
-        this.mountedTooltips = new Set();
+        const activeKeys = new Set<string>();
+        for (let i = 0; i < this.crumbs.length; i++) {
+          const crumb = this.crumbs[i];
+          if (crumb.truncate) {
+            activeKeys.add(this.tooltipKey(crumb, i));
+          }
+        }
+        let pruned = false;
+        const next = new Set<string>();
+        for (const key of this.mountedTooltips) {
+          if (activeKeys.has(key)) {
+            next.add(key);
+          } else {
+            pruned = true;
+          }
+        }
+        if (pruned) {
+          this.mountedTooltips = next;
+        }
       }
     }
   }
@@ -197,10 +219,10 @@ export class ScionBreadcrumb extends LitElement {
     crumb.onActivate(e);
   }
 
-  private mountTooltip(index: number, restoreFocus: boolean): void {
-    if (this.mountedTooltips.has(index)) return;
+  private mountTooltip(key: string, index: number, restoreFocus: boolean): void {
+    if (this.mountedTooltips.has(key)) return;
     const next = new Set(this.mountedTooltips);
-    next.add(index);
+    next.add(key);
     this.mountedTooltips = next;
     void this.updateComplete.then(() => {
       const tip = this.shadowRoot?.querySelector<
@@ -226,7 +248,8 @@ export class ScionBreadcrumb extends LitElement {
     const classes = [crumb.truncate ? 'truncate' : '', crumb.pending ? 'pending' : '']
       .filter(Boolean)
       .join(' ');
-    const mountTip = Boolean(crumb.truncate && this.mountedTooltips.has(index));
+    const key = this.tooltipKey(crumb, index);
+    const mountTip = Boolean(crumb.truncate && this.mountedTooltips.has(key));
     const deferTip = Boolean(crumb.truncate && !mountTip);
 
     let inner: TemplateResult;
@@ -236,8 +259,8 @@ export class ScionBreadcrumb extends LitElement {
         part="link"
         class=${classes}
         @click=${(e: MouseEvent) => this.handleCrumbClick(crumb, e)}
-        @pointerenter=${deferTip ? () => this.mountTooltip(index, false) : nothing}
-        @focusin=${deferTip ? () => this.mountTooltip(index, true) : nothing}
+        @pointerenter=${deferTip ? () => this.mountTooltip(key, index, false) : nothing}
+        @focusin=${deferTip ? () => this.mountTooltip(key, index, true) : nothing}
         >${crumb.label}</a
       >`;
     } else {
@@ -245,11 +268,13 @@ export class ScionBreadcrumb extends LitElement {
         console.warn('scion-breadcrumb: crumb without href must be the last item', crumb);
       }
       const currentClasses = ['current', classes].filter(Boolean).join(' ');
+      // Pointer-only tooltip: the full name is already shown in the page h1,
+      // so the current-page span is intentionally kept non-focusable.
       inner = html`<span
         aria-current="page"
         part="current"
         class=${currentClasses}
-        @pointerenter=${deferTip ? () => this.mountTooltip(index, false) : nothing}
+        @pointerenter=${deferTip ? () => this.mountTooltip(key, index, false) : nothing}
         >${crumb.label}</span
       >`;
     }

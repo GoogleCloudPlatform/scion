@@ -112,6 +112,47 @@ describe('scion-breadcrumb', () => {
     expect(tooltips[0].querySelector('a')?.classList.contains('truncate')).toBe(true);
   });
 
+  it('preserves focus and mounted tooltip across re-renders with a new crumbs array', async () => {
+    const makeCrumbs = (projectLabel = 'Very Long Project Display Name'): Crumb[] => [
+      { label: 'Projects', href: '/projects' },
+      { label: projectLabel, href: '/projects/p-1', truncate: true },
+      { label: 'Worker' },
+    ];
+    const el = await mount(makeCrumbs());
+
+    const initialLink = el.shadowRoot!.querySelector<HTMLAnchorElement>('a[href="/projects/p-1"]')!;
+    initialLink.focus();
+    initialLink.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    await el.updateComplete;
+    // Wait for the microtask in mountTooltip that restores focus onto the wrapped anchor.
+    await Promise.resolve();
+
+    const wrappedLink = el.shadowRoot!.querySelector<HTMLAnchorElement>(
+      'sl-tooltip > a[href="/projects/p-1"]'
+    );
+    expect(wrappedLink).not.toBeNull();
+    expect(el.shadowRoot!.activeElement).toBe(wrappedLink);
+
+    // Reassigning an equal new array literal (as host pages do on tick/SSE re-renders)
+    // must keep the same anchor connected, focused, and wrapped in its tooltip.
+    el.crumbs = makeCrumbs();
+    await el.updateComplete;
+    expect(wrappedLink!.isConnected).toBe(true);
+    expect(el.shadowRoot!.activeElement).toBe(wrappedLink);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')?.getAttribute('content')).toBe(
+      'Very Long Project Display Name'
+    );
+
+    // Updating the label in place on the same href updates the tooltip without dropping focus.
+    el.crumbs = makeCrumbs('Renamed Project Display Name');
+    await el.updateComplete;
+    expect(wrappedLink!.isConnected).toBe(true);
+    expect(el.shadowRoot!.activeElement).toBe(wrappedLink);
+    expect(el.shadowRoot!.querySelector('sl-tooltip')?.getAttribute('content')).toBe(
+      'Renamed Project Display Name'
+    );
+  });
+
   it('applies the pending class when crumb.pending is true', async () => {
     const el = await mount([
       { label: 'Projects', href: '/projects' },
