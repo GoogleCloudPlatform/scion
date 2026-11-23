@@ -113,4 +113,17 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     await el.updateComplete;
     expect(new URLSearchParams(window.location.search).get('q')).toBe('label:team=ui');
   });
+
+  it('shows "No Matching Agents" instead of "No Agents Found" when a filter query matches zero rows', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, true);
+    window.history.replaceState(null, '', '/agents?q=phase%3Aerror');
+
+    const el = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    const heading = el.shadowRoot?.querySelector('.empty-state h2')?.textContent?.trim();
+    expect(heading).toBe('No Matching Agents');
+  });
 });

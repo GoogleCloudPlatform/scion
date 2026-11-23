@@ -68,13 +68,26 @@ export function setSingleKeyInQuery(
     return value ? `${target}:${value} ${trimmed}` : trimmed;
   }
 
-  // Splice out existing terms for `target` from right to left.
+  // Splice out existing terms for `target` from right to left without touching
+  // whitespace inside other terms or quoted values.
   let out = input;
   const sortedDesc = [...keyTerms].sort((a, b) => b.offset - a.offset);
   for (let idx = 0; idx < sortedDesc.length; idx++) {
     const t = sortedDesc[idx];
-    const replacement = value && idx === sortedDesc.length - 1 ? `${target}:${value}` : '';
-    out = out.slice(0, t.offset) + replacement + out.slice(t.offset + t.length);
+    const isLastRemaining = idx === sortedDesc.length - 1;
+    if (value && isLastRemaining) {
+      out = out.slice(0, t.offset) + `${target}:${value}` + out.slice(t.offset + t.length);
+    } else {
+      const before = out.slice(0, t.offset);
+      const after = out.slice(t.offset + t.length);
+      const beforeTrimmed = before.replace(/[ \t\n\r]+$/, '');
+      const afterTrimmed = after.replace(/^[ \t\n\r]+/, '');
+      if (beforeTrimmed && afterTrimmed) {
+        out = `${beforeTrimmed} ${afterTrimmed}`;
+      } else {
+        out = beforeTrimmed + afterTrimmed;
+      }
+    }
   }
-  return out.replace(/\s+/g, ' ').trim();
+  return out.trim();
 }

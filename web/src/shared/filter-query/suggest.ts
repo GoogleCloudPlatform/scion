@@ -15,6 +15,7 @@
  */
 
 import { classifyMatch } from '../../utils/palette-match.js';
+import { formatValue } from './canonical.js';
 import type { ViewSchema } from './types.js';
 
 export interface Suggestion {
@@ -90,7 +91,7 @@ export function getSuggestions(
       .sort((a, b) => a.tier - b.tier || a.val.localeCompare(b.val));
 
     return scored.slice(0, 12).map(({ val }) => ({
-      insertText: val.includes(' ') ? `"${val}"` : val,
+      insertText: formatValue(val),
       label: val,
       replaceStart,
       replaceEnd: cursor,

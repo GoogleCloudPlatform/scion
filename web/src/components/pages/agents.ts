@@ -1829,6 +1829,24 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
+  /** Whether any filter (dialect query or legacy phase/label) is currently active. */
+  private get hasActiveFilter(): boolean {
+    if (filtersQueryDialectEnabled()) {
+      return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
+    }
+    return this.phaseFilter !== '' || this.committedLabel.trim() !== '';
+  }
+
+  private renderNoMatchingAgents(): TemplateResult {
+    return html`
+      <div class="empty-state">
+        <sl-icon name="funnel"></sl-icon>
+        <h2>No Matching Agents</h2>
+        <p>No agents match the current filter. Try changing or clearing the filter.</p>
+      </div>
+    `;
+  }
+
   /**
    * The agent views. The empty states read `T`: the member index total
    * while paged (the count-only snapshot above 2,000), otherwise
@@ -1838,7 +1856,9 @@ export class ScionPageAgents extends LitElement {
     const win = this.agentWindow;
     if (win.stats.total === 0 && win.display.length === 0) {
       // An incomplete or stale set still says so above the empty state.
-      return html`${this.renderWindowBanner()}${this.renderNoAgents()}`;
+      return html`${this.renderWindowBanner()}${this.hasActiveFilter
+        ? this.renderNoMatchingAgents()
+        : this.renderNoAgents()}`;
     }
 
     if (win.state === 'paged' && !win.isSortedEligible(this.committedLabel)) {
@@ -1855,22 +1875,17 @@ export class ScionPageAgents extends LitElement {
     }
 
     const filtered = win.display;
-    if (filtered.length === 0 && this.phaseFilter) {
+    if (filtered.length === 0 && this.hasActiveFilter) {
       // A capped, failed or stale set still says so above the empty state:
       // agents beyond what was loaded may match the filter.
-      return html`
-        ${this.renderWindowBanner()}
-        <div class="empty-state">
-          <sl-icon name="funnel"></sl-icon>
-          <h2>No Matching Agents</h2>
-          <p>No agents match the current filter. Try changing the status filter.</p>
-        </div>
-      `;
+      return html`${this.renderWindowBanner()}${this.renderNoMatchingAgents()}`;
     }
 
     if (this.viewMode === 'graph') {
       // Everything that can narrow/widen `filtered` independent of a delete.
-      const filterKey = `${this.loadedScope}|${this.phaseFilter}|${this.modeFilter}|${this.labelFilter}`;
+      const filterKey = filtersQueryDialectEnabled()
+        ? `${this.loadedScope}|${this.modeFilter}|${this.filterQueryText}`
+        : `${this.loadedScope}|${this.phaseFilter}|${this.modeFilter}|${this.labelFilter}`;
       return html`${this.renderWindowBanner()}<scion-agent-tree-view
           .agents=${filtered}
           filterKey=${filterKey}
