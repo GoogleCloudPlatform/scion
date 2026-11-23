@@ -59,6 +59,26 @@ func (b *flushingChunkBuffer) Flush() error {
 	return nil
 }
 
+type fakeWatchClock struct {
+	now time.Time
+}
+
+func newFakeWatchClock() *fakeWatchClock {
+	return &fakeWatchClock{now: time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC)}
+}
+
+func (c *fakeWatchClock) Now() time.Time { return c.now }
+
+func (c *fakeWatchClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+func (c *fakeWatchClock) Sleep(ctx context.Context, d time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.Advance(d)
+	return nil
+}
+
 // Criterion 16: --once exits 0 and prints the message; timeout exits 124 and
 // prints {"events":[],"timedOut":true,"nextCursor":...} under --json; 410 exits 3.
 func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
@@ -109,10 +129,11 @@ func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
 	})
 
 	t.Run("timeout exits 124 and writes timeout JSON", func(t *testing.T) {
+		clk := newFakeWatchClock()
 		var stdout, stderr bytes.Buffer
 		svc := &fakeWatchConvService{
 			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
-				time.Sleep(25 * time.Millisecond)
+				clk.Advance(25 * time.Millisecond)
 				return &hubclient.WatchResult{
 					Events:     []hubclient.WatchEvent{},
 					NextCursor: "cur-head",
@@ -130,6 +151,8 @@ func TestConversationWatchOnce_ExitCodesAndJSON(t *testing.T) {
 			JSON:           true,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
+			Now:            clk.Now,
+			Sleep:          clk.Sleep,
 		})
 		require.Error(t, err)
 		assert.Equal(t, 124, exitCodeFor(err))
@@ -237,13 +260,14 @@ func TestConversationWatch_Gating(t *testing.T) {
 // the first poll, executeConversationWatch exits 124 without issuing another
 // Watch call with Wait == 0 (which would omit wait and block for 30s).
 func TestConversationWatchOnce_ExpiredBudgetDoesNotPollWithZeroWait(t *testing.T) {
+	clk := newFakeWatchClock()
 	var stdout, stderr bytes.Buffer
 	calls := 0
 	svc := &fakeWatchConvService{
 		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
 			calls++
 			assert.Greater(t, opts.Wait, time.Duration(0), "Watch must never be called with Wait==0 when budget remains")
-			time.Sleep(15 * time.Millisecond)
+			clk.Advance(15 * time.Millisecond)
 			return &hubclient.WatchResult{
 				Events:     []hubclient.WatchEvent{},
 				NextCursor: "cur-1",
@@ -262,6 +286,8 @@ func TestConversationWatchOnce_ExpiredBudgetDoesNotPollWithZeroWait(t *testing.T
 		JSON:           true,
 		Stdout:         &stdout,
 		Stderr:         &stderr,
+		Now:            clk.Now,
+		Sleep:          clk.Sleep,
 	})
 	require.Error(t, err)
 	assert.Equal(t, 124, exitCodeFor(err))
@@ -320,6 +346,7 @@ func TestConversationWatchOnce_AccumulatesTruncatedAcrossPolls(t *testing.T) {
 	})
 
 	t.Run("preserved on subsequent timeout", func(t *testing.T) {
+		clk := newFakeWatchClock()
 		var stdout, stderr bytes.Buffer
 		call := 0
 		svc := &fakeWatchConvService{
@@ -333,7 +360,7 @@ func TestConversationWatchOnce_AccumulatesTruncatedAcrossPolls(t *testing.T) {
 						TimedOut:   true,
 					}, nil
 				}
-				time.Sleep(25 * time.Millisecond)
+				clk.Advance(25 * time.Millisecond)
 				return &hubclient.WatchResult{
 					Events:     []hubclient.WatchEvent{},
 					NextCursor: "cur-1",
@@ -353,6 +380,8 @@ func TestConversationWatchOnce_AccumulatesTruncatedAcrossPolls(t *testing.T) {
 			JSON:           true,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
+			Now:            clk.Now,
+			Sleep:          clk.Sleep,
 		})
 		require.Error(t, err)
 		assert.Equal(t, 124, exitCodeFor(err))
@@ -524,6 +553,7 @@ func TestConversationWatchStream_PlainRendererAndStderrCursor(t *testing.T) {
 }
 
 func TestConversationWatchStream_TimeoutExitsZero(t *testing.T) {
+	clk := newFakeWatchClock()
 	var stdout, stderr bytes.Buffer
 	var seenWaits []time.Duration
 	call := 0
@@ -532,7 +562,7 @@ func TestConversationWatchStream_TimeoutExitsZero(t *testing.T) {
 		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
 			call++
 			seenWaits = append(seenWaits, opts.Wait)
-			time.Sleep(25 * time.Millisecond)
+			clk.Advance(25 * time.Millisecond)
 			return &hubclient.WatchResult{
 				Events:     []hubclient.WatchEvent{},
 				NextCursor: "cur-timeout",
@@ -550,6 +580,8 @@ func TestConversationWatchStream_TimeoutExitsZero(t *testing.T) {
 		JSON:           false,
 		Stdout:         &stdout,
 		Stderr:         &stderr,
+		Now:            clk.Now,
+		Sleep:          clk.Sleep,
 	})
 	require.NoError(t, err, "stream mode reaching --timeout must exit 0")
 	assert.Equal(t, 1, call)
@@ -790,6 +822,7 @@ func TestConversationWatchStream_NonTransportErrorsAreTerminal(t *testing.T) {
 // lastCursor and exit 124; if no poll succeeded yet, return the error (exit 1).
 func TestConversationWatchOnce_TimeoutDuringRetry(t *testing.T) {
 	t.Run("after successful poll returns timeout JSON and exit 124", func(t *testing.T) {
+		clk := newFakeWatchClock()
 		var stdout, stderr bytes.Buffer
 		call := 0
 		svc := &fakeWatchConvService{
@@ -816,10 +849,8 @@ func TestConversationWatchOnce_TimeoutDuringRetry(t *testing.T) {
 			JSON:           true,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
-			Sleep: func(_ context.Context, _ time.Duration) error {
-				time.Sleep(35 * time.Millisecond)
-				return nil
-			},
+			Now:            clk.Now,
+			Sleep:          clk.Sleep,
 		})
 		require.Error(t, err)
 		assert.Equal(t, 124, exitCodeFor(err))
@@ -832,6 +863,7 @@ func TestConversationWatchOnce_TimeoutDuringRetry(t *testing.T) {
 	})
 
 	t.Run("before any successful poll returns transport error and exit 1", func(t *testing.T) {
+		clk := newFakeWatchClock()
 		var stdout, stderr bytes.Buffer
 		svc := &fakeWatchConvService{
 			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
@@ -848,10 +880,8 @@ func TestConversationWatchOnce_TimeoutDuringRetry(t *testing.T) {
 			JSON:           true,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
-			Sleep: func(_ context.Context, _ time.Duration) error {
-				time.Sleep(35 * time.Millisecond)
-				return nil
-			},
+			Now:            clk.Now,
+			Sleep:          clk.Sleep,
 		})
 		require.Error(t, err)
 		assert.Equal(t, 1, exitCodeFor(err))
@@ -1023,6 +1053,18 @@ func TestConversationWatch_OldHubUnsupported404Detection(t *testing.T) {
 // Deferred P1 item 6b: a tiny --timeout (e.g. 1ns) with no --cursor still
 // performs one immediate (wait=0) poll so the caller always receives a cursor.
 func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
+	newExpiredAfterSetupNow := func() func() time.Time {
+		clk := newFakeWatchClock()
+		calls := 0
+		return func() time.Time {
+			calls++
+			if calls > 1 {
+				clk.Advance(10 * time.Nanosecond)
+			}
+			return clk.Now()
+		}
+	}
+
 	t.Run("--once mode with 1ns timeout gets nextCursor on timeout", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		calls := 0
@@ -1048,6 +1090,7 @@ func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
 			JSON:           true,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
+			Now:            newExpiredAfterSetupNow(),
 		})
 		require.Error(t, err)
 		assert.Equal(t, 124, exitCodeFor(err))
@@ -1085,6 +1128,7 @@ func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
 			JSON:           true,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
+			Now:            newExpiredAfterSetupNow(),
 		})
 		require.NoError(t, err)
 		assert.Equal(t, 1, calls)
@@ -1101,6 +1145,7 @@ func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
 // succeeded, exit 0 cleanly with next-cursor on stderr.
 func TestConversationWatchStream_TimeoutDuringRetry(t *testing.T) {
 	t.Run("never succeeded returns error and exit 1", func(t *testing.T) {
+		clk := newFakeWatchClock()
 		var stdout, stderr bytes.Buffer
 		svc := &fakeWatchConvService{
 			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
@@ -1117,10 +1162,8 @@ func TestConversationWatchStream_TimeoutDuringRetry(t *testing.T) {
 			JSON:           true,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
-			Sleep: func(_ context.Context, _ time.Duration) error {
-				time.Sleep(35 * time.Millisecond)
-				return nil
-			},
+			Now:            clk.Now,
+			Sleep:          clk.Sleep,
 		})
 		require.Error(t, err)
 		assert.Equal(t, 1, exitCodeFor(err))
@@ -1128,6 +1171,7 @@ func TestConversationWatchStream_TimeoutDuringRetry(t *testing.T) {
 	})
 
 	t.Run("after successful poll exits 0 with next-cursor", func(t *testing.T) {
+		clk := newFakeWatchClock()
 		var stdout, stderr bytes.Buffer
 		call := 0
 		svc := &fakeWatchConvService{
@@ -1153,10 +1197,8 @@ func TestConversationWatchStream_TimeoutDuringRetry(t *testing.T) {
 			JSON:           false,
 			Stdout:         &stdout,
 			Stderr:         &stderr,
-			Sleep: func(_ context.Context, _ time.Duration) error {
-				time.Sleep(35 * time.Millisecond)
-				return nil
-			},
+			Now:            clk.Now,
+			Sleep:          clk.Sleep,
 		})
 		require.NoError(t, err)
 		assert.Contains(t, stderr.String(), "next-cursor: cur-ok\n")

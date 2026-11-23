@@ -139,6 +139,7 @@ type watchParams struct {
 	Stderr         io.Writer
 
 	// Optional test hooks; nil uses production defaults.
+	Now     func() time.Time
 	Sleep   func(ctx context.Context, d time.Duration) error
 	Backoff func(attempt int, retryAfter time.Duration) time.Duration
 }
@@ -201,6 +202,10 @@ func runConversationWatch(cmd *cobra.Command, args []string) error {
 }
 
 func executeConversationWatch(ctx context.Context, svc hubclient.ConversationService, params watchParams) error {
+	nowFn := params.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
 	sleepFn := params.Sleep
 	if sleepFn == nil {
 		sleepFn = sleepWithContext
@@ -216,7 +221,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 	)
 	if params.Timeout > 0 {
 		hasDeadline = true
-		deadline = time.Now().Add(params.Timeout)
+		deadline = nowFn().Add(params.Timeout)
 	}
 
 	opts := hubclient.WatchOptions{
@@ -270,7 +275,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 		wait := watchMaxServerWait
 		opts.Immediate = false
 		if hasDeadline {
-			remaining := time.Until(deadline)
+			remaining := deadline.Sub(nowFn())
 			if remaining <= 0 {
 				if polled {
 					return finishAtDeadline(nil)
@@ -310,7 +315,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			consecutiveErrors++
 			delay := backoffFn(consecutiveErrors, retryAfter)
 			if hasDeadline {
-				remaining := time.Until(deadline)
+				remaining := deadline.Sub(nowFn())
 				if remaining <= 0 {
 					return finishAtDeadline(err)
 				}
@@ -324,7 +329,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			if sleepErr := sleepFn(ctx, delay); sleepErr != nil {
 				return handleInterrupt()
 			}
-			if hasDeadline && time.Until(deadline) <= 0 {
+			if hasDeadline && deadline.Sub(nowFn()) <= 0 {
 				return finishAtDeadline(err)
 			}
 			continue
@@ -350,7 +355,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 				}
 				return writeWatchOncePlain(params.Stdout, params.Stderr, res)
 			}
-			if hasDeadline && time.Until(deadline) <= 0 {
+			if hasDeadline && deadline.Sub(nowFn()) <= 0 {
 				return finishAtDeadline(nil)
 			}
 		} else {
@@ -375,7 +380,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 				}
 			}
 
-			if hasDeadline && time.Until(deadline) <= 0 {
+			if hasDeadline && deadline.Sub(nowFn()) <= 0 {
 				return finishAtDeadline(nil)
 			}
 		}
@@ -388,7 +393,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 		}
 		if paceDelay > 0 {
 			if hasDeadline {
-				remaining := time.Until(deadline)
+				remaining := deadline.Sub(nowFn())
 				if remaining <= 0 {
 					return finishAtDeadline(nil)
 				}
@@ -399,7 +404,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			if sleepErr := sleepFn(ctx, paceDelay); sleepErr != nil {
 				return handleInterrupt()
 			}
-			if hasDeadline && time.Until(deadline) <= 0 {
+			if hasDeadline && deadline.Sub(nowFn()) <= 0 {
 				return finishAtDeadline(nil)
 			}
 		}
