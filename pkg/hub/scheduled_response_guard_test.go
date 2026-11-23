@@ -312,6 +312,27 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 			sentinel := "EXECSENTINEL-" + uuid.NewString()
 			outputCanary := "EXECOUTPUTCANARY-" + uuid.NewString()
 			rows := seedGuardRows(t, f, sentinel, outputCanary)
+
+			// Positive control (before c.setup potentially revokes f.owner's
+			// attach): attach holder gets 200 on /output with Cache-Control:
+			// no-store, and NEVER sees the output canary on any other GET route (A10).
+			owner := authUser(f.owner)
+			for _, key := range guardOrder {
+				if key == "GET /api/v1/projects/{projectId}/scheduled-events/{id}/output" {
+					rec := requestAsIdentity(t, f.srv, owner, http.MethodGet, cases[key].path(f, rows), nil)
+					assert.Equal(t, http.StatusOK, rec.Code, "attach holder must get 200 on /output: %s", rec.Body.String())
+					assert.Contains(t, rec.Body.String(), outputCanary, "positive control: attach holder receives output canary")
+					assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+					continue
+				}
+				method, _, _ := strings.Cut(key, " ")
+				if method != http.MethodGet {
+					continue
+				}
+				rec := requestAsIdentity(t, f.srv, owner, method, cases[key].path(f, rows), nil)
+				assert.NotContains(t, rec.Body.String(), outputCanary, "catalogued route %s leaked output canary even to attach holder", key)
+			}
+
 			identity := c.setup(t, f)
 			successes := 0
 			for _, key := range guardOrder {
@@ -333,25 +354,6 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 				t.Logf("%s -> %d", key, rec.Code)
 			}
 			assert.Positive(t, successes, "the caller must reach at least some routes for the guard to mean anything")
-
-			// Also verify an attach holder NEVER sees the output canary on any
-			// catalogued route OTHER than /output (A10).
-			owner := authUser(f.owner)
-			for _, key := range guardOrder {
-				if key == "GET /api/v1/projects/{projectId}/scheduled-events/{id}/output" {
-					rec := requestAsIdentity(t, f.srv, owner, http.MethodGet, cases[key].path(f, rows), nil)
-					assert.Equal(t, http.StatusOK, rec.Code, "attach holder must get 200 on /output: %s", rec.Body.String())
-					assert.Contains(t, rec.Body.String(), outputCanary, "positive control: attach holder receives output canary")
-					assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
-					continue
-				}
-				method, _, _ := strings.Cut(key, " ")
-				if method != http.MethodGet {
-					continue
-				}
-				rec := requestAsIdentity(t, f.srv, owner, method, cases[key].path(f, rows), nil)
-				assert.NotContains(t, rec.Body.String(), outputCanary, "catalogued route %s leaked output canary even to attach holder", key)
-			}
 
 			// R1 transition & reclassification guard cases: reclassifying or
 			// re-targeting an exec row (including to an agent the caller DOES

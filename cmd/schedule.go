@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,19 +39,20 @@ const defaultExecTimeoutSeconds = 60
 
 // Schedule command flags
 var (
-	scheduleType      string
-	scheduleStatus    string
-	scheduleIn        string
-	scheduleAt        string
-	scheduleAgent     string
-	scheduleMessage   string
-	scheduleInterrupt bool
-	scheduleWake      bool
-	scheduleTimeout   string
-	scheduleName      string
-	scheduleCron      string
-	scheduleTimeZone  string
-	scheduleListType  string // "events", "recurring", "all"
+	scheduleType          string
+	scheduleStatus        string
+	scheduleIn            string
+	scheduleAt            string
+	scheduleAgent         string
+	scheduleMessage       string
+	scheduleInterrupt     bool
+	scheduleWake          bool
+	scheduleTimeout       string
+	scheduleCaptureOutput string
+	scheduleName          string
+	scheduleCron          string
+	scheduleTimeZone      string
+	scheduleListType      string // "events", "recurring", "all"
 )
 
 // scheduleCmd is the top-level command group for schedule management.
@@ -74,6 +76,25 @@ var scheduleGetCmd = &cobra.Command{
 	Short: "Get details of a scheduled event",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runScheduleGet,
+}
+
+// scheduleEventsCmd groups scheduled-event subcommands.
+var scheduleEventsCmd = &cobra.Command{
+	Use:   "events",
+	Short: "Inspect scheduled events",
+}
+
+// scheduleEventsOutputCmd retrieves captured output of an exec scheduled event.
+var scheduleEventsOutputCmd = &cobra.Command{
+	Use:   "output <event-id>",
+	Short: "Fetch captured output of an exec scheduled event",
+	Long: `Fetch the bounded captured output of an exec scheduled event whose captureOutput
+was set to "json" or "tail". Requires live attach permission on the target agent.
+
+Prints pretty-printed JSON for json mode or raw text for tail mode; pass --json
+for the full response envelope.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runScheduleEventsOutput,
 }
 
 // scheduleCancelCmd cancels a pending scheduled event.
@@ -563,6 +584,12 @@ func printEventExecSummary(s *hubclient.ExecSummary) {
 	if s.OutputBytes != nil {
 		fmt.Printf("  Output:     %d B\n", *s.OutputBytes)
 	}
+	if s.CaptureMode != "" {
+		fmt.Printf("  Capture:    %s\n", s.CaptureMode)
+	}
+	if s.OutputStatus != "" {
+		fmt.Printf("  Out Status: %s\n", s.OutputStatus)
+	}
 }
 
 func printScheduleDetail(sched *hubclient.Schedule, lastExec *hubclient.ExecSummary) {
@@ -613,6 +640,7 @@ type execPayloadView struct {
 	AgentName       string   `json:"agentName"`
 	Command         []string `json:"command"`
 	TimeoutSeconds  int      `json:"timeoutSeconds"`
+	CaptureOutput   string   `json:"captureOutput"`
 	CommandRedacted bool     `json:"commandRedacted"`
 	Argc            int      `json:"argc"`
 	CommandSHA256   string   `json:"commandSha256"`
@@ -660,6 +688,9 @@ func printSchedulePayloadDetail(eventType, rawPayload string) {
 				timeoutSec = defaultExecTimeoutSeconds
 			}
 			fmt.Printf("  Timeout:    %ds\n", timeoutSec)
+			if p.CaptureOutput != "" {
+				fmt.Printf("  Capture:    %s\n", p.CaptureOutput)
+			}
 		}
 		return
 	}
@@ -688,6 +719,75 @@ func printSchedulePayloadDetail(eventType, rawPayload string) {
 	}
 	if branch, ok := payload["branch"].(string); ok && branch != "" {
 		fmt.Printf("  Branch:     %s\n", branch)
+	}
+}
+
+func runScheduleEventsOutput(cmd *cobra.Command, args []string) error {
+	eventID := args[0]
+
+	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	fullID, _, err := resolveScheduleID(ctx, hubCtx, projectID, eventID, "event")
+	if err != nil {
+		return err
+	}
+
+	out, err := hubCtx.Client.ScheduledEvents(projectID).GetOutput(ctx, fullID)
+	if err != nil {
+		return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to get scheduled event output: %w", err))
+	}
+	return writeExecOutput(out)
+}
+
+func writeExecOutput(out *hubclient.ExecOutput) error {
+	if isJSONOutput() {
+		return outputJSON(out)
+	}
+	if len(out.Output) == 0 {
+		if out.OutputStatus != "" {
+			fmt.Printf("No captured output (status: %s).\n", out.OutputStatus)
+		} else {
+			fmt.Println("No captured output.")
+		}
+		return nil
+	}
+	switch out.CaptureMode {
+	case agentcontrol.ExecCaptureJSON:
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, out.Output, "", "  "); err != nil {
+			fmt.Println(string(out.Output))
+			return nil
+		}
+		fmt.Println(buf.String())
+	case agentcontrol.ExecCaptureTail:
+		var s string
+		if err := json.Unmarshal(out.Output, &s); err != nil {
+			fmt.Println(string(out.Output))
+			return nil
+		}
+		if strings.HasSuffix(s, "\n") {
+			fmt.Print(s)
+		} else {
+			fmt.Println(s)
+		}
+	default:
+		fmt.Println(string(out.Output))
+	}
+	return nil
+}
+
+func parseExecCaptureOutput(raw string) (string, error) {
+	switch raw {
+	case "", "none":
+		return "", nil
+	case agentcontrol.ExecCaptureJSON, agentcontrol.ExecCaptureTail:
+		return raw, nil
+	default:
+		return "", fmt.Errorf("invalid --capture-output %q: must be none, json, or tail", raw)
 	}
 }
 
@@ -796,6 +896,9 @@ func validateScheduleTypeFlags(cmd *cobra.Command, args []string, resourcePlural
 		if scheduleTimeout != "" {
 			return fmt.Errorf("--timeout is only valid with --type exec")
 		}
+		if scheduleCaptureOutput != "" {
+			return fmt.Errorf("--capture-output is only valid with --type exec")
+		}
 		if cmd != nil && cmd.ArgsLenAtDash() >= 0 {
 			return fmt.Errorf("command arguments after '--' are only valid with --type exec")
 		}
@@ -813,6 +916,9 @@ func validateScheduleTypeFlags(cmd *cobra.Command, args []string, resourcePlural
 			return fmt.Errorf("--wake is not supported with --type exec")
 		}
 		if _, err := parseExecTimeoutSeconds(scheduleTimeout); err != nil {
+			return err
+		}
+		if _, err := parseExecCaptureOutput(scheduleCaptureOutput); err != nil {
 			return err
 		}
 		if _, err := extractExecCommandArgs(cmd, args); err != nil {
@@ -952,11 +1058,16 @@ func buildCreateEventRequestForCmd(cmd *cobra.Command, args []string) (*hubclien
 	if err != nil {
 		return nil, err
 	}
+	captureOutput, err := parseExecCaptureOutput(scheduleCaptureOutput)
+	if err != nil {
+		return nil, err
+	}
 	req := &hubclient.CreateScheduledEventRequest{
 		EventType:      scheduleType,
 		AgentName:      scheduleAgent,
 		Command:        argv,
 		TimeoutSeconds: timeoutSecs,
+		CaptureOutput:  captureOutput,
 	}
 	if scheduleIn != "" {
 		req.FireIn = scheduleIn
@@ -993,6 +1104,10 @@ func buildCreateRecurringRequestForCmd(cmd *cobra.Command, args []string) (*hubc
 	if err != nil {
 		return nil, err
 	}
+	captureOutput, err := parseExecCaptureOutput(scheduleCaptureOutput)
+	if err != nil {
+		return nil, err
+	}
 	return &hubclient.CreateScheduleRequest{
 		Name:           scheduleName,
 		CronExpr:       scheduleCron,
@@ -1001,6 +1116,7 @@ func buildCreateRecurringRequestForCmd(cmd *cobra.Command, args []string) (*hubc
 		AgentName:      scheduleAgent,
 		Command:        argv,
 		TimeoutSeconds: timeoutSecs,
+		CaptureOutput:  captureOutput,
 	}, nil
 }
 
@@ -1233,6 +1349,8 @@ func init() {
 
 	scheduleCmd.AddCommand(scheduleListCmd)
 	scheduleCmd.AddCommand(scheduleGetCmd)
+	scheduleEventsCmd.AddCommand(scheduleEventsOutputCmd)
+	scheduleCmd.AddCommand(scheduleEventsCmd)
 	scheduleCmd.AddCommand(scheduleCancelCmd)
 	scheduleCmd.AddCommand(scheduleCreateCmd)
 	scheduleCmd.AddCommand(scheduleCreateRecurringCmd)
@@ -1262,6 +1380,7 @@ func registerScheduleCreateFlags(c *cobra.Command) {
 	c.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Message events only: interrupt the agent")
 	c.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
 	c.Flags().StringVar(&scheduleTimeout, "timeout", "", "Exec events only: command timeout as a whole-second duration from 1s to 60m (default 60s)")
+	c.Flags().StringVar(&scheduleCaptureOutput, "capture-output", "", "Exec events only: opt-in output capture mode (none, json, or tail; default none)")
 }
 
 func registerScheduleCreateRecurringFlags(c *cobra.Command) {
@@ -1274,6 +1393,7 @@ func registerScheduleCreateRecurringFlags(c *cobra.Command) {
 	c.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Message schedules only: interrupt the agent")
 	c.Flags().BoolVar(&scheduleWake, "wake", false, "Message schedules only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
 	c.Flags().StringVar(&scheduleTimeout, "timeout", "", "Exec schedules only: command timeout as a whole-second duration from 1s to 60m (default 60s)")
+	c.Flags().StringVar(&scheduleCaptureOutput, "capture-output", "", "Exec schedules only: opt-in output capture mode (none, json, or tail; default none)")
 }
 
 // scheduleWhen renders a scheduled time relative to now. A pending time that

@@ -76,6 +76,7 @@ type CreateScheduleRequest struct {
 	Branch         string   `json:"branch,omitempty"`
 	Command        []string `json:"command,omitempty"`
 	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+	CaptureOutput  string   `json:"captureOutput,omitempty"`
 }
 
 // UpdateScheduleRequest is the client-side request for updating a schedule.
@@ -83,10 +84,15 @@ type UpdateScheduleRequest struct {
 	Name     string `json:"name,omitempty"`
 	CronExpr string `json:"cronExpr,omitempty"`
 	// TimeZone: nil leaves the zone unchanged; "" sets it back to UTC.
-	TimeZone  *string `json:"timeZone,omitempty"`
-	EventType string  `json:"eventType,omitempty"`
-	Payload   string  `json:"payload,omitempty"`
-	Status    string  `json:"status,omitempty"`
+	TimeZone       *string  `json:"timeZone,omitempty"`
+	EventType      string   `json:"eventType,omitempty"`
+	Payload        string   `json:"payload,omitempty"`
+	Status         string   `json:"status,omitempty"`
+	AgentID        string   `json:"agentId,omitempty"`
+	AgentName      string   `json:"agentName,omitempty"`
+	Command        []string `json:"command,omitempty"`
+	TimeoutSeconds *int     `json:"timeoutSeconds,omitempty"`
+	CaptureOutput  *string  `json:"captureOutput,omitempty"`
 }
 
 // Schedule represents a recurring schedule returned by the Hub API.

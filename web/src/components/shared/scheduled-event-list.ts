@@ -125,6 +125,10 @@ export class ScionScheduledEventList extends LitElement {
   // Detail dialog
   @state() private detailEvent: ScheduledEvent | null = null;
   @state() private detailOpen = false;
+  @state() private outputLoading = false;
+  @state() private outputError: string | null = null;
+  @state() private outputText: string | null = null;
+  @state() private outputFetched = false;
 
   /** Bumped on every load, so a slower, older walk never overwrites a newer result. */
   private loadGeneration = 0;
@@ -370,11 +374,61 @@ export class ScionScheduledEventList extends LitElement {
   private showDetail(evt: ScheduledEvent): void {
     this.detailEvent = evt;
     this.detailOpen = true;
+    this.outputLoading = false;
+    this.outputError = null;
+    this.outputText = null;
+    this.outputFetched = false;
   }
 
   private closeDetail(): void {
     this.detailOpen = false;
     this.detailEvent = null;
+    this.outputLoading = false;
+    this.outputError = null;
+    this.outputText = null;
+    this.outputFetched = false;
+  }
+
+  private async handleViewOutput(eventId: string): Promise<void> {
+    this.outputLoading = true;
+    this.outputError = null;
+    this.outputText = null;
+    this.outputFetched = false;
+
+    try {
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events/${encodeURIComponent(eventId)}/output`
+      );
+      if (this.detailEvent?.id !== eventId) return;
+      if (response.status === 403) {
+        this.outputError = 'Output unavailable: requires attach on the agent.';
+        return;
+      }
+      if (!response.ok) {
+        this.outputError = await extractApiError(response, `HTTP ${response.status}`);
+        return;
+      }
+      const data = (await response.json()) as {
+        captureMode?: string;
+        outputStatus?: string;
+        output?: unknown;
+      };
+      this.outputFetched = true;
+      if (data.output === undefined) {
+        this.outputText = null;
+      } else if (data.captureMode === 'json') {
+        this.outputText = JSON.stringify(data.output, null, 2);
+      } else {
+        this.outputText = typeof data.output === 'string' ? data.output : String(data.output);
+      }
+    } catch (err) {
+      if (this.detailEvent?.id !== eventId) return;
+      this.outputError = err instanceof Error ? err.message : 'Failed to load output';
+    } finally {
+      if (this.detailEvent?.id === eventId) {
+        this.outputLoading = false;
+      }
+    }
   }
 
   /** Relative fire time; an overdue pending instant reads "now", as before. */
@@ -767,6 +821,32 @@ export class ScionScheduledEventList extends LitElement {
           ${isExec && execPayload
             ? html`
                 ${renderExecRunSummaryRows(evt.execSummary)} ${renderExecDetailPayload(execPayload)}
+                ${evt.execSummary?.captureMode
+                  ? html`
+                      <div class="exec-output-section">
+                        <div>
+                          <sl-button
+                            size="small"
+                            variant="default"
+                            class="exec-view-output-btn"
+                            ?loading=${this.outputLoading}
+                            @click=${() => this.handleViewOutput(evt.id)}
+                          >
+                            View output
+                          </sl-button>
+                        </div>
+                        ${this.outputError
+                          ? html`<div class="exec-output-error">${this.outputError}</div>`
+                          : this.outputFetched
+                            ? this.outputText !== null
+                              ? html`<pre class="exec-output-pre">${this.outputText}</pre>`
+                              : html`<div class="exec-no-output-note">
+                                  No captured output (${evt.execSummary.outputStatus ?? 'none'}).
+                                </div>`
+                            : nothing}
+                      </div>
+                    `
+                  : nothing}
               `
             : nothing}
           ${evt.eventType === 'message' && payloadDetails.message

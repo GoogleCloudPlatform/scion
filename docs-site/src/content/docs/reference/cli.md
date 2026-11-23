@@ -1686,19 +1686,21 @@ Manage one-shot scheduled events and recurring cron schedules on the Hub for the
         - `--interrupt`: Interrupt the target agent (`message` events only; rejected with `--type exec`).
         - `--wake`: Resume the target agent if it is suspended when a `message` event fires (`message` events only; requires permission to start it; stopped agents are not resumed; rejected with `--type exec`).
         - `--timeout <duration>`: Command timeout as a whole-second duration from `1s` to `60m` / `3600s` (default `60s`; `exec` events only, rejected with `--type message`).
+        - `--capture-output <none|json|tail>`: Opt-in bounded output capture (`none` default, `json` stdout-only up to 64 KiB, or `tail` merged stdout/stderr last 64 KiB; `exec` events only, rejected with `--type message`). Captured output is stored as written without secret redaction.
         - `-- <argv...>`: Command arguments executed directly without a shell (`exec` events only; `1`–`64` non-NUL arguments, non-empty `argv[0]`, at most `4,096` bytes per argument and `16,384` bytes total; rejected with `--type message`).
 - `scion schedule create-recurring [-- <argv...>]`: Create a recurring cron schedule. Requires `--name`, `--cron`, and `--agent`.
     - Flags:
         - `--name <name>` (required): Unique schedule name within the project.
         - `--cron "<min> <hour> <dom> <mon> <dow>"` (required): Standard 5-field cron expression (zone prefixes `CRON_TZ=` and `TZ=` are rejected).
         - `--time-zone <IANA-zone>`: IANA time zone in which `--cron` is evaluated (for example `America/Los_Angeles`; defaults to `UTC` when omitted; displayed next-run times follow `--tz` / display zone).
-        - `--type <message|exec>`, `--agent <name>`, `--message <text>`, `--interrupt`, `--wake`, `--timeout <duration>`, `-- <argv...>`: Same event parameters and validation rules as `create`.
+        - `--type <message|exec>`, `--agent <name>`, `--message <text>`, `--interrupt`, `--wake`, `--timeout <duration>`, `--capture-output <none|json|tail>`, `-- <argv...>`: Same event parameters and validation rules as `create`.
 - `scion schedule list`: List recurring schedules and one-shot events in the project. When caller-scoped (`scope: "caller"` or authenticated with an agent token), the Hub returns only schedules and events whose recorded authority is that agent, and text mode prints `Note: showing only schedules and events held by this agent (other project schedules are hidden).` on stdout.
     - Flags:
         - `--show <all|events|recurring>`: Filter by resource type (default: `all`).
         - `--status <status>`: Filter by status (`pending`, `firing`, `fired`, `skipped`, `cancelled`, `expired`, `failed`, `active`, `paused`).
         - `--type <message|dispatch_agent|exec>`: Filter one-shot scheduled events by event type.
-- `scion schedule get <id>`: Inspect a one-shot event or recurring schedule by full UUID or unique UUID prefix. For `exec` events and schedules, displays `Command` (or `<redacted, N args, sha256:...>` when redacted), `Timeout`, and `execSummary` fields (`Outcome`, `Exit Code`, `Duration`, `Output` on events; `Last Outcome` and `Last Exit Code` from the latest history entry on recurring schedules).
+- `scion schedule get <id>`: Inspect a one-shot event or recurring schedule by full UUID or unique UUID prefix. For `exec` events and schedules, displays `Command` (or `<redacted, N args, sha256:...>` when redacted), `Timeout`, `Capture` (when set), and `execSummary` fields (`Outcome`, `Exit Code`, `Duration`, `Output`, `Capture`, `Out Status` on events; `Last Outcome` and `Last Exit Code` from the latest history entry on recurring schedules).
+- `scion schedule events output <event-id>`: Fetch the captured output of an `exec` scheduled event (requires live `agent.attach` on the target agent; available in both human and agent mode). Prints pretty-printed JSON for `json` mode or raw text for `tail` mode; pass `--json` for the full response envelope.
 - `scion schedule cancel <id>`: Cancel a `pending` one-shot event (accepts full UUID or unique UUID prefix).
 - `scion schedule pause <id>`, `scion schedule resume <id>`, `scion schedule delete <id>`: Pause, resume, or delete a recurring schedule by full UUID or unique UUID prefix. Resuming a schedule records the caller's authority (and for `exec` schedules, requires live `agent.attach` on the stored target).
 - `scion schedule history <id>`: Show recent execution history for a recurring schedule by full UUID or unique UUID prefix (adds `OUTCOME`, `EXIT`, `DURATION`, and `OUTPUT` columns when any entry is an `exec` run).
