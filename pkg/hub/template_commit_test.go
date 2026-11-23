@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1142,5 +1143,52 @@ func TestTemplateCommit_AgentConfigValidation(t *testing.T) {
 			UploadID: uploadID,
 		})
 		assert422InvalidConfig(t, doTemplateRequest(t, srv, http.MethodPost, "/api/v1/templates/"+created2.Template.ID+"/finalize", "application/json", finBody2), "auth_selectedType")
+	})
+
+	t.Run("oversized_agent_config", func(t *testing.T) {
+		oversizedYAML := "# " + strings.Repeat("a", maxTemplateFileSize) + "\n"
+		for _, on := range []bool{true, false} {
+			name := "flag_off"
+			if on {
+				name = "flag_on"
+			}
+			t.Run("finalize/"+name, func(t *testing.T) {
+				srv, s := newCommitTestServer(t, newCommitTestStorage(t))
+				setTemplateValidationExperiment(t, srv, on)
+				logs := captureSlogDefault(t)
+				tmpl := seedCommittedTemplate(t, srv, "tpl-oversized-"+name, store.TemplateScopeGlobal, "", map[string]string{"scion-agent.yaml": commitCfgOld})
+				next := map[string]string{"scion-agent.yaml": oversizedYAML}
+				stageObjects(t, srv, tmpl, next)
+				w := finalizeTemplate(t, srv, tmpl.ID, commitManifest(next))
+				if on {
+					assert422InvalidConfig(t, w, "too large to validate")
+					assertUnchanged(t, s, tmpl)
+				} else {
+					mustStatus(t, w, http.StatusOK)
+					if !strings.Contains(logs.String(), "too large to validate") {
+						t.Errorf("expected warning log when flag off, got:\n%s", logs.String())
+					}
+				}
+			})
+			t.Run("bootstrap/"+name, func(t *testing.T) {
+				srv, _ := newCommitTestServer(t, newCommitTestStorage(t))
+				setTemplateValidationExperiment(t, srv, on)
+				dir := writeTemplateDir(t, t.TempDir(), "oversized-boot", map[string]string{
+					"scion-agent.yaml": oversizedYAML,
+				})
+				_, err := srv.templateStore().Bootstrap(ctx, "oversized-boot", dir, store.TemplateScopeGlobal, "", "", false)
+				if on {
+					var iac *invalidAgentConfigError
+					if !errors.As(err, &iac) {
+						t.Fatalf("Bootstrap(flag_on) err = %v, want *invalidAgentConfigError", err)
+					}
+					if !strings.Contains(iac.PublicMessage(), "too large to validate") {
+						t.Errorf("PublicMessage() = %q, want 'too large to validate'", iac.PublicMessage())
+					}
+				} else if err != nil {
+					t.Fatalf("Bootstrap(flag_off) unexpected error: %v", err)
+				}
+			})
+		}
 	})
 }

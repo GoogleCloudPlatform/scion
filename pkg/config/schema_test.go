@@ -730,10 +730,62 @@ func TestValidateTemplateAgentConfig_ValidAndEdgeCases(t *testing.T) {
 		assert.Empty(t, findings)
 	})
 
-	t.Run("open top level allows unknown keys", func(t *testing.T) {
-		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte("description: my template\nunknown_future_key: true\n"))
+	t.Run("json null root accepted", func(t *testing.T) {
+		for _, raw := range [][]byte{[]byte("null"), []byte("  null \n")} {
+			findings, err := ValidateTemplateAgentConfig("scion-agent.json", raw)
+			require.NoError(t, err)
+			assert.Empty(t, findings)
+		}
+	})
+
+	t.Run("json null with trailing data refused", func(t *testing.T) {
+		_, err := ValidateTemplateAgentConfig("scion-agent.json", []byte("null {}"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to parse agent config scion-agent.json")
+	})
+
+	t.Run("json array root refused", func(t *testing.T) {
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", []byte("[]"))
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "", findings[0].Path)
+	})
+
+	t.Run("closed top level accepts declared fields and refuses unknown keys", func(t *testing.T) {
+		validYAML := `
+description: my template
+thinking_level: 50
+persistence: ephemeral
+skills:
+  - uri: skill://example/foo
+    as: foo
+    optional: true
+task: run tests
+branch: main
+explicit_workspace: false
+empty_per_agent_workspace: false
+`
+		findings, err := ValidateTemplateAgentConfig("scion-agent.yaml", []byte(validYAML))
 		require.NoError(t, err)
 		assert.Empty(t, findings)
+
+		findings, err = ValidateTemplateAgentConfig("scion-agent.yaml", []byte("description: my template\nunknown_future_key: true\n"))
+		require.NoError(t, err)
+		require.NotEmpty(t, findings, "unknown top-level key must be refused now that top level is closed")
+		assert.Contains(t, findings[0].Message, "unknown_future_key")
+	})
+
+	t.Run("nested json key case canonicalized", func(t *testing.T) {
+		raw := []byte(`{"services":[{"Name":"x","Command":["a"]}],"mcp_servers":{"MyServer":{"Transport":"stdio","Command":"npx","Env":{"KEEP_CASE":"1"}}}}`)
+		cfg, err := ParseScionAgentConfig("scion-agent.json", raw)
+		require.NoError(t, err)
+		require.Len(t, cfg.Services, 1)
+		assert.Equal(t, "x", cfg.Services[0].Name)
+		assert.Equal(t, []string{"a"}, cfg.Services[0].Command)
+
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", raw)
+		require.NoError(t, err)
+		assert.Empty(t, findings, "valid nested JSON with case-variant struct keys should be accepted")
 	})
 }
 
@@ -858,6 +910,35 @@ func TestValidateTemplateAgentConfig_InvalidAndNormalization(t *testing.T) {
 		assert.Equal(t, "auth_selectedType", findings[0].Path)
 	})
 
+	t.Run("nested json case-variant invalid value and last-wins", func(t *testing.T) {
+		// Nested invalid enum via case-variant key is caught.
+		rawBad := []byte(`{"services":[{"Name":"x","Command":["a"],"RESTART":"bogus"}]}`)
+		findings, err := ValidateTemplateAgentConfig("scion-agent.json", rawBad)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "services/0/restart", findings[0].Path)
+
+		// Nested duplicate case-variant: last key wins (invalid last -> refused).
+		rawDupBad := []byte(`{"services":[{"name":"x","command":["a"],"restart":"always","RESTART":"bogus"}]}`)
+		findings, err = ValidateTemplateAgentConfig("scion-agent.json", rawDupBad)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "services/0/restart", findings[0].Path)
+
+		// Nested duplicate case-variant: valid last -> accepted.
+		rawDupGood := []byte(`{"services":[{"name":"x","command":["a"],"RESTART":"bogus","restart":"always"}]}`)
+		findings, err = ValidateTemplateAgentConfig("scion-agent.json", rawDupGood)
+		require.NoError(t, err)
+		assert.Empty(t, findings)
+
+		// Nested object under map (additionalProperties schema): mcp_servers.<name>.TRANSPORT.
+		rawMCPBad := []byte(`{"mcp_servers":{"srv":{"TRANSPORT":"invalid"}}}`)
+		findings, err = ValidateTemplateAgentConfig("scion-agent.json", rawMCPBad)
+		require.NoError(t, err)
+		require.NotEmpty(t, findings)
+		assert.Equal(t, "mcp_servers/srv/transport", findings[0].Path)
+	})
+
 	t.Run("yaml duplicate key after hyphen normalization refused", func(t *testing.T) {
 		raw := []byte("auth_selectedType: api-key\nauth-selectedType: none\n")
 		_, parseErr := ParseScionAgentConfig("scion-agent.yaml", raw)
@@ -888,6 +969,32 @@ func TestValidateTemplateAgentConfig_InvalidAndNormalization(t *testing.T) {
 		_, err := ValidateTemplateAgentConfig("scion-agent.json", []byte(`{"max_turns":`))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to parse agent config scion-agent.json")
+	})
+
+	t.Run("json exceeding max nesting depth refused", func(t *testing.T) {
+		// Depth 10001 (1 outer object + 10000 nested arrays) exceeds encoding/json's
+		// maxNestingDepth (10000) and must be rejected as a parse error rather than
+		// recursing unboundedly.
+		deepArr := []byte(`{"kubernetes":` + strings.Repeat("[", maxJSONNestingDepth) + strings.Repeat("]", maxJSONNestingDepth) + `}`)
+		_, parseErr := ParseScionAgentConfig("scion-agent.json", deepArr)
+		require.Error(t, parseErr)
+
+		_, valErr := ValidateTemplateAgentConfig("scion-agent.json", deepArr)
+		require.Error(t, valErr)
+		assert.Contains(t, valErr.Error(), "failed to parse agent config scion-agent.json")
+		assert.Contains(t, valErr.Error(), "exceeded max depth")
+
+		// Nested objects exceeding maxJSONNestingDepth are also rejected.
+		deepObj := []byte(strings.Repeat(`{"a":`, maxJSONNestingDepth+1) + `1` + strings.Repeat(`}`, maxJSONNestingDepth+1))
+		_, valErr = ValidateTemplateAgentConfig("scion-agent.json", deepObj)
+		require.Error(t, valErr)
+		assert.Contains(t, valErr.Error(), "exceeded max depth")
+
+		// Exactly maxJSONNestingDepth levels (1 outer object + 9999 nested arrays)
+		// parses without hitting the depth cap (matches encoding/json).
+		atLimit := []byte(`{"kubernetes":` + strings.Repeat("[", maxJSONNestingDepth-1) + strings.Repeat("]", maxJSONNestingDepth-1) + `}`)
+		_, err := decodeJSONCanonical(atLimit)
+		require.NoError(t, err)
 	})
 }
 

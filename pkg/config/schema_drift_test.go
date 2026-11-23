@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/stretchr/testify/require"
 )
 
@@ -121,6 +122,62 @@ func TestSettingsSchema_NoDriftFromGoTypes(t *testing.T) {
 
 	require.Empty(t, unexpected, "settings-v1 schema drifted from the Go settings types; add the missing schema properties / Go fields, or allow-list intentional mismatches in schemaDriftAllowList:\n  %s", strings.Join(unexpected, "\n  "))
 	require.Empty(t, stale, "schemaDriftAllowList entries no longer match any drift; remove them:\n  %s", strings.Join(stale, "\n  "))
+}
+
+// agentSchemaDriftAllowList lists intentional mismatches between api.ScionConfig
+// (and its reachable nested types) and agent-v1.schema.json. Every entry must
+// explain why the mismatch is intentional.
+var agentSchemaDriftAllowList = map[string]string{
+	// Schema-only top-level keys that are valid in scion-agent.yaml but not
+	// stored on api.ScionConfig.
+	"schema-only: $schema":        "JSON Schema pointer for IDE support; not an agent config field",
+	"schema-only: schema_version": "schema version marker in scion-agent.yaml; not on api.ScionConfig",
+	"schema-only: description":    "template metadata field used in embedded default and imported templates",
+	"schema-only: args":           "legacy/schema-declared args array retained for backwards compatibility",
+
+	// Wire-only fields on api.ScionConfig (yaml:"-"); ignored if a template sets them.
+	"go-only: cleared_fields": "wire-only hub-to-broker field (yaml:\"-\"); not valid in template configs",
+	"go-only: changed_fields": "wire-only hub-to-broker field (yaml:\"-\"); not valid in template configs",
+}
+
+// TestAgentSchema_NoDriftFromGoTypes walks api.ScionConfig alongside
+// agent-v1.schema.json (with its closed top level) and fails if a Go field is
+// missing from a closed schema object, a schema property has no Go field, or
+// types diverge. Intentional mismatches go in agentSchemaDriftAllowList.
+func TestAgentSchema_NoDriftFromGoTypes(t *testing.T) {
+	raw, err := GetAgentSchemaJSON("1")
+	require.NoError(t, err)
+	var root map[string]any
+	require.NoError(t, json.Unmarshal(raw, &root))
+
+	require.Equal(t, false, root["additionalProperties"],
+		"agent-v1.schema.json top level must set additionalProperties: false")
+
+	w := &schemaDriftWalker{root: root, seen: map[string]bool{}}
+	w.walk("", reflect.TypeOf(api.ScionConfig{}), root)
+
+	var unexpected []string
+	for _, d := range w.drift {
+		if _, ok := agentSchemaDriftAllowList[d]; !ok {
+			unexpected = append(unexpected, d)
+		}
+	}
+	sort.Strings(unexpected)
+
+	found := map[string]bool{}
+	for _, d := range w.drift {
+		found[d] = true
+	}
+	var stale []string
+	for k := range agentSchemaDriftAllowList {
+		if !found[k] {
+			stale = append(stale, k)
+		}
+	}
+	sort.Strings(stale)
+
+	require.Empty(t, unexpected, "agent-v1 schema drifted from api.ScionConfig; add the missing schema properties / Go fields, or allow-list intentional mismatches in agentSchemaDriftAllowList:\n  %s", strings.Join(unexpected, "\n  "))
+	require.Empty(t, stale, "agentSchemaDriftAllowList entries no longer match any drift; remove them:\n  %s", strings.Join(stale, "\n  "))
 }
 
 type schemaDriftWalker struct {

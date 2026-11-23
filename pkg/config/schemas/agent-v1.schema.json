@@ -4,6 +4,7 @@
   "title": "Scion Agent Configuration",
   "description": "Configuration for a Scion agent template (scion-agent.yaml).",
   "type": "object",
+  "additionalProperties": false,
   "properties": {
     "$schema": {
       "type": "string",
@@ -14,6 +15,10 @@
       "const": "1",
       "description": "Agent config schema version.",
       "x-since": "1"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the template."
     },
     "harness_config": {
       "type": "string",
@@ -81,6 +86,17 @@
       "type": "string",
       "description": "Model size alias (small, medium, large) or concrete model name. Prefer size aliases for portability — they are resolved to harness-specific model names at provision time via the harness-config's model_aliases map. Concrete names are passed through unchanged but tie the template to a specific harness."
     },
+    "thinking_level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Thinking/reasoning level for agents created from this template (0-100; 0 disables thinking)."
+    },
+    "persistence": {
+      "type": "string",
+      "enum": ["", "persistent", "ephemeral"],
+      "description": "Agent environment lifetime (persistent or ephemeral; empty defaults to persistent)."
+    },
     "message_mode": {
       "type": "string",
       "enum": ["none", "lineage", "branch", "project", "hub"],
@@ -133,6 +149,11 @@
       "items": { "$ref": "#/$defs/requiredSecret" },
       "description": "Required secrets for this agent/template."
     },
+    "skills": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/skillReference" },
+      "description": "Skill references to resolve at provision time."
+    },
     "agent_plugins": {
       "type": "array",
       "description": "Agent Plugins 1.0.0 bundles to install natively into the harness (experiment hub.agent_plugins). Paths are relative to the template directory.",
@@ -159,6 +180,22 @@
     "default_harness_config": {
       "type": "string",
       "description": "Default harness config name for this template."
+    },
+    "task": {
+      "type": "string",
+      "description": "Agent operational parameter: task prompt (creation-time record)."
+    },
+    "branch": {
+      "type": "string",
+      "description": "Agent operational parameter: git branch name (creation-time record)."
+    },
+    "explicit_workspace": {
+      "type": "boolean",
+      "description": "Agent operational parameter: records that /workspace is a user-provided workspace path."
+    },
+    "empty_per_agent_workspace": {
+      "type": "boolean",
+      "description": "Agent operational parameter: records that the agent uses an empty per-agent workspace."
     },
     "kubernetes": {
       "type": "object",
@@ -340,7 +377,23 @@
         "key": { "type": "string", "description": "Secret key name." },
         "description": { "type": "string", "description": "Human-readable description." },
         "type": { "type": "string", "enum": ["environment", "variable", "file"], "default": "environment" },
-        "target": { "type": "string", "description": "Projection target (defaults to key for env type)." }
+        "target": { "type": "string", "description": "Projection target (defaults to key for env type)." },
+        "alternative_env_keys": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Env var names that satisfy this requirement instead (e.g. GOOGLE_APPLICATION_CREDENTIALS for a gcloud-adc file secret)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "skillReference": {
+      "type": "object",
+      "required": ["uri"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1, "description": "Skill URI to resolve." },
+        "as": { "type": "string", "description": "Optional destination skill name." },
+        "optional": { "type": "boolean", "description": "If true, missing skill does not fail provisioning." },
+        "scope": { "type": "string", "description": "Injection scope for collision precedence." }
       },
       "additionalProperties": false
     },
@@ -356,6 +409,19 @@
             "endpoint": { "type": "string" },
             "protocol": { "type": "string", "enum": ["grpc", "http"] },
             "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "provider": {
+              "type": "string",
+              "description": "Cloud telemetry provider (e.g., 'gcp' for GCP-native export)."
+            },
+            "gcp_project_id": {
+              "type": "string",
+              "description": "GCP project ID for telemetry (Cloud Monitoring). Overrides auto-detection from SA credentials."
+            },
+            "cloud_logging": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable direct Cloud Logging output."
+            },
             "tls": {
               "type": "object",
               "properties": {
