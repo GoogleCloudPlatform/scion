@@ -501,6 +501,9 @@ func TestAgentStanding_CredentialRoutesCoverage(t *testing.T) {
 			path: func(f *standingCoverageFixture, _ *store.Agent) string {
 				return "/api/v1/projects/" + f.projectID + "/webhook-endpoints/00000000-0000-4000-8000-000000000001/rotate-secret"
 			},
+			body: func(*standingCoverageFixture) any {
+				return nil
+			},
 			wantDen: assertForbidden,
 		},
 		{
