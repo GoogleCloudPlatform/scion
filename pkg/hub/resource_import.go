@@ -216,8 +216,12 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 // of the discovered dirs; dirs it drops must be appended to skipped. noMatch is
 // the error message returned when the selection keeps no dirs.
 func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, selectDirs func([]resourceDir, []skippedDir) ([]resourceDir, []skippedDir), noMatch string) ([]string, error) {
-	if !config.IsRemoteURI(sourceURL) {
-		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+	if s.workstation {
+		if !config.IsRemoteURI(sourceURL) {
+			return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+		}
+	} else if _, err := s.checkImportSource(sourceURL); err != nil {
+		return nil, err
 	}
 	if s.GetStorage() == nil {
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
@@ -234,7 +238,7 @@ func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, source
 		return nil, err
 	}
 	if len(dirs) == 0 {
-		return nil, fmt.Errorf("no scion %s found at %s", kind.noun, sourceURL)
+		return nil, fmt.Errorf("no scion %s found at the source", kind.noun)
 	}
 
 	dirs, skipped = selectDirs(dirs, skipped)
@@ -300,27 +304,6 @@ func checkResourceDirsContent(dirs []resourceDir, scope string, kind resourceImp
 		return nil
 	}
 	return kind.checkContent(dirs, scope)
-}
-
-// fetchRemoteForImport fetches a remote source URL to a local cache directory,
-// authenticating against GitHub with the credential importCredential selects
-// for the import's scope ("global", "project" or "user") and scopeID. It
-// applies to both resource kinds (templates and harness-configs) and to skill
-// directory discovery. On a hosted hub it refuses sources checkImportSource
-// refuses and downloads archives through importArchiveClient. The caller owns
-// the returned cache path and must remove it.
-func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourceURL string) (string, error) {
-	if err := s.checkImportSource(sourceURL); err != nil {
-		return "", err
-	}
-	cachePath, err := config.FetchRemoteTemplateWithOptions(ctx, sourceURL, config.FetchOptions{
-		AuthToken:     s.importCredential(ctx, scope, scopeID, sourceURL),
-		ArchiveClient: s.importArchiveClient(),
-	})
-	if err != nil {
-		return "", mapImportFetchError(err)
-	}
-	return cachePath, nil
 }
 
 // importCredential returns the GitHub credential for fetching sourceURL into
@@ -669,8 +652,12 @@ func applySlugFilter(dirs []resourceDir, skipped []skippedDir, slug string) ([]r
 // fetch authenticates with the credentials of scope and scopeID (see
 // importCredential).
 func (s *Server) discoverFromRemote(ctx context.Context, scope, scopeID, sourceURL string, kind resourceImportKind) ([]string, []string, error) {
-	if !config.IsRemoteURI(sourceURL) {
-		return nil, nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+	if s.workstation {
+		if !config.IsRemoteURI(sourceURL) {
+			return nil, nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
+		}
+	} else if _, err := s.checkImportSource(sourceURL); err != nil {
+		return nil, nil, err
 	}
 	if s.GetStorage() == nil {
 		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)
@@ -687,7 +674,7 @@ func (s *Server) discoverFromRemote(ctx context.Context, scope, scopeID, sourceU
 		return nil, nil, err
 	}
 	if len(dirs) == 0 {
-		return nil, nil, fmt.Errorf("no scion %s found at %s", kind.noun, sourceURL)
+		return nil, nil, fmt.Errorf("no scion %s found at the source", kind.noun)
 	}
 
 	names := make([]string, len(dirs))

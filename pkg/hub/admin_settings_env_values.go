@@ -210,6 +210,7 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 		srv.Hub.TestIdentities = nil
 		srv.Hub.GCPProjectID = ""
 		srv.Hub.InternalURL = ""
+		srv.Hub.AllowedImportSources = nil
 		if c := srv.Hub.Conduit; c != nil {
 			c.PeerSecret = ""
 		}

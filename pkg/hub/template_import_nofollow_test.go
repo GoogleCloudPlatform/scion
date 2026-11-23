@@ -277,12 +277,13 @@ exit 0
 	t.Setenv("SCION_FAKE_UP31", strings.Repeat("../", 31))
 }
 
-// TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets drives the
-// hub import through the sparse-checkout path (the tarball download fails,
-// so the production execSparseGitCheckout runs against a fake git whose
-// checkout holds file links to a file outside the fetch) and asserts that
-// the stored template holds only its regular files and never the link
-// target's content.
+// TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets drives a
+// hosted hub import whose tarball download fails, with the production
+// execSparseGitCheckout wired to a fake git whose checkout holds file links
+// to a file outside the fetch. A hosted Hub no longer falls back to a git
+// checkout (its fetch limits cannot bound one), so the import fails and
+// nothing, in particular no link target's content, is stored. The CLI's
+// checkout copy is covered in pkg/config.
 func TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink fixtures require a POSIX file system")
@@ -295,7 +296,7 @@ func TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets(t *testing.
 	}
 	installLinkingFakeGit(t, secretPath, outside)
 	// The pkg/hub TestMain disables the sparse checkout for every test; this
-	// test runs the production checkout and copy code against the fake git.
+	// test wires the production checkout to the fake git.
 	t.Cleanup(config.SetGitSparseCheckoutForTest(config.ProductionGitSparseCheckoutForTest()))
 
 	srv, s, stor := testTemplateBootstrapServer(t)
@@ -313,34 +314,22 @@ func TestImportTemplatesFromRemote_SparseCheckoutStoresNoLinkTargets(t *testing.
 		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(""))}, nil
 	}}
 
-	imported, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/acme/repo/tree/main/templates")
-	if err != nil {
-		t.Fatalf("importTemplatesFromRemote: %v", err)
-	}
-	if len(imported) != 1 || imported[0] != "my-template" {
-		t.Fatalf("imported = %v, want [my-template]", imported)
+	if _, err := srv.importTemplatesFromRemote(ctx, projectID, "https://github.com/acme/repo/tree/main/templates"); err == nil {
+		t.Fatal("expected the import to fail without a git fallback")
 	}
 
 	result, err := s.ListTemplates(ctx, store.TemplateFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.TotalCount != 1 {
-		t.Fatalf("expected 1 stored template, got %d", result.TotalCount)
-	}
-	var paths []string
-	for _, f := range result.Items[0].Files {
-		paths = append(paths, f.Path)
-	}
-	sort.Strings(paths)
-	if want := []string{"agents.md", "scion-agent.yaml"}; !slices.Equal(paths, want) {
-		t.Errorf("stored template files = %v, want %v", paths, want)
+	if result.TotalCount != 0 {
+		t.Fatalf("expected no stored template, got %d", result.TotalCount)
 	}
 
 	stor.mu.Lock()
 	defer stor.mu.Unlock()
-	if len(stor.objects) != 2 {
-		t.Errorf("expected 2 stored objects, got %d", len(stor.objects))
+	if len(stor.objects) != 0 {
+		t.Errorf("expected no stored objects, got %d", len(stor.objects))
 	}
 	for name, data := range stor.content {
 		if strings.Contains(string(data), importOutsideSecret) {
