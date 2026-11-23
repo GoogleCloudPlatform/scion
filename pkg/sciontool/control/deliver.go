@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -463,6 +464,15 @@ func (s *deliverStore) put(key string, res deliverResult) {
 
 func (s *deliverStore) len() int { return s.order.Len() }
 
+// IsShellHarness reports whether the container's SCION_HARNESS environment
+// variable selects the reserved built-in "shell" execution container harness.
+func IsShellHarness(getenv func(string) string) bool {
+	if getenv == nil {
+		return false
+	}
+	return strings.TrimSpace(getenv("SCION_HARNESS")) == config.ShellHarnessConfigName
+}
+
 // DeliverEnabled reports whether sciontool should register deliver-message:
 // the agent was launched with ExperimentConduitDeliver in
 // SCION_HUB_EXPERIMENTS (set by the hub at dispatch) and tmux is available
@@ -474,7 +484,7 @@ func DeliverEnabled(getenv func(string) string, hasTmux bool) bool {
 	}
 	// Harnesses with Delivery: none (e.g. the built-in shell execution
 	// container) never register the deliver-message control route (S5).
-	if strings.TrimSpace(getenv("SCION_HARNESS")) == "shell" {
+	if IsShellHarness(getenv) {
 		return false
 	}
 	for _, name := range strings.Split(getenv(EnvHubExperiments), ",") {

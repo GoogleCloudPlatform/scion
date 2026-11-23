@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/autoexpose"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/sshd"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/delegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -2122,7 +2123,7 @@ func livenessAgentGID(targetGID int) int {
 // the built-in "shell" execution container harness only, or nil for every
 // other harness (ptone/scion#8812 §3.3).
 func livenessAttachedChecker(getenv func(string) string, uid, gid int) func() bool {
-	if strings.TrimSpace(getenv("SCION_HARNESS")) != "shell" {
+	if !control.IsShellHarness(getenv) {
 		return nil
 	}
 	return liveness.TmuxAttachedChecker("scion", uid, gid)
@@ -2225,7 +2226,7 @@ const harnessTailLines = 5
 // or published so credentials displayed in the interactive shell cannot leave
 // the container via crash/status reasons (ptone/scion#8812 §3.4 I1).
 func readHarnessTail() string {
-	if strings.TrimSpace(os.Getenv("SCION_HARNESS")) == "shell" {
+	if control.IsShellHarness(os.Getenv) {
 		return ""
 	}
 	data, err := dirfd.ReadFileNoFollow(harnessTailPath, harnessTailMaxBytes)
