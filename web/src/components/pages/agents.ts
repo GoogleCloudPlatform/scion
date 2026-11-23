@@ -282,6 +282,13 @@ export class ScionPageAgents extends LitElement {
   /** Last valid parsed filter query for instant client-side evaluation. */
   private filterQuery: FilterQuery | null = null;
 
+  /**
+   * Snapshot of the filter query that matches `committedServerQ` (updated only
+   * on initial load, commit, or chip click — never on per-keystroke typing).
+   * Used for paged-state SSE add/leave membership checks.
+   */
+  private committedFilterQuery: FilterQuery | null = null;
+
   /** Canonical server `?q=` string committed to hub requests. */
   private committedServerQ = '';
 
@@ -332,7 +339,13 @@ export class ScionPageAgents extends LitElement {
   private agentWindow = new AgentListWindow({
     viewState: this.windowViewState(),
     getProjectId: (): string => '',
-    isAddable: (): boolean => this.loadedScope === 'all',
+    isAddable: (agent: Agent): boolean => {
+      if (this.loadedScope !== 'all') return false;
+      if (filtersQueryDialectEnabled() && this.committedFilterQuery) {
+        return matchFilterQuery(this.committedFilterQuery, agentToFilterRow(agent));
+      }
+      return true;
+    },
     fetchPage: (params: PagedPageParams): Promise<PagedPageResult> => this.fetchAgentsPage(params),
     getAgent: (id: string): Agent | undefined => stateManager.getAgent(id),
     getHeldAgents: (): Agent[] => this.agents,
@@ -781,6 +794,7 @@ export class ScionPageAgents extends LitElement {
   private windowViewState(): AgentListViewState {
     if (filtersQueryDialectEnabled()) {
       const fq = this.filterQuery;
+      const cfq = this.committedFilterQuery;
       return {
         phaseFilter: '',
         label: '',
@@ -790,6 +804,9 @@ export class ScionPageAgents extends LitElement {
         view: listViewOf(this.viewMode),
         modeFilter: this.modeFilter,
         filterPredicate: fq ? (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)) : null,
+        committedFilterPredicate: cfq
+          ? (a: Agent) => matchFilterQuery(cfq, agentToFilterRow(a))
+          : null,
         serverQuery: this.committedServerQ,
       };
     }
@@ -810,11 +827,13 @@ export class ScionPageAgents extends LitElement {
       const v = validateFilterQuery(parsed.query, AGENTS_FILTER_SCHEMA, raw);
       if (!v.error) {
         this.filterQuery = parsed.query;
+        this.committedFilterQuery = parsed.query;
         this.committedServerQ = serverSubset(parsed.query, AGENTS_FILTER_SCHEMA);
         return;
       }
     }
     this.filterQuery = null;
+    this.committedFilterQuery = null;
     this.committedServerQ = '';
   }
 
@@ -845,9 +864,11 @@ export class ScionPageAgents extends LitElement {
     const nextQ = e.detail.serverQ;
     if (nextQ === this.committedServerQ) return;
     this.committedServerQ = nextQ;
+    this.committedFilterQuery = e.detail.query;
     const fq = e.detail.query;
     this.agentWindow.setViewState({
       filterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
+      committedFilterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
       serverQuery: nextQ,
     });
     void this.loadAgents('label-commit');
@@ -865,9 +886,11 @@ export class ScionPageAgents extends LitElement {
         const fq = parsed.query;
         const nextQ = serverSubset(fq, AGENTS_FILTER_SCHEMA);
         this.filterQuery = fq;
+        this.committedFilterQuery = fq;
         this.committedServerQ = nextQ;
         this.agentWindow.setViewState({
           filterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
+          committedFilterPredicate: (a: Agent) => matchFilterQuery(fq, agentToFilterRow(a)),
           serverQuery: nextQ,
         });
         void this.loadAgents('label-commit');

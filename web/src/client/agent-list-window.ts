@@ -146,6 +146,13 @@ export interface AgentListViewState {
    */
   filterPredicate?: ((agent: Agent) => boolean) | null;
   /**
+   * Snapshot predicate for the committed server query (updated only when
+   * `serverQuery` commits, never on per-keystroke typing). Used in the paged
+   * state to gate off-page SSE adds and detect when existing members leave
+   * the server's filtered population.
+   */
+  committedFilterPredicate?: ((agent: Agent) => boolean) | null;
+  /**
    * Canonical server `?q=` query string when the unified filter dialect is active.
    * When defined (even empty string), `isSortedEligible` does not require `=` in
    * `committedLabel` and `serverParamsKey` tracks `serverQuery` instead of `phaseFilter`.
@@ -1082,12 +1089,15 @@ export class AgentListWindow extends EventTarget {
     this.notifyChange();
   }
 
-  /** The committed label's add rule (today's add rule, mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v`, if any. */
+  /** The committed label's add rule (today's add rule, mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v` or committed query predicate, if any. */
   private passesCommittedLabel(agent: Agent): boolean {
     if (this.isAddable) {
       if (!this.isAddable(agent)) return false;
     } else if (agent.projectId !== this.getProjectId()) {
       return false;
+    }
+    if (this.viewState.committedFilterPredicate) {
+      return this.viewState.committedFilterPredicate(agent);
     }
     const label = this.committedLabel.trim();
     if (!label || !label.includes('=')) return true;
@@ -1154,6 +1164,9 @@ export class AgentListWindow extends EventTarget {
   }
 
   private passesPhase(a: Agent): boolean {
+    if (this.viewState.committedFilterPredicate) {
+      return this.viewState.committedFilterPredicate(a);
+    }
     return !this.viewState.phaseFilter || a.phase === this.viewState.phaseFilter;
   }
 
@@ -1169,6 +1182,7 @@ export class AgentListWindow extends EventTarget {
     const rangeBefore = this.pageKRange();
     const onPage = new Map(this.pageItems.map((a) => [a.id, a]));
     const pageSizeBefore = onPage.size;
+    const statsBefore = this.memberIndex.stats;
     let chip = false;
     let resort = false;
 
@@ -1190,12 +1204,17 @@ export class AgentListWindow extends EventTarget {
           if (rangeBefore && this.onPageChipForNewKey(newK, rangeBefore)) chip = true;
           onPage.set(id, agent);
           resort = true;
+          this.memberIndex.set(id, agent.phase);
         } else {
-          // On-page agent now fails the phase filter: remove the row (backfill chip).
+          // On-page agent now fails the phase / committed query filter: remove the row (backfill chip).
           onPage.delete(id);
           chip = true;
+          if (this.viewState.committedFilterPredicate) {
+            this.memberIndex.delete(id);
+          } else {
+            this.memberIndex.set(id, agent.phase);
+          }
         }
-        this.memberIndex.set(id, agent.phase);
       } else {
         chip ||= this.applyOffPageUpsert(id, agent, rangeBefore);
       }
@@ -1220,8 +1239,12 @@ export class AgentListWindow extends EventTarget {
       );
     }
 
+    const statsAfter = this.memberIndex.stats;
+    const statsChanged =
+      statsAfter.total !== statsBefore.total || statsAfter.running !== statsBefore.running;
+
     if (chip) this._updatesAvailable = true;
-    if (chip || resort) this.notifyChange();
+    if (chip || resort || statsChanged) this.notifyChange();
   }
 
   /**
@@ -1267,6 +1290,15 @@ export class AgentListWindow extends EventTarget {
     const wasMember = this.memberIndex.has(id);
 
     if (wasMember) {
+      if (this.viewState.committedFilterPredicate) {
+        if (!this.viewState.committedFilterPredicate(agent)) {
+          // Existing member stopped matching the committed server query: remove from population.
+          this.memberIndex.delete(id);
+          return false;
+        }
+        this.memberIndex.set(id, agent.phase);
+        return this.withinPageKRange(this.kOf(agent), rangeBefore);
+      }
       // An existing off-page member's phase changes unconditionally: only
       // *adding* a new member is gated by the add rule.
       const prevPhase = this.memberIndex.getPhase(id);

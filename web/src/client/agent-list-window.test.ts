@@ -1086,3 +1086,125 @@ describe('AgentListWindow — stopping phase filter', () => {
     expect(win.updatesAvailable).toBe(true);
   });
 });
+
+describe('AgentListWindow — paged state with committed filter query (serverQuery)', () => {
+  it('ignores off-page upsert of a non-matching agent (no member growth, no chip)', () => {
+    const live = new Map<string, Agent>();
+    const matchesErrorUi = (a: Agent): boolean =>
+      a.phase === 'error' && a.labels?.['team'] === 'ui';
+    const { win } = createWindow({
+      viewState: makeViewState({
+        phaseFilter: '',
+        serverQuery: 'label:team=ui phase:error',
+        filterPredicate: matchesErrorUi,
+        committedFilterPredicate: matchesErrorUi,
+      }),
+      getAgent: (id) => live.get(id),
+    });
+
+    win.setPaged(
+      {
+        agents: [agent('a1', { phase: 'error', labels: { team: 'ui' } })],
+        totalCount: 2,
+        stats: {
+          total: 2,
+          running: 0,
+          agents: [
+            ['a1', 'error'],
+            ['a2', 'error'],
+          ],
+        },
+      },
+      ''
+    );
+
+    // Brand-new agent outside the committed query arrives via SSE.
+    live.set('new-other', agent('new-other', { phase: 'running', labels: { team: 'backend' } }));
+    win.applyChanges({
+      upserted: ['new-other'],
+      deleted: [],
+      unknown: new Map(),
+      generation: 1,
+    });
+
+    expect(win.stats.total).toBe(2);
+    expect(win.stats.running).toBe(0);
+    expect(win.updatesAvailable).toBe(false);
+  });
+
+  it('removes an off-page member from stats when it transitions out of the committed query', () => {
+    const live = new Map<string, Agent>();
+    const matchesRunning = (a: Agent): boolean => a.phase === 'running';
+    const { win } = createWindow({
+      viewState: makeViewState({
+        phaseFilter: '',
+        serverQuery: 'phase:running',
+        filterPredicate: matchesRunning,
+        committedFilterPredicate: matchesRunning,
+      }),
+      getAgent: (id) => live.get(id),
+    });
+
+    win.setPaged(
+      {
+        agents: [agent('a1', { phase: 'running' })],
+        totalCount: 2,
+        stats: {
+          total: 2,
+          running: 2,
+          agents: [
+            ['a1', 'running'],
+            ['off-1', 'running'],
+          ],
+        },
+      },
+      ''
+    );
+
+    // Existing off-page member stops running -> leaves the committed query population.
+    live.set('off-1', agent('off-1', { phase: 'stopped' }));
+    win.applyChanges({ upserted: ['off-1'], deleted: [], unknown: new Map(), generation: 1 });
+
+    expect(win.stats.total).toBe(1);
+    expect(win.stats.running).toBe(1);
+    expect(win.updatesAvailable).toBe(false);
+  });
+
+  it('removes an on-page member from items and stats when it transitions out of the committed query', () => {
+    const live = new Map<string, Agent>();
+    const matchesRunning = (a: Agent): boolean => a.phase === 'running';
+    const { win } = createWindow({
+      viewState: makeViewState({
+        phaseFilter: '',
+        serverQuery: 'phase:running',
+        filterPredicate: matchesRunning,
+        committedFilterPredicate: matchesRunning,
+      }),
+      getAgent: (id) => live.get(id),
+    });
+
+    win.setPaged(
+      {
+        agents: [agent('a1', { phase: 'running' })],
+        totalCount: 2,
+        stats: {
+          total: 2,
+          running: 2,
+          agents: [
+            ['a1', 'running'],
+            ['off-1', 'running'],
+          ],
+        },
+      },
+      ''
+    );
+
+    live.set('a1', agent('a1', { phase: 'stopped' }));
+    win.applyChanges({ upserted: ['a1'], deleted: [], unknown: new Map(), generation: 1 });
+
+    expect(win.items).toHaveLength(0);
+    expect(win.stats.total).toBe(1);
+    expect(win.stats.running).toBe(1);
+    expect(win.updatesAvailable).toBe(true);
+  });
+});
