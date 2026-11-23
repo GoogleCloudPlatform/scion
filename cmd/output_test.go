@@ -66,7 +66,7 @@ func (b *testFlushingBuffer) Flush() error {
 func TestOutputNDJSON(t *testing.T) {
 	t.Run("writes single compact line without HTML escaping and flushes", func(t *testing.T) {
 		var buf testFlushingBuffer
-		err := writeNDJSONTo(&buf, map[string]string{"type": "cursor", "msg": "a -> b & c"})
+		err := outputNDJSON(&buf, map[string]string{"type": "cursor", "msg": "a -> b & c"})
 		require.NoError(t, err)
 		assert.Equal(t, 1, buf.flushes)
 
@@ -80,10 +80,10 @@ func TestOutputNDJSON(t *testing.T) {
 		assert.Equal(t, "cursor", parsed["type"])
 	})
 
-	t.Run("outputNDJSON writes to stdout", func(t *testing.T) {
+	t.Run("writes to os.Stdout", func(t *testing.T) {
 		var err error
 		out := captureStdout(t, func() {
-			err = outputNDJSON(map[string]string{"k": "v"})
+			err = outputNDJSON(os.Stdout, map[string]string{"k": "v"})
 		})
 		require.NoError(t, err)
 		assert.Equal(t, "{\"k\":\"v\"}\n", out)

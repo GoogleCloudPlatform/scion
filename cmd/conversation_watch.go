@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -247,6 +249,17 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 		return nil
 	}
 
+	finishAtDeadline := func(errForOnce error) error {
+		if params.Once {
+			if polled || errForOnce == nil {
+				return writeWatchOnceTimeout(params, lastCursor, truncated)
+			}
+			return errForOnce
+		}
+		emitStreamCursor()
+		return nil
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return handleInterrupt()
@@ -258,11 +271,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
 				if polled {
-					if params.Once {
-						return writeWatchOnceTimeout(params, lastCursor, truncated)
-					}
-					emitStreamCursor()
-					return nil
+					return finishAtDeadline(nil)
 				}
 				// Always perform at least one immediate (wait=0) poll so the
 				// caller receives any already-committed messages or a valid
@@ -301,28 +310,20 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			if hasDeadline {
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
-					if params.Once {
-						return err
-					}
-					emitStreamCursor()
-					return nil
+					return finishAtDeadline(err)
 				}
 				if delay > remaining {
 					delay = remaining
 				}
 			}
-			if !params.JSON && params.Stderr != nil {
+			if params.Stderr != nil {
 				_, _ = fmt.Fprintf(params.Stderr, "watch error (retrying in %s): %v\n", delay.Round(time.Millisecond), err)
 			}
 			if sleepErr := sleepFn(ctx, delay); sleepErr != nil {
 				return handleInterrupt()
 			}
 			if hasDeadline && time.Until(deadline) <= 0 {
-				if params.Once {
-					return err
-				}
-				emitStreamCursor()
-				return nil
+				return finishAtDeadline(err)
 			}
 			continue
 		}
@@ -343,18 +344,18 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			if len(res.Events) > 0 {
 				res.Truncated = truncated
 				if params.JSON {
-					return writeNDJSONTo(params.Stdout, res)
+					return outputNDJSON(params.Stdout, res)
 				}
 				return writeWatchOncePlain(params.Stdout, params.Stderr, res)
 			}
 			if hasDeadline && time.Until(deadline) <= 0 {
-				return writeWatchOnceTimeout(params, lastCursor, truncated)
+				return finishAtDeadline(nil)
 			}
 		} else {
 			if len(res.Events) > 0 {
 				for _, evt := range res.Events {
 					if params.JSON {
-						if wErr := writeNDJSONTo(params.Stdout, evt); wErr != nil {
+						if wErr := outputNDJSON(params.Stdout, evt); wErr != nil {
 							return wErr
 						}
 					} else {
@@ -364,7 +365,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 					}
 				}
 			} else if params.JSON && res.TimedOut && res.NextCursor != "" {
-				if wErr := writeNDJSONTo(params.Stdout, watchCursorHeartbeat{
+				if wErr := outputNDJSON(params.Stdout, watchCursorHeartbeat{
 					Type:       "cursor",
 					NextCursor: res.NextCursor,
 				}); wErr != nil {
@@ -373,8 +374,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			}
 
 			if hasDeadline && time.Until(deadline) <= 0 {
-				emitStreamCursor()
-				return nil
+				return finishAtDeadline(nil)
 			}
 		}
 
@@ -383,11 +383,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			if hasDeadline {
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
-					if params.Once {
-						return writeWatchOnceTimeout(params, lastCursor, truncated)
-					}
-					emitStreamCursor()
-					return nil
+					return finishAtDeadline(nil)
 				}
 				if delay > remaining {
 					delay = remaining
@@ -415,8 +411,12 @@ func isWatchUnsupportedError(err error) bool {
 		strings.Contains(msg, "page not found")
 }
 
-// classifyWatchError distinguishes transient errors (network failures, 5xx,
-// 429) from terminal errors (400, 401, 403, 404, 410, etc.).
+// classifyWatchError uses an allowlist to distinguish transient errors
+// (429, 5xx, and real transport failures: *url.Error excluding redirect
+// failures, net.Error, per-request context.DeadlineExceeded while the outer
+// context is still live, and io.EOF/io.ErrUnexpectedEOF) from terminal
+// failures (400/401/403/404/410, auth-apply failures, signed-body or
+// configuration errors).
 func classifyWatchError(err error) (retryable bool, retryAfter time.Duration) {
 	var apiErr *apiclient.APIError
 	if errors.As(err, &apiErr) {
@@ -429,7 +429,23 @@ func classifyWatchError(err error) (retryable bool, retryAfter time.Duration) {
 		}
 		return false, 0
 	}
-	return true, 0
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		if urlErr.Err != nil && strings.Contains(urlErr.Err.Error(), "redirects") {
+			return false, 0
+		}
+		return true, 0
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true, 0
+	}
+	if errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
+		return true, 0
+	}
+	return false, 0
 }
 
 // watchBackoffDuration computes exponential jittered backoff (1s base, capped
@@ -484,7 +500,7 @@ func writeWatchOnceTimeout(params watchParams, nextCursor string, truncated bool
 			Truncated:  truncated,
 			TimedOut:   true,
 		}
-		if wErr := writeNDJSONTo(params.Stdout, out); wErr != nil {
+		if wErr := outputNDJSON(params.Stdout, out); wErr != nil {
 			return wErr
 		}
 		return &watchExitError{

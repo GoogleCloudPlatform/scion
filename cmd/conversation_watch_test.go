@@ -19,8 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -666,9 +669,20 @@ func TestConversationWatchStream_RetryBackoffWithFakeServer(t *testing.T) {
 
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	require.Len(t, lines, 2)
+	// O1: retry diagnostics are written to stderr even under --json, without
+	// corrupting stdout NDJSON.
+	assert.Contains(t, stderr.String(), "watch error (retrying in")
 }
 
 func TestConversationWatchStream_NetworkErrorRetries(t *testing.T) {
+	// Closed httptest server produces a real *url.Error wrapping *net.OpError.
+	closedSrv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closedSrv.URL
+	closedSrv.Close()
+
+	closedClient, err := hubclient.New(closedURL)
+	require.NoError(t, err)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -677,23 +691,32 @@ func TestConversationWatchStream_NetworkErrorRetries(t *testing.T) {
 	sleeps := 0
 
 	svc := &fakeWatchConvService{
-		fn: func(_ context.Context, _ string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+		fn: func(c context.Context, convID string, opts hubclient.WatchOptions) (*hubclient.WatchResult, error) {
 			call++
-			if call == 1 {
-				return nil, errors.New("connection refused")
+			switch call {
+			case 1:
+				// Real transport dial error (*url.Error / net.Error).
+				return closedClient.Conversations().Watch(c, convID, opts)
+			case 2:
+				// Per-request timeout while outer ctx is still live.
+				return nil, context.DeadlineExceeded
+			case 3:
+				// Truncated response body.
+				return nil, io.ErrUnexpectedEOF
+			default:
+				assert.Equal(t, "cur-0", opts.Cursor, "must retry from initial cursor")
+				cancel()
+				return &hubclient.WatchResult{
+					Events: []hubclient.WatchEvent{
+						{EventID: "msg:m1", Type: "conversation.message.created", Cursor: "cur-1"},
+					},
+					NextCursor: "cur-1",
+				}, nil
 			}
-			assert.Equal(t, "cur-0", opts.Cursor, "must retry from initial cursor")
-			cancel()
-			return &hubclient.WatchResult{
-				Events: []hubclient.WatchEvent{
-					{EventID: "msg:m1", Type: "conversation.message.created", Cursor: "cur-1"},
-				},
-				NextCursor: "cur-1",
-			}, nil
 		},
 	}
 
-	err := executeConversationWatch(ctx, svc, watchParams{
+	err = executeConversationWatch(ctx, svc, watchParams{
 		ConversationID: "conv-1",
 		Cursor:         "cur-0",
 		Filter:         "others",
@@ -707,8 +730,133 @@ func TestConversationWatchStream_NetworkErrorRetries(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 2, call)
-	assert.Equal(t, 1, sleeps)
+	assert.Equal(t, 4, call)
+	assert.Equal(t, 3, sleeps)
+}
+
+// R1: non-transport, non-APIError failures (such as auth-apply or redirect
+// errors) must be terminal with zero retries and emit next-cursor in plain
+// stream mode.
+func TestConversationWatchStream_NonTransportErrorsAreTerminal(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "auth apply failure",
+			err:  fmt.Errorf("failed to apply auth: %w", errors.New("no profile credential available")),
+		},
+		{
+			name: "redirect loop url.Error",
+			err:  &url.Error{Op: "Get", URL: "https://hub.example/api/v1/conversations/c/watch", Err: errors.New("stopped after 10 redirects")},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			calls := 0
+			svc := &fakeWatchConvService{
+				fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+					calls++
+					return nil, tc.err
+				},
+			}
+
+			err := executeConversationWatch(context.Background(), svc, watchParams{
+				ConversationID: "conv-1",
+				Once:           false,
+				Cursor:         "cur-last",
+				Filter:         "others",
+				Limit:          50,
+				JSON:           false,
+				Stdout:         &stdout,
+				Stderr:         &stderr,
+				Sleep: func(_ context.Context, _ time.Duration) error {
+					t.Fatal("terminal client error must not trigger backoff sleep")
+					return nil
+				},
+			})
+			require.Error(t, err)
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, 1, exitCodeFor(err))
+			assert.Equal(t, "next-cursor: cur-last\n", stderr.String())
+		})
+	}
+}
+
+// O2 + N2: in --once mode, when --timeout expires while retrying a transient
+// error after at least one successful poll, write the timeout JSON with
+// lastCursor and exit 124; if no poll succeeded yet, return the error (exit 1).
+func TestConversationWatchOnce_TimeoutDuringRetry(t *testing.T) {
+	t.Run("after successful poll returns timeout JSON and exit 124", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		call := 0
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				call++
+				if call == 1 {
+					return &hubclient.WatchResult{
+						Events:     []hubclient.WatchEvent{},
+						NextCursor: "cur-advanced",
+						TimedOut:   true,
+					}, nil
+				}
+				return nil, &apiclient.APIError{StatusCode: http.StatusServiceUnavailable, Message: "hub restarting"}
+			},
+		}
+
+		err := executeConversationWatch(context.Background(), svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           true,
+			Cursor:         "cur-0",
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        25 * time.Millisecond,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+			Sleep: func(_ context.Context, _ time.Duration) error {
+				time.Sleep(35 * time.Millisecond)
+				return nil
+			},
+		})
+		require.Error(t, err)
+		assert.Equal(t, 124, exitCodeFor(err))
+		assert.True(t, isReportedInJSON(err))
+
+		var got hubclient.WatchResult
+		require.NoError(t, json.Unmarshal(stdout.Bytes(), &got))
+		assert.True(t, got.TimedOut)
+		assert.Equal(t, "cur-advanced", got.NextCursor)
+	})
+
+	t.Run("before any successful poll returns transport error and exit 1", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				return nil, &apiclient.APIError{StatusCode: http.StatusServiceUnavailable, Message: "hub unreachable"}
+			},
+		}
+
+		err := executeConversationWatch(context.Background(), svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           true,
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        25 * time.Millisecond,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+			Sleep: func(_ context.Context, _ time.Duration) error {
+				time.Sleep(35 * time.Millisecond)
+				return nil
+			},
+		})
+		require.Error(t, err)
+		assert.Equal(t, 1, exitCodeFor(err))
+		assert.Contains(t, err.Error(), "hub unreachable")
+	})
 }
 
 func TestConversationWatchStream_TerminalStatusesDoNotRetry(t *testing.T) {
