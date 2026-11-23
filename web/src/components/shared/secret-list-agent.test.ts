@@ -316,4 +316,86 @@ describe('scion-secret-list — agent scope and existing scopes', () => {
       '/api/v1/secrets?scope=agent&scopeId=agent-B',
     ]);
   });
+
+  it('performs exactly one list fetch on initial mount and waits when agent scopeId starts empty', async () => {
+    // Initial mount with scopeId set -> exactly 1 GET
+    const calls = installFetch([]);
+    const el = await mountList({
+      scope: 'agent',
+      scopeId: 'agent-once',
+      compact: true,
+    });
+    expect(calls.filter((c) => c.method === 'GET')).toHaveLength(1);
+    el.remove();
+
+    // Initial mount with empty scopeId -> 0 GETs until scopeId is provided
+    const lateCalls = installFetch([]);
+    const lateEl = await mountList({
+      scope: 'agent',
+      scopeId: '',
+      compact: true,
+    });
+    expect(lateCalls.filter((c) => c.method === 'GET')).toHaveLength(0);
+
+    lateEl.scopeId = 'agent-late';
+    await lateEl.updateComplete;
+    await new Promise((r) => setTimeout(r, 30));
+    await lateEl.updateComplete;
+
+    expect(lateCalls.filter((c) => c.method === 'GET').map((c) => c.url)).toEqual([
+      '/api/v1/secrets?scope=agent&scopeId=agent-late',
+    ]);
+  });
+
+  it('hides pending secret actions when readonly is true', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              scope: 'user',
+              scopeId: 'u-1',
+              secrets: [],
+              items: [
+                {
+                  state: 'pending',
+                  key: 'PENDING_KEY',
+                  pending: {
+                    id: 'pend-1',
+                    key: 'PENDING_KEY',
+                    type: 'environment',
+                    target: 'PENDING_KEY',
+                    scope: 'user',
+                    injectionMode: 'as_needed',
+                    allowProgeny: false,
+                    valueLen: 12,
+                    agentId: 'a-1',
+                    agentSlug: 'worker-1',
+                    projectId: 'p-1',
+                    projectName: 'alpha',
+                    created: '2026-11-20T00:00:00Z',
+                    updated: '2026-11-20T00:00:00Z',
+                    expiresAt: '2026-11-27T00:00:00Z',
+                    replacesExisting: false,
+                    state: 'pending',
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        )
+      )
+    );
+
+    const el = await mountList({ scope: 'user', readonly: true });
+    const tbody = el.shadowRoot!.querySelector('tbody');
+    expect(tbody).not.toBeNull();
+    expect(tbody!.textContent).toContain('PENDING_KEY');
+    expect(tbody!.querySelector('.pending-actions')).toBeNull();
+    expect(tbody!.textContent).not.toContain('Approve');
+    expect(tbody!.textContent).not.toContain('Reject');
+    expect(tbody!.textContent).not.toContain('Reveal');
+  });
 });

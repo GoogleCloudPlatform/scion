@@ -193,7 +193,7 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     expect(editForm.shadowRoot!.querySelector('[data-testid="create-secrets-editor"]')).toBeNull();
   });
 
-  it('masks values with show/hide toggle and uses textarea for file type', async () => {
+  it('masks values with show/hide toggle and never exposes masked file plaintext in DOM', async () => {
     const { form } = await mountCreate(true);
     const rowEl = await addAndFillRow(form, { key: 'API_KEY', value: 's3cr3t' });
 
@@ -201,17 +201,31 @@ describe('create agent page — Secrets tab (hub.agent_secrets)', () => {
     expect(valInput.tagName.toLowerCase()).toBe('sl-input');
     expect(valInput.getAttribute('type')).toBe('password');
 
-    // Toggle show/hide
-    rowEl.querySelector<HTMLElement>('[data-action="toggle-reveal"]')!.click();
-    await form.updateComplete;
-    expect(rowEl.querySelector<Valued>('[data-field="value"]')!.getAttribute('type')).toBe('text');
-
-    // Switch to file type -> renders sl-textarea
+    // Switch to file type while still masked -> plaintext must not appear in DOM
     const typeSelect = rowEl.querySelector<Valued>('[data-field="type"]')!;
     typeSelect.value = 'file';
     typeSelect.dispatchEvent(new Event('sl-change'));
     await form.updateComplete;
-    expect(rowEl.querySelector('[data-field="value"]')!.tagName.toLowerCase()).toBe('sl-textarea');
+
+    expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).not.toBeNull();
+    expect(rowEl.querySelector('sl-textarea')).toBeNull();
+    expect(rowEl.textContent).not.toContain('s3cr3t');
+    expect(rowEl.innerHTML).not.toContain('s3cr3t');
+
+    // Toggle show -> renders sl-textarea with value for viewing/editing
+    rowEl.querySelector<HTMLElement>('[data-action="toggle-reveal"]')!.click();
+    await form.updateComplete;
+    const textarea = rowEl.querySelector<Valued>('[data-field="value"]')!;
+    expect(textarea.tagName.toLowerCase()).toBe('sl-textarea');
+    expect(textarea.value).toBe('s3cr3t');
+
+    // Toggle hide again -> removes textarea and plaintext from DOM
+    rowEl.querySelector<HTMLElement>('[data-action="toggle-reveal"]')!.click();
+    await form.updateComplete;
+    expect(rowEl.querySelector('[data-testid="secret-file-masked"]')).not.toBeNull();
+    expect(rowEl.querySelector('sl-textarea')).toBeNull();
+    expect(rowEl.textContent).not.toContain('s3cr3t');
+    expect(rowEl.innerHTML).not.toContain('s3cr3t');
   });
 
   it('omits secrets from POST body when none are entered', async () => {

@@ -198,16 +198,16 @@ export class ScionSecretList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (this.scope === 'agent' && !this.scopeId) return;
-    void this.loadSecrets();
+    // Initial load runs in updated() when scope/scopeId are applied; only
+    // reload here if the element is re-connected after a prior update.
+    if (this.hasUpdated && (this.scope !== 'agent' || this.scopeId !== '')) {
+      void this.loadSecrets();
+    }
   }
 
   override updated(changed: Map<string, unknown>): void {
     super.updated(changed);
-    if (
-      (changed.has('scope') || changed.has('scopeId')) &&
-      (changed.get('scope') !== undefined || changed.get('scopeId') !== undefined)
-    ) {
+    if (changed.has('scope') || changed.has('scopeId')) {
       if (this.scope === 'agent' && !this.scopeId) return;
       void this.loadSecrets();
     }
@@ -439,7 +439,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private openApproveDialog(entry: SecretEntry): void {
-    if (!entry.pending) return;
+    if (this.readonly || !entry.pending) return;
     this.approveEntry = entry;
     this.approveAllowProgeny = entry.pending.allowProgeny;
     this.approveError = null;
@@ -488,6 +488,7 @@ export class ScionSecretList extends LitElement {
   }
 
   private async handleReject(pending: PendingSecret, event?: MouseEvent): Promise<void> {
+    if (this.readonly) return;
     if (
       !event?.altKey &&
       !(await showConfirm(
@@ -521,6 +522,7 @@ export class ScionSecretList extends LitElement {
    * logged or stored.
    */
   private async handleReveal(pending: PendingSecret): Promise<void> {
+    if (this.readonly) return;
     this.clearReveal();
     this.revealPending = pending;
     this.pendingBusyId = pending.id;
@@ -729,7 +731,7 @@ export class ScionSecretList extends LitElement {
           >
         </td>
         <td class="actions-cell">
-          ${pending ? this.renderPendingActions(pending) : nothing}
+          ${pending && !this.readonly ? this.renderPendingActions(pending) : nothing}
           ${secret && !this.readonly
             ? html`
                 <sl-icon-button

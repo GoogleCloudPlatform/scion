@@ -2243,23 +2243,34 @@ export class ScionAgentConfigForm extends LitElement {
 
               <div class="secret-row-value">
                 ${row.type === 'file'
-                  ? html`
-                      <sl-textarea
-                        size="small"
-                        label="Value"
-                        data-field="value"
-                        class=${row.revealed ? '' : 'secret-value-masked'}
-                        rows="3"
-                        resize="vertical"
-                        placeholder="Paste file contents (e.g. private key)"
-                        .value=${row.value}
-                        ?disabled=${this.disabled}
-                        @sl-input=${(e: Event) =>
-                          this.updateSecretRow(i, {
-                            value: (e.target as HTMLElement & { value: string }).value,
-                          })}
-                      ></sl-textarea>
-                    `
+                  ? !row.revealed && row.value !== ''
+                    ? html`
+                        <div class="secret-file-masked" data-testid="secret-file-masked">
+                          <sl-icon name="lock"></sl-icon>
+                          <span
+                            >&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;
+                            (${row.value.split('\n').length}
+                            ${row.value.split('\n').length === 1 ? 'line' : 'lines'}, hidden — click
+                            Show to view or edit)</span
+                          >
+                        </div>
+                      `
+                    : html`
+                        <sl-textarea
+                          size="small"
+                          label="Value"
+                          data-field="value"
+                          rows="3"
+                          resize="vertical"
+                          placeholder="Paste file contents (e.g. private key)"
+                          .value=${row.value}
+                          ?disabled=${this.disabled}
+                          @sl-input=${(e: Event) =>
+                            this.updateSecretRow(i, {
+                              value: (e.target as HTMLElement & { value: string }).value,
+                            })}
+                        ></sl-textarea>
+                      `
                   : html`
                       <sl-input
                         size="small"
@@ -2561,11 +2572,20 @@ export class ScionAgentConfigForm extends LitElement {
       gap: 0.375rem;
     }
     .secret-row-value sl-input,
-    .secret-row-value sl-textarea {
+    .secret-row-value sl-textarea,
+    .secret-file-masked {
       flex: 1 1 auto;
     }
-    sl-textarea.secret-value-masked::part(textarea) {
-      -webkit-text-security: disc;
+    .secret-file-masked {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--scion-border, var(--sl-color-neutral-300));
+      border-radius: var(--scion-radius, var(--sl-border-radius-medium));
+      background: var(--scion-surface, var(--sl-color-neutral-0));
+      color: var(--scion-text-muted, var(--sl-color-neutral-600));
+      font-size: var(--sl-font-size-small);
     }
     .secret-remove-btn,
     .secret-reveal-btn {
