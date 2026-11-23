@@ -15,8 +15,10 @@
 package metadata
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -173,4 +175,236 @@ func TestSetupMetadataBlock_NoPrivileges(t *testing.T) {
 func TestCleanupMetadataBlock_Noop(t *testing.T) {
 	// Cleanup with blockNone should be a silent no-op
 	cleanupMetadataBlock(blockNone)
+}
+
+func stubRunIPTables(t *testing.T, fn func(args ...string) ([]byte, error)) {
+	t.Helper()
+	orig := runIPTables
+	runIPTables = fn
+	t.Cleanup(func() { runIPTables = orig })
+}
+
+func TestInstallInterceptionRules_IPTablesArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		mode      string
+		port      int
+		wantCalls [][]string
+	}{
+		{
+			name: "block installs nat redirect, filter output accept at pos 1, and metadata block",
+			mode: modeBlock,
+			port: 18380,
+			wantCalls: [][]string{
+				{"-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
+				{"-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
+				{"-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REJECT", "--reject-with", "icmp-port-unreachable"},
+			},
+		},
+		{
+			name: "assign installs nat redirect and filter output accept at pos 1 without block rule",
+			mode: modeAssign,
+			port: 18381,
+			wantCalls: [][]string{
+				{"-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18381"},
+				{"-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18381", "-j", "ACCEPT"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got [][]string
+			stubRunIPTables(t, func(args ...string) ([]byte, error) {
+				cp := append([]string(nil), args...)
+				got = append(got, cp)
+				return nil, nil
+			})
+
+			if err := InstallInterceptionRules(tt.mode, tt.port); err != nil {
+				t.Fatalf("InstallInterceptionRules(%q, %d) = %v, want nil", tt.mode, tt.port, err)
+			}
+			if !reflect.DeepEqual(got, tt.wantCalls) {
+				t.Errorf("iptables calls:\ngot:  %q\nwant: %q", got, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestSetupIPTablesRedirect_FilterAcceptFailureRollsBackNat(t *testing.T) {
+	var got [][]string
+	stubRunIPTables(t, func(args ...string) ([]byte, error) {
+		cp := append([]string(nil), args...)
+		got = append(got, cp)
+		if len(args) >= 2 && args[0] == "-I" && args[1] == "OUTPUT" {
+			return []byte("iptables: filter insert failed"), errors.New("exit status 1")
+		}
+		return nil, nil
+	})
+
+	err := InstallInterceptionRules(modeBlock, 18380)
+	if !errors.Is(err, ErrInterceptionUnavailable) {
+		t.Fatalf("InstallInterceptionRules() error = %v, want ErrInterceptionUnavailable", err)
+	}
+
+	wantCalls := [][]string{
+		{"-t", "nat", "-A", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
+		{"-I", "OUTPUT", "1", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
+		{"-t", "nat", "-D", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
+	}
+	if !reflect.DeepEqual(got, wantCalls) {
+		t.Errorf("iptables calls on filter accept failure:\ngot:  %q\nwant: %q", got, wantCalls)
+	}
+}
+
+func TestCleanupIPTablesRedirect_RemovesBothRules(t *testing.T) {
+	var got [][]string
+	stubRunIPTables(t, func(args ...string) ([]byte, error) {
+		cp := append([]string(nil), args...)
+		got = append(got, cp)
+		return nil, nil
+	})
+
+	cleanupIPTablesRedirect(18380)
+
+	wantCalls := [][]string{
+		{"-t", "nat", "-D", "OUTPUT", "-d", metadataIP, "-p", "tcp", "--dport", "80", "-j", "REDIRECT", "--to-port", "18380"},
+		{"-D", "OUTPUT", "-d", loopbackIP, "-p", "tcp", "--dport", "18380", "-j", "ACCEPT"},
+	}
+	if !reflect.DeepEqual(got, wantCalls) {
+		t.Errorf("cleanupIPTablesRedirect calls:\ngot:  %q\nwant: %q", got, wantCalls)
+	}
+}
+
+// TestFirewallAndInterceptionRuleOrdering models the filter OUTPUT chain
+// after init-firewall.sh (which allows -o lo and appends a catch-all REJECT)
+// followed by InstallInterceptionRules. It verifies that a packet rewritten
+// by nat OUTPUT REDIRECT (dst=127.0.0.1:<port>, out=eth0) is accepted while
+// non-allowlisted egress (including external traffic on the metadata port and
+// un-redirected metadata traffic) remains rejected.
+func TestFirewallAndInterceptionRuleOrdering(t *testing.T) {
+	type filterRule struct {
+		outIface string
+		dst      string
+		proto    string
+		dport    string
+		target   string
+	}
+	type packet struct {
+		name     string
+		outIface string
+		dst      string
+		proto    string
+		dport    string
+		want     string
+	}
+
+	eval := func(rules []filterRule, p packet) string {
+		for _, r := range rules {
+			if r.outIface != "" && r.outIface != p.outIface {
+				continue
+			}
+			if r.dst != "" && r.dst != p.dst {
+				continue
+			}
+			if r.proto != "" && r.proto != p.proto {
+				continue
+			}
+			if r.dport != "" && r.dport != p.dport {
+				continue
+			}
+			return r.target
+		}
+		return "DROP"
+	}
+
+	parseFilterRule := func(args []string) (pos int, rule filterRule, isFilter bool) {
+		// Ignore non-filter tables (e.g., -t nat).
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == "-t" && args[i+1] != "filter" {
+				return 0, filterRule{}, false
+			}
+		}
+		pos = -1 // append
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "-I":
+				// -I OUTPUT 1
+				if i+2 < len(args) && args[i+1] == "OUTPUT" && args[i+2] == "1" {
+					pos = 0
+					i += 2
+				}
+			case "-o":
+				if i+1 < len(args) {
+					rule.outIface = args[i+1]
+					i++
+				}
+			case "-d":
+				if i+1 < len(args) {
+					rule.dst = args[i+1]
+					i++
+				}
+			case "-p":
+				if i+1 < len(args) {
+					rule.proto = args[i+1]
+					i++
+				}
+			case "--dport":
+				if i+1 < len(args) {
+					rule.dport = args[i+1]
+					i++
+				}
+			case "-j":
+				if i+1 < len(args) {
+					rule.target = args[i+1]
+					i++
+				}
+			}
+		}
+		return pos, rule, true
+	}
+
+	for _, mode := range []string{modeBlock, modeAssign} {
+		t.Run(mode, func(t *testing.T) {
+			// Baseline filter OUTPUT chain installed by init-firewall.sh:
+			// allows -o lo, rejects everything else not on the allowlist.
+			chain := []filterRule{
+				{outIface: "lo", target: "ACCEPT"},
+				{target: "REJECT"},
+			}
+
+			stubRunIPTables(t, func(args ...string) ([]byte, error) {
+				pos, r, ok := parseFilterRule(args)
+				if !ok {
+					return nil, nil
+				}
+				if pos == 0 {
+					chain = append([]filterRule{r}, chain...)
+				} else {
+					chain = append(chain, r)
+				}
+				return nil, nil
+			})
+
+			if err := InstallInterceptionRules(mode, 18380); err != nil {
+				t.Fatalf("InstallInterceptionRules(%q, 18380) = %v", mode, err)
+			}
+
+			packets := []packet{
+				{name: "redirected metadata probe via eth0", outIface: "eth0", dst: "127.0.0.1", proto: "tcp", dport: "18380", want: "ACCEPT"},
+				{name: "direct loopback traffic", outIface: "lo", dst: "127.0.0.1", proto: "tcp", dport: "8080", want: "ACCEPT"},
+				{name: "non-allowlisted external HTTPS", outIface: "eth0", dst: "93.184.216.34", proto: "tcp", dport: "443", want: "REJECT"},
+				{name: "external host on metadata emulator port", outIface: "eth0", dst: "192.0.2.1", proto: "tcp", dport: "18380", want: "REJECT"},
+				{name: "un-redirected metadata HTTP", outIface: "eth0", dst: "169.254.169.254", proto: "tcp", dport: "80", want: "REJECT"},
+				{name: "non-HTTP metadata port", outIface: "eth0", dst: "169.254.169.254", proto: "tcp", dport: "443", want: "REJECT"},
+				{name: "UDP to loopback metadata port via eth0", outIface: "eth0", dst: "127.0.0.1", proto: "udp", dport: "18380", want: "REJECT"},
+			}
+
+			for _, p := range packets {
+				if got := eval(chain, p); got != p.want {
+					t.Errorf("packet %q: verdict = %s, want %s (chain=%+v)", p.name, got, p.want, chain)
+				}
+			}
+		})
+	}
 }
