@@ -41,7 +41,7 @@ If a project has no usable installation, agents fall back to a `GITHUB_TOKEN` se
    | **Webhook URL** | `https://<hub-public-url>/api/v1/webhooks/github` |
    | **Webhook secret** | A long random value, for example from `openssl rand -hex 32`. Keep it for Step 2. |
 
-3. Under **Permissions**, set the repository permissions. The Hub requests these by default for every installation token (`contents`, `pull_requests` and `issues` at write, `metadata` at read), so grant at least:
+3. Under **Permissions**, set the repository permissions. The Hub's default token permissions are `contents`, `pull_requests` and `issues` at write and `metadata` at read, so for full functionality grant:
 
    | Repository permission | Access |
    | :--- | :--- |
@@ -52,8 +52,10 @@ If a project has no usable installation, agents fall back to a `GITHUB_TOKEN` se
 
    Add **Checks** or **Actions** only if you also give a project those token permissions (see [Project token permissions](#project-token-permissions)).
 
-   :::caution[A token request may not exceed the App's permissions]
-   If the App lacks a permission that the Hub requests, GitHub refuses the token and the project shows `permission_denied`. To run an App without **Issues** write, narrow each project's token permissions to what the App grants.
+   :::caution[Token permissions are capped at the App's permissions]
+   For a project without its own token permissions, the Hub caps the defaults at what the App grants: it drops any permission the App lacks and lowers `write` to `read` where the App grants only read. An App with only **Contents** and **Metadata**, for example, still gets git-only tokens. The project is marked `degraded` (`permission_denied`) with the missing permissions listed. The Hub refuses the token if the App grants none of the defaults, or if it can't read the App's permissions.
+
+   Project token permissions you set explicitly are not capped: if they ask for more than the App grants, GitHub refuses the token and the project shows `permission_denied`. To run an App without **Issues** write and keep projects `ok`, set each project's token permissions to what the App grants.
    :::
 
 4. Under **Subscribe to events**, select the events you need. The Hub handles the installation lifecycle events `installation` and `installation_repositories` whenever webhooks are active; GitHub sends them to every App with an active webhook. For GitHub triggers, also subscribe to **Issues**, **Issue comment**, **Pull request**, **Pull request review** and **Pull request review comment**, plus **Push** if you want push triggers. The Hub reports trigger readiness only when the first five are subscribed.
@@ -175,7 +177,7 @@ There is no web UI or CLI command for binding yet.
 
 ### Project token permissions
 
-Each project can narrow what its tokens request with `GET`, `PUT` and `DELETE` on `/api/v1/projects/<project-id>/github-permissions`. The body takes `contents`, `pull_requests`, `issues`, `metadata`, `checks` and `actions`, each `"read"`, `"write"` or empty. A `PUT` must set at least one of them: a body with every field empty, or with any other field, is rejected with `400`. To go back to the defaults, send `DELETE`. Without stored permissions the Hub requests the defaults from Step 1, and `GET` returns them; a stored set with every field empty counts as no stored permissions. A read-only proof turns any `write` into `read`.
+Each project can narrow what its tokens request with `GET`, `PUT` and `DELETE` on `/api/v1/projects/<project-id>/github-permissions`. The body takes `contents`, `pull_requests`, `issues`, `metadata`, `checks` and `actions`, each `"read"`, `"write"` or empty. A `PUT` must set at least one of them: a body with every field empty, or with any other field, is rejected with `400`. To go back to the defaults, send `DELETE`. Without stored permissions `GET` returns the defaults from Step 1, and the Hub requests those defaults capped at the App's permissions (see the caution in Step 1); a stored set with every field empty counts as no stored permissions. Stored permissions are requested as set, not capped at the App's permissions. A read-only proof turns any `write` into `read`.
 
 Commit authorship for agent commits is configured per project at `/api/v1/projects/<project-id>/git-identity` (mode `bot`, `custom` with `name` and `email`, or `co-authored`; default `bot`).
 
@@ -192,7 +194,7 @@ When an agent starts, the Hub injects `GITHUB_TOKEN`, `SCION_GITHUB_APP_ENABLED=
 
 `GET /api/v1/github-app` returns `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `configured` (an App ID and a private key are present), `has_private_key`, `has_webhook_secret` and the last seen GitHub `rate_limit`. With `hub.triggers` and `hub.github_triggers` enabled it also returns `triggers`, whose `ready` is `true` only when webhooks are enabled, a webhook secret is set, the App's metadata could be read, and no required event or permission is missing (`missing_events`, `missing_permissions`). Secrets are never returned.
 
-**Sync Permissions** on the **GitHub App** tab (`POST /api/v1/github-app/sync-permissions`) re-reads the App's permissions from GitHub and marks any project whose token permissions exceed them as `degraded` (`permission_denied`). The health check runs the same comparison.
+**Sync Permissions** on the **GitHub App** tab (`POST /api/v1/github-app/sync-permissions`) re-reads the App's permissions from GitHub and marks any project whose token permissions (stored, or the defaults when none are stored) exceed them as `degraded` (`permission_denied`). The health check runs the same comparison.
 
 To review every association on the Hub, use `GET /api/v1/github-app/installations/association-report` (add `?refresh=true` to rebuild it; rebuilds are limited to one per minute). Each entry shows whether the association is `authorized`, its `basis` (`admin_binding`, `creator_push` or `creator_pull`) and, when refused, an `error_code` and `reason`.
 
@@ -207,7 +209,7 @@ A project's GitHub App status is `unchecked`, `ok`, `degraded` or `error`, with 
 | `installation_revoked` | The installation no longer exists. | Reinstall the App on the account, then discover installations. |
 | `installation_suspended` | The installation is suspended. | Have the account owner unsuspend it on GitHub. |
 | `repo_not_accessible` | The installation does not cover the repository. | Add the repository to the installation on GitHub. |
-| `permission_denied` | The token request asked for more than the App or installation grants. | Add the permission to the App and have the installation owner accept it, or narrow the project's token permissions. |
+| `permission_denied` | The token request asked for more than the App or installation grants, or the project uses the defaults and the App lacks some of them (tokens are still minted with the permissions the App has, unless it has none of the defaults). | Add the permission to the App and have the installation owner accept it, or set the project's token permissions to what the App grants. |
 | `association_unauthorized` | The association failed the host, account or proof check. | Bind the installation as an admin, or have the creator store a `GITHUB_TOKEN` with access to the repository. |
 | `association_check_failed` | The association check could not complete. | Retry; check the Hub logs for GitHub errors or rate limits. |
 | `token_mint_failed` | Other token mint failures, such as a missing App ID or private key. | Check the configuration and the Hub logs. |
