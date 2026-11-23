@@ -150,7 +150,7 @@ func TestExecStartRequestValidateIsFieldOnly(t *testing.T) {
 func TestExecStartRequestTriggerContextValidation(t *testing.T) {
 	validBase := func() ExecStartRequest {
 		return ExecStartRequest{
-			V:              ExecVersionTriggerContext,
+			V:              ExecVersion,
 			RunID:          "00000000-0000-4000-8000-000000000001",
 			ScheduleID:     "00000000-0000-4000-8000-000000000002",
 			Argv:           []string{"echo", "ok"},
@@ -162,14 +162,22 @@ func TestExecStartRequestTriggerContextValidation(t *testing.T) {
 
 	base := validBase()
 	if err := base.Validate(); err != nil {
-		t.Fatalf("valid v2 request rejected: %v", err)
+		t.Fatalf("valid v1 request with trigger_context rejected: %v", err)
 	}
 
-	// Simulated old v1-only sciontool decoder rejects v2 wire payload (fail closed):
-	// both because of DisallowUnknownFields on trigger_context and v != 1.
+	// Empty TriggerContext on v1 remains valid (standard scheduled exec).
+	noCtx := validBase()
+	noCtx.TriggerContext = ""
+	if err := noCtx.Validate(); err != nil {
+		t.Fatalf("valid v1 request without trigger_context rejected: %v", err)
+	}
+
+	// Simulated old sciontool decoder (without trigger_context) rejects the
+	// optional field via DisallowUnknownFields as a defense-in-depth backstop
+	// behind the hub's exec_context.v1 capability gate.
 	wireBytes, err := json.Marshal(validBase())
 	if err != nil {
-		t.Fatalf("marshal v2: %v", err)
+		t.Fatalf("marshal v1 with trigger_context: %v", err)
 	}
 	type oldV1ExecStartRequest struct {
 		V              int      `json:"v"`
@@ -181,7 +189,7 @@ func TestExecStartRequestTriggerContextValidation(t *testing.T) {
 	}
 	var oldReq oldV1ExecStartRequest
 	if err := decodeStrict(wireBytes, &oldReq); err == nil {
-		t.Fatal("old v1 strict decoder must reject v2 wire payload with trigger_context")
+		t.Fatal("old strict decoder must reject trigger_context field")
 	}
 
 	cases := []struct {
@@ -190,42 +198,35 @@ func TestExecStartRequestTriggerContextValidation(t *testing.T) {
 		wantField string
 	}{
 		{
-			name: "v1 with trigger_context rejected",
+			name: "v2 rejected (version stays 1; capability-gated)",
 			mutate: func(r *ExecStartRequest) {
-				r.V = ExecVersion
+				r.V = 2
 			},
-			wantField: FieldTriggerContext,
+			wantField: FieldV,
 		},
 		{
-			name: "v2 with empty trigger_context rejected",
-			mutate: func(r *ExecStartRequest) {
-				r.TriggerContext = ""
-			},
-			wantField: FieldTriggerContext,
-		},
-		{
-			name: "v2 with non-object json rejected",
+			name: "non-object json rejected",
 			mutate: func(r *ExecStartRequest) {
 				r.TriggerContext = `["not","an","object"]`
 			},
 			wantField: FieldTriggerContext,
 		},
 		{
-			name: "v2 with trailing json rejected",
+			name: "trailing json rejected",
 			mutate: func(r *ExecStartRequest) {
 				r.TriggerContext = `{"a":1}{"b":2}`
 			},
 			wantField: FieldTriggerContext,
 		},
 		{
-			name: "v2 with NUL byte rejected",
+			name: "NUL byte rejected",
 			mutate: func(r *ExecStartRequest) {
 				r.TriggerContext = "{\"a\":\"b\x00c\"}"
 			},
 			wantField: FieldTriggerContext,
 		},
 		{
-			name: "v2 exceeding MaxExecTriggerContextBytes rejected",
+			name: "exceeding MaxExecTriggerContextBytes rejected",
 			mutate: func(r *ExecStartRequest) {
 				r.TriggerContext = `{"a":"` + strings.Repeat("x", MaxExecTriggerContextBytes) + `"}`
 			},

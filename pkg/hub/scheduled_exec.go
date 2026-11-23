@@ -362,6 +362,7 @@ const (
 	execReasonRateLimit                = "rate limit"
 	execReasonSubjectBusy              = "subject busy"
 	execReasonContextInvalid           = "trigger context invalid"
+	execReasonContextUnsupported       = "sciontool lacks exec_context.v1"
 )
 
 // execReasonExitStatus is the text of a non-zero exit (D6).

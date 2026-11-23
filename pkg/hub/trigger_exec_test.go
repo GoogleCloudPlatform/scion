@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
@@ -384,14 +385,15 @@ func TestTriggerExec_AcceptanceFixture_WebhookStartedJobEndToEnd(t *testing.T) {
 		return fire.FinishedAt != nil
 	}, 5*time.Second, 25*time.Millisecond, "expected trigger exec fire to finish")
 
-	// 5. Verify exec-start wire request: v=2, literal argv, bounded allow-listed trigger_context.
+	// 5. Verify exec-start wire request: v=1 (capability-gated via exec_context.v1),
+	// literal argv, bounded allow-listed trigger_context.
 	f.capture.mu.Lock()
 	startBodies := f.capture.bodies[execRoutePath(agentcontrol.RouteExecStart)]
 	f.capture.mu.Unlock()
 	require.NotEmpty(t, startBodies, "expected exec-start RPC over Conduit")
 	var startReq agentcontrol.ExecStartRequest
 	require.NoError(t, json.Unmarshal(startBodies[0], &startReq))
-	assert.Equal(t, agentcontrol.ExecVersionTriggerContext, startReq.V)
+	assert.Equal(t, agentcontrol.ExecVersion, startReq.V)
 	assert.Equal(t, fire.ID, startReq.RunID)
 	assert.Equal(t, tr.ID, startReq.ScheduleID)
 	assert.Equal(t, cmd, startReq.Argv, "argv must stay literal and never template from hostile payload")
@@ -595,25 +597,19 @@ func TestTriggerExec_SkipHoldsClaimUntilRunEnds(t *testing.T) {
 	assert.Equal(t, store.ScheduledExecOutcomeOK, run3.Outcome)
 }
 
-// TestTriggerExec_OldSciontoolRejectsV2AndContextBounds verifies:
-//   - an old v1 sciontool rejecting v=2 / trigger_context with 400 invalid fails
-//     closed and records the fire as failed;
+// TestTriggerExec_MissingCapabilityRefusalAndContextBounds verifies:
+//   - a session whose Hello capabilities.features lacks exec_context.v1 fails
+//     closed BEFORE sending exec-start (fire failed, reason
+//     "sciontool lacks exec_context.v1", run outcome error, zero RPCs sent);
 //   - an oversize allow-listed attribute refuses the fire before exec-start;
 //   - sweeper recovery after a hub restart finishes a fire_id-owned run.
-func TestTriggerExec_OldSciontoolRejectsV2AndContextBounds(t *testing.T) {
+func TestTriggerExec_MissingCapabilityRefusalAndContextBounds(t *testing.T) {
 	f := newExecRouteFixture(t)
 	enableTriggerExecExperiments(t, f.srv)
 
-	// Simulate an old v1 sciontool that rejects trigger_context / v=2.
-	f.capture.answer = func(req *conduitv1.RpcRequest) *conduitv1.RpcResponse {
-		if req.GetPath() != execRoutePath(agentcontrol.RouteExecStart) {
-			return nil
-		}
-		return &conduitv1.RpcResponse{
-			Status: http.StatusBadRequest,
-			Body:   []byte(`{"outcome":"invalid","field":"body"}`),
-		}
-	}
+	// Simulate an older sciontool that advertises exec-start in Rpc but lacks
+	// exec_context.v1 in Hello.capabilities.features.
+	f.controlFeatures = []string{conduit.FeatureStreamRenewal}
 	f.startAgent(t)
 
 	ctx := context.Background()
@@ -718,14 +714,18 @@ func TestTriggerExec_OldSciontoolRejectsV2AndContextBounds(t *testing.T) {
 		}
 	}
 
-	// 1. Old v1 sciontool rejects v=2 -> fails closed.
+	// 1. Session lacking exec_context.v1 -> fails closed BEFORE sending exec-start.
 	f1ID, req1 := makeReq(map[string]string{"big": "ok"})
 	out1 := f.srv.fireAction(ctx, req1)
 	assert.Equal(t, hubfire.FireStatusFailed, out1.Status)
+	assert.Equal(t, execReasonContextUnsupported, out1.Error)
 	assert.True(t, out1.Detached)
+	assert.Equal(t, 0, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)),
+		"hub must refuse before sending exec-start when session lacks exec_context.v1")
 	gotF1, err := f.store.GetTriggerFire(ctx, f1ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.TriggerFireStatusFailed, gotF1.Status)
+	assert.Equal(t, execReasonContextUnsupported, gotF1.Error)
 	assert.Equal(t, store.ScheduledExecOutcomeError, f.getRun(t, f1ID).Outcome)
 
 	// 2. Oversize allow-listed attribute (>4 KiB) -> refused before exec-start.

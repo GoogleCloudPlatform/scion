@@ -38,16 +38,19 @@ import (
 //     and Fire sends p.Command verbatim, bound by ExecArgvDigest(p.Command) in
 //     scheduled_exec_runs.command_sha256 and sciontool's execBinding.
 //  2. Environment (env): inherited from the target agent's harness tmux session
-//     plus PWD; for trigger-routed runs (v=2) ONLY the single fixed-name variable
+//     plus PWD; for trigger-routed runs ONLY the single fixed-name variable
 //     SCION_TRIGGER_CONTEXT is added. No arbitrary env var names from rule config
 //     or event data.
 //  3. Context variable (SCION_TRIGGER_CONTEXT): hub-built JSON object
-//     {event_id, trigger_id, fire_id, subject?, attributes?} sent via versioned
-//     ExecStartRequest.TriggerContext (v=2); old v1 sciontool rejects both the
-//     unknown field and v=2 (fail closed). Only keys in the rule's validated
-//     contextAttributes allow-list are copied (each value <=4 KiB, valid UTF-8,
-//     no NUL; total JSON <=16 KiB; violations refuse the fire without truncation).
-//     Bound into sciontool's execBinding sha256 digest and never logged.
+//     {event_id, trigger_id, fire_id, subject?, attributes?} sent via optional
+//     ExecStartRequest.TriggerContext (v=1) ONLY when the agent's Conduit Hello
+//     capabilities.features advertises exec_context.v1. If a fire-owned run has
+//     trigger context and the session lacks exec_context.v1, the hub refuses the
+//     run before sending exec-start (fire failed, "sciontool lacks exec_context.v1")
+//     and never starts without context or drops the field. Only keys in the rule's
+//     validated contextAttributes allow-list are copied (each value <=4 KiB, valid
+//     UTF-8, no NUL; total JSON <=16 KiB; violations refuse the fire without
+//     truncation). Bound into sciontool's execBinding sha256 digest and never logged.
 //  4. Working directory (workdir): fixed by sciontool (/workspace -> HOME -> /);
 //     neither rule config nor event data can influence it.
 //  5. Attach target (agentId / launch_id): resolved to authoritative UUID agentId
@@ -584,6 +587,8 @@ func (a *execAction) dispatchExecAction(ctx context.Context, req hubfire.FireReq
 			return skipRun(execReasonDisabled, "experiment_off_at_start")
 		case errors.Is(startErr, errExecCaptureUnsupported):
 			return failRun(execReasonCaptureUnsupported)
+		case errors.Is(startErr, ErrAgentExecContextUnsupported):
+			return failRun(execReasonContextUnsupported)
 		case errors.Is(startErr, router.ErrNoSession), errors.Is(startErr, ErrAgentControlNotAdvertised),
 			errors.Is(startErr, ErrAgentExecLaunchChanged), errors.Is(startErr, store.ErrNotFound):
 			return skipRun(execReasonUnavailable, "executor_unavailable")

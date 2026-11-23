@@ -109,7 +109,7 @@ func (h *Handler) Routes() []string {
 // registered routes, for Hello.capabilities.features.
 func (h *Handler) Features() []string {
 	if h.exec != nil {
-		return []string{agentcontrol.FeatureExecCapture}
+		return []string{agentcontrol.FeatureExecCapture, agentcontrol.FeatureExecContextV1}
 	}
 	return nil
 }

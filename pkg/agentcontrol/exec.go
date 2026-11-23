@@ -44,14 +44,16 @@ const (
 	FeatureExecCapture = "exec_capture.v1"
 )
 
-// ExecVersion is the v1 request version of exec-start and exec-status.
-// ExecVersionTriggerContext is the v2 exec-start request version that carries
-// the bounded SCION_TRIGGER_CONTEXT JSON payload; an older sciontool rejects
-// both the unknown trigger_context field and v=2, failing closed.
-const (
-	ExecVersion               = 1
-	ExecVersionTriggerContext = 2
-)
+// ExecVersion is the request version of exec-start and exec-status.
+const ExecVersion = 1
+
+// FeatureExecContextV1 is the Hello capabilities feature of a sciontool that
+// accepts the optional trigger_context field on v1 exec-start requests and
+// delivers it to the spawned process as SCION_TRIGGER_CONTEXT. The hub checks
+// for this feature before sending trigger_context and fails closed when it is
+// absent, avoiding version-number contention with other additive exec-start
+// features.
+const FeatureExecContextV1 = "exec_context.v1"
 
 // ExecTriggerContextEnvName is the single fixed environment variable name
 // through which trigger-routed exec runs receive bounded JSON event context.
@@ -176,8 +178,9 @@ type ExecStartRequest struct {
 	TimeoutS       int      `json:"timeout_s"`
 	NotAfterUnixMS int64    `json:"not_after_unix_ms"`
 	Capture string `json:"capture,omitempty"`
-	// TriggerContext is the bounded JSON object delivered to trigger-routed
-	// exec runs as SCION_TRIGGER_CONTEXT. Valid only when V == ExecVersionTriggerContext.
+	// TriggerContext is the optional bounded JSON object delivered to
+	// trigger-routed exec runs as SCION_TRIGGER_CONTEXT. Sent only when the
+	// session advertises FeatureExecContextV1.
 	TriggerContext string `json:"trigger_context,omitempty"`
 }
 
@@ -331,17 +334,13 @@ func ExecTriggerContextDigest(raw string) string {
 // *ExecFieldError naming the first field that fails, in a fixed order. It does
 // not judge not_after_unix_ms against a clock; only that it is set.
 func (r *ExecStartRequest) Validate() error {
-	switch r.V {
-	case ExecVersion:
-		if r.TriggerContext != "" {
-			return execFieldError(FieldTriggerContext)
-		}
-	case ExecVersionTriggerContext:
+	if r.V != ExecVersion {
+		return execFieldError(FieldV)
+	}
+	if r.TriggerContext != "" {
 		if err := ValidateExecTriggerContext(r.TriggerContext); err != nil {
 			return err
 		}
-	default:
-		return execFieldError(FieldV)
 	}
 	if !ValidRunID(r.RunID) {
 		return execFieldError(FieldRunID)

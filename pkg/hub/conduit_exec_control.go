@@ -61,6 +61,12 @@ var ErrAgentExecLaunchChanged = errors.New("agent exec: the agent's launch chang
 // (capture_unsupported).
 var errExecCaptureUnsupported = errors.New("agent exec: target session does not advertise exec_capture.v1")
 
+// ErrAgentExecContextUnsupported: exec-start carried trigger_context, but the
+// target agent's Conduit session did not advertise agentcontrol.FeatureExecContextV1.
+// Nothing was sent; trigger-routed exec runs fail closed rather than starting
+// without SCION_TRIGGER_CONTEXT.
+var ErrAgentExecContextUnsupported = errors.New("agent exec: sciontool lacks exec_context.v1")
+
 // AgentExecLaunchChangedError wraps ErrAgentExecLaunchChanged.
 type AgentExecLaunchChangedError struct {
 	AgentID string
@@ -100,11 +106,7 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 	if !s.execSchedulesEnabled() || !s.conduitRoutable() {
 		return agentcontrol.ExecResult{}, ErrExecSchedulesDisabled
 	}
-	if req.TriggerContext != "" {
-		req.V = agentcontrol.ExecVersionTriggerContext
-	} else {
-		req.V = agentcontrol.ExecVersion
-	}
+	req.V = agentcontrol.ExecVersion
 	if req.NotAfterUnixMS <= 0 {
 		req.NotAfterUnixMS = time.Now().Add(agentcontrol.ExecNotAfter).UnixMilli()
 	}
@@ -115,11 +117,14 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
-	var requireFeature string
+	var requireFeatures []string
 	if req.Capture != "" {
-		requireFeature = agentcontrol.FeatureExecCapture
+		requireFeatures = append(requireFeatures, agentcontrol.FeatureExecCapture)
 	}
-	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStart, body, requireFeature)
+	if req.TriggerContext != "" {
+		requireFeatures = append(requireFeatures, agentcontrol.FeatureExecContextV1)
+	}
+	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStart, body, requireFeatures...)
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
@@ -144,7 +149,7 @@ func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runI
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
-	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStatus, body, "")
+	status, resp, err := s.callAgentExec(ctx, agentID, launchID, agentcontrol.RouteExecStatus, body)
 	if err != nil {
 		return agentcontrol.ExecResult{}, err
 	}
@@ -157,7 +162,7 @@ func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runI
 // incarnation facts (callAgentControlPinned), so the call can reach only a
 // session of launch launchID, locally or through another relay, never a
 // replacement incarnation.
-func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route string, body []byte, requireFeature string) (int, []byte, error) {
+func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route string, body []byte, requireFeatures ...string) (int, []byte, error) {
 	if launchID == "" {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
@@ -174,7 +179,7 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 	if agent.RunID != launchID {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
-	return s.callAgentControlPinned(ctx, agent, route, body, requireFeature, execSeamDuration(&scheduledExecCallTimeout))
+	return s.callAgentControlPinned(ctx, agent, route, body, execSeamDuration(&scheduledExecCallTimeout), requireFeatures...)
 }
 
 // callAgentControlPinned is callAgentControlJSON for an agent snapshot the
@@ -185,14 +190,14 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 // fallback, or of any other launch, is refused before anything is sent
 // (*AgentExecLaunchChangedError). A session's incarnation is fixed at
 // admission and a relayed call is delivered to the resolved session id, so
-// this holds locally and across nodes. The route must be advertised, as
-// for callAgentControlJSON; errors are the same otherwise.
+// this holds locally and across nodes. The route (and optional requireFeature)
+// must be advertised before anything is sent.
 //
 // Unlike callAgentControlJSON it does not check the hub's conduit
 // experiment flag, only that a router exists: the caller owns the gate
 // (StartAgentExecRun gates new starts; AgentExecRunStatus recovers admitted
 // runs whatever the flags, AC18).
-func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent, route string, body []byte, requireFeature string, timeout time.Duration) (int, []byte, error) {
+func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent, route string, body []byte, timeout time.Duration, requireFeatures ...string) (int, []byte, error) {
 	rtr := s.conduitRouter()
 	if rtr == nil {
 		return 0, nil, router.ErrNoSession
@@ -221,8 +226,18 @@ func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent,
 		if !slices.Contains(res.Session.Info().Capabilities.GetRpc(), route) {
 			return fmt.Errorf("%w: agent %s, route %s", ErrAgentControlNotAdvertised, agent.ID, route)
 		}
-		if requireFeature != "" && !slices.Contains(res.Session.Info().Capabilities.GetFeatures(), requireFeature) {
-			return fmt.Errorf("%w: agent %s, feature %s", errExecCaptureUnsupported, agent.ID, requireFeature)
+		for _, requireFeature := range requireFeatures {
+			if requireFeature == "" || slices.Contains(res.Session.Info().Capabilities.GetFeatures(), requireFeature) {
+				continue
+			}
+			switch requireFeature {
+			case agentcontrol.FeatureExecContextV1:
+				return fmt.Errorf("%w: agent %s", ErrAgentExecContextUnsupported, agent.ID)
+			case agentcontrol.FeatureExecCapture:
+				return fmt.Errorf("%w: agent %s, feature %s", errExecCaptureUnsupported, agent.ID, requireFeature)
+			default:
+				return fmt.Errorf("%w: agent %s, feature %s", ErrAgentControlNotAdvertised, agent.ID, requireFeature)
+			}
 		}
 		resp, err := res.Session.Call(ctx, rpc)
 		if err != nil {

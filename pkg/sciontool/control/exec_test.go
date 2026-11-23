@@ -976,22 +976,22 @@ func TestExecWorkdirFallback(t *testing.T) {
 	}
 }
 
-// TestExecTriggerContextEnvAndBinding verifies that v2 exec-start delivers
-// trigger_context exclusively via SCION_TRIGGER_CONTEXT without touching argv,
-// binds trigger_context into run_id replay mismatch checks, and rejects invalid
-// v1/v2 combinations without spawning.
+// TestExecTriggerContextEnvAndBinding verifies that v1 exec-start with optional
+// trigger_context delivers it exclusively via SCION_TRIGGER_CONTEXT without
+// touching argv, binds trigger_context into run_id replay mismatch checks, and
+// rejects malformed trigger_context or unsupported versions without spawning.
 func TestExecTriggerContextEnvAndBinding(t *testing.T) {
 	f := newExecFixture(t)
 	ctxJSON := `{"event_id":"evt-1","trigger_id":"trg-1","fire_id":"fire-1","attributes":{"env":"prod"}}`
 
 	req := f.startReq(50, "trig")
-	req.V = agentcontrol.ExecVersionTriggerContext
+	req.V = agentcontrol.ExecVersion
 	req.ScheduleID = uuidN(700)
 	req.TriggerContext = ctxJSON
 
 	code, resp := f.start(t, req)
 	if code != http.StatusAccepted || resp.State != agentcontrol.ExecStateRunning {
-		t.Fatalf("v2 start = %d %+v, want 202 running", code, resp)
+		t.Fatalf("start with trigger_context = %d %+v, want 202 running", code, resp)
 	}
 
 	// Verify spawned spec received SCION_TRIGGER_CONTEXT and literal argv.
@@ -1016,18 +1016,17 @@ func TestExecTriggerContextEnvAndBinding(t *testing.T) {
 		t.Fatalf("altered trigger_context replay = %d %+v, want 409 mismatch", code, resp)
 	}
 
-	// v1 request with trigger_context is refused 400 invalid without spawning.
-	badV1 := f.startReq(51, "bad-v1")
-	badV1.V = agentcontrol.ExecVersion
-	badV1.TriggerContext = ctxJSON
-	if code, resp := f.start(t, badV1); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldTriggerContext {
-		t.Fatalf("v1 with trigger_context = %d %+v, want 400 invalid trigger_context", code, resp)
+	// Malformed trigger_context is refused 400 invalid without spawning.
+	badCtx := f.startReq(51, "bad-ctx")
+	badCtx.TriggerContext = `["not-an-object"]`
+	if code, resp := f.start(t, badCtx); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldTriggerContext {
+		t.Fatalf("malformed trigger_context = %d %+v, want 400 invalid trigger_context", code, resp)
 	}
 
-	// v2 request without trigger_context is refused 400 invalid without spawning.
-	badV2 := f.startReq(52, "bad-v2")
-	badV2.V = agentcontrol.ExecVersionTriggerContext
-	if code, resp := f.start(t, badV2); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldTriggerContext {
-		t.Fatalf("v2 without trigger_context = %d %+v, want 400 invalid trigger_context", code, resp)
+	// Unsupported version v=2 is refused 400 invalid v without spawning.
+	badVer := f.startReq(52, "bad-ver")
+	badVer.V = 2
+	if code, resp := f.start(t, badVer); code != http.StatusBadRequest || resp.Outcome != agentcontrol.ExecOutcomeInvalid || resp.Field != agentcontrol.FieldV {
+		t.Fatalf("v2 request = %d %+v, want 400 invalid v", code, resp)
 	}
 }
