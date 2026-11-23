@@ -24,6 +24,9 @@ import io
 import json
 import os
 import re
+import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager, redirect_stderr
@@ -1543,6 +1546,220 @@ class CopilotAgentPluginsTest(BaseTelemetryTest):
         self.reconcile(budget_s=20.0, clock=lambda: next(ticks))
         # --version 10s default and install 15s default, both capped to 3s.
         self.assertEqual(self.cli.timeouts, [3.0, 3.0])
+
+
+class DockerfileSmokeCheckTests(unittest.TestCase):
+    """Verify Copilot CLI version pinning and build-time launch-flag smoke check."""
+
+    DOCKERFILE_PATH = os.path.join(os.path.dirname(__file__), "Dockerfile")
+    CONFIG_YAML_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
+    VALID_INSTRUCTIONS = frozenset({
+        "ADD", "ARG", "CMD", "COPY", "ENTRYPOINT", "ENV", "EXPOSE",
+        "FROM", "HEALTHCHECK", "LABEL", "MAINTAINER", "ONBUILD", "RUN",
+        "SHELL", "STOPSIGNAL", "USER", "VOLUME", "WORKDIR",
+    })
+
+    def _read_dockerfile(self) -> str:
+        with open(self.DOCKERFILE_PATH, encoding="utf-8") as f:
+            return f.read()
+
+    def _parse_dockerfile_instructions(self, text: str) -> list[tuple[int, str, str]]:
+        """Validate Dockerfile line-continuation and BuildKit heredoc structure.
+
+        Returns a list of (start_line_no, INSTRUCTION, full_text) tuples and
+        fails the test if any instruction keyword is invalid or a heredoc is
+        unterminated.
+        """
+        lines = text.splitlines()
+        self.assertTrue(
+            lines and lines[0].strip() == "# syntax=docker/dockerfile:1",
+            "Dockerfile must declare `# syntax=docker/dockerfile:1` on line 1 for --mount and heredocs",
+        )
+        instructions: list[tuple[int, str, str]] = []
+        i = 0
+        while i < len(lines):
+            raw = lines[i]
+            stripped = raw.strip()
+            if not stripped or stripped.startswith("#"):
+                i += 1
+                continue
+            start_line = i + 1
+            parts = [raw]
+            while parts[-1].rstrip().endswith("\\"):
+                i += 1
+                self.assertLess(
+                    i, len(lines),
+                    f"Dockerfile line {start_line}: trailing line continuation at EOF",
+                )
+                # Dockerfile allows comment lines inside a line continuation.
+                while i < len(lines) and lines[i].lstrip().startswith("#"):
+                    i += 1
+                self.assertLess(
+                    i, len(lines),
+                    f"Dockerfile line {start_line}: trailing line continuation at EOF",
+                )
+                parts.append(lines[i])
+            header = "\n".join(parts)
+            m = re.match(r"^\s*([A-Za-z]+)\b", header)
+            self.assertIsNotNone(
+                m,
+                f"Dockerfile line {start_line}: expected instruction keyword, got {raw!r}",
+            )
+            keyword = m.group(1).upper()
+            self.assertIn(
+                keyword,
+                self.VALID_INSTRUCTIONS,
+                f"Dockerfile line {start_line}: unknown instruction {m.group(1)!r} in {raw!r}",
+            )
+            # Check for BuildKit heredoc markers (e.g. <<'PY' or <<-EOF).
+            heredocs = re.findall(r"<<(-?)(?:'([A-Za-z_][A-Za-z0-9_]*)'|\"([A-Za-z_][A-Za-z0-9_]*)\"|([A-Za-z_][A-Za-z0-9_]*))", header)
+            i += 1
+            body_lines: list[str] = []
+            for strip_tabs, q1, q2, bare in heredocs:
+                delim = q1 or q2 or bare
+                found = False
+                while i < len(lines):
+                    candidate = lines[i].lstrip("\t") if strip_tabs else lines[i]
+                    if candidate == delim:
+                        found = True
+                        i += 1
+                        break
+                    body_lines.append(lines[i])
+                    i += 1
+                self.assertTrue(
+                    found,
+                    f"Dockerfile line {start_line}: unterminated heredoc <<{delim}",
+                )
+            full = header + ("\n" + "\n".join(body_lines) if body_lines else "")
+            instructions.append((start_line, keyword, full))
+        return instructions
+
+    def _extract_smoke_check_script(self) -> str:
+        df = self._read_dockerfile()
+        # Ensure the Dockerfile itself parses structurally before extracting.
+        self._parse_dockerfile_instructions(df)
+        m = re.search(
+            r"RUN\s+--mount=type=bind,source=config\.yaml,target=/tmp/copilot-config\.yaml,readonly\s*\\\s*\n"
+            r"\s*python3\s+-\s+/tmp/copilot-config\.yaml\s+<<'PY'\n"
+            r"(.*?)\nPY(?:\n|$)",
+            df,
+            re.S,
+        )
+        self.assertIsNotNone(
+            m,
+            "Dockerfile must run a build-time launch-flag smoke check via BuildKit heredoc <<'PY' mounting config.yaml",
+        )
+        return m.group(1)
+
+    def _make_fake_copilot(self, bin_dir: str, record_path: str, reject_flag: str = "") -> None:
+        script = os.path.join(bin_dir, "copilot")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write(
+                f"#!{sys.executable}\n"
+                "import json, sys\n"
+                f"with open({record_path!r}, 'w', encoding='utf-8') as out:\n"
+                "    json.dump(sys.argv[1:], out)\n"
+                f"reject = {reject_flag!r}\n"
+                "if reject and reject in sys.argv[1:]:\n"
+                "    sys.stderr.write(f'error: {reject} was removed\\n')\n"
+                "    sys.exit(1)\n"
+                "print('GitHub Copilot CLI 1.0.114.')\n"
+            )
+        os.chmod(script, os.stat(script).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    def test_dockerfile_instructions_are_structurally_valid(self) -> None:
+        df = self._read_dockerfile()
+        instructions = self._parse_dockerfile_instructions(df)
+        keywords = [kw for _, kw, _ in instructions]
+        self.assertIn("FROM", keywords)
+        self.assertIn("RUN", keywords)
+        self.assertEqual(keywords[-1], "CMD")
+
+    def test_copilot_cli_version_is_pinned(self) -> None:
+        df = self._read_dockerfile()
+        m = re.search(r"^ARG\s+COPILOT_CLI_VERSION=(\S+)\s*$", df, re.M)
+        self.assertIsNotNone(m, "Dockerfile must declare ARG COPILOT_CLI_VERSION=<version>")
+        version = m.group(1)
+        self.assertNotEqual(version, "latest", "COPILOT_CLI_VERSION must be pinned, not 'latest'")
+        self.assertRegex(
+            version,
+            r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$",
+            f"COPILOT_CLI_VERSION={version!r} must be a concrete release version",
+        )
+
+    def test_smoke_check_invokes_configured_launch_flags(self) -> None:
+        smoke_script = self._extract_smoke_check_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            record_path = os.path.join(tmp, "argv.json")
+            self._make_fake_copilot(bin_dir, record_path)
+            env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ.get("PATH", ""))
+            res = subprocess.run(
+                [sys.executable, "-", self.CONFIG_YAML_PATH],
+                input=smoke_script,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0, f"smoke check failed:\n{res.stdout}\n{res.stderr}")
+            with open(record_path, encoding="utf-8") as f:
+                argv = json.load(f)
+            self.assertEqual(
+                argv,
+                [
+                    "--no-auto-update",
+                    "--no-color",
+                    "--allow-all",
+                    "--continue",
+                    "-i",
+                    "smoke-check",
+                    "--version",
+                ],
+            )
+
+    def test_smoke_check_fails_when_cli_rejects_flag(self) -> None:
+        smoke_script = self._extract_smoke_check_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            record_path = os.path.join(tmp, "argv.json")
+            self._make_fake_copilot(bin_dir, record_path, reject_flag="--no-remote")
+            bad_cfg = os.path.join(tmp, "config.yaml")
+            with open(bad_cfg, "w", encoding="utf-8") as f:
+                f.write(
+                    'harness: copilot\n'
+                    'command:\n'
+                    '  base: ["copilot", "--no-auto-update", "--no-remote"]\n'
+                    '  resume_flag: "--continue"\n'
+                    '  task_flag: "-i"\n'
+                )
+            env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ.get("PATH", ""))
+            res = subprocess.run(
+                [sys.executable, "-", bad_cfg],
+                input=smoke_script,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0, "smoke check must fail when copilot rejects a flag")
+            self.assertIn("--no-remote was removed", res.stderr)
+
+    def test_smoke_check_fails_when_command_base_missing(self) -> None:
+        smoke_script = self._extract_smoke_check_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_cfg = os.path.join(tmp, "config.yaml")
+            with open(empty_cfg, "w", encoding="utf-8") as f:
+                f.write("harness: copilot\n")
+            res = subprocess.run(
+                [sys.executable, "-", empty_cfg],
+                input=smoke_script,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0, "smoke check must fail when command.base is missing")
+            self.assertIn("failed to parse command.base", res.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

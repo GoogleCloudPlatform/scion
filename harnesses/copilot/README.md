@@ -25,6 +25,23 @@ harnesses/copilot/
 scion harness-config install harnesses/copilot
 ```
 
+## Copilot CLI Version
+
+`Dockerfile` pins `ARG COPILOT_CLI_VERSION` to a known-good release of
+[`github/copilot-cli`](https://github.com/github/copilot-cli/releases) instead
+of defaulting to `latest`, and runs a build-time smoke check that parses the
+`command:` flags from `config.yaml` and verifies `copilot <flags> --version`
+exits 0 before the image is published.
+
+To bump the bundled CLI version:
+
+1. Update `ARG COPILOT_CLI_VERSION` in `harnesses/copilot/Dockerfile` to the
+   target release (without the leading `v`).
+2. Rebuild the image (or pass `--build-arg COPILOT_CLI_VERSION=<version>` for
+   ad-hoc testing; `--build-arg COPILOT_CLI_VERSION=latest` remains supported).
+   If the new release removed or renamed any configured launch flag, the
+   build-time smoke check fails the build immediately.
+
 ## Authentication
 
 The Copilot CLI requires a GitHub account with an active Copilot subscription.
