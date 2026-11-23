@@ -227,10 +227,7 @@ func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) 
 	if work := s.cpuWork(procs, excluded); work != nil {
 		return work
 	}
-	if tool != nil {
-		return tool
-	}
-	return nil
+	return tool
 }
 
 // recordCPU records every process's CPU time for the next sample's Tier 2
