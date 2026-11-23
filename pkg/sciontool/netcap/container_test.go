@@ -104,22 +104,33 @@ func buildTestImage(t *testing.T) {
 	mustDocker(t, append(args, filepath.Join("testdata", "container"))...)
 }
 
-func capHasNetAdmin(t *testing.T, hex string) bool {
+func capHasBit(t *testing.T, hex string, bit uint) bool {
 	t.Helper()
 	v, err := strconv.ParseUint(strings.TrimSpace(hex), 16, 64)
 	if err != nil {
 		t.Fatalf("parse capability mask %q: %v", hex, err)
 	}
-	return v&(1<<capNetAdmin) != 0
+	return v&(1<<bit) != 0
 }
 
-// createAgent creates and starts an agent container WITHOUT --cap-add NET_ADMIN.
+func capHasNetAdmin(t *testing.T, hex string) bool {
+	t.Helper()
+	return capHasBit(t, hex, capNetAdmin)
+}
+
+func capHasNetRaw(t *testing.T, hex string) bool {
+	t.Helper()
+	return capHasBit(t, hex, capNetRaw)
+}
+
+// createAgent creates and starts an agent container WITHOUT --cap-add NET_ADMIN
+// and WITH --cap-drop NET_RAW, matching pkg/runtime/common.go's agent argv.
 // When runSidecar is true (normal assign/block launch), it also runs the
 // short-lived netns-setup container sharing the agent's network namespace.
 func createAgent(t *testing.T, sciontool, mode string, runSidecar bool, extra ...string) string {
 	t.Helper()
 	name := fmt.Sprintf("scion-netcap-%s-%d", mode, time.Now().UnixNano())
-	args := []string{"create", "--name", name}
+	args := []string{"create", "--name", name, "--cap-drop", "NET_RAW"}
 	if mode == "assign" || mode == "block" {
 		args = append(args, "-e", interceptionRequired, "-e", interceptionSourceRuntime)
 	}
@@ -242,6 +253,45 @@ func anyHasNetAdmin(t *testing.T, vals []string) bool {
 	return false
 }
 
+func anyHasNetRaw(t *testing.T, vals []string) bool {
+	t.Helper()
+	for _, v := range vals {
+		if capHasNetRaw(t, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertRawSocketsEPERM verifies that creating both AF_PACKET/SOCK_RAW and
+// AF_INET/SOCK_RAW sockets fails with EPERM inside container name, even when
+// running as root directly or via sudo from the scion user.
+func assertRawSocketsEPERM(t *testing.T, name string) {
+	t.Helper()
+	pyCheck := `import errno, socket, sys
+cases = [
+    ("AF_PACKET/SOCK_RAW", (socket.AF_PACKET, socket.SOCK_RAW)),
+    ("AF_INET/SOCK_RAW", (socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)),
+]
+for label, args in cases:
+    try:
+        s = socket.socket(*args)
+        s.close()
+        sys.exit(f"{label} succeeded unexpectedly")
+    except PermissionError as e:
+        if e.errno != errno.EPERM:
+            sys.exit(f"{label} raised PermissionError with errno={e.errno}, want EPERM ({errno.EPERM})")
+    except OSError as e:
+        sys.exit(f"{label} raised OSError errno={e.errno} ({e}), want EPERM ({errno.EPERM})")
+`
+	if out, err := docker(t, "exec", "--user", "root", name, "python3", "-c", pyCheck); err != nil {
+		t.Errorf("raw socket EPERM check as root failed: %v\n%s", err, out)
+	}
+	if out, err := docker(t, "exec", "--user", "scion", name, "sudo", "-n", "python3", "-c", pyCheck); err != nil {
+		t.Errorf("raw socket EPERM check via sudo failed: %v\n%s", err, out)
+	}
+}
+
 func TestContainer(t *testing.T) {
 	sciontool := os.Getenv("SCION_NETCAP_TEST_SCIONTOOL")
 	if sciontool == "" {
@@ -257,29 +307,53 @@ func TestContainer(t *testing.T) {
 			name := createAgent(t, sciontool, mode, true)
 			waitProbe(t, name)
 
-			// AC 1: agent container OCI spec has no NET_ADMIN.
+			// AC 1: agent container OCI spec has neither NET_ADMIN nor NET_RAW in CapAdd.
+			// Effective capability absence (including CAP_NET_RAW) is verified via the
+			// kernel capability sets and raw-socket EPERM checks below, since engines
+			// whose default set already omits NET_RAW (e.g. newer Podman) may record
+			// an empty HostConfig.CapDrop.
 			capAdd := mustDocker(t, "inspect", "--format", "{{.HostConfig.CapAdd}}", name)
 			if strings.Contains(capAdd, "NET_ADMIN") {
 				t.Errorf("agent container HostConfig.CapAdd = %q, must not contain NET_ADMIN", capAdd)
 			}
+			if strings.Contains(capAdd, "NET_RAW") {
+				t.Errorf("agent container HostConfig.CapAdd = %q, must not contain NET_RAW", capAdd)
+			}
 
-			// AC 1: harness, PID 1, and exec sessions (--user root and --user scion) have no CAP_NET_ADMIN.
+			// AC 1: harness, PID 1, and exec sessions (--user root and --user scion)
+			// have neither CAP_NET_ADMIN nor CAP_NET_RAW.
 			if uid := probe(t, name, "uid"); uid != "1000" {
 				t.Errorf("harness uid = %s, want 1000 (the scion user)", uid)
 			}
 			for _, f := range []string{"capbnd", "capeff", "capprm"} {
-				if capHasNetAdmin(t, probe(t, name, f)) {
+				val := probe(t, name, f)
+				if capHasNetAdmin(t, val) {
 					t.Errorf("harness %s still has CAP_NET_ADMIN", f)
 				}
-			}
-			if anyHasNetAdmin(t, pid1ThreadCaps(t, name)) {
-				t.Error("a thread of init (PID 1) still has CAP_NET_ADMIN in CapBnd, CapEff or CapPrm")
-			}
-			for _, user := range []string{"root", "scion"} {
-				if bnd := execCapBnd(t, name, user); capHasNetAdmin(t, bnd) {
-					t.Errorf("docker exec --user %s CapBnd = %s still has CAP_NET_ADMIN", user, bnd)
+				if capHasNetRaw(t, val) {
+					t.Errorf("harness %s still has CAP_NET_RAW", f)
 				}
 			}
+			pid1Caps := pid1ThreadCaps(t, name)
+			if anyHasNetAdmin(t, pid1Caps) {
+				t.Error("a thread of init (PID 1) still has CAP_NET_ADMIN in CapBnd, CapEff or CapPrm")
+			}
+			if anyHasNetRaw(t, pid1Caps) {
+				t.Error("a thread of init (PID 1) still has CAP_NET_RAW in CapBnd, CapEff or CapPrm")
+			}
+			for _, user := range []string{"root", "scion"} {
+				bnd := execCapBnd(t, name, user)
+				if capHasNetAdmin(t, bnd) {
+					t.Errorf("docker exec --user %s CapBnd = %s still has CAP_NET_ADMIN", user, bnd)
+				}
+				if capHasNetRaw(t, bnd) {
+					t.Errorf("docker exec --user %s CapBnd = %s still has CAP_NET_RAW", user, bnd)
+				}
+			}
+
+			// Raw-socket creation (AF_PACKET/SOCK_RAW and AF_INET/SOCK_RAW) fails
+			// with EPERM even as root.
+			assertRawSocketsEPERM(t, name)
 
 			// AC 2: sudo iptables flush fails from both harness and exec session, and redirect survives.
 			if rc := probe(t, name, "sudo-flush-rc"); rc == "0" {
@@ -307,6 +381,21 @@ func TestContainer(t *testing.T) {
 			}
 		})
 	}
+
+	// Passthrough mode also drops CAP_NET_RAW and has no CAP_NET_ADMIN.
+	t.Run("passthrough drops CAP_NET_RAW", func(t *testing.T) {
+		name := createAgent(t, sciontool, "passthrough", false)
+		waitProbe(t, name)
+
+		pid1Caps := pid1ThreadCaps(t, name)
+		if anyHasNetAdmin(t, pid1Caps) {
+			t.Error("a thread of init (PID 1) still has CAP_NET_ADMIN in CapBnd, CapEff or CapPrm")
+		}
+		if anyHasNetRaw(t, pid1Caps) {
+			t.Error("a thread of init (PID 1) still has CAP_NET_RAW in CapBnd, CapEff or CapPrm")
+		}
+		assertRawSocketsEPERM(t, name)
+	})
 
 	// AC 5: with SCION_INIT_FIREWALL=true plus block/assign, the sidecar runs
 	// init-firewall.sh before installing the metadata redirect, so both the

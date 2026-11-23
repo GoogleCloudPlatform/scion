@@ -11,8 +11,11 @@ import (
 	"strings"
 )
 
-// capNetAdmin is CAP_NET_ADMIN's bit number (linux/capability.h).
-const capNetAdmin = 12
+// Kernel capability bit numbers (linux/capability.h).
+const (
+	capNetAdmin = 12
+	capNetRaw   = 13
+)
 
 // CapabilityName is the only identifying text DropNetAdmin's errors carry.
 const CapabilityName = "CAP_NET_ADMIN"

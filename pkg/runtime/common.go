@@ -1024,6 +1024,14 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addTrackedArgEnv(MetadataInterceptionEnvVar+"="+MetadataInterceptionOff, false)
 	}
 
+	// Drop CAP_NET_RAW on Docker and Podman agent containers as defense in
+	// depth: agents do not require raw sockets, and removing this unneeded
+	// default capability restricts raw packet access across all metadata and
+	// network modes. Apple Container does not accept --cap-drop flags.
+	if config.RuntimeName == "docker" || config.RuntimeName == "podman" {
+		addArg("--cap-drop", "NET_RAW")
+	}
+
 	// Add extra /etc/hosts entries (e.g. for host.docker.internal on Linux)
 	for _, h := range config.ExtraHosts {
 		addArg("--add-host", h)
