@@ -118,6 +118,7 @@ var dispatchHubSentinels = []struct {
 	{"delete_in_progress", store.ErrDeleteInProgress},
 	{"launch_invalid_phase", ErrLaunchInvalidPhase},
 	{"broker_lacks_home_files", ErrBrokerLacksHomeFiles},
+	{"broker_lacks_github_token_installation_only", ErrBrokerLacksGitHubTokenInstallationOnly},
 	{"home_files_env_gather_deferred", ErrHomeFilesEnvGatherDeferred},
 	{"home_files_create_not_deferrable", ErrHomeFilesCreateNotDeferrable},
 	{"start_broker_not_connected", errStartBrokerNotConnected},

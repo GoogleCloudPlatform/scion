@@ -31,9 +31,15 @@ import (
 // dispatchStuckAge: 3× the dispatchRollingTimeout (90s) from dispatch_wait.go —
 // gives the rolling-timeout wait ample time to fail organically before the
 // reaper force-transitions the row.
+// dispatchPendingTTL: bounded lifetime for a pending dispatch row that is
+// never claimed (or whose broker never drains it). Exceeding this TTL — or
+// passing deadline_at — transitions the row to failed and clears its args
+// (including any HomeFiles event bodies) so abandoned payloads cannot linger
+// in the database (P1c-4a security L-1).
 const (
 	affinityStaleAge   = 2 * defaultAffinityFreshness // 180s
 	dispatchStuckAge   = 3 * dispatchRollingTimeout   // 270s
+	dispatchPendingTTL = 10 * time.Minute
 	dispatchMaxRetries = 3
 )
 
@@ -116,15 +122,22 @@ func (s *Server) brokerAffinityReapHandler() func(ctx context.Context) {
 			return
 		}
 
+		expiredPending, err := s.store.ReapExpiredPendingDispatch(ctx, now.Add(-dispatchPendingTTL))
+		if err != nil {
+			slog.Error("Scheduler: expired pending dispatch reap failed", "error", err)
+			return
+		}
+
 		requeued, failed, err := s.store.ReapStuckDispatch(ctx, now.Add(-dispatchStuckAge), dispatchMaxRetries)
 		if err != nil {
 			slog.Error("Scheduler: stuck dispatch reap failed", "error", err)
 			return
 		}
 
-		if cleared > 0 || requeued > 0 || failed > 0 {
+		if cleared > 0 || expiredPending > 0 || requeued > 0 || failed > 0 {
 			slog.Info("Scheduler: broker affinity reap complete",
 				"affinity_cleared", cleared,
+				"pending_expired", expiredPending,
 				"dispatch_requeued", requeued,
 				"dispatch_failed", failed)
 		}

@@ -104,7 +104,7 @@ func (s *Server) agentListUserSecrets(
 			continue
 		}
 		if usesInstallationGitHubToken(facts.Agent) &&
-			(isBlockedInstallationGitHubEnvKey(m.Name) || isBlockedInstallationGitHubEnvKey(m.Target)) {
+			isBlockedInstallationGitHubSecret(m.SecretType, m.Name, m.Target) {
 			continue
 		}
 		live, kind, _, lerr := s.progenySourceLive(ctx, m)

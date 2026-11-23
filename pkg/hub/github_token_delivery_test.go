@@ -70,11 +70,12 @@ func TestGitHubTokenDelivery_CreateStartRestartAndAsNeeded(t *testing.T) {
 	require.NoError(t, st.CreateProject(ctx, projNoApp))
 
 	broker := &store.RuntimeBroker{
-		ID:       tid("gh-pref-broker"),
-		Name:     "gh-pref-broker",
-		Slug:     "gh-pref-broker",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
+		ID:           tid("gh-pref-broker"),
+		Name:         "gh-pref-broker",
+		Slug:         "gh-pref-broker",
+		Endpoint:     "http://localhost:9800",
+		Status:       store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{GitHubTokenInstallationOnly: true},
 	}
 	require.NoError(t, st.CreateRuntimeBroker(ctx, broker))
 
@@ -763,11 +764,12 @@ func TestGitHubTokenInstallation_RuntimeSecretPullRefusedAndChildInherits(t *tes
 
 		// Attach a runtime broker to the project so interactive agent create succeeds.
 		broker := &store.RuntimeBroker{
-			ID:       api.NewUUID(),
-			Name:     "child-inherit-broker",
-			Slug:     "child-inherit-broker",
-			Endpoint: "http://localhost:9800",
-			Status:   store.BrokerStatusOnline,
+			ID:           api.NewUUID(),
+			Name:         "child-inherit-broker",
+			Slug:         "child-inherit-broker",
+			Endpoint:     "http://localhost:9800",
+			Status:       store.BrokerStatusOnline,
+			Capabilities: &store.BrokerCapabilities{GitHubTokenInstallationOnly: true},
 		}
 		require.NoError(t, f.Store.CreateRuntimeBroker(ctx, broker))
 		require.NoError(t, f.Store.AddProjectProvider(ctx, &store.ProjectProvider{
@@ -988,11 +990,12 @@ func TestGitHubTokenDelivery_NoAuthAndFinalizeEnv(t *testing.T) {
 	}
 	require.NoError(t, st.CreateProject(ctx, proj))
 	broker := &store.RuntimeBroker{
-		ID:       tid("o2-noauth-broker"),
-		Name:     "o2-noauth-broker",
-		Slug:     "o2-noauth-broker",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
+		ID:           tid("o2-noauth-broker"),
+		Name:         "o2-noauth-broker",
+		Slug:         "o2-noauth-broker",
+		Endpoint:     "http://localhost:9800",
+		Status:       store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{GitHubTokenInstallationOnly: true},
 	}
 	require.NoError(t, st.CreateRuntimeBroker(ctx, broker))
 
@@ -1310,11 +1313,12 @@ func TestGitHubTokenInheritance_FailClosedOnParentLookupFault(t *testing.T) {
 		require.NoError(t, f.Store.UpdateAgent(ctx, parent))
 
 		broker := &store.RuntimeBroker{
-			ID:       api.NewUUID(),
-			Name:     name + "-broker",
-			Slug:     name + "-broker",
-			Endpoint: "http://localhost:9801",
-			Status:   store.BrokerStatusOnline,
+			ID:           api.NewUUID(),
+			Name:         name + "-broker",
+			Slug:         name + "-broker",
+			Endpoint:     "http://localhost:9801",
+			Status:       store.BrokerStatusOnline,
+			Capabilities: &store.BrokerCapabilities{GitHubTokenInstallationOnly: true},
 		}
 		require.NoError(t, f.Store.CreateRuntimeBroker(ctx, broker))
 		require.NoError(t, f.Store.AddProjectProvider(ctx, &store.ProjectProvider{
@@ -1715,11 +1719,12 @@ func TestGitHubTokenInstallation_AgentScopedSecretsGuarded(t *testing.T) {
 		}
 		require.NoError(t, st.CreateProject(ctx, proj))
 		broker := &store.RuntimeBroker{
-			ID:       tid("gh-agentscope-broker"),
-			Name:     "gh-agentscope-broker",
-			Slug:     "gh-agentscope-broker",
-			Endpoint: "http://localhost:9800",
-			Status:   store.BrokerStatusOnline,
+			ID:           tid("gh-agentscope-broker"),
+			Name:         "gh-agentscope-broker",
+			Slug:         "gh-agentscope-broker",
+			Endpoint:     "http://localhost:9800",
+			Status:       store.BrokerStatusOnline,
+			Capabilities: &store.BrokerCapabilities{GitHubTokenInstallationOnly: true},
 		}
 		require.NoError(t, st.CreateRuntimeBroker(ctx, broker))
 		userID := tid("gh-agentscope-user")

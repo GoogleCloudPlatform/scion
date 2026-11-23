@@ -751,7 +751,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 	} else if len(cfg.Env) > 0 {
 		env := make(map[string]string, len(cfg.Env))
 		for k, v := range cfg.Env {
-			if k == "GITHUB_TOKEN" {
+			if api.IsBlockedInstallationGitHubEnvKey(k) {
 				continue
 			}
 			env[k] = v
@@ -860,7 +860,7 @@ func (ac AgentAppliedConfig) MarshalJSON() ([]byte, error) {
 	} else if len(out.Env) > 0 {
 		filtered := make(map[string]string, len(out.Env))
 		for k, v := range out.Env {
-			if k == "GITHUB_TOKEN" {
+			if api.IsBlockedInstallationGitHubEnvKey(k) {
 				continue
 			}
 			filtered[k] = v
@@ -1546,6 +1546,12 @@ type BrokerCapabilities struct {
 	// starting the harness (ptone/scion#8058). The hub refuses to dispatch a
 	// create carrying non-empty HomeFiles to a broker without it.
 	HomeFiles bool `json:"homeFiles,omitempty"`
+	// GitHubTokenInstallationOnly indicates the broker honours the
+	// githubTokenInstallationOnly dispatch flag by refusing broker-side host
+	// env passthrough and config/bundle injection for blocked GitHub token
+	// keys (ptone/scion#8058). The hub refuses to dispatch installation-only
+	// agents to a broker without it.
+	GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker

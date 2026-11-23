@@ -873,3 +873,33 @@ func (s *BrokerDispatchStore) ReapStuckDispatch(ctx context.Context, stuckBefore
 
 	return requeued, failed, nil
 }
+
+// ReapExpiredPendingDispatch fails and scrubs pending dispatches whose
+// updated_at is older than staleBefore or whose deadline_at has passed.
+// Clearing args in the same atomic conditional update guarantees that
+// HomeFiles event bodies and other serialized dispatch arguments cannot linger
+// on rows that never reach a terminal state (P1c-4a security L-1).
+func (s *BrokerDispatchStore) ReapExpiredPendingDispatch(ctx context.Context, staleBefore time.Time) (int, error) {
+	now := time.Now()
+	stalePendingPred := brokerdispatch.And(
+		brokerdispatch.StateEQ(store.DispatchStatePending),
+		brokerdispatch.Or(
+			brokerdispatch.UpdatedAtLT(staleBefore),
+			brokerdispatch.And(
+				brokerdispatch.DeadlineAtNotNil(),
+				brokerdispatch.DeadlineAtLT(now),
+			),
+		),
+	)
+	expired, err := s.client.BrokerDispatch.Update().
+		Where(stalePendingPred).
+		SetState(store.DispatchStateFailed).
+		SetError("reaper: pending dispatch expired").
+		ClearArgs().
+		SetUpdatedAt(now).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return expired, nil
+}

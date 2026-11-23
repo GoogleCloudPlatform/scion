@@ -475,6 +475,10 @@ type BrokerCapabilities struct {
 	// starting the harness (ptone/scion#8058; store.BrokerCapabilities.HomeFiles
 	// is its counterpart).
 	HomeFiles bool `json:"homeFiles,omitempty"`
+	// GitHubTokenInstallationOnly indicates the broker honours the
+	// githubTokenInstallationOnly dispatch flag (ptone/scion#8058;
+	// store.BrokerCapabilities.GitHubTokenInstallationOnly is its counterpart).
+	GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent workspace in place
 	// (store.BrokerCapabilities.ReprovisionEmptyPerAgent is its counterpart).

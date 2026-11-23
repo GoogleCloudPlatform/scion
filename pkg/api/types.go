@@ -1602,6 +1602,15 @@ type StartOptions struct {
 	// resume, start, restart, and reprovision.
 	HomeFiles []HomeFile
 
+	// GitHubTokenInstallationOnly, set by the Hub on create/start/restart for
+	// agents with GitHubTokenPreference == "installation" (Stage 2 §5.1a),
+	// instructs the broker/agent env builder to refuse broker-host env
+	// passthrough and non-Hub config/bundle/settings injection for blocked
+	// GitHub token env keys (api.IsBlockedInstallationGitHubEnvKey). Only the
+	// Hub-minted installation token carried in ResolvedEnv may supply
+	// GITHUB_TOKEN.
+	GitHubTokenInstallationOnly bool
+
 	// Checkpoint, when set, is called by the runtime immediately before each
 	// resource-creating call (an async launch's pre-create gate, design
 	// t1-async-create-v11.md §3.8.3). A non-nil error stops the launch

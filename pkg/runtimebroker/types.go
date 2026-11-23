@@ -167,6 +167,11 @@ type BrokerCapabilities struct {
 	// the newly provisioned agent's home directory under .scion/ before
 	// starting the harness (ptone/scion#8058).
 	HomeFiles bool `json:"homeFiles,omitempty"`
+	// GitHubTokenInstallationOnly indicates this broker honours the
+	// githubTokenInstallationOnly dispatch flag by refusing host-env
+	// passthrough and non-Hub config/bundle injection for blocked GitHub token
+	// keys (ptone/scion#8058).
+	GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -518,6 +523,11 @@ type CreateAgentRequest struct {
 	// write under .scion/ in the newly provisioned agent's home directory on
 	// create only (ptone/scion#8058). Content is base64-encoded on the wire.
 	HomeFiles []api.HomeFile `json:"homeFiles,omitempty"`
+
+	// GitHubTokenInstallationOnly instructs the broker to strip blocked GitHub
+	// token env keys from broker host-env passthrough and non-Hub config layers
+	// (Stage 2 §5.1a, ptone/scion#8058).
+	GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 }
 
 // CreateAgentConfig contains configuration for agent creation.

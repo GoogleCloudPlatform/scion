@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -29,25 +30,57 @@ import (
 // GitHub token delivery policy (Stage 2 design §5.1a).
 //
 // When an agent has AppliedConfig.GitHubTokenPreference == "installation",
-// non-installation GitHub token material (matched by the shared predicate
-// isBlockedInstallationGitHubEnvKey: GITHUB_TOKEN, GH_TOKEN,
-// GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN, SCION_USER_GITHUB_TOKEN)
+// non-installation GitHub token material — matched by the shared predicates in
+// pkg/api/github_token_policy.go:
+//   - env keys (api.IsBlockedInstallationGitHubEnvKey): GITHUB_TOKEN, GH_TOKEN,
+//     GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN, SCION_USER_GITHUB_TOKEN
+//   - file-type secret credential targets
+//     (api.IsBlockedInstallationGitHubCredentialFileTarget):
+//     ~/.config/gh/hosts.{yml,yaml}, ~/.git-credentials,
+//     ~/.config/git/credentials, ~/.netrc (under ~/, /root/, /home/<user>/,
+//     /Users/<user>/), and /etc/netrc
+//
 // must never reach the agent or its descendants. Every door and its guard:
 //
 //   - Push (create / provision / reprovision):
 //     HTTPAgentDispatcher.buildCreateRequestFor (httpdispatcher.go) ->
 //     deliverGitHubToken (strips blocked env, classifications, resolved
-//     secrets across broker/hub/project/user/agent scopes, and as-needed keys
-//     before minting) + defense-in-depth noAuth token guard and
-//     noAuthProjectToken reset before restrictCreateRequestTokenRemote.
+//     secrets across broker/hub/project/user/agent scopes — including file
+//     secrets targeting gh/git credential paths — and as-needed keys before
+//     minting) + defense-in-depth noAuth token guard and noAuthProjectToken
+//     reset before restrictCreateRequestTokenRemote.
+//     Carries GitHubTokenInstallationOnly=true on RemoteCreateAgentRequest and
+//     refuses dispatch fail-closed via gateGitHubTokenInstallationOnly
+//     (ErrBrokerLacksGitHubTokenInstallationOnly) when the target broker does
+//     not advertise Capabilities.GitHubTokenInstallationOnly.
 //   - Push (start / restart / resume):
 //     HTTPAgentDispatcher.buildStartEnv (httpdispatcher.go) ->
 //     deliverGitHubToken (strips blocked material across all delivery scopes
-//     including agent scope) + defense-in-depth noAuth token guard and
-//     projectToken reset before restrictPersonalTokenRemote.
+//     including agent scope and gh/git credential file secrets) + defense-in-depth
+//     noAuth token guard and projectToken reset before
+//     restrictPersonalTokenRemote.
+//     Carries GitHubTokenInstallationOnly=true in StartExtras and refuses
+//     dispatch fail-closed via gateGitHubTokenInstallationOnly when the target
+//     broker lacks Capabilities.GitHubTokenInstallationOnly.
+//   - Push (broker-side host-env passthrough & non-Hub config layers):
+//     runtimebroker (handlers.go, start_context.go) threads
+//     githubTokenInstallationOnly into api.StartOptions and strips blocked
+//     GitHub env keys from Config.Env, InlineConfig.Env, and workstation
+//     altEnvKeySatisfied host-env lookups. pkg/agent/run.go
+//     (resolveAuthEnvOverlayWithPolicy, buildTrackedAgentEnv) refuses broker
+//     host-env passthrough, ${VAR} expansion, harness-config settings/bundle
+//     entries, persisted scionCfg.Env entries, and hub defaults for blocked
+//     GitHub keys when GitHubTokenInstallationOnly is set, so only the
+//     Hub-minted installation token in ResolvedEnv may supply GITHUB_TOKEN.
 //   - Push (env-gather finalize):
 //     HTTPAgentDispatcher.DispatchFinalizeEnv (httpdispatcher.go) ->
 //     filters gathered env keys with isBlockedInstallationGitHubEnvKey.
+//   - Push (env-gather response metadata):
+//     Server.buildEnvGatherResponse / MissingEnvVars (handlers_agents_core.go) ->
+//     omits blocked keys from Required, BrokerHas, Needs, HubHas, SecretInfo,
+//     and HubWarnings (stored-scope warnings) when usesInstallationGitHubToken
+//     is true, so neither blocked key names nor their storage scopes are
+//     disclosed to an installation create caller.
 //   - Push (as-needed secret second pass):
 //     HTTPAgentDispatcher.resolveAsNeededForKeys (httpdispatcher.go) ->
 //     filters requested keys and resolved secrets (including agent scope) with
@@ -55,13 +88,14 @@ import (
 //   - Pull (runtime secret fetch: GET /api/v1/agents/{id}/secrets/{key} and
 //     POST /api/v1/agent/secrets):
 //     Server.selectRuntimeMaterial (material_selection.go) -> refuses blocked
-//     keys before backend read and again by item.Meta.Target after lookup
+//     keys before backend read and again via isBlockedInstallationGitHubSecret
+//     (env key or gh/git credential file target) after lookup
 //     (ReasonGitHubTokenInstallationOnly, not_found-indistinguishable across
 //     agent, project, and user scopes).
 //   - Pull (runtime secret list: GET /api/v1/agents/{id}/secrets):
 //     Server.agentListSecrets (handlers_env_secrets.go; agent and project
 //     scopes) and Server.agentListUserSecrets (material_list_user.go; user
-//     scope) -> omit blocked keys by Name or Target.
+//     scope) -> omit blocked secrets via isBlockedInstallationGitHubSecret.
 //   - Pull (env var by key: GET /api/v1/env/{key}?scope=...,
 //     GET /api/v1/projects/{id}/env/{key},
 //     GET /api/v1/runtime-brokers/{id}/env/{key} [not agent-reachable
@@ -88,7 +122,8 @@ import (
 //     Server.getSecret and Server.handleScopedSecretByKey
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
 //     (fail-closed), return 404 for blocked key names (before lookup) or
-//     blocked Meta.Target (after lookup).
+//     blocked secrets via isBlockedInstallationGitHubSecret (after lookup,
+//     covering aliased env targets and gh/git credential file targets).
 //   - Pull (secret metadata lists: GET /api/v1/secrets?scope=...
 //     [scope=agent is not agent-reachable (resolveAgentSecretAccess refuses
 //     non-user identities); defence in depth],
@@ -97,7 +132,8 @@ import (
 //     (authorizeBrokerMaterial refuses non-user identities); defence in depth]):
 //     Server.listSecrets, Server.handleProjectSecrets, Server.handleBrokerSecrets
 //     (handlers_env_secrets.go) -> check callerAgentUsesInstallationGitHubToken
-//     (fail-closed), omit blocked secrets by Name or Target.
+//     (fail-closed), omit blocked secrets via withoutInstallationBlockedSecrets
+//     (isBlockedInstallationGitHubSecret).
 //   - Cross-agent observation and control (ActionAttach, ActionLifecycle, and
 //     response env visibility):
 //     Server.authorizeAgentTargetAction (authorize.go) -> calls
@@ -132,24 +168,81 @@ import (
 //     Server.reincarnateConfig (reincarnate_config.go) -> sticky: preserves
 //     "installation" if either AppliedConfig or CreateInputs carries it.
 
+// ErrBrokerLacksGitHubTokenInstallationOnly is returned when an
+// installation-only GitHub token agent is dispatched to a Runtime Broker that
+// does not advertise Capabilities.GitHubTokenInstallationOnly (Stage 2 §5.1a,
+// ptone/scion#8058).
+var ErrBrokerLacksGitHubTokenInstallationOnly = errors.New("broker does not support installation-only GitHub token delivery")
+
+type brokerLacksGitHubTokenInstallationOnlyError struct {
+	broker string
+}
+
+func (e *brokerLacksGitHubTokenInstallationOnlyError) Error() string {
+	if e.broker == "" {
+		return ErrBrokerLacksGitHubTokenInstallationOnly.Error()
+	}
+	return fmt.Sprintf("broker %s does not support installation-only GitHub token delivery", e.broker)
+}
+
+func (e *brokerLacksGitHubTokenInstallationOnlyError) Unwrap() []error {
+	return []error{ErrBrokerLacksGitHubTokenInstallationOnly, errStartRequestNotSent}
+}
+
+// checkBrokerGitHubTokenInstallationOnlyCapability fails closed when broker
+// does not advertise GitHubTokenInstallationOnly. Mirrors
+// checkBrokerHomeFilesCapability.
+func checkBrokerGitHubTokenInstallationOnlyCapability(broker *store.RuntimeBroker) error {
+	if broker != nil && broker.Capabilities != nil && broker.Capabilities.GitHubTokenInstallationOnly {
+		return nil
+	}
+	name := ""
+	if broker != nil {
+		name = brokerDisplayName(broker)
+	}
+	return &brokerLacksGitHubTokenInstallationOnlyError{broker: name}
+}
+
+// gateGitHubTokenInstallationOnly enforces that installation-only agents are
+// only dispatched to brokers advertising Capabilities.GitHubTokenInstallationOnly.
+func (d *HTTPAgentDispatcher) gateGitHubTokenInstallationOnly(ctx context.Context, agent *store.Agent) error {
+	if !usesInstallationGitHubToken(agent) {
+		return nil
+	}
+	if d.store == nil || agent == nil || agent.RuntimeBrokerID == "" {
+		return &brokerLacksGitHubTokenInstallationOnlyError{}
+	}
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return fmt.Errorf("failed to load runtime broker for installation-only GitHub token capability check: %w (%w)", err, errStartRequestNotSent)
+	}
+	return checkBrokerGitHubTokenInstallationOnlyCapability(broker)
+}
+
 // isGitHubTokenEnvKey reports whether key is a GitHub token environment
 // variable that git's credential helper, gh CLI, or sciontool gh-wrapper
 // would pick up instead of a minted GitHub App installation token
 // (Stage 2 design §5.1a).
 func isGitHubTokenEnvKey(key string) bool {
-	switch key {
-	case "GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN":
-		return true
-	default:
-		return false
-	}
+	return api.IsGitHubTokenEnvKey(key)
 }
 
 // isBlockedInstallationGitHubEnvKey reports whether key must never be
 // delivered from user/project/config storage when an agent's
 // GitHubTokenPreference is "installation".
 func isBlockedInstallationGitHubEnvKey(key string) bool {
-	return isGitHubTokenEnvKey(key) || key == "SCION_USER_GITHUB_TOKEN"
+	return api.IsBlockedInstallationGitHubEnvKey(key)
+}
+
+// isBlockedInstallationGitHubSecret reports whether a secret of the given type,
+// name, and target must be withheld from installation-only GitHub token agents
+// (either because its name/target is a blocked GitHub token env key, or because
+// it is a file-type secret targeting a gh/git/netrc credential file).
+func isBlockedInstallationGitHubSecret(secretType, name, target string) bool {
+	if isBlockedInstallationGitHubEnvKey(name) || isBlockedInstallationGitHubEnvKey(target) {
+		return true
+	}
+	return secretType == store.SecretTypeFile && api.IsBlockedInstallationGitHubCredentialFileTarget(target)
 }
 
 // agentGitHubTokenPreference returns the agent's stored GitHub token delivery
@@ -331,14 +424,15 @@ func withoutInstallationBlockedEnvVars(envVars []store.EnvVar) []store.EnvVar {
 }
 
 // withoutInstallationBlockedSecrets omits secret metadata whose Name or Target
-// is blocked for installation-only agents.
+// (including file-type gh/git credential paths) is blocked for
+// installation-only agents.
 func withoutInstallationBlockedSecrets(metas []secret.SecretMeta) []secret.SecretMeta {
 	if len(metas) == 0 {
 		return metas
 	}
 	out := make([]secret.SecretMeta, 0, len(metas))
 	for _, m := range metas {
-		if isBlockedInstallationGitHubEnvKey(m.Name) || isBlockedInstallationGitHubEnvKey(m.Target) {
+		if isBlockedInstallationGitHubSecret(m.SecretType, m.Name, m.Target) {
 			continue
 		}
 		out = append(out, m)
@@ -408,7 +502,7 @@ func stripNonInstallationGitHubMaterial(
 	if len(resolvedSecrets) > 0 {
 		kept := resolvedSecrets[:0:len(resolvedSecrets)]
 		for _, s := range resolvedSecrets {
-			if isBlockedInstallationGitHubEnvKey(s.Target) || isBlockedInstallationGitHubEnvKey(s.Name) {
+			if isBlockedInstallationGitHubSecret(s.Type, s.Name, s.Target) {
 				continue
 			}
 			kept = append(kept, s)

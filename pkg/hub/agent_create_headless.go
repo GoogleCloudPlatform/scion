@@ -518,6 +518,11 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			agent.AppliedConfig.CreateInputs.GitHubTokenPreference = effectiveGitHubToken
 		}
 	}
+	if usesInstallationGitHubToken(agent) {
+		if err := checkBrokerGitHubTokenInstallationOnlyCapability(scheduledBroker); err != nil {
+			return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+		}
+	}
 
 	templateExplicit := templateName != ""
 

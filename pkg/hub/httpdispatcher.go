@@ -966,6 +966,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	}
 	req.Persistence = dispatchPersistence(agent)
 	req.HomeFiles = createHomeFilesFromContext(ctx)
+	req.GitHubTokenInstallationOnly = usesInstallationGitHubToken(agent)
 
 	// Propagate attach mode from applied config
 	if agent.AppliedConfig != nil {
@@ -2261,6 +2262,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreate", failOnSecretResolutionError)
 	if err != nil {
@@ -2410,6 +2415,9 @@ func (d *HTTPAgentDispatcher) dispatchProvisionWithWorkspaceSource(ctx context.C
 		return err
 	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, reprovision); err != nil {
+		return err
+	}
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
 		return err
 	}
 
@@ -2669,6 +2677,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
 		return nil, err
 	}
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreateWithGather", failOnSecretResolutionError)
 	if err != nil {
@@ -2887,6 +2898,9 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return nil, err
 	}
 	if err := d.createHomeFilesPrecheck(ctx, agent, false); err != nil {
+		return nil, err
+	}
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
 		return nil, err
 	}
 
@@ -4135,6 +4149,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		span.SetStatus(codes.Error, errHomeFilesNotDelivered.Error())
 		return nil, errHomeFilesNotDelivered
 	}
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -4320,12 +4338,13 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 			withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
 			d.shouldCreateKSA(ctx, agent, startEnv.experiments),
 		),
-		TelemetryPolicy:    tel.telemetryPolicy(),
-		Image:              d.dispatchImageForBroker(agent, imageTag),
-		TemplateName:       agent.Template,
-		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
-		NoAuth:             launchesWithoutCredentials(agent),
-		PriorStatus:        priorStatus,
+		TelemetryPolicy:             tel.telemetryPolicy(),
+		Image:                       d.dispatchImageForBroker(agent, imageTag),
+		TemplateName:                agent.Template,
+		PreviousProjectIDs:          d.previousProjectIDs(ctx, projectInfo),
+		NoAuth:                      launchesWithoutCredentials(agent),
+		PriorStatus:                 priorStatus,
+		GitHubTokenInstallationOnly: usesInstallationGitHubToken(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -4553,6 +4572,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if agentHomeFilesPending(agent) {
 		return errHomeFilesNotDelivered
 	}
+	if err := d.gateGitHubTokenInstallationOnly(ctx, agent); err != nil {
+		return err
+	}
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -4625,17 +4647,18 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 			withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
 			d.shouldCreateKSA(ctx, agent, startEnv.experiments),
 		),
-		TelemetryPolicy:    tel.telemetryPolicy(),
-		Image:              d.dispatchImageForBroker(agent, imageTag),
-		SharedWorkspace:    projectInfo.sharedWorkspace,
-		TemplateName:       agent.Template,
-		ProjectPath:        projectInfo.projectPath,
-		ProjectSlug:        projectInfo.projectSlug,
-		SharedDirs:         projectInfo.sharedDirs,
-		ResolvedSecrets:    startEnv.secrets,
-		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
-		NoAuth:             launchesWithoutCredentials(agent),
-		PriorStatus:        priorStatus,
+		TelemetryPolicy:             tel.telemetryPolicy(),
+		Image:                       d.dispatchImageForBroker(agent, imageTag),
+		SharedWorkspace:             projectInfo.sharedWorkspace,
+		TemplateName:                agent.Template,
+		ProjectPath:                 projectInfo.projectPath,
+		ProjectSlug:                 projectInfo.projectSlug,
+		SharedDirs:                  projectInfo.sharedDirs,
+		ResolvedSecrets:             startEnv.secrets,
+		PreviousProjectIDs:          d.previousProjectIDs(ctx, projectInfo),
+		NoAuth:                      launchesWithoutCredentials(agent),
+		PriorStatus:                 priorStatus,
+		GitHubTokenInstallationOnly: usesInstallationGitHubToken(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -5925,7 +5948,7 @@ func classifyEnvKeys(m *map[string]api.EnvKind, keys map[string]string, kind api
 // gate that would treat "nil map" as "trust everything" -- that would be
 // backwards for this call site).
 func shouldPersistResolvedEnvKey(key string, classifications map[string]api.EnvKind) bool {
-	if key == "GITHUB_TOKEN" {
+	if api.IsBlockedInstallationGitHubEnvKey(key) {
 		return false
 	}
 	// TZ is resolved on every dispatch and recorded only as

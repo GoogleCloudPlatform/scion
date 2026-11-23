@@ -3418,7 +3418,10 @@ func (s *Server) createAgentInProject(
 					// (RevokeCredentials), before the row is deleted
 					// (ptone/scion#1956: a create that fails after the mint must
 					// not leave the credential valid for its full TTL).
-					failCreate(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { MissingEnvVars(w, envReqs.Needs, s.buildEnvGatherResponse(ctx, agent, envReqs)) })
+					failCreate(createRollback{Stage: createStageMissingEnv, Cause: errors.New("broker reported missing required environment variables"), RevokeCredentials: true, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
+						MissingEnvVars(w, hubEnvGather.Needs, hubEnvGather)
+					})
 					return
 				} else {
 					if !s.preserveTerminalPhase(ctx, agent) {
@@ -3774,11 +3777,26 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// TZ is never gathered: never forward it to the CLI as a need, even if
 	// an older broker reported one the dispatcher did not already remove.
 	takeTZGatherNeed(brokerReqs)
+	installationOnly := usesInstallationGitHubToken(agent)
+	filterBlockedKeys := func(keys []string) []string {
+		if !installationOnly || len(keys) == 0 {
+			return keys
+		}
+		out := make([]string, 0, len(keys))
+		for _, k := range keys {
+			if isBlockedInstallationGitHubEnvKey(k) {
+				continue
+			}
+			out = append(out, k)
+		}
+		return out
+	}
+
 	resp := &EnvGatherResponse{
 		AgentID:   agent.ID,
-		Required:  brokerReqs.Required,
-		BrokerHas: brokerReqs.BrokerHas,
-		Needs:     brokerReqs.Needs,
+		Required:  filterBlockedKeys(brokerReqs.Required),
+		BrokerHas: filterBlockedKeys(brokerReqs.BrokerHas),
+		Needs:     filterBlockedKeys(brokerReqs.Needs),
 	}
 
 	// The env var storage scopes that apply to this agent, in the order the
@@ -3794,6 +3812,9 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 
 	// Label each key the Hub provided with the source whose value won.
 	for _, key := range brokerReqs.HubHas {
+		if installationOnly && isBlockedInstallationGitHubEnvKey(key) {
+			continue
+		}
 		if key == agentTZEnvKey {
 			// TZ is labelled with the rung of the agent TZ chain. The
 			// label is advisory, like envGatherStoredScope: a failed
@@ -3815,11 +3836,17 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	if len(brokerReqs.SecretInfo) > 0 {
 		resp.SecretInfo = make(map[string]SecretKeyInfo, len(brokerReqs.SecretInfo))
 		for k, v := range brokerReqs.SecretInfo {
+			if installationOnly && isBlockedInstallationGitHubEnvKey(k) {
+				continue
+			}
 			resp.SecretInfo[k] = SecretKeyInfo{
 				Description: v.Description,
 				Source:      v.Source,
 				Type:        v.Type,
 			}
+		}
+		if len(resp.SecretInfo) == 0 {
+			resp.SecretInfo = nil
 		}
 	}
 
@@ -3827,7 +3854,7 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// Hub actually has it in storage (env_vars table or secret backend).  If
 	// found, this indicates a resolution mismatch — the dispatch should have
 	// included it but didn't.
-	for _, key := range brokerReqs.Needs {
+	for _, key := range resp.Needs {
 		// Check env_vars table, highest-precedence scope first.
 		// as_needed rows count here: they are the usual reason a stored key
 		// was left out of the first dispatch pass.

@@ -2310,6 +2310,13 @@ type BrokerDispatchStore interface {
 	// Returns counts of re-driven and failed rows.
 	ReapStuckDispatch(ctx context.Context, stuckBefore time.Time, maxAttempts int) (requeued, failed int, err error)
 
+	// ReapExpiredPendingDispatch fails and scrubs pending dispatches that have
+	// never been claimed past staleBefore (updated_at < staleBefore) or past
+	// their deadline_at, so serialized args (including HomeFiles event bodies)
+	// cannot linger indefinitely in the database. Returns the number of rows
+	// transitioned to failed.
+	ReapExpiredPendingDispatch(ctx context.Context, staleBefore time.Time) (int, error)
+
 	// CountBrokerDispatchHealth counts broker_dispatch rows for the health
 	// summary: stuck = state in_progress with updated_at < stuckBefore (the
 	// reaper's staleness test, without its deadline arm); failed = state

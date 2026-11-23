@@ -78,6 +78,10 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker writes create-time HomeFiles entries into the newly
 		// provisioned agent's home directory (ptone/scion#8058).
 		HomeFiles: true,
+		// This broker honours githubTokenInstallationOnly by refusing host-env
+		// passthrough and non-Hub config injection for blocked GitHub token
+		// keys (ptone/scion#8058).
+		GitHubTokenInstallationOnly: true,
 	}
 }
 

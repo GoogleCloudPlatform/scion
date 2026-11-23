@@ -1994,6 +1994,7 @@ authDone:
 		inlineEnv,
 		api.HubAgentDefaultsFromContext(ctx).DefaultEnv(),
 		opts.BrokerMode,
+		opts.GitHubTokenInstallationOnly,
 	)
 	if hcDirUnresolved && finalScionCfg != nil && len(finalScionCfg.Env) > 0 {
 		warnings = append(warnings, fmt.Sprintf("Warning: harness-config %q could not be resolved at start; persisted env provenance cannot be verified.", harnessConfigName))
@@ -4317,7 +4318,7 @@ func containerName(projectName, agentName string) string {
 // when the key is absent from the merged env or has an empty value, i.e. when
 // no layer would otherwise put it in the container.
 func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
-	tracked, warnings, missingKeys, dropped := buildTrackedAgentEnv(nil, scionCfg, extraEnv, nil, extraEnv, nil, defaultEnv, brokerMode)
+	tracked, warnings, missingKeys, dropped := buildTrackedAgentEnv(nil, scionCfg, extraEnv, nil, extraEnv, nil, defaultEnv, brokerMode, false)
 	return tracked.Slice(), warnings, missingKeys, dropped
 }
 
@@ -4331,7 +4332,7 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 //
 // Retained for direct unit tests that inspect the slice and origin map.
 func buildAgentEnvWithBundle(rawBundleEnv map[string]string, scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv, provenance map[string]envOrigin) {
-	tracked, warnings, missingKeys, dropped := buildTrackedAgentEnv(rawBundleEnv, scionCfg, extraEnv, nil, extraEnv, nil, defaultEnv, brokerMode)
+	tracked, warnings, missingKeys, dropped := buildTrackedAgentEnv(rawBundleEnv, scionCfg, extraEnv, nil, extraEnv, nil, defaultEnv, brokerMode, false)
 	provenance = make(map[string]envOrigin, len(tracked.entries))
 	for k, ent := range tracked.entries {
 		provenance[k] = ent.origin
@@ -4348,6 +4349,11 @@ func buildAgentEnvWithBundle(rawBundleEnv map[string]string, scionCfg *api.Scion
 // overridden by callerEnv or inlineEnv receive envOriginLegacyHC so non-demoted
 // legacy bundle keys stay withheld from hooks. Keys in extraEnv that came from
 // settingsHCEnv (absent or empty in callerEnv) receive envOriginSettingsHC.
+//
+// When githubTokenInstallationOnly is true, blocked GitHub token keys
+// (api.IsBlockedInstallationGitHubEnvKey) are refused on broker host-env
+// passthrough, ${VAR} expansion, bundle/config layers, and hub defaults so only
+// the Hub-minted installation token in extraEnv may supply GITHUB_TOKEN.
 func buildTrackedAgentEnv(
 	rawBundleEnv map[string]string,
 	scionCfg *api.ScionConfig,
@@ -4357,9 +4363,24 @@ func buildTrackedAgentEnv(
 	inlineEnv map[string]string,
 	defaultEnv map[string]string,
 	brokerMode bool,
+	githubTokenInstallationOnly bool,
 ) (env *trackedAgentEnv, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
 	combined := make(map[string]string)
 	origins := make(map[string]envOrigin)
+
+	refuseHostEnv := refuseHostEnvForAgent
+	hostRefusalWarning := refusedHostEnvWarning
+	if githubTokenInstallationOnly {
+		refuseHostEnv = func(name string) bool {
+			return refuseHostEnvForAgent(name) || api.IsBlockedInstallationGitHubEnvKey(name)
+		}
+		hostRefusalWarning = func(name string) string {
+			if refuseHostEnvForAgent(name) {
+				return refusedHostEnvWarning(name)
+			}
+			return fmt.Sprintf("Warning: host environment variable '%s' is not passed to installation-only GitHub token agents.", name)
+		}
+	}
 
 	var bundleEntries map[string]string
 	if len(rawBundleEnv) > 0 {
@@ -4376,6 +4397,9 @@ func buildTrackedAgentEnv(
 				warnings = append(warnings, ignoredAuthTokenWarning)
 				continue
 			}
+			if githubTokenInstallationOnly && api.IsBlockedInstallationGitHubEnvKey(k) {
+				continue
+			}
 			combined[k] = v
 			origins[k] = envOriginBundle
 		}
@@ -4384,11 +4408,12 @@ func buildTrackedAgentEnv(
 	if scionCfg != nil && scionCfg.Env != nil {
 		for k, v := range scionCfg.Env {
 			// Support variable substitution in keys and values. Names
-			// reserved for the server process expand to empty.
-			expandedKey, _, refusedInKey := util.ExpandEnvRefusing(k, refuseHostEnvForAgent)
-			expandedValue, warned, refusedInValue := util.ExpandEnvRefusing(v, refuseHostEnvForAgent)
+			// reserved for the server process (and blocked GitHub token keys
+			// when githubTokenInstallationOnly is set) expand to empty.
+			expandedKey, _, refusedInKey := util.ExpandEnvRefusing(k, refuseHostEnv)
+			expandedValue, warned, refusedInValue := util.ExpandEnvRefusing(v, refuseHostEnv)
 			for _, name := range append(refusedInKey, refusedInValue...) {
-				warnings = append(warnings, refusedHostEnvWarning(name))
+				warnings = append(warnings, hostRefusalWarning(name))
 			}
 
 			if expandedKey == "" {
@@ -4415,10 +4440,10 @@ func buildTrackedAgentEnv(
 			// If the value is empty (no variable reference was used),
 			// treat the key as an implicit host env passthrough: look up
 			// the environment variable of the same name on the host. A
-			// name reserved for the server is omitted with a warning.
+			// name refused by refuseHostEnv is omitted with a warning.
 			if expandedValue == "" {
-				if refuseHostEnvForAgent(expandedKey) {
-					warnings = append(warnings, refusedHostEnvWarning(expandedKey))
+				if refuseHostEnv(expandedKey) {
+					warnings = append(warnings, hostRefusalWarning(expandedKey))
 					continue
 				}
 				if hostVal, ok := os.LookupEnv(expandedKey); ok && hostVal != "" {
@@ -4429,6 +4454,9 @@ func buildTrackedAgentEnv(
 				// Not hub-issued: a hub-dispatched agent's hub token comes
 				// only from the hub (StartOptions.HubIssuedToken).
 				warnings = append(warnings, ignoredAuthTokenWarning)
+				continue
+			}
+			if githubTokenInstallationOnly && api.IsBlockedInstallationGitHubEnvKey(expandedKey) {
 				continue
 			}
 			combined[expandedKey] = expandedValue
@@ -4457,6 +4485,9 @@ func buildTrackedAgentEnv(
 	// hub default so it does not shadow the harness hint in container readers.
 	for k, v := range defaultEnv {
 		if brokerMode && k == "SCION_AUTH_TOKEN" {
+			continue
+		}
+		if githubTokenInstallationOnly && api.IsBlockedInstallationGitHubEnvKey(k) {
 			continue
 		}
 		if hint, ok := envpolicy.LegacyHarnessHint(k); ok && combined[hint] != "" {
@@ -4657,6 +4688,9 @@ func resolveAuthEnvOverlayWithPolicy(opts *api.StartOptions, settings *config.Ve
 				}
 				if config.IsReservedLifecycleEnvKey(k) {
 					droppedReserved = append(droppedReserved, k)
+				}
+				if opts.GitHubTokenInstallationOnly && api.IsBlockedInstallationGitHubEnvKey(k) {
+					continue
 				}
 				nonHubOnly[k] = v
 			}

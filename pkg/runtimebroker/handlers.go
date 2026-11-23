@@ -473,6 +473,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			TemplateTiers: true,
 			// Create-time HomeFiles provisioning (ptone/scion#8058).
 			HomeFiles: true,
+			// Installation-only GitHub token host-env passthrough guard (ptone/scion#8058).
+			GitHubTokenInstallationOnly: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),
@@ -1876,33 +1878,34 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		testHookCreateBeforeBuildStartContext(req)
 	}
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               req.Name,
-		AgentID:            req.ID,
-		Slug:               req.Slug,
-		ProjectPath:        req.ProjectPath,
-		ProjectSlug:        req.ProjectSlug,
-		ProjectID:          req.ProjectID,
-		HubGlobalProject:   hubGlobalProject,
-		Config:             req.Config,
-		InlineConfig:       req.InlineConfig,
-		SharedDirs:         req.SharedDirs,
-		HubEndpoint:        req.HubEndpoint,
-		AgentToken:         req.AgentToken,
-		CreatorName:        req.CreatorName,
-		ResolvedEnv:        req.ResolvedEnv,
-		EnvClassifications: req.EnvClassifications,
-		ResolvedSecrets:    req.ResolvedSecrets,
-		NoAuth:             req.NoAuth,
-		Attach:             req.Attach,
-		WorkspaceMode:      req.WorkspaceMode,
-		RunID:              req.RunID,
-		PreviousProjectIDs: req.PreviousProjectIDs,
-		Persistence:        req.Persistence,
-		InitFirewall:       hubInitFirewall,
-		HomeFiles:          req.HomeFiles,
-		HTTPRequest:        r,
-		Operation:          opCreate,
-		OwnedAbandon:       ownedAbandon,
+		Name:                        req.Name,
+		AgentID:                     req.ID,
+		Slug:                        req.Slug,
+		ProjectPath:                 req.ProjectPath,
+		ProjectSlug:                 req.ProjectSlug,
+		ProjectID:                   req.ProjectID,
+		HubGlobalProject:            hubGlobalProject,
+		Config:                      req.Config,
+		InlineConfig:                req.InlineConfig,
+		SharedDirs:                  req.SharedDirs,
+		HubEndpoint:                 req.HubEndpoint,
+		AgentToken:                  req.AgentToken,
+		CreatorName:                 req.CreatorName,
+		ResolvedEnv:                 req.ResolvedEnv,
+		EnvClassifications:          req.EnvClassifications,
+		ResolvedSecrets:             req.ResolvedSecrets,
+		NoAuth:                      req.NoAuth,
+		Attach:                      req.Attach,
+		WorkspaceMode:               req.WorkspaceMode,
+		RunID:                       req.RunID,
+		PreviousProjectIDs:          req.PreviousProjectIDs,
+		Persistence:                 req.Persistence,
+		InitFirewall:                hubInitFirewall,
+		HomeFiles:                   req.HomeFiles,
+		HTTPRequest:                 r,
+		Operation:                   opCreate,
+		OwnedAbandon:                ownedAbandon,
+		GitHubTokenInstallationOnly: req.GitHubTokenInstallationOnly,
 		// Threaded only for the workspace-source checks; the download
 		// itself runs after buildStartContext (below, or in runLaunch).
 		WorkspaceStoragePath: req.WorkspaceStoragePath,
@@ -4036,6 +4039,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// NoAuth is the agent's no-credential intent, under the key create
 		// uses (CreateAgentRequest.NoAuth); false from an older Hub.
 		NoAuth bool `json:"noAuth,omitempty"`
+		// GitHubTokenInstallationOnly mirrors CreateAgentRequest.GitHubTokenInstallationOnly.
+		GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 		// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and
 		// LaunchKeepaliveSeconds request an async start, under the same
 		// wire keys and meaning as a create's (CreateAgentRequest; design
@@ -4229,33 +4234,34 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}()
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:                     id,
-		AgentID:                  startAgentID,
-		ProjectID:                projectID,
-		ProjectPath:              startProjectPath,
-		ProjectPathFromContainer: startProjectPathFromContainer,
-		ProjectSlug:              startReq.ProjectSlug,
-		HubGlobalProject:         startHubGlobalProject,
-		PreviousProjectIDs:       startReq.PreviousProjectIDs,
-		Config:                   cfg,
-		InlineConfig:             startReq.InlineConfig,
-		HubEndpoint:              startReq.HubEndpoint,
-		ResolvedEnv:              startReq.ResolvedEnv,
-		EnvClassifications:       startReq.EnvClassifications,
-		ResolvedSecrets:          startReq.ResolvedSecrets,
-		NoAuth:                   startReq.NoAuth,
-		SharedDirs:               startReq.SharedDirs,
-		WorkspaceMode:            startReq.WorkspaceMode,
-		RunID:                    startReq.RunID,
-		TemplateName:             startReq.TemplateName,
-		TelemetryPolicy:          startReq.TelemetryPolicy,
-		InitFirewall:             hubInitFirewall,
-		TemplateID:               startReq.TemplateID,
-		TemplateHash:             startReq.TemplateHash,
-		HubProfile:               startReq.Profile,
-		Persistence:              startReq.Persistence,
-		HTTPRequest:              r,
-		Operation:                opHTTPStart,
+		Name:                        id,
+		AgentID:                     startAgentID,
+		ProjectID:                   projectID,
+		ProjectPath:                 startProjectPath,
+		ProjectPathFromContainer:    startProjectPathFromContainer,
+		ProjectSlug:                 startReq.ProjectSlug,
+		HubGlobalProject:            startHubGlobalProject,
+		PreviousProjectIDs:          startReq.PreviousProjectIDs,
+		Config:                      cfg,
+		InlineConfig:                startReq.InlineConfig,
+		HubEndpoint:                 startReq.HubEndpoint,
+		ResolvedEnv:                 startReq.ResolvedEnv,
+		EnvClassifications:          startReq.EnvClassifications,
+		ResolvedSecrets:             startReq.ResolvedSecrets,
+		NoAuth:                      startReq.NoAuth,
+		SharedDirs:                  startReq.SharedDirs,
+		WorkspaceMode:               startReq.WorkspaceMode,
+		RunID:                       startReq.RunID,
+		TemplateName:                startReq.TemplateName,
+		TelemetryPolicy:             startReq.TelemetryPolicy,
+		InitFirewall:                hubInitFirewall,
+		TemplateID:                  startReq.TemplateID,
+		TemplateHash:                startReq.TemplateHash,
+		HubProfile:                  startReq.Profile,
+		Persistence:                 startReq.Persistence,
+		HTTPRequest:                 r,
+		Operation:                   opHTTPStart,
+		GitHubTokenInstallationOnly: startReq.GitHubTokenInstallationOnly,
 	})
 	if err != nil {
 		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
@@ -5410,6 +5416,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID string `json:"runId,omitempty"`
 		// NoAuth mirrors the same field on the start path.
 		NoAuth bool `json:"noAuth,omitempty"`
+		// GitHubTokenInstallationOnly mirrors CreateAgentRequest.GitHubTokenInstallationOnly.
+		GitHubTokenInstallationOnly bool `json:"githubTokenInstallationOnly,omitempty"`
 		// TemplateName mirrors the same field on the start path.
 		TemplateName string `json:"templateName,omitempty"`
 		// Profile mirrors the same field on the start path.
@@ -5569,29 +5577,30 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		Name: agentName,
 		// The Hub UUID, as on start: a worktree-per-agent restart resolves
 		// this agent's own worktree from it.
-		AgentID:                  restartReq.ResolvedEnv["SCION_AGENT_ID"],
-		ProjectPath:              projectPath,
-		ProjectPathFromContainer: projectPathFromContainer,
-		ProjectSlug:              restartProjectSlug,
-		HubGlobalProject:         restartHubGlobalProject,
-		PreviousProjectIDs:       restartReq.PreviousProjectIDs,
-		Config:                   restartCfg,
-		SharedDirs:               restartReq.SharedDirs,
-		WorkspaceMode:            restartReq.WorkspaceMode,
-		HubEndpoint:              restartReq.HubEndpoint,
-		ResolvedEnv:              restartReq.ResolvedEnv,
-		EnvClassifications:       restartReq.EnvClassifications,
-		ResolvedSecrets:          restartReq.ResolvedSecrets,
-		NoAuth:                   restartReq.NoAuth,
-		RunID:                    restartReq.RunID,
-		SharedWorkspace:          restartReq.SharedWorkspace,
-		HubProfile:               restartReq.Profile,
-		Persistence:              restartReq.Persistence,
-		TemplateName:             restartReq.TemplateName,
-		TelemetryPolicy:          restartReq.TelemetryPolicy,
-		InitFirewall:             hubInitFirewall,
-		TemplateID:               restartReq.TemplateID,
-		TemplateHash:             restartReq.TemplateHash,
+		AgentID:                     restartReq.ResolvedEnv["SCION_AGENT_ID"],
+		ProjectPath:                 projectPath,
+		ProjectPathFromContainer:    projectPathFromContainer,
+		ProjectSlug:                 restartProjectSlug,
+		HubGlobalProject:            restartHubGlobalProject,
+		PreviousProjectIDs:          restartReq.PreviousProjectIDs,
+		Config:                      restartCfg,
+		SharedDirs:                  restartReq.SharedDirs,
+		WorkspaceMode:               restartReq.WorkspaceMode,
+		HubEndpoint:                 restartReq.HubEndpoint,
+		ResolvedEnv:                 restartReq.ResolvedEnv,
+		EnvClassifications:          restartReq.EnvClassifications,
+		ResolvedSecrets:             restartReq.ResolvedSecrets,
+		NoAuth:                      restartReq.NoAuth,
+		RunID:                       restartReq.RunID,
+		SharedWorkspace:             restartReq.SharedWorkspace,
+		HubProfile:                  restartReq.Profile,
+		Persistence:                 restartReq.Persistence,
+		TemplateName:                restartReq.TemplateName,
+		TelemetryPolicy:             restartReq.TelemetryPolicy,
+		InitFirewall:                hubInitFirewall,
+		TemplateID:                  restartReq.TemplateID,
+		TemplateHash:                restartReq.TemplateHash,
+		GitHubTokenInstallationOnly: restartReq.GitHubTokenInstallationOnly,
 		// The Hub-supplied project ID (the request's projectId) locates a
 		// shared-workspace agent's broker-side external state root, as on
 		// start; never the project-id marker inside the workspace.
@@ -7265,7 +7274,7 @@ func (s *Server) extractRequiredEnvKeysChecked(req CreateAgentRequest, hydratedT
 					// broker's launch never reads its own env for auth
 					// (GatherAuthWithEnv in broker mode), and a member-written
 					// harness config must not make it read env by name.
-					if !altEnvKeySatisfied(req.ResolvedEnv, as.AlternativeEnvKeys, s.config.WorkstationMode) {
+					if !altEnvKeySatisfiedWithPolicy(req.ResolvedEnv, as.AlternativeEnvKeys, s.config.WorkstationMode, req.GitHubTokenInstallationOnly) {
 						required[as.Key] = struct{}{}
 						secretInfo[as.Key] = api.SecretKeyInfo{
 							Description: as.Description,
@@ -7463,11 +7472,22 @@ func fillAbsentDirEnv(base, expandedDirEnv map[string]string) map[string]string 
 // not refused for agents (util.IsAgentRefusedHostEnvName), in this process's
 // env.
 func altEnvKeySatisfied(resolvedEnv map[string]string, altKeys []string, processEnv bool) bool {
+	return altEnvKeySatisfiedWithPolicy(resolvedEnv, altKeys, processEnv, false)
+}
+
+// altEnvKeySatisfiedWithPolicy is altEnvKeySatisfied with an optional
+// installation-only GitHub token policy: when githubTokenInstallationOnly is
+// true, blocked GitHub token env keys are never satisfied from the broker
+// process environment.
+func altEnvKeySatisfiedWithPolicy(resolvedEnv map[string]string, altKeys []string, processEnv, githubTokenInstallationOnly bool) bool {
 	for _, altKey := range altKeys {
 		if v, ok := resolvedEnv[altKey]; ok && v != "" {
 			return true
 		}
 		if !processEnv || util.IsAgentRefusedHostEnvName(altKey) {
+			continue
+		}
+		if githubTokenInstallationOnly && api.IsBlockedInstallationGitHubEnvKey(altKey) {
 			continue
 		}
 		if v := os.Getenv(altKey); v != "" {

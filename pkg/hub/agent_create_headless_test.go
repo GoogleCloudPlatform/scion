@@ -767,10 +767,10 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 		require.ErrorIs(t, err, ErrBrokerLacksHomeFiles)
 		f.assertNoChild(t, hcNoCap.Name)
 
-		// Enable HomeFiles capability on the Runtime Broker and verify transient delivery.
+		// Enable HomeFiles and GitHubTokenInstallationOnly capabilities on the Runtime Broker.
 		broker, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
 		require.NoError(t, err)
-		broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true}
+		broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true, GitHubTokenInstallationOnly: true}
 		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, broker))
 
 		payload := []byte(`{"id":"evt-1","secret":"USER_PRIVATE_SECRET"}`)

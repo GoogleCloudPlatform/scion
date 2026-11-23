@@ -19,6 +19,8 @@ import (
 	"maps"
 	"strings"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // AgentPendingConfig is an agent's pending config: config edits the hub
@@ -223,7 +225,11 @@ func redactPendingConfigForResponse(cfg map[string]json.RawMessage, canAttach bo
 				delete(out, k)
 				continue
 			}
-			delete(env, "GITHUB_TOKEN")
+			for ek := range env {
+				if api.IsBlockedInstallationGitHubEnvKey(ek) {
+					delete(env, ek)
+				}
+			}
 			b, err := json.Marshal(env)
 			if err != nil {
 				delete(out, k)

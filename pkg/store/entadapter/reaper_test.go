@@ -216,3 +216,71 @@ func TestReapStuckDispatch_PastDeadline(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, store.DispatchStatePending, got.State)
 }
+
+// ---------------------------------------------------------------------------
+// ReapExpiredPendingDispatch (P1c-4a security L-1)
+// ---------------------------------------------------------------------------
+
+func TestReapExpiredPendingDispatch_FailsAndScrubsStaleAndPastDeadline(t *testing.T) {
+	client := enttest.NewClient(t)
+	ds := NewBrokerDispatchStore(client)
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+
+	const hfArgs = `{"homeFiles":[{"path":".scion/trigger-event.json","content":"c2VjcmV0LWV2ZW50"}],"env":{"A":"1"}}`
+
+	// 1. Stale pending row (updated_at older than cutoff, no deadline) -> failed + args cleared.
+	stalePending := newDispatch(brokerID, "create_with_gather")
+	stalePending.Args = hfArgs
+	require.NoError(t, ds.InsertBrokerDispatch(ctx, stalePending))
+	_, err := client.BrokerDispatch.UpdateOneID(uuid.MustParse(stalePending.ID)).
+		SetUpdatedAt(time.Now().Add(-15 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	// 2. Pending row past deadline (updated_at recent) -> failed + args cleared.
+	pastDeadlinePending := newDispatch(brokerID, "finalize_env")
+	pastDeadlinePending.Args = hfArgs
+	past := time.Now().Add(-1 * time.Minute)
+	pastDeadlinePending.DeadlineAt = &past
+	require.NoError(t, ds.InsertBrokerDispatch(ctx, pastDeadlinePending))
+
+	// 3. Fresh pending row (recent updated_at, future deadline) -> untouched.
+	freshPending := newDispatch(brokerID, "create_with_gather")
+	freshPending.Args = hfArgs
+	future := time.Now().Add(5 * time.Minute)
+	freshPending.DeadlineAt = &future
+	require.NoError(t, ds.InsertBrokerDispatch(ctx, freshPending))
+
+	// 4. Stale in_progress row -> untouched (handled by ReapStuckDispatch).
+	inProg := newDispatch(brokerID, "create_with_gather")
+	inProg.Args = hfArgs
+	inProg.State = store.DispatchStateInProgress
+	require.NoError(t, ds.InsertBrokerDispatch(ctx, inProg))
+	_, err = client.BrokerDispatch.UpdateOneID(uuid.MustParse(inProg.ID)).
+		SetUpdatedAt(time.Now().Add(-15 * time.Minute)).
+		Save(ctx)
+	require.NoError(t, err)
+
+	expired, err := ds.ReapExpiredPendingDispatch(ctx, time.Now().Add(-10*time.Minute))
+	require.NoError(t, err)
+	assert.Equal(t, 2, expired)
+
+	for _, id := range []string{stalePending.ID, pastDeadlinePending.ID} {
+		got, err := ds.GetBrokerDispatch(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStateFailed, got.State, "id=%s", id)
+		assert.Contains(t, got.Error, "pending dispatch expired", "id=%s", id)
+		assert.Empty(t, got.Args, "id=%s args must be scrubbed", id)
+	}
+
+	gotFresh, err := ds.GetBrokerDispatch(ctx, freshPending.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStatePending, gotFresh.State)
+	assert.Equal(t, hfArgs, gotFresh.Args)
+
+	gotInProg, err := ds.GetBrokerDispatch(ctx, inProg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DispatchStateInProgress, gotInProg.State)
+	assert.Equal(t, hfArgs, gotInProg.Args)
+}
