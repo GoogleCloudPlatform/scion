@@ -497,12 +497,13 @@ func (s *Server) authorizeTriggerDispatchAgentAuthoring(
 	}
 
 	action := &dispatchAgentAction{srv: s}
-	normalized, err := action.validateForAuthoring(ctx, identity, projectID, string(raw), dispatchAgentAuthoringOpts{
+	authCtx := withDispatchAgentAuthoringOpts(ctx, dispatchAgentAuthoringOpts{
 		sourceKind: sourceKind,
 		endpoint:   ep,
 		ceiling:    &ceiling,
 		provenance: &prov,
 	})
+	normalized, err := action.Validate(authCtx, identity, projectID, string(raw))
 	if err != nil {
 		var ve *dispatchAgentValidationError
 		if errors.As(err, &ve) {
