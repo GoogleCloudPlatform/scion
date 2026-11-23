@@ -779,41 +779,65 @@ func TestConversationWatch_ShutdownDrainEarlyReturn(t *testing.T) {
 	}
 }
 
-// Phase 3 item 1 (Q-B): Pins current group filter=addressed behavior — explicit
-// recipient and message_addressees rows match, whereas a human body @-mention
-// in a group thread does not create a message_addressees row and therefore does
-// not match filter=addressed (it still matches filter=others).
+// Phase 3 item 1 (Q-B): Pins current group filter=addressed behavior both
+// through the real group send handler (an @user body mention creates no
+// user-principal message_addressees row and is omitted by filter=addressed)
+// and at the feed filter level (explicit recipient and message_addressees rows
+// match, while filter=others delivers the body mention).
 func TestConversationWatch_GroupFilterAddressed_QB(t *testing.T) {
 	srv, s := testServer(t)
+	cs, ok := s.(*entadapter.CompositeStore)
+	require.True(t, ok, "testServer store must be *entadapter.CompositeStore")
+	wcs := NewWebChatStore(cs.DB(), "sqlite")
+	require.NoError(t, wcs.Init())
+	srv.SetWebChatStore(wcs)
+
 	ctx := context.Background()
 
 	projID := uuid.NewString()
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projID, Name: "P", Slug: "p-" + projID[:8]}))
 	user := watchTestUser(t, s, projID, store.ProjectRoleMember)
+	senderUser := watchTestUser(t, s, projID, store.ProjectRoleMember)
 	agent := &store.Agent{ID: uuid.NewString(), Slug: "a1", Name: "Agent 1", ProjectID: projID, Phase: string(state.PhaseRunning)}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	group := watchTestGroupConv(t, s, projID)
 
-	// 1. Body @-mention only (no explicit recipient, no message_addressees row).
-	bodyMentionOnly := &store.Message{
-		ID:             uuid.NewString(),
+	now := time.Now().UTC()
+	topicID := uuid.NewString()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:             topicID,
 		ProjectID:      projID,
-		ConversationID: group.ID,
-		Sender:         "agent:" + agent.Slug,
-		SenderID:       agent.ID,
-		Recipient:      "group:g",
-		RecipientID:    group.ID,
-		Msg:            "Hey @" + user.Email + ", check this out",
-		Type:           "chat",
-		DispatchState:  store.MessageDispatchDispatched,
+		Name:           "qb-group-thread",
+		CreatedBy:      senderUser.ID,
+		CreatedAt:      now,
+		LastActivityAt: now,
+	}))
+	topic, err := wcs.GetTopic(ctx, topicID)
+	require.NoError(t, err)
+	require.NotNil(t, topic)
+	require.NotEmpty(t, topic.ConversationID)
+
+	// 1. Real group send handler with an @user body mention: verify no
+	// user-principal message_addressees row is written and filter=addressed omits it.
+	postRec := doRequestAsUser(t, srv, senderUser, http.MethodPost,
+		"/api/v1/chat/conversations/"+topic.ID+"/messages",
+		map[string]string{"content": "Hey @" + user.Email + ", check this out"})
+	require.Equal(t, http.StatusCreated, postRec.Code, postRec.Body.String())
+	var postResp chatMessageResponse
+	require.NoError(t, json.Unmarshal(postRec.Body.Bytes(), &postResp))
+	require.NotEmpty(t, postResp.ID)
+
+	addressees, err := s.ListAddressees(ctx, postResp.ID)
+	require.NoError(t, err)
+	for _, a := range addressees {
+		assert.NotEqual(t, "user", a.PrincipalKind,
+			"group body @-mention must not create a user-principal message_addressees row")
 	}
-	require.NoError(t, s.CreateMessage(ctx, bodyMentionOnly))
 
 	// 2. Explicit user recipient.
 	explicitRecip := &store.Message{
 		ID:             uuid.NewString(),
 		ProjectID:      projID,
-		ConversationID: group.ID,
+		ConversationID: topic.ConversationID,
 		Sender:         "agent:" + agent.Slug,
 		SenderID:       agent.ID,
 		Recipient:      "user:" + user.Email,
@@ -828,11 +852,11 @@ func TestConversationWatch_GroupFilterAddressed_QB(t *testing.T) {
 	addresseeRowMsg := &store.Message{
 		ID:             uuid.NewString(),
 		ProjectID:      projID,
-		ConversationID: group.ID,
+		ConversationID: topic.ConversationID,
 		Sender:         "agent:" + agent.Slug,
 		SenderID:       agent.ID,
 		Recipient:      "group:g",
-		RecipientID:    group.ID,
+		RecipientID:    topic.ConversationID,
 		Msg:            "Addressed via message_addressees",
 		Type:           "chat",
 		DispatchState:  store.MessageDispatchDispatched,
@@ -847,9 +871,10 @@ func TestConversationWatch_GroupFilterAddressed_QB(t *testing.T) {
 		DeliveryState: "delivered",
 	}))
 
-	// filter=addressed matches explicit recipient + message_addressees, NOT body @-mention.
+	// filter=addressed matches explicit recipient + message_addressees, NOT the
+	// real group-handler body @-mention.
 	recAddr := doRequestAsUser(t, srv, user, http.MethodGet,
-		"/api/v1/conversations/"+group.ID+"/watch?start=beginning&filter=addressed&wait=0", nil)
+		"/api/v1/conversations/"+topic.ConversationID+"/watch?start=beginning&filter=addressed&wait=0", nil)
 	require.Equal(t, http.StatusOK, recAddr.Code, recAddr.Body.String())
 	var addrBody conversationWatchResponse
 	require.NoError(t, json.Unmarshal(recAddr.Body.Bytes(), &addrBody))
@@ -860,12 +885,12 @@ func TestConversationWatch_GroupFilterAddressed_QB(t *testing.T) {
 
 	// filter=others (recommended for group threads) delivers all three, including the body @-mention.
 	recOthers := doRequestAsUser(t, srv, user, http.MethodGet,
-		"/api/v1/conversations/"+group.ID+"/watch?start=beginning&filter=others&wait=0", nil)
+		"/api/v1/conversations/"+topic.ConversationID+"/watch?start=beginning&filter=others&wait=0", nil)
 	require.Equal(t, http.StatusOK, recOthers.Code, recOthers.Body.String())
 	var othersBody conversationWatchResponse
 	require.NoError(t, json.Unmarshal(recOthers.Body.Bytes(), &othersBody))
 	require.Len(t, othersBody.Events, 3)
-	assert.Equal(t, "msg:"+bodyMentionOnly.ID, othersBody.Events[0].EventID)
+	assert.Equal(t, "msg:"+postResp.ID, othersBody.Events[0].EventID)
 }
 
 // Phase 3 item 7: DevUser (SCION_DEV_TOKEN, Type()=="dev") has /messages and

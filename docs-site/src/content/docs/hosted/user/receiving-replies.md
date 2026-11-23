@@ -140,7 +140,7 @@ Use `--filter` to control which messages wake the watch:
 
 - `others` *(default)*: delivers every message not sent by the caller. In a DM, this delivers every reply from the agent while ignoring your own sends.
 - `all`: delivers all messages in the conversation, including your own sends.
-- `addressed`: delivers messages not sent by the caller where the caller is an explicit recipient (`recipient_id`) or recorded in `message_addressees`. In group conversations today, human body `@`-mentions are not written to `message_addressees`, so `--filter addressed` matches explicit recipients only; use `--filter others` to follow a group thread as a user.
+- `addressed`: for a user, `addressed` currently means messages not sent by you that were sent explicitly to you (as the message's `recipient`). Body `@`-mentions of a user in a group thread do not match `addressed`, so use `--filter others` to follow a group thread as a user.
 
 When neither `--cursor` nor `--after-message` is provided:
 
