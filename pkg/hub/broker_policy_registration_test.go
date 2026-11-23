@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
@@ -669,4 +670,75 @@ func TestBrokerPolicy_AdminServerConfigDB_ExperimentGateAndLiveApply(t *testing.
 		Name: "e2e-member-allowed-after-clear",
 	}, memberAuth)
 	require.Equal(t, http.StatusCreated, memberAllowed.Code, memberAllowed.Body.String())
+}
+
+func TestBrokerPolicy_OnlineUnmanagedReregister_PolicyPrecedesOnlineGuard(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	member := newHubMemberUser(t, s, "bp-online-member")
+	superAdmin := newSuperAdminUser(t, s, "bp-online-super")
+	memberAuth := func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, member))
+	}
+	adminAuth := func(r *http.Request) {
+		r.Header.Set("Authorization", "Bearer "+mintInteractiveUserJWT(t, srv, superAdmin))
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	broker := &store.RuntimeBroker{
+		ID:            api.NewUUID(),
+		Name:          "bp-online-unmanaged",
+		Slug:          "bp-online-unmanaged",
+		Status:        store.BrokerStatusOnline,
+		LastHeartbeat: now,
+		CreatedBy:     member.ID,
+		AdminManaged:  false,
+		AutoProvide:   false,
+		Labels:        map[string]string{"env": "orig"},
+		Created:       now,
+		Updated:       now,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	before, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+
+	setBrokerPolicyState(t, srv, s, true, true)
+
+	cases := []struct {
+		name         string
+		auth         func(*http.Request)
+		force        bool
+		adminManaged bool
+	}{
+		{name: "owner_no_force", auth: memberAuth, force: false, adminManaged: false},
+		{name: "owner_with_force", auth: memberAuth, force: true, adminManaged: false},
+		{name: "admin_no_force_adminManaged", auth: adminAuth, force: false, adminManaged: true},
+		{name: "admin_with_force_adminManaged", auth: adminAuth, force: true, adminManaged: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doBrokerRequest(t, srv, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+				Name:         broker.Name,
+				Force:        tc.force,
+				AdminManaged: tc.adminManaged,
+				Labels:       map[string]string{"mutated": "yes"},
+			}, tc.auth)
+			require.Equal(t, http.StatusForbidden, rec.Code, "expected 403 broker_policy_admin_managed_only (not 409 broker_online); body: %s", rec.Body.String())
+			code, details := decodeBrokerPolicyErrorCode(t, rec)
+			assert.Equal(t, ErrCodeBrokerPolicyAdminManagedOnly, code)
+			assert.Equal(t, brokerPolicyOpReregister, details["operation"])
+			assert.Equal(t, broker.ID, details["brokerId"])
+
+			// Confirm nothing was written to the broker row or secret table.
+			after, err := s.GetRuntimeBroker(ctx, broker.ID)
+			require.NoError(t, err)
+			assert.False(t, after.AdminManaged)
+			assert.Equal(t, map[string]string{"env": "orig"}, after.Labels)
+			assert.True(t, after.Updated.Equal(before.Updated), "broker row must not be modified on refusal")
+			_, secErr := s.GetBrokerSecret(ctx, broker.ID)
+			assert.ErrorIs(t, secErr, store.ErrNotFound, "no broker secret or join token may be written on refusal")
+		})
+	}
 }
