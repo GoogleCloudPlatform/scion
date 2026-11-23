@@ -648,6 +648,7 @@ func (s *Server) authorizeTriggerExecAuthoring(
 	subjectMode string,
 	spec *TriggerActionSpec,
 	ceiling store.EffectCeiling,
+	prov store.AuthorityProvenance,
 ) (string, string, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
@@ -695,7 +696,8 @@ func (s *Server) authorizeTriggerExecAuthoring(
 		ValidationError(w, err.Error(), nil)
 		return "", "", false
 	}
-	if !EffectCeilingAllows(ceiling, scheduledExecPermission, false) {
+	hopCeiling := uatHopEffectCeiling(prov.SourcePrincipalKind, prov.SourcePrincipalID, prov, ceiling)
+	if !EffectCeilingAllows(hopCeiling, scheduledExecPermission, false) {
 		writeForbiddenDenial(w, "caller's delegation ceiling does not allow agent.attach", DeniedByDelegationCeiling)
 		return "", "", false
 	}

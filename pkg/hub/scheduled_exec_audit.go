@@ -123,15 +123,15 @@ func scheduledExecAuditAttrs(e *ScheduledExecEvent) []slog.Attr {
 		slog.String("event_type", eventType),
 		slog.String("audit_action", auditAction),
 		slog.String("project_id", e.ProjectID),
-		slog.String("target_agent_id", e.TargetAgentID),
 	}
+	if !e.IsTrigger || e.EventID != "" {
+		attrs = append(attrs, slog.String("scheduled_event_id", e.EventID))
+	}
+	attrs = append(attrs, slog.String("target_agent_id", e.TargetAgentID))
 	add := func(key, val string) {
 		if val != "" {
 			attrs = append(attrs, slog.String(key, val))
 		}
-	}
-	if !e.IsTrigger || e.EventID != "" {
-		attrs = append(attrs, slog.String("scheduled_event_id", e.EventID))
 	}
 	add("schedule_id", e.ScheduleID)
 	add("trigger_id", e.TriggerID)

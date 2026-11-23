@@ -599,7 +599,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	case store.TriggerActionDispatchAgent:
 		actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &req.Action, ceiling, prov)
 	case store.TriggerActionExec:
-		actionPayload, execTargetID, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &req.Action, ceiling)
+		actionPayload, execTargetID, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &req.Action, ceiling, prov)
 	case store.TriggerActionGitHubComment:
 		actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &req.Action)
 	default:
@@ -793,7 +793,7 @@ func (s *Server) authorizeStoredTriggerAction(
 	case store.TriggerActionDispatchAgent:
 		return s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, sourceKind, ep, &spec, ceiling, prov)
 	case store.TriggerActionExec:
-		payload, _, ok := s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &spec, ceiling)
+		payload, _, ok := s.authorizeTriggerExecAuthoring(w, r, projectID, sourceKind, ep, subjectMode, &spec, ceiling, prov)
 		return payload, ok
 	case store.TriggerActionGitHubComment:
 		return s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, sourceKind, matchTypes, &spec)
@@ -1152,7 +1152,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			case store.TriggerActionDispatchAgent:
 				actionPayload, ok = s.authorizeTriggerDispatchAgentAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, req.Action, ceiling, prov)
 			case store.TriggerActionExec:
-				actionPayload, _, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, req.Action, ceiling)
+				actionPayload, _, ok = s.authorizeTriggerExecAuthoring(w, r, projectID, tr.SourceKind, resolvedEP, tr.SubjectMode, req.Action, ceiling, prov)
 			case store.TriggerActionGitHubComment:
 				actionPayload, ok = s.authorizeTriggerGitHubCommentAuthoring(w, r, projectID, tr.SourceKind, tr.MatchTypes, req.Action)
 			}
