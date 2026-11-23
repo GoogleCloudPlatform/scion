@@ -126,4 +126,18 @@ describe('<scion-page-agents> unified filter dialect (P1)', () => {
     const heading = el.shadowRoot?.querySelector('.empty-state h2')?.textContent?.trim();
     expect(heading).toBe('No Matching Agents');
   });
+
+  it('keeps legacy empty-state behaviour unchanged when filters.query_dialect is off', async () => {
+    setFeatureFlag(FILTERS_QUERY_DIALECT_FLAG, false);
+    localStorage.setItem('scion-filter-agents-phase', 'error');
+
+    const el = document.createElement('scion-page-agents') as ScionPageAgents;
+    document.body.appendChild(el);
+    await new Promise((r) => setTimeout(r, 10));
+    await el.updateComplete;
+
+    // With experiment off and zero total agents returned, legacy renders "No Agents Found".
+    const heading = el.shadowRoot?.querySelector('.empty-state h2')?.textContent?.trim();
+    expect(heading).toBe('No Agents Found');
+  });
 });

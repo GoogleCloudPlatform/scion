@@ -1871,12 +1871,12 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
-  /** Whether any filter (dialect query or legacy phase/label) is currently active. */
-  private get hasActiveFilter(): boolean {
-    if (filtersQueryDialectEnabled()) {
-      return this.filterQueryText.trim() !== '' || this.committedServerQ !== '';
-    }
-    return this.phaseFilter !== '' || this.committedLabel.trim() !== '';
+  /** Whether a unified-dialect filter query is currently active (experiment on only). */
+  private get hasActiveDialectFilter(): boolean {
+    return (
+      filtersQueryDialectEnabled() &&
+      (this.filterQueryText.trim() !== '' || this.committedServerQ !== '')
+    );
   }
 
   private renderNoMatchingAgents(): TemplateResult {
@@ -1898,7 +1898,7 @@ export class ScionPageAgents extends LitElement {
     const win = this.agentWindow;
     if (win.stats.total === 0 && win.display.length === 0) {
       // An incomplete or stale set still says so above the empty state.
-      return html`${this.renderWindowBanner()}${this.hasActiveFilter
+      return html`${this.renderWindowBanner()}${this.hasActiveDialectFilter
         ? this.renderNoMatchingAgents()
         : this.renderNoAgents()}`;
     }
@@ -1917,10 +1917,22 @@ export class ScionPageAgents extends LitElement {
     }
 
     const filtered = win.display;
-    if (filtered.length === 0 && this.hasActiveFilter) {
+    if (filtered.length === 0 && this.hasActiveDialectFilter) {
       // A capped, failed or stale set still says so above the empty state:
       // agents beyond what was loaded may match the filter.
       return html`${this.renderWindowBanner()}${this.renderNoMatchingAgents()}`;
+    }
+    if (filtered.length === 0 && this.phaseFilter) {
+      // A capped, failed or stale set still says so above the empty state:
+      // agents beyond what was loaded may match the filter.
+      return html`
+        ${this.renderWindowBanner()}
+        <div class="empty-state">
+          <sl-icon name="funnel"></sl-icon>
+          <h2>No Matching Agents</h2>
+          <p>No agents match the current filter. Try changing the status filter.</p>
+        </div>
+      `;
     }
 
     if (this.viewMode === 'graph') {
