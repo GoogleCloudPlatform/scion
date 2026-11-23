@@ -119750,6 +119750,10 @@ type TriggerMutation struct {
 	subject_mode                          *string
 	coalesce_window_seconds               *int
 	addcoalesce_window_seconds            *int
+	max_fires_per_minute                  *int
+	addmax_fires_per_minute               *int
+	max_concurrent_dispatches             *int
+	addmax_concurrent_dispatches          *int
 	status                                *string
 	status_reason                         *string
 	last_fire_at                          *time.Time
@@ -121239,6 +121243,118 @@ func (m *TriggerMutation) ResetCoalesceWindowSeconds() {
 	m.addcoalesce_window_seconds = nil
 }
 
+// SetMaxFiresPerMinute sets the "max_fires_per_minute" field.
+func (m *TriggerMutation) SetMaxFiresPerMinute(i int) {
+	m.max_fires_per_minute = &i
+	m.addmax_fires_per_minute = nil
+}
+
+// MaxFiresPerMinute returns the value of the "max_fires_per_minute" field in the mutation.
+func (m *TriggerMutation) MaxFiresPerMinute() (r int, exists bool) {
+	v := m.max_fires_per_minute
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMaxFiresPerMinute returns the old "max_fires_per_minute" field's value of the Trigger entity.
+// If the Trigger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerMutation) OldMaxFiresPerMinute(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMaxFiresPerMinute is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMaxFiresPerMinute requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMaxFiresPerMinute: %w", err)
+	}
+	return oldValue.MaxFiresPerMinute, nil
+}
+
+// AddMaxFiresPerMinute adds i to the "max_fires_per_minute" field.
+func (m *TriggerMutation) AddMaxFiresPerMinute(i int) {
+	if m.addmax_fires_per_minute != nil {
+		*m.addmax_fires_per_minute += i
+	} else {
+		m.addmax_fires_per_minute = &i
+	}
+}
+
+// AddedMaxFiresPerMinute returns the value that was added to the "max_fires_per_minute" field in this mutation.
+func (m *TriggerMutation) AddedMaxFiresPerMinute() (r int, exists bool) {
+	v := m.addmax_fires_per_minute
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMaxFiresPerMinute resets all changes to the "max_fires_per_minute" field.
+func (m *TriggerMutation) ResetMaxFiresPerMinute() {
+	m.max_fires_per_minute = nil
+	m.addmax_fires_per_minute = nil
+}
+
+// SetMaxConcurrentDispatches sets the "max_concurrent_dispatches" field.
+func (m *TriggerMutation) SetMaxConcurrentDispatches(i int) {
+	m.max_concurrent_dispatches = &i
+	m.addmax_concurrent_dispatches = nil
+}
+
+// MaxConcurrentDispatches returns the value of the "max_concurrent_dispatches" field in the mutation.
+func (m *TriggerMutation) MaxConcurrentDispatches() (r int, exists bool) {
+	v := m.max_concurrent_dispatches
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMaxConcurrentDispatches returns the old "max_concurrent_dispatches" field's value of the Trigger entity.
+// If the Trigger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerMutation) OldMaxConcurrentDispatches(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMaxConcurrentDispatches is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMaxConcurrentDispatches requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMaxConcurrentDispatches: %w", err)
+	}
+	return oldValue.MaxConcurrentDispatches, nil
+}
+
+// AddMaxConcurrentDispatches adds i to the "max_concurrent_dispatches" field.
+func (m *TriggerMutation) AddMaxConcurrentDispatches(i int) {
+	if m.addmax_concurrent_dispatches != nil {
+		*m.addmax_concurrent_dispatches += i
+	} else {
+		m.addmax_concurrent_dispatches = &i
+	}
+}
+
+// AddedMaxConcurrentDispatches returns the value that was added to the "max_concurrent_dispatches" field in this mutation.
+func (m *TriggerMutation) AddedMaxConcurrentDispatches() (r int, exists bool) {
+	v := m.addmax_concurrent_dispatches
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMaxConcurrentDispatches resets all changes to the "max_concurrent_dispatches" field.
+func (m *TriggerMutation) ResetMaxConcurrentDispatches() {
+	m.max_concurrent_dispatches = nil
+	m.addmax_concurrent_dispatches = nil
+}
+
 // SetStatus sets the "status" field.
 func (m *TriggerMutation) SetStatus(s string) {
 	m.status = &s
@@ -121738,7 +121854,7 @@ func (m *TriggerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerMutation) Fields() []string {
-	fields := make([]string, 0, 41)
+	fields := make([]string, 0, 43)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, trigger.FieldInitiatorPrincipalKind)
 	}
@@ -121831,6 +121947,12 @@ func (m *TriggerMutation) Fields() []string {
 	}
 	if m.coalesce_window_seconds != nil {
 		fields = append(fields, trigger.FieldCoalesceWindowSeconds)
+	}
+	if m.max_fires_per_minute != nil {
+		fields = append(fields, trigger.FieldMaxFiresPerMinute)
+	}
+	if m.max_concurrent_dispatches != nil {
+		fields = append(fields, trigger.FieldMaxConcurrentDispatches)
 	}
 	if m.status != nil {
 		fields = append(fields, trigger.FieldStatus)
@@ -121932,6 +122054,10 @@ func (m *TriggerMutation) Field(name string) (ent.Value, bool) {
 		return m.SubjectMode()
 	case trigger.FieldCoalesceWindowSeconds:
 		return m.CoalesceWindowSeconds()
+	case trigger.FieldMaxFiresPerMinute:
+		return m.MaxFiresPerMinute()
+	case trigger.FieldMaxConcurrentDispatches:
+		return m.MaxConcurrentDispatches()
 	case trigger.FieldStatus:
 		return m.Status()
 	case trigger.FieldStatusReason:
@@ -122023,6 +122149,10 @@ func (m *TriggerMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldSubjectMode(ctx)
 	case trigger.FieldCoalesceWindowSeconds:
 		return m.OldCoalesceWindowSeconds(ctx)
+	case trigger.FieldMaxFiresPerMinute:
+		return m.OldMaxFiresPerMinute(ctx)
+	case trigger.FieldMaxConcurrentDispatches:
+		return m.OldMaxConcurrentDispatches(ctx)
 	case trigger.FieldStatus:
 		return m.OldStatus(ctx)
 	case trigger.FieldStatusReason:
@@ -122269,6 +122399,20 @@ func (m *TriggerMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetCoalesceWindowSeconds(v)
 		return nil
+	case trigger.FieldMaxFiresPerMinute:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMaxFiresPerMinute(v)
+		return nil
+	case trigger.FieldMaxConcurrentDispatches:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMaxConcurrentDispatches(v)
+		return nil
 	case trigger.FieldStatus:
 		v, ok := value.(string)
 		if !ok {
@@ -122359,6 +122503,12 @@ func (m *TriggerMutation) AddedFields() []string {
 	if m.addcoalesce_window_seconds != nil {
 		fields = append(fields, trigger.FieldCoalesceWindowSeconds)
 	}
+	if m.addmax_fires_per_minute != nil {
+		fields = append(fields, trigger.FieldMaxFiresPerMinute)
+	}
+	if m.addmax_concurrent_dispatches != nil {
+		fields = append(fields, trigger.FieldMaxConcurrentDispatches)
+	}
 	if m.addfire_count != nil {
 		fields = append(fields, trigger.FieldFireCount)
 	}
@@ -122381,6 +122531,10 @@ func (m *TriggerMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedAuthorityCeilingVersion()
 	case trigger.FieldCoalesceWindowSeconds:
 		return m.AddedCoalesceWindowSeconds()
+	case trigger.FieldMaxFiresPerMinute:
+		return m.AddedMaxFiresPerMinute()
+	case trigger.FieldMaxConcurrentDispatches:
+		return m.AddedMaxConcurrentDispatches()
 	case trigger.FieldFireCount:
 		return m.AddedFireCount()
 	case trigger.FieldErrorCount:
@@ -122421,6 +122575,20 @@ func (m *TriggerMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddCoalesceWindowSeconds(v)
+		return nil
+	case trigger.FieldMaxFiresPerMinute:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMaxFiresPerMinute(v)
+		return nil
+	case trigger.FieldMaxConcurrentDispatches:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMaxConcurrentDispatches(v)
 		return nil
 	case trigger.FieldFireCount:
 		v, ok := value.(int)
@@ -122666,6 +122834,12 @@ func (m *TriggerMutation) ResetField(name string) error {
 		return nil
 	case trigger.FieldCoalesceWindowSeconds:
 		m.ResetCoalesceWindowSeconds()
+		return nil
+	case trigger.FieldMaxFiresPerMinute:
+		m.ResetMaxFiresPerMinute()
+		return nil
+	case trigger.FieldMaxConcurrentDispatches:
+		m.ResetMaxConcurrentDispatches()
 		return nil
 	case trigger.FieldStatus:
 		m.ResetStatus()
@@ -134907,38 +135081,48 @@ func (m *UserTerminalWorkspaceMutation) ResetEdge(name string) error {
 // WebhookEndpointMutation represents an operation that mutates the WebhookEndpoint nodes in the graph.
 type WebhookEndpointMutation struct {
 	config
-	op                    Op
-	typ                   string
-	id                    *uuid.UUID
-	fixture_root_id       *uuid.UUID
-	fixture_issuer_id     *uuid.UUID
-	project_id            *uuid.UUID
-	name                  *string
-	description           *string
-	owner_principal_kind  *string
-	owner_principal_id    *string
-	owner_credential_kind *string
-	secret_version        *int
-	addsecret_version     *int
-	secret_rotated_at     *time.Time
-	config_version        *int
-	addconfig_version     *int
-	signature_mode        *string
-	status                *string
-	bound_agent_id        *uuid.UUID
-	bound_lifetime        *string
-	created_by            *string
-	last_received_at      *time.Time
-	receive_count         *int
-	addreceive_count      *int
-	reject_count          *int
-	addreject_count       *int
-	created               *time.Time
-	updated               *time.Time
-	clearedFields         map[string]struct{}
-	done                  bool
-	oldValue              func(context.Context) (*WebhookEndpoint, error)
-	predicates            []predicate.WebhookEndpoint
+	op                       Op
+	typ                      string
+	id                       *uuid.UUID
+	fixture_root_id          *uuid.UUID
+	fixture_issuer_id        *uuid.UUID
+	project_id               *uuid.UUID
+	name                     *string
+	description              *string
+	owner_principal_kind     *string
+	owner_principal_id       *string
+	owner_credential_kind    *string
+	auth_mode                *string
+	allow_project_agents     *bool
+	max_body_bytes           *int
+	addmax_body_bytes        *int
+	rate_per_second          *int
+	addrate_per_second       *int
+	rate_burst               *int
+	addrate_burst            *int
+	replay_window_seconds    *int
+	addreplay_window_seconds *int
+	secret_version           *int
+	addsecret_version        *int
+	secret_rotated_at        *time.Time
+	config_version           *int
+	addconfig_version        *int
+	signature_mode           *string
+	status                   *string
+	bound_agent_id           *uuid.UUID
+	bound_lifetime           *string
+	created_by               *string
+	last_received_at         *time.Time
+	receive_count            *int
+	addreceive_count         *int
+	reject_count             *int
+	addreject_count          *int
+	created                  *time.Time
+	updated                  *time.Time
+	clearedFields            map[string]struct{}
+	done                     bool
+	oldValue                 func(context.Context) (*WebhookEndpoint, error)
+	predicates               []predicate.WebhookEndpoint
 }
 
 var _ ent.Mutation = (*WebhookEndpointMutation)(nil)
@@ -135370,6 +135554,302 @@ func (m *WebhookEndpointMutation) OldOwnerCredentialKind(ctx context.Context) (v
 // ResetOwnerCredentialKind resets all changes to the "owner_credential_kind" field.
 func (m *WebhookEndpointMutation) ResetOwnerCredentialKind() {
 	m.owner_credential_kind = nil
+}
+
+// SetAuthMode sets the "auth_mode" field.
+func (m *WebhookEndpointMutation) SetAuthMode(s string) {
+	m.auth_mode = &s
+}
+
+// AuthMode returns the value of the "auth_mode" field in the mutation.
+func (m *WebhookEndpointMutation) AuthMode() (r string, exists bool) {
+	v := m.auth_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthMode returns the old "auth_mode" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldAuthMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthMode: %w", err)
+	}
+	return oldValue.AuthMode, nil
+}
+
+// ResetAuthMode resets all changes to the "auth_mode" field.
+func (m *WebhookEndpointMutation) ResetAuthMode() {
+	m.auth_mode = nil
+}
+
+// SetAllowProjectAgents sets the "allow_project_agents" field.
+func (m *WebhookEndpointMutation) SetAllowProjectAgents(b bool) {
+	m.allow_project_agents = &b
+}
+
+// AllowProjectAgents returns the value of the "allow_project_agents" field in the mutation.
+func (m *WebhookEndpointMutation) AllowProjectAgents() (r bool, exists bool) {
+	v := m.allow_project_agents
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAllowProjectAgents returns the old "allow_project_agents" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldAllowProjectAgents(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAllowProjectAgents is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAllowProjectAgents requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAllowProjectAgents: %w", err)
+	}
+	return oldValue.AllowProjectAgents, nil
+}
+
+// ResetAllowProjectAgents resets all changes to the "allow_project_agents" field.
+func (m *WebhookEndpointMutation) ResetAllowProjectAgents() {
+	m.allow_project_agents = nil
+}
+
+// SetMaxBodyBytes sets the "max_body_bytes" field.
+func (m *WebhookEndpointMutation) SetMaxBodyBytes(i int) {
+	m.max_body_bytes = &i
+	m.addmax_body_bytes = nil
+}
+
+// MaxBodyBytes returns the value of the "max_body_bytes" field in the mutation.
+func (m *WebhookEndpointMutation) MaxBodyBytes() (r int, exists bool) {
+	v := m.max_body_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMaxBodyBytes returns the old "max_body_bytes" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldMaxBodyBytes(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMaxBodyBytes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMaxBodyBytes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMaxBodyBytes: %w", err)
+	}
+	return oldValue.MaxBodyBytes, nil
+}
+
+// AddMaxBodyBytes adds i to the "max_body_bytes" field.
+func (m *WebhookEndpointMutation) AddMaxBodyBytes(i int) {
+	if m.addmax_body_bytes != nil {
+		*m.addmax_body_bytes += i
+	} else {
+		m.addmax_body_bytes = &i
+	}
+}
+
+// AddedMaxBodyBytes returns the value that was added to the "max_body_bytes" field in this mutation.
+func (m *WebhookEndpointMutation) AddedMaxBodyBytes() (r int, exists bool) {
+	v := m.addmax_body_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMaxBodyBytes resets all changes to the "max_body_bytes" field.
+func (m *WebhookEndpointMutation) ResetMaxBodyBytes() {
+	m.max_body_bytes = nil
+	m.addmax_body_bytes = nil
+}
+
+// SetRatePerSecond sets the "rate_per_second" field.
+func (m *WebhookEndpointMutation) SetRatePerSecond(i int) {
+	m.rate_per_second = &i
+	m.addrate_per_second = nil
+}
+
+// RatePerSecond returns the value of the "rate_per_second" field in the mutation.
+func (m *WebhookEndpointMutation) RatePerSecond() (r int, exists bool) {
+	v := m.rate_per_second
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRatePerSecond returns the old "rate_per_second" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldRatePerSecond(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRatePerSecond is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRatePerSecond requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRatePerSecond: %w", err)
+	}
+	return oldValue.RatePerSecond, nil
+}
+
+// AddRatePerSecond adds i to the "rate_per_second" field.
+func (m *WebhookEndpointMutation) AddRatePerSecond(i int) {
+	if m.addrate_per_second != nil {
+		*m.addrate_per_second += i
+	} else {
+		m.addrate_per_second = &i
+	}
+}
+
+// AddedRatePerSecond returns the value that was added to the "rate_per_second" field in this mutation.
+func (m *WebhookEndpointMutation) AddedRatePerSecond() (r int, exists bool) {
+	v := m.addrate_per_second
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRatePerSecond resets all changes to the "rate_per_second" field.
+func (m *WebhookEndpointMutation) ResetRatePerSecond() {
+	m.rate_per_second = nil
+	m.addrate_per_second = nil
+}
+
+// SetRateBurst sets the "rate_burst" field.
+func (m *WebhookEndpointMutation) SetRateBurst(i int) {
+	m.rate_burst = &i
+	m.addrate_burst = nil
+}
+
+// RateBurst returns the value of the "rate_burst" field in the mutation.
+func (m *WebhookEndpointMutation) RateBurst() (r int, exists bool) {
+	v := m.rate_burst
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRateBurst returns the old "rate_burst" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldRateBurst(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRateBurst is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRateBurst requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRateBurst: %w", err)
+	}
+	return oldValue.RateBurst, nil
+}
+
+// AddRateBurst adds i to the "rate_burst" field.
+func (m *WebhookEndpointMutation) AddRateBurst(i int) {
+	if m.addrate_burst != nil {
+		*m.addrate_burst += i
+	} else {
+		m.addrate_burst = &i
+	}
+}
+
+// AddedRateBurst returns the value that was added to the "rate_burst" field in this mutation.
+func (m *WebhookEndpointMutation) AddedRateBurst() (r int, exists bool) {
+	v := m.addrate_burst
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRateBurst resets all changes to the "rate_burst" field.
+func (m *WebhookEndpointMutation) ResetRateBurst() {
+	m.rate_burst = nil
+	m.addrate_burst = nil
+}
+
+// SetReplayWindowSeconds sets the "replay_window_seconds" field.
+func (m *WebhookEndpointMutation) SetReplayWindowSeconds(i int) {
+	m.replay_window_seconds = &i
+	m.addreplay_window_seconds = nil
+}
+
+// ReplayWindowSeconds returns the value of the "replay_window_seconds" field in the mutation.
+func (m *WebhookEndpointMutation) ReplayWindowSeconds() (r int, exists bool) {
+	v := m.replay_window_seconds
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReplayWindowSeconds returns the old "replay_window_seconds" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldReplayWindowSeconds(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReplayWindowSeconds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReplayWindowSeconds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReplayWindowSeconds: %w", err)
+	}
+	return oldValue.ReplayWindowSeconds, nil
+}
+
+// AddReplayWindowSeconds adds i to the "replay_window_seconds" field.
+func (m *WebhookEndpointMutation) AddReplayWindowSeconds(i int) {
+	if m.addreplay_window_seconds != nil {
+		*m.addreplay_window_seconds += i
+	} else {
+		m.addreplay_window_seconds = &i
+	}
+}
+
+// AddedReplayWindowSeconds returns the value that was added to the "replay_window_seconds" field in this mutation.
+func (m *WebhookEndpointMutation) AddedReplayWindowSeconds() (r int, exists bool) {
+	v := m.addreplay_window_seconds
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetReplayWindowSeconds resets all changes to the "replay_window_seconds" field.
+func (m *WebhookEndpointMutation) ResetReplayWindowSeconds() {
+	m.replay_window_seconds = nil
+	m.addreplay_window_seconds = nil
 }
 
 // SetSecretVersion sets the "secret_version" field.
@@ -136006,7 +136486,7 @@ func (m *WebhookEndpointMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *WebhookEndpointMutation) Fields() []string {
-	fields := make([]string, 0, 21)
+	fields := make([]string, 0, 27)
 	if m.fixture_root_id != nil {
 		fields = append(fields, webhookendpoint.FieldFixtureRootID)
 	}
@@ -136030,6 +136510,24 @@ func (m *WebhookEndpointMutation) Fields() []string {
 	}
 	if m.owner_credential_kind != nil {
 		fields = append(fields, webhookendpoint.FieldOwnerCredentialKind)
+	}
+	if m.auth_mode != nil {
+		fields = append(fields, webhookendpoint.FieldAuthMode)
+	}
+	if m.allow_project_agents != nil {
+		fields = append(fields, webhookendpoint.FieldAllowProjectAgents)
+	}
+	if m.max_body_bytes != nil {
+		fields = append(fields, webhookendpoint.FieldMaxBodyBytes)
+	}
+	if m.rate_per_second != nil {
+		fields = append(fields, webhookendpoint.FieldRatePerSecond)
+	}
+	if m.rate_burst != nil {
+		fields = append(fields, webhookendpoint.FieldRateBurst)
+	}
+	if m.replay_window_seconds != nil {
+		fields = append(fields, webhookendpoint.FieldReplayWindowSeconds)
 	}
 	if m.secret_version != nil {
 		fields = append(fields, webhookendpoint.FieldSecretVersion)
@@ -136094,6 +136592,18 @@ func (m *WebhookEndpointMutation) Field(name string) (ent.Value, bool) {
 		return m.OwnerPrincipalID()
 	case webhookendpoint.FieldOwnerCredentialKind:
 		return m.OwnerCredentialKind()
+	case webhookendpoint.FieldAuthMode:
+		return m.AuthMode()
+	case webhookendpoint.FieldAllowProjectAgents:
+		return m.AllowProjectAgents()
+	case webhookendpoint.FieldMaxBodyBytes:
+		return m.MaxBodyBytes()
+	case webhookendpoint.FieldRatePerSecond:
+		return m.RatePerSecond()
+	case webhookendpoint.FieldRateBurst:
+		return m.RateBurst()
+	case webhookendpoint.FieldReplayWindowSeconds:
+		return m.ReplayWindowSeconds()
 	case webhookendpoint.FieldSecretVersion:
 		return m.SecretVersion()
 	case webhookendpoint.FieldSecretRotatedAt:
@@ -136145,6 +136655,18 @@ func (m *WebhookEndpointMutation) OldField(ctx context.Context, name string) (en
 		return m.OldOwnerPrincipalID(ctx)
 	case webhookendpoint.FieldOwnerCredentialKind:
 		return m.OldOwnerCredentialKind(ctx)
+	case webhookendpoint.FieldAuthMode:
+		return m.OldAuthMode(ctx)
+	case webhookendpoint.FieldAllowProjectAgents:
+		return m.OldAllowProjectAgents(ctx)
+	case webhookendpoint.FieldMaxBodyBytes:
+		return m.OldMaxBodyBytes(ctx)
+	case webhookendpoint.FieldRatePerSecond:
+		return m.OldRatePerSecond(ctx)
+	case webhookendpoint.FieldRateBurst:
+		return m.OldRateBurst(ctx)
+	case webhookendpoint.FieldReplayWindowSeconds:
+		return m.OldReplayWindowSeconds(ctx)
 	case webhookendpoint.FieldSecretVersion:
 		return m.OldSecretVersion(ctx)
 	case webhookendpoint.FieldSecretRotatedAt:
@@ -136235,6 +136757,48 @@ func (m *WebhookEndpointMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetOwnerCredentialKind(v)
+		return nil
+	case webhookendpoint.FieldAuthMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthMode(v)
+		return nil
+	case webhookendpoint.FieldAllowProjectAgents:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAllowProjectAgents(v)
+		return nil
+	case webhookendpoint.FieldMaxBodyBytes:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMaxBodyBytes(v)
+		return nil
+	case webhookendpoint.FieldRatePerSecond:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRatePerSecond(v)
+		return nil
+	case webhookendpoint.FieldRateBurst:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRateBurst(v)
+		return nil
+	case webhookendpoint.FieldReplayWindowSeconds:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReplayWindowSeconds(v)
 		return nil
 	case webhookendpoint.FieldSecretVersion:
 		v, ok := value.(int)
@@ -136335,6 +136899,18 @@ func (m *WebhookEndpointMutation) SetField(name string, value ent.Value) error {
 // this mutation.
 func (m *WebhookEndpointMutation) AddedFields() []string {
 	var fields []string
+	if m.addmax_body_bytes != nil {
+		fields = append(fields, webhookendpoint.FieldMaxBodyBytes)
+	}
+	if m.addrate_per_second != nil {
+		fields = append(fields, webhookendpoint.FieldRatePerSecond)
+	}
+	if m.addrate_burst != nil {
+		fields = append(fields, webhookendpoint.FieldRateBurst)
+	}
+	if m.addreplay_window_seconds != nil {
+		fields = append(fields, webhookendpoint.FieldReplayWindowSeconds)
+	}
 	if m.addsecret_version != nil {
 		fields = append(fields, webhookendpoint.FieldSecretVersion)
 	}
@@ -136355,6 +136931,14 @@ func (m *WebhookEndpointMutation) AddedFields() []string {
 // was not set, or was not defined in the schema.
 func (m *WebhookEndpointMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
+	case webhookendpoint.FieldMaxBodyBytes:
+		return m.AddedMaxBodyBytes()
+	case webhookendpoint.FieldRatePerSecond:
+		return m.AddedRatePerSecond()
+	case webhookendpoint.FieldRateBurst:
+		return m.AddedRateBurst()
+	case webhookendpoint.FieldReplayWindowSeconds:
+		return m.AddedReplayWindowSeconds()
 	case webhookendpoint.FieldSecretVersion:
 		return m.AddedSecretVersion()
 	case webhookendpoint.FieldConfigVersion:
@@ -136372,6 +136956,34 @@ func (m *WebhookEndpointMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *WebhookEndpointMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case webhookendpoint.FieldMaxBodyBytes:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMaxBodyBytes(v)
+		return nil
+	case webhookendpoint.FieldRatePerSecond:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRatePerSecond(v)
+		return nil
+	case webhookendpoint.FieldRateBurst:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRateBurst(v)
+		return nil
+	case webhookendpoint.FieldReplayWindowSeconds:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddReplayWindowSeconds(v)
+		return nil
 	case webhookendpoint.FieldSecretVersion:
 		v, ok := value.(int)
 		if !ok {
@@ -136495,6 +137107,24 @@ func (m *WebhookEndpointMutation) ResetField(name string) error {
 		return nil
 	case webhookendpoint.FieldOwnerCredentialKind:
 		m.ResetOwnerCredentialKind()
+		return nil
+	case webhookendpoint.FieldAuthMode:
+		m.ResetAuthMode()
+		return nil
+	case webhookendpoint.FieldAllowProjectAgents:
+		m.ResetAllowProjectAgents()
+		return nil
+	case webhookendpoint.FieldMaxBodyBytes:
+		m.ResetMaxBodyBytes()
+		return nil
+	case webhookendpoint.FieldRatePerSecond:
+		m.ResetRatePerSecond()
+		return nil
+	case webhookendpoint.FieldRateBurst:
+		m.ResetRateBurst()
+		return nil
+	case webhookendpoint.FieldReplayWindowSeconds:
+		m.ResetReplayWindowSeconds()
 		return nil
 	case webhookendpoint.FieldSecretVersion:
 		m.ResetSecretVersion()

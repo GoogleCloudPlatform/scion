@@ -77,6 +77,118 @@ func (_u *WebhookEndpointUpdate) ClearDescription() *WebhookEndpointUpdate {
 	return _u
 }
 
+// SetAuthMode sets the "auth_mode" field.
+func (_u *WebhookEndpointUpdate) SetAuthMode(v string) *WebhookEndpointUpdate {
+	_u.mutation.SetAuthMode(v)
+	return _u
+}
+
+// SetNillableAuthMode sets the "auth_mode" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableAuthMode(v *string) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetAuthMode(*v)
+	}
+	return _u
+}
+
+// SetAllowProjectAgents sets the "allow_project_agents" field.
+func (_u *WebhookEndpointUpdate) SetAllowProjectAgents(v bool) *WebhookEndpointUpdate {
+	_u.mutation.SetAllowProjectAgents(v)
+	return _u
+}
+
+// SetNillableAllowProjectAgents sets the "allow_project_agents" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableAllowProjectAgents(v *bool) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetAllowProjectAgents(*v)
+	}
+	return _u
+}
+
+// SetMaxBodyBytes sets the "max_body_bytes" field.
+func (_u *WebhookEndpointUpdate) SetMaxBodyBytes(v int) *WebhookEndpointUpdate {
+	_u.mutation.ResetMaxBodyBytes()
+	_u.mutation.SetMaxBodyBytes(v)
+	return _u
+}
+
+// SetNillableMaxBodyBytes sets the "max_body_bytes" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableMaxBodyBytes(v *int) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetMaxBodyBytes(*v)
+	}
+	return _u
+}
+
+// AddMaxBodyBytes adds value to the "max_body_bytes" field.
+func (_u *WebhookEndpointUpdate) AddMaxBodyBytes(v int) *WebhookEndpointUpdate {
+	_u.mutation.AddMaxBodyBytes(v)
+	return _u
+}
+
+// SetRatePerSecond sets the "rate_per_second" field.
+func (_u *WebhookEndpointUpdate) SetRatePerSecond(v int) *WebhookEndpointUpdate {
+	_u.mutation.ResetRatePerSecond()
+	_u.mutation.SetRatePerSecond(v)
+	return _u
+}
+
+// SetNillableRatePerSecond sets the "rate_per_second" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableRatePerSecond(v *int) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetRatePerSecond(*v)
+	}
+	return _u
+}
+
+// AddRatePerSecond adds value to the "rate_per_second" field.
+func (_u *WebhookEndpointUpdate) AddRatePerSecond(v int) *WebhookEndpointUpdate {
+	_u.mutation.AddRatePerSecond(v)
+	return _u
+}
+
+// SetRateBurst sets the "rate_burst" field.
+func (_u *WebhookEndpointUpdate) SetRateBurst(v int) *WebhookEndpointUpdate {
+	_u.mutation.ResetRateBurst()
+	_u.mutation.SetRateBurst(v)
+	return _u
+}
+
+// SetNillableRateBurst sets the "rate_burst" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableRateBurst(v *int) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetRateBurst(*v)
+	}
+	return _u
+}
+
+// AddRateBurst adds value to the "rate_burst" field.
+func (_u *WebhookEndpointUpdate) AddRateBurst(v int) *WebhookEndpointUpdate {
+	_u.mutation.AddRateBurst(v)
+	return _u
+}
+
+// SetReplayWindowSeconds sets the "replay_window_seconds" field.
+func (_u *WebhookEndpointUpdate) SetReplayWindowSeconds(v int) *WebhookEndpointUpdate {
+	_u.mutation.ResetReplayWindowSeconds()
+	_u.mutation.SetReplayWindowSeconds(v)
+	return _u
+}
+
+// SetNillableReplayWindowSeconds sets the "replay_window_seconds" field if the given value is not nil.
+func (_u *WebhookEndpointUpdate) SetNillableReplayWindowSeconds(v *int) *WebhookEndpointUpdate {
+	if v != nil {
+		_u.SetReplayWindowSeconds(*v)
+	}
+	return _u
+}
+
+// AddReplayWindowSeconds adds value to the "replay_window_seconds" field.
+func (_u *WebhookEndpointUpdate) AddReplayWindowSeconds(v int) *WebhookEndpointUpdate {
+	_u.mutation.AddReplayWindowSeconds(v)
+	return _u
+}
+
 // SetSecretVersion sets the "secret_version" field.
 func (_u *WebhookEndpointUpdate) SetSecretVersion(v int) *WebhookEndpointUpdate {
 	_u.mutation.ResetSecretVersion()
@@ -370,6 +482,36 @@ func (_u *WebhookEndpointUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if _u.mutation.DescriptionCleared() {
 		_spec.ClearField(webhookendpoint.FieldDescription, field.TypeString)
 	}
+	if value, ok := _u.mutation.AuthMode(); ok {
+		_spec.SetField(webhookendpoint.FieldAuthMode, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AllowProjectAgents(); ok {
+		_spec.SetField(webhookendpoint.FieldAllowProjectAgents, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.MaxBodyBytes(); ok {
+		_spec.SetField(webhookendpoint.FieldMaxBodyBytes, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedMaxBodyBytes(); ok {
+		_spec.AddField(webhookendpoint.FieldMaxBodyBytes, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.RatePerSecond(); ok {
+		_spec.SetField(webhookendpoint.FieldRatePerSecond, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedRatePerSecond(); ok {
+		_spec.AddField(webhookendpoint.FieldRatePerSecond, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.RateBurst(); ok {
+		_spec.SetField(webhookendpoint.FieldRateBurst, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedRateBurst(); ok {
+		_spec.AddField(webhookendpoint.FieldRateBurst, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReplayWindowSeconds(); ok {
+		_spec.SetField(webhookendpoint.FieldReplayWindowSeconds, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedReplayWindowSeconds(); ok {
+		_spec.AddField(webhookendpoint.FieldReplayWindowSeconds, field.TypeInt, value)
+	}
 	if value, ok := _u.mutation.SecretVersion(); ok {
 		_spec.SetField(webhookendpoint.FieldSecretVersion, field.TypeInt, value)
 	}
@@ -495,6 +637,118 @@ func (_u *WebhookEndpointUpdateOne) SetNillableDescription(v *string) *WebhookEn
 // ClearDescription clears the value of the "description" field.
 func (_u *WebhookEndpointUpdateOne) ClearDescription() *WebhookEndpointUpdateOne {
 	_u.mutation.ClearDescription()
+	return _u
+}
+
+// SetAuthMode sets the "auth_mode" field.
+func (_u *WebhookEndpointUpdateOne) SetAuthMode(v string) *WebhookEndpointUpdateOne {
+	_u.mutation.SetAuthMode(v)
+	return _u
+}
+
+// SetNillableAuthMode sets the "auth_mode" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableAuthMode(v *string) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetAuthMode(*v)
+	}
+	return _u
+}
+
+// SetAllowProjectAgents sets the "allow_project_agents" field.
+func (_u *WebhookEndpointUpdateOne) SetAllowProjectAgents(v bool) *WebhookEndpointUpdateOne {
+	_u.mutation.SetAllowProjectAgents(v)
+	return _u
+}
+
+// SetNillableAllowProjectAgents sets the "allow_project_agents" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableAllowProjectAgents(v *bool) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetAllowProjectAgents(*v)
+	}
+	return _u
+}
+
+// SetMaxBodyBytes sets the "max_body_bytes" field.
+func (_u *WebhookEndpointUpdateOne) SetMaxBodyBytes(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.ResetMaxBodyBytes()
+	_u.mutation.SetMaxBodyBytes(v)
+	return _u
+}
+
+// SetNillableMaxBodyBytes sets the "max_body_bytes" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableMaxBodyBytes(v *int) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetMaxBodyBytes(*v)
+	}
+	return _u
+}
+
+// AddMaxBodyBytes adds value to the "max_body_bytes" field.
+func (_u *WebhookEndpointUpdateOne) AddMaxBodyBytes(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.AddMaxBodyBytes(v)
+	return _u
+}
+
+// SetRatePerSecond sets the "rate_per_second" field.
+func (_u *WebhookEndpointUpdateOne) SetRatePerSecond(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.ResetRatePerSecond()
+	_u.mutation.SetRatePerSecond(v)
+	return _u
+}
+
+// SetNillableRatePerSecond sets the "rate_per_second" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableRatePerSecond(v *int) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetRatePerSecond(*v)
+	}
+	return _u
+}
+
+// AddRatePerSecond adds value to the "rate_per_second" field.
+func (_u *WebhookEndpointUpdateOne) AddRatePerSecond(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.AddRatePerSecond(v)
+	return _u
+}
+
+// SetRateBurst sets the "rate_burst" field.
+func (_u *WebhookEndpointUpdateOne) SetRateBurst(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.ResetRateBurst()
+	_u.mutation.SetRateBurst(v)
+	return _u
+}
+
+// SetNillableRateBurst sets the "rate_burst" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableRateBurst(v *int) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetRateBurst(*v)
+	}
+	return _u
+}
+
+// AddRateBurst adds value to the "rate_burst" field.
+func (_u *WebhookEndpointUpdateOne) AddRateBurst(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.AddRateBurst(v)
+	return _u
+}
+
+// SetReplayWindowSeconds sets the "replay_window_seconds" field.
+func (_u *WebhookEndpointUpdateOne) SetReplayWindowSeconds(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.ResetReplayWindowSeconds()
+	_u.mutation.SetReplayWindowSeconds(v)
+	return _u
+}
+
+// SetNillableReplayWindowSeconds sets the "replay_window_seconds" field if the given value is not nil.
+func (_u *WebhookEndpointUpdateOne) SetNillableReplayWindowSeconds(v *int) *WebhookEndpointUpdateOne {
+	if v != nil {
+		_u.SetReplayWindowSeconds(*v)
+	}
+	return _u
+}
+
+// AddReplayWindowSeconds adds value to the "replay_window_seconds" field.
+func (_u *WebhookEndpointUpdateOne) AddReplayWindowSeconds(v int) *WebhookEndpointUpdateOne {
+	_u.mutation.AddReplayWindowSeconds(v)
 	return _u
 }
 
@@ -820,6 +1074,36 @@ func (_u *WebhookEndpointUpdateOne) sqlSave(ctx context.Context) (_node *Webhook
 	}
 	if _u.mutation.DescriptionCleared() {
 		_spec.ClearField(webhookendpoint.FieldDescription, field.TypeString)
+	}
+	if value, ok := _u.mutation.AuthMode(); ok {
+		_spec.SetField(webhookendpoint.FieldAuthMode, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.AllowProjectAgents(); ok {
+		_spec.SetField(webhookendpoint.FieldAllowProjectAgents, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.MaxBodyBytes(); ok {
+		_spec.SetField(webhookendpoint.FieldMaxBodyBytes, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedMaxBodyBytes(); ok {
+		_spec.AddField(webhookendpoint.FieldMaxBodyBytes, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.RatePerSecond(); ok {
+		_spec.SetField(webhookendpoint.FieldRatePerSecond, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedRatePerSecond(); ok {
+		_spec.AddField(webhookendpoint.FieldRatePerSecond, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.RateBurst(); ok {
+		_spec.SetField(webhookendpoint.FieldRateBurst, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedRateBurst(); ok {
+		_spec.AddField(webhookendpoint.FieldRateBurst, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReplayWindowSeconds(); ok {
+		_spec.SetField(webhookendpoint.FieldReplayWindowSeconds, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedReplayWindowSeconds(); ok {
+		_spec.AddField(webhookendpoint.FieldReplayWindowSeconds, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.SecretVersion(); ok {
 		_spec.SetField(webhookendpoint.FieldSecretVersion, field.TypeInt, value)

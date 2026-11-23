@@ -4102,6 +4102,8 @@ var (
 		{Name: "subject_rule", Type: field.TypeString, Size: 2147483647, Default: ""},
 		{Name: "subject_mode", Type: field.TypeString, Default: "new"},
 		{Name: "coalesce_window_seconds", Type: field.TypeInt, Default: 0},
+		{Name: "max_fires_per_minute", Type: field.TypeInt, Default: 0},
+		{Name: "max_concurrent_dispatches", Type: field.TypeInt, Default: 0},
 		{Name: "status", Type: field.TypeString, Default: "active"},
 		{Name: "status_reason", Type: field.TypeString, Nullable: true},
 		{Name: "last_fire_at", Type: field.TypeTime, Nullable: true},
@@ -4137,7 +4139,7 @@ var (
 			{
 				Name:    "trigger_project_id_source_kind_source_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[32]},
+				Columns: []*schema.Column{TriggersColumns[16], TriggersColumns[19], TriggersColumns[20], TriggersColumns[34]},
 			},
 			{
 				Name:    "trigger_initiator_principal_id",
@@ -4581,6 +4583,12 @@ var (
 		{Name: "owner_principal_kind", Type: field.TypeString},
 		{Name: "owner_principal_id", Type: field.TypeString},
 		{Name: "owner_credential_kind", Type: field.TypeString},
+		{Name: "auth_mode", Type: field.TypeString, Default: "hmac"},
+		{Name: "allow_project_agents", Type: field.TypeBool, Default: false},
+		{Name: "max_body_bytes", Type: field.TypeInt, Default: 65536},
+		{Name: "rate_per_second", Type: field.TypeInt, Default: 0},
+		{Name: "rate_burst", Type: field.TypeInt, Default: 0},
+		{Name: "replay_window_seconds", Type: field.TypeInt, Default: 300},
 		{Name: "secret_version", Type: field.TypeInt, Default: 1},
 		{Name: "secret_rotated_at", Type: field.TypeTime, Nullable: true},
 		{Name: "config_version", Type: field.TypeInt, Default: 1},
@@ -4619,7 +4627,7 @@ var (
 			{
 				Name:    "webhookendpoint_project_id_bound_agent_id",
 				Unique:  false,
-				Columns: []*schema.Column{WebhookEndpointsColumns[3], WebhookEndpointsColumns[14]},
+				Columns: []*schema.Column{WebhookEndpointsColumns[3], WebhookEndpointsColumns[20]},
 			},
 		},
 	}

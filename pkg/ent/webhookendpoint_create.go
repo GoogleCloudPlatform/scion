@@ -96,6 +96,90 @@ func (_c *WebhookEndpointCreate) SetOwnerCredentialKind(v string) *WebhookEndpoi
 	return _c
 }
 
+// SetAuthMode sets the "auth_mode" field.
+func (_c *WebhookEndpointCreate) SetAuthMode(v string) *WebhookEndpointCreate {
+	_c.mutation.SetAuthMode(v)
+	return _c
+}
+
+// SetNillableAuthMode sets the "auth_mode" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableAuthMode(v *string) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetAuthMode(*v)
+	}
+	return _c
+}
+
+// SetAllowProjectAgents sets the "allow_project_agents" field.
+func (_c *WebhookEndpointCreate) SetAllowProjectAgents(v bool) *WebhookEndpointCreate {
+	_c.mutation.SetAllowProjectAgents(v)
+	return _c
+}
+
+// SetNillableAllowProjectAgents sets the "allow_project_agents" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableAllowProjectAgents(v *bool) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetAllowProjectAgents(*v)
+	}
+	return _c
+}
+
+// SetMaxBodyBytes sets the "max_body_bytes" field.
+func (_c *WebhookEndpointCreate) SetMaxBodyBytes(v int) *WebhookEndpointCreate {
+	_c.mutation.SetMaxBodyBytes(v)
+	return _c
+}
+
+// SetNillableMaxBodyBytes sets the "max_body_bytes" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableMaxBodyBytes(v *int) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetMaxBodyBytes(*v)
+	}
+	return _c
+}
+
+// SetRatePerSecond sets the "rate_per_second" field.
+func (_c *WebhookEndpointCreate) SetRatePerSecond(v int) *WebhookEndpointCreate {
+	_c.mutation.SetRatePerSecond(v)
+	return _c
+}
+
+// SetNillableRatePerSecond sets the "rate_per_second" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableRatePerSecond(v *int) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetRatePerSecond(*v)
+	}
+	return _c
+}
+
+// SetRateBurst sets the "rate_burst" field.
+func (_c *WebhookEndpointCreate) SetRateBurst(v int) *WebhookEndpointCreate {
+	_c.mutation.SetRateBurst(v)
+	return _c
+}
+
+// SetNillableRateBurst sets the "rate_burst" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableRateBurst(v *int) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetRateBurst(*v)
+	}
+	return _c
+}
+
+// SetReplayWindowSeconds sets the "replay_window_seconds" field.
+func (_c *WebhookEndpointCreate) SetReplayWindowSeconds(v int) *WebhookEndpointCreate {
+	_c.mutation.SetReplayWindowSeconds(v)
+	return _c
+}
+
+// SetNillableReplayWindowSeconds sets the "replay_window_seconds" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableReplayWindowSeconds(v *int) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetReplayWindowSeconds(*v)
+	}
+	return _c
+}
+
 // SetSecretVersion sets the "secret_version" field.
 func (_c *WebhookEndpointCreate) SetSecretVersion(v int) *WebhookEndpointCreate {
 	_c.mutation.SetSecretVersion(v)
@@ -327,6 +411,30 @@ func (_c *WebhookEndpointCreate) ExecX(ctx context.Context) {
 
 // defaults sets the default values of the builder before save.
 func (_c *WebhookEndpointCreate) defaults() {
+	if _, ok := _c.mutation.AuthMode(); !ok {
+		v := webhookendpoint.DefaultAuthMode
+		_c.mutation.SetAuthMode(v)
+	}
+	if _, ok := _c.mutation.AllowProjectAgents(); !ok {
+		v := webhookendpoint.DefaultAllowProjectAgents
+		_c.mutation.SetAllowProjectAgents(v)
+	}
+	if _, ok := _c.mutation.MaxBodyBytes(); !ok {
+		v := webhookendpoint.DefaultMaxBodyBytes
+		_c.mutation.SetMaxBodyBytes(v)
+	}
+	if _, ok := _c.mutation.RatePerSecond(); !ok {
+		v := webhookendpoint.DefaultRatePerSecond
+		_c.mutation.SetRatePerSecond(v)
+	}
+	if _, ok := _c.mutation.RateBurst(); !ok {
+		v := webhookendpoint.DefaultRateBurst
+		_c.mutation.SetRateBurst(v)
+	}
+	if _, ok := _c.mutation.ReplayWindowSeconds(); !ok {
+		v := webhookendpoint.DefaultReplayWindowSeconds
+		_c.mutation.SetReplayWindowSeconds(v)
+	}
 	if _, ok := _c.mutation.SecretVersion(); !ok {
 		v := webhookendpoint.DefaultSecretVersion
 		_c.mutation.SetSecretVersion(v)
@@ -405,6 +513,24 @@ func (_c *WebhookEndpointCreate) check() error {
 		if err := webhookendpoint.OwnerCredentialKindValidator(v); err != nil {
 			return &ValidationError{Name: "owner_credential_kind", err: fmt.Errorf(`ent: validator failed for field "WebhookEndpoint.owner_credential_kind": %w`, err)}
 		}
+	}
+	if _, ok := _c.mutation.AuthMode(); !ok {
+		return &ValidationError{Name: "auth_mode", err: errors.New(`ent: missing required field "WebhookEndpoint.auth_mode"`)}
+	}
+	if _, ok := _c.mutation.AllowProjectAgents(); !ok {
+		return &ValidationError{Name: "allow_project_agents", err: errors.New(`ent: missing required field "WebhookEndpoint.allow_project_agents"`)}
+	}
+	if _, ok := _c.mutation.MaxBodyBytes(); !ok {
+		return &ValidationError{Name: "max_body_bytes", err: errors.New(`ent: missing required field "WebhookEndpoint.max_body_bytes"`)}
+	}
+	if _, ok := _c.mutation.RatePerSecond(); !ok {
+		return &ValidationError{Name: "rate_per_second", err: errors.New(`ent: missing required field "WebhookEndpoint.rate_per_second"`)}
+	}
+	if _, ok := _c.mutation.RateBurst(); !ok {
+		return &ValidationError{Name: "rate_burst", err: errors.New(`ent: missing required field "WebhookEndpoint.rate_burst"`)}
+	}
+	if _, ok := _c.mutation.ReplayWindowSeconds(); !ok {
+		return &ValidationError{Name: "replay_window_seconds", err: errors.New(`ent: missing required field "WebhookEndpoint.replay_window_seconds"`)}
 	}
 	if _, ok := _c.mutation.SecretVersion(); !ok {
 		return &ValidationError{Name: "secret_version", err: errors.New(`ent: missing required field "WebhookEndpoint.secret_version"`)}
@@ -500,6 +626,30 @@ func (_c *WebhookEndpointCreate) createSpec() (*WebhookEndpoint, *sqlgraph.Creat
 	if value, ok := _c.mutation.OwnerCredentialKind(); ok {
 		_spec.SetField(webhookendpoint.FieldOwnerCredentialKind, field.TypeString, value)
 		_node.OwnerCredentialKind = value
+	}
+	if value, ok := _c.mutation.AuthMode(); ok {
+		_spec.SetField(webhookendpoint.FieldAuthMode, field.TypeString, value)
+		_node.AuthMode = value
+	}
+	if value, ok := _c.mutation.AllowProjectAgents(); ok {
+		_spec.SetField(webhookendpoint.FieldAllowProjectAgents, field.TypeBool, value)
+		_node.AllowProjectAgents = value
+	}
+	if value, ok := _c.mutation.MaxBodyBytes(); ok {
+		_spec.SetField(webhookendpoint.FieldMaxBodyBytes, field.TypeInt, value)
+		_node.MaxBodyBytes = value
+	}
+	if value, ok := _c.mutation.RatePerSecond(); ok {
+		_spec.SetField(webhookendpoint.FieldRatePerSecond, field.TypeInt, value)
+		_node.RatePerSecond = value
+	}
+	if value, ok := _c.mutation.RateBurst(); ok {
+		_spec.SetField(webhookendpoint.FieldRateBurst, field.TypeInt, value)
+		_node.RateBurst = value
+	}
+	if value, ok := _c.mutation.ReplayWindowSeconds(); ok {
+		_spec.SetField(webhookendpoint.FieldReplayWindowSeconds, field.TypeInt, value)
+		_node.ReplayWindowSeconds = value
 	}
 	if value, ok := _c.mutation.SecretVersion(); ok {
 		_spec.SetField(webhookendpoint.FieldSecretVersion, field.TypeInt, value)
@@ -644,6 +794,102 @@ func (u *WebhookEndpointUpsert) UpdateDescription() *WebhookEndpointUpsert {
 // ClearDescription clears the value of the "description" field.
 func (u *WebhookEndpointUpsert) ClearDescription() *WebhookEndpointUpsert {
 	u.SetNull(webhookendpoint.FieldDescription)
+	return u
+}
+
+// SetAuthMode sets the "auth_mode" field.
+func (u *WebhookEndpointUpsert) SetAuthMode(v string) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldAuthMode, v)
+	return u
+}
+
+// UpdateAuthMode sets the "auth_mode" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateAuthMode() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldAuthMode)
+	return u
+}
+
+// SetAllowProjectAgents sets the "allow_project_agents" field.
+func (u *WebhookEndpointUpsert) SetAllowProjectAgents(v bool) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldAllowProjectAgents, v)
+	return u
+}
+
+// UpdateAllowProjectAgents sets the "allow_project_agents" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateAllowProjectAgents() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldAllowProjectAgents)
+	return u
+}
+
+// SetMaxBodyBytes sets the "max_body_bytes" field.
+func (u *WebhookEndpointUpsert) SetMaxBodyBytes(v int) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldMaxBodyBytes, v)
+	return u
+}
+
+// UpdateMaxBodyBytes sets the "max_body_bytes" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateMaxBodyBytes() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldMaxBodyBytes)
+	return u
+}
+
+// AddMaxBodyBytes adds v to the "max_body_bytes" field.
+func (u *WebhookEndpointUpsert) AddMaxBodyBytes(v int) *WebhookEndpointUpsert {
+	u.Add(webhookendpoint.FieldMaxBodyBytes, v)
+	return u
+}
+
+// SetRatePerSecond sets the "rate_per_second" field.
+func (u *WebhookEndpointUpsert) SetRatePerSecond(v int) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldRatePerSecond, v)
+	return u
+}
+
+// UpdateRatePerSecond sets the "rate_per_second" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateRatePerSecond() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldRatePerSecond)
+	return u
+}
+
+// AddRatePerSecond adds v to the "rate_per_second" field.
+func (u *WebhookEndpointUpsert) AddRatePerSecond(v int) *WebhookEndpointUpsert {
+	u.Add(webhookendpoint.FieldRatePerSecond, v)
+	return u
+}
+
+// SetRateBurst sets the "rate_burst" field.
+func (u *WebhookEndpointUpsert) SetRateBurst(v int) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldRateBurst, v)
+	return u
+}
+
+// UpdateRateBurst sets the "rate_burst" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateRateBurst() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldRateBurst)
+	return u
+}
+
+// AddRateBurst adds v to the "rate_burst" field.
+func (u *WebhookEndpointUpsert) AddRateBurst(v int) *WebhookEndpointUpsert {
+	u.Add(webhookendpoint.FieldRateBurst, v)
+	return u
+}
+
+// SetReplayWindowSeconds sets the "replay_window_seconds" field.
+func (u *WebhookEndpointUpsert) SetReplayWindowSeconds(v int) *WebhookEndpointUpsert {
+	u.Set(webhookendpoint.FieldReplayWindowSeconds, v)
+	return u
+}
+
+// UpdateReplayWindowSeconds sets the "replay_window_seconds" field to the value that was provided on create.
+func (u *WebhookEndpointUpsert) UpdateReplayWindowSeconds() *WebhookEndpointUpsert {
+	u.SetExcluded(webhookendpoint.FieldReplayWindowSeconds)
+	return u
+}
+
+// AddReplayWindowSeconds adds v to the "replay_window_seconds" field.
+func (u *WebhookEndpointUpsert) AddReplayWindowSeconds(v int) *WebhookEndpointUpsert {
+	u.Add(webhookendpoint.FieldReplayWindowSeconds, v)
 	return u
 }
 
@@ -951,6 +1197,118 @@ func (u *WebhookEndpointUpsertOne) UpdateDescription() *WebhookEndpointUpsertOne
 func (u *WebhookEndpointUpsertOne) ClearDescription() *WebhookEndpointUpsertOne {
 	return u.Update(func(s *WebhookEndpointUpsert) {
 		s.ClearDescription()
+	})
+}
+
+// SetAuthMode sets the "auth_mode" field.
+func (u *WebhookEndpointUpsertOne) SetAuthMode(v string) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetAuthMode(v)
+	})
+}
+
+// UpdateAuthMode sets the "auth_mode" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateAuthMode() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateAuthMode()
+	})
+}
+
+// SetAllowProjectAgents sets the "allow_project_agents" field.
+func (u *WebhookEndpointUpsertOne) SetAllowProjectAgents(v bool) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetAllowProjectAgents(v)
+	})
+}
+
+// UpdateAllowProjectAgents sets the "allow_project_agents" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateAllowProjectAgents() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateAllowProjectAgents()
+	})
+}
+
+// SetMaxBodyBytes sets the "max_body_bytes" field.
+func (u *WebhookEndpointUpsertOne) SetMaxBodyBytes(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetMaxBodyBytes(v)
+	})
+}
+
+// AddMaxBodyBytes adds v to the "max_body_bytes" field.
+func (u *WebhookEndpointUpsertOne) AddMaxBodyBytes(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddMaxBodyBytes(v)
+	})
+}
+
+// UpdateMaxBodyBytes sets the "max_body_bytes" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateMaxBodyBytes() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateMaxBodyBytes()
+	})
+}
+
+// SetRatePerSecond sets the "rate_per_second" field.
+func (u *WebhookEndpointUpsertOne) SetRatePerSecond(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetRatePerSecond(v)
+	})
+}
+
+// AddRatePerSecond adds v to the "rate_per_second" field.
+func (u *WebhookEndpointUpsertOne) AddRatePerSecond(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddRatePerSecond(v)
+	})
+}
+
+// UpdateRatePerSecond sets the "rate_per_second" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateRatePerSecond() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateRatePerSecond()
+	})
+}
+
+// SetRateBurst sets the "rate_burst" field.
+func (u *WebhookEndpointUpsertOne) SetRateBurst(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetRateBurst(v)
+	})
+}
+
+// AddRateBurst adds v to the "rate_burst" field.
+func (u *WebhookEndpointUpsertOne) AddRateBurst(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddRateBurst(v)
+	})
+}
+
+// UpdateRateBurst sets the "rate_burst" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateRateBurst() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateRateBurst()
+	})
+}
+
+// SetReplayWindowSeconds sets the "replay_window_seconds" field.
+func (u *WebhookEndpointUpsertOne) SetReplayWindowSeconds(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetReplayWindowSeconds(v)
+	})
+}
+
+// AddReplayWindowSeconds adds v to the "replay_window_seconds" field.
+func (u *WebhookEndpointUpsertOne) AddReplayWindowSeconds(v int) *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddReplayWindowSeconds(v)
+	})
+}
+
+// UpdateReplayWindowSeconds sets the "replay_window_seconds" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertOne) UpdateReplayWindowSeconds() *WebhookEndpointUpsertOne {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateReplayWindowSeconds()
 	})
 }
 
@@ -1457,6 +1815,118 @@ func (u *WebhookEndpointUpsertBulk) UpdateDescription() *WebhookEndpointUpsertBu
 func (u *WebhookEndpointUpsertBulk) ClearDescription() *WebhookEndpointUpsertBulk {
 	return u.Update(func(s *WebhookEndpointUpsert) {
 		s.ClearDescription()
+	})
+}
+
+// SetAuthMode sets the "auth_mode" field.
+func (u *WebhookEndpointUpsertBulk) SetAuthMode(v string) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetAuthMode(v)
+	})
+}
+
+// UpdateAuthMode sets the "auth_mode" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateAuthMode() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateAuthMode()
+	})
+}
+
+// SetAllowProjectAgents sets the "allow_project_agents" field.
+func (u *WebhookEndpointUpsertBulk) SetAllowProjectAgents(v bool) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetAllowProjectAgents(v)
+	})
+}
+
+// UpdateAllowProjectAgents sets the "allow_project_agents" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateAllowProjectAgents() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateAllowProjectAgents()
+	})
+}
+
+// SetMaxBodyBytes sets the "max_body_bytes" field.
+func (u *WebhookEndpointUpsertBulk) SetMaxBodyBytes(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetMaxBodyBytes(v)
+	})
+}
+
+// AddMaxBodyBytes adds v to the "max_body_bytes" field.
+func (u *WebhookEndpointUpsertBulk) AddMaxBodyBytes(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddMaxBodyBytes(v)
+	})
+}
+
+// UpdateMaxBodyBytes sets the "max_body_bytes" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateMaxBodyBytes() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateMaxBodyBytes()
+	})
+}
+
+// SetRatePerSecond sets the "rate_per_second" field.
+func (u *WebhookEndpointUpsertBulk) SetRatePerSecond(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetRatePerSecond(v)
+	})
+}
+
+// AddRatePerSecond adds v to the "rate_per_second" field.
+func (u *WebhookEndpointUpsertBulk) AddRatePerSecond(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddRatePerSecond(v)
+	})
+}
+
+// UpdateRatePerSecond sets the "rate_per_second" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateRatePerSecond() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateRatePerSecond()
+	})
+}
+
+// SetRateBurst sets the "rate_burst" field.
+func (u *WebhookEndpointUpsertBulk) SetRateBurst(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetRateBurst(v)
+	})
+}
+
+// AddRateBurst adds v to the "rate_burst" field.
+func (u *WebhookEndpointUpsertBulk) AddRateBurst(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddRateBurst(v)
+	})
+}
+
+// UpdateRateBurst sets the "rate_burst" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateRateBurst() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateRateBurst()
+	})
+}
+
+// SetReplayWindowSeconds sets the "replay_window_seconds" field.
+func (u *WebhookEndpointUpsertBulk) SetReplayWindowSeconds(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.SetReplayWindowSeconds(v)
+	})
+}
+
+// AddReplayWindowSeconds adds v to the "replay_window_seconds" field.
+func (u *WebhookEndpointUpsertBulk) AddReplayWindowSeconds(v int) *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.AddReplayWindowSeconds(v)
+	})
+}
+
+// UpdateReplayWindowSeconds sets the "replay_window_seconds" field to the value that was provided on create.
+func (u *WebhookEndpointUpsertBulk) UpdateReplayWindowSeconds() *WebhookEndpointUpsertBulk {
+	return u.Update(func(s *WebhookEndpointUpsert) {
+		s.UpdateReplayWindowSeconds()
 	})
 }
 

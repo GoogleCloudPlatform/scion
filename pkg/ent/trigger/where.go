@@ -210,6 +210,16 @@ func CoalesceWindowSeconds(v int) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldCoalesceWindowSeconds, v))
 }
 
+// MaxFiresPerMinute applies equality check predicate on the "max_fires_per_minute" field. It's identical to MaxFiresPerMinuteEQ.
+func MaxFiresPerMinute(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMaxFiresPerMinute, v))
+}
+
+// MaxConcurrentDispatches applies equality check predicate on the "max_concurrent_dispatches" field. It's identical to MaxConcurrentDispatchesEQ.
+func MaxConcurrentDispatches(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMaxConcurrentDispatches, v))
+}
+
 // Status applies equality check predicate on the "status" field. It's identical to StatusEQ.
 func Status(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldStatus, v))
@@ -2203,6 +2213,86 @@ func CoalesceWindowSecondsLT(v int) predicate.Trigger {
 // CoalesceWindowSecondsLTE applies the LTE predicate on the "coalesce_window_seconds" field.
 func CoalesceWindowSecondsLTE(v int) predicate.Trigger {
 	return predicate.Trigger(sql.FieldLTE(FieldCoalesceWindowSeconds, v))
+}
+
+// MaxFiresPerMinuteEQ applies the EQ predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteEQ(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMaxFiresPerMinute, v))
+}
+
+// MaxFiresPerMinuteNEQ applies the NEQ predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteNEQ(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNEQ(FieldMaxFiresPerMinute, v))
+}
+
+// MaxFiresPerMinuteIn applies the In predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteIn(vs ...int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldIn(FieldMaxFiresPerMinute, vs...))
+}
+
+// MaxFiresPerMinuteNotIn applies the NotIn predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteNotIn(vs ...int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotIn(FieldMaxFiresPerMinute, vs...))
+}
+
+// MaxFiresPerMinuteGT applies the GT predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteGT(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGT(FieldMaxFiresPerMinute, v))
+}
+
+// MaxFiresPerMinuteGTE applies the GTE predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteGTE(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGTE(FieldMaxFiresPerMinute, v))
+}
+
+// MaxFiresPerMinuteLT applies the LT predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteLT(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLT(FieldMaxFiresPerMinute, v))
+}
+
+// MaxFiresPerMinuteLTE applies the LTE predicate on the "max_fires_per_minute" field.
+func MaxFiresPerMinuteLTE(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLTE(FieldMaxFiresPerMinute, v))
+}
+
+// MaxConcurrentDispatchesEQ applies the EQ predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesEQ(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMaxConcurrentDispatches, v))
+}
+
+// MaxConcurrentDispatchesNEQ applies the NEQ predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesNEQ(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNEQ(FieldMaxConcurrentDispatches, v))
+}
+
+// MaxConcurrentDispatchesIn applies the In predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesIn(vs ...int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldIn(FieldMaxConcurrentDispatches, vs...))
+}
+
+// MaxConcurrentDispatchesNotIn applies the NotIn predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesNotIn(vs ...int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotIn(FieldMaxConcurrentDispatches, vs...))
+}
+
+// MaxConcurrentDispatchesGT applies the GT predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesGT(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGT(FieldMaxConcurrentDispatches, v))
+}
+
+// MaxConcurrentDispatchesGTE applies the GTE predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesGTE(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGTE(FieldMaxConcurrentDispatches, v))
+}
+
+// MaxConcurrentDispatchesLT applies the LT predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesLT(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLT(FieldMaxConcurrentDispatches, v))
+}
+
+// MaxConcurrentDispatchesLTE applies the LTE predicate on the "max_concurrent_dispatches" field.
+func MaxConcurrentDispatchesLTE(v int) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLTE(FieldMaxConcurrentDispatches, v))
 }
 
 // StatusEQ applies the EQ predicate on the "status" field.

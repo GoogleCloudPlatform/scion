@@ -529,6 +529,48 @@ func (_u *TriggerUpdate) AddCoalesceWindowSeconds(v int) *TriggerUpdate {
 	return _u
 }
 
+// SetMaxFiresPerMinute sets the "max_fires_per_minute" field.
+func (_u *TriggerUpdate) SetMaxFiresPerMinute(v int) *TriggerUpdate {
+	_u.mutation.ResetMaxFiresPerMinute()
+	_u.mutation.SetMaxFiresPerMinute(v)
+	return _u
+}
+
+// SetNillableMaxFiresPerMinute sets the "max_fires_per_minute" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableMaxFiresPerMinute(v *int) *TriggerUpdate {
+	if v != nil {
+		_u.SetMaxFiresPerMinute(*v)
+	}
+	return _u
+}
+
+// AddMaxFiresPerMinute adds value to the "max_fires_per_minute" field.
+func (_u *TriggerUpdate) AddMaxFiresPerMinute(v int) *TriggerUpdate {
+	_u.mutation.AddMaxFiresPerMinute(v)
+	return _u
+}
+
+// SetMaxConcurrentDispatches sets the "max_concurrent_dispatches" field.
+func (_u *TriggerUpdate) SetMaxConcurrentDispatches(v int) *TriggerUpdate {
+	_u.mutation.ResetMaxConcurrentDispatches()
+	_u.mutation.SetMaxConcurrentDispatches(v)
+	return _u
+}
+
+// SetNillableMaxConcurrentDispatches sets the "max_concurrent_dispatches" field if the given value is not nil.
+func (_u *TriggerUpdate) SetNillableMaxConcurrentDispatches(v *int) *TriggerUpdate {
+	if v != nil {
+		_u.SetMaxConcurrentDispatches(*v)
+	}
+	return _u
+}
+
+// AddMaxConcurrentDispatches adds value to the "max_concurrent_dispatches" field.
+func (_u *TriggerUpdate) AddMaxConcurrentDispatches(v int) *TriggerUpdate {
+	_u.mutation.AddMaxConcurrentDispatches(v)
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *TriggerUpdate) SetStatus(v string) *TriggerUpdate {
 	_u.mutation.SetStatus(v)
@@ -906,6 +948,18 @@ func (_u *TriggerUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedCoalesceWindowSeconds(); ok {
 		_spec.AddField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.MaxFiresPerMinute(); ok {
+		_spec.SetField(trigger.FieldMaxFiresPerMinute, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedMaxFiresPerMinute(); ok {
+		_spec.AddField(trigger.FieldMaxFiresPerMinute, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.MaxConcurrentDispatches(); ok {
+		_spec.SetField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedMaxConcurrentDispatches(); ok {
+		_spec.AddField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
@@ -1475,6 +1529,48 @@ func (_u *TriggerUpdateOne) AddCoalesceWindowSeconds(v int) *TriggerUpdateOne {
 	return _u
 }
 
+// SetMaxFiresPerMinute sets the "max_fires_per_minute" field.
+func (_u *TriggerUpdateOne) SetMaxFiresPerMinute(v int) *TriggerUpdateOne {
+	_u.mutation.ResetMaxFiresPerMinute()
+	_u.mutation.SetMaxFiresPerMinute(v)
+	return _u
+}
+
+// SetNillableMaxFiresPerMinute sets the "max_fires_per_minute" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableMaxFiresPerMinute(v *int) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetMaxFiresPerMinute(*v)
+	}
+	return _u
+}
+
+// AddMaxFiresPerMinute adds value to the "max_fires_per_minute" field.
+func (_u *TriggerUpdateOne) AddMaxFiresPerMinute(v int) *TriggerUpdateOne {
+	_u.mutation.AddMaxFiresPerMinute(v)
+	return _u
+}
+
+// SetMaxConcurrentDispatches sets the "max_concurrent_dispatches" field.
+func (_u *TriggerUpdateOne) SetMaxConcurrentDispatches(v int) *TriggerUpdateOne {
+	_u.mutation.ResetMaxConcurrentDispatches()
+	_u.mutation.SetMaxConcurrentDispatches(v)
+	return _u
+}
+
+// SetNillableMaxConcurrentDispatches sets the "max_concurrent_dispatches" field if the given value is not nil.
+func (_u *TriggerUpdateOne) SetNillableMaxConcurrentDispatches(v *int) *TriggerUpdateOne {
+	if v != nil {
+		_u.SetMaxConcurrentDispatches(*v)
+	}
+	return _u
+}
+
+// AddMaxConcurrentDispatches adds value to the "max_concurrent_dispatches" field.
+func (_u *TriggerUpdateOne) AddMaxConcurrentDispatches(v int) *TriggerUpdateOne {
+	_u.mutation.AddMaxConcurrentDispatches(v)
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *TriggerUpdateOne) SetStatus(v string) *TriggerUpdateOne {
 	_u.mutation.SetStatus(v)
@@ -1882,6 +1978,18 @@ func (_u *TriggerUpdateOne) sqlSave(ctx context.Context) (_node *Trigger, err er
 	}
 	if value, ok := _u.mutation.AddedCoalesceWindowSeconds(); ok {
 		_spec.AddField(trigger.FieldCoalesceWindowSeconds, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.MaxFiresPerMinute(); ok {
+		_spec.SetField(trigger.FieldMaxFiresPerMinute, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedMaxFiresPerMinute(); ok {
+		_spec.AddField(trigger.FieldMaxFiresPerMinute, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.MaxConcurrentDispatches(); ok {
+		_spec.SetField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedMaxConcurrentDispatches(); ok {
+		_spec.AddField(trigger.FieldMaxConcurrentDispatches, field.TypeInt, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(trigger.FieldStatus, field.TypeString, value)
