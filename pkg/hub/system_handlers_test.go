@@ -103,6 +103,18 @@ func TestSystemStatus_NoUncheckedImagesPresent(t *testing.T) {
 	}
 }
 
+func TestSystemStatus_ImageTag(t *testing.T) {
+	srv, _ := testWorkstationServer(t)
+
+	setTestVersion(t, "v0.4.0-preview.3")
+	status := getWorkstationOnboardingStatus(t, srv)
+	assert.Equal(t, "v0.4.0-preview.3", status.ImageTag)
+
+	setTestVersion(t, "dev")
+	status = getWorkstationOnboardingStatus(t, srv)
+	assert.Equal(t, "", status.ImageTag)
+}
+
 func getWorkstationOnboardingStatus(t *testing.T, srv *Server) OnboardingStatus {
 	t.Helper()
 	rec := doWorkstationRequest(t, srv, http.MethodGet, "/api/v1/system/status", nil)

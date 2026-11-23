@@ -67,6 +67,7 @@ func brokerRegistryMissingError() error {
 		"            export " + config.EnvImageRegistry + "=<your-registry>; for a service, add\n" +
 		"            " + config.EnvImageRegistry + "=<your-registry> to its environment file\n" +
 		"            (such as hub.env for a hub run by systemd)\n\n" +
+		"For public release images, use " + defaultImageRegistrySuggestion + ".\n" +
 		"For images in this host's local image store, use localhost/scion.\n" +
 		"Then start or restart the server or broker.\n\n"
 	if maintenanceOnlyRegistrySet() {

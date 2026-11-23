@@ -44,5 +44,5 @@ func init() {
 	initCmd.Flags().BoolVar(&globalInit, "global", false, "Initialize the global project in the home directory")
 	initCmd.Flags().BoolVar(&machineInit, "machine", false, "Perform full machine-level setup (seeds harness-configs, templates, settings)")
 	initCmd.Flags().BoolVar(&machineInitForce, "force", false, "Force overwrite existing templates and harness-configs with embedded defaults")
-	initCmd.Flags().StringVar(&initImageRegistry, "image-registry", "", "Container image registry path (e.g., ghcr.io/myorg)")
+	initCmd.Flags().StringVar(&initImageRegistry, "image-registry", "", "Container image registry path (e.g., "+defaultImageRegistrySuggestion+" or ghcr.io/myorg)")
 }
