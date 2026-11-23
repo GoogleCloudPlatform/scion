@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/storedtime"
 	"github.com/google/uuid"
 )
@@ -1402,6 +1403,12 @@ func (s *sqliteWebChatStore) hasConversationsTable() bool {
 	return err == nil && count > 0
 }
 
+func (s *sqliteWebChatStore) hasTableColumn(table, column string) bool {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?", table, column).Scan(&count)
+	return err == nil && count > 0
+}
+
 // ---------------------------------------------------------------------------
 // Wave-2 Read-state methods (SQLite)
 // ---------------------------------------------------------------------------
@@ -2759,6 +2766,8 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 	// ambient pool access inside the tx (which deadlocks at MaxOpenConns=1).
 	// INVARIANT U-TX-1.
 	hasConv := s.hasConversationsTable()
+	hasMsgSeq := s.hasTableColumn("messages", "conversation_seq")
+	hasConvLastSeq := hasConv && s.hasTableColumn("conversations", "last_message_seq")
 
 	// DEF-96 / DEF-89 pattern: when no ConversationID is provided and the
 	// conversations table exists, generate one so the conversation is created
@@ -2837,13 +2846,35 @@ func (s *sqliteWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, 
 	// on moved rows (design §3.1 C2a).
 	var res sql.Result
 	if topic.ConversationID != "" {
-		res, err = tx.ExecContext(ctx,
-			`UPDATE messages SET thread_id = ?, conversation_id = ?
-			 WHERE (? <> '' AND conversation_id = ?)
-			    OR thread_id = ?`,
-			topic.ID, topic.ConversationID,
-			directConvID, directConvID,
-			dmKey)
+		if hasMsgSeq {
+			// Clear conversation_seq while moving rows so merged arms never
+			// carry duplicate or stale sequences, then immediately re-allocate
+			// contiguous seqs in (created, id) order and update
+			// conversations.last_message_seq in the same tx (ptone/scion#8136).
+			res, err = tx.ExecContext(ctx,
+				`UPDATE messages SET thread_id = ?, conversation_id = ?, conversation_seq = NULL
+				 WHERE (? <> '' AND conversation_id = ?)
+				    OR thread_id = ?`,
+				topic.ID, topic.ConversationID,
+				directConvID, directConvID,
+				dmKey)
+			if err != nil {
+				return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)
+			}
+			if hasConvLastSeq {
+				if _, err = entadapter.BackfillConversationSeqInTx(ctx, tx, false, "messages", "conversations", topic.ConversationID); err != nil {
+					return nil, fmt.Errorf("webchat store: re-sequence promoted messages: %w", err)
+				}
+			}
+		} else {
+			res, err = tx.ExecContext(ctx,
+				`UPDATE messages SET thread_id = ?, conversation_id = ?
+				 WHERE (? <> '' AND conversation_id = ?)
+				    OR thread_id = ?`,
+				topic.ID, topic.ConversationID,
+				directConvID, directConvID,
+				dmKey)
+		}
 	} else {
 		res, err = tx.ExecContext(ctx,
 			`UPDATE messages SET thread_id = ?

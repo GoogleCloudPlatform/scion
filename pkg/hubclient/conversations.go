@@ -16,11 +16,24 @@ package hubclient
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+var (
+	// ErrCursorExpired is returned by ConversationService.Watch when the Hub
+	// responds with 410 Gone (cursor_expired).
+	ErrCursorExpired = errors.New("hubclient: cursor expired")
+	// ErrInvalidCursor is returned by ConversationService.Watch when the Hub
+	// responds with 400 Bad Request (invalid_cursor).
+	ErrInvalidCursor = errors.New("hubclient: invalid cursor")
 )
 
 // ConversationService provides operations on conversations.
@@ -48,6 +61,9 @@ type ConversationService interface {
 
 	// Leave removes the caller from a conversation.
 	Leave(ctx context.Context, conversationID string) error
+
+	// Watch performs one long-poll request against GET /api/v1/conversations/{id}/watch.
+	Watch(ctx context.Context, conversationID string, opts WatchOptions) (*WatchResult, error)
 }
 
 // conversationService is the implementation of ConversationService.
@@ -134,6 +150,37 @@ type AddParticipantRequest struct {
 type ConversationListResult struct {
 	Conversations []ConversationDetail `json:"conversations"`
 	Cursor        string               `json:"cursor,omitempty"`
+}
+
+// WatchOptions configures a single long-poll call to ConversationService.Watch.
+type WatchOptions struct {
+	Cursor       string
+	AfterMessage string
+	Start        string
+	Filter       string
+	Limit        int
+	Wait         time.Duration
+}
+
+// WatchEvent is a single event returned by GET /api/v1/conversations/{id}/watch.
+type WatchEvent struct {
+	EventID     string         `json:"eventId"`
+	Type        string         `json:"type"`
+	OccurredAt  time.Time      `json:"occurredAt"`
+	Cursor      string         `json:"cursor"`
+	ResourceURI string         `json:"resourceUri"`
+	Data        *store.Message `json:"data"`
+}
+
+// WatchResult is the decoded response from ConversationService.Watch.
+type WatchResult struct {
+	Events       []WatchEvent  `json:"events"`
+	NextCursor   string        `json:"nextCursor"`
+	HasMore      bool          `json:"hasMore"`
+	Truncated    bool          `json:"truncated"`
+	TimedOut     bool          `json:"timedOut"`
+	RetryAfter   time.Duration `json:"-"`
+	RetryAfterMs int64         `json:"retryAfterMs"`
 }
 
 // List returns conversations the caller participates in.
@@ -262,4 +309,61 @@ func (s *conversationService) Leave(ctx context.Context, conversationID string) 
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+const (
+	defaultWatchWaitFallback = 30 * time.Second
+	watchClientTimeoutGrace  = 15 * time.Second
+)
+
+// Watch performs one long-poll request against GET /api/v1/conversations/{id}/watch.
+// It extends the per-request HTTP timeout via apiclient.WithRequestTimeout to
+// opts.Wait + 15s (using 30s when opts.Wait is 0).
+func (s *conversationService) Watch(ctx context.Context, conversationID string, opts WatchOptions) (*WatchResult, error) {
+	query := url.Values{}
+	if opts.Cursor != "" {
+		query.Set("cursor", opts.Cursor)
+	}
+	if opts.AfterMessage != "" {
+		query.Set("after_message", opts.AfterMessage)
+	}
+	if opts.Start != "" {
+		query.Set("start", opts.Start)
+	}
+	if opts.Filter != "" {
+		query.Set("filter", opts.Filter)
+	}
+	if opts.Limit > 0 {
+		query.Set("limit", strconv.Itoa(opts.Limit))
+	}
+	effectiveWait := opts.Wait
+	if opts.Wait > 0 {
+		query.Set("wait", opts.Wait.String())
+	} else {
+		effectiveWait = defaultWatchWaitFallback
+	}
+
+	reqCtx := apiclient.WithRequestTimeout(ctx, effectiveWait+watchClientTimeoutGrace)
+	resp, err := s.c.getWithQuery(reqCtx, "/api/v1/conversations/"+url.PathEscape(conversationID)+"/watch", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	result, err := apiclient.DecodeRequired[WatchResult](resp)
+	if err != nil {
+		var apiErr *apiclient.APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusGone {
+				return nil, fmt.Errorf("%w: %w", ErrCursorExpired, err)
+			}
+			if apiErr.StatusCode == http.StatusBadRequest && apiErr.Code == "invalid_cursor" {
+				return nil, fmt.Errorf("%w: %w", ErrInvalidCursor, err)
+			}
+		}
+		return nil, err
+	}
+	if result.Events == nil {
+		result.Events = []WatchEvent{}
+	}
+	result.RetryAfter = time.Duration(result.RetryAfterMs) * time.Millisecond
+	return result, nil
 }

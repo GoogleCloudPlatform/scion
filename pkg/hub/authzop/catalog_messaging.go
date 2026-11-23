@@ -211,6 +211,7 @@ var messagingOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}", Method: "GET", Variant: "group"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/messages", Method: "GET", Variant: "group"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/messages/{messageId}", Method: "GET", Variant: "group"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/watch", Method: "GET", Variant: "group"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -222,6 +223,7 @@ var messagingOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestGroupConversationToken_ProjectlessGroupRequiresHubBoundary"},
+			{Package: "pkg/hub", Function: "TestConversationWatch_AuthzParity"},
 		},
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -233,6 +235,7 @@ var messagingOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}", Method: "GET", Variant: "direct"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/messages", Method: "GET", Variant: "direct"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/messages/{messageId}", Method: "GET", Variant: "direct"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/conversations/{id}/watch", Method: "GET", Variant: "direct"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -244,6 +247,7 @@ var messagingOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestDirectConversationToken_PeerAgentMustBeInsideBoundary"},
+			{Package: "pkg/hub", Function: "TestConversationWatch_AuthzParity"},
 		},
 		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},

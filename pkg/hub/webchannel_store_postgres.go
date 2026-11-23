@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -2298,13 +2299,23 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	// avoid blanking conversation_id on moved rows (design §3.1 C2a).
 	var res sql.Result
 	if topic.ConversationID != "" {
+		// Clear conversation_seq while moving rows so merged arms never
+		// carry duplicate or stale sequences, then immediately re-allocate
+		// contiguous seqs in (created, id) order and update
+		// conversations.last_message_seq in the same tx (ptone/scion#8136).
 		res, err = tx.ExecContext(ctx,
-			`UPDATE `+messagesTable+` SET thread_id = $1, conversation_id = $2
+			`UPDATE `+messagesTable+` SET thread_id = $1, conversation_id = $2, conversation_seq = NULL
 			 WHERE conversation_id = NULLIF($3, '')::uuid
 			    OR thread_id = $4`,
 			topic.ID, topic.ConversationID,
 			directConvID,
 			dmKey)
+		if err != nil {
+			return nil, fmt.Errorf("webchat store: re-key messages in promote: %w", err)
+		}
+		if _, err = entadapter.BackfillConversationSeqInTx(ctx, tx, true, messagesTable, conversationsTable, topic.ConversationID); err != nil {
+			return nil, fmt.Errorf("webchat store: re-sequence promoted messages: %w", err)
+		}
 	} else {
 		res, err = tx.ExecContext(ctx,
 			`UPDATE `+messagesTable+` SET thread_id = $1

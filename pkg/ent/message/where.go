@@ -180,6 +180,11 @@ func ConversationID(v uuid.UUID) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldConversationID, v))
 }
 
+// ConversationSeq applies equality check predicate on the "conversation_seq" field. It's identical to ConversationSeqEQ.
+func ConversationSeq(v int64) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldConversationSeq, v))
+}
+
 // SenderProjectID applies equality check predicate on the "sender_project_id" field. It's identical to SenderProjectIDEQ.
 func SenderProjectID(v uuid.UUID) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldSenderProjectID, v))
@@ -1678,6 +1683,56 @@ func ConversationIDIsNil() predicate.Message {
 // ConversationIDNotNil applies the NotNil predicate on the "conversation_id" field.
 func ConversationIDNotNil() predicate.Message {
 	return predicate.Message(sql.FieldNotNull(FieldConversationID))
+}
+
+// ConversationSeqEQ applies the EQ predicate on the "conversation_seq" field.
+func ConversationSeqEQ(v int64) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldConversationSeq, v))
+}
+
+// ConversationSeqNEQ applies the NEQ predicate on the "conversation_seq" field.
+func ConversationSeqNEQ(v int64) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldConversationSeq, v))
+}
+
+// ConversationSeqIn applies the In predicate on the "conversation_seq" field.
+func ConversationSeqIn(vs ...int64) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldConversationSeq, vs...))
+}
+
+// ConversationSeqNotIn applies the NotIn predicate on the "conversation_seq" field.
+func ConversationSeqNotIn(vs ...int64) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldConversationSeq, vs...))
+}
+
+// ConversationSeqGT applies the GT predicate on the "conversation_seq" field.
+func ConversationSeqGT(v int64) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldConversationSeq, v))
+}
+
+// ConversationSeqGTE applies the GTE predicate on the "conversation_seq" field.
+func ConversationSeqGTE(v int64) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldConversationSeq, v))
+}
+
+// ConversationSeqLT applies the LT predicate on the "conversation_seq" field.
+func ConversationSeqLT(v int64) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldConversationSeq, v))
+}
+
+// ConversationSeqLTE applies the LTE predicate on the "conversation_seq" field.
+func ConversationSeqLTE(v int64) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldConversationSeq, v))
+}
+
+// ConversationSeqIsNil applies the IsNil predicate on the "conversation_seq" field.
+func ConversationSeqIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldConversationSeq))
+}
+
+// ConversationSeqNotNil applies the NotNil predicate on the "conversation_seq" field.
+func ConversationSeqNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldConversationSeq))
 }
 
 // SenderProjectIDEQ applies the EQ predicate on the "sender_project_id" field.

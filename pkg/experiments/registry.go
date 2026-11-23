@@ -247,6 +247,11 @@ const ChatStarredMessages = "web.chat_starred_messages"
 // window.
 const ChatRetention = "hub.chat_retention"
 
+// ConversationWatch gates the long-poll conversation watch endpoint
+// (GET /api/v1/conversations/{id}/watch; ptone/scion#8136). While off, the
+// route answers 404; sequence allocation and backfill remain active.
+const ConversationWatch = "hub.conversation_watch"
+
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
 // It is the only activation control and stays default-off; turning it on
 // needs explicit owner approval.
@@ -1224,6 +1229,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#8812",
 		Owner:       "@ptone",
 		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        ConversationWatch,
+		Title:       "Conversation watch",
+		Description: "Long-poll conversation watch endpoint (GET /api/v1/conversations/{id}/watch) for receiving new conversation messages with low latency.",
+		Default:     true,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8136",
+		Owner:       "hub",
+		ReviewBy:    "2027-05-31",
 	},
 }
 

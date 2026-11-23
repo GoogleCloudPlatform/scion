@@ -5931,6 +5931,7 @@
 | http_route | GET | `/api/v1/conversations/{id}` |
 | http_route | GET | `/api/v1/conversations/{id}/messages` |
 | http_route | GET | `/api/v1/conversations/{id}/messages/{messageId}` |
+| http_route | GET | `/api/v1/conversations/{id}/watch` |
 
 **Principals:** `user`, `agent`
 
@@ -5949,6 +5950,7 @@
 ### Tests
 
 - `pkg/hub:TestGroupConversationToken_ProjectlessGroupRequiresHubBoundary`
+- `pkg/hub:TestConversationWatch_AuthzParity`
 
 ---
 
@@ -5965,6 +5967,7 @@
 | http_route | GET | `/api/v1/conversations/{id}` |
 | http_route | GET | `/api/v1/conversations/{id}/messages` |
 | http_route | GET | `/api/v1/conversations/{id}/messages/{messageId}` |
+| http_route | GET | `/api/v1/conversations/{id}/watch` |
 
 **Principals:** `user`, `agent`
 
@@ -5983,6 +5986,7 @@
 ### Tests
 
 - `pkg/hub:TestDirectConversationToken_PeerAgentMustBeInsideBoundary`
+- `pkg/hub:TestConversationWatch_AuthzParity`
 
 ---
 

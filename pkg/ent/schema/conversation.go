@@ -68,6 +68,12 @@ func (Conversation) Fields() []ent.Field {
 			Default("active"),
 		field.Time("last_activity_at").
 			Default(time.Now),
+		// last_message_seq is the highest conversation_seq allocated for
+		// messages in this conversation (ptone/scion#8136). Bumped under the
+		// conversation row lock inside CreateMessage so sequence order matches
+		// commit order.
+		field.Int64("last_message_seq").
+			Default(0),
 		field.Time("created_at").
 			Default(time.Now).
 			Immutable(),

@@ -134,6 +134,20 @@ func (_c *ConversationCreate) SetNillableLastActivityAt(v *time.Time) *Conversat
 	return _c
 }
 
+// SetLastMessageSeq sets the "last_message_seq" field.
+func (_c *ConversationCreate) SetLastMessageSeq(v int64) *ConversationCreate {
+	_c.mutation.SetLastMessageSeq(v)
+	return _c
+}
+
+// SetNillableLastMessageSeq sets the "last_message_seq" field if the given value is not nil.
+func (_c *ConversationCreate) SetNillableLastMessageSeq(v *int64) *ConversationCreate {
+	if v != nil {
+		_c.SetLastMessageSeq(*v)
+	}
+	return _c
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (_c *ConversationCreate) SetCreatedAt(v time.Time) *ConversationCreate {
 	_c.mutation.SetCreatedAt(v)
@@ -245,6 +259,10 @@ func (_c *ConversationCreate) defaults() {
 		v := conversation.DefaultLastActivityAt()
 		_c.mutation.SetLastActivityAt(v)
 	}
+	if _, ok := _c.mutation.LastMessageSeq(); !ok {
+		v := conversation.DefaultLastMessageSeq
+		_c.mutation.SetLastMessageSeq(v)
+	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		v := conversation.DefaultCreatedAt()
 		_c.mutation.SetCreatedAt(v)
@@ -283,6 +301,9 @@ func (_c *ConversationCreate) check() error {
 	}
 	if _, ok := _c.mutation.LastActivityAt(); !ok {
 		return &ValidationError{Name: "last_activity_at", err: errors.New(`ent: missing required field "Conversation.last_activity_at"`)}
+	}
+	if _, ok := _c.mutation.LastMessageSeq(); !ok {
+		return &ValidationError{Name: "last_message_seq", err: errors.New(`ent: missing required field "Conversation.last_message_seq"`)}
 	}
 	if _, ok := _c.mutation.CreatedAt(); !ok {
 		return &ValidationError{Name: "created_at", err: errors.New(`ent: missing required field "Conversation.created_at"`)}
@@ -358,6 +379,10 @@ func (_c *ConversationCreate) createSpec() (*Conversation, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.LastActivityAt(); ok {
 		_spec.SetField(conversation.FieldLastActivityAt, field.TypeTime, value)
 		_node.LastActivityAt = value
+	}
+	if value, ok := _c.mutation.LastMessageSeq(); ok {
+		_spec.SetField(conversation.FieldLastMessageSeq, field.TypeInt64, value)
+		_node.LastMessageSeq = value
 	}
 	if value, ok := _c.mutation.CreatedAt(); ok {
 		_spec.SetField(conversation.FieldCreatedAt, field.TypeTime, value)
@@ -558,6 +583,24 @@ func (u *ConversationUpsert) SetLastActivityAt(v time.Time) *ConversationUpsert 
 // UpdateLastActivityAt sets the "last_activity_at" field to the value that was provided on create.
 func (u *ConversationUpsert) UpdateLastActivityAt() *ConversationUpsert {
 	u.SetExcluded(conversation.FieldLastActivityAt)
+	return u
+}
+
+// SetLastMessageSeq sets the "last_message_seq" field.
+func (u *ConversationUpsert) SetLastMessageSeq(v int64) *ConversationUpsert {
+	u.Set(conversation.FieldLastMessageSeq, v)
+	return u
+}
+
+// UpdateLastMessageSeq sets the "last_message_seq" field to the value that was provided on create.
+func (u *ConversationUpsert) UpdateLastMessageSeq() *ConversationUpsert {
+	u.SetExcluded(conversation.FieldLastMessageSeq)
+	return u
+}
+
+// AddLastMessageSeq adds v to the "last_message_seq" field.
+func (u *ConversationUpsert) AddLastMessageSeq(v int64) *ConversationUpsert {
+	u.Add(conversation.FieldLastMessageSeq, v)
 	return u
 }
 
@@ -806,6 +849,27 @@ func (u *ConversationUpsertOne) SetLastActivityAt(v time.Time) *ConversationUpse
 func (u *ConversationUpsertOne) UpdateLastActivityAt() *ConversationUpsertOne {
 	return u.Update(func(s *ConversationUpsert) {
 		s.UpdateLastActivityAt()
+	})
+}
+
+// SetLastMessageSeq sets the "last_message_seq" field.
+func (u *ConversationUpsertOne) SetLastMessageSeq(v int64) *ConversationUpsertOne {
+	return u.Update(func(s *ConversationUpsert) {
+		s.SetLastMessageSeq(v)
+	})
+}
+
+// AddLastMessageSeq adds v to the "last_message_seq" field.
+func (u *ConversationUpsertOne) AddLastMessageSeq(v int64) *ConversationUpsertOne {
+	return u.Update(func(s *ConversationUpsert) {
+		s.AddLastMessageSeq(v)
+	})
+}
+
+// UpdateLastMessageSeq sets the "last_message_seq" field to the value that was provided on create.
+func (u *ConversationUpsertOne) UpdateLastMessageSeq() *ConversationUpsertOne {
+	return u.Update(func(s *ConversationUpsert) {
+		s.UpdateLastMessageSeq()
 	})
 }
 
@@ -1227,6 +1291,27 @@ func (u *ConversationUpsertBulk) SetLastActivityAt(v time.Time) *ConversationUps
 func (u *ConversationUpsertBulk) UpdateLastActivityAt() *ConversationUpsertBulk {
 	return u.Update(func(s *ConversationUpsert) {
 		s.UpdateLastActivityAt()
+	})
+}
+
+// SetLastMessageSeq sets the "last_message_seq" field.
+func (u *ConversationUpsertBulk) SetLastMessageSeq(v int64) *ConversationUpsertBulk {
+	return u.Update(func(s *ConversationUpsert) {
+		s.SetLastMessageSeq(v)
+	})
+}
+
+// AddLastMessageSeq adds v to the "last_message_seq" field.
+func (u *ConversationUpsertBulk) AddLastMessageSeq(v int64) *ConversationUpsertBulk {
+	return u.Update(func(s *ConversationUpsert) {
+		s.AddLastMessageSeq(v)
+	})
+}
+
+// UpdateLastMessageSeq sets the "last_message_seq" field to the value that was provided on create.
+func (u *ConversationUpsertBulk) UpdateLastMessageSeq() *ConversationUpsertBulk {
+	return u.Update(func(s *ConversationUpsert) {
+		s.UpdateLastMessageSeq()
 	})
 }
 

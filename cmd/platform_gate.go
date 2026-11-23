@@ -65,6 +65,7 @@ var windowsAllowed = map[string]bool{
 	"conversation.join":         true,
 	"conversation.leave":        true,
 	"conversation.catch-up":     true,
+	"conversation.watch":        true,
 	"conversation.group":        true,
 	"conversation.group.list":   true,
 	"conversation.group.get":    true,

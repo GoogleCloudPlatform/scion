@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventfeed"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
@@ -74,6 +75,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -2287,6 +2289,7 @@ type Server struct {
 	portTunnels              *PortTunnelManager      // Agent-held port-forward tunnels
 	authzService             *AuthzService           // Authorization service for policy evaluation
 	events                   EventPublisher          // Event publisher for real-time SSE updates
+	conversationFeed         *eventfeed.Feed         // Stateless long-poll conversation feed engine
 	commandBus               CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
 	notificationDispatcher   *NotificationDispatcher // Notification dispatcher for agent status events
 	lifecycleHookEvaluator   *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
@@ -3317,6 +3320,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		workspaceLog:      logging.Subsystem("hub.workspace"),
 		agentMetricsLog:   logging.Subsystem("hub.agent-metrics"),
 	}
+	srv.conversationFeed = eventfeed.NewFeed(s, &feedWaker{events: srv.getEventPublisher})
+	if setter, ok := s.(interface {
+		SetMessagePublisher(entadapter.MessagePublisher)
+	}); ok {
+		setter.SetMessagePublisher(&feedNotifier{events: srv.getEventPublisher})
+	}
+
 	// A New that fails part-way must not leak what it already started: the
 	// link-service and preview cleanup loops, the OIDC key loops and the
 	// audit writer's worker. The caller gets no *Server to shut down, so

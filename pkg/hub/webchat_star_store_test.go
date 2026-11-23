@@ -409,10 +409,10 @@ func TestMessageStarStore_Postgres(t *testing.T) {
 	_, err = db.ExecContext(ctx, "CREATE SCHEMA "+schema)
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = db.Exec("DROP SCHEMA " + schema + " CASCADE") })
-	// The Ent-managed messages columns the chat store reads.
+	// The Ent-managed messages columns the chat store reads and updates.
 	_, err = db.ExecContext(ctx, `CREATE TABLE messages (
     id uuid PRIMARY KEY, project_id uuid, created timestamptz NOT NULL, channel text, thread_id text,
-    conversation_id uuid, msg text, sender text, sender_id text, recipient text, recipient_id text)`)
+    conversation_id uuid, conversation_seq bigint, msg text, sender text, sender_id text, recipient text, recipient_id text)`)
 	require.NoError(t, err)
 	// The Ent-managed tables the lifecycle contract reaches: users and
 	// projects (existence only) and conversations (a promotion creates one).
@@ -422,8 +422,8 @@ CREATE TABLE agents (id uuid PRIMARY KEY, name text, slug text);
 CREATE TABLE projects (id uuid PRIMARY KEY);
 CREATE TABLE conversations (
     id uuid PRIMARY KEY, project_id uuid, kind text, surface text, external_ref text, parent_ref text,
-    display_name text, default_agent_id uuid, drift_state text, last_activity_at timestamptz, created_at timestamptz,
-    deleted_at timestamptz)`)
+    display_name text, default_agent_id uuid, drift_state text, last_activity_at timestamptz,
+    last_message_seq bigint NOT NULL DEFAULT 0, created_at timestamptz, deleted_at timestamptz)`)
 	require.NoError(t, err)
 	projectID := uuid.NewString()
 	_, err = db.ExecContext(ctx, `INSERT INTO projects (id) VALUES ($1)`, projectID)

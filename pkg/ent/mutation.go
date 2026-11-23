@@ -37945,25 +37945,27 @@ func (m *ConduitSessionMutation) ResetEdge(name string) error {
 // ConversationMutation represents an operation that mutates the Conversation nodes in the graph.
 type ConversationMutation struct {
 	config
-	op               Op
-	typ              string
-	id               *uuid.UUID
-	project_id       *uuid.UUID
-	kind             *conversation.Kind
-	surface          *conversation.Surface
-	external_ref     *string
-	parent_ref       *string
-	display_name     *string
-	default_agent_id *uuid.UUID
-	drift_state      *conversation.DriftState
-	last_activity_at *time.Time
-	created_at       *time.Time
-	archived_at      *time.Time
-	deleted_at       *time.Time
-	clearedFields    map[string]struct{}
-	done             bool
-	oldValue         func(context.Context) (*Conversation, error)
-	predicates       []predicate.Conversation
+	op                  Op
+	typ                 string
+	id                  *uuid.UUID
+	project_id          *uuid.UUID
+	kind                *conversation.Kind
+	surface             *conversation.Surface
+	external_ref        *string
+	parent_ref          *string
+	display_name        *string
+	default_agent_id    *uuid.UUID
+	drift_state         *conversation.DriftState
+	last_activity_at    *time.Time
+	last_message_seq    *int64
+	addlast_message_seq *int64
+	created_at          *time.Time
+	archived_at         *time.Time
+	deleted_at          *time.Time
+	clearedFields       map[string]struct{}
+	done                bool
+	oldValue            func(context.Context) (*Conversation, error)
+	predicates          []predicate.Conversation
 }
 
 var _ ent.Mutation = (*ConversationMutation)(nil)
@@ -38459,6 +38461,62 @@ func (m *ConversationMutation) ResetLastActivityAt() {
 	m.last_activity_at = nil
 }
 
+// SetLastMessageSeq sets the "last_message_seq" field.
+func (m *ConversationMutation) SetLastMessageSeq(i int64) {
+	m.last_message_seq = &i
+	m.addlast_message_seq = nil
+}
+
+// LastMessageSeq returns the value of the "last_message_seq" field in the mutation.
+func (m *ConversationMutation) LastMessageSeq() (r int64, exists bool) {
+	v := m.last_message_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastMessageSeq returns the old "last_message_seq" field's value of the Conversation entity.
+// If the Conversation object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConversationMutation) OldLastMessageSeq(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastMessageSeq is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastMessageSeq requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastMessageSeq: %w", err)
+	}
+	return oldValue.LastMessageSeq, nil
+}
+
+// AddLastMessageSeq adds i to the "last_message_seq" field.
+func (m *ConversationMutation) AddLastMessageSeq(i int64) {
+	if m.addlast_message_seq != nil {
+		*m.addlast_message_seq += i
+	} else {
+		m.addlast_message_seq = &i
+	}
+}
+
+// AddedLastMessageSeq returns the value that was added to the "last_message_seq" field in this mutation.
+func (m *ConversationMutation) AddedLastMessageSeq() (r int64, exists bool) {
+	v := m.addlast_message_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetLastMessageSeq resets all changes to the "last_message_seq" field.
+func (m *ConversationMutation) ResetLastMessageSeq() {
+	m.last_message_seq = nil
+	m.addlast_message_seq = nil
+}
+
 // SetCreatedAt sets the "created_at" field.
 func (m *ConversationMutation) SetCreatedAt(t time.Time) {
 	m.created_at = &t
@@ -38627,7 +38685,7 @@ func (m *ConversationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ConversationMutation) Fields() []string {
-	fields := make([]string, 0, 12)
+	fields := make([]string, 0, 13)
 	if m.project_id != nil {
 		fields = append(fields, conversation.FieldProjectID)
 	}
@@ -38654,6 +38712,9 @@ func (m *ConversationMutation) Fields() []string {
 	}
 	if m.last_activity_at != nil {
 		fields = append(fields, conversation.FieldLastActivityAt)
+	}
+	if m.last_message_seq != nil {
+		fields = append(fields, conversation.FieldLastMessageSeq)
 	}
 	if m.created_at != nil {
 		fields = append(fields, conversation.FieldCreatedAt)
@@ -38690,6 +38751,8 @@ func (m *ConversationMutation) Field(name string) (ent.Value, bool) {
 		return m.DriftState()
 	case conversation.FieldLastActivityAt:
 		return m.LastActivityAt()
+	case conversation.FieldLastMessageSeq:
+		return m.LastMessageSeq()
 	case conversation.FieldCreatedAt:
 		return m.CreatedAt()
 	case conversation.FieldArchivedAt:
@@ -38723,6 +38786,8 @@ func (m *ConversationMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldDriftState(ctx)
 	case conversation.FieldLastActivityAt:
 		return m.OldLastActivityAt(ctx)
+	case conversation.FieldLastMessageSeq:
+		return m.OldLastMessageSeq(ctx)
 	case conversation.FieldCreatedAt:
 		return m.OldCreatedAt(ctx)
 	case conversation.FieldArchivedAt:
@@ -38801,6 +38866,13 @@ func (m *ConversationMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLastActivityAt(v)
 		return nil
+	case conversation.FieldLastMessageSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastMessageSeq(v)
+		return nil
 	case conversation.FieldCreatedAt:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -38829,13 +38901,21 @@ func (m *ConversationMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *ConversationMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addlast_message_seq != nil {
+		fields = append(fields, conversation.FieldLastMessageSeq)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *ConversationMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case conversation.FieldLastMessageSeq:
+		return m.AddedLastMessageSeq()
+	}
 	return nil, false
 }
 
@@ -38844,6 +38924,13 @@ func (m *ConversationMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *ConversationMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case conversation.FieldLastMessageSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddLastMessageSeq(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Conversation numeric field %s", name)
 }
@@ -38942,6 +39029,9 @@ func (m *ConversationMutation) ResetField(name string) error {
 		return nil
 	case conversation.FieldLastActivityAt:
 		m.ResetLastActivityAt()
+		return nil
+	case conversation.FieldLastMessageSeq:
+		m.ResetLastMessageSeq()
 		return nil
 	case conversation.FieldCreatedAt:
 		m.ResetCreatedAt()
@@ -69189,6 +69279,8 @@ type MessageMutation struct {
 	channel                 *string
 	thread_id               *string
 	conversation_id         *uuid.UUID
+	conversation_seq        *int64
+	addconversation_seq     *int64
 	sender_project_id       *uuid.UUID
 	recipient_project_id    *uuid.UUID
 	authorizing_user_id     *string
@@ -70413,6 +70505,76 @@ func (m *MessageMutation) ResetConversationID() {
 	delete(m.clearedFields, message.FieldConversationID)
 }
 
+// SetConversationSeq sets the "conversation_seq" field.
+func (m *MessageMutation) SetConversationSeq(i int64) {
+	m.conversation_seq = &i
+	m.addconversation_seq = nil
+}
+
+// ConversationSeq returns the value of the "conversation_seq" field in the mutation.
+func (m *MessageMutation) ConversationSeq() (r int64, exists bool) {
+	v := m.conversation_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConversationSeq returns the old "conversation_seq" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldConversationSeq(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConversationSeq is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConversationSeq requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConversationSeq: %w", err)
+	}
+	return oldValue.ConversationSeq, nil
+}
+
+// AddConversationSeq adds i to the "conversation_seq" field.
+func (m *MessageMutation) AddConversationSeq(i int64) {
+	if m.addconversation_seq != nil {
+		*m.addconversation_seq += i
+	} else {
+		m.addconversation_seq = &i
+	}
+}
+
+// AddedConversationSeq returns the value that was added to the "conversation_seq" field in this mutation.
+func (m *MessageMutation) AddedConversationSeq() (r int64, exists bool) {
+	v := m.addconversation_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearConversationSeq clears the value of the "conversation_seq" field.
+func (m *MessageMutation) ClearConversationSeq() {
+	m.conversation_seq = nil
+	m.addconversation_seq = nil
+	m.clearedFields[message.FieldConversationSeq] = struct{}{}
+}
+
+// ConversationSeqCleared returns if the "conversation_seq" field was cleared in this mutation.
+func (m *MessageMutation) ConversationSeqCleared() bool {
+	_, ok := m.clearedFields[message.FieldConversationSeq]
+	return ok
+}
+
+// ResetConversationSeq resets all changes to the "conversation_seq" field.
+func (m *MessageMutation) ResetConversationSeq() {
+	m.conversation_seq = nil
+	m.addconversation_seq = nil
+	delete(m.clearedFields, message.FieldConversationSeq)
+}
+
 // SetSenderProjectID sets the "sender_project_id" field.
 func (m *MessageMutation) SetSenderProjectID(u uuid.UUID) {
 	m.sender_project_id = &u
@@ -70728,7 +70890,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 31)
+	fields := make([]string, 0, 32)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -70803,6 +70965,9 @@ func (m *MessageMutation) Fields() []string {
 	}
 	if m.conversation_id != nil {
 		fields = append(fields, message.FieldConversationID)
+	}
+	if m.conversation_seq != nil {
+		fields = append(fields, message.FieldConversationSeq)
 	}
 	if m.sender_project_id != nil {
 		fields = append(fields, message.FieldSenderProjectID)
@@ -70880,6 +71045,8 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.ThreadID()
 	case message.FieldConversationID:
 		return m.ConversationID()
+	case message.FieldConversationSeq:
+		return m.ConversationSeq()
 	case message.FieldSenderProjectID:
 		return m.SenderProjectID()
 	case message.FieldRecipientProjectID:
@@ -70951,6 +71118,8 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldThreadID(ctx)
 	case message.FieldConversationID:
 		return m.OldConversationID(ctx)
+	case message.FieldConversationSeq:
+		return m.OldConversationSeq(ctx)
 	case message.FieldSenderProjectID:
 		return m.OldSenderProjectID(ctx)
 	case message.FieldRecipientProjectID:
@@ -71147,6 +71316,13 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetConversationID(v)
 		return nil
+	case message.FieldConversationSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConversationSeq(v)
+		return nil
 	case message.FieldSenderProjectID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
@@ -71196,13 +71372,21 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *MessageMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addconversation_seq != nil {
+		fields = append(fields, message.FieldConversationSeq)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *MessageMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case message.FieldConversationSeq:
+		return m.AddedConversationSeq()
+	}
 	return nil, false
 }
 
@@ -71211,6 +71395,13 @@ func (m *MessageMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *MessageMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case message.FieldConversationSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddConversationSeq(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Message numeric field %s", name)
 }
@@ -71266,6 +71457,9 @@ func (m *MessageMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(message.FieldConversationID) {
 		fields = append(fields, message.FieldConversationID)
+	}
+	if m.FieldCleared(message.FieldConversationSeq) {
+		fields = append(fields, message.FieldConversationSeq)
 	}
 	if m.FieldCleared(message.FieldSenderProjectID) {
 		fields = append(fields, message.FieldSenderProjectID)
@@ -71343,6 +71537,9 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldConversationID:
 		m.ClearConversationID()
+		return nil
+	case message.FieldConversationSeq:
+		m.ClearConversationSeq()
 		return nil
 	case message.FieldSenderProjectID:
 		m.ClearSenderProjectID()
@@ -71441,6 +71638,9 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldConversationID:
 		m.ResetConversationID()
+		return nil
+	case message.FieldConversationSeq:
+		m.ResetConversationSeq()
 		return nil
 	case message.FieldSenderProjectID:
 		m.ResetSenderProjectID()

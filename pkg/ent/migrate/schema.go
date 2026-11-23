@@ -1222,6 +1222,7 @@ var (
 		{Name: "default_agent_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "drift_state", Type: field.TypeEnum, Enums: []string{"active", "orphaned", "unresolvable"}, Default: "active"},
 		{Name: "last_activity_at", Type: field.TypeTime},
+		{Name: "last_message_seq", Type: field.TypeInt64, Default: 0},
 		{Name: "created_at", Type: field.TypeTime},
 		{Name: "archived_at", Type: field.TypeTime, Nullable: true},
 		{Name: "deleted_at", Type: field.TypeTime, Nullable: true},
@@ -1253,7 +1254,7 @@ var (
 			{
 				Name:    "conversation_deleted_at",
 				Unique:  false,
-				Columns: []*schema.Column{ConversationsColumns[12]},
+				Columns: []*schema.Column{ConversationsColumns[13]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "deleted_at IS NOT NULL",
 				},
@@ -2327,6 +2328,7 @@ var (
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "conversation_seq", Type: field.TypeInt64, Nullable: true},
 		{Name: "sender_project_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "recipient_project_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
@@ -2353,7 +2355,7 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[31]},
+				Columns: []*schema.Column{MessagesColumns[32]},
 			},
 			{
 				Name:    "message_conversation_id",
@@ -2361,39 +2363,44 @@ var (
 				Columns: []*schema.Column{MessagesColumns[25]},
 			},
 			{
+				Name:    "message_conversation_id_conversation_seq",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[25], MessagesColumns[26]},
+			},
+			{
 				Name:    "message_conversation_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[25], MessagesColumns[23], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[25], MessagesColumns[23], MessagesColumns[32], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_thread_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[24], MessagesColumns[23], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[24], MessagesColumns[23], MessagesColumns[32], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_project_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[32], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_sender_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[32], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_recipient_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[32], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_project_id_sender_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[32], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[32], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'pending'",
 				},
@@ -2401,7 +2408,7 @@ var (
 			{
 				Name:    "message_failed_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[32], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'failed'",
 				},
@@ -2417,7 +2424,7 @@ var (
 			{
 				Name:    "message_awaiting_session_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[32], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'awaiting_session'",
 				},
@@ -2425,7 +2432,7 @@ var (
 			{
 				Name:    "message_awaiting_session_recipient_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[32], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'awaiting_session'",
 				},
@@ -2433,7 +2440,7 @@ var (
 			{
 				Name:    "message_sender_id_recipient_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[32], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "recipient_id IS NOT NULL",
 				},
@@ -2441,7 +2448,7 @@ var (
 			{
 				Name:    "message_thread_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[24], MessagesColumns[31], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[24], MessagesColumns[32], MessagesColumns[0]},
 			},
 		},
 	}

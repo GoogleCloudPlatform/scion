@@ -1059,9 +1059,11 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
 		{"project.conversation.read", "/api/v1/conversations/{id}/messages"}:                  {"id": f.inbox.groupConversation},
 		{"project.conversation.read", "/api/v1/conversations/{id}/messages/{messageId}"}:      {"id": f.inbox.groupConversation, "messageId": f.inbox.groupMessage},
+		{"project.conversation.read", "/api/v1/conversations/{id}/watch"}:                     {"id": f.inbox.groupConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}"}:                      {"id": f.inbox.directConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
+		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/watch"}:                {"id": f.inbox.directConversation},
 
 		// Thread group delete uses its disposable twin.
 		{"inbox.threadgroup.delete", "/api/v1/thread-groups/{id}"}: {"id": f.inbox.threadGroupDel},
@@ -1442,6 +1444,9 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
 		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
+		// handleConvWatch defaults to a 30s long-poll wait; pass wait=0 so
+		// live-inventory and bearer-matrix probes return immediately.
+		"/api/v1/conversations/{id}/watch": "wait=0",
 		// handleAdminEffectiveAccess 400s without a principal.
 		"/api/v1/admin/effective-access": "principalType=user&principalId=" + f.user,
 		// handleAdminEffectivePermissions 400s without a principal.
