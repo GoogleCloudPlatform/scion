@@ -1180,6 +1180,7 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		OwnerMaterialNotice: s.ownerMaterialReRecordNotice(ctx, agent, delegatorType, identity.ID()),
 		OwnerReclaim:        ownerReclaim,
 		RuntimeReadNotice:   s.runtimeReadReRecordNotice(ctx, agent, delegatorType, identity.ID()),
+		RoleChanged:         roleChanged,
 	}, true
 }
 

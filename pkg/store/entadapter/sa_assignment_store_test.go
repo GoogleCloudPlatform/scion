@@ -243,8 +243,6 @@ func TestDelegationEdgeStore_RejectsAssignmentCauses(t *testing.T) {
 	seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-a", "proj-a")
 	for _, cause := range []store.EdgeDeactivationCause{
 		store.EdgeDeactivationSAReplaced, store.EdgeDeactivationSACleared,
-		store.EdgeDeactivationReincarnateFailed, store.EdgeDeactivationReincarnatePendingSwept,
-		store.EdgeDeactivationReincarnateStaleSwept,
 	} {
 		_, err := s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-a",
 			store.Deactivation{Cause: cause, OpID: "op-1"})
@@ -257,11 +255,11 @@ func TestAgentSAAssignmentStore_ReincarnationCausesAreValid(t *testing.T) {
 		store.EdgeDeactivationReincarnateReplaced, store.EdgeDeactivationReincarnateFailed,
 		store.EdgeDeactivationReincarnatePendingSwept, store.EdgeDeactivationReincarnateStaleSwept,
 	} {
-		assert.True(t, store.ValidAssignmentDeactivationCause(cause), "cause %q", cause)
+		assert.True(t, store.ValidAssignmentDeactivationCause(cause), "assignment cause %q", cause)
+		assert.True(t, store.ValidEdgeDeactivationCause(cause), "edge cause %q", cause)
 	}
 	for _, cause := range []store.EdgeDeactivationCause{
-		store.EdgeDeactivationReincarnateFailed, store.EdgeDeactivationReincarnatePendingSwept,
-		store.EdgeDeactivationReincarnateStaleSwept,
+		store.EdgeDeactivationSAReplaced, store.EdgeDeactivationSACleared,
 	} {
 		assert.False(t, store.ValidEdgeDeactivationCause(cause), "cause %q is assignment-only", cause)
 	}

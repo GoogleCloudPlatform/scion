@@ -1417,11 +1417,12 @@ func (s *Server) finishFailReincarnation(ctx context.Context, agentID, reincarna
 // callers' doc comments for why that ordering is required.
 //
 // When restoreConfig is non-nil, the same transaction restores the
-// service-account assignment the reincarnation reincarnationID replaced
-// (restoreReincarnationAssignment), recording cause on the replacement, so
-// the active assignment and the restored configuration change together.
-// Without restoreConfig the disk keeps the new generation's configuration,
-// and the assignment recorded for it stays.
+// service-account assignment (restoreReincarnationAssignment) and delegation
+// edge (restoreReincarnationDelegationEdge) that reincarnationID replaced,
+// recording cause on the replacement, so the active authority records and
+// the restored configuration change together. Without restoreConfig the disk
+// keeps the new generation's configuration, and the authority records
+// written for it stay.
 func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID string, cause store.EdgeDeactivationCause, errMsg string, restoreConfig *store.AgentAppliedConfig, now time.Time) {
 	upd := reincarnationStepUpdate{
 		reincarnationState: store.ReincarnationStateFailed,
@@ -1436,6 +1437,9 @@ func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID 
 			if err := restoreReincarnationAssignment(ctx, tx, agent, reincarnationID, cause, now); err != nil {
 				return fmt.Errorf("assignment restore: %w", err)
 			}
+			if err := restoreReincarnationDelegationEdge(ctx, tx, agent, reincarnationID, cause, now); err != nil {
+				return fmt.Errorf("delegation edge restore: %w", err)
+			}
 			return nil
 		}
 	}
@@ -1443,12 +1447,12 @@ func (s *Server) writeFailedAgent(ctx context.Context, agentID, reincarnationID 
 	// here leaves the agent in its in-flight state, refused with 409, with
 	// no worker left to retry it, until the sweep's orphaned agent-state
 	// reset marks it failed (without restoring the configuration). With a
-	// restore, the assignment restore is lost with it: both roll back
-	// together.
+	// restore, the assignment and delegation edge restores are lost with it:
+	// all roll back together.
 	agent, err := s.updateReincarnationStep(ctx, agentID, upd, reincarnationStepMaxAttempts+3)
 	if err != nil {
 		if restoreConfig != nil {
-			s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries; the agent write and the assignment restore are not applied, and the agent is left for the orphaned agent-state sweep",
+			s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries; the agent write and authority restores are not applied, and the agent is left for the orphaned agent-state sweep",
 				"agent_id", agentID, "reincarnation_id", reincarnationID, "error", err)
 		} else {
 			s.agentLifecycleLog.Error("failReincarnation: failed to update agent after retries",
