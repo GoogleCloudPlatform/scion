@@ -290,19 +290,62 @@ By default this does not activate container-script provisioning. Use
 	},
 }
 
+// resolveHarnessConfigTargetScope validates an explicit --scope flag value
+// against the harness-config sync scope vocabulary ("global", "project"),
+// enforces that root --global does not conflict with a non-global --scope, and
+// falls back to templateScopeFromGlobalFlag() when --scope is empty.
+func resolveHarnessConfigTargetScope(rawScope string) (string, error) {
+	switch rawScope {
+	case "", "project", "global":
+	default:
+		return "", newUsageError("--scope must be global or project")
+	}
+	if globalMode {
+		switch rawScope {
+		case "", "global":
+			return "global", nil
+		default:
+			return "", newUsageError("--global conflicts with --scope %s", rawScope)
+		}
+	}
+	if rawScope == "" {
+		return templateScopeFromGlobalFlag(), nil
+	}
+	return rawScope, nil
+}
+
+// harnessConfigSyncArgs validates arguments and --scope/--global conflicts for
+// 'harness-config sync' and 'harness-config push' before root's
+// PersistentPreRunE runs.
+func harnessConfigSyncArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	rawScope, _ := cmd.Flags().GetString("scope")
+	_, err := resolveHarnessConfigTargetScope(rawScope)
+	return err
+}
+
 var harnessConfigSyncCmd = &cobra.Command{
 	Use:   "sync <name>",
 	Short: "Sync a local harness-config to the Hub",
 	Long: `Uploads a local harness-config directory to the Hub for use by remote Runtime Brokers.
 
 By default the config is synced to the current project's scope on the Hub.
-Use --global to sync it to the global scope (requires hub admin rights).
---global also reads the config from the global directory
-(~/.scion/harness-configs), so to publish a config globally it must live there.
+Use --scope global to publish a local config (including a project-local one) to
+the global scope (requires hub admin rights). Root --global both reads from the
+global directory (~/.scion/harness-configs) and targets the global Hub scope;
+--global conflicts with --scope project.
 An existing config with the same name in the target scope is updated to mirror
 the local directory: files deleted locally are removed from the Hub.`,
-	Args: cobra.ExactArgs(1),
+	Args: harnessConfigSyncArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		rawScope, _ := cmd.Flags().GetString("scope")
+		destScope, err := resolveHarnessConfigTargetScope(rawScope)
+		if err != nil {
+			return err
+		}
+
 		name := args[0]
 
 		gp := localProjectDir()
@@ -313,7 +356,7 @@ the local directory: files deleted locally are removed from the Hub.`,
 			return fmt.Errorf("harness-config %q not found: %w", name, err)
 		}
 
-		hubCtx, err := requireHubForUpload(projectPath)
+		hubCtx, err := requireHubWith(projectPath, destScope != "project")
 		if err != nil {
 			return err
 		}
@@ -324,14 +367,14 @@ the local directory: files deleted locally are removed from the Hub.`,
 			hubName = name
 		}
 
-		return syncLocalHarnessConfigToHub(hubCtx, hubName, hcDir.Path, hcDir.Config.Harness)
+		return syncLocalHarnessConfigToHubScope(hubCtx, hubName, hcDir.Path, hcDir.Config.Harness, destScope)
 	},
 }
 
 var harnessConfigPushCmd = &cobra.Command{
 	Use:   "push <name>",
 	Short: "Push a local harness-config to the Hub (alias for sync)",
-	Args:  cobra.ExactArgs(1),
+	Args:  harnessConfigSyncArgs,
 	RunE:  harnessConfigSyncCmd.RunE,
 }
 
@@ -561,11 +604,17 @@ var harnessConfigDeleteCmd = &cobra.Command{
 	},
 }
 
-// syncLocalHarnessConfigToHub implements 'harness-config sync/push': it
-// picks the scope (project by default, global with --global) and creates or
-// updates the named config there.
+// syncLocalHarnessConfigToHub implements 'harness-config sync/push' using the
+// default scope derived from root --global.
 func syncLocalHarnessConfigToHub(hubCtx *HubContext, name, localPath, harnessType string) error {
-	scope, scopeID, err := harnessConfigHubScope(hubCtx)
+	return syncLocalHarnessConfigToHubScope(hubCtx, name, localPath, harnessType, templateScopeFromGlobalFlag())
+}
+
+// syncLocalHarnessConfigToHubScope implements 'harness-config sync/push' for an
+// explicit target Hub scope ("project" or "global", defaulting via --global
+// when empty) and creates or updates the named config there.
+func syncLocalHarnessConfigToHubScope(hubCtx *HubContext, name, localPath, harnessType, targetScope string) error {
+	scope, scopeID, err := harnessConfigHubScopeFor(hubCtx, targetScope)
 	if err != nil {
 		return err
 	}
@@ -576,15 +625,23 @@ func syncLocalHarnessConfigToHub(hubCtx *HubContext, name, localPath, harnessTyp
 // install, the same way templates do: the current project by default, or
 // global with --global. For project scope it resolves the project ID.
 func harnessConfigHubScope(hubCtx *HubContext) (scope, scopeID string, err error) {
-	scope = templateScopeFromGlobalFlag()
-	if scope == "global" {
-		return scope, "", nil
+	return harnessConfigHubScopeFor(hubCtx, templateScopeFromGlobalFlag())
+}
+
+// harnessConfigHubScopeFor resolves the (scope, scopeID) pair for targetScope
+// ("global" or "project"; empty falls back to templateScopeFromGlobalFlag()).
+func harnessConfigHubScopeFor(hubCtx *HubContext, targetScope string) (scope, scopeID string, err error) {
+	if targetScope == "" {
+		targetScope = templateScopeFromGlobalFlag()
+	}
+	if targetScope == "global" {
+		return "global", "", nil
 	}
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to resolve project for Hub harness-config (use --global for the global scope): %w", err)
+		return "", "", fmt.Errorf("failed to resolve project for Hub harness-config (use --scope global or --global for the global scope): %w", err)
 	}
-	return scope, projectID, nil
+	return targetScope, projectID, nil
 }
 
 // harnessConfigScopeLabel renders a Hub scope for user-facing output, e.g.
@@ -1000,9 +1057,11 @@ func init() {
 
 	// Flags for sync command
 	harnessConfigSyncCmd.Flags().String("name", "", "Name for the harness-config on the Hub")
+	harnessConfigSyncCmd.Flags().String("scope", "", "Target scope on the Hub (project, global; defaults to project, or global with --global)")
 
 	// Flags for push command
 	harnessConfigPushCmd.Flags().String("name", "", "Name for the harness-config on the Hub")
+	harnessConfigPushCmd.Flags().String("scope", "", "Target scope on the Hub (project, global; defaults to project, or global with --global)")
 
 	// Flags for pull command
 	harnessConfigPullCmd.Flags().String("to", "", "Destination path for downloaded harness-config")

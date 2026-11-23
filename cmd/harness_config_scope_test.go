@@ -21,12 +21,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -290,4 +293,256 @@ func TestHarnessConfigScopeLabel(t *testing.T) {
 	assert.Equal(t, "global", harnessConfigScopeLabel("global", ""))
 	assert.Equal(t, "global", harnessConfigScopeLabel("", ""))
 	assert.Equal(t, "project (p1)", harnessConfigScopeLabel("project", "p1"))
+}
+
+// runHarnessConfigRoot runs 'scion <args>' through rootCmd and resets
+// harness-config sync/push and root flags before and after the run.
+func runHarnessConfigRoot(t *testing.T, args ...string) error {
+	t.Helper()
+	restoreAllSilenceUsage(t)
+	resetFlags := func(fs *pflag.FlagSet, names ...string) {
+		for _, name := range names {
+			if f := fs.Lookup(name); f != nil {
+				require.NoError(t, f.Value.Set(f.DefValue))
+				f.Changed = false
+			}
+		}
+	}
+	reset := func() {
+		resetFlags(harnessConfigSyncCmd.Flags(), "name", "scope")
+		resetFlags(harnessConfigPushCmd.Flags(), "name", "scope")
+		resetFlags(rootCmd.PersistentFlags(), "global", "hub", "project", "yes", "non-interactive")
+		rootCmd.SetArgs(nil)
+		rootCmd.SetErr(nil)
+	}
+	reset()
+	t.Cleanup(reset)
+	rootCmd.SetErr(&strings.Builder{})
+	rootCmd.SetArgs(args)
+	var err error
+	_ = captureStdout(t, func() { err = rootCmd.Execute() })
+	return err
+}
+
+// newHarnessConfigCLIHub wraps harnessConfigScopeHubHandler with /healthz and
+// /api/v1/projects endpoints so rootCmd invocations of harness-config sync/push
+// can verify both scope selection and whether any project lookup occurred.
+func newHarnessConfigCLIHub(t *testing.T, rec *hcScopeRecorder, projectID string) (*httptest.Server, *[]string) {
+	t.Helper()
+	var projectHits []string
+	base := harnessConfigScopeHubHandler(t, rec)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
+			rec.mu.Lock()
+			projectHits = append(projectHits, r.Method+" "+r.URL.RequestURI())
+			rec.mu.Unlock()
+		}
+		switch {
+		case r.URL.Path == "/healthz":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.Method == http.MethodGet && projectID != "" && r.URL.Path == "/api/v1/projects/"+projectID:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": projectID, "name": "tu", "slug": "tu"})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "not_found", "message": "project not found"}})
+		default:
+			base(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &projectHits
+}
+
+func writeTestHarnessConfig(t *testing.T, baseDir, name, harness string) {
+	t.Helper()
+	dir := filepath.Join(baseDir, "harness-configs", name)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	content := "harness: " + harness + "\nimage: example/" + harness + ":latest\nuser: scion\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(content), 0o644))
+}
+
+// TestHarnessConfigSyncAndPush_ScopeMatrix covers ptone/scion#2903: separating
+// the local source directory (project-local vs global) from the target Hub
+// scope (--scope project|global) on harness-config sync and push.
+func TestHarnessConfigSyncAndPush_ScopeMatrix(t *testing.T) {
+	cases := []struct {
+		name            string
+		args            []string
+		inProject       bool
+		projectHarness  string // if non-empty, create project-local "my-hc" with this harness
+		globalHarness   string // if non-empty, create global "my-hc" with this harness
+		wantHarness     string
+		wantScope       string
+		wantScopeID     string
+		wantProjectHits bool
+	}{
+		{
+			name:           "project-local to global via sync --scope global",
+			args:           []string{"harness-config", "sync", "my-hc", "--scope", "global"},
+			inProject:      true,
+			projectHarness: "claude",
+			globalHarness:  "codex",
+			wantHarness:    "claude",
+			wantScope:      "global",
+		},
+		{
+			name:           "project-local only to global via push --scope global",
+			args:           []string{"harness-config", "push", "my-hc", "--scope", "global"},
+			inProject:      true,
+			projectHarness: "claude",
+			wantHarness:    "claude",
+			wantScope:      "global",
+		},
+		{
+			name:          "global source to global outside project via --scope global",
+			args:          []string{"harness-config", "sync", "my-hc", "--scope", "global"},
+			inProject:     false,
+			globalHarness: "codex",
+			wantHarness:   "codex",
+			wantScope:     "global",
+		},
+		{
+			name:          "global source to global outside project via hc push --scope global",
+			args:          []string{"hc", "push", "my-hc", "--scope", "global"},
+			inProject:     false,
+			globalHarness: "codex",
+			wantHarness:   "codex",
+			wantScope:     "global",
+		},
+		{
+			name:           "global source to global via --global (ignores project-local)",
+			args:           []string{"--global", "harness-config", "sync", "my-hc"},
+			inProject:      true,
+			projectHarness: "claude",
+			globalHarness:  "codex",
+			wantHarness:    "codex",
+			wantScope:      "global",
+		},
+		{
+			name:           "global source to global via --global --scope global",
+			args:           []string{"--global", "harness-config", "sync", "my-hc", "--scope", "global"},
+			inProject:      true,
+			projectHarness: "claude",
+			globalHarness:  "codex",
+			wantHarness:    "codex",
+			wantScope:      "global",
+		},
+		{
+			name:            "project-local to project via default scope",
+			args:            []string{"harness-config", "sync", "my-hc"},
+			inProject:       true,
+			projectHarness:  "claude",
+			globalHarness:   "codex",
+			wantHarness:     "claude",
+			wantScope:       "project",
+			wantScopeID:     tuProjectID,
+			wantProjectHits: true,
+		},
+		{
+			name:            "project-local to project via explicit --scope project",
+			args:            []string{"harness-config", "sync", "my-hc", "--scope", "project"},
+			inProject:       true,
+			projectHarness:  "claude",
+			wantHarness:     "claude",
+			wantScope:       "project",
+			wantScopeID:     tuProjectID,
+			wantProjectHits: true,
+		},
+		{
+			name:            "global source fallback to project via --scope project",
+			args:            []string{"harness-config", "sync", "my-hc", "--scope", "project"},
+			inProject:       true,
+			globalHarness:   "codex",
+			wantHarness:     "codex",
+			wantScope:       "project",
+			wantScopeID:     tuProjectID,
+			wantProjectHits: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &hcScopeRecorder{}
+			srv, projectHits := newHarnessConfigCLIHub(t, rec, tuProjectID)
+			cwd := tuSetup(t)
+			tuHubSettings(t, srv.URL)
+			home, err := os.UserHomeDir()
+			require.NoError(t, err)
+
+			if tc.inProject {
+				writeTUProjectSettings(t, cwd, tuProjectID)
+			}
+			if tc.projectHarness != "" {
+				writeTestHarnessConfig(t, filepath.Join(cwd, config.DotScion), "my-hc", tc.projectHarness)
+			}
+			if tc.globalHarness != "" {
+				writeTestHarnessConfig(t, filepath.Join(home, config.DotScion), "my-hc", tc.globalHarness)
+			}
+
+			require.NoError(t, runHarnessConfigRoot(t, tc.args...))
+
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			require.Len(t, rec.createReqs, 1)
+			assert.Equal(t, tc.wantHarness, rec.createReqs[0].Harness)
+			assert.Equal(t, tc.wantScope, rec.createReqs[0].Scope)
+			assert.Equal(t, tc.wantScopeID, rec.createReqs[0].ScopeID)
+			assert.Equal(t, []string{tc.wantScope + "|" + tc.wantScopeID}, rec.listScopes)
+			assert.Equal(t, 1, rec.finalized)
+			if !tc.wantProjectHits {
+				assert.Empty(t, *projectHits, "global scope sync must not link or read any project")
+			}
+		})
+	}
+}
+
+func TestHarnessConfigSyncAndPush_ScopeValidationAndConflicts(t *testing.T) {
+	for name, args := range map[string][]string{
+		"sync unknown scope":       {"harness-config", "sync", "my-hc", "--scope", "bogus"},
+		"push unknown scope":       {"harness-config", "push", "my-hc", "--scope", "bogus"},
+		"sync user scope refused":  {"harness-config", "sync", "my-hc", "--scope", "user"},
+		"sync --global vs project": {"--global", "harness-config", "sync", "my-hc", "--scope", "project"},
+		"push --global vs project": {"--global", "harness-config", "push", "my-hc", "--scope", "project"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := &hcScopeRecorder{}
+			srv, _ := newHarnessConfigCLIHub(t, rec, tuProjectID)
+			tuSetup(t)
+			tuHubSettings(t, srv.URL)
+			home, err := os.UserHomeDir()
+			require.NoError(t, err)
+			writeTestHarnessConfig(t, filepath.Join(home, config.DotScion), "my-hc", "codex")
+
+			err = runHarnessConfigRoot(t, args...)
+			require.Error(t, err)
+			assert.True(t, isUsageError(err), "expected usage error, got: %v", err)
+
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			assert.Empty(t, rec.listScopes, "validation must fail before any Hub call")
+			assert.Empty(t, rec.createReqs)
+		})
+	}
+
+	t.Run("sync --scope project outside a project still fails project gate", func(t *testing.T) {
+		rec := &hcScopeRecorder{}
+		srv, _ := newHarnessConfigCLIHub(t, rec, tuProjectID)
+		tuSetup(t)
+		tuHubSettings(t, srv.URL)
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+		writeTestHarnessConfig(t, filepath.Join(home, config.DotScion), "my-hc", "codex")
+
+		err = runHarnessConfigRoot(t, "harness-config", "sync", "my-hc", "--scope", "project")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not in a scion project")
+
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		assert.Empty(t, rec.listScopes)
+		assert.Empty(t, rec.createReqs)
+	})
 }

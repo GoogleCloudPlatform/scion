@@ -1019,27 +1019,31 @@ func checkDerivedTemplateName(tpl *config.Template) error {
 	return nil
 }
 
-// syncAllTemplatesToHub syncs all local project templates to the Hub.
+// syncAllTemplatesToHub syncs all local templates from the selected source
+// directory (project-local by default, global with --global) to the Hub in the
+// given target scope.
 func syncAllTemplatesToHub(hubCtx *HubContext, scope string) error {
-	// Get local templates based on scope
+	// Source directory follows --global (globalMode), independent of the
+	// target Hub scope (--scope).
 	localGlobal, localProject, err := config.ListTemplatesGrouped()
 	if err != nil {
 		return fmt.Errorf("failed to list local templates: %w", err)
 	}
 
+	sourceScope := templateScopeFromGlobalFlag()
 	var templates []*config.Template
-	if scope == "global" {
+	if sourceScope == "global" {
 		templates = localGlobal
 	} else {
 		templates = localProject
 	}
 
 	if len(templates) == 0 {
-		fmt.Printf("No local %s templates found to sync.\n", scope)
+		fmt.Printf("No local %s templates found to sync.\n", sourceScope)
 		return nil
 	}
 
-	fmt.Printf("Syncing %d %s template(s) to Hub...\n", len(templates), scope)
+	fmt.Printf("Syncing %d local %s template(s) to Hub (%s scope)...\n", len(templates), sourceScope, scope)
 
 	var synced, failed int
 	for _, tpl := range templates {

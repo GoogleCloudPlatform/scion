@@ -131,9 +131,10 @@ above.
 Share a locally-authored config with your Hub, or pull one down:
 
 ```bash
-scion harness-config sync <name>          # upload local dir to the Hub (alias: push)
+scion harness-config sync <name>                     # upload local dir to the Hub (alias: push)
+scion harness-config sync <name> --scope global      # publish a local (or project-local) config globally
 scion harness-config sync <name> --name <hub-name>   # publish under a different Hub name
-scion harness-config pull <name>          # download from the Hub to the global dir
+scion harness-config pull <name>                     # download from the Hub to the global dir
 scion harness-config pull <name> --to <path>
 ```
 
@@ -142,10 +143,11 @@ file removed from the local directory is removed from the Hub, and the removed p
 Backup and temp files (`*.bak.<timestamp>`, `.*.tmp-*`) are never uploaded, so any left on the Hub
 are removed the same way. A directory with no files left to sync is refused. `pull` verifies each
 file's hash before writing. Like `install`, `sync`/`push` target the current project's Hub scope by
-default, or the global scope with `--global` (which needs hub admin rights). `--global` also reads
-the config from the global directory (`~/.scion/harness-configs`), so to publish a config globally
-it must live there. They create the config in that scope or update an existing one of the same name,
-and print the scope they used.
+default. Use `--scope global` to publish a local config (including a project-local one) to the
+global Hub scope (requires hub admin rights), or the root `--global` flag to both read from the
+global directory (`~/.scion/harness-configs`) and target the global Hub scope (`--global` conflicts
+with `--scope project`). They create the config in that scope or update an existing one of the same
+name, and print the scope they used.
 
 ### Listing, inspecting, and resetting
 
