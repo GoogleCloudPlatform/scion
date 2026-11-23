@@ -422,12 +422,12 @@ func (s *Server) handleConvWatch(w http.ResponseWriter, r *http.Request, id stri
 	// with an empty result + current cursor; the next poll gets 403
 	// (design §3.5 "Revalidation").
 	var (
-		membershipCh          <-chan Event
-		unsubscribeMembership = func() {}
-		membershipUserID      string
+		membershipCh     <-chan Event
+		membershipUserID string
 	)
 	if user := GetUserIdentityFromContext(ctx); user != nil {
 		membershipUserID = user.ID()
+		var unsubscribeMembership func()
 		membershipCh, unsubscribeMembership = subscribeMembershipChanged(s.getEventPublisher(), membershipUserID)
 		defer unsubscribeMembership()
 	}
