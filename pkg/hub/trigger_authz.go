@@ -103,6 +103,44 @@ func (s *Server) triggerRevisionAuthorityCeiling(w http.ResponseWriter, r *http.
 	return ceiling, prov, true
 }
 
+// resolveDispatchAgentAuthoringCeiling returns the caller's effect ceiling and
+// provenance for dispatch_agent authoring, reusing pre-resolved values when
+// supplied by an HTTP handler and otherwise resolving them via
+// authzService.sourceEffectCeiling so dispatchAgentAction.Validate is
+// self-sufficient while keeping sourceEffectCeiling out of fire-core files.
+func (s *Server) resolveDispatchAgentAuthoringCeiling(
+	ctx context.Context,
+	caller Identity,
+	ceiling *store.EffectCeiling,
+	prov *store.AuthorityProvenance,
+) (store.EffectCeiling, store.AuthorityProvenance, error) {
+	if ceiling != nil && prov != nil {
+		return *ceiling, *prov, nil
+	}
+	if s.authzService == nil {
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, errors.New("dispatch_agent authoring: no authorization service")
+	}
+	c, p, err := s.authzService.sourceEffectCeiling(ctx, caller)
+	if err != nil {
+		cause, structural := ceilingDenyCauseForError(err)
+		if !structural {
+			return store.EffectCeiling{}, store.AuthorityProvenance{}, err
+		}
+		msg := ceilingSourceDenialMessage(cause)
+		if cause == DenyCauseCeilingSourceNotAllowed {
+			msg = "This credential kind cannot authorize trigger work"
+		}
+		return store.EffectCeiling{}, store.AuthorityProvenance{}, &dispatchAgentValidationError{
+			status:   http.StatusForbidden,
+			code:     ErrCodeForbidden,
+			message:  msg,
+			reason:   "effect ceiling denied: " + string(cause) + ": " + err.Error(),
+			deniedBy: DeniedByDelegationCeiling,
+		}
+	}
+	return c, p, nil
+}
+
 func writeWebhookEndpointNotFound(w http.ResponseWriter) {
 	writeError(w, http.StatusNotFound, ErrCodeNotFound, webhookEndpointNotFoundMessage, nil)
 }

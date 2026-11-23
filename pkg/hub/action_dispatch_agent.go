@@ -573,35 +573,9 @@ func (s *Server) validateDispatchAgentAuthoringAuthority(
 		}
 	}
 
-	var resolvedCeiling store.EffectCeiling
-	var resolvedProv store.AuthorityProvenance
-	if ceiling != nil && prov != nil {
-		resolvedCeiling = *ceiling
-		resolvedProv = *prov
-	} else {
-		if s.authzService == nil {
-			return errors.New("dispatch_agent authoring: no authorization service")
-		}
-		c, p, cErr := s.authzService.sourceEffectCeiling(ctx, caller)
-		if cErr != nil {
-			cause, structural := ceilingDenyCauseForError(cErr)
-			if !structural {
-				return fmt.Errorf("evaluate effect ceiling: %w", cErr)
-			}
-			msg := ceilingSourceDenialMessage(cause)
-			if cause == DenyCauseCeilingSourceNotAllowed {
-				msg = "This credential kind cannot authorize trigger work"
-			}
-			return &dispatchAgentValidationError{
-				status:   http.StatusForbidden,
-				code:     ErrCodeForbidden,
-				message:  msg,
-				reason:   "effect ceiling denied: " + string(cause) + ": " + cErr.Error(),
-				deniedBy: DeniedByDelegationCeiling,
-			}
-		}
-		resolvedCeiling = c
-		resolvedProv = p
+	resolvedCeiling, resolvedProv, err := s.resolveDispatchAgentAuthoringCeiling(ctx, caller, ceiling, prov)
+	if err != nil {
+		return err
 	}
 
 	// Enforce the caller's hop effect ceiling against both explicit and
