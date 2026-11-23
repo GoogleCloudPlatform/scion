@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -502,7 +503,7 @@ func newHarnessWatchdogConfig(d harnessWatchdogDeps) harnessWatchdogConfig {
 		cfg.RestoreFromHarnessError = d.StatusHandler.RestoreFromHarnessErrorIf
 		cfg.LastStatusChangeAt = func() (time.Time, bool) { return fileModTime(statusPath) }
 	}
-	if d.CapturePane != nil {
+	if d.CapturePane != nil && strings.TrimSpace(getenv("SCION_HARNESS")) != "shell" {
 		uid, gid, capture := d.TargetUID, d.TargetGID, d.CapturePane
 		cfg.PaneTail = func(ctx context.Context) string { return harnessPaneTail(ctx, capture, uid, gid) }
 	}
