@@ -122,6 +122,49 @@ describe('scion-chat-message links inside markup', () => {
     expect(mentionSlugs(content)).toEqual(['alice']);
   });
 
+  it('keeps @ inside a gs:// object path as part of the link, not a mention', async () => {
+    const content = await mount(
+      'see gs://bkt/a:@b and gs://bkt/dir/a,@bob and gs://bkt/workspace/x=@carol.md and `gs://bkt/c:@dan` and @alice'
+    );
+
+    const gcsLinks = Array.from(content.querySelectorAll('.gcs-link'));
+    expect(gcsLinks.map((a) => a.getAttribute('data-gcs-uri'))).toEqual([
+      'gs://bkt/a:@b',
+      'gs://bkt/dir/a,@bob',
+      'gs://bkt/workspace/x=@carol.md',
+      'gs://bkt/c:@dan',
+    ]);
+    expect(gcsLinks.map((a) => a.textContent)).toEqual([
+      'gs://bkt/a:@b',
+      'gs://bkt/dir/a,@bob',
+      'gs://bkt/workspace/x=@carol.md',
+      'gs://bkt/c:@dan',
+    ]);
+    for (const link of gcsLinks) {
+      expect(link.querySelector('.mention')).toBeNull();
+    }
+    expect(content.querySelector('.path-link')).toBeNull();
+    expect(mentionSlugs(content)).toEqual(['alice']);
+  });
+
+  it('does not link entity tails inside a rejected gs:// URI', async () => {
+    const body = 'see gs://bkt/workspace/x.md?v=1 and gs://bkt/sess_abcd1234#x now';
+    const content = await mount(body);
+
+    expect(content.querySelectorAll('.gcs-link')).toHaveLength(0);
+    expect(content.querySelectorAll('.path-link')).toHaveLength(0);
+    expect(content.querySelector('a[href="/sessions/sess_abcd1234"]')).toBeNull();
+    expect(content.textContent?.trim()).toBe(body);
+  });
+
+  it('preserves original casing and whitespace before session and commit links', async () => {
+    const content = await mount(`Session   ${UUID} and Commit  abc1234`);
+
+    expect(content.querySelector(`a[href="/sessions/${UUID}"]`)?.textContent).toBe(UUID);
+    expect(content.querySelector('a[href="/commits/abc1234"]')?.textContent).toBe('abc1234');
+    expect(content.textContent?.trim()).toBe(`Session   ${UUID} and Commit  abc1234`);
+  });
+
   it('leaves a link title and an image alt that contain ">" and references as they are', async () => {
     const content = await mount(
       '[t](https://example.com "a>@bob sess_abcd1234") ' +
@@ -181,6 +224,7 @@ describe('scion-chat-message text that looks like HTML', () => {
 
     expect(content.querySelector('a[href="/commits/abc1234"]')?.textContent).toBe('abc1234');
     expect(content.querySelector(`a[href="/sessions/${UUID}"]`)?.textContent).toBe(UUID);
+    expect(content.textContent?.trim()).toBe(`commit\u00a0abc1234 and session\u00a0${UUID}`);
   });
 });
 

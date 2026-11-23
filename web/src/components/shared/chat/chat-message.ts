@@ -507,11 +507,11 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   // Bare UUIDs preceded by "session" (case-insensitive)
   {
     regex:
-      /\bsession\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
+      /(\bsession\s+)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\b/gi,
     linkBuilder: (m) => {
-      const uuid = m[1];
+      const [, prefix, uuid] = m;
       return [
-        'session ',
+        prefix,
         linkElement(
           {
             class: 'entity-link',
@@ -525,11 +525,11 @@ const ENTITY_PATTERNS: EntityPattern[] = [
   },
   // Commit SHAs: "commit" followed by 7-40 hex chars
   {
-    regex: /\bcommit\s+([0-9a-fA-F]{7,40})\b/gi,
+    regex: /(\bcommit\s+)([0-9a-fA-F]{7,40})\b/gi,
     linkBuilder: (m) => {
-      const sha = m[1];
+      const [, prefix, sha] = m;
       return [
-        'commit ',
+        prefix,
         linkElement(
           {
             class: 'entity-link',
@@ -568,18 +568,30 @@ const ENTITY_PATTERNS: EntityPattern[] = [
 ];
 
 /**
- * gs:// object link pattern, appended only for a message that is eligible
- * per the gate below (the `web.gcs_links` experiment and agent-sent) —
- * never for a user-sent message. Leftmost-wins in `styleEntityLinksInText`
- * means this still beats a `path-link` match starting later in the same
- * match (e.g. `gs://bkt/workspace/x.md`, where the file-path pattern would
- * otherwise match the `/workspace/x.md` tail): both patterns are tried and
- * the one that starts earliest wins, and the gs:// match always starts at
- * or before the `/workspace/...` substring it contains.
+ * Raw-text blocker for `styleEntityLinksInText` when `gs://` linking is on.
+ * Accepted `gs://` URIs are already wrapped in `<a>` by `styleGcsLinksInText`
+ * and stepped over by the entity pass; only rejected `gs://` URIs (e.g. a
+ * `?`/`#`/`&` continuation or trailing `/`) reach `styleEntityLinksInText`,
+ * where leftmost-wins claims their span as plain text so an inner
+ * `/workspace/...` or `sess_...` tail cannot be linked as a separate entity.
  */
-const GCS_ENTITY_PATTERN: EntityPattern = {
+const GCS_ENTITY_BLOCKER: EntityPattern = {
   regex: GCS_URI_PATTERN,
-  linkBuilder: (m) => {
+  linkBuilder: (m) => [m[0]],
+};
+
+/**
+ * Turn `gs://` object references in one text node into links. Only run for a
+ * message that is eligible per the gate (the `web.gcs_links` experiment and
+ * agent-sent) — never for a user-sent message. Runs before `@mentions` and
+ * other entity links so `@` inside an object name (e.g. `gs://bkt/a:@b`)
+ * stays part of the link instead of being split off as a mention. Accepted
+ * matches are wrapped in `<a>` (and added to `built` so `@mentions` step over
+ * them); rejected matches stay plain text and are shielded from entity tail
+ * linking by {@link GCS_ENTITY_BLOCKER}.
+ */
+function styleGcsLinksInText(text: string, built: WeakSet<Element>): LinkPiece[] | null {
+  return replaceMatches(text, GCS_URI_PATTERN, (m) => {
     const boundary = m[1];
     const bucket = m[2];
     const resolved = resolveGcsMatch(m);
@@ -587,9 +599,11 @@ const GCS_ENTITY_PATTERN: EntityPattern = {
     // the fragment/query/param continuation rule) — leave the raw matched
     // text unchanged rather than linking a truncated name.
     if (!resolved) return [m[0]];
-    return [boundary, buildGcsLinkElement(bucket, resolved.object), resolved.suffix];
-  },
-};
+    const link = buildGcsLinkElement(bucket, resolved.object);
+    built.add(link);
+    return [boundary, link, resolved.suffix];
+  });
+}
 
 /**
  * Turn scion://artifact/ references in one text node into links. Only run
@@ -617,16 +631,15 @@ function styleArtifactLinksInText(text: string, built: WeakSet<Element>): LinkPi
  * This is intentionally simple: it scans linearly and does not try to
  * handle overlapping matches from different patterns.
  *
- * `includeGcs` appends {@link GCS_ENTITY_PATTERN} for this call only — the
- * gate (the web.gcs_links experiment && the real sender is an agent) is
- * evaluated once per render by the caller, not baked into a shared, mutable
- * pattern list.
+ * When `includeGcs` is true, appends {@link GCS_ENTITY_BLOCKER} so any
+ * `gs://` URI rejected by `styleGcsLinksInText` still claims its span as
+ * plain text instead of letting a later entity pattern link its tail.
  */
 function styleEntityLinksInText(text: string, includeGcs: boolean): LinkPiece[] | null {
   // Collect all matches from all patterns, then sort by position.
   const replacements: { start: number; end: number; pieces: LinkPiece[] }[] = [];
 
-  const patterns = includeGcs ? [...ENTITY_PATTERNS, GCS_ENTITY_PATTERN] : ENTITY_PATTERNS;
+  const patterns = includeGcs ? [...ENTITY_PATTERNS, GCS_ENTITY_BLOCKER] : ENTITY_PATTERNS;
   for (const pattern of patterns) {
     // Clone the regex so each call starts from index 0.
     // Ensure the global flag is always set so re.exec() advances lastIndex
@@ -1155,16 +1168,20 @@ function promoteCodeSpanMentions(
 
 /**
  * Turn references in rendered, sanitized markdown into links, in this
- * order: artifact references (when `artifacts`), @mentions, entity
- * references (gs:// objects too when `gcs`), then GitHub shortform refs.
+ * order: artifact references (when `artifacts`), `gs://` object references
+ * (when `gcs`), @mentions, entity references, then GitHub shortform refs.
  * What each pass steps over:
  *
  * - Artifact references: code (`<pre>`, `<code>`) and existing links.
- * - @mentions: code, `mailto:` links, and the artifact links just built.
- *   Non-`mailto:` links are not stepped over, so an `@name` in a markdown
- *   link's text is still styled. When `codeSpanMentions` is enabled, standalone
- *   inline `<code>@token</code>` elements whose token resolves against
- *   `knownMentionSlugs` / `knownUsersByEmail` are also promoted to mention pills.
+ * - `gs://` object references: `<pre>` fences and existing links. Inline
+ *   `<code>` is not stepped over, so a `gs://` path inside backticks still
+ *   links.
+ * - @mentions: code, `mailto:` links, and the artifact / `gs://` links just
+ *   built. Non-`mailto:` markdown links are not stepped over, so an `@name`
+ *   in a markdown link's text is still styled. When `codeSpanMentions` is
+ *   enabled, standalone inline `<code>@token</code>` elements whose token
+ *   resolves against `knownMentionSlugs` / `knownUsersByEmail` are also
+ *   promoted to mention pills.
  * - Entity references: `<pre>` fences and existing links. Inline `<code>`
  *   is not stepped over, so a file path inside backticks still links.
  * - GitHub refs: code and existing links; a ref inside backticks is
@@ -1184,16 +1201,21 @@ function linkifyRenderedFragment(
   }
 ): void {
   const isCode = elementsNamed('pre', 'code');
-  const artifactLinks = new WeakSet<Element>();
+  const protectedLinks = new WeakSet<Element>();
   if (opts.artifacts) {
     linkifyTextNodes(root, elementsNamed('pre', 'code', 'a'), (text) =>
-      styleArtifactLinksInText(text, artifactLinks)
+      styleArtifactLinksInText(text, protectedLinks)
+    );
+  }
+  if (opts.gcs) {
+    linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
+      styleGcsLinksInText(text, protectedLinks)
     );
   }
   unwrapLeadingAtMailtoLinks(root);
   linkifyTextNodes(
     root,
-    (el) => isCode(el) || artifactLinks.has(el) || isMailtoLink(el),
+    (el) => isCode(el) || protectedLinks.has(el) || isMailtoLink(el),
     (text) => styleMentionsInText(text, opts.knownUsersByEmail)
   );
   if (opts.codeSpanMentions) {
