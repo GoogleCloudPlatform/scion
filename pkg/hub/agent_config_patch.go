@@ -121,10 +121,16 @@ func rawEnvJSON(rawConfig map[string]json.RawMessage) (json.RawMessage, bool) {
 	if raw, ok := rawConfig["env"]; ok {
 		return raw, true
 	}
+	var bestKey string
+	var bestVal json.RawMessage
 	for k, v := range rawConfig {
-		if strings.EqualFold(k, "env") {
-			return v, true
+		if strings.EqualFold(k, "env") && (bestKey == "" || k < bestKey) {
+			bestKey = k
+			bestVal = v
 		}
+	}
+	if bestKey != "" {
+		return bestVal, true
 	}
 	return nil, false
 }

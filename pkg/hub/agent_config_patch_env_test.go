@@ -372,3 +372,103 @@ func TestPatchAgent_EnvEditRequiresAttach(t *testing.T) {
 		"OWNER_ADDED": "ok",
 	}, stored.AppliedConfig.Env)
 }
+
+// TestPatchAgent_HeldEnvPatchMergeAndFold exercises combining multiple held
+// config.env patches (mergeEnvPatches / marshalEnvPatch) while an agent is
+// running and verifying the folded env at the next start.
+func TestPatchAgent_HeldEnvPatchMergeAndFold(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	setBrokerCaps(t, s, broker, &store.BrokerCapabilities{ClearedFields: true})
+	ctx := context.Background()
+
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.AgentEditHeld {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseRunning)
+		a.AppliedConfig.Env = map[string]string{
+			"KEEP": "orig",
+			"B":    "drop-me",
+		}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Harness: "claude",
+			Env: map[string]string{
+				"KEEP": "orig",
+				"B":    "drop-me",
+			},
+		}
+	})
+
+	readPendingEnv := func(t *testing.T) map[string]*string {
+		t.Helper()
+		stored, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		require.NotNil(t, stored.PendingConfig)
+		raw, ok := stored.PendingConfig.Config["env"]
+		require.True(t, ok, "pendingConfig.config.env must exist")
+		var m map[string]*string
+		require.NoError(t, json.Unmarshal(raw, &m))
+		return m
+	}
+
+	// 1. Save {A: "1"} while running.
+	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"env": map[string]interface{}{"A": "1"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	p1 := readPendingEnv(t)
+	require.NotNil(t, p1["A"])
+	assert.Equal(t, "1", *p1["A"])
+
+	// 2. Save {B: null} while running -> combines with pending {A: "1"}.
+	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"env": map[string]interface{}{"B": nil},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	p2 := readPendingEnv(t)
+	require.NotNil(t, p2["A"])
+	assert.Equal(t, "1", *p2["A"])
+	bVal, hasB := p2["B"]
+	assert.True(t, hasB)
+	assert.Nil(t, bVal)
+
+	// 3. Save {A: null} while running -> overrides pending A to null while keeping B: null.
+	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"env": map[string]interface{}{"A": nil},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	p3 := readPendingEnv(t)
+	aVal, hasA := p3["A"]
+	assert.True(t, hasA)
+	assert.Nil(t, aVal)
+	bVal, hasB = p3["B"]
+	assert.True(t, hasB)
+	assert.Nil(t, bVal)
+
+	// 4. Transition to stopped and fold via a non-env PATCH (model update).
+	cur, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	cur.Phase = string(state.PhaseStopped)
+	require.NoError(t, s.UpdateAgent(ctx, cur))
+
+	rec = patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
+		"model": "after-fold",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.True(t, after.PendingConfig.IsEmpty(), "pending config must be drained after fold")
+	assert.Equal(t, map[string]string{"KEEP": "orig"}, after.AppliedConfig.Env)
+	assert.Equal(t, map[string]string{"KEEP": "orig"}, after.AppliedConfig.InlineConfig.Env)
+	assert.Contains(t, after.AppliedConfig.InlineConfig.ClearedFields, "env.B")
+}

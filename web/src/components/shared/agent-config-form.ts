@@ -137,7 +137,9 @@ type StringConfigKey = {
  * emits its key's JSON type (a duration is a string, so Unlimited is "0").
  */
 export type AgentConfigPatch = {
-  [K in keyof AgentInlineConfig]?: NonNullable<AgentInlineConfig[K]> | null;
+  [K in keyof AgentInlineConfig]?: K extends 'env'
+    ? Record<string, string | null> | null
+    : NonNullable<AgentInlineConfig[K]> | null;
 };
 
 /** The create or PATCH request's top-level keys the form owns. */
@@ -170,9 +172,8 @@ export interface AgentConfigEditValues {
   env?: Record<string, string> | undefined;
   /**
    * False when the hub withheld the agent's env from the caller (it is
-   * returned only with attach access). The env fields are then locked: a
-   * PATCH env replaces the whole env, so an edit made without seeing it
-   * would drop the keys the caller cannot see.
+   * returned only with attach access). The env fields are then locked, since
+   * editing config.env also requires attach access.
    */
   envVisible?: boolean | undefined;
   /**
@@ -942,15 +943,29 @@ export class ScionAgentConfigForm extends LitElement {
       out.env = { ...env, ...autoExposeEnv };
       return out;
     }
-    // Edit mode: the hub replaces the agent's env with the one sent, so the
-    // whole env goes: every row, shown or edited, minus TZ. The auto-expose
-    // keys go only when that control was used; the hub keeps the agent's
-    // auto-expose keys a request leaves out.
-    const rows = this.envEntries ?? this.storedEnvEntries();
-    for (const e of rows) {
-      if (e.key && e.key !== TZ_ENV_KEY && !AUTO_EXPOSE_ENV_KEYS.has(e.key)) env[e.key] = e.value;
+    // Edit mode: the hub merges config.env by key (explicit null removes a
+    // key; absent keys are kept). Send only added/changed keys and explicit
+    // nulls for stored keys that were deleted or renamed away, skipping TZ
+    // and auto-expose keys. Auto-expose keys are sent only when that control
+    // was used.
+    const envDelta: Record<string, string | null> = {};
+    if (this.envEntries !== null) {
+      const stored = new Map(this.storedEnvEntries().map((e) => [e.key, e.value]));
+      const next = new Map<string, string>();
+      for (const e of this.envEntries) {
+        if (e.key && e.key !== TZ_ENV_KEY && !AUTO_EXPOSE_ENV_KEYS.has(e.key)) {
+          next.set(e.key, e.value);
+        }
+      }
+      for (const [k, v] of next) {
+        if (!stored.has(k) || stored.get(k) !== v) envDelta[k] = v;
+      }
+      for (const k of stored.keys()) {
+        if (!next.has(k)) envDelta[k] = null;
+      }
     }
-    out.env = { ...env, ...autoExposeEnv };
+    const merged: Record<string, string | null> = { ...envDelta, ...autoExposeEnv };
+    if (Object.keys(merged).length > 0) out.env = merged;
     return out;
   }
 
@@ -1937,9 +1952,9 @@ export class ScionAgentConfigForm extends LitElement {
     }
     return html`${this.mode === 'edit'
         ? html`<div class="hint">TZ is not set here: the Timezone field pins the timezone.</div>
-            <div class="hint" data-testid="env-replace-note">
-              Saving a change here replaces the agent's stored environment with this list. Values
-              this page cannot show you, such as GITHUB_TOKEN, are not kept.
+            <div class="hint" data-testid="env-merge-note">
+              Only added, changed, or removed variables are sent. Values this page cannot show you,
+              such as GITHUB_TOKEN, are kept.
             </div>`
         : nothing}
       <scion-env-editor

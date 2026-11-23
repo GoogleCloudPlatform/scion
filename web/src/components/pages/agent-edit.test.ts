@@ -377,7 +377,7 @@ describe('agent edit page shared goldens (replayed by the hub tests)', () => {
     expect(patches().map((c) => c.body)).toEqual([golden('timezone')]);
   });
 
-  it('an added env row sends the whole env', async () => {
+  it('an added env row sends only the changed key', async () => {
     const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
     const form = formOf(el)!;
     form.shadowRoot!.querySelector('.field[data-key="config.env"] scion-env-editor')!.dispatchEvent(
@@ -394,6 +394,20 @@ describe('agent edit page shared goldens (replayed by the hub tests)', () => {
     await flush(el);
     await click(el, 'save');
     expect(patches().map((c) => c.body)).toEqual([golden('env')]);
+  });
+
+  it('a deleted env row sends null for the removed key', async () => {
+    const el = await mount(makeAgent('stopped', 5), makeAgent('stopped', 6));
+    const form = formOf(el)!;
+    form
+      .shadowRoot!.querySelector('.field[data-key="config.env"] scion-env-editor')!
+      .dispatchEvent(new CustomEvent('env-change', { detail: { entries: [] } }));
+    await flush(form);
+    await flush(el);
+    await click(el, 'save');
+    expect(patches().map((c) => c.body)).toEqual([
+      { stateVersion: 5, config: { env: { FOO: null } } },
+    ]);
   });
 
   it('an emptied next task is not an edit: Save stays disabled and nothing is sent', async () => {

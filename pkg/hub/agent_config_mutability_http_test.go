@@ -659,9 +659,8 @@ func TestAgentEditGoldens(t *testing.T) {
 			assert.Equal(t, "Asia/Tokyo", after.AppliedConfig.ExplicitTimezone)
 		}},
 		{name: "env", applied: []string{"config.env"}, check: func(t *testing.T, inline *api.ScionConfig) {
-			assert.Equal(t, map[string]string{"FOO": "bar", "NEW": "1"}, inline.Env)
+			assert.Equal(t, map[string]string{"NEW": "1"}, inline.Env)
 		}, agentCheck: func(t *testing.T, after *store.Agent) {
-			assert.Equal(t, "bar", after.AppliedConfig.Env["FOO"])
 			assert.Equal(t, "1", after.AppliedConfig.Env["NEW"])
 		}},
 		{name: "task", applied: []string{"config.task"}, check: func(t *testing.T, inline *api.ScionConfig) {
