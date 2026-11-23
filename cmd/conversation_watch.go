@@ -40,9 +40,10 @@ const (
 	watchExitCursorExpired = 3
 	watchExitInterrupted   = 130
 
-	watchMaxServerWait  = 55 * time.Second
-	watchInitialBackoff = 1 * time.Second
-	watchMaxBackoff     = 30 * time.Second
+	watchMaxServerWait         = 55 * time.Second
+	watchInitialBackoff        = 1 * time.Second
+	watchMaxBackoff            = 30 * time.Second
+	watchEmptyEarlyReturnDelay = 1 * time.Second
 )
 
 var (
@@ -249,12 +250,13 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 		return nil
 	}
 
-	finishAtDeadline := func(errForOnce error) error {
+	finishAtDeadline := func(retryErr error) error {
+		if !polled && retryErr != nil {
+			emitStreamCursor()
+			return retryErr
+		}
 		if params.Once {
-			if polled || errForOnce == nil {
-				return writeWatchOnceTimeout(params, lastCursor, truncated)
-			}
-			return errForOnce
+			return writeWatchOnceTimeout(params, lastCursor, truncated)
 		}
 		emitStreamCursor()
 		return nil
@@ -364,7 +366,7 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 						}
 					}
 				}
-			} else if params.JSON && res.TimedOut && res.NextCursor != "" {
+			} else if params.JSON && res.NextCursor != "" {
 				if wErr := outputNDJSON(params.Stdout, watchCursorHeartbeat{
 					Type:       "cursor",
 					NextCursor: res.NextCursor,
@@ -378,19 +380,27 @@ func executeConversationWatch(ctx context.Context, svc hubclient.ConversationSer
 			}
 		}
 
-		if res.RetryAfter > 0 {
-			delay := res.RetryAfter
+		paceDelay := res.RetryAfter
+		if paceDelay <= 0 && len(res.Events) == 0 && !res.TimedOut && !opts.Immediate {
+			// Guard against tight re-poll loops on early empty 200 responses
+			// (e.g. hub shutdown drain or membership revocation without RetryAfter).
+			paceDelay = watchEmptyEarlyReturnDelay
+		}
+		if paceDelay > 0 {
 			if hasDeadline {
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
 					return finishAtDeadline(nil)
 				}
-				if delay > remaining {
-					delay = remaining
+				if paceDelay > remaining {
+					paceDelay = remaining
 				}
 			}
-			if sleepErr := sleepFn(ctx, delay); sleepErr != nil {
+			if sleepErr := sleepFn(ctx, paceDelay); sleepErr != nil {
 				return handleInterrupt()
+			}
+			if hasDeadline && time.Until(deadline) <= 0 {
+				return finishAtDeadline(nil)
 			}
 		}
 	}

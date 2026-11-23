@@ -1059,7 +1059,7 @@ func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
 		assert.Equal(t, "cur-initial-head", got.NextCursor)
 	})
 
-	t.Run("stream mode with 1ns timeout gets heartbeat and exits 0", func(t *testing.T) {
+	t.Run("stream mode with 1ns timeout gets heartbeat on real wait=0 shape and exits 0", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		calls := 0
 		svc := &fakeWatchConvService{
@@ -1067,10 +1067,11 @@ func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
 				calls++
 				assert.True(t, opts.Immediate)
 				assert.Equal(t, time.Duration(0), opts.Wait)
+				// Real Hub returns TimedOut: false when wait=0.
 				return &hubclient.WatchResult{
 					Events:     []hubclient.WatchEvent{},
 					NextCursor: "cur-stream-head",
-					TimedOut:   true,
+					TimedOut:   false,
 				}, nil
 			},
 		}
@@ -1093,6 +1094,185 @@ func TestConversationWatch_TinyTimeoutStillPollsOnceForCursor(t *testing.T) {
 		assert.Equal(t, "cursor", hb["type"])
 		assert.Equal(t, "cur-stream-head", hb["nextCursor"])
 	})
+}
+
+// O2: in stream mode, if no poll ever succeeded and --timeout expires while
+// retrying a transient error, exit 1 with that error; if at least one poll
+// succeeded, exit 0 cleanly with next-cursor on stderr.
+func TestConversationWatchStream_TimeoutDuringRetry(t *testing.T) {
+	t.Run("never succeeded returns error and exit 1", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				return nil, context.DeadlineExceeded
+			},
+		}
+
+		err := executeConversationWatch(context.Background(), svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           false,
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        25 * time.Millisecond,
+			JSON:           true,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+			Sleep: func(_ context.Context, _ time.Duration) error {
+				time.Sleep(35 * time.Millisecond)
+				return nil
+			},
+		})
+		require.Error(t, err)
+		assert.Equal(t, 1, exitCodeFor(err))
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+	})
+
+	t.Run("after successful poll exits 0 with next-cursor", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		call := 0
+		svc := &fakeWatchConvService{
+			fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+				call++
+				if call == 1 {
+					return &hubclient.WatchResult{
+						Events:     []hubclient.WatchEvent{},
+						NextCursor: "cur-ok",
+						TimedOut:   true,
+					}, nil
+				}
+				return nil, &apiclient.APIError{StatusCode: http.StatusServiceUnavailable, Message: "restarting"}
+			},
+		}
+
+		err := executeConversationWatch(context.Background(), svc, watchParams{
+			ConversationID: "conv-1",
+			Once:           false,
+			Filter:         "others",
+			Limit:          50,
+			Timeout:        25 * time.Millisecond,
+			JSON:           false,
+			Stdout:         &stdout,
+			Stderr:         &stderr,
+			Sleep: func(_ context.Context, _ time.Duration) error {
+				time.Sleep(35 * time.Millisecond)
+				return nil
+			},
+		})
+		require.NoError(t, err)
+		assert.Contains(t, stderr.String(), "next-cursor: cur-ok\n")
+	})
+}
+
+// Cross-PR pacing: early empty 200 responses with TimedOut=false (e.g. hub
+// shutdown drain or membership revocation) pace before re-polling (1s default,
+// or server RetryAfter when > 0) instead of spinning.
+func TestConversationWatchStream_EarlyEmptyReturnPacing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	var sleepCalls []time.Duration
+	call := 0
+
+	svc := &fakeWatchConvService{
+		fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			call++
+			switch call {
+			case 1:
+				// Early empty return with RetryAfter==0 -> waits watchEmptyEarlyReturnDelay (1s).
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-1",
+					TimedOut:   false,
+				}, nil
+			case 2:
+				// Early empty return with RetryAfter>0 -> honors RetryAfter.
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-1",
+					TimedOut:   false,
+					RetryAfter: 3 * time.Second,
+				}, nil
+			default:
+				cancel()
+				return nil, context.Canceled
+			}
+		},
+	}
+
+	err := executeConversationWatch(ctx, svc, watchParams{
+		ConversationID: "conv-1",
+		Once:           false,
+		Filter:         "others",
+		Limit:          50,
+		JSON:           true,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+		Sleep: func(_ context.Context, d time.Duration) error {
+			sleepCalls = append(sleepCalls, d)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []time.Duration{watchEmptyEarlyReturnDelay, 3 * time.Second}, sleepCalls)
+	// Both early empty polls emitted cursor heartbeats under --json.
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	require.Len(t, lines, 2)
+}
+
+// N2: consecutiveErrors resets to 0 after a successful poll so subsequent
+// transient errors restart backoff at attempt 1.
+func TestConversationWatchStream_BackoffResetsAfterSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	var backoffAttempts []int
+	call := 0
+
+	svc := &fakeWatchConvService{
+		fn: func(_ context.Context, _ string, _ hubclient.WatchOptions) (*hubclient.WatchResult, error) {
+			call++
+			switch call {
+			case 1:
+				return nil, &apiclient.APIError{StatusCode: http.StatusServiceUnavailable, Message: "blip 1"}
+			case 2:
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-1",
+					TimedOut:   true,
+				}, nil
+			case 3:
+				return nil, &apiclient.APIError{StatusCode: http.StatusBadGateway, Message: "blip 2"}
+			default:
+				cancel()
+				return &hubclient.WatchResult{
+					Events:     []hubclient.WatchEvent{},
+					NextCursor: "cur-1",
+					TimedOut:   true,
+				}, nil
+			}
+		},
+	}
+
+	err := executeConversationWatch(ctx, svc, watchParams{
+		ConversationID: "conv-1",
+		Once:           false,
+		Filter:         "others",
+		Limit:          50,
+		JSON:           true,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
+		Backoff: func(attempt int, ra time.Duration) time.Duration {
+			backoffAttempts = append(backoffAttempts, attempt)
+			return watchBackoffDuration(attempt, ra)
+		},
+		Sleep: func(_ context.Context, _ time.Duration) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 1}, backoffAttempts, "backoff attempt counter must reset after a successful poll")
 }
 
 func TestConversationWatch_SignalDuringBackoffSleep(t *testing.T) {
