@@ -56,13 +56,22 @@ func (s *Server) listAgentSecretNames(ctx context.Context, agentID string) []str
 	return keys
 }
 
+// externalSecretNamer is an optional interface implemented by external secret
+// backends (e.g. GCPBackend) that can report the backend-specific secret name
+// for operator remediation logging when post-commit deletion fails.
+type externalSecretNamer interface {
+	ExternalSecretName(name, scope, scopeID string) string
+}
+
 // removeAgentScopedSecrets deletes agent-scoped secrets from the secret
-// backend (such as GCP Secret Manager) after a hard delete or retention purge
-// commits. Local-backend DB rows are already deleted inside the transaction
-// via DeleteSecretsByScope; this handles external backends whose values cannot
-// join the DB transaction. Modeled on removeUserScopedData: best-effort,
-// bounded by agentScopedSecretCleanupTimeout, logs at Warn on failure and
-// never fails the delete.
+// backend (such as GCP Secret Manager) after a hard delete, retention purge,
+// env-gather recreate, or create rollback commits. Local-backend DB rows are
+// already deleted inside the transaction via DeleteSecretsByScope; this
+// handles external backends whose values cannot join the DB transaction, as
+// well as any secrets written in the window between pre-transaction listing
+// and commit. Best-effort, bounded by agentScopedSecretCleanupTimeout; each
+// failed delete is retried once and remaining failures are logged at Error
+// level with the backend secret name when available.
 func (s *Server) removeAgentScopedSecrets(ctx context.Context, agentID string, keys []string) bool {
 	if agentID == "" {
 		return true
@@ -77,30 +86,60 @@ func (s *Server) removeAgentScopedSecrets(ctx context.Context, agentID string, k
 }
 
 func (s *Server) removeAgentScopedSecretsCtx(ctx context.Context, backend secret.SecretBackend, agentID string, keys []string) bool {
-	if len(keys) == 0 {
-		// Fall back to listing from the backend in case any rows remain.
-		metas, err := backend.List(ctx, secret.Filter{Scope: secret.ScopeAgent, ScopeID: agentID})
-		if err != nil {
-			slog.Warn("agent delete: failed to list agent-scope secrets for cleanup",
-				"agent_id", agentID, "error", err)
-			return false
-		}
-		if len(metas) == 0 {
-			return true
-		}
-		keys = make([]string, 0, len(metas))
-		for _, m := range metas {
-			keys = append(keys, m.Name)
+	// Always re-list from the backend after commit and merge with the
+	// pre-transaction key snapshot so keys written in the race window between
+	// listing and commit are also cleaned up.
+	ok := true
+	seen := make(map[string]struct{}, len(keys))
+	merged := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if _, dup := seen[k]; !dup {
+			seen[k] = struct{}{}
+			merged = append(merged, k)
 		}
 	}
+	metas, err := backend.List(ctx, secret.Filter{Scope: secret.ScopeAgent, ScopeID: agentID})
+	if err != nil {
+		ok = false
+		slog.Error("agent delete: failed to list agent-scope secrets for post-commit cleanup",
+			"agent_id", agentID, "error", err)
+	} else {
+		for _, m := range metas {
+			if _, dup := seen[m.Name]; !dup {
+				seen[m.Name] = struct{}{}
+				merged = append(merged, m.Name)
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return ok
+	}
 
-	ok := true
+	namer, _ := backend.(externalSecretNamer)
 	removed := 0
-	for _, key := range keys {
-		if err := backend.Delete(ctx, key, secret.ScopeAgent, agentID); err != nil && !errors.Is(err, store.ErrNotFound) {
+	for _, key := range merged {
+		var delErr error
+		for attempt := 0; attempt < 2; attempt++ {
+			delErr = backend.Delete(ctx, key, secret.ScopeAgent, agentID)
+			if delErr == nil || errors.Is(delErr, store.ErrNotFound) {
+				delErr = nil
+				break
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		if delErr != nil {
 			ok = false
-			slog.Warn("agent delete: failed to remove agent-scope secret from backend; retry cleanup or remove manually",
-				"agent_id", agentID, "name", key, "error", err)
+			attrs := []any{
+				"agent_id", agentID,
+				"name", key,
+				"error", delErr,
+			}
+			if namer != nil {
+				attrs = append(attrs, "secret_name", namer.ExternalSecretName(key, secret.ScopeAgent, agentID))
+			}
+			slog.Error("agent delete: failed to remove agent-scope secret from backend after retry; remove manually", attrs...)
 			continue
 		}
 		removed++
@@ -113,18 +152,20 @@ func (s *Server) removeAgentScopedSecretsCtx(ctx context.Context, backend secret
 }
 
 // withAgentSecretCleanup captures any agent-scoped secret names for agentID
-// before fn runs a hard-delete or purge transaction (which removes the DB
-// rows), and runs best-effort post-commit external (GCP) secret cleanup when
-// fn commits with n > 0. Keeping the store call inside fn preserves per-site
-// authz-guard exemptions while making external cleanup structural across all
-// hard-delete callers.
+// before fn runs a hard-delete, purge, env-gather recreate, or create
+// compensation transaction (which removes the DB rows), and runs best-effort
+// post-commit external (GCP) secret cleanup when fn commits with n > 0.
+// Post-commit cleanup always runs when a secret backend is configured so keys
+// written between the pre-transaction snapshot and commit are also removed.
+// Keeping the store call inside fn preserves per-site authz-guard exemptions
+// while making external cleanup structural across all hard-delete callers.
 func (s *Server) withAgentSecretCleanup(ctx context.Context, agentID string, fn func() (int, error)) (int, error) {
 	var agentSecretKeys []string
 	if s.GetSecretBackend() != nil {
 		agentSecretKeys = s.listAgentSecretNames(ctx, agentID)
 	}
 	n, err := fn()
-	if err == nil && n > 0 && len(agentSecretKeys) > 0 {
+	if err == nil && n > 0 {
 		s.removeAgentScopedSecrets(ctx, agentID, agentSecretKeys)
 	}
 	return n, err

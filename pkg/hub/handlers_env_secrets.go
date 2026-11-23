@@ -291,6 +291,10 @@ func (s *Server) resolveAgentSecretAccess(w http.ResponseWriter, r *http.Request
 		Forbidden(w)
 		return "", nil, false
 	}
+	if isWrite && !agent.DeletedAt.IsZero() {
+		NotFound(w, "Agent")
+		return "", nil, false
+	}
 	return agent.ID, agent, true
 }
 
@@ -1321,6 +1325,17 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	// Close the write vs hard-delete (or soft-delete) race: if the agent was
+	// deleted while backend.Set was in flight, compensate by removing the
+	// just-written secret and answering 404.
+	if scope == store.ScopeAgent {
+		if a, gerr := s.store.GetAgent(ctx, scopeID); errors.Is(gerr, store.ErrNotFound) || (gerr == nil && !a.DeletedAt.IsZero()) {
+			s.removeAgentScopedSecrets(ctx, scopeID, []string{key})
+			NotFound(w, "Agent")
+			return
+		}
 	}
 
 	result := metaToStoreSecret(*meta)
