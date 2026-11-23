@@ -471,3 +471,66 @@ func (f *gcpMintFailingStore) GetGCPServiceAccount(ctx context.Context, id strin
 	}
 	return f.Store.GetGCPServiceAccount(ctx, id)
 }
+
+type failingIDTokenGenerator struct {
+	mockGCPTokenGenerator
+	idErr error
+}
+
+func (g *failingIDTokenGenerator) GenerateIDToken(_ context.Context, _ string, _ string) (*GCPIDToken, error) {
+	return nil, g.idErr
+}
+
+// TestHandleAgentGCPIdentityToken_AuditRecordsAudience verifies that issuing
+// (or failing to issue) a GCP OIDC identity credential records the requested
+// audience in the emitted GCP token audit event without logging any token
+// material, and that arbitrary audiences continue to be served.
+func TestHandleAgentGCPIdentityToken_AuditRecordsAudience(t *testing.T) {
+	f := newGCPMintFixture(t, "id-audit-audience")
+
+	for _, audience := range []string{
+		"https://service-a.example.com/api",
+		"api://custom-audience-b",
+	} {
+		t.Run("success/"+audience, func(t *testing.T) {
+			buf := captureAuditLogs(t)
+			f.Server.auditLogger = NewLogAuditLogger("[Test]", false)
+
+			rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/gcp-identity-token",
+				map[string]string{"audience": audience}, f.Token)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+			auditRec := auditRecordWithMsg(t, buf, "GCP token audit event")
+			require.NotNil(t, auditRec, "expected GCP token audit event to be emitted")
+			require.Equal(t, string(GCPTokenEventIdentityToken), auditRec["event_type"])
+			require.Equal(t, true, auditRec["success"])
+			require.Equal(t, f.AgentID, auditRec["agent_id"])
+			require.Equal(t, f.ProjectID, auditRec["project_id"])
+			require.Equal(t, f.SA.Email, auditRec["sa_email"])
+			require.Equal(t, f.SA.ID, auditRec["sa_id"])
+			require.Equal(t, audience, auditRec["audience"])
+			require.NotContains(t, buf.String(), "test-id-token", "audit log must not contain token material")
+		})
+	}
+
+	t.Run("failure", func(t *testing.T) {
+		f.Server.SetGCPTokenGenerator(&failingIDTokenGenerator{
+			mockGCPTokenGenerator: mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"},
+			idErr:                 errors.New("iam credentials unavailable"),
+		})
+		buf := captureAuditLogs(t)
+		f.Server.auditLogger = NewLogAuditLogger("[Test]", false)
+		const audience = "https://failing.example.com"
+
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/gcp-identity-token",
+			map[string]string{"audience": audience}, f.Token)
+		require.Equal(t, http.StatusBadGateway, rec.Code, "body: %s", rec.Body.String())
+
+		auditRec := auditRecordWithMsg(t, buf, "GCP token audit event")
+		require.NotNil(t, auditRec, "expected GCP token audit event to be emitted on failure")
+		require.Equal(t, "WARN", auditRec["level"])
+		require.Equal(t, string(GCPTokenEventIdentityToken), auditRec["event_type"])
+		require.Equal(t, false, auditRec["success"])
+		require.Equal(t, audience, auditRec["audience"])
+	})
+}

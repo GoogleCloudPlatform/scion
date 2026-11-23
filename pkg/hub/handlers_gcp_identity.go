@@ -1686,8 +1686,8 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		if s.gcpTokenMetrics != nil {
 			s.gcpTokenMetrics.RecordIDTokenRequest(false, time.Since(start))
 		}
-		LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventIdentityToken,
-			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, false, err.Error())
+		LogGCPIdentityTokenGeneration(r.Context(), s.auditLogger,
+			agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, req.Audience, false, err.Error())
 		writeError(w, http.StatusBadGateway, "gcp_token_failed",
 			"identity token generation failed: "+err.Error(), nil)
 		return
@@ -1696,8 +1696,8 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 	if s.gcpTokenMetrics != nil {
 		s.gcpTokenMetrics.RecordIDTokenRequest(true, time.Since(start))
 	}
-	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventIdentityToken,
-		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, true, "")
+	LogGCPIdentityTokenGeneration(r.Context(), s.auditLogger,
+		agent.Subject, agentRecord.ProjectID, gcpID.ServiceAccountEmail, gcpID.ServiceAccountID, req.Audience, true, "")
 	writeJSON(w, http.StatusOK, token)
 }
 

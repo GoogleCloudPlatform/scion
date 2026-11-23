@@ -101,6 +101,7 @@ func TestGCPTokenEvent_SchemaKeysAreStable(t *testing.T) {
 		ProjectID:           "project-1",
 		ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
 		ServiceAccountID:    "sa-789",
+		Audience:            "https://api.example.com",
 		Success:             false,
 		FailReason:          "permission denied",
 	})
@@ -111,15 +112,109 @@ func TestGCPTokenEvent_SchemaKeysAreStable(t *testing.T) {
 	}
 	for _, key := range []string{
 		"event_type", "success", "agent_id", "project_id",
-		"sa_email", "sa_id", "fail_reason",
+		"sa_email", "sa_id", "audience", "fail_reason",
 	} {
 		if _, ok := rec[key]; !ok {
 			t.Errorf("attribute %q missing from emitted record", key)
 		}
 	}
+	if got := rec["audience"]; got != "https://api.example.com" {
+		t.Errorf("audience: got %v, want %q", got, "https://api.example.com")
+	}
 	// A failed token event must be visible at WARN, not buried at INFO.
 	if rec["level"] != "WARN" {
 		t.Errorf("level: got %v, want WARN for an unsuccessful event", rec["level"])
+	}
+}
+
+// TestGCPTokenEvent_AudienceIsEmitted verifies that audience is written for
+// identity token events and omitted when empty (such as access tokens).
+func TestGCPTokenEvent_AudienceIsEmitted(t *testing.T) {
+	t.Run("identity token emits audience", func(t *testing.T) {
+		buf := captureAuditLogs(t)
+		logger := NewLogAuditLogger("[Test]", false)
+
+		err := logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
+			EventType:           GCPTokenEventIdentityToken,
+			AgentID:             "agent-1",
+			ProjectID:           "project-1",
+			ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
+			ServiceAccountID:    "sa-789",
+			Audience:            "https://target.example.com",
+			Success:             true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		rec := auditRecordWithMsg(t, buf, "GCP token audit event")
+		if rec == nil {
+			t.Fatal("no GCP token audit record was emitted")
+		}
+		if got := rec["audience"]; got != "https://target.example.com" {
+			t.Errorf("audience: got %v, want %q", got, "https://target.example.com")
+		}
+	})
+
+	t.Run("access token omits empty audience", func(t *testing.T) {
+		buf := captureAuditLogs(t)
+		logger := NewLogAuditLogger("[Test]", false)
+
+		err := logger.LogGCPTokenEvent(context.Background(), &GCPTokenEvent{
+			EventType:           GCPTokenEventAccessToken,
+			AgentID:             "agent-1",
+			ProjectID:           "project-1",
+			ServiceAccountEmail: "sa@proj.iam.gserviceaccount.com",
+			ServiceAccountID:    "sa-789",
+			Success:             true,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		rec := auditRecordWithMsg(t, buf, "GCP token audit event")
+		if rec == nil {
+			t.Fatal("no GCP token audit record was emitted")
+		}
+		if _, present := rec["audience"]; present {
+			t.Errorf("audience should be omitted when empty, got %v", rec["audience"])
+		}
+	})
+}
+
+// TestGCPTokenEvent_AudienceSurvivesIdentityTokenHelper covers the helper path
+// used by handleAgentGCPIdentityToken on both success and failure.
+func TestGCPTokenEvent_AudienceSurvivesIdentityTokenHelper(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		success    bool
+		failReason string
+		wantLevel  string
+	}{
+		{name: "success", success: true, wantLevel: "DEBUG"},
+		{name: "failure", success: false, failReason: "impersonation denied", wantLevel: "WARN"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureAuditLogs(t)
+
+			LogGCPIdentityTokenGeneration(context.Background(), NewLogAuditLogger("[Test]", false),
+				"agent-1", "project-1", "sa@proj.iam.gserviceaccount.com", "sa-789",
+				"https://service.example.com/v1", tc.success, tc.failReason)
+
+			rec := auditRecordWithMsg(t, buf, "GCP token audit event")
+			if rec == nil {
+				t.Fatal("no GCP token audit record was emitted")
+			}
+			if got := rec["event_type"]; got != string(GCPTokenEventIdentityToken) {
+				t.Errorf("event_type: got %v, want %q", got, GCPTokenEventIdentityToken)
+			}
+			if got := rec["audience"]; got != "https://service.example.com/v1" {
+				t.Errorf("audience: got %v, want %q", got, "https://service.example.com/v1")
+			}
+			if got := rec["level"]; got != tc.wantLevel {
+				t.Errorf("level: got %v, want %q", got, tc.wantLevel)
+			}
+		})
 	}
 }
 

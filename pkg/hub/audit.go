@@ -74,6 +74,9 @@ type GCPTokenEvent struct {
 	ProjectID           string            `json:"projectId"`
 	ServiceAccountEmail string            `json:"serviceAccountEmail"`
 	ServiceAccountID    string            `json:"serviceAccountId"`
+	// Audience is the requested OIDC target audience for identity token
+	// events (GCPTokenEventIdentityToken).
+	Audience string `json:"audience,omitempty"`
 	// Member is the IAM member of a Workload Identity binding event
 	// (GCPTokenEventWIBinding), e.g. serviceAccount:<pool>[<ns>/<ksa>].
 	Member     string    `json:"member,omitempty"`
@@ -597,6 +600,10 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		// anyone could read. Emitting it only when non-empty would make the key
 		// come and go between records and defeat the point of a stable schema.
 		slog.String("sa_id", event.ServiceAccountID),
+	}
+
+	if event.Audience != "" {
+		attrs = append(attrs, slog.String("audience", event.Audience))
 	}
 
 	if event.Member != "" {
@@ -1285,6 +1292,28 @@ func LogGCPTokenGeneration(ctx context.Context, logger AuditLogger, eventType GC
 		ProjectID:           projectID,
 		ServiceAccountEmail: saEmail,
 		ServiceAccountID:    saID,
+		Success:             success,
+		FailReason:          failReason,
+		Timestamp:           time.Now(),
+	}
+
+	_ = logger.LogGCPTokenEvent(ctx, event)
+}
+
+// LogGCPIdentityTokenGeneration logs a GCP OIDC identity token generation
+// event, recording the requested audience without logging any token material.
+func LogGCPIdentityTokenGeneration(ctx context.Context, logger AuditLogger, agentID, projectID, saEmail, saID, audience string, success bool, failReason string) {
+	if logger == nil {
+		return
+	}
+
+	event := &GCPTokenEvent{
+		EventType:           GCPTokenEventIdentityToken,
+		AgentID:             agentID,
+		ProjectID:           projectID,
+		ServiceAccountEmail: saEmail,
+		ServiceAccountID:    saID,
+		Audience:            audience,
 		Success:             success,
 		FailReason:          failReason,
 		Timestamp:           time.Now(),
