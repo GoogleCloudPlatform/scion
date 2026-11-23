@@ -2260,7 +2260,7 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		assert.Equal(t, 45, ea.payload.timeout())
 	})
 
-	t.Run("DefinitionKindTrigger fails closed with generic refusal before any skip or refusal audit", func(t *testing.T) {
+	t.Run("DefinitionKindTrigger gates on experiment, event presence, and replay protection without schedule audit", func(t *testing.T) {
 		logBuf := &fireCoreLogBuffer{}
 		prev := slog.Default()
 		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
@@ -2269,9 +2269,8 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		ms, srv, _, auth, identity, target := setupFixture(t)
 		act := &execAction{srv: srv}
 
-		// Even with hub.exec_schedules disabled, stale FireAt, and unrecorded
-		// authority, DefinitionKindTrigger refuses before Preauthorize's skip
-		// audit or OnAuthorityRefused's refusal audit can fire.
+		// With hub.exec_schedules disabled, DefinitionKindTrigger skips cleanly
+		// and logs under trigger.fire.exec.*, never schedule.exec.*.
 		setFireCoreExperiments(t, srv, map[string]bool{
 			conduitExperiment:         true,
 			experiments.ExecSchedules: false,
@@ -2289,14 +2288,23 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		}
 
 		out := srv.fireAction(context.Background(), trigReq)
-		assert.Equal(t, hubfire.FireStatusRefused, out.Status)
-		assert.Equal(t, execReasonRefused, out.Error)
+		assert.Equal(t, hubfire.FireStatusSkipped, out.Status)
+		assert.Equal(t, execReasonDisabled, out.Error)
 		assert.Empty(t, out.ResultRef)
 		assert.False(t, out.Detached)
 		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
 
-		// Direct Authorize and Fire calls also fail closed with generic refusal
-		// text and zero schedule.exec.* audit records.
+		// With hub.exec_schedules enabled, missing Event fails closed in both
+		// Preauthorize and Authorize, with zero schedule.exec.* audit records.
+		setFireCoreExperiments(t, srv, map[string]bool{
+			conduitExperiment:         true,
+			experiments.ExecSchedules: true,
+		})
+		refusal, err := act.Preauthorize(context.Background(), trigReq)
+		require.NoError(t, err)
+		require.NotNil(t, refusal)
+		assert.Equal(t, execReasonRefused, refusal.Reason)
+
 		trigRec := newFireCoreTestAuthority(ms, projectID) // DefinitionKindTrigger
 		authorized, refusal, err := act.Authorize(context.Background(), hubfire.FireRequest{
 			ProjectID:  projectID,
@@ -2308,16 +2316,7 @@ func TestFireCoreExecActionPreauthorizeAndAuthorize(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, authorized)
 		require.NotNil(t, refusal)
-		assert.Equal(t, execReasonRefused, refusal.Reason)
-
-		fireOut, fireErr := act.Fire(context.Background(), trigReq, &execAuthorized{
-			payload: &scheduledExecPayload{AgentID: target.ID, Command: []string{"echo", "ok"}},
-			target:  target,
-			auth:    auth,
-		})
-		require.EqualError(t, fireErr, execReasonRefused)
-		assert.Empty(t, fireOut.ResultRef)
-		assert.False(t, fireOut.Detached)
+		assert.Equal(t, execReasonContextInvalid, refusal.Reason)
 		assert.NotContains(t, logBuf.String(), "audit_action=schedule.exec.")
 	})
 }
