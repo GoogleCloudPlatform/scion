@@ -770,9 +770,23 @@ func TestBrokerPolicy_CreateOnExistingSuspended_Refused(t *testing.T) {
 
 	setBrokerPolicyStateP4(t, f.srv, f.s, true, true)
 
+	// Without resume=true, upstream #5194 refuses with 409 agent_exists_resumable
+	// before any start dispatch (broker policy is not bypassed).
+	recNoResume := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", map[string]any{
+		"name":      a.Name,
+		"projectId": a.ProjectID,
+	})
+	assert.Equal(t, http.StatusConflict, recNoResume.Code, recNoResume.Body.String())
+	noResumeCode, _, _ := decodePolicyError(t, recNoResume)
+	assert.Equal(t, ErrCodeAgentExistsResumable, noResumeCode)
+	assert.Equal(t, 0, startCalls, "refused create-on-existing without resume must not dispatch start")
+
+	// With explicit resume=true, handleExistingAgent enters Branch 1 -> startAgentCore
+	// and surfaces the §4.3.D broker policy 403 (operation: start).
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", map[string]any{
 		"name":      a.Name,
 		"projectId": a.ProjectID,
+		"resume":    true,
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	code, msg, details := decodePolicyError(t, rec)
@@ -780,7 +794,7 @@ func TestBrokerPolicy_CreateOnExistingSuspended_Refused(t *testing.T) {
 	assert.Contains(t, msg, brokerPolicySettingKey)
 	assert.Equal(t, brokerPolicyOpStart, details["operation"])
 	assert.Equal(t, broker.ID, details["brokerId"])
-	assert.Equal(t, 0, startCalls, "refused create-on-existing must not dispatch start")
+	assert.Equal(t, 0, startCalls, "refused resume-on-existing must not dispatch start")
 }
 
 func TestBrokerPolicy_HarnessConfigImageOp_HTTP403(t *testing.T) {
