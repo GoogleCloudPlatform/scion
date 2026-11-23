@@ -249,41 +249,30 @@ func TestSyncAppPermissions_NoStoredPermissionsMarkedDegraded(t *testing.T) {
 		return got, affected
 	}
 
-	t.Run("read-only app marks nil-permissions project degraded", func(t *testing.T) {
+	t.Run("read-only app keeps nil-permissions project ok", func(t *testing.T) {
 		proj, affected := runSyncCase(t, map[string]string{
 			"contents": "read",
 			"metadata": "read",
 		}, nil)
-		if len(affected) != 1 {
-			t.Fatalf("expected 1 affected project, got %d: %v", len(affected), affected)
+		if len(affected) != 0 {
+			t.Fatalf("expected 0 affected projects, got %d: %v", len(affected), affected)
 		}
-		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateDegraded {
-			t.Fatalf("expected degraded state, got %+v", proj.GitHubAppStatus)
-		}
-		if proj.GitHubAppStatus.ErrorCode != githubapp.ErrCodePermissionDenied {
-			t.Errorf("expected error_code %q, got %q", githubapp.ErrCodePermissionDenied, proj.GitHubAppStatus.ErrorCode)
-		}
-		for _, wantSub := range []string{"contents:write (app has read)", "pull_requests:write", "issues:write"} {
-			if !strings.Contains(proj.GitHubAppStatus.ErrorMessage, wantSub) {
-				t.Errorf("expected ErrorMessage to contain %q, got %q", wantSub, proj.GitHubAppStatus.ErrorMessage)
-			}
+		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateOK {
+			t.Fatalf("expected ok state, got %+v", proj.GitHubAppStatus)
 		}
 	})
 
-	t.Run("git-only app without issues marks nil-permissions project degraded", func(t *testing.T) {
+	t.Run("git-only app without issues keeps nil-permissions project ok", func(t *testing.T) {
 		proj, affected := runSyncCase(t, map[string]string{
 			"contents":      "write",
 			"pull_requests": "write",
 			"metadata":      "read",
 		}, nil)
-		if len(affected) != 1 {
-			t.Fatalf("expected 1 affected project, got %d: %v", len(affected), affected)
+		if len(affected) != 0 {
+			t.Fatalf("expected 0 affected projects, got %d: %v", len(affected), affected)
 		}
-		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateDegraded {
-			t.Fatalf("expected degraded state, got %+v", proj.GitHubAppStatus)
-		}
-		if !strings.Contains(proj.GitHubAppStatus.ErrorMessage, "issues:write") {
-			t.Errorf("expected ErrorMessage to mention issues:write, got %q", proj.GitHubAppStatus.ErrorMessage)
+		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateOK {
+			t.Fatalf("expected ok state, got %+v", proj.GitHubAppStatus)
 		}
 	})
 
@@ -294,6 +283,24 @@ func TestSyncAppPermissions_NoStoredPermissionsMarkedDegraded(t *testing.T) {
 		}
 		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateDegraded {
 			t.Fatalf("expected degraded state, got %+v", proj.GitHubAppStatus)
+		}
+		if proj.GitHubAppStatus.ErrorCode != githubapp.ErrCodePermissionDenied {
+			t.Errorf("expected error_code %q, got %q", githubapp.ErrCodePermissionDenied, proj.GitHubAppStatus.ErrorCode)
+		}
+	})
+
+	t.Run("disjoint app grant marks nil-permissions project degraded", func(t *testing.T) {
+		proj, affected := runSyncCase(t, map[string]string{
+			"actions": "write",
+		}, nil)
+		if len(affected) != 1 {
+			t.Fatalf("expected 1 affected project, got %d: %v", len(affected), affected)
+		}
+		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateDegraded {
+			t.Fatalf("expected degraded state, got %+v", proj.GitHubAppStatus)
+		}
+		if proj.GitHubAppStatus.ErrorCode != githubapp.ErrCodePermissionDenied {
+			t.Errorf("expected error_code %q, got %q", githubapp.ErrCodePermissionDenied, proj.GitHubAppStatus.ErrorCode)
 		}
 	})
 
@@ -325,6 +332,29 @@ func TestSyncAppPermissions_NoStoredPermissionsMarkedDegraded(t *testing.T) {
 		}
 		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateOK {
 			t.Fatalf("expected ok state, got %+v", proj.GitHubAppStatus)
+		}
+	})
+
+	t.Run("explicit stored permissions exceeding git-only app marks degraded", func(t *testing.T) {
+		proj, affected := runSyncCase(t, map[string]string{
+			"contents":      "write",
+			"pull_requests": "write",
+			"metadata":      "read",
+		}, &store.GitHubTokenPermissions{
+			Contents: "write",
+			Issues:   "write",
+		})
+		if len(affected) != 1 {
+			t.Fatalf("expected 1 affected project, got %d: %v", len(affected), affected)
+		}
+		if proj.GitHubAppStatus == nil || proj.GitHubAppStatus.State != store.GitHubAppStateDegraded {
+			t.Fatalf("expected degraded state, got %+v", proj.GitHubAppStatus)
+		}
+		if proj.GitHubAppStatus.ErrorCode != githubapp.ErrCodePermissionDenied {
+			t.Errorf("expected error_code %q, got %q", githubapp.ErrCodePermissionDenied, proj.GitHubAppStatus.ErrorCode)
+		}
+		if !strings.Contains(proj.GitHubAppStatus.ErrorMessage, "issues:write") {
+			t.Errorf("expected ErrorMessage to mention issues:write, got %q", proj.GitHubAppStatus.ErrorMessage)
 		}
 	})
 }

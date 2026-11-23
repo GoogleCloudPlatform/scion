@@ -1031,6 +1031,13 @@ func TestMintGitHubAppToken_NoStoredPerms_ReadOnlyApp(t *testing.T) {
 	p := createAssocProject(t, st, "perm-ro-app", gh.remote("acme", "widgets"), "pusher", ptrInt64(5910))
 	require.Nil(t, reloadProject(t, st, p.ID).GitHubPermissions)
 
+	// GET github-permissions returns the capped defaults matching what minting requests.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var displayed store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayed))
+	assert.Equal(t, store.GitHubTokenPermissions{Contents: "read", Metadata: "read"}, displayed)
+
 	tok, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
 	require.NoError(t, err)
 	assert.NotEmpty(t, tok)
@@ -1044,12 +1051,10 @@ func TestMintGitHubAppToken_NoStoredPerms_ReadOnlyApp(t *testing.T) {
 
 	updated := reloadProject(t, st, p.ID)
 	require.NotNil(t, updated.GitHubAppStatus)
-	assert.Equal(t, store.GitHubAppStateDegraded, updated.GitHubAppStatus.State, "narrowed defaults must mark project degraded")
-	assert.Equal(t, githubapp.ErrCodePermissionDenied, updated.GitHubAppStatus.ErrorCode)
+	assert.Equal(t, store.GitHubAppStateOK, updated.GitHubAppStatus.State, "non-empty capped defaults must be healthy")
+	assert.Empty(t, updated.GitHubAppStatus.ErrorCode)
+	assert.Empty(t, updated.GitHubAppStatus.ErrorMessage)
 	assert.NotNil(t, updated.GitHubAppStatus.LastTokenMint)
-	assert.Contains(t, updated.GitHubAppStatus.ErrorMessage, "contents:write (app has read)")
-	assert.Contains(t, updated.GitHubAppStatus.ErrorMessage, "pull_requests:write")
-	assert.Contains(t, updated.GitHubAppStatus.ErrorMessage, "issues:write")
 }
 
 func TestMintGitHubAppToken_NoStoredPerms_GitOnlyAppNoIssues(t *testing.T) {
@@ -1068,6 +1073,18 @@ func TestMintGitHubAppToken_NoStoredPerms_GitOnlyAppNoIssues(t *testing.T) {
 	gh.grant("ghp_pusher", "acme/widgets", githubapp.RepoAccess{Push: true, Pull: true})
 
 	p := createAssocProject(t, st, "perm-git-only-app", gh.remote("acme", "widgets"), "pusher", ptrInt64(5911))
+
+	// GET github-permissions returns the capped defaults without issues.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var displayed store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayed))
+	assert.Equal(t, store.GitHubTokenPermissions{
+		Contents:     "write",
+		PullRequests: "write",
+		Metadata:     "read",
+	}, displayed)
+
 	tok, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
 	require.NoError(t, err)
 	assert.NotEmpty(t, tok)
@@ -1082,8 +1099,10 @@ func TestMintGitHubAppToken_NoStoredPerms_GitOnlyAppNoIssues(t *testing.T) {
 
 	updated := reloadProject(t, st, p.ID)
 	require.NotNil(t, updated.GitHubAppStatus)
-	assert.Equal(t, store.GitHubAppStateDegraded, updated.GitHubAppStatus.State)
-	assert.Contains(t, updated.GitHubAppStatus.ErrorMessage, "issues:write")
+	assert.Equal(t, store.GitHubAppStateOK, updated.GitHubAppStatus.State, "git-only app with non-empty capped defaults must be healthy")
+	assert.Empty(t, updated.GitHubAppStatus.ErrorCode)
+	assert.Empty(t, updated.GitHubAppStatus.ErrorMessage)
+	assert.NotNil(t, updated.GitHubAppStatus.LastTokenMint)
 }
 
 func TestMintGitHubAppToken_StoredPermsUnchanged(t *testing.T) {
@@ -1104,6 +1123,13 @@ func TestMintGitHubAppToken_StoredPermsUnchanged(t *testing.T) {
 	stored := reloadProject(t, st, p.ID)
 	stored.GitHubPermissions = &store.GitHubTokenPermissions{Contents: "write", Metadata: "read"}
 	require.NoError(t, st.UpdateProject(ctx, stored))
+
+	// GET github-permissions returns explicit stored permissions unchanged (not capped).
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var displayed store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayed))
+	assert.Equal(t, store.GitHubTokenPermissions{Contents: "write", Metadata: "read"}, displayed)
 
 	_, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
 	require.NoError(t, err)
@@ -1136,6 +1162,14 @@ func TestMintGitHubAppToken_EmptyAppGrantFailsSafeAndVisibly(t *testing.T) {
 			gh.grant("ghp_pusher", "acme/widgets", githubapp.RepoAccess{Push: true, Pull: true})
 
 			p := createAssocProject(t, st, "perm-empty-grant", gh.remote("acme", "widgets"), "pusher", ptrInt64(5913))
+
+			// GET github-permissions reflects the empty intersection.
+			rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			var displayed store.GitHubTokenPermissions
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayed))
+			assert.Equal(t, store.GitHubTokenPermissions{}, displayed)
+
 			tok, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
 			require.Error(t, err)
 			assert.Empty(t, tok)
@@ -1168,6 +1202,14 @@ func TestMintGitHubAppToken_MissingAppGrantFailsSafeAndVisibly(t *testing.T) {
 	gh.grant("ghp_pusher", "acme/widgets", githubapp.RepoAccess{Push: true, Pull: true})
 
 	p := createAssocProject(t, st, "perm-missing-grant", gh.remote("acme", "widgets"), "pusher", ptrInt64(5914))
+
+	// When App identity is unavailable, GET github-permissions falls back to uncapped defaults.
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var displayed store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayed))
+	assert.Equal(t, store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions()), displayed)
+
 	tok, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
 	require.Error(t, err)
 	assert.Empty(t, tok)
