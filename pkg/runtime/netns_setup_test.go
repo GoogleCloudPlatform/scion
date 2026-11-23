@@ -1350,6 +1350,89 @@ exit 0
 			t.Errorf("DeleteResource() calls = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("Run sweeps labelled setup containers on netns-setup failure", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			agentID string
+			run     func(cli string, cfg RunConfig) (string, error)
+		}{
+			{
+				name:    "docker",
+				agentID: "deadbeef7777",
+				run: func(cli string, cfg RunConfig) (string, error) {
+					return (&DockerRuntime{Command: cli}).Run(context.Background(), cfg)
+				},
+			},
+			{
+				name:    "podman rootful",
+				agentID: mockPodmanID,
+				run: func(cli string, cfg RunConfig) (string, error) {
+					return (&PodmanRuntime{Command: cli, Rootless: false}).Run(context.Background(), cfg)
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				mockCLI := filepath.Join(tmpDir, "mock-cli")
+				cleanupLog := filepath.Join(tmpDir, "cleanup.log")
+				script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "ps" ]; then
+  echo "$@" >> %q
+  echo "cafe01234567"
+  exit 0
+fi
+if [ "$1" = "rm" ]; then
+  echo "$@" >> %q
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  case "$*" in
+    *"netns-setup"*)
+      echo "iptables failed" >&2
+      exit 1
+      ;;
+    *)
+      echo %q
+      exit 0
+      ;;
+  esac
+fi
+exit 0
+`, cleanupLog, cleanupLog, tc.agentID)
+				if err := os.WriteFile(mockCLI, []byte(script), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				_, err := tc.run(mockCLI, RunConfig{
+					Harness:              &harness.Generic{},
+					Name:                 "test-agent",
+					UnixUsername:         "scion",
+					Image:                "scion-agent:latest",
+					Task:                 "hello",
+					Env:                  []string{"SCION_METADATA_MODE=block"},
+					MetadataInterception: true,
+				})
+				if err == nil {
+					t.Fatal("Run() = nil on sidecar failure, want error")
+				}
+				raw, readErr := os.ReadFile(cleanupLog)
+				if readErr != nil {
+					t.Fatalf("read cleanup.log: %v", readErr)
+				}
+				setupName := netnsSetupContainerName(tc.agentID)
+				want := []string{
+					"rm -f " + setupName,
+					"rm -f " + setupName,
+					"ps -aq --no-trunc --filter label=scion.netns-setup=" + tc.agentID,
+					"rm -f cafe01234567",
+					"rm -f " + tc.agentID,
+				}
+				if got := strings.Split(strings.TrimSpace(string(raw)), "\n"); !reflect.DeepEqual(got, want) {
+					t.Errorf("cleanup calls = %q, want %q", got, want)
+				}
+			})
+		}
+	})
 }
 
 func TestDockerAndPodmanRun_FirewallWithoutMetadataInterceptionRefused(t *testing.T) {

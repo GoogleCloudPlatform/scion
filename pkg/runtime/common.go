@@ -3188,7 +3188,9 @@ func effectiveInitFirewall(cfg RunConfig) (value string, set bool) {
 // fixed canonical token ("true", "false", or "invalid") for the netns-setup
 // container argv so raw values (including secret-sourced values) are never
 // placed verbatim on the command line. Empty and whitespace-only values are
-// omitted.
+// omitted. Forwarding "invalid" fails closed because sciontool parses the
+// value with strconv.ParseBool (cmd/sciontool/commands/init_netadmin.go),
+// which rejects it.
 func normalizeInitFirewallArg(raw string) (string, bool) {
 	if strings.TrimSpace(raw) == "" {
 		return "", false
