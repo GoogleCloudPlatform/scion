@@ -320,7 +320,7 @@ notifications without implementing a separate release-discovery path.
 [`build-release.yml`](../.github/workflows/build-release.yml) runs when a stable, preview,
 release-candidate, or nightly tag is pushed. It:
 
-1. Builds the web UI and cross-compiles Scion for all supported platforms, and builds `sciontool`
+1. Builds the web UI, cross-compiles Scion for all supported platforms, and builds `sciontool`
    for Linux.
 2. Builds the Linux plugin binaries.
 3. Packages and uploads the build artifacts.
