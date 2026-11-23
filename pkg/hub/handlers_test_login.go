@@ -241,6 +241,15 @@ func (ws *WebServer) handleTestLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Keep the system-scoped super-admin binding in sync with the stored role
+	// (mirrors handleOAuthCallback and proxy auth in web.go). Best-effort:
+	// errors are logged by the helpers and the login continues.
+	if user.Role == store.UserRoleAdmin {
+		ensureSuperAdminRoleBinding(ctx, ws.store, user.ID)
+	} else if oldRole == store.UserRoleAdmin {
+		deleteSuperAdminRoleBinding(ctx, ws.store, user.ID)
+	}
+
 	// Make the hub-members group and hub-viewer binding match the stored role
 	// (mirrors the other login paths). Best-effort: a failure is logged and
 	// the login continues.

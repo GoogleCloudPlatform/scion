@@ -2099,8 +2099,95 @@ func TestHandleTestLogin_GrantsFollowRole(t *testing.T) {
 	webTestLogin(t, s, email, store.UserRoleMember)
 	assertMemberGrants(t, srv, s, email)
 
+	webTestLogin(t, s, email, store.UserRoleAdmin)
+	assertAdminGrants(t, s, email)
+
+	webTestLogin(t, s, email, store.UserRoleMember)
+	assertMemberGrants(t, srv, s, email)
+
 	webTestLogin(t, s, email, store.UserRoleViewer)
 	assertViewerGrants(t, srv, s, email)
+}
+
+// TestHandleTestLogin_ColdStartAdminHasEffectiveGrant verifies that on a fresh
+// instance with a configured admin email, startup reconciliation creates no
+// user or binding for the nonexistent user, and the first test-login as admin
+// immediately creates the super-admin RoleBinding so hub-admin endpoints
+// (such as POST /api/v1/groups) succeed without a hub restart.
+func TestHandleTestLogin_ColdStartAdminHasEffectiveGrant(t *testing.T) {
+	ctx := context.Background()
+
+	s, err := newTestStore(t, ":memory:")
+	if err != nil {
+		if strings.Contains(err.Error(), "sqlite driver not registered") {
+			t.Skip("Skipping test because sqlite driver is not registered")
+		}
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
+
+	const adminEmail = "first-test-login-admin@example.com"
+	cfg := DefaultServerConfig()
+	cfg.AdminEmails = []string{adminEmail}
+	srv, err := newTestHubServer(t, cfg, s)
+	require.NoError(t, err)
+	srv.SetHubID("test-hub-id")
+	t.Cleanup(func() {
+		_ = srv.Shutdown(ctx)
+		_ = s.Close()
+	})
+
+	// Startup reconciliation must not create a user or super-admin binding for
+	// an admin email whose user does not exist yet.
+	demotionSafe, err := ReconcileSuperAdminBindings(ctx, s, cfg.AdminEmails, store.UserRoleMember)
+	require.NoError(t, err)
+	assert.False(t, demotionSafe, "startup reconciliation with no existing users must not enable demotions")
+	users, err := s.ListUsers(ctx, store.UserFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Empty(t, users.Items, "startup reconciliation must not create users on a fresh store")
+	_, err = s.GetUserByEmail(ctx, adminEmail)
+	require.ErrorIs(t, err, store.ErrNotFound, "startup reconciliation must not create nonexistent admin user")
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	sysBindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	for _, b := range sysBindings {
+		assert.NotEqual(t, superAdminRD.ID, b.RoleDefinitionID,
+			"startup reconciliation must not create super-admin bindings when no users exist")
+	}
+
+	ws := NewWebServer(WebServerConfig{EnableTestLogin: true})
+	ws.SetUserTokenService(srv.userTokenService)
+	ws.SetStore(s)
+
+	body := `{"email":"` + adminEmail + `","role":"admin","displayName":"First Test Admin"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", testLoginAuthHeader(t, srv.userTokenService))
+	rec := httptest.NewRecorder()
+	ws.handleTestLogin(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp TestLoginResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.True(t, resp.Created)
+	require.Equal(t, store.UserRoleAdmin, resp.User.Role)
+	require.NotEmpty(t, resp.AccessToken)
+
+	// Super-admin binding must exist immediately without a hub restart.
+	assertAdminGrants(t, s, adminEmail)
+	assert.True(t, srv.authzService.IsSystemAdmin(ctx, resp.User.ID),
+		"IsSystemAdmin must be true immediately after first test-login as admin")
+
+	// Effective hub-admin authorization: creating a group must succeed with
+	// the token returned by test-login, without restarting the hub.
+	groupReq := httptest.NewRequest(http.MethodPost, "/api/v1/groups", strings.NewReader(`{"name":"Cold Start Group"}`))
+	groupReq.Header.Set("Content-Type", "application/json")
+	groupReq.Header.Set("Authorization", "Bearer "+resp.AccessToken)
+	groupRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(groupRec, groupReq)
+	require.Equal(t, http.StatusCreated, groupRec.Code,
+		"hub-admin group creation must succeed without restart: %s", groupRec.Body.String())
 }
 
 // failingUpdateUserStore wraps a real store and fails every UpdateUser call,
