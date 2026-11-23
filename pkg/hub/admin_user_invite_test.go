@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -1219,4 +1220,232 @@ func TestAdminUserInviteBulk_InvalidThenValidSameAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, u.InviteNote)
 	assert.Equal(t, "fine", *u.InviteNote)
+}
+
+// inviteAuditFaultStore fails CreateMutationAudit for user_invite records
+// (optionally only when AfterSummary contains matchEmail) while its fault
+// switch is active, including inside WithTx.
+type inviteAuditFaultStore struct {
+	store.Store
+	fault      *storeFaultSwitch
+	matchEmail string
+	err        error
+}
+
+func (s *inviteAuditFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		c := *s
+		c.Store = tx
+		return fn(&c)
+	})
+}
+
+func (s *inviteAuditFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
+	if s.fault.Active() && r.MutationType == "user_invite" {
+		if s.matchEmail == "" || strings.Contains(r.AfterSummary, s.matchEmail) {
+			return s.err
+		}
+	}
+	return s.Store.CreateMutationAudit(ctx, r)
+}
+
+func listUserInviteAudits(t *testing.T, s store.Store, userID string) []*store.MutationAuditRecord {
+	t.Helper()
+	recs, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+		TargetType:   "user",
+		MutationType: "user_invite",
+	})
+	require.NoError(t, err)
+	var out []*store.MutationAuditRecord
+	for _, r := range recs {
+		if userID == "" || r.TargetID == userID {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestAdminUserInvite_MutationAudit(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("single_invite_writes_audit_and_duplicate_writes_none", func(t *testing.T) {
+		srv, s := testServerNoDevAuth(t)
+		caller := bulkInviteOnlyCaller(t, s, "inviter-single", "user.invite")
+
+		rec := doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{
+			Email: "  Single.Invite@Example.com ",
+			Note:  "private admin note",
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var resp UserInviteResponse
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+
+		audits := listUserInviteAudits(t, s, resp.ID)
+		require.Len(t, audits, 1)
+		a := audits[0]
+		assert.Equal(t, "user_invite", a.MutationType)
+		assert.Equal(t, "user", a.TargetType)
+		assert.Equal(t, resp.ID, a.TargetID)
+		assert.Equal(t, "user", a.ActorPrincipalKind)
+		assert.Equal(t, caller.ID, a.ActorPrincipalID)
+		assert.Equal(t, string(CredentialKindInteractive), a.ActorCredentialType)
+		assert.JSONEq(t, `{"email":"single.invite@example.com","status":"invited"}`, a.AfterSummary)
+		assert.NotContains(t, a.AfterSummary, "private admin note")
+
+		// Duplicate invite returns 409 and writes no additional audit record.
+		rec = doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{
+			Email: "single.invite@example.com",
+		})
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Len(t, listUserInviteAudits(t, s, ""), 1)
+	})
+
+	t.Run("single_invite_audit_failure_rolls_back_user", func(t *testing.T) {
+		srv, s := testServerNoDevAuth(t)
+		_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *inviteAuditFaultStore {
+			return &inviteAuditFaultStore{Store: inner, fault: f, err: errors.New("injected audit failure")}
+		})
+		caller := bulkInviteOnlyCaller(t, s, "inviter-single-fail", "user.invite")
+		fault.Arm()
+
+		rec := doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{
+			Email: "rollback-single@example.com",
+		})
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+		_, err := s.GetUserByEmail(ctx, "rollback-single@example.com")
+		assert.ErrorIs(t, err, store.ErrNotFound, "user creation must roll back when mutation audit fails")
+		assert.Empty(t, listUserInviteAudits(t, s, ""))
+	})
+
+	t.Run("bulk_invite_writes_one_audit_per_created_user_only", func(t *testing.T) {
+		srv, s := testServerNoDevAuth(t)
+		invited, active, suspended := seedBulkExisting(t, s)
+		caller := bulkInviteOnlyCaller(t, s, "inviter-bulk", "user.invite")
+
+		req := UserInviteBulkRequest{Emails: []UserInviteRequest{
+			{Email: "  Bulk.One@Example.com ", Note: "note-1"},
+			{Email: "bulk.two@example.com"},
+			{Email: "bulk.one@example.com"}, // duplicate in batch
+			{Email: "not-an-email"},         // invalid
+			{Email: invited.Email},          // already invited
+			{Email: active.Email},           // already active
+			{Email: suspended.Email},        // suspended
+		}}
+		rec := doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/admin/users/invite/bulk", req)
+		resp := decodeBulk(t, rec)
+		require.Equal(t, 2, resp.Counts.Created)
+
+		allAudits := listUserInviteAudits(t, s, "")
+		require.Len(t, allAudits, 2)
+
+		for _, tc := range []struct {
+			idx   int
+			email string
+		}{
+			{0, "bulk.one@example.com"},
+			{1, "bulk.two@example.com"},
+		} {
+			res := resp.Results[tc.idx]
+			require.Equal(t, inviteBatchStatusCreated, res.Status)
+			audits := listUserInviteAudits(t, s, res.UserID)
+			require.Len(t, audits, 1)
+			a := audits[0]
+			assert.Equal(t, "user_invite", a.MutationType)
+			assert.Equal(t, "user", a.TargetType)
+			assert.Equal(t, res.UserID, a.TargetID)
+			assert.Equal(t, "user", a.ActorPrincipalKind)
+			assert.Equal(t, caller.ID, a.ActorPrincipalID)
+			assert.Equal(t, string(CredentialKindInteractive), a.ActorCredentialType)
+			assert.JSONEq(t, fmt.Sprintf(`{"email":%q,"status":"invited"}`, tc.email), a.AfterSummary)
+			assert.NotContains(t, a.AfterSummary, "note-1")
+		}
+
+		// Re-running the same bulk invite writes no additional audit records.
+		rec = doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/admin/users/invite/bulk", req)
+		resp2 := decodeBulk(t, rec)
+		assert.Equal(t, 0, resp2.Counts.Created)
+		assert.Len(t, listUserInviteAudits(t, s, ""), 2)
+	})
+
+	t.Run("bulk_invite_audit_failure_rolls_back_only_failed_entry", func(t *testing.T) {
+		srv, s := testServerNoDevAuth(t)
+		_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *inviteAuditFaultStore {
+			return &inviteAuditFaultStore{
+				Store:      inner,
+				fault:      f,
+				matchEmail: "rollback-bulk@example.com",
+				err:        errors.New("injected bulk audit failure"),
+			}
+		})
+		caller := bulkInviteOnlyCaller(t, s, "inviter-bulk-fail", "user.invite")
+		fault.Arm()
+
+		rec := doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{
+			Emails: []UserInviteRequest{
+				{Email: "rollback-bulk@example.com"},
+				{Email: "succeed-bulk@example.com"},
+			},
+		})
+		resp := decodeBulk(t, rec)
+		require.Len(t, resp.Results, 2)
+		assert.Equal(t, inviteBatchStatusFailed, resp.Results[0].Status)
+		assert.Equal(t, inviteBatchReasonInternalError, resp.Results[0].Reason)
+		assert.Equal(t, inviteBatchStatusCreated, resp.Results[1].Status)
+		assert.False(t, resp.Complete)
+
+		_, err := s.GetUserByEmail(ctx, "rollback-bulk@example.com")
+		assert.ErrorIs(t, err, store.ErrNotFound, "failed entry must roll back its user row")
+
+		okUser, err := s.GetUserByEmail(ctx, "succeed-bulk@example.com")
+		require.NoError(t, err)
+		audits := listUserInviteAudits(t, s, "")
+		require.Len(t, audits, 1)
+		assert.Equal(t, okUser.ID, audits[0].TargetID)
+		assert.JSONEq(t, `{"email":"succeed-bulk@example.com","status":"invited"}`, audits[0].AfterSummary)
+	})
+
+	t.Run("uat_credential_attribution_single_and_bulk", func(t *testing.T) {
+		srv, s := testServerNoDevAuth(t)
+		holderID := hubConfigTokenUser(t, s, "invite-uat-holder", store.SystemRoleHubAdmin)
+		key, tok, err := srv.uatService.CreateTokenWithParams(rs4MintContext(holderID), CreateTokenParams{
+			UserID:   holderID,
+			Name:     "invite-uat-" + tid("tok"),
+			Boundary: hubBoundary(),
+			Scopes:   []string{"user:invite"},
+		})
+		require.NoError(t, err)
+
+		recSingle := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/admin/users/invite", UserInviteRequest{
+			Email: "uat-single@example.com",
+		})
+		require.Equal(t, http.StatusCreated, recSingle.Code, recSingle.Body.String())
+		var singleResp UserInviteResponse
+		require.NoError(t, json.NewDecoder(recSingle.Body).Decode(&singleResp))
+
+		recBulk := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/admin/users/invite/bulk", UserInviteBulkRequest{
+			Emails: []UserInviteRequest{{Email: "uat-bulk@example.com"}},
+		})
+		bulkResp := decodeBulk(t, recBulk)
+		require.Equal(t, 1, bulkResp.Counts.Created)
+
+		for _, tc := range []struct {
+			name   string
+			userID string
+			email  string
+		}{
+			{"single", singleResp.ID, "uat-single@example.com"},
+			{"bulk", bulkResp.Results[0].UserID, "uat-bulk@example.com"},
+		} {
+			audits := listUserInviteAudits(t, s, tc.userID)
+			require.Len(t, audits, 1, tc.name)
+			a := audits[0]
+			assert.Equal(t, holderID, a.ActorPrincipalID, tc.name)
+			assert.Equal(t, tok.ID, a.ActorCredentialID, tc.name)
+			assert.Equal(t, string(CredentialKindUAT), a.ActorCredentialType, tc.name)
+			assert.Equal(t, "hub", a.CredentialBoundaryKind, tc.name)
+			assert.JSONEq(t, fmt.Sprintf(`{"email":%q,"status":"invited"}`, tc.email), a.AfterSummary, tc.name)
+			assert.NotContains(t, a.AfterSummary, key, "raw token must never appear in audit summary")
+		}
+	})
 }
