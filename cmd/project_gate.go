@@ -134,6 +134,12 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if isProjectlessScopedTemplatesCommand(cmd) {
 		return false
 	}
+	// 'harness-config sync' and 'harness-config push' with --scope global
+	// upload to the global Hub scope and read no project, so they run outside
+	// a project (ptone/scion#2903).
+	if isProjectlessScopedHarnessConfigCommand(cmd) {
+		return false
+	}
 	// 'decisions list --all-projects' queries GET /api/v1/users/me/decisions
 	// across the user's Hub projects and needs no local project (ptone/scion#7995).
 	if isAllProjectsDecisionsList(cmd) {
@@ -217,6 +223,25 @@ func isProjectlessScopedTemplatesCommand(cmd *cobra.Command) bool {
 	}
 	scope, _ := cmd.Flags().GetString("scope")
 	return scope == "global" || scope == "user"
+}
+
+// isProjectlessScopedHarnessConfigCommand reports whether cmd is
+// 'harness-config sync' or 'harness-config push' targeting 'global' scope,
+// which reads no project.
+func isProjectlessScopedHarnessConfigCommand(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Parent() == nil || !isTopLevel(cmd.Parent()) {
+		return false
+	}
+	if cmd.Parent().Name() != "harness-config" {
+		return false
+	}
+	switch cmd.Name() {
+	case "sync", "push":
+	default:
+		return false
+	}
+	scope, _ := cmd.Flags().GetString("scope")
+	return scope == "global"
 }
 
 // isTopLevel reports whether c is a direct child of the root command.

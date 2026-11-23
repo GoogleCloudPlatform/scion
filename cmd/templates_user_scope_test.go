@@ -265,6 +265,119 @@ func TestTemplatesSyncAndPush_ScopeValidationAndConflicts(t *testing.T) {
 	})
 }
 
+// TestTemplatesSyncAll_SourceVsTargetScope covers the residual from
+// ptone/scion#2903: 'templates sync --all --scope global' (without --global)
+// reads project-local templates inside a project and publishes them to Hub
+// global scope, falls back to global templates when run outside a project, and
+// '--global templates sync --all' always reads global templates.
+func TestTemplatesSyncAll_SourceVsTargetScope(t *testing.T) {
+	cases := []struct {
+		name            string
+		args            []string
+		inProject       bool
+		wantName        string
+		wantScope       string
+		wantProjectID   string
+		wantProjectHits bool
+	}{
+		{
+			name:          "sync --all --scope global inside project reads project-local templates",
+			args:          []string{"templates", "sync", "--all", "--scope", "global"},
+			inProject:     true,
+			wantName:      "proj-only",
+			wantScope:     "global",
+			wantProjectID: "",
+		},
+		{
+			name:          "push --all --scope global inside project reads project-local templates",
+			args:          []string{"templates", "push", "--all", "--scope", "global"},
+			inProject:     true,
+			wantName:      "proj-only",
+			wantScope:     "global",
+			wantProjectID: "",
+		},
+		{
+			name:          "sync --all --scope global outside project reads global templates",
+			args:          []string{"templates", "sync", "--all", "--scope", "global"},
+			inProject:     false,
+			wantName:      "glob-only",
+			wantScope:     "global",
+			wantProjectID: "",
+		},
+		{
+			name:          "push --all --scope global outside project reads global templates",
+			args:          []string{"templates", "push", "--all", "--scope", "global"},
+			inProject:     false,
+			wantName:      "glob-only",
+			wantScope:     "global",
+			wantProjectID: "",
+		},
+		{
+			name:          "--global sync --all inside project reads global templates",
+			args:          []string{"--global", "templates", "sync", "--all"},
+			inProject:     true,
+			wantName:      "glob-only",
+			wantScope:     "global",
+			wantProjectID: "",
+		},
+		{
+			name:            "default sync --all reads project-local templates to project scope",
+			args:            []string{"templates", "sync", "--all"},
+			inProject:       true,
+			wantName:        "proj-only",
+			wantScope:       "project",
+			wantProjectID:   tuProjectID,
+			wantProjectHits: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub, srv := newUserScopeHub(t, nil)
+			cwd := tuSetup(t)
+			tuHubSettings(t, srv.URL)
+			home, err := os.UserHomeDir()
+			require.NoError(t, err)
+
+			if tc.inProject {
+				writeTUProjectSettings(t, cwd, tuProjectID)
+				createProjectTestTemplate(t, cwd, "proj-only")
+			}
+			createTestTemplate(t, home, "glob-only")
+
+			require.NoError(t, runTemplatesRoot(t, tc.args...))
+
+			hub.mu.Lock()
+			defer hub.mu.Unlock()
+			require.Len(t, hub.created, 1)
+			assert.Equal(t, tc.wantName, hub.created[0].Name)
+			assert.Equal(t, tc.wantScope, hub.created[0].Scope)
+			assert.Equal(t, tc.wantProjectID, hub.created[0].ProjectID)
+			if !tc.wantProjectHits {
+				assert.Empty(t, hub.projectHits, "global sync must not link or read any project")
+			}
+		})
+	}
+
+	t.Run("--project outside cwd does not publish global templates into project scope", func(t *testing.T) {
+		hub, srv := newUserScopeHub(t, nil)
+		tuSetup(t)
+		tuHubSettings(t, srv.URL)
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+
+		extProject := t.TempDir()
+		writeTUProjectSettings(t, extProject, tuProjectID)
+		createTestTemplate(t, home, "glob-only")
+
+		require.NoError(t, runTemplatesRoot(t, "--project", extProject, "templates", "sync", "--all"))
+
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Empty(t, hub.created, "global templates must not be published into --project scope")
+	})
+}
+
 func TestTemplatesDelete_ScopeUser(t *testing.T) {
 	allTemplates := []map[string]string{
 		{"id": tuGlobalTemplateID, "name": "base", "slug": "base", "scope": "global", "status": "active"},

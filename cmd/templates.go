@@ -757,7 +757,9 @@ The harness type is automatically detected from the template's configuration fil
 Use --scope <project|global|user> (or the root --global flag as shorthand for
 --scope global) to choose the target scope on the Hub.
 
-Use --all to sync all project-scoped (or global-scoped) local templates to the Hub at once.
+Use --all to sync all local templates to the Hub at once (reads project-local
+templates inside a project, or global templates with --global or with --scope
+global outside a project).
 
 The template may also be given as a directory path: . or .., an absolute
 path, or one containing a path separator (such as ./name). The directory is
@@ -1019,27 +1021,37 @@ func checkDerivedTemplateName(tpl *config.Template) error {
 	return nil
 }
 
-// syncAllTemplatesToHub syncs all local project templates to the Hub.
+// syncAllTemplatesToHub syncs all local templates from the selected source
+// directory (project-local inside a project, or global with --global or outside
+// a project) to the Hub in the given target scope.
 func syncAllTemplatesToHub(hubCtx *HubContext, scope string) error {
-	// Get local templates based on scope
+	// Source directory follows --global (globalMode) inside a project, and
+	// falls back to global outside a project (e.g. 'templates sync --all
+	// --scope global' run outside a project), independent of target --scope.
 	localGlobal, localProject, err := config.ListTemplatesGrouped()
 	if err != nil {
 		return fmt.Errorf("failed to list local templates: %w", err)
 	}
 
+	sourceScope := templateScopeFromGlobalFlag()
+	if sourceScope != "global" && scope == "global" {
+		if _, inProject := config.FindProjectRoot(); !inProject {
+			sourceScope = "global"
+		}
+	}
 	var templates []*config.Template
-	if scope == "global" {
+	if sourceScope == "global" {
 		templates = localGlobal
 	} else {
 		templates = localProject
 	}
 
 	if len(templates) == 0 {
-		fmt.Printf("No local %s templates found to sync.\n", scope)
+		fmt.Printf("No local %s templates found to sync.\n", sourceScope)
 		return nil
 	}
 
-	fmt.Printf("Syncing %d %s template(s) to Hub...\n", len(templates), scope)
+	fmt.Printf("Syncing %d local %s template(s) to Hub (%s scope)...\n", len(templates), sourceScope, scope)
 
 	var synced, failed int
 	for _, tpl := range templates {

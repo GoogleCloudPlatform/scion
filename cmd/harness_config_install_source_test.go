@@ -138,7 +138,7 @@ func TestSyncLocalHarnessConfigToHub_SendsNoSourceURL(t *testing.T) {
 	rec.existingSourceURL = installTestSourceURL
 	hubCtx, dir := newHCScopeTestEnv(t, rec)
 
-	require.NoError(t, syncLocalHarnessConfigToHub(hubCtx, "codex", dir, "codex"))
+	require.NoError(t, syncLocalHarnessConfigToHubScope(hubCtx, "codex", dir, "codex", ""))
 	assert.Equal(t, []string{""}, rec.finalizeSourceURLs)
 }
 
