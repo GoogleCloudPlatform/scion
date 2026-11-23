@@ -183,7 +183,7 @@ func hubDeletePendingReason(o hubDeleteOutcome) string {
 		switch {
 		case errors.Is(err, errDeleteResultUnknown):
 			return err.Error()
-		case err == nil, apiclient.IsForbiddenError(err), apiclient.IsUnauthorizedError(err):
+		case err == nil, apiclient.IsForbiddenError(err), apiclient.IsUnauthorizedError(err), apiclient.IsNotFoundError(err):
 			return "the Hub did not allow reading the agent"
 		default:
 			return fmt.Sprintf("the Hub rejected reading the agent: %v", err)

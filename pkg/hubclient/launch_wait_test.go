@@ -364,11 +364,20 @@ func TestWaitForLaunch_Early403404(t *testing.T) {
 				var r *LaunchStatusRejectedError
 				require.True(t, errors.As(err, &r), "got %v", err)
 			}},
-		{"user 404 after accepted launch: deleted after retries", false, launchingAgent(""),
+		{"user 404 after accepted launch: unreadable after retries", false, launchingAgent(""),
 			[]getResult{httpErr(http.StatusNotFound)},
 			func(t *testing.T, _ LaunchOutcome, err error, svc *scriptedGetService) {
-				assert.ErrorIs(t, err, ErrAgentDeletedDuringLaunch)
+				u := unreadable(t, err)
+				assert.False(t, u.AfterRead)
+				assert.True(t, apiclient.IsNotFoundError(err))
+				assert.NotErrorIs(t, err, ErrAgentDeletedDuringLaunch)
 				assert.Greater(t, svc.Calls(), 1)
+			}},
+		{"user 404 without accepted launch: unreadable, no retry", false, nil,
+			[]getResult{httpErr(http.StatusNotFound)},
+			func(t *testing.T, _ LaunchOutcome, err error, svc *scriptedGetService) {
+				assert.False(t, unreadable(t, err).AfterRead)
+				assert.Equal(t, 1, svc.Calls())
 			}},
 		{"user 403 after accepted launch: rejected", false, launchingAgent(""),
 			[]getResult{httpErr(http.StatusForbidden)},
@@ -803,32 +812,38 @@ func TestWaitForLaunch_InterruptDuringDeletionConfirmation(t *testing.T) {
 	}
 }
 
-// Mutant: the retry-cut-short condition becomes true for every caller: a
-// user caller's definite 404/403 is then reported as a timeout.
+// Mutant: the retry-cut-short condition becomes true for a user's 403: a
+// user caller's definite 403 is then reported as a timeout. A user caller's
+// 404 before any read is ambiguous (project-scoped GET returns 404 on deny)
+// and reports timeout when the budget cuts the retry short.
 func TestWaitForLaunch_UserCallerBudgetEndsDuringRetry(t *testing.T) {
-	for _, status := range []int{http.StatusNotFound, http.StatusForbidden} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			fastLaunchTimings(t)
-			clock := installFakeLaunchClock(t)
-			launchUnreadableGrace = time.Hour
-			clock.blocked = true
-			svc := script(httpErr(status))
+	t.Run(http.StatusText(http.StatusForbidden), func(t *testing.T) {
+		fastLaunchTimings(t)
+		clock := installFakeLaunchClock(t)
+		launchUnreadableGrace = time.Hour
+		clock.blocked = true
+		svc := script(httpErr(http.StatusForbidden))
 
-			_, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""), LaunchWaitOptions{Timeout: 50 * time.Millisecond})
-			assert.NotErrorIs(t, err, ErrLaunchWaitTimeout)
-			if status == http.StatusNotFound {
-				assert.ErrorIs(t, err, ErrAgentDeletedDuringLaunch)
-			} else {
-				var rejected *LaunchStatusRejectedError
-				assert.ErrorAs(t, err, &rejected)
-			}
-		})
-	}
+		_, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""), LaunchWaitOptions{Timeout: 50 * time.Millisecond})
+		assert.NotErrorIs(t, err, ErrLaunchWaitTimeout)
+		var rejected *LaunchStatusRejectedError
+		assert.ErrorAs(t, err, &rejected)
+	})
+	t.Run(http.StatusText(http.StatusNotFound), func(t *testing.T) {
+		fastLaunchTimings(t)
+		clock := installFakeLaunchClock(t)
+		launchUnreadableGrace = time.Hour
+		clock.blocked = true
+		svc := script(httpErr(http.StatusNotFound))
+
+		_, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""), LaunchWaitOptions{Timeout: 50 * time.Millisecond})
+		assert.ErrorIs(t, err, ErrLaunchWaitTimeout)
+	})
 }
 
 // Mutant: drop the "read cut short by ctx" return in retryUnreadableStatus:
 // the cut-short read's deadline error then replaces the 404, and a user
-// caller's deletion is reported as a timeout.
+// caller's after-read deletion is reported as a timeout.
 func TestWaitForLaunch_RetryReadCutShortKeepsNotFound(t *testing.T) {
 	fastLaunchTimings(t)
 	installFakeLaunchClock(t)
@@ -837,7 +852,7 @@ func TestWaitForLaunch_RetryReadCutShortKeepsNotFound(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}}
-	svc := script(httpErr(http.StatusNotFound), blockUntilDone)
+	svc := script(ok(launchingAgent("image_pull")), httpErr(http.StatusNotFound), blockUntilDone)
 
 	_, _, err := waitGuarded(t, context.Background(), svc, launchingAgent(""), LaunchWaitOptions{Timeout: 50 * time.Millisecond})
 	assert.ErrorIs(t, err, ErrAgentDeletedDuringLaunch)

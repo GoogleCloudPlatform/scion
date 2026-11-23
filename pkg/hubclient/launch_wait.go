@@ -33,9 +33,10 @@ import (
 //
 // The rules follow the scion CLI's wait (cmd/launch_wait.go), without its
 // printing: the budget comes from the Hub-advertised remaining launch time,
-// transient read errors are retried, and a refused (403) or not-found (404)
-// read is interpreted by caller kind, because the Hub answers an agent
-// caller with 404 both for a missing agent and for one it may not read.
+// transient read errors are retried, and a not-found (404) before any read
+// has succeeded is treated as unreadable for all callers (the project-scoped
+// GET answers denied reads with 404); after a read, a lasting 404 is a
+// deletion for non-agent callers and unreadable for agent callers.
 //
 // The CLI still has its own copy of these rules (waitForAgentLaunch in
 // cmd/launch_wait.go); a change to one must be applied to the other until
@@ -84,7 +85,7 @@ var ErrLaunchWaitTimeout = errors.New("launch wait budget ran out while the agen
 
 // ErrAgentDeletedDuringLaunch is returned (wrapped, together with the Hub's
 // not-found error) by WaitForLaunch when a caller that is not an agent gets
-// a lasting not-found for the agent being waited for.
+// a lasting not-found after the agent was already read in the wait.
 var ErrAgentDeletedDuringLaunch = errors.New("agent was deleted while launching")
 
 // ErrLaunchNotRunning matches *LaunchNotRunningError with errors.Is.
@@ -121,12 +122,13 @@ type LaunchWaitOptions struct {
 	// to a new non-empty value, starting with the step of the agent passed
 	// in.
 	OnStep func(step string)
-	// AgentCaller is true when the client authenticates as an agent. The
-	// Hub answers an agent with 404 both for a missing agent and for one it
-	// may not read, so an agent caller's not-found is never reported as a
-	// deletion: it ends the wait with *LaunchStatusUnreadableError, before
-	// or after a successful read. A non-agent caller is refused with 403,
-	// so its lasting not-found is a deletion.
+	// AgentCaller is true when the client authenticates as an agent. Before
+	// any read has succeeded, a not-found ends the wait with
+	// *LaunchStatusUnreadableError for all callers (the project-scoped GET
+	// returns 404 on read denial). When AgentCaller is true, an after-read
+	// not-found also returns *LaunchStatusUnreadableError (with AfterRead
+	// set) rather than ErrAgentDeletedDuringLaunch, and an early 403 on an
+	// accepted launch is reported the same way.
 	AgentCaller bool
 	// Timeout, when positive, replaces the derived wait budget (it may be
 	// longer or shorter) and starts before the first fetch. Running out of
@@ -137,9 +139,10 @@ type LaunchWaitOptions struct {
 	PollInterval time.Duration
 }
 
-// LaunchStatusUnreadableError is returned by WaitForLaunch to an agent
-// caller whose reads of the agent were refused or answered not-found. The
-// launch itself is not affected.
+// LaunchStatusUnreadableError is returned by WaitForLaunch when the agent's
+// status could not be read with the caller's credential (any caller's 404
+// before a read has succeeded, or an agent caller's after-read 404 or early
+// 403 on an accepted launch). The launch itself is not affected.
 type LaunchStatusUnreadableError struct {
 	AgentID string
 	// LaunchID is the accepted launch's ID, when known.
@@ -328,9 +331,9 @@ func launchWaitBudget(a *Agent) time.Duration {
 // whether the agent is running, or how it failed. Otherwise the error is
 // one of: ErrLaunchWaitTimeout (wrapped) when the budget runs out; the
 // context's error (wrapped) when ctx ends; ErrAgentDeletedDuringLaunch
-// (wrapped) for a non-agent caller's lasting not-found;
-// *LaunchStatusUnreadableError for an agent caller whose reads are refused
-// or not found (see LaunchWaitOptions.AgentCaller);
+// (wrapped) for a non-agent caller's lasting not-found after a read;
+// *LaunchStatusUnreadableError for any caller's not-found before a read or
+// an agent caller's unreadable reads (see LaunchWaitOptions.AgentCaller);
 // *LaunchStatusRejectedError for any other 4xx except 408 and 429. Network
 // errors, 5xx, 408 and 429 are retried. With an error, the outcome carries
 // the last agent read, if any, and Running is false. It never changes the
@@ -373,11 +376,11 @@ func WaitForLaunch(ctx context.Context, svc AgentGetter, agentID string, start *
 		if err != nil && last == nil && accepted && isUnreadableStatusError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, get, err)
 			// When the retry is cut short, the wait loop reports the
-			// interrupt or timeout, except for a non-agent caller whose
-			// budget ran out: its 403 or 404 is a definite answer and is
-			// reported below.
+			// interrupt or timeout, except for a non-agent caller's 403 when
+			// the budget ran out: a 403 is a definite refusal and is reported
+			// below.
 			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil &&
-				(ctx.Err() != nil || opts.AgentCaller) {
+				(ctx.Err() != nil || opts.AgentCaller || apiclient.IsNotFoundError(err)) {
 				return false, nil
 			}
 		}
@@ -391,12 +394,14 @@ func WaitForLaunch(ctx context.Context, svc AgentGetter, agentID string, start *
 				return false, nil
 			}
 		}
-		// An agent caller's not-found never proves a deletion, before or
-		// after a read (the Hub can refuse a later read that an earlier one
-		// passed). Before any read of an accepted launch, its 403 is
+		// The project-scoped GET answers denied reads with 404 for all
+		// callers, so a 404 before any read has succeeded does not prove a
+		// deletion. For an agent caller, a 404 after a read is also reported
+		// as unreadable (the Hub can refuse a later read that an earlier one
+		// passed), and before any read of an accepted launch its 403 is
 		// reported the same way; after a read, a 403 is a refusal.
-		if err != nil && opts.AgentCaller &&
-			(apiclient.IsNotFoundError(err) || (last == nil && accepted && apiclient.IsForbiddenError(err))) {
+		if err != nil && ((last == nil && apiclient.IsNotFoundError(err)) ||
+			(opts.AgentCaller && (apiclient.IsNotFoundError(err) || (last == nil && accepted && apiclient.IsForbiddenError(err))))) {
 			return true, &LaunchStatusUnreadableError{AgentID: agentID, LaunchID: launchID, AfterRead: last != nil, Err: err}
 		}
 		if err != nil {

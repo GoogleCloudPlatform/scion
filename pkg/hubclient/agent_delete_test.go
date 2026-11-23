@@ -271,6 +271,15 @@ func TestWaitForAgentDeletion_Outcomes(t *testing.T) {
 			wantPolls: 4,
 		},
 		{
+			name:      "404 before any read cannot observe",
+			steps:     []getStep{{err: apiErr(http.StatusNotFound)}},
+			want:      DeletionUnobservable,
+			wantPolls: 1,
+			check: func(t *testing.T, r DeletionWaitResult) {
+				assert.True(t, apiclient.IsNotFoundError(r.Err))
+			},
+		},
+		{
 			name:      "403 cannot observe",
 			steps:     []getStep{{agent: deleting()}, {err: apiErr(http.StatusForbidden)}},
 			want:      DeletionUnobservable,
@@ -309,15 +318,15 @@ func TestWaitForAgentDeletion_Outcomes(t *testing.T) {
 		},
 		{
 			name:      "408 and 429 are retried",
-			steps:     []getStep{{err: apiErr(http.StatusRequestTimeout)}, {err: apiErr(http.StatusTooManyRequests)}, {err: apiErr(http.StatusNotFound)}},
+			steps:     []getStep{{err: apiErr(http.StatusRequestTimeout)}, {err: apiErr(http.StatusTooManyRequests)}, {agent: deleting()}, {err: apiErr(http.StatusNotFound)}},
 			want:      DeletionConfirmed,
-			wantPolls: 3,
+			wantPolls: 4,
 		},
 		{
 			name:      "transient errors keep polling",
-			steps:     []getStep{{err: apiErr(http.StatusBadGateway)}, {err: errors.New("connection reset")}, {err: apiErr(http.StatusNotFound)}},
+			steps:     []getStep{{err: apiErr(http.StatusBadGateway)}, {err: errors.New("connection reset")}, {agent: deleting()}, {err: apiErr(http.StatusNotFound)}},
 			want:      DeletionConfirmed,
-			wantPolls: 3,
+			wantPolls: 4,
 		},
 		{
 			name:      "timeout while still deleting",

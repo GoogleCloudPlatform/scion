@@ -141,12 +141,14 @@ type launchWaitOptions struct {
 	// Accepted reports that the Hub accepted the start being waited for:
 	// the create answer shows an active launch, or a workspace finalize
 	// dispatched the start. Then a status read that is refused or answered
-	// not-found before any read has succeeded is retried briefly and, for
-	// an agent caller, reported as not readable
-	// (*launchStatusUnreadableError) rather than as a deletion. An agent
-	// caller's not-found is reported as not readable even when Accepted is
-	// false (before any read, only without the retry), and also after a
-	// read, once the not-found has lasted through launchUnreadableGrace.
+	// not-found before any read has succeeded is retried briefly; a lasting
+	// not-found before any read is reported as not readable
+	// (*launchStatusUnreadableError) rather than as a deletion for all
+	// callers, and for an agent caller a refused read is reported the same
+	// way. A not-found before any read is reported as not readable even when
+	// Accepted is false (only without the retry), and for an agent caller
+	// also after a read, once the not-found has lasted through
+	// launchUnreadableGrace.
 	Accepted bool
 	// LaunchID is the accepted launch's ID, when the client holds one; it
 	// only names the launch in the not-readable message.
@@ -170,13 +172,14 @@ type launchWaitOptions struct {
 // stopped (*launchFailedError), is deleted, the wait budget runs out
 // (*launchWaitTimeoutError), or ctx is cancelled (*launchWaitInterruptedError).
 // Transient fetch errors (network, 5xx, 408, 429) are retried; other 4xx
-// answers end the wait with the Hub's error. The agent is reported deleted
-// only to a user caller: on a not-found after it has been read in this wait
-// that persists for launchUnreadableGrace, or on a not-found before any
-// read (after launchUnreadableGrace when Accepted). An agent caller's
-// not-found is reported as a status that is not readable
-// (*launchStatusUnreadableError), before or after a read; see Accepted. It
-// never changes the agent.
+// answers end the wait with the Hub's error. A not-found before any read has
+// succeeded is reported as a status that is not readable
+// (*launchStatusUnreadableError) for all callers, because the project-scoped
+// GET answers denied reads with 404. The agent is reported deleted only to a
+// user caller on a not-found after it has been read in this wait that persists
+// for launchUnreadableGrace. An agent caller's not-found is reported as not
+// readable both before and after a read; see Accepted. It never changes the
+// agent.
 func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Agent, error) {
 	interval := o.PollInterval
 	if interval <= 0 {
@@ -196,11 +199,11 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 		if err != nil && last == nil && o.Accepted && isUnreadableStatusError(err) {
 			a, err = retryUnreadableStatus(fetchCtx, o.Get, err)
 			// When the retry is cut short, the wait loop reports the
-			// interrupt or timeout, except for a user caller whose wait
-			// budget ran out: its 403 or 404 is a definite answer and is
+			// interrupt or timeout, except for a user caller's 403 when the
+			// wait budget ran out: a 403 is a definite refusal and is
 			// reported below, not as a launch still in progress.
 			if err != nil && isUnreadableStatusError(err) && fetchCtx.Err() != nil &&
-				(ctx.Err() != nil || config.IsHubManagedAgent()) {
+				(ctx.Err() != nil || config.IsHubManagedAgent() || apiclient.IsNotFoundError(err)) {
 				return false, nil
 			}
 		}
@@ -219,22 +222,20 @@ func waitForAgentLaunch(ctx context.Context, o launchWaitOptions) (*hubclient.Ag
 				return false, nil // the wait loop reports the interrupt
 			}
 		}
-		// An agent caller gets the same 404 for an agent it may not read as
-		// for a missing one, so its 404 does not mean the agent is gone:
-		// not before any read has succeeded, whether or not the start shows
-		// an accepted launch (Accepted only decides the retry above), and
-		// not after a read either, since the Hub can refuse a later read
-		// that an earlier one passed (for example an authorization lookup
-		// that fails closed). After a read, the report says the agent may
-		// have been deleted (AfterRead). Before any read, after an
-		// accepted launch, an agent caller's 403 is reported the same way;
-		// after a read, its 403 keeps the Hub's refusal below.
-		// A user caller is refused with 403, so a user's 404 is a definite
-		// not-found and a user's 403 keeps the login hint below. This
-		// follows the Hub's read check: authorizeSingleAgentRead and
-		// writeAgentNotFound in pkg/hub/handlers_agents_core.go.
-		if err != nil && config.IsHubManagedAgent() &&
-			(apiclient.IsNotFoundError(err) || (last == nil && o.Accepted && apiclient.IsForbiddenError(err))) {
+		// The project-scoped GET (getProjectAgent, using authorizeRead in
+		// pkg/hub/handlers_projects_core.go) answers denied reads with 404 for
+		// all callers, so a 404 before any read has succeeded does not prove
+		// the agent is gone (whether or not the start shows an accepted launch;
+		// Accepted only decides the retry above). For an agent caller, a 404
+		// after a read is also reported as not readable (AfterRead), since the
+		// Hub can refuse a later read that an earlier one passed (for example
+		// an authorization lookup that fails closed), and before any read of
+		// an accepted launch its 403 is reported the same way; after a read,
+		// its 403 keeps the Hub's refusal below. For a user caller, a 403
+		// keeps the login hint below, and a lasting 404 after a successful
+		// read is reported as a deletion.
+		if err != nil && ((last == nil && apiclient.IsNotFoundError(err)) ||
+			(config.IsHubManagedAgent() && (apiclient.IsNotFoundError(err) || (last == nil && o.Accepted && apiclient.IsForbiddenError(err))))) {
 			return true, &launchStatusUnreadableError{Agent: o.AgentName, LaunchID: o.LaunchID, AfterRead: last != nil, Err: err}
 		}
 		if err != nil {
